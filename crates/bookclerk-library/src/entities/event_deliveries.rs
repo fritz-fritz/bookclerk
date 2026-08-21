@@ -55,6 +55,8 @@ pub struct Model {
     pub wake_event_type: String,
     /// Host-owned payload object filter JSON for event-wake; empty = type only.
     pub wake_filter_json: String,
+    /// Host-derived wake grants JSON (`schemaVersions` + intersected filter).
+    pub wake_grants_json: String,
 }
 
 /// Declared SeaORM relations (parent event is queried by `event_id`).

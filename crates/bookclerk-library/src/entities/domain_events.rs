@@ -23,7 +23,7 @@ pub struct Model {
     pub correlation_id: String,
     /// Causing event or job id.
     pub causation_id: String,
-    /// Producer idempotency key unique with `event_type`.
+    /// Producer idempotency key unique with `(account_id, source, event_type)`.
     pub dedup_key: String,
     /// Bounded JSON payload (never media bytes).
     pub payload: String,
@@ -35,6 +35,14 @@ pub struct Model {
     pub created_at: String,
     /// `1` until matching suspended deliveries have been woken (or none exist).
     pub wake_pending: i64,
+    /// Worker that currently holds the wake-slice lease.
+    pub wake_lease_owner: Option<String>,
+    /// RFC 3339 wake-slice lease expiry.
+    pub wake_lease_expires_at: Option<String>,
+    /// `(created_at, id)` cursor for the next wake delivery page.
+    pub wake_cursor_at: String,
+    /// Delivery id cursor paired with [`Self::wake_cursor_at`].
+    pub wake_cursor_id: String,
 }
 
 /// Declared SeaORM relations (deliveries are queried by `event_id`).

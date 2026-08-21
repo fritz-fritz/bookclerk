@@ -1665,7 +1665,7 @@ fn plan_reserve_job_temp(
     }
 }
 
-/// Insert a domain event unless `(event_type, dedup_key)` already exists.
+/// Insert a domain event unless `(account_id, source, event_type, dedup_key)` already exists.
 #[allow(clippy::too_many_arguments)]
 fn plan_publish_domain_event(
     id: &str,
@@ -1689,7 +1689,8 @@ fn plan_publish_domain_event(
                     dispatch_state, created_at, wake_pending\
                  ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 1 \
                  WHERE NOT EXISTS (\
-                    SELECT 1 FROM domain_events WHERE event_type = ? AND dedup_key = ?\
+                    SELECT 1 FROM domain_events \
+                    WHERE account_id = ? AND source = ? AND event_type = ? AND dedup_key = ?\
                  )",
                 vec![
                     j_str(id),
@@ -1704,6 +1705,8 @@ fn plan_publish_domain_event(
                     j_str(payload),
                     j_str(ordering_key),
                     j_str(now),
+                    j_str(account_id),
+                    j_str(source),
                     j_str(event_type),
                     j_str(dedup_key),
                 ],
@@ -1711,15 +1714,27 @@ fn plan_publish_domain_event(
             sql(
                 "SELECT CASE \
                     WHEN EXISTS (SELECT 1 FROM domain_events WHERE id = ?) THEN 'ok' \
-                    WHEN EXISTS (SELECT 1 FROM domain_events WHERE event_type = ? AND dedup_key = ?) \
+                    WHEN EXISTS (SELECT 1 FROM domain_events \
+                         WHERE account_id = ? AND source = ? AND event_type = ? AND dedup_key = ?) \
                          THEN 'duplicate' \
                     ELSE 'notFound' END AS status",
-                vec![j_str(id), j_str(event_type), j_str(dedup_key)],
+                vec![
+                    j_str(id),
+                    j_str(account_id),
+                    j_str(source),
+                    j_str(event_type),
+                    j_str(dedup_key),
+                ],
             ),
             sql(
                 "SELECT json_object('id', id) AS payload FROM domain_events \
-                 WHERE event_type = ? AND dedup_key = ? LIMIT 1",
-                vec![j_str(event_type), j_str(dedup_key)],
+                 WHERE account_id = ? AND source = ? AND event_type = ? AND dedup_key = ? LIMIT 1",
+                vec![
+                    j_str(account_id),
+                    j_str(source),
+                    j_str(event_type),
+                    j_str(dedup_key),
+                ],
             ),
         ],
         outcome_index: 1,
@@ -1770,7 +1785,8 @@ fn plan_set_acquire_status(
                     dispatch_state, created_at, wake_pending\
                  ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 1 \
                  WHERE ? != '' AND NOT EXISTS (\
-                    SELECT 1 FROM domain_events WHERE event_type = ? AND dedup_key = ?\
+                    SELECT 1 FROM domain_events \
+                    WHERE account_id = ? AND source = ? AND event_type = ? AND dedup_key = ?\
                  ) AND EXISTS (SELECT 1 FROM books WHERE uuid = ?)",
                 vec![
                     j_str(event_id),
@@ -1786,6 +1802,8 @@ fn plan_set_acquire_status(
                     j_str(ordering_key),
                     j_str(now),
                     j_str(event_type),
+                    j_str(event_account_id),
+                    j_str(source),
                     j_str(event_type),
                     j_str(dedup_key),
                     j_str(book_uuid),
@@ -1816,7 +1834,7 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
                     lease_owner, lease_expires_at, lease_generation, run_after, invocation_sequence, \
                     resume_pending, checkpoint_json, checkpoint_schema_version, ordering_key, \
                     outcome, error_message, created_at, updated_at, cancel_requested, resource_class, \
-                    wake_event_type, wake_filter_json\
+                    wake_event_type, wake_filter_json, wake_grants_json\
                  ) SELECT \
                     ? || ':' || json_extract(j.value, '$.pluginId'), \
                     ?, \
@@ -1830,7 +1848,7 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
                         json_extract(j.value, '$.resource_class'), \
                         'network'\
                     ), \
-                    '', '' \
+                    '', '', '' \
                  FROM json_each(?) AS j \
                  WHERE json_extract(j.value, '$.pluginId') IS NOT NULL \
                    AND COALESCE(\
@@ -1989,7 +2007,8 @@ fn plan_claim_next_event_delivery(
                     'cancel_requested', json(CASE WHEN cancel_requested != 0 THEN 'true' ELSE 'false' END), \
                     'resource_class', COALESCE(resource_class, 'network'), \
                     'wake_event_type', COALESCE(wake_event_type, ''), \
-                    'wake_filter_json', COALESCE(wake_filter_json, '')\
+                    'wake_filter_json', COALESCE(wake_filter_json, ''), \
+                    'wake_grants_json', COALESCE(wake_grants_json, '')\
                  ) AS payload FROM event_deliveries \
                  WHERE lease_owner = ? AND state = 'running' AND updated_at = ? \
                  ORDER BY lease_generation DESC LIMIT 1",
@@ -3292,6 +3311,97 @@ mod tests {
         );
         let skipped = run_plan(&conn, &plan_atomic(&empty, now).unwrap());
         assert_eq!(skipped.status, atomic_status::EMPTY);
+    }
+
+    #[test]
+    fn publish_domain_event_namespaces_dedup_by_account_and_source() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        let a = test_req(
+            DbAtomicParams::PublishDomainEvent {
+                id: "evt-ns-a".into(),
+                event_type: "book_acquired".into(),
+                schema_version: 1,
+                account_id: "acct-a".into(),
+                source: String::new(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                dedup_key: "book_acquired:ns".into(),
+                payload: "{}".into(),
+                ordering_key: String::new(),
+            },
+            "evt-ns-a",
+        );
+        assert_eq!(
+            run_plan(&conn, &plan_atomic(&a, now).unwrap()).status,
+            atomic_status::OK
+        );
+        let b = test_req(
+            DbAtomicParams::PublishDomainEvent {
+                id: "evt-ns-b".into(),
+                event_type: "book_acquired".into(),
+                schema_version: 1,
+                account_id: "acct-b".into(),
+                source: String::new(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                dedup_key: "book_acquired:ns".into(),
+                payload: "{}".into(),
+                ordering_key: String::new(),
+            },
+            "evt-ns-b",
+        );
+        assert_eq!(
+            run_plan(&conn, &plan_atomic(&b, now).unwrap()).status,
+            atomic_status::OK
+        );
+        let c = test_req(
+            DbAtomicParams::PublishDomainEvent {
+                id: "evt-ns-src".into(),
+                event_type: "book_acquired".into(),
+                schema_version: 1,
+                account_id: "acct-a".into(),
+                source: "audible".into(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                dedup_key: "book_acquired:ns".into(),
+                payload: "{}".into(),
+                ordering_key: String::new(),
+            },
+            "evt-ns-src",
+        );
+        assert_eq!(
+            run_plan(&conn, &plan_atomic(&c, now).unwrap()).status,
+            atomic_status::OK
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM domain_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 3);
+        let dup = test_req(
+            DbAtomicParams::PublishDomainEvent {
+                id: "evt-ns-dup".into(),
+                event_type: "book_acquired".into(),
+                schema_version: 1,
+                account_id: "acct-a".into(),
+                source: String::new(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                dedup_key: "book_acquired:ns".into(),
+                payload: "{}".into(),
+                ordering_key: String::new(),
+            },
+            "evt-ns-dup",
+        );
+        assert_eq!(
+            run_plan(&conn, &plan_atomic(&dup, now).unwrap()).status,
+            atomic_status::DUPLICATE
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM domain_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 3);
     }
 
     #[test]

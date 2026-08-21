@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bookclerk_integrations::{DomainEvent, EventResult, EventSubscription};
-use bookclerk_library::{catalog_subscribers_for_event, EventCatalogSubscription, LibraryStore};
+use bookclerk_library::{
+    catalog_subscribers_for_event, wake_grants_from_subscriptions, EventCatalogSubscription,
+    LibraryStore,
+};
 use chrono::{TimeZone, Utc};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
@@ -72,17 +75,22 @@ fn spawn_dispatcher(state: Arc<AppState>) {
         loop {
             upsert_event_subscriber_catalog(&state).await;
             let library = state.library_snapshot().await;
-            let retention_days = state.config.read().await.events.retention_days;
-            match dispatch_pending(
+            let (retention_days, files_dir) = {
+                let cfg = state.config.read().await;
+                (cfg.events.retention_days, cfg.paths().files_dir.clone())
+            };
+            let node_id = event_node_id(&state, &files_dir);
+            let wake_more = match dispatch_pending(
                 &library,
                 retention_days,
                 &last_catalog_fp,
                 last_reconcile_empty,
                 ticks_since_reconcile,
+                &node_id,
             )
             .await
             {
-                Ok((fp, empty, reconciled)) => {
+                Ok((fp, empty, reconciled, wake_more)) => {
                     last_catalog_fp = fp;
                     last_reconcile_empty = empty;
                     ticks_since_reconcile = if reconciled {
@@ -90,13 +98,18 @@ fn spawn_dispatcher(state: Arc<AppState>) {
                     } else {
                         ticks_since_reconcile.saturating_add(1)
                     };
+                    wake_more
                 }
                 Err(err) => {
                     warn!(error = %err, "event dispatch failed");
                     last_reconcile_empty = false;
+                    false
                 }
-            }
+            };
             state.job_notify.notify_waiters();
+            if wake_more {
+                continue;
+            }
             tokio::select! {
                 () = state.job_notify.notified() => {}
                 _ = idle.tick() => {}
@@ -297,7 +310,8 @@ async fn dispatch_pending(
     last_catalog_fp: &str,
     last_reconcile_empty: bool,
     ticks_since_reconcile: u32,
-) -> Result<(String, bool, bool), bookclerk_library::LibraryError> {
+    node_id: &str,
+) -> Result<(String, bool, bool, bool), bookclerk_library::LibraryError> {
     let catalog = library.list_live_event_subscribers().await?;
     let fingerprint = catalog_fingerprint(&catalog);
     loop {
@@ -332,7 +346,9 @@ async fn dispatch_pending(
             );
         }
     }
-    library.process_pending_wakes(WAKE_PENDING_PAGE).await?;
+    let wakes = library
+        .process_pending_wakes(WAKE_PENDING_PAGE, node_id, LEASE_SECS)
+        .await?;
     let created_after =
         Utc::now() - chrono::Duration::days(i64::try_from(retention_days.max(1)).unwrap_or(7));
     let skip_reconcile = should_skip_catalog_reconcile(
@@ -354,7 +370,7 @@ async fn dispatch_pending(
     } else {
         n == 0
     };
-    Ok((fingerprint, empty, !skip_reconcile))
+    Ok((fingerprint, empty, !skip_reconcile, wakes.still_pending))
 }
 
 /// True when the process-local skip cache may omit this tick's late-join scan.
@@ -660,39 +676,54 @@ async fn run_delivery(
                 library
                     .reject_event_delivery(&fence, "suspend not advertised for this event type")
                     .await
-            } else if !wake_type_allowed(&integration.event_subscriptions(), &wake_on_event_type) {
-                warn!(
-                    delivery_id = %delivery.id,
-                    plugin = %delivery.plugin_id,
-                    wake_on_event_type = %wake_on_event_type,
-                    "wake event type not subscribed; treating as reject"
-                );
-                library
-                    .reject_event_delivery(&fence, "wake event type not subscribed")
-                    .await
             } else {
-                let wake = if !wake_on_event_type.trim().is_empty() && wake_at_unix_ms == 0 {
-                    far_future_wake()
-                } else {
-                    unix_ms_to_utc(wake_at_unix_ms)
-                        .unwrap_or_else(|| Utc::now() + chrono::Duration::seconds(30))
-                };
-                info!(
-                    delivery_id = %delivery.id,
-                    plugin = %delivery.plugin_id,
-                    outcome = "suspended",
-                    "event delivery suspended"
-                );
-                library
-                    .suspend_event_delivery(
-                        &fence,
-                        &checkpoint_json,
-                        i64::from(checkpoint_schema_version),
-                        wake,
-                        &wake_on_event_type,
-                        &wake_on_filter_json,
-                    )
-                    .await
+                match wake_grants_from_subscriptions(
+                    &catalog_from_runtime(&integration.event_subscriptions()),
+                    &wake_on_event_type,
+                    &wake_on_filter_json,
+                ) {
+                    Err(reason) => {
+                        warn!(
+                            delivery_id = %delivery.id,
+                            plugin = %delivery.plugin_id,
+                            wake_on_event_type = %wake_on_event_type,
+                            reason,
+                            "wake grant rejected; treating as reject"
+                        );
+                        library.reject_event_delivery(&fence, reason).await
+                    }
+                    Ok(grants) => {
+                        let grants_json = if grants.is_empty() {
+                            String::new()
+                        } else {
+                            serde_json::to_string(&grants).unwrap_or_default()
+                        };
+                        let wake = if !wake_on_event_type.trim().is_empty() && wake_at_unix_ms == 0
+                        {
+                            far_future_wake()
+                        } else {
+                            unix_ms_to_utc(wake_at_unix_ms)
+                                .unwrap_or_else(|| Utc::now() + chrono::Duration::seconds(30))
+                        };
+                        info!(
+                            delivery_id = %delivery.id,
+                            plugin = %delivery.plugin_id,
+                            outcome = "suspended",
+                            "event delivery suspended"
+                        );
+                        library
+                            .suspend_event_delivery(
+                                &fence,
+                                &checkpoint_json,
+                                i64::from(checkpoint_schema_version),
+                                wake,
+                                &wake_on_event_type,
+                                &wake_on_filter_json,
+                                &grants_json,
+                            )
+                            .await
+                    }
+                }
             }
         }
     };
@@ -710,12 +741,6 @@ fn suspend_allowed(subs: &[EventSubscription], event_type: &str, schema_version:
                 .iter()
                 .any(|v| i64::from(*v) == schema_version)
     })
-}
-
-/// True when `wake_on_event_type` is empty or matches a declared subscription.
-fn wake_type_allowed(subs: &[EventSubscription], wake_on_event_type: &str) -> bool {
-    let wake = wake_on_event_type.trim();
-    wake.is_empty() || subs.iter().any(|s| s.event_type == wake)
 }
 
 /// Parse a unix-ms timestamp into UTC, ignoring overflows.
@@ -809,6 +834,7 @@ mod tests {
             resource_class: "network".into(),
             wake_event_type: String::new(),
             wake_filter_json: String::new(),
+            wake_grants_json: String::new(),
         }
     }
 
@@ -875,16 +901,52 @@ mod tests {
 
     #[test]
     fn wake_type_must_be_a_declared_subscription() {
-        let subs = vec![EventSubscription {
+        let subs = catalog_from_runtime(&[EventSubscription {
             event_type: "book_acquired".into(),
             schema_versions: vec![1],
             supports_suspend: true,
             resource_class: "network".into(),
             filter: None,
-        }];
-        assert!(wake_type_allowed(&subs, ""));
-        assert!(wake_type_allowed(&subs, "book_acquired"));
-        assert!(!wake_type_allowed(&subs, "listen_progress"));
+        }]);
+        assert!(wake_grants_from_subscriptions(&subs, "", "")
+            .unwrap()
+            .is_empty());
+        assert!(wake_grants_from_subscriptions(&subs, "book_acquired", "")
+            .unwrap()
+            .iter()
+            .any(|g| g.schema_versions == vec![1]));
+        assert_eq!(
+            wake_grants_from_subscriptions(&subs, "listen_progress", ""),
+            Err("wake event type not subscribed")
+        );
+    }
+
+    #[test]
+    fn wake_grants_keep_subscription_schema_and_filter() {
+        let subs = catalog_from_runtime(&[EventSubscription {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: true,
+            resource_class: "network".into(),
+            filter: Some(serde_json::json!({"source": "audible"})),
+        }]);
+        let grants = wake_grants_from_subscriptions(&subs, "book_acquired", "").unwrap();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].schema_versions, vec![1]);
+        assert_eq!(
+            grants[0].filter,
+            Some(serde_json::json!({"source": "audible"}))
+        );
+        assert_eq!(
+            wake_grants_from_subscriptions(&subs, "book_acquired", r#"{"source":"libro"}"#),
+            Err("wake filter not within subscription")
+        );
+        let narrowed =
+            wake_grants_from_subscriptions(&subs, "book_acquired", r#"{"titleId":"u1"}"#).unwrap();
+        assert_eq!(
+            narrowed[0].filter,
+            Some(serde_json::json!({"source":"audible","titleId":"u1"}))
+        );
     }
 
     #[test]

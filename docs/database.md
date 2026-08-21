@@ -290,7 +290,8 @@ V20 adds `user_preferences.theme` (`system`, `light`, or `dark`; default
 designed light theme when the OS hint is missing or not dark.
 V21 adds `domain_events` (immutable outbox envelopes) and `event_deliveries`
 (one fenced row per subscriber). Domain events are **not** job kinds; see
-[jobs.md](jobs.md). Duplicate publishes coalesce on `(event_type, dedup_key)`.
+[jobs.md](jobs.md). Duplicate publishes coalesce on
+`(account_id, source, event_type, dedup_key)`.
 Deliveries are idempotent on `(event_id, plugin_id)`.
 V22 adds `domain_events.ordering_key` so the producer FIFO key is stored on the
 envelope and copied verbatim onto each delivery.
@@ -311,6 +312,12 @@ anti-join instead of walking every retained dispatched event.
 V26 adds `domain_events.wake_pending` so event-triggered wake is replayable
 after a Duplicate publish or a crash between dispatch and wake. Wake scans are
 account-scoped (parent `domain_events.account_id`) and paged.
+V27 rebuilds uniqueness to `(account_id, source, event_type, dedup_key)`, adds
+claimed wake slices (`wake_lease_owner`, `wake_lease_expires_at`,
+`wake_cursor_at`, `wake_cursor_id`) so each dispatcher tick owns at most a
+bounded page of sleepers, and stores host-derived `event_deliveries.wake_grants_json`
+(schema versions + intersected filter). Publish is commit + notify; the
+dispatcher drains `wake_pending`.
 
 ## Encrypted secrets
 

@@ -1047,8 +1047,12 @@ reconcile still runs at least every 60s as a backstop. The process-stable `event
 start. A `suspended` result is accepted only when a subscription matches
 that exact `(type, schema_version)` and sets `supports_suspend = true`;
 otherwise it is stored as a permanent reject. Non-empty `wakeOnEventType` must
-also match a declared subscription type (waiting on an event does not grant a
-new binding). Acquire success writes
+also match a declared subscription type. The host derives wake grants from
+those subscriptions (`schemaVersions` plus the intersection of `sub.filter` and
+`wakeOnFilterJson`); an empty requested filter keeps the subscription filter
+and cannot broaden it. Waiting on an event does not grant a new binding.
+Publish commits `wake_pending` and returns; the dispatcher claims bounded wake
+slices so producer latency does not track sleeper count. Acquire success writes
 `book_acquired` into `domain_events` in the same transaction as the library
 acquire-status change (book uuid, storage key, product ids — never media bytes)
 and sets envelope `source` to the book’s storefront plugin id.

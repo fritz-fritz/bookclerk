@@ -20,12 +20,12 @@ use crate::entities::{
 };
 use crate::error::{LibraryError, Result};
 use crate::models::{
-    catalog_subscribers_for_event, collapse_live_subscriber_nodes, event_filter_matches,
+    catalog_subscribers_for_event, collapse_live_subscriber_nodes, event_matches_wake_grants,
     job_backoff_run_after, AcquireStatus, DomainEventRecord, EventCatalogSubscription,
     EventDeliveryFence, EventDeliveryMetrics, EventDeliveryRecord, EventSubscriber,
-    EventSubscriberCatalogRecord, EventSubscriberNodeRecord, PublishDomainEventOutcome,
-    PublishDomainEventSpec, EVENT_DELIVERY_MAX_ATTEMPTS, EVENT_RESOURCE_CLASS_NETWORK,
-    EVENT_SUBSCRIBER_HEARTBEAT_TTL_SECS,
+    EventSubscriberCatalogRecord, EventSubscriberNodeRecord, PendingWakeProgress,
+    PublishDomainEventOutcome, PublishDomainEventSpec, EVENT_DELIVERY_MAX_ATTEMPTS,
+    EVENT_RESOURCE_CLASS_NETWORK, EVENT_SUBSCRIBER_HEARTBEAT_TTL_SECS,
 };
 
 const STATE_PENDING: &str = "pending";
@@ -75,7 +75,6 @@ static INJECT_PUBLISH_FAULTS: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 thread_local! {
     static DISPATCH_EVENT_CALLS: AtomicU32 = const { AtomicU32::new(0) };
-    static SKIP_WAKE_FOR_PUBLISHED: AtomicU32 = const { AtomicU32::new(0) };
 }
 
 /// Fail the next `n` outbox inserts (used to prove acquire+publish rollback).
@@ -84,34 +83,10 @@ pub(crate) fn inject_event_publish_failures(n: u32) {
     INJECT_PUBLISH_FAULTS.store(n, Ordering::SeqCst);
 }
 
-/// Skip the next `n` post-publish wake passes (library tests only).
-#[cfg(test)]
-pub(crate) fn inject_skip_wake_for_published(n: u32) {
-    SKIP_WAKE_FOR_PUBLISHED.with(|c| c.store(n, Ordering::SeqCst));
-}
-
 /// Take and reset the dispatch-call counter (library tests only).
 #[cfg(test)]
 pub(crate) fn take_dispatch_event_calls() -> u32 {
     DISPATCH_EVENT_CALLS.with(|c| c.swap(0, Ordering::SeqCst))
-}
-
-fn take_skip_wake() -> bool {
-    #[cfg(test)]
-    {
-        SKIP_WAKE_FOR_PUBLISHED.with(|c| {
-            let current = c.load(Ordering::SeqCst);
-            if current == 0 {
-                return false;
-            }
-            c.store(current.saturating_sub(1), Ordering::SeqCst);
-            true
-        })
-    }
-    #[cfg(not(test))]
-    {
-        false
-    }
 }
 
 fn take_publish_fault() -> bool {
@@ -133,7 +108,8 @@ fn take_publish_fault() -> bool {
 }
 
 impl LibraryStore {
-    /// Persist a domain event. Duplicate `(event_type, dedup_key)` coalesces.
+    /// Persist a domain event. Duplicate `(account_id, source, event_type, dedup_key)`
+    /// coalesces. Wake processing is left to [`Self::process_pending_wakes`].
     ///
     /// # Errors
     ///
@@ -144,23 +120,20 @@ impl LibraryStore {
         spec: PublishDomainEventSpec,
     ) -> Result<PublishDomainEventOutcome> {
         let spec = prepare_publish_domain_event(spec)?;
-        let outcome = if let Some(atomic) = &self.atomic {
-            atomic.publish_domain_event(spec).await?
-        } else {
-            let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-            match publish_domain_event_on(&txn, spec).await {
-                Ok(outcome) => {
-                    txn.commit().await.map_err(LibraryError::Orm)?;
-                    outcome
-                }
-                Err(err) => {
-                    let _ = txn.rollback().await;
-                    return Err(err);
-                }
+        if let Some(atomic) = &self.atomic {
+            return atomic.publish_domain_event(spec).await;
+        }
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        match publish_domain_event_on(&txn, spec).await {
+            Ok(outcome) => {
+                txn.commit().await.map_err(LibraryError::Orm)?;
+                Ok(outcome)
             }
-        };
-        self.wake_for_published(&outcome).await?;
-        Ok(outcome)
+            Err(err) => {
+                let _ = txn.rollback().await;
+                Err(err)
+            }
+        }
     }
 
     /// Snapshot matching subscribers and create one delivery row per plugin.
@@ -224,39 +197,106 @@ impl LibraryStore {
         row.map(map_event).transpose()
     }
 
-    /// Wake matching deliveries for outbox rows still flagged `wake_pending`.
+    /// Claim up to `limit` `wake_pending` events and process one delivery page each.
     ///
-    /// Pages `limit` events per iteration until a short page. Each event's wake
-    /// pass and flag clear run in one transaction (local SQLite/Postgres).
+    /// Each claimed event is leased so two processors cannot own the same slice.
+    /// A short delivery page clears `wake_pending`; otherwise the cursor is saved
+    /// and the lease is released for the next tick.
     ///
     /// # Errors
     ///
     /// Returns [`LibraryError::Orm`] when the read or wake write fails.
-    pub async fn process_pending_wakes(&self, limit: u64) -> Result<u32> {
+    pub async fn process_pending_wakes(
+        &self,
+        limit: u64,
+        owner: &str,
+        lease_secs: u64,
+    ) -> Result<PendingWakeProgress> {
         let page = limit.max(1);
-        let mut total = 0u32;
-        loop {
-            let rows = domain_events::Entity::find()
+        let now = Utc::now();
+        let now_s = now.to_rfc3339();
+        let lease_expires =
+            (now + Duration::seconds(i64::try_from(lease_secs).unwrap_or(60))).to_rfc3339();
+        let candidates = domain_events::Entity::find()
+            .filter(domain_events::Column::WakePending.eq(1i64))
+            .filter(
+                Condition::any()
+                    .add(domain_events::Column::WakeLeaseExpiresAt.is_null())
+                    .add(domain_events::Column::WakeLeaseExpiresAt.eq(""))
+                    .add(domain_events::Column::WakeLeaseExpiresAt.lte(now_s.clone())),
+            )
+            .order_by_asc(domain_events::Column::CreatedAt)
+            .order_by_asc(domain_events::Column::Id)
+            .limit(page)
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let mut still_pending = u64::try_from(candidates.len()).unwrap_or(0) >= page;
+        let mut claimed = 0u32;
+        for row in candidates {
+            let cas = domain_events::Entity::update_many()
+                .col_expr(
+                    domain_events::Column::WakeLeaseOwner,
+                    sea_orm::sea_query::Expr::value(Some(owner.to_string())),
+                )
+                .col_expr(
+                    domain_events::Column::WakeLeaseExpiresAt,
+                    sea_orm::sea_query::Expr::value(Some(lease_expires.clone())),
+                )
+                .filter(domain_events::Column::Id.eq(&row.id))
                 .filter(domain_events::Column::WakePending.eq(1i64))
-                .order_by_asc(domain_events::Column::CreatedAt)
-                .order_by_asc(domain_events::Column::Id)
-                .limit(page)
-                .all(&self.db)
+                .filter(
+                    Condition::any()
+                        .add(domain_events::Column::WakeLeaseExpiresAt.is_null())
+                        .add(domain_events::Column::WakeLeaseExpiresAt.eq(""))
+                        .add(domain_events::Column::WakeLeaseExpiresAt.lte(now_s.clone())),
+                )
+                .exec(&self.db)
                 .await
                 .map_err(LibraryError::Orm)?;
-            let page_len = u64::try_from(rows.len()).unwrap_or(0);
-            if page_len == 0 {
-                break;
+            if cas.rows_affected != 1 {
+                continue;
             }
-            for row in rows {
-                let event = map_event(row)?;
-                total = total.saturating_add(self.wake_matching_event_deliveries(&event).await?);
-            }
-            if page_len < page {
-                break;
+            claimed = claimed.saturating_add(1);
+            let Some(fresh) = domain_events::Entity::find_by_id(&row.id)
+                .one(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?
+            else {
+                continue;
+            };
+            self.wake_one_claimed_page(&fresh).await?;
+            if let Some(after) = domain_events::Entity::find_by_id(&row.id)
+                .one(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?
+            {
+                if after.wake_pending != 0 {
+                    still_pending = true;
+                }
             }
         }
-        Ok(total)
+        Ok(PendingWakeProgress {
+            claimed,
+            still_pending,
+        })
+    }
+
+    async fn wake_one_claimed_page(&self, row: &domain_events::Model) -> Result<u32> {
+        if self.atomic.is_some() {
+            return wake_one_page_on(&self.db, row).await;
+        }
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        match wake_one_page_on(&txn, row).await {
+            Ok(n) => {
+                txn.commit().await.map_err(LibraryError::Orm)?;
+                Ok(n)
+            }
+            Err(err) => {
+                let _ = txn.rollback().await;
+                Err(err)
+            }
+        }
     }
 
     /// Claim the next ready delivery with a fenced `pending` → `running` mutation.
@@ -531,6 +571,7 @@ impl LibraryStore {
         wake_at: chrono::DateTime<Utc>,
         wake_event_type: &str,
         wake_filter_json: &str,
+        wake_grants_json: &str,
     ) -> Result<bool> {
         if checkpoint_json.len() > 65_536 {
             return Err(LibraryError::Other(anyhow::anyhow!(
@@ -605,6 +646,10 @@ impl LibraryStore {
             .col_expr(
                 event_deliveries::Column::WakeFilterJson,
                 sea_orm::sea_query::Expr::value(wake_filter_json.to_string()),
+            )
+            .col_expr(
+                event_deliveries::Column::WakeGrantsJson,
+                sea_orm::sea_query::Expr::value(wake_grants_json.to_string()),
             )
             .col_expr(
                 event_deliveries::Column::LeaseOwner,
@@ -1424,50 +1469,24 @@ impl LibraryStore {
         Ok(res.rows_affected == 1)
     }
 
-    /// Wake suspended deliveries whose `wake_event_type` matches `event`.
+    /// Wake one page of matching suspended deliveries for `event`.
     ///
-    /// Host-owned filter equality is the same as catalog `filter`. A match sets
-    /// `run_after = now` and `resume_pending` so the row is claimable before a
-    /// timestamp timeout. Only deliveries whose parent event shares
-    /// `event.account_id` are considered. Completing the pass clears
-    /// `domain_events.wake_pending`.
+    /// Dispatcher ticks should prefer [`Self::process_pending_wakes`], which
+    /// claims a lease before this slice. Completing a short page clears
+    /// `wake_pending`.
     ///
     /// # Errors
     ///
     /// Returns [`LibraryError::Orm`] when the update fails.
     pub async fn wake_matching_event_deliveries(&self, event: &DomainEventRecord) -> Result<u32> {
-        if self.atomic.is_some() {
-            return wake_matching_event_deliveries_on(&self.db, event).await;
-        }
-        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match wake_matching_event_deliveries_on(&txn, event).await {
-            Ok(n) => {
-                txn.commit().await.map_err(LibraryError::Orm)?;
-                Ok(n)
-            }
-            Err(err) => {
-                let _ = txn.rollback().await;
-                Err(err)
-            }
-        }
-    }
-
-    async fn wake_for_published(&self, outcome: &PublishDomainEventOutcome) -> Result<()> {
-        if take_skip_wake() {
-            return Ok(());
-        }
-        let id = match outcome {
-            PublishDomainEventOutcome::Created { id } => id.as_str(),
-            PublishDomainEventOutcome::Duplicate { existing_id } => existing_id.as_str(),
+        let Some(row) = domain_events::Entity::find_by_id(&event.id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        else {
+            return Ok(0);
         };
-        let Some(event) = self.get_domain_event(id).await? else {
-            return Ok(());
-        };
-        if !event.wake_pending {
-            return Ok(());
-        }
-        self.wake_matching_event_deliveries(&event).await?;
-        Ok(())
+        self.wake_one_claimed_page(&row).await
     }
 
     /// Delete terminal deliveries past their retention windows, then empty events.
@@ -1637,7 +1656,7 @@ pub(crate) async fn update_acquire_status_on<C: ConnectionTrait>(
     Ok(())
 }
 
-/// Insert an outbox row or return the existing id for the same dedup key.
+/// Insert an outbox row or return the existing id for the same namespaced key.
 pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
     db: &C,
     spec: PublishDomainEventSpec,
@@ -1647,6 +1666,8 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
     }
     let spec = prepare_publish_domain_event(spec)?;
     if let Some(existing) = domain_events::Entity::find()
+        .filter(domain_events::Column::AccountId.eq(&spec.account_id))
+        .filter(domain_events::Column::Source.eq(&spec.source))
         .filter(domain_events::Column::EventType.eq(&spec.event_type))
         .filter(domain_events::Column::DedupKey.eq(&spec.dedup_key))
         .one(db)
@@ -1661,6 +1682,8 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
     let id = spec.id;
     let event_type = spec.event_type.clone();
     let dedup_key = spec.dedup_key.clone();
+    let account_id = spec.account_id.clone();
+    let source = spec.source.clone();
     let model = domain_events::ActiveModel {
         id: Set(id.clone()),
         event_type: Set(spec.event_type),
@@ -1676,11 +1699,17 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
         dispatch_state: Set(STATE_PENDING.into()),
         created_at: Set(now),
         wake_pending: Set(1),
+        wake_lease_owner: NotSet,
+        wake_lease_expires_at: NotSet,
+        wake_cursor_at: Set(String::new()),
+        wake_cursor_id: Set(String::new()),
     };
     match model.insert(db).await {
         Ok(_) => Ok(PublishDomainEventOutcome::Created { id }),
         Err(err) if is_unique_violation(&err) => {
             if let Some(existing) = domain_events::Entity::find()
+                .filter(domain_events::Column::AccountId.eq(account_id))
+                .filter(domain_events::Column::Source.eq(source))
                 .filter(domain_events::Column::EventType.eq(event_type))
                 .filter(domain_events::Column::DedupKey.eq(dedup_key))
                 .one(db)
@@ -1697,105 +1726,143 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
     }
 }
 
-/// Page matching suspended deliveries and clear `wake_pending` when finished.
-async fn wake_matching_event_deliveries_on<C: ConnectionTrait>(
-    db: &C,
-    event: &DomainEventRecord,
-) -> Result<u32> {
+/// Process one delivery page for a claimed `wake_pending` event, then persist cursor.
+async fn wake_one_page_on<C: ConnectionTrait>(db: &C, row: &domain_events::Model) -> Result<u32> {
+    let event = map_event(row.clone())?;
     if event.event_type.trim().is_empty() {
-        clear_wake_pending_on(db, &event.id).await?;
+        finish_wake_on(db, &event.id).await?;
         return Ok(0);
     }
     let now = now_str();
-    let mut woken = 0u32;
-    let mut cursor_at = String::new();
-    let mut cursor_id = String::new();
-    loop {
-        let rows = event_deliveries::Entity::find()
-            .filter(event_deliveries::Column::State.eq(STATE_PENDING))
-            .filter(event_deliveries::Column::WakeEventType.eq(&event.event_type))
-            .filter(event_deliveries::Column::EventId.ne(&event.id))
-            .filter(
-                Condition::any()
-                    .add(event_deliveries::Column::CreatedAt.gt(cursor_at.clone()))
-                    .add(
-                        Condition::all()
-                            .add(event_deliveries::Column::CreatedAt.eq(cursor_at.clone()))
-                            .add(event_deliveries::Column::Id.gt(cursor_id.clone())),
-                    ),
-            )
-            .order_by_asc(event_deliveries::Column::CreatedAt)
-            .order_by_asc(event_deliveries::Column::Id)
-            .limit(WAKE_PAGE)
-            .all(db)
-            .await
-            .map_err(LibraryError::Orm)?;
-        if rows.is_empty() {
-            break;
+    let mut cursor_at = row.wake_cursor_at.clone();
+    let mut cursor_id = row.wake_cursor_id.clone();
+    let rows = event_deliveries::Entity::find()
+        .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+        .filter(event_deliveries::Column::WakeEventType.eq(&event.event_type))
+        .filter(event_deliveries::Column::EventId.ne(&event.id))
+        .filter(
+            Condition::any()
+                .add(event_deliveries::Column::CreatedAt.gt(cursor_at.clone()))
+                .add(
+                    Condition::all()
+                        .add(event_deliveries::Column::CreatedAt.eq(cursor_at.clone()))
+                        .add(event_deliveries::Column::Id.gt(cursor_id.clone())),
+                ),
+        )
+        .order_by_asc(event_deliveries::Column::CreatedAt)
+        .order_by_asc(event_deliveries::Column::Id)
+        .limit(WAKE_PAGE)
+        .all(db)
+        .await
+        .map_err(LibraryError::Orm)?;
+    if rows.is_empty() {
+        finish_wake_on(db, &event.id).await?;
+        return Ok(0);
+    }
+    let page_len = rows.len();
+    let parent_ids: Vec<String> = rows
+        .iter()
+        .map(|delivery| delivery.event_id.clone())
+        .collect();
+    let parents = domain_events::Entity::find()
+        .filter(domain_events::Column::Id.is_in(parent_ids))
+        .all(db)
+        .await
+        .map_err(LibraryError::Orm)?;
+    let mut account_by_id = std::collections::HashMap::<String, String>::new();
+    for parent in parents {
+        account_by_id.insert(parent.id, parent.account_id);
+    }
+    let mut ids = Vec::new();
+    for delivery in rows {
+        cursor_at.clone_from(&delivery.created_at);
+        cursor_id.clone_from(&delivery.id);
+        if account_by_id.get(&delivery.event_id).map(String::as_str)
+            != Some(event.account_id.as_str())
+        {
+            continue;
         }
-        let page_len = rows.len();
-        let parent_ids: Vec<String> = rows.iter().map(|row| row.event_id.clone()).collect();
-        let parents = domain_events::Entity::find()
-            .filter(domain_events::Column::Id.is_in(parent_ids))
-            .all(db)
-            .await
-            .map_err(LibraryError::Orm)?;
-        let mut account_by_id = std::collections::HashMap::<String, String>::new();
-        for parent in parents {
-            account_by_id.insert(parent.id, parent.account_id);
-        }
-        let mut ids = Vec::new();
-        for row in rows {
-            cursor_at.clone_from(&row.created_at);
-            cursor_id.clone_from(&row.id);
-            if account_by_id.get(&row.event_id).map(String::as_str)
-                != Some(event.account_id.as_str())
-            {
-                continue;
-            }
-            let filter = if row.wake_filter_json.trim().is_empty() {
-                None
-            } else {
-                serde_json::from_str(&row.wake_filter_json).ok()
-            };
-            if event_filter_matches(filter.as_ref(), &event.payload) {
-                ids.push(row.id);
-            }
-        }
-        if !ids.is_empty() {
-            let res = event_deliveries::Entity::update_many()
-                .col_expr(
-                    event_deliveries::Column::RunAfter,
-                    sea_orm::sea_query::Expr::value(now.clone()),
-                )
-                .col_expr(
-                    event_deliveries::Column::ResumePending,
-                    sea_orm::sea_query::Expr::value(1i64),
-                )
-                .col_expr(
-                    event_deliveries::Column::UpdatedAt,
-                    sea_orm::sea_query::Expr::value(now.clone()),
-                )
-                .filter(event_deliveries::Column::Id.is_in(ids))
-                .filter(event_deliveries::Column::State.eq(STATE_PENDING))
-                .exec(db)
-                .await
-                .map_err(LibraryError::Orm)?;
-            woken = woken.saturating_add(u32::try_from(res.rows_affected).unwrap_or(0));
-        }
-        if u64::try_from(page_len).unwrap_or(WAKE_PAGE) < WAKE_PAGE {
-            break;
+        if event_matches_wake_grants(
+            &delivery.wake_grants_json,
+            &delivery.wake_filter_json,
+            event.schema_version,
+            &event.payload,
+        ) {
+            ids.push(delivery.id);
         }
     }
-    clear_wake_pending_on(db, &event.id).await?;
+    let mut woken = 0u32;
+    if !ids.is_empty() {
+        let res = event_deliveries::Entity::update_many()
+            .col_expr(
+                event_deliveries::Column::RunAfter,
+                sea_orm::sea_query::Expr::value(now.clone()),
+            )
+            .col_expr(
+                event_deliveries::Column::ResumePending,
+                sea_orm::sea_query::Expr::value(1i64),
+            )
+            .col_expr(
+                event_deliveries::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now.clone()),
+            )
+            .filter(event_deliveries::Column::Id.is_in(ids))
+            .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+            .exec(db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        woken = u32::try_from(res.rows_affected).unwrap_or(0);
+    }
+    if u64::try_from(page_len).unwrap_or(WAKE_PAGE) < WAKE_PAGE {
+        finish_wake_on(db, &event.id).await?;
+    } else {
+        domain_events::Entity::update_many()
+            .col_expr(
+                domain_events::Column::WakeCursorAt,
+                sea_orm::sea_query::Expr::value(cursor_at),
+            )
+            .col_expr(
+                domain_events::Column::WakeCursorId,
+                sea_orm::sea_query::Expr::value(cursor_id),
+            )
+            .col_expr(
+                domain_events::Column::WakeLeaseOwner,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                domain_events::Column::WakeLeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .filter(domain_events::Column::Id.eq(&event.id))
+            .filter(domain_events::Column::WakePending.eq(1i64))
+            .exec(db)
+            .await
+            .map_err(LibraryError::Orm)?;
+    }
     Ok(woken)
 }
 
-async fn clear_wake_pending_on<C: ConnectionTrait>(db: &C, event_id: &str) -> Result<()> {
+async fn finish_wake_on<C: ConnectionTrait>(db: &C, event_id: &str) -> Result<()> {
     domain_events::Entity::update_many()
         .col_expr(
             domain_events::Column::WakePending,
             sea_orm::sea_query::Expr::value(0i64),
+        )
+        .col_expr(
+            domain_events::Column::WakeLeaseOwner,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            domain_events::Column::WakeLeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            domain_events::Column::WakeCursorAt,
+            sea_orm::sea_query::Expr::value(String::new()),
+        )
+        .col_expr(
+            domain_events::Column::WakeCursorId,
+            sea_orm::sea_query::Expr::value(String::new()),
         )
         .filter(domain_events::Column::Id.eq(event_id))
         .filter(domain_events::Column::WakePending.eq(1i64))
@@ -1861,6 +1928,7 @@ pub(crate) async fn dispatch_event_deliveries_on<C: ConnectionTrait>(
             resource_class: Set(EVENT_RESOURCE_CLASS_NETWORK.into()),
             wake_event_type: Set(String::new()),
             wake_filter_json: Set(String::new()),
+            wake_grants_json: Set(String::new()),
         };
         match model.insert(db).await {
             Ok(_) => created += 1,
@@ -2201,6 +2269,7 @@ fn map_delivery(m: event_deliveries::Model) -> Result<EventDeliveryRecord> {
         },
         wake_event_type: m.wake_event_type,
         wake_filter_json: m.wake_filter_json,
+        wake_grants_json: m.wake_grants_json,
     })
 }
 

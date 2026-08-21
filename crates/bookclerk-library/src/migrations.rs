@@ -1155,6 +1155,61 @@ const MIGRATION_V26_WAKE_PENDING_POSTGRES: &str = r#"
         ON domain_events(created_at, id) WHERE wake_pending = 1;
 "#;
 
+/// Tenant/producer dedup, claimed wake slices, and host-derived wake grants (SQLite).
+const MIGRATION_V27_DEDUP_WAKE_CLAIM_SQLITE: &str = r#"
+    ALTER TABLE event_deliveries ADD COLUMN wake_grants_json TEXT NOT NULL DEFAULT '';
+    CREATE TABLE domain_events_v27 (
+        id TEXT PRIMARY KEY NOT NULL,
+        event_type TEXT NOT NULL,
+        schema_version INTEGER NOT NULL,
+        occurred_at TEXT NOT NULL,
+        account_id TEXT NOT NULL DEFAULT '',
+        source TEXT NOT NULL DEFAULT '',
+        correlation_id TEXT NOT NULL DEFAULT '',
+        causation_id TEXT NOT NULL DEFAULT '',
+        dedup_key TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        ordering_key TEXT NOT NULL DEFAULT '',
+        dispatch_state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        wake_pending INTEGER NOT NULL DEFAULT 1,
+        wake_lease_owner TEXT,
+        wake_lease_expires_at TEXT,
+        wake_cursor_at TEXT NOT NULL DEFAULT '',
+        wake_cursor_id TEXT NOT NULL DEFAULT '',
+        UNIQUE(account_id, source, event_type, dedup_key)
+    );
+    INSERT INTO domain_events_v27 (
+        id, event_type, schema_version, occurred_at, account_id, source,
+        correlation_id, causation_id, dedup_key, payload, ordering_key,
+        dispatch_state, created_at, wake_pending
+    ) SELECT
+        id, event_type, schema_version, occurred_at, account_id, source,
+        correlation_id, causation_id, dedup_key, payload, ordering_key,
+        dispatch_state, created_at, wake_pending
+    FROM domain_events;
+    DROP TABLE domain_events;
+    ALTER TABLE domain_events_v27 RENAME TO domain_events;
+    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch
+        ON domain_events(dispatch_state, created_at);
+    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch_created
+        ON domain_events(dispatch_state, created_at, id);
+    CREATE INDEX IF NOT EXISTS idx_domain_events_wake_pending
+        ON domain_events(created_at, id) WHERE wake_pending = 1;
+"#;
+
+/// Tenant/producer dedup, claimed wake slices, and host-derived wake grants (Postgres).
+const MIGRATION_V27_DEDUP_WAKE_CLAIM_POSTGRES: &str = r#"
+    ALTER TABLE domain_events DROP CONSTRAINT IF EXISTS domain_events_event_type_dedup_key_key;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_domain_events_dedup_ns
+        ON domain_events(account_id, source, event_type, dedup_key);
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS wake_lease_owner TEXT;
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS wake_lease_expires_at TEXT;
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS wake_cursor_at TEXT NOT NULL DEFAULT '';
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS wake_cursor_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE event_deliveries ADD COLUMN IF NOT EXISTS wake_grants_json TEXT NOT NULL DEFAULT '';
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -1186,6 +1241,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V24_EVENT_NODES_SQLITE,
         MIGRATION_V25_EVENT_SOURCE_WAKE_SQLITE,
         MIGRATION_V26_WAKE_PENDING_SQLITE,
+        MIGRATION_V27_DEDUP_WAKE_CLAIM_SQLITE,
     ]
 }
 
@@ -1220,6 +1276,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V24_EVENT_NODES_POSTGRES,
         MIGRATION_V25_EVENT_SOURCE_WAKE_POSTGRES,
         MIGRATION_V26_WAKE_PENDING_POSTGRES,
+        MIGRATION_V27_DEDUP_WAKE_CLAIM_POSTGRES,
     ]
 }
 

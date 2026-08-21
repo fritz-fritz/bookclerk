@@ -1848,6 +1848,145 @@ pub fn event_filter_matches(filter: Option<&serde_json::Value>, payload_json: &s
         .all(|(key, value)| payload_obj.get(key) == Some(value))
 }
 
+/// Host-derived wake grant: schema versions plus an intersected payload filter.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EventWakeGrant {
+    /// Schema versions this grant may observe.
+    #[serde(rename = "schemaVersions")]
+    pub schema_versions: Vec<u32>,
+    /// Intersected payload object filter; `None` / empty object matches any payload.
+    #[serde(default)]
+    pub filter: Option<serde_json::Value>,
+}
+
+/// Merge declared and requested payload filters; `None` on a same-key conflict.
+#[must_use]
+pub fn intersect_event_filters(
+    declared: Option<&serde_json::Value>,
+    requested: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    fn as_map(
+        v: Option<&serde_json::Value>,
+    ) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        match v {
+            None => None,
+            Some(serde_json::Value::Object(m)) if m.is_empty() => None,
+            Some(serde_json::Value::Object(m)) => Some(m),
+            Some(_) => None,
+        }
+    }
+    match (as_map(declared), as_map(requested)) {
+        (None, None) => Some(serde_json::Value::Object(serde_json::Map::new())),
+        (Some(m), None) | (None, Some(m)) => Some(serde_json::Value::Object(m.clone())),
+        (Some(left), Some(right)) => {
+            let mut out = left.clone();
+            for (key, value) in right {
+                if let Some(existing) = out.get(key) {
+                    if existing != value {
+                        return None;
+                    }
+                } else {
+                    out.insert(key.clone(), value.clone());
+                }
+            }
+            Some(serde_json::Value::Object(out))
+        }
+    }
+}
+
+/// Build wake grants from declared subscriptions for `wake_type`.
+///
+/// Empty `wake_type` yields no grants (timestamp-only). A type with no matching
+/// subscription returns `"wake event type not subscribed"`. When every matching
+/// subscription conflicts with the requested filter, returns
+/// `"wake filter not within subscription"`.
+///
+/// # Errors
+///
+/// Returns a static reason when the type is undeclared or the requested filter
+/// cannot intersect any declared filter.
+pub fn wake_grants_from_subscriptions(
+    subs: &[EventCatalogSubscription],
+    wake_type: &str,
+    requested_filter_json: &str,
+) -> std::result::Result<Vec<EventWakeGrant>, &'static str> {
+    let wake = wake_type.trim();
+    if wake.is_empty() {
+        return Ok(Vec::new());
+    }
+    let requested = if requested_filter_json.trim().is_empty() {
+        None
+    } else {
+        let parsed: serde_json::Value = serde_json::from_str(requested_filter_json)
+            .map_err(|_| "wake filter not within subscription")?;
+        if !parsed.is_object() {
+            return Err("wake filter not within subscription");
+        }
+        Some(parsed)
+    };
+    let eligible: Vec<&EventCatalogSubscription> =
+        subs.iter().filter(|s| s.event_type == wake).collect();
+    if eligible.is_empty() {
+        return Err("wake event type not subscribed");
+    }
+    let mut grants = Vec::new();
+    for sub in eligible {
+        let Some(filter) = intersect_event_filters(sub.filter.as_ref(), requested.as_ref()) else {
+            continue;
+        };
+        let filter = match &filter {
+            serde_json::Value::Object(m) if m.is_empty() => None,
+            other => Some(other.clone()),
+        };
+        grants.push(EventWakeGrant {
+            schema_versions: sub.schema_versions.clone(),
+            filter,
+        });
+    }
+    if grants.is_empty() {
+        return Err("wake filter not within subscription");
+    }
+    Ok(grants)
+}
+
+/// True when an event matches persisted wake grants, or legacy type+filter rows.
+#[must_use]
+pub fn event_matches_wake_grants(
+    grants_json: &str,
+    legacy_filter_json: &str,
+    schema_version: i64,
+    payload: &str,
+) -> bool {
+    let grants_json = grants_json.trim();
+    if grants_json.is_empty() || grants_json == "[]" {
+        let filter = if legacy_filter_json.trim().is_empty() {
+            None
+        } else {
+            serde_json::from_str(legacy_filter_json).ok()
+        };
+        return event_filter_matches(filter.as_ref(), payload);
+    }
+    let Ok(grants) = serde_json::from_str::<Vec<EventWakeGrant>>(grants_json) else {
+        return false;
+    };
+    grants.iter().any(|grant| {
+        grant
+            .schema_versions
+            .iter()
+            .any(|v| i64::from(*v) == schema_version)
+            && event_filter_matches(grant.filter.as_ref(), payload)
+    })
+}
+
+/// How far one claimed wake tick got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PendingWakeProgress {
+    /// Events this tick claimed and processed one delivery page for.
+    pub claimed: u32,
+    /// True when another tick should run (saved cursor or remaining flags).
+    pub still_pending: bool,
+}
+
 /// Enabled catalog rows that match `event` type, schema version, and filter.
 #[must_use]
 pub fn catalog_subscribers_for_event(
@@ -1972,6 +2111,9 @@ pub struct EventDeliveryRecord {
     /// Host-owned payload object filter JSON for event-wake; empty = type only.
     #[serde(default)]
     pub wake_filter_json: String,
+    /// Host-derived wake grants JSON; empty falls back to type + `wake_filter_json`.
+    #[serde(default)]
+    pub wake_grants_json: String,
 }
 
 impl EventDeliveryRecord {
@@ -1999,3 +2141,41 @@ pub struct EventDeliveryFence {
 
 /// Default max delivery attempts before dead-letter.
 pub const EVENT_DELIVERY_MAX_ATTEMPTS: i64 = 8;
+
+#[cfg(test)]
+mod wake_grant_tests {
+    use super::*;
+
+    #[test]
+    fn event_matches_wake_grants_honors_schema_and_filter() {
+        let grants = serde_json::to_string(&[EventWakeGrant {
+            schema_versions: vec![1],
+            filter: Some(serde_json::json!({"source": "audible"})),
+        }])
+        .unwrap();
+        assert!(event_matches_wake_grants(
+            &grants,
+            "",
+            1,
+            r#"{"source":"audible"}"#
+        ));
+        assert!(!event_matches_wake_grants(
+            &grants,
+            "",
+            2,
+            r#"{"source":"audible"}"#
+        ));
+        assert!(!event_matches_wake_grants(
+            &grants,
+            "",
+            1,
+            r#"{"source":"libro"}"#
+        ));
+        assert!(event_matches_wake_grants(
+            "",
+            r#"{"source":"audible"}"#,
+            2,
+            r#"{"source":"audible"}"#
+        ));
+    }
+}

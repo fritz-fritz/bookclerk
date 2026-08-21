@@ -6,7 +6,7 @@ workers claim jobs. There is no external broker.
 
 This is not a general pub/sub bus. Domain events such as `book_acquired` /
 plugin `onEvent` stay **off** `JobKind`. They use a durable outbox
-(`domain_events` + `event_deliveries` + `event_subscriber_nodes`, schema V26) with
+(`domain_events` + `event_deliveries` + `event_subscriber_nodes`, schema V27) with
 the same fenced-lease pattern as jobs. Acquire success publishes
 `book_acquired` with producer `source` on the envelope. Each host heartbeats discovered (config-enabled, even if spawn
 failed) and loaded integrations into a **per-node** catalog keyed by
@@ -24,11 +24,16 @@ that process. `[events.concurrency]` is both the local worker count **and** the
 cluster-wide max `running` deliveries per `(plugin_id, resource_class)`
 (PostgreSQL serializes admission with a per-plugin advisory lock).
 `EventResult::suspended` may set `wakeOnEventType` / `wakeOnFilterJson`; the
-host wakes matching parked rows in the same account when a later event is
-published. Publish sets `domain_events.wake_pending` until that pass
-completes, so a Duplicate retry or dispatcher replay repairs a crash after
-commit. `wakeOnEventType` must be a declared subscription (empty stays
-timestamp-only). Late-join skip cache is invalidated on dispatch error and
+host derives wake grants from declared subscriptions (schema versions plus the
+intersection of `sub.filter` and the requested filter — requested keys only
+add constraints) and wakes matching parked rows in the same account when a
+later event is published. Publish commits `domain_events.wake_pending = 1` and
+returns; the dispatcher claims bounded wake slices (`wake_lease_*` + delivery
+cursor, at most 32 events and one 200-row page each) so producer latency does
+not track sleeper count. Duplicate retries leave the flag set until a claimed
+slice finishes. `wakeOnEventType` must be a declared subscription (empty stays
+timestamp-only); an empty requested filter keeps the subscription filter and
+cannot broaden it. Late-join skip cache is invalidated on dispatch error and
 reconciles at least every 60s as a backstop.
 `GET /api/status` includes event queue counts plus durable retry/suspend totals
 and average dispatch/handler latency. Retention is independent of jobs
