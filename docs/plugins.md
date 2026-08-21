@@ -1023,18 +1023,28 @@ subscriptions = [
 ]
 ```
 
+Optional `resource_class` (default `"network"`) is copied onto `event_deliveries`.
+Optional `filter` is a host-owned JSON object; the dispatcher matches **payload
+object key equality** only (no plugin-provided code / CEL). Echo and
+Audiobookshelf may omit both (defaults).
+
 Non-empty `subscriptions` requires `onEvent` in `capabilities.methods.list`.
-The host intersects loaded guests with matching `type` + `schema_versions`.
-A `suspended` result is accepted only when a subscription matches that exact
-`(type, schema_version)` and sets `supports_suspend = true`; otherwise it is
-stored as a permanent reject. Acquire success writes `book_acquired` into
-`domain_events` in the same transaction as the library acquire-status change
-(book uuid, storage key, product ids — never media bytes). The producer
-`ordering_key` is stored on the envelope and copied verbatim onto each
-delivery. Each VPS claims only plugin ids loaded on that process; an unused
-claim is released without consuming `attempt_count`. The delivery worker
-heartbeats the lease during `onEvent` (`lease/3`); fence loss cancels the
-in-flight RPC (including workerd/native) and ignores the handler result.
+Each host upserts discovered config-enabled integration manifests (even when
+spawn failed) and currently loaded integrations into `event_subscribers`. Nodes
+do not delete catalog rows they lack. The dispatcher matches catalog type +
+schema version + enabled + filter, then `INSERT OR IGNORE`s deliveries for
+pending **and** already-`dispatched` events so a plugin that appears later still
+gets a row. A `suspended` result is accepted only when a subscription matches
+that exact `(type, schema_version)` and sets `supports_suspend = true`;
+otherwise it is stored as a permanent reject. Acquire success writes
+`book_acquired` into `domain_events` in the same transaction as the library
+acquire-status change (book uuid, storage key, product ids — never media bytes).
+The producer `ordering_key` is stored on the envelope and copied verbatim onto
+each delivery. Each VPS claims only plugin ids loaded on that process; an unused
+claim is released without consuming `attempt_count`. `[events.concurrency]`
+(default 1) is the number of local delivery workers. The delivery worker
+heartbeats the lease during `onEvent` (`lease/3`); fence loss or operator
+`cancel_requested` cancels the in-flight RPC (including workerd/native).
 See [jobs.md](jobs.md).
 
 ### Source capabilities

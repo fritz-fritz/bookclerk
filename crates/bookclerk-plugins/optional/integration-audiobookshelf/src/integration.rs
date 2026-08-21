@@ -247,6 +247,8 @@ impl Integration for AbsIntegration {
             event_type: "book_acquired".into(),
             schema_versions: vec![1],
             supports_suspend: false,
+            resource_class: "network".into(),
+            filter: None,
         }]
     }
 

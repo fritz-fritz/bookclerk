@@ -33,6 +33,7 @@ Classic Libation setting names are accepted as aliases where documented in
 | `[discovery]` | Recommendations, embeddings, Open Library, listening sync |
 | `[diagnostics]` | Opt-in report sharing |
 | `[jobs]` / `[jobs.concurrency]` | Durable queue admission, leases, network-class concurrency |
+| `[events]` | Outbox retention and local delivery-worker concurrency |
 
 ## Important environment variables
 
@@ -101,6 +102,20 @@ network = 1
 
 See [jobs.md](jobs.md) for the state machine, `409`/`429` admission, and crash
 recovery.
+
+## Events
+
+```toml
+[events]
+retention_days = 7
+dead_letter_retention_days = 30
+concurrency = 1
+```
+
+Acked/rejected deliveries (and parent events with no remaining live deliveries)
+use `retention_days`. Dead letters use the longer `dead_letter_retention_days`.
+`concurrency` is the number of local delivery workers (claim still filters by
+loaded plugin ids). See [jobs.md](jobs.md) and [plugins.md](plugins.md).
 
 ## Identity broker (`[auth.oidc]`)
 

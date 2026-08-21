@@ -1657,12 +1657,165 @@ pub enum PublishDomainEventOutcome {
     },
 }
 
+/// Default delivery resource class (`network`).
+pub const EVENT_RESOURCE_CLASS_NETWORK: &str = "network";
+
+/// Serde default for [`EventSubscriber::resource_class`].
+fn default_event_resource_class() -> String {
+    EVENT_RESOURCE_CLASS_NETWORK.into()
+}
+
 /// Subscriber snapshot used when creating deliveries for one event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct EventSubscriber {
     /// Plugin id that declared a matching subscription.
     pub plugin_id: String,
+    /// Concurrency class copied onto the delivery row.
+    #[serde(default = "default_event_resource_class")]
+    pub resource_class: String,
+}
+
+impl EventSubscriber {
+    /// Catalog match for `plugin_id` with the default `network` resource class.
+    #[must_use]
+    pub fn plugin(plugin_id: impl Into<String>) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            resource_class: default_event_resource_class(),
+        }
+    }
+}
+
+impl Default for EventSubscriber {
+    fn default() -> Self {
+        Self::plugin(String::new())
+    }
+}
+
+/// One `[capabilities.events.subscriptions]` row persisted in `event_subscribers`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EventCatalogSubscription {
+    /// Versioned event type (`book_acquired`, …).
+    #[serde(rename = "type")]
+    pub event_type: String,
+    /// Schema versions this guest can consume (default `[1]`).
+    #[serde(default = "default_catalog_schema_versions")]
+    pub schema_versions: Vec<u32>,
+    /// Whether `EventResult::Suspended` is supported for this type.
+    #[serde(default)]
+    pub supports_suspend: bool,
+    /// Concurrency class (default `"network"`).
+    #[serde(default = "default_event_resource_class")]
+    pub resource_class: String,
+    /// Optional host-owned payload object filter (top-level key equality).
+    #[serde(default)]
+    pub filter: Option<serde_json::Value>,
+}
+
+/// Default `[1]` when a catalog subscription omits `schema_versions`.
+fn default_catalog_schema_versions() -> Vec<u32> {
+    vec![1]
+}
+
+impl EventCatalogSubscription {
+    /// Build a type+schema subscription with default resource class and no filter.
+    #[must_use]
+    pub fn new(event_type: impl Into<String>, schema_versions: Vec<u32>) -> Self {
+        Self {
+            event_type: event_type.into(),
+            schema_versions,
+            supports_suspend: false,
+            resource_class: default_event_resource_class(),
+            filter: None,
+        }
+    }
+}
+
+/// Cluster-authoritative catalog row (`event_subscribers`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EventSubscriberCatalogRecord {
+    /// Subscriber plugin id.
+    pub plugin_id: String,
+    /// Declared subscriptions.
+    pub subscriptions: Vec<EventCatalogSubscription>,
+    /// Whether matching events should create deliveries.
+    pub enabled: bool,
+    /// Last upsert time.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Operator-visible delivery-queue counters for `GET /api/status`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EventDeliveryMetrics {
+    /// `pending` rows with no checkpoint (not suspended).
+    pub pending: i64,
+    /// Currently claimed rows.
+    pub running: i64,
+    /// `pending` rows that hold a suspend checkpoint.
+    pub suspended: i64,
+    /// Dead-lettered rows.
+    pub dead_letter: i64,
+    /// Successfully acked rows.
+    pub acked: i64,
+    /// Age in seconds of the oldest `pending` row, when any exist.
+    pub oldest_pending_age_secs: Option<i64>,
+}
+
+/// True when `filter` is absent/empty or every filter key equals the payload object value.
+#[must_use]
+pub fn event_filter_matches(filter: Option<&serde_json::Value>, payload_json: &str) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let serde_json::Value::Object(filter_obj) = filter else {
+        return false;
+    };
+    if filter_obj.is_empty() {
+        return true;
+    }
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(payload_json) else {
+        return false;
+    };
+    let serde_json::Value::Object(payload_obj) = payload else {
+        return false;
+    };
+    filter_obj
+        .iter()
+        .all(|(key, value)| payload_obj.get(key) == Some(value))
+}
+
+/// Enabled catalog rows that match `event` type, schema version, and filter.
+#[must_use]
+pub fn catalog_subscribers_for_event(
+    catalog: &[EventSubscriberCatalogRecord],
+    event: &DomainEventRecord,
+) -> Vec<EventSubscriber> {
+    let mut out = Vec::new();
+    for row in catalog {
+        if !row.enabled {
+            continue;
+        }
+        let Some(spec) = row.subscriptions.iter().find(|s| {
+            s.event_type == event.event_type
+                && s.schema_versions
+                    .iter()
+                    .any(|v| i64::from(*v) == event.schema_version)
+                && event_filter_matches(s.filter.as_ref(), &event.payload)
+        }) else {
+            continue;
+        };
+        let resource_class = if spec.resource_class.trim().is_empty() {
+            default_event_resource_class()
+        } else {
+            spec.resource_class.clone()
+        };
+        out.push(EventSubscriber {
+            plugin_id: row.plugin_id.clone(),
+            resource_class,
+        });
+    }
+    out
 }
 
 /// Immutable outbox envelope.
@@ -1737,6 +1890,12 @@ pub struct EventDeliveryRecord {
     pub created_at: DateTime<Utc>,
     /// Last-modified time.
     pub updated_at: DateTime<Utc>,
+    /// Cooperative cancel flag for a running delivery.
+    #[serde(default)]
+    pub cancel_requested: bool,
+    /// Concurrency class (`network` today).
+    #[serde(default = "default_event_resource_class")]
+    pub resource_class: String,
 }
 
 impl EventDeliveryRecord {

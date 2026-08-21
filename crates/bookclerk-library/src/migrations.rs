@@ -1032,6 +1032,30 @@ const MIGRATION_V22_EVENT_ORDERING_POSTGRES: &str = r#"
     ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS ordering_key TEXT NOT NULL DEFAULT '';
 "#;
 
+/// Cluster subscriber catalog plus delivery cancel/resource-class columns (SQLite).
+const MIGRATION_V23_EVENT_CATALOG_SQLITE: &str = r#"
+    ALTER TABLE event_deliveries ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE event_deliveries ADD COLUMN resource_class TEXT NOT NULL DEFAULT 'network';
+    CREATE TABLE IF NOT EXISTS event_subscribers (
+        plugin_id TEXT PRIMARY KEY NOT NULL,
+        subscriptions_json TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+    );
+"#;
+
+/// Cluster subscriber catalog plus delivery cancel/resource-class columns (Postgres / D1).
+const MIGRATION_V23_EVENT_CATALOG_POSTGRES: &str = r#"
+    ALTER TABLE event_deliveries ADD COLUMN IF NOT EXISTS cancel_requested BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE event_deliveries ADD COLUMN IF NOT EXISTS resource_class TEXT NOT NULL DEFAULT 'network';
+    CREATE TABLE IF NOT EXISTS event_subscribers (
+        plugin_id TEXT PRIMARY KEY NOT NULL,
+        subscriptions_json TEXT NOT NULL,
+        enabled BIGINT NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+    );
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -1059,6 +1083,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V20_THEME_SQLITE,
         MIGRATION_V21_EVENT_OUTBOX_SQLITE,
         MIGRATION_V22_EVENT_ORDERING_SQLITE,
+        MIGRATION_V23_EVENT_CATALOG_SQLITE,
     ]
 }
 
@@ -1089,6 +1114,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V20_THEME_POSTGRES,
         MIGRATION_V21_EVENT_OUTBOX_POSTGRES,
         MIGRATION_V22_EVENT_ORDERING_POSTGRES,
+        MIGRATION_V23_EVENT_CATALOG_POSTGRES,
     ]
 }
 

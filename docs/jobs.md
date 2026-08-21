@@ -6,15 +6,23 @@ workers claim jobs. There is no external broker.
 
 This is not a general pub/sub bus. Domain events such as `book_acquired` /
 plugin `onEvent` stay **off** `JobKind`. They use a durable outbox
-(`domain_events` + `event_deliveries`, schema V22) with the same fenced-lease
-pattern as jobs. Acquire success publishes `book_acquired`; a dispatcher
-snapshots loaded subscribers and a delivery worker invokes
-`Integration.onEvent`, honoring `EventResult` (`ack`, `retry` until
-`max_attempts` then dead-letter, `reject`, `deadLetter`, `suspended`). Operator APIs: `GET /api/events`,
+(`domain_events` + `event_deliveries` + `event_subscribers`, schema V23) with
+the same fenced-lease pattern as jobs. Acquire success publishes
+`book_acquired`. Each host upserts discovered (config-enabled, even if spawn
+failed) and loaded integrations into the cluster catalog and does **not**
+delete other nodes’ rows. The dispatcher matches catalog rows (type, schema
+version, enabled, optional payload-object filter) and `INSERT OR IGNORE`s
+deliveries, including late-join onto already-`dispatched` events. Each VPS
+claims only plugin ids loaded on that process. `GET /api/status` includes
+event queue counts. Retention is independent of jobs
+(`[events].retention_days` for acked/rejected + empty parent events,
+`dead_letter_retention_days` for dead letters). Operator APIs: `GET /api/events`,
 `GET /api/events/deliveries?state=dead_letter`,
 `POST /api/events/deliveries/{id}/retry`,
-`POST /api/events/deliveries/{id}/acknowledge`. CLI:
-`bookclerk events list|dead-letters|retry|ack`.
+`POST /api/events/deliveries/{id}/acknowledge`,
+`POST /api/events/deliveries/{id}/cancel`,
+`POST /api/events/deliveries/{id}/resume`. CLI:
+`bookclerk events list|dead-letters|retry|ack|cancel|resume`.
 
 See [architecture.md](architecture.md), [plugins.md](plugins.md), and
 [operations.md](operations.md).
@@ -172,4 +180,5 @@ and the shared `StorageIndex` stay single-writer. Codec work stays in the
 
 ## Configuration
 
-See [configuration.md](configuration.md) (`[jobs]` and `BOOKCLERK_JOBS_*`).
+See [configuration.md](configuration.md) (`[jobs]` / `BOOKCLERK_JOBS_*` and
+`[events]` / `BOOKCLERK_EVENTS_*`).

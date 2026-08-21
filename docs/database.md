@@ -266,7 +266,7 @@ statements use `CREATE TABLE/INDEX IF NOT EXISTS`. Tables:
 `claim_tickets`, `portal_sessions`, `account_links`, `works`, `work_editions`,
 `listening_progress`, `title_requests`, `title_request_sources`, `embeddings`,
 `user_preferences`, `encrypted_secrets`, `jobs`, `job_temp_paths`,
-`domain_events`, `event_deliveries`.
+`domain_events`, `event_deliveries`, `event_subscribers`.
 The `jobs` table is the durable daemon queue (see [jobs.md](jobs.md)); V12
 adds it for existing databases. V13 adds `jobs.lease_generation`, a partial
 unique index on active `dedup_key`s, `job_temp_paths.reserved_bytes`, and a
@@ -294,6 +294,11 @@ V21 adds `domain_events` (immutable outbox envelopes) and `event_deliveries`
 Deliveries are idempotent on `(event_id, plugin_id)`.
 V22 adds `domain_events.ordering_key` so the producer FIFO key is stored on the
 envelope and copied verbatim onto each delivery.
+V23 adds `event_subscribers` (cluster-authoritative catalog: `plugin_id`,
+`subscriptions_json`, `enabled`, `updated_at`) plus
+`event_deliveries.cancel_requested` and `event_deliveries.resource_class`.
+Dispatchers match the catalog, not this process’s loaded registry; workers
+still claim only locally loaded plugin ids.
 
 ## Encrypted secrets
 

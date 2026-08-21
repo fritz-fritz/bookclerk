@@ -15,12 +15,13 @@ use sea_orm::{
 use uuid::Uuid;
 
 use super::{now_str, parse_dt, parse_dt_opt, LibraryStore};
-use crate::entities::{books, domain_events, event_deliveries};
+use crate::entities::{books, domain_events, event_deliveries, event_subscribers};
 use crate::error::{LibraryError, Result};
 use crate::models::{
-    job_backoff_run_after, AcquireStatus, DomainEventRecord, EventDeliveryFence,
-    EventDeliveryRecord, EventSubscriber, PublishDomainEventOutcome, PublishDomainEventSpec,
-    EVENT_DELIVERY_MAX_ATTEMPTS,
+    catalog_subscribers_for_event, job_backoff_run_after, AcquireStatus, DomainEventRecord,
+    EventCatalogSubscription, EventDeliveryFence, EventDeliveryMetrics, EventDeliveryRecord,
+    EventSubscriber, EventSubscriberCatalogRecord, PublishDomainEventOutcome,
+    PublishDomainEventSpec, EVENT_DELIVERY_MAX_ATTEMPTS, EVENT_RESOURCE_CLASS_NETWORK,
 };
 
 const STATE_PENDING: &str = "pending";
@@ -486,11 +487,53 @@ impl LibraryStore {
 
     /// Reclaim expired running deliveries back to `pending`.
     ///
+    /// Rows with `cancel_requested` become `rejected` instead of pending so an
+    /// operator cancel survives a worker crash.
+    ///
     /// # Errors
     ///
     /// Returns [`LibraryError::Orm`] when the update fails.
     pub async fn reclaim_expired_event_deliveries(&self) -> Result<u32> {
         let now = Utc::now();
+        let now_s = now.to_rfc3339();
+        let expired = Condition::any()
+            .add(event_deliveries::Column::LeaseExpiresAt.is_null())
+            .add(event_deliveries::Column::LeaseExpiresAt.lte(now_s.clone()));
+        let cancelled = event_deliveries::Entity::update_many()
+            .col_expr(
+                event_deliveries::Column::State,
+                sea_orm::sea_query::Expr::value(STATE_REJECTED),
+            )
+            .col_expr(
+                event_deliveries::Column::Outcome,
+                sea_orm::sea_query::Expr::value(Some("reject".to_string())),
+            )
+            .col_expr(
+                event_deliveries::Column::ErrorMessage,
+                sea_orm::sea_query::Expr::value(Some("cancelled by operator".to_string())),
+            )
+            .col_expr(
+                event_deliveries::Column::LeaseOwner,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                event_deliveries::Column::LeaseExpiresAt,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                event_deliveries::Column::CancelRequested,
+                sea_orm::sea_query::Expr::value(0i64),
+            )
+            .col_expr(
+                event_deliveries::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now_s.clone()),
+            )
+            .filter(event_deliveries::Column::State.eq(STATE_RUNNING))
+            .filter(event_deliveries::Column::CancelRequested.eq(1i64))
+            .filter(expired.clone())
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
         let res = event_deliveries::Entity::update_many()
             .col_expr(
                 event_deliveries::Column::State,
@@ -506,18 +549,14 @@ impl LibraryStore {
             )
             .col_expr(
                 event_deliveries::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(now.to_rfc3339()),
+                sea_orm::sea_query::Expr::value(now_s),
             )
             .filter(event_deliveries::Column::State.eq(STATE_RUNNING))
-            .filter(
-                Condition::any()
-                    .add(event_deliveries::Column::LeaseExpiresAt.is_null())
-                    .add(event_deliveries::Column::LeaseExpiresAt.lte(now.to_rfc3339())),
-            )
+            .filter(expired)
             .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
-        Ok(u32::try_from(res.rows_affected).unwrap_or(u32::MAX))
+        Ok(u32::try_from(cancelled.rows_affected + res.rows_affected).unwrap_or(u32::MAX))
     }
 
     /// Load one event envelope.
@@ -685,6 +724,315 @@ impl LibraryStore {
             .await
             .map_err(LibraryError::Orm)?;
         i64::try_from(n).map_err(|err| LibraryError::Other(anyhow::anyhow!(err.to_string())))
+    }
+
+    /// Operator-visible delivery-queue counters (pending vs suspended split).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the read fails.
+    pub async fn event_delivery_metrics(&self) -> Result<EventDeliveryMetrics> {
+        let pending_all = self.count_event_deliveries(STATE_PENDING).await?;
+        let suspended = i64::try_from(
+            event_deliveries::Entity::find()
+                .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+                .filter(event_deliveries::Column::CheckpointJson.is_not_null())
+                .count(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?,
+        )
+        .map_err(|err| LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
+        let oldest = event_deliveries::Entity::find()
+            .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+            .order_by_asc(event_deliveries::Column::CreatedAt)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let oldest_pending_age_secs = oldest.map(|row| {
+            let created = parse_dt(&row.created_at);
+            (Utc::now() - created).num_seconds().max(0)
+        });
+        Ok(EventDeliveryMetrics {
+            pending: (pending_all - suspended).max(0),
+            running: self.count_event_deliveries(STATE_RUNNING).await?,
+            suspended,
+            dead_letter: self.count_event_deliveries(STATE_DEAD_LETTER).await?,
+            acked: self.count_event_deliveries(STATE_ACKED).await?,
+            oldest_pending_age_secs,
+        })
+    }
+
+    /// Outbox envelopes in `dispatch_state`, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the read fails.
+    pub async fn list_domain_events_by_dispatch_state(
+        &self,
+        dispatch_state: &str,
+        limit: u64,
+    ) -> Result<Vec<DomainEventRecord>> {
+        domain_events::Entity::find()
+            .filter(domain_events::Column::DispatchState.eq(dispatch_state))
+            .order_by_asc(domain_events::Column::CreatedAt)
+            .limit(limit)
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .into_iter()
+            .map(map_event)
+            .collect()
+    }
+
+    /// Insert or replace one cluster catalog row (last writer per `plugin_id`).
+    ///
+    /// Does not delete other plugins' rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the write fails.
+    pub async fn upsert_event_subscriber(
+        &self,
+        plugin_id: &str,
+        subscriptions: &[EventCatalogSubscription],
+        enabled: bool,
+    ) -> Result<()> {
+        let plugin_id = plugin_id.trim();
+        if plugin_id.is_empty() {
+            return Ok(());
+        }
+        let now = now_str();
+        let json = serde_json::to_string(subscriptions).unwrap_or_else(|_| "[]".into());
+        let model = event_subscribers::ActiveModel {
+            plugin_id: Set(plugin_id.to_string()),
+            subscriptions_json: Set(json),
+            enabled: Set(i64::from(enabled)),
+            updated_at: Set(now),
+        };
+        event_subscribers::Entity::insert(model)
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::column(event_subscribers::Column::PluginId)
+                    .update_columns([
+                        event_subscribers::Column::SubscriptionsJson,
+                        event_subscribers::Column::Enabled,
+                        event_subscribers::Column::UpdatedAt,
+                    ])
+                    .to_owned(),
+            )
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(())
+    }
+
+    /// All catalog rows (enabled and disabled).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the read fails.
+    pub async fn list_event_subscribers(&self) -> Result<Vec<EventSubscriberCatalogRecord>> {
+        event_subscribers::Entity::find()
+            .order_by_asc(event_subscribers::Column::PluginId)
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .into_iter()
+            .map(map_catalog_row)
+            .collect()
+    }
+
+    /// Create deliveries from the cluster catalog for one event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the write fails.
+    pub async fn dispatch_catalog_matches(
+        &self,
+        event: &DomainEventRecord,
+        operation_id: &str,
+    ) -> Result<u32> {
+        let catalog = self.list_event_subscribers().await?;
+        let subs = catalog_subscribers_for_event(&catalog, event);
+        self.dispatch_event_deliveries(&event.id, &subs, operation_id)
+            .await
+    }
+
+    /// Cancel a pending delivery or flag a running one for cooperative stop.
+    ///
+    /// Pending (including suspended) rows become `rejected`. Running rows set
+    /// `cancel_requested` so the heartbeat loop aborts `onEvent`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the update fails.
+    pub async fn request_event_delivery_cancel(
+        &self,
+        id: &str,
+    ) -> Result<Option<EventDeliveryRecord>> {
+        for _ in 0..16 {
+            let Some(model) = event_deliveries::Entity::find_by_id(id)
+                .one(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?
+            else {
+                return Ok(None);
+            };
+            if model.state != STATE_PENDING && model.state != STATE_RUNNING {
+                return Ok(Some(map_delivery(model)?));
+            }
+            if model.state == STATE_PENDING {
+                let now = now_str();
+                let res = event_deliveries::Entity::update_many()
+                    .col_expr(
+                        event_deliveries::Column::State,
+                        sea_orm::sea_query::Expr::value(STATE_REJECTED),
+                    )
+                    .col_expr(
+                        event_deliveries::Column::Outcome,
+                        sea_orm::sea_query::Expr::value(Some("reject".to_string())),
+                    )
+                    .col_expr(
+                        event_deliveries::Column::ErrorMessage,
+                        sea_orm::sea_query::Expr::value(Some("cancelled by operator".to_string())),
+                    )
+                    .col_expr(
+                        event_deliveries::Column::CancelRequested,
+                        sea_orm::sea_query::Expr::value(0i64),
+                    )
+                    .col_expr(
+                        event_deliveries::Column::UpdatedAt,
+                        sea_orm::sea_query::Expr::value(now),
+                    )
+                    .filter(event_deliveries::Column::Id.eq(id))
+                    .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+                    .exec(&self.db)
+                    .await
+                    .map_err(LibraryError::Orm)?;
+                if res.rows_affected == 1 {
+                    return self.get_event_delivery(id).await;
+                }
+                continue;
+            }
+            let res = event_deliveries::Entity::update_many()
+                .col_expr(
+                    event_deliveries::Column::CancelRequested,
+                    sea_orm::sea_query::Expr::value(1i64),
+                )
+                .col_expr(
+                    event_deliveries::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(now_str()),
+                )
+                .filter(event_deliveries::Column::Id.eq(id))
+                .filter(event_deliveries::Column::State.eq(STATE_RUNNING))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            if res.rows_affected == 1 {
+                return self.get_event_delivery(id).await;
+            }
+        }
+        self.get_event_delivery(id).await
+    }
+
+    /// True when a running delivery worker should abort after the current step.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the read fails.
+    pub async fn event_delivery_cancel_requested(&self, id: &str) -> Result<bool> {
+        let Some(model) = event_deliveries::Entity::find_by_id(id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        else {
+            return Ok(false);
+        };
+        Ok(model.cancel_requested != 0)
+    }
+
+    /// Wake a suspended delivery: `run_after = now` and `resume_pending = 1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the update fails.
+    pub async fn resume_event_delivery(&self, id: &str) -> Result<bool> {
+        let now = now_str();
+        let res = event_deliveries::Entity::update_many()
+            .col_expr(
+                event_deliveries::Column::RunAfter,
+                sea_orm::sea_query::Expr::value(now.clone()),
+            )
+            .col_expr(
+                event_deliveries::Column::ResumePending,
+                sea_orm::sea_query::Expr::value(1i64),
+            )
+            .col_expr(
+                event_deliveries::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(event_deliveries::Column::Id.eq(id))
+            .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+            .filter(event_deliveries::Column::CheckpointJson.is_not_null())
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(res.rows_affected == 1)
+    }
+
+    /// Delete terminal deliveries past their retention windows, then empty events.
+    ///
+    /// Acked/rejected rows use `retention_days`. Dead letters use
+    /// `dead_letter_retention_days`. Dispatched parent events with no remaining
+    /// deliveries are removed afterward.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the delete fails.
+    pub async fn prune_event_deliveries(
+        &self,
+        retention_days: u64,
+        dead_letter_retention_days: u64,
+    ) -> Result<u64> {
+        let terminal_cutoff = (Utc::now()
+            - chrono::Duration::days(i64::try_from(retention_days).unwrap_or(7)))
+        .to_rfc3339();
+        let dead_letter_cutoff = (Utc::now()
+            - chrono::Duration::days(i64::try_from(dead_letter_retention_days).unwrap_or(30)))
+        .to_rfc3339();
+        let acked = event_deliveries::Entity::delete_many()
+            .filter(event_deliveries::Column::State.is_in([STATE_ACKED, STATE_REJECTED]))
+            .filter(event_deliveries::Column::UpdatedAt.lte(terminal_cutoff))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let dead = event_deliveries::Entity::delete_many()
+            .filter(event_deliveries::Column::State.eq(STATE_DEAD_LETTER))
+            .filter(event_deliveries::Column::UpdatedAt.lte(dead_letter_cutoff.clone()))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let remaining: Vec<String> = event_deliveries::Entity::find()
+            .select_only()
+            .column(event_deliveries::Column::EventId)
+            .into_tuple()
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let events = if remaining.is_empty() {
+            domain_events::Entity::delete_many()
+                .filter(domain_events::Column::DispatchState.eq(STATE_DISPATCHED))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?
+        } else {
+            domain_events::Entity::delete_many()
+                .filter(domain_events::Column::DispatchState.eq(STATE_DISPATCHED))
+                .filter(domain_events::Column::Id.is_not_in(remaining))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?
+        };
+        Ok(acked.rows_affected + dead.rows_affected + events.rows_affected)
     }
 }
 
@@ -892,6 +1240,12 @@ pub(crate) async fn dispatch_event_deliveries_on<C: ConnectionTrait>(
             error_message: NotSet,
             created_at: Set(now.clone()),
             updated_at: Set(now.clone()),
+            cancel_requested: Set(0),
+            resource_class: Set(if sub.resource_class.trim().is_empty() {
+                EVENT_RESOURCE_CLASS_NETWORK.into()
+            } else {
+                sub.resource_class.clone()
+            }),
         };
         match model.insert(db).await {
             Ok(_) => created += 1,
@@ -933,6 +1287,7 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
             .filter(event_deliveries::Column::State.eq(STATE_PENDING))
             .filter(event_deliveries::Column::RunAfter.lte(now_s.clone()))
             .filter(event_deliveries::Column::PluginId.is_in(plugin_ids.to_vec()))
+            .filter(event_deliveries::Column::ResourceClass.eq(EVENT_RESOURCE_CLASS_NETWORK))
             .order_by_asc(event_deliveries::Column::CreatedAt)
             .limit(PAGE)
             .offset(offset)
@@ -1114,6 +1469,23 @@ fn map_delivery(m: event_deliveries::Model) -> Result<EventDeliveryRecord> {
         outcome: m.outcome,
         error_message: m.error_message,
         created_at: parse_dt(&m.created_at),
+        updated_at: parse_dt(&m.updated_at),
+        cancel_requested: m.cancel_requested != 0,
+        resource_class: if m.resource_class.trim().is_empty() {
+            EVENT_RESOURCE_CLASS_NETWORK.into()
+        } else {
+            m.resource_class
+        },
+    })
+}
+
+fn map_catalog_row(m: event_subscribers::Model) -> Result<EventSubscriberCatalogRecord> {
+    let subscriptions: Vec<EventCatalogSubscription> =
+        serde_json::from_str(&m.subscriptions_json).unwrap_or_default();
+    Ok(EventSubscriberCatalogRecord {
+        plugin_id: m.plugin_id,
+        subscriptions,
+        enabled: m.enabled != 0,
         updated_at: parse_dt(&m.updated_at),
     })
 }

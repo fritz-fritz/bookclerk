@@ -1804,7 +1804,7 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
                     id, event_id, plugin_id, idempotency_key, state, attempt_count, max_attempts, \
                     lease_owner, lease_expires_at, lease_generation, run_after, invocation_sequence, \
                     resume_pending, checkpoint_json, checkpoint_schema_version, ordering_key, \
-                    outcome, error_message, created_at, updated_at\
+                    outcome, error_message, created_at, updated_at, cancel_requested, resource_class\
                  ) SELECT \
                     ? || ':' || json_extract(j.value, '$.pluginId'), \
                     ?, \
@@ -1812,7 +1812,12 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
                     ? || ':' || json_extract(j.value, '$.pluginId'), \
                     'pending', 0, 8, NULL, NULL, 0, ?, 0, 0, NULL, 0, \
                     COALESCE((SELECT ordering_key FROM domain_events WHERE id = ?), ''), \
-                    NULL, NULL, ?, ? \
+                    NULL, NULL, ?, ?, 0, \
+                    COALESCE(\
+                        json_extract(j.value, '$.resourceClass'), \
+                        json_extract(j.value, '$.resource_class'), \
+                        'network'\
+                    ) \
                  FROM json_each(?) AS j \
                  WHERE json_extract(j.value, '$.pluginId') IS NOT NULL \
                    AND EXISTS (SELECT 1 FROM domain_events WHERE id = ?)",
@@ -1883,6 +1888,7 @@ fn plan_claim_next_event_delivery(
                     SELECT d.id FROM event_deliveries d \
                     WHERE d.state = 'pending' AND d.run_after <= ? \
                       AND d.plugin_id IN (SELECT value FROM json_each(?)) \
+                      AND COALESCE(d.resource_class, 'network') = 'network' \
                       AND NOT EXISTS (\
                         SELECT 1 FROM event_deliveries earlier \
                         WHERE earlier.plugin_id = d.plugin_id \
@@ -1920,7 +1926,9 @@ fn plan_claim_next_event_delivery(
                     'checkpoint_json', checkpoint_json, \
                     'checkpoint_schema_version', checkpoint_schema_version, \
                     'ordering_key', ordering_key, 'outcome', outcome, \
-                    'error_message', error_message, 'created_at', created_at, 'updated_at', updated_at\
+                    'error_message', error_message, 'created_at', created_at, 'updated_at', updated_at, \
+                    'cancel_requested', json(CASE WHEN cancel_requested != 0 THEN 'true' ELSE 'false' END), \
+                    'resource_class', COALESCE(resource_class, 'network')\
                  ) AS payload FROM event_deliveries \
                  WHERE lease_owner = ? AND state = 'running' AND updated_at = ? \
                  ORDER BY lease_generation DESC LIMIT 1",

@@ -17,6 +17,7 @@ pub mod domain_events;
 pub mod embeddings;
 pub mod encrypted_secrets;
 pub mod event_deliveries;
+pub mod event_subscribers;
 pub mod ignored_titles;
 pub mod job_temp_paths;
 pub mod jobs;

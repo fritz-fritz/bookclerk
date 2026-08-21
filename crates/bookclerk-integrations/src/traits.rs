@@ -19,7 +19,7 @@ use crate::error::{IntegrationError, Result};
 use crate::types::{ExternalUser, IntegrationEvent, IntegrationHealth};
 
 /// Declared durable `onEvent` subscription (mirrors `plugin.toml`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EventSubscription {
     /// Event type (`book_acquired`).
     pub event_type: String,
@@ -27,6 +27,24 @@ pub struct EventSubscription {
     pub schema_versions: Vec<u32>,
     /// Whether `EventResult::Suspended` is advertised for this type.
     pub supports_suspend: bool,
+    /// Concurrency class copied onto deliveries (default `"network"`).
+    pub resource_class: String,
+    /// Optional host-owned payload object filter (top-level key equality).
+    pub filter: Option<serde_json::Value>,
+}
+
+impl EventSubscription {
+    /// Type + schema subscription with the default `network` resource class.
+    #[must_use]
+    pub fn new(event_type: impl Into<String>, schema_versions: Vec<u32>) -> Self {
+        Self {
+            event_type: event_type.into(),
+            schema_versions,
+            supports_suspend: false,
+            resource_class: "network".into(),
+            filter: None,
+        }
+    }
 }
 
 /// Context passed when starting background watchers.

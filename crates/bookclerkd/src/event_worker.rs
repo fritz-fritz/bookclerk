@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bookclerk_integrations::{DomainEvent, EventResult, EventSubscription};
-use bookclerk_library::{EventSubscriber, LibraryStore};
+use bookclerk_library::{
+    catalog_subscribers_for_event, EventCatalogSubscription, EventSubscriberCatalogRecord,
+    LibraryStore,
+};
 use chrono::{TimeZone, Utc};
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
@@ -23,11 +26,31 @@ const CLAIM_REPLAY_DELAY: Duration = Duration::from_millis(200);
 /// Lease duration granted to a delivery worker on claim.
 const LEASE_SECS: u64 = 60;
 
-/// Dispatch undispatched outbox rows and run one delivery worker.
+/// Dispatch undispatched outbox rows and run configured delivery workers.
 pub fn start_event_runtime(state: Arc<AppState>) {
-    info!("starting durable event dispatcher");
-    spawn_dispatcher(state.clone());
-    spawn_delivery_worker(state);
+    tokio::spawn(async move {
+        upsert_event_subscriber_catalog(&state).await;
+        let (retention_days, dead_letter_retention_days, workers) = {
+            let cfg = state.config.read().await;
+            (
+                cfg.events.retention_days,
+                cfg.events.dead_letter_retention_days,
+                cfg.events.concurrency.max(1),
+            )
+        };
+        let library = state.library_snapshot().await;
+        if let Err(err) = library
+            .prune_event_deliveries(retention_days, dead_letter_retention_days)
+            .await
+        {
+            warn!(error = %err, "event retention prune failed");
+        }
+        info!(event_workers = workers, "starting durable event dispatcher");
+        spawn_dispatcher(state.clone());
+        for _ in 0..workers {
+            spawn_delivery_worker(state.clone());
+        }
+    });
 }
 
 /// Tick the outbox dispatcher on notify and a 5s idle interval.
@@ -37,9 +60,23 @@ fn spawn_dispatcher(state: Arc<AppState>) {
         idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let library = state.library_snapshot().await;
-            if let Err(err) = dispatch_pending(&state, &library).await {
+            let (retention_days, dead_letter_retention_days) = {
+                let cfg = state.config.read().await;
+                (
+                    cfg.events.retention_days,
+                    cfg.events.dead_letter_retention_days,
+                )
+            };
+            if let Err(err) = library
+                .prune_event_deliveries(retention_days, dead_letter_retention_days)
+                .await
+            {
+                warn!(error = %err, "event retention prune failed");
+            }
+            if let Err(err) = dispatch_pending(&library).await {
                 warn!(error = %err, "event dispatch failed");
             }
+            state.job_notify.notify_waiters();
             tokio::select! {
                 () = state.job_notify.notified() => {}
                 _ = idle.tick() => {}
@@ -78,36 +115,110 @@ fn spawn_delivery_worker(state: Arc<AppState>) {
     });
 }
 
-/// Create deliveries for undispatched outbox rows using currently loaded subscribers.
-async fn dispatch_pending(
-    state: &AppState,
-    library: &LibraryStore,
-) -> Result<(), bookclerk_library::LibraryError> {
+/// Upsert discovered + loaded integration subscriptions into the cluster catalog.
+pub async fn upsert_event_subscriber_catalog(state: &AppState) {
+    let cfg = state.config.read().await.clone();
+    let discovered = tokio::task::spawn_blocking({
+        let cfg = cfg.clone();
+        move || bookclerk_plugin_host::discover_plugins(&cfg)
+    })
+    .await;
+    let library = state.library_snapshot().await;
+    match discovered {
+        Ok(Ok(plugins)) => {
+            for plugin in plugins {
+                if plugin.manifest.kind.as_str() != "integration" {
+                    continue;
+                }
+                let enabled = cfg.integrations.is_enabled(&plugin.manifest.id);
+                let subs = catalog_from_manifest(&plugin);
+                if let Err(err) = library
+                    .upsert_event_subscriber(&plugin.manifest.id, &subs, enabled)
+                    .await
+                {
+                    warn!(
+                        plugin = %plugin.manifest.id,
+                        error = %err,
+                        "event subscriber catalog upsert failed"
+                    );
+                }
+            }
+        }
+        Ok(Err(err)) => {
+            warn!(error = %err, "plugin discovery for event catalog failed");
+        }
+        Err(err) => {
+            warn!(error = %err, "plugin discovery task for event catalog failed");
+        }
+    }
+    let integrations = state.integrations.read().await;
+    for integration in integrations.all() {
+        let subs = catalog_from_runtime(&integration.event_subscriptions());
+        if let Err(err) = library
+            .upsert_event_subscriber(integration.id(), &subs, true)
+            .await
+        {
+            warn!(
+                plugin = %integration.id(),
+                error = %err,
+                "loaded integration catalog upsert failed"
+            );
+        }
+    }
+}
+
+/// Map `plugin.toml` subscriptions onto the durable catalog JSON shape.
+fn catalog_from_manifest(
+    plugin: &bookclerk_plugin_host::DiscoveredPlugin,
+) -> Vec<EventCatalogSubscription> {
+    plugin
+        .manifest
+        .capabilities
+        .events
+        .subscriptions
+        .iter()
+        .map(|s| EventCatalogSubscription {
+            event_type: s.event_type.clone(),
+            schema_versions: s.schema_versions.clone(),
+            supports_suspend: s.supports_suspend,
+            resource_class: if s.resource_class.trim().is_empty() {
+                "network".into()
+            } else {
+                s.resource_class.clone()
+            },
+            filter: s.filter.clone().filter(|v| !v.is_null()),
+        })
+        .collect()
+}
+
+/// Map loaded in-process / guest runtime subscriptions onto the catalog shape.
+fn catalog_from_runtime(subs: &[EventSubscription]) -> Vec<EventCatalogSubscription> {
+    subs.iter()
+        .map(|s| EventCatalogSubscription {
+            event_type: s.event_type.clone(),
+            schema_versions: s.schema_versions.clone(),
+            supports_suspend: s.supports_suspend,
+            resource_class: if s.resource_class.trim().is_empty() {
+                "network".into()
+            } else {
+                s.resource_class.clone()
+            },
+            filter: s.filter.clone(),
+        })
+        .collect()
+}
+
+/// Create deliveries from the cluster catalog for pending and already-dispatched events.
+async fn dispatch_pending(library: &LibraryStore) -> Result<(), bookclerk_library::LibraryError> {
+    let catalog: Vec<EventSubscriberCatalogRecord> = library.list_event_subscribers().await?;
     loop {
         let Some(event) = library.next_undispatched_event().await? else {
-            return Ok(());
+            break;
         };
-        let subscribers = {
-            let integrations = state.integrations.read().await;
-            integrations
-                .all()
-                .iter()
-                .filter(|i| {
-                    i.event_subscriptions().iter().any(|s| {
-                        s.event_type == event.event_type
-                            && s.schema_versions
-                                .iter()
-                                .any(|v| i64::from(*v) == event.schema_version)
-                    })
-                })
-                .map(|i| EventSubscriber {
-                    plugin_id: i.id().to_string(),
-                })
-                .collect::<Vec<_>>()
-        };
+        let subs = catalog_subscribers_for_event(&catalog, &event);
         let op = format!("dispatch-{}", event.id);
         let n = library
-            .dispatch_event_deliveries(&event.id, &subscribers, &op)
+            .dispatch_event_deliveries(&event.id, &subs, &op)
             .await?;
         info!(
             event_id = %event.id,
@@ -115,8 +226,29 @@ async fn dispatch_pending(
             deliveries = n,
             "dispatched domain event"
         );
-        state.job_notify.notify_waiters();
     }
+    let dispatched = library
+        .list_domain_events_by_dispatch_state("dispatched", 200)
+        .await?;
+    for event in dispatched {
+        let subs = catalog_subscribers_for_event(&catalog, &event);
+        if subs.is_empty() {
+            continue;
+        }
+        let op = format!("reconcile-{}", event.id);
+        let n = library
+            .dispatch_event_deliveries(&event.id, &subs, &op)
+            .await?;
+        if n > 0 {
+            info!(
+                event_id = %event.id,
+                event_type = %event.event_type,
+                deliveries = n,
+                "reconciled late-join event deliveries"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Plugin ids currently loaded on this process.
@@ -190,10 +322,12 @@ async fn run_delivery(
     };
     let domain = domain_event_for_delivery(&event, &delivery);
     let cancel = Arc::new(AtomicBool::new(false));
+    let operator_cancel = Arc::new(AtomicBool::new(false));
     let heartbeat = {
         let library = library.clone();
         let fence = fence.clone();
         let cancel = Arc::clone(&cancel);
+        let operator_cancel = Arc::clone(&operator_cancel);
         tokio::spawn(async move {
             let lease = Duration::from_secs(LEASE_SECS);
             let mut confirmed_until = Instant::now() + lease;
@@ -201,6 +335,28 @@ async fn run_delivery(
             tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
+                match library
+                    .event_delivery_cancel_requested(&fence.delivery_id)
+                    .await
+                {
+                    Ok(true) => {
+                        warn!(
+                            delivery_id = %fence.delivery_id,
+                            "event delivery cancel requested; cancelling onEvent"
+                        );
+                        operator_cancel.store(true, Ordering::SeqCst);
+                        cancel.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        warn!(
+                            delivery_id = %fence.delivery_id,
+                            error = %err,
+                            "event_delivery_cancel_requested failed; continuing heartbeat"
+                        );
+                    }
+                }
                 let classified =
                     classify_heartbeat(library.heartbeat_event_delivery(&fence, LEASE_SECS).await);
                 if let HeartbeatTick::Transient(err) = &classified {
@@ -235,6 +391,16 @@ async fn run_delivery(
         Ok(result) => result,
         Err(err) => {
             heartbeat.abort();
+            if operator_cancel.load(Ordering::SeqCst) {
+                warn!(
+                    delivery_id = %delivery.id,
+                    "event delivery cancelled by operator"
+                );
+                let _ = library
+                    .reject_event_delivery(&fence, "cancelled by operator")
+                    .await;
+                return;
+            }
             if cancel.load(Ordering::SeqCst) {
                 warn!(
                     delivery_id = %delivery.id,
@@ -253,6 +419,16 @@ async fn run_delivery(
         }
     };
     heartbeat.abort();
+    if operator_cancel.load(Ordering::SeqCst) {
+        warn!(
+            delivery_id = %delivery.id,
+            "event delivery cancelled by operator"
+        );
+        let _ = library
+            .reject_event_delivery(&fence, "cancelled by operator")
+            .await;
+        return;
+    }
     if cancel.load(Ordering::SeqCst) {
         warn!(
             delivery_id = %delivery.id,
@@ -448,6 +624,8 @@ mod tests {
             error_message: None,
             created_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
             updated_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+            cancel_requested: false,
+            resource_class: "network".into(),
         }
     }
 
@@ -482,11 +660,15 @@ mod tests {
                 event_type: "book_acquired".into(),
                 schema_versions: vec![1],
                 supports_suspend: false,
+                resource_class: "network".into(),
+                filter: None,
             },
             EventSubscription {
                 event_type: "book_acquired".into(),
                 schema_versions: vec![2],
                 supports_suspend: true,
+                resource_class: "network".into(),
+                filter: None,
             },
         ];
         assert!(!suspend_allowed(&subs, "book_acquired", 1));

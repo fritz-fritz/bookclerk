@@ -109,7 +109,7 @@ enum Commands {
     /// Durable domain-event outbox and deliveries.
     Events {
         #[command(subcommand)]
-        /// Nested `events` verb (list, dead-letters, retry, ack).
+        /// Nested `events` verb (list, dead-letters, retry, ack, cancel, resume).
         command: commands::events::EventsCommand,
     },
     /// Print a loopback operator sign-in URL (requires a running daemon).

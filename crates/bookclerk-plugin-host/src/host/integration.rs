@@ -92,6 +92,12 @@ impl ExternalIntegration {
                 event_type: s.event_type.clone(),
                 schema_versions: s.schema_versions.clone(),
                 supports_suspend: s.supports_suspend,
+                resource_class: if s.resource_class.trim().is_empty() {
+                    "network".into()
+                } else {
+                    s.resource_class.clone()
+                },
+                filter: s.filter.clone().filter(|v| !v.is_null()),
             })
             .collect();
         Ok(Self {

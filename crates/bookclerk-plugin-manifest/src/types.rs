@@ -163,7 +163,7 @@ pub struct MethodCapabilities {
 ///
 /// `network` is mandatory in TOML; `bindings` and `methods` default to empty
 /// / all-false when omitted.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitiesManifest {
     /// Network mode and optional workerd domain allowlist.
@@ -178,6 +178,8 @@ pub struct CapabilitiesManifest {
     #[serde(default, skip_serializing_if = "EventCapabilities::is_default")]
     pub events: EventCapabilities,
 }
+
+impl Eq for CapabilitiesManifest {}
 
 impl BindingCapabilities {
     /// True when every binding flag is off (omit the `[capabilities.bindings]` table).
@@ -194,7 +196,7 @@ impl MethodCapabilities {
 }
 
 /// One `[capabilities.events.subscriptions]` row.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EventSubscription {
     /// Versioned event type (`book_acquired`, …).
@@ -206,21 +208,36 @@ pub struct EventSubscription {
     /// Whether `EventResult::Suspended` is supported for this type.
     #[serde(default)]
     pub supports_suspend: bool,
+    /// Concurrency class copied onto deliveries (default `"network"`).
+    #[serde(default = "default_resource_class")]
+    pub resource_class: String,
+    /// Optional host-owned payload object filter (top-level key equality).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<serde_json::Value>,
 }
+
+impl Eq for EventSubscription {}
 
 /// Default `[1]` when a subscription omits `schema_versions`.
 fn default_schema_versions() -> Vec<u32> {
     vec![1]
 }
 
+/// Default `"network"` when a subscription omits `resource_class`.
+fn default_resource_class() -> String {
+    "network".into()
+}
+
 /// `[capabilities.events]` — durable outbox subscriptions.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct EventCapabilities {
     /// Declared event subscriptions. Empty means the guest is not a subscriber.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subscriptions: Vec<EventSubscription>,
 }
+
+impl Eq for EventCapabilities {}
 
 impl EventCapabilities {
     /// True when no subscriptions are declared (omit `[capabilities.events]`).
@@ -378,7 +395,7 @@ fn default_module_type() -> String {
 /// - native requires `command`; workerd requires `[workerd]` with date + main
 /// - `domains` forbidden on native; required for workerd + outbound
 /// - optional `logo` must pass [`crate::validate_logo`]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
     /// ABI / schema version. Must be `2` (object-capability Cap'n Proto).
@@ -423,6 +440,8 @@ pub struct PluginManifest {
     #[serde(default, skip_serializing_if = "OidcManifest::is_empty")]
     pub oidc: OidcManifest,
 }
+
+impl Eq for PluginManifest {}
 
 /// `[[oidc.clients]]` install-time OIDC AS templates.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -944,6 +963,40 @@ subscriptions = [
             vec![1]
         );
         assert!(m.capabilities.events.subscriptions[0].supports_suspend);
+        assert_eq!(
+            m.capabilities.events.subscriptions[0].resource_class,
+            "network"
+        );
+        assert!(m.capabilities.events.subscriptions[0].filter.is_none());
+    }
+
+    #[test]
+    fn event_subscriptions_parse_resource_class_and_filter() {
+        let m = PluginManifest::parse(
+            r#"
+api_version = 2
+id = "echo"
+kind = "integration"
+runtime = "native"
+command = "./echo"
+[capabilities.network]
+mode = "deny"
+[capabilities.methods]
+list = ["onEvent"]
+[capabilities.events]
+subscriptions = [
+  { type = "book_acquired", resource_class = "network", filter = { source = "audible" } },
+]
+"#,
+        )
+        .unwrap();
+        let sub = &m.capabilities.events.subscriptions[0];
+        assert_eq!(sub.resource_class, "network");
+        let filter = sub.filter.as_ref().and_then(|v| v.as_object()).unwrap();
+        assert_eq!(
+            filter.get("source").and_then(|v| v.as_str()),
+            Some("audible")
+        );
     }
 
     #[test]

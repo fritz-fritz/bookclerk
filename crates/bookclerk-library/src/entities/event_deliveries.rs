@@ -47,6 +47,10 @@ pub struct Model {
     pub created_at: String,
     /// RFC 3339 last-modified time.
     pub updated_at: String,
+    /// Cooperative cancel flag (`0` / `1`); running workers check on heartbeat.
+    pub cancel_requested: i64,
+    /// Concurrency class copied from the catalog (`network` today).
+    pub resource_class: String,
 }
 
 /// Declared SeaORM relations (parent event is queried by `event_id`).

@@ -25,6 +25,16 @@ pub enum EventsCommand {
         /// Delivery id (`{event_id}:{plugin_id}`).
         id: String,
     },
+    /// POST /api/events/deliveries/{id}/cancel
+    Cancel {
+        /// Delivery id (`{event_id}:{plugin_id}`).
+        id: String,
+    },
+    /// POST /api/events/deliveries/{id}/resume
+    Resume {
+        /// Delivery id (`{event_id}:{plugin_id}`).
+        id: String,
+    },
 }
 
 /// Dispatches an events verb against a running bookclerkd.
@@ -63,6 +73,28 @@ pub async fn run(
         EventsCommand::Ack { id } => {
             let v = daemon_cmd::post_json_async(
                 &format!("{base}/api/events/deliveries/{id}/acknowledge"),
+                serde_json::json!({}),
+                token.as_deref(),
+            )
+            .await?;
+            emit(format, &v, || {
+                println!("ok={} {}", v["ok"], v["message"].as_str().unwrap_or(""));
+            })
+        }
+        EventsCommand::Cancel { id } => {
+            let v = daemon_cmd::post_json_async(
+                &format!("{base}/api/events/deliveries/{id}/cancel"),
+                serde_json::json!({}),
+                token.as_deref(),
+            )
+            .await?;
+            emit(format, &v, || {
+                println!("ok={} {}", v["ok"], v["message"].as_str().unwrap_or(""));
+            })
+        }
+        EventsCommand::Resume { id } => {
+            let v = daemon_cmd::post_json_async(
+                &format!("{base}/api/events/deliveries/{id}/resume"),
                 serde_json::json!({}),
                 token.as_deref(),
             )
