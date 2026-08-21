@@ -1032,7 +1032,9 @@ impl LibraryStore {
                     .dispatch_event_deliveries(&event.id, &subs, &op)
                     .await?;
             }
-            let last = page.last().expect("non-empty page");
+            let Some(last) = page.last() else {
+                break;
+            };
             after = Some((last.created_at.to_rfc3339(), last.id.clone()));
             if u64::try_from(page.len()).unwrap_or(RECONCILE_PAGE) < RECONCILE_PAGE {
                 break;
