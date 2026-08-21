@@ -76,9 +76,10 @@ pub use secrets::{
 };
 pub use session_client::{classify_session_client, SessionClientInfo};
 pub use store::{
-    fallback_work_key, prefer_enrichment_source, wishlist_identities_match,
-    CatalogEnrichmentFields, LibraryStore, NewBook, NewListeningProgress, NewTitleRequest,
-    NewTitleRequestSource, NewWork, SavedFilterRecord, UserBookFields, WishlistIdentity,
+    event_outbox::prepare_publish_domain_event, fallback_work_key, prefer_enrichment_source,
+    wishlist_identities_match, CatalogEnrichmentFields, LibraryStore, NewBook,
+    NewListeningProgress, NewTitleRequest, NewTitleRequestSource, NewWork, SavedFilterRecord,
+    UserBookFields, WishlistIdentity,
 };
 pub use text::{
     decode_html_entities, decode_html_entities_cow, decode_html_entities_in_place,

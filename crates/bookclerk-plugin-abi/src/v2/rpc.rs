@@ -1584,6 +1584,13 @@ fn read_domain_event(r: domain_event::Reader<'_>) -> Result<DomainEvent> {
             payload.len()
         )));
     }
+    let checkpoint_json = text_of(r.get_checkpoint_json().map_err(from_capnp)?);
+    if checkpoint_json.len() > MAX_CHECKPOINT_BYTES as usize {
+        return Err(PluginError::payload_too_large(format!(
+            "checkpoint of {} bytes exceeds {MAX_CHECKPOINT_BYTES}",
+            checkpoint_json.len()
+        )));
+    }
     Ok(DomainEvent {
         event_id: text_of(r.get_event_id().map_err(from_capnp)?),
         event_type: text_of(r.get_event_type().map_err(from_capnp)?),
@@ -1595,6 +1602,10 @@ fn read_domain_event(r: domain_event::Reader<'_>) -> Result<DomainEvent> {
         deduplication_key: text_of(r.get_deduplication_key().map_err(from_capnp)?),
         delivery_attempt: r.get_delivery_attempt(),
         payload,
+        checkpoint_json,
+        checkpoint_schema_version: r.get_checkpoint_schema_version(),
+        invocation_sequence: r.get_invocation_sequence(),
+        resume_pending: r.get_resume_pending(),
     })
 }
 
@@ -1873,8 +1884,19 @@ impl integration_capnp::Server for IntegrationServer {
             },
             Err(err) => return Err(capnp::Error::failed(err.to_string())),
         };
+        let outcome = match self.inner.on_event(event).await {
+            Ok(EventResult::Suspended {
+                checkpoint_json, ..
+            }) if checkpoint_json.len() > MAX_CHECKPOINT_BYTES as usize => {
+                Err(PluginError::payload_too_large(format!(
+                    "checkpoint of {} bytes exceeds {MAX_CHECKPOINT_BYTES}",
+                    checkpoint_json.len()
+                )))
+            }
+            other => other,
+        };
         let result = results.get().init_result();
-        match self.inner.on_event(event).await {
+        match outcome {
             Ok(ev) => write_event_result(result.init_ok(), &ev),
             Err(err) => write_error(result.init_err(), &err),
         }
@@ -2832,6 +2854,12 @@ impl Integration for IntegrationClient {
                 event.payload.len()
             )));
         }
+        if event.checkpoint_json.len() > MAX_CHECKPOINT_BYTES as usize {
+            return Err(PluginError::payload_too_large(format!(
+                "checkpoint of {} bytes exceeds {MAX_CHECKPOINT_BYTES}",
+                event.checkpoint_json.len()
+            )));
+        }
         let mut req = self.client.on_event_request();
         {
             let mut e = req.get().get_event().map_err(from_capnp)?;
@@ -2845,6 +2873,10 @@ impl Integration for IntegrationClient {
             e.set_deduplication_key(&event.deduplication_key);
             e.set_delivery_attempt(event.delivery_attempt);
             e.set_payload(&event.payload);
+            e.set_checkpoint_json(&event.checkpoint_json);
+            e.set_checkpoint_schema_version(event.checkpoint_schema_version);
+            e.set_invocation_sequence(event.invocation_sequence);
+            e.set_resume_pending(event.resume_pending);
         }
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
@@ -2956,30 +2988,37 @@ fn read_empty(result: empty_reply::Reader<'_>) -> Result<()> {
 ///
 /// Returns when the union or a nested text field cannot be read.
 fn read_event_result(r: event_result_capnp::Reader<'_>) -> Result<EventResult> {
-    Ok(match r.which().map_err(from_capnp)? {
-        event_result_capnp::Ack(_) => EventResult::Ack,
+    match r.which().map_err(from_capnp)? {
+        event_result_capnp::Ack(_) => Ok(EventResult::Ack),
         event_result_capnp::Retry(ok) => {
             let ok = ok.map_err(from_capnp)?;
-            EventResult::Retry {
+            Ok(EventResult::Retry {
                 retry_at_unix_ms: ok.get_retry_at_unix_ms(),
                 reason: text_of(ok.get_reason().map_err(from_capnp)?),
-            }
+            })
         }
-        event_result_capnp::Reject(ok) => EventResult::Reject {
+        event_result_capnp::Reject(ok) => Ok(EventResult::Reject {
             reason: text_of(ok.map_err(from_capnp)?.get_reason().map_err(from_capnp)?),
-        },
-        event_result_capnp::DeadLetter(ok) => EventResult::DeadLetter {
+        }),
+        event_result_capnp::DeadLetter(ok) => Ok(EventResult::DeadLetter {
             reason: text_of(ok.map_err(from_capnp)?.get_reason().map_err(from_capnp)?),
-        },
+        }),
         event_result_capnp::Suspended(ok) => {
             let ok = ok.map_err(from_capnp)?;
-            EventResult::Suspended {
-                checkpoint_json: text_of(ok.get_checkpoint_json().map_err(from_capnp)?),
+            let checkpoint_json = text_of(ok.get_checkpoint_json().map_err(from_capnp)?);
+            if checkpoint_json.len() > MAX_CHECKPOINT_BYTES as usize {
+                return Err(PluginError::payload_too_large(format!(
+                    "checkpoint of {} bytes exceeds {MAX_CHECKPOINT_BYTES}",
+                    checkpoint_json.len()
+                )));
+            }
+            Ok(EventResult::Suspended {
+                checkpoint_json,
                 checkpoint_schema_version: ok.get_checkpoint_schema_version(),
                 wake_at_unix_ms: ok.get_wake_at_unix_ms(),
-            }
+            })
         }
-    })
+    }
 }
 
 /// Cap'n Proto client for [`Database`].
@@ -3245,7 +3284,7 @@ mod tests {
         JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo, ObjectMetadata,
         PluginDescribe, PluginRoot, ProgressSink, PutResult, ReadResult, ScalarLimits, Source,
         SourceContext, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS,
-        MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, PRODUCT_API_VERSION,
+        MAX_CHECKPOINT_BYTES, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, PRODUCT_API_VERSION,
     };
     use crate::{PluginError, PluginErrorCode, Result};
     use std::collections::HashMap;
@@ -3580,6 +3619,11 @@ mod tests {
                     checkpoint_schema_version: 1,
                     wake_at_unix_ms: 3,
                 },
+                "test_suspend_huge" => EventResult::Suspended {
+                    checkpoint_json: "x".repeat(MAX_CHECKPOINT_BYTES as usize + 1),
+                    checkpoint_schema_version: 1,
+                    wake_at_unix_ms: 3,
+                },
                 _ => EventResult::Ack,
             })
         }
@@ -3591,12 +3635,10 @@ mod tests {
             event_type: event_type.into(),
             schema_version: 1,
             occurred_at_unix_ms: 1,
-            account_id: String::new(),
-            correlation_id: String::new(),
-            causation_id: String::new(),
             deduplication_key: "k".into(),
             delivery_attempt: 1,
             payload: b"{}".to_vec(),
+            ..DomainEvent::default()
         }
     }
 
@@ -3667,6 +3709,11 @@ mod tests {
                 let mut oversized = sample_event("book_acquired");
                 oversized.payload = vec![0; MAX_EVENT_PAYLOAD_BYTES as usize + 1];
                 let err = integration.on_event(oversized).await.unwrap_err();
+                assert_eq!(err.code, crate::PluginErrorCode::PayloadTooLarge);
+                let err = integration
+                    .on_event(sample_event("test_suspend_huge"))
+                    .await
+                    .unwrap_err();
                 assert_eq!(err.code, crate::PluginErrorCode::PayloadTooLarge);
             })
             .await;

@@ -9,8 +9,8 @@ plugin `onEvent` stay **off** `JobKind`. They use a durable outbox
 (`domain_events` + `event_deliveries`, schema V21) with the same fenced-lease
 pattern as jobs. Acquire success publishes `book_acquired`; a dispatcher
 snapshots loaded subscribers and a delivery worker invokes
-`Integration.onEvent`, honoring `EventResult` (`ack`, `retry`, `reject`,
-`deadLetter`, `suspended`). Operator APIs: `GET /api/events`,
+`Integration.onEvent`, honoring `EventResult` (`ack`, `retry` until
+`max_attempts` then dead-letter, `reject`, `deadLetter`, `suspended`). Operator APIs: `GET /api/events`,
 `GET /api/events/deliveries?state=dead_letter`,
 `POST /api/events/deliveries/{id}/retry`,
 `POST /api/events/deliveries/{id}/acknowledge`. CLI:

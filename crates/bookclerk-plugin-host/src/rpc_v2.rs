@@ -828,16 +828,9 @@ async fn dispatch_integration(
         }),
         "onEvent" => {
             let event: DomainEvent = serde_json::from_str(params).unwrap_or(DomainEvent {
-                event_id: String::new(),
-                event_type: String::new(),
-                schema_version: 1,
-                occurred_at_unix_ms: 0,
-                account_id: String::new(),
-                correlation_id: String::new(),
-                causation_id: String::new(),
-                deduplication_key: String::new(),
                 delivery_attempt: 1,
                 payload: params.as_bytes().to_vec(),
+                ..DomainEvent::default()
             });
             role.on_event(event).await.map(|r| match r {
                 EventResult::Ack => "{\"kind\":\"ack\"}".into(),

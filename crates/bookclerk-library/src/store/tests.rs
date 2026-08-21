@@ -3104,6 +3104,57 @@ async fn operator_retry_and_ack_dead_letter() {
 }
 
 #[tokio::test]
+async fn retry_at_max_attempts_dead_letters() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:retry-max",
+            r#"{"titleId":"retry-max"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    store
+        .dispatch_event_deliveries(
+            &id,
+            &[EventSubscriber {
+                plugin_id: "echo".into(),
+            }],
+            "op",
+        )
+        .await
+        .unwrap();
+    let mut last_id = String::new();
+    for expected_attempt in 1..=crate::EVENT_DELIVERY_MAX_ATTEMPTS {
+        let claimed = claim_delivery(&store, "retry-w").await;
+        assert_eq!(claimed.attempt_count, expected_attempt);
+        last_id = claimed.id.clone();
+        let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+        assert!(store
+            .retry_event_delivery(&claimed.fence(), past, "again")
+            .await
+            .unwrap());
+    }
+    let row = store.get_event_delivery(&last_id).await.unwrap().unwrap();
+    assert_eq!(row.state, "dead_letter");
+    assert!(
+        row.error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("retry exhausted")),
+        "unexpected error: {:?}",
+        row.error_message
+    );
+    assert!(store
+        .claim_next_event_delivery("retry-w", 60, &uuid::Uuid::new_v4().to_string())
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn postgres_event_outbox_publish_dispatch_claim() {
     if !postgres_tests_enabled() {
         return;

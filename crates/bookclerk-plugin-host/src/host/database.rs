@@ -883,6 +883,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
         &self,
         spec: bookclerk_library::PublishDomainEventSpec,
     ) -> bookclerk_library::Result<bookclerk_library::PublishDomainEventOutcome> {
+        let spec = bookclerk_library::prepare_publish_domain_event(spec)?;
         let result = self
             .call(DbAtomicParams::PublishDomainEvent {
                 id: spec.id,

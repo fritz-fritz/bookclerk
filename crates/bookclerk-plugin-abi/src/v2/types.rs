@@ -68,7 +68,7 @@ pub struct ExtensibleConfig {
 }
 
 /// Domain event (not a job). Outbox-produced, at-least-once, idempotent consume.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DomainEvent {
     /// Unique event id.
@@ -96,6 +96,18 @@ pub struct DomainEvent {
     /// Bounded payload.
     #[serde(default)]
     pub payload: Vec<u8>,
+    /// Checkpoint JSON from a prior [`EventResult::Suspended`] (≤ [`MAX_CHECKPOINT_BYTES`]).
+    #[serde(default)]
+    pub checkpoint_json: String,
+    /// Schema version of [`Self::checkpoint_json`].
+    #[serde(default)]
+    pub checkpoint_schema_version: u32,
+    /// Resume ordinal copied from the delivery row.
+    #[serde(default)]
+    pub invocation_sequence: u32,
+    /// True when this invocation continues a prior `suspended` result.
+    #[serde(default)]
+    pub resume_pending: bool,
 }
 
 /// Result of [`crate::v2::Integration::on_event`].

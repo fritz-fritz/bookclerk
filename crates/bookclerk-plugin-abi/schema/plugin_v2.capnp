@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 4;
+const abiMinor :UInt32 = 5;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -253,6 +253,11 @@ struct DomainEvent {
   deduplicationKey @7 :Text;
   deliveryAttempt @8 :UInt32;
   payload @9 :Data;
+  # Append-only (abiMinor 5). Resume a prior EventResult.suspended.
+  checkpointJson @10 :Text;
+  checkpointSchemaVersion @11 :UInt32;
+  invocationSequence @12 :UInt32;
+  resumePending @13 :Bool;
 }
 
 struct EventAck {

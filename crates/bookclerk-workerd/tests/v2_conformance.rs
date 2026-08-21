@@ -225,12 +225,10 @@ fn sample_event(event_type: &str) -> DomainEvent {
         event_type: event_type.into(),
         schema_version: 1,
         occurred_at_unix_ms: 1,
-        account_id: String::new(),
-        correlation_id: String::new(),
-        causation_id: String::new(),
         deduplication_key: "k".into(),
         delivery_attempt: 1,
         payload: b"{}".to_vec(),
+        ..DomainEvent::default()
     }
 }
 

@@ -1007,7 +1007,7 @@ Advertise in `handshake.capabilities`: `start`, `onEvent`, `health`,
 | Method | Notes |
 | --- | --- |
 | `start` | Background watchers |
-| `onEvent` | Versioned [`DomainEvent`](../packages/plugin-sdk/src/v2.ts) (`eventId`, `eventType`, `schemaVersion`, correlation/causation, `deduplicationKey`, `deliveryAttempt`, bounded payload). Return `EventResult`: `ack`, `retry` (`retryAtUnixMs`), `reject`, `deadLetter`, or `suspended` (`checkpointJson`, `checkpointSchemaVersion`, `wakeAtUnixMs`; `abiMinor` 4). Host delivery is at-least-once; guests must be idempotent on `deduplicationKey`. |
+| `onEvent` | Versioned [`DomainEvent`](../packages/plugin-sdk/src/v2.ts) (`eventId`, `eventType`, `schemaVersion`, correlation/causation, `deduplicationKey`, `deliveryAttempt`, bounded payload). A `suspended` result (`abiMinor` 4) parks a checkpoint; the next `onEvent` copies `checkpointJson`, `checkpointSchemaVersion`, `invocationSequence`, and `resumePending` (`abiMinor` 5). Return `EventResult`: `ack`, `retry` (`retryAtUnixMs`; exhausted attempts dead-letter), `reject`, `deadLetter`, or `suspended` (`checkpointJson`, `checkpointSchemaVersion`, `wakeAtUnixMs`). Host delivery is at-least-once; guests must be idempotent on `deduplicationKey`. |
 | `scanLibrary` | `{ "force": bool }` |
 | `syncListening` | Return listening progress snapshots; host upserts tagged with plugin id |
 | `authenticateUser` | `{ "username", "password" }` → external user |

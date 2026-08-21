@@ -138,6 +138,12 @@ export interface DomainEvent {
   deduplicationKey?: string;
   deliveryAttempt: number;
   payload?: Uint8Array;
+  /** Checkpoint JSON from a prior `suspended` result (`abiMinor` ≥ 5). */
+  checkpointJson?: string;
+  checkpointSchemaVersion?: number;
+  invocationSequence?: number;
+  /** True when this invocation continues a prior `suspended` result. */
+  resumePending?: boolean;
 }
 
 /** Result of {@link Integration.onEvent}. */

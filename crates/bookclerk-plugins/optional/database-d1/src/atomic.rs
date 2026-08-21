@@ -212,9 +212,36 @@ fn receipt_expiry(now: &str) -> String {
         .unwrap_or_else(|_| now.to_string())
 }
 
+/// Reject oversized or blank `publishDomainEvent` fields before hashing.
+fn validate_publish_domain_event(op: &DbAtomicParams) -> std::result::Result<(), DbErr> {
+    let DbAtomicParams::PublishDomainEvent {
+        event_type,
+        dedup_key,
+        payload,
+        ..
+    } = op
+    else {
+        return Ok(());
+    };
+    const MAX_PAYLOAD: usize = 65_536;
+    if payload.len() > MAX_PAYLOAD {
+        return Err(DbErr::Custom(format!(
+            "domain event payload of {} bytes exceeds {MAX_PAYLOAD}",
+            payload.len()
+        )));
+    }
+    if event_type.trim().is_empty() || dedup_key.trim().is_empty() {
+        return Err(DbErr::Custom(
+            "domain event type and dedup_key are required".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Builds the D1 batch for `op`. `now` is the RFC 3339 timestamp shared by
 /// every statement in the batch (consume correlation, `updated_at`, sessions).
 fn plan_atomic(req: &DbAtomicRequest, now: &str) -> std::result::Result<AtomicPlan, DbErr> {
+    validate_publish_domain_event(&req.operation)?;
     let inner = plan_inner(&req.operation, now);
     let ctx = ReceiptCtx {
         operation_id: req.operation_id.clone(),
@@ -350,17 +377,24 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
             dedup_key,
             payload,
             ordering_key: _,
-        } => plan_publish_domain_event(
-            id,
-            event_type,
-            *schema_version,
-            account_id,
-            correlation_id,
-            causation_id,
-            dedup_key,
-            payload,
-            now,
-        ),
+        } => {
+            let minted = if id.trim().is_empty() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                id.trim().to_string()
+            };
+            plan_publish_domain_event(
+                &minted,
+                event_type,
+                *schema_version,
+                account_id,
+                correlation_id,
+                causation_id,
+                dedup_key,
+                payload,
+                now,
+            )
+        }
         DbAtomicParams::DispatchEventDeliveries {
             event_id,
             subscribers_json,
@@ -3026,5 +3060,62 @@ mod tests {
         let payload = claimed.payload.expect("claim payload");
         assert_eq!(payload["plugin_id"], "echo");
         assert_eq!(payload["state"], "running");
+    }
+
+    #[test]
+    fn publish_domain_event_mints_empty_id_and_rejects_oversized_payload() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        let publish = test_req(
+            DbAtomicParams::PublishDomainEvent {
+                id: String::new(),
+                event_type: "book_acquired".into(),
+                schema_version: 1,
+                account_id: "acct".into(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                dedup_key: "book_acquired:mint".into(),
+                payload: r#"{"titleId":"mint"}"#.into(),
+                ordering_key: "mint".into(),
+            },
+            "evt-mint",
+        );
+        let created = run_plan(&conn, &plan_atomic(&publish, now).unwrap());
+        assert_eq!(created.status, atomic_status::OK);
+        let id: String = conn
+            .query_row("SELECT id FROM domain_events", [], |r| r.get(0))
+            .unwrap();
+        assert!(!id.is_empty(), "empty event id must be minted");
+        let payload_id = created
+            .payload
+            .as_ref()
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert_eq!(payload_id, id);
+
+        let huge = test_req(
+            DbAtomicParams::PublishDomainEvent {
+                id: String::new(),
+                event_type: "book_acquired".into(),
+                schema_version: 1,
+                account_id: "acct".into(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                dedup_key: "book_acquired:huge".into(),
+                payload: "x".repeat(65_537),
+                ordering_key: "huge".into(),
+            },
+            "evt-huge",
+        );
+        let err = match plan_atomic(&huge, now) {
+            Ok(_) => panic!("oversized payload must fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("exceeds"),
+            "unexpected error: {err}"
+        );
     }
 }

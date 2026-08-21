@@ -38,6 +38,7 @@ impl LibraryStore {
         &self,
         spec: PublishDomainEventSpec,
     ) -> Result<PublishDomainEventOutcome> {
+        let spec = prepare_publish_domain_event(spec)?;
         if let Some(atomic) = &self.atomic {
             return atomic.publish_domain_event(spec).await;
         }
@@ -213,6 +214,10 @@ impl LibraryStore {
 
     /// Return a fenced delivery to `pending` with backoff (retryable handler).
     ///
+    /// When `attempt_count` has already reached `max_attempts`, the delivery is
+    /// dead-lettered instead of looping forever on a guest that keeps returning
+    /// retry.
+    ///
     /// # Errors
     ///
     /// Returns [`LibraryError::Orm`] when the update fails.
@@ -222,6 +227,30 @@ impl LibraryStore {
         run_after: chrono::DateTime<Utc>,
         reason: &str,
     ) -> Result<bool> {
+        let Some(row) = event_deliveries::Entity::find_by_id(&fence.delivery_id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+        else {
+            return Ok(false);
+        };
+        if row.state != STATE_RUNNING
+            || row.lease_owner.as_deref() != Some(fence.owner.as_str())
+            || row.lease_generation != fence.generation
+        {
+            return Ok(false);
+        }
+        if row.attempt_count >= row.max_attempts {
+            return self
+                .dead_letter_event_delivery(
+                    fence,
+                    &format!(
+                        "retry exhausted after {} attempts: {reason}",
+                        row.attempt_count
+                    ),
+                )
+                .await;
+        }
         let now = now_str();
         let res = event_deliveries::Entity::update_many()
             .col_expr(
@@ -555,11 +584,15 @@ impl LibraryStore {
     }
 }
 
-/// Insert an outbox row or return the existing id for the same dedup key.
-pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
-    db: &C,
-    spec: PublishDomainEventSpec,
-) -> Result<PublishDomainEventOutcome> {
+/// Mint an event id when empty and reject oversized or blank publish fields.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Other`] when the payload exceeds 64 KiB or when
+/// `event_type` / `dedup_key` are blank.
+pub fn prepare_publish_domain_event(
+    mut spec: PublishDomainEventSpec,
+) -> Result<PublishDomainEventSpec> {
     const MAX_PAYLOAD: usize = 65_536;
     if spec.payload.len() > MAX_PAYLOAD {
         return Err(LibraryError::Other(anyhow::anyhow!(
@@ -572,6 +605,20 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
             "domain event type and dedup_key are required"
         )));
     }
+    if spec.id.trim().is_empty() {
+        spec.id = Uuid::new_v4().to_string();
+    } else {
+        spec.id = spec.id.trim().to_string();
+    }
+    Ok(spec)
+}
+
+/// Insert an outbox row or return the existing id for the same dedup key.
+pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
+    db: &C,
+    spec: PublishDomainEventSpec,
+) -> Result<PublishDomainEventOutcome> {
+    let spec = prepare_publish_domain_event(spec)?;
     if let Some(existing) = domain_events::Entity::find()
         .filter(domain_events::Column::EventType.eq(&spec.event_type))
         .filter(domain_events::Column::DedupKey.eq(&spec.dedup_key))
@@ -584,11 +631,7 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
         });
     }
     let now = now_str();
-    let id = if spec.id.trim().is_empty() {
-        Uuid::new_v4().to_string()
-    } else {
-        spec.id
-    };
+    let id = spec.id;
     let event_type = spec.event_type.clone();
     let dedup_key = spec.dedup_key.clone();
     let model = domain_events::ActiveModel {

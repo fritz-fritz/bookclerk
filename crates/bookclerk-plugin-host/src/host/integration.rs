@@ -474,12 +474,10 @@ fn domain_event_from(event: &IntegrationEvent) -> DomainEvent {
         event_type: event_type.to_string(),
         schema_version: 1,
         occurred_at_unix_ms,
-        account_id: String::new(),
-        correlation_id: String::new(),
-        causation_id: String::new(),
         deduplication_key: event_type.to_string(),
         delivery_attempt: 1,
         payload: serde_json::to_vec(&payload_val).unwrap_or_default(),
+        ..DomainEvent::default()
     }
 }
 

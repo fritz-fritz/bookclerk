@@ -172,18 +172,7 @@ async fn run_delivery(
             .await;
         return;
     };
-    let domain = DomainEvent {
-        event_id: event.id.clone(),
-        event_type: event.event_type.clone(),
-        schema_version: u32::try_from(event.schema_version).unwrap_or(1),
-        occurred_at_unix_ms: u64::try_from(event.occurred_at.timestamp_millis()).unwrap_or(0),
-        account_id: event.account_id.clone(),
-        correlation_id: event.correlation_id.clone(),
-        causation_id: event.causation_id.clone(),
-        deduplication_key: delivery.idempotency_key.clone(),
-        delivery_attempt: u32::try_from(delivery.attempt_count.max(1)).unwrap_or(1),
-        payload: event.payload.into_bytes(),
-    };
+    let domain = domain_event_for_delivery(&event, &delivery);
     let result = match integration.deliver_domain_event(domain).await {
         Ok(result) => result,
         Err(err) => {
@@ -224,13 +213,24 @@ async fn run_delivery(
         } => {
             let wake = unix_ms_to_utc(retry_at_unix_ms)
                 .unwrap_or_else(|| Utc::now() + chrono::Duration::seconds(5));
-            info!(
-                delivery_id = %delivery.id,
-                plugin = %delivery.plugin_id,
-                outcome = "retry",
-                %reason,
-                "event delivery retry scheduled"
-            );
+            if delivery.attempt_count >= delivery.max_attempts {
+                warn!(
+                    delivery_id = %delivery.id,
+                    plugin = %delivery.plugin_id,
+                    outcome = "dead_letter",
+                    %reason,
+                    attempts = delivery.attempt_count,
+                    "event delivery retry exhausted"
+                );
+            } else {
+                info!(
+                    delivery_id = %delivery.id,
+                    plugin = %delivery.plugin_id,
+                    outcome = "retry",
+                    %reason,
+                    "event delivery retry scheduled"
+                );
+            }
             library.retry_event_delivery(&fence, wake, &reason).await
         }
         EventResult::Reject { reason } => {
@@ -300,4 +300,102 @@ async fn run_delivery(
 fn unix_ms_to_utc(ms: u64) -> Option<chrono::DateTime<Utc>> {
     let ms = i64::try_from(ms).ok()?;
     Utc.timestamp_millis_opt(ms).single()
+}
+
+/// Map an outbox envelope plus the claimed delivery onto an ABI [`DomainEvent`].
+///
+/// Claim clears `resume_pending` on the row; a stored checkpoint still means
+/// this invocation continues a prior [`EventResult::Suspended`].
+fn domain_event_for_delivery(
+    event: &bookclerk_library::DomainEventRecord,
+    delivery: &bookclerk_library::EventDeliveryRecord,
+) -> DomainEvent {
+    DomainEvent {
+        event_id: event.id.clone(),
+        event_type: event.event_type.clone(),
+        schema_version: u32::try_from(event.schema_version).unwrap_or(1),
+        occurred_at_unix_ms: u64::try_from(event.occurred_at.timestamp_millis()).unwrap_or(0),
+        account_id: event.account_id.clone(),
+        correlation_id: event.correlation_id.clone(),
+        causation_id: event.causation_id.clone(),
+        deduplication_key: delivery.idempotency_key.clone(),
+        delivery_attempt: u32::try_from(delivery.attempt_count.max(1)).unwrap_or(1),
+        payload: event.payload.as_bytes().to_vec(),
+        checkpoint_json: delivery.checkpoint_json.clone().unwrap_or_default(),
+        checkpoint_schema_version: u32::try_from(delivery.checkpoint_schema_version).unwrap_or(0),
+        invocation_sequence: u32::try_from(delivery.invocation_sequence).unwrap_or(0),
+        resume_pending: delivery.checkpoint_json.is_some(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookclerk_library::{DomainEventRecord, EventDeliveryRecord};
+    use chrono::TimeZone;
+
+    fn sample_event() -> DomainEventRecord {
+        DomainEventRecord {
+            id: "evt-1".into(),
+            event_type: "book_acquired".into(),
+            schema_version: 1,
+            occurred_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+            account_id: "acct".into(),
+            correlation_id: "corr".into(),
+            causation_id: String::new(),
+            dedup_key: "book_acquired:u1".into(),
+            payload: r#"{"titleId":"u1"}"#.into(),
+            dispatch_state: "dispatched".into(),
+            created_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+        }
+    }
+
+    fn sample_delivery() -> EventDeliveryRecord {
+        EventDeliveryRecord {
+            id: "evt-1:echo".into(),
+            event_id: "evt-1".into(),
+            plugin_id: "echo".into(),
+            idempotency_key: "evt-1:echo".into(),
+            state: "running".into(),
+            attempt_count: 1,
+            max_attempts: 8,
+            lease_owner: Some("worker".into()),
+            lease_expires_at: None,
+            lease_generation: 1,
+            run_after: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+            invocation_sequence: 0,
+            resume_pending: false,
+            checkpoint_json: None,
+            checkpoint_schema_version: 0,
+            ordering_key: "u1".into(),
+            outcome: None,
+            error_message: None,
+            created_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+            updated_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
+        }
+    }
+
+    #[test]
+    fn first_delivery_has_empty_checkpoint() {
+        let domain = domain_event_for_delivery(&sample_event(), &sample_delivery());
+        assert!(domain.checkpoint_json.is_empty());
+        assert_eq!(domain.checkpoint_schema_version, 0);
+        assert_eq!(domain.invocation_sequence, 0);
+        assert!(!domain.resume_pending);
+        assert_eq!(domain.payload, br#"{"titleId":"u1"}"#);
+    }
+
+    #[test]
+    fn resume_delivery_copies_checkpoint_onto_domain_event() {
+        let mut delivery = sample_delivery();
+        delivery.checkpoint_json = Some(r#"{"offset":1}"#.into());
+        delivery.checkpoint_schema_version = 2;
+        delivery.invocation_sequence = 1;
+        delivery.resume_pending = false;
+        let domain = domain_event_for_delivery(&sample_event(), &delivery);
+        assert_eq!(domain.checkpoint_json, r#"{"offset":1}"#);
+        assert_eq!(domain.checkpoint_schema_version, 2);
+        assert_eq!(domain.invocation_sequence, 1);
+        assert!(domain.resume_pending);
+    }
 }
