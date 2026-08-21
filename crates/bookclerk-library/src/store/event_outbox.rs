@@ -40,9 +40,10 @@ const EVENT_WAKE_FAR_FUTURE: &str = "9999-12-31T23:59:59+00:00";
 
 /// Remaining injected `publish_domain_event_on` failures (library tests only).
 static INJECT_PUBLISH_FAULTS: AtomicU32 = AtomicU32::new(0);
-/// Calls to [`LibraryStore::dispatch_event_deliveries`] (library tests only).
 #[cfg(test)]
-static DISPATCH_EVENT_CALLS: AtomicU32 = AtomicU32::new(0);
+thread_local! {
+    static DISPATCH_EVENT_CALLS: AtomicU32 = const { AtomicU32::new(0) };
+}
 
 /// Fail the next `n` outbox inserts (used to prove acquire+publish rollback).
 #[cfg(test)]
@@ -53,7 +54,7 @@ pub(crate) fn inject_event_publish_failures(n: u32) {
 /// Take and reset the dispatch-call counter (library tests only).
 #[cfg(test)]
 pub(crate) fn take_dispatch_event_calls() -> u32 {
-    DISPATCH_EVENT_CALLS.swap(0, Ordering::SeqCst)
+    DISPATCH_EVENT_CALLS.with(|c| c.swap(0, Ordering::SeqCst))
 }
 
 fn take_publish_fault() -> bool {
@@ -120,7 +121,9 @@ impl LibraryStore {
         operation_id: &str,
     ) -> Result<u32> {
         #[cfg(test)]
-        DISPATCH_EVENT_CALLS.fetch_add(1, Ordering::SeqCst);
+        DISPATCH_EVENT_CALLS.with(|c| {
+            c.fetch_add(1, Ordering::SeqCst);
+        });
         if let Some(atomic) = &self.atomic {
             if subscribers.len() <= 1 {
                 return atomic

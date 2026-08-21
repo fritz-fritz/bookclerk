@@ -4089,6 +4089,7 @@ async fn unchanged_catalog_reconcile_does_zero_dispatch_writes() {
         ids.push(id);
     }
     let created_after = chrono::Utc::now() - chrono::Duration::days(7);
+    let before = store.list_event_deliveries(None, 500).await.unwrap().len();
     super::event_outbox::take_dispatch_event_calls();
     let n = store
         .reconcile_catalog_deliveries(created_after)
@@ -4096,6 +4097,10 @@ async fn unchanged_catalog_reconcile_does_zero_dispatch_writes() {
         .unwrap();
     assert_eq!(n, 0);
     assert_eq!(super::event_outbox::take_dispatch_event_calls(), 0);
+    assert_eq!(
+        store.list_event_deliveries(None, 500).await.unwrap().len(),
+        before
+    );
     store
         .upsert_event_subscriber(
             "node-b",
