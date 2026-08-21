@@ -315,6 +315,7 @@ fn integration_event_from_payload(
     }
 }
 
+/// Poll until `flag` is set so `select!` can abort an in-flight delivery.
 async fn wait_cancel_flag(flag: Arc<AtomicBool>) {
     while !flag.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -323,6 +324,7 @@ async fn wait_cancel_flag(flag: Arc<AtomicBool>) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::missing_docs_in_private_items)]
     use super::*;
     use crate::types::IntegrationHealth;
     use std::time::Instant;
