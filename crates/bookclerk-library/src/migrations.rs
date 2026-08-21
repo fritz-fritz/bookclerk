@@ -1119,6 +1119,28 @@ const MIGRATION_V24_EVENT_NODES_POSTGRES: &str = r#"
     DROP TABLE IF EXISTS event_subscribers;
 "#;
 
+/// Producer `source` on the envelope plus wake-on-event delivery columns (SQLite).
+const MIGRATION_V25_EVENT_SOURCE_WAKE_SQLITE: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN source TEXT NOT NULL DEFAULT '';
+    ALTER TABLE event_deliveries ADD COLUMN wake_event_type TEXT NOT NULL DEFAULT '';
+    ALTER TABLE event_deliveries ADD COLUMN wake_filter_json TEXT NOT NULL DEFAULT '';
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_wake
+        ON event_deliveries(state, wake_event_type);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_plugin_running
+        ON event_deliveries(plugin_id, state);
+"#;
+
+/// Producer `source` on the envelope plus wake-on-event delivery columns (Postgres / D1).
+const MIGRATION_V25_EVENT_SOURCE_WAKE_POSTGRES: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
+    ALTER TABLE event_deliveries ADD COLUMN IF NOT EXISTS wake_event_type TEXT NOT NULL DEFAULT '';
+    ALTER TABLE event_deliveries ADD COLUMN IF NOT EXISTS wake_filter_json TEXT NOT NULL DEFAULT '';
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_wake
+        ON event_deliveries(state, wake_event_type);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_plugin_running
+        ON event_deliveries(plugin_id, state);
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -1148,6 +1170,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V22_EVENT_ORDERING_SQLITE,
         MIGRATION_V23_EVENT_CATALOG_SQLITE,
         MIGRATION_V24_EVENT_NODES_SQLITE,
+        MIGRATION_V25_EVENT_SOURCE_WAKE_SQLITE,
     ]
 }
 
@@ -1180,6 +1203,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V22_EVENT_ORDERING_POSTGRES,
         MIGRATION_V23_EVENT_CATALOG_POSTGRES,
         MIGRATION_V24_EVENT_NODES_POSTGRES,
+        MIGRATION_V25_EVENT_SOURCE_WAKE_POSTGRES,
     ]
 }
 

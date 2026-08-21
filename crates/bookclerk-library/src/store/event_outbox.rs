@@ -20,11 +20,12 @@ use crate::entities::{
 };
 use crate::error::{LibraryError, Result};
 use crate::models::{
-    catalog_subscribers_for_event, collapse_live_subscriber_nodes, job_backoff_run_after,
-    AcquireStatus, DomainEventRecord, EventCatalogSubscription, EventDeliveryFence,
-    EventDeliveryMetrics, EventDeliveryRecord, EventSubscriber, EventSubscriberCatalogRecord,
-    EventSubscriberNodeRecord, PublishDomainEventOutcome, PublishDomainEventSpec,
-    EVENT_DELIVERY_MAX_ATTEMPTS, EVENT_RESOURCE_CLASS_NETWORK, EVENT_SUBSCRIBER_HEARTBEAT_TTL_SECS,
+    catalog_subscribers_for_event, collapse_live_subscriber_nodes, event_filter_matches,
+    job_backoff_run_after, AcquireStatus, DomainEventRecord, EventCatalogSubscription,
+    EventDeliveryFence, EventDeliveryMetrics, EventDeliveryRecord, EventSubscriber,
+    EventSubscriberCatalogRecord, EventSubscriberNodeRecord, PublishDomainEventOutcome,
+    PublishDomainEventSpec, EVENT_DELIVERY_MAX_ATTEMPTS, EVENT_RESOURCE_CLASS_NETWORK,
+    EVENT_SUBSCRIBER_HEARTBEAT_TTL_SECS,
 };
 
 const STATE_PENDING: &str = "pending";
@@ -35,14 +36,24 @@ const STATE_REJECTED: &str = "rejected";
 const STATE_DEAD_LETTER: &str = "dead_letter";
 const RECONCILE_PAGE: u64 = 200;
 const EVENT_OUTBOX_STATS_ID: i64 = 1;
+const EVENT_WAKE_FAR_FUTURE: &str = "9999-12-31T23:59:59+00:00";
 
 /// Remaining injected `publish_domain_event_on` failures (library tests only).
 static INJECT_PUBLISH_FAULTS: AtomicU32 = AtomicU32::new(0);
+/// Calls to [`LibraryStore::dispatch_event_deliveries`] (library tests only).
+#[cfg(test)]
+static DISPATCH_EVENT_CALLS: AtomicU32 = AtomicU32::new(0);
 
 /// Fail the next `n` outbox inserts (used to prove acquire+publish rollback).
 #[cfg(test)]
 pub(crate) fn inject_event_publish_failures(n: u32) {
     INJECT_PUBLISH_FAULTS.store(n, Ordering::SeqCst);
+}
+
+/// Take and reset the dispatch-call counter (library tests only).
+#[cfg(test)]
+pub(crate) fn take_dispatch_event_calls() -> u32 {
+    DISPATCH_EVENT_CALLS.swap(0, Ordering::SeqCst)
 }
 
 fn take_publish_fault() -> bool {
@@ -75,20 +86,23 @@ impl LibraryStore {
         spec: PublishDomainEventSpec,
     ) -> Result<PublishDomainEventOutcome> {
         let spec = prepare_publish_domain_event(spec)?;
-        if let Some(atomic) = &self.atomic {
-            return atomic.publish_domain_event(spec).await;
-        }
-        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match publish_domain_event_on(&txn, spec).await {
-            Ok(outcome) => {
-                txn.commit().await.map_err(LibraryError::Orm)?;
-                Ok(outcome)
+        let outcome = if let Some(atomic) = &self.atomic {
+            atomic.publish_domain_event(spec).await?
+        } else {
+            let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+            match publish_domain_event_on(&txn, spec).await {
+                Ok(outcome) => {
+                    txn.commit().await.map_err(LibraryError::Orm)?;
+                    outcome
+                }
+                Err(err) => {
+                    let _ = txn.rollback().await;
+                    return Err(err);
+                }
             }
-            Err(err) => {
-                let _ = txn.rollback().await;
-                Err(err)
-            }
-        }
+        };
+        self.wake_for_published(&outcome).await?;
+        Ok(outcome)
     }
 
     /// Snapshot matching subscribers and create one delivery row per plugin.
@@ -105,10 +119,22 @@ impl LibraryStore {
         subscribers: &[EventSubscriber],
         operation_id: &str,
     ) -> Result<u32> {
+        #[cfg(test)]
+        DISPATCH_EVENT_CALLS.fetch_add(1, Ordering::SeqCst);
         if let Some(atomic) = &self.atomic {
-            return atomic
-                .dispatch_event_deliveries(event_id, subscribers, operation_id)
-                .await;
+            if subscribers.len() <= 1 {
+                return atomic
+                    .dispatch_event_deliveries(event_id, subscribers, operation_id)
+                    .await;
+            }
+            let mut total = 0u32;
+            for sub in subscribers {
+                let op = format!("{operation_id}-{}", sub.plugin_id);
+                total += atomic
+                    .dispatch_event_deliveries(event_id, std::slice::from_ref(sub), &op)
+                    .await?;
+            }
+            return Ok(total);
         }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
         match dispatch_event_deliveries_on(&txn, event_id, subscribers).await {
@@ -149,17 +175,25 @@ impl LibraryStore {
         lease_secs: u64,
         operation_id: &str,
         plugin_ids: &[String],
+        max_in_flight: u32,
     ) -> Result<Option<EventDeliveryRecord>> {
         if plugin_ids.is_empty() {
             return Ok(None);
         }
         if let Some(atomic) = &self.atomic {
             return atomic
-                .claim_next_event_delivery(owner, lease_secs, operation_id, plugin_ids)
+                .claim_next_event_delivery(
+                    owner,
+                    lease_secs,
+                    operation_id,
+                    plugin_ids,
+                    max_in_flight,
+                )
                 .await;
         }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match claim_next_event_delivery_on(&txn, owner, lease_secs, plugin_ids).await {
+        match claim_next_event_delivery_on(&txn, owner, lease_secs, plugin_ids, max_in_flight).await
+        {
             Ok(row) => {
                 txn.commit().await.map_err(LibraryError::Orm)?;
                 Ok(row)
@@ -400,12 +434,30 @@ impl LibraryStore {
         checkpoint_json: &str,
         checkpoint_schema_version: i64,
         wake_at: chrono::DateTime<Utc>,
+        wake_event_type: &str,
+        wake_filter_json: &str,
     ) -> Result<bool> {
         if checkpoint_json.len() > 65_536 {
             return Err(LibraryError::Other(anyhow::anyhow!(
                 "event checkpoint of {} bytes exceeds 65536",
                 checkpoint_json.len()
             )));
+        }
+        let wake_event_type = wake_event_type.trim();
+        if !wake_event_type.is_empty() {
+            validate_wake_event_type(wake_event_type)?;
+        }
+        let wake_filter_json = wake_filter_json.trim();
+        if !wake_filter_json.is_empty() {
+            let parsed: serde_json::Value =
+                serde_json::from_str(wake_filter_json).map_err(|err| {
+                    LibraryError::Other(anyhow::anyhow!("wake filter JSON is invalid: {err}"))
+                })?;
+            if !parsed.is_object() {
+                return Err(LibraryError::Other(anyhow::anyhow!(
+                    "wake filter JSON must be an object"
+                )));
+            }
         }
         let now = Utc::now();
         let Some(row) = event_deliveries::Entity::find_by_id(&fence.delivery_id)
@@ -421,6 +473,11 @@ impl LibraryStore {
         {
             return Ok(false);
         }
+        let run_after = if !wake_event_type.is_empty() && wake_at.timestamp_millis() <= 0 {
+            EVENT_WAKE_FAR_FUTURE.to_string()
+        } else {
+            wake_at.to_rfc3339()
+        };
         let res = event_deliveries::Entity::update_many()
             .col_expr(
                 event_deliveries::Column::State,
@@ -428,7 +485,7 @@ impl LibraryStore {
             )
             .col_expr(
                 event_deliveries::Column::RunAfter,
-                sea_orm::sea_query::Expr::value(wake_at.to_rfc3339()),
+                sea_orm::sea_query::Expr::value(run_after),
             )
             .col_expr(
                 event_deliveries::Column::CheckpointJson,
@@ -445,6 +502,14 @@ impl LibraryStore {
             .col_expr(
                 event_deliveries::Column::ResumePending,
                 sea_orm::sea_query::Expr::value(1i64),
+            )
+            .col_expr(
+                event_deliveries::Column::WakeEventType,
+                sea_orm::sea_query::Expr::value(wake_event_type.to_string()),
+            )
+            .col_expr(
+                event_deliveries::Column::WakeFilterJson,
+                sea_orm::sea_query::Expr::value(wake_filter_json.to_string()),
             )
             .col_expr(
                 event_deliveries::Column::LeaseOwner,
@@ -467,9 +532,10 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)?;
         if res.rows_affected == 1 {
             bump_event_stats(&self.db, 0, 1, 0, None, None).await?;
-            return Ok(true);
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        Ok(false)
     }
 
     /// Fail a running delivery: retry with backoff or dead-letter at max attempts.
@@ -996,9 +1062,90 @@ impl LibraryStore {
             .await
     }
 
-    /// Late-join catalog deliveries onto already-dispatched events until exhaustion.
+    /// Dispatched events in the retention window missing a delivery for `plugin_id`.
     ///
-    /// Only walks events newer than `created_after` (the event-retention cutoff).
+    /// Restricted to `event_types` the plugin actually subscribes to so unrelated
+    /// types do not occupy the page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the read fails.
+    async fn list_missing_dispatched_events_for_plugin(
+        &self,
+        plugin_id: &str,
+        event_types: &[String],
+        created_after: &str,
+        after: Option<(&str, &str)>,
+        limit: u64,
+    ) -> Result<Vec<DomainEventRecord>> {
+        if event_types.is_empty() || plugin_id.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = event_types
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sql = format!(
+            "SELECT e.id FROM domain_events e \
+             WHERE e.dispatch_state = 'dispatched' \
+               AND e.created_at > ? \
+               AND e.event_type IN ({placeholders}) \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM event_deliveries d \
+                 WHERE d.event_id = e.id AND d.plugin_id = ? \
+               )"
+        );
+        let mut values: Vec<sea_orm::Value> = vec![created_after.to_string().into()];
+        for event_type in event_types {
+            values.push(event_type.clone().into());
+        }
+        values.push(plugin_id.to_string().into());
+        if let Some((created_at, id)) = after {
+            sql.push_str(" AND (e.created_at > ? OR (e.created_at = ? AND e.id > ?))");
+            values.push(created_at.to_string().into());
+            values.push(created_at.to_string().into());
+            values.push(id.to_string().into());
+        }
+        sql.push_str(" ORDER BY e.created_at ASC, e.id ASC LIMIT ?");
+        values.push(i64::try_from(limit).unwrap_or(200).into());
+        let backend = self.db.get_database_backend();
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(backend, sql, values))
+            .await
+            .map_err(LibraryError::Orm)?;
+        let mut ids = Vec::new();
+        for row in rows {
+            if let Ok(id) = row.try_get_by_index::<String>(0) {
+                if !id.is_empty() {
+                    ids.push(id);
+                }
+            }
+        }
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let models = domain_events::Entity::find()
+            .filter(domain_events::Column::Id.is_in(ids.clone()))
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let mut by_id = std::collections::HashMap::new();
+        for model in models {
+            by_id.insert(model.id.clone(), model);
+        }
+        ids.into_iter()
+            .filter_map(|id| by_id.remove(&id))
+            .map(map_event)
+            .collect()
+    }
+
+    /// Late-join catalog deliveries for missing `(event_id, plugin_id)` pairs.
+    ///
+    /// Pages an anti-join of dispatched events in the retention window that
+    /// lack a delivery for each live plugin. Unchanged catalogs with no missing
+    /// pairs issue bounded empty `SELECT`s and **zero** dispatch writes.
     ///
     /// # Errors
     ///
@@ -1010,34 +1157,51 @@ impl LibraryStore {
         let catalog = self.list_live_event_subscribers().await?;
         let cutoff = created_after.to_rfc3339();
         let mut total = 0u32;
-        let mut after: Option<(String, String)> = None;
-        loop {
-            let page = self
-                .list_dispatched_events_page(
-                    &cutoff,
-                    after.as_ref().map(|(c, i)| (c.as_str(), i.as_str())),
-                    RECONCILE_PAGE,
-                )
-                .await?;
-            if page.is_empty() {
-                break;
+        for row in &catalog {
+            if !row.enabled {
+                continue;
             }
-            for event in &page {
-                let subs = catalog_subscribers_for_event(&catalog, event);
-                if subs.is_empty() {
-                    continue;
-                }
-                let op = format!("reconcile-{}", event.id);
-                total += self
-                    .dispatch_event_deliveries(&event.id, &subs, &op)
+            let mut types: Vec<String> = row
+                .subscriptions
+                .iter()
+                .map(|s| s.event_type.clone())
+                .collect();
+            types.sort();
+            types.dedup();
+            if types.is_empty() {
+                continue;
+            }
+            let mut after: Option<(String, String)> = None;
+            loop {
+                let page = self
+                    .list_missing_dispatched_events_for_plugin(
+                        &row.plugin_id,
+                        &types,
+                        &cutoff,
+                        after.as_ref().map(|(c, i)| (c.as_str(), i.as_str())),
+                        RECONCILE_PAGE,
+                    )
                     .await?;
-            }
-            let Some(last) = page.last() else {
-                break;
-            };
-            after = Some((last.created_at.to_rfc3339(), last.id.clone()));
-            if u64::try_from(page.len()).unwrap_or(RECONCILE_PAGE) < RECONCILE_PAGE {
-                break;
+                if page.is_empty() {
+                    break;
+                }
+                for event in &page {
+                    let subs = catalog_subscribers_for_event(std::slice::from_ref(row), event);
+                    let Some(sub) = subs.into_iter().find(|s| s.plugin_id == row.plugin_id) else {
+                        continue;
+                    };
+                    let op = format!("reconcile-{}-{}", event.id, sub.plugin_id);
+                    total += self
+                        .dispatch_event_deliveries(&event.id, std::slice::from_ref(&sub), &op)
+                        .await?;
+                }
+                let Some(last) = page.last() else {
+                    break;
+                };
+                after = Some((last.created_at.to_rfc3339(), last.id.clone()));
+                if u64::try_from(page.len()).unwrap_or(RECONCILE_PAGE) < RECONCILE_PAGE {
+                    break;
+                }
             }
         }
         Ok(total)
@@ -1165,6 +1329,71 @@ impl LibraryStore {
         Ok(res.rows_affected == 1)
     }
 
+    /// Wake suspended deliveries whose `wake_event_type` matches `event`.
+    ///
+    /// Host-owned filter equality is the same as catalog `filter`. A match sets
+    /// `run_after = now` and `resume_pending` so the row is claimable before a
+    /// timestamp timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the update fails.
+    pub async fn wake_matching_event_deliveries(&self, event: &DomainEventRecord) -> Result<u32> {
+        if event.event_type.trim().is_empty() {
+            return Ok(0);
+        }
+        let now = now_str();
+        let rows = event_deliveries::Entity::find()
+            .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+            .filter(event_deliveries::Column::WakeEventType.eq(&event.event_type))
+            .filter(event_deliveries::Column::EventId.ne(&event.id))
+            .all(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        let mut woken = 0u32;
+        for row in rows {
+            let filter = if row.wake_filter_json.trim().is_empty() {
+                None
+            } else {
+                serde_json::from_str(&row.wake_filter_json).ok()
+            };
+            if !event_filter_matches(filter.as_ref(), &event.payload) {
+                continue;
+            }
+            let res = event_deliveries::Entity::update_many()
+                .col_expr(
+                    event_deliveries::Column::RunAfter,
+                    sea_orm::sea_query::Expr::value(now.clone()),
+                )
+                .col_expr(
+                    event_deliveries::Column::ResumePending,
+                    sea_orm::sea_query::Expr::value(1i64),
+                )
+                .col_expr(
+                    event_deliveries::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(now.clone()),
+                )
+                .filter(event_deliveries::Column::Id.eq(&row.id))
+                .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+                .exec(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            woken = woken.saturating_add(u32::try_from(res.rows_affected).unwrap_or(0));
+        }
+        Ok(woken)
+    }
+
+    async fn wake_for_published(&self, outcome: &PublishDomainEventOutcome) -> Result<()> {
+        let PublishDomainEventOutcome::Created { id } = outcome else {
+            return Ok(());
+        };
+        let Some(event) = self.get_domain_event(id).await? else {
+            return Ok(());
+        };
+        self.wake_matching_event_deliveries(&event).await?;
+        Ok(())
+    }
+
     /// Delete terminal deliveries past their retention windows, then empty events.
     ///
     /// Acked/rejected rows use `retention_days`. Dead letters use
@@ -1229,8 +1458,9 @@ impl LibraryStore {
 ///
 /// # Errors
 ///
-/// Returns [`LibraryError::Other`] when the payload exceeds 64 KiB or when
-/// `event_type` / `dedup_key` are blank.
+/// Returns [`LibraryError::Other`] when the payload exceeds 64 KiB, when
+/// `event_type` / `dedup_key` are blank, or when `source` is not empty and
+/// fails the plugin-id grammar.
 pub fn prepare_publish_domain_event(
     mut spec: PublishDomainEventSpec,
 ) -> Result<PublishDomainEventSpec> {
@@ -1246,6 +1476,7 @@ pub fn prepare_publish_domain_event(
             "domain event type and dedup_key are required"
         )));
     }
+    validate_event_source(&spec.source)?;
     if spec.id.trim().is_empty() {
         spec.id = Uuid::new_v4().to_string();
     } else {
@@ -1281,6 +1512,7 @@ pub(crate) fn book_acquired_spec(
         event_type: "book_acquired".into(),
         schema_version: 1,
         account_id: book.account_id.clone(),
+        source: book.source.clone(),
         correlation_id: book.uuid.clone(),
         causation_id: String::new(),
         dedup_key: format!("book_acquired:{}", book.uuid),
@@ -1359,6 +1591,7 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
         schema_version: Set(spec.schema_version.max(1)),
         occurred_at: Set(now.clone()),
         account_id: Set(spec.account_id),
+        source: Set(spec.source),
         correlation_id: Set(spec.correlation_id),
         causation_id: Set(spec.causation_id),
         dedup_key: Set(spec.dedup_key),
@@ -1441,6 +1674,8 @@ pub(crate) async fn dispatch_event_deliveries_on<C: ConnectionTrait>(
             updated_at: Set(now.clone()),
             cancel_requested: Set(0),
             resource_class: Set(EVENT_RESOURCE_CLASS_NETWORK.into()),
+            wake_event_type: Set(String::new()),
+            wake_filter_json: Set(String::new()),
         };
         match model.insert(db).await {
             Ok(_) => created += 1,
@@ -1471,6 +1706,7 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
     owner: &str,
     lease_secs: u64,
     plugin_ids: &[String],
+    max_in_flight: u32,
 ) -> Result<Option<EventDeliveryRecord>> {
     if plugin_ids.is_empty() {
         return Ok(None);
@@ -1500,6 +1736,11 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
         let page_len = u64::try_from(candidates.len()).unwrap_or(PAGE);
         for model in candidates {
             if fifo_blocked(db, &model).await? {
+                continue;
+            }
+            if plugin_in_flight_at_cap(db, &model.plugin_id, &model.resource_class, max_in_flight)
+                .await?
+            {
                 continue;
             }
             let resuming = model.resume_pending != 0;
@@ -1631,6 +1872,75 @@ fn is_unique_violation(err: &sea_orm::DbErr) -> bool {
     s.contains("unique") || s.contains("constraint")
 }
 
+async fn plugin_in_flight_at_cap<C: ConnectionTrait>(
+    db: &C,
+    plugin_id: &str,
+    resource_class: &str,
+    max_in_flight: u32,
+) -> Result<bool> {
+    if max_in_flight == 0 {
+        return Ok(true);
+    }
+    let class = if resource_class.trim().is_empty() {
+        EVENT_RESOURCE_CLASS_NETWORK
+    } else {
+        resource_class.trim()
+    };
+    let n = event_deliveries::Entity::find()
+        .filter(event_deliveries::Column::PluginId.eq(plugin_id))
+        .filter(event_deliveries::Column::State.eq(STATE_RUNNING))
+        .filter(event_deliveries::Column::ResourceClass.eq(class))
+        .count(db)
+        .await
+        .map_err(LibraryError::Orm)?;
+    Ok(n >= u64::from(max_in_flight))
+}
+
+/// Empty is allowed; otherwise the same grammar as a plugin id.
+fn validate_event_source(source: &str) -> Result<()> {
+    if source.is_empty() {
+        return Ok(());
+    }
+    if source != source.trim() {
+        return Err(LibraryError::Other(anyhow::anyhow!(
+            "event source `{source}` must not have leading or trailing whitespace"
+        )));
+    }
+    if source.len() < 2 || source.len() > 32 {
+        return Err(LibraryError::Other(anyhow::anyhow!(
+            "event source `{source}` must be 2–32 characters"
+        )));
+    }
+    if !source
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(LibraryError::Other(anyhow::anyhow!(
+            "event source `{source}` must be lowercase ascii letters, digits, or `_`"
+        )));
+    }
+    if source.starts_with('_') || source.ends_with('_') || source.contains("__") {
+        return Err(LibraryError::Other(anyhow::anyhow!(
+            "event source `{source}` must not start/end with `_` or contain `__`"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_wake_event_type(event_type: &str) -> Result<()> {
+    if event_type.len() > 64
+        || event_type.is_empty()
+        || !event_type
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(LibraryError::Other(anyhow::anyhow!(
+            "wake event type `{event_type}` must be 1–64 lowercase ascii letters, digits, or `_`"
+        )));
+    }
+    Ok(())
+}
+
 fn map_event(m: domain_events::Model) -> Result<DomainEventRecord> {
     Ok(DomainEventRecord {
         id: m.id,
@@ -1638,6 +1948,7 @@ fn map_event(m: domain_events::Model) -> Result<DomainEventRecord> {
         schema_version: m.schema_version,
         occurred_at: parse_dt(&m.occurred_at),
         account_id: m.account_id,
+        source: m.source,
         correlation_id: m.correlation_id,
         causation_id: m.causation_id,
         dedup_key: m.dedup_key,
@@ -1676,6 +1987,8 @@ fn map_delivery(m: event_deliveries::Model) -> Result<EventDeliveryRecord> {
         } else {
             m.resource_class
         },
+        wake_event_type: m.wake_event_type,
+        wake_filter_json: m.wake_filter_json,
     })
 }
 

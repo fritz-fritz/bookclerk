@@ -612,6 +612,7 @@ async fn run_operation(
             event_type,
             schema_version,
             account_id,
+            source,
             correlation_id,
             causation_id,
             dedup_key,
@@ -624,6 +625,7 @@ async fn run_operation(
                 event_type: event_type.clone(),
                 schema_version: *schema_version,
                 account_id: account_id.clone(),
+                source: source.clone(),
                 correlation_id: correlation_id.clone(),
                 causation_id: causation_id.clone(),
                 dedup_key: dedup_key.clone(),
@@ -658,6 +660,7 @@ async fn run_operation(
             owner,
             lease_secs,
             plugin_ids_json,
+            max_in_flight,
         } => {
             let plugin_ids: Vec<String> = if plugin_ids_json.trim().is_empty() {
                 Vec::new()
@@ -669,6 +672,7 @@ async fn run_operation(
                 owner,
                 u64::try_from(*lease_secs).unwrap_or(60),
                 &plugin_ids,
+                u32::try_from(*max_in_flight).unwrap_or(0),
             )
             .await?
             {
@@ -685,6 +689,7 @@ async fn run_operation(
             event_type,
             schema_version,
             event_account_id,
+            source,
             correlation_id,
             causation_id,
             dedup_key,
@@ -718,6 +723,7 @@ async fn run_operation(
                         event_type: event_type.clone(),
                         schema_version: *schema_version,
                         account_id: event_account_id.clone(),
+                        source: source.clone(),
                         correlation_id: correlation_id.clone(),
                         causation_id: causation_id.clone(),
                         dedup_key: dedup_key.clone(),

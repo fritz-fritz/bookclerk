@@ -281,6 +281,8 @@ async fn event_result_vectors(client: &PluginClient) {
             checkpoint_json: r#"{"n":1}"#.into(),
             checkpoint_schema_version: 1,
             wake_at_unix_ms: 1,
+            wake_on_event_type: String::new(),
+            wake_on_filter_json: String::new(),
         }
     );
     let mut oversized = sample_event("book_acquired");

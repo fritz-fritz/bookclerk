@@ -82,6 +82,9 @@ pub struct DomainEvent {
     /// Tenant / account id.
     #[serde(default)]
     pub account_id: String,
+    /// Producer plugin id; empty when unknown (`abiMinor` ≥ 6).
+    #[serde(default)]
+    pub source: String,
     /// Trace correlation id.
     #[serde(default)]
     pub correlation_id: String,
@@ -148,6 +151,12 @@ pub enum EventResult {
         checkpoint_schema_version: u32,
         /// UTC unix-ms wake hint.
         wake_at_unix_ms: u64,
+        /// Event type that can wake this sleep; empty = timestamp-only (`abiMinor` ≥ 6).
+        #[serde(default)]
+        wake_on_event_type: String,
+        /// Host-owned payload object filter JSON; empty = type only (`abiMinor` ≥ 6).
+        #[serde(default)]
+        wake_on_filter_json: String,
     },
 }
 
@@ -727,12 +736,28 @@ mod tests {
             checkpoint_json: r#"{"n":1}"#.into(),
             checkpoint_schema_version: 1,
             wake_at_unix_ms: 42,
+            wake_on_event_type: String::new(),
+            wake_on_filter_json: String::new(),
         };
         let json = serde_json::to_value(&suspended).unwrap();
         assert_eq!(json["kind"], "suspended");
         assert_eq!(json["wakeAtUnixMs"], 42);
         let back: EventResult = serde_json::from_value(json).unwrap();
         assert_eq!(back, suspended);
+        let legacy = EventResult::from_json_str(
+            r#"{"kind":"suspended","checkpointJson":"{}","checkpointSchemaVersion":1,"wakeAtUnixMs":7}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy,
+            EventResult::Suspended {
+                checkpoint_json: "{}".into(),
+                checkpoint_schema_version: 1,
+                wake_at_unix_ms: 7,
+                wake_on_event_type: String::new(),
+                wake_on_filter_json: String::new(),
+            }
+        );
     }
 
     #[test]

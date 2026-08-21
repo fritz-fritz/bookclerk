@@ -17,6 +17,8 @@ pub struct Model {
     pub occurred_at: String,
     /// Tenant / account id, when known.
     pub account_id: String,
+    /// Producer plugin id (`audible`, …); empty when unknown.
+    pub source: String,
     /// Trace correlation id.
     pub correlation_id: String,
     /// Causing event or job id.

@@ -1629,6 +1629,9 @@ pub struct PublishDomainEventSpec {
     /// Tenant / account id.
     #[serde(default)]
     pub account_id: String,
+    /// Producer plugin id (`audible`, …); empty when unknown.
+    #[serde(default)]
+    pub source: String,
     /// Trace correlation id.
     #[serde(default)]
     pub correlation_id: String,
@@ -1892,6 +1895,9 @@ pub struct DomainEventRecord {
     pub occurred_at: DateTime<Utc>,
     /// Tenant / account id.
     pub account_id: String,
+    /// Producer plugin id (`audible`, …); empty when unknown.
+    #[serde(default)]
+    pub source: String,
     /// Trace correlation id.
     pub correlation_id: String,
     /// Causing id.
@@ -1957,6 +1963,12 @@ pub struct EventDeliveryRecord {
     /// Concurrency class (`network` today).
     #[serde(default = "default_event_resource_class")]
     pub resource_class: String,
+    /// Event type that can wake this suspended delivery; empty = timestamp-only.
+    #[serde(default)]
+    pub wake_event_type: String,
+    /// Host-owned payload object filter JSON for event-wake; empty = type only.
+    #[serde(default)]
+    pub wake_filter_json: String,
 }
 
 impl EventDeliveryRecord {

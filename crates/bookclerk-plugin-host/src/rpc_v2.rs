@@ -871,9 +871,13 @@ async fn dispatch_integration(
                     checkpoint_json,
                     checkpoint_schema_version,
                     wake_at_unix_ms,
+                    wake_on_event_type,
+                    wake_on_filter_json,
                 } => format!(
-                    "{{\"kind\":\"suspended\",\"checkpointJson\":{},\"checkpointSchemaVersion\":{checkpoint_schema_version},\"wakeAtUnixMs\":{wake_at_unix_ms}}}",
-                    serde_json::to_string(&checkpoint_json).unwrap_or_else(|_| "\"\"".into())
+                    "{{\"kind\":\"suspended\",\"checkpointJson\":{},\"checkpointSchemaVersion\":{checkpoint_schema_version},\"wakeAtUnixMs\":{wake_at_unix_ms},\"wakeOnEventType\":{},\"wakeOnFilterJson\":{}}}",
+                    serde_json::to_string(&checkpoint_json).unwrap_or_else(|_| "\"\"".into()),
+                    serde_json::to_string(&wake_on_event_type).unwrap_or_else(|_| "\"\"".into()),
+                    serde_json::to_string(&wake_on_filter_json).unwrap_or_else(|_| "\"\"".into())
                 ),
             })
         }

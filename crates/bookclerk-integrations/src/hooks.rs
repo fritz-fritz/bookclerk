@@ -48,6 +48,7 @@ pub async fn emit_book_acquired(
             event_type: "book_acquired".into(),
             schema_version: 1,
             account_id: book.account_id.clone(),
+            source: book.source.clone(),
             correlation_id: book.uuid.clone(),
             causation_id: String::new(),
             dedup_key: format!("book_acquired:{}", book.uuid),

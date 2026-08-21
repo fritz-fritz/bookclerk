@@ -374,6 +374,7 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
             event_type,
             schema_version,
             account_id,
+            source,
             correlation_id,
             causation_id,
             dedup_key,
@@ -390,6 +391,7 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
                 event_type,
                 *schema_version,
                 account_id,
+                source,
                 correlation_id,
                 causation_id,
                 dedup_key,
@@ -407,6 +409,7 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
             event_type,
             schema_version,
             event_account_id,
+            source,
             correlation_id,
             causation_id,
             dedup_key,
@@ -427,6 +430,7 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
                 event_type,
                 *schema_version,
                 event_account_id,
+                source,
                 correlation_id,
                 causation_id,
                 dedup_key,
@@ -443,7 +447,10 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
             owner,
             lease_secs,
             plugin_ids_json,
-        } => plan_claim_next_event_delivery(owner, *lease_secs, plugin_ids_json, now),
+            max_in_flight,
+        } => {
+            plan_claim_next_event_delivery(owner, *lease_secs, plugin_ids_json, *max_in_flight, now)
+        }
     }
 }
 
@@ -1665,6 +1672,7 @@ fn plan_publish_domain_event(
     event_type: &str,
     schema_version: i64,
     account_id: &str,
+    source: &str,
     correlation_id: &str,
     causation_id: &str,
     dedup_key: &str,
@@ -1676,10 +1684,10 @@ fn plan_publish_domain_event(
         statements: vec![
             sql(
                 "INSERT INTO domain_events (\
-                    id, event_type, schema_version, occurred_at, account_id, \
+                    id, event_type, schema_version, occurred_at, account_id, source, \
                     correlation_id, causation_id, dedup_key, payload, ordering_key, \
                     dispatch_state, created_at\
-                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ? \
+                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ? \
                  WHERE NOT EXISTS (\
                     SELECT 1 FROM domain_events WHERE event_type = ? AND dedup_key = ?\
                  )",
@@ -1689,6 +1697,7 @@ fn plan_publish_domain_event(
                     j_i64(schema_version.max(1)),
                     j_str(now),
                     j_str(account_id),
+                    j_str(source),
                     j_str(correlation_id),
                     j_str(causation_id),
                     j_str(dedup_key),
@@ -1733,6 +1742,7 @@ fn plan_set_acquire_status(
     event_type: &str,
     schema_version: i64,
     event_account_id: &str,
+    source: &str,
     correlation_id: &str,
     causation_id: &str,
     dedup_key: &str,
@@ -1755,10 +1765,10 @@ fn plan_set_acquire_status(
             ),
             sql(
                 "INSERT INTO domain_events (\
-                    id, event_type, schema_version, occurred_at, account_id, \
+                    id, event_type, schema_version, occurred_at, account_id, source, \
                     correlation_id, causation_id, dedup_key, payload, ordering_key, \
                     dispatch_state, created_at\
-                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ? \
+                 ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ? \
                  WHERE ? != '' AND NOT EXISTS (\
                     SELECT 1 FROM domain_events WHERE event_type = ? AND dedup_key = ?\
                  ) AND EXISTS (SELECT 1 FROM books WHERE uuid = ?)",
@@ -1768,6 +1778,7 @@ fn plan_set_acquire_status(
                     j_i64(schema_version.max(1)),
                     j_str(now),
                     j_str(event_account_id),
+                    j_str(source),
                     j_str(correlation_id),
                     j_str(causation_id),
                     j_str(dedup_key),
@@ -1804,7 +1815,8 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
                     id, event_id, plugin_id, idempotency_key, state, attempt_count, max_attempts, \
                     lease_owner, lease_expires_at, lease_generation, run_after, invocation_sequence, \
                     resume_pending, checkpoint_json, checkpoint_schema_version, ordering_key, \
-                    outcome, error_message, created_at, updated_at, cancel_requested, resource_class\
+                    outcome, error_message, created_at, updated_at, cancel_requested, resource_class, \
+                    wake_event_type, wake_filter_json\
                  ) SELECT \
                     ? || ':' || json_extract(j.value, '$.pluginId'), \
                     ?, \
@@ -1817,7 +1829,8 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
                         json_extract(j.value, '$.resourceClass'), \
                         json_extract(j.value, '$.resource_class'), \
                         'network'\
-                    ) \
+                    ), \
+                    '', '' \
                  FROM json_each(?) AS j \
                  WHERE json_extract(j.value, '$.pluginId') IS NOT NULL \
                    AND COALESCE(\
@@ -1886,6 +1899,7 @@ fn plan_claim_next_event_delivery(
     owner: &str,
     lease_secs: i64,
     plugin_ids_json: &str,
+    max_in_flight: i64,
     now: &str,
 ) -> AtomicPlan {
     let expires = chrono::DateTime::parse_from_rfc3339(now)
@@ -1935,6 +1949,12 @@ fn plan_claim_next_event_delivery(
                           AND earlier.created_at < d.created_at \
                           AND earlier.state IN ('pending', 'running')\
                       ) \
+                      AND ( \
+                        SELECT COUNT(*) FROM event_deliveries running \
+                        WHERE running.plugin_id = d.plugin_id \
+                          AND running.state = 'running' \
+                          AND COALESCE(running.resource_class, 'network') = COALESCE(d.resource_class, 'network') \
+                      ) < ? \
                     ORDER BY d.created_at ASC LIMIT 1\
                  ) AND state = 'pending'",
                 vec![
@@ -1943,6 +1963,7 @@ fn plan_claim_next_event_delivery(
                     j_str(now),
                     j_str(now),
                     j_str(ids_json),
+                    j_i64(max_in_flight.max(0)),
                 ],
             ),
             sql(
@@ -1966,7 +1987,9 @@ fn plan_claim_next_event_delivery(
                     'ordering_key', ordering_key, 'outcome', outcome, \
                     'error_message', error_message, 'created_at', created_at, 'updated_at', updated_at, \
                     'cancel_requested', json(CASE WHEN cancel_requested != 0 THEN 'true' ELSE 'false' END), \
-                    'resource_class', COALESCE(resource_class, 'network')\
+                    'resource_class', COALESCE(resource_class, 'network'), \
+                    'wake_event_type', COALESCE(wake_event_type, ''), \
+                    'wake_filter_json', COALESCE(wake_filter_json, '')\
                  ) AS payload FROM event_deliveries \
                  WHERE lease_owner = ? AND state = 'running' AND updated_at = ? \
                  ORDER BY lease_generation DESC LIMIT 1",
@@ -3194,6 +3217,7 @@ mod tests {
                 event_type: "book_acquired".into(),
                 schema_version: 1,
                 account_id: "acct".into(),
+                source: "audible".into(),
                 correlation_id: String::new(),
                 causation_id: String::new(),
                 dedup_key: "book_acquired:u1".into(),
@@ -3212,6 +3236,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ordering, "u1");
+        let source: String = conn
+            .query_row(
+                "SELECT source FROM domain_events WHERE id = 'evt-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "audible");
         let dup = run_plan(&conn, &plan_atomic(&publish, now).unwrap());
         assert_eq!(dup.status, atomic_status::OK);
         assert!(dup.replayed);
@@ -3231,6 +3263,7 @@ mod tests {
                 owner: "worker-1".into(),
                 lease_secs: 60,
                 plugin_ids_json: r#"["echo"]"#.into(),
+                max_in_flight: 1,
             },
             "evt-claim",
         );
@@ -3245,11 +3278,142 @@ mod tests {
                 owner: "worker-empty".into(),
                 lease_secs: 60,
                 plugin_ids_json: "[]".into(),
+                max_in_flight: 1,
             },
             "evt-claim-empty",
         );
         let skipped = run_plan(&conn, &plan_atomic(&empty, now).unwrap());
         assert_eq!(skipped.status, atomic_status::EMPTY);
+    }
+
+    #[test]
+    fn dispatch_late_join_second_plugin_does_not_idempotency_conflict() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        let publish = test_req(
+            DbAtomicParams::PublishDomainEvent {
+                id: "evt-late".into(),
+                event_type: "book_acquired".into(),
+                schema_version: 1,
+                account_id: "acct".into(),
+                source: String::new(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                dedup_key: "book_acquired:late".into(),
+                payload: r#"{"titleId":"late"}"#.into(),
+                ordering_key: "late".into(),
+            },
+            "evt-late-pub",
+        );
+        assert_eq!(
+            run_plan(&conn, &plan_atomic(&publish, now).unwrap()).status,
+            atomic_status::OK
+        );
+
+        let first = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-late".into(),
+                subscribers_json: r#"[{"pluginId":"echo"}]"#.into(),
+            },
+            "reconcile-evt-late-echo",
+        );
+        let a = run_plan(&conn, &plan_atomic(&first, now).unwrap());
+        assert_eq!(a.status, atomic_status::OK);
+        assert_ne!(a.status, atomic_status::IDEMPOTENCY_CONFLICT);
+
+        let second = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-late".into(),
+                subscribers_json: r#"[{"pluginId":"echo"},{"pluginId":"audiobookshelf"}]"#.into(),
+            },
+            "reconcile-evt-late-audiobookshelf",
+        );
+        let ab = run_plan(&conn, &plan_atomic(&second, now).unwrap());
+        assert_eq!(ab.status, atomic_status::OK);
+        assert_ne!(ab.status, atomic_status::IDEMPOTENCY_CONFLICT);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM event_deliveries WHERE event_id = 'evt-late'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        let plugins: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT plugin_id FROM event_deliveries WHERE event_id = 'evt-late' ORDER BY plugin_id")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(
+            plugins,
+            vec!["audiobookshelf".to_string(), "echo".to_string()]
+        );
+    }
+
+    #[test]
+    fn claim_respects_per_plugin_in_flight_cap() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        for (id, key) in [("evt-cap-a", "ka"), ("evt-cap-b", "kb")] {
+            let publish = test_req(
+                DbAtomicParams::PublishDomainEvent {
+                    id: id.into(),
+                    event_type: "book_acquired".into(),
+                    schema_version: 1,
+                    account_id: "acct".into(),
+                    source: String::new(),
+                    correlation_id: String::new(),
+                    causation_id: String::new(),
+                    dedup_key: format!("book_acquired:{key}"),
+                    payload: "{}".into(),
+                    ordering_key: key.into(),
+                },
+                &format!("{id}-pub"),
+            );
+            assert_eq!(
+                run_plan(&conn, &plan_atomic(&publish, now).unwrap()).status,
+                atomic_status::OK
+            );
+            let dispatch = test_req(
+                DbAtomicParams::DispatchEventDeliveries {
+                    event_id: id.into(),
+                    subscribers_json: r#"[{"pluginId":"echo"}]"#.into(),
+                },
+                &format!("dispatch-{id}-echo"),
+            );
+            assert_eq!(
+                run_plan(&conn, &plan_atomic(&dispatch, now).unwrap()).status,
+                atomic_status::OK
+            );
+        }
+        let first = test_req(
+            DbAtomicParams::ClaimNextEventDelivery {
+                owner: "cap-w1".into(),
+                lease_secs: 60,
+                plugin_ids_json: r#"["echo"]"#.into(),
+                max_in_flight: 1,
+            },
+            "evt-cap-claim-1",
+        );
+        let claimed = run_plan(&conn, &plan_atomic(&first, now).unwrap());
+        assert_eq!(claimed.status, atomic_status::OK);
+        let second = test_req(
+            DbAtomicParams::ClaimNextEventDelivery {
+                owner: "cap-w2".into(),
+                lease_secs: 60,
+                plugin_ids_json: r#"["echo"]"#.into(),
+                max_in_flight: 1,
+            },
+            "evt-cap-claim-2",
+        );
+        let blocked = run_plan(&conn, &plan_atomic(&second, now).unwrap());
+        assert_eq!(blocked.status, atomic_status::EMPTY);
     }
 
     #[test]
@@ -3279,6 +3443,7 @@ mod tests {
                 event_type: "book_acquired".into(),
                 schema_version: 1,
                 event_account_id: "user-1".into(),
+                source: "audible".into(),
                 correlation_id: "b1".into(),
                 causation_id: String::new(),
                 dedup_key: "book_acquired:b1".into(),
@@ -3316,6 +3481,7 @@ mod tests {
                 event_type: "book_acquired".into(),
                 schema_version: 1,
                 event_account_id: "user-1".into(),
+                source: "audible".into(),
                 correlation_id: String::new(),
                 causation_id: String::new(),
                 dedup_key: "book_acquired:missing".into(),
@@ -3347,6 +3513,7 @@ mod tests {
                 event_type: "book_acquired".into(),
                 schema_version: 1,
                 account_id: "acct".into(),
+                source: String::new(),
                 correlation_id: String::new(),
                 causation_id: String::new(),
                 dedup_key: "book_acquired:mint".into(),
@@ -3375,6 +3542,7 @@ mod tests {
                 event_type: "book_acquired".into(),
                 schema_version: 1,
                 account_id: "acct".into(),
+                source: String::new(),
                 correlation_id: String::new(),
                 causation_id: String::new(),
                 dedup_key: "book_acquired:huge".into(),

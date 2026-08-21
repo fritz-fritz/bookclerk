@@ -1007,7 +1007,7 @@ Advertise in `handshake.capabilities`: `start`, `onEvent`, `health`,
 | Method | Notes |
 | --- | --- |
 | `start` | Background watchers |
-| `onEvent` | Versioned [`DomainEvent`](../packages/plugin-sdk/src/v2.ts) (`eventId`, `eventType`, `schemaVersion`, correlation/causation, `deduplicationKey`, `deliveryAttempt`, bounded payload). A `suspended` result (`abiMinor` 4) parks a checkpoint; the next `onEvent` copies `checkpointJson`, `checkpointSchemaVersion`, `invocationSequence`, and `resumePending` (`abiMinor` 5). Return `EventResult`: `ack`, `retry` (`retryAtUnixMs`; exhausted attempts dead-letter), `reject`, `deadLetter`, or `suspended` (`checkpointJson`, `checkpointSchemaVersion`, `wakeAtUnixMs`). Host delivery is at-least-once; guests must be idempotent on `deduplicationKey`. |
+| `onEvent` | Versioned [`DomainEvent`](../packages/plugin-sdk/src/v2.ts) (`eventId`, `eventType`, `schemaVersion`, correlation/causation, `source`, `deduplicationKey`, `deliveryAttempt`, bounded payload). A `suspended` result (`abiMinor` 4) parks a checkpoint; the next `onEvent` copies `checkpointJson`, `checkpointSchemaVersion`, `invocationSequence`, and `resumePending` (`abiMinor` 5). `wakeOnEventType` / `wakeOnFilterJson` (`abiMinor` 6) ask the host to wake on a matching later event (empty = timestamp-only). Return `EventResult`: `ack`, `retry` (`retryAtUnixMs`; exhausted attempts dead-letter), `reject`, `deadLetter`, or `suspended` (`checkpointJson`, `checkpointSchemaVersion`, `wakeAtUnixMs`, optional wake-on-event fields). Host delivery is at-least-once; guests must be idempotent on `deduplicationKey`. |
 | `scanLibrary` | `{ "force": bool }` |
 | `syncListening` | Return listening progress snapshots; host upserts tagged with plugin id |
 | `authenticateUser` | `{ "username", "password" }` → external user |
@@ -1036,17 +1036,26 @@ spawn failed) and currently loaded integrations into `event_subscriber_nodes`
 keyed by `(node_id, plugin_id)`. Nodes do not delete catalog rows they lack.
 A plugin is live when any heartbeating node (60s TTL) has it enabled; matching
 subscriptions are the union of those enabled rows. The dispatcher then
-`INSERT OR IGNORE`s deliveries for pending **and** already-`dispatched` events
-(paginated until exhaustion) so a plugin that appears later still gets a row.
-A `suspended` result is accepted only when a subscription matches
+`INSERT OR IGNORE`s deliveries for pending events (one D1 atomic op per
+`(event_id, plugin_id)` with receipt `dispatch-{event_id}-{plugin_id}`) **and**
+late-joins already-`dispatched` events via a missing-pair anti-join (receipt
+`reconcile-{event_id}-{plugin_id}`). An unchanged live catalog with no missing
+pairs does a bounded empty `SELECT` and zero dispatch writes. Heartbeat of this
+node’s catalog runs **before** that reconcile so a catch-up page cannot starve
+the 60s TTL. The process-stable `event_node_id` is resolved once at runtime
+start. A `suspended` result is accepted only when a subscription matches
 that exact `(type, schema_version)` and sets `supports_suspend = true`;
 otherwise it is stored as a permanent reject. Acquire success writes
 `book_acquired` into `domain_events` in the same transaction as the library
-acquire-status change (book uuid, storage key, product ids — never media bytes).
+acquire-status change (book uuid, storage key, product ids — never media bytes)
+and sets envelope `source` to the book’s storefront plugin id.
 The producer `ordering_key` is stored on the envelope and copied verbatim onto
 each delivery. Each VPS claims only plugin ids loaded on that process; an unused
 claim is released without consuming `attempt_count`. `[events.concurrency]`
-(default 1) is the number of local delivery workers. The delivery worker
+(default 1) is the number of local delivery workers **and** the cluster-wide
+max `running` deliveries per `(plugin_id, resource_class)` (`network` today),
+enforced at claim time. FIFO per ordering key stays; unrelated keys are only
+blocked by that cap. The delivery worker
 heartbeats the lease during `onEvent` (`lease/3`); fence loss or operator
 `cancel_requested` cancels the in-flight RPC (including workerd/native).
 See [jobs.md](jobs.md).

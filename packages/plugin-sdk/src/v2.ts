@@ -133,6 +133,8 @@ export interface DomainEvent {
   schemaVersion: number;
   occurredAtUnixMs: number;
   accountId?: string;
+  /** Producer plugin id; empty/omitted when unknown (`abiMinor` ≥ 6). */
+  source?: string;
   correlationId?: string;
   causationId?: string;
   deduplicationKey?: string;
@@ -157,6 +159,10 @@ export type EventResult =
       checkpointJson?: string;
       checkpointSchemaVersion?: number;
       wakeAtUnixMs: number;
+      /** Event type that can wake this sleep; empty = timestamp-only (`abiMinor` ≥ 6). */
+      wakeOnEventType?: string;
+      /** Host-owned payload object filter JSON; empty = type only (`abiMinor` ≥ 6). */
+      wakeOnFilterJson?: string;
     };
 
 /** Author-visible granted bindings. Adapter-private tokens are not present. */

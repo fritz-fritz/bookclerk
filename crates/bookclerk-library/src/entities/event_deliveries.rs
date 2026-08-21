@@ -51,6 +51,10 @@ pub struct Model {
     pub cancel_requested: i64,
     /// Concurrency class copied from the catalog (`network` today).
     pub resource_class: String,
+    /// Event type that can wake this suspended delivery; empty = timestamp-only.
+    pub wake_event_type: String,
+    /// Host-owned payload object filter JSON for event-wake; empty = type only.
+    pub wake_filter_json: String,
 }
 
 /// Declared SeaORM relations (parent event is queried by `event_id`).

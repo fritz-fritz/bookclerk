@@ -1562,11 +1562,15 @@ fn write_event_result(b: event_result_capnp::Builder<'_>, result: &EventResult) 
             checkpoint_json,
             checkpoint_schema_version,
             wake_at_unix_ms,
+            wake_on_event_type,
+            wake_on_filter_json,
         } => {
             let mut s = b.init_suspended();
             s.set_checkpoint_json(checkpoint_json);
             s.set_checkpoint_schema_version(*checkpoint_schema_version);
             s.set_wake_at_unix_ms(*wake_at_unix_ms);
+            s.set_wake_on_event_type(wake_on_event_type);
+            s.set_wake_on_filter_json(wake_on_filter_json);
         }
     }
 }
@@ -1606,6 +1610,7 @@ fn read_domain_event(r: domain_event::Reader<'_>) -> Result<DomainEvent> {
         checkpoint_schema_version: r.get_checkpoint_schema_version(),
         invocation_sequence: r.get_invocation_sequence(),
         resume_pending: r.get_resume_pending(),
+        source: text_of(r.get_source().map_err(from_capnp)?),
     })
 }
 
@@ -2877,6 +2882,7 @@ impl Integration for IntegrationClient {
             e.set_checkpoint_schema_version(event.checkpoint_schema_version);
             e.set_invocation_sequence(event.invocation_sequence);
             e.set_resume_pending(event.resume_pending);
+            e.set_source(&event.source);
         }
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
@@ -3016,6 +3022,8 @@ fn read_event_result(r: event_result_capnp::Reader<'_>) -> Result<EventResult> {
                 checkpoint_json,
                 checkpoint_schema_version: ok.get_checkpoint_schema_version(),
                 wake_at_unix_ms: ok.get_wake_at_unix_ms(),
+                wake_on_event_type: text_of(ok.get_wake_on_event_type().map_err(from_capnp)?),
+                wake_on_filter_json: text_of(ok.get_wake_on_filter_json().map_err(from_capnp)?),
             })
         }
     }
@@ -3618,11 +3626,15 @@ mod tests {
                     checkpoint_json: r#"{"n":1}"#.into(),
                     checkpoint_schema_version: 1,
                     wake_at_unix_ms: 3,
+                    wake_on_event_type: String::new(),
+                    wake_on_filter_json: String::new(),
                 },
                 "test_suspend_huge" => EventResult::Suspended {
                     checkpoint_json: "x".repeat(MAX_CHECKPOINT_BYTES as usize + 1),
                     checkpoint_schema_version: 1,
                     wake_at_unix_ms: 3,
+                    wake_on_event_type: String::new(),
+                    wake_on_filter_json: String::new(),
                 },
                 _ => EventResult::Ack,
             })
@@ -3704,6 +3716,8 @@ mod tests {
                         checkpoint_json: r#"{"n":1}"#.into(),
                         checkpoint_schema_version: 1,
                         wake_at_unix_ms: 3,
+                        wake_on_event_type: String::new(),
+                        wake_on_filter_json: String::new(),
                     }
                 );
                 let mut oversized = sample_event("book_acquired");

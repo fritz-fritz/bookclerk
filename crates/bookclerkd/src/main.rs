@@ -153,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         last_bound_listen: RwLock::new(None),
         tray: RwLock::new(None),
         tray_handoff: Mutex::new(None),
+        event_node_id: std::sync::OnceLock::new(),
     });
 
     start_integration_watchers(&state).await;

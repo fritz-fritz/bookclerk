@@ -400,6 +400,9 @@ pub enum DbAtomicParams {
         /// Tenant / account id.
         #[serde(default)]
         account_id: String,
+        /// Producer plugin id; empty when unknown.
+        #[serde(default)]
+        source: String,
         /// Trace correlation id.
         #[serde(default)]
         correlation_id: String,
@@ -439,6 +442,9 @@ pub enum DbAtomicParams {
         /// Tenant / account id on the event.
         #[serde(default)]
         event_account_id: String,
+        /// Producer plugin id; empty when unknown.
+        #[serde(default)]
+        source: String,
         /// Trace correlation id.
         #[serde(default)]
         correlation_id: String,
@@ -473,7 +479,15 @@ pub enum DbAtomicParams {
         /// JSON array of plugin ids this worker can execute (`[]` claims nothing).
         #[serde(default)]
         plugin_ids_json: String,
+        /// Cluster-wide max `running` deliveries per `(plugin_id, resource_class)`.
+        #[serde(default = "default_claim_max_in_flight")]
+        max_in_flight: i64,
     },
+}
+
+/// Default cluster in-flight cap when an older guest omits the field.
+fn default_claim_max_in_flight() -> i64 {
+    1
 }
 
 /// Host-generated idempotency envelope for [`crate::methods::db_atomic`].

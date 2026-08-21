@@ -890,6 +890,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
                 event_type: spec.event_type,
                 schema_version: spec.schema_version,
                 account_id: spec.account_id,
+                source: spec.source,
                 correlation_id: spec.correlation_id,
                 causation_id: spec.causation_id,
                 dedup_key: spec.dedup_key,
@@ -970,6 +971,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
         lease_secs: u64,
         operation_id: &str,
         plugin_ids: &[String],
+        max_in_flight: u32,
     ) -> bookclerk_library::Result<Option<bookclerk_library::EventDeliveryRecord>> {
         let result = self
             .call_with_id(
@@ -979,6 +981,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
                     lease_secs: i64::try_from(lease_secs).unwrap_or(60),
                     plugin_ids_json: serde_json::to_string(plugin_ids)
                         .unwrap_or_else(|_| "[]".into()),
+                    max_in_flight: i64::from(max_in_flight),
                 },
             )
             .await?;
@@ -1009,6 +1012,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
                 event_type: String::new(),
                 schema_version: 0,
                 account_id: String::new(),
+                source: String::new(),
                 correlation_id: String::new(),
                 causation_id: String::new(),
                 dedup_key: String::new(),
@@ -1026,6 +1030,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
                 event_type: event.event_type,
                 schema_version: event.schema_version,
                 event_account_id: event.account_id,
+                source: event.source,
                 correlation_id: event.correlation_id,
                 causation_id: event.causation_id,
                 dedup_key: event.dedup_key,

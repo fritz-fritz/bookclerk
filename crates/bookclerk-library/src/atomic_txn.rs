@@ -135,5 +135,6 @@ pub trait AtomicTxnBackend: Send + Sync {
         lease_secs: u64,
         operation_id: &str,
         plugin_ids: &[String],
+        max_in_flight: u32,
     ) -> Result<Option<EventDeliveryRecord>>;
 }

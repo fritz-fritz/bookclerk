@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::Request;
@@ -96,6 +96,8 @@ pub struct AppState {
     pub tray: RwLock<Option<bookclerk_tray::SharedTrayConfig>>,
     /// Single-use tray Open Bookclerk ticket (hash + deadline). Replaced on prepare; restart clears it.
     pub tray_handoff: Mutex<Option<TrayHandoffTicket>>,
+    /// Process-stable catalog heartbeat key (resolved once at event runtime start).
+    pub event_node_id: OnceLock<String>,
 }
 
 /// In-process tray Open Bookclerk ticket: hash of a one-time code plus expiry.
@@ -5716,6 +5718,7 @@ mode = "deny"
             last_bound_listen: RwLock::new(None),
             tray: RwLock::new(None),
             tray_handoff: Mutex::new(None),
+            event_node_id: std::sync::OnceLock::new(),
         });
 
         let app = Router::new()
@@ -5814,6 +5817,7 @@ mode = "deny"
             last_bound_listen: RwLock::new(None),
             tray: RwLock::new(None),
             tray_handoff: Mutex::new(None),
+            event_node_id: std::sync::OnceLock::new(),
         });
 
         let app = Router::new()

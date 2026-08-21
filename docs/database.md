@@ -304,6 +304,10 @@ V24 replaces last-writer-wins `event_subscribers` with per-node
 dispatch/handler latency. Live dispatch unions enabled rows whose heartbeat is
 within 60 seconds. Parent events with no remaining deliveries are retained until
 `[events].retention_days`.
+V25 adds `domain_events.source` (producer plugin id; empty when unknown) and
+`event_deliveries.wake_event_type` / `wake_filter_json` for host-side
+wake-on-matching-event. Late-join uses a missing `(event_id, plugin_id)`
+anti-join instead of walking every retained dispatched event.
 
 ## Encrypted secrets
 

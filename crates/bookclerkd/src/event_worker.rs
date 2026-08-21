@@ -29,6 +29,9 @@ const EVENT_PRUNE_INTERVAL: Duration = Duration::from_secs(3600);
 /// Dispatch undispatched outbox rows and run configured delivery workers.
 pub fn start_event_runtime(state: Arc<AppState>) {
     tokio::spawn(async move {
+        let files_dir = state.config.read().await.paths().files_dir.clone();
+        let node_id = resolve_event_node_id(&files_dir);
+        let _ = state.event_node_id.set(node_id);
         upsert_event_subscriber_catalog(&state).await;
         let (retention_days, dead_letter_retention_days, workers) = {
             let cfg = state.config.read().await;
@@ -59,12 +62,27 @@ fn spawn_dispatcher(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut idle = tokio::time::interval(Duration::from_secs(5));
         idle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_catalog_fp = String::new();
+        let mut last_reconcile_empty = false;
         loop {
             upsert_event_subscriber_catalog(&state).await;
             let library = state.library_snapshot().await;
             let retention_days = state.config.read().await.events.retention_days;
-            if let Err(err) = dispatch_pending(&library, retention_days).await {
-                warn!(error = %err, "event dispatch failed");
+            match dispatch_pending(
+                &library,
+                retention_days,
+                &last_catalog_fp,
+                last_reconcile_empty,
+            )
+            .await
+            {
+                Ok((fp, empty)) => {
+                    last_catalog_fp = fp;
+                    last_reconcile_empty = empty;
+                }
+                Err(err) => {
+                    warn!(error = %err, "event dispatch failed");
+                }
             }
             state.job_notify.notify_waiters();
             tokio::select! {
@@ -112,7 +130,14 @@ fn spawn_delivery_worker(state: Arc<AppState>) {
             if let Err(err) = library.reclaim_expired_event_deliveries().await {
                 warn!(error = %err, "event delivery reclaim failed");
             }
-            match claim_delivery(&library, &owner, &loaded_plugin_ids(&state).await).await {
+            match claim_delivery(
+                &library,
+                &owner,
+                &loaded_plugin_ids(&state).await,
+                state.config.read().await.events.concurrency.max(1),
+            )
+            .await
+            {
                 Ok(Some(delivery)) => {
                     run_delivery(&state, &library, delivery).await;
                 }
@@ -134,7 +159,7 @@ fn spawn_delivery_worker(state: Arc<AppState>) {
 /// Upsert this node's discovered + loaded integration subscriptions.
 pub async fn upsert_event_subscriber_catalog(state: &AppState) {
     let cfg = state.config.read().await.clone();
-    let node_id = event_node_id(&cfg.paths().files_dir);
+    let node_id = event_node_id(state, &cfg.paths().files_dir);
     let discovered = tokio::task::spawn_blocking({
         let cfg = cfg.clone();
         move || bookclerk_plugin_host::discover_plugins(&cfg)
@@ -184,8 +209,16 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
     }
 }
 
-/// Stable per-files-dir node id used as the catalog heartbeat key.
-fn event_node_id(files_dir: &Path) -> String {
+/// Process-stable per-files-dir node id used as the catalog heartbeat key.
+fn event_node_id(state: &AppState, files_dir: &Path) -> String {
+    state
+        .event_node_id
+        .get_or_init(|| resolve_event_node_id(files_dir))
+        .clone()
+}
+
+/// Read or mint the node id once. Persistence is best-effort.
+fn resolve_event_node_id(files_dir: &Path) -> String {
     let path = files_dir.join("event_node_id");
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let trimmed = existing.trim();
@@ -245,35 +278,75 @@ fn catalog_from_runtime(subs: &[EventSubscription]) -> Vec<EventCatalogSubscript
         .collect()
 }
 
-/// Create deliveries from the live catalog for pending and already-dispatched events.
+/// Create deliveries from the live catalog for pending events, then late-join.
 async fn dispatch_pending(
     library: &LibraryStore,
     retention_days: u64,
-) -> Result<(), bookclerk_library::LibraryError> {
+    last_catalog_fp: &str,
+    last_reconcile_empty: bool,
+) -> Result<(String, bool), bookclerk_library::LibraryError> {
     let catalog = library.list_live_event_subscribers().await?;
+    let fingerprint = catalog_fingerprint(&catalog);
     loop {
         let Some(event) = library.next_undispatched_event().await? else {
             break;
         };
         let subs = catalog_subscribers_for_event(&catalog, &event);
-        let op = format!("dispatch-{}", event.id);
-        let n = library
-            .dispatch_event_deliveries(&event.id, &subs, &op)
-            .await?;
-        info!(
-            event_id = %event.id,
-            event_type = %event.event_type,
-            deliveries = n,
-            "dispatched domain event"
-        );
+        if subs.is_empty() {
+            let op = format!("dispatch-{}", event.id);
+            let n = library
+                .dispatch_event_deliveries(&event.id, &[], &op)
+                .await?;
+            info!(
+                event_id = %event.id,
+                event_type = %event.event_type,
+                deliveries = n,
+                "dispatched domain event"
+            );
+        } else {
+            let mut n = 0u32;
+            for sub in &subs {
+                let op = format!("dispatch-{}-{}", event.id, sub.plugin_id);
+                n += library
+                    .dispatch_event_deliveries(&event.id, std::slice::from_ref(sub), &op)
+                    .await?;
+            }
+            info!(
+                event_id = %event.id,
+                event_type = %event.event_type,
+                deliveries = n,
+                "dispatched domain event"
+            );
+        }
+        if let Err(err) = library.wake_matching_event_deliveries(&event).await {
+            warn!(event_id = %event.id, error = %err, "wake matching event deliveries failed");
+        }
     }
     let created_after =
         Utc::now() - chrono::Duration::days(i64::try_from(retention_days.max(1)).unwrap_or(7));
-    let n = library.reconcile_catalog_deliveries(created_after).await?;
+    let skip_reconcile = fingerprint == last_catalog_fp && last_reconcile_empty;
+    let n = if skip_reconcile {
+        0
+    } else {
+        library.reconcile_catalog_deliveries(created_after).await?
+    };
     if n > 0 {
         info!(deliveries = n, "reconciled late-join event deliveries");
     }
-    Ok(())
+    Ok((fingerprint, n == 0))
+}
+
+/// Stable fingerprint of live plugin ids, enablement, and subscription JSON.
+fn catalog_fingerprint(catalog: &[bookclerk_library::EventSubscriberCatalogRecord]) -> String {
+    let mut parts: Vec<String> = catalog
+        .iter()
+        .map(|row| {
+            let subs = serde_json::to_string(&row.subscriptions).unwrap_or_else(|_| "[]".into());
+            format!("{}:{}:{subs}", row.plugin_id, row.enabled)
+        })
+        .collect();
+    parts.sort();
+    parts.join("|")
 }
 
 /// Plugin ids currently loaded on this process.
@@ -291,6 +364,7 @@ async fn claim_delivery(
     library: &LibraryStore,
     owner: &str,
     plugin_ids: &[String],
+    max_in_flight: u32,
 ) -> Result<Option<bookclerk_library::EventDeliveryRecord>, bookclerk_library::LibraryError> {
     if plugin_ids.is_empty() {
         return Ok(None);
@@ -299,7 +373,13 @@ async fn claim_delivery(
     let deadline = Instant::now() + CLAIM_REPLAY_BUDGET;
     loop {
         match library
-            .claim_next_event_delivery(owner, LEASE_SECS, &operation_id, plugin_ids)
+            .claim_next_event_delivery(
+                owner,
+                LEASE_SECS,
+                &operation_id,
+                plugin_ids,
+                max_in_flight.max(1),
+            )
             .await
         {
             Ok(row) => return Ok(row),
@@ -530,6 +610,8 @@ async fn run_delivery(
             checkpoint_json,
             checkpoint_schema_version,
             wake_at_unix_ms,
+            wake_on_event_type,
+            wake_on_filter_json,
         } => {
             let allowed = suspend_allowed(
                 &integration.event_subscriptions(),
@@ -546,8 +628,12 @@ async fn run_delivery(
                     .reject_event_delivery(&fence, "suspend not advertised for this event type")
                     .await
             } else {
-                let wake = unix_ms_to_utc(wake_at_unix_ms)
-                    .unwrap_or_else(|| Utc::now() + chrono::Duration::seconds(30));
+                let wake = if !wake_on_event_type.trim().is_empty() && wake_at_unix_ms == 0 {
+                    far_future_wake()
+                } else {
+                    unix_ms_to_utc(wake_at_unix_ms)
+                        .unwrap_or_else(|| Utc::now() + chrono::Duration::seconds(30))
+                };
                 info!(
                     delivery_id = %delivery.id,
                     plugin = %delivery.plugin_id,
@@ -560,6 +646,8 @@ async fn run_delivery(
                         &checkpoint_json,
                         i64::from(checkpoint_schema_version),
                         wake,
+                        &wake_on_event_type,
+                        &wake_on_filter_json,
                     )
                     .await
             }
@@ -587,6 +675,13 @@ fn unix_ms_to_utc(ms: u64) -> Option<chrono::DateTime<Utc>> {
     Utc.timestamp_millis_opt(ms).single()
 }
 
+/// Sentinel `run_after` for event-only suspends (`wakeAtUnixMs == 0`).
+fn far_future_wake() -> chrono::DateTime<Utc> {
+    chrono::DateTime::parse_from_rfc3339("9999-12-31T23:59:59+00:00")
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now() + chrono::Duration::days(36500))
+}
+
 /// Map an outbox envelope plus the claimed delivery onto an ABI [`DomainEvent`].
 ///
 /// Claim clears `resume_pending` on the row; a stored checkpoint still means
@@ -601,6 +696,7 @@ fn domain_event_for_delivery(
         schema_version: u32::try_from(event.schema_version).unwrap_or(1),
         occurred_at_unix_ms: u64::try_from(event.occurred_at.timestamp_millis()).unwrap_or(0),
         account_id: event.account_id.clone(),
+        source: event.source.clone(),
         correlation_id: event.correlation_id.clone(),
         causation_id: event.causation_id.clone(),
         deduplication_key: delivery.idempotency_key.clone(),
@@ -626,6 +722,7 @@ mod tests {
             schema_version: 1,
             occurred_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
             account_id: "acct".into(),
+            source: String::new(),
             correlation_id: "corr".into(),
             causation_id: String::new(),
             dedup_key: "book_acquired:u1".into(),
@@ -660,7 +757,23 @@ mod tests {
             updated_at: Utc.timestamp_millis_opt(1_700_000_000_000).unwrap(),
             cancel_requested: false,
             resource_class: "network".into(),
+            wake_event_type: String::new(),
+            wake_filter_json: String::new(),
         }
+    }
+
+    #[test]
+    fn event_node_id_reuses_persisted_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = resolve_event_node_id(dir.path());
+        let second = resolve_event_node_id(dir.path());
+        assert_eq!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("event_node_id"))
+                .unwrap()
+                .trim(),
+            first
+        );
     }
 
     #[test]

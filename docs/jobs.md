@@ -6,15 +6,24 @@ workers claim jobs. There is no external broker.
 
 This is not a general pub/sub bus. Domain events such as `book_acquired` /
 plugin `onEvent` stay **off** `JobKind`. They use a durable outbox
-(`domain_events` + `event_deliveries` + `event_subscriber_nodes`, schema V24) with
+(`domain_events` + `event_deliveries` + `event_subscriber_nodes`, schema V25) with
 the same fenced-lease pattern as jobs. Acquire success publishes
-`book_acquired`. Each host heartbeats discovered (config-enabled, even if spawn
+`book_acquired` with producer `source` on the envelope. Each host heartbeats discovered (config-enabled, even if spawn
 failed) and loaded integrations into a **per-node** catalog keyed by
-`(node_id, plugin_id)` and does **not** delete other nodes’ rows. Dispatch uses
+`(node_id, plugin_id)` and does **not** delete other nodes’ rows. The process
+resolves `event_node_id` once at event-runtime start (best-effort file under
+the files dir) and reuses that in-memory id on every heartbeat. Dispatch uses
 the live union (any enabled node whose heartbeat is within 60s). Optional
 payload-object filters and `resource_class` (currently `network` only) are
-matched host-side; late-join paginates already-`dispatched` events until
-exhaustion. Each VPS claims only plugin ids loaded on that process.
+matched host-side. Late-join is a **missing `(event_id, plugin_id)` anti-join**
+paged 200, restricted to the retention window — an unchanged catalog with no
+missing pairs does a bounded empty `SELECT` and zero dispatch writes. D1
+dispatch receipts are per pair (`dispatch-{event_id}-{plugin_id}` /
+`reconcile-{event_id}-{plugin_id}`). Each VPS claims only plugin ids loaded on
+that process. `[events.concurrency]` is both the local worker count **and** the
+cluster-wide max `running` deliveries per `(plugin_id, resource_class)`.
+`EventResult::suspended` may set `wakeOnEventType` / `wakeOnFilterJson`; the
+host wakes matching parked rows when a later event is published.
 `GET /api/status` includes event queue counts plus durable retry/suspend totals
 and average dispatch/handler latency. Retention is independent of jobs
 (`[events].retention_days` for acked/rejected + empty parent events after that
