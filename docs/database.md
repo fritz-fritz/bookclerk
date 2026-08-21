@@ -317,7 +317,18 @@ claimed wake slices (`wake_lease_owner`, `wake_lease_expires_at`,
 `wake_cursor_at`, `wake_cursor_id`) so each dispatcher tick owns at most a
 bounded page of sleepers, and stores host-derived `event_deliveries.wake_grants_json`
 (schema versions + intersected filter). Publish is commit + notify; the
-dispatcher drains `wake_pending`.
+dispatcher drains `wake_pending`. File SQLite applies V27 under
+`PRAGMA foreign_keys=OFF` (drop parent while the cascading child exists).
+D1 enforces FKs, so V27 is **not** the SQLite DROP-parent rebuild: versions
+1–26 go through the guest migrator, then V27 is one D1 `{ "batch": [...] }`
+SQL transaction that rebuilds both tables, **drops `event_deliveries` then
+`domain_events`**, renames, recreates indexes, and inserts
+`schema_migrations` version 28 (the last sqlite/D1 step index; the extra V3
+portal migration means named V27 is not bookkeeping version 27). Wake
+registration (`wake_event_type` / `wake_filter_json` / `wake_grants_json`) is
+cleared when a matching event is accepted so retry is not re-woken. Claim
+uses this node’s catalog (type + schema + filter); cluster dispatch still
+unions live nodes.
 
 ## Encrypted secrets
 

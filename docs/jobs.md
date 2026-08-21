@@ -15,12 +15,16 @@ resolves `event_node_id` once at event-runtime start (best-effort file under
 the files dir) and reuses that in-memory id on every heartbeat. Dispatch uses
 the live union (any enabled node whose heartbeat is within 60s). Optional
 payload-object filters and `resource_class` (currently `network` only) are
-matched host-side. Late-join is a **missing `(event_id, plugin_id)` anti-join**
+matched host-side. Each dispatcher tick dispatches at most 32 undispatched
+events, then always runs a wake slice (so a backlog cannot starve sleepers or
+the catalog heartbeat) and continues when either undispatched remain or
+`wake still_pending`. Late-join is a **missing `(event_id, plugin_id)` anti-join**
 paged 200, restricted to the retention window — an unchanged catalog with no
 missing pairs does a bounded empty `SELECT` and zero dispatch writes. D1
 dispatch receipts are per pair (`dispatch-{event_id}-{plugin_id}` /
 `reconcile-{event_id}-{plugin_id}`). Each VPS claims only plugin ids loaded on
-that process. `[events.concurrency]` is both the local worker count **and** the
+that process **and** only events its own node catalog matches (type, schema
+version, filter). `[events.concurrency]` is both the local worker count **and** the
 cluster-wide max `running` deliveries per `(plugin_id, resource_class)`
 (PostgreSQL serializes admission with a per-plugin advisory lock).
 `EventResult::suspended` may set `wakeOnEventType` / `wakeOnFilterJson`; the
@@ -28,9 +32,12 @@ host derives wake grants from declared subscriptions (schema versions plus the
 intersection of `sub.filter` and the requested filter — requested keys only
 add constraints) and wakes matching parked rows in the same account when a
 later event is published. Publish commits `domain_events.wake_pending = 1` and
-returns; the dispatcher claims bounded wake slices (`wake_lease_*` + delivery
-cursor, at most 32 events and one 200-row page each) so producer latency does
-not track sleeper count. Duplicate retries leave the flag set until a claimed
+returns; the dispatcher claims bounded wake slices with a unique UUID fence
+token (`wake_lease_*` + delivery cursor, at most 32 events and one 200-row
+page each) so producer latency does not track sleeper count. Cursor release
+and finish require that token; a lost fence does not clobber another owner.
+Accepting a wake clears the registration so a later matching event does not
+re-wake a retry. Duplicate retries leave the flag set until a claimed
 slice finishes. `wakeOnEventType` must be a declared subscription (empty stays
 timestamp-only); an empty requested filter keeps the subscription filter and
 cannot broaden it. Late-join skip cache is invalidated on dispatch error and

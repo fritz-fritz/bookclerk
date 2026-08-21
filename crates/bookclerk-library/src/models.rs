@@ -1987,6 +1987,26 @@ pub struct PendingWakeProgress {
     pub still_pending: bool,
 }
 
+/// True when one catalog subscription matches `event` type, schema, class, and filter.
+#[must_use]
+pub fn subscription_matches_event(
+    sub: &EventCatalogSubscription,
+    event: &DomainEventRecord,
+) -> bool {
+    let class = if sub.resource_class.trim().is_empty() {
+        EVENT_RESOURCE_CLASS_NETWORK
+    } else {
+        sub.resource_class.trim()
+    };
+    class == EVENT_RESOURCE_CLASS_NETWORK
+        && sub.event_type == event.event_type
+        && sub
+            .schema_versions
+            .iter()
+            .any(|v| i64::from(*v) == event.schema_version)
+        && event_filter_matches(sub.filter.as_ref(), &event.payload)
+}
+
 /// Enabled catalog rows that match `event` type, schema version, and filter.
 #[must_use]
 pub fn catalog_subscribers_for_event(
@@ -1998,19 +2018,11 @@ pub fn catalog_subscribers_for_event(
         if !row.enabled {
             continue;
         }
-        if !row.subscriptions.iter().any(|s| {
-            let class = if s.resource_class.trim().is_empty() {
-                EVENT_RESOURCE_CLASS_NETWORK
-            } else {
-                s.resource_class.trim()
-            };
-            class == EVENT_RESOURCE_CLASS_NETWORK
-                && s.event_type == event.event_type
-                && s.schema_versions
-                    .iter()
-                    .any(|v| i64::from(*v) == event.schema_version)
-                && event_filter_matches(s.filter.as_ref(), &event.payload)
-        }) {
+        if !row
+            .subscriptions
+            .iter()
+            .any(|s| subscription_matches_event(s, event))
+        {
             continue;
         }
         out.push(EventSubscriber {

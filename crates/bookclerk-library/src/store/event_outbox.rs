@@ -21,9 +21,9 @@ use crate::entities::{
 use crate::error::{LibraryError, Result};
 use crate::models::{
     catalog_subscribers_for_event, collapse_live_subscriber_nodes, event_matches_wake_grants,
-    job_backoff_run_after, AcquireStatus, DomainEventRecord, EventCatalogSubscription,
-    EventDeliveryFence, EventDeliveryMetrics, EventDeliveryRecord, EventSubscriber,
-    EventSubscriberCatalogRecord, EventSubscriberNodeRecord, PendingWakeProgress,
+    job_backoff_run_after, subscription_matches_event, AcquireStatus, DomainEventRecord,
+    EventCatalogSubscription, EventDeliveryFence, EventDeliveryMetrics, EventDeliveryRecord,
+    EventSubscriber, EventSubscriberCatalogRecord, EventSubscriberNodeRecord, PendingWakeProgress,
     PublishDomainEventOutcome, PublishDomainEventSpec, EVENT_DELIVERY_MAX_ATTEMPTS,
     EVENT_RESOURCE_CLASS_NETWORK, EVENT_SUBSCRIBER_HEARTBEAT_TTL_SECS,
 };
@@ -199,9 +199,9 @@ impl LibraryStore {
 
     /// Claim up to `limit` `wake_pending` events and process one delivery page each.
     ///
-    /// Each claimed event is leased so two processors cannot own the same slice.
-    /// A short delivery page clears `wake_pending`; otherwise the cursor is saved
-    /// and the lease is released for the next tick.
+    /// Each claimed event is leased with a unique UUID token so two processors
+    /// cannot own the same slice (process `node_id` is not the fence — it is ABA
+    /// across restarts). Cursor release and finish require that token.
     ///
     /// # Errors
     ///
@@ -209,7 +209,7 @@ impl LibraryStore {
     pub async fn process_pending_wakes(
         &self,
         limit: u64,
-        owner: &str,
+        _owner: &str,
         lease_secs: u64,
     ) -> Result<PendingWakeProgress> {
         let page = limit.max(1);
@@ -234,10 +234,11 @@ impl LibraryStore {
         let mut still_pending = u64::try_from(candidates.len()).unwrap_or(0) >= page;
         let mut claimed = 0u32;
         for row in candidates {
+            let token = Uuid::new_v4().to_string();
             let cas = domain_events::Entity::update_many()
                 .col_expr(
                     domain_events::Column::WakeLeaseOwner,
-                    sea_orm::sea_query::Expr::value(Some(owner.to_string())),
+                    sea_orm::sea_query::Expr::value(Some(token.clone())),
                 )
                 .col_expr(
                     domain_events::Column::WakeLeaseExpiresAt,
@@ -265,7 +266,7 @@ impl LibraryStore {
             else {
                 continue;
             };
-            self.wake_one_claimed_page(&fresh).await?;
+            self.wake_one_claimed_page(&fresh, &token).await?;
             if let Some(after) = domain_events::Entity::find_by_id(&row.id)
                 .one(&self.db)
                 .await
@@ -282,12 +283,12 @@ impl LibraryStore {
         })
     }
 
-    async fn wake_one_claimed_page(&self, row: &domain_events::Model) -> Result<u32> {
+    async fn wake_one_claimed_page(&self, row: &domain_events::Model, owner: &str) -> Result<u32> {
         if self.atomic.is_some() {
-            return wake_one_page_on(&self.db, row).await;
+            return wake_one_page_on(&self.db, row, owner).await;
         }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match wake_one_page_on(&txn, row).await {
+        match wake_one_page_on(&txn, row, owner).await {
             Ok(n) => {
                 txn.commit().await.map_err(LibraryError::Orm)?;
                 Ok(n)
@@ -304,6 +305,17 @@ impl LibraryStore {
     /// # Errors
     ///
     /// Returns [`LibraryError::Orm`] when the claim write fails.
+    /// Claim the next ready delivery with a fenced `pending` → `running` mutation.
+    ///
+    /// When `node_id` is non-empty, this node’s own catalog must match the parent
+    /// event’s type, schema version, and filter. Cluster dispatch still uses the
+    /// live union; claim is node-local so a v1-only node cannot run a v2 delivery.
+    /// An empty `node_id` keeps plugin-id-only filtering (tests).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Orm`] when the claim write fails.
+    #[allow(clippy::too_many_arguments)]
     pub async fn claim_next_event_delivery(
         &self,
         owner: &str,
@@ -311,12 +323,13 @@ impl LibraryStore {
         operation_id: &str,
         plugin_ids: &[String],
         max_in_flight: u32,
+        node_id: &str,
     ) -> Result<Option<EventDeliveryRecord>> {
         if plugin_ids.is_empty() {
             return Ok(None);
         }
-        if let Some(atomic) = &self.atomic {
-            return atomic
+        let claimed = if let Some(atomic) = &self.atomic {
+            atomic
                 .claim_next_event_delivery(
                     owner,
                     lease_secs,
@@ -324,20 +337,69 @@ impl LibraryStore {
                     plugin_ids,
                     max_in_flight,
                 )
-                .await;
-        }
-        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match claim_next_event_delivery_on(&txn, owner, lease_secs, plugin_ids, max_in_flight).await
-        {
-            Ok(row) => {
-                txn.commit().await.map_err(LibraryError::Orm)?;
-                Ok(row)
+                .await?
+        } else {
+            let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+            match claim_next_event_delivery_on(
+                &txn,
+                owner,
+                lease_secs,
+                plugin_ids,
+                max_in_flight,
+                node_id,
+            )
+            .await
+            {
+                Ok(row) => {
+                    txn.commit().await.map_err(LibraryError::Orm)?;
+                    row
+                }
+                Err(err) => {
+                    let _ = txn.rollback().await;
+                    return Err(err);
+                }
             }
-            Err(err) => {
-                let _ = txn.rollback().await;
-                Err(err)
-            }
+        };
+        self.release_if_incompatible_local_catalog(node_id, claimed)
+            .await
+    }
+
+    /// Release a claimed row when this node’s catalog cannot handle it.
+    ///
+    /// D1 SQL claim cannot evaluate JSON filters / schema versions, so an
+    /// incompatible row is returned then released here (`attempt_count` restored).
+    pub(crate) async fn release_if_incompatible_local_catalog(
+        &self,
+        node_id: &str,
+        claimed: Option<EventDeliveryRecord>,
+    ) -> Result<Option<EventDeliveryRecord>> {
+        let Some(row) = claimed else {
+            return Ok(None);
+        };
+        if node_id.trim().is_empty() {
+            return Ok(Some(row));
         }
+        if self.delivery_matches_node_catalog(node_id, &row).await? {
+            return Ok(Some(row));
+        }
+        let restore_resume = row.checkpoint_json.is_some();
+        self.release_unexecuted_event_delivery(&row.fence(), restore_resume)
+            .await?;
+        Ok(None)
+    }
+
+    async fn delivery_matches_node_catalog(
+        &self,
+        node_id: &str,
+        row: &EventDeliveryRecord,
+    ) -> Result<bool> {
+        let Some(event) = self.get_domain_event(&row.event_id).await? else {
+            return Ok(false);
+        };
+        let Some(subs) = node_plugin_subscriptions(&self.db, node_id, &row.plugin_id).await? else {
+            return Ok(false);
+        };
+        Ok(subs.iter().any(|s| subscription_matches_event(s, &event)))
     }
 
     /// Return a claimed delivery to `pending` without consuming an attempt.
@@ -1470,26 +1532,6 @@ impl LibraryStore {
         Ok(res.rows_affected == 1)
     }
 
-    /// Wake one page of matching suspended deliveries for `event`.
-    ///
-    /// Dispatcher ticks should prefer [`Self::process_pending_wakes`], which
-    /// claims a lease before this slice. Completing a short page clears
-    /// `wake_pending`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LibraryError::Orm`] when the update fails.
-    pub async fn wake_matching_event_deliveries(&self, event: &DomainEventRecord) -> Result<u32> {
-        let Some(row) = domain_events::Entity::find_by_id(&event.id)
-            .one(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?
-        else {
-            return Ok(0);
-        };
-        self.wake_one_claimed_page(&row).await
-    }
-
     /// Delete terminal deliveries past their retention windows, then empty events.
     ///
     /// Acked/rejected rows use `retention_days`. Dead letters use
@@ -1728,10 +1770,17 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
 }
 
 /// Process one delivery page for a claimed `wake_pending` event, then persist cursor.
-async fn wake_one_page_on<C: ConnectionTrait>(db: &C, row: &domain_events::Model) -> Result<u32> {
+///
+/// Cursor release and finish require `wake_lease_owner = owner` and `wake_pending = 1`.
+/// Zero rows affected is fence loss: do not overwrite another owner’s cursor.
+async fn wake_one_page_on<C: ConnectionTrait>(
+    db: &C,
+    row: &domain_events::Model,
+    owner: &str,
+) -> Result<u32> {
     let event = map_event(row.clone())?;
     if event.event_type.trim().is_empty() {
-        finish_wake_on(db, &event.id).await?;
+        let _ = finish_wake_on(db, &event.id, owner).await?;
         return Ok(0);
     }
     let now = now_str();
@@ -1757,7 +1806,7 @@ async fn wake_one_page_on<C: ConnectionTrait>(db: &C, row: &domain_events::Model
         .await
         .map_err(LibraryError::Orm)?;
     if rows.is_empty() {
-        finish_wake_on(db, &event.id).await?;
+        let _ = finish_wake_on(db, &event.id, owner).await?;
         return Ok(0);
     }
     let page_len = rows.len();
@@ -1804,6 +1853,18 @@ async fn wake_one_page_on<C: ConnectionTrait>(db: &C, row: &domain_events::Model
                 sea_orm::sea_query::Expr::value(1i64),
             )
             .col_expr(
+                event_deliveries::Column::WakeEventType,
+                sea_orm::sea_query::Expr::value(String::new()),
+            )
+            .col_expr(
+                event_deliveries::Column::WakeFilterJson,
+                sea_orm::sea_query::Expr::value(String::new()),
+            )
+            .col_expr(
+                event_deliveries::Column::WakeGrantsJson,
+                sea_orm::sea_query::Expr::value(String::new()),
+            )
+            .col_expr(
                 event_deliveries::Column::UpdatedAt,
                 sea_orm::sea_query::Expr::value(now.clone()),
             )
@@ -1815,36 +1876,54 @@ async fn wake_one_page_on<C: ConnectionTrait>(db: &C, row: &domain_events::Model
         woken = u32::try_from(res.rows_affected).unwrap_or(0);
     }
     if u64::try_from(page_len).unwrap_or(WAKE_PAGE) < WAKE_PAGE {
-        finish_wake_on(db, &event.id).await?;
+        let _ = finish_wake_on(db, &event.id, owner).await?;
     } else {
-        domain_events::Entity::update_many()
-            .col_expr(
-                domain_events::Column::WakeCursorAt,
-                sea_orm::sea_query::Expr::value(cursor_at),
-            )
-            .col_expr(
-                domain_events::Column::WakeCursorId,
-                sea_orm::sea_query::Expr::value(cursor_id),
-            )
-            .col_expr(
-                domain_events::Column::WakeLeaseOwner,
-                sea_orm::sea_query::Expr::value(Option::<String>::None),
-            )
-            .col_expr(
-                domain_events::Column::WakeLeaseExpiresAt,
-                sea_orm::sea_query::Expr::value(Option::<String>::None),
-            )
-            .filter(domain_events::Column::Id.eq(&event.id))
-            .filter(domain_events::Column::WakePending.eq(1i64))
-            .exec(db)
-            .await
-            .map_err(LibraryError::Orm)?;
+        let _ = release_wake_cursor_on(db, &event.id, owner, &cursor_at, &cursor_id).await?;
     }
     Ok(woken)
 }
 
-async fn finish_wake_on<C: ConnectionTrait>(db: &C, event_id: &str) -> Result<()> {
-    domain_events::Entity::update_many()
+/// Persist the next-page cursor and drop the wake lease when this token still owns it.
+pub(crate) async fn release_wake_cursor_on<C: ConnectionTrait>(
+    db: &C,
+    event_id: &str,
+    owner: &str,
+    cursor_at: &str,
+    cursor_id: &str,
+) -> Result<bool> {
+    let res = domain_events::Entity::update_many()
+        .col_expr(
+            domain_events::Column::WakeCursorAt,
+            sea_orm::sea_query::Expr::value(cursor_at.to_string()),
+        )
+        .col_expr(
+            domain_events::Column::WakeCursorId,
+            sea_orm::sea_query::Expr::value(cursor_id.to_string()),
+        )
+        .col_expr(
+            domain_events::Column::WakeLeaseOwner,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            domain_events::Column::WakeLeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .filter(domain_events::Column::Id.eq(event_id))
+        .filter(domain_events::Column::WakePending.eq(1i64))
+        .filter(domain_events::Column::WakeLeaseOwner.eq(owner))
+        .exec(db)
+        .await
+        .map_err(LibraryError::Orm)?;
+    Ok(res.rows_affected == 1)
+}
+
+/// Clear `wake_pending` when `owner` still holds the claim token.
+pub(crate) async fn finish_wake_on<C: ConnectionTrait>(
+    db: &C,
+    event_id: &str,
+    owner: &str,
+) -> Result<bool> {
+    let res = domain_events::Entity::update_many()
         .col_expr(
             domain_events::Column::WakePending,
             sea_orm::sea_query::Expr::value(0i64),
@@ -1867,10 +1946,11 @@ async fn finish_wake_on<C: ConnectionTrait>(db: &C, event_id: &str) -> Result<()
         )
         .filter(domain_events::Column::Id.eq(event_id))
         .filter(domain_events::Column::WakePending.eq(1i64))
+        .filter(domain_events::Column::WakeLeaseOwner.eq(owner))
         .exec(db)
         .await
         .map_err(LibraryError::Orm)?;
-    Ok(())
+    Ok(res.rows_affected == 1)
 }
 
 /// Create deliveries for `subscribers` and mark the event dispatched.
@@ -1961,6 +2041,7 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
     lease_secs: u64,
     plugin_ids: &[String],
     max_in_flight: u32,
+    node_id: &str,
 ) -> Result<Option<EventDeliveryRecord>> {
     if plugin_ids.is_empty() {
         return Ok(None);
@@ -1990,6 +2071,11 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
         let page_len = u64::try_from(candidates.len()).unwrap_or(PAGE);
         for model in candidates {
             if fifo_blocked(db, &model).await? {
+                continue;
+            }
+            if !node_id.trim().is_empty()
+                && !delivery_model_matches_node_catalog(db, node_id, &model).await?
+            {
                 continue;
             }
             lock_plugin_in_flight(db, &model.plugin_id, &model.resource_class).await?;
@@ -2284,6 +2370,47 @@ fn map_node_row(m: event_subscriber_nodes::Model) -> Result<EventSubscriberNodeR
         enabled: m.enabled != 0,
         heartbeat_at: parse_dt(&m.heartbeat_at),
     })
+}
+
+async fn node_plugin_subscriptions<C: ConnectionTrait>(
+    db: &C,
+    node_id: &str,
+    plugin_id: &str,
+) -> Result<Option<Vec<EventCatalogSubscription>>> {
+    let Some(row) = event_subscriber_nodes::Entity::find()
+        .filter(event_subscriber_nodes::Column::NodeId.eq(node_id))
+        .filter(event_subscriber_nodes::Column::PluginId.eq(plugin_id))
+        .one(db)
+        .await
+        .map_err(LibraryError::Orm)?
+    else {
+        return Ok(None);
+    };
+    if row.enabled == 0 {
+        return Ok(None);
+    }
+    Ok(Some(
+        serde_json::from_str(&row.subscriptions_json).unwrap_or_default(),
+    ))
+}
+
+async fn delivery_model_matches_node_catalog<C: ConnectionTrait>(
+    db: &C,
+    node_id: &str,
+    model: &event_deliveries::Model,
+) -> Result<bool> {
+    let Some(event_row) = domain_events::Entity::find_by_id(&model.event_id)
+        .one(db)
+        .await
+        .map_err(LibraryError::Orm)?
+    else {
+        return Ok(false);
+    };
+    let event = map_event(event_row)?;
+    let Some(subs) = node_plugin_subscriptions(db, node_id, &model.plugin_id).await? else {
+        return Ok(false);
+    };
+    Ok(subs.iter().any(|s| subscription_matches_event(s, &event)))
 }
 
 async fn ensure_event_outbox_stats<C: ConnectionTrait>(

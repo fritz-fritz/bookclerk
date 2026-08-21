@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use bookclerk_integrations::{DomainEvent, EventResult, EventSubscription};
 use bookclerk_library::{
-    catalog_subscribers_for_event, wake_grants_from_subscriptions, EventCatalogSubscription,
-    LibraryStore,
+    catalog_subscribers_for_event, subscription_matches_event, wake_grants_from_subscriptions,
+    EventCatalogSubscription, LibraryStore,
 };
 use chrono::{TimeZone, Utc};
 use tokio::time::MissedTickBehavior;
@@ -80,7 +80,7 @@ fn spawn_dispatcher(state: Arc<AppState>) {
                 (cfg.events.retention_days, cfg.paths().files_dir.clone())
             };
             let node_id = event_node_id(&state, &files_dir);
-            let wake_more = match dispatch_pending(
+            let more = match dispatch_pending(
                 &library,
                 retention_days,
                 &last_catalog_fp,
@@ -90,7 +90,7 @@ fn spawn_dispatcher(state: Arc<AppState>) {
             )
             .await
             {
-                Ok((fp, empty, reconciled, wake_more)) => {
+                Ok((fp, empty, reconciled, more)) => {
                     last_catalog_fp = fp;
                     last_reconcile_empty = empty;
                     ticks_since_reconcile = if reconciled {
@@ -98,7 +98,7 @@ fn spawn_dispatcher(state: Arc<AppState>) {
                     } else {
                         ticks_since_reconcile.saturating_add(1)
                     };
-                    wake_more
+                    more
                 }
                 Err(err) => {
                     warn!(error = %err, "event dispatch failed");
@@ -107,7 +107,7 @@ fn spawn_dispatcher(state: Arc<AppState>) {
                 }
             };
             state.job_notify.notify_waiters();
-            if wake_more {
+            if more {
                 continue;
             }
             tokio::select! {
@@ -155,11 +155,15 @@ fn spawn_delivery_worker(state: Arc<AppState>) {
             if let Err(err) = library.reclaim_expired_event_deliveries().await {
                 warn!(error = %err, "event delivery reclaim failed");
             }
+            let files_dir = state.config.read().await.paths().files_dir.clone();
+            let max_in_flight = state.config.read().await.events.concurrency.max(1);
+            let node_id = event_node_id(&state, &files_dir);
             match claim_delivery(
                 &library,
                 &owner,
                 &loaded_plugin_ids(&state).await,
-                state.config.read().await.events.concurrency.max(1),
+                max_in_flight,
+                &node_id,
             )
             .await
             {
@@ -304,16 +308,23 @@ fn catalog_from_runtime(subs: &[EventSubscription]) -> Vec<EventCatalogSubscript
 }
 
 /// Create deliveries from the live catalog for pending events, then late-join.
-async fn dispatch_pending(
+///
+/// Caps undispatched dispatch per tick (`WAKE_PENDING_PAGE`) so a backlog cannot
+/// starve wake processing or the catalog heartbeat. Always runs a wake slice
+/// after that cap. The outer loop continues when either undispatched remain or
+/// `wake still_pending`.
+pub(crate) async fn dispatch_pending(
     library: &LibraryStore,
     retention_days: u64,
     last_catalog_fp: &str,
     last_reconcile_empty: bool,
     ticks_since_reconcile: u32,
-    node_id: &str,
+    _node_id: &str,
 ) -> Result<(String, bool, bool, bool), bookclerk_library::LibraryError> {
     let catalog = library.list_live_event_subscribers().await?;
     let fingerprint = catalog_fingerprint(&catalog);
+    let mut dispatched = 0u64;
+    let mut dispatch_more = false;
     loop {
         let Some(event) = library.next_undispatched_event().await? else {
             break;
@@ -345,9 +356,15 @@ async fn dispatch_pending(
                 "dispatched domain event"
             );
         }
+        dispatched = dispatched.saturating_add(1);
+        if dispatched >= WAKE_PENDING_PAGE {
+            dispatch_more = true;
+            break;
+        }
     }
+    let wake_token = Uuid::new_v4().to_string();
     let wakes = library
-        .process_pending_wakes(WAKE_PENDING_PAGE, node_id, LEASE_SECS)
+        .process_pending_wakes(WAKE_PENDING_PAGE, &wake_token, LEASE_SECS)
         .await?;
     let created_after =
         Utc::now() - chrono::Duration::days(i64::try_from(retention_days.max(1)).unwrap_or(7));
@@ -370,7 +387,12 @@ async fn dispatch_pending(
     } else {
         n == 0
     };
-    Ok((fingerprint, empty, !skip_reconcile, wakes.still_pending))
+    Ok((
+        fingerprint,
+        empty,
+        !skip_reconcile,
+        dispatch_more || wakes.still_pending,
+    ))
 }
 
 /// True when the process-local skip cache may omit this tick's late-join scan.
@@ -414,6 +436,7 @@ async fn claim_delivery(
     owner: &str,
     plugin_ids: &[String],
     max_in_flight: u32,
+    node_id: &str,
 ) -> Result<Option<bookclerk_library::EventDeliveryRecord>, bookclerk_library::LibraryError> {
     if plugin_ids.is_empty() {
         return Ok(None);
@@ -428,6 +451,7 @@ async fn claim_delivery(
                 &operation_id,
                 plugin_ids,
                 max_in_flight.max(1),
+                node_id,
             )
             .await
         {
@@ -474,6 +498,22 @@ async fn run_delivery(
             .await;
         return;
     };
+    let local_subs = catalog_from_runtime(&integration.event_subscriptions());
+    if !local_subs
+        .iter()
+        .any(|s| subscription_matches_event(s, &event))
+    {
+        let restore_resume = delivery.checkpoint_json.is_some();
+        warn!(
+            delivery_id = %delivery.id,
+            plugin = %delivery.plugin_id,
+            "local catalog does not match claimed event; releasing unused claim"
+        );
+        let _ = library
+            .release_unexecuted_event_delivery(&fence, restore_resume)
+            .await;
+        return;
+    }
     let domain = domain_event_for_delivery(&event, &delivery);
     let cancel = Arc::new(AtomicBool::new(false));
     let operator_cancel = Arc::new(AtomicBool::new(false));
@@ -786,7 +826,10 @@ fn domain_event_for_delivery(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bookclerk_library::{DomainEventRecord, EventDeliveryRecord};
+    use bookclerk_library::{
+        DomainEventRecord, EventDeliveryRecord, EventSubscriber, PublishDomainEventOutcome,
+        PublishDomainEventSpec,
+    };
     use chrono::TimeZone;
 
     fn sample_event() -> DomainEventRecord {
@@ -956,5 +999,90 @@ mod tests {
         assert!(!should_skip_catalog_reconcile("fp", "other", true, 0));
         assert!(should_skip_catalog_reconcile("fp", "fp", true, 11));
         assert!(!should_skip_catalog_reconcile("fp", "fp", true, 12));
+    }
+
+    fn publish_spec(dedup: &str) -> PublishDomainEventSpec {
+        PublishDomainEventSpec {
+            id: String::new(),
+            event_type: "book_acquired".into(),
+            schema_version: 1,
+            account_id: "acct".into(),
+            source: String::new(),
+            correlation_id: String::new(),
+            causation_id: String::new(),
+            dedup_key: dedup.into(),
+            payload: r#"{"titleId":"t","source":"audible"}"#.into(),
+            ordering_key: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_pending_caps_undispatched_and_still_wakes() {
+        let store = LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        );
+        let first = store
+            .publish_domain_event(publish_spec("book_acquired:cap-sleeper"))
+            .await
+            .unwrap();
+        let PublishDomainEventOutcome::Created { id: sleeper_event } = first else {
+            panic!("{first:?}");
+        };
+        store
+            .dispatch_event_deliveries(
+                &sleeper_event,
+                &[EventSubscriber::plugin("echo")],
+                "cap-sleeper",
+            )
+            .await
+            .unwrap();
+        let claimed = store
+            .claim_next_event_delivery(
+                "cap-park",
+                60,
+                &uuid::Uuid::new_v4().to_string(),
+                &["echo".into()],
+                32,
+                "",
+            )
+            .await
+            .unwrap()
+            .expect("claim sleeper");
+        let future = Utc::now() + chrono::Duration::days(30);
+        assert!(store
+            .suspend_event_delivery(
+                &claimed.fence(),
+                r#"{"offset":1}"#,
+                1,
+                future,
+                "book_acquired",
+                r#"{"source":"audible"}"#,
+                "",
+            )
+            .await
+            .unwrap());
+        let sleeper_id = claimed.id.clone();
+
+        for i in 0..40 {
+            store
+                .publish_domain_event(publish_spec(&format!("book_acquired:cap-backlog-{i}")))
+                .await
+                .unwrap();
+        }
+
+        let (_, _, _, more) = dispatch_pending(&store, 7, "", false, 0, "test-node")
+            .await
+            .unwrap();
+        assert!(more, "undispatched backlog should request another tick");
+        assert!(store.next_undispatched_event().await.unwrap().is_some());
+        let woken = store
+            .get_event_delivery(&sleeper_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(woken.resume_pending);
+        assert!(woken.run_after <= Utc::now() + chrono::Duration::seconds(2));
     }
 }

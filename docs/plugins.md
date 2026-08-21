@@ -1042,7 +1042,10 @@ late-joins already-`dispatched` events via a missing-pair anti-join (receipt
 `reconcile-{event_id}-{plugin_id}`). An unchanged live catalog with no missing
 pairs does a bounded empty `SELECT` and zero dispatch writes. Heartbeat of this
 node’s catalog runs **before** that reconcile so a catch-up page cannot starve
-the 60s TTL. A dispatch error clears the empty-reconcile skip cache; a bounded
+the 60s TTL. Each tick dispatches at most 32 pending outbox rows, then always
+runs a claimed wake slice (UUID fence token, not `event_node_id`) even when
+undispatched remain; accepting a wake clears `wake_event_type` /
+`wake_filter_json` / `wake_grants_json` so retry is not re-woken. A dispatch error clears the empty-reconcile skip cache; a bounded
 reconcile still runs at least every 60s as a backstop. The process-stable `event_node_id` is resolved once at runtime
 start. A `suspended` result is accepted only when a subscription matches
 that exact `(type, schema_version)` and sets `supports_suspend = true`;
@@ -1057,7 +1060,8 @@ slices so producer latency does not track sleeper count. Acquire success writes
 acquire-status change (book uuid, storage key, product ids — never media bytes)
 and sets envelope `source` to the book’s storefront plugin id.
 The producer `ordering_key` is stored on the envelope and copied verbatim onto
-each delivery. Each VPS claims only plugin ids loaded on that process; an unused
+each delivery. Each VPS claims only plugin ids loaded on that process **and**
+only events its node-local catalog matches (type, schema version, filter); an unused
 claim is released without consuming `attempt_count`. `[events.concurrency]`
 (default 1) is the number of local delivery workers **and** the cluster-wide
 max `running` deliveries per `(plugin_id, resource_class)` (`network` today),
