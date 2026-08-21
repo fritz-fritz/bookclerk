@@ -1061,8 +1061,13 @@ acquire-status change (book uuid, storage key, product ids — never media bytes
 and sets envelope `source` to the book’s storefront plugin id.
 The producer `ordering_key` is stored on the envelope and copied verbatim onto
 each delivery. Each VPS claims only plugin ids loaded on that process **and**
-only events its node-local catalog matches (type, schema version, filter); an unused
-claim is released without consuming `attempt_count`. `[events.concurrency]`
+only events its node-local catalog matches (type, schema version, filter). SeaORM
+prefilters by this node’s catalog. D1/`dbAtomic` still selects by `plugin_id`
+only; the host releases an incompatible row (without consuming `attempt_count`)
+and continues with a node-local claim so a later compatible delivery is not
+starved. #178 will push eligibility into the generic atomic plan. Wake pages
+are 64 rows so `IN (…)` and the fenced sleeper UPDATE stay under D1’s 100
+bound-parameter limit; the UPDATE includes `EXISTS (wake_pending ∧ lease owner)`. `[events.concurrency]`
 (default 1) is the number of local delivery workers **and** the cluster-wide
 max `running` deliveries per `(plugin_id, resource_class)` (`network` today),
 enforced at claim time (PostgreSQL takes a per-plugin advisory lock so two

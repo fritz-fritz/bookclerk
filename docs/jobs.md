@@ -33,9 +33,11 @@ intersection of `sub.filter` and the requested filter — requested keys only
 add constraints) and wakes matching parked rows in the same account when a
 later event is published. Publish commits `domain_events.wake_pending = 1` and
 returns; the dispatcher claims bounded wake slices with a unique UUID fence
-token (`wake_lease_*` + delivery cursor, at most 32 events and one 200-row
-page each) so producer latency does not track sleeper count. Cursor release
-and finish require that token; a lost fence does not clobber another owner.
+token (`wake_lease_*` + delivery cursor, at most 32 events and one 64-row
+page each, below D1’s 100 bound parameters; #178 will negotiate `maxBinds`)
+so producer latency does not track sleeper count. Cursor release, finish,
+and the sleeper UPDATE require that token in the same statement; a lost
+fence does not clobber another owner or a later wake registration.
 Accepting a wake clears the registration so a later matching event does not
 re-wake a retry. Duplicate retries leave the flag set until a claimed
 slice finishes. `wakeOnEventType` must be a declared subscription (empty stays

@@ -4,7 +4,11 @@ use crate::models::{
     JobFence, JobKind, JobPayload, JobRecord, JobResourceClass, JobState, JobTrigger,
     PublishDomainEventOutcome, PublishDomainEventSpec,
 };
+use crate::{execute_db_atomic, AtomicTxnBackend, EventDeliveryRecord, LibraryError};
+use async_trait::async_trait;
+use bookclerk_plugin_abi::{atomic_status, DbAtomicParams, DbAtomicRequest};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn account_and_book_roundtrip() {
@@ -1688,6 +1692,177 @@ async fn test_store() -> LibraryStore {
             .await
             .unwrap(),
     )
+}
+
+/// In-process `dbAtomic` backend used to prove host skip after plugin-id-only claim.
+struct SqliteAtomicClaimBackend {
+    db: sea_orm::DatabaseConnection,
+}
+
+fn claim_only_err<T>() -> crate::Result<T> {
+    Err(LibraryError::Other(anyhow::anyhow!(
+        "SqliteAtomicClaimBackend is claim-only"
+    )))
+}
+
+#[async_trait]
+impl AtomicTxnBackend for SqliteAtomicClaimBackend {
+    async fn delete_user(&self, _id: i64) -> crate::Result<()> {
+        claim_only_err()
+    }
+
+    async fn set_user_status(
+        &self,
+        _id: i64,
+        _status: crate::UserStatus,
+    ) -> crate::Result<crate::UserRecord> {
+        claim_only_err()
+    }
+
+    async fn set_user_password_hash(
+        &self,
+        _id: i64,
+        _password_hash: Option<&str>,
+    ) -> crate::Result<crate::UserRecord> {
+        claim_only_err()
+    }
+
+    async fn set_user_role(
+        &self,
+        _id: i64,
+        _role: crate::UserRole,
+    ) -> crate::Result<crate::UserRecord> {
+        claim_only_err()
+    }
+
+    async fn redeem_claim_ticket_to_session(
+        &self,
+        _token_hash: &str,
+        _session_hash: &str,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+        _client: Option<&crate::SessionClientInfo>,
+        _new_password_hash: Option<&str>,
+        _password_fingerprint: Option<&str>,
+    ) -> crate::Result<crate::PortalIdentity> {
+        claim_only_err()
+    }
+
+    async fn take_oidc_rp_state(
+        &self,
+        _state_hash: &str,
+    ) -> crate::Result<Option<(String, String, String, String, Option<i64>)>> {
+        claim_only_err()
+    }
+
+    async fn take_webauthn_challenge(
+        &self,
+        _challenge_id: &str,
+        _kind: &str,
+    ) -> crate::Result<Option<(Option<i64>, String)>> {
+        claim_only_err()
+    }
+
+    async fn enqueue_job(&self, _spec: EnqueueJobSpec) -> crate::Result<EnqueueOutcome> {
+        claim_only_err()
+    }
+
+    async fn claim_next_job(
+        &self,
+        _resource_class: JobResourceClass,
+        _owner: &str,
+        _lease_secs: u64,
+        _operation_id: &str,
+    ) -> crate::Result<Option<JobRecord>> {
+        claim_only_err()
+    }
+
+    async fn reserve_job_temp_path(
+        &self,
+        _job_id: &str,
+        _path: &str,
+        _reserved_bytes: u64,
+        _quota_bytes: u64,
+    ) -> crate::Result<()> {
+        claim_only_err()
+    }
+
+    async fn confirm_totp_enrollment(
+        &self,
+        _user_id: i64,
+        _record: &crate::secrets::EncryptedSecretRecord,
+    ) -> crate::Result<()> {
+        claim_only_err()
+    }
+
+    async fn disable_user_totp(&self, _user_id: i64) -> crate::Result<()> {
+        claim_only_err()
+    }
+
+    async fn publish_domain_event(
+        &self,
+        _spec: PublishDomainEventSpec,
+    ) -> crate::Result<PublishDomainEventOutcome> {
+        claim_only_err()
+    }
+
+    async fn set_acquire_status(
+        &self,
+        _book_uuid: &str,
+        _status: crate::AcquireStatus,
+        _storage_key: Option<&str>,
+        _error_message: Option<&str>,
+        _event: Option<PublishDomainEventSpec>,
+    ) -> crate::Result<()> {
+        claim_only_err()
+    }
+
+    async fn dispatch_event_deliveries(
+        &self,
+        _event_id: &str,
+        _subscribers: &[EventSubscriber],
+        _operation_id: &str,
+    ) -> crate::Result<u32> {
+        claim_only_err()
+    }
+
+    async fn claim_next_event_delivery(
+        &self,
+        owner: &str,
+        lease_secs: u64,
+        operation_id: &str,
+        plugin_ids: &[String],
+        max_in_flight: u32,
+    ) -> crate::Result<Option<EventDeliveryRecord>> {
+        let result = execute_db_atomic(
+            &self.db,
+            DbAtomicRequest {
+                operation_id: operation_id.to_string(),
+                operation: DbAtomicParams::ClaimNextEventDelivery {
+                    owner: owner.to_string(),
+                    lease_secs: i64::try_from(lease_secs).unwrap_or(60),
+                    plugin_ids_json: serde_json::to_string(plugin_ids)
+                        .unwrap_or_else(|_| "[]".into()),
+                    max_in_flight: i64::from(max_in_flight),
+                },
+            },
+        )
+        .await?;
+        if result.status == atomic_status::EMPTY {
+            return Ok(None);
+        }
+        if result.status != atomic_status::OK {
+            return Err(LibraryError::Other(anyhow::anyhow!(
+                "database atomic claim failed: {}",
+                result.status
+            )));
+        }
+        let payload = result.payload.ok_or_else(|| {
+            LibraryError::Other(anyhow::anyhow!("database atomic claim missing payload"))
+        })?;
+        serde_json::from_value(payload).map(Some).map_err(|err| {
+            LibraryError::Other(anyhow::anyhow!("database atomic claim payload: {err}"))
+        })
+    }
 }
 
 fn scan_spec(account: Option<&str>, max_pending: i64) -> EnqueueJobSpec {
@@ -4689,7 +4864,7 @@ async fn wake_stays_inside_account_boundary() {
 }
 
 #[tokio::test]
-async fn wake_pages_more_than_two_hundred_same_account() {
+async fn wake_pages_more_than_page_size_same_account() {
     let store = test_store().await;
     let parent = store
         .publish_domain_event(publish_spec(
@@ -4704,7 +4879,8 @@ async fn wake_pages_more_than_two_hundred_same_account() {
     };
     let now = chrono::Utc::now().to_rfc3339();
     let future = "9999-12-31T23:59:59+00:00";
-    for i in 0..201 {
+    let n = usize::try_from(super::event_outbox::WAKE_PAGE).unwrap() + 1;
+    for i in 0..n {
         let id = format!("wake-page-{i:03}");
         crate::entities::event_deliveries::ActiveModel {
             id: sea_orm::ActiveValue::Set(id.clone()),
@@ -4747,7 +4923,7 @@ async fn wake_pages_more_than_two_hundred_same_account() {
         .unwrap();
     drain_pending_wakes(&store).await;
     let mut woken = 0u32;
-    for i in 0..201 {
+    for i in 0..n {
         let row = store
             .get_event_delivery(&format!("wake-page-{i:03}"))
             .await
@@ -4757,7 +4933,7 @@ async fn wake_pages_more_than_two_hundred_same_account() {
             woken += 1;
         }
     }
-    assert_eq!(woken, 201);
+    assert_eq!(woken, u32::try_from(n).unwrap());
 }
 
 #[tokio::test]
@@ -5140,6 +5316,104 @@ async fn stale_wake_fence_does_not_clobber(store: &LibraryStore) {
 }
 
 #[tokio::test]
+async fn stale_wake_delivery_update_does_not_clear_new_registration() {
+    stale_wake_delivery_update_does_not_clear(&test_store().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+async fn postgres_stale_wake_delivery_update_does_not_clear_new_registration() {
+    stale_wake_delivery_update_does_not_clear(&postgres_test_store().await).await;
+}
+
+async fn stale_wake_delivery_update_does_not_clear(store: &LibraryStore) {
+    let parked = park_echo_wake(
+        store,
+        "book_acquired:stale-wake-upd-1",
+        r#"{"titleId":"one","source":"audible"}"#,
+        "book_acquired",
+        r#"{"source":"audible"}"#,
+    )
+    .await;
+    let trigger = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:stale-wake-upd-2",
+            r#"{"titleId":"two","source":"audible"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id: trigger_id } = trigger else {
+        panic!("{trigger:?}");
+    };
+    let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let mut am: crate::entities::domain_events::ActiveModel =
+        crate::entities::domain_events::Entity::find_by_id(&trigger_id)
+            .one(store.db())
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+    am.wake_lease_owner = sea_orm::ActiveValue::Set(Some("token-a".into()));
+    am.wake_lease_expires_at = sea_orm::ActiveValue::Set(Some(future.clone()));
+    am.update(store.db()).await.unwrap();
+
+    let mut am: crate::entities::domain_events::ActiveModel =
+        crate::entities::domain_events::Entity::find_by_id(&trigger_id)
+            .one(store.db())
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+    am.wake_lease_owner = sea_orm::ActiveValue::Set(Some("token-b".into()));
+    am.update(store.db()).await.unwrap();
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let woken = super::event_outbox::wake_deliveries_fenced_on(
+        store.db(),
+        &trigger_id,
+        "token-b",
+        std::slice::from_ref(&parked.id),
+        &now,
+    )
+    .await
+    .unwrap();
+    assert_eq!(woken, 1);
+
+    let future_run = "9999-12-31T23:59:59+00:00";
+    let mut dm: crate::entities::event_deliveries::ActiveModel =
+        crate::entities::event_deliveries::Entity::find_by_id(&parked.id)
+            .one(store.db())
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+    dm.run_after = sea_orm::ActiveValue::Set(future_run.into());
+    dm.wake_event_type = sea_orm::ActiveValue::Set("book_acquired".into());
+    dm.wake_filter_json = sea_orm::ActiveValue::Set(r#"{"source":"audible"}"#.into());
+    dm.wake_grants_json = sea_orm::ActiveValue::Set(audible_v1_wake_grants());
+    dm.resume_pending = sea_orm::ActiveValue::Set(1);
+    dm.update(store.db()).await.unwrap();
+
+    let stale = super::event_outbox::wake_deliveries_fenced_on(
+        store.db(),
+        &trigger_id,
+        "token-a",
+        std::slice::from_ref(&parked.id),
+        &now,
+    )
+    .await
+    .unwrap();
+    assert_eq!(stale, 0);
+
+    let row = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
+    assert_eq!(row.wake_event_type, "book_acquired");
+    assert_eq!(row.wake_filter_json, r#"{"source":"audible"}"#);
+    assert!(!row.wake_grants_json.is_empty());
+    assert!(row.run_after > chrono::Utc::now() + chrono::Duration::days(1));
+}
+
+#[tokio::test]
 async fn wake_consumes_registration_so_retry_is_not_rewoken() {
     let store = test_store().await;
     let parked = park_echo_wake(
@@ -5355,6 +5629,70 @@ async fn incompatible_d1_style_claim_is_released_without_attempt_burn() {
         .unwrap();
     assert_eq!(row.state, "pending");
     assert_eq!(row.attempt_count, 0);
+}
+
+#[tokio::test]
+async fn atomic_claim_skips_incompatible_oldest_and_claims_later_compatible() {
+    let store = test_store().await;
+    store
+        .upsert_event_subscriber(
+            "node-v1",
+            "echo",
+            &[EventCatalogSubscription::new("book_acquired", vec![1])],
+            true,
+        )
+        .await
+        .unwrap();
+    let mut spec_v2 = publish_spec("book_acquired", "book_acquired:atomic-skip-v2", "{}");
+    spec_v2.schema_version = 2;
+    let created_v2 = store.publish_domain_event(spec_v2).await.unwrap();
+    let PublishDomainEventOutcome::Created { id: id_v2 } = created_v2 else {
+        panic!("{created_v2:?}");
+    };
+    store
+        .dispatch_event_deliveries(&id_v2, &[EventSubscriber::plugin("echo")], "atomic-skip-v2")
+        .await
+        .unwrap();
+    let created_v1 = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:atomic-skip-v1",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id: id_v1 } = created_v1 else {
+        panic!("{created_v1:?}");
+    };
+    store
+        .dispatch_event_deliveries(&id_v1, &[EventSubscriber::plugin("echo")], "atomic-skip-v1")
+        .await
+        .unwrap();
+
+    let db = store.db().clone();
+    let store = store.with_atomic_txn(Arc::new(SqliteAtomicClaimBackend { db }));
+    let claimed = store
+        .claim_next_event_delivery(
+            "atomic-skip-worker",
+            60,
+            &uuid::Uuid::new_v4().to_string(),
+            &["echo".into()],
+            1,
+            "node-v1",
+        )
+        .await
+        .unwrap()
+        .expect("compatible later row");
+    assert_eq!(claimed.id, format!("{id_v1}:echo"));
+    assert_eq!(claimed.attempt_count, 1);
+
+    let skipped = store
+        .get_event_delivery(&format!("{id_v2}:echo"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(skipped.state, "pending");
+    assert_eq!(skipped.attempt_count, 0);
 }
 
 #[tokio::test]

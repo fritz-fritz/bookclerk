@@ -326,9 +326,13 @@ SQL transaction that rebuilds both tables, **drops `event_deliveries` then
 `schema_migrations` version 28 (the last sqlite/D1 step index; the extra V3
 portal migration means named V27 is not bookkeeping version 27). Wake
 registration (`wake_event_type` / `wake_filter_json` / `wake_grants_json`) is
-cleared when a matching event is accepted so retry is not re-woken. Claim
-uses this node’s catalog (type + schema + filter); cluster dispatch still
-unions live nodes.
+cleared when a matching event is accepted so retry is not re-woken. Wake
+pages are 64 rows so parent `IN (…)` and the fenced sleeper UPDATE stay under
+D1’s 100 bound-parameter limit (#178 will negotiate `maxBinds`). The sleeper
+UPDATE is one statement gated on `wake_pending = 1` and `wake_lease_owner`.
+Claim uses this node’s catalog (type + schema + filter); cluster dispatch still
+unions live nodes. D1/`dbAtomic` claim SQL is plugin-id-only; the host
+releases an incompatible row and node-locally claims a later match.
 
 ## Encrypted secrets
 
