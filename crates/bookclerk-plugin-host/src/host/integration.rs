@@ -269,7 +269,8 @@ impl Integration for ExternalIntegration {
         }
         let params = serde_json::to_value(&event).unwrap_or(Value::Object(Default::default()));
         let raw = self.int_call("onEvent", params).await?;
-        Ok(parse_event_result(&raw))
+        EventResult::from_json_str(&raw)
+            .map_err(|err| bookclerk_integrations::IntegrationError::message(err.to_string()))
     }
 
     fn event_subscriptions(&self) -> Vec<EventSubscription> {
@@ -478,48 +479,6 @@ fn domain_event_from(event: &IntegrationEvent) -> DomainEvent {
         delivery_attempt: 1,
         payload: serde_json::to_vec(&payload_val).unwrap_or_default(),
         ..DomainEvent::default()
-    }
-}
-
-/// Parses an [`EventResult`] JSON object (`{"kind":"ack"|…}`).
-fn parse_event_result(raw: &str) -> EventResult {
-    let v: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
-    match v.get("kind").and_then(|x| x.as_str()).unwrap_or("ack") {
-        "retry" => EventResult::Retry {
-            retry_at_unix_ms: v.get("retryAtUnixMs").and_then(|x| x.as_u64()).unwrap_or(0),
-            reason: v
-                .get("reason")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-        },
-        "reject" => EventResult::Reject {
-            reason: v
-                .get("reason")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-        },
-        "deadLetter" => EventResult::DeadLetter {
-            reason: v
-                .get("reason")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-        },
-        "suspended" => EventResult::Suspended {
-            checkpoint_json: v
-                .get("checkpointJson")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            checkpoint_schema_version: v
-                .get("checkpointSchemaVersion")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(0) as u32,
-            wake_at_unix_ms: v.get("wakeAtUnixMs").and_then(|x| x.as_u64()).unwrap_or(0),
-        },
-        _ => EventResult::Ack,
     }
 }
 

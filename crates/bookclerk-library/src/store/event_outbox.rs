@@ -530,6 +530,22 @@ impl LibraryStore {
                 sea_orm::sea_query::Expr::value(0i64),
             )
             .col_expr(
+                event_deliveries::Column::ResumePending,
+                sea_orm::sea_query::Expr::value(0i64),
+            )
+            .col_expr(
+                event_deliveries::Column::InvocationSequence,
+                sea_orm::sea_query::Expr::value(0i64),
+            )
+            .col_expr(
+                event_deliveries::Column::CheckpointJson,
+                sea_orm::sea_query::Expr::value(Option::<String>::None),
+            )
+            .col_expr(
+                event_deliveries::Column::CheckpointSchemaVersion,
+                sea_orm::sea_query::Expr::value(0i64),
+            )
+            .col_expr(
                 event_deliveries::Column::UpdatedAt,
                 sea_orm::sea_query::Expr::value(now),
             )
@@ -735,79 +751,91 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
     owner: &str,
     lease_secs: u64,
 ) -> Result<Option<EventDeliveryRecord>> {
+    const PAGE: u64 = 64;
     let now = Utc::now();
     let now_s = now.to_rfc3339();
-    let candidates = event_deliveries::Entity::find()
-        .filter(event_deliveries::Column::State.eq(STATE_PENDING))
-        .filter(event_deliveries::Column::RunAfter.lte(now_s.clone()))
-        .order_by_asc(event_deliveries::Column::CreatedAt)
-        .limit(32)
-        .all(db)
-        .await
-        .map_err(LibraryError::Orm)?;
     let lease_expires =
         (now + Duration::seconds(i64::try_from(lease_secs).unwrap_or(60))).to_rfc3339();
-    for model in candidates {
-        if fifo_blocked(db, &model).await? {
-            continue;
-        }
-        let resuming = model.resume_pending != 0;
-        let attempt = if resuming {
-            model.attempt_count.max(1)
-        } else {
-            model.attempt_count + 1
-        };
-        let generation = model.lease_generation + 1;
-        let mut update = event_deliveries::Entity::update_many()
-            .col_expr(
-                event_deliveries::Column::State,
-                sea_orm::sea_query::Expr::value(STATE_RUNNING),
-            )
-            .col_expr(
-                event_deliveries::Column::AttemptCount,
-                sea_orm::sea_query::Expr::value(attempt),
-            )
-            .col_expr(
-                event_deliveries::Column::LeaseOwner,
-                sea_orm::sea_query::Expr::value(Some(owner.to_string())),
-            )
-            .col_expr(
-                event_deliveries::Column::LeaseExpiresAt,
-                sea_orm::sea_query::Expr::value(Some(lease_expires.clone())),
-            )
-            .col_expr(
-                event_deliveries::Column::LeaseGeneration,
-                sea_orm::sea_query::Expr::value(generation),
-            )
-            .col_expr(
-                event_deliveries::Column::UpdatedAt,
-                sea_orm::sea_query::Expr::value(now_s.clone()),
-            );
-        if resuming {
-            update = update.col_expr(
-                event_deliveries::Column::ResumePending,
-                sea_orm::sea_query::Expr::value(0i64),
-            );
-        }
-        let res = update
-            .filter(event_deliveries::Column::Id.eq(&model.id))
+    let mut offset = 0u64;
+    loop {
+        let candidates = event_deliveries::Entity::find()
             .filter(event_deliveries::Column::State.eq(STATE_PENDING))
-            .exec(db)
+            .filter(event_deliveries::Column::RunAfter.lte(now_s.clone()))
+            .order_by_asc(event_deliveries::Column::CreatedAt)
+            .limit(PAGE)
+            .offset(offset)
+            .all(db)
             .await
             .map_err(LibraryError::Orm)?;
-        if res.rows_affected != 1 {
-            continue;
+        if candidates.is_empty() {
+            return Ok(None);
         }
-        let Some(updated) = event_deliveries::Entity::find_by_id(&model.id)
-            .one(db)
-            .await
-            .map_err(LibraryError::Orm)?
-        else {
-            continue;
-        };
-        return Ok(Some(map_delivery(updated)?));
+        let page_len = u64::try_from(candidates.len()).unwrap_or(PAGE);
+        for model in candidates {
+            if fifo_blocked(db, &model).await? {
+                continue;
+            }
+            let resuming = model.resume_pending != 0;
+            let attempt = if resuming {
+                model.attempt_count.max(1)
+            } else {
+                model.attempt_count + 1
+            };
+            let generation = model.lease_generation + 1;
+            let mut update = event_deliveries::Entity::update_many()
+                .col_expr(
+                    event_deliveries::Column::State,
+                    sea_orm::sea_query::Expr::value(STATE_RUNNING),
+                )
+                .col_expr(
+                    event_deliveries::Column::AttemptCount,
+                    sea_orm::sea_query::Expr::value(attempt),
+                )
+                .col_expr(
+                    event_deliveries::Column::LeaseOwner,
+                    sea_orm::sea_query::Expr::value(Some(owner.to_string())),
+                )
+                .col_expr(
+                    event_deliveries::Column::LeaseExpiresAt,
+                    sea_orm::sea_query::Expr::value(Some(lease_expires.clone())),
+                )
+                .col_expr(
+                    event_deliveries::Column::LeaseGeneration,
+                    sea_orm::sea_query::Expr::value(generation),
+                )
+                .col_expr(
+                    event_deliveries::Column::UpdatedAt,
+                    sea_orm::sea_query::Expr::value(now_s.clone()),
+                );
+            if resuming {
+                update = update.col_expr(
+                    event_deliveries::Column::ResumePending,
+                    sea_orm::sea_query::Expr::value(0i64),
+                );
+            }
+            let res = update
+                .filter(event_deliveries::Column::Id.eq(&model.id))
+                .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+                .exec(db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            if res.rows_affected != 1 {
+                continue;
+            }
+            let Some(updated) = event_deliveries::Entity::find_by_id(&model.id)
+                .one(db)
+                .await
+                .map_err(LibraryError::Orm)?
+            else {
+                continue;
+            };
+            return Ok(Some(map_delivery(updated)?));
+        }
+        if page_len < PAGE {
+            return Ok(None);
+        }
+        offset += PAGE;
     }
-    Ok(None)
 }
 
 async fn fifo_blocked<C: ConnectionTrait>(

@@ -3052,6 +3052,53 @@ async fn fifo_skips_later_delivery_with_same_ordering_key() {
 }
 
 #[tokio::test]
+async fn fifo_blocked_window_does_not_starve_other_ordering_keys() {
+    let store = test_store().await;
+    let sub = [EventSubscriber {
+        plugin_id: "echo".into(),
+    }];
+    let mut blocked_ids = Vec::new();
+    for i in 0..40 {
+        let created = store
+            .publish_domain_event(publish_spec(
+                "book_acquired",
+                &format!("book_acquired:fifo-block-{i}"),
+                r#"{"titleId":"blocked-book"}"#,
+            ))
+            .await
+            .unwrap();
+        let PublishDomainEventOutcome::Created { id } = created else {
+            panic!("{created:?}");
+        };
+        store
+            .dispatch_event_deliveries(&id, &sub, &format!("block-{i}"))
+            .await
+            .unwrap();
+        blocked_ids.push(id);
+    }
+    let head = claim_delivery(&store, "w-head").await;
+    assert_eq!(head.event_id, blocked_ids[0]);
+
+    let other = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:fifo-other",
+            r#"{"titleId":"other-book"}"#,
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id: other_id } = other else {
+        panic!("{other:?}");
+    };
+    store
+        .dispatch_event_deliveries(&other_id, &sub, "other")
+        .await
+        .unwrap();
+    let next = claim_delivery(&store, "w-other").await;
+    assert_eq!(next.event_id, other_id);
+}
+
+#[tokio::test]
 async fn operator_retry_and_ack_dead_letter() {
     let store = test_store().await;
     let created = store
@@ -3077,7 +3124,18 @@ async fn operator_retry_and_ack_dead_letter() {
         .unwrap();
     let claimed = claim_delivery(&store, "w").await;
     assert!(store
-        .dead_letter_event_delivery(&claimed.fence(), "poison")
+        .suspend_event_delivery(
+            &claimed.fence(),
+            r#"{"offset":9}"#,
+            1,
+            chrono::Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap());
+    let resumed = claim_delivery(&store, "w-resume").await;
+    assert_eq!(resumed.checkpoint_json.as_deref(), Some(r#"{"offset":9}"#));
+    assert!(store
+        .dead_letter_event_delivery(&resumed.fence(), "poison")
         .await
         .unwrap());
     assert_eq!(
@@ -3085,6 +3143,14 @@ async fn operator_retry_and_ack_dead_letter() {
         1
     );
     assert!(store.retry_dead_letter_delivery(&claimed.id).await.unwrap());
+    let reset = store
+        .get_event_delivery(&claimed.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reset.checkpoint_json.is_none());
+    assert!(!reset.resume_pending);
+    assert_eq!(reset.invocation_sequence, 0);
     let retried = claim_delivery(&store, "w2").await;
     assert_eq!(retried.id, claimed.id);
     assert!(store

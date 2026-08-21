@@ -16,8 +16,8 @@ use bookclerk_plugin_abi::v2::{
     EventResult, HealthOk, Integration, IntegrationContext, JobHandler, JobHandlerContext,
     JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo, ObjectMetadata,
     OidcClientTemplate, PluginDescribe, PluginRoot, PutResult, ReadResult, ScalarLimitsDto, Source,
-    SourceContext, WorkerContext, WriteOptions, MAX_CHECKPOINT_BYTES, MAX_LIST_PAGE,
-    MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+    SourceContext, WorkerContext, WriteOptions, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
+    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_abi::{PluginError, Result as AbiResult};
 use tokio::io::AsyncRead;
@@ -281,53 +281,7 @@ impl Integration for HttpIntegration {
             )
             .await
             .map_err(map_http)?;
-        let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("ack");
-        Ok(match kind {
-            "retry" => EventResult::Retry {
-                retry_at_unix_ms: v.get("retryAtUnixMs").and_then(|x| x.as_u64()).unwrap_or(0),
-                reason: v
-                    .get("reason")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            },
-            "reject" => EventResult::Reject {
-                reason: v
-                    .get("reason")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            },
-            "deadLetter" => EventResult::DeadLetter {
-                reason: v
-                    .get("reason")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            },
-            "suspended" => {
-                let checkpoint_json = v
-                    .get("checkpointJson")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if checkpoint_json.len() > MAX_CHECKPOINT_BYTES as usize {
-                    return Err(PluginError::payload_too_large(format!(
-                        "checkpoint of {} bytes exceeds {MAX_CHECKPOINT_BYTES}",
-                        checkpoint_json.len()
-                    )));
-                }
-                EventResult::Suspended {
-                    checkpoint_json,
-                    checkpoint_schema_version: v
-                        .get("checkpointSchemaVersion")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(0) as u32,
-                    wake_at_unix_ms: v.get("wakeAtUnixMs").and_then(|x| x.as_u64()).unwrap_or(0),
-                }
-            }
-            _ => EventResult::Ack,
-        })
+        EventResult::from_json_value(&v)
     }
 
     async fn start(&self) -> AbiResult<()> {

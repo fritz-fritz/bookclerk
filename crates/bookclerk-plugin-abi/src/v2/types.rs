@@ -151,6 +151,49 @@ pub enum EventResult {
     },
 }
 
+impl EventResult {
+    /// Decode JSON `{"kind":"ack"|…}`. Missing or unknown `kind` is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::PluginErrorCode::InvalidParams`] when the payload is not
+    /// a tagged [`EventResult`], or [`crate::PluginErrorCode::PayloadTooLarge`]
+    /// when a `suspended` checkpoint exceeds [`MAX_CHECKPOINT_BYTES`].
+    pub fn from_json_value(value: &serde_json::Value) -> crate::Result<Self> {
+        let parsed: Self = serde_json::from_value(value.clone()).map_err(|err| {
+            crate::PluginError::invalid_params(format!("malformed EventResult: {err}"))
+        })?;
+        parsed.reject_oversized_checkpoint()
+    }
+
+    /// Decode a JSON object string as [`EventResult`].
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::from_json_value`].
+    pub fn from_json_str(raw: &str) -> crate::Result<Self> {
+        let value: serde_json::Value = serde_json::from_str(raw).map_err(|err| {
+            crate::PluginError::invalid_params(format!("malformed EventResult: {err}"))
+        })?;
+        Self::from_json_value(&value)
+    }
+
+    fn reject_oversized_checkpoint(self) -> crate::Result<Self> {
+        if let Self::Suspended {
+            checkpoint_json, ..
+        } = &self
+        {
+            if checkpoint_json.len() > MAX_CHECKPOINT_BYTES as usize {
+                return Err(crate::PluginError::payload_too_large(format!(
+                    "checkpoint of {} bytes exceeds {MAX_CHECKPOINT_BYTES}",
+                    checkpoint_json.len()
+                )));
+            }
+        }
+        Ok(self)
+    }
+}
+
 /// Health payload.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -684,5 +727,17 @@ mod tests {
         assert_eq!(json["wakeAtUnixMs"], 42);
         let back: EventResult = serde_json::from_value(json).unwrap();
         assert_eq!(back, suspended);
+    }
+
+    #[test]
+    fn event_result_from_json_rejects_missing_and_unknown_kind() {
+        assert!(EventResult::from_json_str("{}").is_err());
+        assert!(EventResult::from_json_str("").is_err());
+        assert!(EventResult::from_json_str("not-json").is_err());
+        assert!(EventResult::from_json_str(r#"{"kind":"nope"}"#).is_err());
+        assert_eq!(
+            EventResult::from_json_str(r#"{"kind":"ack"}"#).unwrap(),
+            EventResult::Ack
+        );
     }
 }
