@@ -563,6 +563,7 @@ impl LibraryStore {
     /// # Errors
     ///
     /// Returns [`LibraryError::Orm`] when the update fails.
+    #[allow(clippy::too_many_arguments)]
     pub async fn suspend_event_delivery(
         &self,
         fence: &EventDeliveryFence,
