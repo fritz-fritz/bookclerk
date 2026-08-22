@@ -3175,10 +3175,7 @@ async fn dispatch_snapshot_cas_two_stores_agree() {
         .await
         .unwrap();
     let db2 = bookclerk_plugin_database_sqlite::open(&path).await.unwrap();
-    let store1 = LibraryStore::from_connection(db1.clone())
-        .with_atomic_txn(Arc::new(InProcessSqliteAtomic { db: db1 }));
-    let store2 = LibraryStore::from_connection(db2.clone())
-        .with_atomic_txn(Arc::new(InProcessSqliteAtomic { db: db2 }));
+    let store1 = LibraryStore::from_connection(db1.clone());
     let created = store1
         .publish_domain_event(publish_spec(
             "book_acquired",
@@ -3190,6 +3187,9 @@ async fn dispatch_snapshot_cas_two_stores_agree() {
     let PublishDomainEventOutcome::Created { id } = created else {
         panic!("{created:?}");
     };
+    let store1 = store1.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db: db1 }));
+    let store2 = LibraryStore::from_connection(db2.clone())
+        .with_atomic_txn(Arc::new(InProcessSqliteAtomic { db: db2 }));
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     super::event_outbox::set_snapshot_claim_barrier(Some(barrier));
     let op = format!("dispatch-{id}");
