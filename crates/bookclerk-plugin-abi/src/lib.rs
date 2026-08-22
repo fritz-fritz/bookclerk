@@ -80,11 +80,12 @@ pub mod plugin_v2_capnp {
 mod wire_fixtures;
 
 pub use db::{
-    atomic_status, DbAtomicParams, DbAtomicPlan, DbAtomicRequest, DbAtomicResult, DbAtomicTiming,
-    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbPlanStatement,
-    DbPlanStatementKind, DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
-    D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL, FIRST_PARTY_MAX_STATEMENTS,
-    HOST_MIN_BINDS, HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS,
+    atomic_status, sea_null, sea_null_kind, DbAtomicParams, DbAtomicPlan, DbAtomicRequest,
+    DbAtomicResult, DbAtomicTiming, DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult,
+    DbPlanStatement, DbPlanStatementKind, DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto,
+    StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS,
+    SEA_NULL_KEY, SQLITE_MAX_BINDS,
 };
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use events::{HostToPluginEvent, PluginToHostEvent};
@@ -116,6 +117,14 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(ABI_SCHEMA_JSON).expect("abi.json must be valid JSON");
         assert_eq!(v["title"], "BookclerkPluginAbi");
+    }
+
+    #[test]
+    fn sea_null_wire_shape() {
+        let v = sea_null("Bytes");
+        assert_eq!(v, serde_json::json!({ "$sea_null": "Bytes" }));
+        assert_eq!(sea_null_kind(&v), Some("Bytes"));
+        assert_eq!(sea_null_kind(&serde_json::json!(null)), None);
     }
 
     #[test]

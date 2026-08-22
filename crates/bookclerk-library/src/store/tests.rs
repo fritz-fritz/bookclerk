@@ -5902,7 +5902,7 @@ fn postgres_tests_enabled() -> bool {
 /// Opens a disposable Postgres database with a multi-connection pool.
 ///
 /// Requires `BOOKCLERK_TEST_POSTGRES_URL`. Setup failures are fatal so a
-/// required CI job cannot pass without exercising the advisory lock.
+/// required CI job cannot pass without exercising the serialization slot.
 async fn postgres_test_store() -> LibraryStore {
     let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL").unwrap_or_else(|_| {
         panic!(

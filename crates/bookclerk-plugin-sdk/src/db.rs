@@ -15,14 +15,11 @@ use sea_orm::{ProxyExecResult, ProxyRow, Statement, Value};
 use serde_json::Value as JsonValue;
 
 pub use bookclerk_plugin_abi::{
-    atomic_status, DbAtomicParams, DbAtomicPlan, DbAtomicRequest, DbAtomicResult, DbAtomicTiming,
-    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbPlanStatement,
-    DbPlanStatementKind, DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
-    D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    atomic_status, sea_null, sea_null_kind, DbAtomicParams, DbAtomicPlan, DbAtomicRequest,
+    DbAtomicResult, DbAtomicTiming, DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult,
+    DbPlanStatement, DbPlanStatementKind, DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto,
+    StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL, SEA_NULL_KEY,
 };
-
-/// JSON object key that carries a typed SeaORM null (`{"$sea_null": "BigInt"}`).
-const SEA_NULL_KEY: &str = "$sea_null";
 
 /// Converts a SeaORM [`Statement`] into the wire [`StatementDto`] used by `dbQuery` / `dbExecute`.
 ///
@@ -280,9 +277,7 @@ pub fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
 
 /// Wire JSON object for a typed SeaORM null of `kind`.
 fn sea_null_json(kind: &str) -> JsonValue {
-    let mut map = serde_json::Map::new();
-    map.insert(SEA_NULL_KEY.into(), JsonValue::String(kind.to_string()));
-    JsonValue::Object(map)
+    sea_null(kind)
 }
 
 /// Rebuilds a typed SeaORM `Value::…(None)` from a `$sea_null` object; unknown kinds become string null.

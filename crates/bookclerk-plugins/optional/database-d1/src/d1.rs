@@ -846,6 +846,11 @@ mod tests {
         assert!(sql.contains("encrypted_secrets"), "{sql}");
         assert!(sql.contains("totp_enabled"), "{sql}");
         assert!(sql.contains("db_atomic_receipts"), "{sql}");
+        let body = serde_json::to_string(&queries[0]).unwrap();
+        assert!(
+            !body.contains("$sea_null"),
+            "D1 HTTP params must flatten typed nulls to JSON null: {body}"
+        );
     }
 
     #[tokio::test]

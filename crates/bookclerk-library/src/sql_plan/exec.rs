@@ -99,6 +99,16 @@ pub async fn execute_plan_on(
 
 /// Maps a JSON bind onto a SeaORM [`Value`], decoding `b64:` strings as blobs.
 fn json_to_sea(v: &JsonValue) -> Value {
+    if let Some(kind) = bookclerk_plugin_abi::sea_null_kind(v) {
+        return match kind {
+            "Bytes" => Value::Bytes(None),
+            "BigInt" | "Int" | "TinyInt" | "SmallInt" | "TinyUnsigned" | "SmallUnsigned"
+            | "Unsigned" | "BigUnsigned" => Value::BigInt(None),
+            "Bool" => Value::Bool(None),
+            "Double" | "Float" => Value::Double(None),
+            _ => Value::String(None),
+        };
+    }
     match v {
         JsonValue::Null => Value::String(None),
         JsonValue::Bool(b) => Value::Bool(Some(*b)),
@@ -140,5 +150,36 @@ fn sea_to_json(v: &Value) -> JsonValue {
         Value::Char(Some(c)) => JsonValue::String(c.to_string()),
         Value::Bytes(Some(b)) => JsonValue::String(crate::bytes_to_b64_string(b)),
         _ => JsonValue::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_to_sea;
+    use sea_orm::Value;
+    use serde_json::json;
+
+    #[test]
+    fn typed_null_bytes_is_bytea_null() {
+        assert!(matches!(
+            json_to_sea(&json!({ "$sea_null": "Bytes" })),
+            Value::Bytes(None)
+        ));
+    }
+
+    #[test]
+    fn typed_null_bigint_is_integer_null() {
+        assert!(matches!(
+            json_to_sea(&json!({ "$sea_null": "BigInt" })),
+            Value::BigInt(None)
+        ));
+    }
+
+    #[test]
+    fn b64_string_decodes_as_bytes() {
+        assert!(matches!(
+            json_to_sea(&json!("b64:AA==")),
+            Value::Bytes(Some(b)) if b.as_slice() == [0]
+        ));
     }
 }

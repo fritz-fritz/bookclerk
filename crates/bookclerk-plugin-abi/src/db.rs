@@ -354,12 +354,33 @@ pub enum DbPlanStatementKind {
 pub struct DbPlanStatement {
     /// Dialect-specific SQL (SQLite `?` or Postgres `$1`).
     pub sql: String,
-    /// Ordered JSON binds (null, bool, number, string, or `b64:` blobs).
+    /// Ordered JSON binds (null, bool, number, string, `b64:` blobs, or
+    /// [`sea_null`] objects so Postgres can distinguish BYTEA/INTEGER nulls).
     #[serde(default)]
     pub binds: Vec<JsonValue>,
     /// Whether the guest should collect rows or only `rowsAffected`.
     #[serde(default)]
     pub kind: DbPlanStatementKind,
+}
+
+/// JSON object key for a typed SQL null (`{"$sea_null": "Bytes"}`).
+pub const SEA_NULL_KEY: &str = "$sea_null";
+
+/// Wire JSON for a typed null bind of SeaORM `kind` (`Bytes`, `BigInt`, `String`, …).
+///
+/// Postgres infers parameter types from the bind OID. A JSON `null` that
+/// becomes `Value::String(None)` cannot be inserted into `BYTEA` or `INTEGER`.
+#[must_use]
+pub fn sea_null(kind: &str) -> JsonValue {
+    let mut map = serde_json::Map::new();
+    map.insert(SEA_NULL_KEY.into(), JsonValue::String(kind.to_string()));
+    JsonValue::Object(map)
+}
+
+/// Returns the `$sea_null` kind when `v` is a typed-null object.
+#[must_use]
+pub fn sea_null_kind(v: &JsonValue) -> Option<&str> {
+    v.get(SEA_NULL_KEY)?.as_str()
 }
 
 /// Generic atomic batch: ordered SQL with outcome/receipt selectors.

@@ -6,7 +6,9 @@
 
 use std::time::Duration;
 
-use bookclerk_plugin_sdk::{DbAtomicPlan, DbAtomicRequest, DbAtomicResult, DbAtomicTiming};
+use bookclerk_plugin_sdk::{
+    sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicResult, DbAtomicTiming,
+};
 use sea_orm::DbErr;
 use serde_json::Value as JsonValue;
 
@@ -38,7 +40,7 @@ impl D1Proxy {
         let statements: Vec<SqlStmt> = plan
             .statements
             .iter()
-            .map(|s| (s.sql.clone(), s.binds.clone()))
+            .map(|s| (s.sql.clone(), d1_wire_binds(&s.binds)))
             .collect();
         let mut last_err = None;
         for attempt in 0..ATOMIC_HTTP_ATTEMPTS {
@@ -81,6 +83,20 @@ impl D1Proxy {
         }
         Err(last_err.unwrap_or_else(|| ambiguous_d1("exhausted retries")))
     }
+}
+
+/// D1 HTTP params are untyped JSON; typed `$sea_null` objects become SQL NULL.
+fn d1_wire_binds(binds: &[JsonValue]) -> Vec<JsonValue> {
+    binds
+        .iter()
+        .map(|v| {
+            if sea_null_kind(v).is_some() {
+                JsonValue::Null
+            } else {
+                v.clone()
+            }
+        })
+        .collect()
 }
 
 /// Waits before a D1 retry, honoring `Retry-After` or a capped exponential backoff.

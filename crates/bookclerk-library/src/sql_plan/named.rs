@@ -453,11 +453,19 @@ fn j_opt_str(s: Option<&str>) -> JsonValue {
     }
 }
 
-/// JSON number bind, or JSON null when the optional value is absent.
+/// JSON number bind, or a typed BigInt null when the optional value is absent.
 fn j_opt_i64(n: Option<i64>) -> JsonValue {
     match n {
         Some(v) => JsonValue::from(v),
-        None => JsonValue::Null,
+        None => bookclerk_plugin_abi::sea_null("BigInt"),
+    }
+}
+
+/// JSON `b64:` blob bind, or a typed Bytes null when the optional value is absent.
+fn j_opt_blob(s: Option<&str>) -> JsonValue {
+    match s {
+        Some(v) => JsonValue::String(v.to_string()),
+        None => bookclerk_plugin_abi::sea_null("Bytes"),
     }
 }
 
@@ -1089,12 +1097,12 @@ fn plan_confirm_totp_enrollment(
                     j_str(format),
                     j_str(ciphertext),
                     j_opt_str(kdf_algorithm),
-                    j_opt_str(kdf_salt),
+                    j_opt_blob(kdf_salt),
                     j_opt_i64(kdf_m_cost),
                     j_opt_i64(kdf_t_cost),
                     j_opt_i64(kdf_p_cost),
                     j_opt_str(cipher_algorithm),
-                    j_opt_str(cipher_nonce),
+                    j_opt_blob(cipher_nonce),
                     j_str(created),
                     j_str(now),
                     j_i64(user_id),
@@ -2453,6 +2461,9 @@ mod tests {
     }
 
     fn json_to_rusqlite(v: &JsonValue) -> rusqlite::types::Value {
+        if bookclerk_plugin_abi::sea_null_kind(v).is_some() {
+            return rusqlite::types::Value::Null;
+        }
         match v {
             JsonValue::Null => rusqlite::types::Value::Null,
             JsonValue::Bool(b) => rusqlite::types::Value::Integer(i64::from(*b)),
@@ -2465,7 +2476,13 @@ mod tests {
                     rusqlite::types::Value::Text(n.to_string())
                 }
             }
-            JsonValue::String(s) => rusqlite::types::Value::Text(s.clone()),
+            JsonValue::String(s) => {
+                if let Some(bytes) = crate::b64_string_to_bytes(s) {
+                    rusqlite::types::Value::Blob(bytes)
+                } else {
+                    rusqlite::types::Value::Text(s.clone())
+                }
+            }
             other => rusqlite::types::Value::Text(other.to_string()),
         }
     }
@@ -3236,6 +3253,34 @@ mod tests {
             kdf_p_cost: None,
             created_at: "2024-06-01T00:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn totp_optional_blob_and_int_binds_are_typed_nulls() {
+        let req = test_req(confirm_totp_params(7), "totp-typed-null");
+        let compiled =
+            compile_named_request(&req, "2024-06-01T00:00:00Z", SqlFamily::Postgres).unwrap();
+        let insert = compiled
+            .plan
+            .statements
+            .iter()
+            .find(|s| s.sql.contains("INSERT INTO encrypted_secrets"))
+            .expect("totp plan inserts encrypted_secrets");
+        assert_eq!(insert.binds[4], json!({ "$sea_null": "Bytes" }));
+        assert_eq!(insert.binds[5], json!({ "$sea_null": "BigInt" }));
+        assert_eq!(insert.binds[6], json!({ "$sea_null": "BigInt" }));
+        assert_eq!(insert.binds[7], json!({ "$sea_null": "BigInt" }));
+        assert!(insert.binds[2]
+            .as_str()
+            .is_some_and(|s| s.starts_with("b64:")));
+        assert!(insert.binds[9]
+            .as_str()
+            .is_some_and(|s| s.starts_with("b64:")));
+        assert!(
+            insert.sql.contains("$5"),
+            "postgres renderer must number blob binds:\n{}",
+            insert.sql
+        );
     }
 
     fn seed_totp_secret(conn: &Connection, user_id: i64, name: &str) {
