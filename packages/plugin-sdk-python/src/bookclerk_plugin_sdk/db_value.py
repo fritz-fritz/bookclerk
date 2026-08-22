@@ -15,31 +15,43 @@ TYPES = frozenset({"unspecified", "bool", "int64", "float64", "text", "bytes"})
 
 
 class NullValue(TypedDict):
+    """Typed SQL NULL with a declared ``DbType``."""
+
     kind: Literal["null"]
     value: DbType
 
 
 class BoolValue(TypedDict):
+    """Boolean cell."""
+
     kind: Literal["boolean"]
     value: bool
 
 
 class Int64Value(TypedDict):
+    """Signed 64-bit integer cell."""
+
     kind: Literal["int64"]
     value: int
 
 
 class Float64Value(TypedDict):
+    """Finite IEEE-754 float64 cell."""
+
     kind: Literal["float64"]
     value: float
 
 
 class TextValue(TypedDict):
+    """UTF-8 text cell (embedded NUL allowed)."""
+
     kind: Literal["text"]
     value: str
 
 
 class BytesValue(TypedDict):
+    """Binary cell encoded as a ``b64:`` string."""
+
     kind: Literal["bytes"]
     value: str
 
