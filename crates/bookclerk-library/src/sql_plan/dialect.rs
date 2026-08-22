@@ -96,10 +96,16 @@ fn sqlite_fns_to_postgres(family: SqlFamily, sql: &str) -> String {
     }
     let mut sql = sql.replace("IFNULL(", "COALESCE(");
     sql = sql.replace("MAX(attempt_count, 1)", "GREATEST(attempt_count, 1)");
-    sql = sql.replace("json_valid(payload) = 0", "FALSE");
-    sql = sql.replace("json_valid(payload) = 1", "TRUE");
+    // PG16+ `IS JSON` is the portable equivalent of SQLite `json_valid`.
+    // Do not rewrite these to TRUE/FALSE: claim must quarantine poison rows
+    // and skip them, not cast invalid text to jsonb (which aborts the batch).
+    sql = sql.replace("json_valid(payload) = 0", "(payload IS NOT JSON)");
+    sql = sql.replace("json_valid(payload) = 1", "(payload IS JSON)");
     sql = rewrite_json_extract(&sql);
-    sql = sql.replace("json(payload)", "(payload)::jsonb");
+    sql = sql.replace(
+        "json(payload)",
+        "(CASE WHEN payload IS JSON THEN payload::jsonb END)",
+    );
     sql = sql.replace(
         "json(CASE WHEN password_hash IS NOT NULL AND password_hash != '' THEN 'true' ELSE 'false' END)",
         "(password_hash IS NOT NULL AND password_hash != '')",
@@ -148,7 +154,12 @@ fn rewrite_json_extract(sql: &str) -> String {
             continue;
         };
         let pg_path = json_path.replace('.', ",");
-        out.push_str(&format!("(({expr})::jsonb #>> '{{{pg_path}}}')"));
+        // Guard the cast: Postgres OR/AND do not short-circuit, so
+        // `json_valid = 0 OR json_extract(...)` must not evaluate `::jsonb`
+        // on malformed text.
+        out.push_str(&format!(
+            "(CASE WHEN ({expr}) IS JSON THEN (({expr})::jsonb #>> '{{{pg_path}}}') END)"
+        ));
         rest = rest2;
     }
     out.push_str(rest);
@@ -188,7 +199,40 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "SELECT ((payload)::jsonb #>> '{v}') FROM t WHERE id = $1"
+            "SELECT (CASE WHEN (payload) IS JSON THEN ((payload)::jsonb #>> '{v}') END) FROM t WHERE id = $1"
+        );
+    }
+
+    #[test]
+    fn postgres_rewrites_json_valid_to_is_json() {
+        let invalid = render_statement(
+            SqlFamily::Postgres,
+            "WHERE json_valid(payload) = 0 OR json_extract(payload, '$.v') IS NULL",
+        );
+        assert!(
+            invalid.contains("(payload IS NOT JSON)"),
+            "malformed check must stay a real predicate:\n{invalid}"
+        );
+        assert!(
+            !invalid.contains("FALSE") && !invalid.contains("json_valid"),
+            "{invalid}"
+        );
+        assert!(
+            invalid.contains("IS JSON THEN"),
+            "json_extract must not cast invalid text:\n{invalid}"
+        );
+
+        let valid = render_statement(
+            SqlFamily::Postgres,
+            "AND json_valid(payload) = 1 AND json_extract(payload, '$.v') = '1'",
+        );
+        assert!(
+            valid.contains("(payload IS JSON)"),
+            "valid check must stay a real predicate:\n{valid}"
+        );
+        assert!(
+            !valid.contains("TRUE") && !valid.contains("json_valid"),
+            "{valid}"
         );
     }
 

@@ -339,6 +339,124 @@ async fn postgres_plan_receipt_replay() {
     assert!(replay.replayed);
 }
 
+/// Disposable Postgres so claim cannot see leftover `jobs` rows.
+async fn postgres_migrated_db() -> sea_orm::DatabaseConnection {
+    let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL").expect("postgres url");
+    let db_name = format!("plan_{}", uuid::Uuid::new_v4().as_simple());
+    let admin = sea_orm::Database::connect(url.as_str())
+        .await
+        .expect("connect to BOOKCLERK_TEST_POSTGRES_URL");
+    let backend = sea_orm::ConnectionTrait::get_database_backend(&admin);
+    sea_orm::ConnectionTrait::execute_raw(
+        &admin,
+        sea_orm::Statement::from_string(backend, format!("CREATE DATABASE {db_name}")),
+    )
+    .await
+    .expect("create disposable postgres database");
+    let (base, query) = match url.split_once('?') {
+        Some((base, q)) => (base, Some(q)),
+        None => (url.as_str(), None),
+    };
+    let trimmed = base.trim_end_matches('/');
+    let slash = trimmed
+        .rfind('/')
+        .expect("BOOKCLERK_TEST_POSTGRES_URL must include a database path");
+    let db_url = match query {
+        Some(q) => format!("{}/{db_name}?{q}", &trimmed[..slash]),
+        None => format!("{}/{db_name}", &trimmed[..slash]),
+    };
+    let db = sea_orm::Database::connect(&db_url)
+        .await
+        .expect("connect to disposable postgres database");
+    let backend = sea_orm::ConnectionTrait::get_database_backend(&db);
+    for step in crate::migrations::migration_sql_postgres() {
+        for stmt in step.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            sea_orm::ConnectionTrait::execute_raw(
+                &db,
+                sea_orm::Statement::from_string(backend, stmt.to_string()),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("postgres migration `{stmt}` failed: {err}"));
+        }
+    }
+    db
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_claim_malformed_json_is_quarantined() {
+    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        return;
+    }
+    let db = postgres_migrated_db().await;
+    let backend = sea_orm::ConnectionTrait::get_database_backend(&db);
+    for (id, payload, priority) in [
+        ("bad-json", "{not-json", 10_i64),
+        ("good", r#"{"v":1}"#, 0_i64),
+    ] {
+        sea_orm::ConnectionTrait::execute_raw(
+            &db,
+            sea_orm::Statement::from_sql_and_values(
+                backend,
+                "INSERT INTO jobs (\
+                    id, kind, state, priority, resource_class, payload, progress, \
+                    attempt_count, max_attempts, run_after, lease_owner, lease_expires_at, \
+                    dedup_key, error_kind, error_message, cancel_requested, \
+                    created_at, updated_at, started_at, finished_at, lease_generation\
+                 ) VALUES ($1, 'scan', 'pending', $2, 'network', $3, NULL, 0, 3, \
+                    '2020-01-01T00:00:00Z', NULL, NULL, $1, NULL, NULL, 0, \
+                    '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', NULL, NULL, 0)",
+                [id.into(), priority.into(), payload.into()],
+            ),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("seed job {id}: {err}"));
+    }
+    let now = "2024-06-01T00:00:00Z";
+    let req = DbAtomicRequest::named(
+        "pg-claim-poison",
+        DbAtomicParams::ClaimNextJob {
+            resource_class: "network".into(),
+            owner: "worker-1".into(),
+            lease_secs: 60,
+        },
+    );
+    let compiled = compile_named_request(&req, now, SqlFamily::Postgres).unwrap();
+    let result = execute_plan_on(
+        &db,
+        &compiled.plan,
+        &compiled.expected_hash,
+        "pg-claim-poison",
+        "postgres_txn",
+    )
+    .await
+    .expect("malformed payload must not abort the claim batch");
+    assert_eq!(result.status, atomic_status::OK);
+    let rows = sea_orm::ConnectionTrait::query_all_raw(
+        &db,
+        sea_orm::Statement::from_string(
+            backend,
+            "SELECT id, state, kind, error_kind FROM jobs WHERE id IN ('bad-json', 'good') ORDER BY id",
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].try_get_by_index::<String>(0).unwrap(), "bad-json");
+    assert_eq!(rows[0].try_get_by_index::<String>(1).unwrap(), "failed");
+    assert_eq!(rows[0].try_get_by_index::<String>(2).unwrap(), "invalid");
+    assert_eq!(
+        rows[0].try_get_by_index::<String>(3).unwrap(),
+        "invalid_job"
+    );
+    assert_eq!(rows[1].try_get_by_index::<String>(0).unwrap(), "good");
+    assert_eq!(rows[1].try_get_by_index::<String>(1).unwrap(), "running");
+}
+
 #[test]
 fn architecture_lint_database_plugins() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
