@@ -81,6 +81,7 @@ where
     );
 }
 
+/// Enqueue once, then replay the same `operationId`.
 async fn commit_and_replay(db: &DatabaseConnection, family: SqlFamily, timing: &str) {
     let compiled = compile_named_request(
         "vec-enq-conn",
@@ -118,6 +119,7 @@ async fn commit_and_replay(db: &DatabaseConnection, family: SqlFamily, timing: &
     assert!(replay.replayed);
 }
 
+/// Same `operationId` with a different request hash is an idempotency conflict.
 async fn hash_conflict(db: &DatabaseConnection, family: SqlFamily, timing: &str) {
     let first = compile_named_request(
         "vec-conflict",
@@ -168,6 +170,7 @@ async fn hash_conflict(db: &DatabaseConnection, family: SqlFamily, timing: &str)
     assert_eq!(result.status, atomic_status::IDEMPOTENCY_CONFLICT);
 }
 
+/// Duplicate primary-key inserts fail closed (engine unique / 23505).
 async fn unique_generic_insert_fails(db: &DatabaseConnection, timing: &str) {
     let err = execute_statements_on(db, &dup_slot_plan("dup"), "op-unique", timing, 0)
         .await
@@ -179,6 +182,7 @@ async fn unique_generic_insert_fails(db: &DatabaseConnection, timing: &str) {
     );
 }
 
+/// A later failing statement rolls back earlier inserts in the same plan.
 async fn failed_statement_rolls_back(db: &DatabaseConnection, timing: &str) {
     let plan = DbAtomicPlan {
         statements: vec![
@@ -205,6 +209,7 @@ async fn failed_statement_rolls_back(db: &DatabaseConnection, timing: &str) {
         .is_err());
 }
 
+/// Two inserts of the same `db_serialization_slots` key.
 fn dup_slot_plan(key: &str) -> DbAtomicPlan {
     DbAtomicPlan {
         statements: vec![
