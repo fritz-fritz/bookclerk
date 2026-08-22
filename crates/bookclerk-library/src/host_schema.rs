@@ -155,12 +155,28 @@ async fn apply_sqlite_user_version(db: &DatabaseConnection) -> Result<()> {
     let steps = migration_sql();
     for (idx, schema) in steps.iter().enumerate() {
         let version = (idx + 1) as i64;
+        apply_one_sqlite_version(db, backend, version, schema).await?;
+    }
+    exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
+    Ok(())
+}
+
+/// Applies one file-SQLite version, recovering when a peer committed DDL first.
+async fn apply_one_sqlite_version(
+    db: &DatabaseConnection,
+    backend: DbBackend,
+    version: i64,
+    schema: &str,
+) -> Result<()> {
+    let mut delay_ms = 20u64;
+    let mut last_applied_err = None;
+    for attempt in 0..8 {
         if version <= sqlite_user_version(db).await? {
-            continue;
+            return Ok(());
         }
         let mut stmts = split_sql_statements(schema);
         stmts.push(format!("PRAGMA user_version = {version}"));
-        match run_atomic_ddl_retrying(
+        match run_atomic_ddl(
             db,
             backend,
             "sqlite_txn",
@@ -169,13 +185,32 @@ async fn apply_sqlite_user_version(db: &DatabaseConnection) -> Result<()> {
         )
         .await
         {
-            Ok(()) => {}
-            Err(_) if version <= sqlite_user_version(db).await? => {}
+            Ok(()) => return Ok(()),
+            Err(err) if is_already_applied_ddl(&err) => {
+                // Peer's ALTER is visible before its version marker commits.
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                last_applied_err = Some(err);
+            }
+            Err(err) if attempt + 1 < 8 && is_schema_lock_err(&err) => {
+                last_applied_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = delay_ms.saturating_mul(2).min(250);
+            }
             Err(err) => return Err(err),
         }
     }
-    exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
-    Ok(())
+    if version <= sqlite_user_version(db).await? {
+        return Ok(());
+    }
+    if last_applied_err
+        .as_ref()
+        .is_some_and(is_already_applied_ddl)
+    {
+        // Peer applied this version's DDL but has not yet written the marker.
+        exec_sql(db, backend, &format!("PRAGMA user_version = {version}")).await?;
+        return Ok(());
+    }
+    Err(last_applied_err.expect("sqlite schema version retry"))
 }
 
 /// Additive sqlite steps after the D1 V27 batch (versions 29+).
@@ -343,6 +378,15 @@ async fn run_atomic_ddl_retrying(
         }
     }
     Err(last_lock_err.expect("schema ddl lock retry"))
+}
+
+/// True when a concurrent migrator already applied this version's DDL.
+fn is_already_applied_ddl(err: &LibraryError) -> bool {
+    let s = err.to_string().to_lowercase();
+    s.contains("duplicate column")
+        || s.contains("already exists")
+        || s.contains("23505")
+        || s.contains("sqlite_constraint")
 }
 
 /// True when a concurrent migrator should retry this version.

@@ -115,7 +115,7 @@ impl SqliteProxy {
     /// Call after the host applies schema (see [`open`] / [`open_memory`]).
     #[must_use]
     pub fn new(conn: Connection) -> Self {
-        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
         conn.progress_handler(250, Some(|| exec_deadline_expired()));
         Self {
             conn: Arc::new(Mutex::new(SqliteState { conn, txn_depth: 0 })),
