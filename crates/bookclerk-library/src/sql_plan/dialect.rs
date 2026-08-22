@@ -65,10 +65,15 @@ pub fn insert_or_ignore(family: SqlFamily, sql: &str) -> String {
     if family != SqlFamily::Postgres {
         return sql.to_string();
     }
-    if let Some(rest) = sql.trim_start().strip_prefix("INSERT OR IGNORE INTO") {
-        return format!("INSERT INTO{rest} ON CONFLICT DO NOTHING");
+    let Some(rest) = sql.trim_start().strip_prefix("INSERT OR IGNORE INTO") else {
+        return sql.to_string();
+    };
+    // `ON CONFLICT` must precede `RETURNING`.
+    if let Some(idx) = rest.find(" RETURNING ") {
+        let (head, returning) = rest.split_at(idx);
+        return format!("INSERT INTO{head} ON CONFLICT DO NOTHING{returning}");
     }
-    sql.to_string()
+    format!("INSERT INTO{rest} ON CONFLICT DO NOTHING")
 }
 
 /// Rewrites SQLite `json_object(` to Postgres `json_build_object(`.
@@ -241,6 +246,18 @@ mod tests {
         assert_eq!(
             render_statement(SqlFamily::Sqlite, "a = ? AND b = ?"),
             "a = ? AND b = ?"
+        );
+    }
+
+    #[test]
+    fn postgres_insert_or_ignore_keeps_returning_after_conflict() {
+        let sql = render_statement(
+            SqlFamily::Postgres,
+            "INSERT OR IGNORE INTO t (id) SELECT ? RETURNING id",
+        );
+        assert_eq!(
+            sql,
+            "INSERT INTO t (id) SELECT $1 ON CONFLICT DO NOTHING RETURNING id"
         );
     }
 }

@@ -120,12 +120,13 @@ pub trait AtomicTxnBackend: Send + Sync {
         event: Option<PublishDomainEventSpec>,
     ) -> Result<()>;
 
-    /// Create deliveries for `subscribers` and mark the event dispatched.
+    /// Create deliveries for `subscribers`. `mark_dispatched` finishes the parent event.
     async fn dispatch_event_deliveries(
         &self,
         event_id: &str,
         subscribers: &[EventSubscriber],
         operation_id: &str,
+        mark_dispatched: bool,
     ) -> Result<u32>;
 
     /// CAS-claim one pending delivery after the host has filtered eligibility.

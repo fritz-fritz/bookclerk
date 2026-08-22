@@ -124,6 +124,12 @@ pub fn compile_claim_event_delivery(
         hasher.update(b":");
         hasher.update(owner.as_bytes());
         hasher.update(b":");
+        hasher.update(lease_secs.to_string().as_bytes());
+        hasher.update(b":");
+        hasher.update(plugin_id.as_bytes());
+        hasher.update(b":");
+        hasher.update(resource_class.as_bytes());
+        hasher.update(b":");
         hasher.update(max_in_flight.to_string().as_bytes());
         hex::encode(hasher.finalize())
     };
@@ -418,7 +424,8 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
         DbAtomicParams::DispatchEventDeliveries {
             event_id,
             subscribers_json,
-        } => plan_dispatch_event_deliveries(event_id, subscribers_json, now),
+            mark_dispatched,
+        } => plan_dispatch_event_deliveries(event_id, subscribers_json, *mark_dispatched, now),
         DbAtomicParams::ClaimNextEventDelivery {
             owner,
             lease_secs,
@@ -1832,10 +1839,16 @@ fn plan_set_acquire_status(
     }
 }
 
-/// Create deliveries from a JSON subscriber array and mark the event dispatched.
-fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &str) -> AtomicPlan {
+/// Create deliveries from a JSON subscriber array; mark dispatched only on the last page.
+fn plan_dispatch_event_deliveries(
+    event_id: &str,
+    subscribers_json: &str,
+    mark_dispatched: bool,
+    now: &str,
+) -> AtomicPlan {
     let subs: Vec<JsonValue> = serde_json::from_str(subscribers_json).unwrap_or_default();
     let mut statements = Vec::new();
+    let mut page_plugins: Vec<String> = Vec::new();
     for sub in subs.iter().take(24) {
         let plugin_id = sub
             .get("pluginId")
@@ -1855,6 +1868,7 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
             continue;
         }
         let delivery_id = format!("{event_id}:{plugin_id}");
+        page_plugins.push(plugin_id.to_string());
         statements.push(sql(
             "INSERT OR IGNORE INTO event_deliveries (\
                 id, event_id, plugin_id, idempotency_key, state, attempt_count, max_attempts, \
@@ -1865,7 +1879,8 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
              ) SELECT ?, ?, ?, ?, 'pending', 0, 8, NULL, NULL, 0, ?, 0, 0, NULL, 0, \
                 COALESCE((SELECT ordering_key FROM domain_events WHERE id = ?), ''), \
                 NULL, NULL, ?, ?, 0, 'network', '', '', '' \
-             WHERE EXISTS (SELECT 1 FROM domain_events WHERE id = ?)",
+             WHERE EXISTS (SELECT 1 FROM domain_events WHERE id = ?) \
+             RETURNING id",
             vec![
                 j_str(&delivery_id),
                 j_str(event_id),
@@ -1879,29 +1894,31 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
             ],
         ));
     }
-    statements.push(sql(
-        "INSERT OR IGNORE INTO event_outbox_stats (\
-            id, retries_total, suspensions_total, dead_letters_total, \
-            dispatch_latency_ms_sum, dispatch_count, handler_latency_ms_sum, handler_count\
-         ) SELECT 1, 0, 0, 0, 0, 0, 0, 0 WHERE 1",
-        vec![],
-    ));
-    statements.push(sql(
-        "UPDATE event_outbox_stats SET \
-            dispatch_count = dispatch_count + 1, \
-            dispatch_latency_ms_sum = dispatch_latency_ms_sum + MAX(0, \
-                CAST((julianday(?) - julianday((SELECT created_at FROM domain_events WHERE id = ?))) * 86400000 AS INTEGER)\
-            ) \
-         WHERE id = 1 AND EXISTS (\
-            SELECT 1 FROM domain_events WHERE id = ? AND dispatch_state = 'pending'\
-         )",
-        vec![j_str(now), j_str(event_id), j_str(event_id)],
-    ));
-    statements.push(sql(
-        "UPDATE domain_events SET dispatch_state = 'dispatched' \
-         WHERE id = ? AND dispatch_state = 'pending'",
-        vec![j_str(event_id)],
-    ));
+    if mark_dispatched {
+        statements.push(sql(
+            "INSERT OR IGNORE INTO event_outbox_stats (\
+                id, retries_total, suspensions_total, dead_letters_total, \
+                dispatch_latency_ms_sum, dispatch_count, handler_latency_ms_sum, handler_count\
+             ) SELECT 1, 0, 0, 0, 0, 0, 0, 0 WHERE 1",
+            vec![],
+        ));
+        statements.push(sql(
+            "UPDATE event_outbox_stats SET \
+                dispatch_count = dispatch_count + 1, \
+                dispatch_latency_ms_sum = dispatch_latency_ms_sum + MAX(0, \
+                    CAST((julianday(?) - julianday((SELECT created_at FROM domain_events WHERE id = ?))) * 86400000 AS INTEGER)\
+                ) \
+             WHERE id = 1 AND EXISTS (\
+                SELECT 1 FROM domain_events WHERE id = ? AND dispatch_state = 'pending'\
+             )",
+            vec![j_str(now), j_str(event_id), j_str(event_id)],
+        ));
+        statements.push(sql(
+            "UPDATE domain_events SET dispatch_state = 'dispatched' \
+             WHERE id = ? AND dispatch_state = 'pending'",
+            vec![j_str(event_id)],
+        ));
+    }
     let outcome_index = statements.len();
     statements.push(sql(
         "SELECT CASE WHEN EXISTS (SELECT 1 FROM domain_events WHERE id = ?) \
@@ -1909,10 +1926,22 @@ fn plan_dispatch_event_deliveries(event_id: &str, subscribers_json: &str, now: &
         vec![j_str(event_id)],
     ));
     let payload_index = statements.len();
+    let mut created_binds = vec![j_str(event_id), j_str(now)];
+    let plugin_placeholders = if page_plugins.is_empty() {
+        created_binds.push(j_str(""));
+        "?".to_string()
+    } else {
+        created_binds.extend(page_plugins.iter().map(|p| j_str(p)));
+        vec!["?"; page_plugins.len()].join(", ")
+    };
     statements.push(sql(
-        "SELECT json_object('created', \
-            (SELECT COUNT(*) FROM event_deliveries WHERE event_id = ?)) AS payload",
-        vec![j_str(event_id)],
+        &format!(
+            "SELECT json_object('created', \
+                (SELECT COUNT(*) FROM event_deliveries \
+                 WHERE event_id = ? AND created_at = ? AND plugin_id IN ({plugin_placeholders}))) \
+             AS payload"
+        ),
+        created_binds,
     ));
     AtomicPlan {
         statements,
@@ -1973,9 +2002,10 @@ fn plan_claim_event_delivery_cas(
     ));
     statements.push(sql(
         "SELECT CASE WHEN EXISTS (\
-            SELECT 1 FROM event_deliveries WHERE id = ? AND state = 'running' AND lease_owner = ?\
+            SELECT 1 FROM event_deliveries \
+            WHERE id = ? AND state = 'running' AND lease_owner = ? AND updated_at = ?\
          ) THEN 'ok' ELSE 'empty' END AS status",
-        vec![j_str(delivery_id), j_str(owner)],
+        vec![j_str(delivery_id), j_str(owner), j_str(now)],
     ));
     statements.push(sql(
         "SELECT json_object(\
@@ -1996,8 +2026,8 @@ fn plan_claim_event_delivery_cas(
             'wake_filter_json', COALESCE(wake_filter_json, ''), \
             'wake_grants_json', COALESCE(wake_grants_json, '')\
          ) AS payload FROM event_deliveries \
-         WHERE id = ? AND state = 'running' AND lease_owner = ?",
-        vec![j_str(delivery_id), j_str(owner)],
+         WHERE id = ? AND state = 'running' AND lease_owner = ? AND updated_at = ?",
+        vec![j_str(delivery_id), j_str(owner), j_str(now)],
     ));
     let outcome_index = statements.len() - 2;
     let payload_index = statements.len() - 1;
@@ -3440,6 +3470,7 @@ mod tests {
             DbAtomicParams::DispatchEventDeliveries {
                 event_id: "evt-1".into(),
                 subscribers_json: r#"[{"pluginId":"echo"}]"#.into(),
+                mark_dispatched: true,
             },
             "evt-disp",
         );
@@ -3594,6 +3625,7 @@ mod tests {
             DbAtomicParams::DispatchEventDeliveries {
                 event_id: "evt-late".into(),
                 subscribers_json: r#"[{"pluginId":"echo"}]"#.into(),
+                mark_dispatched: false,
             },
             "reconcile-evt-late-echo",
         );
@@ -3604,7 +3636,8 @@ mod tests {
         let second = test_req(
             DbAtomicParams::DispatchEventDeliveries {
                 event_id: "evt-late".into(),
-                subscribers_json: r#"[{"pluginId":"echo"},{"pluginId":"audiobookshelf"}]"#.into(),
+                subscribers_json: r#"[{"pluginId":"audiobookshelf"}]"#.into(),
+                mark_dispatched: true,
             },
             "reconcile-evt-late-audiobookshelf",
         );
@@ -3663,6 +3696,7 @@ mod tests {
                 DbAtomicParams::DispatchEventDeliveries {
                     event_id: id.into(),
                     subscribers_json: r#"[{"pluginId":"echo"}]"#.into(),
+                    mark_dispatched: true,
                 },
                 &format!("dispatch-{id}-echo"),
             );
@@ -3838,5 +3872,258 @@ mod tests {
             err.to_string().contains("exceeds"),
             "unexpected error: {err}"
         );
+    }
+
+    fn seed_domain_event(conn: &Connection, id: &str, now: &str) {
+        conn.execute(
+            "INSERT INTO domain_events (\
+                id, event_type, schema_version, occurred_at, account_id, source, correlation_id, \
+                causation_id, dedup_key, payload, ordering_key, dispatch_state, created_at, \
+                wake_pending\
+             ) VALUES (?, 'book_acquired', 1, ?, 'acct', '', '', '', ?, '{}', ?, 'pending', ?, 0)",
+            rusqlite::params![id, now, format!("book_acquired:{id}"), id, now],
+        )
+        .unwrap();
+    }
+
+    fn seed_pending_delivery(conn: &Connection, event_id: &str, plugin_id: &str, now: &str) {
+        let id = format!("{event_id}:{plugin_id}");
+        conn.execute(
+            "INSERT INTO event_deliveries (\
+                id, event_id, plugin_id, idempotency_key, state, attempt_count, max_attempts, \
+                lease_owner, lease_expires_at, lease_generation, run_after, invocation_sequence, \
+                resume_pending, checkpoint_json, checkpoint_schema_version, ordering_key, \
+                outcome, error_message, created_at, updated_at, cancel_requested, resource_class, \
+                wake_event_type, wake_filter_json, wake_grants_json\
+             ) VALUES (?, ?, ?, ?, 'pending', 0, 8, NULL, NULL, 0, ?, 0, 0, NULL, 0, '', \
+                NULL, NULL, ?, ?, 0, 'network', '', '', '')",
+            rusqlite::params![id, event_id, plugin_id, id, now, now, now],
+        )
+        .unwrap();
+    }
+
+    fn run_compiled(
+        conn: &Connection,
+        compiled: &crate::sql_plan::CompiledAtomic,
+    ) -> DbAtomicResult {
+        let plan = AtomicPlan {
+            statements: compiled
+                .plan
+                .statements
+                .iter()
+                .map(|s| (s.sql.clone(), s.binds.clone()))
+                .collect(),
+            outcome_index: compiled.plan.outcome_index as usize,
+            payload_index: compiled.plan.payload_index.map(|i| i as usize),
+            consume_once: None,
+            receipt_select_index: compiled.plan.receipt_select_index.map(|i| i as usize),
+            prior_receipt_index: compiled.plan.prior_receipt_index.map(|i| i as usize),
+            expected_hash: Some(compiled.expected_hash.clone()),
+        };
+        run_plan(conn, &plan)
+    }
+
+    #[test]
+    fn claim_cas_same_owner_already_running_is_empty() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        seed_domain_event(&conn, "evt-cas", now);
+        let id = "evt-cas:echo";
+        conn.execute(
+            "INSERT INTO event_deliveries (\
+                id, event_id, plugin_id, idempotency_key, state, attempt_count, max_attempts, \
+                lease_owner, lease_expires_at, lease_generation, run_after, invocation_sequence, \
+                resume_pending, checkpoint_json, checkpoint_schema_version, ordering_key, \
+                outcome, error_message, created_at, updated_at, cancel_requested, resource_class, \
+                wake_event_type, wake_filter_json, wake_grants_json\
+             ) VALUES (?, 'evt-cas', 'echo', ?, 'running', 1, 8, 'same-owner', ?, 1, ?, 0, 0, \
+                NULL, 0, '', NULL, NULL, ?, '2024-05-01T00:00:00Z', 0, 'network', '', '', '')",
+            rusqlite::params![id, id, "2099-01-01T00:00:00Z", now, now],
+        )
+        .unwrap();
+        let compiled = compile_claim_event_delivery(
+            "cas-fresh-op",
+            id,
+            "same-owner",
+            60,
+            "echo",
+            "network",
+            1,
+            now,
+            SqlFamily::Sqlite,
+        )
+        .unwrap();
+        let result = run_compiled(&conn, &compiled);
+        assert_eq!(result.status, atomic_status::EMPTY);
+    }
+
+    #[test]
+    fn claim_hash_includes_lease_and_conflicts_on_change() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        seed_domain_event(&conn, "evt-hash", now);
+        seed_pending_delivery(&conn, "evt-hash", "echo", now);
+        let id = "evt-hash:echo";
+        let first = compile_claim_event_delivery(
+            "claim-lease-op",
+            id,
+            "owner-h",
+            60,
+            "echo",
+            "network",
+            1,
+            now,
+            SqlFamily::Sqlite,
+        )
+        .unwrap();
+        let claimed = run_compiled(&conn, &first);
+        assert_eq!(claimed.status, atomic_status::OK);
+        let replay_changed = compile_claim_event_delivery(
+            "claim-lease-op",
+            id,
+            "owner-h",
+            120,
+            "echo",
+            "network",
+            1,
+            now,
+            SqlFamily::Sqlite,
+        )
+        .unwrap();
+        let conflict = run_compiled(&conn, &replay_changed);
+        assert_eq!(conflict.status, atomic_status::IDEMPOTENCY_CONFLICT);
+    }
+
+    #[test]
+    fn dispatch_created_is_per_plan_delta() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        seed_domain_event(&conn, "evt-delta", now);
+        let two_first = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-two".into(),
+                subscribers_json: r#"[{"pluginId":"echo"},{"pluginId":"audiobookshelf"}]"#.into(),
+                mark_dispatched: true,
+            },
+            "disp-two-first",
+        );
+        seed_domain_event(&conn, "evt-two", now);
+        let both_first = run_plan(&conn, &plan_atomic(&two_first, now).unwrap());
+        assert_eq!(both_first.status, atomic_status::OK);
+        assert_eq!(both_first.payload.as_ref().unwrap()["created"], 2);
+
+        let one = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-delta".into(),
+                subscribers_json: r#"[{"pluginId":"echo"}]"#.into(),
+                mark_dispatched: false,
+            },
+            "disp-one",
+        );
+        let first = run_plan(&conn, &plan_atomic(&one, now).unwrap());
+        assert_eq!(first.status, atomic_status::OK);
+        assert_eq!(first.payload.as_ref().unwrap()["created"], 1);
+
+        let replay_same = run_plan(&conn, &plan_atomic(&one, now).unwrap());
+        assert!(replay_same.replayed);
+        assert_eq!(replay_same.payload.as_ref().unwrap()["created"], 1);
+
+        let later = "2024-06-01T00:00:01Z";
+        let one_again = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-delta".into(),
+                subscribers_json: r#"[{"pluginId":"echo"}]"#.into(),
+                mark_dispatched: false,
+            },
+            "disp-one-replay",
+        );
+        let second = run_plan(&conn, &plan_atomic(&one_again, later).unwrap());
+        assert_eq!(second.status, atomic_status::OK);
+        assert!(!second.replayed);
+        assert_eq!(
+            second.payload.as_ref().unwrap()["created"],
+            0,
+            "INSERT OR IGNORE of an existing subscriber is a zero delta"
+        );
+
+        let two = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-delta".into(),
+                subscribers_json: r#"[{"pluginId":"echo"},{"pluginId":"audiobookshelf"}]"#.into(),
+                mark_dispatched: true,
+            },
+            "disp-two",
+        );
+        let both = run_plan(&conn, &plan_atomic(&two, later).unwrap());
+        assert_eq!(both.status, atomic_status::OK);
+        assert_eq!(
+            both.payload.as_ref().unwrap()["created"],
+            1,
+            "only the new subscriber counts on this page"
+        );
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM event_deliveries WHERE event_id = 'evt-delta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        let state: String = conn
+            .query_row(
+                "SELECT dispatch_state FROM domain_events WHERE id = 'evt-delta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "dispatched");
+    }
+
+    #[test]
+    fn dispatch_intermediate_page_leaves_parent_pending() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        seed_domain_event(&conn, "evt-page", now);
+        let first_page = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-page".into(),
+                subscribers_json: r#"[{"pluginId":"echo"}]"#.into(),
+                mark_dispatched: false,
+            },
+            "page-0",
+        );
+        let a = run_plan(&conn, &plan_atomic(&first_page, now).unwrap());
+        assert_eq!(a.status, atomic_status::OK);
+        let state: String = conn
+            .query_row(
+                "SELECT dispatch_state FROM domain_events WHERE id = 'evt-page'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "pending");
+        let last_page = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-page".into(),
+                subscribers_json: r#"[{"pluginId":"audiobookshelf"}]"#.into(),
+                mark_dispatched: true,
+            },
+            "page-1",
+        );
+        let b = run_plan(&conn, &plan_atomic(&last_page, now).unwrap());
+        assert_eq!(b.status, atomic_status::OK);
+        assert_eq!(b.payload.as_ref().unwrap()["created"], 1);
+        let state: String = conn
+            .query_row(
+                "SELECT dispatch_state FROM domain_events WHERE id = 'evt-page'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "dispatched");
     }
 }

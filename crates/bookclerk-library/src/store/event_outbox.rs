@@ -35,6 +35,41 @@ const STATE_ACKED: &str = "acked";
 const STATE_REJECTED: &str = "rejected";
 const STATE_DEAD_LETTER: &str = "dead_letter";
 const RECONCILE_PAGE: u64 = 200;
+/// Pending-delivery claim page. Tests may override via [`set_claim_page_for_test`].
+const EVENT_CLAIM_PAGE: u64 = 64;
+
+#[cfg(test)]
+thread_local! {
+    static CLAIM_PAGE_OVERRIDE: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Override the claim candidate page size (library tests only).
+#[cfg(test)]
+pub(crate) fn set_claim_page_for_test(page: Option<u64>) {
+    CLAIM_PAGE_OVERRIDE.with(|c| c.set(page));
+}
+
+fn claim_page_size() -> u64 {
+    #[cfg(test)]
+    {
+        if let Some(n) = CLAIM_PAGE_OVERRIDE.with(std::cell::Cell::get) {
+            return n.max(1);
+        }
+    }
+    EVENT_CLAIM_PAGE
+}
+
+/// Keyset after `(created_at, id)` so concurrent claims cannot skip rows via OFFSET.
+fn claim_keyset_after(created_at: &str, id: &str) -> Condition {
+    Condition::any()
+        .add(event_deliveries::Column::CreatedAt.gt(created_at.to_string()))
+        .add(
+            Condition::all()
+                .add(event_deliveries::Column::CreatedAt.eq(created_at.to_string()))
+                .add(event_deliveries::Column::Id.gt(id.to_string())),
+        )
+}
 /// SET `run_after` / `updated_at` plus EXISTS `event_id` / `wake_lease_owner`.
 const WAKE_UPDATE_FIXED_BINDS: usize = 4;
 const EVENT_OUTBOX_STATS_ID: i64 = 1;
@@ -135,6 +170,9 @@ static INJECT_PUBLISH_FAULTS: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 thread_local! {
     static DISPATCH_EVENT_CALLS: AtomicU32 = const { AtomicU32::new(0) };
+    static DISPATCH_PAGE_FAULTS: AtomicU32 = const { AtomicU32::new(0) };
+    static DISPATCH_CHUNK_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Fail the next `n` outbox inserts (used to prove acquire+publish rollback).
@@ -147,6 +185,37 @@ pub(crate) fn inject_event_publish_failures(n: u32) {
 #[cfg(test)]
 pub(crate) fn take_dispatch_event_calls() -> u32 {
     DISPATCH_EVENT_CALLS.with(|c| c.swap(0, Ordering::SeqCst))
+}
+
+/// Fail after the next `n` successful dispatch pages (library tests only).
+#[cfg(test)]
+pub(crate) fn inject_dispatch_page_failures(n: u32) {
+    DISPATCH_PAGE_FAULTS.with(|c| c.store(n, Ordering::SeqCst));
+}
+
+/// Override subscribers-per-plan for dispatch paging tests.
+#[cfg(test)]
+pub(crate) fn set_dispatch_chunk_for_test(chunk: Option<usize>) {
+    DISPATCH_CHUNK_OVERRIDE.with(|c| c.set(chunk));
+}
+
+/// Current dispatch chunk override, if any.
+#[cfg(test)]
+pub(crate) fn dispatch_chunk_override() -> Option<usize> {
+    DISPATCH_CHUNK_OVERRIDE.with(|c| c.get())
+}
+
+#[cfg(test)]
+fn take_dispatch_page_fault() -> bool {
+    DISPATCH_PAGE_FAULTS.with(|c| {
+        let n = c.load(Ordering::SeqCst);
+        if n == 0 {
+            false
+        } else {
+            c.store(n - 1, Ordering::SeqCst);
+            true
+        }
+    })
 }
 
 fn take_publish_fault() -> bool {
@@ -215,17 +284,30 @@ impl LibraryStore {
             c.fetch_add(1, Ordering::SeqCst);
         });
         if let Some(atomic) = &self.atomic {
-            if subscribers.len() <= 1 {
+            let chunk = self.dispatch_chunk_size().max(1);
+            if subscribers.is_empty() {
                 return atomic
-                    .dispatch_event_deliveries(event_id, subscribers, operation_id)
+                    .dispatch_event_deliveries(event_id, subscribers, operation_id, true)
                     .await;
             }
             let mut total = 0u32;
-            for sub in subscribers {
-                let op = format!("{operation_id}-{}", sub.plugin_id);
+            let mut start = 0usize;
+            let mut page = 0usize;
+            while start < subscribers.len() {
+                let end = (start + chunk).min(subscribers.len());
+                let last = end == subscribers.len();
+                let op = format!("{operation_id}:p{page}");
                 total += atomic
-                    .dispatch_event_deliveries(event_id, std::slice::from_ref(sub), &op)
+                    .dispatch_event_deliveries(event_id, &subscribers[start..end], &op, last)
                     .await?;
+                #[cfg(test)]
+                if take_dispatch_page_fault() {
+                    return Err(LibraryError::Other(anyhow!(
+                        "injected dispatch page failure after page {page}"
+                    )));
+                }
+                start = end;
+                page += 1;
             }
             return Ok(total);
         }
@@ -434,26 +516,32 @@ impl LibraryStore {
         let Some(atomic) = &self.atomic else {
             return Ok(None);
         };
-        const PAGE: u64 = 64;
+        let page = claim_page_size();
         let now_s = Utc::now().to_rfc3339();
         sanitize_unknown_event_resource_class_on(&self.db, &now_s).await?;
-        let mut offset = 0u64;
+        let mut cursor: Option<(String, String)> = None;
         loop {
-            let candidates = event_deliveries::Entity::find()
+            let mut query = event_deliveries::Entity::find()
                 .filter(event_deliveries::Column::State.eq(STATE_PENDING))
                 .filter(event_deliveries::Column::RunAfter.lte(now_s.clone()))
                 .filter(event_deliveries::Column::PluginId.is_in(plugin_ids.to_vec()))
-                .filter(event_deliveries::Column::ResourceClass.eq(EVENT_RESOURCE_CLASS_NETWORK))
+                .filter(event_deliveries::Column::ResourceClass.eq(EVENT_RESOURCE_CLASS_NETWORK));
+            if let Some((created_at, id)) = &cursor {
+                query = query.filter(claim_keyset_after(created_at, id));
+            }
+            let candidates = query
                 .order_by_asc(event_deliveries::Column::CreatedAt)
-                .limit(PAGE)
-                .offset(offset)
+                .order_by_asc(event_deliveries::Column::Id)
+                .limit(page)
                 .all(&self.db)
                 .await
                 .map_err(LibraryError::Orm)?;
             if candidates.is_empty() {
                 return Ok(None);
             }
-            let page_len = u64::try_from(candidates.len()).unwrap_or(PAGE);
+            cursor = candidates
+                .last()
+                .map(|m| (m.created_at.clone(), m.id.clone()));
             for model in candidates {
                 if fifo_blocked(&self.db, &model).await? {
                     continue;
@@ -479,7 +567,6 @@ impl LibraryStore {
                     return Ok(Some(row));
                 }
             }
-            offset = offset.saturating_add(page_len);
         }
     }
 
@@ -2146,29 +2233,35 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
     if plugin_ids.is_empty() {
         return Ok(None);
     }
-    const PAGE: u64 = 64;
+    let page = claim_page_size();
     let now = Utc::now();
     let now_s = now.to_rfc3339();
     sanitize_unknown_event_resource_class_on(db, &now_s).await?;
     let lease_expires =
         (now + Duration::seconds(i64::try_from(lease_secs).unwrap_or(60))).to_rfc3339();
-    let mut offset = 0u64;
+    let mut cursor: Option<(String, String)> = None;
     loop {
-        let candidates = event_deliveries::Entity::find()
+        let mut query = event_deliveries::Entity::find()
             .filter(event_deliveries::Column::State.eq(STATE_PENDING))
             .filter(event_deliveries::Column::RunAfter.lte(now_s.clone()))
             .filter(event_deliveries::Column::PluginId.is_in(plugin_ids.to_vec()))
-            .filter(event_deliveries::Column::ResourceClass.eq(EVENT_RESOURCE_CLASS_NETWORK))
+            .filter(event_deliveries::Column::ResourceClass.eq(EVENT_RESOURCE_CLASS_NETWORK));
+        if let Some((created_at, id)) = &cursor {
+            query = query.filter(claim_keyset_after(created_at, id));
+        }
+        let candidates = query
             .order_by_asc(event_deliveries::Column::CreatedAt)
-            .limit(PAGE)
-            .offset(offset)
+            .order_by_asc(event_deliveries::Column::Id)
+            .limit(page)
             .all(db)
             .await
             .map_err(LibraryError::Orm)?;
         if candidates.is_empty() {
             return Ok(None);
         }
-        let page_len = u64::try_from(candidates.len()).unwrap_or(PAGE);
+        cursor = candidates
+            .last()
+            .map(|m| (m.created_at.clone(), m.id.clone()));
         for model in candidates {
             if fifo_blocked(db, &model).await? {
                 continue;
@@ -2240,10 +2333,6 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
             };
             return Ok(Some(map_delivery(updated)?));
         }
-        if page_len < PAGE {
-            return Ok(None);
-        }
-        offset += PAGE;
     }
 }
 

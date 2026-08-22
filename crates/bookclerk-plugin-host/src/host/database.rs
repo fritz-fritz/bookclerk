@@ -958,6 +958,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
         event_id: &str,
         subscribers: &[bookclerk_library::EventSubscriber],
         operation_id: &str,
+        mark_dispatched: bool,
     ) -> bookclerk_library::Result<u32> {
         let subscribers_json = serde_json::to_string(subscribers).map_err(|err| {
             bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
@@ -968,6 +969,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
                 DbAtomicParams::DispatchEventDeliveries {
                     event_id: event_id.to_string(),
                     subscribers_json,
+                    mark_dispatched,
                 },
             )
             .await?;

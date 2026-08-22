@@ -49,6 +49,12 @@ pub struct LibraryStore {
     atomic: Option<Arc<dyn AtomicTxnBackend>>,
     /// Negotiated guest `maxBinds` (defaults to D1's cap for in-process tests).
     max_binds: u32,
+    /// Negotiated guest `maxStatements`.
+    max_statements: u32,
+    /// Negotiated guest `maxResultRows`.
+    max_result_rows: u32,
+    /// Negotiated guest `maxPayloadBytes`.
+    max_payload_bytes: u32,
 }
 
 impl std::fmt::Debug for LibraryStore {
@@ -69,6 +75,9 @@ impl LibraryStore {
             db,
             atomic: None,
             max_binds: bookclerk_plugin_abi::D1_MAX_BINDS,
+            max_statements: bookclerk_plugin_abi::FIRST_PARTY_MAX_STATEMENTS,
+            max_result_rows: 256,
+            max_payload_bytes: 256 * 1024,
         }
     }
 
@@ -88,6 +97,36 @@ impl LibraryStore {
     pub fn with_max_binds(mut self, max_binds: u32) -> Self {
         self.max_binds = max_binds.max(bookclerk_plugin_abi::HOST_MIN_BINDS);
         self
+    }
+
+    /// Records negotiated statement / result / payload caps from connect.
+    #[must_use]
+    pub fn with_plan_limits(
+        mut self,
+        max_statements: u32,
+        max_result_rows: u32,
+        max_payload_bytes: u32,
+    ) -> Self {
+        self.max_statements = max_statements.max(bookclerk_plugin_abi::HOST_MIN_STATEMENTS);
+        self.max_result_rows = max_result_rows.max(1);
+        self.max_payload_bytes = max_payload_bytes.max(1024);
+        self
+    }
+
+    /// Subscribers packed into one dispatch plan (receipt overhead is ~12 statements).
+    #[must_use]
+    pub fn dispatch_chunk_size(&self) -> usize {
+        #[cfg(test)]
+        {
+            if let Some(n) = crate::store::event_outbox::dispatch_chunk_override() {
+                return n.max(1);
+            }
+        }
+        const OVERHEAD: u32 = 12;
+        const BINDS_PER_INSERT: u32 = 9;
+        let by_stmts = self.max_statements.saturating_sub(OVERHEAD).max(1);
+        let by_binds = self.max_binds.saturating_sub(16) / BINDS_PER_INSERT;
+        usize::try_from(by_stmts.min(by_binds.max(1))).unwrap_or(1)
     }
 
     /// Wake delivery page size derived from negotiated `maxBinds`.

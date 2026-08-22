@@ -646,6 +646,9 @@ pub enum DbAtomicParams {
         event_id: String,
         /// JSON array of `{ "pluginId": "…" }` subscriber snapshots.
         subscribers_json: String,
+        /// When true, this page is the last snapshot and may mark the parent dispatched.
+        #[serde(default = "default_mark_dispatched")]
+        mark_dispatched: bool,
     },
     /// Claim the next ready event delivery for `owner`.
     #[serde(rename_all = "camelCase")]
@@ -666,6 +669,11 @@ pub enum DbAtomicParams {
 /// Default cluster in-flight cap when an older guest omits the field.
 fn default_claim_max_in_flight() -> i64 {
     1
+}
+
+/// Older callers omit `markDispatched`; a single-page dispatch still finishes the parent.
+fn default_mark_dispatched() -> bool {
+    true
 }
 
 /// Host-generated idempotency envelope for [`crate::methods::db_atomic`].
