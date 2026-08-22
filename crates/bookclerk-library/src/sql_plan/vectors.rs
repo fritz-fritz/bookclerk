@@ -382,7 +382,7 @@ where
     .await
     .unwrap_or_else(|e| panic!("returning insert setup: {e}"));
     let sql = recursive_insert_returning("vec_ret_ins", "id", n);
-    let before = table_ids(&mut *run, "vec-ret-ins-before", "vec_ret_ins").await;
+    let before = table_fingerprint(&mut *run, "vec-ret-ins-before", "vec_ret_ins").await;
     let err = run(request("vec-ret-ins", returning_plan(&sql)), row_cap)
         .await
         .expect_err("capped INSERT RETURNING must fail");
@@ -394,7 +394,7 @@ where
         err.to_lowercase().contains("maxresultrows"),
         "INSERT RETURNING cap must fail closed: {err}"
     );
-    let after = table_ids(&mut *run, "vec-ret-ins-after", "vec_ret_ins").await;
+    let after = table_fingerprint(&mut *run, "vec-ret-ins-after", "vec_ret_ins").await;
     assert_eq!(
         before, after,
         "failed INSERT RETURNING must not leave rows: before={before:?} after={after:?}"
@@ -421,7 +421,7 @@ where
     )
     .await
     .unwrap_or_else(|e| panic!("returning update setup: {e}"));
-    let before = table_ids(&mut *run, "vec-ret-upd-before", "vec_ret_upd").await;
+    let before = table_fingerprint(&mut *run, "vec-ret-upd-before", "vec_ret_upd").await;
     let err = run(
         request(
             "vec-ret-upd",
@@ -439,7 +439,7 @@ where
         err.to_lowercase().contains("maxresultrows"),
         "UPDATE RETURNING cap must fail closed: {err}"
     );
-    let after = table_ids(&mut *run, "vec-ret-upd-after", "vec_ret_upd").await;
+    let after = table_fingerprint(&mut *run, "vec-ret-upd-after", "vec_ret_upd").await;
     assert_eq!(
         before, after,
         "failed UPDATE RETURNING must leave the table unchanged"
@@ -466,7 +466,7 @@ where
     )
     .await
     .unwrap_or_else(|e| panic!("returning delete setup: {e}"));
-    let before = table_ids(&mut *run, "vec-ret-del-before", "vec_ret_del").await;
+    let before = table_fingerprint(&mut *run, "vec-ret-del-before", "vec_ret_del").await;
     let err = run(
         request(
             "vec-ret-del",
@@ -484,7 +484,7 @@ where
         err.to_lowercase().contains("maxresultrows"),
         "DELETE RETURNING cap must fail closed: {err}"
     );
-    let after = table_ids(&mut *run, "vec-ret-del-after", "vec_ret_del").await;
+    let after = table_fingerprint(&mut *run, "vec-ret-del-after", "vec_ret_del").await;
     assert_eq!(
         before, after,
         "failed DELETE RETURNING must leave the table unchanged"
@@ -555,8 +555,8 @@ where
     );
 }
 
-/// Uncapped `SELECT id … ORDER BY id` used to prove RETURNING overflow rolled back.
-async fn table_ids<F, Fut>(run: &mut F, operation_id: &str, table: &str) -> Vec<JsonValue>
+/// Uncapped one-row `SELECT COUNT/SUM` proving RETURNING overflow did not mutate.
+async fn table_fingerprint<F, Fut>(run: &mut F, operation_id: &str, table: &str) -> Vec<JsonValue>
 where
     F: FnMut(DbAtomicRequest, u32) -> Fut,
     Fut: Future<Output = Result<DbPlanExecResult, String>>,
@@ -564,7 +564,9 @@ where
     let exec = run(
         request(
             operation_id,
-            select_plan(&format!("SELECT id FROM {table} ORDER BY id")),
+            select_plan(&format!(
+                "SELECT COUNT(*) AS n, COALESCE(SUM(id), 0) AS s FROM {table}"
+            )),
         ),
         0,
     )
