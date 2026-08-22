@@ -5,6 +5,7 @@
 //! Consume-once ops use `DELETE … RETURNING`. Receipt wrapping is host SQL.
 
 use crate::atomic_ops::{atomic_status, DbAtomicParams};
+use bookclerk_plugin_abi::DbPlanStatementKind;
 use sea_orm::DbErr;
 use serde_json::Value as JsonValue;
 
@@ -16,8 +17,16 @@ use serde_json::json;
 use super::dialect::{render_statement, SqlFamily};
 use super::{wire_plan, CompiledAtomic};
 
-/// One statement in a planned batch (SQL + JSON binds).
-pub(crate) type SqlStmt = (String, Vec<JsonValue>);
+/// One statement in a planned batch (SQL, binds, and structural kind).
+#[derive(Clone, Debug)]
+pub(crate) struct SqlStmt {
+    /// Dialect-neutral SQL text.
+    pub sql: String,
+    /// Ordered JSON binds.
+    pub binds: Vec<JsonValue>,
+    /// Host-authored kind; adapters must not reparse SQL.
+    pub kind: DbPlanStatementKind,
+}
 
 /// Planned batch plus the index of the application-status `SELECT`.
 struct AtomicPlan {
@@ -77,7 +86,7 @@ pub fn compile_named_request(
     let statements = inner
         .statements
         .into_iter()
-        .map(|(sql, binds)| (render_statement(family, &sql), binds))
+        .map(|stmt| render_sql_stmt(family, stmt))
         .collect();
     Ok(CompiledAtomic {
         plan: wire_plan(
@@ -145,7 +154,7 @@ pub fn compile_claim_event_delivery(
     let statements = wrapped
         .statements
         .into_iter()
-        .map(|(sql, binds)| (render_statement(family, &sql), binds))
+        .map(|stmt| render_sql_stmt(family, stmt))
         .collect();
     Ok(CompiledAtomic {
         plan: wire_plan(
@@ -439,9 +448,153 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
     }
 }
 
-/// Pairs a SQL text with JSON bind parameters for a D1 batch statement.
+/// Pairs SQL text with JSON binds and a structural kind.
 fn sql(text: &str, params: Vec<JsonValue>) -> SqlStmt {
-    (text.to_string(), params)
+    let sql = text.to_string();
+    let kind = authored_kind(&sql);
+    SqlStmt {
+        sql,
+        binds: params,
+        kind,
+    }
+}
+
+/// Renders one planned statement into the guest dialect without changing kind.
+fn render_sql_stmt(family: SqlFamily, stmt: SqlStmt) -> SqlStmt {
+    SqlStmt {
+        sql: render_statement(family, &stmt.sql),
+        binds: stmt.binds,
+        kind: stmt.kind,
+    }
+}
+
+/// Host-authored kind from the SQL this helper just wrote (not adapter sniffing).
+pub(crate) fn authored_kind(sql: &str) -> DbPlanStatementKind {
+    if find_returning_clause(sql).is_some() {
+        return DbPlanStatementKind::Returning;
+    }
+    let first = first_top_level_keyword(sql).unwrap_or_default();
+    match first.as_str() {
+        "SELECT" | "WITH" | "VALUES" => DbPlanStatementKind::Select,
+        _ => DbPlanStatementKind::Execute,
+    }
+}
+
+/// Byte offset of a top-level `RETURNING` keyword, if present.
+fn find_returning_clause(sql: &str) -> Option<usize> {
+    last_top_level_keyword(sql, "RETURNING")
+}
+
+/// True when `keyword` appears at parenthesis depth 0 (not inside quotes).
+fn has_top_level_keyword(sql: &str, keyword: &str) -> bool {
+    last_top_level_keyword(sql, keyword).is_some()
+}
+
+/// First top-level SQL keyword, uppercased.
+fn first_top_level_keyword(sql: &str) -> Option<String> {
+    let mut first = None;
+    for_each_top_level_keyword(sql, |_, kw| {
+        if first.is_none() {
+            first = Some(kw.to_ascii_uppercase());
+        }
+    });
+    first
+}
+
+/// Start index of the last top-level match of `keyword` (ASCII, case-insensitive).
+fn last_top_level_keyword(sql: &str, keyword: &str) -> Option<usize> {
+    let want = keyword.to_ascii_uppercase();
+    let mut last = None;
+    for_each_top_level_keyword(sql, |idx, kw| {
+        if kw.eq_ignore_ascii_case(&want) {
+            last = Some(idx);
+        }
+    });
+    last
+}
+
+/// Invokes `on_keyword` for each unquoted, top-level identifier.
+fn for_each_top_level_keyword(sql: &str, mut on_keyword: impl FnMut(usize, &str)) {
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    let mut depth = 0usize;
+    let mut in_squote = false;
+    let mut in_dquote = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_squote {
+            if c == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_squote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_dquote {
+            if c == b'"' {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
+                in_dquote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => {
+                in_squote = true;
+                i += 1;
+            }
+            b'"' => {
+                in_dquote = true;
+                i += 1;
+            }
+            b'(' => {
+                depth = depth.saturating_add(1);
+                i += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            _ if depth == 0 && c.is_ascii_alphabetic() => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                on_keyword(start, &sql[start..i]);
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+/// Inserts a write gate before top-level `RETURNING`, or as `WHERE`/`AND` on DML.
+fn apply_write_predicate(sql: &str, kind: DbPlanStatementKind, pred: &str) -> String {
+    let splice_at = match kind {
+        DbPlanStatementKind::Returning | DbPlanStatementKind::Query => find_returning_clause(sql),
+        _ => None,
+    };
+    if let Some(idx) = splice_at {
+        let prefix = sql[..idx].trim_end();
+        let returning = sql[idx..].trim_start();
+        return format!("{} {} {pred} {returning}", prefix, where_or_and(prefix));
+    }
+    format!("{sql} {} {pred}", where_or_and(sql))
+}
+
+/// `AND` when `sql` already has a top-level `WHERE`; otherwise `WHERE`.
+fn where_or_and(sql: &str) -> &'static str {
+    if has_top_level_keyword(sql, "WHERE") {
+        "AND"
+    } else {
+        "WHERE"
+    }
 }
 
 /// JSON number bind for a signed 64-bit integer column.
@@ -511,51 +664,43 @@ fn select_receipt(ctx: &ReceiptCtx) -> SqlStmt {
 }
 
 /// Appends a `NOT EXISTS` receipt gate so writes skip when this attempt already ran.
-fn gate_write(sql_text: String, mut params: Vec<JsonValue>, operation_id: &str) -> SqlStmt {
-    let trimmed = sql_text.trim_start();
-    let is_write = trimmed.starts_with("INSERT")
-        || trimmed.starts_with("UPDATE")
-        || trimmed.starts_with("DELETE");
-    if !is_write {
-        return (sql_text, params);
+fn gate_write(mut stmt: SqlStmt, operation_id: &str) -> SqlStmt {
+    if !matches!(
+        stmt.kind,
+        DbPlanStatementKind::Execute | DbPlanStatementKind::Returning | DbPlanStatementKind::Query
+    ) {
+        return stmt;
     }
-    params.push(j_str(operation_id));
-    (
-        format!(
-            "{sql_text} AND NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)"
-        ),
-        params,
-    )
+    stmt.binds.push(j_str(operation_id));
+    stmt.sql = apply_write_predicate(
+        &stmt.sql,
+        stmt.kind,
+        "NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)",
+    );
+    stmt
 }
 
 /// Like [`gate_write`], and only when this attempt's outcome `SELECT` is `ok`.
 ///
 /// Uses the live outcome subquery, not a prior `db_atomic_receipts` row, so a
 /// committed `ok` receipt cannot authorize replay mutations.
-fn gate_write_when_outcome_ok(
-    sql_text: String,
-    mut params: Vec<JsonValue>,
-    operation_id: &str,
-    outcome: &SqlStmt,
-) -> SqlStmt {
-    let trimmed = sql_text.trim_start();
-    let is_write = trimmed.starts_with("INSERT")
-        || trimmed.starts_with("UPDATE")
-        || trimmed.starts_with("DELETE");
-    if !is_write {
-        return (sql_text, params);
+fn gate_write_when_outcome_ok(mut stmt: SqlStmt, operation_id: &str, outcome: &SqlStmt) -> SqlStmt {
+    if !matches!(
+        stmt.kind,
+        DbPlanStatementKind::Execute | DbPlanStatementKind::Returning | DbPlanStatementKind::Query
+    ) {
+        return stmt;
     }
-    params.push(j_str(operation_id));
-    params.extend(outcome.1.clone());
-    (
-        format!(
-            "{sql_text} AND NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?) \
-             AND EXISTS (SELECT 1 FROM ({}) o WHERE o.status = '{ok}')",
-            outcome.0,
-            ok = atomic_status::OK,
-        ),
-        params,
-    )
+    stmt.binds.push(j_str(operation_id));
+    stmt.binds.extend(outcome.binds.clone());
+    let pred = format!(
+        "NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?) \
+         AND EXISTS (SELECT 1 FROM ({}) o WHERE o.status = '{ok}')",
+        outcome.sql,
+        ok = atomic_status::OK,
+    );
+    stmt.sql = apply_write_predicate(&stmt.sql, stmt.kind, &pred);
+    stmt
 }
 
 /// Scratch `db_serialization_slots` key that holds this attempt's outcome bump.
@@ -632,14 +777,14 @@ fn snapshot_outcome_insert(ctx: &ReceiptCtx) -> SqlStmt {
 /// Records the live outcome status before later writes can invalidate it.
 fn snapshot_outcome_update(ctx: &ReceiptCtx, outcome: &SqlStmt) -> SqlStmt {
     let bump = status_to_bump_sql("o.status");
-    let mut params = outcome.1.clone();
+    let mut params = outcome.binds.clone();
     params.push(j_str(&outcome_scratch_key(&ctx.operation_id)));
-    (
-        format!(
+    sql(
+        &format!(
             "UPDATE db_serialization_slots SET bump = (\
                 SELECT {bump} FROM ({}) o\
              ) WHERE slot_key = ? AND bump = 0",
-            outcome.0,
+            outcome.sql,
         ),
         params,
     )
@@ -704,27 +849,20 @@ fn wrap_status_op(plan: AtomicPlan, ctx: &ReceiptCtx, payload: PayloadKind) -> A
     let payload_stmt = payload_index.and_then(|idx| plan.statements.get(idx).cloned());
     let mut statements = vec![prune_receipts(ctx), select_receipt(ctx)];
     let prior_receipt_index = Some(1);
-    for (i, (sql_text, params)) in plan.statements.into_iter().enumerate() {
+    for (i, stmt) in plan.statements.into_iter().enumerate() {
         if Some(i) == payload_index {
             continue;
         }
         if i == outcome_index {
-            // Capture status after pre-outcome writes (enqueue/claim) and
-            // before post-outcome mutations that would invalidate it (delete).
             statements.push(snapshot_outcome_insert(ctx));
             statements.push(snapshot_outcome_update(ctx, &outcome));
             continue;
         }
-        // Absence of a prior receipt, not an existing `ok` row: a committed
-        // receipt must not authorize post-outcome writes on replay / D1 retry.
-        // Post-outcome writes still require this attempt's outcome to be `ok`
-        // (live subquery, not `db_atomic_receipts.status`).
         if i < outcome_index {
-            statements.push(gate_write(sql_text, params, &ctx.operation_id));
+            statements.push(gate_write(stmt, &ctx.operation_id));
         } else {
             statements.push(gate_write_when_outcome_ok(
-                sql_text,
-                params,
+                stmt,
                 &ctx.operation_id,
                 &outcome,
             ));
@@ -748,6 +886,15 @@ fn wrap_status_op(plan: AtomicPlan, ctx: &ReceiptCtx, payload: PayloadKind) -> A
     }
 }
 
+/// Execute-kind statement from already-owned SQL text.
+fn exec_sql(sql: String, binds: Vec<JsonValue>) -> SqlStmt {
+    SqlStmt {
+        sql,
+        binds,
+        kind: DbPlanStatementKind::Execute,
+    }
+}
+
 /// Updates an `ok` receipt with user or identity JSON when the payload is still null.
 fn receipt_payload_update(
     ctx: &ReceiptCtx,
@@ -763,31 +910,36 @@ fn receipt_payload_update(
                 user_payload_json_sql(),
                 ok = atomic_status::OK,
             );
-            Some((sql, vec![j_i64(user_id), j_str(&ctx.operation_id)]))
+            Some(exec_sql(
+                sql,
+                vec![j_i64(user_id), j_str(&ctx.operation_id)],
+            ))
         }
         PayloadKind::Identity => {
-            let (inner_sql, inner_params) = payload_stmt?;
+            let payload = payload_stmt?;
             let sql = format!(
-                "UPDATE db_atomic_receipts SET payload = ({}{inner_sql})) \
+                "UPDATE db_atomic_receipts SET payload = ({}{})) \
                  WHERE operation_id = ? AND status = '{ok}' AND payload IS NULL",
                 identity_payload_json_sql(),
+                payload.sql,
                 ok = atomic_status::OK,
             );
-            let mut params = inner_params;
+            let mut params = payload.binds;
             params.push(j_str(&ctx.operation_id));
-            Some((sql, params))
+            Some(exec_sql(sql, params))
         }
         PayloadKind::JsonFromPlan => {
-            let (inner_sql, inner_params) = payload_stmt?;
+            let payload = payload_stmt?;
             let sql = format!(
-                "UPDATE db_atomic_receipts SET payload = ({inner_sql}) \
+                "UPDATE db_atomic_receipts SET payload = ({}) \
                  WHERE operation_id = ? AND status IN ('{ok}', '{dup}') AND payload IS NULL",
+                payload.sql,
                 ok = atomic_status::OK,
                 dup = atomic_status::DUPLICATE,
             );
-            let mut params = inner_params;
+            let mut params = payload.binds;
             params.push(j_str(&ctx.operation_id));
-            Some((sql, params))
+            Some(exec_sql(sql, params))
         }
     }
 }
@@ -898,9 +1050,9 @@ fn wrap_consume(
     let statements = vec![
         prune_receipts(ctx),
         select_receipt(ctx),
-        (insert_from_row, from_row_params),
-        (delete_sql, delete_params),
-        (insert_empty, empty_params),
+        sql(&insert_from_row, from_row_params),
+        sql(&delete_sql, delete_params),
+        sql(&insert_empty, empty_params),
         select_receipt(ctx),
     ];
     AtomicPlan {
@@ -2725,6 +2877,125 @@ mod tests {
         );
     }
 
+    #[test]
+    fn write_gate_lands_before_top_level_returning() {
+        let sql = "INSERT INTO t (id) SELECT ? WHERE EXISTS (SELECT 1 FROM u WHERE id = ?) \
+             RETURNING id";
+        let gated = apply_write_predicate(
+            sql,
+            DbPlanStatementKind::Returning,
+            "NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)",
+        );
+        let returning = gated.to_ascii_uppercase().rfind("RETURNING").unwrap();
+        let gate = gated
+            .find("NOT EXISTS (SELECT 1 FROM db_atomic_receipts")
+            .unwrap();
+        assert!(
+            gate < returning,
+            "receipt gate must not become a RETURNING expression: {gated}"
+        );
+        assert_eq!(
+            authored_kind(&gated),
+            DbPlanStatementKind::Returning,
+            "{gated}"
+        );
+    }
+
+    #[test]
+    fn wrapped_dispatch_insert_gates_before_returning() {
+        let compiled = super::compile_named_request(
+            "disp-op",
+            &DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-1".into(),
+                subscribers_json: r#"[{"pluginId":"a"}]"#.into(),
+                mark_dispatched: true,
+            },
+            "2024-06-01T00:00:00Z",
+            crate::sql_plan::SqlFamily::Sqlite,
+        )
+        .unwrap();
+        let insert = compiled
+            .plan
+            .statements
+            .iter()
+            .find(|s| s.sql.contains("INSERT") && s.sql.to_ascii_uppercase().contains("RETURNING"))
+            .expect("dispatch insert returning");
+        assert_eq!(insert.kind, DbPlanStatementKind::Returning);
+        let returning = insert.sql.to_ascii_uppercase().rfind("RETURNING").unwrap();
+        let gate = insert
+            .sql
+            .find("NOT EXISTS (SELECT 1 FROM db_atomic_receipts")
+            .expect("receipt gate");
+        assert!(
+            gate < returning,
+            "hash-conflict retry must not insert behind RETURNING: {}",
+            insert.sql
+        );
+    }
+
+    #[test]
+    fn dispatch_hash_conflict_does_not_insert_new_subscriber() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        let publish = test_req(
+            DbAtomicParams::PublishDomainEvent {
+                id: "evt-hash".into(),
+                event_type: "book_acquired".into(),
+                schema_version: 1,
+                account_id: "acct".into(),
+                source: String::new(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                dedup_key: "book_acquired:hash".into(),
+                payload: "{}".into(),
+                ordering_key: String::new(),
+            },
+            "evt-hash-pub",
+        );
+        assert_eq!(
+            run_plan(&conn, &plan_req(&publish, now).unwrap()).status,
+            atomic_status::OK
+        );
+        let first = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-hash".into(),
+                subscribers_json: r#"[{"pluginId":"a"}]"#.into(),
+                mark_dispatched: true,
+            },
+            "disp-same-op",
+        );
+        let a = run_plan(&conn, &plan_req(&first, now).unwrap());
+        assert_eq!(a.status, atomic_status::OK);
+        let second = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-hash".into(),
+                subscribers_json: r#"[{"pluginId":"b"}]"#.into(),
+                mark_dispatched: true,
+            },
+            "disp-same-op",
+        );
+        let conflict = run_plan(&conn, &plan_req(&second, now).unwrap());
+        assert_eq!(conflict.status, atomic_status::IDEMPOTENCY_CONFLICT);
+        let plugins: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT plugin_id FROM event_deliveries \
+                     WHERE event_id = 'evt-hash' ORDER BY plugin_id",
+                )
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(plugins, vec!["a".to_string()]);
+        assert!(
+            !plugins.iter().any(|p| p == "b"),
+            "mismatched-hash dispatch must not insert subscriber b: {plugins:?}"
+        );
+    }
+
     fn json_to_rusqlite(v: &JsonValue) -> rusqlite::types::Value {
         if bookclerk_plugin_abi::sea_null_kind(v).is_some() {
             return rusqlite::types::Value::Null;
@@ -2755,21 +3026,23 @@ mod tests {
     fn run_plan(conn: &Connection, plan: &AtomicPlan) -> DbAtomicResult {
         let txn = conn.unchecked_transaction().unwrap();
         let mut results = Vec::new();
-        for (sql_text, params) in &plan.statements {
-            let binds: Vec<rusqlite::types::Value> = params.iter().map(json_to_rusqlite).collect();
-            let mut stmt = txn.prepare(sql_text).unwrap();
-            let col_count = stmt.column_count();
-            let names: Vec<String> = stmt
+        for stmt in &plan.statements {
+            let binds: Vec<rusqlite::types::Value> =
+                stmt.binds.iter().map(json_to_rusqlite).collect();
+            let mut prepared = txn.prepare(&stmt.sql).unwrap();
+            let col_count = prepared.column_count();
+            let names: Vec<String> = prepared
                 .column_names()
                 .into_iter()
                 .map(str::to_string)
                 .collect();
             let mut rows_out = Vec::new();
             if col_count == 0 {
-                stmt.execute(rusqlite::params_from_iter(binds.iter()))
+                prepared
+                    .execute(rusqlite::params_from_iter(binds.iter()))
                     .unwrap();
             } else {
-                let mut rows = stmt
+                let mut rows = prepared
                     .query(rusqlite::params_from_iter(binds.iter()))
                     .unwrap();
                 while let Some(row) = rows.next().unwrap() {
@@ -4147,7 +4420,11 @@ mod tests {
                 .plan
                 .statements
                 .iter()
-                .map(|s| (s.sql.clone(), s.binds.clone()))
+                .map(|s| SqlStmt {
+                    sql: s.sql.clone(),
+                    binds: s.binds.clone(),
+                    kind: s.kind,
+                })
                 .collect(),
             outcome_index: compiled.plan.outcome_index as usize,
             payload_index: compiled.plan.payload_index.map(|i| i as usize),

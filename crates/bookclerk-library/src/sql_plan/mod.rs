@@ -14,9 +14,9 @@ mod named;
 mod slots;
 pub mod vectors;
 
-use bookclerk_plugin_abi::{
-    DbAtomicPlan, DbAtomicRequest, DbConnectResult, DbPlanStatement, DbPlanStatementKind,
-};
+#[cfg(test)]
+use bookclerk_plugin_abi::DbPlanStatementKind;
+use bookclerk_plugin_abi::{DbAtomicPlan, DbAtomicRequest, DbConnectResult, DbPlanStatement};
 
 pub use dialect::{rewrite_placeholders, SqlFamily};
 pub use exec::{
@@ -115,7 +115,7 @@ pub fn wake_page_for_max_binds(max_binds: u32) -> u64 {
 
 /// Converts an internal statement list into the wire plan.
 fn wire_plan(
-    statements: Vec<(String, Vec<serde_json::Value>)>,
+    statements: Vec<named::SqlStmt>,
     outcome_index: usize,
     payload_index: Option<usize>,
     prior_receipt_index: Option<usize>,
@@ -124,9 +124,10 @@ fn wire_plan(
     DbAtomicPlan {
         statements: statements
             .into_iter()
-            .map(|(sql, binds)| {
-                let kind = host_statement_kind(&sql);
-                DbPlanStatement { sql, binds, kind }
+            .map(|stmt| DbPlanStatement {
+                sql: stmt.sql,
+                binds: stmt.binds,
+                kind: stmt.kind,
             })
             .collect(),
         outcome_index: u32::try_from(outcome_index).unwrap_or(0),
@@ -139,19 +140,9 @@ fn wire_plan(
 /// Host-authored statement shape for the wire `kind` field.
 ///
 /// Adapters must not reparse SQL; they trust this classification.
+#[cfg(test)]
 pub(crate) fn host_statement_kind(sql: &str) -> DbPlanStatementKind {
-    let compact = sql
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_uppercase();
-    if compact.contains(" RETURNING ") || compact.ends_with(" RETURNING") {
-        return DbPlanStatementKind::Returning;
-    }
-    match compact.split_whitespace().next().unwrap_or("") {
-        "SELECT" | "WITH" | "VALUES" => DbPlanStatementKind::Select,
-        _ => DbPlanStatementKind::Execute,
-    }
+    named::authored_kind(sql)
 }
 
 #[cfg(test)]
