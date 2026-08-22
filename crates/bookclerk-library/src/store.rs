@@ -55,6 +55,8 @@ pub struct LibraryStore {
     max_result_rows: u32,
     /// Negotiated guest `maxPayloadBytes`.
     max_payload_bytes: u32,
+    /// Full connect advertisement (SQL family, limits, timing).
+    connect: Arc<bookclerk_plugin_abi::DbConnectResult>,
 }
 
 impl std::fmt::Debug for LibraryStore {
@@ -78,6 +80,7 @@ impl LibraryStore {
             max_statements: bookclerk_plugin_abi::FIRST_PARTY_MAX_STATEMENTS,
             max_result_rows: 256,
             max_payload_bytes: 256 * 1024,
+            connect: Arc::new(bookclerk_plugin_abi::DbConnectResult::d1()),
         }
     }
 
@@ -96,6 +99,9 @@ impl LibraryStore {
     #[must_use]
     pub fn with_max_binds(mut self, max_binds: u32) -> Self {
         self.max_binds = max_binds.max(bookclerk_plugin_abi::HOST_MIN_BINDS);
+        let mut caps = (*self.connect).clone();
+        caps.max_binds = self.max_binds;
+        self.connect = Arc::new(caps);
         self
     }
 
@@ -110,7 +116,31 @@ impl LibraryStore {
         self.max_statements = max_statements.max(bookclerk_plugin_abi::HOST_MIN_STATEMENTS);
         self.max_result_rows = max_result_rows.max(1);
         self.max_payload_bytes = max_payload_bytes.max(1024);
+        let mut caps = (*self.connect).clone();
+        caps.max_statements = self.max_statements;
+        caps.max_result_rows = self.max_result_rows;
+        caps.max_payload_bytes = self.max_payload_bytes;
+        self.connect = Arc::new(caps);
         self
+    }
+
+    /// Records the full negotiated [`bookclerk_plugin_abi::DbConnectResult`].
+    #[must_use]
+    pub fn with_connect_result(mut self, caps: bookclerk_plugin_abi::DbConnectResult) -> Self {
+        self.max_binds = caps.max_binds.max(bookclerk_plugin_abi::HOST_MIN_BINDS);
+        self.max_statements = caps
+            .max_statements
+            .max(bookclerk_plugin_abi::HOST_MIN_STATEMENTS);
+        self.max_result_rows = caps.max_result_rows.max(1);
+        self.max_payload_bytes = caps.max_payload_bytes.max(1024);
+        self.connect = Arc::new(caps);
+        self
+    }
+
+    /// Negotiated connect advertisement used for plan validation.
+    #[must_use]
+    pub fn connect_result(&self) -> &bookclerk_plugin_abi::DbConnectResult {
+        self.connect.as_ref()
     }
 
     /// Subscribers packed into one dispatch plan (receipt overhead is ~12 statements).

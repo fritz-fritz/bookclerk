@@ -18,8 +18,8 @@ use bookclerk_plugin_abi::{
 };
 
 pub use dialect::{rewrite_placeholders, SqlFamily};
-pub use exec::execute_plan_on;
-pub use interpret::{interpret_plan, PlanStmtResult};
+pub use exec::{execute_plan_on, execute_plan_on_capped, execute_statements_on};
+pub use interpret::{interpret_exec, interpret_plan, PlanStmtResult};
 pub use named::{compile_claim_event_delivery, compile_named_request};
 pub use slots::{event_inflight_slot, lock_serialization_slot, JOB_QUEUE_SLOT};
 
@@ -44,6 +44,62 @@ impl CompiledAtomic {
 #[must_use]
 pub fn family_from_connect(caps: &DbConnectResult) -> Option<SqlFamily> {
     SqlFamily::parse(&caps.sql_family)
+}
+
+/// Rejects a plan that exceeds negotiated guest limits or has out-of-range selectors.
+///
+/// # Errors
+///
+/// Returns [`crate::LibraryError::Other`] when the plan cannot be sent.
+pub fn validate_plan(plan: &DbAtomicPlan, caps: &DbConnectResult) -> crate::error::Result<()> {
+    let n_stmt = u32::try_from(plan.statements.len()).unwrap_or(u32::MAX);
+    if caps.max_statements > 0 && n_stmt > caps.max_statements {
+        return Err(crate::LibraryError::Other(anyhow::anyhow!(
+            "atomic plan has {n_stmt} statements; guest maxStatements is {}",
+            caps.max_statements
+        )));
+    }
+    let stmt_len = plan.statements.len();
+    let mut selectors = vec![("outcomeIndex", plan.outcome_index)];
+    if let Some(idx) = plan.payload_index {
+        selectors.push(("payloadIndex", idx));
+    }
+    if let Some(idx) = plan.prior_receipt_index {
+        selectors.push(("priorReceiptIndex", idx));
+    }
+    if let Some(idx) = plan.receipt_select_index {
+        selectors.push(("receiptSelectIndex", idx));
+    }
+    for (name, idx) in selectors {
+        if (idx as usize) >= stmt_len {
+            return Err(crate::LibraryError::Other(anyhow::anyhow!(
+                "atomic plan {name} {idx} is out of range for {stmt_len} statements"
+            )));
+        }
+    }
+    for (i, stmt) in plan.statements.iter().enumerate() {
+        let n_binds = u32::try_from(stmt.binds.len()).unwrap_or(u32::MAX);
+        if caps.max_binds > 0 && n_binds > caps.max_binds {
+            return Err(crate::LibraryError::Other(anyhow::anyhow!(
+                "atomic plan statement {i} has {n_binds} binds; guest maxBinds is {}",
+                caps.max_binds
+            )));
+        }
+        if caps.max_payload_bytes > 0 {
+            let binds_len = serde_json::to_vec(&stmt.binds)
+                .map(|b| b.len())
+                .unwrap_or(0);
+            let payload = stmt.sql.len().saturating_add(binds_len);
+            let cap = usize::try_from(caps.max_payload_bytes).unwrap_or(usize::MAX);
+            if payload > cap {
+                return Err(crate::LibraryError::Other(anyhow::anyhow!(
+                    "atomic plan statement {i} encoded payload is {payload} bytes; guest maxPayloadBytes is {}",
+                    caps.max_payload_bytes
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Wake page size from negotiated `maxBinds` (SET/EXISTS overhead is 4 binds).
@@ -83,5 +139,91 @@ fn statement_kind(sql: &str) -> DbPlanStatementKind {
         DbPlanStatementKind::Query
     } else {
         DbPlanStatementKind::Execute
+    }
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::{
+        validate_plan, DbAtomicPlan, DbConnectResult, DbPlanStatement, DbPlanStatementKind,
+    };
+
+    fn tiny_caps() -> DbConnectResult {
+        let mut caps = DbConnectResult::sqlite();
+        caps.max_statements = 2;
+        caps.max_binds = 2;
+        caps.max_payload_bytes = 64;
+        caps
+    }
+
+    fn stmt(sql: &str, binds: Vec<serde_json::Value>) -> DbPlanStatement {
+        DbPlanStatement {
+            sql: sql.into(),
+            binds,
+            kind: DbPlanStatementKind::Query,
+        }
+    }
+
+    #[test]
+    fn validate_plan_rejects_too_many_statements() {
+        let plan = DbAtomicPlan {
+            statements: vec![
+                stmt("SELECT 1", vec![]),
+                stmt("SELECT 2", vec![]),
+                stmt("SELECT 3", vec![]),
+            ],
+            outcome_index: 0,
+            payload_index: None,
+            prior_receipt_index: None,
+            receipt_select_index: None,
+        };
+        let err = validate_plan(&plan, &tiny_caps()).unwrap_err();
+        assert!(err.to_string().contains("maxStatements"), "{err}");
+    }
+
+    #[test]
+    fn validate_plan_rejects_too_many_binds() {
+        let plan = DbAtomicPlan {
+            statements: vec![stmt(
+                "SELECT ?, ?, ?",
+                vec![
+                    serde_json::json!(1),
+                    serde_json::json!(2),
+                    serde_json::json!(3),
+                ],
+            )],
+            outcome_index: 0,
+            payload_index: None,
+            prior_receipt_index: None,
+            receipt_select_index: None,
+        };
+        let err = validate_plan(&plan, &tiny_caps()).unwrap_err();
+        assert!(err.to_string().contains("maxBinds"), "{err}");
+    }
+
+    #[test]
+    fn validate_plan_rejects_payload_bytes() {
+        let plan = DbAtomicPlan {
+            statements: vec![stmt("SELECT ?", vec![serde_json::json!("x".repeat(200))])],
+            outcome_index: 0,
+            payload_index: None,
+            prior_receipt_index: None,
+            receipt_select_index: None,
+        };
+        let err = validate_plan(&plan, &tiny_caps()).unwrap_err();
+        assert!(err.to_string().contains("maxPayloadBytes"), "{err}");
+    }
+
+    #[test]
+    fn validate_plan_rejects_out_of_range_selector() {
+        let plan = DbAtomicPlan {
+            statements: vec![stmt("SELECT 1", vec![])],
+            outcome_index: 3,
+            payload_index: None,
+            prior_receipt_index: None,
+            receipt_select_index: None,
+        };
+        let err = validate_plan(&plan, &DbConnectResult::sqlite()).unwrap_err();
+        assert!(err.to_string().contains("outcomeIndex"), "{err}");
     }
 }

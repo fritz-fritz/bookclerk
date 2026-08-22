@@ -2,14 +2,17 @@
 
 use std::time::Instant;
 
-use bookclerk_plugin_abi::{DbAtomicPlan, DbAtomicResult, DbAtomicTiming, DbPlanStatementKind};
+use bookclerk_plugin_abi::{
+    DbAtomicPlan, DbAtomicTiming, DbPlanExecResult, DbPlanStatementKind, DbPlanStmtExecResult,
+};
 use sea_orm::{
     from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, Statement,
     TransactionTrait, Value,
 };
 use serde_json::Value as JsonValue;
 
-use super::interpret::{interpret_plan, PlanStmtResult};
+use super::interpret::interpret_exec;
+use crate::atomic_ops::DbAtomicResult;
 use crate::error::{LibraryError, Result};
 
 /// Executes `plan` as one transaction and interprets receipt/outcome rows.
@@ -25,6 +28,42 @@ pub async fn execute_plan_on(
     operation_id: &str,
     timing_source: &str,
 ) -> Result<DbAtomicResult> {
+    execute_plan_on_capped(db, plan, expected_hash, operation_id, timing_source, 0).await
+}
+
+/// Like [`execute_plan_on`], capping collected rows at `max_result_rows` (`0` = unlimited).
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Orm`] when a statement fails.
+pub async fn execute_plan_on_capped(
+    db: &DatabaseConnection,
+    plan: &DbAtomicPlan,
+    expected_hash: &str,
+    operation_id: &str,
+    timing_source: &str,
+    max_result_rows: u32,
+) -> Result<DbAtomicResult> {
+    let exec =
+        execute_statements_on(db, plan, operation_id, timing_source, max_result_rows).await?;
+    Ok(interpret_exec(plan, &exec, expected_hash))
+}
+
+/// Executes `plan` as one transaction and returns generic statement results.
+///
+/// Guests and in-process tests share this path. `max_result_rows` of `0` means
+/// unlimited; otherwise each statement's collected rows are truncated.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Orm`] when a statement fails.
+pub async fn execute_statements_on(
+    db: &DatabaseConnection,
+    plan: &DbAtomicPlan,
+    operation_id: &str,
+    timing_source: &str,
+    max_result_rows: u32,
+) -> Result<DbPlanExecResult> {
     let started = Instant::now();
     let txn = db.begin().await.map_err(LibraryError::Orm)?;
     if crate::is_txn_broken() {
@@ -33,7 +72,7 @@ pub async fn execute_plan_on(
         return Err(LibraryError::Orm(sea_orm::DbErr::Custom(fault)));
     }
     let sql_started = Instant::now();
-    let mut results = Vec::with_capacity(plan.statements.len());
+    let mut statements = Vec::with_capacity(plan.statements.len());
     let backend = txn.get_database_backend();
     for stmt in &plan.statements {
         let values: Vec<Value> = stmt.binds.iter().map(json_to_sea).collect();
@@ -48,7 +87,7 @@ pub async fn execute_plan_on(
                         return Err(LibraryError::Orm(err));
                     }
                 };
-                let json_rows = rows
+                let mut json_rows: Vec<JsonValue> = rows
                     .into_iter()
                     .map(|row| {
                         let proxy = from_query_result_to_proxy_row(&row);
@@ -59,18 +98,29 @@ pub async fn execute_plan_on(
                         JsonValue::Object(map)
                     })
                     .collect();
-                PlanStmtResult { rows: json_rows }
+                cap_rows(&mut json_rows, max_result_rows);
+                let rows_affected = u64::try_from(json_rows.len()).unwrap_or(u64::MAX);
+                DbPlanStmtExecResult {
+                    rows: json_rows,
+                    rows_affected,
+                }
             }
             DbPlanStatementKind::Execute => {
-                if let Err(err) = txn.execute_raw(sea_stmt).await {
-                    let _ = txn.rollback().await;
-                    let _ = crate::take_txn_fault();
-                    return Err(LibraryError::Orm(err));
+                let exec = match txn.execute_raw(sea_stmt).await {
+                    Ok(exec) => exec,
+                    Err(err) => {
+                        let _ = txn.rollback().await;
+                        let _ = crate::take_txn_fault();
+                        return Err(LibraryError::Orm(err));
+                    }
+                };
+                DbPlanStmtExecResult {
+                    rows: Vec::new(),
+                    rows_affected: exec.rows_affected(),
                 }
-                PlanStmtResult { rows: Vec::new() }
             }
         };
-        results.push(stmt_result);
+        statements.push(stmt_result);
     }
     if crate::consume_commit_injection() {
         let _ = txn.rollback().await;
@@ -87,14 +137,26 @@ pub async fn execute_plan_on(
         return Err(LibraryError::Orm(sea_orm::DbErr::Custom(fault)));
     }
     let db_execution_us = u64::try_from(sql_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    let mut result = interpret_plan(plan, &results, expected_hash);
-    result.operation_id = operation_id.to_string();
-    result.timing = Some(DbAtomicTiming {
-        attempt_elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-        db_execution_us: Some(db_execution_us),
-        db_timing_source: Some(timing_source.to_string()),
-    });
-    Ok(result)
+    Ok(DbPlanExecResult {
+        operation_id: operation_id.to_string(),
+        statements,
+        timing: Some(DbAtomicTiming {
+            attempt_elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            db_execution_us: Some(db_execution_us),
+            db_timing_source: Some(timing_source.to_string()),
+        }),
+    })
+}
+
+/// Truncates `rows` when `max_result_rows` is a positive cap.
+fn cap_rows(rows: &mut Vec<JsonValue>, max_result_rows: u32) {
+    if max_result_rows == 0 {
+        return;
+    }
+    let cap = usize::try_from(max_result_rows).unwrap_or(usize::MAX);
+    if rows.len() > cap {
+        rows.truncate(cap);
+    }
 }
 
 /// Maps a JSON bind onto a SeaORM [`Value`], decoding `b64:` strings as blobs.

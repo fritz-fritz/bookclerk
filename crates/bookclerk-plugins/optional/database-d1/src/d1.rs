@@ -615,13 +615,17 @@ mod tests {
 
     fn named_plan(
         operation_id: &str,
-        operation: bookclerk_plugin_sdk::DbAtomicParams,
+        operation: bookclerk_library::DbAtomicParams,
     ) -> bookclerk_plugin_sdk::DbAtomicRequest {
-        let named = bookclerk_plugin_sdk::DbAtomicRequest::named(operation_id, operation);
         let now = chrono::Utc::now().to_rfc3339();
-        bookclerk_library::compile_named_request(&named, &now, bookclerk_library::SqlFamily::Sqlite)
-            .expect("compile named atomic request")
-            .into_request(named.operation_id)
+        bookclerk_library::compile_named_request(
+            operation_id,
+            &operation,
+            &now,
+            bookclerk_library::SqlFamily::Sqlite,
+        )
+        .expect("compile named atomic request")
+        .into_request(operation_id)
     }
 
     fn query_ok() -> ResponseTemplate {
@@ -738,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_redeem_posts_one_multi_statement_batch() {
-        use bookclerk_plugin_sdk::DbAtomicParams;
+        use bookclerk_library::DbAtomicParams;
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -792,7 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_confirm_totp_posts_one_multi_statement_batch() {
-        use bookclerk_plugin_sdk::DbAtomicParams;
+        use bookclerk_library::DbAtomicParams;
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -855,7 +859,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_take_oidc_posts_delete_returning_batch() {
-        use bookclerk_plugin_sdk::DbAtomicParams;
+        use bookclerk_library::DbAtomicParams;
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -898,7 +902,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_take_oidc_retries_mangled_response() {
-        use bookclerk_plugin_sdk::DbAtomicParams;
+        use bookclerk_library::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
@@ -939,7 +943,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_take_oidc_retries_incomplete_2xx() {
-        use bookclerk_plugin_sdk::DbAtomicParams;
+        use bookclerk_library::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
@@ -980,7 +984,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_take_oidc_outer_retry_reuses_operation_id_after_two_lost_replies() {
-        use bookclerk_plugin_sdk::DbAtomicParams;
+        use bookclerk_library::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
@@ -1026,7 +1030,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_take_oidc_exhausted_inner_retries_then_same_id_recovers() {
-        use bookclerk_plugin_sdk::DbAtomicParams;
+        use bookclerk_library::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
@@ -1070,7 +1074,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_permanent_400_is_not_retried() {
-        use bookclerk_plugin_sdk::DbAtomicParams;
+        use bookclerk_library::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
@@ -1111,7 +1115,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_503_is_retried_then_succeeds() {
-        use bookclerk_plugin_sdk::DbAtomicParams;
+        use bookclerk_library::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;

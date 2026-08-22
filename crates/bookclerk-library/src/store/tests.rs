@@ -1,4 +1,5 @@
 use super::*;
+use crate::atomic_status;
 use crate::models::{
     EnqueueJobSpec, EnqueueOutcome, EventCatalogSubscription, EventSubscriber, EventWakeGrant,
     JobFence, JobKind, JobPayload, JobRecord, JobResourceClass, JobState, JobTrigger,
@@ -6,7 +7,6 @@ use crate::models::{
 };
 use crate::{execute_db_atomic, AtomicTxnBackend, EventDeliveryRecord, LibraryError};
 use async_trait::async_trait;
-use bookclerk_plugin_abi::atomic_status;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait};
 use std::sync::Arc;
 
@@ -1825,17 +1825,18 @@ impl AtomicTxnBackend for SqliteAtomicClaimBackend {
     ) -> crate::Result<u32> {
         let subscribers_json = serde_json::to_string(subscribers)
             .map_err(|err| LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
-        let req = bookclerk_plugin_abi::DbAtomicRequest::named(
-            operation_id.to_string(),
-            bookclerk_plugin_abi::DbAtomicParams::DispatchEventDeliveries {
+        let now = chrono::Utc::now().to_rfc3339();
+        let compiled = crate::compile_named_request(
+            operation_id,
+            &crate::DbAtomicParams::DispatchEventDeliveries {
                 event_id: event_id.to_string(),
                 subscribers_json,
                 mark_dispatched,
             },
-        );
-        let now = chrono::Utc::now().to_rfc3339();
-        let compiled = crate::compile_named_request(&req, &now, crate::SqlFamily::Sqlite)
-            .map_err(LibraryError::Orm)?;
+            &now,
+            crate::SqlFamily::Sqlite,
+        )
+        .map_err(LibraryError::Orm)?;
         let result =
             execute_db_atomic(&self.db, compiled.into_request(operation_id.to_string())).await?;
         if result.status == atomic_status::NOT_FOUND {
@@ -3229,22 +3230,20 @@ async fn concurrent_host_cas_claims_do_not_skip_keyset_pages() {
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
             let mut n = 0u32;
-            loop {
-                match store
-                    .claim_next_event_delivery(
-                        &format!("keyset-w{i}"),
-                        60,
-                        &uuid::Uuid::new_v4().to_string(),
-                        &["echo".into()],
-                        8,
-                        "",
-                    )
-                    .await
-                    .unwrap()
-                {
-                    Some(_) => n += 1,
-                    None => break,
-                }
+            while store
+                .claim_next_event_delivery(
+                    &format!("keyset-w{i}"),
+                    60,
+                    &uuid::Uuid::new_v4().to_string(),
+                    &["echo".into()],
+                    8,
+                    "",
+                )
+                .await
+                .unwrap()
+                .is_some()
+            {
+                n += 1;
             }
             n
         }));

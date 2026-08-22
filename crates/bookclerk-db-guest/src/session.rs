@@ -12,7 +12,7 @@ use std::sync::{Arc, LazyLock, OnceLock};
 
 use bookclerk_plugin_sdk::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use bookclerk_plugin_sdk::{
-    proxy_rows_to_dto, statement_from_dto, DbAtomicRequest, DbAtomicResult, ExecResultDto,
+    proxy_rows_to_dto, statement_from_dto, DbAtomicRequest, DbPlanExecResult, ExecResultDto,
     ProxyRowDto, QueryResultDto, StatementDto,
 };
 use futures::TryStreamExt;
@@ -215,7 +215,8 @@ pub async fn guest_rollback(txn_id: String) -> Result<()> {
 /// Runs a host-authored generic SQL plan as one native transaction.
 ///
 /// Guests must not compile Bookclerk operation names. The host sends
-/// [`DbAtomicRequest::plan`]; missing plans fail closed.
+/// [`DbAtomicRequest::plan`]; missing plans fail closed. Results are generic
+/// statement rows; the host interprets receipts and application status.
 ///
 /// # Arguments
 ///
@@ -225,21 +226,30 @@ pub async fn guest_rollback(txn_id: String) -> Result<()> {
 ///
 /// Returns an error string when not connected, the plan is missing, or the
 /// engine rejects the work.
-pub async fn guest_atomic(req: DbAtomicRequest) -> Result<DbAtomicResult> {
+pub async fn guest_atomic(req: DbAtomicRequest) -> Result<DbPlanExecResult> {
     let gate = txn_gate();
     let _gate = gate.lock().await;
     let conn = connection().await?;
     let plan = req
         .plan
         .ok_or_else(|| "dbAtomic requires a host-authored executePlan".to_string())?;
-    let hash = req.request_hash.unwrap_or_default();
     let timing_source = match conn.get_database_backend() {
         DbBackend::Postgres => "postgres_txn",
         _ => "sqlite_txn",
     };
-    bookclerk_library::execute_plan_on(&conn, &plan, &hash, &req.operation_id, timing_source)
-        .await
-        .map_err(|e| e.to_string())
+    let max_result_rows = match conn.get_database_backend() {
+        DbBackend::Postgres => bookclerk_plugin_sdk::DbConnectResult::postgres().max_result_rows,
+        _ => bookclerk_plugin_sdk::DbConnectResult::sqlite().max_result_rows,
+    };
+    bookclerk_library::execute_statements_on(
+        &conn,
+        &plan,
+        &req.operation_id,
+        timing_source,
+        max_result_rows,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Runs a read-only SQL query through the guest database bridge.

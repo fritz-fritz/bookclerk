@@ -80,10 +80,10 @@ pub mod plugin_v2_capnp {
 mod wire_fixtures;
 
 pub use db::{
-    atomic_status, sea_null, sea_null_kind, DbAtomicParams, DbAtomicPlan, DbAtomicRequest,
-    DbAtomicResult, DbAtomicTiming, DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult,
-    DbPlanStatement, DbPlanStatementKind, DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto,
-    StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbBeginParams,
+    DbBeginResult, DbConnectParams, DbConnectResult, DbPlanExecResult, DbPlanStatement,
+    DbPlanStatementKind, DbPlanStmtExecResult, DbTxnParams, ExecResultDto, ProxyRowDto,
+    QueryResultDto, StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
     FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS,
     SEA_NULL_KEY, SQLITE_MAX_BINDS,
 };
@@ -162,31 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn db_atomic_params_use_camel_case_op_tag() {
-        let params = DbAtomicParams::DeleteUser { user_id: 7 };
-        let v = serde_json::to_value(&params).unwrap();
-        assert_eq!(v["op"], "deleteUser");
-        assert_eq!(v["userId"], 7);
-        let back: DbAtomicParams = serde_json::from_value(v).unwrap();
-        assert_eq!(back, params);
-
-        let take = DbAtomicParams::TakeOidcRpState {
-            state_hash: "abc".into(),
-        };
-        let tv = serde_json::to_value(&take).unwrap();
-        assert_eq!(tv["op"], "takeOidcRpState");
-        assert_eq!(tv["stateHash"], "abc");
-        let take_back: DbAtomicParams = serde_json::from_value(tv).unwrap();
-        assert_eq!(take_back, take);
-
-        let req = DbAtomicRequest::named("op-1", take.clone());
-        let rv = serde_json::to_value(&req).unwrap();
-        assert_eq!(rv["operationId"], "op-1");
-        assert!(
-            rv.get("operation").is_none(),
-            "named operations stay off the guest wire"
-        );
-
+    fn db_atomic_plan_wire_omits_named_operations() {
         let plan_req = DbAtomicRequest::with_plan(
             "op-plan",
             "abc",
@@ -207,40 +183,23 @@ mod tests {
         assert_eq!(pv["requestHash"], "abc");
         assert_eq!(pv["plan"]["statements"][0]["sql"], "SELECT 1");
         assert_eq!(pv["plan"]["statements"][0]["kind"], "query");
+        assert!(
+            pv.get("operation").is_none(),
+            "named operations stay off the guest wire"
+        );
 
-        let chal = DbAtomicParams::TakeWebauthnChallenge {
-            challenge_id: "c1".into(),
-            kind: "login".into(),
+        let exec = DbPlanExecResult {
+            operation_id: "op-plan".into(),
+            statements: vec![DbPlanStmtExecResult {
+                rows: vec![serde_json::json!({"status": "ok"})],
+                rows_affected: 0,
+            }],
+            timing: None,
         };
-        let cv = serde_json::to_value(&chal).unwrap();
-        assert_eq!(cv["op"], "takeWebauthnChallenge");
-        assert_eq!(cv["challengeId"], "c1");
-        assert_eq!(cv["kind"], "login");
-
-        let confirm = DbAtomicParams::ConfirmTotpEnrollment {
-            user_id: 9,
-            format: "sealed-v1".into(),
-            ciphertext: "b64:AA==".into(),
-            cipher_algorithm: Some("xchacha20poly1305".into()),
-            cipher_nonce: Some("b64:AA==".into()),
-            kdf_algorithm: None,
-            kdf_salt: None,
-            kdf_m_cost: None,
-            kdf_t_cost: None,
-            kdf_p_cost: None,
-            created_at: "2024-06-01T00:00:00Z".into(),
-        };
-        let conf_v = serde_json::to_value(&confirm).unwrap();
-        assert_eq!(conf_v["op"], "confirmTotpEnrollment");
-        assert_eq!(conf_v["userId"], 9);
-        assert_eq!(conf_v["ciphertext"], "b64:AA==");
-        let confirm_back: DbAtomicParams = serde_json::from_value(conf_v).unwrap();
-        assert_eq!(confirm_back, confirm);
-
-        let disable = DbAtomicParams::DisableUserTotp { user_id: 9 };
-        let dis_v = serde_json::to_value(&disable).unwrap();
-        assert_eq!(dis_v["op"], "disableUserTotp");
-        assert_eq!(dis_v["userId"], 9);
+        let ev = serde_json::to_value(&exec).unwrap();
+        assert_eq!(ev["operationId"], "op-plan");
+        assert_eq!(ev["statements"][0]["rowsAffected"], 0);
+        assert!(ev.get("status").is_none());
 
         let d1 = DbConnectResult::d1();
         let rv = serde_json::to_value(&d1).unwrap();

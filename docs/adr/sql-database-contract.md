@@ -74,9 +74,12 @@ special-case that SQL sentinel):
 - uniform timing metadata on the result
 
 The guest runs the statements as **one SQL transaction** (D1 HTTP
-`{ "batch": [...] }`; SQLite/PostgreSQL `BEGIN`). Receipt rows live in
-host-authored SQL against `db_atomic_receipts`. Guests must not parse
-Bookclerk operation names.
+`{ "batch": [...] }`; SQLite/PostgreSQL `BEGIN`) and returns a generic
+`DbPlanExecResult` (`operationId`, per-statement `rows` / `rowsAffected`,
+timing). Receipt rows live in host-authored SQL against `db_atomic_receipts`.
+The host runs `interpret_plan` on those statement results to produce
+application status (`ok`, `empty`, `idempotencyConflict`, …). Guests must
+not parse Bookclerk operation names or interpret receipts.
 
 Stable error categories: unique/constraint, retryable, unavailable,
 timeout, unsupported.
@@ -106,7 +109,8 @@ limits is not loaded.
 - First-party database plugins shrink to connect, migrate (executing
   host-authored DDL), proxy CRUD, and a generic batch executor.
 - An architecture lint forbids plugin sources from importing Bookclerk
-  entities or embedding application table names.
+  entities, embedding application table names, or interpreting named
+  operations (`DbAtomicParams`, `atomic_status`, `interpret_plan`).
 - Equal performance across engines is not guaranteed.
 - Integration plugins never receive database credentials or raw
   connections.

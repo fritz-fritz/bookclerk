@@ -2,12 +2,13 @@
 //!
 //! The guest does not parse Bookclerk operation names. The host compiles
 //! domain work into [`DbAtomicPlan`]; this module runs that list as one
-//! D1 `{ "batch": [...] }` SQL transaction and returns rows.
+//! D1 `{ "batch": [...] }` SQL transaction and returns statement results.
 
 use std::time::Duration;
 
 use bookclerk_plugin_sdk::{
-    sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicResult, DbAtomicTiming,
+    sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbConnectResult,
+    DbPlanExecResult, DbPlanStmtExecResult,
 };
 use sea_orm::DbErr;
 use serde_json::Value as JsonValue;
@@ -30,13 +31,12 @@ impl D1Proxy {
     pub async fn run_atomic(
         &self,
         req: DbAtomicRequest,
-    ) -> std::result::Result<DbAtomicResult, DbErr> {
+    ) -> std::result::Result<DbPlanExecResult, DbErr> {
         let started = std::time::Instant::now();
         let plan = req
             .plan
             .clone()
             .ok_or_else(|| DbErr::Custom("dbAtomic requires a host-authored executePlan".into()))?;
-        let expected_hash = req.request_hash.clone().unwrap_or_default();
         let statements: Vec<SqlStmt> = plan
             .statements
             .iter()
@@ -53,27 +53,8 @@ impl D1Proxy {
                 }
                 Err(err) => return Err(err.into()),
             };
-            match parse_generic_batch(&plan, &raw, &req.operation_id) {
-                Ok(results) => {
-                    let stmt_results: Vec<bookclerk_library::sql_plan::PlanStmtResult> = results
-                        .into_iter()
-                        .map(|r| bookclerk_library::sql_plan::PlanStmtResult { rows: r.rows })
-                        .collect();
-                    let mut result = bookclerk_library::sql_plan::interpret_plan(
-                        &plan,
-                        &stmt_results,
-                        &expected_hash,
-                    );
-                    let db_execution_us = d1_sql_duration_us(&raw);
-                    result.operation_id = req.operation_id;
-                    result.timing = Some(DbAtomicTiming {
-                        attempt_elapsed_us: u64::try_from(started.elapsed().as_micros())
-                            .unwrap_or(u64::MAX),
-                        db_execution_us,
-                        db_timing_source: db_execution_us.map(|_| "d1_sql_duration".into()),
-                    });
-                    return Ok(result);
-                }
+            match parse_generic_batch(&plan, &raw, req.operation_id.clone(), started) {
+                Ok(result) => return Ok(result),
                 Err(err) if is_ambiguous_d1(&err) && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
                     sleep_before_d1_retry(attempt, None).await;
                     last_err = Some(err);
@@ -167,74 +148,41 @@ fn d1_sql_duration_us(raw: &JsonValue) -> Option<u64> {
     any.then_some((ms * 1000.0) as u64)
 }
 
-#[derive(Debug, Clone)]
-/// Rows returned by one statement in a D1 HTTP batch response.
-struct BatchStmtResult {
-    /// Result rows for this statement; empty when the statement did not return rows.
-    rows: Vec<JsonValue>,
-}
-
 /// Parses a D1 batch for a host-authored [`DbAtomicPlan`].
 fn parse_generic_batch(
     plan: &DbAtomicPlan,
     value: &JsonValue,
-    operation_id: &str,
-) -> std::result::Result<Vec<BatchStmtResult>, DbErr> {
-    let results = parse_batch_results(value)?;
-    if results.len() != plan.statements.len() {
+    operation_id: String,
+    started: std::time::Instant,
+) -> std::result::Result<DbPlanExecResult, DbErr> {
+    let mut statements = parse_batch_results(value)?;
+    if statements.len() != plan.statements.len() {
         return Err(ambiguous_d1(format!(
             "expected {} statement results, got {}",
             plan.statements.len(),
-            results.len()
+            statements.len()
         )));
     }
-    if let Some(idx) = plan.prior_receipt_index {
-        let idx = idx as usize;
-        if let Some(row) = results.get(idx).and_then(|r| r.rows.first()) {
-            validate_receipt_row(row, operation_id)?;
+    let cap = usize::try_from(DbConnectResult::d1().max_result_rows).unwrap_or(1_000);
+    for stmt in &mut statements {
+        if stmt.rows.len() > cap {
+            stmt.rows.truncate(cap);
         }
     }
-    if let Some(idx) = plan.receipt_select_index {
-        let idx = idx as usize;
-        let Some(row) = results.get(idx).and_then(|r| r.rows.first()) else {
-            return Err(ambiguous_d1("missing final receipt row"));
-        };
-        validate_receipt_row(row, operation_id)?;
-    }
-    Ok(results)
-}
-
-/// Reads a required non-empty string field from a receipt row, or marks the response ambiguous.
-fn required_receipt_string<'a>(
-    row: &'a JsonValue,
-    field: &str,
-) -> std::result::Result<&'a str, DbErr> {
-    row.get(field)
-        .and_then(JsonValue::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| ambiguous_d1(format!("malformed receipt row: missing {field}")))
-}
-
-/// Requires `operation_id`, `request_hash`, `status`, and `created_at`, and checks the id matches.
-fn validate_receipt_row(
-    row: &JsonValue,
-    expected_operation_id: &str,
-) -> std::result::Result<(), DbErr> {
-    let op_id = required_receipt_string(row, "operation_id")?;
-    let _hash = required_receipt_string(row, "request_hash")?;
-    let _status = required_receipt_string(row, "status")?;
-    let _created = required_receipt_string(row, "created_at")?;
-    if op_id != expected_operation_id {
-        return Err(ambiguous_d1(format!(
-            "receipt operation_id {op_id} != {expected_operation_id}"
-        )));
-    }
-    Ok(())
+    let db_execution_us = d1_sql_duration_us(value);
+    Ok(DbPlanExecResult {
+        operation_id,
+        statements,
+        timing: Some(DbAtomicTiming {
+            attempt_elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            db_execution_us,
+            db_timing_source: db_execution_us.map(|_| "d1_sql_duration".into()),
+        }),
+    })
 }
 
 /// Parses the D1 `result` array; a `success: false` entry is a hard statement failure.
-fn parse_batch_results(value: &JsonValue) -> std::result::Result<Vec<BatchStmtResult>, DbErr> {
+fn parse_batch_results(value: &JsonValue) -> std::result::Result<Vec<DbPlanStmtExecResult>, DbErr> {
     let Some(arr) = value.get("result").and_then(JsonValue::as_array) else {
         return Err(ambiguous_d1("batch response missing result array"));
     };
@@ -250,7 +198,15 @@ fn parse_batch_results(value: &JsonValue) -> std::result::Result<Vec<BatchStmtRe
             .and_then(JsonValue::as_array)
             .cloned()
             .unwrap_or_default();
-        out.push(BatchStmtResult { rows });
+        let rows_affected = entry
+            .get("meta")
+            .and_then(|m| m.get("changes"))
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(0);
+        out.push(DbPlanStmtExecResult {
+            rows,
+            rows_affected,
+        });
     }
     Ok(out)
 }
@@ -269,25 +225,42 @@ mod tests {
             prior_receipt_index: None,
             receipt_select_index: None,
         };
-        let err = parse_generic_batch(&plan, &json!({}), "op-1").unwrap_err();
+        let started = std::time::Instant::now();
+        let err = parse_generic_batch(&plan, &json!({}), "op-1".into(), started).unwrap_err();
         assert!(is_ambiguous_d1(&err), "{err}");
     }
 
     #[test]
     fn statement_failure_is_not_ambiguous() {
+        let value = json!({
+            "result": [{ "success": false, "error": "constraint" }]
+        });
+        let err = parse_batch_results(&value).unwrap_err();
+        assert!(!is_ambiguous_d1(&err), "{err}");
+    }
+
+    #[test]
+    fn parse_caps_result_rows() {
         let plan = DbAtomicPlan {
-            statements: vec![],
+            statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+                sql: "SELECT 1".into(),
+                binds: vec![],
+                kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+            }],
             outcome_index: 0,
             payload_index: None,
             prior_receipt_index: None,
             receipt_select_index: None,
         };
+        let mut rows = Vec::new();
+        for i in 0..1_050 {
+            rows.push(json!({ "n": i }));
+        }
         let value = json!({
-            "result": [{ "success": false, "error": "constraint" }]
+            "result": [{ "success": true, "results": rows, "meta": { "changes": 0 } }]
         });
-        // statements.len() is 0, result len is 1 → ambiguous count; use parse_batch_results
-        let err = parse_batch_results(&value).unwrap_err();
-        assert!(!is_ambiguous_d1(&err), "{err}");
-        let _ = plan;
+        let started = std::time::Instant::now();
+        let exec = parse_generic_batch(&plan, &value, "op-cap".into(), started).unwrap();
+        assert_eq!(exec.statements[0].rows.len(), 1_000);
     }
 }

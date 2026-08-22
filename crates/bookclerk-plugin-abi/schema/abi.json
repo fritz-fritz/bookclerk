@@ -1244,27 +1244,32 @@
         }
       }
     },
-    "DbAtomicResult": {
+    "DbPlanStmtExecResult": {
+      "type": "object",
+      "properties": {
+        "rows": {
+          "type": "array"
+        },
+        "rowsAffected": {
+          "type": "integer"
+        }
+      }
+    },
+    "DbPlanExecResult": {
       "type": "object",
       "required": [
-        "status"
+        "operationId",
+        "statements"
       ],
       "properties": {
-        "status": {
-          "type": "string",
-          "description": "Application outcome: ok, empty, notFound, lastOwner, claimInvalid, passwordRequired, idempotencyConflict."
-        },
-        "payload": {
-          "description": "Op-specific library record JSON when status is ok."
-        },
         "operationId": {
           "type": "string"
         },
-        "replayed": {
-          "type": "boolean"
-        },
-        "receiptCreatedAt": {
-          "type": "string"
+        "statements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DbPlanStmtExecResult"
+          }
         },
         "timing": {
           "type": "object"

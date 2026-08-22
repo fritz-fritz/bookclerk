@@ -13,9 +13,8 @@ use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
-    atomic_status, exec_result_from_dto, proxy_rows_from_dto, statement_to_dto, DbAtomicParams,
-    DbAtomicRequest, DbAtomicResult, DbConnectParams, DbConnectResult, ExecResultDto, ProxyRowDto,
-    DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    exec_result_from_dto, proxy_rows_from_dto, statement_to_dto, DbConnectParams, DbConnectResult,
+    DbPlanExecResult, ExecResultDto, ProxyRowDto, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -28,6 +27,7 @@ use crate::discover::DiscoveredPlugin;
 use crate::jail::plugin_data_dir;
 use crate::rpc_v2::{V2PluginSession, OPERATOR_ACCOUNT};
 use crate::{PluginError, Result as PluginResult};
+use bookclerk_library::{atomic_status, DbAtomicParams};
 
 /// External database backend spawned for `[database].plugin`.
 #[derive(Clone)]
@@ -226,10 +226,11 @@ pub async fn open_library_store(
         bookclerk_library::LibraryError::Other(anyhow::anyhow!(caps.capability_failure_reason()))
     })?;
     let store = bookclerk_library::LibraryStore::from_connection(db)
-        .with_max_binds(caps.max_binds)
+        .with_connect_result(caps.clone())
         .with_atomic_txn(Arc::new(RpcAtomicBackend {
             session: ext.session.clone(),
             family,
+            caps,
         }));
     store.ensure_users_bridged().await?;
     Ok(store)
@@ -493,11 +494,16 @@ struct RpcAtomicBackend {
     session: Arc<V2PluginSession>,
     /// Negotiated SQL family for host-authored plans.
     family: bookclerk_library::SqlFamily,
+    /// Full negotiated capabilities used to reject oversized plans before RPC.
+    caps: DbConnectResult,
 }
 
 impl RpcAtomicBackend {
     /// Sends one `bookclerk.atomic` query; ambiguous transport maps to [`LibraryError::Unavailable`].
-    async fn call(&self, params: DbAtomicParams) -> bookclerk_library::Result<DbAtomicResult> {
+    async fn call(
+        &self,
+        params: bookclerk_library::DbAtomicParams,
+    ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
         let operation_id = bookclerk_library::db_atomic_operation_id(&params);
         self.call_with_id(operation_id, params).await
     }
@@ -506,29 +512,40 @@ impl RpcAtomicBackend {
     async fn call_with_id(
         &self,
         operation_id: String,
-        params: DbAtomicParams,
-    ) -> bookclerk_library::Result<DbAtomicResult> {
-        let named = DbAtomicRequest::named(operation_id.clone(), params);
+        params: bookclerk_library::DbAtomicParams,
+    ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
         let now = chrono::Utc::now().to_rfc3339();
-        let compiled = bookclerk_library::compile_named_request(&named, &now, self.family)
-            .map_err(bookclerk_library::LibraryError::Orm)?;
-        self.send_request(compiled.into_request(operation_id)).await
+        let compiled =
+            bookclerk_library::compile_named_request(&operation_id, &params, &now, self.family)
+                .map_err(bookclerk_library::LibraryError::Orm)?;
+        self.send_compiled(compiled, operation_id).await
     }
 
-    /// Sends an already-compiled generic plan.
-    async fn send_request(
+    /// Sends an already-compiled generic plan and interprets the guest statement results.
+    async fn send_compiled(
         &self,
-        request: DbAtomicRequest,
-    ) -> bookclerk_library::Result<DbAtomicResult> {
+        compiled: bookclerk_library::CompiledAtomic,
+        operation_id: String,
+    ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
+        bookclerk_library::validate_plan(&compiled.plan, &self.caps)?;
+        let request = compiled.clone().into_request(operation_id);
         let payload = serde_json::to_string(&request).map_err(|err| {
             bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
         })?;
         match self.session.db_query(DB_ATOMIC_SENTINEL, payload).await {
-            Ok(page) => serde_json::from_str(&page.rows_json).map_err(|err| {
-                bookclerk_library::LibraryError::Other(anyhow::anyhow!(
-                    "database atomic result: {err}"
+            Ok(page) => {
+                let exec: DbPlanExecResult =
+                    serde_json::from_str(&page.rows_json).map_err(|err| {
+                        bookclerk_library::LibraryError::Other(anyhow::anyhow!(
+                            "database atomic result: {err}"
+                        ))
+                    })?;
+                Ok(bookclerk_library::interpret_exec(
+                    &compiled.plan,
+                    &exec,
+                    &compiled.expected_hash,
                 ))
-            }),
+            }
             Err(err) => Err(map_plugin_err(err)),
         }
     }
@@ -1012,7 +1029,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
         )
         .map_err(bookclerk_library::LibraryError::Orm)?;
         let result = self
-            .send_request(compiled.into_request(operation_id.to_string()))
+            .send_compiled(compiled, operation_id.to_string())
             .await?;
         if result.status == atomic_status::EMPTY {
             return Ok(None);
@@ -1205,17 +1222,9 @@ mod tests {
         let params = DbAtomicParams::TakeOidcRpState {
             state_hash: "abc".into(),
         };
-        let first = serde_json::to_value(DbAtomicRequest::named(
-            bookclerk_library::db_atomic_operation_id(&params),
-            params.clone(),
-        ))
-        .unwrap();
-        let second = serde_json::to_value(DbAtomicRequest::named(
-            bookclerk_library::db_atomic_operation_id(&params),
-            params,
-        ))
-        .unwrap();
-        assert_eq!(first["operationId"], second["operationId"]);
-        assert_eq!(first["operationId"], "takeOidcRpState:abc");
+        let first = bookclerk_library::db_atomic_operation_id(&params);
+        let second = bookclerk_library::db_atomic_operation_id(&params);
+        assert_eq!(first, second);
+        assert_eq!(first, "takeOidcRpState:abc");
     }
 }

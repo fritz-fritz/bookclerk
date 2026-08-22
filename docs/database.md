@@ -202,16 +202,22 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   `dbAtomic` on every bundled backend. The **host** compiles a bounded generic
   SQL plan (statements + binds + outcome selectors + receipt wrapping). The
   D1 plugin runs that plan as **one** `{ "batch": [...] }` REST request (a real
-  SQL transaction). SQLite and PostgreSQL guests run the same plan in a native
-  local transaction. Guests do not parse Bookclerk operation names or table
-  names. Each call carries an `operationId` and `requestHash`; host-authored
-  SQL writes a durable receipt in the same transaction so a committed result
-  whose HTTP/RPC response is lost can be retried without a second mutation.
+  SQL transaction) and returns per-statement `rows` / `rowsAffected`. SQLite
+  and PostgreSQL guests run the same plan in a native local transaction and
+  return the same generic batch result. The host interprets receipts and
+  application status (`ok`, `empty`, `lastOwner`, …). Guests do not parse
+  Bookclerk operation names or table names. Each call carries an
+  `operationId` and `requestHash`; host-authored SQL writes a durable receipt
+  in the same transaction so a committed result whose HTTP/RPC response is
+  lost can be retried without a second mutation.
   Structured statuses include `ok`, `empty`, `lastOwner`, `claimInvalid`,
   `passwordRequired`, `notFound`, and `idempotencyConflict`. Consume-once ops
   use `DELETE … RETURNING` so a missing or expired row cannot be observed
   twice. After `openSession` the host queries `bookclerk.capabilities`; D1
-  reports `interactiveTxn: false` and `maxBinds: 100`. A guest that cannot
+  reports `interactiveTxn: false` and `maxBinds: 100`. The host stores the
+  full connect advertisement and rejects plans that exceed `maxStatements`,
+  per-statement `maxBinds`, `maxPayloadBytes`, or out-of-range selectors.
+  Executors cap collected rows at `maxResultRows`. A guest that cannot
   provide `atomicBatch` or the host's minimum bind/statement limits is not
   loaded. Time Travel is not used.
 - Schema migrations run in the D1 plugin module via
@@ -224,12 +230,13 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
 | --- | --- |
 | [`bookclerk-library`](../crates/bookclerk-library) | Greenfield DDL ([`migrations`](../crates/bookclerk-library/src/migrations.rs)), SeaORM entities, domain invariants, host-owned atomic SQL plans, [`LibraryStore`](../crates/bookclerk-library) CRUD (`from_connection` only) |
 | `bookclerk-plugin-database-{sqlite,d1,postgres}` | Connection/transport, capability advertisement, bind encoding, generic query/execute/atomic-batch, error/timing normalization. **Not** Bookclerk table names or named domain operations. |
-| Host (`bookclerk-plugin-host`) | Spawn guest, mediate secrets into tagged `DbConnectParams`, negotiate capabilities, compile plans, forward SeaORM via RPC proxy |
+| Host (`bookclerk-plugin-host`) | Spawn guest, mediate secrets into tagged `DbConnectParams`, negotiate capabilities, compile plans, interpret statement results, forward SeaORM via RPC proxy |
 
 Core stays database-agnostic: it sees a migrated `DatabaseConnection`, and
 the host always attaches [`AtomicTxnBackend`](../crates/bookclerk-library)
-(`dbAtomic` executePlan on the guest) for atomic security, job, and event
-operations. Domain names stay in host code.
+(`dbAtomic` generic plan on the guest; host `interpret_plan` on the result)
+for atomic security, job, and event operations. Domain names stay in host
+code.
 Hosts must install/stage the active database guest; missing guests are hard errors.
 
 ### LibraryStore status

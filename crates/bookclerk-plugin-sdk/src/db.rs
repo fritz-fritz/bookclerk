@@ -15,10 +15,11 @@ use sea_orm::{ProxyExecResult, ProxyRow, Statement, Value};
 use serde_json::Value as JsonValue;
 
 pub use bookclerk_plugin_abi::{
-    atomic_status, sea_null, sea_null_kind, DbAtomicParams, DbAtomicPlan, DbAtomicRequest,
-    DbAtomicResult, DbAtomicTiming, DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult,
-    DbPlanStatement, DbPlanStatementKind, DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto,
-    StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL, SEA_NULL_KEY,
+    sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbBeginParams,
+    DbBeginResult, DbConnectParams, DbConnectResult, DbPlanExecResult, DbPlanStatement,
+    DbPlanStatementKind, DbPlanStmtExecResult, DbTxnParams, ExecResultDto, ProxyRowDto,
+    QueryResultDto, StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    SEA_NULL_KEY,
 };
 
 /// Converts a SeaORM [`Statement`] into the wire [`StatementDto`] used by `dbQuery` / `dbExecute`.

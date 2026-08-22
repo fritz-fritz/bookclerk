@@ -24,6 +24,10 @@ PLUGIN_GLOBS = (
 FORBIDDEN_IMPORTS = (
     re.compile(r"bookclerk_library::entities"),
     re.compile(r"use\s+bookclerk_library::entities"),
+    re.compile(r"bookclerk_library::sql_plan"),
+    re.compile(r"\binterpret_plan\b"),
+    re.compile(r"\bDbAtomicParams\b"),
+    re.compile(r"\batomic_status\b"),
 )
 
 # Application tables the host owns. Guests must not mention these identifiers.
@@ -128,7 +132,9 @@ def check_file(path: Path) -> list[str]:
     for rx in FORBIDDEN_IMPORTS:
         for m in rx.finditer(scanned):
             line = scanned.count("\n", 0, m.start()) + 1
-            hits.append(f"{rel}:{line}: forbidden import of bookclerk-library entities")
+            hits.append(
+                f"{rel}:{line}: forbidden host/domain symbol `{m.group(0)}` in database plugin"
+            )
     for m in TABLE_RE.finditer(scanned):
         line = scanned.count("\n", 0, m.start()) + 1
         hits.append(f"{rel}:{line}: application table identifier `{m.group(1)}`")

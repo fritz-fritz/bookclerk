@@ -7,6 +7,7 @@
 //! ([`migrations`]), typed [`entities`], and the store API. See
 //! `docs/database.md`.
 
+mod atomic_ops;
 mod atomic_txn;
 mod backend_migrate;
 mod db_atomic;
@@ -30,9 +31,12 @@ mod text;
 mod token_hash;
 mod wishlist_merge;
 
+pub use atomic_ops::{atomic_status, DbAtomicParams, DbAtomicResult};
 pub use atomic_txn::AtomicTxnBackend;
 pub use backend_migrate::{migrate_library_backend, BackendMigrateOptions, BackendMigrateSummary};
-pub use db_atomic::{db_atomic_operation_id, db_atomic_request_hash, execute_db_atomic};
+pub use db_atomic::{
+    db_atomic_operation_id, db_atomic_request_hash, execute_db_atomic, execute_named_atomic,
+};
 pub use email::{gravatar_hash, is_valid_user_email, normalize_user_email};
 pub use error::{LibraryError, Result};
 pub use master_key::{
@@ -83,7 +87,8 @@ pub use secrets::{
 };
 pub use session_client::{classify_session_client, SessionClientInfo};
 pub use sql_plan::{
-    compile_claim_event_delivery, compile_named_request, execute_plan_on, family_from_connect,
+    compile_claim_event_delivery, compile_named_request, execute_plan_on, execute_plan_on_capped,
+    execute_statements_on, family_from_connect, interpret_exec, interpret_plan, validate_plan,
     wake_page_for_max_binds, CompiledAtomic, SqlFamily,
 };
 pub use store::{

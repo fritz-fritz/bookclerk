@@ -4,12 +4,12 @@
 //! other non-interactive backends never need mid-transaction round-trips.
 //! Consume-once ops use `DELETE … RETURNING`. Receipt wrapping is host SQL.
 
-use bookclerk_plugin_abi::{atomic_status, DbAtomicParams, DbAtomicRequest};
+use crate::atomic_ops::{atomic_status, DbAtomicParams};
 use sea_orm::DbErr;
 use serde_json::Value as JsonValue;
 
 #[cfg(test)]
-use bookclerk_plugin_abi::DbAtomicResult;
+use crate::atomic_ops::DbAtomicResult;
 #[cfg(test)]
 use serde_json::json;
 
@@ -67,11 +67,12 @@ enum ConsumeOnceKind {
 ///
 /// Returns [`DbErr::Custom`] when the named operation is missing or invalid.
 pub fn compile_named_request(
-    req: &DbAtomicRequest,
+    operation_id: &str,
+    params: &DbAtomicParams,
     now: &str,
     family: SqlFamily,
 ) -> std::result::Result<CompiledAtomic, DbErr> {
-    let inner = plan_atomic(req, now)?;
+    let inner = plan_atomic(operation_id, params, now)?;
     let expected_hash = inner.expected_hash.clone().unwrap_or_default();
     let statements = inner
         .statements
@@ -220,14 +221,15 @@ fn validate_publish_domain_event(op: &DbAtomicParams) -> std::result::Result<(),
 
 /// Builds the D1 batch for `op`. `now` is the RFC 3339 timestamp shared by
 /// every statement in the batch (consume correlation, `updated_at`, sessions).
-fn plan_atomic(req: &DbAtomicRequest, now: &str) -> std::result::Result<AtomicPlan, DbErr> {
-    let operation = req.operation.as_ref().ok_or_else(|| {
-        DbErr::Custom("dbAtomic named operation missing (generic plan not handled here)".into())
-    })?;
+fn plan_atomic(
+    operation_id: &str,
+    operation: &DbAtomicParams,
+    now: &str,
+) -> std::result::Result<AtomicPlan, DbErr> {
     validate_publish_domain_event(operation)?;
     let inner = plan_inner(operation, now);
     let ctx = ReceiptCtx {
-        operation_id: req.operation_id.clone(),
+        operation_id: operation_id.to_string(),
         request_hash: request_hash(operation)?,
         kind: operation_kind(operation),
         now: now.to_string(),
@@ -2480,9 +2482,24 @@ fn webauthn_challenge_payload(row: &JsonValue) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bookclerk_plugin_abi::{atomic_status, DbAtomicParams, DbAtomicRequest, DbAtomicResult};
     use rusqlite::Connection;
     use serde_json::json;
+
+    struct NamedReq {
+        operation_id: String,
+        operation: DbAtomicParams,
+    }
+
+    fn test_req(op: DbAtomicParams, id: &str) -> NamedReq {
+        NamedReq {
+            operation_id: id.into(),
+            operation: op,
+        }
+    }
+
+    fn plan_req(req: &NamedReq, now: &str) -> std::result::Result<AtomicPlan, sea_orm::DbErr> {
+        plan_atomic(&req.operation_id, &req.operation, now)
+    }
 
     fn migrate(conn: &Connection) {
         for sql in crate::migrations::migration_sql() {
@@ -2884,10 +2901,6 @@ mod tests {
         assert_eq!(n, 0);
     }
 
-    fn test_req(op: DbAtomicParams, id: &str) -> DbAtomicRequest {
-        DbAtomicRequest::named(id, op)
-    }
-
     #[test]
     fn delete_user_removes_webauthn_and_oidc_rows() {
         let conn = Connection::open_in_memory().unwrap();
@@ -2939,7 +2952,7 @@ mod tests {
         let doomed = seed_user(&conn, "owner", "active", "Go");
         let now = "2024-06-01T00:00:00Z";
         let req = test_req(DbAtomicParams::DeleteUser { user_id: doomed }, "del-1");
-        let plan = plan_atomic(&req, now).unwrap();
+        let plan = plan_req(&req, now).unwrap();
         let first = run_plan(&conn, &plan);
         assert_eq!(first.status, atomic_status::OK);
         let n: i64 = conn
@@ -2953,7 +2966,7 @@ mod tests {
         assert_eq!(second.status, atomic_status::OK);
         assert!(second.replayed);
 
-        let again = plan_atomic(
+        let again = plan_req(
             &test_req(DbAtomicParams::DeleteUser { user_id: doomed }, "del-2"),
             now,
         )
@@ -2968,7 +2981,7 @@ mod tests {
         migrate(&conn);
         let owner = seed_user(&conn, "owner", "active", "Only");
         let now = "2024-06-01T00:00:00Z";
-        let plan = plan_atomic(
+        let plan = plan_req(
             &test_req(DbAtomicParams::DeleteUser { user_id: owner }, "del-owner"),
             now,
         )
@@ -3002,7 +3015,7 @@ mod tests {
             },
             "redeem-1",
         );
-        let plan = plan_atomic(&req, now).unwrap();
+        let plan = plan_req(&req, now).unwrap();
         let first = run_plan(&conn, &plan);
         assert_eq!(first.status, atomic_status::OK);
         assert_eq!(first.payload.as_ref().unwrap()["id"], identity);
@@ -3028,7 +3041,7 @@ mod tests {
             },
             "op-take-1",
         );
-        let plan = plan_atomic(&req, now).unwrap();
+        let plan = plan_req(&req, now).unwrap();
         let first = run_plan(&conn, &plan);
         assert_eq!(first.status, atomic_status::OK);
         assert!(!first.replayed);
@@ -3043,7 +3056,7 @@ mod tests {
         assert!(second.replayed);
         assert_eq!(second.payload, first.payload);
 
-        let conflict = plan_atomic(
+        let conflict = plan_req(
             &test_req(
                 DbAtomicParams::TakeOidcRpState {
                     state_hash: "other".into(),
@@ -3081,7 +3094,7 @@ mod tests {
             },
             "op-malformed",
         );
-        let plan = plan_atomic(&req, "2024-06-01T00:00:00Z").unwrap();
+        let plan = plan_req(&req, "2024-06-01T00:00:00Z").unwrap();
         let value = envelope_for_plan(
             &plan,
             json!({
@@ -3103,7 +3116,7 @@ mod tests {
             },
             "op-conflict",
         );
-        let plan = plan_atomic(&req, "2024-06-01T00:00:00Z").unwrap();
+        let plan = plan_req(&req, "2024-06-01T00:00:00Z").unwrap();
         let value = envelope_for_plan(
             &plan,
             json!({
@@ -3288,8 +3301,13 @@ mod tests {
     #[test]
     fn totp_optional_blob_and_int_binds_are_typed_nulls() {
         let req = test_req(confirm_totp_params(7), "totp-typed-null");
-        let compiled =
-            compile_named_request(&req, "2024-06-01T00:00:00Z", SqlFamily::Postgres).unwrap();
+        let compiled = compile_named_request(
+            &req.operation_id,
+            &req.operation,
+            "2024-06-01T00:00:00Z",
+            SqlFamily::Postgres,
+        )
+        .unwrap();
         let insert = compiled
             .plan
             .statements
@@ -3355,7 +3373,7 @@ mod tests {
         seed_totp_secret(&conn, other, "pending");
         seed_totp_secret(&conn, 999, "pending");
         let req = test_req(confirm_totp_params(999), "totp-missing");
-        let result = run_plan(&conn, &plan_atomic(&req, "2024-06-01T00:00:00Z").unwrap());
+        let result = run_plan(&conn, &plan_req(&req, "2024-06-01T00:00:00Z").unwrap());
         assert_eq!(result.status, atomic_status::NOT_FOUND);
         assert_eq!(totp_names(&conn, 999), vec!["pending".to_string()]);
         assert_eq!(totp_names(&conn, other), vec!["pending".to_string()]);
@@ -3369,7 +3387,7 @@ mod tests {
         seed_totp_secret(&conn, user, "pending");
         let now = "2024-06-01T00:00:00Z";
         let req = test_req(confirm_totp_params(user), "totp-confirm");
-        let plan = plan_atomic(&req, now).unwrap();
+        let plan = plan_req(&req, now).unwrap();
         let first = run_plan(&conn, &plan);
         assert_eq!(first.status, atomic_status::OK);
         assert_eq!(totp_names(&conn, user), vec!["primary".to_string()]);
@@ -3385,7 +3403,7 @@ mod tests {
             DbAtomicParams::DisableUserTotp { user_id: user },
             "totp-disable",
         );
-        let disable_plan = plan_atomic(&disable_req, now).unwrap();
+        let disable_plan = plan_req(&disable_req, now).unwrap();
         let disabled = run_plan(&conn, &disable_plan);
         assert_eq!(disabled.status, atomic_status::OK);
         assert!(totp_names(&conn, user).is_empty());
@@ -3410,7 +3428,7 @@ mod tests {
             DbAtomicParams::DisableUserTotp { user_id: 999 },
             "totp-disable-missing",
         );
-        let result = run_plan(&conn, &plan_atomic(&req, "2024-06-01T00:00:00Z").unwrap());
+        let result = run_plan(&conn, &plan_req(&req, "2024-06-01T00:00:00Z").unwrap());
         assert_eq!(result.status, atomic_status::NOT_FOUND);
         assert_eq!(totp_names(&conn, other), vec!["primary".to_string()]);
         assert_eq!(totp_enabled(&conn, other), 1);
@@ -3436,7 +3454,7 @@ mod tests {
             },
             "evt-pub",
         );
-        let created = run_plan(&conn, &plan_atomic(&publish, now).unwrap());
+        let created = run_plan(&conn, &plan_req(&publish, now).unwrap());
         assert_eq!(created.status, atomic_status::OK);
         let ordering: String = conn
             .query_row(
@@ -3462,7 +3480,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(wake_pending, 1);
-        let dup = run_plan(&conn, &plan_atomic(&publish, now).unwrap());
+        let dup = run_plan(&conn, &plan_req(&publish, now).unwrap());
         assert_eq!(dup.status, atomic_status::OK);
         assert!(dup.replayed);
 
@@ -3474,7 +3492,7 @@ mod tests {
             },
             "evt-disp",
         );
-        let dispatched = run_plan(&conn, &plan_atomic(&dispatch, now).unwrap());
+        let dispatched = run_plan(&conn, &plan_req(&dispatch, now).unwrap());
         assert_eq!(dispatched.status, atomic_status::OK);
 
         let claim = test_req(
@@ -3486,7 +3504,7 @@ mod tests {
             },
             "evt-claim",
         );
-        let claimed = run_plan(&conn, &plan_atomic(&claim, now).unwrap());
+        let claimed = run_plan(&conn, &plan_req(&claim, now).unwrap());
         assert_eq!(claimed.status, atomic_status::OK);
         let payload = claimed.payload.expect("claim payload");
         assert_eq!(payload["plugin_id"], "echo");
@@ -3501,7 +3519,7 @@ mod tests {
             },
             "evt-claim-empty",
         );
-        let skipped = run_plan(&conn, &plan_atomic(&empty, now).unwrap());
+        let skipped = run_plan(&conn, &plan_req(&empty, now).unwrap());
         assert_eq!(skipped.status, atomic_status::EMPTY);
     }
 
@@ -3526,7 +3544,7 @@ mod tests {
             "evt-ns-a",
         );
         assert_eq!(
-            run_plan(&conn, &plan_atomic(&a, now).unwrap()).status,
+            run_plan(&conn, &plan_req(&a, now).unwrap()).status,
             atomic_status::OK
         );
         let b = test_req(
@@ -3545,7 +3563,7 @@ mod tests {
             "evt-ns-b",
         );
         assert_eq!(
-            run_plan(&conn, &plan_atomic(&b, now).unwrap()).status,
+            run_plan(&conn, &plan_req(&b, now).unwrap()).status,
             atomic_status::OK
         );
         let c = test_req(
@@ -3564,7 +3582,7 @@ mod tests {
             "evt-ns-src",
         );
         assert_eq!(
-            run_plan(&conn, &plan_atomic(&c, now).unwrap()).status,
+            run_plan(&conn, &plan_req(&c, now).unwrap()).status,
             atomic_status::OK
         );
         let count: i64 = conn
@@ -3587,7 +3605,7 @@ mod tests {
             "evt-ns-dup",
         );
         assert_eq!(
-            run_plan(&conn, &plan_atomic(&dup, now).unwrap()).status,
+            run_plan(&conn, &plan_req(&dup, now).unwrap()).status,
             atomic_status::DUPLICATE
         );
         let count: i64 = conn
@@ -3617,7 +3635,7 @@ mod tests {
             "evt-late-pub",
         );
         assert_eq!(
-            run_plan(&conn, &plan_atomic(&publish, now).unwrap()).status,
+            run_plan(&conn, &plan_req(&publish, now).unwrap()).status,
             atomic_status::OK
         );
 
@@ -3629,7 +3647,7 @@ mod tests {
             },
             "reconcile-evt-late-echo",
         );
-        let a = run_plan(&conn, &plan_atomic(&first, now).unwrap());
+        let a = run_plan(&conn, &plan_req(&first, now).unwrap());
         assert_eq!(a.status, atomic_status::OK);
         assert_ne!(a.status, atomic_status::IDEMPOTENCY_CONFLICT);
 
@@ -3641,7 +3659,7 @@ mod tests {
             },
             "reconcile-evt-late-audiobookshelf",
         );
-        let ab = run_plan(&conn, &plan_atomic(&second, now).unwrap());
+        let ab = run_plan(&conn, &plan_req(&second, now).unwrap());
         assert_eq!(ab.status, atomic_status::OK);
         assert_ne!(ab.status, atomic_status::IDEMPOTENCY_CONFLICT);
         let n: i64 = conn
@@ -3689,7 +3707,7 @@ mod tests {
                 &format!("{id}-pub"),
             );
             assert_eq!(
-                run_plan(&conn, &plan_atomic(&publish, now).unwrap()).status,
+                run_plan(&conn, &plan_req(&publish, now).unwrap()).status,
                 atomic_status::OK
             );
             let dispatch = test_req(
@@ -3701,7 +3719,7 @@ mod tests {
                 &format!("dispatch-{id}-echo"),
             );
             assert_eq!(
-                run_plan(&conn, &plan_atomic(&dispatch, now).unwrap()).status,
+                run_plan(&conn, &plan_req(&dispatch, now).unwrap()).status,
                 atomic_status::OK
             );
         }
@@ -3714,7 +3732,7 @@ mod tests {
             },
             "evt-cap-claim-1",
         );
-        let claimed = run_plan(&conn, &plan_atomic(&first, now).unwrap());
+        let claimed = run_plan(&conn, &plan_req(&first, now).unwrap());
         assert_eq!(claimed.status, atomic_status::OK);
         let second = test_req(
             DbAtomicParams::ClaimNextEventDelivery {
@@ -3725,7 +3743,7 @@ mod tests {
             },
             "evt-cap-claim-2",
         );
-        let blocked = run_plan(&conn, &plan_atomic(&second, now).unwrap());
+        let blocked = run_plan(&conn, &plan_req(&second, now).unwrap());
         assert_eq!(blocked.status, atomic_status::EMPTY);
     }
 
@@ -3765,7 +3783,7 @@ mod tests {
             },
             "acq-1",
         );
-        let result = run_plan(&conn, &plan_atomic(&req, now).unwrap());
+        let result = run_plan(&conn, &plan_req(&req, now).unwrap());
         assert_eq!(result.status, atomic_status::OK);
         let status: String = conn
             .query_row(
@@ -3803,7 +3821,7 @@ mod tests {
             },
             "acq-missing",
         );
-        let not_found = run_plan(&conn, &plan_atomic(&missing, now).unwrap());
+        let not_found = run_plan(&conn, &plan_req(&missing, now).unwrap());
         assert_eq!(not_found.status, atomic_status::NOT_FOUND);
         let events: i64 = conn
             .query_row(
@@ -3835,7 +3853,7 @@ mod tests {
             },
             "evt-mint",
         );
-        let created = run_plan(&conn, &plan_atomic(&publish, now).unwrap());
+        let created = run_plan(&conn, &plan_req(&publish, now).unwrap());
         assert_eq!(created.status, atomic_status::OK);
         let id: String = conn
             .query_row("SELECT id FROM domain_events", [], |r| r.get(0))
@@ -3864,7 +3882,7 @@ mod tests {
             },
             "evt-huge",
         );
-        let err = match plan_atomic(&huge, now) {
+        let err = match plan_req(&huge, now) {
             Ok(_) => panic!("oversized payload must fail"),
             Err(err) => err,
         };
@@ -4011,7 +4029,7 @@ mod tests {
             "disp-two-first",
         );
         seed_domain_event(&conn, "evt-two", now);
-        let both_first = run_plan(&conn, &plan_atomic(&two_first, now).unwrap());
+        let both_first = run_plan(&conn, &plan_req(&two_first, now).unwrap());
         assert_eq!(both_first.status, atomic_status::OK);
         assert_eq!(both_first.payload.as_ref().unwrap()["created"], 2);
 
@@ -4023,11 +4041,11 @@ mod tests {
             },
             "disp-one",
         );
-        let first = run_plan(&conn, &plan_atomic(&one, now).unwrap());
+        let first = run_plan(&conn, &plan_req(&one, now).unwrap());
         assert_eq!(first.status, atomic_status::OK);
         assert_eq!(first.payload.as_ref().unwrap()["created"], 1);
 
-        let replay_same = run_plan(&conn, &plan_atomic(&one, now).unwrap());
+        let replay_same = run_plan(&conn, &plan_req(&one, now).unwrap());
         assert!(replay_same.replayed);
         assert_eq!(replay_same.payload.as_ref().unwrap()["created"], 1);
 
@@ -4040,7 +4058,7 @@ mod tests {
             },
             "disp-one-replay",
         );
-        let second = run_plan(&conn, &plan_atomic(&one_again, later).unwrap());
+        let second = run_plan(&conn, &plan_req(&one_again, later).unwrap());
         assert_eq!(second.status, atomic_status::OK);
         assert!(!second.replayed);
         assert_eq!(
@@ -4057,7 +4075,7 @@ mod tests {
             },
             "disp-two",
         );
-        let both = run_plan(&conn, &plan_atomic(&two, later).unwrap());
+        let both = run_plan(&conn, &plan_req(&two, later).unwrap());
         assert_eq!(both.status, atomic_status::OK);
         assert_eq!(
             both.payload.as_ref().unwrap()["created"],
@@ -4096,7 +4114,7 @@ mod tests {
             },
             "page-0",
         );
-        let a = run_plan(&conn, &plan_atomic(&first_page, now).unwrap());
+        let a = run_plan(&conn, &plan_req(&first_page, now).unwrap());
         assert_eq!(a.status, atomic_status::OK);
         let state: String = conn
             .query_row(
@@ -4114,7 +4132,7 @@ mod tests {
             },
             "page-1",
         );
-        let b = run_plan(&conn, &plan_atomic(&last_page, now).unwrap());
+        let b = run_plan(&conn, &plan_req(&last_page, now).unwrap());
         assert_eq!(b.status, atomic_status::OK);
         assert_eq!(b.payload.as_ref().unwrap()["created"], 1);
         let state: String = conn

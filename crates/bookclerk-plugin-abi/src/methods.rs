@@ -369,7 +369,7 @@ pub mod db_rollback {
 
 /// Run a host-authored generic SQL plan as one guest SQL transaction.
 ///
-/// Params: [`crate::db::DbAtomicRequest`]. Result: [`crate::db::DbAtomicResult`].
+/// Params: [`crate::db::DbAtomicRequest`]. Result: [`crate::db::DbPlanExecResult`].
 /// Every bundled database guest implements this (D1 as one HTTP `batch()`,
 /// SQLite / Postgres as one native transaction). Guests execute `plan`
 /// statements only and must not parse Bookclerk operation names.

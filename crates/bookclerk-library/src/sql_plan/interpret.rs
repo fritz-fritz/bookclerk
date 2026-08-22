@@ -1,13 +1,42 @@
 //! Decode generic atomic-plan statement results into [`DbAtomicResult`].
 
-use bookclerk_plugin_abi::{atomic_status, DbAtomicPlan, DbAtomicResult};
+use bookclerk_plugin_abi::{DbAtomicPlan, DbPlanExecResult, DbPlanStmtExecResult};
 use serde_json::Value as JsonValue;
+
+use crate::atomic_ops::{atomic_status, DbAtomicResult};
 
 /// Rows produced by one plan statement.
 #[derive(Debug, Clone, Default)]
 pub struct PlanStmtResult {
     /// Result-set rows (empty for DML).
     pub rows: Vec<JsonValue>,
+    /// Engine-reported rows affected.
+    pub rows_affected: u64,
+}
+
+impl From<&DbPlanStmtExecResult> for PlanStmtResult {
+    fn from(stmt: &DbPlanStmtExecResult) -> Self {
+        Self {
+            rows: stmt.rows.clone(),
+            rows_affected: stmt.rows_affected,
+        }
+    }
+}
+
+/// Maps a guest [`DbPlanExecResult`] onto a host [`DbAtomicResult`].
+#[must_use]
+pub fn interpret_exec(
+    plan: &DbAtomicPlan,
+    exec: &DbPlanExecResult,
+    expected_hash: &str,
+) -> DbAtomicResult {
+    let results: Vec<PlanStmtResult> = exec.statements.iter().map(PlanStmtResult::from).collect();
+    let mut result = interpret_plan(plan, &results, expected_hash);
+    result.operation_id = exec.operation_id.clone();
+    if result.timing.is_none() {
+        result.timing = exec.timing.clone();
+    }
+    result
 }
 
 /// Maps statement rows onto a [`DbAtomicResult`], preferring receipt rows.
