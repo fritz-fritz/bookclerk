@@ -2,7 +2,9 @@
 //!
 //! Host domain plans emit SQLite-shaped canonical SQL (`?`, `INSERT OR IGNORE`,
 //! `json_extract`, `json_valid`). Postgres adapters apply this table before
-//! execution. Do not call this from host domain compilers.
+//! execution. Rewrites are SQL-token aware: quoted strings/identifiers, line
+//! and block comments, and PostgreSQL dollar quotes are copied verbatim.
+//! Do not call this from host domain compilers.
 
 use sea_orm::DatabaseBackend;
 
@@ -20,22 +22,31 @@ pub fn lower_canonical_sql(backend: DatabaseBackend, sql: &str) -> String {
 #[must_use]
 pub fn lower_canonical_to_postgres(sql: &str) -> String {
     let sql = insert_or_ignore_postgres(sql);
-    let sql = sql.replace("json_object(", "json_build_object(");
+    let sql = replace_in_code(&sql, "json_object(", "json_build_object(");
     let sql = sqlite_fns_to_postgres(&sql);
     rewrite_placeholders_postgres(&sql)
 }
 
-/// Rewrites SQLite `?` placeholders to Postgres `$1`…`$n`.
+/// Rewrites SQLite `?` placeholders to Postgres `$1`…`$n` (code spans only).
 fn rewrite_placeholders_postgres(sql: &str) -> String {
     let mut n = 0u32;
     let mut out = String::with_capacity(sql.len() + 16);
-    for ch in sql.chars() {
+    let mut i = 0;
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
         if ch == '?' {
             n += 1;
             out.push('$');
             out.push_str(&n.to_string());
+            i += 1;
         } else {
             out.push(ch);
+            i += ch.len_utf8();
         }
     }
     out
@@ -43,36 +54,47 @@ fn rewrite_placeholders_postgres(sql: &str) -> String {
 
 /// Renders `INSERT OR IGNORE` as `ON CONFLICT DO NOTHING` (before `RETURNING`).
 fn insert_or_ignore_postgres(sql: &str) -> String {
-    let Some(rest) = sql.trim_start().strip_prefix("INSERT OR IGNORE INTO") else {
+    let trimmed = skip_trivia(sql);
+    let Some(rest) = strip_prefix_ci(trimmed, "INSERT OR IGNORE INTO") else {
         return sql.to_string();
     };
-    if let Some(idx) = rest.find(" RETURNING ") {
+    let prefix_len = sql.len() - trimmed.len();
+    let rebuilt = if let Some(idx) = find_in_code(rest, " RETURNING ") {
         let (head, returning) = rest.split_at(idx);
-        return format!("INSERT INTO{head} ON CONFLICT DO NOTHING{returning}");
-    }
-    format!("INSERT INTO{rest} ON CONFLICT DO NOTHING")
+        format!("INSERT INTO{head} ON CONFLICT DO NOTHING{returning}")
+    } else {
+        format!("INSERT INTO{rest} ON CONFLICT DO NOTHING")
+    };
+    let mut out = String::with_capacity(prefix_len + rebuilt.len());
+    out.push_str(&sql[..prefix_len]);
+    out.push_str(&rebuilt);
+    out
 }
 
 /// Maps SQLite helpers used in host plans onto PostgreSQL equivalents.
 fn sqlite_fns_to_postgres(sql: &str) -> String {
-    let mut sql = sql.replace("IFNULL(", "COALESCE(");
-    sql = sql.replace("MAX(attempt_count, 1)", "GREATEST(attempt_count, 1)");
-    sql = sql.replace("json_valid(payload) = 0", "(payload IS NOT JSON)");
-    sql = sql.replace("json_valid(payload) = 1", "(payload IS JSON)");
+    let mut sql = replace_in_code(sql, "IFNULL(", "COALESCE(");
+    sql = replace_in_code(&sql, "MAX(attempt_count, 1)", "GREATEST(attempt_count, 1)");
+    sql = replace_in_code(&sql, "json_valid(payload) = 0", "(payload IS NOT JSON)");
+    sql = replace_in_code(&sql, "json_valid(payload) = 1", "(payload IS JSON)");
     sql = rewrite_json_extract(&sql);
-    sql = sql.replace(
+    sql = replace_in_code(
+        &sql,
         "json(payload)",
         "(CASE WHEN payload IS JSON THEN payload::jsonb END)",
     );
-    sql = sql.replace(
+    sql = replace_in_code(
+        &sql,
         "json(CASE WHEN password_hash IS NOT NULL AND password_hash != '' THEN 'true' ELSE 'false' END)",
         "(password_hash IS NOT NULL AND password_hash != '')",
     );
-    sql = sql.replace(
+    sql = replace_in_code(
+        &sql,
         "json(CASE WHEN cancel_requested != 0 THEN 'true' ELSE 'false' END)",
         "(cancel_requested != 0)",
     );
-    sql = sql.replace(
+    sql = replace_in_code(
+        &sql,
         "json(CASE WHEN resume_pending != 0 THEN 'true' ELSE 'false' END)",
         "(resume_pending != 0)",
     );
@@ -81,55 +103,66 @@ fn sqlite_fns_to_postgres(sql: &str) -> String {
 
 /// Rewrites `json_extract(expr, '$.a.b')` to a guarded `jsonb #>>` extract.
 fn rewrite_json_extract(sql: &str) -> String {
-    let mut rest = sql;
+    let mut i = 0;
     let mut out = String::with_capacity(sql.len());
-    while let Some(idx) = rest.find("json_extract(") {
-        out.push_str(&rest[..idx]);
-        let after = &rest[idx + "json_extract(".len()..];
-        let Some(comma) = find_top_level_comma(after) else {
-            out.push_str("json_extract(");
-            rest = after;
+    let needle = "json_extract(";
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
             continue;
-        };
-        let expr = after[..comma].trim();
-        let after_comma = after[comma + 1..].trim_start();
-        let Some(path) = after_comma.strip_prefix("'$.") else {
-            out.push_str("json_extract(");
-            rest = after;
-            continue;
-        };
-        let Some(endq) = path.find('\'') else {
-            out.push_str("json_extract(");
-            rest = after;
-            continue;
-        };
-        let json_path = &path[..endq];
-        let remainder = path[endq + 1..].trim_start();
-        let Some(rest2) = remainder.strip_prefix(')') else {
-            out.push_str("json_extract(");
-            rest = after;
-            continue;
-        };
-        let pg_path = json_path.replace('.', ",");
-        out.push_str(&format!(
-            "(CASE WHEN ({expr}) IS JSON THEN (({expr})::jsonb #>> '{{{pg_path}}}') END)"
-        ));
-        rest = rest2;
+        }
+        if sql[i..].starts_with(needle) {
+            let after = &sql[i + needle.len()..];
+            if let Some((expr, json_path, rest2)) = parse_json_extract_args(after) {
+                let expr = rewrite_json_extract(expr);
+                let pg_path = json_path.replace('.', ",");
+                out.push_str(&format!(
+                    "(CASE WHEN ({expr}) IS JSON THEN (({expr})::jsonb #>> '{{{pg_path}}}') END)"
+                ));
+                i = sql.len() - rest2.len();
+                continue;
+            }
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
     }
-    out.push_str(rest);
     out
 }
 
-/// Index of the first comma at parenthesis depth 0.
+/// Parses `expr, '$.path')` from `json_extract(` arguments (string-aware).
+fn parse_json_extract_args(after: &str) -> Option<(&str, &str, &str)> {
+    let comma = find_top_level_comma(after)?;
+    let expr = after[..comma].trim();
+    let after_comma = after[comma + 1..].trim_start();
+    let path = after_comma.strip_prefix("'$.")?;
+    let endq = path.find('\'')?;
+    let json_path = &path[..endq];
+    let remainder = path[endq + 1..].trim_start();
+    let rest2 = remainder.strip_prefix(')')?;
+    Some((expr, json_path, rest2))
+}
+
+/// Index of the first comma at parenthesis depth 0, skipping literals.
 fn find_top_level_comma(s: &str) -> Option<usize> {
     let mut depth = 0i32;
-    for (i, ch) in s.char_indices() {
-        match ch {
+    let mut i = 0;
+    while i < s.len() {
+        if let Some(len) = literal_or_comment_len(&s[i..]) {
+            i += len;
+            continue;
+        }
+        match s[i..].chars().next()? {
             '(' => depth += 1,
             ')' => depth -= 1,
             ',' if depth == 0 => return Some(i),
-            _ => {}
+            ch => {
+                i += ch.len_utf8();
+                continue;
+            }
         }
+        i += 1;
     }
     None
 }
@@ -138,7 +171,143 @@ fn find_top_level_comma(s: &str) -> Option<usize> {
 fn rewrite_julianday_delta(sql: &str) -> String {
     const NEEDLE: &str = "CAST((julianday(?) - julianday((SELECT created_at FROM domain_events WHERE id = ?))) * 86400000 AS INTEGER)";
     const REPL: &str = "CAST(EXTRACT(EPOCH FROM (?::timestamptz - (SELECT created_at::timestamptz FROM domain_events WHERE id = ?))) * 1000 AS BIGINT)";
-    sql.replace(NEEDLE, REPL)
+    replace_in_code(sql, NEEDLE, REPL)
+}
+
+/// Replaces `from` with `to` only in SQL code spans (not strings/comments).
+fn replace_in_code(sql: &str, from: &str, to: &str) -> String {
+    if from.is_empty() {
+        return sql.to_string();
+    }
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len());
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        if sql[i..].starts_with(from) {
+            out.push_str(to);
+            i += from.len();
+            continue;
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Byte offset of `needle` in a code span, if present.
+fn find_in_code(sql: &str, needle: &str) -> Option<usize> {
+    let mut i = 0;
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            i += len;
+            continue;
+        }
+        if sql[i..].starts_with(needle) {
+            return Some(i);
+        }
+        let ch = sql[i..].chars().next()?;
+        i += ch.len_utf8();
+    }
+    None
+}
+
+/// Leading comments and whitespace.
+fn skip_trivia(sql: &str) -> &str {
+    let mut i = 0;
+    while i < sql.len() {
+        let rest = &sql[i..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch.is_whitespace() {
+            i += ch.len_utf8();
+            continue;
+        }
+        if let Some(len) = comment_len(rest) {
+            i += len;
+            continue;
+        }
+        break;
+    }
+    &sql[i..]
+}
+
+/// ASCII-case-insensitive prefix strip.
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    if s.len() < prefix.len() {
+        return None;
+    }
+    if s.get(..prefix.len())?.eq_ignore_ascii_case(prefix) {
+        Some(&s[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+/// Length of a string, identifier, dollar-quote, or comment at `s`, if any.
+fn literal_or_comment_len(s: &str) -> Option<usize> {
+    comment_len(s).or_else(|| quoted_len(s))
+}
+
+/// Length of a `--` line comment or `/* */` block at `s`.
+fn comment_len(s: &str) -> Option<usize> {
+    if s.starts_with("--") {
+        let nl = s.find('\n').unwrap_or(s.len());
+        return Some(nl);
+    }
+    if s.starts_with("/*") {
+        return s.find("*/").map(|i| i + 2).or(Some(s.len()));
+    }
+    None
+}
+
+/// Length of a quoted identifier/string or dollar-quote at `s`.
+fn quoted_len(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    match bytes[0] {
+        b'\'' => scan_quote(s, '\''),
+        b'"' => scan_quote(s, '"'),
+        b'$' => dollar_quote_len(s),
+        _ => None,
+    }
+}
+
+/// Length of a `'…'` or `"…"` literal, honoring doubled escapes.
+fn scan_quote(s: &str, q: char) -> Option<usize> {
+    let mut chars = s.char_indices();
+    chars.next()?;
+    while let Some((i, ch)) = chars.next() {
+        if ch == q {
+            if s[i + q.len_utf8()..].starts_with(q) {
+                chars.next();
+                continue;
+            }
+            return Some(i + q.len_utf8());
+        }
+    }
+    Some(s.len())
+}
+
+/// Length of a PostgreSQL `$tag$…$tag$` dollar quote at `s`.
+fn dollar_quote_len(s: &str) -> Option<usize> {
+    let rest = s.get(1..)?;
+    let tag_end = rest.find('$').filter(|i| {
+        rest[..*i]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })?;
+    let tag = &s[..=tag_end + 1];
+    let after = s.get(tag.len()..)?;
+    let close = after.find(tag)?;
+    Some(tag.len() + close + tag.len())
 }
 
 #[cfg(test)]
@@ -161,5 +330,43 @@ mod tests {
             lower_canonical_sql(DatabaseBackend::Sqlite, "a = ? AND b = ?"),
             "a = ? AND b = ?"
         );
+    }
+
+    #[test]
+    fn placeholders_inside_strings_and_comments_are_preserved() {
+        let sql = lower_canonical_to_postgres(
+            "SELECT '?' AS literal, /* ? */ ? FROM t WHERE x = '?' -- ?\nAND y = ?",
+        );
+        assert!(sql.contains("'?'"), "{sql}");
+        assert!(sql.contains("/* ? */"), "{sql}");
+        assert!(sql.contains("-- ?"), "{sql}");
+        assert!(sql.contains("$1"), "{sql}");
+        assert!(sql.contains("$2"), "{sql}");
+        assert!(!sql.contains("$3"), "{sql}");
+    }
+
+    #[test]
+    fn dollar_quotes_are_preserved() {
+        let sql = lower_canonical_to_postgres("SELECT $tag$?$tag$, ?");
+        assert!(sql.contains("$tag$?$tag$"), "{sql}");
+        assert!(sql.contains("$1"), "{sql}");
+        assert!(!sql.contains("$2"), "{sql}");
+    }
+
+    #[test]
+    fn json_extract_inside_a_string_is_not_rewritten() {
+        let sql = lower_canonical_to_postgres("SELECT 'json_extract(payload, ''$.v'')', ?");
+        assert!(sql.contains("json_extract(payload"), "{sql}");
+        assert!(sql.contains("$1"), "{sql}");
+    }
+
+    #[test]
+    fn nested_json_extract_lowers() {
+        let sql = lower_canonical_to_postgres(
+            "SELECT json_extract(json_extract(payload, '$.a'), '$.b') FROM t",
+        );
+        assert!(!sql.contains("json_extract("), "{sql}");
+        assert!(sql.contains("#>> '{a}'"), "{sql}");
+        assert!(sql.contains("#>> '{b}'"), "{sql}");
     }
 }

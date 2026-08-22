@@ -15,9 +15,10 @@ use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
-    exec_result_from_dto, proxy_rows_from_dto, sql_payload_exceeds, statement_to_dto, DbAtomicPlan,
-    DbAtomicRequest, DbConnectParams, DbConnectResult, DbPlanExecResult, DbPlanStatement,
-    DbPlanStatementKind, ExecResultDto, ExecuteRequest, ProxyRowDto, DB_ATOMIC_SENTINEL,
+    db_value_from_sea, exec_result_from_dto, proxy_rows_from_dto, proxy_rows_from_typed,
+    sql_payload_exceeds, statement_to_dto, DbAtomicPlan, DbAtomicRequest, DbConnectParams,
+    DbConnectResult, DbPlanExecResult, DbPlanStatement, DbPlanStatementKind, DbResultSelection,
+    ExecResultDto, ExecuteRequest, ProxyRowDto, TypedDbStatement, DB_ATOMIC_SENTINEL,
     DB_CAPABILITIES_SENTINEL,
 };
 use sea_orm::{
@@ -127,11 +128,14 @@ impl ExternalDatabase {
         if !connect_result.meets_host_minimums() {
             return Err(DbErr::Custom(connect_result.capability_failure_reason()));
         }
-        let backend = dialect_to_backend(&connect_result.dialect)?;
+        let kind = bookclerk_library::HostSchemaKind::from_connect(&connect_result)
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
+        let backend = schema_kind_to_backend(kind);
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
             session: self.session.clone(),
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
             max_payload_bytes: connect_result.max_payload_bytes,
+            typed_atomic: Arc::new(AtomicBool::new(true)),
         }));
         let db = Database::connect_proxy(backend, proxy).await?;
         self.apply_host_schema(&db, &connect_result).await?;
@@ -146,19 +150,13 @@ impl ExternalDatabase {
     ) -> Result<(), DbErr> {
         let kind = bookclerk_library::HostSchemaKind::from_connect(caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
-        if kind == bookclerk_library::HostSchemaKind::D1 {
-            let session = self.session.clone();
-            bookclerk_library::apply_host_schema_with_batch(db, kind, move |stmts| {
-                let session = session.clone();
-                async move { exec_host_ddl_batch(&session, stmts).await }
-            })
-            .await
-            .map_err(|err| DbErr::Custom(err.to_string()))
-        } else {
-            bookclerk_library::apply_host_schema(db, kind)
-                .await
-                .map_err(|err| DbErr::Custom(err.to_string()))
-        }
+        let session = self.session.clone();
+        bookclerk_library::apply_host_schema_with_batch(db, kind, move |stmts| {
+            let session = session.clone();
+            async move { exec_host_ddl_batch(&session, stmts).await }
+        })
+        .await
+        .map_err(|err| DbErr::Custom(err.to_string()))
     }
 }
 
@@ -336,6 +334,8 @@ struct RpcDatabaseProxy {
     txn_depth: Arc<Mutex<HashMap<TaskKey, usize>>>,
     /// Negotiated `maxPayloadBytes` (capped at [`bookclerk_plugin_sdk::v2::MAX_SCALAR_BYTES`]).
     max_payload_bytes: u32,
+    /// False after `executeAtomic` returns `unsupported` (old-minor shim).
+    typed_atomic: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for RpcDatabaseProxy {
@@ -387,6 +387,51 @@ impl RpcDatabaseProxy {
         let values_json = serde_json::to_string(&dto.values).unwrap_or_else(|_| "[]".into());
         (dto.sql, values_json)
     }
+
+    /// Typed `ExecuteRequest` for one SeaORM statement (no JSON `b64:` decoding).
+    ///
+    /// # Errors
+    ///
+    /// Returns when a SeaORM bind is outside the universal [`DbValue`] domain.
+    fn statement_to_typed(
+        statement: &Statement,
+        kind: DbPlanStatementKind,
+        selection: DbResultSelection,
+    ) -> Result<TypedDbStatement, DbErr> {
+        let parameters = match &statement.values {
+            Some(values) => values
+                .0
+                .iter()
+                .map(db_value_from_sea)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbErr::Custom)?,
+            None => Vec::new(),
+        };
+        Ok(TypedDbStatement {
+            sql: statement.sql.clone(),
+            parameters,
+            kind,
+            max_rows: 0,
+            result_selection: selection,
+        })
+    }
+
+    /// One-statement `ExecuteRequest` used by the proxy query/execute/ping path.
+    fn typed_request(stmt: TypedDbStatement, operation_id: String) -> ExecuteRequest {
+        ExecuteRequest {
+            operation_id,
+            request_hash: String::new(),
+            statements: vec![stmt],
+            outcome_index: 0,
+            payload_index: 0,
+            has_payload_index: false,
+            prior_receipt_index: 0,
+            has_prior_receipt_index: false,
+            receipt_select_index: 0,
+            has_receipt_select_index: false,
+            deadline_unix_ms: 0,
+        }
+    }
 }
 
 #[async_trait]
@@ -394,6 +439,28 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
     async fn query(&self, statement: Statement) -> std::result::Result<Vec<ProxyRow>, DbErr> {
         if bookclerk_library::is_txn_broken() {
             return Err(bookclerk_library::txn_broken_err());
+        }
+        if self.depth() == 0 && self.typed_atomic.load(Ordering::SeqCst) {
+            let typed = Self::statement_to_typed(
+                &statement,
+                DbPlanStatementKind::Query,
+                DbResultSelection::Rows,
+            )?;
+            let req = Self::typed_request(typed, format!("proxy-query-{}", uuid::Uuid::new_v4()));
+            let cancel = Arc::new(AtomicBool::new(false));
+            match self.session.db_execute_atomic(req, cancel).await {
+                Ok(reply) => {
+                    let stmt = reply.statements.into_iter().next().ok_or_else(|| {
+                        DbErr::Custom("executeAtomic query returned no statement result".into())
+                    })?;
+                    return proxy_rows_from_typed(&stmt).map_err(DbErr::Custom);
+                }
+                Err(err) if matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported") =>
+                {
+                    self.typed_atomic.store(false, Ordering::SeqCst);
+                }
+                Err(err) => return Err(map_rpc_err(err)),
+            }
         }
         let (sql, values_json) = Self::statement_parts(&statement);
         if sql_payload_exceeds(&sql, &values_json, self.max_payload_bytes) {
@@ -433,6 +500,33 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         if bookclerk_library::is_txn_broken() {
             return Err(bookclerk_library::txn_broken_err());
         }
+        if self.depth() == 0 && self.typed_atomic.load(Ordering::SeqCst) {
+            let typed = Self::statement_to_typed(
+                &statement,
+                DbPlanStatementKind::Execute,
+                DbResultSelection::AffectedRows,
+            )?;
+            let req = Self::typed_request(typed, format!("proxy-exec-{}", uuid::Uuid::new_v4()));
+            let cancel = Arc::new(AtomicBool::new(false));
+            match self.session.db_execute_atomic(req, cancel).await {
+                Ok(reply) => {
+                    let rows_affected = reply
+                        .statements
+                        .first()
+                        .map(|s| s.rows_affected)
+                        .unwrap_or(0);
+                    return Ok(exec_result_from_dto(ExecResultDto {
+                        last_insert_id: 0,
+                        rows_affected,
+                    }));
+                }
+                Err(err) if matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported") =>
+                {
+                    self.typed_atomic.store(false, Ordering::SeqCst);
+                }
+                Err(err) => return Err(map_rpc_err(err)),
+            }
+        }
         let (sql, values_json) = Self::statement_parts(&statement);
         if sql_payload_exceeds(&sql, &values_json, self.max_payload_bytes) {
             return Err(DbErr::Custom(format!(
@@ -453,6 +547,25 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
     }
 
     async fn ping(&self) -> std::result::Result<(), DbErr> {
+        if self.typed_atomic.load(Ordering::SeqCst) {
+            let typed = TypedDbStatement {
+                sql: "SELECT 1".into(),
+                parameters: Vec::new(),
+                kind: DbPlanStatementKind::Select,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            };
+            let req = RpcDatabaseProxy::typed_request(typed, "proxy-ping".into());
+            let cancel = Arc::new(AtomicBool::new(false));
+            match self.session.db_execute_atomic(req, cancel).await {
+                Ok(_) => return Ok(()),
+                Err(err) if matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported") =>
+                {
+                    self.typed_atomic.store(false, Ordering::SeqCst);
+                }
+                Err(err) => return Err(map_rpc_err(err)),
+            }
+        }
         self.session
             .db_query("SELECT 1", "[]")
             .await
@@ -574,6 +687,10 @@ impl RpcAtomicBackend {
     }
 
     /// Sends an already-compiled generic plan and interprets the guest statement results.
+    ///
+    /// # Errors
+    ///
+    /// Returns when validation, `executeAtomic`, or result interpretation fails.
     async fn send_compiled(
         &self,
         compiled: bookclerk_library::CompiledAtomic,
@@ -583,9 +700,9 @@ impl RpcAtomicBackend {
         let mut request = compiled.clone().into_request(operation_id.clone());
         let deadline_unix_ms = unix_now_ms().saturating_add(120_000);
         request.deadline_unix_ms = Some(deadline_unix_ms);
-        bookclerk_library::validate_atomic_request(&request, &self.caps)?;
         let typed = ExecuteRequest::from_atomic(&request)
             .map_err(|err| bookclerk_library::LibraryError::Other(anyhow::anyhow!(err)))?;
+        bookclerk_library::validate_execute_request(&typed, &self.caps)?;
         let cancel = Arc::new(AtomicBool::new(false));
         let _guard = CancelOnDrop(Arc::clone(&cancel));
         let remaining_ms = deadline_unix_ms.saturating_sub(unix_now_ms()).max(1);
@@ -623,6 +740,10 @@ impl RpcAtomicBackend {
     }
 
     /// Older guests: `bookclerk.atomic` JSON sentinel.
+    ///
+    /// # Errors
+    ///
+    /// Returns when JSON validation, the sentinel query, or result interpretation fails.
     async fn send_compiled_sentinel(
         &self,
         compiled: bookclerk_library::CompiledAtomic,
@@ -630,6 +751,7 @@ impl RpcAtomicBackend {
         request: DbAtomicRequest,
         cancel: Arc<AtomicBool>,
     ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
+        bookclerk_library::validate_atomic_request(&request, &self.caps)?;
         let payload = serde_json::to_string(&request).map_err(|err| {
             bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
         })?;
@@ -1350,14 +1472,13 @@ fn connect_params(
     }
 }
 
-/// Maps the guest-reported dialect string to a SeaORM [`DbBackend`].
-fn dialect_to_backend(dialect: &str) -> Result<DbBackend, DbErr> {
-    match dialect.trim().to_ascii_lowercase().as_str() {
-        "sqlite" => Ok(DbBackend::Sqlite),
-        "postgres" | "postgresql" => Ok(DbBackend::Postgres),
-        other => Err(DbErr::Custom(format!(
-            "database plugin returned unknown dialect `{other}`"
-        ))),
+/// Maps advertised schema capabilities to a SeaORM [`DbBackend`].
+fn schema_kind_to_backend(kind: bookclerk_library::HostSchemaKind) -> DbBackend {
+    match kind {
+        bookclerk_library::HostSchemaKind::SqliteFile | bookclerk_library::HostSchemaKind::D1 => {
+            DbBackend::Sqlite
+        }
+        bookclerk_library::HostSchemaKind::Postgres => DbBackend::Postgres,
     }
 }
 
@@ -1381,9 +1502,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_dialects() {
-        assert_eq!(dialect_to_backend("sqlite").unwrap(), DbBackend::Sqlite);
-        assert_eq!(dialect_to_backend("postgres").unwrap(), DbBackend::Postgres);
+    fn maps_schema_kind_to_backend() {
+        assert_eq!(
+            schema_kind_to_backend(bookclerk_library::HostSchemaKind::SqliteFile),
+            DbBackend::Sqlite
+        );
+        assert_eq!(
+            schema_kind_to_backend(bookclerk_library::HostSchemaKind::D1),
+            DbBackend::Sqlite
+        );
+        assert_eq!(
+            schema_kind_to_backend(bookclerk_library::HostSchemaKind::Postgres),
+            DbBackend::Postgres
+        );
     }
 
     #[test]

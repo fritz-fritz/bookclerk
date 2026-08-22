@@ -16,7 +16,10 @@ pub mod vectors;
 
 #[cfg(test)]
 use bookclerk_plugin_abi::DbPlanStatementKind;
-use bookclerk_plugin_abi::{DbAtomicPlan, DbAtomicRequest, DbConnectResult, DbPlanStatement};
+use bookclerk_plugin_abi::{
+    encoded_execute_request_bytes, DbAtomicPlan, DbAtomicRequest, DbConnectResult, DbPlanStatement,
+    ExecuteRequest,
+};
 
 pub use dialect::{rewrite_placeholders, SqlFamily};
 pub use exec::{
@@ -102,6 +105,44 @@ pub fn validate_plan(plan: &DbAtomicPlan, caps: &DbConnectResult) -> crate::erro
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Rejects a typed [`ExecuteRequest`] that exceeds negotiated guest limits.
+///
+/// `maxAtomicRequestBytes` is measured against the Cap'n-encoded
+/// [`ExecuteRequest`] that will be sent, not the JSON [`DbAtomicRequest`]
+/// envelope used by older-minor sentinels.
+///
+/// # Errors
+///
+/// Returns [`crate::LibraryError::Other`] when the request cannot be sent.
+pub fn validate_execute_request(
+    req: &ExecuteRequest,
+    caps: &DbConnectResult,
+) -> crate::error::Result<()> {
+    let atomic = req
+        .clone()
+        .into_atomic()
+        .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!(err)))?;
+    let plan = atomic.plan.as_ref().ok_or_else(|| {
+        crate::LibraryError::Other(anyhow::anyhow!(
+            "executeAtomic requires a host-authored plan"
+        ))
+    })?;
+    validate_plan(plan, caps)?;
+    let cap = atomic_request_cap_bytes(caps);
+    if cap == 0 {
+        return Ok(());
+    }
+    let bytes = encoded_execute_request_bytes(req)
+        .map(|b| b.len())
+        .unwrap_or(usize::MAX);
+    if bytes > cap {
+        return Err(crate::LibraryError::Other(anyhow::anyhow!(
+            "atomic request is {bytes} bytes; guest maxAtomicRequestBytes is {cap}"
+        )));
     }
     Ok(())
 }
@@ -192,8 +233,8 @@ pub(crate) fn host_statement_kind(sql: &str) -> DbPlanStatementKind {
 #[cfg(test)]
 mod limits_tests {
     use super::{
-        validate_atomic_request, validate_plan, DbAtomicPlan, DbAtomicRequest, DbConnectResult,
-        DbPlanStatement, DbPlanStatementKind,
+        validate_atomic_request, validate_execute_request, validate_plan, DbAtomicPlan,
+        DbAtomicRequest, DbConnectResult, DbPlanStatement, DbPlanStatementKind,
     };
 
     fn tiny_caps() -> DbConnectResult {
@@ -302,6 +343,9 @@ mod limits_tests {
         caps.max_result_bytes = 4_096;
         let req = DbAtomicRequest::with_plan("op", "abc", plan);
         let err = validate_atomic_request(&req, &caps).unwrap_err();
+        assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
+        let typed = bookclerk_plugin_abi::ExecuteRequest::from_atomic(&req).unwrap();
+        let err = validate_execute_request(&typed, &caps).unwrap_err();
         assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
     }
 

@@ -1,7 +1,6 @@
 //! Cap'n Proto codec for typed database execute / capabilities.
 
 #![allow(clippy::missing_docs_in_private_items)]
-#![allow(clippy::missing_errors_doc)]
 
 use super::plugin_v2_capnp::{
     db_capabilities as db_caps_capnp, db_capabilities_reply, db_column as db_column_capnp,
@@ -28,6 +27,9 @@ pub(super) fn write_db_type(ty: DbType) -> CapnpDbType {
     }
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::unsupported`] when the wire tag is unknown.
 pub(super) fn read_db_type(ty: CapnpDbType) -> Result<DbType> {
     match ty {
         CapnpDbType::Unspecified => Ok(DbType::Unspecified),
@@ -50,6 +52,10 @@ pub(super) fn write_db_value(mut b: db_value_capnp::Builder<'_>, v: &DbValue) {
     }
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::unsupported`] or [`PluginError::invalid_params`] when
+/// the union member is unknown or a float64 is not finite.
 pub(super) fn read_db_value(r: db_value_capnp::Reader<'_>) -> Result<DbValue> {
     match r.which() {
         Ok(db_value_capnp::Null(ty)) => {
@@ -79,6 +85,9 @@ fn write_kind(kind: DbPlanStatementKind) -> CapnpDbStatementKind {
     }
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::unsupported`] when the wire tag is unknown.
 fn read_kind(kind: CapnpDbStatementKind) -> Result<DbPlanStatementKind> {
     match kind {
         CapnpDbStatementKind::Query => Ok(DbPlanStatementKind::Query),
@@ -97,6 +106,9 @@ fn write_selection(sel: DbResultSelection) -> CapnpDbResultSelection {
     }
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::unsupported`] when the wire tag is unknown.
 fn read_selection(sel: CapnpDbResultSelection) -> Result<DbResultSelection> {
     match sel {
         CapnpDbResultSelection::Discard => Ok(DbResultSelection::Discard),
@@ -117,6 +129,9 @@ fn write_db_statement(mut b: db_statement_capnp::Builder<'_>, stmt: &TypedDbStat
     }
 }
 
+/// # Errors
+///
+/// Returns when SQL, parameters, or statement tags cannot be decoded.
 fn read_db_statement(r: db_statement_capnp::Reader<'_>) -> Result<TypedDbStatement> {
     let sql = text_of(r.get_sql().map_err(from_capnp)?);
     let kind = read_kind(
@@ -162,6 +177,10 @@ pub(super) fn write_execute_request(
     }
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the statement list is empty, or
+/// [`PluginError::unsupported`] when a nested field cannot be decoded.
 pub(super) fn read_execute_request(r: execute_request_capnp::Reader<'_>) -> Result<ExecuteRequest> {
     let list = r.get_statements().map_err(from_capnp)?;
     let mut statements = Vec::with_capacity(list.len() as usize);
@@ -193,6 +212,9 @@ fn write_column(mut b: db_column_capnp::Builder<'_>, col: &DbColumn) {
     b.set_db_type(write_db_type(col.db_type));
 }
 
+/// # Errors
+///
+/// Returns when the column name or declared type cannot be decoded.
 fn read_column(r: db_column_capnp::Reader<'_>) -> Result<DbColumn> {
     Ok(DbColumn {
         name: text_of(r.get_name().map_err(from_capnp)?),
@@ -210,6 +232,9 @@ fn write_row(mut b: db_row_capnp::Builder<'_>, row: &DbRow) {
     }
 }
 
+/// # Errors
+///
+/// Returns when a cell cannot be decoded as [`DbValue`].
 fn read_row(r: db_row_capnp::Reader<'_>) -> Result<DbRow> {
     let list = r.get_values().map_err(from_capnp)?;
     let mut values = Vec::with_capacity(list.len() as usize);
@@ -232,6 +257,10 @@ fn write_statement_result(mut b: statement_result_capnp::Builder<'_>, stmt: &Sta
     }
 }
 
+/// # Errors
+///
+/// Returns when columns/rows cannot be decoded, a row width does not match
+/// `columns.len()`, or column names are duplicated.
 fn read_statement_result(r: statement_result_capnp::Reader<'_>) -> Result<StatementResult> {
     let cols = r.get_columns().map_err(from_capnp)?;
     let mut columns = Vec::with_capacity(cols.len() as usize);
@@ -243,12 +272,16 @@ fn read_statement_result(r: statement_result_capnp::Reader<'_>) -> Result<Statem
     for item in rows_list.iter() {
         rows.push(read_row(item)?);
     }
-    Ok(StatementResult {
+    let result = StatementResult {
         rows,
         columns,
         rows_affected: r.get_rows_affected(),
         cursor: text_of(r.get_cursor().map_err(from_capnp)?),
-    })
+    };
+    result
+        .validate_positional()
+        .map_err(PluginError::invalid_params)?;
+    Ok(result)
 }
 
 fn write_timing(mut b: db_timing_capnp::Builder<'_>, t: &DbTiming) {
@@ -257,6 +290,9 @@ fn write_timing(mut b: db_timing_capnp::Builder<'_>, t: &DbTiming) {
     b.set_db_timing_source(&t.db_timing_source);
 }
 
+/// # Errors
+///
+/// Returns when the timing source string cannot be decoded.
 fn read_timing(r: db_timing_capnp::Reader<'_>) -> Result<DbTiming> {
     Ok(DbTiming {
         attempt_elapsed_us: r.get_attempt_elapsed_us(),
@@ -274,6 +310,10 @@ pub(super) fn fill_execute_reply(mut b: execute_reply_capnp::Builder<'_>, reply:
     }
 }
 
+/// # Errors
+///
+/// Returns when statements or timing cannot be decoded, or a statement result
+/// fails positional validation.
 pub(super) fn read_execute_reply(r: execute_reply_capnp::Reader<'_>) -> Result<ExecuteReply> {
     let list = r.get_statements().map_err(from_capnp)?;
     let mut statements = Vec::with_capacity(list.len() as usize);
@@ -303,6 +343,9 @@ pub(super) fn write_execute_atomic_reply(
     }
 }
 
+/// # Errors
+///
+/// Returns the guest [`PluginError`] on `err`, or a decode failure on `ok`.
 pub(super) fn read_execute_atomic_reply(
     result: execute_atomic_reply::Reader<'_>,
 ) -> Result<ExecuteReply> {
@@ -333,6 +376,9 @@ pub(super) fn write_db_capabilities(mut b: db_caps_capnp::Builder<'_>, caps: &Db
     b.set_diagnostic_engine(&caps.diagnostic_engine);
 }
 
+/// # Errors
+///
+/// Returns when `diagnosticEngine` cannot be decoded.
 pub(super) fn read_db_capabilities(r: db_caps_capnp::Reader<'_>) -> Result<DbCapabilities> {
     Ok(DbCapabilities {
         sql_contract_version: r.get_sql_contract_version(),
@@ -366,6 +412,9 @@ pub(super) fn write_db_capabilities_reply(
     }
 }
 
+/// # Errors
+///
+/// Returns the guest [`PluginError`] on `err`, or a decode failure on `ok`.
 pub(super) fn read_db_capabilities_reply(
     result: db_capabilities_reply::Reader<'_>,
 ) -> Result<DbCapabilities> {
@@ -373,4 +422,74 @@ pub(super) fn read_db_capabilities_reply(
         db_capabilities_reply::Ok(ok) => read_db_capabilities(ok.map_err(from_capnp)?),
         db_capabilities_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
     }
+}
+
+/// Serializes a Cap'n message to unpacked stream bytes.
+///
+/// # Errors
+///
+/// Returns [`PluginError::internal`] when serialization fails.
+fn write_message_bytes(
+    message: &capnp::message::Builder<capnp::message::HeapAllocator>,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    capnp::serialize::write_message(&mut out, message).map_err(from_capnp)?;
+    Ok(out)
+}
+
+/// Encodes a standalone Cap'n `DbValue` message (unpacked stream).
+///
+/// # Errors
+///
+/// Returns [`PluginError::internal`] when the message cannot be serialized.
+pub fn encoded_db_value_bytes(v: &DbValue) -> Result<Vec<u8>> {
+    let mut message = capnp::message::Builder::new_default();
+    write_db_value(message.init_root(), v);
+    write_message_bytes(&message)
+}
+
+/// Encodes a standalone Cap'n `ExecuteRequest` message (unpacked stream).
+///
+/// # Errors
+///
+/// Returns [`PluginError::internal`] when the message cannot be serialized.
+pub fn encoded_execute_request_bytes(req: &ExecuteRequest) -> Result<Vec<u8>> {
+    let mut message = capnp::message::Builder::new_default();
+    write_execute_request(message.init_root(), req);
+    write_message_bytes(&message)
+}
+
+/// Encodes a standalone Cap'n `ExecuteReply` message (unpacked stream).
+///
+/// # Errors
+///
+/// Returns [`PluginError::internal`] when the message cannot be serialized.
+pub fn encoded_execute_reply_bytes(reply: &ExecuteReply) -> Result<Vec<u8>> {
+    let mut message = capnp::message::Builder::new_default();
+    fill_execute_reply(message.init_root(), reply);
+    write_message_bytes(&message)
+}
+
+/// Decodes a standalone Cap'n `DbValue` message.
+///
+/// # Errors
+///
+/// Returns when the buffer is not a valid unpacked `DbValue`.
+pub fn decode_db_value_bytes(bytes: &[u8]) -> Result<DbValue> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let reader = capnp::serialize::read_message(&mut cursor, capnp::message::ReaderOptions::new())
+        .map_err(from_capnp)?;
+    read_db_value(reader.get_root().map_err(from_capnp)?)
+}
+
+/// Decodes a standalone Cap'n `ExecuteRequest` message.
+///
+/// # Errors
+///
+/// Returns when the buffer is not a valid unpacked `ExecuteRequest`.
+pub fn decode_execute_request_bytes(bytes: &[u8]) -> Result<ExecuteRequest> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let reader = capnp::serialize::read_message(&mut cursor, capnp::message::ReaderOptions::new())
+        .map_err(from_capnp)?;
+    read_execute_request(reader.get_root().map_err(from_capnp)?)
 }

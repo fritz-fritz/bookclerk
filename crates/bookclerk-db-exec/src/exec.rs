@@ -41,7 +41,11 @@ impl AtomicSession {
     }
 
     /// Checks cancel / deadline / test inject at `phase`.
-    fn check(&self, phase: AtomicInterruptPhase) -> Result<(), DbErr> {
+    ///
+    /// # Errors
+    ///
+    /// Returns when the session is cancelled, past deadline, or a test inject fires.
+    pub(crate) fn check(&self, phase: AtomicInterruptPhase) -> Result<(), DbErr> {
         if let Some(kind) = consume_atomic_interrupt(phase) {
             return Err(interrupt_err(phase, kind));
         }
@@ -291,7 +295,7 @@ fn unix_now_ms() -> u64 {
 }
 
 /// Remaining milliseconds until `deadline_unix_ms` (`None` if unlimited).
-fn remaining_deadline_ms(deadline_unix_ms: Option<u64>) -> Option<u64> {
+pub(crate) fn remaining_deadline_ms(deadline_unix_ms: Option<u64>) -> Option<u64> {
     let dl = deadline_unix_ms?;
     Some(dl.saturating_sub(unix_now_ms()).max(1))
 }
@@ -308,50 +312,51 @@ pub fn cap_query_sql(sql: &str, max_result_rows: u32) -> String {
     format!("SELECT * FROM ({inner}) AS _bc_cap LIMIT {n}")
 }
 
+/// Collects at most `max_result_rows + 1` engine rows (no JSON conversion).
+///
+/// # Errors
+///
+/// Returns when the engine stream/query fails.
+pub(crate) async fn collect_capped_query_results(
+    txn: &sea_orm::DatabaseTransaction,
+    stmt: Statement,
+    max_result_rows: u32,
+) -> Result<Vec<QueryResult>, DbErr> {
+    if ConnectionTrait::get_database_backend(txn) == sea_orm::DatabaseBackend::Postgres {
+        let stream = txn.stream_raw(stmt).await?;
+        futures::pin_mut!(stream);
+        let stop_after = row_stop_after(max_result_rows);
+        let mut rows = Vec::new();
+        while let Some(row) = stream.try_next().await? {
+            rows.push(row);
+            if rows.len() >= stop_after {
+                break;
+            }
+        }
+        return Ok(rows);
+    }
+    let rows = txn.query_all_raw(stmt).await?;
+    let stop_after = row_stop_after(max_result_rows);
+    Ok(rows.into_iter().take(stop_after).collect())
+}
+
 /// Collects at most `max_result_rows + 1` rows, checking cell/result bytes first.
 async fn collect_capped_query_rows(
     txn: &sea_orm::DatabaseTransaction,
     stmt: Statement,
     caps: ExecCaps,
 ) -> Result<Vec<JsonValue>, DbErr> {
-    if ConnectionTrait::get_database_backend(txn) == sea_orm::DatabaseBackend::Postgres {
-        return collect_streamed_rows(txn, stmt, caps).await;
-    }
-    let rows = txn.query_all_raw(stmt).await?;
+    let rows = collect_capped_query_results(txn, stmt, caps.max_result_rows).await?;
     let mut json_rows = Vec::new();
     let mut used = 0usize;
-    let stop_after = row_stop_after(caps.max_result_rows);
     for row in rows {
         push_capped_json_row(&mut json_rows, &mut used, query_row_to_json(row)?, caps)?;
-        if json_rows.len() >= stop_after {
-            break;
-        }
-    }
-    json_rows_respecting_cap(json_rows, caps.max_result_rows)
-}
-
-/// Streams Postgres results and stops after `cap + 1` rows.
-async fn collect_streamed_rows<C: ConnectionTrait + StreamTrait>(
-    conn: &C,
-    stmt: Statement,
-    caps: ExecCaps,
-) -> Result<Vec<JsonValue>, DbErr> {
-    let stream = conn.stream_raw(stmt).await?;
-    futures::pin_mut!(stream);
-    let stop_after = row_stop_after(caps.max_result_rows);
-    let mut json_rows = Vec::new();
-    let mut used = 0usize;
-    while let Some(row) = stream.try_next().await? {
-        push_capped_json_row(&mut json_rows, &mut used, query_row_to_json(row)?, caps)?;
-        if json_rows.len() >= stop_after {
-            break;
-        }
     }
     json_rows_respecting_cap(json_rows, caps.max_result_rows)
 }
 
 /// Uniform `rowsAffected` by host-authored kind.
-fn rows_affected_for_kind(kind: DbPlanStatementKind, returned_rows: usize) -> u64 {
+pub(crate) fn rows_affected_for_kind(kind: DbPlanStatementKind, returned_rows: usize) -> u64 {
     match kind {
         DbPlanStatementKind::Select => 0,
         DbPlanStatementKind::Returning | DbPlanStatementKind::Query => {
@@ -537,8 +542,8 @@ fn json_rows_respecting_cap(
     Ok(json_rows)
 }
 
-/// True when `n` exceeds a positive `max_result_rows` cap.
-fn exceeds_result_row_cap(n: usize, max_result_rows: u32) -> bool {
+/// Fails closed when `n` exceeds a positive `max_result_rows` cap.
+pub(crate) fn exceeds_result_row_cap(n: usize, max_result_rows: u32) -> bool {
     if max_result_rows == 0 {
         return false;
     }

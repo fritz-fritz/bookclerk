@@ -100,6 +100,10 @@ pub use events::{HostToPluginEvent, PluginToHostEvent};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
 pub use types::*;
+pub use v2::{
+    decode_db_value_bytes, decode_execute_request_bytes, encoded_db_value_bytes,
+    encoded_execute_reply_bytes, encoded_execute_request_bytes,
+};
 
 /// Negotiated JSON-adapter API version (`1`).
 ///

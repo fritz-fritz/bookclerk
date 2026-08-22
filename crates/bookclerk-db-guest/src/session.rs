@@ -277,19 +277,41 @@ pub async fn guest_capabilities(
     Ok(DbCapabilities::from_connect(&caps))
 }
 
-/// Typed `DatabaseSession.executeAtomic` wrapping [`guest_atomic`].
+/// Typed `DatabaseSession.executeAtomic`.
+///
+/// Runs [`ExecuteRequest`] directly (no JSON `DbAtomicRequest` conversion).
+/// The guest encodes [`ExecuteReply`] before COMMIT; post-commit failures are
+/// classified as `unavailable`.
 ///
 /// # Errors
 ///
-/// Returns when the request cannot be converted or the engine rejects the work.
+/// Returns when no connection is open or the engine rejects the work.
 pub async fn guest_execute_atomic(
     request: ExecuteRequest,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_sdk::PluginError> {
-    let atomic = request
-        .into_atomic()
-        .map_err(bookclerk_plugin_sdk::PluginError::invalid_params)?;
-    let result = guest_atomic(atomic).await?;
-    ExecuteReply::from_plan_exec(&result).map_err(bookclerk_plugin_sdk::PluginError::invalid_params)
+    let gate = txn_gate();
+    let _gate = gate.lock().await;
+    let conn = connection()
+        .await
+        .map_err(bookclerk_plugin_sdk::PluginError::internal)?;
+    let caps = match conn.get_database_backend() {
+        DbBackend::Postgres => bookclerk_plugin_sdk::DbConnectResult::postgres(),
+        _ => bookclerk_plugin_sdk::DbConnectResult::sqlite(),
+    };
+    let timing_source = match conn.get_database_backend() {
+        DbBackend::Postgres => "postgres_txn",
+        _ => "sqlite_txn",
+    };
+    let deadline = (request.deadline_unix_ms > 0).then_some(request.deadline_unix_ms);
+    bookclerk_db_exec::execute_typed_on_session(
+        &conn,
+        &request,
+        timing_source,
+        bookclerk_db_exec::ExecCaps::from_connect(&caps),
+        bookclerk_db_exec::AtomicSession::from_deadline(deadline),
+    )
+    .await
+    .map_err(|e| crate::plugin_error_from_db_err(&e))
 }
 
 /// Runs a read-only SQL query through the guest database bridge.

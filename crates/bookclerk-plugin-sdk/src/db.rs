@@ -301,6 +301,47 @@ pub fn db_value_from_sea(v: &Value) -> Result<bookclerk_plugin_abi::DbValue, Str
     }
 }
 
+/// Convert a typed bind into a SeaORM value without JSON / `b64:` decoding.
+#[must_use]
+pub fn db_value_to_sea(value: &bookclerk_plugin_abi::DbValue) -> Value {
+    use bookclerk_plugin_abi::{DbType, DbValue};
+    match value {
+        DbValue::Null(DbType::Unspecified | DbType::Text) => Value::String(None),
+        DbValue::Null(DbType::Int64) => Value::BigInt(None),
+        DbValue::Null(DbType::Float64) => Value::Double(None),
+        DbValue::Null(DbType::Bytes) => Value::Bytes(None),
+        DbValue::Null(DbType::Bool) => Value::Bool(None),
+        DbValue::Text(s) => Value::String(Some(s.clone())),
+        DbValue::Int64(n) => Value::BigInt(Some(*n)),
+        DbValue::Float64(n) => Value::Double(Some(*n)),
+        DbValue::Bytes(b) => Value::Bytes(Some(b.clone())),
+        DbValue::Boolean(b) => Value::Bool(Some(*b)),
+    }
+}
+
+/// Builds SeaORM proxy rows from a typed statement result.
+///
+/// # Errors
+///
+/// Returns when the result is not positional.
+pub fn proxy_rows_from_typed(
+    stmt: &bookclerk_plugin_abi::StatementResult,
+) -> Result<Vec<ProxyRow>, String> {
+    stmt.validate_positional()?;
+    Ok(stmt
+        .rows
+        .iter()
+        .map(|row| ProxyRow {
+            values: stmt
+                .columns
+                .iter()
+                .zip(row.values.iter())
+                .map(|(col, v)| (col.name.clone(), db_value_to_sea(v)))
+                .collect(),
+        })
+        .collect())
+}
+
 /// Decodes one JSON bind/cell value into a SeaORM [`Value`].
 ///
 /// Recognizes `$sea_null` objects from [`sea_value_to_json`]. Plain JSON null

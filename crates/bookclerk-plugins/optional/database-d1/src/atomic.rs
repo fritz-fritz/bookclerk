@@ -90,6 +90,75 @@ impl D1Proxy {
         }
         Err(last_err.unwrap_or_else(|| ambiguous_d1("exhausted retries")))
     }
+
+    /// Runs a typed [`ExecuteRequest`] as one D1 HTTP batch.
+    ///
+    /// [`DbValue::Text`] is sent as a JSON string even when it starts with
+    /// `b64:`. [`DbValue::Bytes`] uses the D1 HTTP `b64:` adapter convention.
+    /// After HTTP success, encode/size failures are ambiguous (`unavailable`).
+    ///
+    /// # Errors
+    ///
+    /// Returns when the batch is rejected, HTTP fails, or the reply cannot be
+    /// encoded after commit.
+    pub async fn run_typed_atomic(
+        &self,
+        req: &bookclerk_plugin_sdk::ExecuteRequest,
+    ) -> std::result::Result<bookclerk_plugin_sdk::ExecuteReply, DbErr> {
+        let started = std::time::Instant::now();
+        let deadline = (req.deadline_unix_ms > 0).then_some(req.deadline_unix_ms);
+        check_d1_session(
+            bookclerk_db_exec::AtomicInterruptPhase::BeforeBegin,
+            deadline,
+        )?;
+        reject_unbounded_returning_typed(&req.statements)?;
+        let d1_caps = DbConnectResult::d1();
+        let cap = d1_caps.max_result_rows;
+        let statements: Vec<SqlStmt> = req
+            .statements
+            .iter()
+            .map(|s| {
+                let sql = if s.kind.wrap_select_limit() {
+                    bookclerk_db_exec::cap_query_sql(&s.sql, cap)
+                } else {
+                    s.sql.clone()
+                };
+                (sql, d1_typed_binds(&s.parameters))
+            })
+            .collect();
+        let mut last_err = None;
+        for attempt in 0..ATOMIC_HTTP_ATTEMPTS {
+            check_d1_session(
+                bookclerk_db_exec::AtomicInterruptPhase::BeforeBegin,
+                deadline,
+            )?;
+            let timeout = d1_http_timeout(deadline)?;
+            let raw = match self.run_batch_with_timeout(&statements, timeout).await {
+                Ok(value) => {
+                    check_d1_session(
+                        bookclerk_db_exec::AtomicInterruptPhase::AroundCommit,
+                        deadline,
+                    )?;
+                    value
+                }
+                Err(err) if err.is_retryable() && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
+                    sleep_before_d1_retry_bounded(attempt, err.retry_after(), deadline).await?;
+                    last_err = Some(DbErr::from(err));
+                    continue;
+                }
+                Err(err) => return Err(err.into()),
+            };
+            match parse_typed_batch(req, &raw, started) {
+                Ok(reply) => return Ok(reply),
+                Err(err) if is_ambiguous_d1(&err) && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
+                    sleep_before_d1_retry_bounded(attempt, None, deadline).await?;
+                    last_err = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| ambiguous_d1("exhausted retries")))
+    }
 }
 
 /// HTTP timeout for one D1 batch, capped by the guest-visible deadline.
@@ -138,6 +207,25 @@ fn d1_unix_now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+/// D1 HTTP params: typed nulls become JSON null; text is never `b64:`-decoded.
+fn d1_typed_binds(params: &[bookclerk_plugin_sdk::DbValue]) -> Vec<JsonValue> {
+    use bookclerk_plugin_sdk::DbValue;
+    params
+        .iter()
+        .map(|v| match v {
+            DbValue::Null(_) => JsonValue::Null,
+            DbValue::Boolean(b) => JsonValue::Bool(*b),
+            DbValue::Int64(n) => JsonValue::from(*n),
+            DbValue::Float64(n) => JsonValue::from(*n),
+            DbValue::Text(s) => JsonValue::String(s.clone()),
+            DbValue::Bytes(b) => JsonValue::String(format!(
+                "b64:{}",
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b)
+            )),
+        })
+        .collect()
 }
 
 /// D1 HTTP params are untyped JSON; typed `$sea_null` objects become SQL NULL.
@@ -254,6 +342,215 @@ fn reject_unbounded_returning(plan: &DbAtomicPlan) -> std::result::Result<(), Db
         }
     }
     Ok(())
+}
+
+/// Fails closed on DML `RETURNING` that D1 HTTP cannot prove is at most one row.
+///
+/// # Errors
+///
+/// Returns when SQL is multi-statement, `max_rows != 1`, or `VALUES` is not a
+/// single tuple.
+fn reject_unbounded_returning_typed(
+    statements: &[bookclerk_plugin_sdk::TypedDbStatement],
+) -> std::result::Result<(), DbErr> {
+    let cap = DbConnectResult::d1().max_result_rows;
+    for (i, stmt) in statements.iter().enumerate() {
+        if sql_has_top_level_semicolon(&stmt.sql) {
+            return Err(DbErr::Custom(format!(
+                "D1 statement {i} contains multiple SQL statements; maxResultRows is {cap}"
+            )));
+        }
+        let looks_returning = matches!(stmt.kind, DbPlanStatementKind::Returning)
+            || (matches!(stmt.kind, DbPlanStatementKind::Query)
+                && has_top_level_keyword(&stmt.sql, "RETURNING"));
+        if !looks_returning {
+            continue;
+        }
+        if stmt.max_rows != 1 {
+            return Err(DbErr::Custom(format!(
+                "D1 statement {i} Returning is not proven bounded; maxResultRows is {cap}"
+            )));
+        }
+        if has_top_level_keyword(&stmt.sql, "VALUES") {
+            let tuples = count_top_level_values_tuples(&stmt.sql);
+            if tuples != 1 {
+                return Err(DbErr::Custom(format!(
+                    "D1 statement {i} Returning VALUES is not a single tuple ({tuples}); maxResultRows is {cap}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Maps one D1 HTTP JSON cell onto a typed [`DbValue`] (strings stay text).
+///
+/// # Errors
+///
+/// Returns when the cell is an array, object, or a non-finite number.
+fn d1_json_cell_to_db_value(v: &JsonValue) -> Result<bookclerk_plugin_sdk::DbValue, String> {
+    use bookclerk_plugin_sdk::{DbType, DbValue};
+    match v {
+        JsonValue::Null => Ok(DbValue::Null(DbType::Unspecified)),
+        JsonValue::Bool(b) => Ok(DbValue::Boolean(*b)),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                return Ok(DbValue::Int64(i));
+            }
+            if let Some(u) = n.as_u64() {
+                let i = i64::try_from(u)
+                    .map_err(|_| format!("unsigned integer {u} overflows int64"))?;
+                return Ok(DbValue::Int64(i));
+            }
+            let f = n
+                .as_f64()
+                .ok_or_else(|| "number is not a finite float64".to_string())?;
+            if !f.is_finite() {
+                return Err("float64 value is not finite".into());
+            }
+            Ok(DbValue::Float64(f))
+        }
+        JsonValue::String(s) => Ok(DbValue::Text(s.clone())),
+        JsonValue::Array(_) => Err("arrays are not a baseline DbValue".into()),
+        JsonValue::Object(_) => Err("objects are not a baseline DbValue".into()),
+    }
+}
+
+/// Parses a D1 HTTP batch body into [`ExecuteReply`] and encodes before return.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the body is malformed, a row fails conversion, or
+/// the encoded reply exceeds `maxAtomicResultBytes` (ambiguous after HTTP).
+fn parse_typed_batch(
+    req: &bookclerk_plugin_sdk::ExecuteRequest,
+    value: &JsonValue,
+    started: std::time::Instant,
+) -> std::result::Result<bookclerk_plugin_sdk::ExecuteReply, DbErr> {
+    use bookclerk_plugin_sdk::{
+        encoded_execute_reply_bytes, DbColumn, DbRow, DbTiming, DbType, ExecuteReply,
+        StatementResult,
+    };
+    let Some(arr) = value.get("result").and_then(JsonValue::as_array) else {
+        return Err(ambiguous_d1("batch response missing result array"));
+    };
+    if arr.len() != req.statements.len() {
+        return Err(ambiguous_d1(format!(
+            "expected {} statement results, got {}",
+            req.statements.len(),
+            arr.len()
+        )));
+    }
+    let caps = DbConnectResult::d1();
+    let row_cap = usize::try_from(caps.max_result_rows).unwrap_or(1_000);
+    let mut statements = Vec::with_capacity(arr.len());
+    for (i, entry) in arr.iter().enumerate() {
+        if entry.get("success").and_then(JsonValue::as_bool) == Some(false) {
+            return Err(DbErr::Custom(format!(
+                "D1 batch statement {i} failed: {entry}"
+            )));
+        }
+        let kind = req.statements[i].kind;
+        let selection = req.statements[i].result_selection;
+        let changes = entry
+            .get("meta")
+            .and_then(|m| m.get("changes"))
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(0);
+        let stmt_result = match selection {
+            bookclerk_plugin_sdk::DbResultSelection::AffectedRows
+            | bookclerk_plugin_sdk::DbResultSelection::Discard => {
+                let n = if matches!(selection, bookclerk_plugin_sdk::DbResultSelection::Discard)
+                    || matches!(kind, DbPlanStatementKind::Select)
+                {
+                    0
+                } else {
+                    changes
+                };
+                StatementResult::from_affected(n)
+            }
+            bookclerk_plugin_sdk::DbResultSelection::Rows
+            | bookclerk_plugin_sdk::DbResultSelection::Cursor => {
+                let raw_rows = entry
+                    .get("results")
+                    .and_then(JsonValue::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                if raw_rows.len() > row_cap {
+                    return Err(ambiguous_d1(format!(
+                        "D1 statement {i} returned {} rows; maxResultRows is {row_cap}",
+                        raw_rows.len()
+                    )));
+                }
+                let columns: Vec<DbColumn> = raw_rows
+                    .first()
+                    .and_then(JsonValue::as_object)
+                    .map(|map| {
+                        map.keys()
+                            .map(|name| DbColumn {
+                                name: name.clone(),
+                                db_type: DbType::Unspecified,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut rows = Vec::new();
+                for row in raw_rows {
+                    let Some(map) = row.as_object() else {
+                        return Err(ambiguous_d1(format!(
+                            "D1 statement {i} row is not an object"
+                        )));
+                    };
+                    let mut values = Vec::with_capacity(columns.len());
+                    for col in &columns {
+                        let cell = map.get(&col.name).unwrap_or(&JsonValue::Null);
+                        values.push(d1_json_cell_to_db_value(cell).map_err(DbErr::Custom)?);
+                    }
+                    rows.push(DbRow { values });
+                }
+                let mut result = StatementResult::from_rows(columns, rows).map_err(ambiguous_d1)?;
+                result.rows_affected = match kind {
+                    DbPlanStatementKind::Select => 0,
+                    DbPlanStatementKind::Returning | DbPlanStatementKind::Query => {
+                        u64::try_from(result.rows.len()).unwrap_or(u64::MAX)
+                    }
+                    DbPlanStatementKind::Execute => changes,
+                };
+                result
+            }
+        };
+        statements.push(stmt_result);
+    }
+    let db_execution_us = d1_sql_duration_us(value);
+    let reply = ExecuteReply {
+        operation_id: req.operation_id.clone(),
+        statements,
+        timing: DbTiming {
+            attempt_elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            db_execution_us: db_execution_us.unwrap_or(0),
+            db_timing_source: db_execution_us
+                .map(|_| "d1_sql_duration".to_string())
+                .unwrap_or_default(),
+        },
+    };
+    reply.validate_positional().map_err(ambiguous_d1)?;
+    match encoded_execute_reply_bytes(&reply) {
+        Ok(bytes) => {
+            let cap = usize::try_from(caps.max_atomic_result_bytes).unwrap_or(0);
+            if cap > 0 && bytes.len() > cap {
+                return Err(ambiguous_d1(format!(
+                    "atomic result is {} bytes; maxAtomicResultBytes is {cap}",
+                    bytes.len()
+                )));
+            }
+        }
+        Err(err) => {
+            return Err(ambiguous_d1(format!(
+                "failed to encode ExecuteReply after D1 HTTP commit: {err}"
+            )));
+        }
+    }
+    Ok(reply)
 }
 
 /// True when a top-level semicolon would start another statement.

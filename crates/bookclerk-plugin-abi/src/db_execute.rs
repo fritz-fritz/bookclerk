@@ -5,6 +5,8 @@
 //! `DatabaseSession.executeAtomic`. JSON `bookclerk.capabilities` /
 //! `bookclerk.atomic` sentinels remain for older `abiMinor` guests.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::db::{
@@ -218,19 +220,74 @@ pub struct StatementResult {
 }
 
 impl StatementResult {
+    /// Builds a row-bearing result and rejects width / name errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns when a row length differs from `columns.len()` or a column name
+    /// is duplicated.
+    pub fn from_rows(columns: Vec<DbColumn>, rows: Vec<DbRow>) -> Result<Self, String> {
+        let stmt = Self {
+            rows,
+            columns,
+            rows_affected: 0,
+            cursor: String::new(),
+        };
+        stmt.validate_positional()?;
+        Ok(stmt)
+    }
+
+    /// Builds an affected-rows-only result.
+    #[must_use]
+    pub fn from_affected(rows_affected: u64) -> Self {
+        Self {
+            rows: Vec::new(),
+            columns: Vec::new(),
+            rows_affected,
+            cursor: String::new(),
+        }
+    }
+
+    /// Rejects duplicate column names and row widths that do not match `columns`.
+    ///
+    /// # Errors
+    ///
+    /// Returns when a row has the wrong cell count or two columns share a name.
+    pub fn validate_positional(&self) -> Result<(), String> {
+        let mut seen = HashSet::with_capacity(self.columns.len());
+        for col in &self.columns {
+            if !seen.insert(col.name.as_str()) {
+                return Err(format!("duplicate result column name `{}`", col.name));
+            }
+        }
+        let width = self.columns.len();
+        for (i, row) in self.rows.iter().enumerate() {
+            if row.values.len() != width {
+                return Err(format!(
+                    "result row {i} has {} values; columns has {width}",
+                    row.values.len()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Converts JSON plan rows onto typed columns + positional cells.
     ///
     /// # Errors
     ///
-    /// Returns when a JSON cell is outside the universal domain.
+    /// Returns when a JSON cell is outside the universal domain, a row width
+    /// does not match the column list, or column names are duplicated.
     pub fn from_plan_stmt(stmt: &DbPlanStmtExecResult) -> Result<Self, String> {
         let (columns, rows) = json_rows_to_typed(&stmt.rows)?;
-        Ok(Self {
+        let result = Self {
             rows,
             columns,
             rows_affected: stmt.rows_affected,
             cursor: String::new(),
-        })
+        };
+        result.validate_positional()?;
+        Ok(result)
     }
 
     /// JSON object rows used by host `interpret_exec`.
@@ -288,22 +345,38 @@ pub struct ExecuteReply {
 }
 
 impl ExecuteReply {
+    /// Rejects positional errors on every statement result.
+    ///
+    /// # Errors
+    ///
+    /// Returns when any statement has a row-width or duplicate-name error.
+    pub fn validate_positional(&self) -> Result<(), String> {
+        for (i, stmt) in self.statements.iter().enumerate() {
+            stmt.validate_positional()
+                .map_err(|err| format!("statement {i}: {err}"))?;
+        }
+        Ok(())
+    }
+
     /// Typed reply from a JSON [`DbPlanExecResult`].
     ///
     /// # Errors
     ///
-    /// Returns when a JSON cell is outside the universal domain.
+    /// Returns when a JSON cell is outside the universal domain or a result
+    /// row is not positional.
     pub fn from_plan_exec(result: &DbPlanExecResult) -> Result<Self, String> {
         let statements = result
             .statements
             .iter()
             .map(StatementResult::from_plan_stmt)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
+        let reply = Self {
             operation_id: result.operation_id.clone(),
             statements,
             timing: result.timing.clone().map(Into::into).unwrap_or_default(),
-        })
+        };
+        reply.validate_positional()?;
+        Ok(reply)
     }
 
     /// JSON plan result used by host interpretation.
@@ -394,19 +467,23 @@ impl DbCapabilities {
 
     /// JSON connect result used by existing host negotiation.
     ///
-    /// SeaORM dialect selection uses `diagnostic_engine` as an observational
-    /// hint (`sqlite` / `postgres`). Schema selection uses the schema flags.
+    /// SeaORM `dialect` / `sqlFamily` are derived from schema capability flags
+    /// (`pragmaUserVersion`, `schemaMigrations`, `atomicSchemaBatch`), never
+    /// from [`Self::diagnostic_engine`]. That field is observability only.
     #[must_use]
     pub fn to_connect(&self) -> DbConnectResult {
-        let engine = self.diagnostic_engine.to_ascii_lowercase();
-        let (dialect, sql_family) = if engine.contains("postgres") {
-            ("postgres", "postgres")
+        let (dialect, sql_family, interactive_txn) = if self.pragma_user_version {
+            ("sqlite", "sqlite", true)
+        } else if self.schema_migrations && self.atomic_schema_batch {
+            ("sqlite", "sqlite", false)
+        } else if self.schema_migrations {
+            ("postgres", "postgres", true)
         } else {
-            ("sqlite", "sqlite")
+            ("sqlite", "sqlite", !self.atomic_schema_batch)
         };
         DbConnectResult {
             dialect: dialect.into(),
-            interactive_txn: !self.atomic_schema_batch,
+            interactive_txn,
             sql_family: sql_family.into(),
             atomic_batch: self.atomic_batch,
             returning: self.returning,
@@ -569,5 +646,136 @@ mod tests {
                 back.capability_failure_reason()
             );
         }
+    }
+
+    #[test]
+    fn to_connect_ignores_diagnostic_engine() {
+        let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
+        caps.diagnostic_engine = "postgres".into();
+        let back = caps.to_connect();
+        assert_eq!(back.dialect, "sqlite");
+        assert_eq!(back.sql_family, "sqlite");
+        assert!(back.interactive_txn);
+        assert!(back.pragma_user_version);
+    }
+
+    #[test]
+    fn duplicate_column_names_are_rejected() {
+        let stmt = StatementResult {
+            columns: vec![
+                DbColumn {
+                    name: "id".into(),
+                    db_type: DbType::Int64,
+                },
+                DbColumn {
+                    name: "id".into(),
+                    db_type: DbType::Text,
+                },
+            ],
+            rows: vec![DbRow {
+                values: vec![DbValue::Int64(1), DbValue::Text("x".into())],
+            }],
+            rows_affected: 1,
+            cursor: String::new(),
+        };
+        let err = stmt.validate_positional().unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn row_width_mismatch_is_rejected() {
+        let stmt = StatementResult {
+            columns: vec![DbColumn {
+                name: "id".into(),
+                db_type: DbType::Int64,
+            }],
+            rows: vec![DbRow {
+                values: vec![DbValue::Int64(1), DbValue::Int64(2)],
+            }],
+            rows_affected: 1,
+            cursor: String::new(),
+        };
+        let err = stmt.validate_positional().unwrap_err();
+        assert!(err.contains("values"), "{err}");
+    }
+
+    #[test]
+    fn capnp_db_value_goldens_roundtrip() {
+        use crate::{decode_db_value_bytes, encoded_db_value_bytes};
+        let cases = [
+            DbValue::Int64(i64::MIN),
+            DbValue::Int64(i64::MAX),
+            DbValue::Text("b64:AAAA".into()),
+            DbValue::Bytes(vec![0, 1, 2]),
+            DbValue::Null(DbType::Bytes),
+            DbValue::Boolean(true),
+        ];
+        for v in cases {
+            let bytes = encoded_db_value_bytes(&v).unwrap();
+            let back = decode_db_value_bytes(&bytes).unwrap();
+            assert_eq!(back, v);
+        }
+        let text = encoded_db_value_bytes(&DbValue::Text("b64:AAAA".into())).unwrap();
+        let blob = encoded_db_value_bytes(&DbValue::Bytes(vec![0, 1, 2])).unwrap();
+        assert_ne!(text, blob);
+        assert_eq!(
+            hex::encode(encoded_db_value_bytes(&DbValue::Int64(i64::MIN)).unwrap()),
+            "00000000040000000000000002000100000002000000000000000000000000800000000000000000"
+        );
+        assert_eq!(
+            hex::encode(encoded_db_value_bytes(&DbValue::Int64(i64::MAX)).unwrap()),
+            "000000000400000000000000020001000000020000000000ffffffffffffff7f0000000000000000"
+        );
+        assert_eq!(
+            hex::encode(encoded_db_value_bytes(&DbValue::Text("b64:AAAA".into())).unwrap()),
+            "0000000006000000000000000200010000000400000000000000000000000000010000004a0000006236343a414141410000000000000000"
+        );
+        assert_eq!(
+            hex::encode(encoded_db_value_bytes(&DbValue::Bytes(vec![0, 1, 2])).unwrap()),
+            "0000000005000000000000000200010000000500000000000000000000000000010000001a0000000001020000000000"
+        );
+        assert_eq!(
+            hex::encode(encoded_db_value_bytes(&DbValue::Boolean(true)).unwrap()),
+            "00000000040000000000000002000100010001000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            hex::encode(encoded_db_value_bytes(&DbValue::Null(DbType::Bytes)).unwrap()),
+            "00000000040000000000000002000100050000000000000000000000000000000000000000000000"
+        );
+    }
+
+    #[test]
+    fn capnp_execute_request_roundtrip() {
+        use crate::{decode_execute_request_bytes, encoded_execute_request_bytes};
+        let req = ExecuteRequest {
+            operation_id: "op".into(),
+            request_hash: "abc".into(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT ?".into(),
+                parameters: vec![
+                    DbValue::Int64(i64::MIN),
+                    DbValue::Text("b64:not-bytes".into()),
+                    DbValue::Bytes(vec![0xff]),
+                ],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            }],
+            outcome_index: 0,
+            payload_index: 0,
+            has_payload_index: false,
+            prior_receipt_index: 0,
+            has_prior_receipt_index: false,
+            receipt_select_index: 0,
+            has_receipt_select_index: false,
+            deadline_unix_ms: 0,
+        };
+        let bytes = encoded_execute_request_bytes(&req).unwrap();
+        let back = decode_execute_request_bytes(&bytes).unwrap();
+        assert_eq!(back, req);
+        assert_eq!(
+            hex::encode(&bytes),
+            "000000001d00000000000000040003000000000000000000000000000000000000000000000000000000000000000000090000001a0000000900000022000000090000001f0000006f70000000000000616263000000000004000000010002000200020001000000050000004a000000090000004f00000053454c454354203f00000000000000000c00000002000100000002000000000000000000000000800000000000000000000004000000000000000000000000000d0000007200000000000500000000000000000000000000090000000a0000006236343a6e6f742d6279746573000000ff00000000000000"
+        );
     }
 }

@@ -88,6 +88,38 @@ pub async fn apply_host_schema(db: &DatabaseConnection, kind: HostSchemaKind) ->
     }
 }
 
+/// Applies sqlite/postgres schema using `run_batch` (typed `executeAtomic`) for
+/// each version, instead of SeaORM interactive transactions.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a version read, DDL statement, or batch fails.
+async fn apply_host_schema_native_or_batch<F, Fut>(
+    db: &DatabaseConnection,
+    kind: HostSchemaKind,
+    mut run_batch: F,
+) -> Result<()>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    match kind {
+        HostSchemaKind::SqliteFile => {
+            apply_sqlite_user_version_with_batch(db, &mut run_batch).await
+        }
+        HostSchemaKind::Postgres => {
+            apply_schema_migrations_with_batch(
+                db,
+                DbBackend::Postgres,
+                migration_sql_postgres(),
+                &mut run_batch,
+            )
+            .await
+        }
+        HostSchemaKind::D1 => apply_host_schema(db, kind).await,
+    }
+}
+
 /// Applies pending DDL, running each D1 version (including V27) as one batch.
 ///
 /// # Errors
@@ -103,7 +135,7 @@ where
     Fut: Future<Output = Result<()>>,
 {
     if kind != HostSchemaKind::D1 {
-        return apply_host_schema(db, kind).await;
+        return apply_host_schema_native_or_batch(db, kind, run_batch).await;
     }
     ensure_schema_migrations(db, DbBackend::Sqlite).await?;
     let mut applied = schema_versions_applied(db, DbBackend::Sqlite).await?;
@@ -181,6 +213,131 @@ where
         return Ok(());
     }
     Err(last_err.expect("d1 schema version retry"))
+}
+
+/// Applies pending SQLite `PRAGMA user_version` migrations via `run_batch`.
+///
+/// # Errors
+///
+/// Returns when a version read or batch fails.
+async fn apply_sqlite_user_version_with_batch<F, Fut>(
+    db: &DatabaseConnection,
+    run_batch: &mut F,
+) -> Result<()>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let backend = DbBackend::Sqlite;
+    exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
+    let steps = migration_sql();
+    for (idx, schema) in steps.iter().enumerate() {
+        let version = (idx + 1) as i64;
+        apply_one_sqlite_version_with_batch(db, backend, version, schema, run_batch).await?;
+    }
+    exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
+    Ok(())
+}
+
+/// Applies one SQLite schema version as a `run_batch` transaction.
+///
+/// # Errors
+///
+/// Returns when the batch fails.
+async fn apply_one_sqlite_version_with_batch<F, Fut>(
+    db: &DatabaseConnection,
+    _backend: DbBackend,
+    version: i64,
+    schema: &str,
+    run_batch: &mut F,
+) -> Result<()>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let mut delay_ms = 20u64;
+    let mut last_applied_err = None;
+    for attempt in 0..8 {
+        if version <= sqlite_user_version(db).await? {
+            return Ok(());
+        }
+        let mut stmts = split_sql_statements(schema);
+        stmts.push(format!("PRAGMA user_version = {version}"));
+        match run_batch(stmts).await {
+            Ok(()) => return Ok(()),
+            Err(err) if is_already_applied_ddl(&err) => {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                last_applied_err = Some(err);
+            }
+            Err(err) if attempt + 1 < 8 && is_schema_lock_err(&err) => {
+                last_applied_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = delay_ms.saturating_mul(2).min(250);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    if version <= sqlite_user_version(db).await? {
+        return Ok(());
+    }
+    Err(last_applied_err.expect("sqlite schema version retry"))
+}
+
+/// Applies pending `schema_migrations` versions via `run_batch`.
+///
+/// # Errors
+///
+/// Returns when a version read or batch fails.
+async fn apply_schema_migrations_with_batch<F, Fut>(
+    db: &DatabaseConnection,
+    backend: DbBackend,
+    steps: &[&str],
+    run_batch: &mut F,
+) -> Result<()>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    ensure_schema_migrations(db, backend).await?;
+    for (idx, schema) in steps.iter().enumerate() {
+        let version = (idx + 1) as i64;
+        let mut delay_ms = 20u64;
+        let mut last_err = None;
+        for attempt in 0..8 {
+            if schema_versions_applied(db, backend)
+                .await?
+                .contains(&version)
+            {
+                break;
+            }
+            let mut stmts = split_sql_statements(schema);
+            stmts.push(format!(
+                "INSERT INTO schema_migrations (version) VALUES ({version})"
+            ));
+            match run_batch(stmts).await {
+                Ok(()) => break,
+                Err(err) if is_already_applied_ddl(&err) => {
+                    tokio::time::sleep(Duration::from_millis(15)).await;
+                    last_err = Some(err);
+                }
+                Err(err) if attempt + 1 < 8 && is_schema_lock_err(&err) => {
+                    last_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2).min(250);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        if !schema_versions_applied(db, backend)
+            .await?
+            .contains(&version)
+        {
+            if let Some(err) = last_err {
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Applies remaining `PRAGMA user_version` steps (file SQLite).

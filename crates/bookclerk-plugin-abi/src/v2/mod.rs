@@ -13,6 +13,10 @@ mod types;
 /// Generated Cap'n Proto RPC interfaces (`schema/plugin_v2.capnp`).
 pub use crate::plugin_v2_capnp;
 
+pub use db_rpc::{
+    decode_db_value_bytes, decode_execute_request_bytes, encoded_db_value_bytes,
+    encoded_execute_reply_bytes, encoded_execute_request_bytes,
+};
 pub use features::{
     negotiate_rpc_features, RpcFeature, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY,
     FEATURE_STREAMS,

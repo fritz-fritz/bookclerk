@@ -9,6 +9,7 @@ mod b64;
 mod exec;
 mod lower;
 pub mod proxy_txn;
+mod typed;
 
 pub use b64::{b64_string_to_bytes, bytes_to_b64_string};
 pub use exec::{
@@ -25,3 +26,4 @@ pub use proxy_txn::{
     take_txn_fault, txn_broken_err, with_exec_budget, AtomicInterruptKind, AtomicInterruptPhase,
     ExecBudget,
 };
+pub use typed::{db_value_from_sea, db_value_to_sea, execute_typed_on_session};

@@ -177,14 +177,12 @@ impl DatabaseSession for D1Session {
     }
 
     async fn execute_atomic(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {
-        let req = request.into_atomic().map_err(PluginError::invalid_params)?;
         let proxy = bookclerk_plugin_database_d1::shared_proxy()
             .ok_or_else(|| PluginError::internal("d1 guest is not connected"))?;
-        let result = proxy
-            .run_atomic(req)
+        proxy
+            .run_typed_atomic(&request)
             .await
-            .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)?;
-        ExecuteReply::from_plan_exec(&result).map_err(PluginError::invalid_params)
+            .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
     }
 }
 

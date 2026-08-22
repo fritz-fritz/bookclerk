@@ -62,13 +62,14 @@ pub mod workerd;
 
 #[cfg(feature = "db")]
 pub use db::{
-    b64_string_to_bytes, bytes_to_b64_string, db_value_from_sea, exec_result_from_dto,
-    exec_result_to_dto, json_to_sea_value, proxy_rows_from_dto, proxy_rows_to_dto, sea_null,
-    sea_null_kind, sea_value_to_json, statement_from_dto, statement_to_dto, DbAtomicPlan,
-    DbAtomicRequest, DbAtomicTiming, DbBeginParams, DbBeginResult, DbConnectParams,
-    DbConnectResult, DbPlanExecResult, DbPlanStatement, DbPlanStatementKind, DbPlanStmtExecResult,
-    DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto, D1_MAX_BINDS,
-    DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL, SEA_NULL_KEY,
+    b64_string_to_bytes, bytes_to_b64_string, db_value_from_sea, db_value_to_sea,
+    exec_result_from_dto, exec_result_to_dto, json_to_sea_value, proxy_rows_from_dto,
+    proxy_rows_from_typed, proxy_rows_to_dto, sea_null, sea_null_kind, sea_value_to_json,
+    statement_from_dto, statement_to_dto, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming,
+    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbPlanExecResult,
+    DbPlanStatement, DbPlanStatementKind, DbPlanStmtExecResult, DbTxnParams, ExecResultDto,
+    ProxyRowDto, QueryResultDto, StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL,
+    DB_CAPABILITIES_SENTINEL, SEA_NULL_KEY,
 };
 
 pub use callback_tunnel::{TunnelGuest, TunnelHost, TunnelStream};
@@ -99,8 +100,10 @@ pub use v2::{
 };
 
 pub use bookclerk_plugin_abi::{
-    db_value_from_json, db_value_to_json, sql_payload_bytes, sql_payload_exceeds, DbCapabilities,
-    DbColumn, DbResultSelection, DbRow, DbTiming, DbType, DbValue, DiagnoseResult, ExecuteReply,
-    ExecuteRequest, HandshakeParams, HostToPluginEvent, PluginError, PluginErrorCode,
-    PluginToHostEvent, StatementResult, TypedDbStatement, API_VERSION, SQL_CONTRACT_VERSION,
+    db_value_from_json, db_value_to_json, decode_db_value_bytes, decode_execute_request_bytes,
+    encoded_db_value_bytes, encoded_execute_reply_bytes, encoded_execute_request_bytes,
+    sql_payload_bytes, sql_payload_exceeds, DbCapabilities, DbColumn, DbResultSelection, DbRow,
+    DbTiming, DbType, DbValue, DiagnoseResult, ExecuteReply, ExecuteRequest, HandshakeParams,
+    HostToPluginEvent, PluginError, PluginErrorCode, PluginToHostEvent, StatementResult,
+    TypedDbStatement, API_VERSION, SQL_CONTRACT_VERSION,
 };
