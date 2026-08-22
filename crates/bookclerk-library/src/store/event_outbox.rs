@@ -222,6 +222,15 @@ async fn wait_snapshot_claim_barrier() {
 #[cfg(not(test))]
 async fn wait_snapshot_claim_barrier() {}
 
+fn parse_dispatch_snapshot(event_id: &str, json: &str) -> Result<Vec<EventSubscriber>> {
+    let ids: Vec<String> = serde_json::from_str(json).map_err(|err| {
+        LibraryError::Other(anyhow!(
+            "domain event {event_id} has invalid dispatch_snapshot_json: {err}"
+        ))
+    })?;
+    Ok(ids.into_iter().map(EventSubscriber::plugin).collect())
+}
+
 /// Current dispatch chunk override, if any.
 pub(crate) fn dispatch_chunk_override() -> Option<usize> {
     DISPATCH_CHUNK_OVERRIDE.with(|c| c.get())
@@ -352,9 +361,7 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)?
             .ok_or_else(|| LibraryError::NotFound(format!("domain event {event_id}")))?;
         if !row.dispatch_snapshot_json.trim().is_empty() {
-            let ids: Vec<String> =
-                serde_json::from_str(&row.dispatch_snapshot_json).unwrap_or_default();
-            return Ok(ids.into_iter().map(EventSubscriber::plugin).collect());
+            return parse_dispatch_snapshot(event_id, &row.dispatch_snapshot_json);
         }
         let json = serde_json::to_string(
             &subscribers
@@ -380,9 +387,7 @@ impl LibraryStore {
                 .await
                 .map_err(LibraryError::Orm)?
                 .ok_or_else(|| LibraryError::NotFound(format!("domain event {event_id}")))?;
-            let ids: Vec<String> =
-                serde_json::from_str(&row.dispatch_snapshot_json).unwrap_or_default();
-            return Ok(ids.into_iter().map(EventSubscriber::plugin).collect());
+            return parse_dispatch_snapshot(event_id, &row.dispatch_snapshot_json);
         }
         Ok(subscribers.to_vec())
     }

@@ -1419,6 +1419,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "bookclerk-plugin-abi",
+ "futures",
  "sea-orm",
  "serde_json",
  "tokio",

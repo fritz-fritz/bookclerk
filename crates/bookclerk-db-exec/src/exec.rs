@@ -4,12 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use bookclerk_plugin_abi::{
-    DbAtomicPlan, DbAtomicTiming, DbPlanExecResult, DbPlanStatementKind, DbPlanStmtExecResult,
-};
+use bookclerk_plugin_abi::{DbAtomicPlan, DbAtomicTiming, DbPlanExecResult, DbPlanStmtExecResult};
+use futures::TryStreamExt;
 use sea_orm::{
-    from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DbErr, Statement,
-    TransactionTrait, Value,
+    from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DbErr, QueryResult,
+    Statement, StreamTrait, TransactionTrait, Value,
 };
 use serde_json::Value as JsonValue;
 
@@ -131,7 +130,7 @@ async fn execute_statements_body(
         let fault = take_txn_fault().unwrap_or_else(|| "database begin failed".into());
         return Err(DbErr::Custom(fault));
     }
-    let backend = txn.get_database_backend();
+    let backend = ConnectionTrait::get_database_backend(&txn);
     if backend == sea_orm::DatabaseBackend::Postgres {
         if let Some(ms) = remaining_deadline_ms(session.deadline_unix_ms) {
             let sql = format!("SET LOCAL statement_timeout = '{ms}ms'");
@@ -150,59 +149,38 @@ async fn execute_statements_body(
             return Err(err);
         }
         let values: Vec<Value> = stmt.binds.iter().map(json_to_sea).collect();
-        let sql = match stmt.kind {
-            DbPlanStatementKind::Query => cap_query_sql(&stmt.sql, max_result_rows),
-            DbPlanStatementKind::Execute => stmt.sql.clone(),
+        let sql = if stmt.kind.wrap_select_limit() {
+            cap_query_sql(&stmt.sql, max_result_rows)
+        } else {
+            stmt.sql.clone()
         };
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
-        let stmt_result = match stmt.kind {
-            DbPlanStatementKind::Query => {
-                let rows = match txn.query_all_raw(sea_stmt).await {
-                    Ok(rows) => rows,
-                    Err(err) => {
-                        let _ = txn.rollback().await;
-                        let _ = take_txn_fault();
-                        return Err(err);
-                    }
-                };
-                let json_rows: Vec<JsonValue> = rows
-                    .into_iter()
-                    .map(|row| {
-                        let proxy = from_query_result_to_proxy_row(&row);
-                        let mut map = serde_json::Map::new();
-                        for (name, value) in proxy.values {
-                            map.insert(name, sea_to_json(&value));
-                        }
-                        JsonValue::Object(map)
-                    })
-                    .collect();
-                if exceeds_result_row_cap(json_rows.len(), max_result_rows) {
+        let stmt_result = if stmt.kind.collects_rows() {
+            let json_rows = match collect_capped_query_rows(&txn, sea_stmt, max_result_rows).await {
+                Ok(rows) => rows,
+                Err(err) => {
                     let _ = txn.rollback().await;
                     let _ = take_txn_fault();
-                    return Err(DbErr::Custom(format!(
-                        "query returned {} rows; maxResultRows is {max_result_rows}",
-                        json_rows.len()
-                    )));
+                    return Err(err);
                 }
-                let rows_affected = u64::try_from(json_rows.len()).unwrap_or(u64::MAX);
-                DbPlanStmtExecResult {
-                    rows: json_rows,
-                    rows_affected,
-                }
+            };
+            let rows_affected = u64::try_from(json_rows.len()).unwrap_or(u64::MAX);
+            DbPlanStmtExecResult {
+                rows: json_rows,
+                rows_affected,
             }
-            DbPlanStatementKind::Execute => {
-                let exec = match txn.execute_raw(sea_stmt).await {
-                    Ok(exec) => exec,
-                    Err(err) => {
-                        let _ = txn.rollback().await;
-                        let _ = take_txn_fault();
-                        return Err(err);
-                    }
-                };
-                DbPlanStmtExecResult {
-                    rows: Vec::new(),
-                    rows_affected: exec.rows_affected(),
+        } else {
+            let exec = match txn.execute_raw(sea_stmt).await {
+                Ok(exec) => exec,
+                Err(err) => {
+                    let _ = txn.rollback().await;
+                    let _ = take_txn_fault();
+                    return Err(err);
                 }
+            };
+            DbPlanStmtExecResult {
+                rows: Vec::new(),
+                rows_affected: exec.rows_affected(),
             }
         };
         statements.push(stmt_result);
@@ -263,39 +241,82 @@ fn remaining_deadline_ms(deadline_unix_ms: Option<u64>) -> Option<u64> {
     Some(dl.saturating_sub(unix_now_ms()).max(1))
 }
 
-/// True when `sql` is a read-only SELECT or SELECT CTE (not DML `RETURNING`).
-#[must_use]
-pub fn is_readonly_select(sql: &str) -> bool {
-    let compact = sql
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_uppercase();
-    let first = compact.split_whitespace().next().unwrap_or("");
-    match first {
-        "SELECT" => true,
-        "WITH" => {
-            let collapsed = compact.replace("( ", "(");
-            !(collapsed.contains("AS (INSERT")
-                || collapsed.contains("AS (UPDATE")
-                || collapsed.contains("AS (DELETE"))
-        }
-        _ => false,
-    }
-}
-
-/// Wraps a read-only SELECT so the engine stops after `cap + 1` rows.
-///
-/// DML `RETURNING` is left unchanged (`SELECT * FROM (INSERT … RETURNING …)`
-/// is invalid SQL). Callers bound those result sets by streaming or counting.
+/// Wraps a host-tagged [`bookclerk_plugin_abi::DbPlanStatementKind::Select`] so the engine stops
+/// after `cap + 1` rows. Callers must not pass DML `RETURNING` SQL.
 #[must_use]
 pub fn cap_query_sql(sql: &str, max_result_rows: u32) -> String {
-    if max_result_rows == 0 || !is_readonly_select(sql) {
+    if max_result_rows == 0 {
         return sql.to_string();
     }
     let n = u64::from(max_result_rows) + 1;
     let inner = sql.trim().trim_end_matches(';');
     format!("SELECT * FROM ({inner}) AS _bc_cap LIMIT {n}")
+}
+
+/// Collects at most `max_result_rows + 1` rows, then drops the rest.
+async fn collect_capped_query_rows(
+    txn: &sea_orm::DatabaseTransaction,
+    stmt: Statement,
+    max_result_rows: u32,
+) -> Result<Vec<JsonValue>, DbErr> {
+    if ConnectionTrait::get_database_backend(txn) == sea_orm::DatabaseBackend::Postgres {
+        return collect_streamed_rows(txn, stmt, max_result_rows).await;
+    }
+    let rows = txn.query_all_raw(stmt).await?;
+    json_rows_respecting_cap(
+        rows.into_iter().map(query_row_to_json).collect(),
+        max_result_rows,
+    )
+}
+
+/// Streams Postgres results and stops after `cap + 1` rows.
+async fn collect_streamed_rows<C: ConnectionTrait + StreamTrait>(
+    conn: &C,
+    stmt: Statement,
+    max_result_rows: u32,
+) -> Result<Vec<JsonValue>, DbErr> {
+    let stream = conn.stream_raw(stmt).await?;
+    futures::pin_mut!(stream);
+    let stop_after = if max_result_rows == 0 {
+        usize::MAX
+    } else {
+        usize::try_from(max_result_rows)
+            .unwrap_or(usize::MAX)
+            .saturating_add(1)
+    };
+    let mut json_rows = Vec::new();
+    while let Some(row) = stream.try_next().await? {
+        json_rows.push(query_row_to_json(row));
+        if json_rows.len() >= stop_after {
+            break;
+        }
+    }
+    json_rows_respecting_cap(json_rows, max_result_rows)
+}
+
+/// Maps a SeaORM query row onto the generic JSON result object.
+fn query_row_to_json(row: QueryResult) -> JsonValue {
+    let proxy = from_query_result_to_proxy_row(&row);
+    let mut map = serde_json::Map::new();
+    for (name, value) in proxy.values {
+        map.insert(name, sea_to_json(&value));
+    }
+    JsonValue::Object(map)
+}
+
+/// Fails closed when `rows` exceeds a positive cap (the extra row was fetched
+/// only to detect overflow).
+fn json_rows_respecting_cap(
+    json_rows: Vec<JsonValue>,
+    max_result_rows: u32,
+) -> Result<Vec<JsonValue>, DbErr> {
+    if exceeds_result_row_cap(json_rows.len(), max_result_rows) {
+        return Err(DbErr::Custom(format!(
+            "query returned {} rows; maxResultRows is {max_result_rows}",
+            json_rows.len()
+        )));
+    }
+    Ok(json_rows)
 }
 
 /// True when `n` exceeds a positive `max_result_rows` cap.
@@ -365,7 +386,8 @@ fn sea_to_json(v: &Value) -> JsonValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{cap_query_sql, is_readonly_select, json_to_sea};
+    use super::{cap_query_sql, json_to_sea};
+    use bookclerk_plugin_abi::DbPlanStatementKind;
     use sea_orm::Value;
     use serde_json::json;
 
@@ -401,18 +423,10 @@ mod tests {
     }
 
     #[test]
-    fn cap_query_sql_does_not_wrap_returning_dml() {
-        for sql in [
-            "INSERT INTO t (id) SELECT 1 UNION ALL SELECT 2 RETURNING id",
-            "UPDATE t SET id = id RETURNING id",
-            "DELETE FROM t RETURNING id",
-            "WITH gone AS (DELETE FROM t RETURNING id) SELECT * FROM gone",
-        ] {
-            assert_eq!(cap_query_sql(sql, 5), sql, "{sql}");
-            assert!(!is_readonly_select(sql), "{sql}");
-        }
-        assert!(is_readonly_select(
-            "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM t WHERE x < 3) SELECT x FROM t"
-        ));
+    fn only_select_kind_requests_limit_wrap() {
+        assert!(DbPlanStatementKind::Select.wrap_select_limit());
+        assert!(!DbPlanStatementKind::Returning.wrap_select_limit());
+        assert!(!DbPlanStatementKind::Query.wrap_select_limit());
+        assert!(!DbPlanStatementKind::Execute.wrap_select_limit());
     }
 }

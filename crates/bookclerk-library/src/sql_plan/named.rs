@@ -528,28 +528,6 @@ fn gate_write(sql_text: String, mut params: Vec<JsonValue>, operation_id: &str) 
     )
 }
 
-/// Restricts a later write to run only after this attempt's receipt claimed `ok`.
-fn gate_claimed_ok(sql_text: String, mut params: Vec<JsonValue>, operation_id: &str) -> SqlStmt {
-    let trimmed = sql_text.trim_start();
-    let is_write = trimmed.starts_with("INSERT")
-        || trimmed.starts_with("UPDATE")
-        || trimmed.starts_with("DELETE");
-    if !is_write {
-        return (sql_text, params);
-    }
-    params.push(j_str(operation_id));
-    (
-        format!(
-            "{sql_text} AND EXISTS (\
-                SELECT 1 FROM db_atomic_receipts \
-                 WHERE operation_id = ? AND status = '{ok}'\
-            )",
-            ok = atomic_status::OK,
-        ),
-        params,
-    )
-}
-
 /// SQL that builds the guest user JSON object (password present as a boolean).
 fn user_payload_json_sql() -> &'static str {
     "SELECT json_object(\
@@ -578,20 +556,14 @@ fn wrap_status_op(plan: AtomicPlan, ctx: &ReceiptCtx, payload: PayloadKind) -> A
     let mut statements = vec![prune_receipts(ctx), select_receipt(ctx)];
     let prior_receipt_index = Some(statements.len() - 1);
     for (i, (sql_text, params)) in plan.statements.into_iter().enumerate() {
-        if Some(i) == payload_index {
+        if Some(i) == payload_index || i == outcome_index {
             continue;
         }
-        if i == outcome_index {
-            // Claim status now so later mutations cannot change the receipt.
-            statements.push(receipt_insert_from_outcome(ctx, &outcome));
-            continue;
-        }
-        if i < outcome_index {
-            statements.push(gate_write(sql_text, params, &ctx.operation_id));
-        } else {
-            statements.push(gate_claimed_ok(sql_text, params, &ctx.operation_id));
-        }
+        // Absence of a prior receipt, not an existing `ok` row: a committed
+        // receipt must not authorize post-outcome writes on replay / D1 retry.
+        statements.push(gate_write(sql_text, params, &ctx.operation_id));
     }
+    statements.push(receipt_insert_from_outcome(ctx, &outcome));
     if let Some(update) = receipt_payload_update(ctx, payload, payload_stmt) {
         statements.push(update);
     }
@@ -2505,6 +2477,52 @@ mod tests {
         for sql in crate::migrations::migration_sql() {
             conn.execute_batch(sql).unwrap();
         }
+    }
+
+    #[test]
+    fn wrapped_password_writes_require_absent_receipt() {
+        let compiled = super::compile_named_request(
+            "pw-op",
+            &DbAtomicParams::SetUserPasswordHash {
+                user_id: 1,
+                password_hash: Some("h".into()),
+            },
+            "2024-06-01T00:00:00Z",
+            crate::sql_plan::SqlFamily::Sqlite,
+        )
+        .unwrap();
+        let update = compiled
+            .plan
+            .statements
+            .iter()
+            .find(|s| s.sql.contains("SET password_hash"))
+            .expect("password update");
+        assert!(
+            update.sql.contains("NOT EXISTS"),
+            "post-outcome write must skip when a receipt already exists: {}",
+            update.sql
+        );
+        assert!(
+            !update.sql.contains("status = 'ok'"),
+            "must not treat a prior ok receipt as this transaction's claim: {}",
+            update.sql
+        );
+        let insert_idx = compiled
+            .plan
+            .statements
+            .iter()
+            .position(|s| s.sql.contains("INSERT INTO db_atomic_receipts"))
+            .unwrap();
+        let update_idx = compiled
+            .plan
+            .statements
+            .iter()
+            .position(|s| s.sql.contains("SET password_hash"))
+            .unwrap();
+        assert!(
+            update_idx < insert_idx,
+            "receipt insert must follow domain writes"
+        );
     }
 
     fn json_to_rusqlite(v: &JsonValue) -> rusqlite::types::Value {

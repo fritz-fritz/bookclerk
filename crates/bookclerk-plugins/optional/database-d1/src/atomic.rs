@@ -46,7 +46,7 @@ impl D1Proxy {
             .statements
             .iter()
             .map(|s| {
-                let sql = if s.kind == bookclerk_plugin_sdk::DbPlanStatementKind::Query {
+                let sql = if s.kind.wrap_select_limit() {
                     bookclerk_db_exec::cap_query_sql(&s.sql, cap)
                 } else {
                     s.sql.clone()
@@ -54,9 +54,13 @@ impl D1Proxy {
                 (sql, d1_wire_binds(&s.binds))
             })
             .collect();
-        let timeout = d1_http_timeout(req.deadline_unix_ms);
         let mut last_err = None;
         for attempt in 0..ATOMIC_HTTP_ATTEMPTS {
+            check_d1_session(
+                bookclerk_db_exec::AtomicInterruptPhase::BeforeBegin,
+                req.deadline_unix_ms,
+            )?;
+            let timeout = d1_http_timeout(req.deadline_unix_ms)?;
             let raw = match self.run_batch_with_timeout(&statements, timeout).await {
                 Ok(value) => {
                     check_d1_session(
@@ -66,7 +70,8 @@ impl D1Proxy {
                     value
                 }
                 Err(err) if err.is_retryable() && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
-                    sleep_before_d1_retry(attempt, err.retry_after()).await;
+                    sleep_before_d1_retry_bounded(attempt, err.retry_after(), req.deadline_unix_ms)
+                        .await?;
                     last_err = Some(DbErr::from(err));
                     continue;
                 }
@@ -75,7 +80,7 @@ impl D1Proxy {
             match parse_generic_batch(&plan, &raw, req.operation_id.clone(), started) {
                 Ok(result) => return Ok(result),
                 Err(err) if is_ambiguous_d1(&err) && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
-                    sleep_before_d1_retry(attempt, None).await;
+                    sleep_before_d1_retry_bounded(attempt, None, req.deadline_unix_ms).await?;
                     last_err = Some(err);
                 }
                 Err(err) => return Err(err),
@@ -86,13 +91,18 @@ impl D1Proxy {
 }
 
 /// HTTP timeout for one D1 batch, capped by the guest-visible deadline.
-fn d1_http_timeout(deadline_unix_ms: Option<u64>) -> Duration {
+fn d1_http_timeout(deadline_unix_ms: Option<u64>) -> std::result::Result<Duration, DbErr> {
     match deadline_unix_ms {
         Some(dl) => {
-            let ms = dl.saturating_sub(d1_unix_now_ms()).max(1);
-            Duration::from_millis(ms).min(super::d1::D1_REQUEST_TIMEOUT)
+            let now = d1_unix_now_ms();
+            if now >= dl {
+                return Err(DbErr::Custom(
+                    "deadline_exceeded: atomic deadline elapsed".into(),
+                ));
+            }
+            Ok(Duration::from_millis(dl - now).min(super::d1::D1_REQUEST_TIMEOUT))
         }
-        None => super::d1::D1_REQUEST_TIMEOUT,
+        None => Ok(super::d1::D1_REQUEST_TIMEOUT),
     }
 }
 
@@ -143,11 +153,33 @@ fn d1_wire_binds(binds: &[JsonValue]) -> Vec<JsonValue> {
 }
 
 /// Waits before a D1 retry, honoring `Retry-After` or a capped exponential backoff.
-async fn sleep_before_d1_retry(attempt: usize, retry_after: Option<Duration>) {
+async fn sleep_before_d1_retry_bounded(
+    attempt: usize,
+    retry_after: Option<Duration>,
+    deadline_unix_ms: Option<u64>,
+) -> std::result::Result<(), DbErr> {
     let delay = retry_after.unwrap_or_else(|| {
         Duration::from_millis((50u64.saturating_mul(3u64.saturating_pow(attempt as u32))).min(400))
     });
-    tokio::time::sleep(delay.min(Duration::from_secs(5))).await;
+    let delay = delay.min(Duration::from_secs(5));
+    if let Some(dl) = deadline_unix_ms {
+        let now = d1_unix_now_ms();
+        if now >= dl {
+            return Err(DbErr::Custom(
+                "deadline_exceeded: atomic deadline elapsed".into(),
+            ));
+        }
+        let remain = Duration::from_millis(dl - now);
+        tokio::time::sleep(delay.min(remain)).await;
+        if d1_unix_now_ms() >= dl {
+            return Err(DbErr::Custom(
+                "deadline_exceeded: atomic deadline elapsed".into(),
+            ));
+        }
+        return Ok(());
+    }
+    tokio::time::sleep(delay).await;
+    Ok(())
 }
 
 /// True when a D1 HTTP/parse failure may have already committed the batch.

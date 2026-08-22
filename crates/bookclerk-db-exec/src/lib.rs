@@ -11,8 +11,7 @@ pub mod proxy_txn;
 
 pub use b64::{b64_string_to_bytes, bytes_to_b64_string};
 pub use exec::{
-    cap_query_sql, execute_statements_on, execute_statements_on_session, is_readonly_select,
-    AtomicSession,
+    cap_query_sql, execute_statements_on, execute_statements_on_session, AtomicSession,
 };
 pub use proxy_txn::{
     arm_exec_budget, clear_exec_budget, consume_atomic_interrupt, consume_begin_injection,

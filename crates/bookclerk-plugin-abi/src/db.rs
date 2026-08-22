@@ -363,14 +363,37 @@ fn dialect_matches_sql_family(dialect: &str, sql_family: &str) -> bool {
 }
 
 /// How a guest should run one statement inside an atomic plan.
+///
+/// `Select` versus `Returning` is explicit so adapters never reparse SQL to
+/// decide whether `SELECT * FROM (…)` wrapping is valid. Legacy [`Self::Query`]
+/// remains on the wire and is treated as a row-producing statement that must
+/// **not** be rewritten as a subquery (it may be DML `RETURNING`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum DbPlanStatementKind {
-    /// Statement returns rows (SELECT / RETURNING).
+    /// Legacy row-producing statement (`SELECT` or `RETURNING`). Not wrapped.
     #[default]
     Query,
     /// Statement is DML; only `rowsAffected` is required.
     Execute,
+    /// Read-only `SELECT` / read-only `WITH` CTE. May be wrapped with `LIMIT`.
+    Select,
+    /// DML that returns rows (`INSERT`/`UPDATE`/`DELETE … RETURNING`).
+    Returning,
+}
+
+impl DbPlanStatementKind {
+    /// True when the guest must collect `rows` (not only `rowsAffected`).
+    #[must_use]
+    pub const fn collects_rows(self) -> bool {
+        !matches!(self, Self::Execute)
+    }
+
+    /// True when the guest may wrap SQL as `SELECT * FROM (sql) LIMIT cap+1`.
+    #[must_use]
+    pub const fn wrap_select_limit(self) -> bool {
+        matches!(self, Self::Select)
+    }
 }
 
 /// One parameterized statement in a host-authored [`DbAtomicPlan`].

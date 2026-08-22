@@ -118,6 +118,11 @@ pub(crate) enum D1Error {
         /// Operator-facing error text from the upstream response.
         message: String,
     },
+    /// Guest-visible `deadlineUnixMs` elapsed (including HTTP mutex wait).
+    Deadline {
+        /// Operator-facing deadline text.
+        message: String,
+    },
 }
 
 impl D1Error {
@@ -126,6 +131,13 @@ impl D1Error {
         Self::Ambiguous {
             message: message.into(),
             retry_after: None,
+        }
+    }
+
+    /// Guest-visible deadline elapsed.
+    fn deadline(message: impl Into<String>) -> Self {
+        Self::Deadline {
+            message: message.into(),
         }
     }
 
@@ -138,7 +150,7 @@ impl D1Error {
     pub(crate) fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::Ambiguous { retry_after, .. } => *retry_after,
-            Self::Permanent { .. } => None,
+            Self::Permanent { .. } | Self::Deadline { .. } => None,
         }
     }
 }
@@ -158,6 +170,7 @@ impl From<D1Error> for DbErr {
             D1Error::Permanent { status, message } => {
                 DbErr::Custom(format!("D1 HTTP {status}: {message}"))
             }
+            D1Error::Deadline { message } => DbErr::Custom(message),
         }
     }
 }
@@ -223,25 +236,54 @@ impl D1Proxy {
     }
 
     /// POSTs a JSON body with an explicit HTTP timeout.
+    ///
+    /// The timeout covers HTTP mutex acquire plus send so a queued caller
+    /// cannot outlive `deadlineUnixMs` while waiting for the slot.
     async fn post_json_timed(
         &self,
         url: &str,
         body: JsonValue,
         timeout: Duration,
     ) -> std::result::Result<JsonValue, D1Error> {
-        let _http = self.inner.http.lock().await;
         let timeout = timeout.min(D1_REQUEST_TIMEOUT);
-        let response = self
-            .inner
-            .client
-            .post(url)
-            .bearer_auth(&self.inner.api_token)
-            .timeout(timeout)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| D1Error::ambiguous(format!("transport: {e}")))?;
-        parse_d1_response(response).await
+        if timeout.is_zero() {
+            return Err(D1Error::deadline(
+                "deadline_exceeded: atomic deadline elapsed",
+            ));
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        let send = async {
+            let _http = self.inner.http.lock().await;
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(D1Error::deadline(
+                    "deadline_exceeded: atomic deadline elapsed waiting for D1 HTTP slot",
+                ));
+            }
+            let response = self
+                .inner
+                .client
+                .post(url)
+                .bearer_auth(&self.inner.api_token)
+                .timeout(remaining)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| D1Error::ambiguous(format!("transport: {e}")))?;
+            parse_d1_response(response).await
+        };
+        match tokio::time::timeout(timeout, send).await {
+            Ok(result) => result,
+            Err(_) => Err(D1Error::deadline(
+                "deadline_exceeded: atomic deadline elapsed waiting for D1 HTTP slot",
+            )),
+        }
+    }
+
+    /// Holds the serialized D1 HTTP slot (tests only).
+    #[cfg(test)]
+    pub(crate) async fn lock_http_for_test(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.inner.http.lock().await
     }
 
     /// Runs one or more SQL statements as one documented D1 `{ "batch": [...] }`
@@ -1840,12 +1882,49 @@ mod tests {
         .expect("host D1 schema");
         bookclerk_library::sql_plan::vectors::run_request_vectors(
             bookclerk_library::SqlFamily::Sqlite,
+            bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows,
             |req| {
                 let proxy = proxy.clone();
                 async move { proxy.run_atomic(req).await }
             },
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn executing_mock_deadline_includes_http_mutex_wait() {
+        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
+        let _hold = proxy.lock_http_for_test().await;
+        let deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0)
+            .saturating_add(80);
+        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+            operation_id: "op-dl".into(),
+            request_hash: None,
+            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+                    sql: "SELECT 1 AS n".into(),
+                    binds: vec![],
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Select,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: Some(deadline),
+        };
+        let err = tokio::time::timeout(std::time::Duration::from_secs(3), proxy.run_atomic(req))
+            .await
+            .expect("run_atomic must return when the deadline elapses")
+            .expect_err("held HTTP slot must expire the deadline");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("deadline"),
+            "mutex wait must count toward deadlineUnixMs: {err}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

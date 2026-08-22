@@ -125,7 +125,7 @@ fn wire_plan(
         statements: statements
             .into_iter()
             .map(|(sql, binds)| {
-                let kind = statement_kind(&sql);
+                let kind = host_statement_kind(&sql);
                 DbPlanStatement { sql, binds, kind }
             })
             .collect(),
@@ -136,13 +136,21 @@ fn wire_plan(
     }
 }
 
-/// Treats `SELECT` and DML with `RETURNING` as row-producing statements.
-fn statement_kind(sql: &str) -> DbPlanStatementKind {
-    let upper = sql.trim_start().to_ascii_uppercase();
-    if upper.starts_with("SELECT") || upper.contains(" RETURNING ") {
-        DbPlanStatementKind::Query
-    } else {
-        DbPlanStatementKind::Execute
+/// Host-authored statement shape for the wire `kind` field.
+///
+/// Adapters must not reparse SQL; they trust this classification.
+pub(crate) fn host_statement_kind(sql: &str) -> DbPlanStatementKind {
+    let compact = sql
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+    if compact.contains(" RETURNING ") || compact.ends_with(" RETURNING") {
+        return DbPlanStatementKind::Returning;
+    }
+    match compact.split_whitespace().next().unwrap_or("") {
+        "SELECT" | "WITH" | "VALUES" => DbPlanStatementKind::Select,
+        _ => DbPlanStatementKind::Execute,
     }
 }
 
@@ -257,5 +265,25 @@ mod limits_tests {
         };
         let err = validate_plan(&plan, &DbConnectResult::sqlite()).unwrap_err();
         assert!(err.to_string().contains("outcomeIndex"), "{err}");
+    }
+
+    #[test]
+    fn host_kind_marks_cte_insert_returning_not_select() {
+        let sql = "WITH seed AS (SELECT 1) INSERT INTO t SELECT * FROM seed RETURNING id";
+        assert_eq!(
+            super::host_statement_kind(sql),
+            DbPlanStatementKind::Returning
+        );
+        assert!(!DbPlanStatementKind::Returning.wrap_select_limit());
+        assert_eq!(
+            super::host_statement_kind("SELECT x FROM t"),
+            DbPlanStatementKind::Select
+        );
+        assert_eq!(
+            super::host_statement_kind(
+                "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM t WHERE x < 3) SELECT x FROM t"
+            ),
+            DbPlanStatementKind::Select
+        );
     }
 }

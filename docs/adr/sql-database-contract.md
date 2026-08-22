@@ -67,9 +67,10 @@ with a **plan body** (no Cap'n `DatabaseSession` method; guests already
 special-case that SQL sentinel):
 
 - caller `operationId` and canonical `requestHash`
-- ordered parameterized statements (`query` \| `execute`) with typed JSON
-  binds (`b64:` blobs; `{"$sea_null": "Bytes"|"BigInt"|…}` for typed SQL
-  nulls so Postgres BYTEA/INTEGER columns do not see TEXT nulls)
+- ordered parameterized statements (`select` \| `returning` \| `execute`;
+  legacy `query` is accepted as an unwrapped row-producing statement) with
+  typed JSON binds (`b64:` blobs; `{"$sea_null": "Bytes"|"BigInt"|…}` for
+  typed SQL nulls so Postgres BYTEA/INTEGER columns do not see TEXT nulls)
 - outcome selector (status column and/or affected-row predicate)
 - optional payload selector
 - uniform timing metadata on the result

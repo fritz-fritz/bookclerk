@@ -1197,7 +1197,9 @@
           "type": "string",
           "enum": [
             "query",
-            "execute"
+            "execute",
+            "select",
+            "returning"
           ]
         }
       }

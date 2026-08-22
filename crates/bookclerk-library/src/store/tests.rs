@@ -3249,6 +3249,45 @@ async fn dispatch_snapshot_cas_two_stores_agree() {
 }
 
 #[tokio::test]
+async fn malformed_dispatch_snapshot_fails_closed() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:bad-snapshot",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    store
+        .db()
+        .execute_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "UPDATE domain_events SET dispatch_snapshot_json = ? WHERE id = ?",
+            [
+                sea_orm::Value::String(Some("{not-json".into())),
+                id.clone().into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    let db = store.db().clone();
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
+    let err = store
+        .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "bad-snap")
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("dispatch_snapshot_json"),
+        "malformed snapshot must fail closed: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn dispatch_twenty_five_subscribers_on_sqlite_caps_are_all_inserted() {
     let store = test_store()
         .await
