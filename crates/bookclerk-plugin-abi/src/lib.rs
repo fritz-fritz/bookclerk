@@ -84,8 +84,9 @@ pub use db::{
     DbBeginResult, DbConnectParams, DbConnectResult, DbPlanExecResult, DbPlanStatement,
     DbPlanStatementKind, DbPlanStmtExecResult, DbTxnParams, ExecResultDto, ProxyRowDto,
     QueryResultDto, StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
-    FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_ROWS,
-    HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS, SEA_NULL_KEY, SQLITE_MAX_BINDS,
+    FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
+    HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS,
+    POSTGRES_MAX_BINDS, SEA_NULL_KEY, SQLITE_MAX_BINDS,
 };
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use events::{HostToPluginEvent, PluginToHostEvent};
@@ -234,6 +235,20 @@ mod tests {
         assert!(zero_payload
             .capability_failure_reason()
             .contains("maxPayloadBytes"));
+
+        let mut zero_result = DbConnectResult::sqlite();
+        zero_result.max_result_bytes = 0;
+        assert!(!zero_result.meets_host_minimums());
+        assert!(zero_result
+            .capability_failure_reason()
+            .contains("maxResultBytes"));
+
+        let mut zero_cell = DbConnectResult::sqlite();
+        zero_cell.max_cell_bytes = 0;
+        assert!(!zero_cell.meets_host_minimums());
+        assert!(zero_cell
+            .capability_failure_reason()
+            .contains("maxCellBytes"));
 
         let mut mismatch = DbConnectResult::sqlite();
         mismatch.dialect = "postgres".into();

@@ -185,6 +185,15 @@ pub const HOST_MIN_RESULT_ROWS: u32 = 1;
 /// Host refuses guests that do not bound encoded statement payload bytes.
 pub const HOST_MIN_PAYLOAD_BYTES: u32 = 1024;
 
+/// Host refuses guests that do not bound JSON bytes of one statement's rows.
+pub const HOST_MIN_RESULT_BYTES: u32 = 4_096;
+
+/// Host refuses guests that do not bound one result cell (`0` is unspecified).
+pub const HOST_MIN_CELL_BYTES: u32 = 1_024;
+
+/// First-party JSON-byte budget for one statement's result rows.
+pub const FIRST_PARTY_MAX_RESULT_BYTES: u32 = 1_048_576;
+
 /// Result of a successful [`crate::methods::db_connect`].
 ///
 /// Tells the host which SeaORM dialect to use when composing subsequent
@@ -231,6 +240,14 @@ pub struct DbConnectResult {
     /// (`0` is unspecified and fails closed).
     #[serde(default)]
     pub max_payload_bytes: u32,
+    /// Maximum JSON bytes of one statement's result rows
+    /// (`0` is unspecified and fails closed).
+    #[serde(default)]
+    pub max_result_bytes: u32,
+    /// Maximum UTF-8 / blob bytes of one result cell
+    /// (`0` is unspecified and fails closed).
+    #[serde(default)]
+    pub max_cell_bytes: u32,
     /// Guest can fill [`DbAtomicTiming::db_execution_us`].
     #[serde(default = "default_true")]
     pub timing: bool,
@@ -250,6 +267,8 @@ impl DbConnectResult {
             max_statements: FIRST_PARTY_MAX_STATEMENTS,
             max_result_rows: 1_000,
             max_payload_bytes: 1_048_576,
+            max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            max_cell_bytes: crate::v2::MAX_SCALAR_BYTES,
             timing: true,
         }
     }
@@ -267,6 +286,8 @@ impl DbConnectResult {
             max_statements: FIRST_PARTY_MAX_STATEMENTS,
             max_result_rows: 1_000,
             max_payload_bytes: 1_048_576,
+            max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            max_cell_bytes: crate::v2::MAX_SCALAR_BYTES,
             timing: true,
         }
     }
@@ -284,6 +305,8 @@ impl DbConnectResult {
             max_statements: FIRST_PARTY_MAX_STATEMENTS,
             max_result_rows: 1_000,
             max_payload_bytes: 1_048_576,
+            max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            max_cell_bytes: crate::v2::MAX_SCALAR_BYTES,
             timing: true,
         }
     }
@@ -345,6 +368,18 @@ impl DbConnectResult {
             return Some(format!(
                 "database guest maxPayloadBytes {} is below host minimum {HOST_MIN_PAYLOAD_BYTES}",
                 self.max_payload_bytes
+            ));
+        }
+        if self.max_result_bytes < HOST_MIN_RESULT_BYTES {
+            return Some(format!(
+                "database guest maxResultBytes {} is below host minimum {HOST_MIN_RESULT_BYTES}",
+                self.max_result_bytes
+            ));
+        }
+        if self.max_cell_bytes < HOST_MIN_CELL_BYTES {
+            return Some(format!(
+                "database guest maxCellBytes {} is below host minimum {HOST_MIN_CELL_BYTES}",
+                self.max_cell_bytes
             ));
         }
         None

@@ -1176,6 +1176,14 @@
           "type": "integer",
           "description": "Maximum UTF-8 bytes of SQL plus JSON binds per statement. 0 fails closed."
         },
+        "maxResultBytes": {
+          "type": "integer",
+          "description": "Maximum JSON bytes of one statement's result rows. 0 is unspecified and fails closed."
+        },
+        "maxCellBytes": {
+          "type": "integer",
+          "description": "Maximum UTF-8 or blob bytes of one result cell. 0 is unspecified and fails closed."
+        },
         "timing": {
           "type": "boolean"
         }
