@@ -80,9 +80,13 @@ pub mod plugin_v2_capnp {
 mod wire_fixtures;
 
 pub use db::{
-    atomic_status, DbAtomicParams, DbAtomicRequest, DbAtomicResult, DbAtomicTiming, DbBeginParams,
-    DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, ExecResultDto, ProxyRowDto,
-    QueryResultDto, StatementDto,
+    sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbBeginParams,
+    DbBeginResult, DbConnectParams, DbConnectResult, DbPlanExecResult, DbPlanStatement,
+    DbPlanStatementKind, DbPlanStmtExecResult, DbTxnParams, ExecResultDto, ProxyRowDto,
+    QueryResultDto, StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
+    HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS,
+    POSTGRES_MAX_BINDS, SEA_NULL_KEY, SQLITE_MAX_BINDS,
 };
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use events::{HostToPluginEvent, PluginToHostEvent};
@@ -114,6 +118,14 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(ABI_SCHEMA_JSON).expect("abi.json must be valid JSON");
         assert_eq!(v["title"], "BookclerkPluginAbi");
+    }
+
+    #[test]
+    fn sea_null_wire_shape() {
+        let v = sea_null("Bytes");
+        assert_eq!(v, serde_json::json!({ "$sea_null": "Bytes" }));
+        assert_eq!(sea_null_kind(&v), Some("Bytes"));
+        assert_eq!(sea_null_kind(&serde_json::json!(null)), None);
     }
 
     #[test]
@@ -151,68 +163,127 @@ mod tests {
     }
 
     #[test]
-    fn db_atomic_params_use_camel_case_op_tag() {
-        let params = DbAtomicParams::DeleteUser { user_id: 7 };
-        let v = serde_json::to_value(&params).unwrap();
-        assert_eq!(v["op"], "deleteUser");
-        assert_eq!(v["userId"], 7);
-        let back: DbAtomicParams = serde_json::from_value(v).unwrap();
-        assert_eq!(back, params);
+    fn db_atomic_plan_wire_omits_named_operations() {
+        let plan_req = DbAtomicRequest::with_plan(
+            "op-plan",
+            "abc",
+            DbAtomicPlan {
+                statements: vec![DbPlanStatement {
+                    sql: "SELECT 1".into(),
+                    binds: vec![],
+                    kind: DbPlanStatementKind::Query,
+                    max_rows: 0,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            },
+        );
+        let pv = serde_json::to_value(&plan_req).unwrap();
+        assert_eq!(pv["operationId"], "op-plan");
+        assert_eq!(pv["requestHash"], "abc");
+        assert_eq!(pv["plan"]["statements"][0]["sql"], "SELECT 1");
+        assert_eq!(pv["plan"]["statements"][0]["kind"], "query");
+        assert!(
+            pv.get("operation").is_none(),
+            "named operations stay off the guest wire"
+        );
 
-        let take = DbAtomicParams::TakeOidcRpState {
-            state_hash: "abc".into(),
+        let exec = DbPlanExecResult {
+            operation_id: "op-plan".into(),
+            statements: vec![DbPlanStmtExecResult {
+                rows: vec![serde_json::json!({"status": "ok"})],
+                rows_affected: 0,
+            }],
+            timing: None,
         };
-        let tv = serde_json::to_value(&take).unwrap();
-        assert_eq!(tv["op"], "takeOidcRpState");
-        assert_eq!(tv["stateHash"], "abc");
-        let take_back: DbAtomicParams = serde_json::from_value(tv).unwrap();
-        assert_eq!(take_back, take);
-
-        let req = DbAtomicRequest {
-            operation_id: "op-1".into(),
-            operation: take.clone(),
-        };
-        let rv = serde_json::to_value(&req).unwrap();
-        assert_eq!(rv["operationId"], "op-1");
-        assert_eq!(rv["operation"]["op"], "takeOidcRpState");
-
-        let chal = DbAtomicParams::TakeWebauthnChallenge {
-            challenge_id: "c1".into(),
-            kind: "login".into(),
-        };
-        let cv = serde_json::to_value(&chal).unwrap();
-        assert_eq!(cv["op"], "takeWebauthnChallenge");
-        assert_eq!(cv["challengeId"], "c1");
-        assert_eq!(cv["kind"], "login");
-
-        let confirm = DbAtomicParams::ConfirmTotpEnrollment {
-            user_id: 9,
-            format: "sealed-v1".into(),
-            ciphertext: "b64:AA==".into(),
-            cipher_algorithm: Some("xchacha20poly1305".into()),
-            cipher_nonce: Some("b64:AA==".into()),
-            kdf_algorithm: None,
-            kdf_salt: None,
-            kdf_m_cost: None,
-            kdf_t_cost: None,
-            kdf_p_cost: None,
-            created_at: "2024-06-01T00:00:00Z".into(),
-        };
-        let conf_v = serde_json::to_value(&confirm).unwrap();
-        assert_eq!(conf_v["op"], "confirmTotpEnrollment");
-        assert_eq!(conf_v["userId"], 9);
-        assert_eq!(conf_v["ciphertext"], "b64:AA==");
-        let confirm_back: DbAtomicParams = serde_json::from_value(conf_v).unwrap();
-        assert_eq!(confirm_back, confirm);
-
-        let disable = DbAtomicParams::DisableUserTotp { user_id: 9 };
-        let dis_v = serde_json::to_value(&disable).unwrap();
-        assert_eq!(dis_v["op"], "disableUserTotp");
-        assert_eq!(dis_v["userId"], 9);
+        let ev = serde_json::to_value(&exec).unwrap();
+        assert_eq!(ev["operationId"], "op-plan");
+        assert_eq!(ev["statements"][0]["rowsAffected"], 0);
+        assert!(ev.get("status").is_none());
 
         let d1 = DbConnectResult::d1();
         let rv = serde_json::to_value(&d1).unwrap();
         assert_eq!(rv["dialect"], "sqlite");
         assert_eq!(rv["interactiveTxn"], false);
+        assert_eq!(rv["sqlFamily"], "sqlite");
+        assert_eq!(rv["maxBinds"], D1_MAX_BINDS);
+        assert!(d1.meets_host_minimums());
+        assert!(DbConnectResult::sqlite().meets_host_minimums());
+        assert!(DbConnectResult::postgres().meets_host_minimums());
+    }
+
+    #[test]
+    fn connect_caps_fail_closed_without_returning_bounds_or_matching_dialect() {
+        let mut no_returning = DbConnectResult::sqlite();
+        no_returning.returning = false;
+        assert!(!no_returning.meets_host_minimums());
+        assert!(no_returning
+            .capability_failure_reason()
+            .contains("returning"));
+
+        let mut zero_rows = DbConnectResult::sqlite();
+        zero_rows.max_result_rows = 0;
+        assert!(!zero_rows.meets_host_minimums());
+        assert!(zero_rows
+            .capability_failure_reason()
+            .contains("maxResultRows"));
+
+        let mut zero_payload = DbConnectResult::sqlite();
+        zero_payload.max_payload_bytes = 0;
+        assert!(!zero_payload.meets_host_minimums());
+        assert!(zero_payload
+            .capability_failure_reason()
+            .contains("maxPayloadBytes"));
+
+        let mut zero_result = DbConnectResult::sqlite();
+        zero_result.max_result_bytes = 0;
+        assert!(!zero_result.meets_host_minimums());
+        assert!(zero_result
+            .capability_failure_reason()
+            .contains("maxResultBytes"));
+
+        let mut zero_cell = DbConnectResult::sqlite();
+        zero_cell.max_cell_bytes = 0;
+        assert!(!zero_cell.meets_host_minimums());
+        assert!(zero_cell
+            .capability_failure_reason()
+            .contains("maxCellBytes"));
+
+        let mut zero_atomic = DbConnectResult::sqlite();
+        zero_atomic.max_atomic_request_bytes = 0;
+        assert!(!zero_atomic.meets_host_minimums());
+        assert!(zero_atomic
+            .capability_failure_reason()
+            .contains("maxAtomicRequestBytes"));
+
+        let mut over_scalar = DbConnectResult::sqlite();
+        over_scalar.max_atomic_result_bytes = crate::v2::MAX_SCALAR_BYTES + 1;
+        assert!(!over_scalar.meets_host_minimums());
+        assert!(over_scalar
+            .capability_failure_reason()
+            .contains("maxAtomicResultBytes"));
+
+        let mut mismatch = DbConnectResult::sqlite();
+        mismatch.dialect = "postgres".into();
+        assert!(!mismatch.meets_host_minimums());
+        assert!(mismatch
+            .capability_failure_reason()
+            .contains("does not match"));
+    }
+
+    #[test]
+    fn stmt_exec_result_requires_rows_and_rows_affected() {
+        let err = serde_json::from_str::<DbPlanStmtExecResult>(r#"{"rows":[]}"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("rowsAffected") || msg.contains("missing field"),
+            "{msg}"
+        );
+        let ok: DbPlanStmtExecResult =
+            serde_json::from_str(r#"{"rows":[],"rowsAffected":0}"#).unwrap();
+        assert!(ok.rows.is_empty());
+        assert_eq!(ok.rows_affected, 0);
     }
 }

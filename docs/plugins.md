@@ -1061,17 +1061,15 @@ acquire-status change (book uuid, storage key, product ids — never media bytes
 and sets envelope `source` to the book’s storefront plugin id.
 The producer `ordering_key` is stored on the envelope and copied verbatim onto
 each delivery. Each VPS claims only plugin ids loaded on that process **and**
-only events its node-local catalog matches (type, schema version, filter). SeaORM
-prefilters by this node’s catalog. D1/`dbAtomic` still selects by `plugin_id`
-only; the host releases an incompatible row (without consuming `attempt_count`)
-and continues with a node-local claim so a later compatible delivery is not
-starved. #178 will push eligibility into the generic atomic plan. Wake pages
-are 64 rows so `IN (…)` and the fenced sleeper UPDATE stay under D1’s 100
-bound-parameter limit; the UPDATE includes `EXISTS (wake_pending ∧ lease owner)`. `[events.concurrency]`
+only events its node-local catalog matches (type, schema version, filter). The
+host evaluates catalog JSON filters, then compare-and-sets a concrete delivery
+id inside a generic atomic plan. Wake page size follows negotiated `maxBinds`
+(D1 is 100) so `IN (…)` and the fenced sleeper UPDATE stay under the bind cap;
+the UPDATE includes `EXISTS (wake_pending ∧ lease owner)`. `[events.concurrency]`
 (default 1) is the number of local delivery workers **and** the cluster-wide
 max `running` deliveries per `(plugin_id, resource_class)` (`network` today),
-enforced at claim time (PostgreSQL takes a per-plugin advisory lock so two
-VPSes cannot over-admit under `READ COMMITTED`). FIFO per ordering key stays; unrelated keys are only
+enforced at claim time with a portable `db_serialization_slots` row so two
+VPSes cannot over-admit under `READ COMMITTED`. FIFO per ordering key stays; unrelated keys are only
 blocked by that cap. The delivery worker
 heartbeats the lease during `onEvent` (`lease/3`); fence loss or operator
 `cancel_requested` cancels the in-flight RPC (including workerd/native).
@@ -1110,21 +1108,30 @@ in-process S3 backend.
 
 ### Database plugins
 
-`kind = "database"` guests implement the SeaORM proxy boundary over Workers RPC.
-Engine connect/migrate/proxy code lives in the guest
+`kind = "database"` guests are **thin SQL adapters**. They implement the SeaORM
+proxy boundary over Workers RPC plus a generic atomic-plan executor. Engine
+connect/migrate/proxy code lives in the guest
 (`bookclerk-plugin-database-sqlite` (and optional d1/postgres guests) modules); the host does not link SQL engines.
-The host opens the library through the external database loader (guest required —
-no in-process fallback). SQLite opens `library.db` at the jail-granted path
+The host owns schema, domain SQL, and Bookclerk invariants
+([ADR: SQL database contract](adr/sql-database-contract.md)). Guests must not
+import Bookclerk entities or embed application table names. The host opens the
+library through the external database loader (guest required — no in-process
+fallback). SQLite opens `library.db` at the jail-granted path
 (`BOOKCLERK_SQLITE_PATH` / `sqlitePath`) at `dbConnect`.
+
+A backend that cannot advertise `atomicBatch`, parameterized statements, and
+bind/statement limits at or above the host minimum is **not loaded** (fail
+closed). Non-SQL engines are unsupported.
 
 | Method | Notes |
 | --- | --- |
 | `dbConnect` | Open backend via tagged connect params (`backend`: `sqlite` / `d1` / `postgres`); returns dialect (SQLite: path grant; D1/Postgres: host-injected credentials) |
+| `bookclerk.capabilities` | Sentinel `dbQuery` after open. Returns `sqlFamily`, `interactiveTxn`, `atomicBatch`, `returning`, `maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`, `maxResultBytes`, `maxCellBytes`, `maxAtomicRequestBytes`, `maxAtomicResultBytes`, `timing`. The host must not invent these from the plugin id. |
 | `dbPing` | Verify connectivity |
 | `dbQuery` / `dbExecute` | Forward SeaORM statement payloads (optional `txnId` from `dbBegin`) |
-| `dbBegin` | Start a native engine transaction (or nested savepoint via `parentTxnId`); returns `txnId`. The host records a sticky per-task fault when this RPC fails so later statements cannot fall back to autocommit. D1 rejects interactive transactions and sets `interactiveTxn: false` on `dbConnect`. |
+| `dbBegin` | Start a native engine transaction (or nested savepoint via `parentTxnId`); returns `txnId`. The host records a sticky per-task fault when this RPC fails so later statements cannot fall back to autocommit. D1 rejects interactive transactions and sets `interactiveTxn: false`. |
 | `dbCommit` / `dbRollback` | Finish that transaction. A failed `dbCommit` is surfaced to `LibraryStore` (SeaORM's proxy hook is infallible); the guest is rolled back. |
-| `dbAtomic` | Named library operation (claim redeem, last-owner guards, password hash, TOTP enroll/disable, consume-once OIDC/WebAuthn) as one SQL transaction, with an `operationId` receipt for lost-response replay. D1 uses `{ "batch": [...] }` on the REST Query API. SQLite and Postgres run the same command in a native local transaction. |
+| `dbAtomic` | Generic host-authored SQL plan (`operationId`, `requestHash`, ordered statements, outcome/payload selectors) as one SQL transaction. D1 uses `{ "batch": [...] }` on the REST Query API. SQLite and Postgres run the same plan in a native local transaction. Guests do not interpret Bookclerk operation names. |
 
 Built-in ids: `sqlite`, `d1`, `postgres` (match `[database].plugin`).
 

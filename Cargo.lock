@@ -1414,9 +1414,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookclerk-db-exec"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "bookclerk-plugin-abi",
+ "futures",
+ "sea-orm",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "bookclerk-db-guest"
 version = "0.1.0"
 dependencies = [
+ "bookclerk-db-exec",
  "bookclerk-library",
  "bookclerk-plugin-database-sqlite",
  "bookclerk-plugin-sdk",
@@ -1531,6 +1544,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "bookclerk-config",
+ "bookclerk-db-exec",
  "bookclerk-plugin-abi",
  "bookclerk-plugin-database-sqlite",
  "chacha20poly1305 0.11.0",
@@ -1673,6 +1687,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
+ "bookclerk-db-exec",
  "bookclerk-db-guest",
  "bookclerk-library",
  "bookclerk-plugin-sdk",
@@ -1695,7 +1710,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bookclerk-db-guest",
- "bookclerk-library",
  "bookclerk-plugin-sdk",
  "sea-orm",
  "serde",
@@ -1710,6 +1724,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bookclerk-db-exec",
  "bookclerk-db-guest",
  "bookclerk-library",
  "bookclerk-plugin-sdk",

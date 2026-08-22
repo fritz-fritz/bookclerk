@@ -12,7 +12,7 @@ use std::sync::{Arc, LazyLock, OnceLock};
 
 use bookclerk_plugin_sdk::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use bookclerk_plugin_sdk::{
-    proxy_rows_to_dto, statement_from_dto, DbAtomicRequest, DbAtomicResult, ExecResultDto,
+    proxy_rows_to_dto, statement_from_dto, DbAtomicRequest, DbPlanExecResult, ExecResultDto,
     ProxyRowDto, QueryResultDto, StatementDto,
 };
 use futures::TryStreamExt;
@@ -146,7 +146,7 @@ pub async fn guest_ping() -> Result<()> {
 /// Returns an error string when not connected, the parent is unknown, or the
 /// engine rejects `BEGIN`.
 pub async fn guest_begin(parent_txn_id: Option<String>) -> Result<String> {
-    if bookclerk_library::consume_begin_injection() {
+    if bookclerk_db_exec::consume_begin_injection() {
         return Err("database begin failed: injected begin failure".into());
     }
     if let Some(parent_txn_id) = parent_txn_id {
@@ -212,22 +212,51 @@ pub async fn guest_rollback(txn_id: String) -> Result<()> {
     finish_txn(txn_id, false).await
 }
 
-/// Runs a named library operation as one native SQL transaction with a receipt.
+/// Runs a host-authored generic SQL plan as one native transaction.
+///
+/// Guests must not compile Bookclerk operation names. The host sends
+/// [`DbAtomicRequest::plan`]; missing plans fail closed. Results are generic
+/// statement rows; the host interprets receipts and application status.
 ///
 /// # Arguments
 ///
-/// * `req` - Idempotency envelope (`operationId` + named command).
+/// * `req` - Idempotency envelope (`operationId` + generic plan).
 ///
 /// # Errors
 ///
-/// Returns an error string when not connected or the engine rejects the work.
-pub async fn guest_atomic(req: DbAtomicRequest) -> Result<DbAtomicResult> {
+/// Returns an error string when not connected, the plan is missing, or the
+/// engine rejects the work.
+pub async fn guest_atomic(
+    req: DbAtomicRequest,
+) -> std::result::Result<DbPlanExecResult, bookclerk_plugin_sdk::PluginError> {
     let gate = txn_gate();
     let _gate = gate.lock().await;
-    let conn = connection().await?;
-    bookclerk_library::execute_db_atomic(&conn, req)
+    let conn = connection()
         .await
-        .map_err(|e| e.to_string())
+        .map_err(bookclerk_plugin_sdk::PluginError::internal)?;
+    let plan = req.plan.ok_or_else(|| {
+        bookclerk_plugin_sdk::PluginError::invalid_params(
+            "dbAtomic requires a host-authored executePlan",
+        )
+    })?;
+    let caps = match conn.get_database_backend() {
+        DbBackend::Postgres => bookclerk_plugin_sdk::DbConnectResult::postgres(),
+        _ => bookclerk_plugin_sdk::DbConnectResult::sqlite(),
+    };
+    let timing_source = match conn.get_database_backend() {
+        DbBackend::Postgres => "postgres_txn",
+        _ => "sqlite_txn",
+    };
+    bookclerk_db_exec::execute_statements_on_session(
+        &conn,
+        &plan,
+        &req.operation_id,
+        timing_source,
+        bookclerk_db_exec::ExecCaps::from_connect(&caps),
+        bookclerk_db_exec::AtomicSession::from_deadline(req.deadline_unix_ms),
+    )
+    .await
+    .map_err(|e| crate::plugin_error_from_db_err(&e))
 }
 
 /// Runs a read-only SQL query through the guest database bridge.
@@ -347,7 +376,7 @@ pub async fn guest_execute(dto: StatementDto) -> Result<ExecResultDto> {
 /// Sends commit or rollback to the worker and drops the route on success.
 async fn finish_txn(txn_id: String, commit: bool) -> Result<()> {
     let tx = route(&txn_id).await?;
-    if commit && bookclerk_library::consume_commit_injection() {
+    if commit && bookclerk_db_exec::consume_commit_injection() {
         let (reply, rx) = oneshot::channel();
         tx.send(TxnOp::Rollback {
             txn_id: txn_id.clone(),
@@ -415,9 +444,9 @@ async fn txn_worker(
             return;
         }
     };
-    if bookclerk_library::is_txn_broken() {
+    if bookclerk_db_exec::is_txn_broken() {
         let fault =
-            bookclerk_library::take_txn_fault().unwrap_or_else(|| "database begin failed".into());
+            bookclerk_db_exec::take_txn_fault().unwrap_or_else(|| "database begin failed".into());
         let _ = txn.rollback().await;
         let _ = ready.send(Err(fault));
         return;
@@ -519,9 +548,9 @@ async fn begin_nested(
             return Err(err.to_string());
         }
     };
-    if bookclerk_library::is_txn_broken() {
+    if bookclerk_db_exec::is_txn_broken() {
         let fault =
-            bookclerk_library::take_txn_fault().unwrap_or_else(|| "database begin failed".into());
+            bookclerk_db_exec::take_txn_fault().unwrap_or_else(|| "database begin failed".into());
         let _ = nested.rollback().await;
         stack.push((pid, parent));
         return Err(fault);
@@ -547,8 +576,10 @@ async fn pop_finish(
     }
     let (_, txn) = stack.pop().expect("checked last");
     if commit {
-        txn.commit().await.map_err(|e| e.to_string())?;
-        if let Some(fault) = bookclerk_library::take_txn_fault() {
+        txn.commit()
+            .await
+            .map_err(|e| format!("database commit failed: {e}"))?;
+        if let Some(fault) = bookclerk_db_exec::take_txn_fault() {
             return Err(fault);
         }
         Ok(())
@@ -1343,6 +1374,161 @@ mod tests {
         let rows: Vec<serde_json::Value> = serde_json::from_str(&page.rows_json).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["values"]["x"], "DELETE");
+    }
+
+    #[tokio::test]
+    async fn guest_atomic_unique_is_conflict_and_commit_is_unavailable() {
+        use bookclerk_plugin_sdk::{
+            DbAtomicPlan, DbAtomicRequest, DbPlanStatement, DbPlanStatementKind, PluginErrorCode,
+        };
+        let _lock = SESSION_LOCK.lock().await;
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        let dup = DbAtomicRequest {
+            operation_id: "dup-op".into(),
+            request_hash: None,
+            plan: Some(DbAtomicPlan {
+                statements: vec![
+                    DbPlanStatement {
+                        sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('dup-g', 0)"
+                            .into(),
+                        binds: vec![],
+                        kind: DbPlanStatementKind::Execute,
+                        max_rows: 0,
+                    },
+                    DbPlanStatement {
+                        sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('dup-g', 1)"
+                            .into(),
+                        binds: vec![],
+                        kind: DbPlanStatementKind::Execute,
+                        max_rows: 0,
+                    },
+                ],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let unique_err = guest_atomic(dup).await.unwrap_err();
+        assert_eq!(unique_err.code, PluginErrorCode::Conflict, "{unique_err}");
+        assert!(
+            unique_err
+                .details
+                .as_ref()
+                .and_then(|d| d.get("engineCode"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|c| c.starts_with("SQLITE_CONSTRAINT")),
+            "sqlite unique must preserve SQLITE_* engineCode: {unique_err:?}"
+        );
+
+        bookclerk_db_exec::inject_commit_failures(1);
+        let commit = DbAtomicRequest {
+            operation_id: "commit-op".into(),
+            request_hash: None,
+            plan: Some(DbAtomicPlan {
+                statements: vec![DbPlanStatement {
+                    sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('c-g', 0)"
+                        .into(),
+                    binds: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let commit_err = guest_atomic(commit).await.unwrap_err();
+        assert_eq!(
+            commit_err.code,
+            PluginErrorCode::Unavailable,
+            "{commit_err}"
+        );
+
+        let syntax = DbAtomicRequest {
+            operation_id: "syn-op".into(),
+            request_hash: None,
+            plan: Some(DbAtomicPlan {
+                statements: vec![DbPlanStatement {
+                    sql: "FROMM nowhere".into(),
+                    binds: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let syn_err = guest_atomic(syntax).await.unwrap_err();
+        assert!(
+            matches!(
+                syn_err.code,
+                PluginErrorCode::InvalidParams | PluginErrorCode::Internal
+            ),
+            "{syn_err}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+    async fn postgres_guest_atomic_unique_preserves_sqlstate_23505() {
+        use bookclerk_plugin_sdk::{
+            DbAtomicPlan, DbAtomicRequest, DbPlanStatement, DbPlanStatementKind, PluginErrorCode,
+        };
+        let _lock = SESSION_LOCK.lock().await;
+        let db = postgres_test_pool().await;
+        bookclerk_library::apply_host_schema(&db, bookclerk_library::HostSchemaKind::Postgres)
+            .await
+            .expect("host postgres schema");
+        set_connection(db).await;
+        let dup = DbAtomicRequest {
+            operation_id: "pg-dup".into(),
+            request_hash: None,
+            plan: Some(DbAtomicPlan {
+                statements: vec![
+                    DbPlanStatement {
+                        sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('pg-dup', 0)"
+                            .into(),
+                        binds: vec![],
+                        kind: DbPlanStatementKind::Execute,
+                        max_rows: 0,
+                    },
+                    DbPlanStatement {
+                        sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('pg-dup', 1)"
+                            .into(),
+                        binds: vec![],
+                        kind: DbPlanStatementKind::Execute,
+                        max_rows: 0,
+                    },
+                ],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let err = guest_atomic(dup).await.unwrap_err();
+        assert_eq!(err.code, PluginErrorCode::Conflict, "{err}");
+        assert_eq!(
+            err.details
+                .as_ref()
+                .and_then(|d| d.get("engineCode"))
+                .and_then(|v| v.as_str()),
+            Some("23505"),
+            "postgres unique must keep SQLSTATE 23505: {err:?}"
+        );
     }
 
     fn postgres_test_url() -> String {

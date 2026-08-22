@@ -1,11 +1,11 @@
 //! Atomic library operations for named security commands.
 //!
-//! Database guests implement [`crate::LibraryStore`] interactive transactions as
-//! a single `dbAtomic` RPC. D1 compiles the command to one HTTP `batch()`;
-//! SQLite and PostgreSQL run it in a native local transaction. Both write a
-//! durable receipt keyed by `operationId` so a committed result can be replayed
-//! after a lost response. Generic `dbBegin` / `dbCommit` remain for unrelated
-//! work.
+//! Hosts compile domain ops into a generic SQL plan and send it as one
+//! `bookclerk.atomic` query. Database guests run that batch as one SQL
+//! transaction (D1 HTTP `batch()`, SQLite/Postgres `BEGIN`) and must not
+//! parse Bookclerk operation names. Receipts live in host-authored SQL
+//! against `db_atomic_receipts`. Generic `dbBegin` / `dbCommit` remain for
+//! unrelated work.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -120,21 +120,25 @@ pub trait AtomicTxnBackend: Send + Sync {
         event: Option<PublishDomainEventSpec>,
     ) -> Result<()>;
 
-    /// Create deliveries for `subscribers` and mark the event dispatched.
+    /// Create deliveries for `subscribers`. `mark_dispatched` finishes the parent event.
     async fn dispatch_event_deliveries(
         &self,
         event_id: &str,
         subscribers: &[EventSubscriber],
         operation_id: &str,
+        mark_dispatched: bool,
     ) -> Result<u32>;
 
-    /// Claim the next ready event delivery; `operation_id` makes a lost response replay-safe.
-    async fn claim_next_event_delivery(
+    /// CAS-claim one pending delivery after the host has filtered eligibility.
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_event_delivery(
         &self,
+        delivery_id: &str,
         owner: &str,
         lease_secs: u64,
         operation_id: &str,
-        plugin_ids: &[String],
+        plugin_id: &str,
+        resource_class: &str,
         max_in_flight: u32,
     ) -> Result<Option<EventDeliveryRecord>>;
 }

@@ -4,8 +4,8 @@ use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::{NotSet, Set},
-    ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -954,15 +954,7 @@ impl LibraryStore {
 ///
 /// Returns [`LibraryError::Orm`] when the lock statement fails.
 pub(crate) async fn lock_job_queue<C: ConnectionTrait>(db: &C) -> Result<()> {
-    let backend = db.get_database_backend();
-    let sql = match backend {
-        DatabaseBackend::Postgres => "SELECT pg_advisory_xact_lock(88118)",
-        _ => "UPDATE job_queue_control SET id = 1 WHERE id = 1",
-    };
-    db.execute_raw(Statement::from_string(backend, sql))
-        .await
-        .map_err(LibraryError::Orm)?;
-    Ok(())
+    crate::sql_plan::lock_serialization_slot(db, crate::sql_plan::JOB_QUEUE_SLOT).await
 }
 
 /// Transactional admission used by the local path and `dbAtomic`.

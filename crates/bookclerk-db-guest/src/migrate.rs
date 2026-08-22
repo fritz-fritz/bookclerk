@@ -1,149 +1,47 @@
-//! Apply greenfield DDL from `bookclerk-library` (D1 / Postgres).
+//! Generic SQL-string helpers for database guests.
+//!
+//! Guests may run host-provided SQL. They must not select Bookclerk schema
+//! versions or import `bookclerk_library::migrations`.
 
-use bookclerk_library::{migrations, LibraryError, Result};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, Value};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement, Value};
 
-/// Apply pending schema versions to backends without `rusqlite_migration`.
-///
-/// # Arguments
-///
-/// * `db` - Open SeaORM connection for the guest database engine.
-///
-/// # Returns
-///
-/// `Ok(())` when all pending versions have been applied (or none were pending).
+/// Runs each non-empty statement on `db` in order (autocommit per statement).
 ///
 /// # Errors
 ///
-/// Returns [`bookclerk_library::LibraryError`] when DDL or bookkeeping statements fail.
-pub async fn apply_pending_migrations(db: &DatabaseConnection) -> Result<()> {
-    let backend = db.get_database_backend();
-    db.execute_raw(Statement::from_string(
-        backend,
-        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)",
-    ))
-    .await
-    .map_err(LibraryError::Orm)?;
-
-    let applied: std::collections::HashSet<i64> = db
-        .query_all_raw(Statement::from_string(
-            backend,
-            "SELECT version FROM schema_migrations",
-        ))
-        .await
-        .map_err(LibraryError::Orm)?
-        .iter()
-        .filter_map(|row| row.try_get::<i64>("", "version").ok())
-        .collect();
-
-    let steps: &[&str] = if backend == DbBackend::Postgres {
-        migrations::migration_sql_postgres()
-    } else {
-        // D1: versions 1–26 only. V27 is one `run_batch` in the D1 guest `open()`.
-        migrations::migration_sql_d1()
-    };
-    apply_migration_steps(db, backend, &applied, steps).await
-}
-
-/// Apply named greenfield steps that are not yet in `schema_migrations`.
-///
-/// # Arguments
-///
-/// * `db` - Open SeaORM connection.
-/// * `steps` - Ordered DDL scripts; index `n` is version `n+1`.
-///
-/// # Errors
-///
-/// Returns [`bookclerk_library::LibraryError`] when DDL or bookkeeping statements fail.
-pub async fn apply_pending_migrations_from(db: &DatabaseConnection, steps: &[&str]) -> Result<()> {
-    let backend = db.get_database_backend();
-    db.execute_raw(Statement::from_string(
-        backend,
-        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)",
-    ))
-    .await
-    .map_err(LibraryError::Orm)?;
-
-    let applied: std::collections::HashSet<i64> = db
-        .query_all_raw(Statement::from_string(
-            backend,
-            "SELECT version FROM schema_migrations",
-        ))
-        .await
-        .map_err(LibraryError::Orm)?
-        .iter()
-        .filter_map(|row| row.try_get::<i64>("", "version").ok())
-        .collect();
-    apply_migration_steps(db, backend, &applied, steps).await
-}
-
-/// True when `schema_migrations` already contains `version`.
-///
-/// # Errors
-///
-/// Returns [`bookclerk_library::LibraryError`] when the read fails.
-pub async fn schema_version_applied(db: &DatabaseConnection, version: i64) -> Result<bool> {
-    let backend = db.get_database_backend();
-    let sql = if backend == DbBackend::Postgres {
-        "SELECT version FROM schema_migrations WHERE version = $1"
-    } else {
-        "SELECT version FROM schema_migrations WHERE version = ?"
-    };
-    let rows = db
-        .query_all_raw(Statement::from_sql_and_values(
-            backend,
-            sql,
-            [Value::from(version)],
-        ))
-        .await
-        .map_err(LibraryError::Orm)?;
-    Ok(!rows.is_empty())
-}
-
-/// Apply each pending `steps[i]` as schema version `i + 1`.
-async fn apply_migration_steps(
+/// Returns the engine error when a statement fails.
+pub async fn execute_sql_scripts(
     db: &DatabaseConnection,
-    backend: DbBackend,
-    applied: &std::collections::HashSet<i64>,
-    steps: &[&str],
-) -> Result<()> {
-    let insert = if backend == DbBackend::Postgres {
-        "INSERT INTO schema_migrations (version) VALUES ($1)"
-    } else {
-        "INSERT INTO schema_migrations (version) VALUES (?)"
-    };
-
-    for (idx, schema) in steps.iter().enumerate() {
-        let version = (idx + 1) as i64;
-        if applied.contains(&version) {
+    statements: impl IntoIterator<Item = impl AsRef<str>>,
+) -> std::result::Result<(), DbErr> {
+    let backend = db.get_database_backend();
+    for sql in statements {
+        let sql = sql.as_ref().trim();
+        if sql.is_empty() {
             continue;
         }
-        for stmt in split_sql_statements(schema) {
-            db.execute_raw(Statement::from_string(backend, stmt))
-                .await
-                .map_err(LibraryError::Orm)?;
-        }
-        db.execute_raw(Statement::from_sql_and_values(
-            backend,
-            insert,
-            [Value::from(version)],
-        ))
-        .await
-        .map_err(LibraryError::Orm)?;
+        db.execute_raw(Statement::from_string(backend, sql.to_string()))
+            .await?;
     }
     Ok(())
+}
+
+/// Splits a script on `;` and drops empty fragments.
+#[must_use]
+pub fn split_sql_statements(sql: &str) -> Vec<String> {
+    sql.split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Typed SQL `NULL` for proxy columns so SeaORM `Option<T>` decoding works.
 ///
 /// # Arguments
 ///
-/// * `decl_type` - String `decl_type` for this call.
-/// * `column` - String `column` for this call.
-///
-/// # Returns
-///
-/// `Value` result.
+/// * `decl_type` - Declared column type when the engine provides one.
+/// * `column` - Column name used when `decl_type` is missing.
 #[must_use]
 pub fn typed_null(decl_type: Option<&str>, column: &str) -> Value {
     if let Some(decl) = decl_type {
@@ -202,13 +100,4 @@ fn null_kind_for_column(column: &str) -> Value {
     } else {
         Value::String(None)
     }
-}
-
-/// Splits a migration script on `;` and drops empty fragments.
-fn split_sql_statements(sql: &str) -> Vec<String> {
-    sql.split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
 }

@@ -26,15 +26,15 @@ dispatch receipts are per pair (`dispatch-{event_id}-{plugin_id}` /
 that process **and** only events its own node catalog matches (type, schema
 version, filter). `[events.concurrency]` is both the local worker count **and** the
 cluster-wide max `running` deliveries per `(plugin_id, resource_class)`
-(PostgreSQL serializes admission with a per-plugin advisory lock).
+(serialized with a portable `db_serialization_slots` row).
 `EventResult::suspended` may set `wakeOnEventType` / `wakeOnFilterJson`; the
 host derives wake grants from declared subscriptions (schema versions plus the
 intersection of `sub.filter` and the requested filter — requested keys only
 add constraints) and wakes matching parked rows in the same account when a
 later event is published. Publish commits `domain_events.wake_pending = 1` and
 returns; the dispatcher claims bounded wake slices with a unique UUID fence
-token (`wake_lease_*` + delivery cursor, at most 32 events and one 64-row
-page each, below D1’s 100 bound parameters; #178 will negotiate `maxBinds`)
+token (`wake_lease_*` + delivery cursor, at most 32 events and one page
+each sized from negotiated `maxBinds`)
 so producer latency does not track sleeper count. Cursor release, finish,
 and the sleeper UPDATE require that token in the same statement; a lost
 fence does not clobber another owner or a later wake registration.
@@ -138,10 +138,9 @@ A database plugin swap takes the write permit so it cannot observe an idle
 worker that is about to claim. Admission waits up to 15s for a read permit
 and returns `503` if a swap holds the lock too long.
 
-PostgreSQL admission and scratch-quota updates take
-`pg_advisory_xact_lock(88118)` (SQLite/D1 lock the `job_queue_control`
-singleton) so `COUNT` then `INSERT` cannot exceed `max_pending` under
-`READ COMMITTED`. The required `postgres job queue` CI job runs those
+Admission, claim, and scratch-quota updates take a write lock on a
+`db_serialization_slots` row (`job-queue`) so `COUNT` then `INSERT` cannot
+exceed `max_pending` under `READ COMMITTED` on every required backend. The required `postgres job queue` CI job runs those
 concurrency tests against a disposable multi-connection database
 (`BOOKCLERK_TEST_POSTGRES_URL` + `BOOKCLERK_REQUIRE_POSTGRES_TESTS=1`).
 They are `#[ignore]` in the default workspace suite so a missing Postgres

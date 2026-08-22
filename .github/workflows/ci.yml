@@ -95,6 +95,9 @@ jobs:
       - name: Run planner unit tests
         run: python3 scripts/tests/test_ci_plan.py -q
 
+      - name: Database plugin isolation
+        run: python3 scripts/tests/test_db_plugin_isolation.py -q
+
       - name: Private-docs lint regression
         run: python3 scripts/tests/test_private_docs_lint.py
 
@@ -448,11 +451,17 @@ jobs:
             # doctests (already run in "Explicit doctests"). `--tests` alone
             # would drop `src/` unit tests.
             cargo test --workspace --lib --bins --tests
+            cargo test -p bookclerk-plugin-database-sqlite --features host-helpers --lib --bins --tests
           else
             PKGS="${{ needs.plan.outputs.rust_packages }}"
             ARGS=()
             for p in $PKGS; do ARGS+=(-p "$p"); done
             cargo test "${ARGS[@]}" --lib --bins --tests
+            case " $PKGS " in
+              *" bookclerk-plugin-database-sqlite "*)
+                cargo test -p bookclerk-plugin-database-sqlite --features host-helpers --lib --bins --tests
+                ;;
+            esac
           fi
 
   release:

@@ -1136,56 +1136,175 @@
         }
       }
     },
-    "DbAtomicParams": {
+    "DbConnectResult": {
       "type": "object",
       "required": [
-        "op"
+        "dialect"
       ],
       "properties": {
-        "op": {
+        "dialect": {
           "type": "string",
-          "description": "Named atomic library operation (camelCase tag: deleteUser, redeemClaimTicket, takeOidcRpState, takeWebauthnChallenge, confirmTotpEnrollment, disableUserTotp, …)."
+          "description": "SeaORM dialect the host should use (sqlite or postgres)."
+        },
+        "interactiveTxn": {
+          "type": "boolean"
+        },
+        "sqlFamily": {
+          "type": "string",
+          "description": "sqlite or postgres. Must match dialect (sqlite/sqlite or postgres/postgres)."
+        },
+        "atomicBatch": {
+          "type": "boolean"
+        },
+        "returning": {
+          "type": "boolean",
+          "description": "Guest SQL supports RETURNING. Required true until a host fallback exists."
+        },
+        "maxBinds": {
+          "type": "integer",
+          "description": "Maximum bound parameters per statement. 0 is unspecified and fails closed."
+        },
+        "maxStatements": {
+          "type": "integer",
+          "description": "Maximum statements in one atomic batch. 0 is unspecified and fails closed."
+        },
+        "maxResultRows": {
+          "type": "integer",
+          "description": "Maximum rows a query may return. 0 is unspecified and fails closed."
+        },
+        "maxPayloadBytes": {
+          "type": "integer",
+          "description": "Maximum UTF-8 bytes of SQL plus JSON binds per statement. 0 fails closed."
+        },
+        "maxResultBytes": {
+          "type": "integer",
+          "description": "Maximum JSON bytes of one statement's result rows. 0 is unspecified and fails closed."
+        },
+        "maxCellBytes": {
+          "type": "integer",
+          "description": "Maximum UTF-8 or blob bytes of one result cell. 0 is unspecified and fails closed."
+        },
+        "maxAtomicRequestBytes": {
+          "type": "integer",
+          "description": "Maximum JSON bytes of one encoded dbAtomic request. 0 fails closed. Must be <= MAX_SCALAR_BYTES."
+        },
+        "maxAtomicResultBytes": {
+          "type": "integer",
+          "description": "Maximum JSON bytes of one encoded dbAtomic result. 0 fails closed. Must be <= MAX_SCALAR_BYTES."
+        },
+        "timing": {
+          "type": "boolean"
         }
-      },
-      "additionalProperties": true
+      }
+    },
+    "DbPlanStatement": {
+      "type": "object",
+      "required": [
+        "sql"
+      ],
+      "properties": {
+        "sql": {
+          "type": "string"
+        },
+        "binds": {
+          "type": "array"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "query",
+            "execute",
+            "select",
+            "returning"
+          ]
+        },
+        "maxRows": {
+          "type": "integer",
+          "description": "Proven upper bound on rows this statement returns. 0 is unproven. D1 Returning requires 1."
+        }
+      }
+    },
+    "DbAtomicPlan": {
+      "type": "object",
+      "required": [
+        "statements"
+      ],
+      "properties": {
+        "statements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DbPlanStatement"
+          }
+        },
+        "outcomeIndex": {
+          "type": "integer"
+        },
+        "payloadIndex": {
+          "type": "integer"
+        },
+        "priorReceiptIndex": {
+          "type": "integer"
+        },
+        "receiptSelectIndex": {
+          "type": "integer"
+        }
+      }
     },
     "DbAtomicRequest": {
       "type": "object",
       "required": [
         "operationId",
-        "operation"
+        "plan"
       ],
       "properties": {
         "operationId": {
           "type": "string",
           "description": "Caller-chosen idempotency key. Retries after an ambiguous outcome must reuse it."
         },
-        "operation": {
-          "$ref": "#/$defs/DbAtomicParams"
+        "requestHash": {
+          "type": "string",
+          "description": "SHA-256 hex of the idempotency-relevant request; compared on receipt replay."
+        },
+        "plan": {
+          "$ref": "#/$defs/DbAtomicPlan",
+          "description": "Host-authored generic SQL batch. Guests must not parse Bookclerk operation names."
+        },
+        "deadlineUnixMs": {
+          "type": "integer",
+          "description": "Optional guest-visible deadline (unix milliseconds). Transport metadata; not hashed for idempotency."
         }
       }
     },
-    "DbAtomicResult": {
+    "DbPlanStmtExecResult": {
       "type": "object",
       "required": [
-        "status"
+        "rows",
+        "rowsAffected"
       ],
       "properties": {
-        "status": {
-          "type": "string",
-          "description": "Application outcome: ok, empty, notFound, lastOwner, claimInvalid, passwordRequired, idempotencyConflict."
+        "rows": {
+          "type": "array"
         },
-        "payload": {
-          "description": "Op-specific library record JSON when status is ok."
-        },
+        "rowsAffected": {
+          "type": "integer"
+        }
+      }
+    },
+    "DbPlanExecResult": {
+      "type": "object",
+      "required": [
+        "operationId",
+        "statements"
+      ],
+      "properties": {
         "operationId": {
           "type": "string"
         },
-        "replayed": {
-          "type": "boolean"
-        },
-        "receiptCreatedAt": {
-          "type": "string"
+        "statements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DbPlanStmtExecResult"
+          }
         },
         "timing": {
           "type": "object"

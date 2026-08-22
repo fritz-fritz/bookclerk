@@ -47,6 +47,16 @@ pub struct LibraryStore {
     /// When set, named security methods run as one guest `dbAtomic` command
     /// instead of a local SeaORM transaction.
     atomic: Option<Arc<dyn AtomicTxnBackend>>,
+    /// Negotiated guest `maxBinds` (defaults to D1's cap for in-process tests).
+    max_binds: u32,
+    /// Negotiated guest `maxStatements`.
+    max_statements: u32,
+    /// Negotiated guest `maxResultRows`.
+    max_result_rows: u32,
+    /// Negotiated guest `maxPayloadBytes`.
+    max_payload_bytes: u32,
+    /// Full connect advertisement (SQL family, limits, timing).
+    connect: Arc<bookclerk_plugin_abi::DbConnectResult>,
 }
 
 impl std::fmt::Debug for LibraryStore {
@@ -63,7 +73,15 @@ impl LibraryStore {
     /// open engine-specific connections.
     #[must_use]
     pub fn from_connection(db: DatabaseConnection) -> Self {
-        Self { db, atomic: None }
+        Self {
+            db,
+            atomic: None,
+            max_binds: bookclerk_plugin_abi::D1_MAX_BINDS,
+            max_statements: bookclerk_plugin_abi::FIRST_PARTY_MAX_STATEMENTS,
+            max_result_rows: 256,
+            max_payload_bytes: 256 * 1024,
+            connect: Arc::new(bookclerk_plugin_abi::DbConnectResult::d1()),
+        }
     }
 
     /// Attach a guest `dbAtomic` backend for named security operations.
@@ -75,6 +93,73 @@ impl LibraryStore {
     pub fn with_atomic_txn(mut self, backend: Arc<dyn AtomicTxnBackend>) -> Self {
         self.atomic = Some(backend);
         self
+    }
+
+    /// Records the guest's negotiated bind cap for wake `IN (…)` chunking.
+    #[must_use]
+    pub fn with_max_binds(mut self, max_binds: u32) -> Self {
+        self.max_binds = max_binds.max(bookclerk_plugin_abi::HOST_MIN_BINDS);
+        let mut caps = (*self.connect).clone();
+        caps.max_binds = self.max_binds;
+        self.connect = Arc::new(caps);
+        self
+    }
+
+    /// Records negotiated statement / result / payload caps from connect.
+    #[must_use]
+    pub fn with_plan_limits(
+        mut self,
+        max_statements: u32,
+        max_result_rows: u32,
+        max_payload_bytes: u32,
+    ) -> Self {
+        self.max_statements = max_statements.max(bookclerk_plugin_abi::HOST_MIN_STATEMENTS);
+        self.max_result_rows = max_result_rows.max(1);
+        self.max_payload_bytes = max_payload_bytes.max(1024);
+        let mut caps = (*self.connect).clone();
+        caps.max_statements = self.max_statements;
+        caps.max_result_rows = self.max_result_rows;
+        caps.max_payload_bytes = self.max_payload_bytes;
+        self.connect = Arc::new(caps);
+        self
+    }
+
+    /// Records the full negotiated [`bookclerk_plugin_abi::DbConnectResult`].
+    #[must_use]
+    pub fn with_connect_result(mut self, caps: bookclerk_plugin_abi::DbConnectResult) -> Self {
+        self.max_binds = caps.max_binds.max(bookclerk_plugin_abi::HOST_MIN_BINDS);
+        self.max_statements = caps
+            .max_statements
+            .max(bookclerk_plugin_abi::HOST_MIN_STATEMENTS);
+        self.max_result_rows = caps.max_result_rows.max(1);
+        self.max_payload_bytes = caps.max_payload_bytes.max(1024);
+        self.connect = Arc::new(caps);
+        self
+    }
+
+    /// Negotiated connect advertisement used for plan validation.
+    #[must_use]
+    pub fn connect_result(&self) -> &bookclerk_plugin_abi::DbConnectResult {
+        self.connect.as_ref()
+    }
+
+    /// Subscribers packed into one dispatch plan (receipt overhead is ~12 statements).
+    #[must_use]
+    pub fn dispatch_chunk_size(&self) -> usize {
+        if let Some(n) = crate::store::event_outbox::dispatch_chunk_override() {
+            return n.max(1);
+        }
+        const OVERHEAD: u32 = 12;
+        const BINDS_PER_INSERT: u32 = 9;
+        let by_stmts = self.max_statements.saturating_sub(OVERHEAD).max(1);
+        let by_binds = self.max_binds.saturating_sub(16) / BINDS_PER_INSERT;
+        usize::try_from(by_stmts.min(by_binds.max(1))).unwrap_or(1)
+    }
+
+    /// Wake delivery page size derived from negotiated `maxBinds`.
+    #[must_use]
+    pub fn wake_page(&self) -> u64 {
+        crate::sql_plan::wake_page_for_max_binds(self.max_binds)
     }
 
     /// Borrow the underlying SeaORM connection (e.g. for [`crate::secrets`]).
@@ -91,6 +176,9 @@ impl LibraryStore {
 
     /// Write-lock active owner rows so last-owner checks cannot race a concurrent
     /// demote/disable/delete (SQLite reserved lock / Postgres row locks).
+    ///
+    /// Used by the SeaORM `*_on` txn helpers kept for in-process tests.
+    #[allow(dead_code)]
     async fn lock_active_owners<C: ConnectionTrait>(conn: &C) -> Result<()> {
         use sea_orm::sea_query::Expr;
         users::Entity::update_many()
@@ -107,6 +195,7 @@ impl LibraryStore {
     }
 
     /// Counts active `owner` users on `conn` (used by last-owner guards).
+    #[allow(dead_code)]
     async fn count_active_owners_on<C: ConnectionTrait>(conn: &C) -> Result<u64> {
         users::Entity::find()
             .filter(users::Column::Role.eq(UserRole::Owner.as_str()))
@@ -861,6 +950,7 @@ impl LibraryStore {
     }
 
     /// Deletes a user and related portal rows inside an open transaction; refuses the last owner.
+    #[allow(dead_code)]
     pub(crate) async fn delete_user_on<C: ConnectionTrait>(txn: &C, id: i64) -> Result<()> {
         Self::lock_active_owners(txn).await?;
         let model = users::Entity::find_by_id(id)
@@ -998,6 +1088,7 @@ impl LibraryStore {
     }
 
     /// Sets user status inside an open transaction; disabling the last owner fails.
+    #[allow(dead_code)]
     pub(crate) async fn set_user_status_on<C: ConnectionTrait>(
         txn: &C,
         id: i64,
@@ -1069,6 +1160,7 @@ impl LibraryStore {
     }
 
     /// Sets or clears the Argon2id password hash inside an open transaction and bumps `security_version`.
+    #[allow(dead_code)]
     pub(crate) async fn set_user_password_hash_on<C: ConnectionTrait>(
         txn: &C,
         id: i64,
@@ -1341,6 +1433,7 @@ impl LibraryStore {
     }
 
     /// Sets user role inside an open transaction; demoting the last active owner fails.
+    #[allow(dead_code)]
     pub(crate) async fn set_user_role_on<C: ConnectionTrait>(
         txn: &C,
         id: i64,
@@ -1802,6 +1895,7 @@ impl LibraryStore {
     }
 
     /// Consumes an unredeemed, unexpired claim ticket and mints a portal session in one transaction.
+    #[allow(dead_code)]
     pub(crate) async fn redeem_claim_ticket_to_session_on<C: ConnectionTrait>(
         txn: &C,
         token_hash: &str,
@@ -2529,6 +2623,7 @@ impl LibraryStore {
     }
 
     /// Deletes and returns one-shot OIDC RP state by hash; `None` if missing or already taken.
+    #[allow(dead_code)]
     pub(crate) async fn take_oidc_rp_state_on<C: ConnectionTrait>(
         txn: &C,
         state_hash: &str,
@@ -2711,6 +2806,7 @@ impl LibraryStore {
     }
 
     /// Sets `users.totp_enabled` inside an open transaction.
+    #[allow(dead_code)]
     pub(crate) async fn set_user_totp_enabled_on<C: ConnectionTrait>(
         txn: &C,
         user_id: i64,
@@ -2749,6 +2845,7 @@ impl LibraryStore {
     }
 
     /// Promote a sealed TOTP secret to `primary` and set `totp_enabled` inside an open transaction.
+    #[allow(dead_code)]
     pub(crate) async fn confirm_totp_enrollment_on<C: ConnectionTrait>(
         txn: &C,
         user_id: i64,
@@ -2781,6 +2878,7 @@ impl LibraryStore {
     }
 
     /// Delete TOTP secrets and clear `totp_enabled` inside an open transaction.
+    #[allow(dead_code)]
     pub(crate) async fn disable_user_totp_on<C: ConnectionTrait>(
         txn: &C,
         user_id: i64,
@@ -2856,6 +2954,7 @@ impl LibraryStore {
     }
 
     /// Deletes and returns a one-shot WebAuthn challenge; `None` if missing or already taken.
+    #[allow(dead_code)]
     pub(crate) async fn take_webauthn_challenge_on<C: ConnectionTrait>(
         txn: &C,
         challenge_id: &str,
@@ -6715,6 +6814,7 @@ fn map_book(m: books::Model) -> Result<BookRecord> {
 }
 
 pub(crate) mod event_outbox;
+pub use event_outbox::{inject_dispatch_page_failures, set_dispatch_chunk_for_test};
 pub(crate) mod job_queue;
 
 #[cfg(test)]

@@ -3,13 +3,16 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use async_trait::async_trait;
-use bookclerk_db_guest::{guest_execute, guest_query_page, set_connection};
+use bookclerk_db_guest::{
+    guest_execute, guest_query_page, plugin_error_from_engine, set_connection,
+};
 use bookclerk_plugin_sdk::v2::{
     Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot, QueryPage,
     ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    serve, DbAtomicRequest, DbConnectParams, HandshakeResult, PluginError, StatementDto,
+    serve, DbAtomicRequest, DbConnectParams, DbConnectResult, HandshakeResult, PluginError,
+    StatementDto, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -33,11 +36,7 @@ fn describe_metadata() -> Result<String, PluginError> {
 }
 
 fn map_guest(err: String) -> PluginError {
-    if err.contains("invalid query cursor") {
-        PluginError::invalid_cursor(err)
-    } else {
-        PluginError::internal(err)
-    }
+    plugin_error_from_engine(err)
 }
 
 fn to_dto(statement: &Statement, txn_id: Option<String>) -> StatementDto {
@@ -122,7 +121,7 @@ struct D1Session;
 #[async_trait(?Send)]
 impl DatabaseSession for D1Session {
     async fn execute(&self, statement: Statement) -> Result<ExecResult, PluginError> {
-        if statement.sql == "bookclerk.atomic" {
+        if statement.sql == DB_ATOMIC_SENTINEL {
             return Err(PluginError::unsupported(
                 "bookclerk.atomic is a query, not execute",
             ));
@@ -139,7 +138,7 @@ impl DatabaseSession for D1Session {
         cursor: &str,
         limit: u32,
     ) -> Result<QueryPage, PluginError> {
-        if statement.sql == "bookclerk.atomic" {
+        if statement.sql == DB_ATOMIC_SENTINEL {
             let req: DbAtomicRequest = serde_json::from_str(&statement.values_json)
                 .map_err(|e| PluginError::invalid_params(e.to_string()))?;
             let proxy = bookclerk_plugin_database_d1::shared_proxy()
@@ -149,7 +148,13 @@ impl DatabaseSession for D1Session {
                 .await
                 .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)?;
             return Ok(QueryPage {
-                rows_json: bookclerk_plugin_sdk::encode_json(result)?,
+                rows_json: bookclerk_plugin_sdk::encode_atomic_result(result)?,
+                next_cursor: None,
+            });
+        }
+        if statement.sql == DB_CAPABILITIES_SENTINEL {
+            return Ok(QueryPage {
+                rows_json: bookclerk_plugin_sdk::encode_json(DbConnectResult::d1())?,
                 next_cursor: None,
             });
         }

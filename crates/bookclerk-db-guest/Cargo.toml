@@ -10,7 +10,7 @@ authors.workspace = true
 publish = false
 
 [dependencies]
-bookclerk-library.workspace = true
+bookclerk-db-exec.workspace = true
 bookclerk-plugin-sdk = { workspace = true, features = ["db"] }
 futures.workspace = true
 sea-orm.workspace = true
@@ -19,7 +19,8 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-bookclerk-plugin-database-sqlite.workspace = true
+bookclerk-library.workspace = true
+bookclerk-plugin-database-sqlite = { workspace = true, features = ["host-helpers"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

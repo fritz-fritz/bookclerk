@@ -4,9 +4,7 @@ use crate::models::{
     JobFence, JobKind, JobPayload, JobRecord, JobResourceClass, JobState, JobTrigger,
     PublishDomainEventOutcome, PublishDomainEventSpec,
 };
-use crate::{execute_db_atomic, AtomicTxnBackend, EventDeliveryRecord, LibraryError};
-use async_trait::async_trait;
-use bookclerk_plugin_abi::{atomic_status, DbAtomicParams, DbAtomicRequest};
+use crate::{AtomicTxnBackend, InProcessSqliteAtomic};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait};
 use std::sync::Arc;
 
@@ -1694,177 +1692,6 @@ async fn test_store() -> LibraryStore {
     )
 }
 
-/// In-process `dbAtomic` backend used to prove host skip after plugin-id-only claim.
-struct SqliteAtomicClaimBackend {
-    db: sea_orm::DatabaseConnection,
-}
-
-fn claim_only_err<T>() -> crate::Result<T> {
-    Err(LibraryError::Other(anyhow::anyhow!(
-        "SqliteAtomicClaimBackend is claim-only"
-    )))
-}
-
-#[async_trait]
-impl AtomicTxnBackend for SqliteAtomicClaimBackend {
-    async fn delete_user(&self, _id: i64) -> crate::Result<()> {
-        claim_only_err()
-    }
-
-    async fn set_user_status(
-        &self,
-        _id: i64,
-        _status: crate::UserStatus,
-    ) -> crate::Result<crate::UserRecord> {
-        claim_only_err()
-    }
-
-    async fn set_user_password_hash(
-        &self,
-        _id: i64,
-        _password_hash: Option<&str>,
-    ) -> crate::Result<crate::UserRecord> {
-        claim_only_err()
-    }
-
-    async fn set_user_role(
-        &self,
-        _id: i64,
-        _role: crate::UserRole,
-    ) -> crate::Result<crate::UserRecord> {
-        claim_only_err()
-    }
-
-    async fn redeem_claim_ticket_to_session(
-        &self,
-        _token_hash: &str,
-        _session_hash: &str,
-        _expires_at: chrono::DateTime<chrono::Utc>,
-        _client: Option<&crate::SessionClientInfo>,
-        _new_password_hash: Option<&str>,
-        _password_fingerprint: Option<&str>,
-    ) -> crate::Result<crate::PortalIdentity> {
-        claim_only_err()
-    }
-
-    async fn take_oidc_rp_state(
-        &self,
-        _state_hash: &str,
-    ) -> crate::Result<Option<(String, String, String, String, Option<i64>)>> {
-        claim_only_err()
-    }
-
-    async fn take_webauthn_challenge(
-        &self,
-        _challenge_id: &str,
-        _kind: &str,
-    ) -> crate::Result<Option<(Option<i64>, String)>> {
-        claim_only_err()
-    }
-
-    async fn enqueue_job(&self, _spec: EnqueueJobSpec) -> crate::Result<EnqueueOutcome> {
-        claim_only_err()
-    }
-
-    async fn claim_next_job(
-        &self,
-        _resource_class: JobResourceClass,
-        _owner: &str,
-        _lease_secs: u64,
-        _operation_id: &str,
-    ) -> crate::Result<Option<JobRecord>> {
-        claim_only_err()
-    }
-
-    async fn reserve_job_temp_path(
-        &self,
-        _job_id: &str,
-        _path: &str,
-        _reserved_bytes: u64,
-        _quota_bytes: u64,
-    ) -> crate::Result<()> {
-        claim_only_err()
-    }
-
-    async fn confirm_totp_enrollment(
-        &self,
-        _user_id: i64,
-        _record: &crate::secrets::EncryptedSecretRecord,
-    ) -> crate::Result<()> {
-        claim_only_err()
-    }
-
-    async fn disable_user_totp(&self, _user_id: i64) -> crate::Result<()> {
-        claim_only_err()
-    }
-
-    async fn publish_domain_event(
-        &self,
-        _spec: PublishDomainEventSpec,
-    ) -> crate::Result<PublishDomainEventOutcome> {
-        claim_only_err()
-    }
-
-    async fn set_acquire_status(
-        &self,
-        _book_uuid: &str,
-        _status: crate::AcquireStatus,
-        _storage_key: Option<&str>,
-        _error_message: Option<&str>,
-        _event: Option<PublishDomainEventSpec>,
-    ) -> crate::Result<()> {
-        claim_only_err()
-    }
-
-    async fn dispatch_event_deliveries(
-        &self,
-        _event_id: &str,
-        _subscribers: &[EventSubscriber],
-        _operation_id: &str,
-    ) -> crate::Result<u32> {
-        claim_only_err()
-    }
-
-    async fn claim_next_event_delivery(
-        &self,
-        owner: &str,
-        lease_secs: u64,
-        operation_id: &str,
-        plugin_ids: &[String],
-        max_in_flight: u32,
-    ) -> crate::Result<Option<EventDeliveryRecord>> {
-        let result = execute_db_atomic(
-            &self.db,
-            DbAtomicRequest {
-                operation_id: operation_id.to_string(),
-                operation: DbAtomicParams::ClaimNextEventDelivery {
-                    owner: owner.to_string(),
-                    lease_secs: i64::try_from(lease_secs).unwrap_or(60),
-                    plugin_ids_json: serde_json::to_string(plugin_ids)
-                        .unwrap_or_else(|_| "[]".into()),
-                    max_in_flight: i64::from(max_in_flight),
-                },
-            },
-        )
-        .await?;
-        if result.status == atomic_status::EMPTY {
-            return Ok(None);
-        }
-        if result.status != atomic_status::OK {
-            return Err(LibraryError::Other(anyhow::anyhow!(
-                "database atomic claim failed: {}",
-                result.status
-            )));
-        }
-        let payload = result.payload.ok_or_else(|| {
-            LibraryError::Other(anyhow::anyhow!("database atomic claim missing payload"))
-        })?;
-        serde_json::from_value(payload).map(Some).map_err(|err| {
-            LibraryError::Other(anyhow::anyhow!("database atomic claim payload: {err}"))
-        })
-    }
-}
-
 fn scan_spec(account: Option<&str>, max_pending: i64) -> EnqueueJobSpec {
     EnqueueJobSpec {
         kind: JobKind::Scan,
@@ -3160,6 +2987,413 @@ async fn dispatch_is_idempotent_and_isolates_subscribers() {
     let abs_row = store.get_event_delivery(&abs.id).await.unwrap().unwrap();
     assert_eq!(echo_row.state, "pending");
     assert_eq!(abs_row.state, "acked");
+}
+
+#[tokio::test]
+async fn concurrent_host_cas_claims_do_not_skip_keyset_pages() {
+    let store = test_store().await;
+    for i in 0..5 {
+        let created = store
+            .publish_domain_event(publish_spec_ordered(
+                "book_acquired",
+                &format!("book_acquired:keyset-{i}"),
+                "{}",
+                &format!("k{i}"),
+            ))
+            .await
+            .unwrap();
+        let PublishDomainEventOutcome::Created { id } = created else {
+            panic!("{created:?}");
+        };
+        store
+            .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], &format!("d-{id}"))
+            .await
+            .unwrap();
+    }
+    let db = store.db().clone();
+    super::event_outbox::set_claim_page_for_test(Some(2));
+    let store = std::sync::Arc::new(store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db })));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let mut handles = Vec::new();
+    for i in 0..2 {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let mut n = 0u32;
+            while store
+                .claim_next_event_delivery(
+                    &format!("keyset-w{i}"),
+                    60,
+                    &uuid::Uuid::new_v4().to_string(),
+                    &["echo".into()],
+                    8,
+                    "",
+                )
+                .await
+                .unwrap()
+                .is_some()
+            {
+                n += 1;
+            }
+            n
+        }));
+    }
+    let mut claimed = 0u32;
+    for handle in handles {
+        claimed += handle.await.unwrap();
+    }
+    super::event_outbox::set_claim_page_for_test(None);
+    assert_eq!(claimed, 5, "keyset paging must not skip pending rows");
+}
+
+#[tokio::test]
+async fn dispatch_page_fault_leaves_parent_pending_and_retries() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:page-fault",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let db = store.db().clone();
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
+    let subs = [
+        EventSubscriber::plugin("echo"),
+        EventSubscriber::plugin("audiobookshelf"),
+    ];
+    super::event_outbox::set_dispatch_chunk_for_test(Some(1));
+    super::event_outbox::inject_dispatch_page_failures(1);
+    let err = store
+        .dispatch_event_deliveries(&id, &subs, "fault-op")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("injected dispatch page failure"),
+        "{err}"
+    );
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(event.dispatch_state, "pending");
+    assert!(store.next_undispatched_event().await.unwrap().is_some());
+    assert!(store
+        .get_event_delivery(&format!("{id}:echo"))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_event_delivery(&format!("{id}:audiobookshelf"))
+        .await
+        .unwrap()
+        .is_none());
+    super::event_outbox::inject_dispatch_page_failures(0);
+    let created = store
+        .dispatch_event_deliveries(&id, &subs, "fault-retry")
+        .await
+        .unwrap();
+    super::event_outbox::set_dispatch_chunk_for_test(None);
+    assert_eq!(created, 1, "retry inserts the remaining subscriber only");
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(event.dispatch_state, "dispatched");
+}
+
+#[tokio::test]
+async fn dispatch_retry_keeps_frozen_snapshot_when_catalog_changes() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:snapshot-catalog",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let db = store.db().clone();
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
+    let original = [
+        EventSubscriber::plugin("echo"),
+        EventSubscriber::plugin("audiobookshelf"),
+        EventSubscriber::plugin("keep"),
+    ];
+    super::event_outbox::set_dispatch_chunk_for_test(Some(2));
+    super::event_outbox::inject_dispatch_page_failures(1);
+    let err = store
+        .dispatch_event_deliveries(&id, &original, "snap-op")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("injected dispatch page failure"),
+        "{err}"
+    );
+    super::event_outbox::inject_dispatch_page_failures(0);
+    let changed = [
+        EventSubscriber::plugin("echo"),
+        EventSubscriber::plugin("replaced-plugin"),
+        EventSubscriber::plugin("keep"),
+    ];
+    let created = store
+        .dispatch_event_deliveries(&id, &changed, "snap-op")
+        .await
+        .unwrap();
+    super::event_outbox::set_dispatch_chunk_for_test(None);
+    assert!(
+        created >= 1,
+        "retry must finish remaining frozen subscribers, created={created}"
+    );
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(event.dispatch_state, "dispatched");
+    assert!(store
+        .get_event_delivery(&format!("{id}:audiobookshelf"))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_event_delivery(&format!("{id}:keep"))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_event_delivery(&format!("{id}:replaced-plugin"))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_snapshot_cas_two_stores_agree() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.db");
+    let db1 = bookclerk_plugin_database_sqlite::open(&path).await.unwrap();
+    crate::apply_host_schema(&db1, crate::HostSchemaKind::SqliteFile)
+        .await
+        .unwrap();
+    let db2 = bookclerk_plugin_database_sqlite::open(&path).await.unwrap();
+    let store1 = LibraryStore::from_connection(db1.clone());
+    let created = store1
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:cas-snapshot",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let store1 = store1.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db: db1 }));
+    let store2 = LibraryStore::from_connection(db2.clone())
+        .with_atomic_txn(Arc::new(InProcessSqliteAtomic { db: db2 }));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    super::event_outbox::set_snapshot_claim_barrier(Some(barrier));
+    let op = format!("dispatch-{id}");
+    let s1 = Arc::new(store1);
+    let s2 = Arc::new(store2);
+    let id1 = id.clone();
+    let id2 = id.clone();
+    let op1 = op.clone();
+    let op2 = op.clone();
+    let a = tokio::spawn(async move {
+        super::event_outbox::with_snapshot_claim_wait(async move {
+            s1.dispatch_event_deliveries(
+                &id1,
+                &[
+                    EventSubscriber::plugin("echo"),
+                    EventSubscriber::plugin("alpha"),
+                ],
+                &op1,
+            )
+            .await
+        })
+        .await
+    });
+    let b = tokio::spawn(async move {
+        super::event_outbox::with_snapshot_claim_wait(async move {
+            s2.dispatch_event_deliveries(
+                &id2,
+                &[
+                    EventSubscriber::plugin("echo"),
+                    EventSubscriber::plugin("beta"),
+                ],
+                &op2,
+            )
+            .await
+        })
+        .await
+    });
+    let (ra, rb) = tokio::join!(a, b);
+    super::event_outbox::set_snapshot_claim_barrier(None);
+    ra.expect("join a").expect("dispatch a");
+    rb.expect("join b").expect("dispatch b");
+    let store =
+        LibraryStore::from_connection(bookclerk_plugin_database_sqlite::open(&path).await.unwrap());
+    let has_alpha = store
+        .get_event_delivery(&format!("{id}:alpha"))
+        .await
+        .unwrap()
+        .is_some();
+    let has_beta = store
+        .get_event_delivery(&format!("{id}:beta"))
+        .await
+        .unwrap()
+        .is_some();
+    assert!(
+        has_alpha ^ has_beta,
+        "exactly one catalog must win the snapshot CAS (alpha={has_alpha} beta={has_beta})"
+    );
+    assert!(store
+        .get_event_delivery(&format!("{id}:echo"))
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn unrelated_dispatch_does_not_wait_on_snapshot_cas_barrier() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:no-barrier-wait",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let db = store.db().clone();
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
+    super::event_outbox::set_snapshot_claim_barrier(Some(std::sync::Arc::new(
+        tokio::sync::Barrier::new(2),
+    )));
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        store.dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op-no-wait"),
+    )
+    .await;
+    super::event_outbox::set_snapshot_claim_barrier(None);
+    result
+        .expect("unrelated dispatch must not wait on the CAS barrier")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn malformed_dispatch_snapshot_fails_closed() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:bad-snapshot",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    store
+        .db()
+        .execute_raw(sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "UPDATE domain_events SET dispatch_snapshot_json = ? WHERE id = ?",
+            [
+                sea_orm::Value::String(Some("{not-json".into())),
+                id.clone().into(),
+            ],
+        ))
+        .await
+        .unwrap();
+    let db = store.db().clone();
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
+    let err = store
+        .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "bad-snap")
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("dispatch_snapshot_json"),
+        "malformed snapshot must fail closed: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_twenty_five_subscribers_on_sqlite_caps_are_all_inserted() {
+    let store = test_store()
+        .await
+        .with_connect_result(bookclerk_plugin_abi::DbConnectResult::sqlite());
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:twenty-five",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let db = store.db().clone();
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
+    assert!(
+        store.dispatch_chunk_size() >= 25,
+        "sqlite caps must pack more than the old take(24) planner cap"
+    );
+    let subs: Vec<EventSubscriber> = (0..25)
+        .map(|i| EventSubscriber::plugin(format!("plugin-{i:02}")))
+        .collect();
+    assert_eq!(
+        store
+            .dispatch_event_deliveries(&id, &subs, "op-25")
+            .await
+            .unwrap(),
+        25
+    );
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(event.dispatch_state, "dispatched");
+    assert_eq!(
+        store.list_event_deliveries(None, 50).await.unwrap().len(),
+        25
+    );
+}
+
+#[tokio::test]
+async fn oversized_dispatch_page_is_rejected_and_parent_stays_pending() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:oversize",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let backend = InProcessSqliteAtomic {
+        db: store.db().clone(),
+    };
+    let subs: Vec<EventSubscriber> = (0..100)
+        .map(|i| EventSubscriber::plugin(format!("plugin-{i:03}")))
+        .collect();
+    let err = backend
+        .dispatch_event_deliveries(&id, &subs, "op-oversize", true)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("maxStatements"),
+        "oversized page must fail closed: {err}"
+    );
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(event.dispatch_state, "pending");
+    assert!(store.next_undispatched_event().await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -4951,7 +5185,7 @@ async fn wake_pages_more_than_page_size_same_account() {
     };
     let now = chrono::Utc::now().to_rfc3339();
     let future = "9999-12-31T23:59:59+00:00";
-    let n = usize::try_from(super::event_outbox::WAKE_PAGE).unwrap() + 1;
+    let n = usize::try_from(store.wake_page()).unwrap() + 1;
     for i in 0..n {
         let id = format!("wake-page-{i:03}");
         crate::entities::event_deliveries::ActiveModel {
@@ -5447,6 +5681,7 @@ async fn stale_wake_delivery_update_does_not_clear(store: &LibraryStore) {
         "token-b",
         std::slice::from_ref(&parked.id),
         &now,
+        100,
     )
     .await
     .unwrap();
@@ -5473,6 +5708,7 @@ async fn stale_wake_delivery_update_does_not_clear(store: &LibraryStore) {
         "token-a",
         std::slice::from_ref(&parked.id),
         &now,
+        100,
     )
     .await
     .unwrap();
@@ -5742,7 +5978,7 @@ async fn atomic_claim_skips_incompatible_oldest_and_claims_later_compatible() {
         .unwrap();
 
     let db = store.db().clone();
-    let store = store.with_atomic_txn(Arc::new(SqliteAtomicClaimBackend { db }));
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
     let claimed = store
         .claim_next_event_delivery(
             "atomic-skip-worker",
@@ -5896,7 +6132,7 @@ fn postgres_tests_enabled() -> bool {
 /// Opens a disposable Postgres database with a multi-connection pool.
 ///
 /// Requires `BOOKCLERK_TEST_POSTGRES_URL`. Setup failures are fatal so a
-/// required CI job cannot pass without exercising the advisory lock.
+/// required CI job cannot pass without exercising the serialization slot.
 async fn postgres_test_store() -> LibraryStore {
     let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL").unwrap_or_else(|_| {
         panic!(

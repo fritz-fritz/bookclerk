@@ -44,6 +44,22 @@ pub fn encode<T: Serialize>(value: T) -> Result<String, PluginError> {
     Ok(json)
 }
 
+/// Encodes a `dbAtomic` result; an oversized scalar after commit is `unavailable`.
+///
+/// # Errors
+///
+/// Returns [`PluginError::payload_too_large`] mapped to
+/// [`PluginError::unavailable`] so the host retries the same `operationId`.
+pub fn encode_atomic_result<T: Serialize>(value: T) -> Result<String, PluginError> {
+    match encode(value) {
+        Ok(json) => Ok(json),
+        Err(err) if err.code == crate::PluginErrorCode::PayloadTooLarge => {
+            Err(PluginError::unavailable(err.message.clone()))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Page a JSON array of rows. `limit == 0` means [`MAX_LIST_PAGE`].
 ///
 /// # Errors

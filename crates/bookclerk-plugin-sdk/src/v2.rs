@@ -19,7 +19,7 @@ pub use bookclerk_plugin_abi::v2::{
 };
 
 mod json;
-pub use json::{decode as decode_json, encode as encode_json, page_rows};
+pub use json::{decode as decode_json, encode as encode_json, encode_atomic_result, page_rows};
 
 use std::sync::Arc;
 
