@@ -41,6 +41,7 @@ export {
 export { decodeDbValue, encodeDbValue, parseDbValue } from "./db-value.js";
 export type { DbType, DbValue } from "./db-value.js";
 export {
+  canonicalExecuteRequestHash,
   createDatabaseBinding,
   decodeExecuteRequest,
   encodeExecuteRequest,
@@ -56,6 +57,8 @@ export type {
   DbTiming,
   ExecuteReply,
   ExecuteRequest,
+  PreparedStatement,
+  RetryToken,
   StatementResult,
   TypedDbStatement,
 } from "./db-execute.js";

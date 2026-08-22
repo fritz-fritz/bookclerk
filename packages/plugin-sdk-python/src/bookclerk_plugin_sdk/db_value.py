@@ -8,8 +8,10 @@ always uses the domain types.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import struct
+import uuid
 from typing import Any, Callable, Literal, TypedDict, Union
 
 DbType = Literal["unspecified", "bool", "int64", "float64", "text", "bytes"]
@@ -282,11 +284,13 @@ def decode_execute_request(data: bytes) -> ExecuteRequest:
 
 
 class DatabaseBinding:
-    """Host-mediated typed SQL execute surface for plugin guests.
+    """Host-mediated Cloudflare-style SQL binding for plugin guests.
 
-    ``execute(batch)`` encodes an unpacked Cap'n ``ExecuteRequest`` (the same
-    bytes the host uses for ``maxRequestBytes``) and forwards the structured
-    request through the injected ``execute_atomic`` transport.
+    Public surface is ``prepare().bind().run()/first()/all()`` and
+    ``batch()``. Raw ``executeAtomic`` is an internal transport used by those
+    methods. Each call without an explicit :class:`RetryToken` mints a fresh
+    operation id and leaves ``requestHash`` empty so the trusted host can stamp
+    the canonical digest after validation. A :class:`RetryToken` reuses both.
     """
 
     def __init__(
@@ -303,8 +307,8 @@ class DatabaseBinding:
         Args:
             execute_atomic: Host session projection.
             max_request_bytes: Negotiated cap (``0`` = unlimited).
-            operation_id: Idempotency key; generated when omitted.
-            request_hash: SHA-256 hex of the request; empty when omitted.
+            operation_id: Default retry id; omitted calls mint a UUID.
+            request_hash: Default retry hash; empty lets the host stamp one.
             deadline_unix_ms: Guest-visible deadline (unix ms).
         """
         self._execute_atomic = execute_atomic
@@ -313,23 +317,69 @@ class DatabaseBinding:
         self._request_hash = request_hash
         self._deadline_unix_ms = deadline_unix_ms
 
-    def execute(self, batch: list[TypedDbStatement]) -> ExecuteReply:
-        """Run a typed atomic batch.
+    def prepare(self, sql: str) -> PreparedStatement:
+        """Prepare one canonical-SQL statement (``?`` placeholders).
 
         Args:
-            batch: Ordered statements with typed ``DbValue`` parameters.
+            sql: Host-mediated SQL. Kind and bounds are derived by the host.
+
+        Returns:
+            A statement that can be bound and executed.
+        """
+        return PreparedStatement(self, sql, [])
+
+    def batch(
+        self,
+        statements: list[PreparedStatement],
+        *,
+        retry: RetryToken | None = None,
+        result_selection: DbResultSelection = "rows",
+    ) -> ExecuteReply:
+        """Run ``statements`` as one typed atomic batch.
+
+        Args:
+            statements: Prepared statements (binds already applied).
+            retry: Reuse a prior operation id and request hash.
+            result_selection: Default selection when a statement has none.
 
         Returns:
             Decoded ``ExecuteReply``.
-
-        Raises:
-            ValueError: If ``batch`` is empty or exceeds ``maxRequestBytes``.
         """
+        typed = [
+            stmt._as_typed(stmt._result_selection or result_selection)  # noqa: SLF001
+            for stmt in statements
+        ]
+        return self._execute_atomic_batch(typed, retry=retry)
+
+    def execute(
+        self,
+        batch: list[TypedDbStatement],
+        *,
+        retry: RetryToken | None = None,
+    ) -> ExecuteReply:
+        """Internal typed-batch transport. Prefer :meth:`prepare` / :meth:`batch`."""
+        return self._execute_atomic_batch(batch, retry=retry)
+
+    def _execute_atomic_batch(
+        self,
+        batch: list[TypedDbStatement],
+        *,
+        retry: RetryToken | None = None,
+    ) -> ExecuteReply:
         if not batch:
             raise ValueError("executeAtomic statements must be non-empty")
+        if retry is not None:
+            operation_id = retry.operation_id
+            request_hash = retry.request_hash
+        elif self._operation_id is not None:
+            operation_id = self._operation_id
+            request_hash = self._request_hash
+        else:
+            operation_id = str(uuid.uuid4())
+            request_hash = ""
         request: ExecuteRequest = {
-            "operationId": self._operation_id or "op",
-            "requestHash": self._request_hash,
+            "operationId": operation_id,
+            "requestHash": request_hash,
             "statements": batch,
             "outcomeIndex": 0,
             "payloadIndex": 0,
@@ -347,6 +397,75 @@ class DatabaseBinding:
                 f"{self._max_request_bytes}"
             )
         return self._execute_atomic(request)
+
+
+class RetryToken:
+    """Explicit retry identity: reuse both ``operationId`` and ``requestHash``."""
+
+    def __init__(self, operation_id: str, request_hash: str) -> None:
+        self.operation_id = operation_id
+        self.request_hash = request_hash
+
+
+class PreparedStatement:
+    """Cloudflare-style prepared statement over a :class:`DatabaseBinding`."""
+
+    def __init__(
+        self,
+        binding: DatabaseBinding,
+        sql: str,
+        parameters: list[DbValue],
+        result_selection: DbResultSelection | None = None,
+    ) -> None:
+        self._binding = binding
+        self.sql = sql
+        self.parameters = list(parameters)
+        self._result_selection = result_selection
+
+    def bind(self, *values: DbValue) -> PreparedStatement:
+        """Replace bound parameters with ``values`` (universal ``DbValue`` only)."""
+        return PreparedStatement(self._binding, self.sql, list(values), self._result_selection)
+
+    def run(self, *, retry: RetryToken | None = None) -> ExecuteReply:
+        """Execute as DML (``affectedRows``)."""
+        return self._binding.batch([self], retry=retry, result_selection="affectedRows")
+
+    def first(self, *, retry: RetryToken | None = None) -> dict[str, Any] | None:
+        """Return the first row as a name→value map, or ``None``."""
+        reply = self._binding.batch([self], retry=retry, result_selection="rows")
+        result = reply["statements"][0] if reply["statements"] else None
+        if result is None or not result["rows"]:
+            return None
+        columns = result["columns"]
+        row = result["rows"][0]
+        cells = row["values"] if isinstance(row, dict) else []
+        return {col["name"]: cell for col, cell in zip(columns, cells)}
+
+    def all(self, *, retry: RetryToken | None = None) -> ExecuteReply:
+        """Execute as a row-returning query."""
+        return self._binding.batch([self], retry=retry, result_selection="rows")
+
+    def _as_typed(self, result_selection: DbResultSelection) -> TypedDbStatement:
+        kind: DbStatementKind = (
+            "execute" if result_selection in ("affectedRows", "discard") else "select"
+        )
+        return {
+            "sql": self.sql,
+            "parameters": self.parameters,
+            "kind": kind,
+            "maxRows": 0,
+            "resultSelection": result_selection,
+        }
+
+
+def canonical_execute_request_hash(request: ExecuteRequest) -> str:
+    """SHA-256 hex of the Cap'n request with id and hash cleared.
+
+    Matches the host ``canonical_execute_request_hash`` digest so a retry
+    token can reuse both id and hash.
+    """
+    canonical: ExecuteRequest = {**request, "operationId": "", "requestHash": ""}
+    return hashlib.sha256(encode_execute_request(canonical)).hexdigest()
 
 
 def _parse_bytes(value: Any) -> bytes:
@@ -505,34 +624,50 @@ class _CapnpStruct:
 
 class _CapnpReader:
     """Single-segment unpacked Cap'n reader."""
+
+    _MAX_TRAVERSAL_WORDS = 64 * 1024
+
     def __init__(self, data: bytes) -> None:
         if len(data) < WORD:
             raise ValueError("truncated Cap'n message")
         nseg_minus, size0 = struct.unpack_from("<II", data, 0)
         nseg = nseg_minus + 1
-        size_words = nseg + 1
-        pad = 4 if size_words % 2 == 1 else 0
+        if nseg != 1:
+            raise ValueError("multi-segment Cap'n messages are not supported")
         self._data = data
-        self._seg = 4 * (nseg + 1) + pad
+        self._seg = 8
+        self._size0 = size0
         if self._seg + size0 * WORD > len(data):
             raise ValueError("truncated Cap'n segment")
+        if size0 > self._MAX_TRAVERSAL_WORDS:
+            raise ValueError("Cap'n segment exceeds traversal budget")
 
     def root(self, data_words: int, pointer_words: int) -> _StructReader:
         return self.struct_at(0, data_words, pointer_words)
 
     def struct_at(self, ptr_word: int, data_words: int, pointer_words: int) -> _StructReader:
         word = self.read_word(ptr_word)
-        if word & 3 != 0:
+        a = word & 3
+        if a == 2 or a == 3:
+            raise ValueError("far pointers are not supported")
+        if a != 0:
             raise ValueError("expected struct pointer")
-        offset = (word >> 2) & 0x3FFFFFFF
+        offset = _sign_extend_30((word >> 2) & 0x3FFFFFFF)
         dw = (word >> 32) & 0xFFFF
         pw = (word >> 48) & 0xFFFF
         if dw < data_words or pw < pointer_words:
             raise ValueError("struct pointer smaller than expected")
-        return _StructReader(self, ptr_word + 1 + offset, dw, pw)
+        target = ptr_word + 1 + offset
+        self._check_range(target, dw + pw)
+        return _StructReader(self, target, dw, pw)
 
     def read_word(self, word: int) -> int:
+        self._check_range(word, 1)
         return struct.unpack_from("<Q", self._data, self._seg + word * WORD)[0]
+
+    def _check_range(self, word: int, n_words: int) -> None:
+        if word < 0 or n_words < 0 or word + n_words > self._size0:
+            raise ValueError("Cap'n pointer out of segment")
 
     def get_u16(self, word: int, field_index: int) -> int:
         return struct.unpack_from("<H", self._data, self._seg + word * WORD + field_index * 2)[0]
@@ -551,21 +686,32 @@ class _CapnpReader:
 
     def get_bool(self, word: int, bit_index: int) -> bool:
         byte_off = self._seg + word * WORD + (bit_index >> 3)
+        if byte_off < 0 or byte_off >= len(self._data):
+            raise ValueError("Cap'n pointer out of segment")
         return (self._data[byte_off] & (1 << (bit_index & 7))) != 0
 
     def read_byte_list(self, ptr_word: int) -> bytes:
         word = self.read_word(ptr_word)
         if word == 0:
             return b""
-        if word & 3 != 1:
+        a = word & 3
+        if a == 2 or a == 3:
+            raise ValueError("far pointers are not supported")
+        if a != 1:
             raise ValueError("expected list pointer")
-        offset = (word >> 2) & 0x3FFFFFFF
+        offset = _sign_extend_30((word >> 2) & 0x3FFFFFFF)
         c = (word >> 32) & 7
         d = word >> 35
         if c != 2:
             raise ValueError("expected byte list")
-        start = self._seg + (ptr_word + 1 + offset) * WORD
-        return self._data[start : start + d]
+        target = ptr_word + 1 + offset
+        n_words = (d + WORD - 1) // WORD if d else 0
+        self._check_range(target, n_words)
+        start = self._seg + target * WORD
+        end = start + d
+        if end > len(self._data):
+            raise ValueError("truncated Cap'n byte list")
+        return self._data[start:end]
 
     def read_text(self, ptr_word: int) -> str:
         data = self.read_byte_list(ptr_word)
@@ -579,9 +725,12 @@ class _CapnpReader:
         word = self.read_word(ptr_word)
         if word == 0:
             return []
-        if word & 3 != 1:
+        a = word & 3
+        if a == 2 or a == 3:
+            raise ValueError("far pointers are not supported")
+        if a != 1:
             raise ValueError("expected list pointer")
-        offset = (word >> 2) & 0x3FFFFFFF
+        offset = _sign_extend_30((word >> 2) & 0x3FFFFFFF)
         c = (word >> 32) & 7
         d = word >> 35
         if c != 7:
@@ -589,6 +738,7 @@ class _CapnpReader:
         if d == 0:
             return []
         tag_word = ptr_word + 1 + offset
+        self._check_range(tag_word, 1)
         tag = self.read_word(tag_word)
         count = (tag >> 2) & 0x3FFFFFFF
         dw = (tag >> 32) & 0xFFFF
@@ -596,9 +746,21 @@ class _CapnpReader:
         if dw < data_words or pw < pointer_words:
             raise ValueError("composite element smaller than expected")
         elem_words = dw + pw
+        if elem_words and count > d // elem_words:
+            raise ValueError("composite list count exceeds payload")
+        if count > self._MAX_TRAVERSAL_WORDS:
+            raise ValueError("composite list count exceeds traversal budget")
+        self._check_range(tag_word, 1 + count * elem_words)
         return [
             _StructReader(self, tag_word + 1 + i * elem_words, dw, pw) for i in range(count)
         ]
+
+
+def _sign_extend_30(n: int) -> int:
+    n &= 0x3FFFFFFF
+    if n & 0x20000000:
+        return n - 0x40000000
+    return n
 
 
 class _StructReader:

@@ -529,6 +529,8 @@ impl JobHandler for HttpJobHandler {
                 allow_open: true,
                 allow_put: true,
                 allow_progress: true,
+                database: context.database.map(Rc::from),
+                allow_database: true,
             },
         );
         let _revoke = RevokeGrant {

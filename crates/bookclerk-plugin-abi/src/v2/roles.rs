@@ -106,6 +106,8 @@ pub struct JobHandlerContext {
     pub output: Box<dyn Destination>,
     /// Progress sink (durable job row).
     pub progress: Box<dyn ProgressSink>,
+    /// Host-mediated typed SQL session when the invocation grant includes one.
+    pub database: Option<Box<dyn DatabaseSession>>,
     /// Cancellation capability (host fence / lease).
     pub cancel: Box<dyn Cancellation>,
 }

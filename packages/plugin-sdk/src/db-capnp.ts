@@ -237,6 +237,8 @@ export class CapnpStruct {
 export class CapnpReader {
   private readonly view: DataView;
   private readonly segOff: number;
+  private readonly size0: number;
+  private static readonly MAX_TRAVERSAL_WORDS = 64 * 1024;
 
   constructor(bytes: Uint8Array) {
     if (bytes.byteLength < WORD) {
@@ -245,12 +247,17 @@ export class CapnpReader {
     this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const nsegMinus = this.view.getUint32(0, true);
     const nseg = nsegMinus + 1;
+    if (nseg !== 1) {
+      throw new Error("multi-segment Cap'n messages are not supported");
+    }
     const size0 = this.view.getUint32(4, true);
-    const sizeWords = nseg + 1;
-    const pad = sizeWords % 2 === 1 ? 4 : 0;
-    this.segOff = 4 * (nseg + 1) + pad;
+    this.segOff = WORD;
+    this.size0 = size0;
     if (this.segOff + size0 * WORD > bytes.byteLength) {
       throw new Error("truncated Cap'n segment");
+    }
+    if (size0 > CapnpReader.MAX_TRAVERSAL_WORDS) {
+      throw new Error("Cap'n segment exceeds traversal budget");
     }
   }
 
@@ -261,21 +268,32 @@ export class CapnpReader {
   structAt(ptrWord: number, dataWords: number, pointerWords: number): StructReader {
     const word = this.readWord(ptrWord);
     const a = Number(word & 3n);
+    if (a === 2 || a === 3) {
+      throw new Error("far pointers are not supported");
+    }
     if (a !== 0) {
       throw new Error("expected struct pointer");
     }
-    const offset = Number((word >> 2n) & 0x3fffffffn);
+    const offset = signExtend30(Number((word >> 2n) & 0x3fffffffn));
     const dw = Number((word >> 32n) & 0xffffn);
     const pw = Number((word >> 48n) & 0xffffn);
     if (dw < dataWords || pw < pointerWords) {
       throw new Error("struct pointer smaller than expected");
     }
     const target = ptrWord + 1 + offset;
+    this.checkRange(target, dw + pw);
     return new StructReader(this, target, dw, pw);
   }
 
   readWord(word: number): bigint {
+    this.checkRange(word, 1);
     return this.view.getBigUint64(this.segOff + word * WORD, true);
+  }
+
+  private checkRange(word: number, nWords: number): void {
+    if (word < 0 || nWords < 0 || word + nWords > this.size0) {
+      throw new Error("Cap'n pointer out of segment");
+    }
   }
 
   getUint16(word: number, fieldIndex: number): number {
@@ -309,17 +327,25 @@ export class CapnpReader {
       return new Uint8Array(0);
     }
     const a = Number(word & 3n);
+    if (a === 2 || a === 3) {
+      throw new Error("far pointers are not supported");
+    }
     if (a !== 1) {
       throw new Error("expected list pointer");
     }
-    const offset = Number((word >> 2n) & 0x3fffffffn);
+    const offset = signExtend30(Number((word >> 2n) & 0x3fffffffn));
     const c = Number((word >> 32n) & 7n);
     const d = Number(word >> 35n);
     if (c !== 2) {
       throw new Error("expected byte list");
     }
     const target = ptrWord + 1 + offset;
+    const nWords = d === 0 ? 0 : Math.ceil(d / WORD);
+    this.checkRange(target, nWords);
     const start = this.segOff + target * WORD;
+    if (start + d > this.view.byteLength) {
+      throw new Error("truncated Cap'n byte list");
+    }
     return new Uint8Array(this.view.buffer, this.view.byteOffset + start, d);
   }
 
@@ -339,10 +365,13 @@ export class CapnpReader {
       return [];
     }
     const a = Number(word & 3n);
+    if (a === 2 || a === 3) {
+      throw new Error("far pointers are not supported");
+    }
     if (a !== 1) {
       throw new Error("expected list pointer");
     }
-    const offset = Number((word >> 2n) & 0x3fffffffn);
+    const offset = signExtend30(Number((word >> 2n) & 0x3fffffffn));
     const c = Number((word >> 32n) & 7n);
     const d = Number(word >> 35n);
     if (c !== 7) {
@@ -352,6 +381,7 @@ export class CapnpReader {
       return [];
     }
     const tagWord = ptrWord + 1 + offset;
+    this.checkRange(tagWord, 1);
     const tag = this.readWord(tagWord);
     const count = Number((tag >> 2n) & 0x3fffffffn);
     const dw = Number((tag >> 32n) & 0xffffn);
@@ -360,12 +390,24 @@ export class CapnpReader {
       throw new Error("composite element smaller than expected");
     }
     const elemWords = dw + pw;
+    if (elemWords > 0 && count > Math.floor(d / elemWords)) {
+      throw new Error("composite list count exceeds payload");
+    }
+    if (count > CapnpReader.MAX_TRAVERSAL_WORDS) {
+      throw new Error("composite list count exceeds traversal budget");
+    }
+    this.checkRange(tagWord, 1 + count * elemWords);
     const out: StructReader[] = [];
     for (let i = 0; i < count; i++) {
       out.push(new StructReader(this, tagWord + 1 + i * elemWords, dw, pw));
     }
     return out;
   }
+}
+
+function signExtend30(n: number): number {
+  const v = n & 0x3fffffff;
+  return v & 0x20000000 ? v - 0x40000000 : v;
 }
 
 export class StructReader {

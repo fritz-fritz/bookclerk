@@ -13,7 +13,10 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use anyhow::{bail, Context as _, Result};
-use bookclerk_plugin_abi::v2::{Destination, ObjectMetadata, ProgressSink, Source, WriteOptions};
+use bookclerk_plugin_abi::decode_execute_request_bytes;
+use bookclerk_plugin_abi::v2::{
+    DatabaseSession, Destination, ObjectMetadata, ProgressSink, Source, WriteOptions,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
@@ -33,6 +36,10 @@ pub struct GrantedSlot {
     pub allow_put: bool,
     /// Whether `progress` is permitted on this grant.
     pub allow_progress: bool,
+    /// Host-mediated typed SQL session, when this invocation is granted one.
+    pub database: Option<Rc<dyn DatabaseSession>>,
+    /// Whether `executeAtomic` is permitted on this grant.
+    pub allow_database: bool,
 }
 
 /// Invocation-id → granted stubs.
@@ -56,6 +63,11 @@ enum GrantedCmd {
         percent: f32,
         message: String,
         resp: oneshot::Sender<Result<(), String>>,
+    },
+    ExecuteAtomic {
+        invocation: String,
+        request_bytes: Vec<u8>,
+        resp: oneshot::Sender<Result<Vec<u8>, String>>,
     },
 }
 
@@ -117,6 +129,14 @@ async fn dispatch_granted(mut rx: mpsc::Receiver<GrantedCmd>, table: GrantedTabl
                 } => {
                     let _ =
                         resp.send(dispatch_progress(&table, invocation, percent, message).await);
+                }
+                GrantedCmd::ExecuteAtomic {
+                    invocation,
+                    request_bytes,
+                    resp,
+                } => {
+                    let _ =
+                        resp.send(dispatch_execute_atomic(&table, invocation, request_bytes).await);
                 }
             }
         });
@@ -255,6 +275,35 @@ async fn dispatch_progress(
         }
     }
     Ok(())
+}
+
+async fn dispatch_execute_atomic(
+    table: &GrantedTable,
+    invocation: String,
+    request_bytes: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let req = decode_execute_request_bytes(&request_bytes).map_err(|err| err.to_string())?;
+    let db = {
+        let mut table = table.borrow_mut();
+        let slot = table
+            .get_mut(&invocation)
+            .ok_or_else(|| "unknown or revoked grant".to_string())?;
+        if slot.expires <= std::time::Instant::now() {
+            table.remove(&invocation);
+            return Err("grant expired".into());
+        }
+        if !slot.allow_database {
+            return Err("database not permitted on this grant".into());
+        }
+        slot.database
+            .clone()
+            .ok_or_else(|| "database not granted".to_string())?
+    };
+    let reply = db
+        .execute_atomic(req)
+        .await
+        .map_err(|err| err.to_string())?;
+    serde_json::to_vec(&reply).map_err(|err| err.to_string())
 }
 
 struct ChannelReader {
@@ -484,6 +533,30 @@ where
             .context("granted progress dropped")?
             .map_err(anyhow::Error::msg)?;
         write_status(&mut writer, 200, "ok").await?;
+        return Ok(());
+    }
+
+    if method == "POST" && path_only == "/db/executeAtomic" {
+        let rest = read_content(&mut reader, &headers, prefix).await?;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        cmds.send(GrantedCmd::ExecuteAtomic {
+            invocation,
+            request_bytes: rest,
+            resp: resp_tx,
+        })
+        .await
+        .context("granted dispatch closed")?;
+        let payload = resp_rx
+            .await
+            .context("granted executeAtomic dropped")?
+            .map_err(anyhow::Error::msg)?;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            payload.len()
+        );
+        writer.write_all(resp.as_bytes()).await?;
+        writer.write_all(&payload).await?;
+        writer.flush().await?;
         return Ok(());
     }
 
@@ -727,6 +800,8 @@ mod tests {
                 allow_open: true,
                 allow_put: true,
                 allow_progress: true,
+                database: None,
+                allow_database: false,
             },
         );
         let err = match take_slot_source(&table, "g1") {
@@ -767,6 +842,8 @@ mod tests {
                 allow_open: true,
                 allow_put: true,
                 allow_progress: true,
+                database: None,
+                allow_database: false,
             },
         );
         table.borrow_mut().remove("g-live");
@@ -775,5 +852,55 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.contains("unknown") || err.contains("revoked"));
+    }
+
+    #[tokio::test]
+    async fn database_grant_is_required_for_execute_atomic() {
+        use bookclerk_plugin_abi::{
+            encoded_execute_request_bytes, DbPlanStatementKind, DbResultSelection, ExecuteRequest,
+            TypedDbStatement,
+        };
+        let table: GrantedTable = Rc::new(RefCell::new(HashMap::new()));
+        table.borrow_mut().insert(
+            "g-db".into(),
+            GrantedSlot {
+                input: None,
+                output: None,
+                progress: None,
+                expires: Instant::now() + Duration::from_secs(60),
+                allow_open: true,
+                allow_put: true,
+                allow_progress: true,
+                database: None,
+                allow_database: false,
+            },
+        );
+        let req = ExecuteRequest {
+            operation_id: "op-db".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 1".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            }],
+            outcome_index: 0,
+            payload_index: 0,
+            has_payload_index: false,
+            prior_receipt_index: 0,
+            has_prior_receipt_index: false,
+            receipt_select_index: 0,
+            has_receipt_select_index: false,
+            deadline_unix_ms: 0,
+        };
+        let bytes = encoded_execute_request_bytes(&req).expect("encode");
+        let err = dispatch_execute_atomic(&table, "g-db".into(), bytes)
+            .await
+            .expect_err("missing database grant must fail");
+        assert!(
+            err.contains("not permitted") || err.contains("not granted"),
+            "{err}"
+        );
     }
 }

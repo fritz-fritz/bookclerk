@@ -147,11 +147,23 @@ export interface AtomicTransport {
 }
 
 /**
+ * Explicit retry identity. Reuses both `operationId` and `requestHash`.
+ */
+export interface RetryToken {
+  /** Caller-chosen idempotency key. */
+  operationId: string;
+  /** Canonical Cap'n request hash stamped by the host. */
+  requestHash: string;
+}
+
+/**
  * Options for {@link createDatabaseBinding}.
  */
 export interface DatabaseBindingOptions {
   /** Negotiated `maxRequestBytes` (`0` = unlimited). */
   maxRequestBytes?: number;
+  /** Default retry token; omitted calls mint a UUID and hash. */
+  retry?: RetryToken;
   /** Idempotency key; generated when omitted. */
   operationId?: string;
   /** SHA-256 hex of the request; empty when omitted. */
@@ -161,20 +173,66 @@ export interface DatabaseBindingOptions {
 }
 
 /**
- * Host-mediated typed SQL execute surface for plugin guests.
+ * Cloudflare-style prepared statement. Kind, bounds, and request hash are
+ * derived by the trusted host. Only universal {@link DbValue}s are public.
+ */
+export interface PreparedStatement {
+  /**
+   * Replace bound parameters.
+   *
+   * @param values Universal `DbValue`s only.
+   */
+  bind(...values: DbValue[]): PreparedStatement;
+  /**
+   * Execute as DML (`affectedRows`).
+   *
+   * @param options Optional retry token.
+   */
+  run(options?: { retry?: RetryToken }): Promise<ExecuteReply>;
+  /**
+   * First row as a name→value map, or `null`.
+   *
+   * @param options Optional retry token.
+   */
+  first(options?: { retry?: RetryToken }): Promise<Record<string, DbValue> | null>;
+  /**
+   * Execute as a row-returning query.
+   *
+   * @param options Optional retry token.
+   */
+  all(options?: { retry?: RetryToken }): Promise<ExecuteReply>;
+}
+
+/**
+ * Host-mediated typed SQL surface for plugin guests.
  *
- * `execute(batch)` encodes an unpacked Cap'n `ExecuteRequest` (the same bytes
- * the host uses for `maxRequestBytes`) and forwards the structured request
- * through the injected `executeAtomic` transport.
+ * Public API is Cloudflare-style `prepare().bind().run()/first()/all()` plus
+ * atomic `batch()`. Raw `executeAtomic` stays internal.
  */
 export interface DatabaseBinding {
   /**
-   * Runs a typed atomic batch.
+   * Prepare one canonical-SQL statement (`?` placeholders).
+   *
+   * @param sql Host-mediated SQL. Kind and bounds are derived by the host.
+   */
+  prepare(sql: string): PreparedStatement;
+  /**
+   * Run prepared statements as one typed atomic batch.
+   *
+   * @param statements Prepared statements (binds already applied).
+   * @param options Retry token and default result selection.
+   */
+  batch(
+    statements: PreparedStatement[],
+    options?: { retry?: RetryToken; resultSelection?: DbResultSelection },
+  ): Promise<ExecuteReply>;
+  /**
+   * Internal typed-batch transport. Prefer {@link DatabaseBinding.prepare}.
    *
    * @param batch Ordered statements with typed `DbValue` parameters.
-   * @returns Decoded `ExecuteReply`.
+   * @param options Optional retry token.
    */
-  execute(batch: TypedDbStatement[]): Promise<ExecuteReply>;
+  execute(batch: TypedDbStatement[], options?: { retry?: RetryToken }): Promise<ExecuteReply>;
 }
 
 /**
@@ -247,31 +305,104 @@ export function createDatabaseBinding(
   transport: AtomicTransport,
   options: DatabaseBindingOptions = {},
 ): DatabaseBinding {
-  return {
-    async execute(batch: TypedDbStatement[]): Promise<ExecuteReply> {
-      if (!Array.isArray(batch) || batch.length === 0) {
-        throw new Error("executeAtomic statements must be non-empty");
-      }
-      const request = executeRequestFromBatch(batch, options);
-      const encoded = encodeExecuteRequest(request);
-      const cap = options.maxRequestBytes ?? 0;
-      if (cap > 0 && encoded.byteLength > cap) {
-        throw new Error(
-          `atomic request is ${encoded.byteLength} bytes; guest maxRequestBytes is ${cap}`,
-        );
-      }
-      return transport.executeAtomic(request);
+  const executeAtomic = async (
+    batch: TypedDbStatement[],
+    retry?: RetryToken,
+  ): Promise<ExecuteReply> => {
+    if (!Array.isArray(batch) || batch.length === 0) {
+      throw new Error("executeAtomic statements must be non-empty");
+    }
+    const request = await executeRequestFromBatch(batch, options, retry);
+    const encoded = encodeExecuteRequest(request);
+    const cap = options.maxRequestBytes ?? 0;
+    if (cap > 0 && encoded.byteLength > cap) {
+      throw new Error(
+        `atomic request is ${encoded.byteLength} bytes; guest maxRequestBytes is ${cap}`,
+      );
+    }
+    return transport.executeAtomic(request);
+  };
+
+  const binding: DatabaseBinding = {
+    prepare(sql: string): PreparedStatement {
+      return makePrepared(binding, sql, []);
+    },
+    batch(statements, opts) {
+      const selection = opts?.resultSelection ?? "rows";
+      const typed = statements.map((s) =>
+        (s as PreparedInternal)._asTyped((s as PreparedInternal)._selection ?? selection),
+      );
+      return executeAtomic(typed, opts?.retry);
+    },
+    execute(batch, opts) {
+      return executeAtomic(batch, opts?.retry);
     },
   };
+  return binding;
 }
 
-function executeRequestFromBatch(
+interface PreparedInternal extends PreparedStatement {
+  _selection?: DbResultSelection;
+  _asTyped(selection: DbResultSelection): TypedDbStatement;
+}
+
+function makePrepared(
+  binding: DatabaseBinding,
+  sql: string,
+  parameters: DbValue[],
+  selection?: DbResultSelection,
+): PreparedInternal {
+  const stmt: PreparedInternal = {
+    _selection: selection,
+    bind(...values: DbValue[]) {
+      return makePrepared(binding, sql, values, selection);
+    },
+    run(options) {
+      return binding.batch([stmt], {
+        retry: options?.retry,
+        resultSelection: "affectedRows",
+      });
+    },
+    async first(options) {
+      const reply = await binding.batch([stmt], {
+        retry: options?.retry,
+        resultSelection: "rows",
+      });
+      const result = reply.statements[0];
+      if (!result || result.rows.length === 0) {
+        return null;
+      }
+      const row: Record<string, DbValue> = {};
+      for (let i = 0; i < result.columns.length; i++) {
+        row[result.columns[i].name] = result.rows[0].values[i];
+      }
+      return row;
+    },
+    all(options) {
+      return binding.batch([stmt], { retry: options?.retry, resultSelection: "rows" });
+    },
+    _asTyped(resultSelection: DbResultSelection): TypedDbStatement {
+      return {
+        sql,
+        parameters,
+        kind: resultSelection === "affectedRows" || resultSelection === "discard" ? "execute" : "select",
+        maxRows: 0,
+        resultSelection,
+      };
+    },
+  };
+  return stmt;
+}
+
+async function executeRequestFromBatch(
   batch: TypedDbStatement[],
   options: DatabaseBindingOptions,
-): ExecuteRequest {
+  retry?: RetryToken,
+): Promise<ExecuteRequest> {
+  const token = retry ?? options.retry;
   return {
-    operationId: options.operationId ?? newOperationId(),
-    requestHash: options.requestHash ?? "",
+    operationId: token?.operationId ?? options.operationId ?? newOperationId(),
+    requestHash: token?.requestHash ?? options.requestHash ?? "",
     statements: batch,
     outcomeIndex: 0,
     payloadIndex: 0,
@@ -284,11 +415,32 @@ function executeRequestFromBatch(
   };
 }
 
+/**
+ * SHA-256 hex of the Cap'n request with id and hash cleared.
+ *
+ * @param request Structured request.
+ * @returns Hex digest matching the host canonical hash.
+ */
+export async function canonicalExecuteRequestHash(request: ExecuteRequest): Promise<string> {
+  const canonical: ExecuteRequest = { ...request, operationId: "", requestHash: "" };
+  const bytes = encodeExecuteRequest(canonical);
+  if (globalThis.crypto?.subtle) {
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    return hexBytes(new Uint8Array(digest));
+  }
+  const { createHash } = await import("node:crypto");
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function hexBytes(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function newOperationId(): string {
   if (typeof globalThis.crypto?.randomUUID === "function") {
     return globalThis.crypto.randomUUID();
   }
-  return `op-${Date.now()}`;
+  return `op-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function writeStatement(s: CapnpStruct, stmt: TypedDbStatement): void {

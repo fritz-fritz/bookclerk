@@ -154,5 +154,28 @@ const reply = await binding.execute(request.statements);
 assert.equal(reply.operationId, "op");
 assert.equal(encodedByBinding, reqBytes.byteLength);
 
+const sequentialIds = [];
+const seqBinding = createDatabaseBinding({
+  async executeAtomic(req) {
+    sequentialIds.push(req.operationId);
+    assert.notEqual(req.operationId, "op");
+    assert.equal(req.requestHash, "");
+    return {
+      operationId: req.operationId,
+      statements: [{ rows: [], columns: [], rowsAffected: 0, cursor: "" }],
+      timing: { attemptElapsedUs: 0, dbExecutionUs: 0, dbTimingSource: "test" },
+    };
+  },
+});
+await seqBinding.prepare("INSERT INTO t VALUES (?)").bind({ kind: "int64", value: 1n }).run();
+await seqBinding.prepare("INSERT INTO t VALUES (?)").bind({ kind: "int64", value: 2n }).run();
+assert.equal(sequentialIds.length, 2);
+assert.notEqual(sequentialIds[0], sequentialIds[1]);
+
+assert.throws(() => decodeDbValue(new Uint8Array([0, 0])), /truncated/);
+const multi = new Uint8Array(24);
+new DataView(multi.buffer).setUint32(0, 1, true);
+assert.throws(() => decodeDbValue(multi), /multi-segment/);
+
 assert.equal(typeof readFileSync, "function");
 console.log("db-value goldens ok");

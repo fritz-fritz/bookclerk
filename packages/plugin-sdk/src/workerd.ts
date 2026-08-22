@@ -65,6 +65,7 @@ export type {
   HostToPluginEvent,
 } from "./generated.js";
 export {
+  canonicalExecuteRequestHash,
   createDatabaseBinding,
   decodeExecuteRequest,
   encodeExecuteRequest,
@@ -82,6 +83,8 @@ export type {
   DbTiming,
   ExecuteReply,
   ExecuteRequest,
+  PreparedStatement,
+  RetryToken,
   StatementResult,
   TypedDbStatement,
 } from "./db-execute.js";

@@ -2238,6 +2238,7 @@ impl job_handler::Server for JobHandlerServer {
             input: Box::new(SourceClient::new(input, self.window)),
             output: Box::new(DestinationClient::new(output, self.window)),
             progress: Box::new(ProgressArc(progress)),
+            database: None,
             cancel,
         };
         let result = results.get().init_result();

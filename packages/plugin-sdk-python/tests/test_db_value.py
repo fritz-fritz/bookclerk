@@ -6,6 +6,8 @@ import unittest
 
 from bookclerk_plugin_sdk.db_value import (
     DatabaseBinding,
+    RetryToken,
+    canonical_execute_request_hash,
     decode_db_value,
     decode_execute_request,
     encode_db_value,
@@ -155,6 +157,111 @@ class DbValueGoldens(unittest.TestCase):
         reply = binding.execute(request["statements"])
         self.assertEqual(reply["operationId"], "op")
         self.assertEqual(seen["n"], len(encoded))
+
+    def test_two_sequential_batches_use_distinct_operation_ids(self) -> None:
+        seen: list[str] = []
+
+        def transport(req):
+            seen.append(req["operationId"])
+            self.assertNotEqual(req["operationId"], "op")
+            return {
+                "operationId": req["operationId"],
+                "statements": [
+                    {"rows": [], "columns": [], "rowsAffected": 0, "cursor": ""}
+                ],
+                "timing": {
+                    "attemptElapsedUs": 0,
+                    "dbExecutionUs": 0,
+                    "dbTimingSource": "test",
+                },
+            }
+
+        hashes: list[str] = []
+
+        def recording(req):
+            hashes.append(req["requestHash"])
+            return transport(req)
+
+        binding = DatabaseBinding(recording)
+        first = [{"kind": "int64", "value": 1}]
+        second = [{"kind": "int64", "value": 2}]
+        binding.prepare("INSERT INTO t VALUES (?)").bind(*first).run()
+        binding.prepare("INSERT INTO t VALUES (?)").bind(*second).run()
+        self.assertEqual(len(seen), 2)
+        self.assertNotEqual(seen[0], seen[1])
+        self.assertNotEqual(seen[0], "op")
+        self.assertNotEqual(seen[1], "op")
+        self.assertEqual(hashes, ["", ""])
+        retry = RetryToken(seen[0], canonical_execute_request_hash({
+            "operationId": seen[0],
+            "requestHash": "",
+            "statements": [
+                {
+                    "sql": "INSERT INTO t VALUES (?)",
+                    "parameters": first,
+                    "kind": "execute",
+                    "maxRows": 0,
+                    "resultSelection": "affectedRows",
+                }
+            ],
+            "outcomeIndex": 0,
+            "payloadIndex": 0,
+            "hasPayloadIndex": False,
+            "priorReceiptIndex": 0,
+            "hasPriorReceiptIndex": False,
+            "receiptSelectIndex": 0,
+            "hasReceiptSelectIndex": False,
+            "deadlineUnixMs": 0,
+        }))
+        replayed = []
+
+        def replay_transport(req):
+            replayed.append((req["operationId"], req["requestHash"]))
+            return transport(req)
+
+        replay = DatabaseBinding(replay_transport)
+        replay.prepare("INSERT INTO t VALUES (?)").bind(*first).run(retry=retry)
+        self.assertEqual(replayed[0][0], seen[0])
+        self.assertEqual(replayed[0][1], retry.request_hash)
+
+    def test_capnp_reader_rejects_truncated_multisegment_and_oversized_count(self) -> None:
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            decode_db_value(b"\x00\x00")
+        multi = (
+            (1).to_bytes(4, "little")
+            + (1).to_bytes(4, "little")
+            + (1).to_bytes(4, "little")
+            + (0).to_bytes(4, "little")
+            + b"\x00" * 16
+        )
+        with self.assertRaisesRegex(ValueError, "multi-segment"):
+            decode_db_value(multi)
+        # Composite list tag with count 2^29 and a 1-word payload (D=1).
+        import struct
+
+        def pack_word(n: int) -> bytes:
+            return struct.pack("<Q", n)
+
+        # single-segment header, size 4 words: root ptr + far-looking list + tag + pad
+        # Build: nseg=1, size0=4. Root is a composite list pointer with huge count.
+        list_ptr = 1 | (0 << 2) | (7 << 32) | (1 << 35)  # offset 0, composite, D=1
+        tag = (0x20000000 << 2) | (1 << 32) | (0 << 48)  # count ~2^29, 1 data word
+        buf = bytearray()
+        buf += struct.pack("<II", 0, 4)
+        buf += pack_word(list_ptr)  # word 0 root — not a struct; decode_db_value expects struct
+        buf += pack_word(0)
+        buf += pack_word(tag)
+        buf += pack_word(0)
+        with self.assertRaises(ValueError):
+            decode_execute_request(bytes(buf))
+        # Backward (negative) struct offset that leaves the segment.
+        back_ptr = 0 | ((0x3FFFFFFF) << 2) | (2 << 32) | (1 << 48)
+        back = bytearray()
+        back += struct.pack("<II", 0, 2)
+        back += pack_word(back_ptr)
+        back += pack_word(0)
+        with self.assertRaisesRegex(ValueError, "out of segment|far pointer|expected struct"):
+            decode_db_value(bytes(back))
 
 
 if __name__ == "__main__":

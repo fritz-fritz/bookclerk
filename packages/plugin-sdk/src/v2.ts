@@ -8,6 +8,8 @@
 
 import "./cloudflare-workers.d.ts";
 import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
+import { createDatabaseBinding, encodeExecuteRequest } from "./db-execute.js";
+import type { ExecuteReply, ExecuteRequest } from "./db-execute.js";
 
 /** Product ABI version (`plugin.toml` `api_version` and `describe().apiVersion`). */
 export const PRODUCT_API_VERSION = 2 as const;
@@ -366,6 +368,8 @@ export interface JobContext {
   input: Source;
   output: Destination;
   progress: ProgressSink;
+  /** Host-mediated typed SQL when the invocation grant includes a database. */
+  database?: import("./db-execute.js").DatabaseBinding;
   signal?: AbortSignal;
 }
 
@@ -872,6 +876,32 @@ class GrantedProgress extends ProgressSink {
   }
 }
 
+class GrantedDatabaseTransport {
+  #granted: GrantedFetcher;
+  #auth: Record<string, string>;
+  #signal: AbortSignal;
+
+  constructor(granted: GrantedFetcher, auth: Record<string, string>, signal: AbortSignal) {
+    this.#granted = granted;
+    this.#auth = auth;
+    this.#signal = signal;
+  }
+
+  async executeAtomic(request: ExecuteRequest): Promise<ExecuteReply> {
+    const body = encodeExecuteRequest(request);
+    const resp = await this.#granted.fetch(`http://granted/db/executeAtomic`, {
+      method: "POST",
+      headers: { ...this.#auth, "content-type": "application/octet-stream" },
+      body,
+      signal: this.#signal,
+    });
+    if (!resp.ok) {
+      throw PluginError.fromWire("unavailable", `database grant: ${resp.status}`);
+    }
+    return (await resp.json()) as ExecuteReply;
+  }
+}
+
 function v2GrantedContext(
   env: AdapterEnv,
   grantToken: string,
@@ -886,6 +916,10 @@ function v2GrantedContext(
     input: new GrantedSource(granted, auth, controller.signal),
     output: new GrantedDestination(granted, auth, controller.signal),
     progress: new GrantedProgress(granted, auth, controller.signal),
+    database: createDatabaseBinding(
+      new GrantedDatabaseTransport(granted, auth, controller.signal),
+    ),
+    signal: controller.signal,
   };
 }
 
