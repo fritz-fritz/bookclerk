@@ -286,17 +286,33 @@ async fn apply_schema_migrations(
     ensure_schema_migrations(db, backend).await?;
     for (idx, schema) in steps.iter().enumerate() {
         let version = (idx + 1) as i64;
+        apply_one_schema_migration(db, backend, timing, version, schema).await?;
+    }
+    Ok(())
+}
+
+/// Applies one `schema_migrations` version, recovering from a concurrent peer.
+async fn apply_one_schema_migration(
+    db: &DatabaseConnection,
+    backend: DbBackend,
+    timing: &str,
+    version: i64,
+    schema: &str,
+) -> Result<()> {
+    let mut delay_ms = 20u64;
+    let mut last_err = None;
+    for attempt in 0..8 {
         if schema_versions_applied(db, backend)
             .await?
             .contains(&version)
         {
-            continue;
+            return Ok(());
         }
         let mut stmts = split_sql_statements(schema);
         stmts.push(format!(
             "INSERT INTO schema_migrations (version) VALUES ({version})"
         ));
-        match run_atomic_ddl_retrying(
+        match run_atomic_ddl(
             db,
             backend,
             timing,
@@ -305,25 +321,66 @@ async fn apply_schema_migrations(
         )
         .await
         {
-            Ok(()) => {}
-            Err(_)
-                if schema_versions_applied(db, backend)
-                    .await?
-                    .contains(&version) => {}
+            Ok(()) => return Ok(()),
+            Err(err) if is_already_applied_ddl(&err) => {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                last_err = Some(err);
+            }
+            Err(err) if attempt + 1 < 8 && is_schema_lock_err(&err) => {
+                last_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = delay_ms.saturating_mul(2).min(250);
+            }
             Err(err) => return Err(err),
         }
     }
-    Ok(())
+    if schema_versions_applied(db, backend)
+        .await?
+        .contains(&version)
+    {
+        return Ok(());
+    }
+    Err(last_err.expect("schema_migrations version retry"))
 }
 
 /// `CREATE TABLE IF NOT EXISTS schema_migrations`.
 async fn ensure_schema_migrations(db: &DatabaseConnection, backend: DbBackend) -> Result<()> {
-    exec_sql(
+    let mut delay_ms = 20u64;
+    let mut last_err = None;
+    for attempt in 0..8 {
+        match exec_sql(
+            db,
+            backend,
+            "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)",
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(err)
+                if attempt + 1 < 8
+                    && (is_already_applied_ddl(&err) || is_schema_lock_err(&err)) =>
+            {
+                last_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = delay_ms.saturating_mul(2).min(250);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    match exec_sql(
         db,
         backend,
         "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)",
     )
     .await
+    {
+        Ok(()) => Ok(()),
+        Err(_) if last_err.is_some() => {
+            // Peer created the table; a follow-up SELECT in the migrator confirms it.
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Runs `stmts` as one generic atomic execute plan (version marker last).
@@ -382,16 +439,17 @@ async fn run_atomic_ddl_retrying(
 
 /// True when a concurrent migrator already applied this version's DDL.
 fn is_already_applied_ddl(err: &LibraryError) -> bool {
-    let s = err.to_string().to_lowercase();
+    let s = format!("{err}\n{err:?}").to_lowercase();
     s.contains("duplicate column")
         || s.contains("already exists")
+        || s.contains("duplicate key")
         || s.contains("23505")
         || s.contains("sqlite_constraint")
 }
 
 /// True when a concurrent migrator should retry this version.
 fn is_schema_lock_err(err: &LibraryError) -> bool {
-    let s = err.to_string();
+    let s = format!("{err}\n{err:?}");
     s.contains("SQLITE_BUSY")
         || s.contains("SQLITE_LOCKED")
         || s.contains("database is locked")
@@ -414,7 +472,13 @@ async fn schema_versions_applied(
         .map_err(LibraryError::Orm)?;
     Ok(rows
         .iter()
-        .filter_map(|row| row.try_get::<i64>("", "version").ok())
+        .filter_map(|row| {
+            row.try_get::<i64>("", "version")
+                .ok()
+                .or_else(|| row.try_get_by_index::<i64>(0).ok())
+                .or_else(|| row.try_get::<i32>("", "version").ok().map(i64::from))
+                .or_else(|| row.try_get_by_index::<i32>(0).ok().map(i64::from))
+        })
         .collect())
 }
 
@@ -649,7 +713,7 @@ mod tests {
             .expect("retry");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
     async fn postgres_concurrent_apply_host_schema_both_ok() {
         if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
