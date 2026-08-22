@@ -162,7 +162,7 @@ export interface RetryToken {
 export interface DatabaseBindingOptions {
   /** Negotiated `maxRequestBytes` (`0` = unlimited). */
   maxRequestBytes?: number;
-  /** Default retry token; omitted calls mint a UUID and hash. */
+  /** Default retry token; omitted calls mint a UUID and leave the hash empty. */
   retry?: RetryToken;
   /** Idempotency key; generated when omitted. */
   operationId?: string;

@@ -9,8 +9,6 @@ use std::cell::RefCell;
 
 use bookclerk_plugin_abi::DbColumn;
 
-use crate::proxy_txn::current_exec_budget;
-
 mod b64;
 mod exec;
 mod lower;
@@ -25,7 +23,7 @@ thread_local! {
 ///
 /// Prefers the request-scoped [`ExecBudget`] so metadata survives `spawn_blocking`.
 pub fn set_positional_result_columns(columns: Vec<DbColumn>) {
-    if let Some(budget) = current_exec_budget() {
+    if let Some(budget) = crate::proxy_txn::current_exec_budget() {
         budget.set_positional_columns(columns);
         return;
     }
@@ -35,7 +33,7 @@ pub fn set_positional_result_columns(columns: Vec<DbColumn>) {
 /// Takes engine column metadata recorded by the SQLite adapter, if any.
 #[must_use]
 pub fn take_positional_result_columns() -> Option<Vec<DbColumn>> {
-    if let Some(budget) = current_exec_budget() {
+    if let Some(budget) = crate::proxy_txn::current_exec_budget() {
         if let Some(cols) = budget.take_positional_columns() {
             return Some(cols);
         }
