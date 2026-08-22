@@ -179,6 +179,12 @@ pub const HOST_MIN_BINDS: u32 = 32;
 /// Host refuses guests that cannot run at least this many statements per batch.
 pub const HOST_MIN_STATEMENTS: u32 = 40;
 
+/// Host refuses guests that do not bound result rows (`0` is unspecified).
+pub const HOST_MIN_RESULT_ROWS: u32 = 1;
+
+/// Host refuses guests that do not bound encoded statement payload bytes.
+pub const HOST_MIN_PAYLOAD_BYTES: u32 = 1024;
+
 /// Result of a successful [`crate::methods::db_connect`].
 ///
 /// Tells the host which SeaORM dialect to use when composing subsequent
@@ -207,18 +213,22 @@ pub struct DbConnectResult {
     #[serde(default = "default_true")]
     pub atomic_batch: bool,
     /// Guest SQL supports `RETURNING` result sets.
+    ///
+    /// Host plans use `RETURNING` unconditionally. `false` fails capability
+    /// negotiation until a real fallback exists.
     #[serde(default = "default_true")]
     pub returning: bool,
-    /// Maximum bound parameters per statement (`0` means unspecified).
+    /// Maximum bound parameters per statement (`0` is unspecified and fails closed).
     #[serde(default)]
     pub max_binds: u32,
-    /// Maximum statements in one atomic batch (`0` means unspecified).
+    /// Maximum statements in one atomic batch (`0` is unspecified and fails closed).
     #[serde(default)]
     pub max_statements: u32,
-    /// Maximum rows a query statement may return (`0` means unspecified).
+    /// Maximum rows a query statement may return (`0` is unspecified and fails closed).
     #[serde(default)]
     pub max_result_rows: u32,
-    /// Maximum UTF-8 bytes of SQL text plus JSON binds per statement.
+    /// Maximum UTF-8 bytes of SQL text plus JSON binds per statement
+    /// (`0` is unspecified and fails closed).
     #[serde(default)]
     pub max_payload_bytes: u32,
     /// Guest can fill [`DbAtomicTiming::db_execution_us`].
@@ -281,37 +291,74 @@ impl DbConnectResult {
     /// True when this guest meets the host's compiled minimum SQL contract.
     #[must_use]
     pub fn meets_host_minimums(&self) -> bool {
-        self.atomic_batch
-            && (self.sql_family == "sqlite" || self.sql_family == "postgres")
-            && self.max_binds >= HOST_MIN_BINDS
-            && self.max_statements >= HOST_MIN_STATEMENTS
+        self.capability_failure_reason_opt().is_none()
     }
 
     /// Operator-facing reason when [`Self::meets_host_minimums`] is false.
     #[must_use]
     pub fn capability_failure_reason(&self) -> String {
+        self.capability_failure_reason_opt()
+            .unwrap_or_else(|| "database guest failed capability negotiation".into())
+    }
+
+    /// Failure reason, or `None` when the guest meets host minima.
+    fn capability_failure_reason_opt(&self) -> Option<String> {
         if !self.atomic_batch {
-            return "database guest does not advertise atomicBatch".into();
+            return Some("database guest does not advertise atomicBatch".into());
         }
         if self.sql_family != "sqlite" && self.sql_family != "postgres" {
-            return format!(
+            return Some(format!(
                 "database guest sqlFamily {:?} is not sqlite or postgres (SQL-like backends only)",
                 self.sql_family
+            ));
+        }
+        if !dialect_matches_sql_family(&self.dialect, &self.sql_family) {
+            return Some(format!(
+                "database guest dialect {:?} does not match sqlFamily {:?}",
+                self.dialect, self.sql_family
+            ));
+        }
+        if !self.returning {
+            return Some(
+                "database guest does not advertise returning (host plans require RETURNING)".into(),
             );
         }
         if self.max_binds < HOST_MIN_BINDS {
-            return format!(
+            return Some(format!(
                 "database guest maxBinds {} is below host minimum {HOST_MIN_BINDS}",
                 self.max_binds
-            );
+            ));
         }
         if self.max_statements < HOST_MIN_STATEMENTS {
-            return format!(
+            return Some(format!(
                 "database guest maxStatements {} is below host minimum {HOST_MIN_STATEMENTS}",
                 self.max_statements
-            );
+            ));
         }
-        "database guest failed capability negotiation".into()
+        if self.max_result_rows < HOST_MIN_RESULT_ROWS {
+            return Some(format!(
+                "database guest maxResultRows {} is below host minimum {HOST_MIN_RESULT_ROWS}",
+                self.max_result_rows
+            ));
+        }
+        if self.max_payload_bytes < HOST_MIN_PAYLOAD_BYTES {
+            return Some(format!(
+                "database guest maxPayloadBytes {} is below host minimum {HOST_MIN_PAYLOAD_BYTES}",
+                self.max_payload_bytes
+            ));
+        }
+        None
+    }
+}
+
+/// True when SeaORM `dialect` names the same SQL family as `sql_family`.
+fn dialect_matches_sql_family(dialect: &str, sql_family: &str) -> bool {
+    match sql_family {
+        "sqlite" => dialect.eq_ignore_ascii_case("sqlite"),
+        "postgres" => {
+            dialect.eq_ignore_ascii_case("postgres") || dialect.eq_ignore_ascii_case("postgresql")
+        }
+        _ => false,
     }
 }
 

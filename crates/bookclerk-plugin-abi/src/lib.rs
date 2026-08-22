@@ -84,8 +84,8 @@ pub use db::{
     DbBeginResult, DbConnectParams, DbConnectResult, DbPlanExecResult, DbPlanStatement,
     DbPlanStatementKind, DbPlanStmtExecResult, DbTxnParams, ExecResultDto, ProxyRowDto,
     QueryResultDto, StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
-    FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS,
-    SEA_NULL_KEY, SQLITE_MAX_BINDS,
+    FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_ROWS,
+    HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS, SEA_NULL_KEY, SQLITE_MAX_BINDS,
 };
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use events::{HostToPluginEvent, PluginToHostEvent};
@@ -210,5 +210,36 @@ mod tests {
         assert!(d1.meets_host_minimums());
         assert!(DbConnectResult::sqlite().meets_host_minimums());
         assert!(DbConnectResult::postgres().meets_host_minimums());
+    }
+
+    #[test]
+    fn connect_caps_fail_closed_without_returning_bounds_or_matching_dialect() {
+        let mut no_returning = DbConnectResult::sqlite();
+        no_returning.returning = false;
+        assert!(!no_returning.meets_host_minimums());
+        assert!(no_returning
+            .capability_failure_reason()
+            .contains("returning"));
+
+        let mut zero_rows = DbConnectResult::sqlite();
+        zero_rows.max_result_rows = 0;
+        assert!(!zero_rows.meets_host_minimums());
+        assert!(zero_rows
+            .capability_failure_reason()
+            .contains("maxResultRows"));
+
+        let mut zero_payload = DbConnectResult::sqlite();
+        zero_payload.max_payload_bytes = 0;
+        assert!(!zero_payload.meets_host_minimums());
+        assert!(zero_payload
+            .capability_failure_reason()
+            .contains("maxPayloadBytes"));
+
+        let mut mismatch = DbConnectResult::sqlite();
+        mismatch.dialect = "postgres".into();
+        assert!(!mismatch.meets_host_minimums());
+        assert!(mismatch
+            .capability_failure_reason()
+            .contains("does not match"));
     }
 }

@@ -1151,25 +1151,30 @@
         },
         "sqlFamily": {
           "type": "string",
-          "description": "sqlite or postgres. Required for host-authored plans."
+          "description": "sqlite or postgres. Must match dialect (sqlite/sqlite or postgres/postgres)."
         },
         "atomicBatch": {
           "type": "boolean"
         },
         "returning": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Guest SQL supports RETURNING. Required true until a host fallback exists."
         },
         "maxBinds": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Maximum bound parameters per statement. 0 is unspecified and fails closed."
         },
         "maxStatements": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Maximum statements in one atomic batch. 0 is unspecified and fails closed."
         },
         "maxResultRows": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Maximum rows a query may return. 0 is unspecified and fails closed."
         },
         "maxPayloadBytes": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Maximum UTF-8 bytes of SQL plus JSON binds per statement. 0 fails closed."
         },
         "timing": {
           "type": "boolean"
