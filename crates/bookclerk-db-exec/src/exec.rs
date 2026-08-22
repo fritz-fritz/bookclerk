@@ -68,6 +68,8 @@ pub struct ExecCaps {
     pub max_result_bytes: u32,
     /// Maximum UTF-8 / blob bytes of one cell (`0` = unlimited).
     pub max_cell_bytes: u32,
+    /// Maximum JSON bytes of the whole encoded [`DbPlanExecResult`] (`0` = unlimited).
+    pub max_atomic_result_bytes: u32,
 }
 
 impl From<u32> for ExecCaps {
@@ -76,6 +78,7 @@ impl From<u32> for ExecCaps {
             max_result_rows,
             max_result_bytes: 0,
             max_cell_bytes: 0,
+            max_atomic_result_bytes: 0,
         }
     }
 }
@@ -88,6 +91,7 @@ impl ExecCaps {
             max_result_rows: caps.max_result_rows,
             max_result_bytes: caps.max_result_bytes,
             max_cell_bytes: caps.max_cell_bytes,
+            max_atomic_result_bytes: caps.max_atomic_result_bytes,
         }
     }
 }
@@ -216,6 +220,16 @@ async fn execute_statements_body(
             }
         };
         statements.push(stmt_result);
+        let preview = DbPlanExecResult {
+            operation_id: operation_id.to_string(),
+            statements: statements.clone(),
+            timing: None,
+        };
+        if let Err(err) = note_atomic_result_bytes(&preview, caps.max_atomic_result_bytes) {
+            let _ = txn.rollback().await;
+            let _ = take_txn_fault();
+            return Err(err);
+        }
     }
     if consume_commit_injection() {
         let _ = txn.rollback().await;
@@ -229,15 +243,8 @@ async fn execute_statements_body(
         let _ = take_txn_fault();
         return Err(err);
     }
-    txn.commit().await.map_err(|err| {
-        let _ = take_txn_fault();
-        DbErr::Custom(format!("database commit failed: {err}"))
-    })?;
-    if let Some(fault) = take_txn_fault() {
-        return Err(DbErr::Custom(fault));
-    }
     let db_execution_us = u64::try_from(sql_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    Ok(DbPlanExecResult {
+    let result = DbPlanExecResult {
         operation_id: operation_id.to_string(),
         statements,
         timing: Some(DbAtomicTiming {
@@ -245,7 +252,20 @@ async fn execute_statements_body(
             db_execution_us: Some(db_execution_us),
             db_timing_source: Some(timing_source.to_string()),
         }),
-    })
+    };
+    if let Err(err) = note_atomic_result_bytes(&result, caps.max_atomic_result_bytes) {
+        let _ = txn.rollback().await;
+        let _ = take_txn_fault();
+        return Err(err);
+    }
+    txn.commit().await.map_err(|err| {
+        let _ = take_txn_fault();
+        DbErr::Custom(format!("database commit failed: {err}"))
+    })?;
+    if let Some(fault) = take_txn_fault() {
+        return Err(DbErr::Custom(fault));
+    }
+    Ok(result)
 }
 
 /// Maps a session interrupt onto a guest-classifiable [`DbErr`].
@@ -362,12 +382,32 @@ fn push_capped_json_row(
     Ok(())
 }
 
+/// Fails when the encoded atomic result would exceed `max_atomic_result_bytes`.
+fn note_atomic_result_bytes(
+    result: &DbPlanExecResult,
+    max_atomic_result_bytes: u32,
+) -> Result<(), DbErr> {
+    if max_atomic_result_bytes == 0 {
+        return Ok(());
+    }
+    let used = serde_json::to_vec(result)
+        .map(|b| b.len())
+        .unwrap_or(usize::MAX);
+    let cap = usize::try_from(max_atomic_result_bytes).unwrap_or(usize::MAX);
+    if used > cap {
+        return Err(DbErr::Custom(format!(
+            "atomic result is {used} bytes; maxAtomicResultBytes is {max_atomic_result_bytes}"
+        )));
+    }
+    Ok(())
+}
+
 /// Maps a SeaORM query row onto the generic JSON result object.
 fn query_row_to_json(row: QueryResult) -> Result<JsonValue, DbErr> {
     let proxy = from_query_result_to_proxy_row(&row);
     let mut map = serde_json::Map::new();
     for (name, value) in proxy.values {
-        map.insert(name, sea_to_json(&value));
+        map.insert(name, sea_value_to_json(&value));
     }
     Ok(JsonValue::Object(map))
 }
@@ -413,10 +453,23 @@ fn note_result_row_bytes(
     used: &mut usize,
     max_result_bytes: u32,
 ) -> Result<(), DbErr> {
+    note_encoded_result_bytes(used, row.to_string().len(), max_result_bytes)
+}
+
+/// Adds `extra` encoded JSON bytes toward `max_result_bytes`.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when the running total would exceed the cap.
+pub fn note_encoded_result_bytes(
+    used: &mut usize,
+    extra: usize,
+    max_result_bytes: u32,
+) -> Result<(), DbErr> {
     if max_result_bytes == 0 {
         return Ok(());
     }
-    *used = used.saturating_add(row.to_string().len());
+    *used = used.saturating_add(extra);
     let cap = usize::try_from(max_result_bytes).unwrap_or(usize::MAX);
     if *used > cap {
         return Err(DbErr::Custom(format!(
@@ -486,7 +539,8 @@ fn json_to_sea(v: &JsonValue) -> Value {
 }
 
 /// Maps a SeaORM cell onto JSON for plan interpretation.
-fn sea_to_json(v: &Value) -> JsonValue {
+#[must_use]
+pub fn sea_value_to_json(v: &Value) -> JsonValue {
     match v {
         Value::Bool(Some(b)) => JsonValue::Bool(*b),
         Value::TinyInt(Some(n)) => JsonValue::from(*n),
@@ -504,6 +558,18 @@ fn sea_to_json(v: &Value) -> JsonValue {
         Value::Bytes(Some(b)) => JsonValue::String(crate::bytes_to_b64_string(b)),
         _ => JsonValue::Null,
     }
+}
+
+/// Encoded JSON length of a SeaORM proxy row (keys, numbers, punctuation).
+#[must_use]
+pub fn encoded_proxy_row_len<'a>(
+    values: impl IntoIterator<Item = (&'a String, &'a Value)>,
+) -> usize {
+    let mut map = serde_json::Map::new();
+    for (name, value) in values {
+        map.insert(name.clone(), sea_value_to_json(value));
+    }
+    JsonValue::Object(map).to_string().len()
 }
 
 #[cfg(test)]
@@ -550,5 +616,21 @@ mod tests {
         assert!(!DbPlanStatementKind::Returning.wrap_select_limit());
         assert!(!DbPlanStatementKind::Query.wrap_select_limit());
         assert!(!DbPlanStatementKind::Execute.wrap_select_limit());
+    }
+
+    #[test]
+    fn encoded_proxy_row_counts_keys_and_numbers() {
+        use super::{encoded_proxy_row_len, sea_value_to_json};
+        let alias = format!("c00_{}", "x".repeat(40));
+        let values = [(alias.clone(), Value::BigInt(Some(1)))];
+        let nbytes = encoded_proxy_row_len(values.iter().map(|(k, v)| (k, v)));
+        let mut map = serde_json::Map::new();
+        map.insert(alias.clone(), sea_value_to_json(&values[0].1));
+        assert_eq!(nbytes, serde_json::Value::Object(map).to_string().len());
+        assert!(
+            nbytes > alias.len(),
+            "JSON punctuation and the numeric cell must count: {nbytes} vs alias {}",
+            alias.len()
+        );
     }
 }

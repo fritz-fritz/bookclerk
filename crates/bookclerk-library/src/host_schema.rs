@@ -433,11 +433,7 @@ async fn run_atomic_ddl(
     let plan = DbAtomicPlan {
         statements: stmts
             .into_iter()
-            .map(|sql| DbPlanStatement {
-                sql,
-                binds: Vec::new(),
-                kind: DbPlanStatementKind::Execute,
-            })
+            .map(|sql| DbPlanStatement::new(sql, Vec::new(), DbPlanStatementKind::Execute))
             .collect(),
         outcome_index: 0,
         payload_index: None,

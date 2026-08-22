@@ -191,8 +191,9 @@ pub const HOST_MIN_RESULT_BYTES: u32 = 4_096;
 /// Host refuses guests that do not bound one result cell (`0` is unspecified).
 pub const HOST_MIN_CELL_BYTES: u32 = 1_024;
 
-/// First-party JSON-byte budget for one statement's result rows.
-pub const FIRST_PARTY_MAX_RESULT_BYTES: u32 = 1_048_576;
+/// First-party JSON-byte budget for one statement's rows and for one atomic
+/// request/result scalar. Must stay at or below [`crate::v2::MAX_SCALAR_BYTES`].
+pub const FIRST_PARTY_MAX_RESULT_BYTES: u32 = crate::v2::MAX_SCALAR_BYTES;
 
 /// Result of a successful [`crate::methods::db_connect`].
 ///
@@ -248,6 +249,14 @@ pub struct DbConnectResult {
     /// (`0` is unspecified and fails closed).
     #[serde(default)]
     pub max_cell_bytes: u32,
+    /// Maximum JSON bytes of one encoded [`DbAtomicRequest`]
+    /// (`0` is unspecified and fails closed). Must be `<=` [`crate::v2::MAX_SCALAR_BYTES`].
+    #[serde(default)]
+    pub max_atomic_request_bytes: u32,
+    /// Maximum JSON bytes of one encoded [`DbPlanExecResult`]
+    /// (`0` is unspecified and fails closed). Must be `<=` [`crate::v2::MAX_SCALAR_BYTES`].
+    #[serde(default)]
+    pub max_atomic_result_bytes: u32,
     /// Guest can fill [`DbAtomicTiming::db_execution_us`].
     #[serde(default = "default_true")]
     pub timing: bool,
@@ -269,6 +278,8 @@ impl DbConnectResult {
             max_payload_bytes: 1_048_576,
             max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             max_cell_bytes: crate::v2::MAX_SCALAR_BYTES,
+            max_atomic_request_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             timing: true,
         }
     }
@@ -288,6 +299,8 @@ impl DbConnectResult {
             max_payload_bytes: 1_048_576,
             max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             max_cell_bytes: crate::v2::MAX_SCALAR_BYTES,
+            max_atomic_request_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             timing: true,
         }
     }
@@ -307,6 +320,8 @@ impl DbConnectResult {
             max_payload_bytes: 1_048_576,
             max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             max_cell_bytes: crate::v2::MAX_SCALAR_BYTES,
+            max_atomic_request_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             timing: true,
         }
     }
@@ -382,6 +397,30 @@ impl DbConnectResult {
                 self.max_cell_bytes
             ));
         }
+        if self.max_atomic_request_bytes < HOST_MIN_RESULT_BYTES
+            || self.max_atomic_request_bytes > crate::v2::MAX_SCALAR_BYTES
+        {
+            return Some(format!(
+                "database guest maxAtomicRequestBytes {} must be between {HOST_MIN_RESULT_BYTES} and {}",
+                self.max_atomic_request_bytes,
+                crate::v2::MAX_SCALAR_BYTES
+            ));
+        }
+        if self.max_atomic_result_bytes < HOST_MIN_RESULT_BYTES
+            || self.max_atomic_result_bytes > crate::v2::MAX_SCALAR_BYTES
+        {
+            return Some(format!(
+                "database guest maxAtomicResultBytes {} must be between {HOST_MIN_RESULT_BYTES} and {}",
+                self.max_atomic_result_bytes,
+                crate::v2::MAX_SCALAR_BYTES
+            ));
+        }
+        if self.max_result_bytes > self.max_atomic_result_bytes {
+            return Some(format!(
+                "database guest maxResultBytes {} exceeds maxAtomicResultBytes {}",
+                self.max_result_bytes, self.max_atomic_result_bytes
+            ));
+        }
         None
     }
 }
@@ -432,7 +471,7 @@ impl DbPlanStatementKind {
 }
 
 /// One parameterized statement in a host-authored [`DbAtomicPlan`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DbPlanStatement {
     /// Dialect-specific SQL (SQLite `?` or Postgres `$1`).
@@ -444,6 +483,25 @@ pub struct DbPlanStatement {
     /// Whether the guest should collect rows or only `rowsAffected`.
     #[serde(default)]
     pub kind: DbPlanStatementKind,
+    /// Proven upper bound on rows this statement returns (`0` = unproven).
+    ///
+    /// Host 1-row `INSERT … RETURNING` sets `1`. D1 refuses `Returning` unless
+    /// this is `1`.
+    #[serde(default)]
+    pub max_rows: u32,
+}
+
+impl DbPlanStatement {
+    /// Statement with an unproven row bound (`maxRows = 0`).
+    #[must_use]
+    pub fn new(sql: impl Into<String>, binds: Vec<JsonValue>, kind: DbPlanStatementKind) -> Self {
+        Self {
+            sql: sql.into(),
+            binds,
+            kind,
+            max_rows: 0,
+        }
+    }
 }
 
 /// JSON object key for a typed SQL null (`{"$sea_null": "Bytes"}`).

@@ -1184,6 +1184,14 @@
           "type": "integer",
           "description": "Maximum UTF-8 or blob bytes of one result cell. 0 is unspecified and fails closed."
         },
+        "maxAtomicRequestBytes": {
+          "type": "integer",
+          "description": "Maximum JSON bytes of one encoded dbAtomic request. 0 fails closed. Must be <= MAX_SCALAR_BYTES."
+        },
+        "maxAtomicResultBytes": {
+          "type": "integer",
+          "description": "Maximum JSON bytes of one encoded dbAtomic result. 0 fails closed. Must be <= MAX_SCALAR_BYTES."
+        },
         "timing": {
           "type": "boolean"
         }
@@ -1209,6 +1217,10 @@
             "select",
             "returning"
           ]
+        },
+        "maxRows": {
+          "type": "integer",
+          "description": "Proven upper bound on rows this statement returns. 0 is unproven. D1 Returning requires 1."
         }
       }
     },

@@ -26,6 +26,8 @@ pub(crate) struct SqlStmt {
     pub binds: Vec<JsonValue>,
     /// Host-authored kind; adapters must not reparse SQL.
     pub kind: DbPlanStatementKind,
+    /// Proven row upper bound (`0` = unproven). Host `Returning` is `1`.
+    pub max_rows: u32,
 }
 
 /// Planned batch plus the index of the application-status `SELECT`.
@@ -452,10 +454,12 @@ fn plan_inner(op: &DbAtomicParams, now: &str) -> AtomicPlan {
 fn sql(text: &str, params: Vec<JsonValue>) -> SqlStmt {
     let sql = text.to_string();
     let kind = authored_kind(&sql);
+    let max_rows = proven_max_rows(kind, &sql);
     SqlStmt {
         sql,
         binds: params,
         kind,
+        max_rows,
     }
 }
 
@@ -465,7 +469,27 @@ fn render_sql_stmt(family: SqlFamily, stmt: SqlStmt) -> SqlStmt {
         sql: render_statement(family, &stmt.sql),
         binds: stmt.binds,
         kind: stmt.kind,
+        max_rows: stmt.max_rows,
     }
+}
+
+/// Proven row upper bound: 1-row `Returning`, or `Select … LIMIT 1`.
+fn proven_max_rows(kind: DbPlanStatementKind, sql: &str) -> u32 {
+    match kind {
+        DbPlanStatementKind::Returning => 1,
+        DbPlanStatementKind::Select if select_limit_is_one(sql) => 1,
+        _ => 0,
+    }
+}
+
+/// True when the statement's trailing limit is exactly `LIMIT 1`.
+fn select_limit_is_one(sql: &str) -> bool {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let upper = trimmed.to_ascii_uppercase();
+    let Some(rest) = upper.strip_suffix("LIMIT 1") else {
+        return false;
+    };
+    rest.ends_with(|c: char| c.is_ascii_whitespace() || c == ')')
 }
 
 /// Host-authored kind from the SQL this helper just wrote (not adapter sniffing).
@@ -892,6 +916,7 @@ fn exec_sql(sql: String, binds: Vec<JsonValue>) -> SqlStmt {
         sql,
         binds,
         kind: DbPlanStatementKind::Execute,
+        max_rows: 0,
     }
 }
 
@@ -2921,6 +2946,10 @@ mod tests {
             .find(|s| s.sql.contains("INSERT") && s.sql.to_ascii_uppercase().contains("RETURNING"))
             .expect("dispatch insert returning");
         assert_eq!(insert.kind, DbPlanStatementKind::Returning);
+        assert_eq!(
+            insert.max_rows, 1,
+            "host Returning must carry a 1-row proof"
+        );
         let returning = insert.sql.to_ascii_uppercase().rfind("RETURNING").unwrap();
         let gate = insert
             .sql
@@ -2930,6 +2959,35 @@ mod tests {
             gate < returning,
             "hash-conflict retry must not insert behind RETURNING: {}",
             insert.sql
+        );
+    }
+
+    #[test]
+    fn proven_max_rows_for_limit_one_select_and_returning() {
+        assert_eq!(
+            super::proven_max_rows(
+                DbPlanStatementKind::Returning,
+                "INSERT INTO t (id) VALUES (1) RETURNING id"
+            ),
+            1
+        );
+        assert_eq!(
+            super::proven_max_rows(
+                DbPlanStatementKind::Select,
+                "SELECT id FROM t ORDER BY id LIMIT 1"
+            ),
+            1
+        );
+        assert_eq!(
+            super::proven_max_rows(DbPlanStatementKind::Select, "SELECT id FROM t LIMIT 2"),
+            0
+        );
+        assert_eq!(
+            super::proven_max_rows(
+                DbPlanStatementKind::Execute,
+                "INSERT INTO t (id) VALUES (1)"
+            ),
+            0
         );
     }
 
@@ -4424,6 +4482,7 @@ mod tests {
                     sql: s.sql.clone(),
                     binds: s.binds.clone(),
                     kind: s.kind,
+                    max_rows: s.max_rows,
                 })
                 .collect(),
             outcome_index: compiled.plan.outcome_index as usize,

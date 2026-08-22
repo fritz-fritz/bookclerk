@@ -148,7 +148,7 @@ impl DatabaseSession for D1Session {
                 .await
                 .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)?;
             return Ok(QueryPage {
-                rows_json: bookclerk_plugin_sdk::encode_json(result)?,
+                rows_json: bookclerk_plugin_sdk::encode_atomic_result(result)?,
                 next_cursor: None,
             });
         }

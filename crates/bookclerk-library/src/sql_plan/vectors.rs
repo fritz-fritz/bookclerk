@@ -2,13 +2,15 @@
 
 use std::future::Future;
 
+use bookclerk_db_exec::ExecCaps;
 use bookclerk_plugin_abi::{
-    DbAtomicPlan, DbAtomicRequest, DbPlanExecResult, DbPlanStatement, DbPlanStatementKind,
+    DbAtomicPlan, DbAtomicRequest, DbConnectResult, DbPlanExecResult, DbPlanStatement,
+    DbPlanStatementKind,
 };
 use sea_orm::DatabaseConnection;
 use serde_json::Value as JsonValue;
 
-use super::{compile_named_request, execute_statements_on, interpret_exec, SqlFamily};
+use super::{compile_named_request, interpret_exec, SqlFamily};
 use crate::atomic_ops::{atomic_status, DbAtomicParams};
 
 /// Runs the contract suite on a SeaORM connection (sqlite / postgres).
@@ -24,7 +26,15 @@ pub async fn run_conn_vectors(db: &DatabaseConnection, family: SqlFamily, timing
         let timing = timing.clone();
         async move {
             let plan = req.plan.expect("vector plan");
-            execute_statements_on(&db, &plan, &req.operation_id, &timing, cap)
+            let connect = match family {
+                SqlFamily::Sqlite => DbConnectResult::sqlite(),
+                SqlFamily::Postgres => DbConnectResult::postgres(),
+            };
+            let mut caps = ExecCaps::from_connect(&connect);
+            if cap > 0 {
+                caps.max_result_rows = cap;
+            }
+            bookclerk_db_exec::execute_statements_on(&db, &plan, &req.operation_id, &timing, caps)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -77,6 +87,9 @@ where
     returning_update_cap(&mut run, row_cap).await;
     returning_delete_cap(&mut run, row_cap).await;
     rows_affected_by_kind(&mut run).await;
+    values_returning_cap(&mut run, row_cap).await;
+    aggregate_scalar_cap(&mut run, family).await;
+    wide_numeric_row_cap(&mut run).await;
 }
 
 /// Enqueue once, then replay the same `operationId`.
@@ -491,6 +504,123 @@ where
     );
 }
 
+/// Multi-tuple `INSERT … VALUES (),( ) … RETURNING` is not a 1-row proof.
+async fn values_returning_cap<F, Fut>(run: &mut F, row_cap: u32)
+where
+    F: FnMut(DbAtomicRequest, u32) -> Fut,
+    Fut: Future<Output = Result<DbPlanExecResult, String>>,
+{
+    let n = row_cap.saturating_add(1);
+    run(
+        request(
+            "vec-val-setup",
+            exec_plan(&[
+                "CREATE TABLE IF NOT EXISTS vec_val_ins (id INTEGER PRIMARY KEY)",
+                "DELETE FROM vec_val_ins",
+            ]),
+        ),
+        0,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("values returning setup: {e}"));
+    let tuples = (0..n)
+        .map(|i| format!("({i})"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("INSERT INTO vec_val_ins (id) VALUES {tuples} RETURNING id");
+    let before = table_fingerprint(&mut *run, "vec-val-before", "vec_val_ins").await;
+    let err = run(request("vec-val-ins", returning_plan(&sql)), row_cap)
+        .await
+        .expect_err("multi-tuple VALUES RETURNING must fail");
+    assert!(
+        err.to_lowercase().contains("maxresultrows")
+            || err.to_lowercase().contains("proven")
+            || err.to_lowercase().contains("values"),
+        "VALUES RETURNING cap must fail closed: {err}"
+    );
+    let after = table_fingerprint(&mut *run, "vec-val-after", "vec_val_ins").await;
+    assert_eq!(
+        before, after,
+        "failed VALUES RETURNING must not leave rows: before={before:?} after={after:?}"
+    );
+}
+
+/// Two individually-valid row-producing statements whose aggregate exceeds the RPC scalar.
+async fn aggregate_scalar_cap<F, Fut>(run: &mut F, family: SqlFamily)
+where
+    F: FnMut(DbAtomicRequest, u32) -> Fut,
+    Fut: Future<Output = Result<DbPlanExecResult, String>>,
+{
+    let pad = match family {
+        SqlFamily::Sqlite => "SELECT hex(zeroblob(70000)) AS pad",
+        SqlFamily::Postgres => "SELECT repeat('a', 140000) AS pad",
+    };
+    run(
+        request(
+            "vec-agg-setup",
+            exec_plan(&[
+                "CREATE TABLE IF NOT EXISTS vec_agg (id INTEGER PRIMARY KEY)",
+                "DELETE FROM vec_agg",
+            ]),
+        ),
+        0,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("aggregate setup: {e}"));
+    let before = table_fingerprint(&mut *run, "vec-agg-before", "vec_agg").await;
+    let err = run(
+        request(
+            "vec-agg",
+            DbAtomicPlan {
+                statements: vec![
+                    DbPlanStatement::new(pad, vec![], DbPlanStatementKind::Select),
+                    DbPlanStatement::new(pad, vec![], DbPlanStatementKind::Select),
+                ],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            },
+        ),
+        0,
+    )
+    .await
+    .expect_err("aggregate result must exceed maxAtomicResultBytes");
+    assert!(
+        err.to_lowercase().contains("maxatomicresultbytes")
+            || err.to_lowercase().contains("maxresultbytes")
+            || err.to_lowercase().contains("body"),
+        "aggregate scalar cap must fail closed: {err}"
+    );
+    let after = table_fingerprint(&mut *run, "vec-agg-after", "vec_agg").await;
+    assert_eq!(before, after, "aggregate overflow must not write rows");
+}
+
+/// One result whose encoded JSON exceeds `maxResultBytes` with tiny numeric cells.
+async fn wide_numeric_row_cap<F, Fut>(run: &mut F)
+where
+    F: FnMut(DbAtomicRequest, u32) -> Fut,
+    Fut: Future<Output = Result<DbPlanExecResult, String>>,
+{
+    let pad = "x".repeat(50);
+    let cols: Vec<String> = (0..40).map(|i| format!("t.i AS c{i:02}_{pad}")).collect();
+    let sql = format!(
+        "WITH RECURSIVE t(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM t WHERE i < 120) \
+         SELECT {} FROM t",
+        cols.join(", ")
+    );
+    let err = run(request("vec-wide", select_plan(&sql)), 0)
+        .await
+        .expect_err("wide numeric result must exceed maxResultBytes");
+    assert!(
+        err.to_lowercase().contains("maxresultbytes")
+            || err.to_lowercase().contains("maxatomicresultbytes")
+            || err.to_lowercase().contains("body")
+            || err.to_lowercase().contains("exceeds"),
+        "wide-row JSON budget must fail closed: {err}"
+    );
+}
+
 /// `Select` reports `rowsAffected = 0`; `Returning` reports returned/affected rows.
 async fn rows_affected_by_kind<F, Fut>(run: &mut F)
 where
@@ -541,7 +671,7 @@ where
     let ins = run(
         request(
             "vec-aff-ret",
-            returning_plan("INSERT INTO vec_aff (id) VALUES (99) RETURNING id"),
+            returning_plan_proven("INSERT INTO vec_aff (id) VALUES (99) RETURNING id"),
         ),
         0,
     )
@@ -617,19 +747,22 @@ fn select_plan(sql: &str) -> DbAtomicPlan {
     stmt_plan(sql, DbPlanStatementKind::Select)
 }
 
-/// Single DML `RETURNING` statement plan.
+/// Single DML `RETURNING` statement plan (`maxRows = 0`, unproven).
 fn returning_plan(sql: &str) -> DbAtomicPlan {
     stmt_plan(sql, DbPlanStatementKind::Returning)
+}
+
+/// Proven 1-row DML `RETURNING` (host-IR `maxRows = 1`).
+fn returning_plan_proven(sql: &str) -> DbAtomicPlan {
+    let mut plan = returning_plan(sql);
+    plan.statements[0].max_rows = 1;
+    plan
 }
 
 /// Single-statement plan with an explicit wire `kind`.
 fn stmt_plan(sql: &str, kind: DbPlanStatementKind) -> DbAtomicPlan {
     DbAtomicPlan {
-        statements: vec![DbPlanStatement {
-            sql: sql.into(),
-            binds: vec![],
-            kind,
-        }],
+        statements: vec![DbPlanStatement::new(sql, vec![], kind)],
         outcome_index: 0,
         payload_index: None,
         prior_receipt_index: None,
@@ -647,11 +780,7 @@ fn exec_plan_owned(sqls: Vec<String>) -> DbAtomicPlan {
     DbAtomicPlan {
         statements: sqls
             .into_iter()
-            .map(|sql| DbPlanStatement {
-                sql,
-                binds: vec![],
-                kind: DbPlanStatementKind::Execute,
-            })
+            .map(|sql| DbPlanStatement::new(sql, vec![], DbPlanStatementKind::Execute))
             .collect(),
         outcome_index: 0,
         payload_index: None,
@@ -664,20 +793,16 @@ fn exec_plan_owned(sqls: Vec<String>) -> DbAtomicPlan {
 fn dup_slot_plan(key: &str) -> DbAtomicPlan {
     DbAtomicPlan {
         statements: vec![
-            DbPlanStatement {
-                sql: format!(
-                    "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{key}', 0)"
-                ),
-                binds: vec![],
-                kind: DbPlanStatementKind::Execute,
-            },
-            DbPlanStatement {
-                sql: format!(
-                    "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{key}', 1)"
-                ),
-                binds: vec![],
-                kind: DbPlanStatementKind::Execute,
-            },
+            DbPlanStatement::new(
+                format!("INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{key}', 0)"),
+                vec![],
+                DbPlanStatementKind::Execute,
+            ),
+            DbPlanStatement::new(
+                format!("INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{key}', 1)"),
+                vec![],
+                DbPlanStatementKind::Execute,
+            ),
         ],
         outcome_index: 0,
         payload_index: None,

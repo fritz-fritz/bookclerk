@@ -172,6 +172,7 @@ mod tests {
                     sql: "SELECT 1".into(),
                     binds: vec![],
                     kind: DbPlanStatementKind::Query,
+                    max_rows: 0,
                 }],
                 outcome_index: 0,
                 payload_index: None,
@@ -249,6 +250,20 @@ mod tests {
         assert!(zero_cell
             .capability_failure_reason()
             .contains("maxCellBytes"));
+
+        let mut zero_atomic = DbConnectResult::sqlite();
+        zero_atomic.max_atomic_request_bytes = 0;
+        assert!(!zero_atomic.meets_host_minimums());
+        assert!(zero_atomic
+            .capability_failure_reason()
+            .contains("maxAtomicRequestBytes"));
+
+        let mut over_scalar = DbConnectResult::sqlite();
+        over_scalar.max_atomic_result_bytes = crate::v2::MAX_SCALAR_BYTES + 1;
+        assert!(!over_scalar.meets_host_minimums());
+        assert!(over_scalar
+            .capability_failure_reason()
+            .contains("maxAtomicResultBytes"));
 
         let mut mismatch = DbConnectResult::sqlite();
         mismatch.dialect = "postgres".into();

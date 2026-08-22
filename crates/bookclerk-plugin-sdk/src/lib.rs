@@ -93,9 +93,9 @@ pub use protocol::{
     PROTOCOL_NAME,
 };
 pub use v2::{
-    decode_json, encode_json, page_rows, serve, serve_v2, ContentSource, Database, DatabaseSession,
-    Integration, PluginDescribe, PluginRoot, Transaction, FEATURE_SCALAR_LIMITS,
-    PRODUCT_API_VERSION,
+    decode_json, encode_atomic_result, encode_json, page_rows, serve, serve_v2, ContentSource,
+    Database, DatabaseSession, Integration, PluginDescribe, PluginRoot, Transaction,
+    FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 
 pub use bookclerk_plugin_abi::{

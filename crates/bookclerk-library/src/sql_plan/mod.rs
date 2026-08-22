@@ -106,6 +106,49 @@ pub fn validate_plan(plan: &DbAtomicPlan, caps: &DbConnectResult) -> crate::erro
     Ok(())
 }
 
+/// Rejects a plan or encoded [`DbAtomicRequest`] that exceeds negotiated guest limits.
+///
+/// # Errors
+///
+/// Returns [`crate::LibraryError::Other`] when the request cannot be sent.
+pub fn validate_atomic_request(
+    req: &DbAtomicRequest,
+    caps: &DbConnectResult,
+) -> crate::error::Result<()> {
+    if let Some(plan) = &req.plan {
+        validate_plan(plan, caps)?;
+    } else {
+        return Err(crate::LibraryError::Other(anyhow::anyhow!(
+            "dbAtomic requires a host-authored executePlan"
+        )));
+    }
+    let cap = atomic_request_cap_bytes(caps);
+    if cap == 0 {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec(req)
+        .map(|b| b.len())
+        .unwrap_or(usize::MAX);
+    if bytes > cap {
+        return Err(crate::LibraryError::Other(anyhow::anyhow!(
+            "atomic request is {bytes} bytes; guest maxAtomicRequestBytes is {cap}"
+        )));
+    }
+    Ok(())
+}
+
+/// JSON-byte budget for one encoded [`DbAtomicRequest`] (`0` = skip the check).
+fn atomic_request_cap_bytes(caps: &DbConnectResult) -> usize {
+    if caps.max_atomic_request_bytes == 0 {
+        return 0;
+    }
+    usize::try_from(
+        caps.max_atomic_request_bytes
+            .min(bookclerk_plugin_abi::v2::MAX_SCALAR_BYTES),
+    )
+    .unwrap_or(usize::MAX)
+}
+
 /// Wake page size from negotiated `maxBinds` (SET/EXISTS overhead is 4 binds).
 #[must_use]
 pub fn wake_page_for_max_binds(max_binds: u32) -> u64 {
@@ -128,6 +171,7 @@ fn wire_plan(
                 sql: stmt.sql,
                 binds: stmt.binds,
                 kind: stmt.kind,
+                max_rows: stmt.max_rows,
             })
             .collect(),
         outcome_index: u32::try_from(outcome_index).unwrap_or(0),
@@ -148,7 +192,8 @@ pub(crate) fn host_statement_kind(sql: &str) -> DbPlanStatementKind {
 #[cfg(test)]
 mod limits_tests {
     use super::{
-        validate_plan, DbAtomicPlan, DbConnectResult, DbPlanStatement, DbPlanStatementKind,
+        validate_atomic_request, validate_plan, DbAtomicPlan, DbAtomicRequest, DbConnectResult,
+        DbPlanStatement, DbPlanStatementKind,
     };
 
     fn tiny_caps() -> DbConnectResult {
@@ -160,11 +205,7 @@ mod limits_tests {
     }
 
     fn stmt(sql: &str, binds: Vec<serde_json::Value>) -> DbPlanStatement {
-        DbPlanStatement {
-            sql: sql.into(),
-            binds,
-            kind: DbPlanStatementKind::Query,
-        }
+        DbPlanStatement::new(sql, binds, DbPlanStatementKind::Query)
     }
 
     #[test]
@@ -243,6 +284,25 @@ mod limits_tests {
             compiled.plan.statements.len() > 40,
             "planner must emit inserts for every subscriber, not take(24)"
         );
+    }
+
+    #[test]
+    fn validate_atomic_request_rejects_oversized_envelope() {
+        let plan = DbAtomicPlan {
+            statements: vec![stmt(&format!("SELECT '{}'", "x".repeat(5000)), vec![])],
+            outcome_index: 0,
+            payload_index: None,
+            prior_receipt_index: None,
+            receipt_select_index: None,
+        };
+        let mut caps = DbConnectResult::sqlite();
+        caps.max_payload_bytes = 1_048_576;
+        caps.max_atomic_request_bytes = 4_096;
+        caps.max_atomic_result_bytes = 4_096;
+        caps.max_result_bytes = 4_096;
+        let req = DbAtomicRequest::with_plan("op", "abc", plan);
+        let err = validate_atomic_request(&req, &caps).unwrap_err();
+        assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
     }
 
     #[test]

@@ -49,17 +49,23 @@ The guest returns a JSON object (also flattened onto `DbConnectResult`):
 - `sqlFamily`: `sqlite` \| `postgres`
 - `interactiveTxn`, `atomicBatch`, `returning`
 - `maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`,
-  `maxResultBytes`, `maxCellBytes`
+  `maxResultBytes`, `maxCellBytes`, `maxAtomicRequestBytes`,
+  `maxAtomicResultBytes`
 - `timing`
 
 The host must not invent these from the plugin id. Missing required fields,
 `atomicBatch: false`, `returning: false`, `maxResultRows` / `maxPayloadBytes`
-/ `maxResultBytes` / `maxCellBytes` of `0` (unspecified), limits below the
-host's compiled minimums, or a `dialect` that does not match `sqlFamily` are
-a hard error. Wake page size and `IN (…)` chunking are derived from
-`maxBinds`. `maxPayloadBytes` bounds request SQL plus JSON binds;
-`maxResultBytes` / `maxCellBytes` bound encoded result rows and are enforced
-incrementally in each adapter before cloning a cell or serializing a row.
+/ `maxResultBytes` / `maxCellBytes` / `maxAtomicRequestBytes` /
+`maxAtomicResultBytes` of `0` (unspecified), limits below the
+host's compiled minimums, batch caps above `MAX_SCALAR_BYTES`, or a `dialect`
+that does not match `sqlFamily` are a hard error. Wake page size and `IN (…)`
+chunking are derived from `maxBinds`. `maxPayloadBytes` bounds request SQL plus
+JSON binds per statement; `maxAtomicRequestBytes` / `maxAtomicResultBytes` bound
+the whole encoded `DbAtomicRequest` / `DbPlanExecResult` (including JSON
+envelope) at or below the v2 scalar limit. `maxResultBytes` / `maxCellBytes`
+bound encoded result rows and are enforced incrementally in each adapter before
+cloning a cell or serializing a row. Native guests check the aggregate result
+size before `COMMIT`.
 
 First-party values: D1 `maxBinds = 100`; SQLite and PostgreSQL report the
 engine bind cap (host still chunks conservatively).
@@ -86,9 +92,9 @@ timing). The host validates the envelope (operation id echo, statement
 count, row/payload caps) before `interpret_plan`. A statement that yields
 more than `maxResultRows` fails the plan (rollback / D1 ambiguous) rather
 than truncating. D1 HTTP cannot roll back after the JSON body returns, so
-the guest refuses `RETURNING` DML that is not proven to be a single-row
-`INSERT … SELECT <scalars> WHERE …` / `INSERT … VALUES …` (no top-level
-`FROM`, `UNION`, or `RECURSIVE`). Overflow or an oversized HTTP body after
+the guest refuses `RETURNING` unless the host-IR `maxRows` is `1`, the SQL
+string is a single statement (no top-level `;`), and any `VALUES` list is
+exactly one tuple. Overflow or an oversized HTTP body after
 a committed batch is `unavailable` (replay the same `operationId`); only a
 definitive non-retryable 4xx is permanent. Receipt rows live in host-authored
 SQL against `db_atomic_receipts`. Guests must not parse Bookclerk operation

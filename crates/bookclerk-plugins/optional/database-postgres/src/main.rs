@@ -144,7 +144,7 @@ impl DatabaseSession for PostgresSession {
                 .map_err(|e| PluginError::invalid_params(e.to_string()))?;
             let result = guest_atomic(req).await?;
             return Ok(QueryPage {
-                rows_json: bookclerk_plugin_sdk::encode_json(result)?,
+                rows_json: bookclerk_plugin_sdk::encode_atomic_result(result)?,
                 next_cursor: None,
             });
         }

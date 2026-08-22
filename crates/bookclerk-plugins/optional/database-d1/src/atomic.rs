@@ -222,43 +222,160 @@ fn ambiguous_d1(msg: impl std::fmt::Display) -> DbErr {
 
 /// Fails closed on DML `RETURNING` that D1 HTTP cannot prove is at most one row.
 ///
-/// Cloudflare commits the batch before JSON is parsed. Multi-row `RETURNING`
-/// (recursive CTEs, `FROM` relations, `UNION`, `UPDATE`/`DELETE`) is rejected
-/// before HTTP. Host 1-row `INSERT … SELECT ?, ? WHERE … RETURNING` is allowed.
+/// Cloudflare commits the batch before JSON is parsed. `Returning` requires a
+/// host-IR `maxRows = 1`. Top-level `;` (multi-statement SQL) and multi-tuple
+/// `VALUES` are rejected before HTTP.
 fn reject_unbounded_returning(plan: &DbAtomicPlan) -> std::result::Result<(), DbErr> {
     let cap = DbConnectResult::d1().max_result_rows;
     for (i, stmt) in plan.statements.iter().enumerate() {
+        if sql_has_top_level_semicolon(&stmt.sql) {
+            return Err(DbErr::Custom(format!(
+                "D1 statement {i} contains multiple SQL statements; maxResultRows is {cap}"
+            )));
+        }
         let looks_returning = matches!(stmt.kind, DbPlanStatementKind::Returning)
             || (matches!(stmt.kind, DbPlanStatementKind::Query)
                 && has_top_level_keyword(&stmt.sql, "RETURNING"));
         if !looks_returning {
             continue;
         }
-        if returning_is_provably_single_row(&stmt.sql) {
-            continue;
+        if stmt.max_rows != 1 {
+            return Err(DbErr::Custom(format!(
+                "D1 statement {i} Returning is not proven bounded; maxResultRows is {cap}"
+            )));
         }
-        return Err(DbErr::Custom(format!(
-            "D1 statement {i} Returning is not proven bounded; maxResultRows is {cap}"
-        )));
+        if has_top_level_keyword(&stmt.sql, "VALUES") {
+            let tuples = count_top_level_values_tuples(&stmt.sql);
+            if tuples != 1 {
+                return Err(DbErr::Custom(format!(
+                    "D1 statement {i} Returning VALUES is not a single tuple ({tuples}); maxResultRows is {cap}"
+                )));
+            }
+        }
     }
     Ok(())
 }
 
-/// True for `INSERT … SELECT <scalars> WHERE … RETURNING` / `INSERT … VALUES … RETURNING`.
-fn returning_is_provably_single_row(sql: &str) -> bool {
-    let mut saw_insert = false;
-    let mut saw_update_or_delete = false;
-    let mut banned = false;
-    for_each_top_level_keyword(sql, |_, kw| {
-        let upper = kw.to_ascii_uppercase();
-        match upper.as_str() {
-            "INSERT" => saw_insert = true,
-            "UPDATE" | "DELETE" => saw_update_or_delete = true,
-            "FROM" | "UNION" | "RECURSIVE" | "GENERATE_SERIES" => banned = true,
+/// True when a top-level semicolon would start another statement.
+fn sql_has_top_level_semicolon(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    let mut depth = 0usize;
+    let mut in_squote = false;
+    let mut in_dquote = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_squote {
+            if c == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_squote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_dquote {
+            if c == b'"' {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
+                in_dquote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => in_squote = true,
+            b'"' => in_dquote = true,
+            b'(' => depth = depth.saturating_add(1),
+            b')' => depth = depth.saturating_sub(1),
+            b';' if depth == 0 => {
+                let rest = sql[i + 1..].trim();
+                if !rest.is_empty() {
+                    return true;
+                }
+            }
             _ => {}
         }
+        i += 1;
+    }
+    false
+}
+
+/// Number of top-level `VALUES` tuples (`(1),(2)` → 2). `0` when none parsed.
+fn count_top_level_values_tuples(sql: &str) -> usize {
+    let Some(idx) = top_level_keyword_index(sql, "VALUES") else {
+        return 0;
+    };
+    let bytes = sql.as_bytes();
+    let mut i = idx + "VALUES".len();
+    let mut depth = 0usize;
+    let mut tuples = 0usize;
+    let mut in_squote = false;
+    let mut in_dquote = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_squote {
+            if c == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_squote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_dquote {
+            if c == b'"' {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
+                in_dquote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => in_squote = true,
+            b'"' => in_dquote = true,
+            b'(' => {
+                if depth == 0 {
+                    tuples = tuples.saturating_add(1);
+                }
+                depth = depth.saturating_add(1);
+            }
+            b')' => depth = depth.saturating_sub(1),
+            _ => {
+                if depth == 0 {
+                    let rest = &sql[i..];
+                    if rest.len() >= 9 && rest[..9].eq_ignore_ascii_case("RETURNING") {
+                        break;
+                    }
+                    if c == b';' {
+                        break;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    tuples
+}
+
+/// Byte offset of a top-level keyword, if present.
+fn top_level_keyword_index(sql: &str, keyword: &str) -> Option<usize> {
+    let mut found = None;
+    for_each_top_level_keyword(sql, |idx, kw| {
+        if kw.eq_ignore_ascii_case(keyword) {
+            found = Some(idx);
+        }
     });
-    saw_insert && !saw_update_or_delete && !banned && has_top_level_keyword(sql, "RETURNING")
+    found
 }
 
 /// True when `keyword` appears at parenthesis depth 0 (not inside quotes).
@@ -377,7 +494,7 @@ fn parse_generic_batch(
         }
     }
     let db_execution_us = d1_sql_duration_us(value);
-    Ok(DbPlanExecResult {
+    let result = DbPlanExecResult {
         operation_id,
         statements,
         timing: Some(DbAtomicTiming {
@@ -385,7 +502,19 @@ fn parse_generic_batch(
             db_execution_us,
             db_timing_source: db_execution_us.map(|_| "d1_sql_duration".into()),
         }),
-    })
+    };
+    let atomic_cap = usize::try_from(DbConnectResult::d1().max_atomic_result_bytes).unwrap_or(0);
+    if atomic_cap > 0 {
+        let used = serde_json::to_vec(&result)
+            .map(|b| b.len())
+            .unwrap_or(usize::MAX);
+        if used > atomic_cap {
+            return Err(ambiguous_d1(format!(
+                "atomic result is {used} bytes; maxAtomicResultBytes is {atomic_cap}"
+            )));
+        }
+    }
+    Ok(result)
 }
 
 /// Parses the D1 `result` array; a `success: false` entry is a hard statement failure.
@@ -493,6 +622,7 @@ mod tests {
                 sql: "INSERT INTO t (k) VALUES ('a')".into(),
                 binds: vec![],
                 kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
             }],
             outcome_index: 0,
             payload_index: None,
@@ -513,6 +643,7 @@ mod tests {
                 sql: "SELECT 1".into(),
                 binds: vec![],
                 kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                max_rows: 0,
             }],
             outcome_index: 0,
             payload_index: None,
@@ -544,11 +675,7 @@ mod tests {
     }
 
     fn stmt(sql: &str, kind: DbPlanStatementKind) -> bookclerk_plugin_sdk::DbPlanStatement {
-        bookclerk_plugin_sdk::DbPlanStatement {
-            sql: sql.into(),
-            binds: vec![],
-            kind,
-        }
+        bookclerk_plugin_sdk::DbPlanStatement::new(sql, vec![], kind)
     }
 
     fn plan_of(sql: &str, kind: DbPlanStatementKind) -> DbAtomicPlan {
@@ -565,8 +692,9 @@ mod tests {
     fn host_insert_returning_is_proven_single_row() {
         let sql = "INSERT OR IGNORE INTO event_deliveries (id) \
              SELECT ? WHERE EXISTS (SELECT 1 FROM domain_events WHERE id = ?) RETURNING id";
-        reject_unbounded_returning(&plan_of(sql, DbPlanStatementKind::Returning)).unwrap();
-        assert!(returning_is_provably_single_row(sql));
+        let mut plan = plan_of(sql, DbPlanStatementKind::Returning);
+        plan.statements[0].max_rows = 1;
+        reject_unbounded_returning(&plan).unwrap();
     }
 
     #[test]
@@ -577,5 +705,24 @@ mod tests {
             reject_unbounded_returning(&plan_of(sql, DbPlanStatementKind::Returning)).unwrap_err();
         assert!(err.to_string().contains("maxResultRows"), "{err}");
         assert!(!is_ambiguous_d1(&err), "{err}");
+    }
+
+    #[test]
+    fn multi_values_returning_is_not_proven() {
+        let sql = "INSERT INTO t(id) VALUES (1),(2) RETURNING id";
+        let mut plan = plan_of(sql, DbPlanStatementKind::Returning);
+        plan.statements[0].max_rows = 1;
+        let err = reject_unbounded_returning(&plan).unwrap_err();
+        assert!(err.to_string().contains("VALUES"), "{err}");
+        assert!(err.to_string().contains("maxResultRows"), "{err}");
+        assert_eq!(count_top_level_values_tuples(sql), 2);
+    }
+
+    #[test]
+    fn semicolon_joined_sql_is_rejected() {
+        let sql = "INSERT INTO t(id) VALUES (1); INSERT INTO t(id) VALUES (2)";
+        let err =
+            reject_unbounded_returning(&plan_of(sql, DbPlanStatementKind::Execute)).unwrap_err();
+        assert!(err.to_string().contains("multiple SQL statements"), "{err}");
     }
 }

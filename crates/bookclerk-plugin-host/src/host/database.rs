@@ -558,6 +558,7 @@ impl RpcAtomicBackend {
         let mut request = compiled.clone().into_request(operation_id.clone());
         let deadline_unix_ms = unix_now_ms().saturating_add(120_000);
         request.deadline_unix_ms = Some(deadline_unix_ms);
+        bookclerk_library::validate_atomic_request(&request, &self.caps)?;
         let payload = serde_json::to_string(&request).map_err(|err| {
             bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
         })?;
@@ -647,11 +648,7 @@ async fn exec_host_ddl_batch(
     }
     let statements: Vec<DbPlanStatement> = stmts
         .into_iter()
-        .map(|sql| DbPlanStatement {
-            sql,
-            binds: Vec::new(),
-            kind: DbPlanStatementKind::Execute,
-        })
+        .map(|sql| DbPlanStatement::new(sql, Vec::new(), DbPlanStatementKind::Execute))
         .collect();
     let plan = DbAtomicPlan {
         statements,

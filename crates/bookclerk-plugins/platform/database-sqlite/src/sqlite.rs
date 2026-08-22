@@ -329,35 +329,33 @@ impl ProxyDatabaseTrait for SqliteProxy {
                 .map_err(rusqlite_db_err)?;
             let caps = DbConnectResult::sqlite();
             let cell_cap = usize::try_from(caps.max_cell_bytes).unwrap_or(usize::MAX);
-            let result_cap = usize::try_from(caps.max_result_bytes).unwrap_or(usize::MAX);
             let mut out = Vec::new();
             let mut result_bytes = 0usize;
             while let Some(row) = rows.next().map_err(rusqlite_db_err)? {
                 let mut values = BTreeMap::new();
                 for (i, name) in names.iter().enumerate() {
-                    let vref = row.get_ref(i).map_err(rusqlite_db_err)?;
-                    let nbytes = match vref {
-                        rusqlite::types::ValueRef::Blob(b) => b.len(),
-                        rusqlite::types::ValueRef::Text(t) => t.len(),
-                        _ => 0,
-                    };
-                    if caps.max_cell_bytes > 0 && nbytes > cell_cap {
-                        return Err(DbErr::Custom(format!(
-                            "column `{name}` is {nbytes} bytes; maxCellBytes is {}",
-                            caps.max_cell_bytes
-                        )));
-                    }
                     let v: rusqlite::types::Value = row.get(i).map_err(rusqlite_db_err)?;
                     let decl = decltypes.get(i).and_then(Option::as_deref);
                     values.insert(name.clone(), rusqlite_to_sea(v, decl, name));
-                    result_bytes = result_bytes.saturating_add(nbytes);
                 }
-                if caps.max_result_bytes > 0 && result_bytes > result_cap {
-                    return Err(DbErr::Custom(format!(
-                        "query result is {result_bytes} bytes; maxResultBytes is {}",
-                        caps.max_result_bytes
-                    )));
+                if caps.max_cell_bytes > 0 {
+                    for (name, value) in &values {
+                        let cell = bookclerk_db_exec::sea_value_to_json(value);
+                        let n = bookclerk_db_exec::json_cell_utf8_len(&cell);
+                        if n > cell_cap {
+                            return Err(DbErr::Custom(format!(
+                                "column `{name}` is {n} bytes; maxCellBytes is {}",
+                                caps.max_cell_bytes
+                            )));
+                        }
+                    }
                 }
+                let nbytes = bookclerk_db_exec::encoded_proxy_row_len(&values);
+                bookclerk_db_exec::note_encoded_result_bytes(
+                    &mut result_bytes,
+                    nbytes,
+                    caps.max_result_bytes,
+                )?;
                 out.push(ProxyRow { values });
                 if budget.note_row() {
                     return Err(DbErr::Custom(format!(

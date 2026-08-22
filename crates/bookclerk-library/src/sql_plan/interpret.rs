@@ -105,6 +105,19 @@ pub fn validate_exec_result(
             }
         }
     }
+    if caps.max_atomic_result_bytes > 0 {
+        let bytes = serde_json::to_vec(exec).map(|b| b.len()).unwrap_or(0);
+        let cap = usize::try_from(
+            caps.max_atomic_result_bytes
+                .min(bookclerk_plugin_abi::v2::MAX_SCALAR_BYTES),
+        )
+        .unwrap_or(usize::MAX);
+        if bytes > cap {
+            return Err(LibraryError::Unavailable(format!(
+                "atomic result is {bytes} bytes; guest maxAtomicResultBytes is {cap}"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -220,6 +233,7 @@ mod tests {
                 sql: "SELECT 1".into(),
                 binds: vec![],
                 kind: DbPlanStatementKind::Query,
+                max_rows: 0,
             }],
             outcome_index: 0,
             payload_index: None,
