@@ -14,7 +14,8 @@ use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, Datab
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
     exec_result_from_dto, proxy_rows_from_dto, statement_to_dto, DbConnectParams, DbConnectResult,
-    DbPlanExecResult, ExecResultDto, ProxyRowDto, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    DbPlanExecResult, DbPlanStmtExecResult, ExecResultDto, ProxyRowDto, DB_ATOMIC_SENTINEL,
+    DB_CAPABILITIES_SENTINEL,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -528,7 +529,7 @@ impl RpcAtomicBackend {
         operation_id: String,
     ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
         bookclerk_library::validate_plan(&compiled.plan, &self.caps)?;
-        let request = compiled.clone().into_request(operation_id);
+        let request = compiled.clone().into_request(operation_id.clone());
         let payload = serde_json::to_string(&request).map_err(|err| {
             bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
         })?;
@@ -536,10 +537,16 @@ impl RpcAtomicBackend {
             Ok(page) => {
                 let exec: DbPlanExecResult =
                     serde_json::from_str(&page.rows_json).map_err(|err| {
-                        bookclerk_library::LibraryError::Other(anyhow::anyhow!(
+                        bookclerk_library::LibraryError::Unavailable(format!(
                             "database atomic result: {err}"
                         ))
                     })?;
+                bookclerk_library::validate_exec_result(
+                    &compiled.plan,
+                    &exec,
+                    &self.caps,
+                    &operation_id,
+                )?;
                 Ok(bookclerk_library::interpret_exec(
                     &compiled.plan,
                     &exec,
@@ -1226,5 +1233,23 @@ mod tests {
         let second = bookclerk_library::db_atomic_operation_id(&params);
         assert_eq!(first, second);
         assert_eq!(first, "takeOidcRpState:abc");
+    }
+
+    #[test]
+    fn omitted_rows_affected_fails_deserialize() {
+        let err = serde_json::from_str::<DbPlanStmtExecResult>(r#"{"rows":[]}"#).unwrap_err();
+        assert!(
+            err.to_string().contains("rowsAffected") || err.to_string().contains("missing field"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn malformed_atomic_json_maps_to_unavailable() {
+        let err = crate::PluginError::unavailable("lost reply");
+        assert!(matches!(
+            map_plugin_err(err),
+            bookclerk_library::LibraryError::Unavailable(_)
+        ));
     }
 }

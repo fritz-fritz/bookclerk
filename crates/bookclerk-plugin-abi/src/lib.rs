@@ -242,4 +242,18 @@ mod tests {
             .capability_failure_reason()
             .contains("does not match"));
     }
+
+    #[test]
+    fn stmt_exec_result_requires_rows_and_rows_affected() {
+        let err = serde_json::from_str::<DbPlanStmtExecResult>(r#"{"rows":[]}"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("rowsAffected") || msg.contains("missing field"),
+            "{msg}"
+        );
+        let ok: DbPlanStmtExecResult =
+            serde_json::from_str(r#"{"rows":[],"rowsAffected":0}"#).unwrap();
+        assert!(ok.rows.is_empty());
+        assert_eq!(ok.rows_affected, 0);
+    }
 }

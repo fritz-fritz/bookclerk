@@ -1,9 +1,10 @@
 //! Decode generic atomic-plan statement results into [`DbAtomicResult`].
 
-use bookclerk_plugin_abi::{DbAtomicPlan, DbPlanExecResult, DbPlanStmtExecResult};
+use bookclerk_plugin_abi::{DbAtomicPlan, DbConnectResult, DbPlanExecResult, DbPlanStmtExecResult};
 use serde_json::Value as JsonValue;
 
 use crate::atomic_ops::{atomic_status, DbAtomicResult};
+use crate::error::{LibraryError, Result};
 
 /// Rows produced by one plan statement.
 #[derive(Debug, Clone, Default)]
@@ -37,6 +38,57 @@ pub fn interpret_exec(
         result.timing = exec.timing.clone();
     }
     result
+}
+
+/// Rejects a guest atomic result that does not match the sent plan or caps.
+///
+/// A mismatch after the guest reports success is treated as
+/// [`LibraryError::Unavailable`] so the caller retries the same `operationId`
+/// rather than interpreting a truncated envelope as `empty` / `notFound`.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Unavailable`] when the echo, statement count, or
+/// per-statement row/byte bounds do not match the request.
+pub fn validate_exec_result(
+    plan: &DbAtomicPlan,
+    exec: &DbPlanExecResult,
+    caps: &DbConnectResult,
+    operation_id: &str,
+) -> Result<()> {
+    if exec.operation_id != operation_id {
+        return Err(LibraryError::Unavailable(format!(
+            "atomic result operationId {:?} does not echo {operation_id}",
+            exec.operation_id
+        )));
+    }
+    if exec.statements.len() != plan.statements.len() {
+        return Err(LibraryError::Unavailable(format!(
+            "atomic result has {} statements; plan has {}",
+            exec.statements.len(),
+            plan.statements.len()
+        )));
+    }
+    for (i, stmt) in exec.statements.iter().enumerate() {
+        let n_rows = u32::try_from(stmt.rows.len()).unwrap_or(u32::MAX);
+        if caps.max_result_rows > 0 && n_rows > caps.max_result_rows {
+            return Err(LibraryError::Unavailable(format!(
+                "atomic result statement {i} returned {n_rows} rows; guest maxResultRows is {}",
+                caps.max_result_rows
+            )));
+        }
+        if caps.max_payload_bytes > 0 {
+            let bytes = serde_json::to_vec(&stmt.rows).map(|b| b.len()).unwrap_or(0);
+            let cap = usize::try_from(caps.max_payload_bytes).unwrap_or(usize::MAX);
+            if bytes > cap {
+                return Err(LibraryError::Unavailable(format!(
+                    "atomic result statement {i} encoded rows are {bytes} bytes; guest maxPayloadBytes is {}",
+                    caps.max_payload_bytes
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Maps statement rows onto a [`DbAtomicResult`], preferring receipt rows.
@@ -136,5 +188,87 @@ fn decode_receipt_payload(value: Option<&JsonValue>) -> Option<JsonValue> {
             .ok()
             .or_else(|| Some(JsonValue::String(s.clone()))),
         Some(other) => Some(other.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_exec_result, DbAtomicPlan, DbPlanExecResult, DbPlanStmtExecResult};
+    use crate::LibraryError;
+    use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatement, DbPlanStatementKind};
+
+    fn one_stmt_plan() -> DbAtomicPlan {
+        DbAtomicPlan {
+            statements: vec![DbPlanStatement {
+                sql: "SELECT 1".into(),
+                binds: vec![],
+                kind: DbPlanStatementKind::Query,
+            }],
+            outcome_index: 0,
+            payload_index: None,
+            prior_receipt_index: None,
+            receipt_select_index: None,
+        }
+    }
+
+    fn exec(id: &str, statements: Vec<DbPlanStmtExecResult>) -> DbPlanExecResult {
+        DbPlanExecResult {
+            operation_id: id.into(),
+            statements,
+            timing: None,
+        }
+    }
+
+    #[test]
+    fn validate_exec_rejects_wrong_operation_id() {
+        let err = validate_exec_result(
+            &one_stmt_plan(),
+            &exec(
+                "other",
+                vec![DbPlanStmtExecResult {
+                    rows: vec![],
+                    rows_affected: 0,
+                }],
+            ),
+            &DbConnectResult::sqlite(),
+            "wanted",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LibraryError::Unavailable(_)), "{err}");
+        assert!(err.to_string().contains("operationId"), "{err}");
+    }
+
+    #[test]
+    fn validate_exec_rejects_short_statement_list() {
+        let err = validate_exec_result(
+            &one_stmt_plan(),
+            &exec("wanted", vec![]),
+            &DbConnectResult::sqlite(),
+            "wanted",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LibraryError::Unavailable(_)), "{err}");
+        assert!(err.to_string().contains("statements"), "{err}");
+    }
+
+    #[test]
+    fn validate_exec_rejects_over_cap_rows() {
+        let mut caps = DbConnectResult::sqlite();
+        caps.max_result_rows = 1;
+        let err = validate_exec_result(
+            &one_stmt_plan(),
+            &exec(
+                "wanted",
+                vec![DbPlanStmtExecResult {
+                    rows: vec![serde_json::json!({"a":1}), serde_json::json!({"a":2})],
+                    rows_affected: 2,
+                }],
+            ),
+            &caps,
+            "wanted",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LibraryError::Unavailable(_)), "{err}");
+        assert!(err.to_string().contains("maxResultRows"), "{err}");
     }
 }

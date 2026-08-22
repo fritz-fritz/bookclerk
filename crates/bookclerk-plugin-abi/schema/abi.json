@@ -1251,6 +1251,10 @@
     },
     "DbPlanStmtExecResult": {
       "type": "object",
+      "required": [
+        "rows",
+        "rowsAffected"
+      ],
       "properties": {
         "rows": {
           "type": "array"

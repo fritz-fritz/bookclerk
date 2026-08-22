@@ -483,10 +483,8 @@ pub struct DbAtomicTiming {
 #[serde(rename_all = "camelCase")]
 pub struct DbPlanStmtExecResult {
     /// Result-set rows (empty for DML without `RETURNING`).
-    #[serde(default)]
     pub rows: Vec<JsonValue>,
     /// Engine-reported rows affected (wire `rowsAffected`).
-    #[serde(default)]
     pub rows_affected: u64,
 }
 
