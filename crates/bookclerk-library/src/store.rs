@@ -146,11 +146,8 @@ impl LibraryStore {
     /// Subscribers packed into one dispatch plan (receipt overhead is ~12 statements).
     #[must_use]
     pub fn dispatch_chunk_size(&self) -> usize {
-        #[cfg(test)]
-        {
-            if let Some(n) = crate::store::event_outbox::dispatch_chunk_override() {
-                return n.max(1);
-            }
+        if let Some(n) = crate::store::event_outbox::dispatch_chunk_override() {
+            return n.max(1);
         }
         const OVERHEAD: u32 = 12;
         const BINDS_PER_INSERT: u32 = 9;
@@ -6817,6 +6814,7 @@ fn map_book(m: books::Model) -> Result<BookRecord> {
 }
 
 pub(crate) mod event_outbox;
+pub use event_outbox::{inject_dispatch_page_failures, set_dispatch_chunk_for_test};
 pub(crate) mod job_queue;
 
 #[cfg(test)]

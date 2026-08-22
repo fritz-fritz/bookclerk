@@ -14,6 +14,7 @@ mod db_atomic;
 pub mod email;
 pub mod entities;
 mod error;
+mod in_process_atomic;
 pub mod master_key;
 pub mod migrations;
 /// Public library DTOs and status enums (`BookRecord`, `AcquireStatus`, prefs) re-exported from this crate.
@@ -39,6 +40,7 @@ pub use db_atomic::{
 };
 pub use email::{gravatar_hash, is_valid_user_email, normalize_user_email};
 pub use error::{LibraryError, Result};
+pub use in_process_atomic::InProcessSqliteAtomic;
 pub use master_key::{
     configure_master_key, configure_master_key_with, inspect_master_key, master_key_path,
     require_master_key, resolve_master_key, resolve_master_key_with, seal_with_dek,
@@ -92,10 +94,10 @@ pub use sql_plan::{
     wake_page_for_max_binds, CompiledAtomic, SqlFamily,
 };
 pub use store::{
-    event_outbox::prepare_publish_domain_event, fallback_work_key, prefer_enrichment_source,
-    wishlist_identities_match, CatalogEnrichmentFields, LibraryStore, NewBook,
-    NewListeningProgress, NewTitleRequest, NewTitleRequestSource, NewWork, SavedFilterRecord,
-    UserBookFields, WishlistIdentity,
+    event_outbox::prepare_publish_domain_event, fallback_work_key, inject_dispatch_page_failures,
+    prefer_enrichment_source, set_dispatch_chunk_for_test, wishlist_identities_match,
+    CatalogEnrichmentFields, LibraryStore, NewBook, NewListeningProgress, NewTitleRequest,
+    NewTitleRequestSource, NewWork, SavedFilterRecord, UserBookFields, WishlistIdentity,
 };
 pub use text::{
     decode_html_entities, decode_html_entities_cow, decode_html_entities_in_place,

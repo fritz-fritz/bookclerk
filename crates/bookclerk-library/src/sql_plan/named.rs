@@ -1851,7 +1851,7 @@ fn plan_dispatch_event_deliveries(
     let subs: Vec<JsonValue> = serde_json::from_str(subscribers_json).unwrap_or_default();
     let mut statements = Vec::new();
     let mut page_plugins: Vec<String> = Vec::new();
-    for sub in subs.iter().take(24) {
+    for sub in &subs {
         let plugin_id = sub
             .get("pluginId")
             .or_else(|| sub.get("plugin_id"))
@@ -4138,6 +4138,44 @@ mod tests {
         let state: String = conn
             .query_row(
                 "SELECT dispatch_state FROM domain_events WHERE id = 'evt-page'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "dispatched");
+    }
+
+    #[test]
+    fn dispatch_twenty_five_subscribers_inserts_every_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn);
+        let now = "2024-06-01T00:00:00Z";
+        seed_domain_event(&conn, "evt-25", now);
+        let subs: Vec<serde_json::Value> = (0..25)
+            .map(|i| json!({ "pluginId": format!("plugin-{i:02}") }))
+            .collect();
+        let req = test_req(
+            DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt-25".into(),
+                subscribers_json: serde_json::to_string(&subs).unwrap(),
+                mark_dispatched: true,
+            },
+            "disp-25",
+        );
+        let result = run_plan(&conn, &plan_req(&req, now).unwrap());
+        assert_eq!(result.status, atomic_status::OK);
+        assert_eq!(result.payload.as_ref().unwrap()["created"], 25);
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM event_deliveries WHERE event_id = 'evt-25'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 25);
+        let state: String = conn
+            .query_row(
+                "SELECT dispatch_state FROM domain_events WHERE id = 'evt-25'",
                 [],
                 |r| r.get(0),
             )

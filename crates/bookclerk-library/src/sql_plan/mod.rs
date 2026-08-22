@@ -215,6 +215,34 @@ mod limits_tests {
     }
 
     #[test]
+    fn validate_plan_rejects_oversized_dispatch_page() {
+        use crate::atomic_ops::DbAtomicParams;
+        use crate::sql_plan::{compile_named_request, SqlFamily};
+        let subs: Vec<serde_json::Value> = (0..50)
+            .map(|i| serde_json::json!({ "pluginId": format!("p{i}") }))
+            .collect();
+        let compiled = compile_named_request(
+            "oversize",
+            &DbAtomicParams::DispatchEventDeliveries {
+                event_id: "evt".into(),
+                subscribers_json: serde_json::to_string(&subs).unwrap(),
+                mark_dispatched: true,
+            },
+            "2024-06-01T00:00:00Z",
+            SqlFamily::Sqlite,
+        )
+        .unwrap();
+        let mut caps = DbConnectResult::sqlite();
+        caps.max_statements = 40;
+        let err = validate_plan(&compiled.plan, &caps).unwrap_err();
+        assert!(err.to_string().contains("maxStatements"), "{err}");
+        assert!(
+            compiled.plan.statements.len() > 40,
+            "planner must emit inserts for every subscriber, not take(24)"
+        );
+    }
+
+    #[test]
     fn validate_plan_rejects_out_of_range_selector() {
         let plan = DbAtomicPlan {
             statements: vec![stmt("SELECT 1", vec![])],

@@ -1,12 +1,10 @@
 use super::*;
-use crate::atomic_status;
 use crate::models::{
     EnqueueJobSpec, EnqueueOutcome, EventCatalogSubscription, EventSubscriber, EventWakeGrant,
     JobFence, JobKind, JobPayload, JobRecord, JobResourceClass, JobState, JobTrigger,
     PublishDomainEventOutcome, PublishDomainEventSpec,
 };
-use crate::{execute_db_atomic, AtomicTxnBackend, EventDeliveryRecord, LibraryError};
-use async_trait::async_trait;
+use crate::{AtomicTxnBackend, InProcessSqliteAtomic};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait};
 use std::sync::Arc;
 
@@ -1694,212 +1692,6 @@ async fn test_store() -> LibraryStore {
     )
 }
 
-/// In-process `dbAtomic` backend used to prove host skip after plugin-id-only claim.
-struct SqliteAtomicClaimBackend {
-    db: sea_orm::DatabaseConnection,
-}
-
-fn claim_only_err<T>() -> crate::Result<T> {
-    Err(LibraryError::Other(anyhow::anyhow!(
-        "SqliteAtomicClaimBackend is claim-only"
-    )))
-}
-
-#[async_trait]
-impl AtomicTxnBackend for SqliteAtomicClaimBackend {
-    async fn delete_user(&self, _id: i64) -> crate::Result<()> {
-        claim_only_err()
-    }
-
-    async fn set_user_status(
-        &self,
-        _id: i64,
-        _status: crate::UserStatus,
-    ) -> crate::Result<crate::UserRecord> {
-        claim_only_err()
-    }
-
-    async fn set_user_password_hash(
-        &self,
-        _id: i64,
-        _password_hash: Option<&str>,
-    ) -> crate::Result<crate::UserRecord> {
-        claim_only_err()
-    }
-
-    async fn set_user_role(
-        &self,
-        _id: i64,
-        _role: crate::UserRole,
-    ) -> crate::Result<crate::UserRecord> {
-        claim_only_err()
-    }
-
-    async fn redeem_claim_ticket_to_session(
-        &self,
-        _token_hash: &str,
-        _session_hash: &str,
-        _expires_at: chrono::DateTime<chrono::Utc>,
-        _client: Option<&crate::SessionClientInfo>,
-        _new_password_hash: Option<&str>,
-        _password_fingerprint: Option<&str>,
-    ) -> crate::Result<crate::PortalIdentity> {
-        claim_only_err()
-    }
-
-    async fn take_oidc_rp_state(
-        &self,
-        _state_hash: &str,
-    ) -> crate::Result<Option<(String, String, String, String, Option<i64>)>> {
-        claim_only_err()
-    }
-
-    async fn take_webauthn_challenge(
-        &self,
-        _challenge_id: &str,
-        _kind: &str,
-    ) -> crate::Result<Option<(Option<i64>, String)>> {
-        claim_only_err()
-    }
-
-    async fn enqueue_job(&self, _spec: EnqueueJobSpec) -> crate::Result<EnqueueOutcome> {
-        claim_only_err()
-    }
-
-    async fn claim_next_job(
-        &self,
-        _resource_class: JobResourceClass,
-        _owner: &str,
-        _lease_secs: u64,
-        _operation_id: &str,
-    ) -> crate::Result<Option<JobRecord>> {
-        claim_only_err()
-    }
-
-    async fn reserve_job_temp_path(
-        &self,
-        _job_id: &str,
-        _path: &str,
-        _reserved_bytes: u64,
-        _quota_bytes: u64,
-    ) -> crate::Result<()> {
-        claim_only_err()
-    }
-
-    async fn confirm_totp_enrollment(
-        &self,
-        _user_id: i64,
-        _record: &crate::secrets::EncryptedSecretRecord,
-    ) -> crate::Result<()> {
-        claim_only_err()
-    }
-
-    async fn disable_user_totp(&self, _user_id: i64) -> crate::Result<()> {
-        claim_only_err()
-    }
-
-    async fn publish_domain_event(
-        &self,
-        _spec: PublishDomainEventSpec,
-    ) -> crate::Result<PublishDomainEventOutcome> {
-        claim_only_err()
-    }
-
-    async fn set_acquire_status(
-        &self,
-        _book_uuid: &str,
-        _status: crate::AcquireStatus,
-        _storage_key: Option<&str>,
-        _error_message: Option<&str>,
-        _event: Option<PublishDomainEventSpec>,
-    ) -> crate::Result<()> {
-        claim_only_err()
-    }
-
-    async fn dispatch_event_deliveries(
-        &self,
-        event_id: &str,
-        subscribers: &[EventSubscriber],
-        operation_id: &str,
-        mark_dispatched: bool,
-    ) -> crate::Result<u32> {
-        let subscribers_json = serde_json::to_string(subscribers)
-            .map_err(|err| LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let compiled = crate::compile_named_request(
-            operation_id,
-            &crate::DbAtomicParams::DispatchEventDeliveries {
-                event_id: event_id.to_string(),
-                subscribers_json,
-                mark_dispatched,
-            },
-            &now,
-            crate::SqlFamily::Sqlite,
-        )
-        .map_err(LibraryError::Orm)?;
-        let result =
-            execute_db_atomic(&self.db, compiled.into_request(operation_id.to_string())).await?;
-        if result.status == atomic_status::NOT_FOUND {
-            return Err(LibraryError::NotFound(format!("event {event_id}")));
-        }
-        if result.status != atomic_status::OK {
-            return Err(LibraryError::Other(anyhow::anyhow!(
-                "database atomic dispatch failed: {}",
-                result.status
-            )));
-        }
-        Ok(result
-            .payload
-            .as_ref()
-            .and_then(|v| v.get("created"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn claim_event_delivery(
-        &self,
-        delivery_id: &str,
-        owner: &str,
-        lease_secs: u64,
-        operation_id: &str,
-        plugin_id: &str,
-        resource_class: &str,
-        max_in_flight: u32,
-    ) -> crate::Result<Option<EventDeliveryRecord>> {
-        let now = chrono::Utc::now().to_rfc3339();
-        let compiled = crate::compile_claim_event_delivery(
-            operation_id,
-            delivery_id,
-            owner,
-            i64::try_from(lease_secs).unwrap_or(60),
-            plugin_id,
-            resource_class,
-            i64::from(max_in_flight),
-            &now,
-            crate::SqlFamily::Sqlite,
-        )
-        .map_err(LibraryError::Orm)?;
-        let result =
-            execute_db_atomic(&self.db, compiled.into_request(operation_id.to_string())).await?;
-        if result.status == atomic_status::EMPTY {
-            return Ok(None);
-        }
-        if result.status != atomic_status::OK {
-            return Err(LibraryError::Other(anyhow::anyhow!(
-                "database atomic claim failed: {}",
-                result.status
-            )));
-        }
-        let payload = result.payload.ok_or_else(|| {
-            LibraryError::Other(anyhow::anyhow!("database atomic claim missing payload"))
-        })?;
-        serde_json::from_value(payload).map(Some).map_err(|err| {
-            LibraryError::Other(anyhow::anyhow!("database atomic claim payload: {err}"))
-        })
-    }
-}
-
 fn scan_spec(account: Option<&str>, max_pending: i64) -> EnqueueJobSpec {
     EnqueueJobSpec {
         kind: JobKind::Scan,
@@ -3220,8 +3012,7 @@ async fn concurrent_host_cas_claims_do_not_skip_keyset_pages() {
     }
     let db = store.db().clone();
     super::event_outbox::set_claim_page_for_test(Some(2));
-    let store =
-        std::sync::Arc::new(store.with_atomic_txn(Arc::new(SqliteAtomicClaimBackend { db })));
+    let store = std::sync::Arc::new(store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db })));
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     let mut handles = Vec::new();
     for i in 0..2 {
@@ -3271,7 +3062,7 @@ async fn dispatch_page_fault_leaves_parent_pending_and_retries() {
         panic!("{created:?}");
     };
     let db = store.db().clone();
-    let store = store.with_atomic_txn(Arc::new(SqliteAtomicClaimBackend { db }));
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
     let subs = [
         EventSubscriber::plugin("echo"),
         EventSubscriber::plugin("audiobookshelf"),
@@ -3308,6 +3099,79 @@ async fn dispatch_page_fault_leaves_parent_pending_and_retries() {
     assert_eq!(created, 1, "retry inserts the remaining subscriber only");
     let event = store.get_domain_event(&id).await.unwrap().unwrap();
     assert_eq!(event.dispatch_state, "dispatched");
+}
+
+#[tokio::test]
+async fn dispatch_twenty_five_subscribers_on_sqlite_caps_are_all_inserted() {
+    let store = test_store()
+        .await
+        .with_connect_result(bookclerk_plugin_abi::DbConnectResult::sqlite());
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:twenty-five",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let db = store.db().clone();
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
+    assert!(
+        store.dispatch_chunk_size() >= 25,
+        "sqlite caps must pack more than the old take(24) planner cap"
+    );
+    let subs: Vec<EventSubscriber> = (0..25)
+        .map(|i| EventSubscriber::plugin(format!("plugin-{i:02}")))
+        .collect();
+    assert_eq!(
+        store
+            .dispatch_event_deliveries(&id, &subs, "op-25")
+            .await
+            .unwrap(),
+        25
+    );
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(event.dispatch_state, "dispatched");
+    assert_eq!(
+        store.list_event_deliveries(None, 50).await.unwrap().len(),
+        25
+    );
+}
+
+#[tokio::test]
+async fn oversized_dispatch_page_is_rejected_and_parent_stays_pending() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:oversize",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let backend = InProcessSqliteAtomic {
+        db: store.db().clone(),
+    };
+    let subs: Vec<EventSubscriber> = (0..100)
+        .map(|i| EventSubscriber::plugin(format!("plugin-{i:03}")))
+        .collect();
+    let err = backend
+        .dispatch_event_deliveries(&id, &subs, "op-oversize", true)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("maxStatements"),
+        "oversized page must fail closed: {err}"
+    );
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(event.dispatch_state, "pending");
+    assert!(store.next_undispatched_event().await.unwrap().is_some());
 }
 
 #[tokio::test]
@@ -5892,7 +5756,7 @@ async fn atomic_claim_skips_incompatible_oldest_and_claims_later_compatible() {
         .unwrap();
 
     let db = store.db().clone();
-    let store = store.with_atomic_txn(Arc::new(SqliteAtomicClaimBackend { db }));
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
     let claimed = store
         .claim_next_event_delivery(
             "atomic-skip-worker",

@@ -167,7 +167,6 @@ pub(crate) async fn wake_deliveries_fenced_on<C: ConnectionTrait>(
 
 /// Remaining injected `publish_domain_event_on` failures (library tests only).
 static INJECT_PUBLISH_FAULTS: AtomicU32 = AtomicU32::new(0);
-#[cfg(test)]
 thread_local! {
     static DISPATCH_EVENT_CALLS: AtomicU32 = const { AtomicU32::new(0) };
     static DISPATCH_PAGE_FAULTS: AtomicU32 = const { AtomicU32::new(0) };
@@ -187,25 +186,21 @@ pub(crate) fn take_dispatch_event_calls() -> u32 {
     DISPATCH_EVENT_CALLS.with(|c| c.swap(0, Ordering::SeqCst))
 }
 
-/// Fail after the next `n` successful dispatch pages (library tests only).
-#[cfg(test)]
-pub(crate) fn inject_dispatch_page_failures(n: u32) {
+/// Fail after the next `n` successful dispatch pages (tests only).
+pub fn inject_dispatch_page_failures(n: u32) {
     DISPATCH_PAGE_FAULTS.with(|c| c.store(n, Ordering::SeqCst));
 }
 
 /// Override subscribers-per-plan for dispatch paging tests.
-#[cfg(test)]
-pub(crate) fn set_dispatch_chunk_for_test(chunk: Option<usize>) {
+pub fn set_dispatch_chunk_for_test(chunk: Option<usize>) {
     DISPATCH_CHUNK_OVERRIDE.with(|c| c.set(chunk));
 }
 
 /// Current dispatch chunk override, if any.
-#[cfg(test)]
 pub(crate) fn dispatch_chunk_override() -> Option<usize> {
     DISPATCH_CHUNK_OVERRIDE.with(|c| c.get())
 }
 
-#[cfg(test)]
 fn take_dispatch_page_fault() -> bool {
     DISPATCH_PAGE_FAULTS.with(|c| {
         let n = c.load(Ordering::SeqCst);
@@ -279,7 +274,6 @@ impl LibraryStore {
         subscribers: &[EventSubscriber],
         operation_id: &str,
     ) -> Result<u32> {
-        #[cfg(test)]
         DISPATCH_EVENT_CALLS.with(|c| {
             c.fetch_add(1, Ordering::SeqCst);
         });
@@ -300,7 +294,6 @@ impl LibraryStore {
                 total += atomic
                     .dispatch_event_deliveries(event_id, &subscribers[start..end], &op, last)
                     .await?;
-                #[cfg(test)]
                 if take_dispatch_page_fault() {
                     return Err(LibraryError::Other(anyhow!(
                         "injected dispatch page failure after page {page}"
