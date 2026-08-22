@@ -444,6 +444,10 @@ pub fn sql_payload_exceeds(sql: &str, values_json: &str, max_payload_bytes: u32)
 }
 
 /// Converts JSON object rows onto typed columns + positional cells.
+///
+/// # Errors
+///
+/// Returns when a row is not a JSON object or a cell is outside [`DbValue`].
 fn json_rows_to_typed(rows: &[serde_json::Value]) -> Result<(Vec<DbColumn>, Vec<DbRow>), String> {
     let Some(first) = rows.first() else {
         return Ok((Vec::new(), Vec::new()));
@@ -491,6 +495,7 @@ fn typed_rows_to_json(columns: &[DbColumn], rows: &[DbRow]) -> Vec<serde_json::V
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
     use serde_json::json;

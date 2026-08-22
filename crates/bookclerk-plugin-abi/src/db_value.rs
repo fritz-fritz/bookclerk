@@ -126,6 +126,7 @@ pub fn db_value_to_json(v: &DbValue) -> serde_json::Value {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
     use serde_json::json;

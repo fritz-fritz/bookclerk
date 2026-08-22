@@ -1,6 +1,7 @@
 //! Cap'n Proto codec for typed database execute / capabilities.
 
 #![allow(clippy::missing_docs_in_private_items)]
+#![allow(clippy::missing_errors_doc)]
 
 use super::plugin_v2_capnp::{
     db_capabilities as db_caps_capnp, db_capabilities_reply, db_column as db_column_capnp,
