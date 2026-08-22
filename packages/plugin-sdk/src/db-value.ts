@@ -5,6 +5,7 @@
  * bytes. Unknown `kind` values fail closed.
  */
 
+/** Column / typed-null type tag on the Cap'n `DbValue` wire. */
 export type DbType =
   | "unspecified"
   | "bool"
@@ -13,6 +14,12 @@ export type DbType =
   | "text"
   | "bytes";
 
+/**
+ * Closed Cap'n `DbValue` union.
+ *
+ * Members are typed null, bool, int64, finite float64, UTF-8 text, and bytes
+ * (`b64:` payload). Unknown `kind` values fail closed.
+ */
 export type DbValue =
   | { kind: "null"; value: DbType }
   | { kind: "boolean"; value: boolean }
