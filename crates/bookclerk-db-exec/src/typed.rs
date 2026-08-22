@@ -4,14 +4,18 @@
 //! [`DbValue::Bytes`] maps to SeaORM bytes. Typed nulls use the matching
 //! SeaORM `Value::…(None)` variant so column types survive the round trip.
 
-use bookclerk_plugin_abi::v2::encoded_execute_reply_bytes;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Instant;
+
+use bookclerk_plugin_abi::v2::{encoded_execute_reply_bytes, encoded_statement_result_bytes};
 use bookclerk_plugin_abi::{
     DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
     ExecuteReply, ExecuteRequest, StatementResult,
 };
 use sea_orm::{
-    from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DbErr, ProxyRow,
-    Statement, TransactionTrait, Value as SeaValue,
+    ConnectionTrait, DatabaseConnection, DbErr, QueryResult, Statement, TransactionTrait,
+    Value as SeaValue,
 };
 
 use crate::exec::{
@@ -23,9 +27,7 @@ use crate::proxy_txn::{
     consume_commit_injection, is_txn_broken, take_txn_fault, with_exec_budget,
     AtomicInterruptPhase, ExecBudget,
 };
-use crate::{cap_query_sql, record_query_rows_seen};
-use std::sync::Arc;
-use std::time::Instant;
+use crate::{cap_query_sql, record_query_rows_seen, take_positional_result_columns};
 
 /// Convert a typed bind into a SeaORM value without JSON / `b64:` decoding.
 #[must_use]
@@ -136,68 +138,245 @@ fn db_value_cell_len(v: &DbValue) -> usize {
     }
 }
 
-/// Builds a positional [`StatementResult`] from SeaORM proxy rows.
+/// Builds a positional [`StatementResult`] from engine [`QueryResult`]s.
+///
+/// Column names and declared types come from rusqlite/SQLite metadata when the
+/// adapter recorded them ([`take_positional_result_columns`]), otherwise from
+/// `QueryResult::column_names` in engine order. Duplicate names are rejected
+/// here, before any name-keyed map conversion. Empty results keep that metadata.
 ///
 /// # Errors
 ///
 /// Returns when a row exceeds the result cap, a cell exceeds `max_cell_bytes`,
-/// or a SeaORM value is outside the universal domain.
-fn statement_result_from_proxy_rows(
-    proxy_rows: Vec<ProxyRow>,
+/// the encoded statement exceeds `max_result_bytes`, a SeaORM value is outside
+/// the universal domain, or column names are duplicated.
+fn statement_result_from_query_results(
+    engine_rows: &[QueryResult],
     kind: DbPlanStatementKind,
     caps: ExecCaps,
 ) -> Result<StatementResult, DbErr> {
-    if exceeds_result_row_cap(proxy_rows.len(), caps.max_result_rows) {
+    if exceeds_result_row_cap(engine_rows.len(), caps.max_result_rows) {
         return Err(DbErr::Custom(format!(
             "query returned {} rows; maxResultRows is {}",
-            proxy_rows.len(),
+            engine_rows.len(),
             caps.max_result_rows
         )));
     }
-    let columns_order: Vec<String> = proxy_rows
-        .first()
-        .map(|row| row.values.keys().cloned().collect())
-        .unwrap_or_default();
-    let mut db_columns: Vec<DbColumn> = columns_order
-        .iter()
-        .map(|name| DbColumn {
-            name: name.clone(),
-            db_type: DbType::Unspecified,
-        })
-        .collect();
-    let mut db_rows = Vec::with_capacity(proxy_rows.len());
-    for proxy in &proxy_rows {
-        let mut values = Vec::with_capacity(columns_order.len());
-        for name in &columns_order {
-            let sea = proxy
-                .values
-                .get(name)
-                .ok_or_else(|| DbErr::Custom(format!("result row missing column `{name}`")))?;
-            let cell = db_value_from_sea(sea).map_err(DbErr::Custom)?;
-            if caps.max_cell_bytes > 0 {
-                let n = db_value_cell_len(&cell);
-                let cap = usize::try_from(caps.max_cell_bytes).unwrap_or(usize::MAX);
+    let mut db_columns = take_positional_result_columns().unwrap_or_else(|| {
+        engine_rows
+            .first()
+            .map(|row| {
+                row.column_names()
+                    .into_iter()
+                    .map(|name| DbColumn {
+                        name,
+                        db_type: DbType::Unspecified,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    reject_duplicate_column_names(&db_columns)?;
+    let mut db_rows = Vec::with_capacity(engine_rows.len());
+    for engine in engine_rows {
+        let values = db_values_from_query_result(engine, &db_columns)?;
+        if caps.max_cell_bytes > 0 {
+            let cap = usize::try_from(caps.max_cell_bytes).unwrap_or(usize::MAX);
+            for (col, cell) in db_columns.iter().zip(values.iter()) {
+                let n = db_value_cell_len(cell);
                 if n > cap {
                     return Err(DbErr::Custom(format!(
-                        "column `{name}` is {n} bytes; maxCellBytes is {}",
-                        caps.max_cell_bytes
+                        "column `{}` is {n} bytes; maxCellBytes is {}",
+                        col.name, caps.max_cell_bytes
                     )));
                 }
             }
-            values.push(cell);
         }
         db_rows.push(DbRow { values });
     }
     for (i, col) in db_columns.iter_mut().enumerate() {
-        if let Some(first) = db_rows.first() {
-            if let Some(cell) = first.values.get(i) {
-                col.db_type = db_type_of(cell);
+        if col.db_type != DbType::Unspecified {
+            continue;
+        }
+        for row in &db_rows {
+            if let Some(cell) = row.values.get(i) {
+                if !matches!(cell, DbValue::Null(_)) {
+                    col.db_type = db_type_of(cell);
+                    break;
+                }
+            }
+        }
+        if col.db_type == DbType::Unspecified {
+            if let Some(DbValue::Null(ty)) = db_rows.first().and_then(|r| r.values.get(i)) {
+                col.db_type = *ty;
             }
         }
     }
     let mut result = StatementResult::from_rows(db_columns, db_rows).map_err(DbErr::Custom)?;
     result.rows_affected = rows_affected_for_kind(kind, result.rows.len());
+    reject_statement_result_bytes(&result, caps.max_result_bytes)?;
     Ok(result)
+}
+
+/// Fails when two positional columns share a name.
+fn reject_duplicate_column_names(columns: &[DbColumn]) -> Result<(), DbErr> {
+    let mut seen = HashSet::new();
+    for col in columns {
+        if !col.name.is_empty() && !seen.insert(col.name.as_str()) {
+            return Err(DbErr::Custom(format!(
+                "duplicate column name `{}`",
+                col.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Fails when the Cap'n-encoded [`StatementResult`] exceeds `max_result_bytes`.
+fn reject_statement_result_bytes(
+    result: &StatementResult,
+    max_result_bytes: u32,
+) -> Result<(), DbErr> {
+    if max_result_bytes == 0 {
+        return Ok(());
+    }
+    let used = encoded_statement_result_bytes(result)
+        .map(|b| b.len())
+        .unwrap_or(usize::MAX);
+    let cap = usize::try_from(max_result_bytes).unwrap_or(usize::MAX);
+    if used > cap {
+        return Err(DbErr::Custom(format!(
+            "query result is {used} bytes; maxResultBytes is {max_result_bytes}"
+        )));
+    }
+    Ok(())
+}
+
+/// Positional cells from one engine row (proxy rows looked up by recorded name).
+fn db_values_from_query_result(
+    row: &QueryResult,
+    columns: &[DbColumn],
+) -> Result<Vec<DbValue>, DbErr> {
+    if let Some(proxy) = row.try_as_proxy_row() {
+        let mut values = Vec::with_capacity(columns.len());
+        for col in columns {
+            let sea = proxy.values.get(&col.name).ok_or_else(|| {
+                DbErr::Custom(format!("result row missing column `{}`", col.name))
+            })?;
+            values.push(db_value_for_column(sea, col)?);
+        }
+        return Ok(values);
+    }
+    let mut values = Vec::with_capacity(columns.len());
+    for (i, col) in columns.iter().enumerate() {
+        let sea = sea_value_from_index(row, i, col.db_type)?;
+        values.push(db_value_for_column(&sea, col)?);
+    }
+    Ok(values)
+}
+
+/// Converts a SeaORM cell, stamping declared column type onto SQL NULL.
+fn db_value_for_column(sea: &SeaValue, col: &DbColumn) -> Result<DbValue, DbErr> {
+    let value = db_value_from_sea(sea).map_err(DbErr::Custom)?;
+    Ok(match value {
+        DbValue::Null(_) if col.db_type != DbType::Unspecified => DbValue::Null(col.db_type),
+        other => other,
+    })
+}
+
+/// Decodes one positional cell without going through a name-keyed map.
+///
+/// `Option<T>` succeeds for every SQL NULL, so the declared [`DbType`] is tried
+/// first. Untyped nulls stay `Null(Unspecified)` rather than the first match
+/// (`Bytes`).
+fn sea_value_from_index(row: &QueryResult, idx: usize, prefer: DbType) -> Result<SeaValue, DbErr> {
+    let order: &[DbType] = match prefer {
+        DbType::Bytes => &[
+            DbType::Bytes,
+            DbType::Int64,
+            DbType::Float64,
+            DbType::Text,
+            DbType::Bool,
+        ],
+        DbType::Int64 | DbType::Bool => &[
+            DbType::Int64,
+            DbType::Bool,
+            DbType::Float64,
+            DbType::Text,
+            DbType::Bytes,
+        ],
+        DbType::Float64 => &[
+            DbType::Float64,
+            DbType::Int64,
+            DbType::Text,
+            DbType::Bytes,
+            DbType::Bool,
+        ],
+        DbType::Text | DbType::Unspecified => &[
+            DbType::Int64,
+            DbType::Float64,
+            DbType::Text,
+            DbType::Bool,
+            DbType::Bytes,
+        ],
+    };
+    let mut saw_null = false;
+    for ty in order {
+        match ty {
+            DbType::Bytes => {
+                if let Ok(v) = row.try_get_by_index::<Option<Vec<u8>>>(idx) {
+                    if v.is_some() {
+                        return Ok(SeaValue::Bytes(v));
+                    }
+                    saw_null = true;
+                }
+            }
+            DbType::Int64 => {
+                if let Ok(v) = row.try_get_by_index::<Option<i64>>(idx) {
+                    if v.is_some() {
+                        return Ok(SeaValue::BigInt(v));
+                    }
+                    saw_null = true;
+                }
+            }
+            DbType::Float64 => {
+                if let Ok(v) = row.try_get_by_index::<Option<f64>>(idx) {
+                    if v.is_some() {
+                        return Ok(SeaValue::Double(v));
+                    }
+                    saw_null = true;
+                }
+            }
+            DbType::Text => {
+                if let Ok(v) = row.try_get_by_index::<Option<String>>(idx) {
+                    if v.is_some() {
+                        return Ok(SeaValue::String(v));
+                    }
+                    saw_null = true;
+                }
+            }
+            DbType::Bool => {
+                if let Ok(v) = row.try_get_by_index::<Option<bool>>(idx) {
+                    if v.is_some() {
+                        return Ok(SeaValue::Bool(v));
+                    }
+                    saw_null = true;
+                }
+            }
+            DbType::Unspecified => {}
+        }
+    }
+    if saw_null {
+        return Ok(match prefer {
+            DbType::Bytes => SeaValue::Bytes(None),
+            DbType::Int64 | DbType::Bool => SeaValue::BigInt(None),
+            DbType::Float64 => SeaValue::Double(None),
+            DbType::Text | DbType::Unspecified => SeaValue::String(None),
+        });
+    }
+    Err(DbErr::Custom(format!(
+        "column {idx} is outside the universal DbValue domain"
+    )))
 }
 
 /// Run a typed atomic batch on an existing SeaORM connection.
@@ -292,11 +471,7 @@ async fn execute_typed_body(
                                 return Err(err);
                             }
                         };
-                    let proxy_rows: Vec<ProxyRow> = engine_rows
-                        .iter()
-                        .map(from_query_result_to_proxy_row)
-                        .collect();
-                    match statement_result_from_proxy_rows(proxy_rows, stmt.kind, caps) {
+                    match statement_result_from_query_results(&engine_rows, stmt.kind, caps) {
                         Ok(result) => result,
                         Err(err) => {
                             let _ = txn.rollback().await;
@@ -317,7 +492,15 @@ async fn execute_typed_body(
                     if matches!(stmt.result_selection, DbResultSelection::Discard) {
                         StatementResult::from_affected(0)
                     } else {
-                        StatementResult::from_affected(exec.rows_affected())
+                        let result = StatementResult::from_affected(exec.rows_affected());
+                        if let Err(err) =
+                            reject_statement_result_bytes(&result, caps.max_result_bytes)
+                        {
+                            let _ = txn.rollback().await;
+                            let _ = take_txn_fault();
+                            return Err(err);
+                        }
+                        result
                     }
                 }
             };
@@ -406,6 +589,21 @@ mod tests {
     }
 
     #[test]
+    fn reject_duplicate_column_names_fails_closed() {
+        let cols = [
+            DbColumn {
+                name: "n".into(),
+                db_type: DbType::Int64,
+            },
+            DbColumn {
+                name: "n".into(),
+                db_type: DbType::Int64,
+            },
+        ];
+        assert!(reject_duplicate_column_names(&cols).is_err());
+    }
+
+    #[test]
     fn typed_nulls_use_matching_sea_variants() {
         assert!(matches!(
             db_value_to_sea(&DbValue::Null(DbType::Bytes)),
@@ -427,5 +625,15 @@ mod tests {
             db_value_to_sea(&DbValue::Null(DbType::Text)),
             SeaValue::String(None)
         ));
+    }
+
+    #[test]
+    fn typed_null_inherits_declared_column_type() {
+        let col = DbColumn {
+            name: "x".into(),
+            db_type: DbType::Int64,
+        };
+        let v = db_value_for_column(&SeaValue::Bytes(None), &col).unwrap();
+        assert!(matches!(v, DbValue::Null(DbType::Int64)));
     }
 }

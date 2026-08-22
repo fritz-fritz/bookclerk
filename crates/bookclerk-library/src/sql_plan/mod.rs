@@ -147,6 +147,38 @@ pub fn validate_execute_request(
     Ok(())
 }
 
+/// Host-authorizes a guest typed batch: overwrite statement kinds, enforce
+/// negotiated caps, and stamp the canonical Cap'n request hash.
+///
+/// A non-empty guest `requestHash` must match the host digest (retry token).
+/// An empty `operationId` is replaced with a fresh UUID.
+///
+/// # Errors
+///
+/// Returns [`crate::LibraryError::Other`] when the request exceeds caps, the
+/// retry hash does not match, or the canonical digest cannot be encoded.
+pub fn authorize_typed_request(
+    req: &mut ExecuteRequest,
+    caps: &DbConnectResult,
+) -> crate::error::Result<()> {
+    for stmt in &mut req.statements {
+        stmt.kind = host_statement_kind(&stmt.sql);
+    }
+    if req.operation_id.is_empty() {
+        req.operation_id = uuid::Uuid::new_v4().to_string();
+    }
+    validate_execute_request(req, caps)?;
+    let computed = bookclerk_plugin_abi::canonical_execute_request_hash(req)
+        .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
+    if !req.request_hash.is_empty() && req.request_hash != computed {
+        return Err(crate::LibraryError::Other(anyhow::anyhow!(
+            "retry token requestHash does not match the canonical request"
+        )));
+    }
+    req.request_hash = computed;
+    Ok(())
+}
+
 /// Rejects a plan or encoded [`DbAtomicRequest`] that exceeds negotiated guest limits.
 ///
 /// # Errors
@@ -225,9 +257,37 @@ fn wire_plan(
 /// Host-authored statement shape for the wire `kind` field.
 ///
 /// Adapters must not reparse SQL; they trust this classification.
-#[cfg(test)]
-pub(crate) fn host_statement_kind(sql: &str) -> DbPlanStatementKind {
+#[must_use]
+pub fn host_statement_kind(sql: &str) -> bookclerk_plugin_abi::DbPlanStatementKind {
     named::authored_kind(sql)
+}
+
+/// Kind for a SeaORM proxy **read**. `SELECT`/`WITH`/`VALUES` become `Select`
+/// (LIMIT-wrapped). `RETURNING` stays `Returning`. Everything else (PRAGMA,
+/// schema introspection) is `Query` so it is not LIMIT-wrapped.
+#[must_use]
+pub fn proxy_read_kind(sql: &str) -> bookclerk_plugin_abi::DbPlanStatementKind {
+    match named::authored_kind(sql) {
+        bookclerk_plugin_abi::DbPlanStatementKind::Select => {
+            bookclerk_plugin_abi::DbPlanStatementKind::Select
+        }
+        bookclerk_plugin_abi::DbPlanStatementKind::Returning => {
+            bookclerk_plugin_abi::DbPlanStatementKind::Returning
+        }
+        _ => bookclerk_plugin_abi::DbPlanStatementKind::Query,
+    }
+}
+
+/// Kind for a SeaORM proxy **write**. `RETURNING` is preserved; other DML is
+/// `Execute`.
+#[must_use]
+pub fn proxy_write_kind(sql: &str) -> bookclerk_plugin_abi::DbPlanStatementKind {
+    match named::authored_kind(sql) {
+        bookclerk_plugin_abi::DbPlanStatementKind::Returning => {
+            bookclerk_plugin_abi::DbPlanStatementKind::Returning
+        }
+        _ => bookclerk_plugin_abi::DbPlanStatementKind::Execute,
+    }
 }
 
 #[cfg(test)]
@@ -347,6 +407,50 @@ mod limits_tests {
         let typed = bookclerk_plugin_abi::ExecuteRequest::from_atomic(&req).unwrap();
         let err = validate_execute_request(&typed, &caps).unwrap_err();
         assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
+        let mut typed = typed;
+        let err = super::authorize_typed_request(&mut typed, &caps).unwrap_err();
+        assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
+    }
+
+    #[test]
+    fn authorize_typed_request_rejects_over_max_binds_and_stamps_hash() {
+        use bookclerk_plugin_abi::{
+            canonical_execute_request_hash, DbResultSelection, DbValue, ExecuteRequest,
+            TypedDbStatement,
+        };
+        let mut caps = DbConnectResult::sqlite();
+        caps.max_binds = 1;
+        let mut req = ExecuteRequest {
+            operation_id: "guest-op".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT ?, ?".into(),
+                parameters: vec![DbValue::Int64(1), DbValue::Int64(2)],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+            outcome_index: 0,
+            payload_index: 0,
+            has_payload_index: false,
+            prior_receipt_index: 0,
+            has_prior_receipt_index: false,
+            receipt_select_index: 0,
+            has_receipt_select_index: false,
+            deadline_unix_ms: 0,
+        };
+        let err = super::authorize_typed_request(&mut req, &caps).unwrap_err();
+        assert!(err.to_string().contains("maxBinds"), "{err}");
+
+        caps.max_binds = 32;
+        req.request_hash.clear();
+        super::authorize_typed_request(&mut req, &caps).unwrap();
+        assert_eq!(req.statements[0].kind, DbPlanStatementKind::Select);
+        let expected = canonical_execute_request_hash(&req).unwrap();
+        assert_eq!(req.request_hash, expected);
+        req.request_hash = "deadbeef".into();
+        let err = super::authorize_typed_request(&mut req, &caps).unwrap_err();
+        assert!(err.to_string().contains("requestHash"), "{err}");
     }
 
     #[test]

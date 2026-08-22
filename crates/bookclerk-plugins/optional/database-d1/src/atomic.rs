@@ -7,10 +7,10 @@
 use std::time::Duration;
 
 use bookclerk_plugin_sdk::{
-    encoded_execute_reply_bytes, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming,
-    DbColumn, DbConnectResult, DbPlanExecResult, DbPlanStatementKind, DbPlanStmtExecResult,
-    DbResultSelection, DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError,
-    StatementResult, TypedDbStatement,
+    encoded_execute_reply_bytes, encoded_statement_result_bytes, sea_null_kind, DbAtomicPlan,
+    DbAtomicRequest, DbAtomicTiming, DbColumn, DbConnectResult, DbPlanExecResult,
+    DbPlanStatementKind, DbPlanStmtExecResult, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
+    ExecuteReply, ExecuteRequest, PluginError, StatementResult, TypedDbStatement,
 };
 use sea_orm::DbErr;
 use serde_json::Value as JsonValue;
@@ -513,6 +513,18 @@ fn parse_typed_batch(
                 result
             }
         };
+        if caps.max_result_bytes > 0 {
+            let used = encoded_statement_result_bytes(&stmt_result)
+                .map(|b| b.len())
+                .unwrap_or(usize::MAX);
+            let cap = usize::try_from(caps.max_result_bytes).unwrap_or(usize::MAX);
+            if used > cap {
+                return Err(ambiguous_d1(format!(
+                    "query result is {used} bytes; maxResultBytes is {}",
+                    caps.max_result_bytes
+                )));
+            }
+        }
         statements.push(stmt_result);
     }
     let db_execution_us = d1_sql_duration_us(value);

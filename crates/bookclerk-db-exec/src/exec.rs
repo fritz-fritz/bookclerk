@@ -17,8 +17,9 @@ use serde_json::Value as JsonValue;
 
 use crate::lower_canonical_sql;
 use crate::proxy_txn::{
-    consume_atomic_interrupt, consume_commit_injection, is_txn_broken, record_query_rows_seen,
-    take_txn_fault, with_exec_budget, AtomicInterruptKind, AtomicInterruptPhase, ExecBudget,
+    consume_atomic_interrupt, consume_commit_injection, is_txn_broken, note_query_row,
+    record_query_rows_seen, take_txn_fault, with_exec_budget, AtomicInterruptKind,
+    AtomicInterruptPhase, ExecBudget,
 };
 
 /// Session-level cancel / deadline for one atomic attempt (not hashed).
@@ -314,6 +315,9 @@ pub fn cap_query_sql(sql: &str, max_result_rows: u32) -> String {
 
 /// Collects at most `max_result_rows + 1` engine rows (no JSON conversion).
 ///
+/// PostgreSQL is streamed. SQLite goes through the rusqlite proxy, which stops
+/// the cursor at the same cap (and records positional column metadata).
+///
 /// # Errors
 ///
 /// Returns when the engine stream/query fails.
@@ -322,12 +326,13 @@ pub(crate) async fn collect_capped_query_results(
     stmt: Statement,
     max_result_rows: u32,
 ) -> Result<Vec<QueryResult>, DbErr> {
+    let stop_after = row_stop_after(max_result_rows);
     if ConnectionTrait::get_database_backend(txn) == sea_orm::DatabaseBackend::Postgres {
         let stream = txn.stream_raw(stmt).await?;
         futures::pin_mut!(stream);
-        let stop_after = row_stop_after(max_result_rows);
         let mut rows = Vec::new();
         while let Some(row) = stream.try_next().await? {
+            let _ = note_query_row();
             rows.push(row);
             if rows.len() >= stop_after {
                 break;
@@ -336,7 +341,6 @@ pub(crate) async fn collect_capped_query_results(
         return Ok(rows);
     }
     let rows = txn.query_all_raw(stmt).await?;
-    let stop_after = row_stop_after(max_result_rows);
     Ok(rows.into_iter().take(stop_after).collect())
 }
 

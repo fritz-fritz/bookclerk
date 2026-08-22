@@ -134,7 +134,7 @@ impl ExternalDatabase {
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
             session: self.session.clone(),
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
-            max_payload_bytes: connect_result.max_payload_bytes,
+            caps: connect_result.clone(),
             typed_atomic: Arc::new(AtomicBool::new(true)),
         }));
         let db = Database::connect_proxy(backend, proxy).await?;
@@ -332,8 +332,8 @@ struct RpcDatabaseProxy {
     session: Arc<V2PluginSession>,
     /// Per-task nested begin depth (vat holds a single transaction).
     txn_depth: Arc<Mutex<HashMap<TaskKey, usize>>>,
-    /// Negotiated `maxPayloadBytes` (capped at [`bookclerk_plugin_sdk::v2::MAX_SCALAR_BYTES`]).
-    max_payload_bytes: u32,
+    /// Negotiated guest capabilities (statement/bind/request byte limits).
+    caps: DbConnectResult,
     /// False after `executeAtomic` returns `unsupported` (old-minor shim).
     typed_atomic: Arc<AtomicBool>,
 }
@@ -432,6 +432,29 @@ impl RpcDatabaseProxy {
             deadline_unix_ms: 0,
         }
     }
+
+    /// Validates `req` against negotiated caps, stamps the host request hash,
+    /// then sends `executeAtomic`.
+    ///
+    /// Guest-supplied statement kinds are replaced with host-authored kinds
+    /// derived from the SQL. After validation the host stamps the canonical
+    /// Cap'n request hash. A non-empty guest hash must match that digest
+    /// (explicit retry token).
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin ABI `invalid_params` error when the request exceeds
+    /// negotiated caps or the retry hash does not match, and a plugin error
+    /// when `executeAtomic` fails.
+    async fn execute_typed_validated(
+        &self,
+        mut req: ExecuteRequest,
+    ) -> Result<bookclerk_plugin_sdk::ExecuteReply, crate::PluginError> {
+        bookclerk_library::authorize_typed_request(&mut req, &self.caps)
+            .map_err(|err| crate::PluginError::from_abi(Some("invalid_params"), err.to_string()))?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.session.db_execute_atomic(req, cancel).await
+    }
 }
 
 #[async_trait]
@@ -443,12 +466,11 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         if self.depth() == 0 && self.typed_atomic.load(Ordering::SeqCst) {
             let typed = Self::statement_to_typed(
                 &statement,
-                DbPlanStatementKind::Query,
+                bookclerk_library::proxy_read_kind(&statement.sql),
                 DbResultSelection::Rows,
             )?;
             let req = Self::typed_request(typed, format!("proxy-query-{}", uuid::Uuid::new_v4()));
-            let cancel = Arc::new(AtomicBool::new(false));
-            match self.session.db_execute_atomic(req, cancel).await {
+            match self.execute_typed_validated(req).await {
                 Ok(reply) => {
                     let stmt = reply.statements.into_iter().next().ok_or_else(|| {
                         DbErr::Custom("executeAtomic query returned no statement result".into())
@@ -463,11 +485,11 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             }
         }
         let (sql, values_json) = Self::statement_parts(&statement);
-        if sql_payload_exceeds(&sql, &values_json, self.max_payload_bytes) {
+        if sql_payload_exceeds(&sql, &values_json, self.caps.max_payload_bytes) {
             return Err(DbErr::Custom(format!(
                 "database statement payload is {} bytes; guest maxPayloadBytes is {}",
                 sql.len().saturating_add(values_json.len()),
-                self.max_payload_bytes
+                self.caps.max_payload_bytes
             )));
         }
         let mut rows = Vec::new();
@@ -503,12 +525,11 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         if self.depth() == 0 && self.typed_atomic.load(Ordering::SeqCst) {
             let typed = Self::statement_to_typed(
                 &statement,
-                DbPlanStatementKind::Execute,
+                bookclerk_library::proxy_write_kind(&statement.sql),
                 DbResultSelection::AffectedRows,
             )?;
             let req = Self::typed_request(typed, format!("proxy-exec-{}", uuid::Uuid::new_v4()));
-            let cancel = Arc::new(AtomicBool::new(false));
-            match self.session.db_execute_atomic(req, cancel).await {
+            match self.execute_typed_validated(req).await {
                 Ok(reply) => {
                     let rows_affected = reply
                         .statements
@@ -528,11 +549,11 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             }
         }
         let (sql, values_json) = Self::statement_parts(&statement);
-        if sql_payload_exceeds(&sql, &values_json, self.max_payload_bytes) {
+        if sql_payload_exceeds(&sql, &values_json, self.caps.max_payload_bytes) {
             return Err(DbErr::Custom(format!(
                 "database statement payload is {} bytes; guest maxPayloadBytes is {}",
                 sql.len().saturating_add(values_json.len()),
-                self.max_payload_bytes
+                self.caps.max_payload_bytes
             )));
         }
         let result = self
@@ -555,9 +576,11 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
                 max_rows: 1,
                 result_selection: DbResultSelection::Rows,
             };
-            let req = RpcDatabaseProxy::typed_request(typed, "proxy-ping".into());
-            let cancel = Arc::new(AtomicBool::new(false));
-            match self.session.db_execute_atomic(req, cancel).await {
+            let req = RpcDatabaseProxy::typed_request(
+                typed,
+                format!("proxy-ping-{}", uuid::Uuid::new_v4()),
+            );
+            match self.execute_typed_validated(req).await {
                 Ok(_) => return Ok(()),
                 Err(err) if matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported") =>
                 {

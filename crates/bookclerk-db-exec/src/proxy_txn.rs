@@ -12,6 +12,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::ThreadId;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bookclerk_plugin_abi::DbColumn;
 use sea_orm::DbErr;
 use tokio::task::{try_id, Id as TaskId};
 
@@ -64,6 +65,8 @@ pub struct ExecBudget {
     query_row_cap: AtomicUsize,
     /// Rows materialized by the current capped query.
     query_rows_seen: AtomicUsize,
+    /// Engine column metadata for the in-flight query (crosses `spawn_blocking`).
+    positional_columns: Mutex<Option<Vec<DbColumn>>>,
 }
 
 impl ExecBudget {
@@ -74,6 +77,7 @@ impl ExecBudget {
             deadline_unix_ms: AtomicU64::new(deadline_unix_ms.unwrap_or(0)),
             query_row_cap: AtomicUsize::new(usize::try_from(query_row_cap).unwrap_or(0)),
             query_rows_seen: AtomicUsize::new(0),
+            positional_columns: Mutex::new(None),
         })
     }
 
@@ -123,6 +127,23 @@ impl ExecBudget {
     #[must_use]
     pub fn rows_seen(&self) -> usize {
         self.query_rows_seen.load(Ordering::SeqCst)
+    }
+
+    /// Records rusqlite/engine column metadata for the in-flight statement.
+    pub fn set_positional_columns(&self, columns: Vec<DbColumn>) {
+        *self
+            .positional_columns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(columns);
+    }
+
+    /// Takes engine column metadata recorded for this request, if any.
+    #[must_use]
+    pub fn take_positional_columns(&self) -> Option<Vec<DbColumn>> {
+        self.positional_columns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 }
 

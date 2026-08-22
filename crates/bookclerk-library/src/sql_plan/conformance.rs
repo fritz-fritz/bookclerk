@@ -1300,3 +1300,267 @@ async fn postgres_plan_cancel_around_commit_is_unavailable() {
     .unwrap_err();
     assert!(err.to_string().contains("database commit failed"), "{err}");
 }
+
+fn typed_query(id: &str, sql: &str) -> bookclerk_plugin_abi::ExecuteRequest {
+    use bookclerk_plugin_abi::{
+        DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+    };
+    ExecuteRequest {
+        operation_id: id.into(),
+        request_hash: String::new(),
+        statements: vec![TypedDbStatement {
+            sql: sql.into(),
+            parameters: vec![],
+            kind: DbPlanStatementKind::Select,
+            max_rows: 0,
+            result_selection: DbResultSelection::Rows,
+        }],
+        outcome_index: 0,
+        payload_index: 0,
+        has_payload_index: false,
+        prior_receipt_index: 0,
+        has_prior_receipt_index: false,
+        receipt_select_index: 0,
+        has_receipt_select_index: false,
+        deadline_unix_ms: 0,
+    }
+}
+
+async fn seed_typed_probe(db: &sea_orm::DatabaseConnection, sql_values: &str) {
+    let backend = sea_orm::ConnectionTrait::get_database_backend(db);
+    sea_orm::ConnectionTrait::execute_raw(
+        db,
+        sea_orm::Statement::from_string(
+            backend,
+            "CREATE TABLE IF NOT EXISTS typed_probe (x INTEGER, y TEXT)",
+        ),
+    )
+    .await
+    .unwrap();
+    sea_orm::ConnectionTrait::execute_raw(db, sea_orm::Statement::from_string(backend, sql_values))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
+    let db = mem_db().await;
+    seed_typed_probe(&db, "INSERT INTO typed_probe (x, y) VALUES (NULL, 'a')").await;
+    let dup = typed_query("dup", "SELECT x, x FROM typed_probe");
+    let reply = bookclerk_db_exec::execute_typed_on_session(
+        &db,
+        &dup,
+        "sqlite_txn",
+        bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None),
+    )
+    .await;
+    match reply {
+        Err(err) => assert!(err.to_string().contains("duplicate column"), "{err}"),
+        Ok(reply) => {
+            assert_eq!(
+                reply.statements[0].columns.len(),
+                2,
+                "duplicate expressions must stay positional, not collapse: {:?}",
+                reply.statements[0].columns
+            );
+            assert_eq!(reply.statements[0].rows[0].values.len(), 2);
+        }
+    }
+
+    let empty = typed_query("empty", "SELECT x FROM typed_probe WHERE 0");
+    let reply = bookclerk_db_exec::execute_typed_on_session(
+        &db,
+        &empty,
+        "sqlite_txn",
+        bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None),
+    )
+    .await
+    .unwrap();
+    assert!(reply.statements[0].rows.is_empty());
+    assert_eq!(reply.statements[0].columns.len(), 1);
+    assert_eq!(reply.statements[0].columns[0].name, "x");
+
+    let nulls = typed_query("nulls", "SELECT x FROM typed_probe");
+    let reply = bookclerk_db_exec::execute_typed_on_session(
+        &db,
+        &nulls,
+        "sqlite_txn",
+        bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reply.statements[0].columns[0].db_type,
+        bookclerk_plugin_abi::DbType::Int64
+    );
+    assert!(matches!(
+        reply.statements[0].rows[0].values[0],
+        bookclerk_plugin_abi::DbValue::Null(bookclerk_plugin_abi::DbType::Int64)
+    ));
+}
+
+#[tokio::test]
+async fn typed_sqlite_select_stops_after_cap_plus_one() {
+    let db = mem_db().await;
+    let backend = sea_orm::ConnectionTrait::get_database_backend(&db);
+    sea_orm::ConnectionTrait::execute_raw(
+        &db,
+        sea_orm::Statement::from_string(
+            backend,
+            "CREATE TABLE IF NOT EXISTS typed_rowcap (x INTEGER)",
+        ),
+    )
+    .await
+    .ok();
+    for i in 0..50 {
+        sea_orm::ConnectionTrait::execute_raw(
+            &db,
+            sea_orm::Statement::from_sql_and_values(
+                backend,
+                "INSERT INTO typed_rowcap (x) VALUES (?)",
+                [i.into()],
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    let req = typed_query("cap", "SELECT x FROM typed_rowcap");
+    let mut caps =
+        bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite());
+    caps.max_result_rows = 5;
+    let err = bookclerk_db_exec::execute_typed_on_session(
+        &db,
+        &req,
+        "sqlite_txn",
+        caps,
+        bookclerk_db_exec::AtomicSession::from_deadline(None),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("maxResultRows"), "{err}");
+    let seen = crate::query_rows_seen();
+    assert!(
+        seen <= 6,
+        "must stop after cap+1 materialized rows, saw {seen}"
+    );
+}
+
+#[tokio::test]
+async fn typed_sqlite_per_statement_max_result_bytes() {
+    let db = mem_db().await;
+    seed_typed_probe(
+        &db,
+        "INSERT INTO typed_probe (x, y) VALUES (1, 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx')",
+    )
+    .await;
+    use bookclerk_plugin_abi::{
+        DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+    };
+    let req = ExecuteRequest {
+        operation_id: "bytes".into(),
+        request_hash: String::new(),
+        statements: vec![
+            TypedDbStatement {
+                sql: "SELECT y FROM typed_probe".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            },
+            TypedDbStatement {
+                sql: "SELECT y FROM typed_probe".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            },
+        ],
+        outcome_index: 0,
+        payload_index: 0,
+        has_payload_index: false,
+        prior_receipt_index: 0,
+        has_prior_receipt_index: false,
+        receipt_select_index: 0,
+        has_receipt_select_index: false,
+        deadline_unix_ms: 0,
+    };
+    let mut caps =
+        bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite());
+    caps.max_result_bytes = 32;
+    caps.max_atomic_result_bytes = 1_048_576;
+    let err = bookclerk_db_exec::execute_typed_on_session(
+        &db,
+        &req,
+        "sqlite_txn",
+        caps,
+        bookclerk_db_exec::AtomicSession::from_deadline(None),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("maxResultBytes"), "{err}");
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
+    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        return;
+    }
+    let db = postgres_migrated_db().await;
+    seed_typed_probe(&db, "INSERT INTO typed_probe (x, y) VALUES (NULL, 'a')").await;
+    let dup = typed_query("dup", "SELECT x AS n, x AS n FROM typed_probe");
+    let err = bookclerk_db_exec::execute_typed_on_session(
+        &db,
+        &dup,
+        "postgres_txn",
+        bookclerk_db_exec::ExecCaps::from_connect(
+            &bookclerk_plugin_abi::DbConnectResult::postgres(),
+        ),
+        bookclerk_db_exec::AtomicSession::from_deadline(None),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("duplicate") || err.to_string().to_lowercase().contains("n"),
+        "{err}"
+    );
+
+    let empty = typed_query("empty", "SELECT x FROM typed_probe WHERE false");
+    let reply = bookclerk_db_exec::execute_typed_on_session(
+        &db,
+        &empty,
+        "postgres_txn",
+        bookclerk_db_exec::ExecCaps::from_connect(
+            &bookclerk_plugin_abi::DbConnectResult::postgres(),
+        ),
+        bookclerk_db_exec::AtomicSession::from_deadline(None),
+    )
+    .await
+    .unwrap();
+    assert!(reply.statements[0].rows.is_empty());
+    assert_eq!(reply.statements[0].columns[0].name, "x");
+
+    let nulls = typed_query("nulls", "SELECT x FROM typed_probe");
+    let reply = bookclerk_db_exec::execute_typed_on_session(
+        &db,
+        &nulls,
+        "postgres_txn",
+        bookclerk_db_exec::ExecCaps::from_connect(
+            &bookclerk_plugin_abi::DbConnectResult::postgres(),
+        ),
+        bookclerk_db_exec::AtomicSession::from_deadline(None),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        reply.statements[0].rows[0].values[0],
+        bookclerk_plugin_abi::DbValue::Null(_)
+    ));
+}

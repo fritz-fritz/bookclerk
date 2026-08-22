@@ -100,10 +100,11 @@ pub use v2::{
 };
 
 pub use bookclerk_plugin_abi::{
-    db_value_from_json, db_value_to_json, decode_db_value_bytes, decode_execute_request_bytes,
-    encoded_db_value_bytes, encoded_execute_reply_bytes, encoded_execute_request_bytes,
-    sql_payload_bytes, sql_payload_exceeds, DbCapabilities, DbColumn, DbResultSelection, DbRow,
-    DbTiming, DbType, DbValue, DiagnoseResult, ExecuteReply, ExecuteRequest, HandshakeParams,
-    HostToPluginEvent, PluginError, PluginErrorCode, PluginToHostEvent, StatementResult,
-    TypedDbStatement, API_VERSION, SQL_CONTRACT_VERSION,
+    canonical_execute_request_hash, db_value_from_json, db_value_to_json, decode_db_value_bytes,
+    decode_execute_request_bytes, encoded_db_value_bytes, encoded_execute_reply_bytes,
+    encoded_execute_request_bytes, encoded_statement_result_bytes, sql_payload_bytes,
+    sql_payload_exceeds, DbCapabilities, DbColumn, DbResultSelection, DbRow, DbTiming, DbType,
+    DbValue, DiagnoseResult, ExecuteReply, ExecuteRequest, HandshakeParams, HostToPluginEvent,
+    PluginError, PluginErrorCode, PluginToHostEvent, StatementResult, TypedDbStatement,
+    API_VERSION, SQL_CONTRACT_VERSION,
 };

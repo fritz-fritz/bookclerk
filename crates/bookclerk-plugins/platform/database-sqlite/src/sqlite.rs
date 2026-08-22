@@ -1,6 +1,6 @@
 //! Local SQLite engine for the database plugin (rusqlite SeaORM proxy).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -9,11 +9,12 @@ use std::time::Instant;
 use async_trait::async_trait;
 use bookclerk_db_exec::{
     consume_begin_injection, consume_commit_injection, current_exec_budget, is_txn_broken,
-    note_begin_failed, note_commit_failed, txn_broken_err, ExecBudget,
+    note_begin_failed, note_commit_failed, set_positional_result_columns, txn_broken_err,
+    ExecBudget,
 };
 #[cfg(feature = "host-helpers")]
 use bookclerk_library::{apply_host_schema, HostSchemaKind, LibraryStore};
-use bookclerk_plugin_sdk::DbConnectResult;
+use bookclerk_plugin_sdk::{DbColumn, DbConnectResult, DbType};
 use rusqlite::Connection;
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -319,11 +320,27 @@ impl ProxyDatabaseTrait for SqliteProxy {
             let names: Vec<String> = (0..stmt.column_count())
                 .map(|i| stmt.column_name(i).unwrap_or("").to_string())
                 .collect();
+            let mut seen_names = HashSet::new();
+            for name in &names {
+                if !name.is_empty() && !seen_names.insert(name.as_str()) {
+                    return Err(DbErr::Custom(format!("duplicate column name `{name}`")));
+                }
+            }
             let decltypes: Vec<Option<String>> = stmt
                 .columns()
                 .iter()
                 .map(|c| c.decl_type().map(str::to_ascii_uppercase))
                 .collect();
+            let positional: Vec<DbColumn> = names
+                .iter()
+                .zip(decltypes.iter())
+                .map(|(name, decl)| DbColumn {
+                    name: name.clone(),
+                    db_type: db_type_from_decl(decl.as_deref()),
+                })
+                .collect();
+            budget.set_positional_columns(positional.clone());
+            set_positional_result_columns(positional);
             let mut rows = stmt
                 .query(rusqlite::params_from_iter(binds.iter()))
                 .map_err(rusqlite_db_err)?;
@@ -610,6 +627,26 @@ fn sea_to_rusqlite(v: &Value) -> rusqlite::types::Value {
         Value::ChronoDateTimeUtc(Some(dt)) => R::Text(dt.to_rfc3339()),
         Value::ChronoDateTime(Some(dt)) => R::Text(dt.and_utc().to_rfc3339()),
         _ => R::Null,
+    }
+}
+
+/// Maps a SQLite `decl_type` onto the universal [`DbType`] (empty → Unspecified).
+fn db_type_from_decl(decl: Option<&str>) -> DbType {
+    let Some(decl) = decl else {
+        return DbType::Unspecified;
+    };
+    if decl.contains("BLOB") || decl.contains("BYTEA") {
+        DbType::Bytes
+    } else if decl.contains("INT") {
+        DbType::Int64
+    } else if decl.contains("BOOL") {
+        DbType::Bool
+    } else if decl.contains("REAL") || decl.contains("FLOA") || decl.contains("DOUB") {
+        DbType::Float64
+    } else if decl.contains("CHAR") || decl.contains("CLOB") || decl.contains("TEXT") {
+        DbType::Text
+    } else {
+        DbType::Unspecified
     }
 }
 

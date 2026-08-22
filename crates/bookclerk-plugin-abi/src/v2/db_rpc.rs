@@ -459,6 +459,25 @@ pub fn encoded_execute_request_bytes(req: &ExecuteRequest) -> Result<Vec<u8>> {
     write_message_bytes(&message)
 }
 
+/// SHA-256 hex of the Cap'n-encoded request with `operationId` and
+/// `requestHash` cleared.
+///
+/// The trusted host stamps this after validation so guests cannot collide
+/// unrelated mutations on one idempotency key. A retry token reuses both
+/// the caller-chosen id and this digest.
+///
+/// # Errors
+///
+/// Returns [`PluginError::internal`] when the message cannot be serialized.
+pub fn canonical_execute_request_hash(req: &ExecuteRequest) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut canonical = req.clone();
+    canonical.operation_id.clear();
+    canonical.request_hash.clear();
+    let bytes = encoded_execute_request_bytes(&canonical)?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
 /// Encodes a standalone Cap'n `ExecuteReply` message (unpacked stream).
 ///
 /// # Errors
@@ -467,6 +486,20 @@ pub fn encoded_execute_request_bytes(req: &ExecuteRequest) -> Result<Vec<u8>> {
 pub fn encoded_execute_reply_bytes(reply: &ExecuteReply) -> Result<Vec<u8>> {
     let mut message = capnp::message::Builder::new_default();
     fill_execute_reply(message.init_root(), reply);
+    write_message_bytes(&message)
+}
+
+/// Encodes a standalone Cap'n `StatementResult` message (unpacked stream).
+///
+/// Used to enforce negotiated `maxResultBytes` against the actual wire size of
+/// one statement before COMMIT.
+///
+/// # Errors
+///
+/// Returns [`PluginError::internal`] when the message cannot be serialized.
+pub fn encoded_statement_result_bytes(stmt: &StatementResult) -> Result<Vec<u8>> {
+    let mut message = capnp::message::Builder::new_default();
+    write_statement_result(message.init_root(), stmt);
     write_message_bytes(&message)
 }
 
