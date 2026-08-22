@@ -13,7 +13,7 @@ use bookclerk_db_exec::{
 };
 #[cfg(feature = "host-helpers")]
 use bookclerk_library::{apply_host_schema, HostSchemaKind, LibraryStore};
-use bookclerk_plugin_sdk::v2::MAX_SCALAR_BYTES;
+use bookclerk_plugin_sdk::DbConnectResult;
 use rusqlite::Connection;
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -327,7 +327,11 @@ impl ProxyDatabaseTrait for SqliteProxy {
             let mut rows = stmt
                 .query(rusqlite::params_from_iter(binds.iter()))
                 .map_err(rusqlite_db_err)?;
+            let caps = DbConnectResult::sqlite();
+            let cell_cap = usize::try_from(caps.max_cell_bytes).unwrap_or(usize::MAX);
+            let result_cap = usize::try_from(caps.max_result_bytes).unwrap_or(usize::MAX);
             let mut out = Vec::new();
+            let mut result_bytes = 0usize;
             while let Some(row) = rows.next().map_err(rusqlite_db_err)? {
                 let mut values = BTreeMap::new();
                 for (i, name) in names.iter().enumerate() {
@@ -337,14 +341,22 @@ impl ProxyDatabaseTrait for SqliteProxy {
                         rusqlite::types::ValueRef::Text(t) => t.len(),
                         _ => 0,
                     };
-                    if nbytes > MAX_SCALAR_BYTES as usize {
+                    if caps.max_cell_bytes > 0 && nbytes > cell_cap {
                         return Err(DbErr::Custom(format!(
-                            "column `{name}` is {nbytes} bytes; exceeds {MAX_SCALAR_BYTES}"
+                            "column `{name}` is {nbytes} bytes; maxCellBytes is {}",
+                            caps.max_cell_bytes
                         )));
                     }
                     let v: rusqlite::types::Value = row.get(i).map_err(rusqlite_db_err)?;
                     let decl = decltypes.get(i).and_then(Option::as_deref);
                     values.insert(name.clone(), rusqlite_to_sea(v, decl, name));
+                    result_bytes = result_bytes.saturating_add(nbytes);
+                }
+                if caps.max_result_bytes > 0 && result_bytes > result_cap {
+                    return Err(DbErr::Custom(format!(
+                        "query result is {result_bytes} bytes; maxResultBytes is {}",
+                        caps.max_result_bytes
+                    )));
                 }
                 out.push(ProxyRow { values });
                 if budget.note_row() {

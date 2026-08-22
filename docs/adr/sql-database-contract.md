@@ -48,14 +48,18 @@ The guest returns a JSON object (also flattened onto `DbConnectResult`):
 
 - `sqlFamily`: `sqlite` \| `postgres`
 - `interactiveTxn`, `atomicBatch`, `returning`
-- `maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`
+- `maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`,
+  `maxResultBytes`, `maxCellBytes`
 - `timing`
 
 The host must not invent these from the plugin id. Missing required fields,
 `atomicBatch: false`, `returning: false`, `maxResultRows` / `maxPayloadBytes`
-of `0` (unspecified), limits below the host's compiled minimums, or a
-`dialect` that does not match `sqlFamily` are a hard error. Wake page size
-and `IN (…)` chunking are derived from `maxBinds`.
+/ `maxResultBytes` / `maxCellBytes` of `0` (unspecified), limits below the
+host's compiled minimums, or a `dialect` that does not match `sqlFamily` are
+a hard error. Wake page size and `IN (…)` chunking are derived from
+`maxBinds`. `maxPayloadBytes` bounds request SQL plus JSON binds;
+`maxResultBytes` / `maxCellBytes` bound encoded result rows and are enforced
+incrementally in each adapter before cloning a cell or serializing a row.
 
 First-party values: D1 `maxBinds = 100`; SQLite and PostgreSQL report the
 engine bind cap (host still chunks conservatively).
@@ -81,9 +85,16 @@ The guest runs the statements as **one SQL transaction** (D1 HTTP
 timing). The host validates the envelope (operation id echo, statement
 count, row/payload caps) before `interpret_plan`. A statement that yields
 more than `maxResultRows` fails the plan (rollback / D1 ambiguous) rather
-than truncating. Receipt rows live in host-authored SQL against
-`db_atomic_receipts`. Guests must not parse Bookclerk operation names or
-interpret receipts.
+than truncating. D1 HTTP cannot roll back after the JSON body returns, so
+the guest refuses `RETURNING` DML that is not proven to be a single-row
+`INSERT … SELECT <scalars> WHERE …` / `INSERT … VALUES …` (no top-level
+`FROM`, `UNION`, or `RECURSIVE`). Overflow or an oversized HTTP body after
+a committed batch is `unavailable` (replay the same `operationId`); only a
+definitive non-retryable 4xx is permanent. Receipt rows live in host-authored
+SQL against `db_atomic_receipts`. Guests must not parse Bookclerk operation
+names or interpret receipts. `rowsAffected` is uniform by kind: `select` is
+`0`; `returning` (and legacy `query`) is the number of returned rows;
+`execute` is the engine change count.
 
 Stable error categories come from SQLSTATE / rusqlite codes (not English
 `"unique"` matching): constraint → `conflict`; serialization/busy/locked →

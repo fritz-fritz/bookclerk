@@ -723,7 +723,7 @@ fn d1_compat_execute(
             .map(str::to_string)
             .collect();
         let mut rows = Vec::new();
-        let rows_affected = if col_count == 0 {
+        let engine_changes = if col_count == 0 {
             u64::try_from(
                 prepared
                     .execute(rusqlite::params_from_iter(binds.iter()))
@@ -754,7 +754,15 @@ fn d1_compat_execute(
                     panic!("D1-compat query exceeded maxResultRows 1000");
                 }
             }
-            u64::try_from(rows.len()).unwrap_or(0)
+            0
+        };
+        let rows_affected = match stmt.kind {
+            bookclerk_plugin_abi::DbPlanStatementKind::Select => 0,
+            bookclerk_plugin_abi::DbPlanStatementKind::Returning
+            | bookclerk_plugin_abi::DbPlanStatementKind::Query => {
+                u64::try_from(rows.len()).unwrap_or(0)
+            }
+            bookclerk_plugin_abi::DbPlanStatementKind::Execute => engine_changes,
         };
         statements.push(bookclerk_plugin_abi::DbPlanStmtExecResult {
             rows,

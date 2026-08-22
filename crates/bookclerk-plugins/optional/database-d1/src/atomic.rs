@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bookclerk_plugin_sdk::{
     sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbConnectResult,
-    DbPlanExecResult, DbPlanStmtExecResult,
+    DbPlanExecResult, DbPlanStatementKind, DbPlanStmtExecResult,
 };
 use sea_orm::DbErr;
 use serde_json::Value as JsonValue;
@@ -41,7 +41,9 @@ impl D1Proxy {
             .plan
             .clone()
             .ok_or_else(|| DbErr::Custom("dbAtomic requires a host-authored executePlan".into()))?;
-        let cap = DbConnectResult::d1().max_result_rows;
+        reject_unbounded_returning(&plan)?;
+        let d1_caps = DbConnectResult::d1();
+        let cap = d1_caps.max_result_rows;
         let statements: Vec<SqlStmt> = plan
             .statements
             .iter()
@@ -218,6 +220,119 @@ fn ambiguous_d1(msg: impl std::fmt::Display) -> DbErr {
     DbErr::Custom(format!("D1 ambiguous response: {msg}"))
 }
 
+/// Fails closed on DML `RETURNING` that D1 HTTP cannot prove is at most one row.
+///
+/// Cloudflare commits the batch before JSON is parsed. Multi-row `RETURNING`
+/// (recursive CTEs, `FROM` relations, `UNION`, `UPDATE`/`DELETE`) is rejected
+/// before HTTP. Host 1-row `INSERT … SELECT ?, ? WHERE … RETURNING` is allowed.
+fn reject_unbounded_returning(plan: &DbAtomicPlan) -> std::result::Result<(), DbErr> {
+    let cap = DbConnectResult::d1().max_result_rows;
+    for (i, stmt) in plan.statements.iter().enumerate() {
+        let looks_returning = matches!(stmt.kind, DbPlanStatementKind::Returning)
+            || (matches!(stmt.kind, DbPlanStatementKind::Query)
+                && has_top_level_keyword(&stmt.sql, "RETURNING"));
+        if !looks_returning {
+            continue;
+        }
+        if returning_is_provably_single_row(&stmt.sql) {
+            continue;
+        }
+        return Err(DbErr::Custom(format!(
+            "D1 statement {i} Returning is not proven bounded; maxResultRows is {cap}"
+        )));
+    }
+    Ok(())
+}
+
+/// True for `INSERT … SELECT <scalars> WHERE … RETURNING` / `INSERT … VALUES … RETURNING`.
+fn returning_is_provably_single_row(sql: &str) -> bool {
+    let mut saw_insert = false;
+    let mut saw_update_or_delete = false;
+    let mut banned = false;
+    for_each_top_level_keyword(sql, |_, kw| {
+        let upper = kw.to_ascii_uppercase();
+        match upper.as_str() {
+            "INSERT" => saw_insert = true,
+            "UPDATE" | "DELETE" => saw_update_or_delete = true,
+            "FROM" | "UNION" | "RECURSIVE" | "GENERATE_SERIES" => banned = true,
+            _ => {}
+        }
+    });
+    saw_insert && !saw_update_or_delete && !banned && has_top_level_keyword(sql, "RETURNING")
+}
+
+/// True when `keyword` appears at parenthesis depth 0 (not inside quotes).
+fn has_top_level_keyword(sql: &str, keyword: &str) -> bool {
+    let mut found = false;
+    for_each_top_level_keyword(sql, |_, kw| {
+        if kw.eq_ignore_ascii_case(keyword) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Invokes `on_keyword` for each unquoted, top-level identifier.
+fn for_each_top_level_keyword(sql: &str, mut on_keyword: impl FnMut(usize, &str)) {
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    let mut depth = 0usize;
+    let mut in_squote = false;
+    let mut in_dquote = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_squote {
+            if c == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_squote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_dquote {
+            if c == b'"' {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
+                in_dquote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => {
+                in_squote = true;
+                i += 1;
+            }
+            b'"' => {
+                in_dquote = true;
+                i += 1;
+            }
+            b'(' => {
+                depth = depth.saturating_add(1);
+                i += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            _ if depth == 0 && c.is_ascii_alphabetic() => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                on_keyword(start, &sql[start..i]);
+            }
+            _ => i += 1,
+        }
+    }
+}
+
 /// Sums D1 `sql_duration_ms` timings from a batch response and returns microseconds.
 fn d1_sql_duration_us(raw: &JsonValue) -> Option<u64> {
     let arr = raw.get("result")?.as_array()?;
@@ -244,7 +359,7 @@ fn parse_generic_batch(
     operation_id: String,
     started: std::time::Instant,
 ) -> std::result::Result<DbPlanExecResult, DbErr> {
-    let statements = parse_batch_results(value)?;
+    let statements = parse_batch_results(plan, value)?;
     if statements.len() != plan.statements.len() {
         return Err(ambiguous_d1(format!(
             "expected {} statement results, got {}",
@@ -255,7 +370,7 @@ fn parse_generic_batch(
     let cap = usize::try_from(DbConnectResult::d1().max_result_rows).unwrap_or(1_000);
     for (i, stmt) in statements.iter().enumerate() {
         if stmt.rows.len() > cap {
-            return Err(DbErr::Custom(format!(
+            return Err(ambiguous_d1(format!(
                 "D1 statement {i} returned {} rows; maxResultRows is {cap}",
                 stmt.rows.len()
             )));
@@ -274,10 +389,17 @@ fn parse_generic_batch(
 }
 
 /// Parses the D1 `result` array; a `success: false` entry is a hard statement failure.
-fn parse_batch_results(value: &JsonValue) -> std::result::Result<Vec<DbPlanStmtExecResult>, DbErr> {
+fn parse_batch_results(
+    plan: &DbAtomicPlan,
+    value: &JsonValue,
+) -> std::result::Result<Vec<DbPlanStmtExecResult>, DbErr> {
     let Some(arr) = value.get("result").and_then(JsonValue::as_array) else {
         return Err(ambiguous_d1("batch response missing result array"));
     };
+    let caps = DbConnectResult::d1();
+    let row_cap = usize::try_from(caps.max_result_rows).unwrap_or(1_000);
+    let result_cap = usize::try_from(caps.max_result_bytes).unwrap_or(usize::MAX);
+    let cell_cap = usize::try_from(caps.max_cell_bytes).unwrap_or(usize::MAX);
     let mut out = Vec::with_capacity(arr.len());
     for (i, entry) in arr.iter().enumerate() {
         if entry.get("success").and_then(JsonValue::as_bool) == Some(false) {
@@ -285,16 +407,58 @@ fn parse_batch_results(value: &JsonValue) -> std::result::Result<Vec<DbPlanStmtE
                 "D1 batch statement {i} failed: {entry}"
             )));
         }
-        let rows = entry
+        let raw_rows = entry
             .get("results")
             .and_then(JsonValue::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let rows_affected = entry
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut rows = Vec::new();
+        let mut used = 0usize;
+        for row in raw_rows {
+            if caps.max_cell_bytes > 0 {
+                if let JsonValue::Object(map) = row {
+                    for (name, cell) in map {
+                        let n = bookclerk_db_exec::json_cell_utf8_len(cell);
+                        if n > cell_cap {
+                            return Err(ambiguous_d1(format!(
+                                "D1 statement {i} column `{name}` is {n} bytes; maxCellBytes is {}",
+                                caps.max_cell_bytes
+                            )));
+                        }
+                    }
+                }
+            }
+            if caps.max_result_bytes > 0 {
+                used = used.saturating_add(row.to_string().len());
+                if used > result_cap {
+                    return Err(ambiguous_d1(format!(
+                        "D1 statement {i} result is {used} bytes; maxResultBytes is {}",
+                        caps.max_result_bytes
+                    )));
+                }
+            }
+            rows.push(row.clone());
+            if rows.len() > row_cap {
+                break;
+            }
+        }
+        let changes = entry
             .get("meta")
             .and_then(|m| m.get("changes"))
             .and_then(JsonValue::as_u64)
             .unwrap_or(0);
+        let kind = plan
+            .statements
+            .get(i)
+            .map(|s| s.kind)
+            .unwrap_or(DbPlanStatementKind::Query);
+        let rows_affected = match kind {
+            DbPlanStatementKind::Select => 0,
+            DbPlanStatementKind::Returning | DbPlanStatementKind::Query => {
+                u64::try_from(rows.len()).unwrap_or(u64::MAX)
+            }
+            DbPlanStatementKind::Execute => changes,
+        };
         out.push(DbPlanStmtExecResult {
             rows,
             rows_affected,
@@ -324,10 +488,21 @@ mod tests {
 
     #[test]
     fn statement_failure_is_not_ambiguous() {
+        let plan = DbAtomicPlan {
+            statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+                sql: "INSERT INTO t (k) VALUES ('a')".into(),
+                binds: vec![],
+                kind: DbPlanStatementKind::Execute,
+            }],
+            outcome_index: 0,
+            payload_index: None,
+            prior_receipt_index: None,
+            receipt_select_index: None,
+        };
         let value = json!({
             "result": [{ "success": false, "error": "constraint" }]
         });
-        let err = parse_batch_results(&value).unwrap_err();
+        let err = parse_batch_results(&plan, &value).unwrap_err();
         assert!(!is_ambiguous_d1(&err), "{err}");
     }
 
@@ -357,10 +532,50 @@ mod tests {
             err.to_string().contains("maxResultRows"),
             "D1 must fail closed on over-cap rows: {err}"
         );
+        assert!(
+            is_ambiguous_d1(&err),
+            "overflow after HTTP commit must be ambiguous: {err}"
+        );
         let at_cap = json!({
             "result": [{ "success": true, "results": rows[..1000].to_vec(), "meta": { "changes": 0 } }]
         });
         let exec = parse_generic_batch(&plan, &at_cap, "op-cap-ok".into(), started).unwrap();
         assert_eq!(exec.statements[0].rows.len(), 1_000);
+    }
+
+    fn stmt(sql: &str, kind: DbPlanStatementKind) -> bookclerk_plugin_sdk::DbPlanStatement {
+        bookclerk_plugin_sdk::DbPlanStatement {
+            sql: sql.into(),
+            binds: vec![],
+            kind,
+        }
+    }
+
+    fn plan_of(sql: &str, kind: DbPlanStatementKind) -> DbAtomicPlan {
+        DbAtomicPlan {
+            statements: vec![stmt(sql, kind)],
+            outcome_index: 0,
+            payload_index: None,
+            prior_receipt_index: None,
+            receipt_select_index: None,
+        }
+    }
+
+    #[test]
+    fn host_insert_returning_is_proven_single_row() {
+        let sql = "INSERT OR IGNORE INTO event_deliveries (id) \
+             SELECT ? WHERE EXISTS (SELECT 1 FROM domain_events WHERE id = ?) RETURNING id";
+        reject_unbounded_returning(&plan_of(sql, DbPlanStatementKind::Returning)).unwrap();
+        assert!(returning_is_provably_single_row(sql));
+    }
+
+    #[test]
+    fn recursive_insert_returning_is_rejected_before_http() {
+        let sql = "WITH RECURSIVE t(id) AS (SELECT 0 UNION ALL SELECT id+1 FROM t WHERE id < 5) \
+             INSERT INTO vec_ret_ins (id) SELECT id FROM t RETURNING id";
+        let err =
+            reject_unbounded_returning(&plan_of(sql, DbPlanStatementKind::Returning)).unwrap_err();
+        assert!(err.to_string().contains("maxResultRows"), "{err}");
+        assert!(!is_ambiguous_d1(&err), "{err}");
     }
 }

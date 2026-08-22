@@ -77,14 +77,31 @@ pub fn validate_exec_result(
                 caps.max_result_rows
             )));
         }
-        if caps.max_payload_bytes > 0 {
+        if caps.max_result_bytes > 0 {
             let bytes = serde_json::to_vec(&stmt.rows).map(|b| b.len()).unwrap_or(0);
-            let cap = usize::try_from(caps.max_payload_bytes).unwrap_or(usize::MAX);
+            let cap = usize::try_from(caps.max_result_bytes).unwrap_or(usize::MAX);
             if bytes > cap {
                 return Err(LibraryError::Unavailable(format!(
-                    "atomic result statement {i} encoded rows are {bytes} bytes; guest maxPayloadBytes is {}",
-                    caps.max_payload_bytes
+                    "atomic result statement {i} encoded rows are {bytes} bytes; guest maxResultBytes is {}",
+                    caps.max_result_bytes
                 )));
+            }
+        }
+        if caps.max_cell_bytes > 0 {
+            let cap = usize::try_from(caps.max_cell_bytes).unwrap_or(usize::MAX);
+            for row in &stmt.rows {
+                let over = match row {
+                    serde_json::Value::Object(map) => map
+                        .values()
+                        .any(|cell| bookclerk_db_exec::json_cell_utf8_len(cell) > cap),
+                    other => bookclerk_db_exec::json_cell_utf8_len(other) > cap,
+                };
+                if over {
+                    return Err(LibraryError::Unavailable(format!(
+                        "atomic result statement {i} cell exceeds guest maxCellBytes {}",
+                        caps.max_cell_bytes
+                    )));
+                }
             }
         }
     }

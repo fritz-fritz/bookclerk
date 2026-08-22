@@ -218,7 +218,11 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   full connect advertisement and rejects plans that exceed `maxStatements`,
   per-statement `maxBinds`, `maxPayloadBytes`, or out-of-range selectors.
   A statement that yields more than `maxResultRows` **fails the plan**
-  (no silent truncate). Guests that omit `returning`, advertise `0` row/payload
+  (no silent truncate). Guests also advertise `maxResultBytes` and
+  `maxCellBytes` (JSON bytes of one statement's rows / one cell); `0` is
+  unspecified and fails closed. D1 refuses unprovably bounded `RETURNING`
+  before HTTP; overflow or an oversized body after HTTP commit is
+  `unavailable`. Guests that omit `returning`, advertise `0` row/payload
   caps, or mismatch `dialect`/`sqlFamily` are not loaded. Time Travel is not
   used.
 - Guest failures are classified from SQLSTATE / `SQLITE_*` codes (not English

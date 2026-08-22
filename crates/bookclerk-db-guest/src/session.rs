@@ -239,20 +239,20 @@ pub async fn guest_atomic(
             "dbAtomic requires a host-authored executePlan",
         )
     })?;
+    let caps = match conn.get_database_backend() {
+        DbBackend::Postgres => bookclerk_plugin_sdk::DbConnectResult::postgres(),
+        _ => bookclerk_plugin_sdk::DbConnectResult::sqlite(),
+    };
     let timing_source = match conn.get_database_backend() {
         DbBackend::Postgres => "postgres_txn",
         _ => "sqlite_txn",
-    };
-    let max_result_rows = match conn.get_database_backend() {
-        DbBackend::Postgres => bookclerk_plugin_sdk::DbConnectResult::postgres().max_result_rows,
-        _ => bookclerk_plugin_sdk::DbConnectResult::sqlite().max_result_rows,
     };
     bookclerk_db_exec::execute_statements_on_session(
         &conn,
         &plan,
         &req.operation_id,
         timing_source,
-        max_result_rows,
+        bookclerk_db_exec::ExecCaps::from_connect(&caps),
         bookclerk_db_exec::AtomicSession::from_deadline(req.deadline_unix_ms),
     )
     .await

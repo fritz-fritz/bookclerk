@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use bookclerk_plugin_abi::{DbAtomicPlan, DbAtomicTiming, DbPlanExecResult, DbPlanStmtExecResult};
+use bookclerk_plugin_abi::{
+    DbAtomicPlan, DbAtomicTiming, DbConnectResult, DbPlanExecResult, DbPlanStatementKind,
+    DbPlanStmtExecResult,
+};
 use futures::TryStreamExt;
 use sea_orm::{
     from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DbErr, QueryResult,
@@ -56,10 +59,45 @@ impl AtomicSession {
     }
 }
 
+/// Per-statement result bounds. Row/byte `0` means unlimited at execute time.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExecCaps {
+    /// Maximum rows a statement may return (`0` = unlimited).
+    pub max_result_rows: u32,
+    /// Maximum JSON bytes of one statement's rows (`0` = unlimited).
+    pub max_result_bytes: u32,
+    /// Maximum UTF-8 / blob bytes of one cell (`0` = unlimited).
+    pub max_cell_bytes: u32,
+}
+
+impl From<u32> for ExecCaps {
+    fn from(max_result_rows: u32) -> Self {
+        Self {
+            max_result_rows,
+            max_result_bytes: 0,
+            max_cell_bytes: 0,
+        }
+    }
+}
+
+impl ExecCaps {
+    /// Copies advertised connect limits into the executor.
+    #[must_use]
+    pub fn from_connect(caps: &DbConnectResult) -> Self {
+        Self {
+            max_result_rows: caps.max_result_rows,
+            max_result_bytes: caps.max_result_bytes,
+            max_cell_bytes: caps.max_cell_bytes,
+        }
+    }
+}
+
 /// Executes `plan` as one transaction and returns generic statement results.
 ///
-/// `max_result_rows` of `0` means unlimited; otherwise a statement that yields
-/// more rows fails the plan (the transaction is rolled back) rather than
+/// `max_result_rows` of `0` (when passing a bare `u32`) means unlimited rows;
+/// byte caps default to unlimited in that form. Pass [`ExecCaps::from_connect`]
+/// to enforce negotiated result/cell budgets. A statement that yields more
+/// than the cap fails the plan (the transaction is rolled back) rather than
 /// truncating the result.
 ///
 /// # Errors
@@ -70,14 +108,14 @@ pub async fn execute_statements_on(
     plan: &DbAtomicPlan,
     operation_id: &str,
     timing_source: &str,
-    max_result_rows: u32,
+    caps: impl Into<ExecCaps>,
 ) -> Result<DbPlanExecResult, DbErr> {
     execute_statements_on_session(
         db,
         plan,
         operation_id,
         timing_source,
-        max_result_rows,
+        caps,
         AtomicSession::default(),
     )
     .await
@@ -93,21 +131,15 @@ pub async fn execute_statements_on_session(
     plan: &DbAtomicPlan,
     operation_id: &str,
     timing_source: &str,
-    max_result_rows: u32,
+    caps: impl Into<ExecCaps>,
     session: AtomicSession,
 ) -> Result<DbPlanExecResult, DbErr> {
+    let caps = caps.into();
     session.check(AtomicInterruptPhase::BeforeBegin)?;
-    let budget = ExecBudget::new(session.deadline_unix_ms, max_result_rows);
+    let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
     let seen_budget = Arc::clone(&budget);
     let result = with_exec_budget(Arc::clone(&budget), || {
-        execute_statements_body(
-            db,
-            plan,
-            operation_id,
-            timing_source,
-            max_result_rows,
-            session,
-        )
+        execute_statements_body(db, plan, operation_id, timing_source, caps, session)
     })
     .await;
     record_query_rows_seen(seen_budget.rows_seen());
@@ -120,7 +152,7 @@ async fn execute_statements_body(
     plan: &DbAtomicPlan,
     operation_id: &str,
     timing_source: &str,
-    max_result_rows: u32,
+    caps: ExecCaps,
     session: AtomicSession,
 ) -> Result<DbPlanExecResult, DbErr> {
     let started = Instant::now();
@@ -150,13 +182,13 @@ async fn execute_statements_body(
         }
         let values: Vec<Value> = stmt.binds.iter().map(json_to_sea).collect();
         let sql = if stmt.kind.wrap_select_limit() {
-            cap_query_sql(&stmt.sql, max_result_rows)
+            cap_query_sql(&stmt.sql, caps.max_result_rows)
         } else {
             stmt.sql.clone()
         };
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = if stmt.kind.collects_rows() {
-            let json_rows = match collect_capped_query_rows(&txn, sea_stmt, max_result_rows).await {
+            let json_rows = match collect_capped_query_rows(&txn, sea_stmt, caps).await {
                 Ok(rows) => rows,
                 Err(err) => {
                     let _ = txn.rollback().await;
@@ -164,7 +196,7 @@ async fn execute_statements_body(
                     return Err(err);
                 }
             };
-            let rows_affected = u64::try_from(json_rows.len()).unwrap_or(u64::MAX);
+            let rows_affected = rows_affected_for_kind(stmt.kind, json_rows.len());
             DbPlanStmtExecResult {
                 rows: json_rows,
                 rows_affected,
@@ -253,55 +285,145 @@ pub fn cap_query_sql(sql: &str, max_result_rows: u32) -> String {
     format!("SELECT * FROM ({inner}) AS _bc_cap LIMIT {n}")
 }
 
-/// Collects at most `max_result_rows + 1` rows, then drops the rest.
+/// Collects at most `max_result_rows + 1` rows, checking cell/result bytes first.
 async fn collect_capped_query_rows(
     txn: &sea_orm::DatabaseTransaction,
     stmt: Statement,
-    max_result_rows: u32,
+    caps: ExecCaps,
 ) -> Result<Vec<JsonValue>, DbErr> {
     if ConnectionTrait::get_database_backend(txn) == sea_orm::DatabaseBackend::Postgres {
-        return collect_streamed_rows(txn, stmt, max_result_rows).await;
+        return collect_streamed_rows(txn, stmt, caps).await;
     }
     let rows = txn.query_all_raw(stmt).await?;
-    json_rows_respecting_cap(
-        rows.into_iter().map(query_row_to_json).collect(),
-        max_result_rows,
-    )
+    let mut json_rows = Vec::new();
+    let mut used = 0usize;
+    let stop_after = row_stop_after(caps.max_result_rows);
+    for row in rows {
+        push_capped_json_row(&mut json_rows, &mut used, query_row_to_json(row)?, caps)?;
+        if json_rows.len() >= stop_after {
+            break;
+        }
+    }
+    json_rows_respecting_cap(json_rows, caps.max_result_rows)
 }
 
 /// Streams Postgres results and stops after `cap + 1` rows.
 async fn collect_streamed_rows<C: ConnectionTrait + StreamTrait>(
     conn: &C,
     stmt: Statement,
-    max_result_rows: u32,
+    caps: ExecCaps,
 ) -> Result<Vec<JsonValue>, DbErr> {
     let stream = conn.stream_raw(stmt).await?;
     futures::pin_mut!(stream);
-    let stop_after = if max_result_rows == 0 {
+    let stop_after = row_stop_after(caps.max_result_rows);
+    let mut json_rows = Vec::new();
+    let mut used = 0usize;
+    while let Some(row) = stream.try_next().await? {
+        push_capped_json_row(&mut json_rows, &mut used, query_row_to_json(row)?, caps)?;
+        if json_rows.len() >= stop_after {
+            break;
+        }
+    }
+    json_rows_respecting_cap(json_rows, caps.max_result_rows)
+}
+
+/// Uniform `rowsAffected` by host-authored kind.
+fn rows_affected_for_kind(kind: DbPlanStatementKind, returned_rows: usize) -> u64 {
+    match kind {
+        DbPlanStatementKind::Select => 0,
+        DbPlanStatementKind::Returning | DbPlanStatementKind::Query => {
+            u64::try_from(returned_rows).unwrap_or(u64::MAX)
+        }
+        DbPlanStatementKind::Execute => 0,
+    }
+}
+
+/// Fetch one extra row past a positive cap so overflow can fail closed.
+fn row_stop_after(max_result_rows: u32) -> usize {
+    if max_result_rows == 0 {
         usize::MAX
     } else {
         usize::try_from(max_result_rows)
             .unwrap_or(usize::MAX)
             .saturating_add(1)
-    };
-    let mut json_rows = Vec::new();
-    while let Some(row) = stream.try_next().await? {
-        json_rows.push(query_row_to_json(row));
-        if json_rows.len() >= stop_after {
-            break;
-        }
     }
-    json_rows_respecting_cap(json_rows, max_result_rows)
+}
+
+/// Converts one engine row, enforcing cell then statement byte budgets.
+fn push_capped_json_row(
+    json_rows: &mut Vec<JsonValue>,
+    used: &mut usize,
+    json: JsonValue,
+    caps: ExecCaps,
+) -> Result<(), DbErr> {
+    reject_row_cell_bytes(&json, caps.max_cell_bytes)?;
+    note_result_row_bytes(&json, used, caps.max_result_bytes)?;
+    json_rows.push(json);
+    Ok(())
 }
 
 /// Maps a SeaORM query row onto the generic JSON result object.
-fn query_row_to_json(row: QueryResult) -> JsonValue {
+fn query_row_to_json(row: QueryResult) -> Result<JsonValue, DbErr> {
     let proxy = from_query_result_to_proxy_row(&row);
     let mut map = serde_json::Map::new();
     for (name, value) in proxy.values {
         map.insert(name, sea_to_json(&value));
     }
-    JsonValue::Object(map)
+    Ok(JsonValue::Object(map))
+}
+
+/// UTF-8 / JSON length of one cell used for `maxCellBytes`.
+pub fn json_cell_utf8_len(v: &JsonValue) -> usize {
+    match v {
+        JsonValue::String(s) => s.len(),
+        JsonValue::Array(_) | JsonValue::Object(_) => v.to_string().len(),
+        _ => 0,
+    }
+}
+
+/// Fails when any string/blob cell in `row` exceeds `max_cell_bytes`.
+fn reject_row_cell_bytes(row: &JsonValue, max_cell_bytes: u32) -> Result<(), DbErr> {
+    if max_cell_bytes == 0 {
+        return Ok(());
+    }
+    let cap = usize::try_from(max_cell_bytes).unwrap_or(usize::MAX);
+    let JsonValue::Object(map) = row else {
+        let n = json_cell_utf8_len(row);
+        if n > cap {
+            return Err(DbErr::Custom(format!(
+                "result cell is {n} bytes; maxCellBytes is {max_cell_bytes}"
+            )));
+        }
+        return Ok(());
+    };
+    for (name, v) in map {
+        let n = json_cell_utf8_len(v);
+        if n > cap {
+            return Err(DbErr::Custom(format!(
+                "column `{name}` is {n} bytes; maxCellBytes is {max_cell_bytes}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Accumulates JSON bytes of `row` and fails when the statement budget is exceeded.
+fn note_result_row_bytes(
+    row: &JsonValue,
+    used: &mut usize,
+    max_result_bytes: u32,
+) -> Result<(), DbErr> {
+    if max_result_bytes == 0 {
+        return Ok(());
+    }
+    *used = used.saturating_add(row.to_string().len());
+    let cap = usize::try_from(max_result_bytes).unwrap_or(usize::MAX);
+    if *used > cap {
+        return Err(DbErr::Custom(format!(
+            "query result is {used} bytes; maxResultBytes is {max_result_bytes}"
+        )));
+    }
+    Ok(())
 }
 
 /// Fails closed when `rows` exceeds a positive cap (the extra row was fetched

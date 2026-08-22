@@ -76,6 +76,7 @@ where
     returning_insert_cap(&mut run, row_cap).await;
     returning_update_cap(&mut run, row_cap).await;
     returning_delete_cap(&mut run, row_cap).await;
+    rows_affected_by_kind(&mut run).await;
 }
 
 /// Enqueue once, then replay the same `operationId`.
@@ -381,6 +382,7 @@ where
     .await
     .unwrap_or_else(|e| panic!("returning insert setup: {e}"));
     let sql = recursive_insert_returning("vec_ret_ins", "id", n);
+    let before = table_ids(&mut *run, "vec-ret-ins-before", "vec_ret_ins").await;
     let err = run(request("vec-ret-ins", returning_plan(&sql)), row_cap)
         .await
         .expect_err("capped INSERT RETURNING must fail");
@@ -391,6 +393,11 @@ where
     assert!(
         err.to_lowercase().contains("maxresultrows"),
         "INSERT RETURNING cap must fail closed: {err}"
+    );
+    let after = table_ids(&mut *run, "vec-ret-ins-after", "vec_ret_ins").await;
+    assert_eq!(
+        before, after,
+        "failed INSERT RETURNING must not leave rows: before={before:?} after={after:?}"
     );
 }
 
@@ -414,6 +421,7 @@ where
     )
     .await
     .unwrap_or_else(|e| panic!("returning update setup: {e}"));
+    let before = table_ids(&mut *run, "vec-ret-upd-before", "vec_ret_upd").await;
     let err = run(
         request(
             "vec-ret-upd",
@@ -430,6 +438,11 @@ where
     assert!(
         err.to_lowercase().contains("maxresultrows"),
         "UPDATE RETURNING cap must fail closed: {err}"
+    );
+    let after = table_ids(&mut *run, "vec-ret-upd-after", "vec_ret_upd").await;
+    assert_eq!(
+        before, after,
+        "failed UPDATE RETURNING must leave the table unchanged"
     );
 }
 
@@ -453,6 +466,7 @@ where
     )
     .await
     .unwrap_or_else(|e| panic!("returning delete setup: {e}"));
+    let before = table_ids(&mut *run, "vec-ret-del-before", "vec_ret_del").await;
     let err = run(
         request(
             "vec-ret-del",
@@ -470,6 +484,96 @@ where
         err.to_lowercase().contains("maxresultrows"),
         "DELETE RETURNING cap must fail closed: {err}"
     );
+    let after = table_ids(&mut *run, "vec-ret-del-after", "vec_ret_del").await;
+    assert_eq!(
+        before, after,
+        "failed DELETE RETURNING must leave the table unchanged"
+    );
+}
+
+/// `Select` reports `rowsAffected = 0`; `Returning` reports returned/affected rows.
+async fn rows_affected_by_kind<F, Fut>(run: &mut F)
+where
+    F: FnMut(DbAtomicRequest, u32) -> Fut,
+    Fut: Future<Output = Result<DbPlanExecResult, String>>,
+{
+    run(
+        request(
+            "vec-aff-setup",
+            exec_plan(&[
+                "CREATE TABLE IF NOT EXISTS vec_aff (id INTEGER PRIMARY KEY)",
+                "DELETE FROM vec_aff",
+            ]),
+        ),
+        0,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("rowsAffected setup: {e}"));
+    run(
+        request(
+            "vec-aff-ins",
+            exec_plan_owned(vec![recursive_insert("vec_aff", "id", 2)]),
+        ),
+        0,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("rowsAffected insert: {e}"));
+    let sel = run(
+        request(
+            "vec-aff-sel",
+            select_plan("SELECT id FROM vec_aff ORDER BY id"),
+        ),
+        0,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("rowsAffected select: {e}"));
+    assert_eq!(
+        sel.statements[0].rows.len(),
+        2,
+        "{:?}",
+        sel.statements[0].rows
+    );
+    assert_eq!(
+        sel.statements[0].rows_affected, 0,
+        "Select rowsAffected must be 0: {:?}",
+        sel.statements[0]
+    );
+    let ins = run(
+        request(
+            "vec-aff-ret",
+            returning_plan("INSERT INTO vec_aff (id) VALUES (99) RETURNING id"),
+        ),
+        0,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("rowsAffected returning: {e}"));
+    assert_eq!(ins.statements[0].rows.len(), 1);
+    assert_eq!(
+        ins.statements[0].rows_affected, 1,
+        "Returning rowsAffected must match returned rows: {:?}",
+        ins.statements[0]
+    );
+}
+
+/// Uncapped `SELECT id … ORDER BY id` used to prove RETURNING overflow rolled back.
+async fn table_ids<F, Fut>(run: &mut F, operation_id: &str, table: &str) -> Vec<JsonValue>
+where
+    F: FnMut(DbAtomicRequest, u32) -> Fut,
+    Fut: Future<Output = Result<DbPlanExecResult, String>>,
+{
+    let exec = run(
+        request(
+            operation_id,
+            select_plan(&format!("SELECT id FROM {table} ORDER BY id")),
+        ),
+        0,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{operation_id}: {e}"));
+    exec.statements
+        .first()
+        .map(|s| s.rows.clone())
+        .unwrap_or_default()
 }
 
 /// `WITH RECURSIVE` prefix producing `n` rows (`0 .. n-1`) in `t(col)`.

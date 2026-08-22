@@ -1126,7 +1126,7 @@ closed). Non-SQL engines are unsupported.
 | Method | Notes |
 | --- | --- |
 | `dbConnect` | Open backend via tagged connect params (`backend`: `sqlite` / `d1` / `postgres`); returns dialect (SQLite: path grant; D1/Postgres: host-injected credentials) |
-| `bookclerk.capabilities` | Sentinel `dbQuery` after open. Returns `sqlFamily`, `interactiveTxn`, `atomicBatch`, `returning`, `maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`, `timing`. The host must not invent these from the plugin id. |
+| `bookclerk.capabilities` | Sentinel `dbQuery` after open. Returns `sqlFamily`, `interactiveTxn`, `atomicBatch`, `returning`, `maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`, `maxResultBytes`, `maxCellBytes`, `timing`. The host must not invent these from the plugin id. |
 | `dbPing` | Verify connectivity |
 | `dbQuery` / `dbExecute` | Forward SeaORM statement payloads (optional `txnId` from `dbBegin`) |
 | `dbBegin` | Start a native engine transaction (or nested savepoint via `parentTxnId`); returns `txnId`. The host records a sticky per-task fault when this RPC fails so later statements cannot fall back to autocommit. D1 rejects interactive transactions and sets `interactiveTxn: false`. |

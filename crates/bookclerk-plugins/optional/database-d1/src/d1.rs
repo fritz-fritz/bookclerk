@@ -454,10 +454,10 @@ async fn read_body_capped(
 ) -> std::result::Result<Vec<u8>, D1Error> {
     if let Some(len) = response.content_length() {
         if len > max as u64 {
-            return Err(D1Error::Permanent {
-                status: response.status().as_u16(),
-                message: format!("D1 body {len} bytes exceeds {max}"),
-            });
+            return Err(body_cap_error(
+                response.status(),
+                format!("D1 body {len} bytes exceeds {max}"),
+            ));
         }
     }
     let mut buf = Vec::new();
@@ -470,14 +470,26 @@ async fn read_body_capped(
             break;
         };
         if buf.len().saturating_add(chunk.len()) > max {
-            return Err(D1Error::Permanent {
-                status: response.status().as_u16(),
-                message: format!("D1 body exceeds {max}"),
-            });
+            return Err(body_cap_error(
+                response.status(),
+                format!("D1 body exceeds {max}"),
+            ));
         }
         buf.extend_from_slice(&chunk);
     }
     Ok(buf)
+}
+
+/// Oversized bodies after a successful or retryable HTTP status are ambiguous.
+fn body_cap_error(status: reqwest::StatusCode, message: String) -> D1Error {
+    if status.is_success() || retryable_http_status(status) {
+        D1Error::ambiguous(message)
+    } else {
+        D1Error::Permanent {
+            status: status.as_u16(),
+            message,
+        }
+    }
 }
 
 /// Last entry in the D1 `result` array (batch responses keep per-statement results).
@@ -1359,6 +1371,8 @@ mod tests {
         interrupt_after: std::sync::Arc<std::sync::atomic::AtomicU32>,
         /// When true, COMMIT then return HTTP 500 (committed but reply lost).
         drop_reply_after_commit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        /// When non-zero, COMMIT then return this status with a body over the HTTP cap.
+        oversized_body_status: std::sync::Arc<std::sync::atomic::AtomicU16>,
     }
 
     impl wiremock::Respond for ExecutingD1 {
@@ -1370,6 +1384,7 @@ mod tests {
                     &conn,
                     &self.interrupt_after,
                     &self.drop_reply_after_commit,
+                    &self.oversized_body_status,
                     batch,
                 );
             }
@@ -1427,6 +1442,7 @@ mod tests {
         conn: &rusqlite::Connection,
         interrupt_after: &std::sync::atomic::AtomicU32,
         drop_reply_after_commit: &std::sync::atomic::AtomicBool,
+        oversized_body_status: &std::sync::atomic::AtomicU16,
         batch: &[JsonValue],
     ) -> ResponseTemplate {
         if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
@@ -1484,6 +1500,11 @@ mod tests {
                 "success": false,
                 "errors": [{"message": "commit reply lost"}]
             }));
+        }
+        let oversized = oversized_body_status.load(std::sync::atomic::Ordering::SeqCst);
+        if oversized != 0 {
+            let huge = "x".repeat(max_d1_http_body_bytes() + 1);
+            return ResponseTemplate::new(oversized).set_body_string(huge);
         }
         ResponseTemplate::new(200).set_body_json(json!({
             "success": true,
@@ -1568,11 +1589,13 @@ mod tests {
         std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
         std::sync::Arc<std::sync::atomic::AtomicU32>,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::Arc<std::sync::atomic::AtomicU16>,
     ) {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let conn = std::sync::Arc::new(std::sync::Mutex::new(conn));
         let interrupt_after = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
         let drop_reply = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let oversized = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0));
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r"/query$"))
@@ -1580,16 +1603,17 @@ mod tests {
                 conn: std::sync::Arc::clone(&conn),
                 interrupt_after: std::sync::Arc::clone(&interrupt_after),
                 drop_reply_after_commit: std::sync::Arc::clone(&drop_reply),
+                oversized_body_status: std::sync::Arc::clone(&oversized),
             })
             .mount(&server)
             .await;
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
-        (server, proxy, conn, interrupt_after, drop_reply)
+        (server, proxy, conn, interrupt_after, drop_reply, oversized)
     }
 
     #[tokio::test]
     async fn executing_mock_unique_constraint_fails_closed() {
-        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
         proxy
             .run_batch(&[("CREATE TABLE t (k TEXT PRIMARY KEY)".into(), Vec::new())])
             .await
@@ -1628,7 +1652,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_cancel_before_begin() {
-        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
         bookclerk_library::inject_atomic_interrupt(
             bookclerk_library::AtomicInterruptPhase::BeforeBegin,
             bookclerk_library::AtomicInterruptKind::Cancel,
@@ -1655,7 +1679,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_interrupt_at_http_return_is_ambiguous() {
-        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
         bookclerk_library::inject_atomic_interrupt(
             bookclerk_library::AtomicInterruptPhase::AroundCommit,
             bookclerk_library::AtomicInterruptKind::Cancel,
@@ -1719,7 +1743,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_row_cap_fails_closed() {
-        let (_server, proxy, conn, _interrupt, _drop) = executing_proxy().await;
+        let (_server, proxy, conn, _interrupt, _drop, _oversize) = executing_proxy().await;
         let cap = bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows as usize;
         {
             let db = conn.lock().expect("sqlite mutex");
@@ -1750,11 +1774,15 @@ mod tests {
             err.to_string().contains("maxResultRows"),
             "row cap must fail closed: {err}"
         );
+        assert!(
+            crate::atomic::is_ambiguous_d1(&err),
+            "over-cap rows after HTTP commit must be ambiguous: {err}"
+        );
     }
 
     #[tokio::test]
     async fn executing_mock_host_schema_and_replay() {
-        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
         let db = sea_orm::Database::connect_proxy(
             DatabaseBackend::Sqlite,
             std::sync::Arc::new(Box::new(proxy.clone())),
@@ -1824,7 +1852,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_schema_crash_retries() {
-        let (_server, proxy, _conn, interrupt, _drop) = executing_proxy().await;
+        let (_server, proxy, _conn, interrupt, _drop, _oversize) = executing_proxy().await;
         let db = sea_orm::Database::connect_proxy(
             DatabaseBackend::Sqlite,
             std::sync::Arc::new(Box::new(proxy.clone())),
@@ -1862,7 +1890,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_shared_vectors() {
-        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
         let db = sea_orm::Database::connect_proxy(
             DatabaseBackend::Sqlite,
             std::sync::Arc::new(Box::new(proxy.clone())),
@@ -1893,7 +1921,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_deadline_includes_http_mutex_wait() {
-        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
         let _hold = proxy.lock_http_for_test().await;
         let deadline = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1929,7 +1957,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn executing_mock_concurrent_independent_proxies_apply_schema() {
-        let (server, proxy1, _conn, _interrupt, _drop) = executing_proxy().await;
+        let (server, proxy1, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
         let proxy2 = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
         let db1 = sea_orm::Database::connect_proxy(
             DatabaseBackend::Sqlite,
@@ -1967,9 +1995,73 @@ mod tests {
         b.expect("independent proxy 2 schema");
     }
 
+    fn select_one_req(op: &str) -> bookclerk_plugin_sdk::DbAtomicRequest {
+        bookclerk_plugin_sdk::DbAtomicRequest {
+            operation_id: op.into(),
+            request_hash: None,
+            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+                    sql: "SELECT 1 AS n".into(),
+                    binds: vec![],
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Select,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        }
+    }
+
+    async fn oversized_after_commit(status: u16) -> sea_orm::DbErr {
+        let (_server, proxy, _conn, _interrupt, _drop, oversized) = executing_proxy().await;
+        oversized.store(status, std::sync::atomic::Ordering::SeqCst);
+        proxy
+            .run_atomic(select_one_req(&format!("big-{status}")))
+            .await
+            .expect_err("oversized post-commit body must fail")
+    }
+
+    #[tokio::test]
+    async fn executing_mock_oversized_2xx_body_after_commit_is_ambiguous() {
+        let err = oversized_after_commit(200).await;
+        assert!(crate::atomic::is_ambiguous_d1(&err), "{err}");
+        let mapped = crate::atomic::plugin_error_from_d1(err);
+        assert_eq!(
+            mapped.code,
+            bookclerk_plugin_sdk::PluginErrorCode::Unavailable,
+            "{mapped}"
+        );
+    }
+
+    #[tokio::test]
+    async fn executing_mock_oversized_429_body_after_commit_is_ambiguous() {
+        let err = oversized_after_commit(429).await;
+        assert!(crate::atomic::is_ambiguous_d1(&err), "{err}");
+        let mapped = crate::atomic::plugin_error_from_d1(err);
+        assert_eq!(
+            mapped.code,
+            bookclerk_plugin_sdk::PluginErrorCode::Unavailable,
+            "{mapped}"
+        );
+    }
+
+    #[tokio::test]
+    async fn executing_mock_oversized_400_body_after_commit_is_permanent() {
+        let err = oversized_after_commit(400).await;
+        assert!(!crate::atomic::is_ambiguous_d1(&err), "{err}");
+        let mapped = crate::atomic::plugin_error_from_d1(err);
+        assert_eq!(
+            mapped.code,
+            bookclerk_plugin_sdk::PluginErrorCode::InvalidParams,
+            "{mapped}"
+        );
+    }
+
     #[tokio::test]
     async fn executing_mock_committed_reply_lost_still_completes() {
-        let (_server, proxy, _conn, _interrupt, drop_reply) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, drop_reply, _oversize) = executing_proxy().await;
         drop_reply.store(true, std::sync::atomic::Ordering::SeqCst);
         let db = sea_orm::Database::connect_proxy(
             DatabaseBackend::Sqlite,
