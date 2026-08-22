@@ -15,9 +15,10 @@ use sea_orm::{ProxyExecResult, ProxyRow, Statement, Value};
 use serde_json::Value as JsonValue;
 
 pub use bookclerk_plugin_abi::{
-    atomic_status, DbAtomicParams, DbAtomicRequest, DbAtomicResult, DbAtomicTiming, DbBeginParams,
-    DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, ExecResultDto, ProxyRowDto,
-    QueryResultDto, StatementDto,
+    atomic_status, DbAtomicParams, DbAtomicPlan, DbAtomicRequest, DbAtomicResult, DbAtomicTiming,
+    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbPlanStatement,
+    DbPlanStatementKind, DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
+    D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
 };
 
 /// JSON object key that carries a typed SeaORM null (`{"$sea_null": "BigInt"}`).

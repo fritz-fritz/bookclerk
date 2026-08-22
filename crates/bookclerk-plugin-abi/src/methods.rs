@@ -367,12 +367,12 @@ pub mod db_rollback {
     pub const NAME: &str = "dbRollback";
 }
 
-/// Run a named atomic library operation as one guest SQL transaction.
+/// Run a host-authored generic SQL plan as one guest SQL transaction.
 ///
 /// Params: [`crate::db::DbAtomicRequest`]. Result: [`crate::db::DbAtomicResult`].
 /// Every bundled database guest implements this (D1 as one HTTP `batch()`,
-/// SQLite / Postgres as one native transaction) and records an `operationId`
-/// receipt so a lost response can be retried.
+/// SQLite / Postgres as one native transaction). Guests execute `plan`
+/// statements only and must not parse Bookclerk operation names.
 pub mod db_atomic {
     /// Wire method name `"dbAtomic"`.
     pub const NAME: &str = "dbAtomic";

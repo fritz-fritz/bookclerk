@@ -153,11 +153,37 @@ fn default_true() -> bool {
     true
 }
 
+/// Sentinel SQL for [`crate::methods::db_atomic`] (`DatabaseSession.query`).
+pub const DB_ATOMIC_SENTINEL: &str = "bookclerk.atomic";
+
+/// Sentinel SQL for capability negotiation (`DatabaseSession.query` after open).
+pub const DB_CAPABILITIES_SENTINEL: &str = "bookclerk.capabilities";
+
+/// SQLite family bind cap advertised by the platform sqlite guest.
+pub const SQLITE_MAX_BINDS: u32 = 32_766;
+
+/// PostgreSQL bind cap advertised by the optional postgres guest.
+pub const POSTGRES_MAX_BINDS: u32 = 65_535;
+
+/// Cloudflare D1 bound-parameter limit.
+///
+/// <https://developers.cloudflare.com/d1/platform/limits/>
+pub const D1_MAX_BINDS: u32 = 100;
+
+/// D1 / first-party batch statement cap (D1 HTTP batch is 100 queries).
+pub const FIRST_PARTY_MAX_STATEMENTS: u32 = 100;
+
+/// Host refuses guests that cannot bind at least this many parameters.
+pub const HOST_MIN_BINDS: u32 = 32;
+
+/// Host refuses guests that cannot run at least this many statements per batch.
+pub const HOST_MIN_STATEMENTS: u32 = 40;
+
 /// Result of a successful [`crate::methods::db_connect`].
 ///
 /// Tells the host which SeaORM dialect to use when composing subsequent
-/// `dbQuery` / `dbExecute` statements against this guest, and whether
-/// interactive `dbBegin` is available.
+/// `dbQuery` / `dbExecute` statements against this guest, and the negotiated
+/// SQL-adapter capabilities. The host must not invent these from the plugin id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbConnectResult {
@@ -172,6 +198,32 @@ pub struct DbConnectResult {
     /// guests (treated as `true`).
     #[serde(default = "default_true")]
     pub interactive_txn: bool,
+    /// SQL dialect family for host-authored plans (`sqlite` or `postgres`).
+    ///
+    /// Empty on older guests; the host then fails closed for generic plans.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sql_family: String,
+    /// Guest can run a bounded statement list as one SQL transaction.
+    #[serde(default = "default_true")]
+    pub atomic_batch: bool,
+    /// Guest SQL supports `RETURNING` result sets.
+    #[serde(default = "default_true")]
+    pub returning: bool,
+    /// Maximum bound parameters per statement (`0` means unspecified).
+    #[serde(default)]
+    pub max_binds: u32,
+    /// Maximum statements in one atomic batch (`0` means unspecified).
+    #[serde(default)]
+    pub max_statements: u32,
+    /// Maximum rows a query statement may return (`0` means unspecified).
+    #[serde(default)]
+    pub max_result_rows: u32,
+    /// Maximum UTF-8 bytes of SQL text plus JSON binds per statement.
+    #[serde(default)]
+    pub max_payload_bytes: u32,
+    /// Guest can fill [`DbAtomicTiming::db_execution_us`].
+    #[serde(default = "default_true")]
+    pub timing: bool,
 }
 
 impl DbConnectResult {
@@ -181,6 +233,14 @@ impl DbConnectResult {
         Self {
             dialect: String::from("sqlite"),
             interactive_txn: true,
+            sql_family: String::from("sqlite"),
+            atomic_batch: true,
+            returning: true,
+            max_binds: SQLITE_MAX_BINDS,
+            max_statements: FIRST_PARTY_MAX_STATEMENTS,
+            max_result_rows: 1_000,
+            max_payload_bytes: 1_048_576,
+            timing: true,
         }
     }
 
@@ -190,6 +250,14 @@ impl DbConnectResult {
         Self {
             dialect: String::from("postgres"),
             interactive_txn: true,
+            sql_family: String::from("postgres"),
+            atomic_batch: true,
+            returning: true,
+            max_binds: POSTGRES_MAX_BINDS,
+            max_statements: FIRST_PARTY_MAX_STATEMENTS,
+            max_result_rows: 1_000,
+            max_payload_bytes: 1_048_576,
+            timing: true,
         }
     }
 
@@ -199,7 +267,51 @@ impl DbConnectResult {
         Self {
             dialect: String::from("sqlite"),
             interactive_txn: false,
+            sql_family: String::from("sqlite"),
+            atomic_batch: true,
+            returning: true,
+            max_binds: D1_MAX_BINDS,
+            max_statements: FIRST_PARTY_MAX_STATEMENTS,
+            max_result_rows: 1_000,
+            max_payload_bytes: 1_048_576,
+            timing: true,
         }
+    }
+
+    /// True when this guest meets the host's compiled minimum SQL contract.
+    #[must_use]
+    pub fn meets_host_minimums(&self) -> bool {
+        self.atomic_batch
+            && (self.sql_family == "sqlite" || self.sql_family == "postgres")
+            && self.max_binds >= HOST_MIN_BINDS
+            && self.max_statements >= HOST_MIN_STATEMENTS
+    }
+
+    /// Operator-facing reason when [`Self::meets_host_minimums`] is false.
+    #[must_use]
+    pub fn capability_failure_reason(&self) -> String {
+        if !self.atomic_batch {
+            return "database guest does not advertise atomicBatch".into();
+        }
+        if self.sql_family != "sqlite" && self.sql_family != "postgres" {
+            return format!(
+                "database guest sqlFamily {:?} is not sqlite or postgres (SQL-like backends only)",
+                self.sql_family
+            );
+        }
+        if self.max_binds < HOST_MIN_BINDS {
+            return format!(
+                "database guest maxBinds {} is below host minimum {HOST_MIN_BINDS}",
+                self.max_binds
+            );
+        }
+        if self.max_statements < HOST_MIN_STATEMENTS {
+            return format!(
+                "database guest maxStatements {} is below host minimum {HOST_MIN_STATEMENTS}",
+                self.max_statements
+            );
+        }
+        "database guest failed capability negotiation".into()
     }
 }
 
@@ -225,13 +337,58 @@ pub mod atomic_status {
     pub const QUEUE_FULL: &str = "queueFull";
 }
 
-/// Named atomic library operation for [`crate::methods::db_atomic`].
+/// How a guest should run one statement inside an atomic plan.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum DbPlanStatementKind {
+    /// Statement returns rows (SELECT / RETURNING).
+    #[default]
+    Query,
+    /// Statement is DML; only `rowsAffected` is required.
+    Execute,
+}
+
+/// One parameterized statement in a host-authored [`DbAtomicPlan`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DbPlanStatement {
+    /// Dialect-specific SQL (SQLite `?` or Postgres `$1`).
+    pub sql: String,
+    /// Ordered JSON binds (null, bool, number, string, or `b64:` blobs).
+    #[serde(default)]
+    pub binds: Vec<JsonValue>,
+    /// Whether the guest should collect rows or only `rowsAffected`.
+    #[serde(default)]
+    pub kind: DbPlanStatementKind,
+}
+
+/// Generic atomic batch: ordered SQL with outcome/receipt selectors.
 ///
-/// D1 guests run each variant as one HTTP `batch()` (one SQL transaction)
-/// with control flow encoded in `WHERE` clauses so the host does not need
-/// mid-transaction reads. Consume-once variants use `DELETE … RETURNING`.
-/// SQLite and Postgres guests run the same command in a native local
-/// transaction. Every backend writes a durable `operationId` receipt.
+/// The plan describes database work, not Bookclerk operations. Domain names
+/// stay in host code.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DbAtomicPlan {
+    /// Statements run as one SQL transaction, in order.
+    pub statements: Vec<DbPlanStatement>,
+    /// Index of the application-status `SELECT` when receipts are not used.
+    #[serde(default)]
+    pub outcome_index: u32,
+    /// Index of a payload `SELECT` when the op returns a JSON record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_index: Option<u32>,
+    /// Index of the receipt `SELECT` immediately after prune (replay detect).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_receipt_index: Option<u32>,
+    /// Index of the final receipt `SELECT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_select_index: Option<u32>,
+}
+
+/// Named atomic library operation compiled by the host into a generic plan.
+///
+/// Domain names stay in host code. Database guests execute
+/// [`DbAtomicPlan`] statements and must not match on this enum.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "camelCase")]
 pub enum DbAtomicParams {
@@ -492,16 +649,51 @@ fn default_claim_max_in_flight() -> i64 {
 
 /// Host-generated idempotency envelope for [`crate::methods::db_atomic`].
 ///
-/// `operation` is the named command. `operation_id` keys a durable receipt so
-/// a committed batch whose HTTP/RPC response is lost can be retried without
-/// a second mutation.
+/// Guests execute [`Self::plan`] as one SQL transaction and must not parse
+/// Bookclerk operation names. [`Self::operation`] is a host compiler input and
+/// is omitted from the wire JSON.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbAtomicRequest {
     /// Caller-chosen idempotency key (UUID). Retries must reuse the same id.
     pub operation_id: String,
-    /// Named library operation to run (or replay from a receipt).
-    pub operation: DbAtomicParams,
+    /// Named library operation used by the host planner (not sent to guests).
+    #[serde(default, skip_serializing)]
+    pub operation: Option<DbAtomicParams>,
+    /// SHA-256 hex of the idempotency-relevant request; compared on receipt replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_hash: Option<String>,
+    /// Generic statement plan. Guests fail closed when this is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<DbAtomicPlan>,
+}
+
+impl DbAtomicRequest {
+    /// Envelope for a named library operation (compatibility window).
+    #[must_use]
+    pub fn named(operation_id: impl Into<String>, operation: DbAtomicParams) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            operation: Some(operation),
+            request_hash: None,
+            plan: None,
+        }
+    }
+
+    /// Envelope for a host-authored generic plan.
+    #[must_use]
+    pub fn with_plan(
+        operation_id: impl Into<String>,
+        request_hash: impl Into<String>,
+        plan: DbAtomicPlan,
+    ) -> Self {
+        Self {
+            operation_id: operation_id.into(),
+            operation: None,
+            request_hash: Some(request_hash.into()),
+            plan: Some(plan),
+        }
+    }
 }
 
 /// Optional engine timing for [`DbAtomicResult`]. Not part of the idempotency hash.

@@ -80,9 +80,11 @@ pub mod plugin_v2_capnp {
 mod wire_fixtures;
 
 pub use db::{
-    atomic_status, DbAtomicParams, DbAtomicRequest, DbAtomicResult, DbAtomicTiming, DbBeginParams,
-    DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, ExecResultDto, ProxyRowDto,
-    QueryResultDto, StatementDto,
+    atomic_status, DbAtomicParams, DbAtomicPlan, DbAtomicRequest, DbAtomicResult, DbAtomicTiming,
+    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbPlanStatement,
+    DbPlanStatementKind, DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
+    D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL, FIRST_PARTY_MAX_STATEMENTS,
+    HOST_MIN_BINDS, HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS,
 };
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use events::{HostToPluginEvent, PluginToHostEvent};
@@ -168,13 +170,34 @@ mod tests {
         let take_back: DbAtomicParams = serde_json::from_value(tv).unwrap();
         assert_eq!(take_back, take);
 
-        let req = DbAtomicRequest {
-            operation_id: "op-1".into(),
-            operation: take.clone(),
-        };
+        let req = DbAtomicRequest::named("op-1", take.clone());
         let rv = serde_json::to_value(&req).unwrap();
         assert_eq!(rv["operationId"], "op-1");
-        assert_eq!(rv["operation"]["op"], "takeOidcRpState");
+        assert!(
+            rv.get("operation").is_none(),
+            "named operations stay off the guest wire"
+        );
+
+        let plan_req = DbAtomicRequest::with_plan(
+            "op-plan",
+            "abc",
+            DbAtomicPlan {
+                statements: vec![DbPlanStatement {
+                    sql: "SELECT 1".into(),
+                    binds: vec![],
+                    kind: DbPlanStatementKind::Query,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            },
+        );
+        let pv = serde_json::to_value(&plan_req).unwrap();
+        assert_eq!(pv["operationId"], "op-plan");
+        assert_eq!(pv["requestHash"], "abc");
+        assert_eq!(pv["plan"]["statements"][0]["sql"], "SELECT 1");
+        assert_eq!(pv["plan"]["statements"][0]["kind"], "query");
 
         let chal = DbAtomicParams::TakeWebauthnChallenge {
             challenge_id: "c1".into(),
@@ -214,5 +237,10 @@ mod tests {
         let rv = serde_json::to_value(&d1).unwrap();
         assert_eq!(rv["dialect"], "sqlite");
         assert_eq!(rv["interactiveTxn"], false);
+        assert_eq!(rv["sqlFamily"], "sqlite");
+        assert_eq!(rv["maxBinds"], D1_MAX_BINDS);
+        assert!(d1.meets_host_minimums());
+        assert!(DbConnectResult::sqlite().meets_host_minimums());
+        assert!(DbConnectResult::postgres().meets_host_minimums());
     }
 }

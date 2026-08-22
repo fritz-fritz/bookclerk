@@ -82,7 +82,9 @@ impl PluginErrorCode {
             "deadline_exceeded" | "deadlineExceeded" => Self::DeadlineExceeded,
             "invalid_cursor" | "invalidCursor" => Self::InvalidCursor,
             "cancelled" | "canceled" => Self::Cancelled,
-            "conflict" => Self::Conflict,
+            "conflict" | "unique" | "constraint" | "unique_constraint" => Self::Conflict,
+            "timeout" | "timed_out" => Self::DeadlineExceeded,
+            "retryable" => Self::Unavailable,
             _ => Self::Unknown,
         }
     }

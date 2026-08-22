@@ -64,9 +64,10 @@ pub mod workerd;
 pub use db::{
     atomic_status, b64_string_to_bytes, bytes_to_b64_string, exec_result_from_dto,
     exec_result_to_dto, json_to_sea_value, proxy_rows_from_dto, proxy_rows_to_dto,
-    sea_value_to_json, statement_from_dto, statement_to_dto, DbAtomicParams, DbAtomicRequest,
-    DbAtomicResult, DbAtomicTiming, DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult,
-    DbTxnParams, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
+    sea_value_to_json, statement_from_dto, statement_to_dto, DbAtomicParams, DbAtomicPlan,
+    DbAtomicRequest, DbAtomicResult, DbAtomicTiming, DbBeginParams, DbBeginResult, DbConnectParams,
+    DbConnectResult, DbPlanStatement, DbPlanStatementKind, DbTxnParams, ExecResultDto, ProxyRowDto,
+    QueryResultDto, StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
 };
 
 pub use callback_tunnel::{TunnelGuest, TunnelHost, TunnelStream};

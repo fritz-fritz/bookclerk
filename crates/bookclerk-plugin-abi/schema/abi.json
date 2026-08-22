@@ -1136,32 +1136,111 @@
         }
       }
     },
-    "DbAtomicParams": {
+    "DbConnectResult": {
       "type": "object",
       "required": [
-        "op"
+        "dialect"
       ],
       "properties": {
-        "op": {
+        "dialect": {
           "type": "string",
-          "description": "Named atomic library operation (camelCase tag: deleteUser, redeemClaimTicket, takeOidcRpState, takeWebauthnChallenge, confirmTotpEnrollment, disableUserTotp, …)."
+          "description": "SeaORM dialect the host should use (sqlite or postgres)."
+        },
+        "interactiveTxn": {
+          "type": "boolean"
+        },
+        "sqlFamily": {
+          "type": "string",
+          "description": "sqlite or postgres. Required for host-authored plans."
+        },
+        "atomicBatch": {
+          "type": "boolean"
+        },
+        "returning": {
+          "type": "boolean"
+        },
+        "maxBinds": {
+          "type": "integer"
+        },
+        "maxStatements": {
+          "type": "integer"
+        },
+        "maxResultRows": {
+          "type": "integer"
+        },
+        "maxPayloadBytes": {
+          "type": "integer"
+        },
+        "timing": {
+          "type": "boolean"
         }
-      },
-      "additionalProperties": true
+      }
+    },
+    "DbPlanStatement": {
+      "type": "object",
+      "required": [
+        "sql"
+      ],
+      "properties": {
+        "sql": {
+          "type": "string"
+        },
+        "binds": {
+          "type": "array"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "query",
+            "execute"
+          ]
+        }
+      }
+    },
+    "DbAtomicPlan": {
+      "type": "object",
+      "required": [
+        "statements"
+      ],
+      "properties": {
+        "statements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DbPlanStatement"
+          }
+        },
+        "outcomeIndex": {
+          "type": "integer"
+        },
+        "payloadIndex": {
+          "type": "integer"
+        },
+        "priorReceiptIndex": {
+          "type": "integer"
+        },
+        "receiptSelectIndex": {
+          "type": "integer"
+        }
+      }
     },
     "DbAtomicRequest": {
       "type": "object",
       "required": [
         "operationId",
-        "operation"
+        "plan"
       ],
       "properties": {
         "operationId": {
           "type": "string",
           "description": "Caller-chosen idempotency key. Retries after an ambiguous outcome must reuse it."
         },
-        "operation": {
-          "$ref": "#/$defs/DbAtomicParams"
+        "requestHash": {
+          "type": "string",
+          "description": "SHA-256 hex of the idempotency-relevant request; compared on receipt replay."
+        },
+        "plan": {
+          "$ref": "#/$defs/DbAtomicPlan",
+          "description": "Host-authored generic SQL batch. Guests must not parse Bookclerk operation names."
         }
       }
     },
