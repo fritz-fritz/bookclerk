@@ -1296,6 +1296,8 @@ mod tests {
 
     struct ExecutingD1 {
         conn: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+        /// Remaining BetweenStatements skips before a simulated crash (`u32::MAX` = off).
+        interrupt_after: std::sync::Arc<std::sync::atomic::AtomicU32>,
     }
 
     impl wiremock::Respond for ExecutingD1 {
@@ -1303,7 +1305,7 @@ mod tests {
             let body: JsonValue = serde_json::from_slice(&request.body).unwrap_or(json!({}));
             let conn = self.conn.lock().expect("sqlite mutex");
             if let Some(batch) = body.get("batch").and_then(JsonValue::as_array) {
-                return sqlite_exec_batch(&conn, batch);
+                return sqlite_exec_batch(&conn, &self.interrupt_after, batch);
             }
             if let Some(sql) = body.get("sql").and_then(JsonValue::as_str) {
                 let params = body
@@ -1355,7 +1357,11 @@ mod tests {
         }
     }
 
-    fn sqlite_exec_batch(conn: &rusqlite::Connection, batch: &[JsonValue]) -> ResponseTemplate {
+    fn sqlite_exec_batch(
+        conn: &rusqlite::Connection,
+        interrupt_after: &std::sync::atomic::AtomicU32,
+        batch: &[JsonValue],
+    ) -> ResponseTemplate {
         if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
             return ResponseTemplate::new(500).set_body_json(json!({
                 "success": false,
@@ -1372,19 +1378,20 @@ mod tests {
                 .unwrap_or_default();
             match sqlite_run_statement(conn, sql, &params) {
                 Ok(entry) => {
-                    if bookclerk_db_exec::consume_atomic_interrupt(
-                        bookclerk_db_exec::AtomicInterruptPhase::BetweenStatements,
-                    )
-                    .is_some()
-                    {
-                        let _ = conn.execute_batch("ROLLBACK");
-                        return ResponseTemplate::new(200).set_body_json(json!({
-                            "success": true,
-                            "result": [{
-                                "success": false,
-                                "error": "cancelled: atomic session cancelled"
-                            }]
-                        }));
+                    let skips = interrupt_after.load(std::sync::atomic::Ordering::SeqCst);
+                    if skips != u32::MAX {
+                        if skips == 0 {
+                            interrupt_after.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return ResponseTemplate::new(200).set_body_json(json!({
+                                "success": true,
+                                "result": [{
+                                    "success": false,
+                                    "error": "cancelled: atomic session cancelled"
+                                }]
+                            }));
+                        }
+                        interrupt_after.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     }
                     results.push(entry);
                 }
@@ -1486,24 +1493,27 @@ mod tests {
         MockServer,
         D1Proxy,
         std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
     ) {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let conn = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        let interrupt_after = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r"/query$"))
             .respond_with(ExecutingD1 {
                 conn: std::sync::Arc::clone(&conn),
+                interrupt_after: std::sync::Arc::clone(&interrupt_after),
             })
             .mount(&server)
             .await;
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
-        (server, proxy, conn)
+        (server, proxy, conn, interrupt_after)
     }
 
     #[tokio::test]
     async fn executing_mock_unique_constraint_fails_closed() {
-        let (_server, proxy, _conn) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt) = executing_proxy().await;
         proxy
             .run_batch(&[("CREATE TABLE t (k TEXT PRIMARY KEY)".into(), Vec::new())])
             .await
@@ -1542,7 +1552,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_cancel_before_begin() {
-        let (_server, proxy, _conn) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt) = executing_proxy().await;
         bookclerk_library::inject_atomic_interrupt(
             bookclerk_library::AtomicInterruptPhase::BeforeBegin,
             bookclerk_library::AtomicInterruptKind::Cancel,
@@ -1569,7 +1579,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_interrupt_at_http_return_is_ambiguous() {
-        let (_server, proxy, _conn) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt) = executing_proxy().await;
         bookclerk_library::inject_atomic_interrupt(
             bookclerk_library::AtomicInterruptPhase::AroundCommit,
             bookclerk_library::AtomicInterruptKind::Cancel,
@@ -1633,7 +1643,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_row_cap_fails_closed() {
-        let (_server, proxy, conn) = executing_proxy().await;
+        let (_server, proxy, conn, _interrupt) = executing_proxy().await;
         let cap = bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows as usize;
         {
             let db = conn.lock().expect("sqlite mutex");
@@ -1668,7 +1678,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_host_schema_and_replay() {
-        let (_server, proxy, _conn) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt) = executing_proxy().await;
         let db = sea_orm::Database::connect_proxy(
             DatabaseBackend::Sqlite,
             std::sync::Arc::new(Box::new(proxy.clone())),
@@ -1681,13 +1691,7 @@ mod tests {
             bookclerk_library::HostSchemaKind::D1,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
-                async move {
-                    let batch: Vec<(String, Vec<JsonValue>)> =
-                        stmts.into_iter().map(|sql| (sql, Vec::new())).collect();
-                    proxy.run_batch(&batch).await.map(|_| ()).map_err(|err| {
-                        bookclerk_library::LibraryError::Orm(sea_orm::DbErr::from(err))
-                    })
-                }
+                async move { run_schema_batch(proxy, stmts).await }
             },
         )
         .await
@@ -1719,33 +1723,46 @@ mod tests {
         assert!(replayed.replayed, "same operationId must replay");
     }
 
+    async fn run_schema_batch(proxy: D1Proxy, stmts: Vec<String>) -> bookclerk_library::Result<()> {
+        let batch: Vec<(String, Vec<JsonValue>)> =
+            stmts.into_iter().map(|sql| (sql, Vec::new())).collect();
+        let raw = proxy
+            .run_batch(&batch)
+            .await
+            .map_err(|err| bookclerk_library::LibraryError::Orm(sea_orm::DbErr::from(err)))?;
+        if let Some(results) = raw.get("result").and_then(JsonValue::as_array) {
+            for entry in results {
+                if entry.get("success").and_then(JsonValue::as_bool) == Some(false) {
+                    let msg = entry
+                        .get("error")
+                        .and_then(JsonValue::as_str)
+                        .unwrap_or("D1 batch statement failed");
+                    return Err(bookclerk_library::LibraryError::Orm(
+                        sea_orm::DbErr::Custom(msg.into()),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn executing_mock_schema_crash_retries() {
-        let (_server, proxy, _conn) = executing_proxy().await;
+        let (_server, proxy, _conn, interrupt) = executing_proxy().await;
         let db = sea_orm::Database::connect_proxy(
             DatabaseBackend::Sqlite,
             std::sync::Arc::new(Box::new(proxy.clone())),
         )
         .await
         .unwrap();
-        bookclerk_db_exec::inject_atomic_interrupt_after(
-            bookclerk_db_exec::AtomicInterruptPhase::BetweenStatements,
-            bookclerk_db_exec::AtomicInterruptKind::Cancel,
-            2,
-        );
+        interrupt.store(2, std::sync::atomic::Ordering::SeqCst);
         let proxy_for_batch = proxy.clone();
         let err = bookclerk_library::apply_host_schema_with_batch(
             &db,
             bookclerk_library::HostSchemaKind::D1,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
-                async move {
-                    let batch: Vec<(String, Vec<JsonValue>)> =
-                        stmts.into_iter().map(|sql| (sql, Vec::new())).collect();
-                    proxy.run_batch(&batch).await.map(|_| ()).map_err(|err| {
-                        bookclerk_library::LibraryError::Orm(sea_orm::DbErr::from(err))
-                    })
-                }
+                async move { run_schema_batch(proxy, stmts).await }
             },
         )
         .await
@@ -1760,13 +1777,7 @@ mod tests {
             bookclerk_library::HostSchemaKind::D1,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
-                async move {
-                    let batch: Vec<(String, Vec<JsonValue>)> =
-                        stmts.into_iter().map(|sql| (sql, Vec::new())).collect();
-                    proxy.run_batch(&batch).await.map(|_| ()).map_err(|err| {
-                        bookclerk_library::LibraryError::Orm(sea_orm::DbErr::from(err))
-                    })
-                }
+                async move { run_schema_batch(proxy, stmts).await }
             },
         )
         .await
@@ -1775,7 +1786,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_shared_vectors() {
-        let (_server, proxy, _conn) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt) = executing_proxy().await;
         let db = sea_orm::Database::connect_proxy(
             DatabaseBackend::Sqlite,
             std::sync::Arc::new(Box::new(proxy.clone())),
@@ -1788,13 +1799,7 @@ mod tests {
             bookclerk_library::HostSchemaKind::D1,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
-                async move {
-                    let batch: Vec<(String, Vec<JsonValue>)> =
-                        stmts.into_iter().map(|sql| (sql, Vec::new())).collect();
-                    proxy.run_batch(&batch).await.map(|_| ()).map_err(|err| {
-                        bookclerk_library::LibraryError::Orm(sea_orm::DbErr::from(err))
-                    })
-                }
+                async move { run_schema_batch(proxy, stmts).await }
             },
         )
         .await
