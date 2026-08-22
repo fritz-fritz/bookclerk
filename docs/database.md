@@ -217,20 +217,30 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   reports `interactiveTxn: false` and `maxBinds: 100`. The host stores the
   full connect advertisement and rejects plans that exceed `maxStatements`,
   per-statement `maxBinds`, `maxPayloadBytes`, or out-of-range selectors.
-  Executors cap collected rows at `maxResultRows`. A guest that cannot
-  provide `atomicBatch` or the host's minimum bind/statement limits is not
-  loaded. Time Travel is not used.
-- Schema migrations run in the D1 plugin module via
-  `bookclerk_db_guest::apply_pending_migrations` (tracked in
-  `schema_migrations`).
+  A statement that yields more than `maxResultRows` **fails the plan**
+  (no silent truncate). Guests that omit `returning`, advertise `0` row/payload
+  caps, or mismatch `dialect`/`sqlFamily` are not loaded. Time Travel is not
+  used.
+- Guest failures are classified from SQLSTATE / `SQLITE_*` codes (not English
+  `"unique"` matching). Constraint → `conflict`; busy/serialization →
+  `unavailable` (the same `operationId` is retried); timeout →
+  `deadline_exceeded`; syntax → `invalid_params`. Cancel and deadlines stay
+  RPC/session-level (`deadlineUnixMs` on the atomic request is transport
+  metadata and is not hashed). Observed cancel/deadline before `BEGIN`/HTTP
+  or between statements is `cancelled` / `deadline_exceeded`; around `COMMIT`
+  or HTTP return is `unavailable` (ambiguous).
+- Schema versions are **host-owned**. After `db.connect` and capability
+  negotiation the host reads the current version and sends remaining DDL as
+  generic execute (D1 V27 stays one host-compiled `{ "batch": [...] }`).
+  Guests connect and ping only.
 
 ### Boundary: core vs database plugins
 
 | Crate | Owns |
 | --- | --- |
-| [`bookclerk-library`](../crates/bookclerk-library) | Greenfield DDL ([`migrations`](../crates/bookclerk-library/src/migrations.rs)), SeaORM entities, domain invariants, host-owned atomic SQL plans, [`LibraryStore`](../crates/bookclerk-library) CRUD (`from_connection` only) |
-| `bookclerk-plugin-database-{sqlite,d1,postgres}` | Connection/transport, capability advertisement, bind encoding, generic query/execute/atomic-batch, error/timing normalization. **Not** Bookclerk table names or named domain operations. |
-| Host (`bookclerk-plugin-host`) | Spawn guest, mediate secrets into tagged `DbConnectParams`, negotiate capabilities, compile plans, interpret statement results, forward SeaORM via RPC proxy |
+| [`bookclerk-library`](../crates/bookclerk-library) | Greenfield DDL ([`migrations`](../crates/bookclerk-library/src/migrations.rs)), SeaORM entities, domain invariants, host-owned atomic SQL plans, schema application after connect, [`LibraryStore`](../crates/bookclerk-library) CRUD (`from_connection` only) |
+| `bookclerk-plugin-database-{sqlite,d1,postgres}` | Connection/transport, capability advertisement, bind encoding, generic query/execute/atomic-batch, error/timing normalization. **Not** Bookclerk table names, schema version selection, or named domain operations. |
+| Host (`bookclerk-plugin-host`) | Spawn guest, mediate secrets into tagged `DbConnectParams`, negotiate capabilities, apply remaining DDL, compile plans, validate result envelopes, interpret statement results, forward SeaORM via RPC proxy |
 
 Core stays database-agnostic: it sees a migrated `DatabaseConnection`, and
 the host always attaches [`AtomicTxnBackend`](../crates/bookclerk-library)
@@ -332,11 +342,11 @@ bounded page of sleepers, and stores host-derived `event_deliveries.wake_grants_
 (schema versions + intersected filter). Publish is commit + notify; the
 dispatcher drains `wake_pending`. File SQLite applies V27 under
 `PRAGMA foreign_keys=OFF` (drop parent while the cascading child exists).
-D1 enforces FKs, so V27 is **not** the SQLite DROP-parent rebuild: versions
-1–26 go through the guest migrator, then V27 is one D1 `{ "batch": [...] }`
-SQL transaction that rebuilds both tables, **drops `event_deliveries` then
-`domain_events`**, renames, recreates indexes, and inserts
-`schema_migrations` version 28 (frozen bookkeeping id; the extra V3
+D1 enforces FKs, so V27 is **not** the SQLite DROP-parent rebuild: the host
+applies versions 1–26 as autocommit execute, then V27 as one D1
+`{ "batch": [...] }` SQL transaction that rebuilds both tables, **drops
+`event_deliveries` then `domain_events`**, renames, recreates indexes, and
+inserts `schema_migrations` version 28 (frozen bookkeeping id; the extra V3
 portal migration means named V27 is not bookkeeping version 27). V28 adds
 `db_serialization_slots` for portable COUNT+mutate serialization (no
 PostgreSQL advisory locks). Wake

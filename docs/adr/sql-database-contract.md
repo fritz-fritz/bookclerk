@@ -52,9 +52,10 @@ The guest returns a JSON object (also flattened onto `DbConnectResult`):
 - `timing`
 
 The host must not invent these from the plugin id. Missing required fields,
-`atomicBatch: false`, or limits below the host's compiled minimums are a
-hard error. Wake page size and `IN (…)` chunking are derived from
-`maxBinds`.
+`atomicBatch: false`, `returning: false`, `maxResultRows` / `maxPayloadBytes`
+of `0` (unspecified), limits below the host's compiled minimums, or a
+`dialect` that does not match `sqlFamily` are a hard error. Wake page size
+and `IN (…)` chunking are derived from `maxBinds`.
 
 First-party values: D1 `maxBinds = 100`; SQLite and PostgreSQL report the
 engine bind cap (host still chunks conservatively).
@@ -76,15 +77,26 @@ special-case that SQL sentinel):
 The guest runs the statements as **one SQL transaction** (D1 HTTP
 `{ "batch": [...] }`; SQLite/PostgreSQL `BEGIN`) and returns a generic
 `DbPlanExecResult` (`operationId`, per-statement `rows` / `rowsAffected`,
-timing). Receipt rows live in host-authored SQL against `db_atomic_receipts`.
-The host runs `interpret_plan` on those statement results to produce
-application status (`ok`, `empty`, `idempotencyConflict`, …). Guests must
-not parse Bookclerk operation names or interpret receipts.
+timing). The host validates the envelope (operation id echo, statement
+count, row/payload caps) before `interpret_plan`. A statement that yields
+more than `maxResultRows` fails the plan (rollback / D1 ambiguous) rather
+than truncating. Receipt rows live in host-authored SQL against
+`db_atomic_receipts`. Guests must not parse Bookclerk operation names or
+interpret receipts.
 
-Stable error categories: unique/constraint, retryable, unavailable,
-timeout, unsupported.
+Stable error categories come from SQLSTATE / rusqlite codes (not English
+`"unique"` matching): constraint → `conflict`; serialization/busy/locked →
+`unavailable`; timeout → `deadline_exceeded`; COMMIT-time I/O or lost HTTP
+→ `unavailable` (retry the same `operationId`); unsupported SQL →
+`unsupported`; syntax → `invalid_params`.
 
-Cancellation and deadlines stay RPC-level (existing session cancel).
+Cancellation and deadlines stay RPC/session-level (not a field on the SQL
+plan). The host races in-flight `db_query` against a cancel flag (drop
+aborts the RPC). Guests may see an optional `deadlineUnixMs` on
+`DbAtomicRequest` (transport metadata; not hashed). Observed cancel/deadline
+before `BEGIN`/HTTP or between statements is `cancelled` /
+`deadline_exceeded`; around `COMMIT` / HTTP return is `unavailable`
+(ambiguous).
 
 ### Portable concurrency
 
@@ -106,11 +118,14 @@ limits is not loaded.
 
 ## Consequences
 
-- First-party database plugins shrink to connect, migrate (executing
-  host-authored DDL), proxy CRUD, and a generic batch executor.
-- An architecture lint forbids plugin sources from importing Bookclerk
-  entities, embedding application table names, or interpreting named
-  operations (`DbAtomicParams`, `atomic_status`, `interpret_plan`).
+- First-party database plugins shrink to connect, ping, proxy CRUD, and a
+  generic batch executor. The host selects and applies schema versions after
+  capability negotiation (generic `dbExecute` / one atomic batch; D1 V27 is
+  still one host-compiled HTTP batch).
+- An architecture lint forbids plugin and `bookclerk-db-guest` production
+  sources from importing Bookclerk migrations, embedding application table
+  names, or interpreting named operations (`DbAtomicParams`, `atomic_status`,
+  `interpret_plan`).
 - Equal performance across engines is not guaranteed.
 - Integration plugins never receive database credentials or raw
   connections.
