@@ -2,10 +2,12 @@
 
 Bookclerk stores library state (accounts, books, portal, discovery) in a
 **database plugin**. Exactly one backend is active — unlike destinations, which
-may fan out.
+may fan out. Supported backends are **SQL-like only**: SQLite, PostgreSQL, and
+Cloudflare D1. Document / key-value stores are out of scope and must fail
+capability negotiation ([ADR: SQL database contract](adr/sql-database-contract.md)).
 
 Default: local SQLite file (`$BOOKCLERK_FILES_DIR/library.db`). Optional:
-Cloudflare D1 (remote SQLite via the Cloudflare HTTP API).
+Cloudflare D1 (remote SQLite via the Cloudflare HTTP API) or PostgreSQL.
 
 ## ORM choice (Prisma-like maintainability)
 
@@ -196,19 +198,22 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   Autocommit `dbQuery` / `dbExecute` use the documented REST body
   `{ "sql", "params" }`.   Atomic library operations (claim redeem, last-owner
   demote/disable/delete, password rotation, TOTP enroll/disable, consume-once OIDC RP state and
-  WebAuthn challenges) use `dbAtomic` on every bundled backend. The D1 plugin
-  sends those writes as **one** `{ "batch": [...] }` REST request (a real SQL
-  transaction) with control flow encoded in `WHERE` clauses. SQLite and
-  PostgreSQL guests run the same named command in a native local transaction.
-  Each call carries an `operationId`; the plugin writes a durable receipt in
-  the same SQL transaction so a committed result whose HTTP/RPC response is
-  lost can be retried without a second mutation. Structured statuses include
-  `ok`, `empty`, `lastOwner`, `claimInvalid`, `passwordRequired`, `notFound`,
-  and `idempotencyConflict`. Consume-once ops use `DELETE … RETURNING` (D1)
-  or transactional delete-and-return (SQLite/Postgres) so a missing or expired
-  row cannot be observed twice. `dbConnect` reports `interactiveTxn: false` on
-  D1 (no `dbBegin`); SQLite/Postgres still expose `dbBegin` for unrelated work.
-  Time Travel is not used.
+  WebAuthn challenges, job admit/claim, event publish/dispatch/claim) use
+  `dbAtomic` on every bundled backend. The **host** compiles a bounded generic
+  SQL plan (statements + binds + outcome selectors + receipt wrapping). The
+  D1 plugin runs that plan as **one** `{ "batch": [...] }` REST request (a real
+  SQL transaction). SQLite and PostgreSQL guests run the same plan in a native
+  local transaction. Guests do not parse Bookclerk operation names or table
+  names. Each call carries an `operationId` and `requestHash`; host-authored
+  SQL writes a durable receipt in the same transaction so a committed result
+  whose HTTP/RPC response is lost can be retried without a second mutation.
+  Structured statuses include `ok`, `empty`, `lastOwner`, `claimInvalid`,
+  `passwordRequired`, `notFound`, and `idempotencyConflict`. Consume-once ops
+  use `DELETE … RETURNING` so a missing or expired row cannot be observed
+  twice. After `openSession` the host queries `bookclerk.capabilities`; D1
+  reports `interactiveTxn: false` and `maxBinds: 100`. A guest that cannot
+  provide `atomicBatch` or the host's minimum bind/statement limits is not
+  loaded. Time Travel is not used.
 - Schema migrations run in the D1 plugin module via
   `bookclerk_db_guest::apply_pending_migrations` (tracked in
   `schema_migrations`).
@@ -217,13 +222,14 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
 
 | Crate | Owns |
 | --- | --- |
-| [`bookclerk-library`](../crates/bookclerk-library) | Greenfield DDL ([`migrations`](../crates/bookclerk-library/src/migrations.rs)), SeaORM entities, [`LibraryStore`](../crates/bookclerk-library) CRUD (`from_connection` only) |
-| `bookclerk-plugin-database-{sqlite,d1,postgres}` | Per-engine connect/migrate/proxy quirks and the jailed Workers-RPC guest |
-| Host (`bookclerk-plugin-host`) | Spawn guest, mediate secrets into tagged `DbConnectParams`, forward SeaORM via RPC proxy |
+| [`bookclerk-library`](../crates/bookclerk-library) | Greenfield DDL ([`migrations`](../crates/bookclerk-library/src/migrations.rs)), SeaORM entities, domain invariants, host-owned atomic SQL plans, [`LibraryStore`](../crates/bookclerk-library) CRUD (`from_connection` only) |
+| `bookclerk-plugin-database-{sqlite,d1,postgres}` | Connection/transport, capability advertisement, bind encoding, generic query/execute/atomic-batch, error/timing normalization. **Not** Bookclerk table names or named domain operations. |
+| Host (`bookclerk-plugin-host`) | Spawn guest, mediate secrets into tagged `DbConnectParams`, negotiate capabilities, compile plans, forward SeaORM via RPC proxy |
 
 Core stays database-agnostic: it sees a migrated `DatabaseConnection`, and
 the host always attaches [`AtomicTxnBackend`](../crates/bookclerk-library)
-(`dbAtomic` on the guest) for named security operations.
+(`dbAtomic` executePlan on the guest) for atomic security, job, and event
+operations. Domain names stay in host code.
 Hosts must install/stage the active database guest; missing guests are hard errors.
 
 ### LibraryStore status
@@ -323,16 +329,18 @@ D1 enforces FKs, so V27 is **not** the SQLite DROP-parent rebuild: versions
 1–26 go through the guest migrator, then V27 is one D1 `{ "batch": [...] }`
 SQL transaction that rebuilds both tables, **drops `event_deliveries` then
 `domain_events`**, renames, recreates indexes, and inserts
-`schema_migrations` version 28 (the last sqlite/D1 step index; the extra V3
-portal migration means named V27 is not bookkeeping version 27). Wake
+`schema_migrations` version 28 (frozen bookkeeping id; the extra V3
+portal migration means named V27 is not bookkeeping version 27). V28 adds
+`db_serialization_slots` for portable COUNT+mutate serialization (no
+PostgreSQL advisory locks). Wake
 registration (`wake_event_type` / `wake_filter_json` / `wake_grants_json`) is
 cleared when a matching event is accepted so retry is not re-woken. Wake
-pages are 64 rows so parent `IN (…)` and the fenced sleeper UPDATE stay under
-D1’s 100 bound-parameter limit (#178 will negotiate `maxBinds`). The sleeper
+page size is derived from the guest’s negotiated `maxBinds` (D1 is 100) minus
+the fenced UPDATE’s fixed binds. The sleeper
 UPDATE is one statement gated on `wake_pending = 1` and `wake_lease_owner`.
-Claim uses this node’s catalog (type + schema + filter); cluster dispatch still
-unions live nodes. D1/`dbAtomic` claim SQL is plugin-id-only; the host
-releases an incompatible row and node-locally claims a later match.
+Claim uses this node’s catalog (type + schema + filter) in **host** code;
+the atomic mutation is a compare-and-set on a concrete delivery id. Cluster
+dispatch still unions live nodes.
 
 ## Encrypted secrets
 
