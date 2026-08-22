@@ -171,6 +171,8 @@ export interface GrantedBindings {
   STORAGE?: unknown;
   SECRETS?: unknown;
   OAUTH?: unknown;
+  /** Host-mediated typed SQL execute surface when a database grant is present. */
+  DATABASE?: import("./db-execute.js").DatabaseBinding;
 }
 
 /** Invocation identity (never a PID, RpcTarget, or adapter map id). */
@@ -265,6 +267,8 @@ export interface BookclerkPluginEnv {
   SECRETS?: unknown;
   /** Opaque OAuth binding when the host injects one. */
   OAUTH?: unknown;
+  /** Host-mediated typed SQL execute surface when a database grant is present. */
+  DATABASE?: import("./db-execute.js").DatabaseBinding;
 }
 
 /** First-party wrapper env. Authors never see this type on their class. */
@@ -693,6 +697,23 @@ export class DatabaseSession extends RpcTarget {
   begin(): Promise<DbTransaction> {
     return Promise.reject(unsupported("begin"));
   }
+  /**
+   * Typed SQL-contract advertisement (`abiMinor` ≥ 7).
+   *
+   * @returns Guest `DbCapabilities`.
+   */
+  capabilities(): Promise<unknown> {
+    return Promise.reject(unsupported("capabilities"));
+  }
+  /**
+   * Typed atomic batch (`ExecuteRequest` → `ExecuteReply`).
+   *
+   * @param _request - Cap'n `ExecuteRequest` (structured Workers RPC object).
+   * @returns `ExecuteReply`.
+   */
+  executeAtomic(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
+    return Promise.reject(unsupported("executeAtomic"));
+  }
   close(): Promise<void> {
     return Promise.resolve();
   }
@@ -1011,6 +1032,7 @@ export function frozenBookclerkContext(
     STORAGE: env.STORAGE,
     SECRETS: env.SECRETS,
     OAUTH: env.OAUTH,
+    DATABASE: env.DATABASE,
   };
   const ctx: BookclerkContext = {
     bindings,

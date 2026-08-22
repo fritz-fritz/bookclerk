@@ -1,57 +1,45 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const KINDS = new Set(["null", "boolean", "int64", "float64", "text", "bytes"]);
-const TYPES = new Set([
-  "unspecified",
-  "bool",
-  "int64",
-  "float64",
-  "text",
-  "bytes",
-]);
+const root = dirname(fileURLToPath(import.meta.url));
+const dist = join(root, "../dist");
 
-function parseDbValue(raw) {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("DbValue must be an object");
-  }
-  if (typeof raw.kind !== "string" || !KINDS.has(raw.kind)) {
-    throw new Error(`unknown DbValue union member: ${String(raw.kind)}`);
-  }
-  switch (raw.kind) {
-    case "null":
-      if (typeof raw.value !== "string" || !TYPES.has(raw.value)) {
-        throw new Error("typed null requires a DbType");
-      }
-      return { kind: "null", value: raw.value };
-    case "boolean":
-      if (typeof raw.value !== "boolean") {
-        throw new Error("boolean DbValue requires a boolean");
-      }
-      return { kind: "boolean", value: raw.value };
-    case "int64":
-      if (typeof raw.value !== "number" || !Number.isInteger(raw.value)) {
-        throw new Error("int64 DbValue requires an integer");
-      }
-      return { kind: "int64", value: raw.value };
-    case "float64":
-      if (typeof raw.value !== "number" || !Number.isFinite(raw.value)) {
-        throw new Error("float64 value is not finite");
-      }
-      return { kind: "float64", value: raw.value };
-    case "text":
-      if (typeof raw.value !== "string") {
-        throw new Error("text DbValue requires a string");
-      }
-      return { kind: "text", value: raw.value };
-    case "bytes":
-      if (typeof raw.value !== "string") {
-        throw new Error("bytes DbValue requires a string");
-      }
-      return { kind: "bytes", value: raw.value };
-    default:
-      throw new Error(`unknown DbValue union member: ${raw.kind}`);
-  }
+const {
+  parseDbValue,
+  encodeDbValue,
+  decodeDbValue,
+} = await import(join(dist, "db-value.js"));
+const {
+  encodeExecuteRequest,
+  decodeExecuteRequest,
+  createDatabaseBinding,
+} = await import(join(dist, "db-execute.js"));
+
+function hex(bytes) {
+  return Buffer.from(bytes).toString("hex");
 }
+
+const I64_MIN = -0x8000_0000_0000_0000n;
+const I64_MAX = 0x7fff_ffff_ffff_ffffn;
+
+const GOLDEN = {
+  i64Min:
+    "00000000040000000000000002000100000002000000000000000000000000800000000000000000",
+  i64Max:
+    "000000000400000000000000020001000000020000000000ffffffffffffff7f0000000000000000",
+  textB64:
+    "0000000006000000000000000200010000000400000000000000000000000000010000004a0000006236343a414141410000000000000000",
+  bytes012:
+    "0000000005000000000000000200010000000500000000000000000000000000010000001a0000000001020000000000",
+  boolTrue:
+    "00000000040000000000000002000100010001000000000000000000000000000000000000000000",
+  nullBytes:
+    "00000000040000000000000002000100050000000000000000000000000000000000000000000000",
+  executeRequest:
+    "000000001d00000000000000040003000000000000000000000000000000000000000000000000000000000000000000090000001a0000000900000022000000090000001f0000006f70000000000000616263000000000004000000010002000200020001000000050000004a000000090000004f00000053454c454354203f00000000000000000c00000002000100000002000000000000000000000000800000000000000000000004000000000000000000000000000d0000007200000000000500000000000000000000000000090000000a0000006236343a6e6f742d6279746573000000ff00000000000000",
+};
 
 const nullBytes = parseDbValue({ kind: "null", value: "bytes" });
 assert.deepEqual(nullBytes, { kind: "null", value: "bytes" });
@@ -59,9 +47,18 @@ assert.deepEqual(nullBytes, { kind: "null", value: "bytes" });
 for (const n of [-1, 0, 1]) {
   assert.deepEqual(parseDbValue({ kind: "int64", value: n }), {
     kind: "int64",
-    value: n,
+    value: BigInt(n),
   });
 }
+
+assert.deepEqual(parseDbValue({ kind: "int64", value: I64_MIN }), {
+  kind: "int64",
+  value: I64_MIN,
+});
+assert.deepEqual(parseDbValue({ kind: "int64", value: I64_MAX }), {
+  kind: "int64",
+  value: I64_MAX,
+});
 
 const text = parseDbValue({ kind: "text", value: "héllo\u0000world" });
 assert.equal(text.kind, "text");
@@ -69,10 +66,93 @@ assert.equal(text.value, "héllo\u0000world");
 
 const blob = parseDbValue({ kind: "bytes", value: "b64:AAEC" });
 assert.equal(blob.kind, "bytes");
+assert.deepEqual(Array.from(blob.value), [0, 1, 2]);
 
 assert.throws(
   () => parseDbValue({ kind: "xml", value: "<a/>" }),
   /unknown DbValue union member/,
 );
 
+assert.equal(hex(encodeDbValue({ kind: "int64", value: I64_MIN })), GOLDEN.i64Min);
+assert.equal(hex(encodeDbValue({ kind: "int64", value: I64_MAX })), GOLDEN.i64Max);
+assert.equal(
+  hex(encodeDbValue({ kind: "text", value: "b64:AAAA" })),
+  GOLDEN.textB64,
+);
+assert.equal(
+  hex(encodeDbValue({ kind: "bytes", value: Uint8Array.of(0, 1, 2) })),
+  GOLDEN.bytes012,
+);
+assert.equal(hex(encodeDbValue({ kind: "boolean", value: true })), GOLDEN.boolTrue);
+assert.equal(
+  hex(encodeDbValue({ kind: "null", value: "bytes" })),
+  GOLDEN.nullBytes,
+);
+
+assert.notEqual(
+  hex(encodeDbValue({ kind: "text", value: "b64:AAAA" })),
+  hex(encodeDbValue({ kind: "bytes", value: Uint8Array.of(0, 1, 2) })),
+);
+
+assert.equal(decodeDbValue(encodeDbValue({ kind: "int64", value: I64_MIN })).value, I64_MIN);
+assert.equal(decodeDbValue(encodeDbValue({ kind: "int64", value: I64_MAX })).value, I64_MAX);
+assert.equal(decodeDbValue(encodeDbValue({ kind: "text", value: "b64:AAAA" })).value, "b64:AAAA");
+assert.deepEqual(
+  Array.from(decodeDbValue(encodeDbValue({ kind: "bytes", value: Uint8Array.of(0, 1, 2) })).value),
+  [0, 1, 2],
+);
+
+const request = {
+  operationId: "op",
+  requestHash: "abc",
+  statements: [
+    {
+      sql: "SELECT ?",
+      parameters: [
+        { kind: "int64", value: I64_MIN },
+        { kind: "text", value: "b64:not-bytes" },
+        { kind: "bytes", value: Uint8Array.of(0xff) },
+      ],
+      kind: "select",
+      maxRows: 1,
+      resultSelection: "rows",
+    },
+  ],
+  outcomeIndex: 0,
+  payloadIndex: 0,
+  hasPayloadIndex: false,
+  priorReceiptIndex: 0,
+  hasPriorReceiptIndex: false,
+  receiptSelectIndex: 0,
+  hasReceiptSelectIndex: false,
+  deadlineUnixMs: 0,
+};
+
+const reqBytes = encodeExecuteRequest(request);
+assert.equal(hex(reqBytes), GOLDEN.executeRequest);
+const back = decodeExecuteRequest(reqBytes);
+assert.equal(back.operationId, "op");
+assert.equal(back.statements[0].parameters[0].value, I64_MIN);
+assert.equal(back.statements[0].parameters[1].value, "b64:not-bytes");
+assert.deepEqual(Array.from(back.statements[0].parameters[2].value), [0xff]);
+
+let encodedByBinding = 0;
+const binding = createDatabaseBinding(
+  {
+    async executeAtomic(req) {
+      encodedByBinding = encodeExecuteRequest(req).byteLength;
+      return {
+        operationId: req.operationId,
+        statements: [],
+        timing: { attemptElapsedUs: 0, dbExecutionUs: 0, dbTimingSource: "test" },
+      };
+    },
+  },
+  { operationId: "op", requestHash: "abc" },
+);
+const reply = await binding.execute(request.statements);
+assert.equal(reply.operationId, "op");
+assert.equal(encodedByBinding, reqBytes.byteLength);
+
+assert.equal(typeof readFileSync, "function");
 console.log("db-value goldens ok");

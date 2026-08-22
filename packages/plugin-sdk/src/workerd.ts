@@ -64,3 +64,24 @@ export type {
   CliInvokeResult,
   HostToPluginEvent,
 } from "./generated.js";
+export {
+  createDatabaseBinding,
+  decodeExecuteRequest,
+  encodeExecuteRequest,
+} from "./db-execute.js";
+export { decodeDbValue, encodeDbValue, parseDbValue } from "./db-value.js";
+export type { DbType, DbValue } from "./db-value.js";
+export type {
+  AtomicTransport,
+  DatabaseBinding,
+  DatabaseBindingOptions,
+  DbColumn,
+  DbResultSelection,
+  DbRow,
+  DbStatementKind,
+  DbTiming,
+  ExecuteReply,
+  ExecuteRequest,
+  StatementResult,
+  TypedDbStatement,
+} from "./db-execute.js";

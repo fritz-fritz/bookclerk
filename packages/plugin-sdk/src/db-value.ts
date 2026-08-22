@@ -1,9 +1,13 @@
 /**
- * Universal Cap'n database value domain (`DbValue`).
+ * Universal Cap'n database value domain (`DbValue`) and unpacked codec.
  *
- * Baseline cells are typed null, bool, int64, finite float64, UTF-8 text, and
- * bytes. Unknown `kind` values fail closed.
+ * Baseline cells are typed null, bool, int64 (`bigint`), finite float64,
+ * UTF-8 text, and bytes (`Uint8Array`). Unknown `kind` values fail closed.
+ * JSON `parseDbValue` still accepts `number` / `b64:` strings; the codec
+ * always uses the domain types.
  */
+
+import { CapnpMessage, CapnpReader } from "./db-capnp.js";
 
 /** Column / typed-null type tag on the Cap'n `DbValue` wire. */
 export type DbType =
@@ -17,16 +21,16 @@ export type DbType =
 /**
  * Closed Cap'n `DbValue` union.
  *
- * Members are typed null, bool, int64, finite float64, UTF-8 text, and bytes
- * (`b64:` payload). Unknown `kind` values fail closed.
+ * Members are typed null, bool, int64 (`bigint`), finite float64, UTF-8 text,
+ * and bytes (`Uint8Array`). Unknown `kind` values fail closed.
  */
 export type DbValue =
   | { kind: "null"; value: DbType }
   | { kind: "boolean"; value: boolean }
-  | { kind: "int64"; value: number }
+  | { kind: "int64"; value: bigint }
   | { kind: "float64"; value: number }
   | { kind: "text"; value: string }
-  | { kind: "bytes"; value: string };
+  | { kind: "bytes"; value: Uint8Array };
 
 const KINDS = new Set(["null", "boolean", "int64", "float64", "text", "bytes"]);
 const TYPES = new Set([
@@ -38,11 +42,36 @@ const TYPES = new Set([
   "bytes",
 ]);
 
+const I64_MIN = -0x8000_0000_0000_0000n;
+const I64_MAX = 0x7fff_ffff_ffff_ffffn;
+
+const DB_TYPE_ORD: Record<DbType, number> = {
+  unspecified: 0,
+  bool: 1,
+  int64: 2,
+  float64: 3,
+  text: 4,
+  bytes: 5,
+};
+
+const DB_TYPE_FROM_ORD: DbType[] = [
+  "unspecified",
+  "bool",
+  "int64",
+  "float64",
+  "text",
+  "bytes",
+];
+
 /**
  * Parses a JSON `DbValue`. Unknown union members throw.
  *
+ * `int64` accepts a `bigint` or a finite integer `number` (converted to
+ * `bigint`). `bytes` accepts a `Uint8Array` or a `b64:` JSON string.
+ *
  * @param raw Parsed JSON object.
  * @returns Typed value.
+ * @throws When `raw` is not a closed `DbValue`.
  */
 export function parseDbValue(raw: unknown): DbValue {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -64,10 +93,7 @@ export function parseDbValue(raw: unknown): DbValue {
       }
       return { kind: "boolean", value: obj.value };
     case "int64":
-      if (typeof obj.value !== "number" || !Number.isInteger(obj.value)) {
-        throw new Error("int64 DbValue requires an integer");
-      }
-      return { kind: "int64", value: obj.value };
+      return { kind: "int64", value: parseInt64(obj.value) };
     case "float64":
       if (typeof obj.value !== "number" || !Number.isFinite(obj.value)) {
         throw new Error("float64 value is not finite");
@@ -79,11 +105,173 @@ export function parseDbValue(raw: unknown): DbValue {
       }
       return { kind: "text", value: obj.value };
     case "bytes":
-      if (typeof obj.value !== "string") {
-        throw new Error("bytes DbValue requires a string");
-      }
-      return { kind: "bytes", value: obj.value };
+      return { kind: "bytes", value: parseBytes(obj.value) };
     default:
       throw new Error(`unknown DbValue union member: ${obj.kind}`);
   }
+}
+
+/**
+ * Encodes a standalone unpacked Cap'n `DbValue` message.
+ *
+ * @param value Domain value (`bigint` / `Uint8Array`, not JSON number / `b64:`).
+ * @returns Unpacked Cap'n stream bytes (same encoding as the Rust SDK).
+ * @throws When `int64` is out of range or `float64` is not finite.
+ */
+export function encodeDbValue(value: DbValue): Uint8Array {
+  const msg = new CapnpMessage();
+  const root = msg.initRoot(2, 1);
+  writeDbValue(root, value);
+  return msg.finish();
+}
+
+/**
+ * Decodes a standalone unpacked Cap'n `DbValue` message.
+ *
+ * @param bytes Unpacked Cap'n stream.
+ * @returns Domain value.
+ * @throws When the buffer is not a valid `DbValue`.
+ */
+export function decodeDbValue(bytes: Uint8Array): DbValue {
+  const reader = new CapnpReader(bytes);
+  return readDbValue(reader.root(2, 1));
+}
+
+/**
+ * Writes a `DbValue` into an unpacked Cap'n struct (2 data words, 1 pointer).
+ *
+ * @param root - Cap'n struct builder.
+ * @param value - Domain value.
+ * @returns Nothing; the struct is mutated in place.
+ * @throws When `int64` is out of range or `float64` is not finite.
+ */
+export function writeDbValue(
+  root: { setUint16(i: number, v: number): void; setBool(i: number, v: boolean): void; setInt64(i: number, v: bigint): void; setFloat64(i: number, v: number): void; setText(i: number, v: string): void; setData(i: number, v: Uint8Array): void },
+  value: DbValue,
+): void {
+  switch (value.kind) {
+    case "null":
+      root.setUint16(0, DB_TYPE_ORD[value.value]);
+      root.setUint16(1, 0);
+      return;
+    case "boolean":
+      root.setBool(0, value.value);
+      root.setUint16(1, 1);
+      return;
+    case "int64":
+      if (value.value < I64_MIN || value.value > I64_MAX) {
+        throw new Error("int64 DbValue is out of range");
+      }
+      root.setInt64(1, value.value);
+      root.setUint16(1, 2);
+      return;
+    case "float64":
+      if (!Number.isFinite(value.value)) {
+        throw new Error("float64 value is not finite");
+      }
+      root.setFloat64(1, value.value);
+      root.setUint16(1, 3);
+      return;
+    case "text":
+      root.setUint16(1, 4);
+      root.setText(0, value.value);
+      return;
+    case "bytes":
+      root.setUint16(1, 5);
+      root.setData(0, value.value);
+      return;
+    default: {
+      const _exhaustive: never = value;
+      throw new Error(`unknown DbValue union member: ${JSON.stringify(_exhaustive)}`);
+    }
+  }
+}
+
+/**
+ * Reads a `DbValue` from an unpacked Cap'n struct (2 data words, 1 pointer).
+ *
+ * @param root - Cap'n struct reader.
+ * @returns Domain value.
+ * @throws When the union member is unknown or a float64 is not finite.
+ */
+export function readDbValue(root: {
+  getUint16(i: number): number;
+  getBool(i: number): boolean;
+  getInt64(i: number): bigint;
+  getFloat64(i: number): number;
+  getText(i: number): string;
+  getData(i: number): Uint8Array;
+}): DbValue {
+  const disc = root.getUint16(1);
+  switch (disc) {
+    case 0: {
+      const ty = DB_TYPE_FROM_ORD[root.getUint16(0)];
+      if (ty === undefined) {
+        throw new Error("unknown DbType");
+      }
+      return { kind: "null", value: ty };
+    }
+    case 1:
+      return { kind: "boolean", value: root.getBool(0) };
+    case 2:
+      return { kind: "int64", value: root.getInt64(1) };
+    case 3: {
+      const n = root.getFloat64(1);
+      if (!Number.isFinite(n)) {
+        throw new Error("float64 value is not finite");
+      }
+      return { kind: "float64", value: n };
+    }
+    case 4:
+      return { kind: "text", value: root.getText(0) };
+    case 5:
+      return { kind: "bytes", value: root.getData(0) };
+    default:
+      throw new Error(`unknown DbValue union member: ${disc}`);
+  }
+}
+
+function parseInt64(raw: unknown): bigint {
+  let n: bigint;
+  if (typeof raw === "bigint") {
+    n = raw;
+  } else if (typeof raw === "number") {
+    if (!Number.isInteger(raw) || !Number.isFinite(raw)) {
+      throw new Error("int64 DbValue requires an integer");
+    }
+    n = BigInt(raw);
+  } else if (typeof raw === "string") {
+    if (!/^-?\d+$/.test(raw)) {
+      throw new Error("int64 DbValue requires an integer");
+    }
+    n = BigInt(raw);
+  } else {
+    throw new Error("int64 DbValue requires an integer");
+  }
+  if (n < I64_MIN || n > I64_MAX) {
+    throw new Error("int64 DbValue is out of range");
+  }
+  return n;
+}
+
+function parseBytes(raw: unknown): Uint8Array {
+  if (raw instanceof Uint8Array) {
+    return raw;
+  }
+  if (typeof raw !== "string") {
+    throw new Error("bytes DbValue requires bytes");
+  }
+  if (!raw.startsWith("b64:")) {
+    throw new Error("bytes DbValue requires bytes");
+  }
+  return decodeBase64(raw.slice(4));
+}
+
+function decodeBase64(b64: string): Uint8Array {
+  const bin = globalThis.atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    out[i] = bin.charCodeAt(i);
+  }
+  return out;
 }

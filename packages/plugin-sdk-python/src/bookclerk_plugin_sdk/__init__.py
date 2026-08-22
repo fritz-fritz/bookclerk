@@ -25,6 +25,14 @@ from .abi import (
     ScanParams,
     StatementDto,
 )
+from .db_value import (
+    DatabaseBinding,
+    decode_db_value,
+    decode_execute_request,
+    encode_db_value,
+    encode_execute_request,
+    parse_db_value,
+)
 from .native import BookclerkPlugin, BookclerkPluginGuest
 
 __all__ = [
@@ -36,11 +44,17 @@ __all__ = [
     "CliInvokeParams",
     "CliInvokeResult",
     "CliSchema",
+    "DatabaseBinding",
+    "decode_db_value",
+    "decode_execute_request",
+    "encode_db_value",
+    "encode_execute_request",
     "FetchTitleParams",
     "HandshakeParams",
     "HandshakeResult",
     "HealthResult",
     "LoginParams",
+    "parse_db_value",
     "PluginError",
     "ScanParams",
     "StatementDto",
