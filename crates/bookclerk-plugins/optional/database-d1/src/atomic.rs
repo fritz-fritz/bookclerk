@@ -155,7 +155,7 @@ fn parse_generic_batch(
     operation_id: String,
     started: std::time::Instant,
 ) -> std::result::Result<DbPlanExecResult, DbErr> {
-    let mut statements = parse_batch_results(value)?;
+    let statements = parse_batch_results(value)?;
     if statements.len() != plan.statements.len() {
         return Err(ambiguous_d1(format!(
             "expected {} statement results, got {}",
@@ -164,9 +164,12 @@ fn parse_generic_batch(
         )));
     }
     let cap = usize::try_from(DbConnectResult::d1().max_result_rows).unwrap_or(1_000);
-    for stmt in &mut statements {
+    for (i, stmt) in statements.iter().enumerate() {
         if stmt.rows.len() > cap {
-            stmt.rows.truncate(cap);
+            return Err(DbErr::Custom(format!(
+                "D1 statement {i} returned {} rows; maxResultRows is {cap}",
+                stmt.rows.len()
+            )));
         }
     }
     let db_execution_us = d1_sql_duration_us(value);
@@ -260,7 +263,15 @@ mod tests {
             "result": [{ "success": true, "results": rows, "meta": { "changes": 0 } }]
         });
         let started = std::time::Instant::now();
-        let exec = parse_generic_batch(&plan, &value, "op-cap".into(), started).unwrap();
+        let err = parse_generic_batch(&plan, &value, "op-cap".into(), started).unwrap_err();
+        assert!(
+            err.to_string().contains("maxResultRows"),
+            "D1 must fail closed on over-cap rows: {err}"
+        );
+        let at_cap = json!({
+            "result": [{ "success": true, "results": rows[..1000].to_vec(), "meta": { "changes": 0 } }]
+        });
+        let exec = parse_generic_batch(&plan, &at_cap, "op-cap-ok".into(), started).unwrap();
         assert_eq!(exec.statements[0].rows.len(), 1_000);
     }
 }

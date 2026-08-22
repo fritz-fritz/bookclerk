@@ -31,11 +31,13 @@ pub async fn execute_plan_on(
     execute_plan_on_capped(db, plan, expected_hash, operation_id, timing_source, 0).await
 }
 
-/// Like [`execute_plan_on`], capping collected rows at `max_result_rows` (`0` = unlimited).
+/// Like [`execute_plan_on`], failing when a statement returns more than `max_result_rows`.
+///
+/// `max_result_rows` of `0` means unlimited.
 ///
 /// # Errors
 ///
-/// Returns [`LibraryError::Orm`] when a statement fails.
+/// Returns [`LibraryError::Orm`] when a statement fails or exceeds the row cap.
 pub async fn execute_plan_on_capped(
     db: &DatabaseConnection,
     plan: &DbAtomicPlan,
@@ -52,7 +54,8 @@ pub async fn execute_plan_on_capped(
 /// Executes `plan` as one transaction and returns generic statement results.
 ///
 /// Guests and in-process tests share this path. `max_result_rows` of `0` means
-/// unlimited; otherwise each statement's collected rows are truncated.
+/// unlimited; otherwise a statement that yields more rows fails the plan
+/// (the transaction is rolled back) rather than truncating the result.
 ///
 /// # Errors
 ///
@@ -87,7 +90,7 @@ pub async fn execute_statements_on(
                         return Err(LibraryError::Orm(err));
                     }
                 };
-                let mut json_rows: Vec<JsonValue> = rows
+                let json_rows: Vec<JsonValue> = rows
                     .into_iter()
                     .map(|row| {
                         let proxy = from_query_result_to_proxy_row(&row);
@@ -98,7 +101,14 @@ pub async fn execute_statements_on(
                         JsonValue::Object(map)
                     })
                     .collect();
-                cap_rows(&mut json_rows, max_result_rows);
+                if exceeds_result_row_cap(json_rows.len(), max_result_rows) {
+                    let _ = txn.rollback().await;
+                    let _ = crate::take_txn_fault();
+                    return Err(LibraryError::Orm(sea_orm::DbErr::Custom(format!(
+                        "query returned {} rows; maxResultRows is {max_result_rows}",
+                        json_rows.len()
+                    ))));
+                }
                 let rows_affected = u64::try_from(json_rows.len()).unwrap_or(u64::MAX);
                 DbPlanStmtExecResult {
                     rows: json_rows,
@@ -148,15 +158,13 @@ pub async fn execute_statements_on(
     })
 }
 
-/// Truncates `rows` when `max_result_rows` is a positive cap.
-fn cap_rows(rows: &mut Vec<JsonValue>, max_result_rows: u32) {
+/// True when `n` exceeds a positive `max_result_rows` cap.
+fn exceeds_result_row_cap(n: usize, max_result_rows: u32) -> bool {
     if max_result_rows == 0 {
-        return;
+        return false;
     }
     let cap = usize::try_from(max_result_rows).unwrap_or(usize::MAX);
-    if rows.len() > cap {
-        rows.truncate(cap);
-    }
+    n > cap
 }
 
 /// Maps a JSON bind onto a SeaORM [`Value`], decoding `b64:` strings as blobs.

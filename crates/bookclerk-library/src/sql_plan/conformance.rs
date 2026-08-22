@@ -557,9 +557,9 @@ fn d1_compat_execute(
                     obj.insert(name.clone(), json);
                 }
                 rows.push(serde_json::Value::Object(obj));
-            }
-            if rows.len() > 1_000 {
-                rows.truncate(1_000);
+                if rows.len() > 1_000 {
+                    panic!("D1-compat query exceeded maxResultRows 1000");
+                }
             }
             u64::try_from(rows.len()).unwrap_or(0)
         };
@@ -717,10 +717,17 @@ async fn execute_caps_collected_rows_at_max_result_rows() {
         prior_receipt_index: None,
         receipt_select_index: None,
     };
-    let exec = super::execute_statements_on(&db, &plan, "op-cap", "sqlite_txn", 2)
+    let exec = super::execute_statements_on(&db, &plan, "op-cap", "sqlite_txn", 5)
         .await
         .unwrap();
-    assert_eq!(exec.statements[0].rows.len(), 2);
+    assert_eq!(exec.statements[0].rows.len(), 5);
+    let err = super::execute_statements_on(&db, &plan, "op-cap-over", "sqlite_txn", 2)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("maxResultRows"),
+        "row cap must fail closed: {err}"
+    );
 }
 
 #[tokio::test]
@@ -819,8 +826,15 @@ async fn postgres_execute_caps_collected_rows() {
         prior_receipt_index: None,
         receipt_select_index: None,
     };
-    let exec = super::execute_statements_on(&db, &plan, "op-pg-cap", "postgres_txn", 2)
+    let exec = super::execute_statements_on(&db, &plan, "op-pg-cap", "postgres_txn", 5)
         .await
         .unwrap();
-    assert_eq!(exec.statements[0].rows.len(), 2);
+    assert_eq!(exec.statements[0].rows.len(), 5);
+    let err = super::execute_statements_on(&db, &plan, "op-pg-cap-over", "postgres_txn", 2)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("maxResultRows"),
+        "row cap must fail closed: {err}"
+    );
 }
