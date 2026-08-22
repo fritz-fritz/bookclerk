@@ -369,17 +369,9 @@ async fn postgres_migrated_db() -> sea_orm::DatabaseConnection {
     let db = sea_orm::Database::connect(&db_url)
         .await
         .expect("connect to disposable postgres database");
-    let backend = sea_orm::ConnectionTrait::get_database_backend(&db);
-    for step in crate::migrations::migration_sql_postgres() {
-        for stmt in step.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-            sea_orm::ConnectionTrait::execute_raw(
-                &db,
-                sea_orm::Statement::from_string(backend, stmt.to_string()),
-            )
-            .await
-            .unwrap_or_else(|err| panic!("postgres migration `{stmt}` failed: {err}"));
-        }
-    }
+    crate::apply_host_schema(&db, crate::HostSchemaKind::Postgres)
+        .await
+        .expect("host-applied postgres schema");
     db
 }
 
@@ -837,4 +829,237 @@ async fn postgres_execute_caps_collected_rows() {
         err.to_string().contains("maxResultRows"),
         "row cap must fail closed: {err}"
     );
+}
+
+#[tokio::test]
+async fn host_applies_schema_to_unmigrated_sqlite() {
+    let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .expect("unmigrated sqlite");
+    crate::apply_host_schema(&db, crate::HostSchemaKind::SqliteFile)
+        .await
+        .expect("host schema");
+    let rows = sea_orm::ConnectionTrait::query_all_raw(
+        &db,
+        sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='db_serialization_slots'",
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+fn interrupt_plan(slot: &str) -> bookclerk_plugin_abi::DbAtomicPlan {
+    bookclerk_plugin_abi::DbAtomicPlan {
+        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+            sql: format!(
+                "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{slot}', 0)"
+            ),
+            binds: vec![],
+            kind: bookclerk_plugin_abi::DbPlanStatementKind::Execute,
+        }],
+        outcome_index: 0,
+        payload_index: None,
+        prior_receipt_index: None,
+        receipt_select_index: None,
+    }
+}
+
+async fn slot_missing(db: &sea_orm::DatabaseConnection, key: &str) -> bool {
+    let rows = sea_orm::ConnectionTrait::query_all_raw(
+        db,
+        sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT bump FROM db_serialization_slots WHERE slot_key = ?",
+            [key.into()],
+        ),
+    )
+    .await
+    .unwrap();
+    rows.is_empty()
+}
+
+#[tokio::test]
+async fn plan_cancel_before_begin_does_not_commit() {
+    let db = mem_db().await;
+    crate::inject_atomic_interrupt(
+        crate::AtomicInterruptPhase::BeforeBegin,
+        crate::AtomicInterruptKind::Cancel,
+    );
+    let err = super::execute_statements_on(
+        &db,
+        &interrupt_plan("c-before"),
+        "op-c-before",
+        "sqlite_txn",
+        0,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("cancelled"), "{err}");
+    assert!(slot_missing(&db, "c-before").await);
+}
+
+#[tokio::test]
+async fn plan_cancel_during_statements_rolls_back() {
+    let db = mem_db().await;
+    crate::inject_atomic_interrupt(
+        crate::AtomicInterruptPhase::BetweenStatements,
+        crate::AtomicInterruptKind::Cancel,
+    );
+    let err = super::execute_statements_on(
+        &db,
+        &interrupt_plan("c-during"),
+        "op-c-during",
+        "sqlite_txn",
+        0,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("cancelled"), "{err}");
+    assert!(slot_missing(&db, "c-during").await);
+}
+
+#[tokio::test]
+async fn plan_cancel_around_commit_is_unavailable() {
+    let db = mem_db().await;
+    crate::inject_atomic_interrupt(
+        crate::AtomicInterruptPhase::AroundCommit,
+        crate::AtomicInterruptKind::Cancel,
+    );
+    let err = super::execute_statements_on(
+        &db,
+        &interrupt_plan("c-commit"),
+        "op-c-commit",
+        "sqlite_txn",
+        0,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("database commit failed"), "{err}");
+    assert!(slot_missing(&db, "c-commit").await);
+}
+
+#[tokio::test]
+async fn plan_deadline_before_begin() {
+    let db = mem_db().await;
+    crate::inject_atomic_interrupt(
+        crate::AtomicInterruptPhase::BeforeBegin,
+        crate::AtomicInterruptKind::Deadline,
+    );
+    let err = super::execute_statements_on(
+        &db,
+        &interrupt_plan("d-before"),
+        "op-d-before",
+        "sqlite_txn",
+        0,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("deadline"), "{err}");
+    assert!(slot_missing(&db, "d-before").await);
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_plan_cancel_before_begin() {
+    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        return;
+    }
+    let db = postgres_migrated_db().await;
+    crate::inject_atomic_interrupt(
+        crate::AtomicInterruptPhase::BeforeBegin,
+        crate::AtomicInterruptKind::Cancel,
+    );
+    let err = super::execute_statements_on(
+        &db,
+        &interrupt_plan("pg-c-before"),
+        "op-pg-c-before",
+        "postgres_txn",
+        0,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("cancelled"), "{err}");
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_plan_cancel_during_statements() {
+    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        return;
+    }
+    let db = postgres_migrated_db().await;
+    crate::inject_atomic_interrupt(
+        crate::AtomicInterruptPhase::BetweenStatements,
+        crate::AtomicInterruptKind::Cancel,
+    );
+    let err = super::execute_statements_on(
+        &db,
+        &interrupt_plan("pg-c-during"),
+        "op-pg-c-during",
+        "postgres_txn",
+        0,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("cancelled"), "{err}");
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_host_applies_schema() {
+    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        return;
+    }
+    let db = postgres_migrated_db().await;
+    sea_orm::ConnectionTrait::query_all_raw(
+        &db,
+        sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT 1 FROM db_serialization_slots LIMIT 1",
+        ),
+    )
+    .await
+    .expect("db_serialization_slots exists after host schema");
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_plan_cancel_around_commit_is_unavailable() {
+    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        return;
+    }
+    let db = postgres_migrated_db().await;
+    crate::inject_atomic_interrupt(
+        crate::AtomicInterruptPhase::AroundCommit,
+        crate::AtomicInterruptKind::Cancel,
+    );
+    let err = super::execute_statements_on(
+        &db,
+        &interrupt_plan("pg-c-commit"),
+        "op-pg-c-commit",
+        "postgres_txn",
+        0,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("database commit failed"), "{err}");
 }

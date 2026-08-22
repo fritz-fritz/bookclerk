@@ -1246,6 +1246,10 @@
         "plan": {
           "$ref": "#/$defs/DbAtomicPlan",
           "description": "Host-authored generic SQL batch. Guests must not parse Bookclerk operation names."
+        },
+        "deadlineUnixMs": {
+          "type": "integer",
+          "description": "Optional guest-visible deadline (unix milliseconds). Transport metadata; not hashed for idempotency."
         }
       }
     },

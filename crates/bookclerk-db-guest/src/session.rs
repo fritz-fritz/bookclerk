@@ -241,12 +241,13 @@ pub async fn guest_atomic(req: DbAtomicRequest) -> Result<DbPlanExecResult> {
         DbBackend::Postgres => bookclerk_plugin_sdk::DbConnectResult::postgres().max_result_rows,
         _ => bookclerk_plugin_sdk::DbConnectResult::sqlite().max_result_rows,
     };
-    bookclerk_library::execute_statements_on(
+    bookclerk_library::execute_statements_on_session(
         &conn,
         &plan,
         &req.operation_id,
         timing_source,
         max_result_rows,
+        bookclerk_library::AtomicSession::from_deadline(req.deadline_unix_ms),
     )
     .await
     .map_err(|e| e.to_string())
@@ -569,7 +570,9 @@ async fn pop_finish(
     }
     let (_, txn) = stack.pop().expect("checked last");
     if commit {
-        txn.commit().await.map_err(|e| e.to_string())?;
+        txn.commit()
+            .await
+            .map_err(|e| format!("database commit failed: {e}"))?;
         if let Some(fault) = bookclerk_library::take_txn_fault() {
             return Err(fault);
         }
@@ -1365,6 +1368,97 @@ mod tests {
         let rows: Vec<serde_json::Value> = serde_json::from_str(&page.rows_json).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["values"]["x"], "DELETE");
+    }
+
+    #[tokio::test]
+    async fn guest_atomic_unique_is_conflict_and_commit_is_unavailable() {
+        use bookclerk_plugin_sdk::{
+            DbAtomicPlan, DbAtomicRequest, DbPlanStatement, DbPlanStatementKind, PluginErrorCode,
+        };
+        let _lock = SESSION_LOCK.lock().await;
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        let dup = DbAtomicRequest {
+            operation_id: "dup-op".into(),
+            request_hash: None,
+            plan: Some(DbAtomicPlan {
+                statements: vec![
+                    DbPlanStatement {
+                        sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('dup-g', 0)"
+                            .into(),
+                        binds: vec![],
+                        kind: DbPlanStatementKind::Execute,
+                    },
+                    DbPlanStatement {
+                        sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('dup-g', 1)"
+                            .into(),
+                        binds: vec![],
+                        kind: DbPlanStatementKind::Execute,
+                    },
+                ],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let unique_err = crate::plugin_error_from_engine(guest_atomic(dup).await.unwrap_err());
+        assert_eq!(unique_err.code, PluginErrorCode::Conflict, "{unique_err}");
+
+        bookclerk_library::inject_commit_failures(1);
+        let commit = DbAtomicRequest {
+            operation_id: "commit-op".into(),
+            request_hash: None,
+            plan: Some(DbAtomicPlan {
+                statements: vec![DbPlanStatement {
+                    sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('c-g', 0)"
+                        .into(),
+                    binds: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let commit_err = crate::plugin_error_from_engine(guest_atomic(commit).await.unwrap_err());
+        assert_eq!(
+            commit_err.code,
+            PluginErrorCode::Unavailable,
+            "{commit_err}"
+        );
+
+        let syntax = DbAtomicRequest {
+            operation_id: "syn-op".into(),
+            request_hash: None,
+            plan: Some(DbAtomicPlan {
+                statements: vec![DbPlanStatement {
+                    sql: "FROMM nowhere".into(),
+                    binds: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let syn_err = crate::plugin_error_from_engine(guest_atomic(syntax).await.unwrap_err());
+        assert!(
+            matches!(
+                syn_err.code,
+                PluginErrorCode::InvalidParams | PluginErrorCode::Internal
+            ),
+            "{syn_err}"
+        );
     }
 
     fn postgres_test_url() -> String {

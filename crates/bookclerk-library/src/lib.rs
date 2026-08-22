@@ -14,6 +14,7 @@ mod db_atomic;
 pub mod email;
 pub mod entities;
 mod error;
+mod host_schema;
 mod in_process_atomic;
 pub mod master_key;
 pub mod migrations;
@@ -40,6 +41,7 @@ pub use db_atomic::{
 };
 pub use email::{gravatar_hash, is_valid_user_email, normalize_user_email};
 pub use error::{LibraryError, Result};
+pub use host_schema::{apply_host_schema, apply_host_schema_with_batch, HostSchemaKind};
 pub use in_process_atomic::InProcessSqliteAtomic;
 pub use master_key::{
     configure_master_key, configure_master_key_with, inspect_master_key, master_key_path,
@@ -75,9 +77,10 @@ pub use operator_token::{
 };
 pub use password::{hash_password, verify_password};
 pub use proxy_txn::{
-    consume_begin_injection, consume_commit_injection, inject_begin_failures,
-    inject_commit_failures, is_txn_broken, note_begin_failed, note_commit_failed, take_txn_fault,
-    txn_broken_err,
+    consume_atomic_interrupt, consume_begin_injection, consume_commit_injection,
+    inject_atomic_interrupt, inject_begin_failures, inject_commit_failures, is_txn_broken,
+    note_begin_failed, note_commit_failed, take_txn_fault, txn_broken_err, AtomicInterruptKind,
+    AtomicInterruptPhase,
 };
 pub use scope::SourceScope;
 pub use secrets::{
@@ -90,8 +93,9 @@ pub use secrets::{
 pub use session_client::{classify_session_client, SessionClientInfo};
 pub use sql_plan::{
     compile_claim_event_delivery, compile_named_request, execute_plan_on, execute_plan_on_capped,
-    execute_statements_on, family_from_connect, interpret_exec, interpret_plan,
-    validate_exec_result, validate_plan, wake_page_for_max_binds, CompiledAtomic, SqlFamily,
+    execute_statements_on, execute_statements_on_session, family_from_connect, interpret_exec,
+    interpret_plan, validate_exec_result, validate_plan, wake_page_for_max_binds, AtomicSession,
+    CompiledAtomic, SqlFamily,
 };
 pub use store::{
     event_outbox::prepare_publish_domain_event, fallback_work_key, inject_dispatch_page_failures,

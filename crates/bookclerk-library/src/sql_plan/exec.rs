@@ -1,6 +1,8 @@
 //! Run a generic [`DbAtomicPlan`] on a SeaORM connection (one native transaction).
 
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bookclerk_plugin_abi::{
     DbAtomicPlan, DbAtomicTiming, DbPlanExecResult, DbPlanStatementKind, DbPlanStmtExecResult,
@@ -51,6 +53,26 @@ pub async fn execute_plan_on_capped(
     Ok(interpret_exec(plan, &exec, expected_hash))
 }
 
+/// Session-level cancel / deadline for one atomic attempt (not hashed).
+#[derive(Clone, Default)]
+pub struct AtomicSession {
+    /// Host RPC cancel flag, when the guest shares a process with the host.
+    pub cancel: Option<Arc<AtomicBool>>,
+    /// Guest-visible deadline (`deadlineUnixMs` on the wire).
+    pub deadline_unix_ms: Option<u64>,
+}
+
+impl AtomicSession {
+    /// Builds session control from a wire `deadlineUnixMs`.
+    #[must_use]
+    pub fn from_deadline(deadline_unix_ms: Option<u64>) -> Self {
+        Self {
+            cancel: None,
+            deadline_unix_ms,
+        }
+    }
+}
+
 /// Executes `plan` as one transaction and returns generic statement results.
 ///
 /// Guests and in-process tests share this path. `max_result_rows` of `0` means
@@ -67,6 +89,31 @@ pub async fn execute_statements_on(
     timing_source: &str,
     max_result_rows: u32,
 ) -> Result<DbPlanExecResult> {
+    execute_statements_on_session(
+        db,
+        plan,
+        operation_id,
+        timing_source,
+        max_result_rows,
+        AtomicSession::default(),
+    )
+    .await
+}
+
+/// [`execute_statements_on`] with session cancel / deadline checks.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Orm`] when a statement fails or the session is interrupted.
+pub async fn execute_statements_on_session(
+    db: &DatabaseConnection,
+    plan: &DbAtomicPlan,
+    operation_id: &str,
+    timing_source: &str,
+    max_result_rows: u32,
+    session: AtomicSession,
+) -> Result<DbPlanExecResult> {
+    session.check(crate::AtomicInterruptPhase::BeforeBegin)?;
     let started = Instant::now();
     let txn = db.begin().await.map_err(LibraryError::Orm)?;
     if crate::is_txn_broken() {
@@ -78,6 +125,11 @@ pub async fn execute_statements_on(
     let mut statements = Vec::with_capacity(plan.statements.len());
     let backend = txn.get_database_backend();
     for stmt in &plan.statements {
+        if let Err(err) = session.check(crate::AtomicInterruptPhase::BetweenStatements) {
+            let _ = txn.rollback().await;
+            let _ = crate::take_txn_fault();
+            return Err(err);
+        }
         let values: Vec<Value> = stmt.binds.iter().map(json_to_sea).collect();
         let sea_stmt = Statement::from_sql_and_values(backend, &stmt.sql, values);
         let stmt_result = match stmt.kind {
@@ -139,9 +191,16 @@ pub async fn execute_statements_on(
             "database commit failed: injected commit failure".into(),
         )));
     }
+    if let Err(err) = session.check(crate::AtomicInterruptPhase::AroundCommit) {
+        let _ = txn.rollback().await;
+        let _ = crate::take_txn_fault();
+        return Err(err);
+    }
     txn.commit().await.map_err(|err| {
         let _ = crate::take_txn_fault();
-        LibraryError::Orm(err)
+        LibraryError::Orm(sea_orm::DbErr::Custom(format!(
+            "database commit failed: {err}"
+        )))
     })?;
     if let Some(fault) = crate::take_txn_fault() {
         return Err(LibraryError::Orm(sea_orm::DbErr::Custom(fault)));
@@ -156,6 +215,51 @@ pub async fn execute_statements_on(
             db_timing_source: Some(timing_source.to_string()),
         }),
     })
+}
+
+impl AtomicSession {
+    /// Checks cancel / deadline / test inject at `phase`.
+    fn check(&self, phase: crate::AtomicInterruptPhase) -> Result<()> {
+        use crate::AtomicInterruptKind;
+        if let Some(kind) = crate::consume_atomic_interrupt(phase) {
+            return Err(interrupt_err(phase, kind));
+        }
+        let cancelled = self
+            .cancel
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::SeqCst));
+        let expired = self.deadline_unix_ms.is_some_and(|ms| unix_now_ms() >= ms);
+        if cancelled {
+            return Err(interrupt_err(phase, AtomicInterruptKind::Cancel));
+        }
+        if expired {
+            return Err(interrupt_err(phase, AtomicInterruptKind::Deadline));
+        }
+        Ok(())
+    }
+}
+
+/// Maps a session interrupt onto a guest-classifiable [`LibraryError`].
+fn interrupt_err(
+    phase: crate::AtomicInterruptPhase,
+    kind: crate::AtomicInterruptKind,
+) -> LibraryError {
+    use crate::{AtomicInterruptKind, AtomicInterruptPhase};
+    let around_commit = matches!(phase, AtomicInterruptPhase::AroundCommit);
+    let msg = match (around_commit, kind) {
+        (true, _) => "database commit failed: session interrupt at commit",
+        (false, AtomicInterruptKind::Cancel) => "cancelled: atomic session cancelled",
+        (false, AtomicInterruptKind::Deadline) => "deadline_exceeded: atomic deadline elapsed",
+    };
+    LibraryError::Orm(sea_orm::DbErr::Custom(msg.into()))
+}
+
+/// Current unix time in milliseconds.
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// True when `n` exceeds a positive `max_result_rows` cap.

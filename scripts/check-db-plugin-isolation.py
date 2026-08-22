@@ -19,12 +19,17 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_GLOBS = (
     "crates/bookclerk-plugins/platform/database-*/src/**/*.rs",
     "crates/bookclerk-plugins/optional/database-*/src/**/*.rs",
+    "crates/bookclerk-db-guest/src/**/*.rs",
 )
 
 FORBIDDEN_IMPORTS = (
     re.compile(r"bookclerk_library::entities"),
     re.compile(r"use\s+bookclerk_library::entities"),
     re.compile(r"bookclerk_library::sql_plan"),
+    re.compile(r"bookclerk_library::migrations"),
+    re.compile(r"\bmigration_sql\b"),
+    re.compile(r"\bmigration_sql_postgres\b"),
+    re.compile(r"\bmigration_sql_d1\b"),
     re.compile(r"\binterpret_plan\b"),
     re.compile(r"\bDbAtomicParams\b"),
     re.compile(r"\batomic_status\b"),
@@ -157,7 +162,8 @@ def main() -> int:
         for h in hits:
             print(f"  {h}", file=sys.stderr)
         print(
-            "Guests must execute host-authored plans only; see docs/adr/sql-database-contract.md",
+            "Guests must execute host-authored plans only; host selects schema versions. "
+            "See docs/adr/sql-database-contract.md",
             file=sys.stderr,
         )
         return 1

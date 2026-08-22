@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use bookclerk_db_guest::{
     guest_atomic, guest_begin, guest_commit, guest_execute, guest_query_page, guest_rollback,
-    set_connection,
+    plugin_error_from_engine, set_connection,
 };
 use bookclerk_plugin_sdk::v2::{
     Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot, QueryPage,
@@ -21,16 +21,7 @@ use crate::ID;
 type Result<T> = std::result::Result<T, PluginError>;
 
 fn map_guest(err: String) -> PluginError {
-    let lower = err.to_lowercase();
-    if err.contains("invalid query cursor") {
-        PluginError::invalid_cursor(err)
-    } else if lower.contains("unique") || lower.contains("constraint") {
-        PluginError::conflict(err)
-    } else if lower.contains("timeout") || lower.contains("timed out") {
-        PluginError::deadline_exceeded(err)
-    } else {
-        PluginError::internal(err)
-    }
+    plugin_error_from_engine(err)
 }
 
 fn to_dto(statement: &Statement, txn_id: Option<String>) -> StatementDto {

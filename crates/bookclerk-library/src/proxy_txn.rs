@@ -40,6 +40,38 @@ static INJECT_BEGIN: LazyLock<Mutex<HashMap<TaskKey, u32>>> =
 /// Remaining injected `COMMIT` failures for tests, keyed by task.
 static INJECT_COMMIT: LazyLock<Mutex<HashMap<TaskKey, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Injected atomic session interrupt (cancel or deadline) for tests.
+static INJECT_INTERRUPT: LazyLock<Mutex<HashMap<TaskKey, InjectedInterrupt>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Phase at which an injected atomic interrupt fires.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AtomicInterruptPhase {
+    /// Before `BEGIN` / HTTP batch.
+    BeforeBegin,
+    /// Between statements during the transaction.
+    BetweenStatements,
+    /// Around `COMMIT` / HTTP return (ambiguous).
+    AroundCommit,
+}
+
+/// Kind of injected atomic interrupt.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AtomicInterruptKind {
+    /// Session cancel.
+    Cancel,
+    /// Deadline elapsed.
+    Deadline,
+}
+
+/// One test-injected interrupt.
+#[derive(Clone, Copy, Debug)]
+struct InjectedInterrupt {
+    /// Phase that should observe the interrupt.
+    phase: AtomicInterruptPhase,
+    /// Cancel vs deadline.
+    kind: AtomicInterruptKind,
+}
 
 /// Locks the fault map, recovering a poisoned mutex so fail-closed still works.
 fn lock_faults() -> std::sync::MutexGuard<'static, HashMap<TaskKey, String>> {
@@ -104,6 +136,28 @@ pub fn consume_begin_injection() -> bool {
 #[must_use]
 pub fn consume_commit_injection() -> bool {
     consume_injection(&INJECT_COMMIT)
+}
+
+/// Queue an atomic session interrupt for this task (cancel or deadline at `phase`).
+pub fn inject_atomic_interrupt(phase: AtomicInterruptPhase, kind: AtomicInterruptKind) {
+    INJECT_INTERRUPT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(task_key(), InjectedInterrupt { phase, kind });
+}
+
+/// Consume an injected interrupt when the executor reaches `phase`.
+#[must_use]
+pub fn consume_atomic_interrupt(phase: AtomicInterruptPhase) -> Option<AtomicInterruptKind> {
+    let mut map = INJECT_INTERRUPT.lock().unwrap_or_else(|e| e.into_inner());
+    let key = task_key();
+    match map.get(&key).copied() {
+        Some(inj) if inj.phase == phase => {
+            map.remove(&key);
+            Some(inj.kind)
+        }
+        _ => None,
+    }
 }
 
 /// Decrements one injected failure for this task; returns true when a fault should fire.

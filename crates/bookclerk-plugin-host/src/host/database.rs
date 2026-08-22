@@ -1,21 +1,23 @@
 //! [`ProxyDatabaseTrait`] adapter over an external database plugin process.
 //!
-//! The host mediates credentials and forwards SeaORM proxy calls over JSON-RPC.
-//! Engine connect / migrate / proxy quirks live entirely in the database guest.
-//! There is no in-process fallback.
+//! The host mediates credentials, applies schema after connect, and forwards
+//! SeaORM proxy calls over JSON-RPC. Engine connect/proxy quirks live in the
+//! database guest. There is no in-process fallback.
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
-    exec_result_from_dto, proxy_rows_from_dto, statement_to_dto, DbConnectParams, DbConnectResult,
-    DbPlanExecResult, DbPlanStmtExecResult, ExecResultDto, ProxyRowDto, DB_ATOMIC_SENTINEL,
-    DB_CAPABILITIES_SENTINEL,
+    exec_result_from_dto, proxy_rows_from_dto, statement_to_dto, DbAtomicPlan, DbAtomicRequest,
+    DbConnectParams, DbConnectResult, DbPlanExecResult, DbPlanStatement, DbPlanStatementKind,
+    ExecResultDto, ProxyRowDto, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -123,7 +125,26 @@ impl ExternalDatabase {
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
         }));
         let db = Database::connect_proxy(backend, proxy).await?;
+        self.apply_host_schema(&db).await?;
         Ok((db, connect_result))
+    }
+
+    /// Reads the guest schema version and applies remaining host-authored DDL.
+    async fn apply_host_schema(&self, db: &DatabaseConnection) -> Result<(), DbErr> {
+        let kind = bookclerk_library::HostSchemaKind::from_plugin_id(&self.plugin_id);
+        if kind == bookclerk_library::HostSchemaKind::D1 {
+            let session = self.session.clone();
+            bookclerk_library::apply_host_schema_with_batch(db, kind, move |stmts| {
+                let session = session.clone();
+                async move { exec_host_ddl_batch(&session, stmts).await }
+            })
+            .await
+            .map_err(|err| DbErr::Custom(err.to_string()))
+        } else {
+            bookclerk_library::apply_host_schema(db, kind)
+                .await
+                .map_err(|err| DbErr::Custom(err.to_string()))
+        }
     }
 }
 
@@ -529,11 +550,18 @@ impl RpcAtomicBackend {
         operation_id: String,
     ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
         bookclerk_library::validate_plan(&compiled.plan, &self.caps)?;
-        let request = compiled.clone().into_request(operation_id.clone());
+        let mut request = compiled.clone().into_request(operation_id.clone());
+        request.deadline_unix_ms = Some(unix_now_ms().saturating_add(120_000));
         let payload = serde_json::to_string(&request).map_err(|err| {
             bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
         })?;
-        match self.session.db_query(DB_ATOMIC_SENTINEL, payload).await {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let _guard = CancelOnDrop(Arc::clone(&cancel));
+        match self
+            .session
+            .db_query_cancelable(DB_ATOMIC_SENTINEL, payload, cancel)
+            .await
+        {
             Ok(page) => {
                 let exec: DbPlanExecResult =
                     serde_json::from_str(&page.rows_json).map_err(|err| {
@@ -553,7 +581,7 @@ impl RpcAtomicBackend {
                     &compiled.expected_hash,
                 ))
             }
-            Err(err) => Err(map_plugin_err(err)),
+            Err(err) => Err(map_atomic_rpc_err(err)),
         }
     }
 }
@@ -565,6 +593,71 @@ fn map_plugin_err(err: crate::PluginError) -> bookclerk_library::LibraryError {
     } else {
         bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
     }
+}
+
+/// In-flight atomic abort is ambiguous (the guest may already have committed).
+fn map_atomic_rpc_err(err: crate::PluginError) -> bookclerk_library::LibraryError {
+    match &err {
+        crate::PluginError::Abi { code, .. } if code == "cancelled" => {
+            bookclerk_library::LibraryError::Unavailable(err.to_string())
+        }
+        _ => map_plugin_err(err),
+    }
+}
+
+/// Sets `cancel` when an in-flight `db_query` future is dropped.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Current unix time in milliseconds.
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Runs host DDL as one `bookclerk.atomic` batch (D1 V27).
+async fn exec_host_ddl_batch(
+    session: &V2PluginSession,
+    stmts: Vec<String>,
+) -> bookclerk_library::Result<()> {
+    if stmts.is_empty() {
+        return Ok(());
+    }
+    let statements: Vec<DbPlanStatement> = stmts
+        .into_iter()
+        .map(|sql| DbPlanStatement {
+            sql,
+            binds: Vec::new(),
+            kind: DbPlanStatementKind::Execute,
+        })
+        .collect();
+    let plan = DbAtomicPlan {
+        statements,
+        outcome_index: 0,
+        payload_index: None,
+        prior_receipt_index: None,
+        receipt_select_index: None,
+    };
+    let req = DbAtomicRequest {
+        operation_id: format!("host-schema-{}", uuid::Uuid::new_v4()),
+        request_hash: None,
+        plan: Some(plan),
+        deadline_unix_ms: None,
+    };
+    let payload = serde_json::to_string(&req)
+        .map_err(|err| bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
+    session
+        .db_query(DB_ATOMIC_SENTINEL, payload)
+        .await
+        .map_err(|err| bookclerk_library::LibraryError::Orm(DbErr::Custom(err.to_string())))?;
+    Ok(())
 }
 
 /// Translates a guest atomic status string into a library error, or `None` on `ok`.
@@ -1237,7 +1330,9 @@ mod tests {
 
     #[test]
     fn omitted_rows_affected_fails_deserialize() {
-        let err = serde_json::from_str::<DbPlanStmtExecResult>(r#"{"rows":[]}"#).unwrap_err();
+        let err =
+            serde_json::from_str::<bookclerk_plugin_sdk::DbPlanStmtExecResult>(r#"{"rows":[]}"#)
+                .unwrap_err();
         assert!(
             err.to_string().contains("rowsAffected") || err.to_string().contains("missing field"),
             "{err}"

@@ -165,19 +165,19 @@ pub(crate) async fn wake_deliveries_fenced_on<C: ConnectionTrait>(
     Ok(woken)
 }
 
-/// Remaining injected `publish_domain_event_on` failures (library tests only).
-static INJECT_PUBLISH_FAULTS: AtomicU32 = AtomicU32::new(0);
 thread_local! {
     static DISPATCH_EVENT_CALLS: AtomicU32 = const { AtomicU32::new(0) };
     static DISPATCH_PAGE_FAULTS: AtomicU32 = const { AtomicU32::new(0) };
     static DISPATCH_CHUNK_OVERRIDE: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
+    /// Remaining injected `publish_domain_event_on` failures (library tests only).
+    static PUBLISH_FAULTS: AtomicU32 = const { AtomicU32::new(0) };
 }
 
 /// Fail the next `n` outbox inserts (used to prove acquire+publish rollback).
 #[cfg(test)]
 pub(crate) fn inject_event_publish_failures(n: u32) {
-    INJECT_PUBLISH_FAULTS.store(n, Ordering::SeqCst);
+    PUBLISH_FAULTS.with(|c| c.store(n, Ordering::SeqCst));
 }
 
 /// Take and reset the dispatch-call counter (library tests only).
@@ -214,21 +214,15 @@ fn take_dispatch_page_fault() -> bool {
 }
 
 fn take_publish_fault() -> bool {
-    let mut current = INJECT_PUBLISH_FAULTS.load(Ordering::SeqCst);
-    loop {
-        if current == 0 {
-            return false;
+    PUBLISH_FAULTS.with(|c| {
+        let n = c.load(Ordering::SeqCst);
+        if n == 0 {
+            false
+        } else {
+            c.store(n - 1, Ordering::SeqCst);
+            true
         }
-        match INJECT_PUBLISH_FAULTS.compare_exchange(
-            current,
-            current - 1,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
-            Ok(_) => return true,
-            Err(actual) => current = actual,
-        }
-    }
+    })
 }
 
 impl LibraryStore {

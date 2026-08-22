@@ -446,6 +446,9 @@ pub struct DbAtomicRequest {
     /// Generic statement plan. Guests fail closed when this is missing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<DbAtomicPlan>,
+    /// Guest-visible deadline (unix ms). Transport metadata; not hashed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_unix_ms: Option<u64>,
 }
 
 impl DbAtomicRequest {
@@ -460,6 +463,7 @@ impl DbAtomicRequest {
             operation_id: operation_id.into(),
             request_hash: Some(request_hash.into()),
             plan: Some(plan),
+            deadline_unix_ms: None,
         }
     }
 }

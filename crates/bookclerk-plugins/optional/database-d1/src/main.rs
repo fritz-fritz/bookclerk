@@ -3,7 +3,9 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use async_trait::async_trait;
-use bookclerk_db_guest::{guest_execute, guest_query_page, set_connection};
+use bookclerk_db_guest::{
+    guest_execute, guest_query_page, plugin_error_from_engine, set_connection,
+};
 use bookclerk_plugin_sdk::v2::{
     Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot, QueryPage,
     ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
@@ -34,11 +36,7 @@ fn describe_metadata() -> Result<String, PluginError> {
 }
 
 fn map_guest(err: String) -> PluginError {
-    if err.contains("invalid query cursor") {
-        PluginError::invalid_cursor(err)
-    } else {
-        PluginError::internal(err)
-    }
+    plugin_error_from_engine(err)
 }
 
 fn to_dto(statement: &Statement, txn_id: Option<String>) -> StatementDto {

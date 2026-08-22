@@ -33,6 +33,10 @@ impl D1Proxy {
         req: DbAtomicRequest,
     ) -> std::result::Result<DbPlanExecResult, DbErr> {
         let started = std::time::Instant::now();
+        check_d1_session(
+            bookclerk_library::AtomicInterruptPhase::BeforeBegin,
+            req.deadline_unix_ms,
+        )?;
         let plan = req
             .plan
             .clone()
@@ -45,7 +49,13 @@ impl D1Proxy {
         let mut last_err = None;
         for attempt in 0..ATOMIC_HTTP_ATTEMPTS {
             let raw = match self.run_batch(&statements).await {
-                Ok(value) => value,
+                Ok(value) => {
+                    check_d1_session(
+                        bookclerk_library::AtomicInterruptPhase::AroundCommit,
+                        req.deadline_unix_ms,
+                    )?;
+                    value
+                }
                 Err(err) if err.is_retryable() && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
                     sleep_before_d1_retry(attempt, err.retry_after()).await;
                     last_err = Some(DbErr::from(err));
@@ -64,6 +74,38 @@ impl D1Proxy {
         }
         Err(last_err.unwrap_or_else(|| ambiguous_d1("exhausted retries")))
     }
+}
+
+/// Checks cancel/deadline inject plus a guest-visible `deadlineUnixMs`.
+fn check_d1_session(
+    phase: bookclerk_library::AtomicInterruptPhase,
+    deadline_unix_ms: Option<u64>,
+) -> std::result::Result<(), DbErr> {
+    use bookclerk_library::{AtomicInterruptKind, AtomicInterruptPhase};
+    let kind = bookclerk_library::consume_atomic_interrupt(phase);
+    let expired = deadline_unix_ms.is_some_and(|ms| d1_unix_now_ms() >= ms);
+    let kind = kind.or_else(|| expired.then_some(AtomicInterruptKind::Deadline));
+    let Some(kind) = kind else {
+        return Ok(());
+    };
+    match phase {
+        AtomicInterruptPhase::AroundCommit => Err(ambiguous_d1("session interrupt at HTTP return")),
+        AtomicInterruptPhase::BeforeBegin | AtomicInterruptPhase::BetweenStatements => {
+            let msg = match kind {
+                AtomicInterruptKind::Cancel => "cancelled: atomic session cancelled",
+                AtomicInterruptKind::Deadline => "deadline_exceeded: atomic deadline elapsed",
+            };
+            Err(DbErr::Custom(msg.into()))
+        }
+    }
+}
+
+/// Current unix time in milliseconds.
+fn d1_unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// D1 HTTP params are untyped JSON; typed `$sea_null` objects become SQL NULL.
@@ -94,23 +136,18 @@ pub fn is_ambiguous_d1(err: &DbErr) -> bool {
 }
 
 /// Maps a D1 [`DbErr`] onto the guest ABI: retryable/ambiguous → `unavailable`,
-/// client 4xx → `invalid_params`, other failures → `internal`.
+/// client 4xx → `invalid_params`, engine codes via the shared mapper.
 #[must_use]
 pub fn plugin_error_from_d1(err: DbErr) -> bookclerk_plugin_sdk::PluginError {
     if is_ambiguous_d1(&err) {
         return bookclerk_plugin_sdk::PluginError::unavailable(err.to_string());
     }
-    let text = err.to_string();
-    let lower = text.to_lowercase();
-    if lower.contains("unique") || lower.contains("constraint") {
-        return bookclerk_plugin_sdk::PluginError::conflict(text);
-    }
     if let Some(status) = permanent_http_status(&err) {
         if (400..500).contains(&status) {
-            return bookclerk_plugin_sdk::PluginError::invalid_params(text);
+            return bookclerk_plugin_sdk::PluginError::invalid_params(err.to_string());
         }
     }
-    bookclerk_plugin_sdk::PluginError::internal(text)
+    bookclerk_db_guest::plugin_error_from_engine(err)
 }
 
 /// Extracts a permanent `D1 HTTP {status}` code from a [`DbErr`], if present.

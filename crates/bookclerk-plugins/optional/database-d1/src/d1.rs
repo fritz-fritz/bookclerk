@@ -25,6 +25,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 /// Open Cloudflare D1 with an explicit API token (host-mediated).
 ///
+/// Connects and pings only. The host applies schema after capability negotiation.
+///
 /// # Errors
 ///
 /// Returns an error when the operation fails.
@@ -40,42 +42,8 @@ pub async fn open(
         .await
         .map_err(LibraryError::Orm)?;
     db.ping().await.map_err(LibraryError::Orm)?;
-    bookclerk_db_guest::apply_pending_migrations(&db).await?;
-    if !bookclerk_db_guest::schema_version_applied(
-        &db,
-        bookclerk_library::migrations::migration_v27_schema_version(),
-    )
-    .await?
-    {
-        apply_d1_v27_batch(&proxy).await?;
-    }
-    apply_d1_post_v27(&db).await?;
     tracing::debug!(plugin = "d1", "opened library database");
     Ok(db)
-}
-
-/// Apply sqlite steps after the V27 batch (`schema_migrations` version 29+).
-async fn apply_d1_post_v27(db: &DatabaseConnection) -> Result<()> {
-    bookclerk_db_guest::apply_pending_migrations_from(
-        db,
-        bookclerk_library::migrations::migration_sql(),
-    )
-    .await
-}
-
-/// Apply D1 V27 as one `{ "batch": [...] }` SQL transaction (child drop first).
-async fn apply_d1_v27_batch(proxy: &D1Proxy) -> Result<()> {
-    let statements: Vec<(String, Vec<JsonValue>)> =
-        bookclerk_library::migrations::migration_v27_d1_batch()
-            .into_iter()
-            .map(|sql| (sql, Vec::new()))
-            .collect();
-    proxy
-        .run_batch(&statements)
-        .await
-        .map_err(DbErr::from)
-        .map_err(LibraryError::Orm)?;
-    Ok(())
 }
 
 /// Operator-facing reason recorded when SeaORM `begin` is rejected on D1 HTTP.
@@ -1318,5 +1286,414 @@ mod tests {
             MAX_SCALAR_BYTES as usize + D1_JSON_ENVELOPE_BYTES
         );
         assert!(max_d1_http_body_bytes() < (MAX_SCALAR_BYTES as usize).saturating_mul(2));
+    }
+
+    struct ExecutingD1 {
+        conn: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+    }
+
+    impl wiremock::Respond for ExecutingD1 {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let body: JsonValue = serde_json::from_slice(&request.body).unwrap_or(json!({}));
+            let conn = self.conn.lock().expect("sqlite mutex");
+            if let Some(batch) = body.get("batch").and_then(JsonValue::as_array) {
+                return sqlite_exec_batch(&conn, batch);
+            }
+            if let Some(sql) = body.get("sql").and_then(JsonValue::as_str) {
+                let params = body
+                    .get("params")
+                    .and_then(JsonValue::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                return sqlite_exec_one(&conn, sql, &params);
+            }
+            ResponseTemplate::new(400).set_body_json(json!({
+                "success": false,
+                "errors": [{"message": "missing sql"}]
+            }))
+        }
+    }
+
+    fn json_to_rusqlite(v: &JsonValue) -> rusqlite::types::Value {
+        match v {
+            JsonValue::Null => rusqlite::types::Value::Null,
+            JsonValue::Bool(b) => rusqlite::types::Value::Integer(i64::from(*b)),
+            JsonValue::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    rusqlite::types::Value::Integer(i)
+                } else if let Some(u) = n.as_u64() {
+                    rusqlite::types::Value::Integer(i64::try_from(u).unwrap_or(i64::MAX))
+                } else {
+                    rusqlite::types::Value::Real(n.as_f64().unwrap_or(0.0))
+                }
+            }
+            JsonValue::String(s) => rusqlite::types::Value::Text(s.clone()),
+            other => rusqlite::types::Value::Text(other.to_string()),
+        }
+    }
+
+    fn sqlite_exec_one(
+        conn: &rusqlite::Connection,
+        sql: &str,
+        params: &[JsonValue],
+    ) -> ResponseTemplate {
+        match sqlite_run_statement(conn, sql, params) {
+            Ok(entry) => ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": [entry]
+            })),
+            Err(msg) => ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": [{ "success": false, "error": msg }]
+            })),
+        }
+    }
+
+    fn sqlite_exec_batch(conn: &rusqlite::Connection, batch: &[JsonValue]) -> ResponseTemplate {
+        if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
+            return ResponseTemplate::new(500).set_body_json(json!({
+                "success": false,
+                "errors": [{"message": "begin failed"}]
+            }));
+        }
+        let mut results = Vec::new();
+        for stmt in batch {
+            let sql = stmt.get("sql").and_then(JsonValue::as_str).unwrap_or("");
+            let params = stmt
+                .get("params")
+                .and_then(JsonValue::as_array)
+                .cloned()
+                .unwrap_or_default();
+            match sqlite_run_statement(conn, sql, &params) {
+                Ok(entry) => results.push(entry),
+                Err(msg) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    results.push(json!({ "success": false, "error": msg }));
+                    return ResponseTemplate::new(200).set_body_json(json!({
+                        "success": true,
+                        "result": results
+                    }));
+                }
+            }
+        }
+        if conn.execute_batch("COMMIT").is_err() {
+            let _ = conn.execute_batch("ROLLBACK");
+            return ResponseTemplate::new(500).set_body_json(json!({
+                "success": false,
+                "errors": [{"message": "commit failed"}]
+            }));
+        }
+        ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "result": results
+        }))
+    }
+
+    fn sqlite_run_statement(
+        conn: &rusqlite::Connection,
+        sql: &str,
+        params: &[JsonValue],
+    ) -> std::result::Result<JsonValue, String> {
+        let binds: Vec<rusqlite::types::Value> = params.iter().map(json_to_rusqlite).collect();
+        let mut stmt = conn.prepare(sql).map_err(format_exec_sqlite_err)?;
+        let names: Vec<String> = (0..stmt.column_count())
+            .map(|i| stmt.column_name(i).unwrap_or("").to_string())
+            .collect();
+        if !names.is_empty() {
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(binds.iter()))
+                .map_err(format_exec_sqlite_err)?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next().map_err(format_exec_sqlite_err)? {
+                let mut map = serde_json::Map::new();
+                for (i, name) in names.iter().enumerate() {
+                    let json = match row.get_ref(i).ok() {
+                        Some(rusqlite::types::ValueRef::Null) | None => JsonValue::Null,
+                        Some(rusqlite::types::ValueRef::Integer(n)) => json!(n),
+                        Some(rusqlite::types::ValueRef::Real(n)) => json!(n),
+                        Some(rusqlite::types::ValueRef::Text(t)) => {
+                            JsonValue::String(String::from_utf8_lossy(t).into_owned())
+                        }
+                        Some(rusqlite::types::ValueRef::Blob(b)) => json!(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            b
+                        )),
+                    };
+                    map.insert(name.clone(), json);
+                }
+                out.push(JsonValue::Object(map));
+            }
+            return Ok(json!({
+                "success": true,
+                "results": out,
+                "meta": { "changes": 0, "last_row_id": 0, "timings": { "sql_duration_ms": 0.1 } }
+            }));
+        }
+        stmt.execute(rusqlite::params_from_iter(binds.iter()))
+            .map_err(format_exec_sqlite_err)?;
+        Ok(json!({
+            "success": true,
+            "results": [],
+            "meta": {
+                "changes": conn.changes(),
+                "last_row_id": conn.last_insert_rowid(),
+                "timings": { "sql_duration_ms": 0.1 }
+            }
+        }))
+    }
+
+    fn format_exec_sqlite_err(err: rusqlite::Error) -> String {
+        match err {
+            rusqlite::Error::SqliteFailure(ffi, msg) => {
+                let name = match ffi.code {
+                    rusqlite::ErrorCode::ConstraintViolation => "SQLITE_CONSTRAINT",
+                    rusqlite::ErrorCode::DatabaseBusy => "SQLITE_BUSY",
+                    rusqlite::ErrorCode::DatabaseLocked => "SQLITE_LOCKED",
+                    _ => "SQLITE_ERROR",
+                };
+                match msg {
+                    Some(detail) => format!("{name} ({}): {detail}", ffi.extended_code),
+                    None => format!("{name} ({})", ffi.extended_code),
+                }
+            }
+            other => other.to_string(),
+        }
+    }
+
+    async fn executing_proxy() -> (
+        MockServer,
+        D1Proxy,
+        std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+    ) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let conn = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(ExecutingD1 {
+                conn: std::sync::Arc::clone(&conn),
+            })
+            .mount(&server)
+            .await;
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        (server, proxy, conn)
+    }
+
+    #[tokio::test]
+    async fn executing_mock_unique_constraint_fails_closed() {
+        let (_server, proxy, _conn) = executing_proxy().await;
+        proxy
+            .run_batch(&[("CREATE TABLE t (k TEXT PRIMARY KEY)".into(), Vec::new())])
+            .await
+            .unwrap();
+        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+            operation_id: "dup".into(),
+            request_hash: None,
+            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
+                statements: vec![
+                    bookclerk_plugin_sdk::DbPlanStatement {
+                        sql: "INSERT INTO t (k) VALUES ('a')".into(),
+                        binds: vec![],
+                        kind: bookclerk_plugin_sdk::DbPlanStatementKind::Execute,
+                    },
+                    bookclerk_plugin_sdk::DbPlanStatement {
+                        sql: "INSERT INTO t (k) VALUES ('a')".into(),
+                        binds: vec![],
+                        kind: bookclerk_plugin_sdk::DbPlanStatementKind::Execute,
+                    },
+                ],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let err = proxy.run_atomic(req).await.unwrap_err();
+        let mapped = crate::atomic::plugin_error_from_d1(err);
+        assert_eq!(
+            mapped.code,
+            bookclerk_plugin_sdk::PluginErrorCode::Conflict,
+            "{mapped}"
+        );
+    }
+
+    #[tokio::test]
+    async fn executing_mock_cancel_before_begin() {
+        let (_server, proxy, _conn) = executing_proxy().await;
+        bookclerk_library::inject_atomic_interrupt(
+            bookclerk_library::AtomicInterruptPhase::BeforeBegin,
+            bookclerk_library::AtomicInterruptKind::Cancel,
+        );
+        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+            operation_id: "c".into(),
+            request_hash: None,
+            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+                    sql: "SELECT 1".into(),
+                    binds: vec![],
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let err = proxy.run_atomic(req).await.unwrap_err();
+        assert!(err.to_string().contains("cancelled"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn executing_mock_interrupt_at_http_return_is_ambiguous() {
+        let (_server, proxy, _conn) = executing_proxy().await;
+        bookclerk_library::inject_atomic_interrupt(
+            bookclerk_library::AtomicInterruptPhase::AroundCommit,
+            bookclerk_library::AtomicInterruptKind::Cancel,
+        );
+        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+            operation_id: "c2".into(),
+            request_hash: None,
+            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+                    sql: "SELECT 1".into(),
+                    binds: vec![],
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let err = proxy.run_atomic(req).await.unwrap_err();
+        assert!(crate::atomic::is_ambiguous_d1(&err), "{err}");
+    }
+
+    #[tokio::test]
+    async fn executing_mock_http_503_is_ambiguous() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/query$"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+                "success": false,
+                "errors": [{"message": "unavailable"}]
+            })))
+            .mount(&server)
+            .await;
+        let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+            operation_id: "t".into(),
+            request_hash: None,
+            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+                    sql: "SELECT 1".into(),
+                    binds: vec![],
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let err = proxy.run_atomic(req).await.unwrap_err();
+        let mapped = crate::atomic::plugin_error_from_d1(err);
+        assert_eq!(
+            mapped.code,
+            bookclerk_plugin_sdk::PluginErrorCode::Unavailable,
+            "{mapped}"
+        );
+    }
+
+    #[tokio::test]
+    async fn executing_mock_row_cap_fails_closed() {
+        let (_server, proxy, conn) = executing_proxy().await;
+        let cap = bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows as usize;
+        {
+            let db = conn.lock().expect("sqlite mutex");
+            db.execute_batch("CREATE TABLE rowcap (x INTEGER)").unwrap();
+            for i in 0..=cap {
+                db.execute("INSERT INTO rowcap (x) VALUES (?1)", [i as i64])
+                    .unwrap();
+            }
+        }
+        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+            operation_id: "row-cap".into(),
+            request_hash: None,
+            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+                    sql: "SELECT x FROM rowcap".into(),
+                    binds: vec![],
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                }],
+                outcome_index: 0,
+                payload_index: None,
+                prior_receipt_index: None,
+                receipt_select_index: None,
+            }),
+            deadline_unix_ms: None,
+        };
+        let err = proxy.run_atomic(req).await.unwrap_err();
+        assert!(
+            err.to_string().contains("maxResultRows"),
+            "row cap must fail closed: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn executing_mock_host_schema_and_replay() {
+        let (_server, proxy, _conn) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::D1,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move {
+                    let batch: Vec<(String, Vec<JsonValue>)> =
+                        stmts.into_iter().map(|sql| (sql, Vec::new())).collect();
+                    proxy.run_batch(&batch).await.map(|_| ()).map_err(|err| {
+                        bookclerk_library::LibraryError::Orm(sea_orm::DbErr::from(err))
+                    })
+                }
+            },
+        )
+        .await
+        .expect("host D1 schema");
+        let now = "2024-06-01T00:00:00Z";
+        let compiled = bookclerk_library::compile_named_request(
+            "d1-enq",
+            &bookclerk_library::DbAtomicParams::EnqueueJob {
+                kind: "scan".into(),
+                payload_json: r#"{"v":1,"account":"a"}"#.into(),
+                priority: 0,
+                max_attempts: 3,
+                max_pending: 10,
+                run_after: None,
+            },
+            now,
+            bookclerk_library::SqlFamily::Sqlite,
+        )
+        .unwrap();
+        let req = compiled.clone().into_request("d1-enq");
+        let first = proxy.run_atomic(req).await.expect("first atomic");
+        let interpreted =
+            bookclerk_library::interpret_exec(&compiled.plan, &first, &compiled.expected_hash);
+        assert_eq!(interpreted.status, bookclerk_library::atomic_status::OK);
+        let replay_req = compiled.clone().into_request("d1-enq");
+        let replay = proxy.run_atomic(replay_req).await.expect("replay");
+        let replayed =
+            bookclerk_library::interpret_exec(&compiled.plan, &replay, &compiled.expected_hash);
+        assert!(replayed.replayed, "same operationId must replay");
     }
 }
