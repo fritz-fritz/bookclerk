@@ -11,8 +11,9 @@ use bookclerk_plugin_sdk::v2::{
     ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    serve, DbAtomicRequest, DbConnectParams, DbConnectResult, HandshakeResult, PluginError,
-    StatementDto, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    serve, DbAtomicRequest, DbCapabilities, DbConnectParams, DbConnectResult, ExecuteReply,
+    ExecuteRequest, HandshakeResult, PluginError, StatementDto, DB_ATOMIC_SENTINEL,
+    DB_CAPABILITIES_SENTINEL,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -167,8 +168,23 @@ impl DatabaseSession for D1Session {
     async fn begin(&self) -> Result<Box<dyn Transaction>, PluginError> {
         Err(PluginError::unsupported(
             "D1 does not support interactive transactions; each HTTP request commits immediately. \
-             Atomic library operations use bookclerk.atomic (one HTTP batch / one SQL transaction)",
+             Atomic library operations use executeAtomic (one HTTP batch / one SQL transaction)",
         ))
+    }
+
+    async fn capabilities(&self) -> Result<DbCapabilities, PluginError> {
+        Ok(DbCapabilities::from_connect(&DbConnectResult::d1()))
+    }
+
+    async fn execute_atomic(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {
+        let req = request.into_atomic().map_err(PluginError::invalid_params)?;
+        let proxy = bookclerk_plugin_database_d1::shared_proxy()
+            .ok_or_else(|| PluginError::internal("d1 guest is not connected"))?;
+        let result = proxy
+            .run_atomic(req)
+            .await
+            .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)?;
+        ExecuteReply::from_plan_exec(&result).map_err(PluginError::invalid_params)
     }
 }
 

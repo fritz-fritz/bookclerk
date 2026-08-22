@@ -30,37 +30,29 @@ pub enum HostSchemaKind {
 }
 
 impl HostSchemaKind {
-    /// Selects a schema plan from negotiated capabilities (never the plugin id).
+    /// Selects a schema plan from advertised schema capabilities.
     ///
-    /// SQLite-family guests with `interactiveTxn` use file versioning. SQLite-
-    /// family guests that are atomic-batch only (no interactive txn) use D1
-    /// `schema_migrations` plus a required V27 batch. PostgreSQL uses Postgres
-    /// DDL. Other families are refused.
+    /// `pragmaUserVersion` selects file SQLite versioning. `schemaMigrations`
+    /// plus `atomicSchemaBatch` selects the atomic-batch (D1) plan.
+    /// `schemaMigrations` without that flag selects the PostgreSQL migration
+    /// pack. Adapter identity (`sqlFamily`, `interactiveTxn`) is not used.
     ///
     /// # Errors
     ///
-    /// Returns [`LibraryError::Other`] when `sqlFamily` is unknown or the guest
-    /// cannot apply migrations (`atomicBatch` missing for sqlite).
+    /// Returns [`LibraryError::Other`] when neither versioning capability is set.
     pub fn from_connect(caps: &DbConnectResult) -> Result<Self> {
-        let family = caps.sql_family.trim().to_ascii_lowercase();
-        match family.as_str() {
-            "postgres" | "postgresql" => Ok(Self::Postgres),
-            "sqlite" => {
-                if !caps.atomic_batch {
-                    return Err(LibraryError::Other(anyhow::anyhow!(
-                        "sqlite-family guest must advertise atomicBatch for host schema"
-                    )));
-                }
-                if caps.interactive_txn {
-                    Ok(Self::SqliteFile)
-                } else {
-                    Ok(Self::D1)
-                }
-            }
-            other => Err(LibraryError::Other(anyhow::anyhow!(
-                "unsupported sqlFamily for host schema: {other}"
-            ))),
+        if caps.pragma_user_version {
+            return Ok(Self::SqliteFile);
         }
+        if caps.schema_migrations && caps.atomic_schema_batch {
+            return Ok(Self::D1);
+        }
+        if caps.schema_migrations {
+            return Ok(Self::Postgres);
+        }
+        Err(LibraryError::Other(anyhow::anyhow!(
+            "database guest must advertise pragmaUserVersion or schemaMigrations (not inferred from sqlFamily/interactiveTxn)"
+        )))
     }
 }
 
@@ -559,46 +551,40 @@ mod tests {
     use bookclerk_plugin_abi::DbConnectResult;
 
     #[test]
-    fn from_connect_uses_family_and_mechanics() {
+    fn from_connect_uses_schema_capabilities_not_identity() {
         let mut sqlite = DbConnectResult::sqlite();
         assert_eq!(
             HostSchemaKind::from_connect(&sqlite).unwrap(),
             HostSchemaKind::SqliteFile
         );
         sqlite.interactive_txn = false;
+        sqlite.sql_family = "postgres".into();
         assert_eq!(
             HostSchemaKind::from_connect(&sqlite).unwrap(),
-            HostSchemaKind::D1
+            HostSchemaKind::SqliteFile,
+            "pragmaUserVersion must not be overridden by sqlFamily/interactiveTxn"
         );
         assert_eq!(
             HostSchemaKind::from_connect(&DbConnectResult::postgres()).unwrap(),
             HostSchemaKind::Postgres
         );
+        let mut d1 = DbConnectResult::d1();
         assert_eq!(
-            HostSchemaKind::from_connect(&DbConnectResult::d1()).unwrap(),
+            HostSchemaKind::from_connect(&d1).unwrap(),
             HostSchemaKind::D1
         );
-        let mut bad = DbConnectResult::sqlite();
-        bad.sql_family = "mysql".into();
-        assert!(HostSchemaKind::from_connect(&bad).is_err());
-        let mut no_batch = DbConnectResult::sqlite();
-        no_batch.atomic_batch = false;
-        assert!(HostSchemaKind::from_connect(&no_batch).is_err());
-        // A D1-shaped guest that advertises interactive sqlite is file SQLite,
-        // not the D1 batch plan — plugin id is not consulted.
-        let mut interactive_batch = DbConnectResult::d1();
-        interactive_batch.interactive_txn = true;
+        d1.interactive_txn = true;
+        d1.sql_family = "postgres".into();
+        d1.dialect = "postgres".into();
         assert_eq!(
-            HostSchemaKind::from_connect(&interactive_batch).unwrap(),
-            HostSchemaKind::SqliteFile
+            HostSchemaKind::from_connect(&d1).unwrap(),
+            HostSchemaKind::D1,
+            "atomicSchemaBatch must not be overridden by sqlFamily/interactiveTxn"
         );
-        let mut postgres_family = DbConnectResult::d1();
-        postgres_family.sql_family = "postgres".into();
-        postgres_family.dialect = "postgres".into();
-        assert_eq!(
-            HostSchemaKind::from_connect(&postgres_family).unwrap(),
-            HostSchemaKind::Postgres
-        );
+        let mut none = DbConnectResult::sqlite();
+        none.pragma_user_version = false;
+        none.schema_migrations = false;
+        assert!(HostSchemaKind::from_connect(&none).is_err());
     }
 
     #[tokio::test]

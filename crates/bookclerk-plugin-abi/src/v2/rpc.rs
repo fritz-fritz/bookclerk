@@ -45,15 +45,15 @@ use super::types::{
 };
 use crate::{PluginError, Result};
 
-fn from_capnp(err: impl std::fmt::Display) -> PluginError {
+pub(super) fn from_capnp(err: impl std::fmt::Display) -> PluginError {
     PluginError::unavailable(err.to_string())
 }
 
-fn text_of(r: capnp::text::Reader<'_>) -> String {
+pub(super) fn text_of(r: capnp::text::Reader<'_>) -> String {
     r.to_string().unwrap_or_default()
 }
 
-fn write_error(mut b: plugin_error::Builder<'_>, err: &PluginError) {
+pub(super) fn write_error(mut b: plugin_error::Builder<'_>, err: &PluginError) {
     b.set_code(err.wire_str());
     b.set_message(&err.message);
 }
@@ -124,7 +124,7 @@ fn fill_put_result(mut out: super::plugin_v2_capnp::put_result::Builder<'_>, put
     }
 }
 
-fn read_error(r: plugin_error::Reader<'_>) -> PluginError {
+pub(super) fn read_error(r: plugin_error::Reader<'_>) -> PluginError {
     let code = r.get_code().ok().map(text_of).unwrap_or_default();
     let message = r.get_message().ok().map(text_of).unwrap_or_default();
     PluginError::from_wire(&code, message)
@@ -2095,6 +2095,38 @@ impl database_session_capnp::Server for DatabaseSessionServer {
         }
         Ok(())
     }
+
+    async fn capabilities(
+        self: Rc<Self>,
+        _params: database_session_capnp::CapabilitiesParams,
+        mut results: database_session_capnp::CapabilitiesResults,
+    ) -> capnp::Result<()> {
+        super::db_rpc::write_db_capabilities_reply(
+            results.get().init_result(),
+            self.inner.capabilities().await,
+        );
+        Ok(())
+    }
+
+    async fn execute_atomic(
+        self: Rc<Self>,
+        params: database_session_capnp::ExecuteAtomicParams,
+        mut results: database_session_capnp::ExecuteAtomicResults,
+    ) -> capnp::Result<()> {
+        let request = params
+            .get()?
+            .get_request()
+            .map_err(|err| capnp::Error::failed(err.to_string()))
+            .and_then(|r| {
+                super::db_rpc::read_execute_request(r)
+                    .map_err(|err| capnp::Error::failed(err.to_string()))
+            })?;
+        super::db_rpc::write_execute_atomic_reply(
+            results.get().init_result(),
+            self.inner.execute_atomic(request).await,
+        );
+        Ok(())
+    }
 }
 
 struct TransactionServer {
@@ -3150,6 +3182,31 @@ impl DatabaseSession for DatabaseSessionClient {
         let req = self.client.close_request();
         let reply = req.send().promise.await.map_err(from_capnp)?;
         read_empty(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+
+    async fn capabilities(&self) -> Result<crate::DbCapabilities> {
+        let req = self.client.capabilities_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        super::db_rpc::read_db_capabilities_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+
+    async fn execute_atomic(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
+        let mut req = self.client.execute_atomic_request();
+        super::db_rpc::write_execute_request(req.get().init_request(), &request);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        super::db_rpc::read_execute_atomic_reply(
             reply
                 .get()
                 .map_err(from_capnp)?

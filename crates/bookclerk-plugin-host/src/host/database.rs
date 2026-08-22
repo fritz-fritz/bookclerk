@@ -15,9 +15,10 @@ use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
-    exec_result_from_dto, proxy_rows_from_dto, statement_to_dto, DbAtomicPlan, DbAtomicRequest,
-    DbConnectParams, DbConnectResult, DbPlanExecResult, DbPlanStatement, DbPlanStatementKind,
-    ExecResultDto, ProxyRowDto, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    exec_result_from_dto, proxy_rows_from_dto, sql_payload_exceeds, statement_to_dto, DbAtomicPlan,
+    DbAtomicRequest, DbConnectParams, DbConnectResult, DbPlanExecResult, DbPlanStatement,
+    DbPlanStatementKind, ExecResultDto, ExecuteRequest, ProxyRowDto, DB_ATOMIC_SENTINEL,
+    DB_CAPABILITIES_SENTINEL,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -103,19 +104,26 @@ impl ExternalDatabase {
         let ctx = serde_json::to_string(&params).map_err(|err| DbErr::Custom(err.to_string()))?;
         self.session.db_open(ctx).await.map_err(map_rpc_err)?;
 
-        let _ = self
-            .session
-            .db_query("SELECT 1", "[]")
-            .await
-            .map_err(map_rpc_err)?;
-
-        let page = self
-            .session
-            .db_query(DB_CAPABILITIES_SENTINEL, "[]")
-            .await
-            .map_err(map_rpc_err)?;
-        let connect_result: DbConnectResult = serde_json::from_str(&page.rows_json)
-            .map_err(|err| DbErr::Custom(format!("database capabilities: {err}")))?;
+        let connect_result = match self.session.db_capabilities().await {
+            Ok(caps) => caps.to_connect(),
+            Err(err) => {
+                if !matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported") {
+                    return Err(map_rpc_err(err));
+                }
+                let _ = self
+                    .session
+                    .db_query("SELECT 1", "[]")
+                    .await
+                    .map_err(map_rpc_err)?;
+                let page = self
+                    .session
+                    .db_query(DB_CAPABILITIES_SENTINEL, "[]")
+                    .await
+                    .map_err(map_rpc_err)?;
+                serde_json::from_str(&page.rows_json)
+                    .map_err(|err| DbErr::Custom(format!("database capabilities: {err}")))?
+            }
+        };
         if !connect_result.meets_host_minimums() {
             return Err(DbErr::Custom(connect_result.capability_failure_reason()));
         }
@@ -123,6 +131,7 @@ impl ExternalDatabase {
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
             session: self.session.clone(),
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
+            max_payload_bytes: connect_result.max_payload_bytes,
         }));
         let db = Database::connect_proxy(backend, proxy).await?;
         self.apply_host_schema(&db, &connect_result).await?;
@@ -325,6 +334,8 @@ struct RpcDatabaseProxy {
     session: Arc<V2PluginSession>,
     /// Per-task nested begin depth (vat holds a single transaction).
     txn_depth: Arc<Mutex<HashMap<TaskKey, usize>>>,
+    /// Negotiated `maxPayloadBytes` (capped at [`bookclerk_plugin_sdk::v2::MAX_SCALAR_BYTES`]).
+    max_payload_bytes: u32,
 }
 
 impl std::fmt::Debug for RpcDatabaseProxy {
@@ -385,6 +396,13 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             return Err(bookclerk_library::txn_broken_err());
         }
         let (sql, values_json) = Self::statement_parts(&statement);
+        if sql_payload_exceeds(&sql, &values_json, self.max_payload_bytes) {
+            return Err(DbErr::Custom(format!(
+                "database statement payload is {} bytes; guest maxPayloadBytes is {}",
+                sql.len().saturating_add(values_json.len()),
+                self.max_payload_bytes
+            )));
+        }
         let mut rows = Vec::new();
         let mut cursor = String::new();
         // 4096 pages × MAX_LIST_PAGE (256) is a hard stop against a malicious next_cursor loop.
@@ -416,6 +434,13 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             return Err(bookclerk_library::txn_broken_err());
         }
         let (sql, values_json) = Self::statement_parts(&statement);
+        if sql_payload_exceeds(&sql, &values_json, self.max_payload_bytes) {
+            return Err(DbErr::Custom(format!(
+                "database statement payload is {} bytes; guest maxPayloadBytes is {}",
+                sql.len().saturating_add(values_json.len()),
+                self.max_payload_bytes
+            )));
+        }
         let result = self
             .session
             .db_execute(sql, values_json)
@@ -559,9 +584,8 @@ impl RpcAtomicBackend {
         let deadline_unix_ms = unix_now_ms().saturating_add(120_000);
         request.deadline_unix_ms = Some(deadline_unix_ms);
         bookclerk_library::validate_atomic_request(&request, &self.caps)?;
-        let payload = serde_json::to_string(&request).map_err(|err| {
-            bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
-        })?;
+        let typed = ExecuteRequest::from_atomic(&request)
+            .map_err(|err| bookclerk_library::LibraryError::Other(anyhow::anyhow!(err)))?;
         let cancel = Arc::new(AtomicBool::new(false));
         let _guard = CancelOnDrop(Arc::clone(&cancel));
         let remaining_ms = deadline_unix_ms.saturating_sub(unix_now_ms()).max(1);
@@ -572,18 +596,9 @@ impl RpcAtomicBackend {
                     "deadline_exceeded: host RPC deadline elapsed".into(),
                 ))
             }
-            result = self.session.db_query_cancelable(
-                DB_ATOMIC_SENTINEL,
-                payload,
-                Arc::clone(&cancel),
-            ) => match result {
-                Ok(page) => {
-                    let exec: DbPlanExecResult =
-                        serde_json::from_str(&page.rows_json).map_err(|err| {
-                            bookclerk_library::LibraryError::Unavailable(format!(
-                                "database atomic result: {err}"
-                            ))
-                        })?;
+            result = self.session.db_execute_atomic(typed, Arc::clone(&cancel)) => match result {
+                Ok(reply) => {
+                    let exec = reply.into_plan_exec();
                     bookclerk_library::validate_exec_result(
                         &compiled.plan,
                         &exec,
@@ -596,8 +611,53 @@ impl RpcAtomicBackend {
                         &compiled.expected_hash,
                     ))
                 }
-                Err(err) => Err(map_atomic_rpc_err(err)),
+                Err(err) => {
+                    if matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported")
+                    {
+                        return self.send_compiled_sentinel(compiled, operation_id, request, cancel).await;
+                    }
+                    Err(map_atomic_rpc_err(err))
+                }
             }
+        }
+    }
+
+    /// Older guests: `bookclerk.atomic` JSON sentinel.
+    async fn send_compiled_sentinel(
+        &self,
+        compiled: bookclerk_library::CompiledAtomic,
+        operation_id: String,
+        request: DbAtomicRequest,
+        cancel: Arc<AtomicBool>,
+    ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
+        let payload = serde_json::to_string(&request).map_err(|err| {
+            bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
+        })?;
+        match self
+            .session
+            .db_query_cancelable(DB_ATOMIC_SENTINEL, payload, cancel)
+            .await
+        {
+            Ok(page) => {
+                let exec: DbPlanExecResult =
+                    serde_json::from_str(&page.rows_json).map_err(|err| {
+                        bookclerk_library::LibraryError::Unavailable(format!(
+                            "database atomic result: {err}"
+                        ))
+                    })?;
+                bookclerk_library::validate_exec_result(
+                    &compiled.plan,
+                    &exec,
+                    &self.caps,
+                    &operation_id,
+                )?;
+                Ok(bookclerk_library::interpret_exec(
+                    &compiled.plan,
+                    &exec,
+                    &compiled.expected_hash,
+                ))
+            }
+            Err(err) => Err(map_atomic_rpc_err(err)),
         }
     }
 }
@@ -663,13 +723,28 @@ async fn exec_host_ddl_batch(
         plan: Some(plan),
         deadline_unix_ms: None,
     };
-    let payload = serde_json::to_string(&req)
-        .map_err(|err| bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
-    session
-        .db_query(DB_ATOMIC_SENTINEL, payload)
-        .await
-        .map_err(|err| bookclerk_library::LibraryError::Orm(DbErr::Custom(err.to_string())))?;
-    Ok(())
+    let typed = ExecuteRequest::from_atomic(&req)
+        .map_err(|err| bookclerk_library::LibraryError::Other(anyhow::anyhow!(err)))?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    match session.db_execute_atomic(typed, cancel).await {
+        Ok(_) => Ok(()),
+        Err(err) if matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported") =>
+        {
+            let payload = serde_json::to_string(&req).map_err(|err| {
+                bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
+            })?;
+            session
+                .db_query(DB_ATOMIC_SENTINEL, payload)
+                .await
+                .map_err(|err| {
+                    bookclerk_library::LibraryError::Orm(DbErr::Custom(err.to_string()))
+                })?;
+            Ok(())
+        }
+        Err(err) => Err(bookclerk_library::LibraryError::Orm(DbErr::Custom(
+            err.to_string(),
+        ))),
+    }
 }
 
 /// Translates a guest atomic status string into a library error, or `None` on `ok`.

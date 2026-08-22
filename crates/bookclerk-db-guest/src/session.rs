@@ -12,8 +12,9 @@ use std::sync::{Arc, LazyLock, OnceLock};
 
 use bookclerk_plugin_sdk::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use bookclerk_plugin_sdk::{
-    proxy_rows_to_dto, statement_from_dto, DbAtomicRequest, DbPlanExecResult, ExecResultDto,
-    ProxyRowDto, QueryResultDto, StatementDto,
+    proxy_rows_to_dto, statement_from_dto, DbAtomicRequest, DbCapabilities, DbConnectResult,
+    DbPlanExecResult, ExecResultDto, ExecuteReply, ExecuteRequest, ProxyRowDto, QueryResultDto,
+    StatementDto,
 };
 use futures::TryStreamExt;
 use sea_orm::{
@@ -257,6 +258,38 @@ pub async fn guest_atomic(
     )
     .await
     .map_err(|e| crate::plugin_error_from_db_err(&e))
+}
+
+/// Typed `DatabaseSession.capabilities` for the connected engine.
+///
+/// # Errors
+///
+/// Returns when no connection has been opened.
+pub async fn guest_capabilities(
+) -> std::result::Result<DbCapabilities, bookclerk_plugin_sdk::PluginError> {
+    let conn = connection()
+        .await
+        .map_err(bookclerk_plugin_sdk::PluginError::internal)?;
+    let caps = match conn.get_database_backend() {
+        DbBackend::Postgres => DbConnectResult::postgres(),
+        _ => DbConnectResult::sqlite(),
+    };
+    Ok(DbCapabilities::from_connect(&caps))
+}
+
+/// Typed `DatabaseSession.executeAtomic` wrapping [`guest_atomic`].
+///
+/// # Errors
+///
+/// Returns when the request cannot be converted or the engine rejects the work.
+pub async fn guest_execute_atomic(
+    request: ExecuteRequest,
+) -> std::result::Result<ExecuteReply, bookclerk_plugin_sdk::PluginError> {
+    let atomic = request
+        .into_atomic()
+        .map_err(bookclerk_plugin_sdk::PluginError::invalid_params)?;
+    let result = guest_atomic(atomic).await?;
+    ExecuteReply::from_plan_exec(&result).map_err(bookclerk_plugin_sdk::PluginError::invalid_params)
 }
 
 /// Runs a read-only SQL query through the guest database bridge.
@@ -596,10 +629,23 @@ async fn rollback_stack(stack: &mut Vec<(String, DatabaseTransaction)>) -> Resul
     Ok(())
 }
 
+/// Rebuilds a SeaORM statement after adapter-side canonical SQL lowering.
+fn statement_from_dto_lowered(dto: StatementDto, backend: DbBackend) -> sea_orm::Statement {
+    let sql = bookclerk_db_exec::lower_canonical_sql(backend, &dto.sql);
+    statement_from_dto(
+        StatementDto {
+            sql,
+            values: dto.values,
+            txn_id: dto.txn_id,
+        },
+        backend,
+    )
+}
+
 /// Executes a read-only statement and projects rows into [`QueryResultDto`].
 async fn query_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<QueryResultDto> {
     let backend = conn.get_database_backend();
-    let stmt = statement_from_dto(dto, backend);
+    let stmt = statement_from_dto_lowered(dto, backend);
     let rows = conn.query_all_raw(stmt).await.map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -912,7 +958,7 @@ where
     let txn_id = dto.txn_id.clone();
     let mut create = dto;
     create.sql = postgres_create_temp_page_sql(&names.table, &names.ord_col, &create.sql);
-    conn.execute_raw(statement_from_dto(create, DbBackend::Postgres))
+    conn.execute_raw(statement_from_dto_lowered(create, DbBackend::Postgres))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -923,7 +969,7 @@ where
             txn_id: txn_id.clone(),
         };
         if let Some(row) = conn
-            .query_one_raw(statement_from_dto(probe, DbBackend::Postgres))
+            .query_one_raw(statement_from_dto_lowered(probe, DbBackend::Postgres))
             .await
             .map_err(|e| e.to_string())?
         {
@@ -939,9 +985,12 @@ where
             values: Vec::new(),
             txn_id: txn_id.clone(),
         };
-        let mut rows =
-            stream_rows_bounded(conn, statement_from_dto(select, DbBackend::Postgres), fetch)
-                .await?;
+        let mut rows = stream_rows_bounded(
+            conn,
+            statement_from_dto_lowered(select, DbBackend::Postgres),
+            fetch,
+        )
+        .await?;
         for row in &mut rows {
             row.values.remove(&names.ord_col);
         }
@@ -955,7 +1004,7 @@ where
         txn_id,
     };
     let _ = conn
-        .execute_raw(statement_from_dto(drop, DbBackend::Postgres))
+        .execute_raw(statement_from_dto_lowered(drop, DbBackend::Postgres))
         .await;
     fetched
 }
@@ -1026,7 +1075,7 @@ where
             postgres_query_page_once(conn, paged, fetch, postgres_isolation).await?
         }
         _ => {
-            let stmt = statement_from_dto(paged, backend);
+            let stmt = statement_from_dto_lowered(paged, backend);
             fetch_page_all_raw(conn, stmt, fetch).await?
         }
     };
@@ -1068,7 +1117,7 @@ where
 /// Executes a mutating statement and returns last-insert id plus rows-affected.
 async fn execute_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<ExecResultDto> {
     let backend = conn.get_database_backend();
-    let stmt = statement_from_dto(dto, backend);
+    let stmt = statement_from_dto_lowered(dto, backend);
     let result = conn.execute_raw(stmt).await.map_err(|e| e.to_string())?;
     Ok(ExecResultDto {
         last_insert_id: result.last_insert_id(),

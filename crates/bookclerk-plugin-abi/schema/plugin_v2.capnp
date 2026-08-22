@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 6;
+const abiMinor :UInt32 = 7;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -583,16 +583,143 @@ interface Integration {
   pollEvents @8 () -> (result :JsonReply);
 }
 
+# Universal database cell/parameter domain. Engine-native arrays, enums,
+# unsigned integers, and JSON text sentinels are not baseline ABI values.
+enum DbType {
+  unspecified @0;
+  bool @1;
+  int64 @2;
+  float64 @3;
+  text @4;
+  bytes @5;
+}
+
+struct DbValue {
+  union {
+    null @0 :DbType;
+    boolean @1 :Bool;
+    int64 @2 :Int64;
+    float64 @3 :Float64;
+    text @4 :Text;
+    bytes @5 :Data;
+  }
+}
+
+struct DbColumn {
+  name @0 :Text;
+  dbType @1 :DbType;
+}
+
+struct DbRow {
+  values @0 :List(DbValue);
+}
+
+enum DbStatementKind {
+  query @0;
+  execute @1;
+  select @2;
+  returning @3;
+}
+
+enum DbResultSelection {
+  discard @0;
+  affectedRows @1;
+  rows @2;
+  cursor @3;
+}
+
+struct DbStatement {
+  sql @0 :Text;
+  parameters @1 :List(DbValue);
+  kind @2 :DbStatementKind;
+  maxRows @3 :UInt32;
+  resultSelection @4 :DbResultSelection;
+}
+
+struct ExecuteRequest {
+  operationId @0 :Text;
+  requestHash @1 :Text;
+  statements @2 :List(DbStatement);
+  outcomeIndex @3 :UInt32;
+  payloadIndex @4 :UInt32;
+  hasPayloadIndex @5 :Bool;
+  priorReceiptIndex @6 :UInt32;
+  hasPriorReceiptIndex @7 :Bool;
+  receiptSelectIndex @8 :UInt32;
+  hasReceiptSelectIndex @9 :Bool;
+  deadlineUnixMs @10 :UInt64;
+}
+
+struct StatementResult {
+  rows @0 :List(DbRow);
+  columns @1 :List(DbColumn);
+  rowsAffected @2 :UInt64;
+  cursor @3 :Text;
+}
+
+struct DbTiming {
+  attemptElapsedUs @0 :UInt64;
+  dbExecutionUs @1 :UInt64;
+  dbTimingSource @2 :Text;
+}
+
+struct ExecuteReply {
+  operationId @0 :Text;
+  statements @1 :List(StatementResult);
+  timing @2 :DbTiming;
+}
+
+struct ExecuteAtomicReply {
+  union {
+    ok @0 :ExecuteReply;
+    err @1 :PluginError;
+  }
+}
+
+# Semantic SQL-contract advertisement. `diagnosticEngine` is observability
+# only; hosts must not branch on it for correctness.
+struct DbCapabilities {
+  sqlContractVersion @0 :UInt32;
+  atomicBatch @1 :Bool;
+  returning @2 :Bool;
+  affectedRows @3 :Bool;
+  schemaMigrations @4 :Bool;
+  pragmaUserVersion @5 :Bool;
+  atomicSchemaBatch @6 :Bool;
+  cancellation @7 :Bool;
+  timing @8 :Bool;
+  maxBinds @9 :UInt32;
+  maxStatements @10 :UInt32;
+  maxResultRows @11 :UInt32;
+  maxPayloadBytes @12 :UInt32;
+  maxResultBytes @13 :UInt32;
+  maxCellBytes @14 :UInt32;
+  maxRequestBytes @15 :UInt32;
+  maxAtomicResultBytes @16 :UInt32;
+  diagnosticEngine @17 :Text;
+}
+
+struct DbCapabilitiesReply {
+  union {
+    ok @0 :DbCapabilities;
+    err @1 :PluginError;
+  }
+}
+
 interface Database {
   openSession @0 () -> (result :SessionReply);
 }
 
 # Invocation-scoped. Must not survive suspension.
+# `execute`/`query`/`begin` remain for older abiMinor guests. First-party
+# hosts use `capabilities` + `executeAtomic` (the #178 data plane).
 interface DatabaseSession {
   execute @0 (statement :Statement) -> (result :ExecReply);
   query @1 (statement :Statement, cursor :Text, limit :UInt32) -> (result :QueryReply);
   begin @2 () -> (result :TransactionReply);
   close @3 () -> (result :EmptyReply);
+  capabilities @4 () -> (result :DbCapabilitiesReply);
+  executeAtomic @5 (request :ExecuteRequest) -> (result :ExecuteAtomicReply);
 }
 
 interface Transaction {

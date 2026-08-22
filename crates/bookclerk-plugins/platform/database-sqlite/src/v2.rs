@@ -4,16 +4,17 @@
 
 use async_trait::async_trait;
 use bookclerk_db_guest::{
-    guest_atomic, guest_begin, guest_commit, guest_execute, guest_query_page, guest_rollback,
-    plugin_error_from_engine, set_connection,
+    guest_atomic, guest_begin, guest_capabilities, guest_commit, guest_execute,
+    guest_execute_atomic, guest_query_page, guest_rollback, plugin_error_from_engine,
+    set_connection,
 };
 use bookclerk_plugin_sdk::v2::{
     Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot, QueryPage,
     ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    DbAtomicRequest, DbConnectResult, PluginError, StatementDto, DB_ATOMIC_SENTINEL,
-    DB_CAPABILITIES_SENTINEL,
+    DbAtomicRequest, DbCapabilities, DbConnectResult, ExecuteReply, ExecuteRequest, PluginError,
+    StatementDto, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
 };
 
 use crate::ID;
@@ -142,6 +143,14 @@ impl DatabaseSession for SqliteSession {
     async fn begin(&self) -> Result<Box<dyn Transaction>> {
         let txn_id = guest_begin(None).await.map_err(map_guest)?;
         Ok(Box::new(SqliteTxn { txn_id }))
+    }
+
+    async fn capabilities(&self) -> Result<DbCapabilities> {
+        guest_capabilities().await
+    }
+
+    async fn execute_atomic(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
+        guest_execute_atomic(request).await
     }
 }
 

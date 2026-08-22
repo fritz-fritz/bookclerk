@@ -213,8 +213,11 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   Structured statuses include `ok`, `empty`, `lastOwner`, `claimInvalid`,
   `passwordRequired`, `notFound`, and `idempotencyConflict`. Consume-once ops
   use `DELETE … RETURNING` so a missing or expired row cannot be observed
-  twice. After `openSession` the host queries `bookclerk.capabilities`; D1
-  reports `interactiveTxn: false` and `maxBinds: 100`. The host stores the
+  twice. After `openSession` the host calls typed `DatabaseSession.capabilities`
+  (`abiMinor` ≥ 7; older guests still answer `bookclerk.capabilities`). Schema
+  selection uses `pragmaUserVersion` / `schemaMigrations` /
+  `atomicSchemaBatch`, not `sqlFamily`/`interactiveTxn`. D1 reports
+  `atomicSchemaBatch: true` and `maxBinds: 100`. The host stores the
   full connect advertisement and rejects plans that exceed `maxStatements`,
   per-statement `maxBinds`, `maxPayloadBytes`, or out-of-range selectors.
   A statement that yields more than `maxResultRows` **fails the plan**

@@ -86,15 +86,21 @@ pub fn json_object_fn(family: SqlFamily, sql: &str) -> String {
 }
 
 /// Applies dialect rewrites to one statement.
+///
+/// Host compilers emit canonical SQL and do not call this. Adapter execute
+/// paths and these seed tests lower via [`bookclerk_db_exec::lower_canonical_to_postgres`].
 #[must_use]
 pub fn render_statement(family: SqlFamily, sql: &str) -> String {
-    let sql = insert_or_ignore(family, sql);
-    let sql = json_object_fn(family, &sql);
-    let sql = sqlite_fns_to_postgres(family, &sql);
-    rewrite_placeholders(family, &sql)
+    match family {
+        SqlFamily::Sqlite => sql.to_string(),
+        SqlFamily::Postgres => bookclerk_db_exec::lower_canonical_to_postgres(sql),
+    }
 }
 
 /// Maps SQLite helpers used in host plans onto PostgreSQL equivalents.
+///
+/// Seed mapping retained beside [`bookclerk_db_exec::lower_canonical_to_postgres`].
+#[allow(dead_code)]
 fn sqlite_fns_to_postgres(family: SqlFamily, sql: &str) -> String {
     if family != SqlFamily::Postgres {
         return sql.to_string();

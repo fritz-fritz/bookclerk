@@ -43,64 +43,71 @@ repository interface.
 
 ### Capability negotiation
 
-After `openSession` the host queries the `bookclerk.capabilities` sentinel.
-The guest returns a JSON object (also flattened onto `DbConnectResult`):
+After `openSession` the host calls typed `DatabaseSession.capabilities`
+(`abiMinor` ≥ 7). `DbCapabilities` advertises the SQL contract version,
+execution semantics (`atomicBatch`, `returning`, `affectedRows`,
+`cancellation`, `timing`), schema versioning (`pragmaUserVersion` /
+`schemaMigrations` / `atomicSchemaBatch`), and all numeric limits
+(`maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`,
+`maxResultBytes`, `maxCellBytes`, `maxRequestBytes`,
+`maxAtomicResultBytes`). `diagnosticEngine` is observability only; hosts
+must not branch on it for plan compilation or schema selection. Schema
+kind is chosen from the schema flags (exactly one of `pragmaUserVersion`
+or `schemaMigrations`; `atomicSchemaBatch` requires `schemaMigrations`).
 
-- `sqlFamily`: `sqlite` \| `postgres`
-- `interactiveTxn`, `atomicBatch`, `returning`
-- `maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`,
-  `maxResultBytes`, `maxCellBytes`, `maxAtomicRequestBytes`,
-  `maxAtomicResultBytes`
-- `timing`
-
-The host must not invent these from the plugin id. Missing required fields,
-`atomicBatch: false`, `returning: false`, `maxResultRows` / `maxPayloadBytes`
-/ `maxResultBytes` / `maxCellBytes` / `maxAtomicRequestBytes` /
-`maxAtomicResultBytes` of `0` (unspecified), limits below the
-host's compiled minimums, batch caps above `MAX_SCALAR_BYTES`, or a `dialect`
-that does not match `sqlFamily` are a hard error. Wake page size and `IN (…)`
-chunking are derived from `maxBinds`. `maxPayloadBytes` bounds request SQL plus
-JSON binds per statement; `maxAtomicRequestBytes` / `maxAtomicResultBytes` bound
-the whole encoded `DbAtomicRequest` / `DbPlanExecResult` (including JSON
-envelope) at or below the v2 scalar limit. `maxResultBytes` / `maxCellBytes`
-bound encoded result rows and are enforced incrementally in each adapter before
-cloning a cell or serializing a row. Native guests check the aggregate result
-size before `COMMIT`.
+Older guests may still answer the `bookclerk.capabilities` query sentinel
+with a JSON `DbConnectResult`. The host must not invent capabilities from
+the plugin id. Missing required fields, `atomicBatch: false`,
+`returning: false`, unspecified (`0`) limits, limits below the host's
+compiled minimums, `maxPayloadBytes` / `maxAtomicRequestBytes` /
+`maxAtomicResultBytes` above `MAX_SCALAR_BYTES`, or a `dialect` that does
+not match `sqlFamily` are a hard error. Wake page size and `IN (…)`
+chunking are derived from `maxBinds`. `maxPayloadBytes` bounds request SQL
+plus binds per statement and must not exceed the v2 scalar ceiling;
+ordinary `dbQuery` / `dbExecute` use the same preflight.
+`maxRequestBytes` / `maxAtomicResultBytes` bound the whole encoded
+`ExecuteRequest` / `ExecuteReply` (JSON `DbAtomicRequest` /
+`DbPlanExecResult` on older guests). Native guests track encoded result
+bytes incrementally as statement results are built and keep one exact
+pre-commit check.
 
 First-party values: D1 `maxBinds = 100`; SQLite and PostgreSQL report the
 engine bind cap (host still chunks conservatively).
 
-### Generic atomic plan
+### Canonical SQL
 
-Atomic work travels as `DatabaseSession.query("bookclerk.atomic", json)`
-with a **plan body** (no Cap'n `DatabaseSession` method; guests already
-special-case that SQL sentinel):
+The host compiler emits **canonical Bookclerk SQL** (`?` placeholders,
+SQLite-shaped helpers such as `INSERT OR IGNORE`, `json_extract`,
+`json_valid`). Adapter SDKs lower placeholders and functions at execute
+time (`bookclerk-db-exec::lower_canonical_sql`). Optional plan choices may
+branch only on semantic capabilities, not on plugin id or `sqlFamily`.
 
-- caller `operationId` and canonical `requestHash`
-- ordered parameterized statements (`select` \| `returning` \| `execute`;
-  legacy `query` is accepted as an unwrapped row-producing statement) with
-  typed JSON binds (`b64:` blobs; `{"$sea_null": "Bytes"|"BigInt"|…}` for
-  typed SQL nulls so Postgres BYTEA/INTEGER columns do not see TEXT nulls)
-- outcome selector (status column and/or affected-row predicate)
-- optional payload selector
-- uniform timing metadata on the result
+### Generic atomic execute
+
+The data plane is typed `DatabaseSession.executeAtomic(ExecuteRequest) ->
+ExecuteReply`. Every request is an ordered non-empty statement list
+(batch-of-one for ordinary reads/mutations). Parameters and rows use
+Cap'n `DbValue` (`null(expectedType)`, `bool`, `int64`, `float64`, `text`,
+`bytes`). Unknown union members fail closed as `unsupported`. Cursor is
+result transport, not a second mutation primitive. Interactive
+`begin`/`query`/`execute` remain for older `abiMinor` guests and SeaORM
+proxy paging.
 
 The guest runs the statements as **one SQL transaction** (D1 HTTP
-`{ "batch": [...] }`; SQLite/PostgreSQL `BEGIN`) and returns a generic
-`DbPlanExecResult` (`operationId`, per-statement `rows` / `rowsAffected`,
-timing). The host validates the envelope (operation id echo, statement
-count, row/payload caps) before `interpret_plan`. A statement that yields
-more than `maxResultRows` fails the plan (rollback / D1 ambiguous) rather
-than truncating. D1 HTTP cannot roll back after the JSON body returns, so
-the guest refuses `RETURNING` unless the host-IR `maxRows` is `1`, the SQL
-string is a single statement (no top-level `;`), and any `VALUES` list is
-exactly one tuple. Overflow or an oversized HTTP body after
-a committed batch is `unavailable` (replay the same `operationId`); only a
-definitive non-retryable 4xx is permanent. Receipt rows live in host-authored
-SQL against `db_atomic_receipts`. Guests must not parse Bookclerk operation
-names or interpret receipts. `rowsAffected` is uniform by kind: `select` is
-`0`; `returning` (and legacy `query`) is the number of returned rows;
-`execute` is the engine change count.
+`{ "batch": [...] }`; SQLite/PostgreSQL `BEGIN`) and returns per-statement
+rows / `rowsAffected` / timing. The host validates the envelope before
+`interpret_plan`. A statement that yields more than `maxResultRows` fails
+the plan (rollback / D1 ambiguous) rather than truncating. D1 HTTP cannot
+roll back after the JSON body returns, so the guest refuses `RETURNING`
+unless the host-IR `maxRows` is `1`, the SQL string is a single statement
+(no top-level `;`), and any `VALUES` list is exactly one tuple. Overflow
+or an oversized HTTP body after a committed batch is `unavailable` (replay
+the same `operationId`); only a definitive non-retryable 4xx is permanent.
+Receipt rows live in host-authored SQL against `db_atomic_receipts`.
+Guests must not parse Bookclerk operation names or interpret receipts.
+`rowsAffected` is uniform by kind: `select` is `0`; `returning` (and
+legacy `query`) is the number of returned rows; `execute` is the engine
+change count.
 
 Stable error categories come from SQLSTATE / rusqlite codes (not English
 `"unique"` matching): constraint → `conflict`; serialization/busy/locked →
@@ -109,9 +116,9 @@ Stable error categories come from SQLSTATE / rusqlite codes (not English
 `unsupported`; syntax → `invalid_params`.
 
 Cancellation and deadlines stay RPC/session-level (not a field on the SQL
-plan). The host races in-flight `db_query` against a cancel flag (drop
-aborts the RPC). Guests may see an optional `deadlineUnixMs` on
-`DbAtomicRequest` (transport metadata; not hashed). Observed cancel/deadline
+plan). The host races in-flight `executeAtomic` against a cancel flag
+(drop aborts the RPC). Guests may see an optional `deadlineUnixMs` on
+`ExecuteRequest` (transport metadata; not hashed). Observed cancel/deadline
 before `BEGIN`/HTTP or between statements is `cancelled` /
 `deadline_exceeded`; around `COMMIT` / HTTP return is `unavailable`
 (ambiguous).

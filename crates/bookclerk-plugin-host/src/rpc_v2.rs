@@ -161,6 +161,14 @@ enum Work {
     DbRollback {
         reply: oneshot::Sender<Result<()>>,
     },
+    DbCapabilities {
+        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::DbCapabilities>>,
+    },
+    DbExecuteAtomic {
+        request: bookclerk_plugin_sdk::ExecuteRequest,
+        cancel: Arc<AtomicBool>,
+        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
+    },
     /// Drop the vat.
     Shutdown,
 }
@@ -711,9 +719,12 @@ impl V2PluginSession {
         sql: impl Into<String>,
         values_json: impl Into<String>,
     ) -> Result<bookclerk_plugin_sdk::v2::ExecResult> {
+        let sql = sql.into();
+        let values_json = values_json.into();
+        reject_oversize_sql(&sql, &values_json)?;
         self.call(|reply| Work::DbExecute {
-            sql: sql.into(),
-            values_json: values_json.into(),
+            sql,
+            values_json,
             reply,
         })
         .await
@@ -785,11 +796,41 @@ impl V2PluginSession {
         limit: u32,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::v2::QueryPage> {
+        let sql = sql.into();
+        let values_json = values_json.into();
+        reject_oversize_sql(&sql, &values_json)?;
         self.call(|reply| Work::DbQuery {
-            sql: sql.into(),
-            values_json: values_json.into(),
+            sql,
+            values_json,
             cursor: cursor.into(),
             limit,
+            cancel,
+            reply,
+        })
+        .await
+    }
+
+    /// Typed `DatabaseSession.capabilities`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the guest rejects the call.
+    pub async fn db_capabilities(&self) -> Result<bookclerk_plugin_sdk::DbCapabilities> {
+        self.call(|reply| Work::DbCapabilities { reply }).await
+    }
+
+    /// Typed `DatabaseSession.executeAtomic`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the guest rejects the call or `cancel` is set.
+    pub async fn db_execute_atomic(
+        &self,
+        request: bookclerk_plugin_sdk::ExecuteRequest,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
+        self.call(|reply| Work::DbExecuteAtomic {
+            request,
             cancel,
             reply,
         })
@@ -828,6 +869,20 @@ impl Drop for V2PluginSession {
     fn drop(&mut self) {
         let _ = self.tx.send(Work::Shutdown);
     }
+}
+
+/// Rejects ordinary `dbQuery`/`dbExecute` payloads above the v2 scalar ceiling.
+fn reject_oversize_sql(sql: &str, values_json: &str) -> Result<()> {
+    if bookclerk_plugin_sdk::sql_payload_exceeds(sql, values_json, MAX_SCALAR_BYTES) {
+        let n = sql.len().saturating_add(values_json.len());
+        return Err(PluginError::from_abi(
+            Some("payload_too_large"),
+            format!(
+                "database statement payload is {n} bytes; maxPayloadBytes is {MAX_SCALAR_BYTES}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Maps ABI errors onto host [`PluginError`].
@@ -1249,6 +1304,38 @@ fn vat_thread(
                                 txn.rollback().await.map_err(map_abi)
                             }
                             .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbCapabilities { reply } => {
+                            let out = async {
+                                match db_session.as_mut() {
+                                    Some(s) => s.capabilities().await.map_err(map_abi),
+                                    None => {
+                                        Err(PluginError::message("v2 database session not open"))
+                                    }
+                                }
+                            }
+                            .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbExecuteAtomic {
+                            request,
+                            cancel,
+                            reply,
+                        } => {
+                            let out = tokio::select! {
+                                () = wait_flag(Arc::clone(&cancel)) => {
+                                    Err(PluginError::from_abi(Some("cancelled"), "rpc cancelled"))
+                                }
+                                out = async {
+                                    match db_session.as_mut() {
+                                        Some(s) => s.execute_atomic(request).await.map_err(map_abi),
+                                        None => Err(PluginError::message(
+                                            "v2 database session not open",
+                                        )),
+                                    }
+                                } => out,
+                            };
                             let _ = reply.send(out);
                         }
                     }

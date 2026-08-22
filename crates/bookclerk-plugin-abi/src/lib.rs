@@ -50,6 +50,8 @@
 //! | [`v2`] | Object-capability ABI (`apiVersion` 2, Cap'n Proto, streams) |
 
 pub mod db;
+pub mod db_execute;
+pub mod db_value;
 pub mod error;
 pub mod events;
 pub mod kind;
@@ -86,8 +88,13 @@ pub use db::{
     QueryResultDto, StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
     FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
     HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS,
-    POSTGRES_MAX_BINDS, SEA_NULL_KEY, SQLITE_MAX_BINDS,
+    POSTGRES_MAX_BINDS, SEA_NULL_KEY, SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
 };
+pub use db_execute::{
+    sql_payload_bytes, sql_payload_exceeds, DbCapabilities, DbColumn, DbResultSelection, DbRow,
+    DbTiming, ExecuteReply, ExecuteRequest, StatementResult, TypedDbStatement,
+};
+pub use db_value::{db_value_from_json, db_value_to_json, DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use events::{HostToPluginEvent, PluginToHostEvent};
 pub use kind::*;

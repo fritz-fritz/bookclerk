@@ -1126,12 +1126,12 @@ closed). Non-SQL engines are unsupported.
 | Method | Notes |
 | --- | --- |
 | `dbConnect` | Open backend via tagged connect params (`backend`: `sqlite` / `d1` / `postgres`); returns dialect (SQLite: path grant; D1/Postgres: host-injected credentials) |
-| `bookclerk.capabilities` | Sentinel `dbQuery` after open. Returns `sqlFamily`, `interactiveTxn`, `atomicBatch`, `returning`, `maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`, `maxResultBytes`, `maxCellBytes`, `maxAtomicRequestBytes`, `maxAtomicResultBytes`, `timing`. The host must not invent these from the plugin id. |
+| `capabilities` | Typed control-plane call after `openSession` (`abiMinor` ≥ 7). Advertises SQL contract version, execution semantics, schema flags (`pragmaUserVersion` / `schemaMigrations` / `atomicSchemaBatch`), and all limits. `diagnosticEngine` is observability only. Older guests may still answer the `bookclerk.capabilities` query sentinel. The host must not invent these from the plugin id. |
 | `dbPing` | Verify connectivity |
-| `dbQuery` / `dbExecute` | Forward SeaORM statement payloads (optional `txnId` from `dbBegin`) |
+| `dbQuery` / `dbExecute` | Forward SeaORM statement payloads (optional `txnId` from `dbBegin`). Ordinary-path SQL+binds are preflighted against `min(maxPayloadBytes, MAX_SCALAR_BYTES)`. |
 | `dbBegin` | Start a native engine transaction (or nested savepoint via `parentTxnId`); returns `txnId`. The host records a sticky per-task fault when this RPC fails so later statements cannot fall back to autocommit. D1 rejects interactive transactions and sets `interactiveTxn: false`. |
 | `dbCommit` / `dbRollback` | Finish that transaction. A failed `dbCommit` is surfaced to `LibraryStore` (SeaORM's proxy hook is infallible); the guest is rolled back. |
-| `dbAtomic` | Generic host-authored SQL plan (`operationId`, `requestHash`, ordered statements, outcome/payload selectors) as one SQL transaction. D1 uses `{ "batch": [...] }` on the REST Query API. SQLite and Postgres run the same plan in a native local transaction. Guests do not interpret Bookclerk operation names. |
+| `executeAtomic` | Typed atomic batch (`ExecuteRequest` → `ExecuteReply`). Every request is a non-empty ordered statement list with Cap'n `DbValue` parameters. D1 uses `{ "batch": [...] }` on the REST Query API. SQLite and Postgres run the same plan in a native local transaction. Host compilers emit canonical `?` SQL; adapters lower at execute. Guests do not interpret Bookclerk operation names. Older guests may still accept the `bookclerk.atomic` query sentinel. |
 
 Built-in ids: `sqlite`, `d1`, `postgres` (match `[database].plugin`).
 

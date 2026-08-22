@@ -14,7 +14,7 @@ use crate::atomic_ops::DbAtomicResult;
 #[cfg(test)]
 use serde_json::json;
 
-use super::dialect::{render_statement, SqlFamily};
+use super::dialect::SqlFamily;
 use super::{wire_plan, CompiledAtomic};
 
 /// One statement in a planned batch (SQL, binds, and structural kind).
@@ -72,7 +72,10 @@ enum ConsumeOnceKind {
     WebauthnChallenge,
 }
 
-/// Compiles a named `dbAtomic` request into a dialect-specific generic plan.
+/// Compiles a named `dbAtomic` request into canonical Bookclerk SQL.
+///
+/// `family` is retained for callers (SeaORM dialect / tests) but does not
+/// rewrite SQL. Adapters lower placeholders and functions at execute time.
 ///
 /// # Errors
 ///
@@ -85,14 +88,12 @@ pub fn compile_named_request(
 ) -> std::result::Result<CompiledAtomic, DbErr> {
     let inner = plan_atomic(operation_id, params, now)?;
     let expected_hash = inner.expected_hash.clone().unwrap_or_default();
-    let statements = inner
-        .statements
-        .into_iter()
-        .map(|stmt| render_sql_stmt(family, stmt))
-        .collect();
+    let _ = family;
+    // Canonical Bookclerk SQL (`?` placeholders, SQLite-shaped helpers).
+    // Adapters lower placeholders and functions at execute time.
     Ok(CompiledAtomic {
         plan: wire_plan(
-            statements,
+            inner.statements,
             inner.outcome_index,
             inner.payload_index,
             inner.prior_receipt_index,
@@ -153,14 +154,10 @@ pub fn compile_claim_event_delivery(
         expires_at: receipt_expiry(now),
     };
     let wrapped = wrap_status_op(inner, &ctx, PayloadKind::JsonFromPlan);
-    let statements = wrapped
-        .statements
-        .into_iter()
-        .map(|stmt| render_sql_stmt(family, stmt))
-        .collect();
+    let _ = family;
     Ok(CompiledAtomic {
         plan: wire_plan(
-            statements,
+            wrapped.statements,
             wrapped.outcome_index,
             wrapped.payload_index,
             wrapped.prior_receipt_index,
@@ -460,16 +457,6 @@ fn sql(text: &str, params: Vec<JsonValue>) -> SqlStmt {
         binds: params,
         kind,
         max_rows,
-    }
-}
-
-/// Renders one planned statement into the guest dialect without changing kind.
-fn render_sql_stmt(family: SqlFamily, stmt: SqlStmt) -> SqlStmt {
-    SqlStmt {
-        sql: render_statement(family, &stmt.sql),
-        binds: stmt.binds,
-        kind: stmt.kind,
-        max_rows: stmt.max_rows,
     }
 }
 
@@ -3874,9 +3861,14 @@ mod tests {
             .as_str()
             .is_some_and(|s| s.starts_with("b64:")));
         assert!(
-            insert.sql.contains("$5"),
-            "postgres renderer must number blob binds:\n{}",
+            insert.sql.contains('?') && !insert.sql.contains('$'),
+            "host compiler must emit canonical SQL, not $n:\n{}",
             insert.sql
+        );
+        let lowered = bookclerk_db_exec::lower_canonical_to_postgres(&insert.sql);
+        assert!(
+            lowered.contains("$5"),
+            "adapter lowering must number blob binds:\n{lowered}"
         );
     }
 

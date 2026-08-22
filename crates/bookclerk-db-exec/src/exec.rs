@@ -15,6 +15,7 @@ use sea_orm::{
 };
 use serde_json::Value as JsonValue;
 
+use crate::lower_canonical_sql;
 use crate::proxy_txn::{
     consume_atomic_interrupt, consume_commit_injection, is_txn_broken, record_query_rows_seen,
     take_txn_fault, with_exec_budget, AtomicInterruptKind, AtomicInterruptPhase, ExecBudget,
@@ -178,6 +179,7 @@ async fn execute_statements_body(
     }
     let sql_started = Instant::now();
     let mut statements = Vec::with_capacity(plan.statements.len());
+    let mut used_atomic = atomic_result_envelope_len(operation_id);
     for stmt in &plan.statements {
         if let Err(err) = session.check(AtomicInterruptPhase::BetweenStatements) {
             let _ = txn.rollback().await;
@@ -190,6 +192,7 @@ async fn execute_statements_body(
         } else {
             stmt.sql.clone()
         };
+        let sql = lower_canonical_sql(backend, &sql);
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = if stmt.kind.collects_rows() {
             let json_rows = match collect_capped_query_rows(&txn, sea_stmt, caps).await {
@@ -219,17 +222,17 @@ async fn execute_statements_body(
                 rows_affected: exec.rows_affected(),
             }
         };
-        statements.push(stmt_result);
-        let preview = DbPlanExecResult {
-            operation_id: operation_id.to_string(),
-            statements: statements.clone(),
-            timing: None,
-        };
-        if let Err(err) = note_atomic_result_bytes(&preview, caps.max_atomic_result_bytes) {
+        if let Err(err) = note_atomic_stmt_bytes(
+            &mut used_atomic,
+            statements.len(),
+            &stmt_result,
+            caps.max_atomic_result_bytes,
+        ) {
             let _ = txn.rollback().await;
             let _ = take_txn_fault();
             return Err(err);
         }
+        statements.push(stmt_result);
     }
     if consume_commit_injection() {
         let _ = txn.rollback().await;
@@ -382,7 +385,47 @@ fn push_capped_json_row(
     Ok(())
 }
 
-/// Fails when the encoded atomic result would exceed `max_atomic_result_bytes`.
+/// JSON bytes of an empty `DbPlanExecResult` envelope (`statements: []`).
+fn atomic_result_envelope_len(operation_id: &str) -> usize {
+    let empty = DbPlanExecResult {
+        operation_id: operation_id.to_string(),
+        statements: Vec::new(),
+        timing: None,
+    };
+    serde_json::to_vec(&empty)
+        .map(|b| b.len())
+        .unwrap_or(usize::MAX)
+}
+
+/// Adds one encoded statement result (plus array comma) toward the aggregate cap.
+fn note_atomic_stmt_bytes(
+    used: &mut usize,
+    stmt_index: usize,
+    stmt: &DbPlanStmtExecResult,
+    max_atomic_result_bytes: u32,
+) -> Result<(), DbErr> {
+    if max_atomic_result_bytes == 0 {
+        return Ok(());
+    }
+    let encoded = serde_json::to_vec(stmt)
+        .map(|b| b.len())
+        .unwrap_or(usize::MAX);
+    let extra = if stmt_index == 0 {
+        encoded
+    } else {
+        encoded.saturating_add(1)
+    };
+    *used = used.saturating_add(extra);
+    let cap = usize::try_from(max_atomic_result_bytes).unwrap_or(usize::MAX);
+    if *used > cap {
+        return Err(DbErr::Custom(format!(
+            "atomic result is {used} bytes; maxAtomicResultBytes is {max_atomic_result_bytes}"
+        )));
+    }
+    Ok(())
+}
+
+/// Exact encoded-size check of the finished result (including timing).
 fn note_atomic_result_bytes(
     result: &DbPlanExecResult,
     max_atomic_result_bytes: u32,
@@ -575,7 +618,7 @@ pub fn encoded_proxy_row_len<'a>(
 #[cfg(test)]
 mod tests {
     use super::{cap_query_sql, json_to_sea};
-    use bookclerk_plugin_abi::DbPlanStatementKind;
+    use bookclerk_plugin_abi::{DbPlanExecResult, DbPlanStatementKind, DbPlanStmtExecResult};
     use sea_orm::Value;
     use serde_json::json;
 
@@ -632,5 +675,30 @@ mod tests {
             "JSON punctuation and the numeric cell must count: {nbytes} vs alias {}",
             alias.len()
         );
+    }
+
+    #[test]
+    fn incremental_atomic_budget_matches_full_serialize_without_timing() {
+        use super::{atomic_result_envelope_len, note_atomic_stmt_bytes};
+        let result = DbPlanExecResult {
+            operation_id: "op".into(),
+            statements: vec![
+                DbPlanStmtExecResult {
+                    rows: vec![serde_json::json!({"a": 1})],
+                    rows_affected: 0,
+                },
+                DbPlanStmtExecResult {
+                    rows: Vec::new(),
+                    rows_affected: 1,
+                },
+            ],
+            timing: None,
+        };
+        let mut used = atomic_result_envelope_len("op");
+        for (i, stmt) in result.statements.iter().enumerate() {
+            note_atomic_stmt_bytes(&mut used, i, stmt, u32::MAX).unwrap();
+        }
+        let exact = serde_json::to_vec(&result).unwrap().len();
+        assert_eq!(used, exact);
     }
 }

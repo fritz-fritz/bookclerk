@@ -271,6 +271,23 @@ pub trait DatabaseSession {
     async fn close(&self) -> Result<()> {
         Ok(())
     }
+
+    /// Typed SQL-contract advertisement (`abiMinor` ≥ 7).
+    ///
+    /// Older guests return [`PluginError::unsupported`]; hosts may fall back
+    /// to the `bookclerk.capabilities` query sentinel.
+    async fn capabilities(&self) -> Result<crate::DbCapabilities> {
+        Err(PluginError::unsupported("capabilities"))
+    }
+
+    /// Typed atomic batch (`abiMinor` ≥ 7). Every request is a non-empty
+    /// ordered statement list (batch-of-one for ordinary reads/mutations).
+    ///
+    /// Older guests return [`PluginError::unsupported`]; hosts may fall back
+    /// to the `bookclerk.atomic` query sentinel.
+    async fn execute_atomic(&self, _request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
+        Err(PluginError::unsupported("executeAtomic"))
+    }
 }
 
 /// Invocation-scoped transaction.

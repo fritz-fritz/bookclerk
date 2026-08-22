@@ -2,6 +2,7 @@
 
 #![allow(clippy::missing_docs_in_private_items)]
 
+mod db_rpc;
 mod features;
 mod jobs;
 mod limits;

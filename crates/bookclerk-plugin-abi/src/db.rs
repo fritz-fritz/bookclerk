@@ -195,6 +195,9 @@ pub const HOST_MIN_CELL_BYTES: u32 = 1_024;
 /// request/result scalar. Must stay at or below [`crate::v2::MAX_SCALAR_BYTES`].
 pub const FIRST_PARTY_MAX_RESULT_BYTES: u32 = crate::v2::MAX_SCALAR_BYTES;
 
+/// Bookclerk SQL contract version advertised by first-party adapters.
+pub const SQL_CONTRACT_VERSION: u32 = 1;
+
 /// Result of a successful [`crate::methods::db_connect`].
 ///
 /// Tells the host which SeaORM dialect to use when composing subsequent
@@ -238,7 +241,7 @@ pub struct DbConnectResult {
     #[serde(default)]
     pub max_result_rows: u32,
     /// Maximum UTF-8 bytes of SQL text plus JSON binds per statement
-    /// (`0` is unspecified and fails closed).
+    /// (`0` is unspecified and fails closed). Must be `<=` [`crate::v2::MAX_SCALAR_BYTES`].
     #[serde(default)]
     pub max_payload_bytes: u32,
     /// Maximum JSON bytes of one statement's result rows
@@ -257,6 +260,18 @@ pub struct DbConnectResult {
     /// (`0` is unspecified and fails closed). Must be `<=` [`crate::v2::MAX_SCALAR_BYTES`].
     #[serde(default)]
     pub max_atomic_result_bytes: u32,
+    /// Bookclerk SQL contract version (`0` is unspecified and fails closed).
+    #[serde(default)]
+    pub sql_contract_version: u32,
+    /// Guest versions schema with `PRAGMA user_version`.
+    #[serde(default)]
+    pub pragma_user_version: bool,
+    /// Guest versions schema with a `schema_migrations` table.
+    #[serde(default)]
+    pub schema_migrations: bool,
+    /// Each schema version must be applied as one atomic batch (D1 HTTP).
+    #[serde(default)]
+    pub atomic_schema_batch: bool,
     /// Guest can fill [`DbAtomicTiming::db_execution_us`].
     #[serde(default = "default_true")]
     pub timing: bool,
@@ -275,11 +290,15 @@ impl DbConnectResult {
             max_binds: SQLITE_MAX_BINDS,
             max_statements: FIRST_PARTY_MAX_STATEMENTS,
             max_result_rows: 1_000,
-            max_payload_bytes: 1_048_576,
+            max_payload_bytes: crate::v2::MAX_SCALAR_BYTES,
             max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             max_cell_bytes: crate::v2::MAX_SCALAR_BYTES,
             max_atomic_request_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            sql_contract_version: SQL_CONTRACT_VERSION,
+            pragma_user_version: true,
+            schema_migrations: false,
+            atomic_schema_batch: false,
             timing: true,
         }
     }
@@ -296,11 +315,15 @@ impl DbConnectResult {
             max_binds: POSTGRES_MAX_BINDS,
             max_statements: FIRST_PARTY_MAX_STATEMENTS,
             max_result_rows: 1_000,
-            max_payload_bytes: 1_048_576,
+            max_payload_bytes: crate::v2::MAX_SCALAR_BYTES,
             max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             max_cell_bytes: crate::v2::MAX_SCALAR_BYTES,
             max_atomic_request_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            sql_contract_version: SQL_CONTRACT_VERSION,
+            pragma_user_version: false,
+            schema_migrations: true,
+            atomic_schema_batch: false,
             timing: true,
         }
     }
@@ -317,11 +340,15 @@ impl DbConnectResult {
             max_binds: D1_MAX_BINDS,
             max_statements: FIRST_PARTY_MAX_STATEMENTS,
             max_result_rows: 1_000,
-            max_payload_bytes: 1_048_576,
+            max_payload_bytes: crate::v2::MAX_SCALAR_BYTES,
             max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             max_cell_bytes: crate::v2::MAX_SCALAR_BYTES,
             max_atomic_request_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            sql_contract_version: SQL_CONTRACT_VERSION,
+            pragma_user_version: false,
+            schema_migrations: true,
+            atomic_schema_batch: true,
             timing: true,
         }
     }
@@ -379,10 +406,13 @@ impl DbConnectResult {
                 self.max_result_rows
             ));
         }
-        if self.max_payload_bytes < HOST_MIN_PAYLOAD_BYTES {
+        if self.max_payload_bytes < HOST_MIN_PAYLOAD_BYTES
+            || self.max_payload_bytes > crate::v2::MAX_SCALAR_BYTES
+        {
             return Some(format!(
-                "database guest maxPayloadBytes {} is below host minimum {HOST_MIN_PAYLOAD_BYTES}",
-                self.max_payload_bytes
+                "database guest maxPayloadBytes {} must be between {HOST_MIN_PAYLOAD_BYTES} and {}",
+                self.max_payload_bytes,
+                crate::v2::MAX_SCALAR_BYTES
             ));
         }
         if self.max_result_bytes < HOST_MIN_RESULT_BYTES {
@@ -420,6 +450,21 @@ impl DbConnectResult {
                 "database guest maxResultBytes {} exceeds maxAtomicResultBytes {}",
                 self.max_result_bytes, self.max_atomic_result_bytes
             ));
+        }
+        if self.sql_contract_version < SQL_CONTRACT_VERSION {
+            return Some(format!(
+                "database guest sqlContractVersion {} is below host minimum {SQL_CONTRACT_VERSION}",
+                self.sql_contract_version
+            ));
+        }
+        if self.pragma_user_version == self.schema_migrations {
+            return Some(
+                "database guest must advertise exactly one of pragmaUserVersion or schemaMigrations"
+                    .into(),
+            );
+        }
+        if self.atomic_schema_batch && !self.schema_migrations {
+            return Some("database guest atomicSchemaBatch requires schemaMigrations".into());
         }
         None
     }

@@ -2,7 +2,6 @@
 
 use sea_orm::{ConnectionTrait, Statement};
 
-use super::dialect::{render_statement, SqlFamily};
 use crate::error::{LibraryError, Result};
 
 /// Slot key for job admit / claim / scratch-quota serialization.
@@ -25,19 +24,14 @@ pub fn event_inflight_slot(plugin_id: &str, resource_class: &str) -> String {
 ///
 /// Returns [`LibraryError::Orm`] when either statement fails.
 pub async fn lock_serialization_slot<C: ConnectionTrait>(db: &C, slot_key: &str) -> Result<()> {
-    let family = SqlFamily::from_sea(db.get_database_backend());
-    let backend = family.sea_backend();
-    let insert = render_statement(
-        family,
-        "INSERT OR IGNORE INTO db_serialization_slots (slot_key, bump) \
+    let backend = db.get_database_backend();
+    const INSERT: &str = "INSERT OR IGNORE INTO db_serialization_slots (slot_key, bump) \
          SELECT ?, 0 WHERE NOT EXISTS (\
             SELECT 1 FROM db_serialization_slots WHERE slot_key = ?\
-         )",
-    );
-    let bump = render_statement(
-        family,
-        "UPDATE db_serialization_slots SET bump = bump + 1 WHERE slot_key = ?",
-    );
+         )";
+    const BUMP: &str = "UPDATE db_serialization_slots SET bump = bump + 1 WHERE slot_key = ?";
+    let insert = bookclerk_db_exec::lower_canonical_sql(backend, INSERT);
+    let bump = bookclerk_db_exec::lower_canonical_sql(backend, BUMP);
     db.execute_raw(Statement::from_sql_and_values(
         backend,
         &insert,

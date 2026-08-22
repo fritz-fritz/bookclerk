@@ -38,6 +38,8 @@ export {
   FEATURE_STORAGE_COPY,
   ENVELOPE_VERSION,
 } from "./v2.js";
+export { parseDbValue } from "./db-value.js";
+export type { DbType, DbValue } from "./db-value.js";
 export type {
   AdapterEnv,
   BookclerkContext,

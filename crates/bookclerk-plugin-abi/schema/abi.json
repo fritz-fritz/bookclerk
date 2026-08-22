@@ -1174,7 +1174,7 @@
         },
         "maxPayloadBytes": {
           "type": "integer",
-          "description": "Maximum UTF-8 bytes of SQL plus JSON binds per statement. 0 fails closed."
+          "description": "Maximum UTF-8 bytes of SQL plus JSON binds per statement. 0 fails closed. Must be <= MAX_SCALAR_BYTES."
         },
         "maxResultBytes": {
           "type": "integer",
@@ -1194,6 +1194,22 @@
         },
         "timing": {
           "type": "boolean"
+        },
+        "sqlContractVersion": {
+          "type": "integer",
+          "description": "Bookclerk SQL contract version. 0 is unspecified and fails closed."
+        },
+        "pragmaUserVersion": {
+          "type": "boolean",
+          "description": "Guest versions schema with PRAGMA user_version."
+        },
+        "schemaMigrations": {
+          "type": "boolean",
+          "description": "Guest versions schema with a schema_migrations table."
+        },
+        "atomicSchemaBatch": {
+          "type": "boolean",
+          "description": "Each schema version must be applied as one atomic batch (D1 HTTP)."
         }
       }
     },

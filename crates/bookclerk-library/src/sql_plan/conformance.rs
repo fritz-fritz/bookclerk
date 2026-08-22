@@ -474,7 +474,7 @@ async fn serialization_slot_bump_is_monotonic() {
 }
 
 #[test]
-fn postgres_renderer_uses_numbered_placeholders() {
+fn postgres_renderer_lowers_canonical_placeholders() {
     let now = "2024-06-01T00:00:00Z";
     let req = named(
         "pg-render",
@@ -496,13 +496,25 @@ fn postgres_renderer_uses_numbered_placeholders() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        joined.contains("$1"),
-        "postgres plans must use $n binds:\n{joined}"
+        !joined.contains("$1"),
+        "host compiler must emit canonical SQL, not $n:\n{joined}"
     );
-    assert!(
-        !joined.contains('?'),
-        "postgres plans must not leave SQLite ? placeholders:\n{joined}"
-    );
+    let mut lowered_any = false;
+    for stmt in &compiled.plan.statements {
+        if stmt.sql.contains('?') {
+            let lowered = bookclerk_db_exec::lower_canonical_to_postgres(&stmt.sql);
+            assert!(
+                lowered.contains('$'),
+                "adapter lowering must produce $n binds:\n{lowered}"
+            );
+            assert!(
+                !lowered.contains('?'),
+                "adapter lowering must not leave ? placeholders:\n{lowered}"
+            );
+            lowered_any = true;
+        }
+    }
+    assert!(lowered_any, "enqueue plan must contain binds:\n{joined}");
 }
 
 #[tokio::test]

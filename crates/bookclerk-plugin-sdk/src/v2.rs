@@ -17,6 +17,9 @@ pub use bookclerk_plugin_abi::v2::{
     FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
     MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
+pub use bookclerk_plugin_abi::{
+    sql_payload_exceeds, DbCapabilities, DbType, DbValue, ExecuteReply, ExecuteRequest,
+};
 
 mod json;
 pub use json::{decode as decode_json, encode as encode_json, encode_atomic_result, page_rows};
