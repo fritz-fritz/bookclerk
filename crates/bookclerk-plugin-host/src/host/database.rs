@@ -125,13 +125,18 @@ impl ExternalDatabase {
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
         }));
         let db = Database::connect_proxy(backend, proxy).await?;
-        self.apply_host_schema(&db).await?;
+        self.apply_host_schema(&db, &connect_result).await?;
         Ok((db, connect_result))
     }
 
     /// Reads the guest schema version and applies remaining host-authored DDL.
-    async fn apply_host_schema(&self, db: &DatabaseConnection) -> Result<(), DbErr> {
-        let kind = bookclerk_library::HostSchemaKind::from_plugin_id(&self.plugin_id);
+    async fn apply_host_schema(
+        &self,
+        db: &DatabaseConnection,
+        caps: &DbConnectResult,
+    ) -> Result<(), DbErr> {
+        let kind = bookclerk_library::HostSchemaKind::from_connect(caps)
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
         if kind == bookclerk_library::HostSchemaKind::D1 {
             let session = self.session.clone();
             bookclerk_library::apply_host_schema_with_batch(db, kind, move |stmts| {
@@ -551,37 +556,47 @@ impl RpcAtomicBackend {
     ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
         bookclerk_library::validate_plan(&compiled.plan, &self.caps)?;
         let mut request = compiled.clone().into_request(operation_id.clone());
-        request.deadline_unix_ms = Some(unix_now_ms().saturating_add(120_000));
+        let deadline_unix_ms = unix_now_ms().saturating_add(120_000);
+        request.deadline_unix_ms = Some(deadline_unix_ms);
         let payload = serde_json::to_string(&request).map_err(|err| {
             bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
         })?;
         let cancel = Arc::new(AtomicBool::new(false));
         let _guard = CancelOnDrop(Arc::clone(&cancel));
-        match self
-            .session
-            .db_query_cancelable(DB_ATOMIC_SENTINEL, payload, cancel)
-            .await
-        {
-            Ok(page) => {
-                let exec: DbPlanExecResult =
-                    serde_json::from_str(&page.rows_json).map_err(|err| {
-                        bookclerk_library::LibraryError::Unavailable(format!(
-                            "database atomic result: {err}"
-                        ))
-                    })?;
-                bookclerk_library::validate_exec_result(
-                    &compiled.plan,
-                    &exec,
-                    &self.caps,
-                    &operation_id,
-                )?;
-                Ok(bookclerk_library::interpret_exec(
-                    &compiled.plan,
-                    &exec,
-                    &compiled.expected_hash,
+        let remaining_ms = deadline_unix_ms.saturating_sub(unix_now_ms()).max(1);
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_millis(remaining_ms)) => {
+                cancel.store(true, Ordering::SeqCst);
+                Err(bookclerk_library::LibraryError::Unavailable(
+                    "deadline_exceeded: host RPC deadline elapsed".into(),
                 ))
             }
-            Err(err) => Err(map_atomic_rpc_err(err)),
+            result = self.session.db_query_cancelable(
+                DB_ATOMIC_SENTINEL,
+                payload,
+                Arc::clone(&cancel),
+            ) => match result {
+                Ok(page) => {
+                    let exec: DbPlanExecResult =
+                        serde_json::from_str(&page.rows_json).map_err(|err| {
+                            bookclerk_library::LibraryError::Unavailable(format!(
+                                "database atomic result: {err}"
+                            ))
+                        })?;
+                    bookclerk_library::validate_exec_result(
+                        &compiled.plan,
+                        &exec,
+                        &self.caps,
+                        &operation_id,
+                    )?;
+                    Ok(bookclerk_library::interpret_exec(
+                        &compiled.plan,
+                        &exec,
+                        &compiled.expected_hash,
+                    ))
+                }
+                Err(err) => Err(map_atomic_rpc_err(err)),
+            }
         }
     }
 }

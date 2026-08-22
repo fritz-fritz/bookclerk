@@ -14,7 +14,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
-use bookclerk_library::{b64_string_to_bytes, bytes_to_b64_string, LibraryError, Result};
+use bookclerk_db_exec::{
+    b64_string_to_bytes, bytes_to_b64_string, exec_deadline_remaining_ms, is_txn_broken,
+    note_begin_failed, txn_broken_err,
+};
 use bookclerk_plugin_sdk::v2::MAX_SCALAR_BYTES;
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -35,13 +38,11 @@ pub async fn open(
     account_id: String,
     database_id: String,
     token: String,
-) -> Result<DatabaseConnection> {
+) -> std::result::Result<DatabaseConnection, DbErr> {
     let proxy = D1Proxy::new(api_base, account_id, database_id, token);
     set_shared_proxy(proxy.clone());
-    let db = Database::connect_proxy(DbBackend::Sqlite, Arc::new(Box::new(proxy.clone())))
-        .await
-        .map_err(LibraryError::Orm)?;
-    db.ping().await.map_err(LibraryError::Orm)?;
+    let db = Database::connect_proxy(DbBackend::Sqlite, Arc::new(Box::new(proxy.clone()))).await?;
+    db.ping().await?;
     tracing::debug!(plugin = "d1", "opened library database");
     Ok(db)
 }
@@ -220,11 +221,16 @@ impl D1Proxy {
         body: JsonValue,
     ) -> std::result::Result<JsonValue, D1Error> {
         let _http = self.inner.http.lock().await;
+        let timeout = exec_deadline_remaining_ms()
+            .map(Duration::from_millis)
+            .unwrap_or(D1_REQUEST_TIMEOUT)
+            .min(D1_REQUEST_TIMEOUT);
         let response = self
             .inner
             .client
             .post(url)
             .bearer_auth(&self.inner.api_token)
+            .timeout(timeout)
             .json(&body)
             .send()
             .await
@@ -270,8 +276,8 @@ impl D1Proxy {
 #[async_trait]
 impl ProxyDatabaseTrait for D1Proxy {
     async fn query(&self, statement: Statement) -> std::result::Result<Vec<ProxyRow>, DbErr> {
-        if bookclerk_library::is_txn_broken() {
-            return Err(bookclerk_library::txn_broken_err());
+        if is_txn_broken() {
+            return Err(txn_broken_err());
         }
         let params = statement_json_params(&statement);
         let paged = sql_is_bookclerk_page(&statement.sql);
@@ -303,8 +309,8 @@ impl ProxyDatabaseTrait for D1Proxy {
     }
 
     async fn execute(&self, statement: Statement) -> std::result::Result<ProxyExecResult, DbErr> {
-        if bookclerk_library::is_txn_broken() {
-            return Err(bookclerk_library::txn_broken_err());
+        if is_txn_broken() {
+            return Err(txn_broken_err());
         }
         let params = statement_json_params(&statement);
         let value = self.run_sql(&statement.sql, params).await?;
@@ -324,7 +330,7 @@ impl ProxyDatabaseTrait for D1Proxy {
     }
 
     async fn begin(&self) {
-        bookclerk_library::note_begin_failed(D1_INTERACTIVE_TXN_UNSUPPORTED);
+        note_begin_failed(D1_INTERACTIVE_TXN_UNSUPPORTED);
     }
 
     async fn commit(&self) {}
@@ -334,8 +340,8 @@ impl ProxyDatabaseTrait for D1Proxy {
     fn start_rollback(&self) {}
 
     async fn ping(&self) -> std::result::Result<(), DbErr> {
-        if bookclerk_library::is_txn_broken() {
-            return Err(bookclerk_library::txn_broken_err());
+        if is_txn_broken() {
+            return Err(txn_broken_err());
         }
         let _ = self.run_sql("SELECT 1 AS ok;", Vec::new()).await?;
         Ok(())
@@ -1365,7 +1371,23 @@ mod tests {
                 .cloned()
                 .unwrap_or_default();
             match sqlite_run_statement(conn, sql, &params) {
-                Ok(entry) => results.push(entry),
+                Ok(entry) => {
+                    if bookclerk_db_exec::consume_atomic_interrupt(
+                        bookclerk_db_exec::AtomicInterruptPhase::BetweenStatements,
+                    )
+                    .is_some()
+                    {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return ResponseTemplate::new(200).set_body_json(json!({
+                            "success": true,
+                            "result": [{
+                                "success": false,
+                                "error": "cancelled: atomic session cancelled"
+                            }]
+                        }));
+                    }
+                    results.push(entry);
+                }
                 Err(msg) => {
                     let _ = conn.execute_batch("ROLLBACK");
                     results.push(json!({ "success": false, "error": msg }));
@@ -1695,5 +1717,95 @@ mod tests {
         let replayed =
             bookclerk_library::interpret_exec(&compiled.plan, &replay, &compiled.expected_hash);
         assert!(replayed.replayed, "same operationId must replay");
+    }
+
+    #[tokio::test]
+    async fn executing_mock_schema_crash_retries() {
+        let (_server, proxy, _conn) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        bookclerk_db_exec::inject_atomic_interrupt_after(
+            bookclerk_db_exec::AtomicInterruptPhase::BetweenStatements,
+            bookclerk_db_exec::AtomicInterruptKind::Cancel,
+            2,
+        );
+        let proxy_for_batch = proxy.clone();
+        let err = bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::D1,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move {
+                    let batch: Vec<(String, Vec<JsonValue>)> =
+                        stmts.into_iter().map(|sql| (sql, Vec::new())).collect();
+                    proxy.run_batch(&batch).await.map(|_| ()).map_err(|err| {
+                        bookclerk_library::LibraryError::Orm(sea_orm::DbErr::from(err))
+                    })
+                }
+            },
+        )
+        .await
+        .expect_err("interrupt mid-version");
+        assert!(
+            err.to_string().to_lowercase().contains("cancel") || err.to_string().contains("failed"),
+            "{err}"
+        );
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::D1,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move {
+                    let batch: Vec<(String, Vec<JsonValue>)> =
+                        stmts.into_iter().map(|sql| (sql, Vec::new())).collect();
+                    proxy.run_batch(&batch).await.map(|_| ()).map_err(|err| {
+                        bookclerk_library::LibraryError::Orm(sea_orm::DbErr::from(err))
+                    })
+                }
+            },
+        )
+        .await
+        .expect("retry after crash");
+    }
+
+    #[tokio::test]
+    async fn executing_mock_shared_vectors() {
+        let (_server, proxy, _conn) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::D1,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move {
+                    let batch: Vec<(String, Vec<JsonValue>)> =
+                        stmts.into_iter().map(|sql| (sql, Vec::new())).collect();
+                    proxy.run_batch(&batch).await.map(|_| ()).map_err(|err| {
+                        bookclerk_library::LibraryError::Orm(sea_orm::DbErr::from(err))
+                    })
+                }
+            },
+        )
+        .await
+        .expect("host D1 schema");
+        bookclerk_library::sql_plan::vectors::run_request_vectors(
+            bookclerk_library::SqlFamily::Sqlite,
+            |req| {
+                let proxy = proxy.clone();
+                async move { proxy.run_atomic(req).await }
+            },
+        )
+        .await;
     }
 }

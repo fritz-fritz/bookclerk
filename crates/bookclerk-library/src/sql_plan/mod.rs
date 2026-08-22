@@ -12,6 +12,7 @@ mod exec;
 mod interpret;
 mod named;
 mod slots;
+pub mod vectors;
 
 use bookclerk_plugin_abi::{
     DbAtomicPlan, DbAtomicRequest, DbConnectResult, DbPlanStatement, DbPlanStatementKind,

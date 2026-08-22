@@ -23,6 +23,112 @@ fn named(id: &'static str, params: DbAtomicParams) -> NamedOp {
 }
 
 #[tokio::test]
+async fn shared_vectors_on_sqlite() {
+    let db = mem_db().await;
+    super::vectors::run_conn_vectors(&db, SqlFamily::Sqlite, "sqlite_txn").await;
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn shared_vectors_on_postgres() {
+    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        return;
+    }
+    let db = postgres_migrated_db().await;
+    super::vectors::run_conn_vectors(&db, SqlFamily::Postgres, "postgres_txn").await;
+}
+
+#[tokio::test]
+async fn sqlite_recursive_cte_honors_deadline() {
+    let db = mem_db().await;
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+        .saturating_add(80);
+    let plan = bookclerk_plugin_abi::DbAtomicPlan {
+        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+            sql: "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM t WHERE x < 200000000) SELECT COUNT(*) AS n FROM t".into(),
+            binds: vec![],
+            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+        }],
+        outcome_index: 0,
+        payload_index: None,
+        prior_receipt_index: None,
+        receipt_select_index: None,
+    };
+    let err = super::execute_statements_on_session(
+        &db,
+        &plan,
+        "op-deadline",
+        "sqlite_txn",
+        0,
+        super::AtomicSession {
+            cancel: None,
+            deadline_unix_ms: Some(deadline),
+        },
+    )
+    .await
+    .unwrap_err();
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("deadline") || msg.contains("interrupt") || msg.contains("cancel"),
+        "long statement must honor deadline, got {err}"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_query_stops_after_cap_plus_one() {
+    let db = mem_db().await;
+    let backend = sea_orm::ConnectionTrait::get_database_backend(&db);
+    sea_orm::ConnectionTrait::execute_raw(
+        &db,
+        sea_orm::Statement::from_string(
+            backend,
+            "CREATE TABLE IF NOT EXISTS rowcap_probe (x INTEGER)",
+        ),
+    )
+    .await
+    .ok();
+    for i in 0..50 {
+        sea_orm::ConnectionTrait::execute_raw(
+            &db,
+            sea_orm::Statement::from_sql_and_values(
+                backend,
+                "INSERT INTO rowcap_probe (x) VALUES (?)",
+                [i.into()],
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    let plan = bookclerk_plugin_abi::DbAtomicPlan {
+        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+            sql: "SELECT x FROM rowcap_probe".into(),
+            binds: vec![],
+            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+        }],
+        outcome_index: 0,
+        payload_index: None,
+        prior_receipt_index: None,
+        receipt_select_index: None,
+    };
+    let err = super::execute_statements_on(&db, &plan, "op-early", "sqlite_txn", 5)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("maxResultRows"), "{err}");
+    let seen = crate::query_rows_seen();
+    assert!(
+        seen <= 6,
+        "must stop after cap+1 materialized rows, saw {seen}"
+    );
+}
+
+#[tokio::test]
 async fn plan_commit_inserts_receipt() {
     let db = mem_db().await;
     let now = "2024-06-01T00:00:00Z";

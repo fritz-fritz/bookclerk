@@ -3102,6 +3102,71 @@ async fn dispatch_page_fault_leaves_parent_pending_and_retries() {
 }
 
 #[tokio::test]
+async fn dispatch_retry_keeps_frozen_snapshot_when_catalog_changes() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:snapshot-catalog",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let db = store.db().clone();
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
+    let original = [
+        EventSubscriber::plugin("echo"),
+        EventSubscriber::plugin("audiobookshelf"),
+        EventSubscriber::plugin("keep"),
+    ];
+    super::event_outbox::set_dispatch_chunk_for_test(Some(2));
+    super::event_outbox::inject_dispatch_page_failures(1);
+    let err = store
+        .dispatch_event_deliveries(&id, &original, "snap-op")
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("injected dispatch page failure"),
+        "{err}"
+    );
+    super::event_outbox::inject_dispatch_page_failures(0);
+    let changed = [
+        EventSubscriber::plugin("echo"),
+        EventSubscriber::plugin("replaced-plugin"),
+        EventSubscriber::plugin("keep"),
+    ];
+    let created = store
+        .dispatch_event_deliveries(&id, &changed, "snap-op")
+        .await
+        .unwrap();
+    super::event_outbox::set_dispatch_chunk_for_test(None);
+    assert!(
+        created >= 1,
+        "retry must finish remaining frozen subscribers, created={created}"
+    );
+    let event = store.get_domain_event(&id).await.unwrap().unwrap();
+    assert_eq!(event.dispatch_state, "dispatched");
+    assert!(store
+        .get_event_delivery(&format!("{id}:audiobookshelf"))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_event_delivery(&format!("{id}:keep"))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(store
+        .get_event_delivery(&format!("{id}:replaced-plugin"))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn dispatch_twenty_five_subscribers_on_sqlite_caps_are_all_inserted() {
     let store = test_store()
         .await

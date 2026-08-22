@@ -11,7 +11,9 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -65,6 +67,50 @@ TABLE_RE = re.compile(
 )
 
 JSON_EACH_RE = re.compile(r"\bjson_each\b", re.IGNORECASE)
+
+# Production guests and the shared guest crate must not take a non-optional
+# `bookclerk-library` dependency. Optional (`host-helpers`) and `[dev-dependencies]`
+# are allowed for tests/CLI helpers.
+LIBRARY_ISOLATION_PACKAGES = (
+    "bookclerk-db-guest",
+    "bookclerk-plugin-database-sqlite",
+    "bookclerk-plugin-database-postgres",
+    "bookclerk-plugin-database-d1",
+)
+
+
+def check_cargo_metadata() -> list[str]:
+    """Refuse a non-optional production `bookclerk-library` dep on guest crates."""
+    proc = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return [f"cargo metadata failed: {proc.stderr.strip() or proc.stdout.strip()}"]
+    meta = json.loads(proc.stdout)
+    hits: list[str] = []
+    for pkg in meta.get("packages", []):
+        if pkg.get("name") not in LIBRARY_ISOLATION_PACKAGES:
+            continue
+        manifest = Path(pkg.get("manifest_path", ""))
+        try:
+            manifest.relative_to(ROOT)
+        except ValueError:
+            continue
+        for dep in pkg.get("dependencies", []):
+            if dep.get("name") != "bookclerk-library":
+                continue
+            kind = dep.get("kind")
+            optional = bool(dep.get("optional"))
+            if kind in (None, "normal") and not optional:
+                hits.append(
+                    f"{pkg['name']}: non-optional dependency on bookclerk-library "
+                    "(use bookclerk-db-exec, optional host-helpers, or a dev-dependency)"
+                )
+    return hits
 
 
 def iter_plugin_sources() -> list[Path]:
@@ -157,6 +203,7 @@ def main() -> int:
     hits: list[str] = []
     for path in files:
         hits.extend(check_file(path))
+    hits.extend(check_cargo_metadata())
     if hits:
         print("Database plugin isolation violations:", file=sys.stderr)
         for h in hits:
@@ -167,7 +214,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"ok: {len(files)} database plugin sources")
+    print(f"ok: {len(files)} database plugin sources + cargo metadata")
     return 0
 
 

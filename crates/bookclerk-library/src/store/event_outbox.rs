@@ -272,21 +272,24 @@ impl LibraryStore {
             c.fetch_add(1, Ordering::SeqCst);
         });
         if let Some(atomic) = &self.atomic {
+            let snapshot = self
+                .load_or_init_dispatch_snapshot(event_id, subscribers)
+                .await?;
             let chunk = self.dispatch_chunk_size().max(1);
-            if subscribers.is_empty() {
+            if snapshot.is_empty() {
                 return atomic
-                    .dispatch_event_deliveries(event_id, subscribers, operation_id, true)
+                    .dispatch_event_deliveries(event_id, &[], operation_id, true)
                     .await;
             }
             let mut total = 0u32;
             let mut start = 0usize;
             let mut page = 0usize;
-            while start < subscribers.len() {
-                let end = (start + chunk).min(subscribers.len());
-                let last = end == subscribers.len();
+            while start < snapshot.len() {
+                let end = (start + chunk).min(snapshot.len());
+                let last = end == snapshot.len();
                 let op = format!("{operation_id}:p{page}");
                 total += atomic
-                    .dispatch_event_deliveries(event_id, &subscribers[start..end], &op, last)
+                    .dispatch_event_deliveries(event_id, &snapshot[start..end], &op, last)
                     .await?;
                 if take_dispatch_page_fault() {
                     return Err(LibraryError::Other(anyhow!(
@@ -309,6 +312,35 @@ impl LibraryStore {
                 Err(err)
             }
         }
+    }
+
+    /// Returns the frozen dispatch subscriber snapshot, writing it on first use.
+    async fn load_or_init_dispatch_snapshot(
+        &self,
+        event_id: &str,
+        subscribers: &[EventSubscriber],
+    ) -> Result<Vec<EventSubscriber>> {
+        let row = domain_events::Entity::find_by_id(event_id)
+            .one(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?
+            .ok_or_else(|| LibraryError::NotFound(format!("domain event {event_id}")))?;
+        if !row.dispatch_snapshot_json.trim().is_empty() {
+            let ids: Vec<String> =
+                serde_json::from_str(&row.dispatch_snapshot_json).unwrap_or_default();
+            return Ok(ids.into_iter().map(EventSubscriber::plugin).collect());
+        }
+        let json = serde_json::to_string(
+            &subscribers
+                .iter()
+                .map(|s| s.plugin_id.as_str())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_else(|_| "[]".into());
+        let mut am: domain_events::ActiveModel = row.into();
+        am.dispatch_snapshot_json = Set(json.clone());
+        am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        Ok(subscribers.to_vec())
     }
 
     /// Next undispatched outbox row (oldest first).
@@ -1948,6 +1980,7 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
         wake_lease_expires_at: NotSet,
         wake_cursor_at: Set(String::new()),
         wake_cursor_id: Set(String::new()),
+        dispatch_snapshot_json: Set(String::new()),
     };
     match model.insert(db).await {
         Ok(_) => Ok(PublishDomainEventOutcome::Created { id }),

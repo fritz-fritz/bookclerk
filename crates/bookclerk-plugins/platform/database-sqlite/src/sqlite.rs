@@ -7,7 +7,12 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use bookclerk_library::{apply_host_schema, HostSchemaKind, LibraryError, LibraryStore, Result};
+use bookclerk_db_exec::{
+    consume_begin_injection, consume_commit_injection, exec_deadline_expired, is_txn_broken,
+    note_begin_failed, note_commit_failed, note_query_row, txn_broken_err,
+};
+#[cfg(feature = "host-helpers")]
+use bookclerk_library::{apply_host_schema, HostSchemaKind, LibraryStore};
 use bookclerk_plugin_sdk::v2::MAX_SCALAR_BYTES;
 use rusqlite::Connection;
 use sea_orm::{
@@ -110,6 +115,8 @@ impl SqliteProxy {
     /// Call after the host applies schema (see [`open`] / [`open_memory`]).
     #[must_use]
     pub fn new(conn: Connection) -> Self {
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+        conn.progress_handler(250, Some(|| exec_deadline_expired()));
         Self {
             conn: Arc::new(Mutex::new(SqliteState { conn, txn_depth: 0 })),
             txn_gate: Arc::new(AsyncMutex::new(())),
@@ -175,25 +182,25 @@ impl std::fmt::Debug for SqliteProxy {
 ///
 /// # Errors
 ///
-/// Returns [`LibraryError`] when the parent directory cannot be created, the
-/// file cannot be opened, or the SeaORM proxy cannot connect.
-pub async fn open(path: &Path) -> Result<DatabaseConnection> {
+/// Returns [`DbErr`] when the parent directory cannot be created, the file
+/// cannot be opened, or the SeaORM proxy cannot connect.
+pub async fn open(path: &Path) -> std::result::Result<DatabaseConnection, DbErr> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(|e| DbErr::Custom(e.to_string()))?;
     }
-    let conn = rusqlite::Connection::open(path)?;
+    let conn = rusqlite::Connection::open(path).map_err(rusqlite_db_err)?;
     // TRUNCATE keeps a durable rollback journal without unlinking it on commit.
     // The jailed sqlite guest only has file-level Landlock grants for the DB and
     // sidecars (not the files-dir parent), so DELETE journal mode fails with
     // SQLITE_IOERR_DELETE when it tries to remove `*-journal`.
-    conn.execute_batch("PRAGMA journal_mode = TRUNCATE;")?;
+    conn.execute_batch("PRAGMA journal_mode = TRUNCATE;")
+        .map_err(rusqlite_db_err)?;
     let db = Database::connect_proxy(
         DbBackend::Sqlite,
         Arc::new(Box::new(SqliteProxy::new(conn))),
     )
-    .await
-    .map_err(LibraryError::Orm)?;
-    db.ping().await.map_err(LibraryError::Orm)?;
+    .await?;
+    db.ping().await?;
     tracing::debug!(path = %path.display(), plugin = "sqlite", "opened library database");
     Ok(db)
 }
@@ -205,9 +212,12 @@ pub async fn open(path: &Path) -> Result<DatabaseConnection> {
 ///
 /// # Errors
 ///
-/// Returns [`LibraryError`] when the SeaORM proxy or host schema fails.
-pub async fn open_memory() -> Result<DatabaseConnection> {
-    let db = open_memory_unmigrated().await?;
+/// Returns [`bookclerk_library::LibraryError`] when the SeaORM proxy or host schema fails.
+#[cfg(feature = "host-helpers")]
+pub async fn open_memory() -> bookclerk_library::Result<DatabaseConnection> {
+    let db = open_memory_unmigrated()
+        .await
+        .map_err(bookclerk_library::LibraryError::Orm)?;
     apply_host_schema(&db, HostSchemaKind::SqliteFile).await?;
     Ok(db)
 }
@@ -216,16 +226,15 @@ pub async fn open_memory() -> Result<DatabaseConnection> {
 ///
 /// # Errors
 ///
-/// Returns [`LibraryError`] when the SeaORM proxy fails.
-pub async fn open_memory_unmigrated() -> Result<DatabaseConnection> {
-    let conn = rusqlite::Connection::open_in_memory()?;
+/// Returns [`DbErr`] when the SeaORM proxy fails.
+pub async fn open_memory_unmigrated() -> std::result::Result<DatabaseConnection, DbErr> {
+    let conn = rusqlite::Connection::open_in_memory().map_err(rusqlite_db_err)?;
     let db = Database::connect_proxy(
         DbBackend::Sqlite,
         Arc::new(Box::new(SqliteProxy::new(conn))),
     )
-    .await
-    .map_err(LibraryError::Orm)?;
-    db.ping().await.map_err(LibraryError::Orm)?;
+    .await?;
+    db.ping().await?;
     Ok(db)
 }
 
@@ -241,8 +250,11 @@ pub async fn open_memory_unmigrated() -> Result<DatabaseConnection> {
 /// # Errors
 ///
 /// Propagates errors from [`open`] or host schema application.
-pub async fn open_store(path: &Path) -> Result<LibraryStore> {
-    let db = open(path).await?;
+#[cfg(feature = "host-helpers")]
+pub async fn open_store(path: &Path) -> bookclerk_library::Result<LibraryStore> {
+    let db = open(path)
+        .await
+        .map_err(bookclerk_library::LibraryError::Orm)?;
     apply_host_schema(&db, HostSchemaKind::SqliteFile).await?;
     Ok(LibraryStore::from_connection(db))
 }
@@ -252,15 +264,16 @@ pub async fn open_store(path: &Path) -> Result<LibraryStore> {
 /// # Errors
 ///
 /// Propagates errors from [`open_memory`].
-pub async fn open_store_memory() -> Result<LibraryStore> {
+#[cfg(feature = "host-helpers")]
+pub async fn open_store_memory() -> bookclerk_library::Result<LibraryStore> {
     Ok(LibraryStore::from_connection(open_memory().await?))
 }
 
 #[async_trait]
 impl ProxyDatabaseTrait for SqliteProxy {
     async fn query(&self, statement: Statement) -> std::result::Result<Vec<ProxyRow>, DbErr> {
-        if bookclerk_library::is_txn_broken() {
-            return Err(bookclerk_library::txn_broken_err());
+        if is_txn_broken() {
+            return Err(txn_broken_err());
         }
         let _permit = self.acquire_for_statement().await;
         let conn = self.conn.clone();
@@ -304,6 +317,12 @@ impl ProxyDatabaseTrait for SqliteProxy {
                     values.insert(name.clone(), rusqlite_to_sea(v, decl, name));
                 }
                 out.push(ProxyRow { values });
+                if note_query_row() {
+                    return Err(DbErr::Custom(format!(
+                        "query returned {} rows; maxResultRows exceeded",
+                        out.len()
+                    )));
+                }
             }
             let elapsed_ms = started.elapsed().as_millis();
             if elapsed_ms >= SLOW_SQL_WARN_MS {
@@ -332,8 +351,8 @@ impl ProxyDatabaseTrait for SqliteProxy {
     }
 
     async fn execute(&self, statement: Statement) -> std::result::Result<ProxyExecResult, DbErr> {
-        if bookclerk_library::is_txn_broken() {
-            return Err(bookclerk_library::txn_broken_err());
+        if is_txn_broken() {
+            return Err(txn_broken_err());
         }
         let _permit = self.acquire_for_statement().await;
         let conn = self.conn.clone();
@@ -398,8 +417,8 @@ impl ProxyDatabaseTrait for SqliteProxy {
     }
 
     async fn begin(&self) {
-        if bookclerk_library::consume_begin_injection() {
-            bookclerk_library::note_begin_failed("injected begin failure");
+        if consume_begin_injection() {
+            note_begin_failed("injected begin failure");
             return;
         }
         {
@@ -409,7 +428,7 @@ impl ProxyDatabaseTrait for SqliteProxy {
                     drop(lease);
                     let mut state = self.lock_state();
                     if let Err(err) = state.begin() {
-                        bookclerk_library::note_begin_failed(format_rusqlite_error(&err));
+                        note_begin_failed(format_rusqlite_error(&err));
                         tracing::error!(error = %err, "sqlite nested begin failed");
                     }
                     return;
@@ -420,7 +439,7 @@ impl ProxyDatabaseTrait for SqliteProxy {
         {
             let mut state = self.lock_state();
             if let Err(err) = state.begin() {
-                bookclerk_library::note_begin_failed(format_rusqlite_error(&err));
+                note_begin_failed(format_rusqlite_error(&err));
                 tracing::error!(error = %err, "sqlite begin failed");
                 return;
             }
@@ -432,8 +451,8 @@ impl ProxyDatabaseTrait for SqliteProxy {
     }
 
     async fn commit(&self) {
-        if bookclerk_library::consume_commit_injection() {
-            bookclerk_library::note_commit_failed("injected commit failure");
+        if consume_commit_injection() {
+            note_commit_failed("injected commit failure");
             let depth = {
                 let mut state = self.lock_state();
                 if let Err(err) = state.rollback() {
@@ -447,7 +466,7 @@ impl ProxyDatabaseTrait for SqliteProxy {
         let depth = {
             let mut state = self.lock_state();
             if let Err(err) = state.commit() {
-                bookclerk_library::note_commit_failed(format_rusqlite_error(&err));
+                note_commit_failed(format_rusqlite_error(&err));
                 tracing::error!(error = %err, "sqlite commit failed");
                 if let Err(rb) = state.rollback() {
                     tracing::error!(error = %rb, "sqlite rollback after commit failure");

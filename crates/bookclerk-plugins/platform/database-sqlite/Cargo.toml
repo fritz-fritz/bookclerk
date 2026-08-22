@@ -20,11 +20,18 @@ display_name = "SQLite"
 name = "bookclerk-plugin-database-sqlite"
 path = "src/main.rs"
 
+[features]
+default = ["host-helpers"]
+# Test / CLI helpers that apply host schema (`open_memory`, `open_store`).
+# Production guest binaries can be built with `--no-default-features`.
+host-helpers = ["dep:bookclerk-library"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+bookclerk-db-exec.workspace = true
 bookclerk-db-guest.workspace = true
-bookclerk-library.workspace = true
+bookclerk-library = { workspace = true, optional = true }
 bookclerk-plugin-sdk = { workspace = true, features = ["db"] }
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
@@ -35,7 +42,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-bookclerk-db-guest.workspace = true
+bookclerk-library.workspace = true
 chrono.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

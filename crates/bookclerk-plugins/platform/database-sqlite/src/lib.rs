@@ -11,4 +11,6 @@ pub const ID: &str = "sqlite";
 pub mod sqlite;
 pub mod v2;
 
-pub use sqlite::{open, open_memory, open_memory_unmigrated, open_store, open_store_memory};
+pub use sqlite::{open, open_memory_unmigrated};
+#[cfg(feature = "host-helpers")]
+pub use sqlite::{open_memory, open_store, open_store_memory};

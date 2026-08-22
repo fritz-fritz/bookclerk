@@ -34,9 +34,11 @@ impl D1Proxy {
     ) -> std::result::Result<DbPlanExecResult, DbErr> {
         let started = std::time::Instant::now();
         check_d1_session(
-            bookclerk_library::AtomicInterruptPhase::BeforeBegin,
+            bookclerk_db_exec::AtomicInterruptPhase::BeforeBegin,
             req.deadline_unix_ms,
         )?;
+        bookclerk_db_exec::arm_exec_budget(req.deadline_unix_ms, 0);
+        let _budget = D1ExecBudget;
         let plan = req
             .plan
             .clone()
@@ -51,7 +53,7 @@ impl D1Proxy {
             let raw = match self.run_batch(&statements).await {
                 Ok(value) => {
                     check_d1_session(
-                        bookclerk_library::AtomicInterruptPhase::AroundCommit,
+                        bookclerk_db_exec::AtomicInterruptPhase::AroundCommit,
                         req.deadline_unix_ms,
                     )?;
                     value
@@ -76,13 +78,22 @@ impl D1Proxy {
     }
 }
 
+/// Clears the process-wide D1 HTTP deadline when `run_atomic` returns.
+struct D1ExecBudget;
+
+impl Drop for D1ExecBudget {
+    fn drop(&mut self) {
+        bookclerk_db_exec::clear_exec_budget();
+    }
+}
+
 /// Checks cancel/deadline inject plus a guest-visible `deadlineUnixMs`.
 fn check_d1_session(
-    phase: bookclerk_library::AtomicInterruptPhase,
+    phase: bookclerk_db_exec::AtomicInterruptPhase,
     deadline_unix_ms: Option<u64>,
 ) -> std::result::Result<(), DbErr> {
-    use bookclerk_library::{AtomicInterruptKind, AtomicInterruptPhase};
-    let kind = bookclerk_library::consume_atomic_interrupt(phase);
+    use bookclerk_db_exec::{AtomicInterruptKind, AtomicInterruptPhase};
+    let kind = bookclerk_db_exec::consume_atomic_interrupt(phase);
     let expired = deadline_unix_ms.is_some_and(|ms| d1_unix_now_ms() >= ms);
     let kind = kind.or_else(|| expired.then_some(AtomicInterruptKind::Deadline));
     let Some(kind) = kind else {

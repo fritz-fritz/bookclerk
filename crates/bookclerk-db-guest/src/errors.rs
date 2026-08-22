@@ -5,7 +5,9 @@
 //! failures are `unavailable` so the host retries the same `operationId`.
 
 use bookclerk_plugin_sdk::{PluginError, PluginErrorCode};
+use sea_orm::{DbErr, RuntimeErr};
 use serde_json::json;
+use std::ops::Deref;
 
 /// Maps an engine / library failure onto a structured [`PluginError`].
 ///
@@ -14,8 +16,48 @@ use serde_json::json;
 /// * `err` - Display of `DbErr`, `LibraryError`, or a guest string.
 #[must_use]
 pub fn plugin_error_from_engine(err: impl std::fmt::Display) -> PluginError {
-    let message = err.to_string();
-    let (code, engine_code) = classify_engine_message(&message);
+    classify_message(&err.to_string())
+}
+
+/// Maps a SeaORM [`DbErr`] using typed driver codes when present.
+///
+/// PostgreSQL SQLSTATE comes from `sqlx::DatabaseError::code()`. SQLite
+/// guests format `SQLITE_*` into [`DbErr::Custom`] before this mapper runs.
+#[must_use]
+pub fn plugin_error_from_db_err(err: &DbErr) -> PluginError {
+    if let Some(code) = sqlx_engine_code(err) {
+        let message = err.to_string();
+        let (abi, engine) = classify_sqlstate(&code, &message);
+        return with_engine_code(abi, message, engine);
+    }
+    plugin_error_from_engine(err)
+}
+
+/// SQLSTATE from sqlx when `err` is a driver `Database` error.
+fn sqlx_engine_code(err: &DbErr) -> Option<String> {
+    match err {
+        DbErr::Exec(RuntimeErr::SqlxError(e))
+        | DbErr::Query(RuntimeErr::SqlxError(e))
+        | DbErr::Conn(RuntimeErr::SqlxError(e)) => match e.deref() {
+            sea_orm::sqlx::Error::Database(db_err) => db_err.code().map(|c| c.into_owned()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Classifies a formatted engine error into a [`PluginError`].
+fn classify_message(message: &str) -> PluginError {
+    let (code, engine_code) = classify_engine_message(message);
+    with_engine_code(code, message.to_string(), engine_code)
+}
+
+/// Attaches `engineCode` details when a driver token is known.
+fn with_engine_code(
+    code: PluginErrorCode,
+    message: String,
+    engine_code: Option<String>,
+) -> PluginError {
     let mut out = PluginError::new(code, message);
     if let Some(engine_code) = engine_code {
         let mut details = serde_json::Map::new();

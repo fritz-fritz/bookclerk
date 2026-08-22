@@ -142,7 +142,7 @@ impl DatabaseSession for PostgresSession {
         if statement.sql == DB_ATOMIC_SENTINEL {
             let req: DbAtomicRequest = serde_json::from_str(&statement.values_json)
                 .map_err(|e| PluginError::invalid_params(e.to_string()))?;
-            let result = guest_atomic(req).await.map_err(map_guest)?;
+            let result = guest_atomic(req).await?;
             return Ok(QueryPage {
                 rows_json: bookclerk_plugin_sdk::encode_json(result)?,
                 next_cursor: None,

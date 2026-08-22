@@ -1231,6 +1231,16 @@ const MIGRATION_V28_SERIALIZATION_SLOTS_POSTGRES: &str = r#"
     );
 "#;
 
+/// Frozen subscriber snapshot so paged dispatch receipts stay stable.
+const MIGRATION_V29_DISPATCH_SNAPSHOT_SQLITE: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN dispatch_snapshot_json TEXT NOT NULL DEFAULT '';
+"#;
+
+/// Frozen subscriber snapshot for Postgres / D1.
+const MIGRATION_V29_DISPATCH_SNAPSHOT_POSTGRES: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS dispatch_snapshot_json TEXT NOT NULL DEFAULT '';
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -1264,6 +1274,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V26_WAKE_PENDING_SQLITE,
         MIGRATION_V27_DEDUP_WAKE_CLAIM_SQLITE,
         MIGRATION_V28_SERIALIZATION_SLOTS_SQLITE,
+        MIGRATION_V29_DISPATCH_SNAPSHOT_SQLITE,
     ]
 }
 
@@ -1300,6 +1311,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V26_WAKE_PENDING_POSTGRES,
         MIGRATION_V27_DEDUP_WAKE_CLAIM_POSTGRES,
         MIGRATION_V28_SERIALIZATION_SLOTS_POSTGRES,
+        MIGRATION_V29_DISPATCH_SNAPSHOT_POSTGRES,
     ]
 }
 
@@ -1935,7 +1947,7 @@ mod tests {
         // Re-run is skipped when the version row exists (crash-safe: the row
         // only appears if the whole batch committed).
         assert_eq!(migration_sql_d1().len(), D1_PRE_V27_STEPS);
-        assert_eq!(migration_sql_d1_post_v27().len(), 1);
+        assert_eq!(migration_sql_d1_post_v27().len(), 2);
         assert_eq!(
             migration_v27_d1_batch().last().map(String::as_str),
             Some("INSERT INTO schema_migrations (version) VALUES (28)")
