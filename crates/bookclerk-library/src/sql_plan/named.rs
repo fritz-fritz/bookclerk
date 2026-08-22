@@ -702,15 +702,17 @@ fn wrap_status_op(plan: AtomicPlan, ctx: &ReceiptCtx, payload: PayloadKind) -> A
     let payload_index = plan.payload_index;
     let outcome = plan.statements[outcome_index].clone();
     let payload_stmt = payload_index.and_then(|idx| plan.statements.get(idx).cloned());
-    let mut statements = vec![
-        prune_receipts(ctx),
-        select_receipt(ctx),
-        snapshot_outcome_insert(ctx),
-        snapshot_outcome_update(ctx, &outcome),
-    ];
+    let mut statements = vec![prune_receipts(ctx), select_receipt(ctx)];
     let prior_receipt_index = Some(1);
     for (i, (sql_text, params)) in plan.statements.into_iter().enumerate() {
-        if Some(i) == payload_index || i == outcome_index {
+        if Some(i) == payload_index {
+            continue;
+        }
+        if i == outcome_index {
+            // Capture status after pre-outcome writes (enqueue/claim) and
+            // before post-outcome mutations that would invalidate it (delete).
+            statements.push(snapshot_outcome_insert(ctx));
+            statements.push(snapshot_outcome_update(ctx, &outcome));
             continue;
         }
         // Absence of a prior receipt, not an existing `ok` row: a committed
@@ -728,9 +730,6 @@ fn wrap_status_op(plan: AtomicPlan, ctx: &ReceiptCtx, payload: PayloadKind) -> A
             ));
         }
     }
-    // Snapshot the outcome before inner writes: delete-user (and similar)
-    // invalidates a live existence SELECT, but the receipt must still follow
-    // those writes so replay cannot treat a committed `ok` row as a claim.
     statements.push(receipt_insert_from_snapshot(ctx));
     statements.push(clear_outcome_snapshot(ctx));
     if let Some(update) = receipt_payload_update(ctx, payload, payload_stmt) {
