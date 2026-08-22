@@ -392,7 +392,7 @@ impl RpcDatabaseProxy {
     ///
     /// # Errors
     ///
-    /// Returns when a SeaORM bind is outside the universal [`DbValue`] domain.
+    /// Returns when a SeaORM bind is outside the universal `DbValue` domain.
     fn statement_to_typed(
         statement: &Statement,
         kind: DbPlanStatementKind,

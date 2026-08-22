@@ -7,8 +7,10 @@
 use std::time::Duration;
 
 use bookclerk_plugin_sdk::{
-    sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbConnectResult,
-    DbPlanExecResult, DbPlanStatementKind, DbPlanStmtExecResult,
+    encoded_execute_reply_bytes, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming,
+    DbColumn, DbConnectResult, DbPlanExecResult, DbPlanStatementKind, DbPlanStmtExecResult,
+    DbResultSelection, DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError,
+    StatementResult, TypedDbStatement,
 };
 use sea_orm::DbErr;
 use serde_json::Value as JsonValue;
@@ -103,8 +105,8 @@ impl D1Proxy {
     /// encoded after commit.
     pub async fn run_typed_atomic(
         &self,
-        req: &bookclerk_plugin_sdk::ExecuteRequest,
-    ) -> std::result::Result<bookclerk_plugin_sdk::ExecuteReply, DbErr> {
+        req: &ExecuteRequest,
+    ) -> std::result::Result<ExecuteReply, DbErr> {
         let started = std::time::Instant::now();
         let deadline = (req.deadline_unix_ms > 0).then_some(req.deadline_unix_ms);
         check_d1_session(
@@ -210,8 +212,7 @@ fn d1_unix_now_ms() -> u64 {
 }
 
 /// D1 HTTP params: typed nulls become JSON null; text is never `b64:`-decoded.
-fn d1_typed_binds(params: &[bookclerk_plugin_sdk::DbValue]) -> Vec<JsonValue> {
-    use bookclerk_plugin_sdk::DbValue;
+fn d1_typed_binds(params: &[DbValue]) -> Vec<JsonValue> {
     params
         .iter()
         .map(|v| match v {
@@ -280,13 +281,13 @@ pub fn is_ambiguous_d1(err: &DbErr) -> bool {
 /// Maps a D1 [`DbErr`] onto the guest ABI: retryable/ambiguous → `unavailable`,
 /// client 4xx → `invalid_params`, engine codes via the shared mapper.
 #[must_use]
-pub fn plugin_error_from_d1(err: DbErr) -> bookclerk_plugin_sdk::PluginError {
+pub fn plugin_error_from_d1(err: DbErr) -> PluginError {
     if is_ambiguous_d1(&err) {
-        return bookclerk_plugin_sdk::PluginError::unavailable(err.to_string());
+        return PluginError::unavailable(err.to_string());
     }
     if let Some(status) = permanent_http_status(&err) {
         if (400..500).contains(&status) {
-            return bookclerk_plugin_sdk::PluginError::invalid_params(err.to_string());
+            return PluginError::invalid_params(err.to_string());
         }
     }
     bookclerk_db_guest::plugin_error_from_engine(err)
@@ -351,7 +352,7 @@ fn reject_unbounded_returning(plan: &DbAtomicPlan) -> std::result::Result<(), Db
 /// Returns when SQL is multi-statement, `max_rows != 1`, or `VALUES` is not a
 /// single tuple.
 fn reject_unbounded_returning_typed(
-    statements: &[bookclerk_plugin_sdk::TypedDbStatement],
+    statements: &[TypedDbStatement],
 ) -> std::result::Result<(), DbErr> {
     let cap = DbConnectResult::d1().max_result_rows;
     for (i, stmt) in statements.iter().enumerate() {
@@ -388,8 +389,7 @@ fn reject_unbounded_returning_typed(
 /// # Errors
 ///
 /// Returns when the cell is an array, object, or a non-finite number.
-fn d1_json_cell_to_db_value(v: &JsonValue) -> Result<bookclerk_plugin_sdk::DbValue, String> {
-    use bookclerk_plugin_sdk::{DbType, DbValue};
+fn d1_json_cell_to_db_value(v: &JsonValue) -> Result<DbValue, String> {
     match v {
         JsonValue::Null => Ok(DbValue::Null(DbType::Unspecified)),
         JsonValue::Bool(b) => Ok(DbValue::Boolean(*b)),
@@ -423,14 +423,10 @@ fn d1_json_cell_to_db_value(v: &JsonValue) -> Result<bookclerk_plugin_sdk::DbVal
 /// Returns [`DbErr`] when the body is malformed, a row fails conversion, or
 /// the encoded reply exceeds `maxAtomicResultBytes` (ambiguous after HTTP).
 fn parse_typed_batch(
-    req: &bookclerk_plugin_sdk::ExecuteRequest,
+    req: &ExecuteRequest,
     value: &JsonValue,
     started: std::time::Instant,
-) -> std::result::Result<bookclerk_plugin_sdk::ExecuteReply, DbErr> {
-    use bookclerk_plugin_sdk::{
-        encoded_execute_reply_bytes, DbColumn, DbRow, DbTiming, DbType, ExecuteReply,
-        StatementResult,
-    };
+) -> std::result::Result<ExecuteReply, DbErr> {
     let Some(arr) = value.get("result").and_then(JsonValue::as_array) else {
         return Err(ambiguous_d1("batch response missing result array"));
     };
@@ -458,9 +454,8 @@ fn parse_typed_batch(
             .and_then(JsonValue::as_u64)
             .unwrap_or(0);
         let stmt_result = match selection {
-            bookclerk_plugin_sdk::DbResultSelection::AffectedRows
-            | bookclerk_plugin_sdk::DbResultSelection::Discard => {
-                let n = if matches!(selection, bookclerk_plugin_sdk::DbResultSelection::Discard)
+            DbResultSelection::AffectedRows | DbResultSelection::Discard => {
+                let n = if matches!(selection, DbResultSelection::Discard)
                     || matches!(kind, DbPlanStatementKind::Select)
                 {
                     0
@@ -469,8 +464,7 @@ fn parse_typed_batch(
                 };
                 StatementResult::from_affected(n)
             }
-            bookclerk_plugin_sdk::DbResultSelection::Rows
-            | bookclerk_plugin_sdk::DbResultSelection::Cursor => {
+            DbResultSelection::Rows | DbResultSelection::Cursor => {
                 let raw_rows = entry
                     .get("results")
                     .and_then(JsonValue::as_array)
