@@ -209,7 +209,28 @@ pub(crate) fn set_snapshot_claim_barrier(barrier: Option<std::sync::Arc<tokio::s
 }
 
 #[cfg(test)]
+tokio::task_local! {
+    static SNAPSHOT_CLAIM_WAIT: ();
+}
+
+/// Runs `fut` as a snapshot-CAS participant.
+///
+/// The rendezvous barrier is process-global so two multi-thread tasks can meet,
+/// but every dispatch calls [`wait_snapshot_claim_barrier`]. Only tasks inside
+/// this scope wait; unrelated tests skip it so the suite cannot deadlock.
+#[cfg(test)]
+pub(crate) async fn with_snapshot_claim_wait<F>(fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    SNAPSHOT_CLAIM_WAIT.scope((), fut).await
+}
+
+#[cfg(test)]
 async fn wait_snapshot_claim_barrier() {
+    if SNAPSHOT_CLAIM_WAIT.try_with(|_| ()).is_err() {
+        return;
+    }
     let barrier = SNAPSHOT_CLAIM_BARRIER
         .lock()
         .unwrap_or_else(|e| e.into_inner())

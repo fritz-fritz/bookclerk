@@ -3200,25 +3200,31 @@ async fn dispatch_snapshot_cas_two_stores_agree() {
     let op1 = op.clone();
     let op2 = op.clone();
     let a = tokio::spawn(async move {
-        s1.dispatch_event_deliveries(
-            &id1,
-            &[
-                EventSubscriber::plugin("echo"),
-                EventSubscriber::plugin("alpha"),
-            ],
-            &op1,
-        )
+        super::event_outbox::with_snapshot_claim_wait(async move {
+            s1.dispatch_event_deliveries(
+                &id1,
+                &[
+                    EventSubscriber::plugin("echo"),
+                    EventSubscriber::plugin("alpha"),
+                ],
+                &op1,
+            )
+            .await
+        })
         .await
     });
     let b = tokio::spawn(async move {
-        s2.dispatch_event_deliveries(
-            &id2,
-            &[
-                EventSubscriber::plugin("echo"),
-                EventSubscriber::plugin("beta"),
-            ],
-            &op2,
-        )
+        super::event_outbox::with_snapshot_claim_wait(async move {
+            s2.dispatch_event_deliveries(
+                &id2,
+                &[
+                    EventSubscriber::plugin("echo"),
+                    EventSubscriber::plugin("beta"),
+                ],
+                &op2,
+            )
+            .await
+        })
         .await
     });
     let (ra, rb) = tokio::join!(a, b);
@@ -3246,6 +3252,36 @@ async fn dispatch_snapshot_cas_two_stores_agree() {
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test]
+async fn unrelated_dispatch_does_not_wait_on_snapshot_cas_barrier() {
+    let store = test_store().await;
+    let created = store
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:no-barrier-wait",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let db = store.db().clone();
+    let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
+    super::event_outbox::set_snapshot_claim_barrier(Some(std::sync::Arc::new(
+        tokio::sync::Barrier::new(2),
+    )));
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        store.dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op-no-wait"),
+    )
+    .await;
+    super::event_outbox::set_snapshot_claim_barrier(None);
+    result
+        .expect("unrelated dispatch must not wait on the CAS barrier")
+        .unwrap();
 }
 
 #[tokio::test]
