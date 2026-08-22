@@ -212,20 +212,32 @@ pub async fn guest_rollback(txn_id: String) -> Result<()> {
     finish_txn(txn_id, false).await
 }
 
-/// Runs a named library operation as one native SQL transaction with a receipt.
+/// Runs a host-authored generic SQL plan as one native transaction.
+///
+/// Guests must not compile Bookclerk operation names. The host sends
+/// [`DbAtomicRequest::plan`]; missing plans fail closed.
 ///
 /// # Arguments
 ///
-/// * `req` - Idempotency envelope (`operationId` + named command).
+/// * `req` - Idempotency envelope (`operationId` + generic plan).
 ///
 /// # Errors
 ///
-/// Returns an error string when not connected or the engine rejects the work.
+/// Returns an error string when not connected, the plan is missing, or the
+/// engine rejects the work.
 pub async fn guest_atomic(req: DbAtomicRequest) -> Result<DbAtomicResult> {
     let gate = txn_gate();
     let _gate = gate.lock().await;
     let conn = connection().await?;
-    bookclerk_library::execute_db_atomic(&conn, req)
+    let plan = req
+        .plan
+        .ok_or_else(|| "dbAtomic requires a host-authored executePlan".to_string())?;
+    let hash = req.request_hash.unwrap_or_default();
+    let timing_source = match conn.get_database_backend() {
+        DbBackend::Postgres => "postgres_txn",
+        _ => "sqlite_txn",
+    };
+    bookclerk_library::execute_plan_on(&conn, &plan, &hash, &req.operation_id, timing_source)
         .await
         .map_err(|e| e.to_string())
 }

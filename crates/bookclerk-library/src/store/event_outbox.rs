@@ -35,14 +35,8 @@ const STATE_ACKED: &str = "acked";
 const STATE_REJECTED: &str = "rejected";
 const STATE_DEAD_LETTER: &str = "dead_letter";
 const RECONCILE_PAGE: u64 = 200;
-/// D1 allows 100 bound parameters per query.
-/// <https://developers.cloudflare.com/d1/platform/limits/>
-const D1_MAX_BOUND_PARAMS: usize = 100;
 /// SET `run_after` / `updated_at` plus EXISTS `event_id` / `wake_lease_owner`.
 const WAKE_UPDATE_FIXED_BINDS: usize = 4;
-/// Strictest-backend wake page so `IN (…)` + the fenced UPDATE stay under D1's cap.
-/// #178 will negotiate `maxBinds`; this constant is the safe current bridge.
-pub(crate) const WAKE_PAGE: u64 = 64;
 const EVENT_OUTBOX_STATS_ID: i64 = 1;
 const EVENT_WAKE_FAR_FUTURE: &str = "9999-12-31T23:59:59+00:00";
 
@@ -98,10 +92,8 @@ fn wake_delivery_update_bind_count(id_count: usize) -> usize {
     WAKE_UPDATE_FIXED_BINDS + id_count
 }
 
-fn wake_in_chunk_size() -> usize {
-    D1_MAX_BOUND_PARAMS
-        .saturating_sub(WAKE_UPDATE_FIXED_BINDS)
-        .max(1)
+fn wake_in_chunk_size(max_binds: usize) -> usize {
+    max_binds.saturating_sub(WAKE_UPDATE_FIXED_BINDS).max(1)
 }
 
 /// Wake matching pending deliveries when `owner` still holds the event's wake lease.
@@ -111,12 +103,13 @@ pub(crate) async fn wake_deliveries_fenced_on<C: ConnectionTrait>(
     owner: &str,
     ids: &[String],
     now: &str,
+    max_binds: usize,
 ) -> Result<u32> {
     if ids.is_empty() {
         return Ok(0);
     }
     let backend = db.get_database_backend();
-    let chunk_size = wake_in_chunk_size();
+    let chunk_size = wake_in_chunk_size(max_binds);
     let mut woken = 0u32;
     for chunk in ids.chunks(chunk_size) {
         let sql = wake_fenced_update_sql(chunk.len());
@@ -351,11 +344,14 @@ impl LibraryStore {
     }
 
     async fn wake_one_claimed_page(&self, row: &domain_events::Model, owner: &str) -> Result<u32> {
+        let page = self.wake_page();
+        let max_binds =
+            usize::try_from(self.max_binds).unwrap_or(bookclerk_plugin_abi::D1_MAX_BINDS as usize);
         if self.atomic.is_some() {
-            return wake_one_page_on(&self.db, row, owner).await;
+            return wake_one_page_on(&self.db, row, owner, page, max_binds).await;
         }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match wake_one_page_on(&txn, row, owner).await {
+        match wake_one_page_on(&txn, row, owner, page, max_binds).await {
             Ok(n) => {
                 txn.commit().await.map_err(LibraryError::Orm)?;
                 Ok(n)
@@ -370,14 +366,10 @@ impl LibraryStore {
     /// Claim the next ready delivery with a fenced `pending` → `running` mutation.
     ///
     /// When `node_id` is non-empty, this node’s own catalog must match the parent
-    /// event’s type, schema version, and filter. Cluster dispatch still uses the
-    /// live union; claim is node-local so a v1-only node cannot run a v2 delivery.
-    /// An empty `node_id` keeps plugin-id-only filtering (tests).
-    ///
-    /// D1/`dbAtomic` still selects by `plugin_id` only (#178 will push eligibility
-    /// into the generic plan). After an incompatible row is released, this call
-    /// continues with a node-local SeaORM claim so a later compatible delivery is
-    /// not starved by looping the same oldest row.
+    /// event’s type, schema version, and filter. The host loads the catalog and
+    /// filters candidates in Rust, then CAS-updates one row (portable slot +
+    /// `UPDATE … WHERE id = ? AND state = pending`). An empty `node_id` keeps
+    /// plugin-id-only filtering (tests).
     ///
     /// # Errors
     ///
@@ -395,50 +387,21 @@ impl LibraryStore {
         if plugin_ids.is_empty() {
             return Ok(None);
         }
-        let used_atomic = self.atomic.is_some();
-        let claimed = if let Some(atomic) = &self.atomic {
-            atomic
-                .claim_next_event_delivery(
+        if self.atomic.is_some() {
+            return self
+                .claim_next_event_delivery_host_cas(
                     owner,
                     lease_secs,
                     operation_id,
                     plugin_ids,
                     max_in_flight,
+                    node_id,
                 )
-                .await?
-        } else {
-            let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-            match claim_next_event_delivery_on(
-                &txn,
-                owner,
-                lease_secs,
-                plugin_ids,
-                max_in_flight,
-                node_id,
-            )
-            .await
-            {
-                Ok(row) => {
-                    txn.commit().await.map_err(LibraryError::Orm)?;
-                    row
-                }
-                Err(err) => {
-                    let _ = txn.rollback().await;
-                    return Err(err);
-                }
-            }
-        };
-        let had_row = claimed.is_some();
-        let compatible = self
-            .release_if_incompatible_local_catalog(node_id, claimed)
-            .await?;
-        if compatible.is_some() || !used_atomic || !had_row || node_id.trim().is_empty() {
-            return Ok(compatible);
+                .await;
         }
-        // dbAtomic re-claim would select the same oldest incompatible row.
-        // SeaORM skips catalog-mismatched pending rows without holding them.
-        claim_next_event_delivery_on(
-            &self.db,
+        let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
+        match claim_next_event_delivery_on(
+            &txn,
             owner,
             lease_secs,
             plugin_ids,
@@ -446,13 +409,85 @@ impl LibraryStore {
             node_id,
         )
         .await
+        {
+            Ok(row) => {
+                txn.commit().await.map_err(LibraryError::Orm)?;
+                Ok(row)
+            }
+            Err(err) => {
+                let _ = txn.rollback().await;
+                Err(err)
+            }
+        }
+    }
+
+    /// Host eligibility + per-row CAS through the guest atomic backend.
+    async fn claim_next_event_delivery_host_cas(
+        &self,
+        owner: &str,
+        lease_secs: u64,
+        operation_id: &str,
+        plugin_ids: &[String],
+        max_in_flight: u32,
+        node_id: &str,
+    ) -> Result<Option<EventDeliveryRecord>> {
+        let Some(atomic) = &self.atomic else {
+            return Ok(None);
+        };
+        const PAGE: u64 = 64;
+        let now_s = Utc::now().to_rfc3339();
+        sanitize_unknown_event_resource_class_on(&self.db, &now_s).await?;
+        let mut offset = 0u64;
+        loop {
+            let candidates = event_deliveries::Entity::find()
+                .filter(event_deliveries::Column::State.eq(STATE_PENDING))
+                .filter(event_deliveries::Column::RunAfter.lte(now_s.clone()))
+                .filter(event_deliveries::Column::PluginId.is_in(plugin_ids.to_vec()))
+                .filter(event_deliveries::Column::ResourceClass.eq(EVENT_RESOURCE_CLASS_NETWORK))
+                .order_by_asc(event_deliveries::Column::CreatedAt)
+                .limit(PAGE)
+                .offset(offset)
+                .all(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?;
+            if candidates.is_empty() {
+                return Ok(None);
+            }
+            let page_len = u64::try_from(candidates.len()).unwrap_or(PAGE);
+            for model in candidates {
+                if fifo_blocked(&self.db, &model).await? {
+                    continue;
+                }
+                if !node_id.trim().is_empty()
+                    && !delivery_model_matches_node_catalog(&self.db, node_id, &model).await?
+                {
+                    continue;
+                }
+                let op = format!("{operation_id}:{}", model.id);
+                if let Some(row) = atomic
+                    .claim_event_delivery(
+                        &model.id,
+                        owner,
+                        lease_secs,
+                        &op,
+                        &model.plugin_id,
+                        &model.resource_class,
+                        max_in_flight,
+                    )
+                    .await?
+                {
+                    return Ok(Some(row));
+                }
+            }
+            offset = offset.saturating_add(page_len);
+        }
     }
 
     /// Release a claimed row when this node’s catalog cannot handle it.
     ///
-    /// D1 SQL claim cannot evaluate JSON filters / schema versions, so an
-    /// incompatible row is returned then released here (`attempt_count` restored).
-    /// [`Self::claim_next_event_delivery`] then node-locally claims a later match.
+    /// Kept for tests that exercise catalog mismatch after a local SeaORM claim.
+    /// Production claim filters eligibility in the host before CAS.
+    #[cfg(test)]
     pub(crate) async fn release_if_incompatible_local_catalog(
         &self,
         node_id: &str,
@@ -473,6 +508,7 @@ impl LibraryStore {
         Ok(None)
     }
 
+    #[cfg(test)]
     async fn delivery_matches_node_catalog(
         &self,
         node_id: &str,
@@ -1869,6 +1905,8 @@ async fn wake_one_page_on<C: ConnectionTrait>(
     db: &C,
     row: &domain_events::Model,
     owner: &str,
+    page: u64,
+    max_binds: usize,
 ) -> Result<u32> {
     let event = map_event(row.clone())?;
     if event.event_type.trim().is_empty() {
@@ -1893,7 +1931,7 @@ async fn wake_one_page_on<C: ConnectionTrait>(
         )
         .order_by_asc(event_deliveries::Column::CreatedAt)
         .order_by_asc(event_deliveries::Column::Id)
-        .limit(WAKE_PAGE)
+        .limit(page)
         .all(db)
         .await
         .map_err(LibraryError::Orm)?;
@@ -1907,7 +1945,8 @@ async fn wake_one_page_on<C: ConnectionTrait>(
         .map(|delivery| delivery.event_id.clone())
         .collect();
     let mut account_by_id = std::collections::HashMap::<String, String>::new();
-    for chunk in parent_ids.chunks(D1_MAX_BOUND_PARAMS) {
+    let in_chunk = max_binds.max(1);
+    for chunk in parent_ids.chunks(in_chunk) {
         let parents = domain_events::Entity::find()
             .filter(domain_events::Column::Id.is_in(chunk.to_vec()))
             .all(db)
@@ -1935,8 +1974,8 @@ async fn wake_one_page_on<C: ConnectionTrait>(
             ids.push(delivery.id);
         }
     }
-    let woken = wake_deliveries_fenced_on(db, &event.id, owner, &ids, &now).await?;
-    if u64::try_from(page_len).unwrap_or(WAKE_PAGE) < WAKE_PAGE {
+    let woken = wake_deliveries_fenced_on(db, &event.id, owner, &ids, &now, max_binds).await?;
+    if u64::try_from(page_len).unwrap_or(page) < page {
         let _ = finish_wake_on(db, &event.id, owner).await?;
     } else {
         let _ = release_wake_cursor_on(db, &event.id, owner, &cursor_at, &cursor_id).await?;
@@ -2274,29 +2313,19 @@ fn is_unique_violation(err: &sea_orm::DbErr) -> bool {
     s.contains("unique") || s.contains("constraint")
 }
 
-/// Serialize COUNT+claim per plugin under PostgreSQL `READ COMMITTED`.
+/// Serialize COUNT+claim per plugin under every isolation level.
 async fn lock_plugin_in_flight<C: ConnectionTrait>(
     db: &C,
     plugin_id: &str,
     resource_class: &str,
 ) -> Result<()> {
-    if db.get_database_backend() != DatabaseBackend::Postgres {
-        return Ok(());
-    }
     let class = if resource_class.trim().is_empty() {
         EVENT_RESOURCE_CLASS_NETWORK
     } else {
         resource_class.trim()
     };
-    let key = format!("event-inflight:{plugin_id}:{class}");
-    db.execute_raw(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        "SELECT pg_advisory_xact_lock(hashtext($1))",
-        [key.into()],
-    ))
-    .await
-    .map_err(LibraryError::Orm)?;
-    Ok(())
+    let key = crate::sql_plan::event_inflight_slot(plugin_id, class);
+    crate::sql_plan::lock_serialization_slot(db, &key).await
 }
 
 async fn plugin_in_flight_at_cap<C: ConnectionTrait>(
@@ -2617,18 +2646,22 @@ mod placeholder_tests {
 
     #[test]
     fn wake_fenced_update_full_page_stays_under_d1_bind_limit() {
-        let page = usize::try_from(WAKE_PAGE).unwrap_or(0);
+        let cap = usize::try_from(bookclerk_plugin_abi::D1_MAX_BINDS).unwrap_or(0);
+        let page = usize::try_from(crate::wake_page_for_max_binds(
+            bookclerk_plugin_abi::D1_MAX_BINDS,
+        ))
+        .unwrap_or(0);
         let sql = wake_fenced_update_sql(page);
         let binds = sql.matches('?').count();
         assert_eq!(binds, wake_delivery_update_bind_count(page));
         assert!(
-            binds <= D1_MAX_BOUND_PARAMS,
-            "full-page wake UPDATE bind count {binds} exceeds D1's {D1_MAX_BOUND_PARAMS}"
+            binds <= cap,
+            "full-page wake UPDATE bind count {binds} exceeds D1's {cap}"
         );
         assert!(
-            page <= D1_MAX_BOUND_PARAMS,
-            "WAKE_PAGE {page} exceeds D1's {D1_MAX_BOUND_PARAMS} for parent SELECT IN"
+            page <= cap,
+            "wake page {page} exceeds D1's {cap} for parent SELECT IN"
         );
-        assert!(wake_in_chunk_size() + WAKE_UPDATE_FIXED_BINDS <= D1_MAX_BOUND_PARAMS);
+        assert!(wake_in_chunk_size(cap) + WAKE_UPDATE_FIXED_BINDS <= cap);
     }
 }

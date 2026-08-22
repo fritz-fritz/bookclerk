@@ -49,8 +49,18 @@ pub async fn open(
     {
         apply_d1_v27_batch(&proxy).await?;
     }
+    apply_d1_post_v27(&db).await?;
     tracing::debug!(plugin = "d1", "opened library database");
     Ok(db)
+}
+
+/// Apply sqlite steps after the V27 batch (`schema_migrations` version 29+).
+async fn apply_d1_post_v27(db: &DatabaseConnection) -> Result<()> {
+    bookclerk_db_guest::apply_pending_migrations_from(
+        db,
+        bookclerk_library::migrations::migration_sql(),
+    )
+    .await
 }
 
 /// Apply D1 V27 as one `{ "batch": [...] }` SQL transaction (child drop first).
@@ -603,6 +613,17 @@ mod tests {
     use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn named_plan(
+        operation_id: &str,
+        operation: bookclerk_plugin_sdk::DbAtomicParams,
+    ) -> bookclerk_plugin_sdk::DbAtomicRequest {
+        let named = bookclerk_plugin_sdk::DbAtomicRequest::named(operation_id, operation);
+        let now = chrono::Utc::now().to_rfc3339();
+        bookclerk_library::compile_named_request(&named, &now, bookclerk_library::SqlFamily::Sqlite)
+            .expect("compile named atomic request")
+            .into_request(named.operation_id)
+    }
+
     fn query_ok() -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(json!({
             "success": true,
@@ -717,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_redeem_posts_one_multi_statement_batch() {
-        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use bookclerk_plugin_sdk::DbAtomicParams;
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -728,9 +749,9 @@ mod tests {
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
         let _ = proxy
-            .run_atomic(DbAtomicRequest {
-                operation_id: "op-redeem".into(),
-                operation: DbAtomicParams::RedeemClaimTicket {
+            .run_atomic(named_plan(
+                "op-redeem",
+                DbAtomicParams::RedeemClaimTicket {
                     token_hash: "ticket".into(),
                     session_hash: "session".into(),
                     expires_at: "2099-01-01T00:00:00Z".into(),
@@ -740,7 +761,7 @@ mod tests {
                     new_password_hash: Some("hash".into()),
                     password_fingerprint: Some("fp".into()),
                 },
-            })
+            ))
             .await;
 
         let queries: Vec<JsonValue> = server
@@ -771,7 +792,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_confirm_totp_posts_one_multi_statement_batch() {
-        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use bookclerk_plugin_sdk::DbAtomicParams;
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -782,9 +803,9 @@ mod tests {
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
         let _ = proxy
-            .run_atomic(DbAtomicRequest {
-                operation_id: "op-totp".into(),
-                operation: DbAtomicParams::ConfirmTotpEnrollment {
+            .run_atomic(named_plan(
+                "op-totp",
+                DbAtomicParams::ConfirmTotpEnrollment {
                     user_id: 7,
                     format: "sealed-v1".into(),
                     ciphertext: "b64:AA==".into(),
@@ -797,7 +818,7 @@ mod tests {
                     kdf_p_cost: None,
                     created_at: "2024-06-01T00:00:00Z".into(),
                 },
-            })
+            ))
             .await;
 
         let queries: Vec<JsonValue> = server
@@ -829,7 +850,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_take_oidc_posts_delete_returning_batch() {
-        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use bookclerk_plugin_sdk::DbAtomicParams;
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -840,12 +861,12 @@ mod tests {
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
         let _ = proxy
-            .run_atomic(DbAtomicRequest {
-                operation_id: "op-take".into(),
-                operation: DbAtomicParams::TakeOidcRpState {
+            .run_atomic(named_plan(
+                "op-take",
+                DbAtomicParams::TakeOidcRpState {
                     state_hash: "abc".into(),
                 },
-            })
+            ))
             .await;
 
         let queries: Vec<JsonValue> = server
@@ -872,7 +893,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_take_oidc_retries_mangled_response() {
-        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use bookclerk_plugin_sdk::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
@@ -900,12 +921,12 @@ mod tests {
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
         let result = proxy
-            .run_atomic(DbAtomicRequest {
-                operation_id: "op-retry".into(),
-                operation: DbAtomicParams::TakeOidcRpState {
+            .run_atomic(named_plan(
+                "op-retry",
+                DbAtomicParams::TakeOidcRpState {
                     state_hash: "abc".into(),
                 },
-            })
+            ))
             .await;
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(hits.load(Ordering::SeqCst), 2);
@@ -913,7 +934,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_take_oidc_retries_incomplete_2xx() {
-        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use bookclerk_plugin_sdk::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
@@ -941,12 +962,12 @@ mod tests {
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
         let result = proxy
-            .run_atomic(DbAtomicRequest {
-                operation_id: "op-incomplete".into(),
-                operation: DbAtomicParams::TakeOidcRpState {
+            .run_atomic(named_plan(
+                "op-incomplete",
+                DbAtomicParams::TakeOidcRpState {
                     state_hash: "abc".into(),
                 },
-            })
+            ))
             .await;
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(hits.load(Ordering::SeqCst), 2);
@@ -954,7 +975,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_take_oidc_outer_retry_reuses_operation_id_after_two_lost_replies() {
-        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use bookclerk_plugin_sdk::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
@@ -981,12 +1002,12 @@ mod tests {
             .await;
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
-        let req = DbAtomicRequest {
-            operation_id: "op-outer".into(),
-            operation: DbAtomicParams::TakeOidcRpState {
+        let req = named_plan(
+            "op-outer",
+            DbAtomicParams::TakeOidcRpState {
                 state_hash: "abc".into(),
             },
-        };
+        );
         // Inner loop retries twice on incomplete 2xx, then succeeds on the third
         // attempt with the same operation_id (the outer caller also reuses it).
         let result = proxy.run_atomic(req.clone()).await;
@@ -1000,7 +1021,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_take_oidc_exhausted_inner_retries_then_same_id_recovers() {
-        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use bookclerk_plugin_sdk::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
@@ -1027,12 +1048,12 @@ mod tests {
             .await;
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
-        let req = DbAtomicRequest {
-            operation_id: "op-resume".into(),
-            operation: DbAtomicParams::TakeOidcRpState {
+        let req = named_plan(
+            "op-resume",
+            DbAtomicParams::TakeOidcRpState {
                 state_hash: "abc".into(),
             },
-        };
+        );
         let first = proxy.run_atomic(req.clone()).await;
         assert!(first.is_err(), "three incomplete 2xx exhaust inner retries");
         assert_eq!(hits.load(Ordering::SeqCst), 3);
@@ -1044,7 +1065,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_permanent_400_is_not_retried() {
-        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use bookclerk_plugin_sdk::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
@@ -1070,12 +1091,12 @@ mod tests {
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
         let err = proxy
-            .run_atomic(DbAtomicRequest {
-                operation_id: "op-400".into(),
-                operation: DbAtomicParams::TakeOidcRpState {
+            .run_atomic(named_plan(
+                "op-400",
+                DbAtomicParams::TakeOidcRpState {
                     state_hash: "abc".into(),
                 },
-            })
+            ))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("D1 HTTP 400"), "{err}");
@@ -1085,7 +1106,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_503_is_retried_then_succeeds() {
-        use bookclerk_plugin_sdk::{DbAtomicParams, DbAtomicRequest};
+        use bookclerk_plugin_sdk::DbAtomicParams;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use wiremock::Respond;
@@ -1115,12 +1136,12 @@ mod tests {
 
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
         let result = proxy
-            .run_atomic(DbAtomicRequest {
-                operation_id: "op-503".into(),
-                operation: DbAtomicParams::TakeOidcRpState {
+            .run_atomic(named_plan(
+                "op-503",
+                DbAtomicParams::TakeOidcRpState {
                     state_hash: "abc".into(),
                 },
-            })
+            ))
             .await;
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(hits.load(Ordering::SeqCst), 2);

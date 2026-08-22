@@ -11,15 +11,23 @@ use bookclerk_plugin_sdk::v2::{
     Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot, QueryPage,
     ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
-use bookclerk_plugin_sdk::{DbAtomicRequest, PluginError, StatementDto};
+use bookclerk_plugin_sdk::{
+    DbAtomicRequest, DbConnectResult, PluginError, StatementDto, DB_ATOMIC_SENTINEL,
+    DB_CAPABILITIES_SENTINEL,
+};
 
 use crate::ID;
 
 type Result<T> = std::result::Result<T, PluginError>;
 
 fn map_guest(err: String) -> PluginError {
+    let lower = err.to_lowercase();
     if err.contains("invalid query cursor") {
         PluginError::invalid_cursor(err)
+    } else if lower.contains("unique") || lower.contains("constraint") {
+        PluginError::conflict(err)
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        PluginError::deadline_exceeded(err)
     } else {
         PluginError::internal(err)
     }
@@ -107,7 +115,7 @@ struct SqliteSession;
 #[async_trait(?Send)]
 impl DatabaseSession for SqliteSession {
     async fn execute(&self, statement: Statement) -> Result<ExecResult> {
-        if statement.sql == "bookclerk.atomic" {
+        if statement.sql == DB_ATOMIC_SENTINEL {
             return Err(PluginError::unsupported(
                 "bookclerk.atomic is a query, not execute",
             ));
@@ -119,12 +127,18 @@ impl DatabaseSession for SqliteSession {
     }
 
     async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage> {
-        if statement.sql == "bookclerk.atomic" {
+        if statement.sql == DB_ATOMIC_SENTINEL {
             let req: DbAtomicRequest = serde_json::from_str(&statement.values_json)
                 .map_err(|e| PluginError::invalid_params(e.to_string()))?;
             let result = guest_atomic(req).await.map_err(map_guest)?;
             return Ok(QueryPage {
                 rows_json: bookclerk_plugin_sdk::encode_json(result)?,
+                next_cursor: None,
+            });
+        }
+        if statement.sql == DB_CAPABILITIES_SENTINEL {
+            return Ok(QueryPage {
+                rows_json: bookclerk_plugin_sdk::encode_json(DbConnectResult::sqlite())?,
                 next_cursor: None,
             });
         }

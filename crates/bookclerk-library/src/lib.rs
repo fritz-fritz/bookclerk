@@ -23,6 +23,8 @@ pub mod proxy_txn;
 pub mod scope;
 pub mod secrets;
 mod session_client;
+/// Host-owned generic SQL atomic plans for thin database adapters.
+pub mod sql_plan;
 mod store;
 mod text;
 mod token_hash;
@@ -80,6 +82,10 @@ pub use secrets::{
     KDF_M_COST, KDF_P_COST, KDF_T_COST,
 };
 pub use session_client::{classify_session_client, SessionClientInfo};
+pub use sql_plan::{
+    compile_claim_event_delivery, compile_named_request, execute_plan_on, family_from_connect,
+    wake_page_for_max_binds, CompiledAtomic, SqlFamily,
+};
 pub use store::{
     event_outbox::prepare_publish_domain_event, fallback_work_key, prefer_enrichment_source,
     wishlist_identities_match, CatalogEnrichmentFields, LibraryStore, NewBook,

@@ -1215,6 +1215,22 @@ const MIGRATION_V27_DEDUP_WAKE_CLAIM_POSTGRES: &str = r#"
     ALTER TABLE event_deliveries ADD COLUMN IF NOT EXISTS wake_grants_json TEXT NOT NULL DEFAULT '';
 "#;
 
+/// Portable COUNT+mutate serialization slots (replaces advisory locks).
+const MIGRATION_V28_SERIALIZATION_SLOTS_SQLITE: &str = r#"
+    CREATE TABLE IF NOT EXISTS db_serialization_slots (
+        slot_key TEXT PRIMARY KEY NOT NULL,
+        bump INTEGER NOT NULL DEFAULT 0
+    );
+"#;
+
+/// Portable COUNT+mutate serialization slots for Postgres / D1.
+const MIGRATION_V28_SERIALIZATION_SLOTS_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS db_serialization_slots (
+        slot_key TEXT PRIMARY KEY NOT NULL,
+        bump BIGINT NOT NULL DEFAULT 0
+    );
+"#;
+
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
 pub fn migration_sql() -> &'static [&'static str] {
@@ -1247,6 +1263,7 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V25_EVENT_SOURCE_WAKE_SQLITE,
         MIGRATION_V26_WAKE_PENDING_SQLITE,
         MIGRATION_V27_DEDUP_WAKE_CLAIM_SQLITE,
+        MIGRATION_V28_SERIALIZATION_SLOTS_SQLITE,
     ]
 }
 
@@ -1282,6 +1299,7 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
         MIGRATION_V25_EVENT_SOURCE_WAKE_POSTGRES,
         MIGRATION_V26_WAKE_PENDING_POSTGRES,
         MIGRATION_V27_DEDUP_WAKE_CLAIM_POSTGRES,
+        MIGRATION_V28_SERIALIZATION_SLOTS_POSTGRES,
     ]
 }
 
@@ -1289,19 +1307,32 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
 ///
 /// D1 HTTP applies each guest-migrator statement as autocommit. The file-SQLite
 /// V27 rebuild drops `domain_events` while `event_deliveries` still cascades, so
-/// D1 must not send the last [`migration_sql`] step through statement-by-statement
-/// `execute_raw`. The extra V3 portal step means V27 DDL is bookkeeping version
-/// [`migration_sql`]`.len()` (currently 28), not 27.
+/// D1 must not send that rebuild through statement-by-statement `execute_raw`.
+/// The extra V3 portal step means V27 DDL is frozen bookkeeping version 28.
+/// Later additive steps (V28+) are applied after the V27 batch.
+const D1_PRE_V27_STEPS: usize = 27;
+
+/// SQLite steps D1 may apply autocommit (everything before the V27 rebuild).
 #[must_use]
 pub fn migration_sql_d1() -> &'static [&'static str] {
-    let all = migration_sql();
-    &all[..all.len().saturating_sub(1)]
+    &migration_sql()[..D1_PRE_V27_STEPS]
 }
 
-/// `schema_migrations.version` for the V27 D1 batch (last sqlite step index).
+/// Additive sqlite steps after the D1 V27 batch (V28+).
+#[must_use]
+pub fn migration_sql_d1_post_v27() -> &'static [&'static str] {
+    let all = migration_sql();
+    if all.len() > D1_PRE_V27_STEPS + 1 {
+        &all[D1_PRE_V27_STEPS + 1..]
+    } else {
+        &[]
+    }
+}
+
+/// `schema_migrations.version` for the V27 D1 batch (frozen; extra V3 portal step).
 #[must_use]
 pub fn migration_v27_schema_version() -> i64 {
-    i64::try_from(migration_sql().len()).unwrap_or(28)
+    28
 }
 
 /// One-transaction D1 V27: rebuild both tables, drop child then parent, record 27.
@@ -1903,10 +1934,8 @@ mod tests {
         assert_eq!(before, 1);
         // Re-run is skipped when the version row exists (crash-safe: the row
         // only appears if the whole batch committed).
-        assert_eq!(
-            migration_sql_d1().len(),
-            migration_sql().len().saturating_sub(1)
-        );
+        assert_eq!(migration_sql_d1().len(), D1_PRE_V27_STEPS);
+        assert_eq!(migration_sql_d1_post_v27().len(), 1);
         assert_eq!(
             migration_v27_d1_batch().last().map(String::as_str),
             Some("INSERT INTO schema_migrations (version) VALUES (28)")

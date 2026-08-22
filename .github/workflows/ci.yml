@@ -95,6 +95,9 @@ jobs:
       - name: Run planner unit tests
         run: python3 scripts/tests/test_ci_plan.py -q
 
+      - name: Database plugin isolation
+        run: python3 scripts/tests/test_db_plugin_isolation.py -q
+
       - name: Private-docs lint regression
         run: python3 scripts/tests/test_private_docs_lint.py
 

@@ -6,7 +6,7 @@ use crate::models::{
 };
 use crate::{execute_db_atomic, AtomicTxnBackend, EventDeliveryRecord, LibraryError};
 use async_trait::async_trait;
-use bookclerk_plugin_abi::{atomic_status, DbAtomicParams, DbAtomicRequest};
+use bookclerk_plugin_abi::atomic_status;
 use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait};
 use std::sync::Arc;
 
@@ -1825,28 +1825,32 @@ impl AtomicTxnBackend for SqliteAtomicClaimBackend {
         claim_only_err()
     }
 
-    async fn claim_next_event_delivery(
+    #[allow(clippy::too_many_arguments)]
+    async fn claim_event_delivery(
         &self,
+        delivery_id: &str,
         owner: &str,
         lease_secs: u64,
         operation_id: &str,
-        plugin_ids: &[String],
+        plugin_id: &str,
+        resource_class: &str,
         max_in_flight: u32,
     ) -> crate::Result<Option<EventDeliveryRecord>> {
-        let result = execute_db_atomic(
-            &self.db,
-            DbAtomicRequest {
-                operation_id: operation_id.to_string(),
-                operation: DbAtomicParams::ClaimNextEventDelivery {
-                    owner: owner.to_string(),
-                    lease_secs: i64::try_from(lease_secs).unwrap_or(60),
-                    plugin_ids_json: serde_json::to_string(plugin_ids)
-                        .unwrap_or_else(|_| "[]".into()),
-                    max_in_flight: i64::from(max_in_flight),
-                },
-            },
+        let now = chrono::Utc::now().to_rfc3339();
+        let compiled = crate::compile_claim_event_delivery(
+            operation_id,
+            delivery_id,
+            owner,
+            i64::try_from(lease_secs).unwrap_or(60),
+            plugin_id,
+            resource_class,
+            i64::from(max_in_flight),
+            &now,
+            crate::SqlFamily::Sqlite,
         )
-        .await?;
+        .map_err(LibraryError::Orm)?;
+        let result =
+            execute_db_atomic(&self.db, compiled.into_request(operation_id.to_string())).await?;
         if result.status == atomic_status::EMPTY {
             return Ok(None);
         }
@@ -4951,7 +4955,7 @@ async fn wake_pages_more_than_page_size_same_account() {
     };
     let now = chrono::Utc::now().to_rfc3339();
     let future = "9999-12-31T23:59:59+00:00";
-    let n = usize::try_from(super::event_outbox::WAKE_PAGE).unwrap() + 1;
+    let n = usize::try_from(store.wake_page()).unwrap() + 1;
     for i in 0..n {
         let id = format!("wake-page-{i:03}");
         crate::entities::event_deliveries::ActiveModel {
@@ -5447,6 +5451,7 @@ async fn stale_wake_delivery_update_does_not_clear(store: &LibraryStore) {
         "token-b",
         std::slice::from_ref(&parked.id),
         &now,
+        100,
     )
     .await
     .unwrap();
@@ -5473,6 +5478,7 @@ async fn stale_wake_delivery_update_does_not_clear(store: &LibraryStore) {
         "token-a",
         std::slice::from_ref(&parked.id),
         &now,
+        100,
     )
     .await
     .unwrap();
