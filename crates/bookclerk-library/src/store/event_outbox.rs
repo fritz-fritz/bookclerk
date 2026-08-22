@@ -174,6 +174,10 @@ thread_local! {
     static PUBLISH_FAULTS: AtomicU32 = const { AtomicU32::new(0) };
 }
 
+#[cfg(test)]
+static SNAPSHOT_CLAIM_BARRIER: std::sync::Mutex<Option<std::sync::Arc<tokio::sync::Barrier>>> =
+    std::sync::Mutex::new(None);
+
 /// Fail the next `n` outbox inserts (used to prove acquire+publish rollback).
 #[cfg(test)]
 pub(crate) fn inject_event_publish_failures(n: u32) {
@@ -195,6 +199,28 @@ pub fn inject_dispatch_page_failures(n: u32) {
 pub fn set_dispatch_chunk_for_test(chunk: Option<usize>) {
     DISPATCH_CHUNK_OVERRIDE.with(|c| c.set(chunk));
 }
+
+/// Two-store tests wait here after observing an empty snapshot, before CAS.
+#[cfg(test)]
+pub(crate) fn set_snapshot_claim_barrier(barrier: Option<std::sync::Arc<tokio::sync::Barrier>>) {
+    *SNAPSHOT_CLAIM_BARRIER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = barrier;
+}
+
+#[cfg(test)]
+async fn wait_snapshot_claim_barrier() {
+    let barrier = SNAPSHOT_CLAIM_BARRIER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(b) = barrier {
+        b.wait().await;
+    }
+}
+
+#[cfg(not(test))]
+async fn wait_snapshot_claim_barrier() {}
 
 /// Current dispatch chunk override, if any.
 pub(crate) fn dispatch_chunk_override() -> Option<usize> {
@@ -337,9 +363,27 @@ impl LibraryStore {
                 .collect::<Vec<_>>(),
         )
         .unwrap_or_else(|_| "[]".into());
-        let mut am: domain_events::ActiveModel = row.into();
-        am.dispatch_snapshot_json = Set(json.clone());
-        am.update(&self.db).await.map_err(LibraryError::Orm)?;
+        wait_snapshot_claim_barrier().await;
+        let cas = domain_events::Entity::update_many()
+            .col_expr(
+                domain_events::Column::DispatchSnapshotJson,
+                sea_orm::sea_query::Expr::value(json.clone()),
+            )
+            .filter(domain_events::Column::Id.eq(event_id))
+            .filter(domain_events::Column::DispatchSnapshotJson.eq(""))
+            .exec(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        if cas.rows_affected == 0 {
+            let row = domain_events::Entity::find_by_id(event_id)
+                .one(&self.db)
+                .await
+                .map_err(LibraryError::Orm)?
+                .ok_or_else(|| LibraryError::NotFound(format!("domain event {event_id}")))?;
+            let ids: Vec<String> =
+                serde_json::from_str(&row.dispatch_snapshot_json).unwrap_or_default();
+            return Ok(ids.into_iter().map(EventSubscriber::plugin).collect());
+        }
         Ok(subscribers.to_vec())
     }
 

@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use bookclerk_db_exec::{
-    consume_begin_injection, consume_commit_injection, exec_deadline_expired, is_txn_broken,
-    note_begin_failed, note_commit_failed, note_query_row, txn_broken_err,
+    consume_begin_injection, consume_commit_injection, current_exec_budget, is_txn_broken,
+    note_begin_failed, note_commit_failed, txn_broken_err, ExecBudget,
 };
 #[cfg(feature = "host-helpers")]
 use bookclerk_library::{apply_host_schema, HostSchemaKind, LibraryStore};
@@ -107,6 +107,8 @@ pub struct SqliteProxy {
     txn_gate: Arc<AsyncMutex<()>>,
     /// Current exclusive transaction lease, if a task has begun one.
     txn_lease: Arc<Mutex<Option<TxnLease>>>,
+    /// Budget installed when this connection's exclusive lease is acquired.
+    budget: Arc<Mutex<Arc<ExecBudget>>>,
 }
 
 impl SqliteProxy {
@@ -116,12 +118,38 @@ impl SqliteProxy {
     #[must_use]
     pub fn new(conn: Connection) -> Self {
         let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
-        conn.progress_handler(250, Some(exec_deadline_expired));
+        let budget = Arc::new(Mutex::new(ExecBudget::unlimited()));
+        let handler_budget = Arc::clone(&budget);
+        conn.progress_handler(
+            250,
+            Some(move || {
+                handler_budget
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .deadline_expired()
+            }),
+        );
         Self {
             conn: Arc::new(Mutex::new(SqliteState { conn, txn_depth: 0 })),
             txn_gate: Arc::new(AsyncMutex::new(())),
             txn_lease: Arc::new(Mutex::new(None)),
+            budget,
         }
+    }
+
+    /// Copies the current request budget onto this connection after the lease is held.
+    fn install_request_budget(&self) {
+        if let Some(budget) = current_exec_budget() {
+            *self.budget.lock().unwrap_or_else(|e| e.into_inner()) = budget;
+        }
+    }
+
+    /// Budget installed on this connection (cloned for `spawn_blocking`).
+    fn connection_budget(&self) -> Arc<ExecBudget> {
+        self.budget
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// True when `owner` is this Tokio task, or both sides lack a task id (sync tests).
@@ -277,6 +305,8 @@ impl ProxyDatabaseTrait for SqliteProxy {
         }
         let _permit = self.acquire_for_statement().await;
         let conn = self.conn.clone();
+        let budget = self.connection_budget();
+        budget.reset_rows_seen();
         tokio::task::spawn_blocking(move || {
             let sql_summary = summarize_sql(&statement.sql);
             let bind_count = statement.values.as_ref().map_or(0usize, |v| v.0.len());
@@ -317,7 +347,7 @@ impl ProxyDatabaseTrait for SqliteProxy {
                     values.insert(name.clone(), rusqlite_to_sea(v, decl, name));
                 }
                 out.push(ProxyRow { values });
-                if note_query_row() {
+                if budget.note_row() {
                     return Err(DbErr::Custom(format!(
                         "query returned {} rows; maxResultRows exceeded",
                         out.len()
@@ -436,6 +466,7 @@ impl ProxyDatabaseTrait for SqliteProxy {
             }
         }
         let guard = self.txn_gate.clone().lock_owned().await;
+        self.install_request_budget();
         {
             let mut state = self.lock_state();
             if let Err(err) = state.begin() {

@@ -451,11 +451,17 @@ jobs:
             # doctests (already run in "Explicit doctests"). `--tests` alone
             # would drop `src/` unit tests.
             cargo test --workspace --lib --bins --tests
+            cargo test -p bookclerk-plugin-database-sqlite --features host-helpers --lib --bins --tests
           else
             PKGS="${{ needs.plan.outputs.rust_packages }}"
             ARGS=()
             for p in $PKGS; do ARGS+=(-p "$p"); done
             cargo test "${ARGS[@]}" --lib --bins --tests
+            case " $PKGS " in
+              *" bookclerk-plugin-database-sqlite "*)
+                cargo test -p bookclerk-plugin-database-sqlite --features host-helpers --lib --bins --tests
+                ;;
+            esac
           fi
 
   release:

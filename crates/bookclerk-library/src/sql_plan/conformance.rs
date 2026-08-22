@@ -2,7 +2,9 @@
 
 use crate::atomic_ops::{atomic_status, DbAtomicParams};
 
-use super::{compile_named_request, execute_plan_on, SqlFamily};
+use super::{
+    compile_named_request, execute_plan_on, execute_statements_on_session, AtomicSession, SqlFamily,
+};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -125,6 +127,99 @@ async fn sqlite_query_stops_after_cap_plus_one() {
     assert!(
         seen <= 6,
         "must stop after cap+1 materialized rows, saw {seen}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_attempts_keep_independent_deadlines_and_caps() {
+    let db_deadline = mem_db().await;
+    let db_cap = mem_db().await;
+    let backend = sea_orm::ConnectionTrait::get_database_backend(&db_cap);
+    sea_orm::ConnectionTrait::execute_raw(
+        &db_cap,
+        sea_orm::Statement::from_string(
+            backend,
+            "CREATE TABLE IF NOT EXISTS rowcap_probe (x INTEGER)",
+        ),
+    )
+    .await
+    .ok();
+    for i in 0..50 {
+        sea_orm::ConnectionTrait::execute_raw(
+            &db_cap,
+            sea_orm::Statement::from_sql_and_values(
+                backend,
+                "INSERT INTO rowcap_probe (x) VALUES (?)",
+                [i.into()],
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let cte = bookclerk_plugin_abi::DbAtomicPlan {
+        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+            sql: "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM t WHERE x < 200000000) SELECT COUNT(*) AS n FROM t".into(),
+            binds: vec![],
+            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+        }],
+        outcome_index: 0,
+        payload_index: None,
+        prior_receipt_index: None,
+        receipt_select_index: None,
+    };
+    let select = bookclerk_plugin_abi::DbAtomicPlan {
+        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+            sql: "SELECT x FROM rowcap_probe".into(),
+            binds: vec![],
+            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+        }],
+        outcome_index: 0,
+        payload_index: None,
+        prior_receipt_index: None,
+        receipt_select_index: None,
+    };
+    let deadline = execute_statements_on_session(
+        &db_deadline,
+        &cte,
+        "op-conc-deadline",
+        "sqlite_txn",
+        0,
+        AtomicSession {
+            cancel: None,
+            deadline_unix_ms: Some(now.saturating_add(80)),
+        },
+    );
+    let cap = execute_statements_on_session(
+        &db_cap,
+        &select,
+        "op-conc-cap",
+        "sqlite_txn",
+        5,
+        AtomicSession {
+            cancel: None,
+            deadline_unix_ms: Some(now.saturating_add(60_000)),
+        },
+    );
+    let (deadline, cap) = tokio::join!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), deadline),
+        cap
+    );
+    let deadline_err = deadline
+        .expect("deadline attempt must not hang if its budget is overwritten")
+        .unwrap_err();
+    let dmsg = deadline_err.to_string().to_lowercase();
+    assert!(
+        dmsg.contains("deadline") || dmsg.contains("interrupt") || dmsg.contains("cancel"),
+        "long CTE must honor its own deadline, got {deadline_err}"
+    );
+    let cap_err = cap.unwrap_err();
+    assert!(
+        cap_err.to_string().contains("maxResultRows"),
+        "capped SELECT must honor its own cap, got {cap_err}"
     );
 }
 

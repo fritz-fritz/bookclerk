@@ -117,35 +117,78 @@ where
     let mut applied = schema_versions_applied(db, DbBackend::Sqlite).await?;
     for (idx, schema) in migration_sql_d1().iter().enumerate() {
         let version = (idx + 1) as i64;
-        if applied.contains(&version) {
-            continue;
-        }
         let mut stmts = split_sql_statements(schema);
         stmts.push(format!(
             "INSERT INTO schema_migrations (version) VALUES ({version})"
         ));
-        run_batch(stmts).await?;
-        applied.insert(version);
+        apply_one_d1_batch(db, version, stmts, &mut run_batch, &mut applied).await?;
     }
     let v27 = migration_v27_schema_version();
     if !applied.contains(&v27) {
-        run_batch(migration_v27_d1_batch()).await?;
-        applied.insert(v27);
+        apply_one_d1_batch(
+            db,
+            v27,
+            migration_v27_d1_batch(),
+            &mut run_batch,
+            &mut applied,
+        )
+        .await?;
     }
     let mut version = v27;
     for schema in migration_sql_d1_post_v27() {
         version += 1;
-        if applied.contains(&version) {
-            continue;
-        }
         let mut stmts = split_sql_statements(schema);
         stmts.push(format!(
             "INSERT INTO schema_migrations (version) VALUES ({version})"
         ));
-        run_batch(stmts).await?;
-        applied.insert(version);
+        apply_one_d1_batch(db, version, stmts, &mut run_batch, &mut applied).await?;
     }
     Ok(())
+}
+
+/// Applies one D1 version batch, reloading `schema_migrations` after errors.
+async fn apply_one_d1_batch<F, Fut>(
+    db: &DatabaseConnection,
+    version: i64,
+    stmts: Vec<String>,
+    run_batch: &mut F,
+    applied: &mut HashSet<i64>,
+) -> Result<()>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let mut delay_ms = 20u64;
+    let mut last_err = None;
+    for attempt in 0..8 {
+        if applied.contains(&version) {
+            return Ok(());
+        }
+        match run_batch(stmts.clone()).await {
+            Ok(()) => {
+                applied.insert(version);
+                return Ok(());
+            }
+            Err(err) => {
+                *applied = schema_versions_applied(db, DbBackend::Sqlite).await?;
+                if applied.contains(&version) {
+                    return Ok(());
+                }
+                if attempt + 1 < 8 && is_schema_lock_err(&err) {
+                    last_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2).min(250);
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+    *applied = schema_versions_applied(db, DbBackend::Sqlite).await?;
+    if applied.contains(&version) {
+        return Ok(());
+    }
+    Err(last_err.expect("d1 schema version retry"))
 }
 
 /// Applies remaining `PRAGMA user_version` steps (file SQLite).
@@ -200,14 +243,6 @@ async fn apply_one_sqlite_version(
         }
     }
     if version <= sqlite_user_version(db).await? {
-        return Ok(());
-    }
-    if last_applied_err
-        .as_ref()
-        .is_some_and(is_already_applied_ddl)
-    {
-        // Peer applied this version's DDL but has not yet written the marker.
-        exec_sql(db, backend, &format!("PRAGMA user_version = {version}")).await?;
         return Ok(());
     }
     Err(last_applied_err.expect("sqlite schema version retry"))
@@ -453,6 +488,7 @@ fn is_schema_lock_err(err: &LibraryError) -> bool {
     s.contains("SQLITE_BUSY")
         || s.contains("SQLITE_LOCKED")
         || s.contains("database is locked")
+        || s.contains("begin failed")
         || s.contains("40P01")
         || s.contains("40001")
         || s.contains("55P03")

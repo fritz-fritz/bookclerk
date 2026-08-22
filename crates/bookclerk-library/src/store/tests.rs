@@ -3166,6 +3166,88 @@ async fn dispatch_retry_keeps_frozen_snapshot_when_catalog_changes() {
         .is_none());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_snapshot_cas_two_stores_agree() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.db");
+    let db1 = bookclerk_plugin_database_sqlite::open(&path).await.unwrap();
+    crate::apply_host_schema(&db1, crate::HostSchemaKind::SqliteFile)
+        .await
+        .unwrap();
+    let db2 = bookclerk_plugin_database_sqlite::open(&path).await.unwrap();
+    let store1 = LibraryStore::from_connection(db1.clone())
+        .with_atomic_txn(Arc::new(InProcessSqliteAtomic { db: db1 }));
+    let store2 = LibraryStore::from_connection(db2.clone())
+        .with_atomic_txn(Arc::new(InProcessSqliteAtomic { db: db2 }));
+    let created = store1
+        .publish_domain_event(publish_spec(
+            "book_acquired",
+            "book_acquired:cas-snapshot",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let PublishDomainEventOutcome::Created { id } = created else {
+        panic!("{created:?}");
+    };
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    super::event_outbox::set_snapshot_claim_barrier(Some(barrier));
+    let op = format!("dispatch-{id}");
+    let s1 = Arc::new(store1);
+    let s2 = Arc::new(store2);
+    let id1 = id.clone();
+    let id2 = id.clone();
+    let op1 = op.clone();
+    let op2 = op.clone();
+    let a = tokio::spawn(async move {
+        s1.dispatch_event_deliveries(
+            &id1,
+            &[
+                EventSubscriber::plugin("echo"),
+                EventSubscriber::plugin("alpha"),
+            ],
+            &op1,
+        )
+        .await
+    });
+    let b = tokio::spawn(async move {
+        s2.dispatch_event_deliveries(
+            &id2,
+            &[
+                EventSubscriber::plugin("echo"),
+                EventSubscriber::plugin("beta"),
+            ],
+            &op2,
+        )
+        .await
+    });
+    let (ra, rb) = tokio::join!(a, b);
+    super::event_outbox::set_snapshot_claim_barrier(None);
+    ra.expect("join a").expect("dispatch a");
+    rb.expect("join b").expect("dispatch b");
+    let store =
+        LibraryStore::from_connection(bookclerk_plugin_database_sqlite::open(&path).await.unwrap());
+    let has_alpha = store
+        .get_event_delivery(&format!("{id}:alpha"))
+        .await
+        .unwrap()
+        .is_some();
+    let has_beta = store
+        .get_event_delivery(&format!("{id}:beta"))
+        .await
+        .unwrap()
+        .is_some();
+    assert!(
+        has_alpha ^ has_beta,
+        "exactly one catalog must win the snapshot CAS (alpha={has_alpha} beta={has_beta})"
+    );
+    assert!(store
+        .get_event_delivery(&format!("{id}:echo"))
+        .await
+        .unwrap()
+        .is_some());
+}
+
 #[tokio::test]
 async fn dispatch_twenty_five_subscribers_on_sqlite_caps_are_all_inserted() {
     let store = test_store()

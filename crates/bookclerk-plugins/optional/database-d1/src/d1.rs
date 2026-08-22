@@ -15,8 +15,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine as _;
 use bookclerk_db_exec::{
-    b64_string_to_bytes, bytes_to_b64_string, exec_deadline_remaining_ms, is_txn_broken,
-    note_begin_failed, txn_broken_err,
+    b64_string_to_bytes, bytes_to_b64_string, is_txn_broken, note_begin_failed, txn_broken_err,
 };
 use bookclerk_plugin_sdk::v2::MAX_SCALAR_BYTES;
 use sea_orm::{
@@ -98,7 +97,7 @@ impl std::fmt::Debug for D1Proxy {
 }
 
 /// HTTP budget for one D1 request, well below the host plugin RPC deadline (300s).
-const D1_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const D1_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// TCP connect budget for one D1 request (10s), well below the 20s request timeout.
 const D1_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -220,11 +219,18 @@ impl D1Proxy {
         url: &str,
         body: JsonValue,
     ) -> std::result::Result<JsonValue, D1Error> {
+        self.post_json_timed(url, body, D1_REQUEST_TIMEOUT).await
+    }
+
+    /// POSTs a JSON body with an explicit HTTP timeout.
+    async fn post_json_timed(
+        &self,
+        url: &str,
+        body: JsonValue,
+        timeout: Duration,
+    ) -> std::result::Result<JsonValue, D1Error> {
         let _http = self.inner.http.lock().await;
-        let timeout = exec_deadline_remaining_ms()
-            .map(Duration::from_millis)
-            .unwrap_or(D1_REQUEST_TIMEOUT)
-            .min(D1_REQUEST_TIMEOUT);
+        let timeout = timeout.min(D1_REQUEST_TIMEOUT);
         let response = self
             .inner
             .client
@@ -241,9 +247,20 @@ impl D1Proxy {
     /// Runs one or more SQL statements as one documented D1 `{ "batch": [...] }`
     /// request: statements execute sequentially as one SQL transaction and roll
     /// back together on failure.
+    #[cfg(test)]
     pub(crate) async fn run_batch(
         &self,
         statements: &[(String, Vec<JsonValue>)],
+    ) -> std::result::Result<JsonValue, D1Error> {
+        self.run_batch_with_timeout(statements, D1_REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// [`run_batch`] with a caller-supplied HTTP timeout.
+    pub(crate) async fn run_batch_with_timeout(
+        &self,
+        statements: &[(String, Vec<JsonValue>)],
+        timeout: Duration,
     ) -> std::result::Result<JsonValue, D1Error> {
         if statements.is_empty() {
             return Err(D1Error::Permanent {
@@ -257,7 +274,7 @@ impl D1Proxy {
                 .map(|(sql, params)| json!({ "sql": sql, "params": params }))
                 .collect::<Vec<_>>(),
         });
-        self.post_json(&self.query_url(), body).await
+        self.post_json_timed(&self.query_url(), body, timeout).await
     }
 
     /// Runs one autocommit `{ sql, params }` statement (not an interactive transaction).
@@ -1298,6 +1315,8 @@ mod tests {
         conn: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
         /// Remaining BetweenStatements skips before a simulated crash (`u32::MAX` = off).
         interrupt_after: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        /// When true, COMMIT then return HTTP 500 (committed but reply lost).
+        drop_reply_after_commit: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl wiremock::Respond for ExecutingD1 {
@@ -1305,7 +1324,12 @@ mod tests {
             let body: JsonValue = serde_json::from_slice(&request.body).unwrap_or(json!({}));
             let conn = self.conn.lock().expect("sqlite mutex");
             if let Some(batch) = body.get("batch").and_then(JsonValue::as_array) {
-                return sqlite_exec_batch(&conn, &self.interrupt_after, batch);
+                return sqlite_exec_batch(
+                    &conn,
+                    &self.interrupt_after,
+                    &self.drop_reply_after_commit,
+                    batch,
+                );
             }
             if let Some(sql) = body.get("sql").and_then(JsonValue::as_str) {
                 let params = body
@@ -1360,6 +1384,7 @@ mod tests {
     fn sqlite_exec_batch(
         conn: &rusqlite::Connection,
         interrupt_after: &std::sync::atomic::AtomicU32,
+        drop_reply_after_commit: &std::sync::atomic::AtomicBool,
         batch: &[JsonValue],
     ) -> ResponseTemplate {
         if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
@@ -1410,6 +1435,12 @@ mod tests {
             return ResponseTemplate::new(500).set_body_json(json!({
                 "success": false,
                 "errors": [{"message": "commit failed"}]
+            }));
+        }
+        if drop_reply_after_commit.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return ResponseTemplate::new(500).set_body_json(json!({
+                "success": false,
+                "errors": [{"message": "commit reply lost"}]
             }));
         }
         ResponseTemplate::new(200).set_body_json(json!({
@@ -1494,26 +1525,29 @@ mod tests {
         D1Proxy,
         std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
         std::sync::Arc<std::sync::atomic::AtomicU32>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let conn = std::sync::Arc::new(std::sync::Mutex::new(conn));
         let interrupt_after = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
+        let drop_reply = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r"/query$"))
             .respond_with(ExecutingD1 {
                 conn: std::sync::Arc::clone(&conn),
                 interrupt_after: std::sync::Arc::clone(&interrupt_after),
+                drop_reply_after_commit: std::sync::Arc::clone(&drop_reply),
             })
             .mount(&server)
             .await;
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
-        (server, proxy, conn, interrupt_after)
+        (server, proxy, conn, interrupt_after, drop_reply)
     }
 
     #[tokio::test]
     async fn executing_mock_unique_constraint_fails_closed() {
-        let (_server, proxy, _conn, _interrupt) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
         proxy
             .run_batch(&[("CREATE TABLE t (k TEXT PRIMARY KEY)".into(), Vec::new())])
             .await
@@ -1552,7 +1586,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_cancel_before_begin() {
-        let (_server, proxy, _conn, _interrupt) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
         bookclerk_library::inject_atomic_interrupt(
             bookclerk_library::AtomicInterruptPhase::BeforeBegin,
             bookclerk_library::AtomicInterruptKind::Cancel,
@@ -1579,7 +1613,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_interrupt_at_http_return_is_ambiguous() {
-        let (_server, proxy, _conn, _interrupt) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
         bookclerk_library::inject_atomic_interrupt(
             bookclerk_library::AtomicInterruptPhase::AroundCommit,
             bookclerk_library::AtomicInterruptKind::Cancel,
@@ -1643,7 +1677,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_row_cap_fails_closed() {
-        let (_server, proxy, conn, _interrupt) = executing_proxy().await;
+        let (_server, proxy, conn, _interrupt, _drop) = executing_proxy().await;
         let cap = bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows as usize;
         {
             let db = conn.lock().expect("sqlite mutex");
@@ -1678,7 +1712,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_host_schema_and_replay() {
-        let (_server, proxy, _conn, _interrupt) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
         let db = sea_orm::Database::connect_proxy(
             DatabaseBackend::Sqlite,
             std::sync::Arc::new(Box::new(proxy.clone())),
@@ -1748,7 +1782,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_schema_crash_retries() {
-        let (_server, proxy, _conn, interrupt) = executing_proxy().await;
+        let (_server, proxy, _conn, interrupt, _drop) = executing_proxy().await;
         let db = sea_orm::Database::connect_proxy(
             DatabaseBackend::Sqlite,
             std::sync::Arc::new(Box::new(proxy.clone())),
@@ -1786,7 +1820,7 @@ mod tests {
 
     #[tokio::test]
     async fn executing_mock_shared_vectors() {
-        let (_server, proxy, _conn, _interrupt) = executing_proxy().await;
+        let (_server, proxy, _conn, _interrupt, _drop) = executing_proxy().await;
         let db = sea_orm::Database::connect_proxy(
             DatabaseBackend::Sqlite,
             std::sync::Arc::new(Box::new(proxy.clone())),
@@ -1812,5 +1846,68 @@ mod tests {
             },
         )
         .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn executing_mock_concurrent_independent_proxies_apply_schema() {
+        let (server, proxy1, _conn, _interrupt, _drop) = executing_proxy().await;
+        let proxy2 = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let db1 = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy1.clone())),
+        )
+        .await
+        .unwrap();
+        let db2 = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy2.clone())),
+        )
+        .await
+        .unwrap();
+        let p1 = proxy1.clone();
+        let p2 = proxy2.clone();
+        let (a, b) = tokio::join!(
+            bookclerk_library::apply_host_schema_with_batch(
+                &db1,
+                bookclerk_library::HostSchemaKind::D1,
+                move |stmts| {
+                    let proxy = p1.clone();
+                    async move { run_schema_batch(proxy, stmts).await }
+                },
+            ),
+            bookclerk_library::apply_host_schema_with_batch(
+                &db2,
+                bookclerk_library::HostSchemaKind::D1,
+                move |stmts| {
+                    let proxy = p2.clone();
+                    async move { run_schema_batch(proxy, stmts).await }
+                },
+            ),
+        );
+        a.expect("independent proxy 1 schema");
+        b.expect("independent proxy 2 schema");
+    }
+
+    #[tokio::test]
+    async fn executing_mock_committed_reply_lost_still_completes() {
+        let (_server, proxy, _conn, _interrupt, drop_reply) = executing_proxy().await;
+        drop_reply.store(true, std::sync::atomic::Ordering::SeqCst);
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::D1,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("reload after committed-but-lost HTTP reply");
     }
 }

@@ -37,20 +37,27 @@ impl D1Proxy {
             bookclerk_db_exec::AtomicInterruptPhase::BeforeBegin,
             req.deadline_unix_ms,
         )?;
-        bookclerk_db_exec::arm_exec_budget(req.deadline_unix_ms, 0);
-        let _budget = D1ExecBudget;
         let plan = req
             .plan
             .clone()
             .ok_or_else(|| DbErr::Custom("dbAtomic requires a host-authored executePlan".into()))?;
+        let cap = DbConnectResult::d1().max_result_rows;
         let statements: Vec<SqlStmt> = plan
             .statements
             .iter()
-            .map(|s| (s.sql.clone(), d1_wire_binds(&s.binds)))
+            .map(|s| {
+                let sql = if s.kind == bookclerk_plugin_sdk::DbPlanStatementKind::Query {
+                    bookclerk_db_exec::cap_query_sql(&s.sql, cap)
+                } else {
+                    s.sql.clone()
+                };
+                (sql, d1_wire_binds(&s.binds))
+            })
             .collect();
+        let timeout = d1_http_timeout(req.deadline_unix_ms);
         let mut last_err = None;
         for attempt in 0..ATOMIC_HTTP_ATTEMPTS {
-            let raw = match self.run_batch(&statements).await {
+            let raw = match self.run_batch_with_timeout(&statements, timeout).await {
                 Ok(value) => {
                     check_d1_session(
                         bookclerk_db_exec::AtomicInterruptPhase::AroundCommit,
@@ -78,12 +85,14 @@ impl D1Proxy {
     }
 }
 
-/// Clears the process-wide D1 HTTP deadline when `run_atomic` returns.
-struct D1ExecBudget;
-
-impl Drop for D1ExecBudget {
-    fn drop(&mut self) {
-        bookclerk_db_exec::clear_exec_budget();
+/// HTTP timeout for one D1 batch, capped by the guest-visible deadline.
+fn d1_http_timeout(deadline_unix_ms: Option<u64>) -> Duration {
+    match deadline_unix_ms {
+        Some(dl) => {
+            let ms = dl.saturating_sub(d1_unix_now_ms()).max(1);
+            Duration::from_millis(ms).min(super::d1::D1_REQUEST_TIMEOUT)
+        }
+        None => super::d1::D1_REQUEST_TIMEOUT,
     }
 }
 

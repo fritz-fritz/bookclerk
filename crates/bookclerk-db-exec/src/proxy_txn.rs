@@ -6,8 +6,9 @@
 //! Proxies record a per-task fault instead and refuse subsequent statements.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::ThreadId;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,12 +44,87 @@ static INJECT_COMMIT: LazyLock<Mutex<HashMap<TaskKey, u32>>> =
 /// Injected atomic session interrupt (cancel or deadline) for tests.
 static INJECT_INTERRUPT: LazyLock<Mutex<HashMap<TaskKey, InjectedInterrupt>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-/// Guest-visible atomic deadline (`0` = none). Read from rusqlite progress handlers.
-static EXEC_DEADLINE_UNIX_MS: AtomicU64 = AtomicU64::new(0);
-/// Advertised query row cap (`0` = unlimited). Callers stop after `cap + 1`.
-static QUERY_ROW_CAP: AtomicUsize = AtomicUsize::new(0);
-/// Rows materialized by the current capped query (tests / early-stop).
-static QUERY_ROWS_SEEN: AtomicUsize = AtomicUsize::new(0);
+/// Rows seen by the last completed atomic attempt (tests).
+static LAST_QUERY_ROWS_SEEN: AtomicUsize = AtomicUsize::new(0);
+
+tokio::task_local! {
+    static TASK_EXEC_BUDGET: Arc<ExecBudget>;
+}
+
+/// Request-scoped deadline and query row cap for one atomic attempt.
+///
+/// Stored on the Tokio task that owns the attempt and copied onto the engine
+/// connection after it acquires the exclusive lease, so concurrent attempts
+/// cannot overwrite each other.
+#[derive(Debug)]
+pub struct ExecBudget {
+    /// Guest-visible deadline (`0` = none).
+    deadline_unix_ms: AtomicU64,
+    /// Advertised query row cap (`0` = unlimited).
+    query_row_cap: AtomicUsize,
+    /// Rows materialized by the current capped query.
+    query_rows_seen: AtomicUsize,
+}
+
+impl ExecBudget {
+    /// Builds a budget for one atomic attempt.
+    #[must_use]
+    pub fn new(deadline_unix_ms: Option<u64>, query_row_cap: u32) -> Arc<Self> {
+        Arc::new(Self {
+            deadline_unix_ms: AtomicU64::new(deadline_unix_ms.unwrap_or(0)),
+            query_row_cap: AtomicUsize::new(usize::try_from(query_row_cap).unwrap_or(0)),
+            query_rows_seen: AtomicUsize::new(0),
+        })
+    }
+
+    /// No deadline and no row cap.
+    #[must_use]
+    pub fn unlimited() -> Arc<Self> {
+        Self::new(None, 0)
+    }
+
+    /// True when an armed deadline has elapsed.
+    #[must_use]
+    pub fn deadline_expired(&self) -> bool {
+        let dl = self.deadline_unix_ms.load(Ordering::SeqCst);
+        dl > 0 && unix_now_ms() >= dl
+    }
+
+    /// Remaining milliseconds until the armed deadline (`None` if unlimited).
+    #[must_use]
+    pub fn remaining_ms(&self) -> Option<u64> {
+        let dl = self.deadline_unix_ms.load(Ordering::SeqCst);
+        if dl == 0 {
+            return None;
+        }
+        Some(dl.saturating_sub(unix_now_ms()).max(1))
+    }
+
+    /// Advertised query row cap (`None` if unlimited).
+    #[must_use]
+    pub fn cap(&self) -> Option<usize> {
+        let n = self.query_row_cap.load(Ordering::SeqCst);
+        (n > 0).then_some(n)
+    }
+
+    /// Clears the per-query row counter.
+    pub fn reset_rows_seen(&self) {
+        self.query_rows_seen.store(0, Ordering::SeqCst);
+    }
+
+    /// Records one materialized query row; `true` when the caller should stop.
+    #[must_use]
+    pub fn note_row(&self) -> bool {
+        let seen = self.query_rows_seen.fetch_add(1, Ordering::SeqCst) + 1;
+        self.cap().is_some_and(|cap| seen > cap)
+    }
+
+    /// Rows materialized by the current capped query.
+    #[must_use]
+    pub fn rows_seen(&self) -> usize {
+        self.query_rows_seen.load(Ordering::SeqCst)
+    }
+}
 
 /// Phase at which an injected atomic interrupt fires.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -208,55 +284,58 @@ fn unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Arms engine-level deadline and query row cap for the current atomic attempt.
-pub fn arm_exec_budget(deadline_unix_ms: Option<u64>, query_row_cap: u32) {
-    EXEC_DEADLINE_UNIX_MS.store(deadline_unix_ms.unwrap_or(0), Ordering::SeqCst);
-    QUERY_ROW_CAP.store(
-        usize::try_from(query_row_cap).unwrap_or(0),
-        Ordering::SeqCst,
-    );
-    QUERY_ROWS_SEEN.store(0, Ordering::SeqCst);
+/// Runs `fut` with `budget` as the request-scoped execution budget.
+pub async fn with_exec_budget<F, Fut, T>(budget: Arc<ExecBudget>, fut: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T>,
+{
+    TASK_EXEC_BUDGET.scope(budget, fut()).await
 }
 
-/// Clears engine-level deadline and query row cap.
-pub fn clear_exec_budget() {
-    EXEC_DEADLINE_UNIX_MS.store(0, Ordering::SeqCst);
-    QUERY_ROW_CAP.store(0, Ordering::SeqCst);
+/// Request-scoped budget for the current Tokio task, if an atomic attempt armed one.
+#[must_use]
+pub fn current_exec_budget() -> Option<Arc<ExecBudget>> {
+    TASK_EXEC_BUDGET.try_with(Arc::clone).ok()
 }
 
-/// True when an armed deadline has elapsed (rusqlite progress handler).
+/// Records `seen` for [`query_rows_seen`] after an atomic attempt completes.
+pub fn record_query_rows_seen(seen: usize) {
+    LAST_QUERY_ROWS_SEEN.store(seen, Ordering::SeqCst);
+}
+
+/// Legacy no-op. Budgets are request-scoped via [`with_exec_budget`].
+pub fn arm_exec_budget(_deadline_unix_ms: Option<u64>, _query_row_cap: u32) {}
+
+/// Legacy no-op. Budgets are request-scoped via [`with_exec_budget`].
+pub fn clear_exec_budget() {}
+
+/// True when the current task's armed deadline has elapsed.
 #[must_use]
 pub fn exec_deadline_expired() -> bool {
-    let dl = EXEC_DEADLINE_UNIX_MS.load(Ordering::SeqCst);
-    dl > 0 && unix_now_ms() >= dl
+    current_exec_budget().is_some_and(|b| b.deadline_expired())
 }
 
-/// Remaining milliseconds until the armed deadline (`None` if unlimited).
+/// Remaining milliseconds until the current task's deadline (`None` if unlimited).
 #[must_use]
 pub fn exec_deadline_remaining_ms() -> Option<u64> {
-    let dl = EXEC_DEADLINE_UNIX_MS.load(Ordering::SeqCst);
-    if dl == 0 {
-        return None;
-    }
-    Some(dl.saturating_sub(unix_now_ms()).max(1))
+    current_exec_budget().and_then(|b| b.remaining_ms())
 }
 
-/// Advertised query row cap (`None` if unlimited).
+/// Advertised query row cap for the current task (`None` if unlimited).
 #[must_use]
 pub fn query_row_cap() -> Option<usize> {
-    let n = QUERY_ROW_CAP.load(Ordering::SeqCst);
-    (n > 0).then_some(n)
+    current_exec_budget().and_then(|b| b.cap())
 }
 
-/// Records one materialized query row; `true` when the caller should stop.
+/// Records one materialized query row against the current task budget.
 #[must_use]
 pub fn note_query_row() -> bool {
-    let seen = QUERY_ROWS_SEEN.fetch_add(1, Ordering::SeqCst) + 1;
-    query_row_cap().is_some_and(|cap| seen > cap)
+    current_exec_budget().is_some_and(|b| b.note_row())
 }
 
-/// Rows materialized by the current capped query (tests).
+/// Rows materialized by the last completed capped query (tests).
 #[must_use]
 pub fn query_rows_seen() -> usize {
-    QUERY_ROWS_SEEN.load(Ordering::SeqCst)
+    LAST_QUERY_ROWS_SEEN.load(Ordering::SeqCst)
 }

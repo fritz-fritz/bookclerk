@@ -14,9 +14,8 @@ use sea_orm::{
 use serde_json::Value as JsonValue;
 
 use crate::proxy_txn::{
-    arm_exec_budget, clear_exec_budget, consume_atomic_interrupt, consume_commit_injection,
-    exec_deadline_remaining_ms, is_txn_broken, take_txn_fault, AtomicInterruptKind,
-    AtomicInterruptPhase,
+    consume_atomic_interrupt, consume_commit_injection, is_txn_broken, record_query_rows_seen,
+    take_txn_fault, with_exec_budget, AtomicInterruptKind, AtomicInterruptPhase, ExecBudget,
 };
 
 /// Session-level cancel / deadline for one atomic attempt (not hashed).
@@ -99,8 +98,32 @@ pub async fn execute_statements_on_session(
     session: AtomicSession,
 ) -> Result<DbPlanExecResult, DbErr> {
     session.check(AtomicInterruptPhase::BeforeBegin)?;
-    arm_exec_budget(session.deadline_unix_ms, max_result_rows);
-    let _budget = ClearExecBudget;
+    let budget = ExecBudget::new(session.deadline_unix_ms, max_result_rows);
+    let seen_budget = Arc::clone(&budget);
+    let result = with_exec_budget(Arc::clone(&budget), || {
+        execute_statements_body(
+            db,
+            plan,
+            operation_id,
+            timing_source,
+            max_result_rows,
+            session,
+        )
+    })
+    .await;
+    record_query_rows_seen(seen_budget.rows_seen());
+    result
+}
+
+/// Body of [`execute_statements_on_session`] after the request budget is armed.
+async fn execute_statements_body(
+    db: &DatabaseConnection,
+    plan: &DbAtomicPlan,
+    operation_id: &str,
+    timing_source: &str,
+    max_result_rows: u32,
+    session: AtomicSession,
+) -> Result<DbPlanExecResult, DbErr> {
     let started = Instant::now();
     let txn = db.begin().await?;
     if is_txn_broken() {
@@ -110,7 +133,7 @@ pub async fn execute_statements_on_session(
     }
     let backend = txn.get_database_backend();
     if backend == sea_orm::DatabaseBackend::Postgres {
-        if let Some(ms) = exec_deadline_remaining_ms() {
+        if let Some(ms) = remaining_deadline_ms(session.deadline_unix_ms) {
             let sql = format!("SET LOCAL statement_timeout = '{ms}ms'");
             if let Err(err) = txn.execute_raw(Statement::from_string(backend, sql)).await {
                 let _ = txn.rollback().await;
@@ -128,7 +151,7 @@ pub async fn execute_statements_on_session(
         }
         let values: Vec<Value> = stmt.binds.iter().map(json_to_sea).collect();
         let sql = match stmt.kind {
-            DbPlanStatementKind::Query => capped_query_sql(&stmt.sql, max_result_rows),
+            DbPlanStatementKind::Query => cap_query_sql(&stmt.sql, max_result_rows),
             DbPlanStatementKind::Execute => stmt.sql.clone(),
         };
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
@@ -234,23 +257,45 @@ fn unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Wraps a query so the engine stops after `cap + 1` rows.
-fn capped_query_sql(sql: &str, max_result_rows: u32) -> String {
-    if max_result_rows == 0 {
+/// Remaining milliseconds until `deadline_unix_ms` (`None` if unlimited).
+fn remaining_deadline_ms(deadline_unix_ms: Option<u64>) -> Option<u64> {
+    let dl = deadline_unix_ms?;
+    Some(dl.saturating_sub(unix_now_ms()).max(1))
+}
+
+/// True when `sql` is a read-only SELECT or SELECT CTE (not DML `RETURNING`).
+#[must_use]
+pub fn is_readonly_select(sql: &str) -> bool {
+    let compact = sql
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+    let first = compact.split_whitespace().next().unwrap_or("");
+    match first {
+        "SELECT" => true,
+        "WITH" => {
+            let collapsed = compact.replace("( ", "(");
+            !(collapsed.contains("AS (INSERT")
+                || collapsed.contains("AS (UPDATE")
+                || collapsed.contains("AS (DELETE"))
+        }
+        _ => false,
+    }
+}
+
+/// Wraps a read-only SELECT so the engine stops after `cap + 1` rows.
+///
+/// DML `RETURNING` is left unchanged (`SELECT * FROM (INSERT … RETURNING …)`
+/// is invalid SQL). Callers bound those result sets by streaming or counting.
+#[must_use]
+pub fn cap_query_sql(sql: &str, max_result_rows: u32) -> String {
+    if max_result_rows == 0 || !is_readonly_select(sql) {
         return sql.to_string();
     }
     let n = u64::from(max_result_rows) + 1;
     let inner = sql.trim().trim_end_matches(';');
     format!("SELECT * FROM ({inner}) AS _bc_cap LIMIT {n}")
-}
-
-/// Clears engine budget when the atomic attempt returns.
-struct ClearExecBudget;
-
-impl Drop for ClearExecBudget {
-    fn drop(&mut self) {
-        clear_exec_budget();
-    }
 }
 
 /// True when `n` exceeds a positive `max_result_rows` cap.
@@ -320,7 +365,7 @@ fn sea_to_json(v: &Value) -> JsonValue {
 
 #[cfg(test)]
 mod tests {
-    use super::json_to_sea;
+    use super::{cap_query_sql, is_readonly_select, json_to_sea};
     use sea_orm::Value;
     use serde_json::json;
 
@@ -345,6 +390,29 @@ mod tests {
         assert!(matches!(
             json_to_sea(&json!("b64:AA==")),
             Value::Bytes(Some(b)) if b.as_slice() == [0]
+        ));
+    }
+
+    #[test]
+    fn cap_query_sql_wraps_readonly_select() {
+        let sql = cap_query_sql("SELECT x FROM t", 5);
+        assert!(sql.contains("LIMIT 6"), "{sql}");
+        assert!(sql.contains("AS _bc_cap"), "{sql}");
+    }
+
+    #[test]
+    fn cap_query_sql_does_not_wrap_returning_dml() {
+        for sql in [
+            "INSERT INTO t (id) SELECT 1 UNION ALL SELECT 2 RETURNING id",
+            "UPDATE t SET id = id RETURNING id",
+            "DELETE FROM t RETURNING id",
+            "WITH gone AS (DELETE FROM t RETURNING id) SELECT * FROM gone",
+        ] {
+            assert_eq!(cap_query_sql(sql, 5), sql, "{sql}");
+            assert!(!is_readonly_select(sql), "{sql}");
+        }
+        assert!(is_readonly_select(
+            "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM t WHERE x < 3) SELECT x FROM t"
         ));
     }
 }

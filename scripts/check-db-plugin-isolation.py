@@ -69,8 +69,9 @@ TABLE_RE = re.compile(
 JSON_EACH_RE = re.compile(r"\bjson_each\b", re.IGNORECASE)
 
 # Production guests and the shared guest crate must not take a non-optional
-# `bookclerk-library` dependency. Optional (`host-helpers`) and `[dev-dependencies]`
-# are allowed for tests/CLI helpers.
+# `bookclerk-library` dependency. Optional (`host-helpers`) is allowed only when
+# it is **not** in the default feature set. `[dev-dependencies]` are allowed
+# for tests/CLI helpers.
 LIBRARY_ISOLATION_PACKAGES = (
     "bookclerk-db-guest",
     "bookclerk-plugin-database-sqlite",
@@ -80,7 +81,11 @@ LIBRARY_ISOLATION_PACKAGES = (
 
 
 def check_cargo_metadata() -> list[str]:
-    """Refuse a non-optional production `bookclerk-library` dep on guest crates."""
+    """Refuse a production `bookclerk-library` dep on guest crates.
+
+    Optional (`host-helpers`) and `[dev-dependencies]` are allowed, but the
+    default/release feature graph must not enable `bookclerk-library`.
+    """
     proc = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--no-deps"],
         cwd=ROOT,
@@ -100,6 +105,17 @@ def check_cargo_metadata() -> list[str]:
             manifest.relative_to(ROOT)
         except ValueError:
             continue
+        features = pkg.get("features") or {}
+        default_enabled = expand_feature_graph(features, "default")
+        if "host-helpers" in (features.get("default") or []):
+            hits.append(
+                f"{pkg['name']}: default features enable host-helpers "
+                "(production `cargo build -p` would compile bookclerk-library)"
+            )
+        if "bookclerk-library" in default_enabled:
+            hits.append(
+                f"{pkg['name']}: default/release feature graph depends on bookclerk-library"
+            )
         for dep in pkg.get("dependencies", []):
             if dep.get("name") != "bookclerk-library":
                 continue
@@ -111,6 +127,25 @@ def check_cargo_metadata() -> list[str]:
                     "(use bookclerk-db-exec, optional host-helpers, or a dev-dependency)"
                 )
     return hits
+
+
+def expand_feature_graph(features: dict, name: str) -> set[str]:
+    """Expands Cargo feature `name` into enabled feature/dep names."""
+    seen: set[str] = set()
+    stack = list(features.get(name) or [])
+    while stack:
+        item = stack.pop()
+        if item in seen:
+            continue
+        seen.add(item)
+        if item.startswith("dep:"):
+            seen.add(item[4:])
+            continue
+        if "/" in item:
+            seen.add(item.split("/", 1)[0])
+            continue
+        stack.extend(features.get(item) or [])
+    return seen
 
 
 def iter_plugin_sources() -> list[Path]:
