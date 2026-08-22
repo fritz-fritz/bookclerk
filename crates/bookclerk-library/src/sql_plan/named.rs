@@ -528,6 +528,155 @@ fn gate_write(sql_text: String, mut params: Vec<JsonValue>, operation_id: &str) 
     )
 }
 
+/// Like [`gate_write`], and only when this attempt's outcome `SELECT` is `ok`.
+///
+/// Uses the live outcome subquery, not a prior `db_atomic_receipts` row, so a
+/// committed `ok` receipt cannot authorize replay mutations.
+fn gate_write_when_outcome_ok(
+    sql_text: String,
+    mut params: Vec<JsonValue>,
+    operation_id: &str,
+    outcome: &SqlStmt,
+) -> SqlStmt {
+    let trimmed = sql_text.trim_start();
+    let is_write = trimmed.starts_with("INSERT")
+        || trimmed.starts_with("UPDATE")
+        || trimmed.starts_with("DELETE");
+    if !is_write {
+        return (sql_text, params);
+    }
+    params.push(j_str(operation_id));
+    params.extend(outcome.1.clone());
+    (
+        format!(
+            "{sql_text} AND NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?) \
+             AND EXISTS (SELECT 1 FROM ({}) o WHERE o.status = '{ok}')",
+            outcome.0,
+            ok = atomic_status::OK,
+        ),
+        params,
+    )
+}
+
+/// Scratch `db_serialization_slots` key that holds this attempt's outcome bump.
+fn outcome_scratch_key(operation_id: &str) -> String {
+    format!("atomic-outcome:{operation_id}")
+}
+
+/// Maps an outcome status expression to a durable integer bump.
+fn status_to_bump_sql(status_sql: &str) -> String {
+    format!(
+        "CASE {status_sql} \
+            WHEN '{ok}' THEN 1 \
+            WHEN '{empty}' THEN 2 \
+            WHEN '{not_found}' THEN 3 \
+            WHEN '{last_owner}' THEN 4 \
+            WHEN '{claim_invalid}' THEN 5 \
+            WHEN '{password_required}' THEN 6 \
+            WHEN '{conflict}' THEN 7 \
+            WHEN '{duplicate}' THEN 8 \
+            WHEN '{queue_full}' THEN 9 \
+            ELSE 0 END",
+        ok = atomic_status::OK,
+        empty = atomic_status::EMPTY,
+        not_found = atomic_status::NOT_FOUND,
+        last_owner = atomic_status::LAST_OWNER,
+        claim_invalid = atomic_status::CLAIM_INVALID,
+        password_required = atomic_status::PASSWORD_REQUIRED,
+        conflict = atomic_status::IDEMPOTENCY_CONFLICT,
+        duplicate = atomic_status::DUPLICATE,
+        queue_full = atomic_status::QUEUE_FULL,
+    )
+}
+
+/// Maps a scratch bump back to an outcome status string.
+fn bump_to_status_sql(bump_sql: &str) -> String {
+    format!(
+        "CASE {bump_sql} \
+            WHEN 1 THEN '{ok}' \
+            WHEN 2 THEN '{empty}' \
+            WHEN 3 THEN '{not_found}' \
+            WHEN 4 THEN '{last_owner}' \
+            WHEN 5 THEN '{claim_invalid}' \
+            WHEN 6 THEN '{password_required}' \
+            WHEN 7 THEN '{conflict}' \
+            WHEN 8 THEN '{duplicate}' \
+            WHEN 9 THEN '{queue_full}' \
+            ELSE '{claim_invalid}' END",
+        ok = atomic_status::OK,
+        empty = atomic_status::EMPTY,
+        not_found = atomic_status::NOT_FOUND,
+        last_owner = atomic_status::LAST_OWNER,
+        claim_invalid = atomic_status::CLAIM_INVALID,
+        password_required = atomic_status::PASSWORD_REQUIRED,
+        conflict = atomic_status::IDEMPOTENCY_CONFLICT,
+        duplicate = atomic_status::DUPLICATE,
+        queue_full = atomic_status::QUEUE_FULL,
+    )
+}
+
+/// Inserts the outcome scratch row unless this `operation_id` already has a receipt.
+fn snapshot_outcome_insert(ctx: &ReceiptCtx) -> SqlStmt {
+    sql(
+        "INSERT OR IGNORE INTO db_serialization_slots (slot_key, bump) \
+         SELECT ?, 0 WHERE NOT EXISTS (\
+            SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?\
+         )",
+        vec![
+            j_str(&outcome_scratch_key(&ctx.operation_id)),
+            j_str(&ctx.operation_id),
+        ],
+    )
+}
+
+/// Records the live outcome status before later writes can invalidate it.
+fn snapshot_outcome_update(ctx: &ReceiptCtx, outcome: &SqlStmt) -> SqlStmt {
+    let bump = status_to_bump_sql("o.status");
+    let mut params = outcome.1.clone();
+    params.push(j_str(&outcome_scratch_key(&ctx.operation_id)));
+    (
+        format!(
+            "UPDATE db_serialization_slots SET bump = (\
+                SELECT {bump} FROM ({}) o\
+             ) WHERE slot_key = ? AND bump = 0",
+            outcome.0,
+        ),
+        params,
+    )
+}
+
+/// Inserts the receipt from the pre-write outcome scratch, not a later re-read.
+fn receipt_insert_from_snapshot(ctx: &ReceiptCtx) -> SqlStmt {
+    let status = bump_to_status_sql("s.bump");
+    sql(
+        &format!(
+            "INSERT INTO db_atomic_receipts (\
+                operation_id, operation_kind, request_hash, status, payload, created_at, expires_at\
+             ) SELECT ?, ?, ?, {status}, NULL, ?, ? \
+               FROM db_serialization_slots s \
+               WHERE s.slot_key = ? \
+                 AND NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)"
+        ),
+        vec![
+            j_str(&ctx.operation_id),
+            j_str(ctx.kind),
+            j_str(&ctx.request_hash),
+            j_str(&ctx.now),
+            j_str(&ctx.expires_at),
+            j_str(&outcome_scratch_key(&ctx.operation_id)),
+            j_str(&ctx.operation_id),
+        ],
+    )
+}
+
+/// Drops the outcome scratch row after the receipt is durable.
+fn clear_outcome_snapshot(ctx: &ReceiptCtx) -> SqlStmt {
+    sql(
+        "DELETE FROM db_serialization_slots WHERE slot_key = ?",
+        vec![j_str(&outcome_scratch_key(&ctx.operation_id))],
+    )
+}
+
 /// SQL that builds the guest user JSON object (password present as a boolean).
 fn user_payload_json_sql() -> &'static str {
     "SELECT json_object(\
@@ -553,17 +702,37 @@ fn wrap_status_op(plan: AtomicPlan, ctx: &ReceiptCtx, payload: PayloadKind) -> A
     let payload_index = plan.payload_index;
     let outcome = plan.statements[outcome_index].clone();
     let payload_stmt = payload_index.and_then(|idx| plan.statements.get(idx).cloned());
-    let mut statements = vec![prune_receipts(ctx), select_receipt(ctx)];
-    let prior_receipt_index = Some(statements.len() - 1);
+    let mut statements = vec![
+        prune_receipts(ctx),
+        select_receipt(ctx),
+        snapshot_outcome_insert(ctx),
+        snapshot_outcome_update(ctx, &outcome),
+    ];
+    let prior_receipt_index = Some(1);
     for (i, (sql_text, params)) in plan.statements.into_iter().enumerate() {
         if Some(i) == payload_index || i == outcome_index {
             continue;
         }
         // Absence of a prior receipt, not an existing `ok` row: a committed
         // receipt must not authorize post-outcome writes on replay / D1 retry.
-        statements.push(gate_write(sql_text, params, &ctx.operation_id));
+        // Post-outcome writes still require this attempt's outcome to be `ok`
+        // (live subquery, not `db_atomic_receipts.status`).
+        if i < outcome_index {
+            statements.push(gate_write(sql_text, params, &ctx.operation_id));
+        } else {
+            statements.push(gate_write_when_outcome_ok(
+                sql_text,
+                params,
+                &ctx.operation_id,
+                &outcome,
+            ));
+        }
     }
-    statements.push(receipt_insert_from_outcome(ctx, &outcome));
+    // Snapshot the outcome before inner writes: delete-user (and similar)
+    // invalidates a live existence SELECT, but the receipt must still follow
+    // those writes so replay cannot treat a committed `ok` row as a claim.
+    statements.push(receipt_insert_from_snapshot(ctx));
+    statements.push(clear_outcome_snapshot(ctx));
     if let Some(update) = receipt_payload_update(ctx, payload, payload_stmt) {
         statements.push(update);
     }
@@ -578,27 +747,6 @@ fn wrap_status_op(plan: AtomicPlan, ctx: &ReceiptCtx, payload: PayloadKind) -> A
         prior_receipt_index,
         expected_hash: Some(ctx.request_hash.clone()),
     }
-}
-
-/// Inserts a receipt whose status comes from the plan's outcome `SELECT`, skipping if one exists.
-fn receipt_insert_from_outcome(ctx: &ReceiptCtx, outcome: &SqlStmt) -> SqlStmt {
-    let insert_sql = format!(
-        "INSERT INTO db_atomic_receipts (\
-            operation_id, operation_kind, request_hash, status, payload, created_at, expires_at\
-         ) SELECT ?, ?, ?, o.status, NULL, ?, ? FROM ({}) o \
-         WHERE NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)",
-        outcome.0
-    );
-    let mut params = vec![
-        j_str(&ctx.operation_id),
-        j_str(ctx.kind),
-        j_str(&ctx.request_hash),
-        j_str(&ctx.now),
-        j_str(&ctx.expires_at),
-    ];
-    params.extend(outcome.1.clone());
-    params.push(j_str(&ctx.operation_id));
-    (insert_sql, params)
 }
 
 /// Updates an `ok` receipt with user or identity JSON when the payload is still null.
@@ -2498,13 +2646,22 @@ mod tests {
             .find(|s| s.sql.contains("SET password_hash"))
             .expect("password update");
         assert!(
-            update.sql.contains("NOT EXISTS"),
+            update
+                .sql
+                .contains("NOT EXISTS (SELECT 1 FROM db_atomic_receipts"),
             "post-outcome write must skip when a receipt already exists: {}",
             update.sql
         );
         assert!(
-            !update.sql.contains("status = 'ok'"),
+            !update
+                .sql
+                .contains("FROM db_atomic_receipts WHERE operation_id = ? AND status = 'ok'"),
             "must not treat a prior ok receipt as this transaction's claim: {}",
+            update.sql
+        );
+        assert!(
+            update.sql.contains("o.status"),
+            "post-outcome write must require this attempt's outcome ok: {}",
             update.sql
         );
         let insert_idx = compiled
@@ -2522,6 +2679,50 @@ mod tests {
         assert!(
             update_idx < insert_idx,
             "receipt insert must follow domain writes"
+        );
+    }
+
+    #[test]
+    fn wrapped_delete_user_snapshots_outcome_before_row_delete() {
+        let compiled = super::compile_named_request(
+            "del-op",
+            &DbAtomicParams::DeleteUser { user_id: 1 },
+            "2024-06-01T00:00:00Z",
+            crate::sql_plan::SqlFamily::Sqlite,
+        )
+        .unwrap();
+        let snapshot_idx = compiled
+            .plan
+            .statements
+            .iter()
+            .position(|s| s.sql.contains("UPDATE db_serialization_slots SET bump"))
+            .expect("outcome snapshot");
+        let delete_idx = compiled
+            .plan
+            .statements
+            .iter()
+            .position(|s| s.sql.contains("DELETE FROM users WHERE id"))
+            .expect("user delete");
+        let insert_idx = compiled
+            .plan
+            .statements
+            .iter()
+            .position(|s| s.sql.contains("INSERT INTO db_atomic_receipts"))
+            .unwrap();
+        assert!(
+            snapshot_idx < delete_idx,
+            "outcome must be snapshotted before DELETE FROM users"
+        );
+        assert!(
+            delete_idx < insert_idx,
+            "receipt insert must follow domain writes"
+        );
+        assert!(
+            compiled.plan.statements[insert_idx]
+                .sql
+                .contains("FROM db_serialization_slots"),
+            "receipt must use the pre-write snapshot: {}",
+            compiled.plan.statements[insert_idx].sql
         );
     }
 
