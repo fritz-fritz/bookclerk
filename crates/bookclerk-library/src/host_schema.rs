@@ -18,27 +18,35 @@ use crate::migrations::{
 };
 use crate::sql_plan::execute_statements_on;
 
-/// Which versioning table / dialect the host should use.
+/// Which versioning mechanic the host should use.
+///
+/// Flags choose **how** versions are stored and applied, not which SQL pack
+/// to emit. Canonical Bookclerk SQL is [`crate::migrations::migration_sql`].
+/// Postgres connections receive the postgres lowering of that pack; SQLite
+/// connections always get the canonical pack — including a new adapter whose
+/// plugin id is not `postgres` / `d1` / `sqlite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostSchemaKind {
-    /// Interactive SQLite (`PRAGMA user_version`, native transactions).
+    /// `PRAGMA user_version` on an interactive SQLite-family connection.
     SqliteFile,
-    /// PostgreSQL (`schema_migrations` + Postgres DDL).
+    /// `schema_migrations` rows without requiring atomic HTTP batches.
     Postgres,
-    /// Non-interactive SQLite-family atomic-batch (Cloudflare D1).
+    /// `schema_migrations` plus one atomic batch per version (D1-style).
     D1,
 }
 
 impl HostSchemaKind {
-    /// Selects a schema plan from advertised schema-versioning capabilities.
+    /// Selects a schema **apply mechanic** from advertised versioning flags.
     ///
     /// Plugin identity, `dialect`, `sqlFamily`, and `diagnosticEngine` are not
-    /// consulted. A conforming adapter may use any plugin id as long as it
+    /// consulted. SQL text is chosen from the live connection backend when
+    /// applying (canonical SQLite pack, or its postgres lowering), not from
+    /// these flags. A conforming adapter may use any plugin id as long as it
     /// advertises exactly one of:
     ///
-    /// - `pragmaUserVersion` (interactive SQLite `PRAGMA user_version`)
-    /// - `schemaMigrations` without `atomicSchemaBatch` (Postgres)
-    /// - `schemaMigrations` + `atomicSchemaBatch` (D1-style atomic batches)
+    /// - `pragmaUserVersion` (`PRAGMA user_version` marker)
+    /// - `schemaMigrations` without `atomicSchemaBatch` (row marker)
+    /// - `schemaMigrations` + `atomicSchemaBatch` (atomic batch apply)
     ///
     /// # Errors
     ///
@@ -102,13 +110,12 @@ pub async fn apply_host_schema(db: &DatabaseConnection, kind: HostSchemaKind) ->
     match kind {
         HostSchemaKind::SqliteFile => apply_sqlite_user_version(db).await,
         HostSchemaKind::Postgres => {
-            apply_schema_migrations(
-                db,
-                DbBackend::Postgres,
-                "postgres_txn",
-                migration_sql_postgres(),
-            )
-            .await
+            let backend = db.get_database_backend();
+            let (backend, sql, timing) = match backend {
+                DbBackend::Postgres => (backend, migration_sql_postgres(), "postgres_txn"),
+                _ => (DbBackend::Sqlite, migration_sql(), "sqlite_txn"),
+            };
+            apply_schema_migrations(db, backend, timing, sql).await
         }
         HostSchemaKind::D1 => {
             apply_schema_migrations(db, DbBackend::Sqlite, "sqlite_txn", migration_sql_d1())
@@ -144,13 +151,27 @@ where
             apply_sqlite_user_version_with_batch(db, &mut run_batch).await
         }
         HostSchemaKind::Postgres => {
-            apply_schema_migrations_with_batch(
-                db,
-                DbBackend::Postgres,
-                migration_sql_postgres(),
-                &mut run_batch,
-            )
-            .await
+            let backend = db.get_database_backend();
+            match backend {
+                DbBackend::Postgres => {
+                    apply_schema_migrations_with_batch(
+                        db,
+                        backend,
+                        migration_sql_postgres(),
+                        &mut run_batch,
+                    )
+                    .await
+                }
+                _ => {
+                    apply_schema_migrations_with_batch(
+                        db,
+                        DbBackend::Sqlite,
+                        migration_sql(),
+                        &mut run_batch,
+                    )
+                    .await
+                }
+            }
         }
         HostSchemaKind::D1 => apply_host_schema(db, kind).await,
     }
@@ -779,6 +800,27 @@ mod tests {
         assert!(HostSchemaKind::SqliteFile
             .advertised_flags_match(&none)
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn schema_migrations_on_sqlite_uses_canonical_sql_not_postgres_pack() {
+        let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+            .await
+            .expect("unmigrated sqlite");
+        apply_host_schema(&db, HostSchemaKind::Postgres)
+            .await
+            .expect("canonical sqlite pack on sqlite backend");
+        let cols = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA table_info(books)",
+            ))
+            .await
+            .expect("table_info");
+        assert!(
+            !cols.is_empty(),
+            "canonical SQLITE_SCHEMA must create books"
+        );
     }
 
     #[tokio::test]
