@@ -12,12 +12,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_plugin_abi::v2::{
-    serve_plugin_stdio, ByteRange, CopyResult, Destination, DestinationContext, DomainEvent,
-    EventResult, HealthOk, Integration, IntegrationContext, JobHandler, JobHandlerContext,
-    JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo, ObjectMetadata,
-    OidcClientTemplate, PluginDescribe, PluginRoot, PutResult, ReadResult, ScalarLimitsDto, Source,
-    SourceContext, WorkerContext, WriteOptions, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
-    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+    serve_plugin_stdio, ByteRange, CopyResult, DatabaseSession, Destination, DestinationContext,
+    DomainEvent, EventResult, HealthOk, Integration, IntegrationContext, JobHandler,
+    JobHandlerContext, JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo,
+    ObjectMetadata, OidcClientTemplate, PluginDescribe, PluginRoot, PutResult, ReadResult,
+    ScalarLimitsDto, Source, SourceContext, WorkerContext, WriteOptions, MAX_LIST_PAGE,
+    MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_abi::{PluginError, Result as AbiResult};
 use tokio::io::AsyncRead;
@@ -518,16 +518,9 @@ impl JobHandler for HttpJobHandler {
         invocation: JobInvocation,
         context: JobHandlerContext,
     ) -> AbiResult<JobOutcome> {
+        let (allow_database, max_atomic_request_bytes) =
+            granted_database_budget(context.database.as_deref()).await?;
         let grant = format!("{:032x}", rand::random::<u128>());
-        let max_atomic_request_bytes = match context.database.as_ref() {
-            Some(db) => db
-                .capabilities()
-                .await
-                .ok()
-                .map(|c| c.max_request_bytes)
-                .unwrap_or(0),
-            None => 0,
-        };
         self.table.borrow_mut().insert(
             grant.clone(),
             GrantedSlot {
@@ -539,7 +532,7 @@ impl JobHandler for HttpJobHandler {
                 allow_put: true,
                 allow_progress: true,
                 database: context.database.map(Rc::from),
-                allow_database: true,
+                allow_database,
                 max_atomic_request_bytes,
             },
         );
@@ -622,6 +615,33 @@ fn outcome_from_json(v: &serde_json::Value) -> AbiResult<JobOutcome> {
     })
 }
 
+/// Negotiates the granted `executeAtomic` body budget.
+///
+/// When no session is granted, the isolate cannot call `/db/executeAtomic`.
+/// When a session is granted, `capabilities()` must succeed and
+/// `maxRequestBytes` must be in `1..=MAX_SCALAR_BYTES` (`0` is not unlimited).
+///
+/// # Errors
+///
+/// Returns when capabilities cannot be obtained or the advertised budget is
+/// zero or larger than the host scalar ceiling.
+async fn granted_database_budget(database: Option<&dyn DatabaseSession>) -> AbiResult<(bool, u32)> {
+    let Some(db) = database else {
+        return Ok((false, 0));
+    };
+    let caps = db
+        .capabilities()
+        .await
+        .map_err(|err| PluginError::unavailable(format!("database capabilities: {err}")))?;
+    if caps.max_request_bytes == 0 || caps.max_request_bytes > MAX_SCALAR_BYTES {
+        return Err(PluginError::invalid_params(format!(
+            "database maxRequestBytes {} is not in 1..={MAX_SCALAR_BYTES}",
+            caps.max_request_bytes
+        )));
+    }
+    Ok((true, caps.max_request_bytes))
+}
+
 struct RevokeGrant {
     table: GrantedTable,
     grant: String,
@@ -644,4 +664,222 @@ fn percent_encode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc as StdArc;
+    use std::time::Duration;
+
+    use bookclerk_plugin_abi::v2::{
+        ExecResult, NeverCancel, ProgressSink, QueryPage, Statement, Transaction, ENVELOPE_VERSION,
+    };
+    use bookclerk_plugin_abi::{DbCapabilities, DbConnectResult};
+
+    struct NoopSource;
+
+    #[async_trait(?Send)]
+    impl Source for NoopSource {
+        async fn open(&self, _key: &str) -> AbiResult<ReadResult> {
+            Err(PluginError::unsupported("open"))
+        }
+    }
+
+    struct NoopDest;
+
+    #[async_trait(?Send)]
+    impl Destination for NoopDest {
+        async fn head(&self, _key: &str) -> AbiResult<Option<ObjectMetadata>> {
+            Ok(None)
+        }
+        async fn list(&self, _options: ListOptions) -> AbiResult<ListPage> {
+            Ok(ListPage {
+                objects: Vec::new(),
+                next_cursor: None,
+            })
+        }
+        async fn get(&self, _key: &str, _range: Option<ByteRange>) -> AbiResult<ReadResult> {
+            Err(PluginError::unsupported("get"))
+        }
+        async fn put(
+            &self,
+            _key: &str,
+            _body: Pin<Box<dyn AsyncRead + Send>>,
+            _options: WriteOptions,
+        ) -> AbiResult<PutResult> {
+            Err(PluginError::unsupported("put"))
+        }
+        async fn copy(&self, _from: &str, _to: &str) -> AbiResult<CopyResult> {
+            Err(PluginError::unsupported("copy"))
+        }
+        async fn delete(&self, _key: &str) -> AbiResult<()> {
+            Ok(())
+        }
+    }
+
+    struct NoopProgress;
+
+    #[async_trait(?Send)]
+    impl ProgressSink for NoopProgress {
+        async fn report(&self, _percent: f32, _message: &str) -> AbiResult<()> {
+            Ok(())
+        }
+    }
+
+    struct BudgetSession {
+        fail: bool,
+        max_request_bytes: u32,
+    }
+
+    #[async_trait(?Send)]
+    impl DatabaseSession for BudgetSession {
+        async fn execute(&self, _statement: Statement) -> AbiResult<ExecResult> {
+            Err(PluginError::unsupported("execute"))
+        }
+
+        async fn query(
+            &self,
+            _statement: Statement,
+            _cursor: &str,
+            _limit: u32,
+        ) -> AbiResult<QueryPage> {
+            Err(PluginError::unsupported("query"))
+        }
+
+        async fn begin(&self) -> AbiResult<Box<dyn Transaction>> {
+            Err(PluginError::unsupported("begin"))
+        }
+
+        async fn capabilities(&self) -> AbiResult<DbCapabilities> {
+            if self.fail {
+                return Err(PluginError::internal("capabilities boom"));
+            }
+            let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
+            caps.max_request_bytes = self.max_request_bytes;
+            Ok(caps)
+        }
+    }
+
+    fn job_context(database: Option<Box<dyn DatabaseSession>>) -> JobHandlerContext {
+        JobHandlerContext {
+            input: Box::new(NoopSource),
+            output: Box::new(NoopDest),
+            progress: Box::new(NoopProgress),
+            database,
+            cancel: Box::new(NeverCancel),
+        }
+    }
+
+    fn test_invocation() -> JobInvocation {
+        JobInvocation {
+            envelope_version: ENVELOPE_VERSION,
+            payload_schema_version: 1,
+            invocation_id: "inv-1".into(),
+            command_type: "stream_copy".into(),
+            payload_json: "{}".into(),
+            idempotency_key: "idem".into(),
+            attempt: 1,
+            correlation_id: "corr".into(),
+            causation_id: None,
+            deadline_unix_ms: 0,
+            checkpoint: None,
+            invocation_sequence: 1,
+            step_id: None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn granted_budget_fails_closed_on_missing_or_invalid_capabilities() {
+        let err = granted_database_budget(Some(&BudgetSession {
+            fail: true,
+            max_request_bytes: MAX_SCALAR_BYTES,
+        }))
+        .await
+        .expect_err("capabilities errors must fail the grant");
+        assert!(err.to_string().contains("capabilities"), "{err}");
+
+        let err = granted_database_budget(Some(&BudgetSession {
+            fail: false,
+            max_request_bytes: 0,
+        }))
+        .await
+        .expect_err("zero maxRequestBytes must fail the grant");
+        assert!(err.to_string().contains("maxRequestBytes"), "{err}");
+
+        let err = granted_database_budget(Some(&BudgetSession {
+            fail: false,
+            max_request_bytes: MAX_SCALAR_BYTES + 1,
+        }))
+        .await
+        .expect_err("oversized maxRequestBytes must fail the grant");
+        assert!(err.to_string().contains("maxRequestBytes"), "{err}");
+
+        assert_eq!(granted_database_budget(None).await.unwrap(), (false, 0));
+        assert_eq!(
+            granted_database_budget(Some(&BudgetSession {
+                fail: false,
+                max_request_bytes: 4096,
+            }))
+            .await
+            .unwrap(),
+            (true, 4096)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failing_capabilities_does_not_insert_grant_or_dispatch_worker() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let accepted = StdArc::new(AtomicBool::new(false));
+        let flag = StdArc::clone(&accepted);
+        let accept = tokio::spawn(async move {
+            if listener.accept().await.is_ok() {
+                flag.store(true, Ordering::SeqCst);
+            }
+        });
+
+        let table: GrantedTable = Rc::new(RefCell::new(HashMap::new()));
+        let handler = HttpJobHandler {
+            http: BridgeHttp {
+                port,
+                token: "no-dispatch".into(),
+            },
+            ctx: WorkerContext {
+                job_id: "job".into(),
+                json: "{}".into(),
+            },
+            table: Rc::clone(&table),
+        };
+        let err = handler
+            .handle(
+                test_invocation(),
+                job_context(Some(Box::new(BudgetSession {
+                    fail: true,
+                    max_request_bytes: MAX_SCALAR_BYTES,
+                }))),
+            )
+            .await
+            .expect_err("must fail closed");
+        assert!(
+            err.to_string().contains("capabilities"),
+            "must not fall through to the worker bridge: {err}"
+        );
+        assert!(
+            table.borrow().is_empty(),
+            "grant must not be inserted when capabilities fail"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), accept)
+                .await
+                .is_err(),
+            "worker HTTP must not be dispatched"
+        );
+        assert!(!accepted.load(Ordering::SeqCst));
+    }
 }

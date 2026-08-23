@@ -45,7 +45,8 @@ pub struct GrantedSlot {
     pub database: Option<Rc<dyn DatabaseSession>>,
     /// Whether `executeAtomic` is permitted on this grant.
     pub allow_database: bool,
-    /// Negotiated `maxAtomicRequestBytes` (`0` = unlimited).
+    /// Negotiated `maxAtomicRequestBytes`. Zero is fail-closed (empty body
+    /// only), never unlimited; grants with a database must store `1..=MAX_SCALAR_BYTES`.
     pub max_atomic_request_bytes: u32,
 }
 
@@ -810,11 +811,7 @@ async fn read_content<S: AsyncRead + Unpin>(
     mut prefix: Vec<u8>,
     max_bytes: u32,
 ) -> Result<Vec<u8>> {
-    let cap = if max_bytes == 0 {
-        usize::MAX
-    } else {
-        max_bytes as usize
-    };
+    let cap = max_bytes as usize;
     if let Some(len) = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
@@ -884,9 +881,6 @@ async fn read_content<S: AsyncRead + Unpin>(
 }
 
 fn declared_content_length_over_cap(headers: &[(String, String)], cap: u32) -> bool {
-    if cap == 0 {
-        return false;
-    }
     headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
@@ -1072,8 +1066,12 @@ mod tests {
 
     #[test]
     fn declared_content_length_over_cap_is_rejected_before_read() {
-        assert!(!declared_content_length_over_cap(
+        assert!(declared_content_length_over_cap(
             &[("content-length".into(), "16".into())],
+            0
+        ));
+        assert!(!declared_content_length_over_cap(
+            &[("content-length".into(), "0".into())],
             0
         ));
         assert!(!declared_content_length_over_cap(
