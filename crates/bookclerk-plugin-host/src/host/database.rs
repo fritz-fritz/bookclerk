@@ -128,9 +128,7 @@ impl ExternalDatabase {
         if !connect_result.meets_host_minimums() {
             return Err(DbErr::Custom(connect_result.capability_failure_reason()));
         }
-        let kind = bookclerk_library::HostSchemaKind::from_plugin_id(&self.plugin_id)
-            .map_err(|err| DbErr::Custom(err.to_string()))?;
-        kind.advertised_flags_match(&connect_result)
+        let kind = bookclerk_library::HostSchemaKind::from_capabilities(&connect_result)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         let backend = schema_kind_to_backend(kind);
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
@@ -150,9 +148,7 @@ impl ExternalDatabase {
         db: &DatabaseConnection,
         caps: &DbConnectResult,
     ) -> Result<(), DbErr> {
-        let kind = bookclerk_library::HostSchemaKind::from_plugin_id(&self.plugin_id)
-            .map_err(|err| DbErr::Custom(err.to_string()))?;
-        kind.advertised_flags_match(caps)
+        let kind = bookclerk_library::HostSchemaKind::from_capabilities(caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         let session = self.session.clone();
         bookclerk_library::apply_host_schema_with_batch(db, kind, move |stmts| {
@@ -1542,6 +1538,10 @@ mod tests {
             schema_kind_to_backend(bookclerk_library::HostSchemaKind::Postgres),
             DbBackend::Postgres
         );
+        let kind = bookclerk_library::HostSchemaKind::from_capabilities(&DbConnectResult::sqlite())
+            .unwrap();
+        assert_eq!(kind, bookclerk_library::HostSchemaKind::SqliteFile);
+        assert_eq!(schema_kind_to_backend(kind), DbBackend::Sqlite);
     }
 
     #[test]
