@@ -246,6 +246,9 @@ impl PreparedStatement {
         binding.batch(vec![bound], retry).await
     }
 
+    /// # Errors
+    ///
+    /// Returns [`PluginError::invalid_params`] when terminal intent is missing.
     fn as_typed(&self) -> Result<TypedDbStatement> {
         let intent = self.intent.ok_or_else(|| {
             PluginError::invalid_params(
@@ -282,6 +285,7 @@ fn new_operation_id() -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
     use bookclerk_plugin_abi::v2::{ExecResult, QueryPage, Statement, Transaction};

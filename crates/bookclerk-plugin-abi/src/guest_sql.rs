@@ -98,6 +98,10 @@ pub fn validate_guest_execute_request(req: &ExecuteRequest) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the statement is outside the
+/// guest grammar.
 fn validate_guest_statement(index: usize, stmt: &TypedDbStatement) -> Result<()> {
     if stmt.sql.trim().is_empty() {
         return Err(PluginError::invalid_params(format!(
@@ -138,6 +142,10 @@ fn validate_guest_statement(index: usize, stmt: &TypedDbStatement) -> Result<()>
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `resultSelection` or `maxRows`
+/// does not match the classified statement.
 fn validate_selection(
     index: usize,
     kind: DbPlanStatementKind,
@@ -574,6 +582,7 @@ fn for_each_unquoted(sql: &str, mut step: impl FnMut(&str, usize) -> usize) {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
     use crate::{DbValue, ExecuteRequest};

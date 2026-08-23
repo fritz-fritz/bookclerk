@@ -309,6 +309,13 @@ fn dispatch_atomic_budget(table: &GrantedTable, invocation: String) -> Result<u3
     Ok(slot.max_atomic_request_bytes)
 }
 
+/// Authorizes a guest typed batch on the granted HTTP path.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] or [`PluginError::payload_too_large`]
+/// when the SQL is outside the guest grammar or the encoded request exceeds
+/// `max_bytes`.
 fn authorize_granted_request(
     req: &mut bookclerk_plugin_abi::ExecuteRequest,
     max_bytes: u32,
