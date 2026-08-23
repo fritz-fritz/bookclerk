@@ -64,14 +64,15 @@ impl ExternalDatabase {
         let table = crate::settings_table(config, plugin);
         let config_json = toml_to_json(&toml::Value::Table(table));
         let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
-        let extra_env = if plugin.manifest.id.eq_ignore_ascii_case("sqlite") {
-            let path = config.database.sqlite_path(&config.paths().files_dir);
-            vec![(
-                "BOOKCLERK_SQLITE_PATH",
-                std::ffi::OsString::from(path.as_os_str()),
-            )]
-        } else {
-            Vec::new()
+        let extra_env = match DatabasePluginKind::parse(&plugin.manifest.id) {
+            Some(DatabasePluginKind::D1) | Some(DatabasePluginKind::Postgres) => Vec::new(),
+            Some(DatabasePluginKind::Sqlite) | None => {
+                let path = config.database.sqlite_path(&config.paths().files_dir);
+                vec![(
+                    "BOOKCLERK_SQLITE_PATH",
+                    std::ffi::OsString::from(path.as_os_str()),
+                )]
+            }
         };
         let session = Arc::new(
             V2PluginSession::spawn_for_account_with_env(
@@ -131,9 +132,9 @@ impl ExternalDatabase {
         if !connect_result.meets_host_minimums() {
             return Err(DbErr::Custom(connect_result.capability_failure_reason()));
         }
-        let kind = bookclerk_library::HostSchemaKind::from_capabilities(&connect_result)
+        let _kind = bookclerk_library::HostSchemaKind::from_capabilities(&connect_result)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
-        let backend = schema_kind_to_backend(kind);
+        let backend = sql_family_to_backend(&connect_result.sql_family)?;
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
             session: self.session.clone(),
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
@@ -1573,13 +1574,7 @@ fn connect_params(
 ) -> Result<DbConnectParams, DbErr> {
     let data_dir = plugin_data_dir.display().to_string();
     match DatabasePluginKind::parse(plugin_id) {
-        Some(DatabasePluginKind::Sqlite) => {
-            let path = config.database.sqlite_path(&config.paths().files_dir);
-            Ok(DbConnectParams::Sqlite {
-                plugin_data_dir: data_dir,
-                sqlite_path: Some(path.display().to_string()),
-            })
-        }
+        Some(DatabasePluginKind::Sqlite) => Ok(sqlite_connect_params(config, plugin_data_dir)),
         Some(DatabasePluginKind::D1) => {
             session
                 .require_binding("secrets")
@@ -1601,19 +1596,37 @@ fn connect_params(
                 url: resolve_postgres_url(config).map_err(map_config_err)?,
             })
         }
-        None => Err(DbErr::Custom(format!(
-            "unknown database plugin `{plugin_id}`"
-        ))),
+        None => Ok(sqlite_connect_params(config, plugin_data_dir)),
     }
 }
 
 /// Maps advertised schema capabilities to a SeaORM [`DbBackend`].
+///
+/// Schema kind is the versioning mechanic, not SQL-family identity. Prefer
+/// [`sql_family_to_backend`] when opening the SeaORM proxy.
+#[cfg(test)]
 fn schema_kind_to_backend(kind: bookclerk_library::HostSchemaKind) -> DbBackend {
     match kind {
         bookclerk_library::HostSchemaKind::SqliteFile | bookclerk_library::HostSchemaKind::D1 => {
             DbBackend::Sqlite
         }
         bookclerk_library::HostSchemaKind::Postgres => DbBackend::Postgres,
+    }
+}
+
+/// SeaORM proxy backend from advertised `sqlFamily` (not schema-version flags).
+fn sql_family_to_backend(sql_family: &str) -> Result<DbBackend, DbErr> {
+    bookclerk_library::SqlFamily::parse(sql_family)
+        .map(bookclerk_library::SqlFamily::sea_backend)
+        .ok_or_else(|| DbErr::Custom(format!("unknown sqlFamily `{sql_family}`")))
+}
+
+/// SQLite `db.connect` params for first-party `sqlite` and arbitrary sqlite-family ids.
+fn sqlite_connect_params(config: &Config, plugin_data_dir: &Path) -> DbConnectParams {
+    let path = config.database.sqlite_path(&config.paths().files_dir);
+    DbConnectParams::Sqlite {
+        plugin_data_dir: plugin_data_dir.display().to_string(),
+        sqlite_path: Some(path.display().to_string()),
     }
 }
 
@@ -1654,6 +1667,40 @@ mod tests {
             .unwrap();
         assert_eq!(kind, bookclerk_library::HostSchemaKind::SqliteFile);
         assert_eq!(schema_kind_to_backend(kind), DbBackend::Sqlite);
+    }
+
+    #[test]
+    fn sqlite_row_migrations_family_is_sqlite_kind_is_postgres() {
+        let caps = DbConnectResult::sqlite_row_migrations();
+        let kind = bookclerk_library::HostSchemaKind::from_capabilities(&caps).unwrap();
+        assert_eq!(kind, bookclerk_library::HostSchemaKind::Postgres);
+        assert_eq!(
+            sql_family_to_backend(&caps.sql_family).unwrap(),
+            DbBackend::Sqlite
+        );
+    }
+
+    #[test]
+    fn unknown_plugin_id_uses_sqlite_connect_params() {
+        assert!(DatabasePluginKind::parse("sql-conformance").is_none());
+        let files = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            paths: Some(bookclerk_config::Paths::from_files_dir(
+                files.path().to_path_buf(),
+            )),
+            ..Config::default()
+        };
+        let params = sqlite_connect_params(&config, Path::new("/tmp/plugin-data"));
+        match params {
+            DbConnectParams::Sqlite {
+                sqlite_path,
+                plugin_data_dir,
+            } => {
+                assert!(sqlite_path.is_some(), "{sqlite_path:?}");
+                assert_eq!(plugin_data_dir, "/tmp/plugin-data");
+            }
+            other => panic!("expected sqlite params, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1776,5 +1823,78 @@ mod tests {
             unsupported.code,
             bookclerk_plugin_sdk::PluginErrorCode::Unsupported
         );
+    }
+    #[tokio::test]
+    async fn granted_job_database_binding_retries_and_conflicts_on_counters() {
+        use bookclerk_plugin_sdk::{DatabaseBinding, DbValue, RetryToken};
+        use sea_orm::{ConnectionTrait, Statement};
+
+        let store = bookclerk_library::LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .with_connect_result(DbConnectResult::sqlite());
+        store
+            .connection()
+            .execute_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "CREATE TABLE counters (id INTEGER PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0)",
+            ))
+            .await
+            .unwrap();
+        let session = granted_job_database_with_policy(
+            store,
+            bookclerk_library::GuestSqlPolicy::allow_tables(["counters"]),
+        );
+        let binding = DatabaseBinding::from_session(session);
+        let token = RetryToken {
+            operation_id: "inc-1".into(),
+            request_hash: String::new(),
+        };
+        let insert = "INSERT INTO counters (id, n) VALUES (?, ?)";
+        binding
+            .prepare(insert)
+            .bind(vec![DbValue::Int64(1), DbValue::Int64(1)])
+            .run(Some(token.clone()))
+            .await
+            .expect("first insert");
+        binding
+            .prepare(insert)
+            .bind(vec![DbValue::Int64(1), DbValue::Int64(1)])
+            .run(Some(token.clone()))
+            .await
+            .expect("idempotent retry");
+        let row = binding
+            .prepare("SELECT n FROM counters WHERE id = 1")
+            .first(None)
+            .await
+            .expect("select")
+            .expect("row");
+        let n = row
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("n"))
+            .map(|(_, v)| v.clone())
+            .expect("n column");
+        assert_eq!(n, DbValue::Int64(1), "{n:?}");
+        let err = binding
+            .prepare(insert)
+            .bind(vec![DbValue::Int64(1), DbValue::Int64(99)])
+            .run(Some(token))
+            .await
+            .expect_err("hash mismatch must conflict");
+        assert_eq!(err.code, bookclerk_plugin_sdk::PluginErrorCode::Conflict);
+        let row = binding
+            .prepare("SELECT n FROM counters WHERE id = 1")
+            .first(None)
+            .await
+            .expect("select after conflict")
+            .expect("row");
+        let n = row
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("n"))
+            .map(|(_, v)| v.clone())
+            .expect("n column");
+        assert_eq!(n, DbValue::Int64(1), "{n:?}");
     }
 }

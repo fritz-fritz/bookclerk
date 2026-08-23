@@ -437,6 +437,8 @@ pub struct DbCapabilities {
     pub max_atomic_result_bytes: u32,
     /// Observability-only engine name (`sqlite`, `postgres`, …).
     pub diagnostic_engine: String,
+    /// SQL family identity (`sqlite` / `postgres`). Empty on older guests.
+    pub sql_family: String,
 }
 
 impl DbCapabilities {
@@ -462,17 +464,23 @@ impl DbCapabilities {
             max_request_bytes: caps.max_atomic_request_bytes.max(caps.max_payload_bytes),
             max_atomic_result_bytes: caps.max_atomic_result_bytes,
             diagnostic_engine: caps.dialect.clone(),
+            sql_family: caps.sql_family.clone(),
         }
     }
 
     /// JSON connect result used by existing host negotiation.
     ///
-    /// SeaORM `dialect` / `sqlFamily` are derived from schema capability flags
-    /// (`pragmaUserVersion`, `schemaMigrations`, `atomicSchemaBatch`), never
-    /// from [`Self::diagnostic_engine`]. That field is observability only.
+    /// When [`Self::sql_family`] is non-empty it is the SeaORM family identity.
+    /// An empty value (legacy guests) falls back to schema capability flags.
+    /// [`Self::diagnostic_engine`] is never used for dialect selection.
     #[must_use]
     pub fn to_connect(&self) -> DbConnectResult {
-        let (dialect, sql_family, interactive_txn) = if self.pragma_user_version {
+        let (dialect, sql_family, interactive_txn) = if !self.sql_family.is_empty() {
+            match self.sql_family.to_ascii_lowercase().as_str() {
+                "postgres" | "postgresql" | "pg" => ("postgres", "postgres", true),
+                _ => ("sqlite", "sqlite", !self.atomic_schema_batch),
+            }
+        } else if self.pragma_user_version {
             ("sqlite", "sqlite", true)
         } else if self.schema_migrations && self.atomic_schema_batch {
             ("sqlite", "sqlite", false)
@@ -657,6 +665,19 @@ mod tests {
         assert_eq!(back.sql_family, "sqlite");
         assert!(back.interactive_txn);
         assert!(back.pragma_user_version);
+    }
+
+    #[test]
+    fn to_connect_sql_family_overrides_schema_migration_flags() {
+        let caps = DbCapabilities::from_connect(&DbConnectResult::sqlite_row_migrations());
+        assert!(caps.schema_migrations);
+        assert!(!caps.atomic_schema_batch);
+        assert_eq!(caps.sql_family, "sqlite");
+        let back = caps.to_connect();
+        assert_eq!(back.dialect, "sqlite");
+        assert_eq!(back.sql_family, "sqlite");
+        assert!(back.schema_migrations);
+        assert!(!back.atomic_schema_batch);
     }
 
     #[test]

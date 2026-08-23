@@ -303,6 +303,36 @@ impl DbConnectResult {
         }
     }
 
+    /// SQLite-family guest that versions schema with `schema_migrations` rows.
+    ///
+    /// Host schema *policy* still treats `schemaMigrations=true` plus
+    /// `atomicSchemaBatch=false` as the row-based pack. The SeaORM proxy
+    /// backend must come from [`Self::sql_family`] (`sqlite`), not from that
+    /// versioning kind.
+    #[must_use]
+    pub fn sqlite_row_migrations() -> Self {
+        Self {
+            dialect: String::from("sqlite"),
+            interactive_txn: true,
+            sql_family: String::from("sqlite"),
+            atomic_batch: true,
+            returning: true,
+            max_binds: SQLITE_MAX_BINDS,
+            max_statements: FIRST_PARTY_MAX_STATEMENTS,
+            max_result_rows: 1_000,
+            max_payload_bytes: crate::v2::MAX_SCALAR_BYTES,
+            max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            max_cell_bytes: crate::v2::MAX_SCALAR_BYTES,
+            max_atomic_request_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            sql_contract_version: SQL_CONTRACT_VERSION,
+            pragma_user_version: false,
+            schema_migrations: true,
+            atomic_schema_batch: false,
+            timing: true,
+        }
+    }
+
     /// Connect result advertising the Postgres dialect with interactive transactions.
     #[must_use]
     pub fn postgres() -> Self {

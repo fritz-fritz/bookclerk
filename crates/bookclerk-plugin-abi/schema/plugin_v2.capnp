@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 9;
+const abiMinor :UInt32 = 10;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -699,6 +699,9 @@ struct DbCapabilities {
   maxRequestBytes @15 :UInt32;
   maxAtomicResultBytes @16 :UInt32;
   diagnosticEngine @17 :Text;
+  # Append-only (abiMinor 10). SQL family identity (`sqlite` / `postgres`).
+  # Not derived from schemaMigrations / atomicSchemaBatch.
+  sqlFamily @18 :Text;
 }
 
 struct DbCapabilitiesReply {

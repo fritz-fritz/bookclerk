@@ -7,7 +7,7 @@ pub const PRODUCT_API_VERSION: u32 = 2;
 pub const ABI_MAJOR: u32 = 2;
 
 /// Minor ABI number. Hosts ignore unknown optional fields.
-pub const ABI_MINOR: u32 = 9;
+pub const ABI_MINOR: u32 = 10;
 
 /// Maximum decoded size of a domain-event scalar payload (not a stream).
 pub const MAX_EVENT_PAYLOAD_BYTES: u32 = 65_536;

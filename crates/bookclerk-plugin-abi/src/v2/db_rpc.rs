@@ -374,6 +374,7 @@ pub(super) fn write_db_capabilities(mut b: db_caps_capnp::Builder<'_>, caps: &Db
     b.set_max_request_bytes(caps.max_request_bytes);
     b.set_max_atomic_result_bytes(caps.max_atomic_result_bytes);
     b.set_diagnostic_engine(&caps.diagnostic_engine);
+    b.set_sql_family(&caps.sql_family);
 }
 
 /// # Errors
@@ -399,6 +400,7 @@ pub(super) fn read_db_capabilities(r: db_caps_capnp::Reader<'_>) -> Result<DbCap
         max_request_bytes: r.get_max_request_bytes(),
         max_atomic_result_bytes: r.get_max_atomic_result_bytes(),
         diagnostic_engine: text_of(r.get_diagnostic_engine().map_err(from_capnp)?),
+        sql_family: text_of(r.get_sql_family().map_err(from_capnp)?),
     })
 }
 
