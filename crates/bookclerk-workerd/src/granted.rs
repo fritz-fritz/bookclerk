@@ -626,6 +626,15 @@ where
             write_status(&mut writer, 413, "payload too large").await?;
             return Ok(());
         }
+        if transfer_encoding_is_chunked(&headers) {
+            write_status(
+                &mut writer,
+                400,
+                "chunked executeAtomic bodies are not supported",
+            )
+            .await?;
+            return Ok(());
+        }
         let rest = match read_content(&mut reader, &headers, prefix, cap).await {
             Ok(body) => body,
             Err(err) if err.to_string().contains("payload_too_large") => {
@@ -834,11 +843,7 @@ async fn read_content<S: AsyncRead + Unpin>(
         prefix.truncate(len);
         return Ok(prefix);
     }
-    let chunked = headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"))
-        .map(|(_, v)| v.to_ascii_lowercase().contains("chunked"))
-        .unwrap_or(false);
+    let chunked = transfer_encoding_is_chunked(headers);
     if chunked {
         let mut body = Vec::new();
         if !prefix.is_empty() {
@@ -878,6 +883,14 @@ async fn read_content<S: AsyncRead + Unpin>(
         bail!("payload_too_large: body exceeded {cap}");
     }
     Ok(prefix)
+}
+
+fn transfer_encoding_is_chunked(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"))
+        .map(|(_, v)| v.to_ascii_lowercase().contains("chunked"))
+        .unwrap_or(false)
 }
 
 fn declared_content_length_over_cap(headers: &[(String, String)], cap: u32) -> bool {
@@ -1279,6 +1292,51 @@ mod tests {
         assert!(
             !dispatched.load(std::sync::atomic::Ordering::SeqCst),
             "executeAtomic must not be dispatched for an over-cap Content-Length"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunked_execute_atomic_is_rejected_before_dispatch() {
+        let (cmds_tx, mut cmds_rx) = mpsc::channel(8);
+        let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&dispatched);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmds_rx.recv().await {
+                match cmd {
+                    GrantedCmd::AtomicBudget { resp, .. } => {
+                        let _ = resp.send(Ok(4096));
+                    }
+                    GrantedCmd::ExecuteAtomic { resp, .. } => {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let _ = resp.send(Err("must not dispatch".into()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let (client, server) = tokio::io::duplex(4096);
+        let serve = tokio::spawn(async move { handle_conn(server, "bridge", cmds_tx).await });
+        // Real HTTP chunk framing. Concatenating these bytes as a Cap'n payload
+        // would be accepted by a decoder that never dechunks.
+        let req = "POST /db/executeAtomic HTTP/1.1\r\n\
+Authorization: Bearer grant-1\r\n\
+Transfer-Encoding: chunked\r\n\
+\r\n\
+5\r\nhello\r\n0\r\n\r\n";
+        let (mut reader, mut writer) = tokio::io::split(client);
+        writer.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = vec![0u8; 256];
+        let n = tokio::time::timeout(Duration::from_secs(2), reader.read(&mut buf))
+            .await
+            .expect("http response")
+            .unwrap();
+        let head = String::from_utf8_lossy(&buf[..n]);
+        assert!(head.contains("400"), "{head}");
+        drop(writer);
+        let _ = serve.await;
+        assert!(
+            !dispatched.load(std::sync::atomic::Ordering::SeqCst),
+            "executeAtomic must not be dispatched for a chunked body"
         );
     }
 }
