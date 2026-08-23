@@ -2234,11 +2234,15 @@ impl job_handler::Server for JobHandlerServer {
             Some(client) => Box::new(CancellationClient { client }),
             None => Box::new(NeverCancel),
         };
+        let database: Option<Box<dyn DatabaseSession>> = match p.get_database().ok() {
+            Some(client) => Some(Box::new(DatabaseSessionClient { client })),
+            None => None,
+        };
         let ctx = JobHandlerContext {
             input: Box::new(SourceClient::new(input, self.window)),
             output: Box::new(DestinationClient::new(output, self.window)),
             progress: Box::new(ProgressArc(progress)),
-            database: None,
+            database,
             cancel,
         };
         let result = results.get().init_result();
@@ -2489,6 +2493,7 @@ impl PluginClient {
             output,
             progress,
             Arc::new(NeverCancel),
+            None,
         )
         .await
     }
@@ -2498,6 +2503,7 @@ impl PluginClient {
     /// # Errors
     ///
     /// Returns a plugin error when the handler fails.
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_job_with_cancel(
         &self,
         handler: job_handler::Client,
@@ -2506,6 +2512,7 @@ impl PluginClient {
         output: Arc<dyn Destination>,
         progress: Arc<dyn ProgressSink>,
         cancel: Arc<dyn Cancellation>,
+        database: Option<Arc<dyn DatabaseSession>>,
     ) -> Result<JobOutcome> {
         let mut req = handler.handle_request();
         fill_invocation(req.get().get_invocation().map_err(from_capnp)?, &invocation)
@@ -2521,6 +2528,10 @@ impl PluginClient {
             .set_progress(capnp_rpc::new_client(ProgressServer { inner: progress }));
         req.get()
             .set_cancel(capnp_rpc::new_client(CancellationServer { inner: cancel }));
+        if let Some(db) = database {
+            req.get()
+                .set_database(capnp_rpc::new_client(DatabaseSessionServer { inner: db }));
+        }
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
             .get()
@@ -3980,6 +3991,7 @@ mod tests {
                         granted as Arc<dyn Destination>,
                         Arc::new(NoopProgress),
                         Arc::new(TestCancel(flag)),
+                        None,
                     ),
                 )
                 .await

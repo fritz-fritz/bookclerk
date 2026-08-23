@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 7;
+const abiMinor :UInt32 = 8;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -549,7 +549,9 @@ interface JobHandler {
       input :Source,
       output :Destination,
       progress :ProgressSink,
-      cancel :Cancellation)
+      cancel :Cancellation,
+      # Append-only (abiMinor 8). Host-mediated typed SQL session.
+      database :DatabaseSession)
       -> (result :HandleReply);
 }
 

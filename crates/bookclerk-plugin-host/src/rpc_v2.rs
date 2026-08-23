@@ -1380,7 +1380,7 @@ async fn run_stream_copy(
     });
     let cancel: Arc<dyn Cancellation> = Arc::new(FlagCancel(cancel));
     client
-        .handle_job_with_cancel(handler, invocation, input, output, progress, cancel)
+        .handle_job_with_cancel(handler, invocation, input, output, progress, cancel, None)
         .await
         .map_err(map_abi)
 }
