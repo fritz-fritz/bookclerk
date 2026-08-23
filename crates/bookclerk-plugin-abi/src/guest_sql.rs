@@ -153,13 +153,16 @@ impl GuestSqlPolicy {
             return Ok(());
         }
         for table in &refs.tables {
+            if is_cte_name(refs, table) {
+                continue;
+            }
             self.authorize_table(index, table)?;
         }
         for (table, column) in &refs.columns {
             if column == "*" {
                 match table {
                     Some(table) => {
-                        if self.columns.contains_key(table) {
+                        if !is_cte_name(refs, table) && self.columns.contains_key(table) {
                             return Err(PluginError::invalid_params(format!(
                                 "statement {index} SELECT * is not allowed on column-restricted table {table}"
                             )));
@@ -178,14 +181,18 @@ impl GuestSqlPolicy {
                 continue;
             }
             let table = match table {
+                Some(table) if is_cte_name(refs, table) => continue,
                 Some(table) => table.clone(),
                 None => {
-                    if refs.tables.len() != 1 {
+                    if refs.tables.len() == 1 {
+                        refs.tables[0].clone()
+                    } else if refs.tables.is_empty() && !refs.ctes.is_empty() {
+                        continue;
+                    } else {
                         return Err(PluginError::invalid_params(format!(
                             "statement {index} unqualified column {column} cannot be resolved"
                         )));
                     }
-                    refs.tables[0].clone()
                 }
             };
             self.authorize_table(index, &table)?;
@@ -272,6 +279,8 @@ pub struct GuestSqlRefs {
     pub columns: Vec<(Option<String>, String)>,
     /// Function names (`ident(`).
     pub functions: Vec<String>,
+    /// CTE names in scope (not physical tables).
+    pub ctes: Vec<String>,
 }
 
 /// Authorizes parsed table/column/function refs against a host-issued policy.
@@ -585,7 +594,7 @@ pub fn parse_guest_sql_refs(sql: &str) -> Result<GuestSqlRefs> {
     let mut refs = GuestSqlRefs::default();
     let mut ctes = Vec::new();
     if scan.take_kw("WITH") {
-        let _ = scan.take_kw("RECURSIVE");
+        let recursive = scan.take_kw("RECURSIVE");
         loop {
             let name = scan.read_ident().ok_or_else(|| unresolved("CTE name"))?;
             if scan.take_byte(b'(') {
@@ -603,7 +612,11 @@ pub fn parse_guest_sql_refs(sql: &str) -> Result<GuestSqlRefs> {
             let body = scan
                 .take_balanced_inner()
                 .ok_or_else(|| unresolved("CTE body"))?;
-            parse_statement_into(body, &mut refs, &ctes)?;
+            let mut body_ctes = ctes.clone();
+            if recursive {
+                body_ctes.push(name.clone());
+            }
+            parse_statement_into(body, &mut refs, &body_ctes)?;
             ctes.push(name);
             if !scan.take_byte(b',') {
                 break;
@@ -611,8 +624,11 @@ pub fn parse_guest_sql_refs(sql: &str) -> Result<GuestSqlRefs> {
         }
     }
     parse_statement_into(scan.rest(), &mut refs, &ctes)?;
+    refs.ctes = ctes;
     refs.tables.sort();
     refs.tables.dedup();
+    refs.ctes.sort();
+    refs.ctes.dedup();
     Ok(refs)
 }
 
@@ -622,6 +638,25 @@ fn unresolved(what: &str) -> PluginError {
     ))
 }
 
+/// True when parenthesized SQL starts with a statement verb, not an expression.
+fn looks_like_sql_statement(sql: &str) -> bool {
+    let mut scan = Scan { sql, i: 0 };
+    scan.peek_kw("WITH")
+        || scan.peek_kw("SELECT")
+        || scan.peek_kw("VALUES")
+        || scan.peek_kw("INSERT")
+        || scan.peek_kw("REPLACE")
+        || scan.peek_kw("UPDATE")
+        || scan.peek_kw("DELETE")
+}
+
+/// True when `name` is a CTE in `refs` (qualified names match on the last label).
+fn is_cte_name(refs: &GuestSqlRefs, name: &str) -> bool {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    refs.ctes.iter().any(|cte| cte == name || cte == last)
+}
+
+#[derive(Clone, Copy)]
 struct Scan<'a> {
     /// Remaining SQL being scanned.
     sql: &'a str,
@@ -735,6 +770,7 @@ fn parse_statement_into(sql: &str, refs: &mut GuestSqlRefs, ctes: &[String]) -> 
             refs.tables.extend(nested.tables);
             refs.columns.extend(nested.columns);
             refs.functions.extend(nested.functions);
+            refs.ctes.extend(nested.ctes);
         });
     }
     Err(unresolved("statement verb"))
@@ -826,17 +862,56 @@ fn collect_ident_list(scan: &mut Scan<'_>, refs: &mut GuestSqlRefs) -> Result<()
 /// cannot be fully resolved.
 fn collect_expr_tail(scan: &mut Scan<'_>, refs: &mut GuestSqlRefs, ctes: &[String]) -> Result<()> {
     let mut aliases: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let start = *scan;
+    collect_from_aliases(scan, refs, ctes, &mut aliases)?;
+    *scan = start;
+    collect_expr_atoms_with_aliases(scan, refs, ctes, &aliases)
+}
+
+/// Walks FROM/JOIN sources first so SELECT-list aliases resolve.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a table ref cannot be resolved.
+fn collect_from_aliases(
+    scan: &mut Scan<'_>,
+    refs: &mut GuestSqlRefs,
+    ctes: &[String],
+    aliases: &mut std::collections::BTreeMap<String, String>,
+) -> Result<()> {
     while !scan_at_end(scan) {
         if scan.take_kw("FROM") {
-            parse_table_refs(scan, refs, ctes, &mut aliases)?;
+            parse_table_refs(scan, refs, ctes, aliases)?;
             continue;
         }
-        if scan.take_kw("JOIN")
-            || (scan.take_kw("INNER") && scan.take_kw("JOIN"))
-            || (scan.take_kw("CROSS") && scan.take_kw("JOIN"))
-            || join_with_outer(scan)
-        {
-            parse_one_table_ref(scan, refs, ctes, &mut aliases)?;
+        if take_join_kw(scan) {
+            parse_one_table_ref(scan, refs, ctes, aliases)?;
+            continue;
+        }
+        skip_one_expr_atom(scan, refs, ctes)?;
+    }
+    Ok(())
+}
+
+/// Second pass: column/function refs after FROM aliases are known.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a column, function, or table
+/// ref cannot be fully resolved.
+fn collect_expr_atoms_with_aliases(
+    scan: &mut Scan<'_>,
+    refs: &mut GuestSqlRefs,
+    ctes: &[String],
+    aliases: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    while !scan_at_end(scan) {
+        if scan.take_kw("FROM") {
+            skip_table_refs(scan)?;
+            continue;
+        }
+        if take_join_kw(scan) {
+            skip_one_table_ref(scan)?;
             if scan.take_kw("ON") {
                 continue;
             }
@@ -851,8 +926,100 @@ fn collect_expr_tail(scan: &mut Scan<'_>, refs: &mut GuestSqlRefs, ctes: &[Strin
             }
             continue;
         }
-        collect_one_expr_atom(scan, refs, &aliases)?;
+        collect_one_expr_atom(scan, refs, ctes, aliases)?;
     }
+    Ok(())
+}
+
+fn take_join_kw(scan: &mut Scan<'_>) -> bool {
+    scan.take_kw("JOIN")
+        || (scan.take_kw("INNER") && scan.take_kw("JOIN"))
+        || (scan.take_kw("CROSS") && scan.take_kw("JOIN"))
+        || join_with_outer(scan)
+}
+
+/// Skips a comma-separated FROM list without collecting identifiers.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a table ref is malformed.
+fn skip_table_refs(scan: &mut Scan<'_>) -> Result<()> {
+    skip_one_table_ref(scan)?;
+    while scan.take_byte(b',') {
+        skip_one_table_ref(scan)?;
+    }
+    Ok(())
+}
+
+/// Skips one FROM/JOIN table ref (name, alias, or parenthesized subquery).
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the table ref is malformed or
+/// a table-valued function.
+fn skip_one_table_ref(scan: &mut Scan<'_>) -> Result<()> {
+    if scan.take_byte(b'(') {
+        scan.take_balanced_inner()
+            .ok_or_else(|| unresolved("subquery"))?;
+        let _ = take_alias(scan);
+        return Ok(());
+    }
+    let _ = scan.read_ident().ok_or_else(|| unresolved("table name"))?;
+    if scan.take_byte(b'.') {
+        let _ = scan
+            .read_ident()
+            .ok_or_else(|| unresolved("qualified table"))?;
+    }
+    if scan.peek_byte(b'(') {
+        return Err(unresolved("table-valued function"));
+    }
+    let _ = take_alias(scan);
+    Ok(())
+}
+
+/// Skips one expression atom during the FROM-alias collection pass.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a nested subquery cannot be
+/// resolved.
+fn skip_one_expr_atom(scan: &mut Scan<'_>, refs: &mut GuestSqlRefs, ctes: &[String]) -> Result<()> {
+    scan.skip();
+    if scan.i >= scan.sql.len() {
+        return Ok(());
+    }
+    let c = scan.sql.as_bytes()[scan.i];
+    if c == b'\'' {
+        skip_quoted_string(scan, b'\'');
+        return Ok(());
+    }
+    if c == b'(' {
+        scan.i += 1;
+        let inner = scan
+            .take_balanced_inner()
+            .ok_or_else(|| unresolved("subquery"))?;
+        if looks_like_sql_statement(inner) {
+            parse_statement_into(inner, refs, ctes)?;
+        }
+        return Ok(());
+    }
+    if scan.read_ident().is_some() {
+        if scan.take_byte(b'(') {
+            let _ = scan.take_balanced_inner();
+            return Ok(());
+        }
+        if scan.take_byte(b'.') {
+            if scan.take_byte(b'*') {
+                return Ok(());
+            }
+            let _ = scan.read_ident();
+            if scan.take_byte(b'(') {
+                let _ = scan.take_balanced_inner();
+            }
+        }
+        return Ok(());
+    }
+    scan.i += 1;
     Ok(())
 }
 
@@ -922,6 +1089,7 @@ fn parse_one_table_ref(
 fn collect_one_expr_atom(
     scan: &mut Scan<'_>,
     refs: &mut GuestSqlRefs,
+    ctes: &[String],
     aliases: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
     scan.skip();
@@ -931,6 +1099,19 @@ fn collect_one_expr_atom(
     let c = scan.sql.as_bytes()[scan.i];
     if c == b'\'' {
         skip_quoted_string(scan, b'\'');
+        return Ok(());
+    }
+    if c == b'(' {
+        scan.i += 1;
+        let inner = scan
+            .take_balanced_inner()
+            .ok_or_else(|| unresolved("subquery"))?;
+        if looks_like_sql_statement(inner) {
+            parse_statement_into(inner, refs, ctes)?;
+        } else {
+            let mut inner_scan = Scan { sql: inner, i: 0 };
+            collect_expr_atoms_with_aliases(&mut inner_scan, refs, ctes, aliases)?;
+        }
         return Ok(());
     }
     if let Some(ident) = scan.read_ident() {
@@ -1652,6 +1833,80 @@ mod tests {
         authorize_guest_sql_policy(
             &req("SELECT id FROM jobs", vec![], DbResultSelection::Rows, 1),
             &GuestSqlPolicy::host_authoritative(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn policy_allows_from_aliases_and_as_aliases() {
+        let books = GuestSqlPolicy::allow_tables(["books"]);
+        authorize_guest_sql_policy(
+            &req(
+                "SELECT b.id FROM books b",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &books,
+        )
+        .unwrap();
+        authorize_guest_sql_policy(
+            &req(
+                "SELECT b.id FROM books AS b",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &books,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn policy_allows_cte_qualified_columns() {
+        let books = GuestSqlPolicy::allow_tables(["books"]);
+        authorize_guest_sql_policy(
+            &req(
+                "WITH recent AS (SELECT id FROM books) SELECT recent.id FROM recent",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &books,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn policy_allows_recursive_cte_self_scope() {
+        let books = GuestSqlPolicy::allow_tables(["books"]);
+        authorize_guest_sql_policy(
+            &req(
+                "WITH RECURSIVE t(x) AS (\
+                     SELECT id FROM books \
+                     UNION ALL \
+                     SELECT t.x FROM t WHERE t.x < 3\
+                 ) SELECT t.x FROM t",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &books,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn policy_allows_parenthesized_column_expressions() {
+        let books = GuestSqlPolicy::allow_tables(["books"]);
+        authorize_guest_sql_policy(
+            &req(
+                "SELECT (id + 1) FROM books",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &books,
         )
         .unwrap();
     }
