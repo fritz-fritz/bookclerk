@@ -216,39 +216,34 @@ fn statement_result_from_query_results(
 
 /// Records column names/types for a Postgres `SELECT` that returned no rows.
 ///
-/// sqlx only exposes `RowDescription` on a `PgRow`. A `LEFT JOIN` against a
-/// one-row dummy yields a single all-NULL row with the inner query's names and
-/// type OIDs, without counting against the request row cap. Types come from
-/// `PgColumn::type_info`, not from decoding NULL cells (`Option<T>` succeeds
-/// for every SQL NULL).
+/// sqlx only materializes `RowDescription` on a `PgRow`. Extended-query
+/// `prepare` (Parse + Describe, no Execute) returns the same field metadata
+/// without running the statement, so volatile functions and data-modifying
+/// CTEs are not evaluated a second time.
 ///
 /// # Errors
 ///
-/// Returns when the metadata probe statement fails.
+/// Returns when the driver cannot describe the statement.
 async fn record_postgres_empty_result_columns(
-    txn: &sea_orm::DatabaseTransaction,
+    db: &DatabaseConnection,
     sql: &str,
-    values: Vec<SeaValue>,
 ) -> Result<(), DbErr> {
-    let probe = Statement::from_sql_and_values(
-        sea_orm::DatabaseBackend::Postgres,
-        postgres_empty_metadata_sql(sql),
-        values,
-    );
-    let probe_rows = txn.query_all_raw(probe).await?;
-    let Some(row) = probe_rows.first() else {
-        return Ok(());
-    };
-    set_positional_result_columns(db_columns_from_engine_row(row));
+    use sea_orm::sqlx::{AssertSqlSafe, Column, Executor, SqlSafeStr, Statement, TypeInfo};
+    let pool = db.get_postgres_connection_pool();
+    let prepared = pool
+        .prepare(AssertSqlSafe(sql.to_owned()).into_sql_str())
+        .await
+        .map_err(|err| DbErr::Custom(format!("postgres prepare/describe: {err}")))?;
+    let columns = prepared
+        .columns()
+        .iter()
+        .map(|c| DbColumn {
+            name: c.name().to_string(),
+            db_type: db_type_from_pg_type_name(c.type_info().name()),
+        })
+        .collect();
+    set_positional_result_columns(columns);
     Ok(())
-}
-
-/// One-row Postgres probe that preserves inner `SELECT` column metadata.
-fn postgres_empty_metadata_sql(sql: &str) -> String {
-    let inner = sql.trim().trim_end_matches(';');
-    format!(
-        "SELECT q.* FROM (SELECT 1::int AS _bc_dummy) AS _bc_d LEFT JOIN ({inner}) AS q ON TRUE LIMIT 1"
-    )
 }
 
 /// Positional [`DbColumn`]s from one engine row (Postgres OIDs when present).
@@ -406,6 +401,18 @@ fn sea_value_from_index(row: &QueryResult, idx: usize, prefer: DbType) -> Result
                     }
                     saw_null = true;
                 }
+                if let Ok(v) = row.try_get_by_index::<Option<i32>>(idx) {
+                    if let Some(n) = v {
+                        return Ok(SeaValue::BigInt(Some(i64::from(n))));
+                    }
+                    saw_null = true;
+                }
+                if let Ok(v) = row.try_get_by_index::<Option<i16>>(idx) {
+                    if let Some(n) = v {
+                        return Ok(SeaValue::BigInt(Some(i64::from(n))));
+                    }
+                    saw_null = true;
+                }
             }
             DbType::Float64 => {
                 if let Ok(v) = row.try_get_by_index::<Option<f64>>(idx) {
@@ -524,7 +531,7 @@ async fn execute_typed_body(
             stmt.sql.clone()
         };
         let sql = lower_canonical_sql(backend, &sql);
-        let sea_stmt = Statement::from_sql_and_values(backend, &sql, values.clone());
+        let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result =
             match stmt.result_selection {
                 DbResultSelection::Rows | DbResultSelection::Cursor => {
@@ -543,9 +550,7 @@ async fn execute_typed_body(
                         && backend == sea_orm::DatabaseBackend::Postgres
                         && stmt.kind.wrap_select_limit()
                     {
-                        if let Err(err) =
-                            record_postgres_empty_result_columns(&txn, &sql, values.clone()).await
-                        {
+                        if let Err(err) = record_postgres_empty_result_columns(db, &sql).await {
                             let _ = txn.rollback().await;
                             let _ = take_txn_fault();
                             return Err(err);
@@ -715,16 +720,6 @@ mod tests {
         };
         let v = db_value_for_column(&SeaValue::Bytes(None), &col).unwrap();
         assert!(matches!(v, DbValue::Null(DbType::Int64)));
-    }
-
-    #[test]
-    fn postgres_empty_metadata_sql_selects_inner_columns_only() {
-        let sql = postgres_empty_metadata_sql(
-            "SELECT * FROM (SELECT x FROM typed_probe WHERE false) AS _bc_cap LIMIT 11",
-        );
-        assert!(sql.contains("LEFT JOIN (SELECT * FROM (SELECT x FROM typed_probe WHERE false) AS _bc_cap LIMIT 11) AS q"));
-        assert!(sql.contains("SELECT q.*"));
-        assert!(!sql.contains("_bc_dummy,"));
     }
 
     #[test]

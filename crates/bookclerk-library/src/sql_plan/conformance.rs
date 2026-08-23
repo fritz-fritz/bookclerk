@@ -1573,3 +1573,63 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_plugin_abi::DbValue::Null(bookclerk_plugin_abi::DbType::Int64)
     ));
 }
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn typed_postgres_empty_select_describe_does_not_reexecute() {
+    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_none()
+    {
+        return;
+    }
+    let db = postgres_migrated_db().await;
+    let backend = sea_orm::ConnectionTrait::get_database_backend(&db);
+    for sql in [
+        "CREATE TABLE typed_counter (n INTEGER NOT NULL)",
+        "INSERT INTO typed_counter (n) VALUES (0)",
+        "CREATE FUNCTION typed_bump() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN UPDATE typed_counter SET n = n + 1; RETURN 1; END; $$",
+    ] {
+        sea_orm::ConnectionTrait::execute_raw(&db, sea_orm::Statement::from_string(backend, sql))
+            .await
+            .unwrap();
+    }
+    let empty = typed_query("bump", "SELECT typed_bump() AS n LIMIT 0");
+    let reply = bookclerk_db_exec::execute_typed_on_session(
+        &db,
+        &empty,
+        "postgres_txn",
+        bookclerk_db_exec::ExecCaps::from_connect(
+            &bookclerk_plugin_abi::DbConnectResult::postgres(),
+        ),
+        bookclerk_db_exec::AtomicSession::from_deadline(None),
+    )
+    .await
+    .unwrap();
+    assert!(reply.statements[0].rows.is_empty());
+    assert_eq!(reply.statements[0].columns[0].name, "n");
+
+    let count = typed_query("count", "SELECT n FROM typed_counter");
+    let reply = bookclerk_db_exec::execute_typed_on_session(
+        &db,
+        &count,
+        "postgres_txn",
+        bookclerk_db_exec::ExecCaps::from_connect(
+            &bookclerk_plugin_abi::DbConnectResult::postgres(),
+        ),
+        bookclerk_db_exec::AtomicSession::from_deadline(None),
+    )
+    .await
+    .unwrap();
+    let bookclerk_plugin_abi::DbValue::Int64(n) = reply.statements[0].rows[0].values[0] else {
+        panic!(
+            "expected int64 counter, got {:?}",
+            reply.statements[0].rows[0].values[0]
+        );
+    };
+    assert!(
+        n <= 1,
+        "zero-row SELECT must execute at most once (counter={n}); describe must not re-run it"
+    );
+}
