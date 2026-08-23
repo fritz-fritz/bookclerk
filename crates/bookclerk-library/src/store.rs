@@ -6865,7 +6865,7 @@ fn map_book(m: books::Model) -> Result<BookRecord> {
     })
 }
 
-/// Maps a SeaORM engine failure onto a structured guest [`PluginError`].
+/// Maps a SeaORM engine failure onto a structured guest [`bookclerk_plugin_abi::PluginError`].
 fn plugin_err_from_db(err: sea_orm::DbErr) -> bookclerk_plugin_abi::PluginError {
     let msg = err.to_string();
     if msg.contains("cancelled:") {

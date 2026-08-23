@@ -143,7 +143,7 @@ pub trait AtomicTxnBackend: Send + Sync {
     ) -> Result<Option<EventDeliveryRecord>>;
 }
 
-/// Runs a host-authorized typed [`ExecuteRequest`] as one guest `executeAtomic`.
+/// Runs a host-authorized typed [`bookclerk_plugin_abi::ExecuteRequest`] as one guest `executeAtomic`.
 ///
 /// First-party hosts attach this alongside [`AtomicTxnBackend`] so granted job
 /// sessions do not round-trip through the SeaORM proxy (`BEGIN` + nested
