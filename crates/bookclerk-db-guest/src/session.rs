@@ -1927,4 +1927,71 @@ mod tests {
             .unwrap();
         assert_eq!(rows.rows.len(), 1);
     }
+
+    #[tokio::test]
+    async fn execute_atomic_on_open_txn_savepoint_rolls_back_partial_batch() {
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
+        };
+        let _lock = SESSION_LOCK.lock().await;
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        guest_execute(stmt(
+            "CREATE TABLE nested_savepoint (id INTEGER PRIMARY KEY, v TEXT)",
+        ))
+        .await
+        .unwrap();
+        let txn_id = guest_begin(None).await.unwrap();
+        let err = guest_execute_atomic_on_txn(
+            txn_id.clone(),
+            ExecuteRequest {
+                operation_id: "nested-partial".into(),
+                request_hash: String::new(),
+                statements: vec![
+                    TypedDbStatement {
+                        sql: "INSERT INTO nested_savepoint (id, v) VALUES (?, ?)".into(),
+                        parameters: vec![DbValue::Int64(1), DbValue::Text("keep".into())],
+                        kind: DbPlanStatementKind::Execute,
+                        max_rows: 0,
+                        result_selection: DbResultSelection::AffectedRows,
+                    },
+                    TypedDbStatement {
+                        sql: "INSERT INTO nested_savepoint (id, v) VALUES (?, ?)".into(),
+                        parameters: vec![DbValue::Int64(1), DbValue::Text("dup".into())],
+                        kind: DbPlanStatementKind::Execute,
+                        max_rows: 0,
+                        result_selection: DbResultSelection::AffectedRows,
+                    },
+                ],
+                outcome_index: 0,
+                payload_index: 0,
+                has_payload_index: false,
+                prior_receipt_index: 0,
+                has_prior_receipt_index: false,
+                receipt_select_index: 0,
+                has_receipt_select_index: false,
+                deadline_unix_ms: 0,
+            },
+        )
+        .await
+        .expect_err("second insert conflicts");
+        assert!(
+            err.to_string().to_lowercase().contains("unique")
+                || err.to_string().to_lowercase().contains("constraint")
+                || err.to_string().contains("conflict"),
+            "{err}"
+        );
+        guest_commit(txn_id).await.unwrap();
+        let rows = guest_query(stmt("SELECT v FROM nested_savepoint"))
+            .await
+            .unwrap();
+        assert!(
+            rows.rows.is_empty(),
+            "partial nested batch must not survive outer commit: {rows:?}"
+        );
+    }
 }

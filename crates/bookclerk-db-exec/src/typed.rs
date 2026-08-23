@@ -495,8 +495,9 @@ pub async fn execute_typed_on_session(
 /// Run a typed batch on an already-open transaction (no BEGIN/COMMIT).
 ///
 /// Used by nested SeaORM work: the guest interactive txn is already open, so
-/// a second `executeAtomic` BEGIN would fail. Encoding failures return [`DbErr`]
-/// without rolling the outer transaction back.
+/// a second `executeAtomic` BEGIN would fail. The batch runs inside a
+/// `SAVEPOINT`; statement, encoding, or budget failures roll back to that
+/// savepoint so a later outer `commit()` cannot persist a partial batch.
 ///
 /// # Errors
 ///
@@ -520,11 +521,57 @@ pub async fn execute_typed_on_txn(
     let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
     let seen_budget = Arc::clone(&budget);
     let result = with_exec_budget(Arc::clone(&budget), || {
-        execute_typed_join_body(txn, describe, req, timing_source, caps, session)
+        nested_savepoint(txn, || {
+            execute_typed_join_body(txn, describe, req, timing_source, caps, session)
+        })
     })
     .await;
     record_query_rows_seen(seen_budget.rows_seen());
     result
+}
+
+/// Savepoint name for one nested `executeAtomic` on an open transaction.
+const NESTED_ATOMIC_SAVEPOINT: &str = "bookclerk_nested_atomic";
+
+/// Runs `f` inside `SAVEPOINT bookclerk_nested_atomic` and rolls back to it
+/// on any error so a later outer commit cannot persist a partial batch.
+async fn nested_savepoint<F, Fut, T>(txn: &DatabaseTransaction, f: F) -> Result<T, DbErr>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, DbErr>>,
+{
+    let backend = ConnectionTrait::get_database_backend(txn);
+    txn.execute_raw(Statement::from_string(
+        backend,
+        format!("SAVEPOINT {NESTED_ATOMIC_SAVEPOINT}"),
+    ))
+    .await?;
+    match f().await {
+        Ok(value) => {
+            let _ = txn
+                .execute_raw(Statement::from_string(
+                    backend,
+                    format!("RELEASE SAVEPOINT {NESTED_ATOMIC_SAVEPOINT}"),
+                ))
+                .await;
+            Ok(value)
+        }
+        Err(err) => {
+            let _ = txn
+                .execute_raw(Statement::from_string(
+                    backend,
+                    format!("ROLLBACK TO SAVEPOINT {NESTED_ATOMIC_SAVEPOINT}"),
+                ))
+                .await;
+            let _ = txn
+                .execute_raw(Statement::from_string(
+                    backend,
+                    format!("RELEASE SAVEPOINT {NESTED_ATOMIC_SAVEPOINT}"),
+                ))
+                .await;
+            Err(err)
+        }
+    }
 }
 
 /// Statement loop for [`execute_typed_on_txn`] (no COMMIT / ROLLBACK).
