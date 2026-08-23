@@ -14,9 +14,9 @@ mod types;
 pub use crate::plugin_v2_capnp;
 
 pub use db_rpc::{
-    canonical_execute_request_hash, decode_db_value_bytes, decode_execute_request_bytes,
-    encoded_db_value_bytes, encoded_execute_reply_bytes, encoded_execute_request_bytes,
-    encoded_statement_result_bytes,
+    canonical_execute_request_hash, decode_db_value_bytes, decode_execute_atomic_reply_bytes,
+    decode_execute_request_bytes, encoded_db_value_bytes, encoded_execute_atomic_reply_bytes,
+    encoded_execute_reply_bytes, encoded_execute_request_bytes, encoded_statement_result_bytes,
 };
 pub use features::{
     negotiate_rpc_features, RpcFeature, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY,

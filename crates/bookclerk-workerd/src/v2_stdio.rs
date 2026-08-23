@@ -519,6 +519,15 @@ impl JobHandler for HttpJobHandler {
         context: JobHandlerContext,
     ) -> AbiResult<JobOutcome> {
         let grant = format!("{:032x}", rand::random::<u128>());
+        let max_atomic_request_bytes = match context.database.as_ref() {
+            Some(db) => db
+                .capabilities()
+                .await
+                .ok()
+                .map(|c| c.max_request_bytes)
+                .unwrap_or(0),
+            None => 0,
+        };
         self.table.borrow_mut().insert(
             grant.clone(),
             GrantedSlot {
@@ -531,6 +540,7 @@ impl JobHandler for HttpJobHandler {
                 allow_progress: true,
                 database: context.database.map(Rc::from),
                 allow_database: true,
+                max_atomic_request_bytes,
             },
         );
         let _revoke = RevokeGrant {

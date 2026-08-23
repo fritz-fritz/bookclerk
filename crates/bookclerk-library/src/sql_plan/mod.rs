@@ -179,6 +179,24 @@ pub fn authorize_typed_request(
     Ok(())
 }
 
+/// Authorizes a **guest-authored** typed batch: grammar and table scope,
+/// bind counts, result selection, then [`authorize_typed_request`].
+///
+/// Host schema DDL must use [`authorize_typed_request`] directly.
+///
+/// # Errors
+///
+/// Returns [`crate::LibraryError::Other`] when the SQL is outside the guest
+/// grammar or fails host validation.
+pub fn authorize_guest_typed_request(
+    req: &mut ExecuteRequest,
+    caps: &DbConnectResult,
+) -> crate::error::Result<()> {
+    bookclerk_plugin_abi::validate_guest_execute_request(req)
+        .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
+    authorize_typed_request(req, caps)
+}
+
 /// Rejects a plan or encoded [`DbAtomicRequest`] that exceeds negotiated guest limits.
 ///
 /// # Errors
@@ -542,6 +560,92 @@ mod limits_tests {
         };
         let err = validate_plan(&plan, &DbConnectResult::sqlite()).unwrap_err();
         assert!(err.to_string().contains("outcomeIndex"), "{err}");
+    }
+
+    #[test]
+    fn authorize_guest_typed_request_rejects_ddl_tables_binds_and_selection() {
+        use bookclerk_plugin_abi::{DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement};
+        let caps = DbConnectResult::sqlite();
+        let mut ddl = ExecuteRequest {
+            operation_id: "g".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "DROP TABLE books".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            outcome_index: 0,
+            payload_index: 0,
+            has_payload_index: false,
+            prior_receipt_index: 0,
+            has_prior_receipt_index: false,
+            receipt_select_index: 0,
+            has_receipt_select_index: false,
+            deadline_unix_ms: 0,
+        };
+        let err = super::authorize_guest_typed_request(&mut ddl, &caps).unwrap_err();
+        assert!(err.to_string().contains("disallowed"), "{err}");
+
+        let mut secrets = ddl.clone();
+        secrets.statements[0].sql = "SELECT token FROM encrypted_secrets".into();
+        secrets.statements[0].result_selection = DbResultSelection::Rows;
+        let err = super::authorize_guest_typed_request(&mut secrets, &caps).unwrap_err();
+        assert!(err.to_string().contains("unauthorized"), "{err}");
+
+        let mut binds = ddl.clone();
+        binds.statements[0].sql = "SELECT ? FROM books WHERE id = ?".into();
+        binds.statements[0].parameters = vec![DbValue::Int64(1)];
+        binds.statements[0].result_selection = DbResultSelection::Rows;
+        let err = super::authorize_guest_typed_request(&mut binds, &caps).unwrap_err();
+        assert!(err.to_string().contains("placeholder"), "{err}");
+
+        let mut rows_on_insert = ddl.clone();
+        rows_on_insert.statements[0].sql = "INSERT INTO books (id) VALUES (?)".into();
+        rows_on_insert.statements[0].parameters = vec![DbValue::Int64(1)];
+        rows_on_insert.statements[0].result_selection = DbResultSelection::Rows;
+        rows_on_insert.statements[0].max_rows = 1;
+        let err = super::authorize_guest_typed_request(&mut rows_on_insert, &caps).unwrap_err();
+        assert!(err.to_string().contains("row-producing"), "{err}");
+
+        let mut select = ddl.clone();
+        select.statements[0].sql = "SELECT id FROM books".into();
+        select.statements[0].kind = DbPlanStatementKind::Query;
+        select.statements[0].result_selection = DbResultSelection::Rows;
+        super::authorize_guest_typed_request(&mut select, &caps).unwrap();
+        assert_eq!(select.statements[0].kind, DbPlanStatementKind::Select);
+        assert!(!select.request_hash.is_empty());
+    }
+
+    #[test]
+    fn canonical_hash_deadline_golden_matches_sdks() {
+        use bookclerk_plugin_abi::{
+            canonical_execute_request_hash, DbResultSelection, ExecuteRequest, TypedDbStatement,
+        };
+        let mut req = ExecuteRequest {
+            operation_id: "op".into(),
+            request_hash: "abc".into(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 1".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            }],
+            outcome_index: 0,
+            payload_index: 0,
+            has_payload_index: false,
+            prior_receipt_index: 0,
+            has_prior_receipt_index: false,
+            receipt_select_index: 0,
+            has_receipt_select_index: false,
+            deadline_unix_ms: 0,
+        };
+        const GOLDEN: &str = "e368ef90b76963c5e93c5e6db37fdb6d7f809d23c10295352a0ba3cd26885f02";
+        assert_eq!(canonical_execute_request_hash(&req).unwrap(), GOLDEN);
+        req.deadline_unix_ms = 9_999_999_999;
+        assert_eq!(canonical_execute_request_hash(&req).unwrap(), GOLDEN);
     }
 
     #[test]

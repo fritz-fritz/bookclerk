@@ -15,7 +15,12 @@ use std::task::{Context, Poll};
 use anyhow::{bail, Context as _, Result};
 use bookclerk_plugin_abi::decode_execute_request_bytes;
 use bookclerk_plugin_abi::v2::{
-    DatabaseSession, Destination, ObjectMetadata, ProgressSink, Source, WriteOptions,
+    encoded_execute_atomic_reply_bytes, DatabaseSession, Destination, ObjectMetadata, ProgressSink,
+    Source, WriteOptions,
+};
+use bookclerk_plugin_abi::{
+    canonical_execute_request_hash, encoded_execute_request_bytes, guest_statement_kind,
+    validate_guest_execute_request, PluginError,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -40,6 +45,8 @@ pub struct GrantedSlot {
     pub database: Option<Rc<dyn DatabaseSession>>,
     /// Whether `executeAtomic` is permitted on this grant.
     pub allow_database: bool,
+    /// Negotiated `maxAtomicRequestBytes` (`0` = unlimited).
+    pub max_atomic_request_bytes: u32,
 }
 
 /// Invocation-id → granted stubs.
@@ -68,6 +75,10 @@ enum GrantedCmd {
         invocation: String,
         request_bytes: Vec<u8>,
         resp: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
+    AtomicBudget {
+        invocation: String,
+        resp: oneshot::Sender<Result<u32, String>>,
     },
 }
 
@@ -137,6 +148,9 @@ async fn dispatch_granted(mut rx: mpsc::Receiver<GrantedCmd>, table: GrantedTabl
                 } => {
                     let _ =
                         resp.send(dispatch_execute_atomic(&table, invocation, request_bytes).await);
+                }
+                GrantedCmd::AtomicBudget { invocation, resp } => {
+                    let _ = resp.send(dispatch_atomic_budget(&table, invocation));
                 }
             }
         });
@@ -277,13 +291,60 @@ async fn dispatch_progress(
     Ok(())
 }
 
+fn dispatch_atomic_budget(table: &GrantedTable, invocation: String) -> Result<u32, String> {
+    let mut table = table.borrow_mut();
+    let slot = table
+        .get_mut(&invocation)
+        .ok_or_else(|| "unknown or revoked grant".to_string())?;
+    if slot.expires <= std::time::Instant::now() {
+        table.remove(&invocation);
+        return Err("grant expired".into());
+    }
+    if !slot.allow_database {
+        return Err("database not permitted on this grant".into());
+    }
+    if slot.database.is_none() {
+        return Err("database not granted".into());
+    }
+    Ok(slot.max_atomic_request_bytes)
+}
+
+fn authorize_granted_request(
+    req: &mut bookclerk_plugin_abi::ExecuteRequest,
+    max_bytes: u32,
+) -> Result<(), PluginError> {
+    validate_guest_execute_request(req)?;
+    for stmt in &mut req.statements {
+        stmt.kind = guest_statement_kind(&stmt.sql);
+    }
+    if req.operation_id.is_empty() {
+        req.operation_id = format!("{:032x}", rand::random::<u128>());
+    }
+    let computed = canonical_execute_request_hash(req)?;
+    if !req.request_hash.is_empty() && req.request_hash != computed {
+        return Err(PluginError::invalid_params(
+            "retry token requestHash does not match the canonical request",
+        ));
+    }
+    req.request_hash = computed;
+    if max_bytes > 0 {
+        let n = encoded_execute_request_bytes(req)?.len();
+        if n > max_bytes as usize {
+            return Err(PluginError::payload_too_large(format!(
+                "atomic request is {n} bytes; guest maxAtomicRequestBytes is {max_bytes}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn dispatch_execute_atomic(
     table: &GrantedTable,
     invocation: String,
     request_bytes: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
-    let req = decode_execute_request_bytes(&request_bytes).map_err(|err| err.to_string())?;
-    let db = {
+    let mut req = decode_execute_request_bytes(&request_bytes).map_err(|err| err.to_string())?;
+    let (db, cap) = {
         let mut table = table.borrow_mut();
         let slot = table
             .get_mut(&invocation)
@@ -295,15 +356,17 @@ async fn dispatch_execute_atomic(
         if !slot.allow_database {
             return Err("database not permitted on this grant".into());
         }
-        slot.database
+        let db = slot
+            .database
             .clone()
-            .ok_or_else(|| "database not granted".to_string())?
+            .ok_or_else(|| "database not granted".to_string())?;
+        (db, slot.max_atomic_request_bytes)
     };
-    let reply = db
-        .execute_atomic(req)
-        .await
-        .map_err(|err| err.to_string())?;
-    serde_json::to_vec(&reply).map_err(|err| err.to_string())
+    if let Err(err) = authorize_granted_request(&mut req, cap) {
+        return encoded_execute_atomic_reply_bytes(Err(err)).map_err(|err| err.to_string());
+    }
+    let outcome = db.execute_atomic(req).await;
+    encoded_execute_atomic_reply_bytes(outcome).map_err(|err| err.to_string())
 }
 
 struct ChannelReader {
@@ -508,7 +571,7 @@ where
     }
 
     if method == "POST" && path_only == "/progress" {
-        let rest = read_content(&mut reader, &headers, prefix).await?;
+        let rest = read_content(&mut reader, &headers, prefix, 64 * 1024).await?;
         let value: serde_json::Value = serde_json::from_slice(&rest).unwrap_or_default();
         let percent = value
             .get("percent")
@@ -537,7 +600,32 @@ where
     }
 
     if method == "POST" && path_only == "/db/executeAtomic" {
-        let rest = read_content(&mut reader, &headers, prefix).await?;
+        let (budget_tx, budget_rx) = oneshot::channel();
+        cmds.send(GrantedCmd::AtomicBudget {
+            invocation: invocation.clone(),
+            resp: budget_tx,
+        })
+        .await
+        .context("granted dispatch closed")?;
+        let cap = match budget_rx.await.context("granted budget dropped")? {
+            Ok(cap) => cap,
+            Err(_) => {
+                write_status(&mut writer, 401, "unauthorized").await?;
+                return Ok(());
+            }
+        };
+        if declared_content_length_over_cap(&headers, cap) {
+            write_status(&mut writer, 413, "payload too large").await?;
+            return Ok(());
+        }
+        let rest = match read_content(&mut reader, &headers, prefix, cap).await {
+            Ok(body) => body,
+            Err(err) if err.to_string().contains("payload_too_large") => {
+                write_status(&mut writer, 413, "payload too large").await?;
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
         let (resp_tx, resp_rx) = oneshot::channel();
         cmds.send(GrantedCmd::ExecuteAtomic {
             invocation,
@@ -551,7 +639,7 @@ where
             .context("granted executeAtomic dropped")?
             .map_err(anyhow::Error::msg)?;
         let resp = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
             payload.len()
         );
         writer.write_all(resp.as_bytes()).await?;
@@ -713,12 +801,21 @@ async fn read_content<S: AsyncRead + Unpin>(
     stream: &mut S,
     headers: &[(String, String)],
     mut prefix: Vec<u8>,
+    max_bytes: u32,
 ) -> Result<Vec<u8>> {
+    let cap = if max_bytes == 0 {
+        usize::MAX
+    } else {
+        max_bytes as usize
+    };
     if let Some(len) = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, v)| v.parse::<usize>().ok())
     {
+        if len > cap {
+            bail!("payload_too_large: Content-Length {len} exceeds {cap}");
+        }
         while prefix.len() < len {
             let mut tmp = vec![0u8; (len - prefix.len()).min(64 * 1024)];
             let n = stream.read(&mut tmp).await?;
@@ -726,10 +823,68 @@ async fn read_content<S: AsyncRead + Unpin>(
                 break;
             }
             prefix.extend_from_slice(&tmp[..n]);
+            if prefix.len() > cap {
+                bail!("payload_too_large: body exceeded {cap}");
+            }
         }
         prefix.truncate(len);
+        return Ok(prefix);
+    }
+    let chunked = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"))
+        .map(|(_, v)| v.to_ascii_lowercase().contains("chunked"))
+        .unwrap_or(false);
+    if chunked {
+        let mut body = Vec::new();
+        if !prefix.is_empty() {
+            body.extend_from_slice(&prefix);
+        }
+        // Remaining chunk-encoded bytes after the header prefix are not fully
+        // parsed here; count whatever was already buffered then read until EOF
+        // with a hard cap so a guest cannot grow an unbounded Vec.
+        loop {
+            if body.len() > cap {
+                bail!("payload_too_large: body exceeded {cap}");
+            }
+            let mut tmp = [0u8; 64 * 1024];
+            let n = stream.read(&mut tmp).await?;
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&tmp[..n]);
+        }
+        if body.len() > cap {
+            bail!("payload_too_large: body exceeded {cap}");
+        }
+        return Ok(body);
+    }
+    while prefix.len() <= cap {
+        let mut tmp = [0u8; 64 * 1024];
+        let n = stream.read(&mut tmp).await?;
+        if n == 0 {
+            break;
+        }
+        prefix.extend_from_slice(&tmp[..n]);
+        if prefix.len() > cap {
+            bail!("payload_too_large: body exceeded {cap}");
+        }
+    }
+    if prefix.len() > cap {
+        bail!("payload_too_large: body exceeded {cap}");
     }
     Ok(prefix)
+}
+
+fn declared_content_length_over_cap(headers: &[(String, String)], cap: u32) -> bool {
+    if cap == 0 {
+        return false;
+    }
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.parse::<usize>().ok())
+        .is_some_and(|len| len > cap as usize)
 }
 
 fn query_param(query: &str, name: &str) -> Option<String> {
@@ -771,6 +926,7 @@ async fn write_status<S: AsyncWrite + Unpin>(
     let reason = match status {
         200 => "OK",
         401 => "Unauthorized",
+        413 => "Payload Too Large",
         _ => "Error",
     };
     let resp = format!(
@@ -802,6 +958,7 @@ mod tests {
                 allow_progress: true,
                 database: None,
                 allow_database: false,
+                max_atomic_request_bytes: 0,
             },
         );
         let err = match take_slot_source(&table, "g1") {
@@ -844,6 +1001,7 @@ mod tests {
                 allow_progress: true,
                 database: None,
                 allow_database: false,
+                max_atomic_request_bytes: 0,
             },
         );
         table.borrow_mut().remove("g-live");
@@ -854,7 +1012,7 @@ mod tests {
         assert!(err.contains("unknown") || err.contains("revoked"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn database_grant_is_required_for_execute_atomic() {
         use bookclerk_plugin_abi::{
             encoded_execute_request_bytes, DbPlanStatementKind, DbResultSelection, ExecuteRequest,
@@ -873,6 +1031,7 @@ mod tests {
                 allow_progress: true,
                 database: None,
                 allow_database: false,
+                max_atomic_request_bytes: 0,
             },
         );
         let req = ExecuteRequest {
@@ -901,6 +1060,220 @@ mod tests {
         assert!(
             err.contains("not permitted") || err.contains("not granted"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn declared_content_length_over_cap_is_rejected_before_read() {
+        assert!(!declared_content_length_over_cap(
+            &[("content-length".into(), "16".into())],
+            0
+        ));
+        assert!(!declared_content_length_over_cap(
+            &[("content-length".into(), "16".into())],
+            16
+        ));
+        assert!(declared_content_length_over_cap(
+            &[("Content-Length".into(), "17".into())],
+            16
+        ));
+    }
+
+    struct FlagSession {
+        called: std::cell::Cell<bool>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl DatabaseSession for FlagSession {
+        async fn execute(
+            &self,
+            _statement: bookclerk_plugin_abi::v2::Statement,
+        ) -> bookclerk_plugin_abi::Result<bookclerk_plugin_abi::v2::ExecResult> {
+            Err(PluginError::unsupported("execute"))
+        }
+
+        async fn query(
+            &self,
+            _statement: bookclerk_plugin_abi::v2::Statement,
+            _cursor: &str,
+            _limit: u32,
+        ) -> bookclerk_plugin_abi::Result<bookclerk_plugin_abi::v2::QueryPage> {
+            Err(PluginError::unsupported("query"))
+        }
+
+        async fn begin(
+            &self,
+        ) -> bookclerk_plugin_abi::Result<Box<dyn bookclerk_plugin_abi::v2::Transaction>> {
+            Err(PluginError::unsupported("begin"))
+        }
+
+        async fn execute_atomic(
+            &self,
+            _request: bookclerk_plugin_abi::ExecuteRequest,
+        ) -> bookclerk_plugin_abi::Result<bookclerk_plugin_abi::ExecuteReply> {
+            self.called.set(true);
+            Err(PluginError::internal("execute_atomic must not run"))
+        }
+    }
+
+    fn guest_sql_bytes(
+        sql: &str,
+        parameters: Vec<bookclerk_plugin_abi::DbValue>,
+        kind: bookclerk_plugin_abi::DbPlanStatementKind,
+        result_selection: bookclerk_plugin_abi::DbResultSelection,
+        max_rows: u32,
+    ) -> Vec<u8> {
+        use bookclerk_plugin_abi::{
+            encoded_execute_request_bytes, ExecuteRequest, TypedDbStatement,
+        };
+        encoded_execute_request_bytes(&ExecuteRequest {
+            operation_id: "op-policy".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: sql.into(),
+                parameters,
+                kind,
+                max_rows,
+                result_selection,
+            }],
+            outcome_index: 0,
+            payload_index: 0,
+            has_payload_index: false,
+            prior_receipt_index: 0,
+            has_prior_receipt_index: false,
+            receipt_select_index: 0,
+            has_receipt_select_index: false,
+            deadline_unix_ms: 0,
+        })
+        .expect("encode")
+    }
+
+    fn grant_flag_session() -> (GrantedTable, Rc<FlagSession>) {
+        let session = Rc::new(FlagSession {
+            called: std::cell::Cell::new(false),
+        });
+        let table: GrantedTable = Rc::new(RefCell::new(HashMap::new()));
+        table.borrow_mut().insert(
+            "g-db".into(),
+            GrantedSlot {
+                input: None,
+                output: None,
+                progress: None,
+                expires: Instant::now() + Duration::from_secs(60),
+                allow_open: true,
+                allow_put: true,
+                allow_progress: true,
+                database: Some(session.clone()),
+                allow_database: true,
+                max_atomic_request_bytes: 0,
+            },
+        );
+        (table, session)
+    }
+
+    async fn assert_granted_policy_rejects(bytes: Vec<u8>, needle: &str) {
+        use bookclerk_plugin_abi::decode_execute_atomic_reply_bytes;
+        let (table, session) = grant_flag_session();
+        let payload = dispatch_execute_atomic(&table, "g-db".into(), bytes)
+            .await
+            .expect("policy rejection is a Cap'n err reply");
+        let err = decode_execute_atomic_reply_bytes(&payload).expect_err("must fail closed");
+        assert!(err.to_string().contains(needle), "{err}");
+        assert!(
+            !session.called.get(),
+            "execute_atomic must not run for unauthorized SQL"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn guest_sql_policy_never_dispatches_execute_atomic() {
+        use bookclerk_plugin_abi::{DbPlanStatementKind, DbResultSelection, DbValue};
+        assert_granted_policy_rejects(
+            guest_sql_bytes(
+                "DROP TABLE books",
+                vec![],
+                DbPlanStatementKind::Execute,
+                DbResultSelection::AffectedRows,
+                0,
+            ),
+            "disallowed",
+        )
+        .await;
+        assert_granted_policy_rejects(
+            guest_sql_bytes(
+                "SELECT token FROM encrypted_secrets",
+                vec![],
+                DbPlanStatementKind::Select,
+                DbResultSelection::Rows,
+                0,
+            ),
+            "unauthorized",
+        )
+        .await;
+        assert_granted_policy_rejects(
+            guest_sql_bytes(
+                "SELECT ? FROM books WHERE id = ?",
+                vec![DbValue::Int64(1)],
+                DbPlanStatementKind::Select,
+                DbResultSelection::Rows,
+                1,
+            ),
+            "placeholder",
+        )
+        .await;
+        assert_granted_policy_rejects(
+            guest_sql_bytes(
+                "INSERT INTO books (id) VALUES (?)",
+                vec![DbValue::Int64(1)],
+                DbPlanStatementKind::Execute,
+                DbResultSelection::Rows,
+                1,
+            ),
+            "row-producing",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn over_cap_content_length_never_dispatches_execute_atomic() {
+        let (cmds_tx, mut cmds_rx) = mpsc::channel(8);
+        let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&dispatched);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmds_rx.recv().await {
+                match cmd {
+                    GrantedCmd::AtomicBudget { resp, .. } => {
+                        let _ = resp.send(Ok(16));
+                    }
+                    GrantedCmd::ExecuteAtomic { resp, .. } => {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let _ = resp.send(Err("must not dispatch".into()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let (client, server) = tokio::io::duplex(4096);
+        let serve = tokio::spawn(async move { handle_conn(server, "bridge", cmds_tx).await });
+        let body = "x".repeat(32);
+        let req = format!(
+            "POST /db/executeAtomic HTTP/1.1\r\nAuthorization: Bearer grant-1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (mut reader, mut writer) = tokio::io::split(client);
+        writer.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = vec![0u8; 256];
+        let n = tokio::time::timeout(Duration::from_secs(2), reader.read(&mut buf))
+            .await
+            .expect("http response")
+            .unwrap();
+        let head = String::from_utf8_lossy(&buf[..n]);
+        assert!(head.contains("413"), "{head}");
+        drop(writer);
+        let _ = serve.await;
+        assert!(
+            !dispatched.load(std::sync::atomic::Ordering::SeqCst),
+            "executeAtomic must not be dispatched for an over-cap Content-Length"
         );
     }
 }

@@ -490,6 +490,29 @@ pub fn encoded_execute_reply_bytes(reply: &ExecuteReply) -> Result<Vec<u8>> {
     write_message_bytes(&message)
 }
 
+/// Encodes a standalone Cap'n `ExecuteAtomicReply` (`ok` or `err`).
+///
+/// # Errors
+///
+/// Returns [`PluginError::internal`] when the message cannot be serialized.
+pub fn encoded_execute_atomic_reply_bytes(outcome: Result<ExecuteReply>) -> Result<Vec<u8>> {
+    let mut message = capnp::message::Builder::new_default();
+    write_execute_atomic_reply(message.init_root(), outcome);
+    write_message_bytes(&message)
+}
+
+/// Decodes a standalone Cap'n `ExecuteAtomicReply` message.
+///
+/// # Errors
+///
+/// Returns the guest [`PluginError`] on `err`, or a decode failure on `ok`.
+pub fn decode_execute_atomic_reply_bytes(bytes: &[u8]) -> Result<ExecuteReply> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let reader = capnp::serialize::read_message(&mut cursor, capnp::message::ReaderOptions::new())
+        .map_err(from_capnp)?;
+    read_execute_atomic_reply(reader.get_root().map_err(from_capnp)?)
+}
+
 /// Encodes a standalone Cap'n `StatementResult` message (unpacked stream).
 ///
 /// Used to enforce negotiated `maxResultBytes` against the actual wire size of

@@ -54,6 +54,7 @@ pub mod db_execute;
 pub mod db_value;
 pub mod error;
 pub mod events;
+pub mod guest_sql;
 pub mod kind;
 pub mod methods;
 pub mod types;
@@ -97,13 +98,14 @@ pub use db_execute::{
 pub use db_value::{db_value_from_json, db_value_to_json, DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use events::{HostToPluginEvent, PluginToHostEvent};
+pub use guest_sql::{guest_statement_kind, validate_guest_execute_request};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
 pub use types::*;
 pub use v2::{
-    canonical_execute_request_hash, decode_db_value_bytes, decode_execute_request_bytes,
-    encoded_db_value_bytes, encoded_execute_reply_bytes, encoded_execute_request_bytes,
-    encoded_statement_result_bytes,
+    canonical_execute_request_hash, decode_db_value_bytes, decode_execute_atomic_reply_bytes,
+    decode_execute_request_bytes, encoded_db_value_bytes, encoded_execute_atomic_reply_bytes,
+    encoded_execute_reply_bytes, encoded_execute_request_bytes, encoded_statement_result_bytes,
 };
 
 /// Negotiated JSON-adapter API version (`1`).
