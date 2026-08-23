@@ -15,7 +15,7 @@ use std::task::{Context, Poll};
 use anyhow::{bail, Context as _, Result};
 use bookclerk_plugin_abi::decode_execute_request_bytes;
 use bookclerk_plugin_abi::v2::{
-    encoded_execute_atomic_reply_bytes, DatabaseSession, Destination, ObjectMetadata, ProgressSink,
+    encoded_execute_result_reply_bytes, Destination, GuestDatabase, ObjectMetadata, ProgressSink,
     Source, WriteOptions,
 };
 use bookclerk_plugin_abi::{
@@ -42,8 +42,8 @@ pub struct GrantedSlot {
     /// Whether `progress` is permitted on this grant.
     pub allow_progress: bool,
     /// Host-mediated typed SQL session, when this invocation is granted one.
-    pub database: Option<Rc<dyn DatabaseSession>>,
-    /// Whether `executeAtomic` is permitted on this grant.
+    pub database: Option<Rc<dyn GuestDatabase>>,
+    /// Whether `execute` is permitted on this grant.
     pub allow_database: bool,
     /// Host-issued table/column/function allowlist for guest SQL.
     pub sql_policy: GuestSqlPolicy,
@@ -74,7 +74,7 @@ enum GrantedCmd {
         message: String,
         resp: oneshot::Sender<Result<(), String>>,
     },
-    ExecuteAtomic {
+    Execute {
         invocation: String,
         request_bytes: Vec<u8>,
         resp: oneshot::Sender<Result<Vec<u8>, String>>,
@@ -144,13 +144,12 @@ async fn dispatch_granted(mut rx: mpsc::Receiver<GrantedCmd>, table: GrantedTabl
                     let _ =
                         resp.send(dispatch_progress(&table, invocation, percent, message).await);
                 }
-                GrantedCmd::ExecuteAtomic {
+                GrantedCmd::Execute {
                     invocation,
                     request_bytes,
                     resp,
                 } => {
-                    let _ =
-                        resp.send(dispatch_execute_atomic(&table, invocation, request_bytes).await);
+                    let _ = resp.send(dispatch_execute(&table, invocation, request_bytes).await);
                 }
                 GrantedCmd::AtomicBudget { invocation, resp } => {
                     let _ = resp.send(dispatch_atomic_budget(&table, invocation));
@@ -350,7 +349,7 @@ fn authorize_granted_request(
     Ok(())
 }
 
-async fn dispatch_execute_atomic(
+async fn dispatch_execute(
     table: &GrantedTable,
     invocation: String,
     request_bytes: Vec<u8>,
@@ -375,10 +374,10 @@ async fn dispatch_execute_atomic(
         (db, slot.max_atomic_request_bytes, slot.sql_policy.clone())
     };
     if let Err(err) = authorize_granted_request(&mut req, cap, &policy) {
-        return encoded_execute_atomic_reply_bytes(Err(err)).map_err(|err| err.to_string());
+        return encoded_execute_result_reply_bytes(Err(err)).map_err(|err| err.to_string());
     }
-    let outcome = db.execute_atomic(req).await;
-    encoded_execute_atomic_reply_bytes(outcome).map_err(|err| err.to_string())
+    let outcome = db.execute(req).await;
+    encoded_execute_result_reply_bytes(outcome).map_err(|err| err.to_string())
 }
 
 struct ChannelReader {
@@ -611,7 +610,7 @@ where
         return Ok(());
     }
 
-    if method == "POST" && path_only == "/db/executeAtomic" {
+    if method == "POST" && path_only == "/db/execute" {
         let (budget_tx, budget_rx) = oneshot::channel();
         cmds.send(GrantedCmd::AtomicBudget {
             invocation: invocation.clone(),
@@ -634,7 +633,7 @@ where
             write_status(
                 &mut writer,
                 400,
-                "chunked executeAtomic bodies are not supported",
+                "chunked execute bodies are not supported",
             )
             .await?;
             return Ok(());
@@ -648,7 +647,7 @@ where
             Err(err) => return Err(err),
         };
         let (resp_tx, resp_rx) = oneshot::channel();
-        cmds.send(GrantedCmd::ExecuteAtomic {
+        cmds.send(GrantedCmd::Execute {
             invocation,
             request_bytes: rest,
             resp: resp_tx,
@@ -657,7 +656,7 @@ where
         .context("granted dispatch closed")?;
         let payload = resp_rx
             .await
-            .context("granted executeAtomic dropped")?
+            .context("granted execute dropped")?
             .map_err(anyhow::Error::msg)?;
         let resp = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -1033,7 +1032,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn database_grant_is_required_for_execute_atomic() {
+    async fn database_grant_is_required_for_execute() {
         use bookclerk_plugin_abi::{
             encoded_execute_request_bytes, DbPlanStatementKind, DbResultSelection, ExecuteRequest,
             TypedDbStatement,
@@ -1075,7 +1074,7 @@ mod tests {
             deadline_unix_ms: 0,
         };
         let bytes = encoded_execute_request_bytes(&req).expect("encode");
-        let err = dispatch_execute_atomic(&table, "g-db".into(), bytes)
+        let err = dispatch_execute(&table, "g-db".into(), bytes)
             .await
             .expect_err("missing database grant must fail");
         assert!(
@@ -1109,35 +1108,13 @@ mod tests {
     }
 
     #[async_trait::async_trait(?Send)]
-    impl DatabaseSession for FlagSession {
+    impl GuestDatabase for FlagSession {
         async fn execute(
-            &self,
-            _statement: bookclerk_plugin_abi::v2::Statement,
-        ) -> bookclerk_plugin_abi::Result<bookclerk_plugin_abi::v2::ExecResult> {
-            Err(PluginError::unsupported("execute"))
-        }
-
-        async fn query(
-            &self,
-            _statement: bookclerk_plugin_abi::v2::Statement,
-            _cursor: &str,
-            _limit: u32,
-        ) -> bookclerk_plugin_abi::Result<bookclerk_plugin_abi::v2::QueryPage> {
-            Err(PluginError::unsupported("query"))
-        }
-
-        async fn begin(
-            &self,
-        ) -> bookclerk_plugin_abi::Result<Box<dyn bookclerk_plugin_abi::v2::Transaction>> {
-            Err(PluginError::unsupported("begin"))
-        }
-
-        async fn execute_atomic(
             &self,
             _request: bookclerk_plugin_abi::ExecuteRequest,
         ) -> bookclerk_plugin_abi::Result<bookclerk_plugin_abi::ExecuteReply> {
             self.called.set(true);
-            Err(PluginError::internal("execute_atomic must not run"))
+            Err(PluginError::internal("execute must not run"))
         }
     }
 
@@ -1202,21 +1179,21 @@ mod tests {
     }
 
     async fn assert_granted_policy_rejects(bytes: Vec<u8>, needle: &str) {
-        use bookclerk_plugin_abi::decode_execute_atomic_reply_bytes;
+        use bookclerk_plugin_abi::decode_execute_result_reply_bytes;
         let (table, session) = grant_flag_session();
-        let payload = dispatch_execute_atomic(&table, "g-db".into(), bytes)
+        let payload = dispatch_execute(&table, "g-db".into(), bytes)
             .await
             .expect("policy rejection is a Cap'n err reply");
-        let err = decode_execute_atomic_reply_bytes(&payload).expect_err("must fail closed");
+        let err = decode_execute_result_reply_bytes(&payload).expect_err("must fail closed");
         assert!(err.to_string().contains(needle), "{err}");
         assert!(
             !session.called.get(),
-            "execute_atomic must not run for unauthorized SQL"
+            "execute must not run for unauthorized SQL"
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn guest_sql_policy_never_dispatches_execute_atomic() {
+    async fn guest_sql_policy_never_dispatches_execute() {
         use bookclerk_plugin_abi::{DbPlanStatementKind, DbResultSelection, DbValue};
         assert_granted_policy_rejects(
             guest_sql_bytes(
@@ -1278,10 +1255,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn host_authoritative_policy_defers_table_scope_to_session() {
         use bookclerk_plugin_abi::{
-            decode_execute_atomic_reply_bytes, DbPlanStatementKind, DbResultSelection,
+            decode_execute_result_reply_bytes, DbPlanStatementKind, DbResultSelection,
         };
         let (table, session) = grant_flag_session_with_policy(GuestSqlPolicy::host_authoritative());
-        let payload = dispatch_execute_atomic(
+        let payload = dispatch_execute(
             &table,
             "g-db".into(),
             guest_sql_bytes(
@@ -1294,14 +1271,14 @@ mod tests {
         )
         .await
         .expect("broker defers table scope to the host session");
-        decode_execute_atomic_reply_bytes(&payload)
+        decode_execute_result_reply_bytes(&payload)
             .expect_err("FlagSession still returns an error");
         assert!(
             session.called.get(),
-            "host-authoritative grants must dispatch executeAtomic"
+            "host-authoritative grants must dispatch execute"
         );
         let (table, session) = grant_flag_session_with_policy(GuestSqlPolicy::host_authoritative());
-        let payload = dispatch_execute_atomic(
+        let payload = dispatch_execute(
             &table,
             "g-db".into(),
             guest_sql_bytes(
@@ -1314,7 +1291,7 @@ mod tests {
         )
         .await
         .expect("grammar rejection is a Cap'n err reply");
-        let err = decode_execute_atomic_reply_bytes(&payload).expect_err("DDL must fail closed");
+        let err = decode_execute_result_reply_bytes(&payload).expect_err("DDL must fail closed");
         assert!(err.to_string().contains("disallowed"), "{err}");
         assert!(
             !session.called.get(),
@@ -1323,7 +1300,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn over_cap_content_length_never_dispatches_execute_atomic() {
+    async fn over_cap_content_length_never_dispatches_execute() {
         let (cmds_tx, mut cmds_rx) = mpsc::channel(8);
         let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = std::sync::Arc::clone(&dispatched);
@@ -1333,7 +1310,7 @@ mod tests {
                     GrantedCmd::AtomicBudget { resp, .. } => {
                         let _ = resp.send(Ok(16));
                     }
-                    GrantedCmd::ExecuteAtomic { resp, .. } => {
+                    GrantedCmd::Execute { resp, .. } => {
                         flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         let _ = resp.send(Err("must not dispatch".into()));
                     }
@@ -1345,7 +1322,7 @@ mod tests {
         let serve = tokio::spawn(async move { handle_conn(server, "bridge", cmds_tx).await });
         let body = "x".repeat(32);
         let req = format!(
-            "POST /db/executeAtomic HTTP/1.1\r\nAuthorization: Bearer grant-1\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /db/execute HTTP/1.1\r\nAuthorization: Bearer grant-1\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
         let (mut reader, mut writer) = tokio::io::split(client);
@@ -1361,12 +1338,12 @@ mod tests {
         let _ = serve.await;
         assert!(
             !dispatched.load(std::sync::atomic::Ordering::SeqCst),
-            "executeAtomic must not be dispatched for an over-cap Content-Length"
+            "execute must not be dispatched for an over-cap Content-Length"
         );
     }
 
     #[tokio::test]
-    async fn chunked_execute_atomic_is_rejected_before_dispatch() {
+    async fn chunked_execute_is_rejected_before_dispatch() {
         let (cmds_tx, mut cmds_rx) = mpsc::channel(8);
         let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = std::sync::Arc::clone(&dispatched);
@@ -1376,7 +1353,7 @@ mod tests {
                     GrantedCmd::AtomicBudget { resp, .. } => {
                         let _ = resp.send(Ok(4096));
                     }
-                    GrantedCmd::ExecuteAtomic { resp, .. } => {
+                    GrantedCmd::Execute { resp, .. } => {
                         flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         let _ = resp.send(Err("must not dispatch".into()));
                     }
@@ -1388,7 +1365,7 @@ mod tests {
         let serve = tokio::spawn(async move { handle_conn(server, "bridge", cmds_tx).await });
         // Real HTTP chunk framing. Concatenating these bytes as a Cap'n payload
         // would be accepted by a decoder that never dechunks.
-        let req = "POST /db/executeAtomic HTTP/1.1\r\n\
+        let req = "POST /db/execute HTTP/1.1\r\n\
 Authorization: Bearer grant-1\r\n\
 Transfer-Encoding: chunked\r\n\
 \r\n\
@@ -1406,7 +1383,7 @@ Transfer-Encoding: chunked\r\n\
         let _ = serve.await;
         assert!(
             !dispatched.load(std::sync::atomic::Ordering::SeqCst),
-            "executeAtomic must not be dispatched for a chunked body"
+            "execute must not be dispatched for a chunked body"
         );
     }
 }
