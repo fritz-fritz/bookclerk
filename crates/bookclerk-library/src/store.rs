@@ -160,8 +160,8 @@ impl LibraryStore {
     ///
     /// Hosts inject this into `JobHandler.handle` as the granted
     /// [`bookclerk_plugin_abi::v2::DatabaseSession::execute_atomic`] path.
-    /// [`policy`](bookclerk_plugin_abi::GuestSqlPolicy::deny_all) fails closed
-    /// until the invocation attaches an explicit table grant.
+    /// Job sessions pass a host-issued [`GuestSqlPolicy`](bookclerk_plugin_abi::GuestSqlPolicy)
+    /// (`books` by default).
     ///
     /// # Errors
     ///

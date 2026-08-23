@@ -1174,6 +1174,10 @@ mod tests {
     }
 
     fn grant_flag_session() -> (GrantedTable, Rc<FlagSession>) {
+        grant_flag_session_with_policy(GuestSqlPolicy::allow_tables(["books"]))
+    }
+
+    fn grant_flag_session_with_policy(policy: GuestSqlPolicy) -> (GrantedTable, Rc<FlagSession>) {
         let session = Rc::new(FlagSession {
             called: std::cell::Cell::new(false),
         });
@@ -1190,7 +1194,7 @@ mod tests {
                 allow_progress: true,
                 database: Some(session.clone()),
                 allow_database: true,
-                sql_policy: GuestSqlPolicy::allow_tables(["books"]),
+                sql_policy: policy,
                 max_atomic_request_bytes: 0,
             },
         );
@@ -1269,6 +1273,53 @@ mod tests {
             "unauthorized table",
         )
         .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_authoritative_policy_defers_table_scope_to_session() {
+        use bookclerk_plugin_abi::{
+            decode_execute_atomic_reply_bytes, DbPlanStatementKind, DbResultSelection,
+        };
+        let (table, session) = grant_flag_session_with_policy(GuestSqlPolicy::host_authoritative());
+        let payload = dispatch_execute_atomic(
+            &table,
+            "g-db".into(),
+            guest_sql_bytes(
+                "SELECT id FROM jobs",
+                vec![],
+                DbPlanStatementKind::Select,
+                DbResultSelection::Rows,
+                1,
+            ),
+        )
+        .await
+        .expect("broker defers table scope to the host session");
+        decode_execute_atomic_reply_bytes(&payload)
+            .expect_err("FlagSession still returns an error");
+        assert!(
+            session.called.get(),
+            "host-authoritative grants must dispatch executeAtomic"
+        );
+        let (table, session) = grant_flag_session_with_policy(GuestSqlPolicy::host_authoritative());
+        let payload = dispatch_execute_atomic(
+            &table,
+            "g-db".into(),
+            guest_sql_bytes(
+                "DROP TABLE books",
+                vec![],
+                DbPlanStatementKind::Execute,
+                DbResultSelection::AffectedRows,
+                0,
+            ),
+        )
+        .await
+        .expect("grammar rejection is a Cap'n err reply");
+        let err = decode_execute_atomic_reply_bytes(&payload).expect_err("DDL must fail closed");
+        assert!(err.to_string().contains("disallowed"), "{err}");
+        assert!(
+            !session.called.get(),
+            "DDL must not dispatch even when the broker defers table scope"
+        );
     }
 
     #[tokio::test]

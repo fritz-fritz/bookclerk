@@ -279,23 +279,32 @@ pub async fn open_library_store(
 ///
 /// Legacy `execute`/`query`/`begin` are unsupported. SQL goes through
 /// [`LibraryStore::execute_guest_atomic`](bookclerk_library::LibraryStore::execute_guest_atomic)
-/// with a fail-closed [`GuestSqlPolicy::deny_all`](bookclerk_library::GuestSqlPolicy::deny_all)
-/// until the invocation attaches an explicit table grant.
+/// with a host-issued table grant (`books`). Unrelated Bookclerk tables stay
+/// denied. Workerd HTTP grants defer the same check to this session.
 #[must_use]
 pub(crate) fn granted_job_database(
     store: bookclerk_library::LibraryStore,
 ) -> Arc<dyn DatabaseSession> {
-    Arc::new(GuestJobDatabase {
+    granted_job_database_with_policy(
         store,
-        policy: bookclerk_library::GuestSqlPolicy::deny_all(),
-    })
+        bookclerk_library::GuestSqlPolicy::allow_tables(["books"]),
+    )
+}
+
+/// Like [`granted_job_database`], with an explicit table/column/function policy.
+#[must_use]
+pub(crate) fn granted_job_database_with_policy(
+    store: bookclerk_library::LibraryStore,
+    policy: bookclerk_library::GuestSqlPolicy,
+) -> Arc<dyn DatabaseSession> {
+    Arc::new(GuestJobDatabase { store, policy })
 }
 
 /// Host-exported `DatabaseSession` for one `JobHandler.handle` invocation.
 struct GuestJobDatabase {
     /// Library used for capabilities and authorized `executeAtomic`.
     store: bookclerk_library::LibraryStore,
-    /// Host-issued table/column/function allowlist (fail-closed `deny_all`).
+    /// Host-issued table/column/function allowlist for this job.
     policy: bookclerk_library::GuestSqlPolicy,
 }
 
@@ -1697,7 +1706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn granted_job_database_advertises_capabilities_and_denies_sql() {
+    async fn granted_job_database_allows_books_and_denies_jobs() {
         let store = bookclerk_library::LibraryStore::from_connection(
             bookclerk_plugin_database_sqlite::open_memory()
                 .await
@@ -1707,12 +1716,12 @@ mod tests {
         let session = granted_job_database(store);
         let caps = session.capabilities().await.expect("capabilities");
         assert_eq!(caps.diagnostic_engine, DbConnectResult::sqlite().dialect);
-        let err = session
+        session
             .execute_atomic(ExecuteRequest {
-                operation_id: "job".into(),
+                operation_id: "job-books".into(),
                 request_hash: String::new(),
                 statements: vec![TypedDbStatement {
-                    sql: "SELECT id FROM books".into(),
+                    sql: "SELECT id FROM books LIMIT 1".into(),
                     parameters: vec![],
                     kind: DbPlanStatementKind::Select,
                     max_rows: 8,
@@ -1728,7 +1737,29 @@ mod tests {
                 deadline_unix_ms: 0,
             })
             .await
-            .expect_err("deny_all");
+            .expect("books grant");
+        let err = session
+            .execute_atomic(ExecuteRequest {
+                operation_id: "job-jobs".into(),
+                request_hash: String::new(),
+                statements: vec![TypedDbStatement {
+                    sql: "SELECT id FROM jobs".into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Select,
+                    max_rows: 8,
+                    result_selection: DbResultSelection::Rows,
+                }],
+                outcome_index: 0,
+                payload_index: 0,
+                has_payload_index: false,
+                prior_receipt_index: 0,
+                has_prior_receipt_index: false,
+                receipt_select_index: 0,
+                has_receipt_select_index: false,
+                deadline_unix_ms: 0,
+            })
+            .await
+            .expect_err("jobs denied");
         assert_eq!(
             err.code,
             bookclerk_plugin_sdk::PluginErrorCode::InvalidParams

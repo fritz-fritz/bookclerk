@@ -533,7 +533,7 @@ impl JobHandler for HttpJobHandler {
                 allow_progress: true,
                 database: context.database.map(Rc::from),
                 allow_database,
-                sql_policy: GuestSqlPolicy::deny_all(),
+                sql_policy: GuestSqlPolicy::host_authoritative(),
                 max_atomic_request_bytes,
             },
         );
