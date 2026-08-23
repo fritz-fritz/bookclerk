@@ -15,6 +15,9 @@ const {
   encodeExecuteRequest,
   decodeExecuteRequest,
   createDatabaseBinding,
+  canonicalExecuteRequestHash,
+  encodeExecuteAtomicReply,
+  decodeExecuteAtomicReply,
 } = await import(join(dist, "db-execute.js"));
 
 function hex(bytes) {
@@ -171,6 +174,144 @@ await seqBinding.prepare("INSERT INTO t VALUES (?)").bind({ kind: "int64", value
 await seqBinding.prepare("INSERT INTO t VALUES (?)").bind({ kind: "int64", value: 2n }).run();
 assert.equal(sequentialIds.length, 2);
 assert.notEqual(sequentialIds[0], sequentialIds[1]);
+
+const GOLDEN_DEADLINE_HASH =
+  "e368ef90b76963c5e93c5e6db37fdb6d7f809d23c10295352a0ba3cd26885f02";
+const deadlineReq = {
+  operationId: "op",
+  requestHash: "abc",
+  statements: [
+    {
+      sql: "SELECT 1",
+      parameters: [],
+      kind: "select",
+      maxRows: 1,
+      resultSelection: "rows",
+    },
+  ],
+  outcomeIndex: 0,
+  payloadIndex: 0,
+  hasPayloadIndex: false,
+  priorReceiptIndex: 0,
+  hasPriorReceiptIndex: false,
+  receiptSelectIndex: 0,
+  hasReceiptSelectIndex: false,
+  deadlineUnixMs: 0,
+};
+assert.equal(await canonicalExecuteRequestHash(deadlineReq), GOLDEN_DEADLINE_HASH);
+deadlineReq.deadlineUnixMs = 9999999999;
+assert.equal(await canonicalExecuteRequestHash(deadlineReq), GOLDEN_DEADLINE_HASH);
+
+const firstSeen = [];
+const firstBinding = createDatabaseBinding({
+  async executeAtomic(req) {
+    firstSeen.push({
+      maxRows: req.statements[0].maxRows,
+      resultSelection: req.statements[0].resultSelection,
+    });
+    return {
+      operationId: req.operationId,
+      statements: [
+        {
+          rows: [
+            {
+              values: [{ kind: "int64", value: 1n }],
+            },
+          ],
+          columns: [{ name: "n", dbType: "int64" }],
+          rowsAffected: 0,
+          cursor: "",
+        },
+      ],
+      timing: { attemptElapsedUs: 0, dbExecutionUs: 0, dbTimingSource: "test" },
+    };
+  },
+});
+const row = await firstBinding.prepare("SELECT n FROM t").first();
+assert.equal(firstSeen[0].maxRows, 1);
+assert.equal(firstSeen[0].resultSelection, "rows");
+assert.equal(row.n.value, 1n);
+
+const mixedSeen = [];
+const mixBinding = createDatabaseBinding({
+  async executeAtomic(req) {
+    mixedSeen.push(
+      req.statements.map((s) => ({
+        selection: s.resultSelection,
+        maxRows: s.maxRows,
+      })),
+    );
+    return {
+      operationId: req.operationId,
+      statements: req.statements.map(() => ({
+        rows: [],
+        columns: [],
+        rowsAffected: 1,
+        cursor: "",
+      })),
+      timing: { attemptElapsedUs: 0, dbExecutionUs: 0, dbTimingSource: "test" },
+    };
+  },
+});
+await mixBinding.batch([
+  mixBinding.prepare("INSERT INTO t VALUES (?)").bind({ kind: "int64", value: 1n }).asRun(),
+  mixBinding.prepare("SELECT n FROM t").asAll(),
+]);
+assert.deepEqual(mixedSeen[0], [
+  { selection: "affectedRows", maxRows: 0 },
+  { selection: "rows", maxRows: 0 },
+]);
+
+const i64Reply = {
+  operationId: "op",
+  statements: [
+    {
+      rows: [
+        {
+          values: [
+            { kind: "int64", value: I64_MIN },
+            { kind: "int64", value: I64_MAX },
+            { kind: "bytes", value: Uint8Array.of(0xff) },
+            { kind: "text", value: "b64:not-bytes" },
+            { kind: "null", value: "int64" },
+          ],
+        },
+      ],
+      columns: [
+        { name: "lo", dbType: "int64" },
+        { name: "hi", dbType: "int64" },
+        { name: "blob", dbType: "bytes" },
+        { name: "txt", dbType: "text" },
+        { name: "n", dbType: "int64" },
+      ],
+      rowsAffected: 0,
+      cursor: "",
+    },
+  ],
+  timing: { attemptElapsedUs: 1, dbExecutionUs: 2, dbTimingSource: "test" },
+};
+const atomicOk = encodeExecuteAtomicReply({ ok: i64Reply });
+const decodedOk = decodeExecuteAtomicReply(atomicOk);
+assert.equal(decodedOk.statements[0].rows[0].values[0].value, I64_MIN);
+assert.equal(decodedOk.statements[0].rows[0].values[1].value, I64_MAX);
+assert.deepEqual(
+  Array.from(decodedOk.statements[0].rows[0].values[2].value),
+  [0xff],
+);
+assert.equal(decodedOk.statements[0].rows[0].values[3].value, "b64:not-bytes");
+assert.equal(decodedOk.statements[0].rows[0].values[4].value, "int64");
+
+const atomicErr = encodeExecuteAtomicReply({
+  err: { code: "unavailable", message: "retry me" },
+});
+try {
+  decodeExecuteAtomicReply(atomicErr);
+  assert.fail("expected PluginError");
+} catch (err) {
+  assert.equal(err.code, "unavailable");
+  assert.equal(err.wireCode, "unavailable");
+  assert.equal(err.message, "retry me");
+}
 
 assert.throws(() => decodeDbValue(new Uint8Array([0, 0])), /truncated/);
 const multi = new Uint8Array(24);

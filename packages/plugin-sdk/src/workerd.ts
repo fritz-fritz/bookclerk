@@ -67,7 +67,9 @@ export type {
 export {
   canonicalExecuteRequestHash,
   createDatabaseBinding,
+  decodeExecuteAtomicReply,
   decodeExecuteRequest,
+  encodeExecuteAtomicReply,
   encodeExecuteRequest,
 } from "./db-execute.js";
 export { decodeDbValue, encodeDbValue, parseDbValue } from "./db-value.js";

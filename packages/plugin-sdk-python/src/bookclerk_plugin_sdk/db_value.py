@@ -283,6 +283,93 @@ def decode_execute_request(data: bytes) -> ExecuteRequest:
     }
 
 
+def encode_execute_atomic_reply(
+    outcome: ExecuteReply | tuple[str, str],
+) -> bytes:
+    """Encode ``ExecuteAtomicReply`` (``ok`` reply or ``(code, message)`` err)."""
+    msg = _CapnpMessage()
+    root = msg.init_root(1, 1)
+    if isinstance(outcome, tuple):
+        root.set_u16(0, 1)
+        err = root.init_struct(0, 0, 2)
+        err.set_text(0, outcome[0])
+        err.set_text(1, outcome[1])
+    else:
+        root.set_u16(0, 0)
+        _write_execute_reply(root.init_struct(0, 0, 3), outcome)
+    return msg.finish()
+
+
+def decode_execute_atomic_reply(data: bytes) -> ExecuteReply:
+    """Decode ``ExecuteAtomicReply``. ``err`` is raised as ``PluginError``."""
+    root = _CapnpReader(data).root(1, 1)
+    disc = root.get_u16(0)
+    if disc == 0:
+        return _read_execute_reply(root.get_struct(0, 0, 3))
+    if disc == 1:
+        err = root.get_struct(0, 0, 2)
+        from bookclerk_plugin_sdk.workerd import PluginError
+
+        raise PluginError.from_wire(err.get_text(0), err.get_text(1))
+    raise ValueError("unknown ExecuteAtomicReply union member")
+
+
+def _write_execute_reply(root: _CapnpStruct, reply: ExecuteReply) -> None:
+    root.set_text(0, reply["operationId"])
+    stmts = root.init_struct_list(1, len(reply["statements"]), 1, 3)
+    for i, stmt in enumerate(reply["statements"]):
+        _write_statement_result(stmts[i], stmt)
+    timing = root.init_struct(2, 2, 1)
+    t = reply["timing"]
+    timing.set_u64(0, t["attemptElapsedUs"])
+    timing.set_u64(1, t["dbExecutionUs"])
+    timing.set_text(0, t["dbTimingSource"])
+
+
+def _read_execute_reply(root: _StructReader) -> ExecuteReply:
+    t = root.get_struct(2, 2, 1)
+    return {
+        "operationId": root.get_text(0),
+        "statements": [_read_statement_result(s) for s in root.get_struct_list(1, 1, 3)],
+        "timing": {
+            "attemptElapsedUs": t.get_u64(0),
+            "dbExecutionUs": t.get_u64(1),
+            "dbTimingSource": t.get_text(0),
+        },
+    }
+
+
+def _write_statement_result(s: _CapnpStruct, stmt: StatementResult) -> None:
+    s.set_u64(0, stmt["rowsAffected"])
+    rows = s.init_struct_list(0, len(stmt["rows"]), 0, 1)
+    for i, row in enumerate(stmt["rows"]):
+        cells = rows[i].init_struct_list(0, len(row["values"]), 2, 1)
+        for j, cell in enumerate(row["values"]):
+            _write_db_value(cells[j], cell)
+    cols = s.init_struct_list(1, len(stmt["columns"]), 1, 1)
+    for i, col in enumerate(stmt["columns"]):
+        cols[i].set_text(0, col["name"])
+        cols[i].set_u16(0, _DB_TYPE_ORD[col["dbType"]])
+    s.set_text(2, stmt["cursor"])
+
+
+def _read_statement_result(s: _StructReader) -> StatementResult:
+    columns = []
+    for c in s.get_struct_list(1, 1, 1):
+        ty = _DB_TYPE_FROM[c.get_u16(0)]
+        columns.append({"name": c.get_text(0), "dbType": ty})
+    rows = [
+        {"values": [_read_db_value(cell) for cell in row.get_struct_list(0, 2, 1)]}
+        for row in s.get_struct_list(0, 0, 1)
+    ]
+    return {
+        "rows": rows,
+        "columns": columns,
+        "rowsAffected": s.get_u64(0),
+        "cursor": s.get_text(2),
+    }
+
+
 class DatabaseBinding:
     """Host-mediated Cloudflare-style SQL binding for plugin guests.
 
@@ -298,6 +385,7 @@ class DatabaseBinding:
         execute_atomic: Callable[[ExecuteRequest], ExecuteReply],
         *,
         max_request_bytes: int = 0,
+        max_result_rows: int = 0,
         operation_id: str | None = None,
         request_hash: str = "",
         deadline_unix_ms: int = 0,
@@ -307,12 +395,14 @@ class DatabaseBinding:
         Args:
             execute_atomic: Host session projection.
             max_request_bytes: Negotiated cap (``0`` = unlimited).
+            max_result_rows: Default ``maxRows`` for :meth:`PreparedStatement.all`.
             operation_id: Default retry id; omitted calls mint a UUID.
             request_hash: Default retry hash; empty lets the host stamp one.
             deadline_unix_ms: Guest-visible deadline (unix ms).
         """
         self._execute_atomic = execute_atomic
         self._max_request_bytes = max_request_bytes
+        self._max_result_rows = max_result_rows
         self._operation_id = operation_id
         self._request_hash = request_hash
         self._deadline_unix_ms = deadline_unix_ms
@@ -326,29 +416,34 @@ class DatabaseBinding:
         Returns:
             A statement that can be bound and executed.
         """
-        return PreparedStatement(self, sql, [])
+        return PreparedStatement(self, sql, [], max_result_rows=self._max_result_rows)
 
     def batch(
         self,
         statements: list[PreparedStatement],
         *,
         retry: RetryToken | None = None,
-        result_selection: DbResultSelection = "rows",
     ) -> ExecuteReply:
         """Run ``statements`` as one typed atomic batch.
 
+        Each statement must already carry a terminal intent (``as_run`` /
+        ``as_first`` / ``as_all``). ``batch`` does not apply a default
+        ``resultSelection``.
+
         Args:
-            statements: Prepared statements (binds already applied).
+            statements: Prepared statements (binds and intent already applied).
             retry: Reuse a prior operation id and request hash.
-            result_selection: Default selection when a statement has none.
 
         Returns:
             Decoded ``ExecuteReply``.
         """
-        typed = [
-            stmt._as_typed(stmt._result_selection or result_selection)  # noqa: SLF001
-            for stmt in statements
-        ]
+        typed = []
+        for stmt in statements:
+            if stmt._intent is None:  # noqa: SLF001
+                raise ValueError(
+                    "batch statement is missing terminal intent (as_run/as_first/as_all)"
+                )
+            typed.append(stmt._as_typed())  # noqa: SLF001
         return self._execute_atomic_batch(typed, retry=retry)
 
     def execute(
@@ -416,23 +511,73 @@ class PreparedStatement:
         sql: str,
         parameters: list[DbValue],
         result_selection: DbResultSelection | None = None,
+        max_rows: int | None = None,
+        *,
+        max_result_rows: int = 0,
+        intent: tuple[DbResultSelection, int] | None = None,
     ) -> None:
         self._binding = binding
         self.sql = sql
         self.parameters = list(parameters)
-        self._result_selection = result_selection
+        self._max_result_rows = max_result_rows
+        if intent is not None:
+            self._intent: tuple[DbResultSelection, int] | None = intent
+        elif result_selection is not None:
+            self._intent = (result_selection, 0 if max_rows is None else max_rows)
+        else:
+            self._intent = None
 
     def bind(self, *values: DbValue) -> PreparedStatement:
         """Replace bound parameters with ``values`` (universal ``DbValue`` only)."""
-        return PreparedStatement(self._binding, self.sql, list(values), self._result_selection)
+        return PreparedStatement(
+            self._binding,
+            self.sql,
+            list(values),
+            max_result_rows=self._max_result_rows,
+            intent=self._intent,
+        )
+
+    def as_run(self) -> PreparedStatement:
+        """Mark DML intent for :meth:`DatabaseBinding.batch`."""
+        return PreparedStatement(
+            self._binding,
+            self.sql,
+            self.parameters,
+            max_result_rows=self._max_result_rows,
+            intent=("affectedRows", 0),
+        )
+
+    def as_first(self) -> PreparedStatement:
+        """Mark ``maxRows = 1`` row intent for :meth:`DatabaseBinding.batch`.
+
+        Wraps the SQL so the engine returns at most one row.
+        """
+        inner = self.sql.strip().rstrip(";").strip()
+        return PreparedStatement(
+            self._binding,
+            f"SELECT * FROM ({inner}) AS _bc_first LIMIT 1",
+            self.parameters,
+            max_result_rows=self._max_result_rows,
+            intent=("rows", 1),
+        )
+
+    def as_all(self) -> PreparedStatement:
+        """Mark row-returning intent for :meth:`DatabaseBinding.batch`."""
+        return PreparedStatement(
+            self._binding,
+            self.sql,
+            self.parameters,
+            max_result_rows=self._max_result_rows,
+            intent=("rows", self._max_result_rows),
+        )
 
     def run(self, *, retry: RetryToken | None = None) -> ExecuteReply:
         """Execute as DML (``affectedRows``)."""
-        return self._binding.batch([self], retry=retry, result_selection="affectedRows")
+        return self._binding.batch([self.as_run()], retry=retry)
 
     def first(self, *, retry: RetryToken | None = None) -> dict[str, Any] | None:
         """Return the first row as a name→value map, or ``None``."""
-        reply = self._binding.batch([self], retry=retry, result_selection="rows")
+        reply = self._binding.batch([self.as_first()], retry=retry)
         result = reply["statements"][0] if reply["statements"] else None
         if result is None or not result["rows"]:
             return None
@@ -443,9 +588,12 @@ class PreparedStatement:
 
     def all(self, *, retry: RetryToken | None = None) -> ExecuteReply:
         """Execute as a row-returning query."""
-        return self._binding.batch([self], retry=retry, result_selection="rows")
+        return self._binding.batch([self.as_all()], retry=retry)
 
-    def _as_typed(self, result_selection: DbResultSelection) -> TypedDbStatement:
+    def _as_typed(self) -> TypedDbStatement:
+        if self._intent is None:
+            raise ValueError("prepared statement is missing terminal intent")
+        result_selection, max_rows = self._intent
         kind: DbStatementKind = (
             "execute" if result_selection in ("affectedRows", "discard") else "select"
         )
@@ -453,7 +601,7 @@ class PreparedStatement:
             "sql": self.sql,
             "parameters": self.parameters,
             "kind": kind,
-            "maxRows": 0,
+            "maxRows": max_rows,
             "resultSelection": result_selection,
         }
 
@@ -525,7 +673,10 @@ class _CapnpMessage:
         self, ptr_word: int, count: int, data_words: int, pointer_words: int
     ) -> list[_CapnpStruct]:
         if count == 0:
-            self.write_list_pointer(ptr_word, ptr_word + 1, 7, 0)
+            tag_word = self.alloc(1)
+            self.write_list_pointer(ptr_word, tag_word, 7, 0)
+            tag = 0 | (data_words << 32) | (pointer_words << 48)
+            self.set_word(tag_word, tag)
             return []
         elem_words = data_words + pointer_words
         payload_words = count * elem_words
@@ -625,6 +776,14 @@ class _CapnpStruct:
         return self.msg.init_struct_list(
             self.pointer_word(pointer_index), count, data_words, pointer_words
         )
+
+    def init_struct(
+        self, pointer_index: int, data_words: int, pointer_words: int
+    ) -> _CapnpStruct:
+        ptr = self.pointer_word(pointer_index)
+        off = self.msg.alloc(data_words + pointer_words)
+        self.msg.write_struct_pointer(ptr, off, data_words, pointer_words)
+        return _CapnpStruct(self.msg, off, data_words, pointer_words)
 
 
 class _CapnpReader:
@@ -809,6 +968,13 @@ class _StructReader:
         self, pointer_index: int, data_words: int, pointer_words: int
     ) -> list[_StructReader]:
         return self.reader.read_struct_list(
+            self.pointer_word(pointer_index), data_words, pointer_words
+        )
+
+    def get_struct(
+        self, pointer_index: int, data_words: int, pointer_words: int
+    ) -> _StructReader:
+        return self.reader.struct_at(
             self.pointer_word(pointer_index), data_words, pointer_words
         )
 

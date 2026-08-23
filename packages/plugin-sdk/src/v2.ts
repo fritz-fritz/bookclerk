@@ -8,7 +8,7 @@
 
 import "./cloudflare-workers.d.ts";
 import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
-import { createDatabaseBinding, encodeExecuteRequest } from "./db-execute.js";
+import { createDatabaseBinding, decodeExecuteAtomicReply, encodeExecuteRequest } from "./db-execute.js";
 import type { ExecuteReply, ExecuteRequest } from "./db-execute.js";
 
 /** Product ABI version (`plugin.toml` `api_version` and `describe().apiVersion`). */
@@ -898,7 +898,18 @@ class GrantedDatabaseTransport {
     if (!resp.ok) {
       throw PluginError.fromWire("unavailable", `database grant: ${resp.status}`);
     }
-    return (await resp.json()) as ExecuteReply;
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    try {
+      return decodeExecuteAtomicReply(bytes);
+    } catch (err) {
+      if (err && typeof err === "object" && "wireCode" in err && "message" in err) {
+        throw PluginError.fromWire(
+          String((err as { wireCode: string }).wireCode),
+          String((err as { message: string }).message),
+        );
+      }
+      throw err;
+    }
   }
 }
 

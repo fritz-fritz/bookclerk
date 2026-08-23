@@ -33,6 +33,17 @@ const SELECT_ORD: Record<DbResultSelection, number> = {
 
 const SELECT_FROM = ["discard", "affectedRows", "rows", "cursor"] as const;
 
+const COL_TYPE_ORD: Record<DbType, number> = {
+  unspecified: 0,
+  bool: 1,
+  int64: 2,
+  float64: 3,
+  text: 4,
+  bytes: 5,
+};
+
+const COL_TYPE_FROM = ["unspecified", "bool", "int64", "float64", "text", "bytes"] as const;
+
 /**
  * One statement in a typed atomic batch.
  */
@@ -162,6 +173,8 @@ export interface RetryToken {
 export interface DatabaseBindingOptions {
   /** Negotiated `maxRequestBytes` (`0` = unlimited). */
   maxRequestBytes?: number;
+  /** Default `maxRows` for `all()` (`0` = host adapter cap). */
+  maxResultRows?: number;
   /** Default retry token; omitted calls mint a UUID and leave the hash empty. */
   retry?: RetryToken;
   /** Idempotency key; generated when omitted. */
@@ -190,7 +203,7 @@ export interface PreparedStatement {
    */
   run(options?: { retry?: RetryToken }): Promise<ExecuteReply>;
   /**
-   * First row as a name→value map, or `null`.
+   * First row as a name→value map, or `null`. Sends `maxRows = 1`.
    *
    * @param options Optional retry token.
    */
@@ -201,6 +214,12 @@ export interface PreparedStatement {
    * @param options Optional retry token.
    */
   all(options?: { retry?: RetryToken }): Promise<ExecuteReply>;
+  /** Mark DML intent for {@link DatabaseBinding.batch}. */
+  asRun(): PreparedStatement;
+  /** Mark `maxRows = 1` row intent for {@link DatabaseBinding.batch}. */
+  asFirst(): PreparedStatement;
+  /** Mark row-returning intent for {@link DatabaseBinding.batch}. */
+  asAll(): PreparedStatement;
 }
 
 /**
@@ -219,12 +238,16 @@ export interface DatabaseBinding {
   /**
    * Run prepared statements as one typed atomic batch.
    *
-   * @param statements Prepared statements (binds already applied).
-   * @param options Retry token and default result selection.
+   * Each statement must already carry a terminal intent (`asRun` / `asFirst` /
+   * `asAll`, or a prior `run`/`first`/`all` builder). `batch` does not apply
+   * a default `resultSelection`.
+   *
+   * @param statements Prepared statements (binds and intent already applied).
+   * @param options Retry token.
    */
   batch(
     statements: PreparedStatement[],
-    options?: { retry?: RetryToken; resultSelection?: DbResultSelection },
+    options?: { retry?: RetryToken },
   ): Promise<ExecuteReply>;
   /**
    * Internal typed-batch transport. Prefer {@link DatabaseBinding.prepare}.
@@ -295,6 +318,145 @@ export function decodeExecuteRequest(bytes: Uint8Array): ExecuteRequest {
 }
 
 /**
+ * Encodes a standalone unpacked Cap'n `ExecuteReply` message.
+ *
+ * @param reply Structured reply.
+ * @returns Unpacked Cap'n stream bytes.
+ */
+export function encodeExecuteReply(reply: ExecuteReply): Uint8Array {
+  const msg = new CapnpMessage();
+  const root = msg.initRoot(0, 3);
+  writeExecuteReply(root, reply);
+  return msg.finish();
+}
+
+/**
+ * Encodes `ExecuteAtomicReply` (`ok` or `err`).
+ *
+ * @param outcome Successful reply or a wire `PluginError`.
+ * @returns Unpacked Cap'n stream bytes.
+ */
+export function encodeExecuteAtomicReply(
+  outcome: { ok: ExecuteReply } | { err: { code: string; message: string } },
+): Uint8Array {
+  const msg = new CapnpMessage();
+  const root = msg.initRoot(1, 1);
+  if ("ok" in outcome) {
+    root.setUint16(0, 0);
+    writeExecuteReply(root.initStruct(0, 0, 3), outcome.ok);
+  } else {
+    root.setUint16(0, 1);
+    const err = root.initStruct(0, 0, 2);
+    err.setText(0, outcome.err.code);
+    err.setText(1, outcome.err.message);
+  }
+  return msg.finish();
+}
+
+/**
+ * Decodes a standalone `ExecuteAtomicReply`. `err` is thrown as `PluginError`.
+ *
+ * @param bytes Unpacked Cap'n stream.
+ * @returns Structured `ExecuteReply`.
+ * @throws When the union is `err` or the buffer is invalid.
+ */
+export function decodeExecuteAtomicReply(bytes: Uint8Array): ExecuteReply {
+  const root = new CapnpReader(bytes).root(1, 1);
+  const disc = root.getUint16(0);
+  if (disc === 0) {
+    return readExecuteReply(root.getStruct(0, 0, 3));
+  }
+  if (disc === 1) {
+    const err = root.getStruct(0, 0, 2);
+    const code = err.getText(0);
+    const message = err.getText(1);
+    const known = new Set([
+      "invalid_params",
+      "unauthorized",
+      "forbidden",
+      "not_found",
+      "unavailable",
+      "unsupported",
+      "internal",
+      "payload_too_large",
+      "deadline_exceeded",
+      "invalid_cursor",
+      "cancelled",
+      "conflict",
+    ]);
+    throw Object.assign(new Error(message), {
+      name: "PluginError",
+      code: known.has(code) ? code : "unknown",
+      wireCode: code,
+    });
+  }
+  throw new Error("unknown ExecuteAtomicReply union member");
+}
+
+function writeExecuteReply(root: CapnpStruct, reply: ExecuteReply): void {
+  root.setText(0, reply.operationId);
+  const stmts = root.initStructList(1, reply.statements.length, 1, 3);
+  for (let i = 0; i < reply.statements.length; i++) {
+    writeStatementResult(stmts[i], reply.statements[i]);
+  }
+  const timing = root.initStruct(2, 2, 1);
+  timing.setUint64(0, BigInt(reply.timing.attemptElapsedUs));
+  timing.setUint64(1, BigInt(reply.timing.dbExecutionUs));
+  timing.setText(0, reply.timing.dbTimingSource);
+}
+
+function readExecuteReply(root: StructReader): ExecuteReply {
+  return {
+    operationId: root.getText(0),
+    statements: root.getStructList(1, 1, 3).map(readStatementResult),
+    timing: (() => {
+      const t = root.getStruct(2, 2, 1);
+      return {
+        attemptElapsedUs: Number(t.getUint64(0)),
+        dbExecutionUs: Number(t.getUint64(1)),
+        dbTimingSource: t.getText(0),
+      };
+    })(),
+  };
+}
+
+function writeStatementResult(s: CapnpStruct, stmt: StatementResult): void {
+  s.setUint64(0, BigInt(stmt.rowsAffected));
+  const rows = s.initStructList(0, stmt.rows.length, 0, 1);
+  for (let i = 0; i < stmt.rows.length; i++) {
+    const cells = rows[i].initStructList(0, stmt.rows[i].values.length, 2, 1);
+    for (let j = 0; j < stmt.rows[i].values.length; j++) {
+      writeDbValue(cells[j], stmt.rows[i].values[j]);
+    }
+  }
+  const cols = s.initStructList(1, stmt.columns.length, 1, 1);
+  for (let i = 0; i < stmt.columns.length; i++) {
+    cols[i].setText(0, stmt.columns[i].name);
+    cols[i].setUint16(0, COL_TYPE_ORD[stmt.columns[i].dbType]);
+  }
+  s.setText(2, stmt.cursor);
+}
+
+function readStatementResult(s: StructReader): StatementResult {
+  const columns = s.getStructList(1, 1, 1).map((c) => {
+    const ty = COL_TYPE_FROM[c.getUint16(0)];
+    if (ty === undefined) {
+      throw new Error("unknown DbType");
+    }
+    return { name: c.getText(0), dbType: ty };
+  });
+  const rows = s.getStructList(0, 0, 1).map((row) => ({
+    values: row.getStructList(0, 2, 1).map(readDbValue),
+  }));
+  return {
+    rows,
+    columns,
+    rowsAffected: Number(s.getUint64(0)),
+    cursor: s.getText(2),
+  };
+}
+
+/**
  * Builds a host-mediated {@link DatabaseBinding} over an `executeAtomic` transport.
  *
  * @param transport Host session projection.
@@ -325,13 +487,18 @@ export function createDatabaseBinding(
 
   const binding: DatabaseBinding = {
     prepare(sql: string): PreparedStatement {
-      return makePrepared(binding, sql, []);
+      return makePrepared(binding, sql, [], options.maxResultRows ?? 0);
     },
     batch(statements, opts) {
-      const selection = opts?.resultSelection ?? "rows";
-      const typed = statements.map((s) =>
-        (s as PreparedInternal)._asTyped((s as PreparedInternal)._selection ?? selection),
-      );
+      const typed = statements.map((s) => {
+        const intent = (s as PreparedInternal)._intent;
+        if (!intent) {
+          throw new Error(
+            "batch statement is missing terminal intent (asRun/asFirst/asAll)",
+          );
+        }
+        return (s as PreparedInternal)._asTyped();
+      });
       return executeAtomic(typed, opts?.retry);
     },
     execute(batch, opts) {
@@ -341,33 +508,58 @@ export function createDatabaseBinding(
   return binding;
 }
 
+interface TerminalIntent {
+  resultSelection: DbResultSelection;
+  maxRows: number;
+}
+
 interface PreparedInternal extends PreparedStatement {
-  _selection?: DbResultSelection;
-  _asTyped(selection: DbResultSelection): TypedDbStatement;
+  _intent?: TerminalIntent;
+  _asTyped(): TypedDbStatement;
 }
 
 function makePrepared(
   binding: DatabaseBinding,
   sql: string,
   parameters: DbValue[],
-  selection?: DbResultSelection,
+  defaultAllRows: number,
+  intent?: TerminalIntent,
 ): PreparedInternal {
   const stmt: PreparedInternal = {
-    _selection: selection,
+    _intent: intent,
     bind(...values: DbValue[]) {
-      return makePrepared(binding, sql, values, selection);
+      return makePrepared(binding, sql, values, defaultAllRows, intent);
+    },
+    asRun() {
+      return makePrepared(binding, sql, parameters, defaultAllRows, {
+        resultSelection: "affectedRows",
+        maxRows: 0,
+      });
+    },
+    asFirst() {
+      const inner = sql.trim().replace(/;+\s*$/, "");
+      return makePrepared(
+        binding,
+        `SELECT * FROM (${inner}) AS _bc_first LIMIT 1`,
+        parameters,
+        defaultAllRows,
+        {
+          resultSelection: "rows",
+          maxRows: 1,
+        },
+      );
+    },
+    asAll() {
+      return makePrepared(binding, sql, parameters, defaultAllRows, {
+        resultSelection: "rows",
+        maxRows: defaultAllRows,
+      });
     },
     run(options) {
-      return binding.batch([stmt], {
-        retry: options?.retry,
-        resultSelection: "affectedRows",
-      });
+      return binding.batch([stmt.asRun()], { retry: options?.retry });
     },
     async first(options) {
-      const reply = await binding.batch([stmt], {
-        retry: options?.retry,
-        resultSelection: "rows",
-      });
+      const reply = await binding.batch([stmt.asFirst()], { retry: options?.retry });
       const result = reply.statements[0];
       if (!result || result.rows.length === 0) {
         return null;
@@ -379,15 +571,22 @@ function makePrepared(
       return row;
     },
     all(options) {
-      return binding.batch([stmt], { retry: options?.retry, resultSelection: "rows" });
+      return binding.batch([stmt.asAll()], { retry: options?.retry });
     },
-    _asTyped(resultSelection: DbResultSelection): TypedDbStatement {
+    _asTyped(): TypedDbStatement {
+      const used = intent;
+      if (!used) {
+        throw new Error("prepared statement is missing terminal intent");
+      }
       return {
         sql,
         parameters,
-        kind: resultSelection === "affectedRows" || resultSelection === "discard" ? "execute" : "select",
-        maxRows: 0,
-        resultSelection,
+        kind:
+          used.resultSelection === "affectedRows" || used.resultSelection === "discard"
+            ? "execute"
+            : "select",
+        maxRows: used.maxRows,
+        resultSelection: used.resultSelection,
       };
     },
   };

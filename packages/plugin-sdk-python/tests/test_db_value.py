@@ -9,8 +9,10 @@ from bookclerk_plugin_sdk.db_value import (
     RetryToken,
     canonical_execute_request_hash,
     decode_db_value,
+    decode_execute_atomic_reply,
     decode_execute_request,
     encode_db_value,
+    encode_execute_atomic_reply,
     encode_execute_request,
     parse_db_value,
 )
@@ -262,6 +264,125 @@ class DbValueGoldens(unittest.TestCase):
         back += pack_word(0)
         with self.assertRaisesRegex(ValueError, "out of segment|far pointer|expected struct"):
             decode_db_value(bytes(back))
+
+    def test_canonical_hash_ignores_deadline_golden(self) -> None:
+        req = {
+            "operationId": "op",
+            "requestHash": "abc",
+            "statements": [
+                {
+                    "sql": "SELECT 1",
+                    "parameters": [],
+                    "kind": "select",
+                    "maxRows": 1,
+                    "resultSelection": "rows",
+                }
+            ],
+            "outcomeIndex": 0,
+            "payloadIndex": 0,
+            "hasPayloadIndex": False,
+            "priorReceiptIndex": 0,
+            "hasPriorReceiptIndex": False,
+            "receiptSelectIndex": 0,
+            "hasReceiptSelectIndex": False,
+            "deadlineUnixMs": 0,
+        }
+        golden = "e368ef90b76963c5e93c5e6db37fdb6d7f809d23c10295352a0ba3cd26885f02"
+        self.assertEqual(canonical_execute_request_hash(req), golden)
+        req["deadlineUnixMs"] = 9_999_999_999
+        self.assertEqual(canonical_execute_request_hash(req), golden)
+
+    def test_first_sends_max_rows_one_and_mixed_batch_keeps_per_statement_intent(self) -> None:
+        seen: list[dict] = []
+
+        def transport(req):
+            seen.append(req["statements"][0] if len(req["statements"]) == 1 else req["statements"])
+            n = len(req["statements"])
+            return {
+                "operationId": req["operationId"],
+                "statements": [
+                    {
+                        "rows": [{"values": [{"kind": "int64", "value": 1}]}],
+                        "columns": [{"name": "n", "dbType": "int64"}],
+                        "rowsAffected": 0,
+                        "cursor": "",
+                    }
+                    for _ in range(n)
+                ],
+                "timing": {
+                    "attemptElapsedUs": 0,
+                    "dbExecutionUs": 0,
+                    "dbTimingSource": "test",
+                },
+            }
+
+        binding = DatabaseBinding(transport)
+        row = binding.prepare("SELECT n FROM t").first()
+        self.assertEqual(seen[0]["maxRows"], 1)
+        self.assertEqual(seen[0]["resultSelection"], "rows")
+        self.assertEqual(row["n"]["value"], 1)
+
+        seen.clear()
+        binding.batch(
+            [
+                binding.prepare("INSERT INTO t VALUES (?)").bind(
+                    {"kind": "int64", "value": 1}
+                ).as_run(),
+                binding.prepare("SELECT n FROM t").as_all(),
+            ]
+        )
+        stmts = seen[0]
+        self.assertEqual(stmts[0]["resultSelection"], "affectedRows")
+        self.assertEqual(stmts[0]["maxRows"], 0)
+        self.assertEqual(stmts[1]["resultSelection"], "rows")
+
+    def test_execute_atomic_reply_preserves_i64_bytes_and_error_code(self) -> None:
+        reply = {
+            "operationId": "op",
+            "statements": [
+                {
+                    "rows": [
+                        {
+                            "values": [
+                                {"kind": "int64", "value": I64_MIN},
+                                {"kind": "int64", "value": I64_MAX},
+                                {"kind": "bytes", "value": b"\xff"},
+                                {"kind": "text", "value": "b64:not-bytes"},
+                                {"kind": "null", "value": "int64"},
+                            ]
+                        }
+                    ],
+                    "columns": [
+                        {"name": "lo", "dbType": "int64"},
+                        {"name": "hi", "dbType": "int64"},
+                        {"name": "blob", "dbType": "bytes"},
+                        {"name": "txt", "dbType": "text"},
+                        {"name": "n", "dbType": "int64"},
+                    ],
+                    "rowsAffected": 0,
+                    "cursor": "",
+                }
+            ],
+            "timing": {
+                "attemptElapsedUs": 1,
+                "dbExecutionUs": 2,
+                "dbTimingSource": "test",
+            },
+        }
+        back = decode_execute_atomic_reply(encode_execute_atomic_reply(reply))
+        cells = back["statements"][0]["rows"][0]["values"]
+        self.assertEqual(cells[0]["value"], I64_MIN)
+        self.assertEqual(cells[1]["value"], I64_MAX)
+        self.assertEqual(cells[2]["value"], b"\xff")
+        self.assertEqual(cells[3]["value"], "b64:not-bytes")
+        from bookclerk_plugin_sdk.workerd import PluginError
+
+        with self.assertRaises(PluginError) as ctx:
+            decode_execute_atomic_reply(
+                encode_execute_atomic_reply(("unavailable", "retry me"))
+            )
+        self.assertEqual(ctx.exception.code, "unavailable")
+        self.assertEqual(ctx.exception.wire_code, "unavailable")
 
 
 if __name__ == "__main__":
