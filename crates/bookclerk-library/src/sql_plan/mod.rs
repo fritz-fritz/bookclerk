@@ -167,7 +167,6 @@ pub fn authorize_typed_request(
     if req.operation_id.is_empty() {
         req.operation_id = uuid::Uuid::new_v4().to_string();
     }
-    validate_execute_request(req, caps)?;
     let computed = bookclerk_plugin_abi::canonical_execute_request_hash(req)
         .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
     if !req.request_hash.is_empty() && req.request_hash != computed {
@@ -176,6 +175,7 @@ pub fn authorize_typed_request(
         )));
     }
     req.request_hash = computed;
+    validate_execute_request(req, caps)?;
     Ok(())
 }
 
@@ -408,6 +408,7 @@ mod limits_tests {
         let err = validate_execute_request(&typed, &caps).unwrap_err();
         assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
         let mut typed = typed;
+        typed.request_hash.clear();
         let err = super::authorize_typed_request(&mut typed, &caps).unwrap_err();
         assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
     }
@@ -451,6 +452,83 @@ mod limits_tests {
         req.request_hash = "deadbeef".into();
         let err = super::authorize_typed_request(&mut req, &caps).unwrap_err();
         assert!(err.to_string().contains("requestHash"), "{err}");
+    }
+
+    #[test]
+    fn authorize_typed_request_measures_size_after_stamping_hash() {
+        use bookclerk_plugin_abi::{
+            encoded_execute_request_bytes, DbResultSelection, ExecuteRequest, TypedDbStatement,
+        };
+        let mut req = ExecuteRequest {
+            operation_id: "guest-op".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 1".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            }],
+            outcome_index: 0,
+            payload_index: 0,
+            has_payload_index: false,
+            prior_receipt_index: 0,
+            has_prior_receipt_index: false,
+            receipt_select_index: 0,
+            has_receipt_select_index: false,
+            deadline_unix_ms: 0,
+        };
+        let empty_len = encoded_execute_request_bytes(&req).unwrap().len();
+        let mut stamped = req.clone();
+        stamped.request_hash = "a".repeat(64);
+        let stamped_len = encoded_execute_request_bytes(&stamped).unwrap().len();
+        assert!(
+            stamped_len > empty_len,
+            "stamped hash must grow the Cap'n encoding ({stamped_len} vs {empty_len})"
+        );
+        let mut caps = DbConnectResult::sqlite();
+        caps.max_payload_bytes = 1_048_576;
+        caps.max_atomic_request_bytes = u32::try_from(empty_len + 1).unwrap();
+        caps.max_atomic_result_bytes = 1_048_576;
+        caps.max_result_bytes = 1_048_576;
+        let err = super::authorize_typed_request(&mut req, &caps).unwrap_err();
+        assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
+    }
+
+    #[test]
+    fn canonical_hash_ignores_deadline_unix_ms() {
+        use bookclerk_plugin_abi::{
+            canonical_execute_request_hash, DbResultSelection, ExecuteRequest, TypedDbStatement,
+        };
+        let mut req = ExecuteRequest {
+            operation_id: "op".into(),
+            request_hash: "abc".into(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 1".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            }],
+            outcome_index: 0,
+            payload_index: 0,
+            has_payload_index: false,
+            prior_receipt_index: 0,
+            has_prior_receipt_index: false,
+            receipt_select_index: 0,
+            has_receipt_select_index: false,
+            deadline_unix_ms: 0,
+        };
+        let a = canonical_execute_request_hash(&req).unwrap();
+        req.deadline_unix_ms = 1;
+        let b = canonical_execute_request_hash(&req).unwrap();
+        req.deadline_unix_ms = 9_999_999_999;
+        let c = canonical_execute_request_hash(&req).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        req.operation_id = "other".into();
+        req.request_hash = "ffff".into();
+        assert_eq!(a, canonical_execute_request_hash(&req).unwrap());
     }
 
     #[test]
