@@ -306,6 +306,13 @@ pub trait Transaction {
 
     /// Rollback.
     async fn rollback(&self) -> Result<()>;
+
+    /// Typed statements on this open transaction (`abiMinor` ≥ 9).
+    ///
+    /// Does not BEGIN or COMMIT. Older guests return [`PluginError::unsupported`].
+    async fn execute_atomic(&self, _request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
+        Err(PluginError::unsupported("executeAtomic"))
+    }
 }
 
 /// Injected factory context for storefronts.

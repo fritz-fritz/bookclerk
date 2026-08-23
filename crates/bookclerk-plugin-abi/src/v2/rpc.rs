@@ -2192,6 +2192,26 @@ impl transaction_capnp::Server for TransactionServer {
         }
         Ok(())
     }
+
+    async fn execute_atomic(
+        self: Rc<Self>,
+        params: transaction_capnp::ExecuteAtomicParams,
+        mut results: transaction_capnp::ExecuteAtomicResults,
+    ) -> capnp::Result<()> {
+        let request = params
+            .get()?
+            .get_request()
+            .map_err(|err| capnp::Error::failed(err.to_string()))
+            .and_then(|r| {
+                super::db_rpc::read_execute_request(r)
+                    .map_err(|err| capnp::Error::failed(err.to_string()))
+            })?;
+        super::db_rpc::write_execute_atomic_reply(
+            results.get().init_result(),
+            self.inner.execute_atomic(request).await,
+        );
+        Ok(())
+    }
 }
 
 struct JobHandlerServer {
@@ -3282,6 +3302,19 @@ impl Transaction for TransactionClient {
                 .map_err(from_capnp)?,
         )
     }
+
+    async fn execute_atomic(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
+        let mut req = self.client.execute_atomic_request();
+        super::db_rpc::write_execute_request(req.get().init_request(), &request);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        super::db_rpc::read_execute_atomic_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
 }
 
 /// Serves `plugin` as the bootstrap object on a two-party vat over `reader`/`writer`.
@@ -3356,14 +3389,15 @@ where
 mod tests {
     use super::*;
     use crate::v2::{
-        ByteRange, Cancellation, CopyResult, Destination, DestinationContext, DomainEvent,
-        EventResult, HealthOk, Integration, IntegrationContext, JobHandler, JobHandlerContext,
-        JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo, ObjectMetadata,
-        PluginDescribe, PluginRoot, ProgressSink, PutResult, ReadResult, ScalarLimits, Source,
-        SourceContext, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS,
-        MAX_CHECKPOINT_BYTES, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, PRODUCT_API_VERSION,
+        ByteRange, Cancellation, CopyResult, DatabaseSession, Destination, DestinationContext,
+        DomainEvent, EventResult, ExecResult, HealthOk, Integration, IntegrationContext,
+        JobHandler, JobHandlerContext, JobInvocation, JobOutcome, ListOptions, ListPage,
+        ObjectInfo, ObjectMetadata, PluginDescribe, PluginRoot, ProgressSink, PutResult, QueryPage,
+        ReadResult, ScalarLimits, Source, SourceContext, Statement, Transaction, WorkerContext,
+        WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS, MAX_CHECKPOINT_BYTES,
+        MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, PRODUCT_API_VERSION,
     };
-    use crate::{PluginError, PluginErrorCode, Result};
+    use crate::{DbCapabilities, DbConnectResult, PluginError, PluginErrorCode, Result};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
@@ -3581,6 +3615,86 @@ mod tests {
     impl ProgressSink for NoopProgress {
         async fn report(&self, _percent: f32, _message: &str) -> Result<()> {
             Ok(())
+        }
+    }
+
+    struct CapsSession;
+
+    #[async_trait::async_trait(?Send)]
+    impl DatabaseSession for CapsSession {
+        async fn execute(&self, _statement: Statement) -> Result<ExecResult> {
+            Err(PluginError::unsupported("execute"))
+        }
+        async fn query(
+            &self,
+            _statement: Statement,
+            _cursor: &str,
+            _limit: u32,
+        ) -> Result<QueryPage> {
+            Err(PluginError::unsupported("query"))
+        }
+        async fn begin(&self) -> Result<Box<dyn Transaction>> {
+            Err(PluginError::unsupported("begin"))
+        }
+        async fn capabilities(&self) -> Result<DbCapabilities> {
+            Ok(DbCapabilities::from_connect(&DbConnectResult::sqlite()))
+        }
+    }
+
+    struct DbProbeHandler;
+
+    #[async_trait::async_trait(?Send)]
+    impl JobHandler for DbProbeHandler {
+        async fn handle(
+            &self,
+            _invocation: JobInvocation,
+            context: JobHandlerContext,
+        ) -> Result<JobOutcome> {
+            let Some(db) = context.database else {
+                return Err(PluginError::internal("database capability missing"));
+            };
+            let caps = db.capabilities().await?;
+            if caps.diagnostic_engine != DbConnectResult::sqlite().dialect {
+                return Err(PluginError::internal(format!(
+                    "unexpected engine {}",
+                    caps.diagnostic_engine
+                )));
+            }
+            Ok(JobOutcome::Completed {
+                message: "database-injected".into(),
+                bytes_copied: 0,
+            })
+        }
+    }
+
+    struct DbProbePlugin {
+        dest: Arc<MemDest>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl PluginRoot for DbProbePlugin {
+        async fn describe(&self) -> Result<PluginDescribe> {
+            Ok(PluginDescribe {
+                api_version: PRODUCT_API_VERSION,
+                id: "db_probe".into(),
+                kind: "output".into(),
+                display_name: None,
+                rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
+                scalar_limits: ScalarLimits::default().into(),
+                ..PluginDescribe::default()
+            })
+        }
+
+        async fn destination(&self, _context: DestinationContext) -> Result<Box<dyn Destination>> {
+            Ok(Box::new(DestClone(Arc::clone(&self.dest))))
+        }
+
+        async fn source(&self, _context: SourceContext) -> Result<Box<dyn Source>> {
+            Ok(Box::new(DestClone(Arc::clone(&self.dest))))
+        }
+
+        async fn worker(&self, _context: WorkerContext) -> Result<Box<dyn JobHandler>> {
+            Ok(Box::new(DbProbeHandler))
         }
     }
 
@@ -3829,6 +3943,55 @@ mod tests {
                     "integrations.audiobookshelf.base_url"
                 );
                 assert_eq!(clients[0].scopes_or_default(), vec!["openid", "profile"]);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_job_injects_database_session() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client_end, server_end) = duplex(64 * 1024);
+                let (server_r, server_w) = tokio::io::split(server_end);
+                let (client_r, client_w) = tokio::io::split(client_end);
+                let store = Arc::new(MemDest {
+                    store: Mutex::new(HashMap::new()),
+                });
+                let plugin = Arc::new(DbProbePlugin {
+                    dest: Arc::clone(&store),
+                });
+                tokio::task::spawn_local(async move {
+                    let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;
+                });
+                let (client, rpc) = connect_plugin(client_r, client_w, 64 * 1024);
+                tokio::task::spawn_local(rpc);
+                let handler = client
+                    .worker(WorkerContext {
+                        job_id: "probe".into(),
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("worker");
+                let granted = Arc::new(DestClone(Arc::clone(&store)));
+                let outcome = client
+                    .handle_job_with_cancel(
+                        handler,
+                        JobInvocation::stream_copy("probe", "{}"),
+                        granted.clone() as Arc<dyn Source>,
+                        granted as Arc<dyn Destination>,
+                        Arc::new(NoopProgress),
+                        Arc::new(TestCancel(Arc::new(AtomicBool::new(false)))),
+                        Some(Arc::new(CapsSession) as Arc<dyn DatabaseSession>),
+                    )
+                    .await
+                    .expect("handle");
+                match outcome {
+                    JobOutcome::Completed { message, .. } => {
+                        assert_eq!(message, "database-injected");
+                    }
+                    other => panic!("expected completed, got {other:?}"),
+                }
             })
             .await;
     }

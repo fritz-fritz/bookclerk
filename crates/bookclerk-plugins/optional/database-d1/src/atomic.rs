@@ -416,6 +416,146 @@ fn d1_json_cell_to_db_value(v: &JsonValue) -> Result<DbValue, String> {
     }
 }
 
+/// Column metadata for a D1 HTTP result page.
+///
+/// Names come from the first row object when present. Empty pages (and `{}`
+/// all-null objects that omit keys) fall back to the SELECT-list identifiers.
+fn d1_result_columns(sql: &str, raw_rows: &[JsonValue]) -> Vec<DbColumn> {
+    if let Some(map) = raw_rows.first().and_then(JsonValue::as_object) {
+        if !map.is_empty() {
+            return map
+                .keys()
+                .map(|name| DbColumn {
+                    name: name.clone(),
+                    db_type: DbType::Unspecified,
+                })
+                .collect();
+        }
+    }
+    select_list_column_names(sql)
+        .into_iter()
+        .map(|name| DbColumn {
+            name,
+            db_type: DbType::Unspecified,
+        })
+        .collect()
+}
+
+/// Fills [`DbType`] from the first non-null cell in each column.
+fn refine_column_types(columns: &mut [DbColumn], rows: &[DbRow]) {
+    for (i, col) in columns.iter_mut().enumerate() {
+        if col.db_type != DbType::Unspecified {
+            continue;
+        }
+        for row in rows {
+            match row.values.get(i) {
+                Some(DbValue::Null(_)) | None => continue,
+                Some(DbValue::Boolean(_)) => col.db_type = DbType::Bool,
+                Some(DbValue::Int64(_)) => col.db_type = DbType::Int64,
+                Some(DbValue::Float64(_)) => col.db_type = DbType::Float64,
+                Some(DbValue::Text(_)) => col.db_type = DbType::Text,
+                Some(DbValue::Bytes(_)) => col.db_type = DbType::Bytes,
+            }
+            break;
+        }
+    }
+}
+
+/// SELECT-list identifiers used when D1 HTTP returns no row objects.
+fn select_list_column_names(sql: &str) -> Vec<String> {
+    let select = match select_list_slice(sql) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let mut names = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let bytes = select.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                if let Some(name) = select_item_name(&select[start..i]) {
+                    names.push(name);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if let Some(name) = select_item_name(&select[start..]) {
+        names.push(name);
+    }
+    names
+}
+
+/// Text between the main `SELECT` and `FROM` (depth-0).
+fn select_list_slice(sql: &str) -> Option<&str> {
+    let upper = sql.to_ascii_uppercase();
+    let mut depth = 0i32;
+    let bytes = upper.as_bytes();
+    let mut i = 0usize;
+    let mut select_at = None;
+    while i + 6 <= bytes.len() {
+        match bytes[i] {
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            b'S' if depth == 0
+                && bytes[i..].starts_with(b"SELECT")
+                && !ident_cont_at(bytes, i + 6) =>
+            {
+                select_at = Some(i + 6);
+                i += 6;
+            }
+            b'F' if depth == 0
+                && select_at.is_some()
+                && bytes[i..].starts_with(b"FROM")
+                && !ident_cont_at(bytes, i + 4) =>
+            {
+                return Some(sql[select_at?..i].trim());
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// True when `bytes[i]` continues an identifier (`[A-Za-z0-9_]`).
+fn ident_cont_at(bytes: &[u8], i: usize) -> bool {
+    bytes
+        .get(i)
+        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+/// Last identifier in a SELECT item (`col`, `table.col`, `expr AS alias`).
+fn select_item_name(item: &str) -> Option<String> {
+    let item = item.trim();
+    if item.is_empty() || item == "*" || item.ends_with(".*") {
+        return None;
+    }
+    let upper = item.to_ascii_uppercase();
+    let token = if let Some(idx) = upper.rfind(" AS ") {
+        item[idx + 4..].trim()
+    } else {
+        item.rsplit([' ', '.']).next().unwrap_or(item).trim()
+    };
+    let token = token.trim_matches(|c| c == '"' || c == '`' || c == '\'');
+    if token.is_empty()
+        || token == "*"
+        || !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    Some(token.to_string())
+}
+
 /// Parses a D1 HTTP batch body into [`ExecuteReply`] and encodes before return.
 ///
 /// # Errors
@@ -476,18 +616,8 @@ fn parse_typed_batch(
                         raw_rows.len()
                     )));
                 }
-                let columns: Vec<DbColumn> = raw_rows
-                    .first()
-                    .and_then(JsonValue::as_object)
-                    .map(|map| {
-                        map.keys()
-                            .map(|name| DbColumn {
-                                name: name.clone(),
-                                db_type: DbType::Unspecified,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let mut columns: Vec<DbColumn> =
+                    d1_result_columns(&req.statements[i].sql, raw_rows);
                 let mut rows = Vec::new();
                 for row in raw_rows {
                     let Some(map) = row.as_object() else {
@@ -502,6 +632,7 @@ fn parse_typed_batch(
                     }
                     rows.push(DbRow { values });
                 }
+                refine_column_types(&mut columns, &rows);
                 let mut result = StatementResult::from_rows(columns, rows).map_err(ambiguous_d1)?;
                 result.rows_affected = match kind {
                     DbPlanStatementKind::Select => 0,
@@ -1027,5 +1158,82 @@ mod tests {
         let err =
             reject_unbounded_returning(&plan_of(sql, DbPlanStatementKind::Execute)).unwrap_err();
         assert!(err.to_string().contains("multiple SQL statements"), "{err}");
+    }
+
+    fn typed_select(sql: &str) -> ExecuteRequest {
+        ExecuteRequest {
+            operation_id: "d1".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: sql.into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 8,
+                result_selection: DbResultSelection::Rows,
+            }],
+            outcome_index: 0,
+            payload_index: 0,
+            has_payload_index: false,
+            prior_receipt_index: 0,
+            has_prior_receipt_index: false,
+            receipt_select_index: 0,
+            has_receipt_select_index: false,
+            deadline_unix_ms: 0,
+        }
+    }
+
+    #[test]
+    fn empty_select_uses_select_list_column_names() {
+        let req = typed_select("SELECT id, title FROM books WHERE 0");
+        let value = json!({
+            "result": [{ "success": true, "results": [], "meta": { "changes": 0 } }]
+        });
+        let reply = parse_typed_batch(&req, &value, std::time::Instant::now()).unwrap();
+        let names: Vec<&str> = reply.statements[0]
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["id", "title"]);
+        assert!(reply.statements[0].rows.is_empty());
+    }
+
+    #[test]
+    fn all_null_row_keeps_column_names_and_null_cells() {
+        let req = typed_select("SELECT id, title FROM books");
+        let value = json!({
+            "result": [{
+                "success": true,
+                "results": [{ "id": null, "title": null }],
+                "meta": { "changes": 0 }
+            }]
+        });
+        let reply = parse_typed_batch(&req, &value, std::time::Instant::now()).unwrap();
+        assert_eq!(reply.statements[0].columns.len(), 2);
+        assert_eq!(
+            reply.statements[0].rows[0].values,
+            vec![
+                DbValue::Null(DbType::Unspecified),
+                DbValue::Null(DbType::Unspecified)
+            ]
+        );
+    }
+
+    #[test]
+    fn text_starting_with_b64_stays_text() {
+        let req = typed_select("SELECT note FROM books");
+        let value = json!({
+            "result": [{
+                "success": true,
+                "results": [{ "note": "b64:not-bytes" }],
+                "meta": { "changes": 0 }
+            }]
+        });
+        let reply = parse_typed_batch(&req, &value, std::time::Instant::now()).unwrap();
+        assert_eq!(
+            reply.statements[0].rows[0].values[0],
+            DbValue::Text("b64:not-bytes".into())
+        );
+        assert_eq!(reply.statements[0].columns[0].db_type, DbType::Text);
     }
 }

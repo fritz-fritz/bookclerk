@@ -742,6 +742,16 @@ export class DbTransaction extends RpcTarget {
   rollback(): Promise<void> {
     return Promise.reject(unsupported("rollback"));
   }
+  /**
+   * Typed statements on this open transaction (`abiMinor` ≥ 9).
+   * Does not BEGIN or COMMIT.
+   *
+   * @param _request - Cap'n `ExecuteRequest`.
+   * @returns `ExecuteReply`.
+   */
+  executeAtomic(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
+    return Promise.reject(unsupported("executeAtomic"));
+  }
 }
 
 /**

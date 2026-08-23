@@ -12,6 +12,6 @@ pub use errors::{plugin_error_from_db_err, plugin_error_from_engine};
 pub use migrate::execute_sql_scripts;
 pub use session::{
     guest_atomic, guest_begin, guest_capabilities, guest_commit, guest_execute,
-    guest_execute_atomic, guest_ping, guest_query, guest_query_page, guest_rollback, row_to_dto,
-    set_connection,
+    guest_execute_atomic, guest_execute_atomic_on_txn, guest_ping, guest_query, guest_query_page,
+    guest_rollback, row_to_dto, set_connection,
 };

@@ -14,8 +14,8 @@ use bookclerk_plugin_abi::{
     ExecuteReply, ExecuteRequest, StatementResult,
 };
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbErr, QueryResult, Statement, TransactionTrait,
-    Value as SeaValue,
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, Statement,
+    TransactionTrait, Value as SeaValue,
 };
 
 use crate::exec::{
@@ -490,6 +490,125 @@ pub async fn execute_typed_on_session(
     .await;
     record_query_rows_seen(seen_budget.rows_seen());
     result
+}
+
+/// Run a typed batch on an already-open transaction (no BEGIN/COMMIT).
+///
+/// Used by nested SeaORM work: the guest interactive txn is already open, so
+/// a second `executeAtomic` BEGIN would fail. Encoding failures return [`DbErr`]
+/// without rolling the outer transaction back.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails or the encoded reply exceeds
+/// `max_atomic_result_bytes`.
+pub async fn execute_typed_on_txn(
+    txn: &DatabaseTransaction,
+    req: &ExecuteRequest,
+    timing_source: &str,
+    caps: impl Into<ExecCaps>,
+    session: AtomicSession,
+    describe: Option<&DatabaseConnection>,
+) -> Result<ExecuteReply, DbErr> {
+    let caps = caps.into();
+    if req.statements.is_empty() {
+        return Err(DbErr::Custom(
+            "executeAtomic statements must be non-empty".into(),
+        ));
+    }
+    session.check(AtomicInterruptPhase::BetweenStatements)?;
+    let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
+    let seen_budget = Arc::clone(&budget);
+    let result = with_exec_budget(Arc::clone(&budget), || {
+        execute_typed_join_body(txn, describe, req, timing_source, caps, session)
+    })
+    .await;
+    record_query_rows_seen(seen_budget.rows_seen());
+    result
+}
+
+/// Statement loop for [`execute_typed_on_txn`] (no COMMIT / ROLLBACK).
+async fn execute_typed_join_body(
+    txn: &DatabaseTransaction,
+    describe: Option<&DatabaseConnection>,
+    req: &ExecuteRequest,
+    timing_source: &str,
+    caps: ExecCaps,
+    session: AtomicSession,
+) -> Result<ExecuteReply, DbErr> {
+    let started = Instant::now();
+    let backend = ConnectionTrait::get_database_backend(txn);
+    let sql_started = Instant::now();
+    let mut statements = Vec::with_capacity(req.statements.len());
+    for stmt in &req.statements {
+        session.check(AtomicInterruptPhase::BetweenStatements)?;
+        let values: Vec<SeaValue> = stmt.parameters.iter().map(db_value_to_sea).collect();
+        let row_cap = effective_row_cap(stmt.max_rows, caps.max_result_rows);
+        let sql = if stmt.kind.wrap_select_limit() {
+            cap_query_sql(&stmt.sql, row_cap)
+        } else {
+            stmt.sql.clone()
+        };
+        let sql = lower_canonical_sql(backend, &sql);
+        let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
+        let stmt_result = match stmt.result_selection {
+            DbResultSelection::Rows | DbResultSelection::Cursor => {
+                let engine_rows = collect_capped_query_results(txn, sea_stmt, row_cap).await?;
+                if engine_rows.is_empty()
+                    && backend == sea_orm::DatabaseBackend::Postgres
+                    && stmt.kind.wrap_select_limit()
+                {
+                    if let Some(db) = describe {
+                        record_postgres_empty_result_columns(db, &sql).await?;
+                    }
+                }
+                statement_result_from_query_results(&engine_rows, stmt.kind, caps, row_cap)?
+            }
+            DbResultSelection::AffectedRows | DbResultSelection::Discard => {
+                let exec = txn.execute_raw(sea_stmt).await?;
+                if matches!(stmt.result_selection, DbResultSelection::Discard) {
+                    StatementResult::from_affected(0)
+                } else {
+                    let result = StatementResult::from_affected(exec.rows_affected());
+                    reject_statement_result_bytes(&result, caps.max_result_bytes)?;
+                    result
+                }
+            }
+        };
+        statements.push(stmt_result);
+    }
+    session.check(AtomicInterruptPhase::AroundCommit)?;
+    let db_execution_us = u64::try_from(sql_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let reply = ExecuteReply {
+        operation_id: req.operation_id.clone(),
+        statements,
+        timing: DbTiming {
+            attempt_elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            db_execution_us,
+            db_timing_source: timing_source.to_string(),
+        },
+    };
+    reply.validate_positional().map_err(DbErr::Custom)?;
+    match encoded_execute_reply_bytes(&reply) {
+        Ok(bytes) => {
+            if caps.max_atomic_result_bytes > 0 {
+                let used = bytes.len();
+                let cap = usize::try_from(caps.max_atomic_result_bytes).unwrap_or(usize::MAX);
+                if used > cap {
+                    return Err(DbErr::Custom(format!(
+                        "atomic result is {used} bytes; maxAtomicResultBytes is {}",
+                        caps.max_atomic_result_bytes
+                    )));
+                }
+            }
+        }
+        Err(err) => {
+            return Err(DbErr::Custom(format!(
+                "failed to encode ExecuteReply on open transaction: {err}"
+            )));
+        }
+    }
+    Ok(reply)
 }
 
 /// Transaction body for [`execute_typed_on_session`]: run, encode, then COMMIT.

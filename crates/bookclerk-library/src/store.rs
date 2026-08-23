@@ -47,6 +47,8 @@ pub struct LibraryStore {
     /// When set, named security methods run as one guest `dbAtomic` command
     /// instead of a local SeaORM transaction.
     atomic: Option<Arc<dyn AtomicTxnBackend>>,
+    /// When set, granted guest SQL runs as one guest `executeAtomic`.
+    typed_exec: Option<Arc<dyn crate::TypedAtomicExec>>,
     /// Negotiated guest `maxBinds` (defaults to D1's cap for in-process tests).
     max_binds: u32,
     /// Negotiated guest `maxStatements`.
@@ -76,6 +78,7 @@ impl LibraryStore {
         Self {
             db,
             atomic: None,
+            typed_exec: None,
             max_binds: bookclerk_plugin_abi::D1_MAX_BINDS,
             max_statements: bookclerk_plugin_abi::FIRST_PARTY_MAX_STATEMENTS,
             max_result_rows: 256,
@@ -92,6 +95,16 @@ impl LibraryStore {
     #[must_use]
     pub fn with_atomic_txn(mut self, backend: Arc<dyn AtomicTxnBackend>) -> Self {
         self.atomic = Some(backend);
+        self
+    }
+
+    /// Attach a guest `executeAtomic` backend for granted job SQL.
+    ///
+    /// Hosts attach this for every database plugin so job sessions do not use
+    /// the SeaORM proxy. Tests that open a local connection leave it unset.
+    #[must_use]
+    pub fn with_typed_exec(mut self, backend: Arc<dyn crate::TypedAtomicExec>) -> Self {
+        self.typed_exec = Some(backend);
         self
     }
 
@@ -141,6 +154,45 @@ impl LibraryStore {
     #[must_use]
     pub fn connect_result(&self) -> &bookclerk_plugin_abi::DbConnectResult {
         self.connect.as_ref()
+    }
+
+    /// Runs guest-authored SQL after grammar, table-scope, and cap checks.
+    ///
+    /// Hosts inject this into `JobHandler.handle` as the granted
+    /// [`bookclerk_plugin_abi::v2::DatabaseSession::execute_atomic`] path.
+    /// [`policy`](bookclerk_plugin_abi::GuestSqlPolicy::deny_all) fails closed
+    /// until the invocation attaches an explicit table grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`bookclerk_plugin_abi::PluginError::invalid_params`] when the
+    /// SQL is outside the guest grammar or allowlist, and an engine/transport
+    /// error when the batch fails.
+    pub async fn execute_guest_atomic(
+        &self,
+        mut req: bookclerk_plugin_abi::ExecuteRequest,
+        policy: &bookclerk_plugin_abi::GuestSqlPolicy,
+    ) -> std::result::Result<bookclerk_plugin_abi::ExecuteReply, bookclerk_plugin_abi::PluginError>
+    {
+        crate::authorize_guest_typed_request(&mut req, self.connect_result(), policy)
+            .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
+        if let Some(exec) = &self.typed_exec {
+            return exec.execute_typed(req).await;
+        }
+        let timing = match self.db.get_database_backend() {
+            sea_orm::DatabaseBackend::Postgres => "postgres_txn",
+            _ => "sqlite_txn",
+        };
+        let deadline = (req.deadline_unix_ms > 0).then_some(req.deadline_unix_ms);
+        bookclerk_db_exec::execute_typed_on_session(
+            &self.db,
+            &req,
+            timing,
+            bookclerk_db_exec::ExecCaps::from_connect(self.connect_result()),
+            bookclerk_db_exec::AtomicSession::from_deadline(deadline),
+        )
+        .await
+        .map_err(plugin_err_from_db)
     }
 
     /// Subscribers packed into one dispatch plan (receipt overhead is ~12 statements).
@@ -6811,6 +6863,18 @@ fn map_book(m: books::Model) -> Result<BookRecord> {
         created_at: parse_dt(&m.created_at),
         updated_at: parse_dt(&m.updated_at),
     })
+}
+
+/// Maps a SeaORM engine failure onto a structured guest [`PluginError`].
+fn plugin_err_from_db(err: sea_orm::DbErr) -> bookclerk_plugin_abi::PluginError {
+    let msg = err.to_string();
+    if msg.contains("cancelled:") {
+        bookclerk_plugin_abi::PluginError::cancelled(msg)
+    } else if msg.contains("deadline_exceeded") {
+        bookclerk_plugin_abi::PluginError::deadline_exceeded(msg)
+    } else {
+        bookclerk_plugin_abi::PluginError::internal(msg)
+    }
 }
 
 pub(crate) mod event_outbox;

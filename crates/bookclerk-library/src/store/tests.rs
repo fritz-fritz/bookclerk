@@ -6420,3 +6420,80 @@ async fn postgres_totp_injected_commit_failure_rolls_back_enroll_and_disable() {
     assert!(!store.get_user(user.id).await.unwrap().unwrap().totp_enabled);
     assert!(totp_secret_names(&store, user.id).await.is_empty());
 }
+
+fn guest_select(sql: &str) -> bookclerk_plugin_abi::ExecuteRequest {
+    use bookclerk_plugin_abi::{DbPlanStatementKind, DbResultSelection, TypedDbStatement};
+    bookclerk_plugin_abi::ExecuteRequest {
+        operation_id: "guest-select".into(),
+        request_hash: String::new(),
+        statements: vec![TypedDbStatement {
+            sql: sql.into(),
+            parameters: vec![],
+            kind: DbPlanStatementKind::Select,
+            max_rows: 8,
+            result_selection: DbResultSelection::Rows,
+        }],
+        outcome_index: 0,
+        payload_index: 0,
+        has_payload_index: false,
+        prior_receipt_index: 0,
+        has_prior_receipt_index: false,
+        receipt_select_index: 0,
+        has_receipt_select_index: false,
+        deadline_unix_ms: 0,
+    }
+}
+
+#[tokio::test]
+async fn execute_guest_atomic_deny_all_does_not_run_sql() {
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    )
+    .with_connect_result(bookclerk_plugin_abi::DbConnectResult::sqlite());
+    let err = store
+        .execute_guest_atomic(
+            guest_select("SELECT id FROM books"),
+            &crate::GuestSqlPolicy::deny_all(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.code,
+        bookclerk_plugin_abi::PluginErrorCode::InvalidParams,
+        "{err}"
+    );
+    assert!(err.to_string().contains("unauthorized table"), "{err}");
+}
+
+#[tokio::test]
+async fn execute_guest_atomic_allow_tables_selects_books() {
+    let store = LibraryStore::from_connection(
+        bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap(),
+    )
+    .with_connect_result(bookclerk_plugin_abi::DbConnectResult::sqlite());
+    store
+        .upsert_account("user-1", "us", Some("Main"), true, "audible")
+        .await
+        .unwrap();
+    let mut book = NewBook::minimal("B00GUEST", "user-1", "us", "Guest Book");
+    book.authors = Some("Author".into());
+    store.upsert_book(&book).await.unwrap();
+
+    let reply = store
+        .execute_guest_atomic(
+            guest_select("SELECT product_id FROM books WHERE product_id = 'B00GUEST'"),
+            &crate::GuestSqlPolicy::allow_tables(["books"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply.statements.len(), 1);
+    assert_eq!(reply.statements[0].rows.len(), 1);
+    match &reply.statements[0].rows[0].values[0] {
+        bookclerk_plugin_abi::DbValue::Text(s) => assert_eq!(s, "B00GUEST"),
+        other => panic!("expected text product_id, got {other:?}"),
+    }
+}

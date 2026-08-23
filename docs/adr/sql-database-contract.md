@@ -90,8 +90,9 @@ ExecuteReply`. Every request is an ordered non-empty statement list
 Cap'n `DbValue` (`null(expectedType)`, `bool`, `int64`, `float64`, `text`,
 `bytes`). Unknown union members fail closed as `unsupported`. Cursor is
 result transport, not a second mutation primitive. Interactive
-`begin`/`query`/`execute` remain for older `abiMinor` guests and SeaORM
-proxy paging.
+`begin`/`query`/`execute` remain for older `abiMinor` guests. Nested first-party
+SeaORM work uses `Transaction.executeAtomic` (`abiMinor` ≥ 9) on the open
+txn so it stays on the typed data plane without a second `BEGIN`.
 
 The guest runs the statements as **one SQL transaction** (D1 HTTP
 `{ "batch": [...] }`; SQLite/PostgreSQL `BEGIN`) and returns per-statement

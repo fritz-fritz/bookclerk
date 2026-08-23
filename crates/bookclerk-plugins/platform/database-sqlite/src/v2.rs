@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use bookclerk_db_guest::{
     guest_atomic, guest_begin, guest_capabilities, guest_commit, guest_execute,
-    guest_execute_atomic, guest_query_page, guest_rollback, plugin_error_from_engine,
-    set_connection,
+    guest_execute_atomic, guest_execute_atomic_on_txn, guest_query_page, guest_rollback,
+    plugin_error_from_engine, set_connection,
 };
 use bookclerk_plugin_sdk::v2::{
     Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot, QueryPage,
@@ -180,5 +180,9 @@ impl Transaction for SqliteTxn {
 
     async fn rollback(&self) -> Result<()> {
         guest_rollback(self.txn_id.clone()).await.map_err(map_guest)
+    }
+
+    async fn execute_atomic(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
+        guest_execute_atomic_on_txn(self.txn_id.clone(), request).await
     }
 }

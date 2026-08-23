@@ -14,12 +14,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
+use bookclerk_plugin_sdk::v2::{
+    DatabaseSession, ExecResult, QueryPage, Statement as AbiStatement, Transaction,
+};
 use bookclerk_plugin_sdk::{
     db_value_from_sea, exec_result_from_dto, proxy_rows_from_dto, proxy_rows_from_typed,
     sql_payload_exceeds, statement_to_dto, DbAtomicPlan, DbAtomicRequest, DbConnectParams,
     DbConnectResult, DbPlanExecResult, DbPlanStatement, DbPlanStatementKind, DbResultSelection,
-    ExecResultDto, ExecuteRequest, ProxyRowDto, TypedDbStatement, DB_ATOMIC_SENTINEL,
-    DB_CAPABILITIES_SENTINEL,
+    ExecResultDto, ExecuteReply, ExecuteRequest, PluginError as AbiPluginError, ProxyRowDto,
+    TypedDbStatement, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -259,15 +262,85 @@ pub async fn open_library_store(
     let family = bookclerk_library::family_from_connect(&caps).ok_or_else(|| {
         bookclerk_library::LibraryError::Other(anyhow::anyhow!(caps.capability_failure_reason()))
     })?;
+    let backend = Arc::new(RpcAtomicBackend {
+        session: ext.session.clone(),
+        family,
+        caps: caps.clone(),
+    });
     let store = bookclerk_library::LibraryStore::from_connection(db)
-        .with_connect_result(caps.clone())
-        .with_atomic_txn(Arc::new(RpcAtomicBackend {
-            session: ext.session.clone(),
-            family,
-            caps,
-        }));
+        .with_connect_result(caps)
+        .with_atomic_txn(backend.clone())
+        .with_typed_exec(backend);
     store.ensure_users_bridged().await?;
     Ok(store)
+}
+
+/// Granted `JobHandler.handle` database session for one library store.
+///
+/// Legacy `execute`/`query`/`begin` are unsupported. SQL goes through
+/// [`LibraryStore::execute_guest_atomic`](bookclerk_library::LibraryStore::execute_guest_atomic)
+/// with a fail-closed [`GuestSqlPolicy::deny_all`](bookclerk_library::GuestSqlPolicy::deny_all)
+/// until the invocation attaches an explicit table grant.
+#[must_use]
+pub(crate) fn granted_job_database(
+    store: bookclerk_library::LibraryStore,
+) -> Arc<dyn DatabaseSession> {
+    Arc::new(GuestJobDatabase {
+        store,
+        policy: bookclerk_library::GuestSqlPolicy::deny_all(),
+    })
+}
+
+/// Host-exported `DatabaseSession` for one `JobHandler.handle` invocation.
+struct GuestJobDatabase {
+    /// Library used for capabilities and authorized `executeAtomic`.
+    store: bookclerk_library::LibraryStore,
+    /// Host-issued table/column/function allowlist (fail-closed `deny_all`).
+    policy: bookclerk_library::GuestSqlPolicy,
+}
+
+#[async_trait(?Send)]
+impl DatabaseSession for GuestJobDatabase {
+    async fn execute(
+        &self,
+        _statement: AbiStatement,
+    ) -> std::result::Result<ExecResult, AbiPluginError> {
+        Err(AbiPluginError::unsupported(
+            "legacy execute is not available on granted job sessions",
+        ))
+    }
+
+    async fn query(
+        &self,
+        _statement: AbiStatement,
+        _cursor: &str,
+        _limit: u32,
+    ) -> std::result::Result<QueryPage, AbiPluginError> {
+        Err(AbiPluginError::unsupported(
+            "legacy query is not available on granted job sessions",
+        ))
+    }
+
+    async fn begin(&self) -> std::result::Result<Box<dyn Transaction>, AbiPluginError> {
+        Err(AbiPluginError::unsupported(
+            "legacy begin is not available on granted job sessions",
+        ))
+    }
+
+    async fn capabilities(
+        &self,
+    ) -> std::result::Result<bookclerk_plugin_sdk::DbCapabilities, AbiPluginError> {
+        Ok(bookclerk_plugin_sdk::DbCapabilities::from_connect(
+            self.store.connect_result(),
+        ))
+    }
+
+    async fn execute_atomic(
+        &self,
+        request: ExecuteRequest,
+    ) -> std::result::Result<ExecuteReply, AbiPluginError> {
+        self.store.execute_guest_atomic(request, &self.policy).await
+    }
 }
 
 /// Open the library for a specific `[database].plugin` id (ignoring the active config value).
@@ -453,7 +526,11 @@ impl RpcDatabaseProxy {
         bookclerk_library::authorize_typed_request(&mut req, &self.caps)
             .map_err(|err| crate::PluginError::from_abi(Some("invalid_params"), err.to_string()))?;
         let cancel = Arc::new(AtomicBool::new(false));
-        self.session.db_execute_atomic(req, cancel).await
+        if self.depth() > 0 {
+            self.session.db_txn_execute_atomic(req, cancel).await
+        } else {
+            self.session.db_execute_atomic(req, cancel).await
+        }
     }
 }
 
@@ -463,7 +540,7 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         if bookclerk_library::is_txn_broken() {
             return Err(bookclerk_library::txn_broken_err());
         }
-        if self.depth() == 0 && self.typed_atomic.load(Ordering::SeqCst) {
+        if self.typed_atomic.load(Ordering::SeqCst) {
             let typed = Self::statement_to_typed(
                 &statement,
                 bookclerk_library::proxy_read_kind(&statement.sql),
@@ -522,7 +599,7 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         if bookclerk_library::is_txn_broken() {
             return Err(bookclerk_library::txn_broken_err());
         }
-        if self.depth() == 0 && self.typed_atomic.load(Ordering::SeqCst) {
+        if self.typed_atomic.load(Ordering::SeqCst) {
             let typed = Self::statement_to_typed(
                 &statement,
                 bookclerk_library::proxy_write_kind(&statement.sql),
@@ -826,6 +903,16 @@ fn map_atomic_rpc_err(err: crate::PluginError) -> bookclerk_library::LibraryErro
     }
 }
 
+/// Maps host RPC failures onto the ABI [`PluginError`](AbiPluginError) the
+/// granted job session returns to guests.
+fn host_err_to_abi(err: crate::PluginError) -> AbiPluginError {
+    match err {
+        crate::PluginError::Abi { code, message } => AbiPluginError::from_wire(&code, message),
+        crate::PluginError::Unavailable(message) => AbiPluginError::unavailable(message),
+        other => AbiPluginError::internal(other.to_string()),
+    }
+}
+
 /// Sets `cancel` when an in-flight `db_query` future is dropped.
 struct CancelOnDrop(Arc<AtomicBool>);
 
@@ -933,6 +1020,22 @@ fn decode_payload<T: serde::de::DeserializeOwned>(
             "database atomic {what} payload: {err}"
         ))
     })
+}
+
+#[async_trait]
+impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
+    async fn execute_typed(
+        &self,
+        mut req: ExecuteRequest,
+    ) -> std::result::Result<ExecuteReply, AbiPluginError> {
+        bookclerk_library::authorize_typed_request(&mut req, &self.caps)
+            .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.session
+            .db_execute_atomic(req, cancel)
+            .await
+            .map_err(host_err_to_abi)
+    }
 }
 
 #[async_trait]
@@ -1591,5 +1694,56 @@ mod tests {
             map_plugin_err(err),
             bookclerk_library::LibraryError::Unavailable(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn granted_job_database_advertises_capabilities_and_denies_sql() {
+        let store = bookclerk_library::LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .with_connect_result(DbConnectResult::sqlite());
+        let session = granted_job_database(store);
+        let caps = session.capabilities().await.expect("capabilities");
+        assert_eq!(caps.diagnostic_engine, DbConnectResult::sqlite().dialect);
+        let err = session
+            .execute_atomic(ExecuteRequest {
+                operation_id: "job".into(),
+                request_hash: String::new(),
+                statements: vec![TypedDbStatement {
+                    sql: "SELECT id FROM books".into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Select,
+                    max_rows: 8,
+                    result_selection: DbResultSelection::Rows,
+                }],
+                outcome_index: 0,
+                payload_index: 0,
+                has_payload_index: false,
+                prior_receipt_index: 0,
+                has_prior_receipt_index: false,
+                receipt_select_index: 0,
+                has_receipt_select_index: false,
+                deadline_unix_ms: 0,
+            })
+            .await
+            .expect_err("deny_all");
+        assert_eq!(
+            err.code,
+            bookclerk_plugin_sdk::PluginErrorCode::InvalidParams
+        );
+        assert!(err.to_string().contains("unauthorized table"), "{err}");
+        let unsupported = session
+            .execute(AbiStatement {
+                sql: "SELECT 1".into(),
+                values_json: "[]".into(),
+            })
+            .await
+            .expect_err("legacy");
+        assert_eq!(
+            unsupported.code,
+            bookclerk_plugin_sdk::PluginErrorCode::Unsupported
+        );
     }
 }

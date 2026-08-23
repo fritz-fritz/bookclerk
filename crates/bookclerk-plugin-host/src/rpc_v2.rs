@@ -169,6 +169,11 @@ enum Work {
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
+    DbTxnExecuteAtomic {
+        request: bookclerk_plugin_sdk::ExecuteRequest,
+        cancel: Arc<AtomicBool>,
+        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
+    },
     /// Drop the vat.
     Shutdown,
 }
@@ -837,6 +842,25 @@ impl V2PluginSession {
         .await
     }
 
+    /// Typed `Transaction.executeAtomic` on the vat-held open transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when no transaction is open, the guest rejects
+    /// the call, or `cancel` is set.
+    pub async fn db_txn_execute_atomic(
+        &self,
+        request: bookclerk_plugin_sdk::ExecuteRequest,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
+        self.call(|reply| Work::DbTxnExecuteAtomic {
+            request,
+            cancel,
+            reply,
+        })
+        .await
+    }
+
     /// Begin a vat-held transaction.
     ///
     /// # Errors
@@ -1338,6 +1362,28 @@ fn vat_thread(
                             };
                             let _ = reply.send(out);
                         }
+                        Work::DbTxnExecuteAtomic {
+                            request,
+                            cancel,
+                            reply,
+                        } => {
+                            let out = tokio::select! {
+                                () = wait_flag(Arc::clone(&cancel)) => {
+                                    Err(PluginError::from_abi(Some("cancelled"), "rpc cancelled"))
+                                }
+                                out = async {
+                                    match db_txn.as_mut() {
+                                        Some(txn) => {
+                                            txn.execute_atomic(request).await.map_err(map_abi)
+                                        }
+                                        None => Err(PluginError::message(
+                                            "v2 database transaction not open",
+                                        )),
+                                    }
+                                } => out,
+                            };
+                            let _ = reply.send(out);
+                        }
                     }
                 }
                 drop(spawned.child);
@@ -1367,6 +1413,9 @@ async fn run_stream_copy(
     let payload =
         serde_json::to_string(&spec).map_err(|err| PluginError::message(err.to_string()))?;
     let invocation = JobInvocation::stream_copy_from_lease(lease, payload);
+    let database = progress
+        .as_ref()
+        .map(|(store, _)| crate::host::granted_job_database(store.clone()));
     let input: Arc<dyn Source> = Arc::new(DestAsSource { dest: dest.clone() });
     let output: Arc<dyn Destination> = Arc::new(FencedDestination {
         inner: Arc::new(dest.clone()),
@@ -1380,7 +1429,9 @@ async fn run_stream_copy(
     });
     let cancel: Arc<dyn Cancellation> = Arc::new(FlagCancel(cancel));
     client
-        .handle_job_with_cancel(handler, invocation, input, output, progress, cancel, None)
+        .handle_job_with_cancel(
+            handler, invocation, input, output, progress, cancel, database,
+        )
         .await
         .map_err(map_abi)
 }

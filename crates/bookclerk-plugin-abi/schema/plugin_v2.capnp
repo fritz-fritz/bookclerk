@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 8;
+const abiMinor :UInt32 = 9;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -729,6 +729,8 @@ interface Transaction {
   query @1 (statement :Statement, cursor :Text, limit :UInt32) -> (result :QueryReply);
   commit @2 () -> (result :EmptyReply);
   rollback @3 () -> (result :EmptyReply);
+  # Append-only (abiMinor 9). Typed statements on the open txn; no BEGIN/COMMIT.
+  executeAtomic @4 (request :ExecuteRequest) -> (result :ExecuteAtomicReply);
 }
 
 interface BookclerkPlugin {

@@ -142,3 +142,23 @@ pub trait AtomicTxnBackend: Send + Sync {
         max_in_flight: u32,
     ) -> Result<Option<EventDeliveryRecord>>;
 }
+
+/// Runs a host-authorized typed [`ExecuteRequest`] as one guest `executeAtomic`.
+///
+/// First-party hosts attach this alongside [`AtomicTxnBackend`] so granted job
+/// sessions do not round-trip through the SeaORM proxy (`BEGIN` + nested
+/// `query`/`execute`). In-process tests leave it unset and run the same
+/// request on the local connection.
+#[async_trait]
+pub trait TypedAtomicExec: Send + Sync {
+    /// Executes `req` as one typed atomic batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin ABI error when validation, transport, or the engine
+    /// rejects the batch.
+    async fn execute_typed(
+        &self,
+        req: bookclerk_plugin_abi::ExecuteRequest,
+    ) -> std::result::Result<bookclerk_plugin_abi::ExecuteReply, bookclerk_plugin_abi::PluginError>;
+}

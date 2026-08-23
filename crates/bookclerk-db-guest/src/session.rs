@@ -88,6 +88,16 @@ enum TxnOp {
         /// Oneshot used to return commit/rollback success or an engine error.
         reply: oneshot::Sender<Result<()>>,
     },
+    /// Runs a typed atomic batch on the named txn without BEGIN/COMMIT.
+    ExecuteAtomic {
+        /// Opaque txn id the host attached to this batch.
+        txn_id: String,
+        /// Typed statements to run on the open transaction.
+        request: ExecuteRequest,
+        /// Oneshot used to return the typed reply.
+        reply:
+            oneshot::Sender<std::result::Result<ExecuteReply, bookclerk_plugin_sdk::PluginError>>,
+    },
 }
 
 /// Process-wide session; one connection and a map of live txn routes.
@@ -312,6 +322,35 @@ pub async fn guest_execute_atomic(
     )
     .await
     .map_err(|e| crate::plugin_error_from_db_err(&e))
+}
+
+/// Typed `Transaction.executeAtomic` on an already-open guest transaction.
+///
+/// Does not BEGIN or COMMIT. The host still owns commit/rollback.
+///
+/// # Errors
+///
+/// Returns when the txn id is unknown or the engine rejects the work.
+pub async fn guest_execute_atomic_on_txn(
+    txn_id: String,
+    request: ExecuteRequest,
+) -> std::result::Result<ExecuteReply, bookclerk_plugin_sdk::PluginError> {
+    let tx = route(&txn_id)
+        .await
+        .map_err(bookclerk_plugin_sdk::PluginError::internal)?;
+    let (reply, rx) = oneshot::channel();
+    tx.send(TxnOp::ExecuteAtomic {
+        txn_id,
+        request,
+        reply,
+    })
+    .await
+    .map_err(|_| {
+        bookclerk_plugin_sdk::PluginError::internal("transaction worker closed".to_string())
+    })?;
+    rx.await.map_err(|_| {
+        bookclerk_plugin_sdk::PluginError::internal("transaction worker closed".to_string())
+    })?
 }
 
 /// Runs a read-only SQL query through the guest database bridge.
@@ -565,6 +604,40 @@ async fn txn_worker(
                 if empty {
                     return;
                 }
+            }
+            TxnOp::ExecuteAtomic {
+                txn_id,
+                request,
+                reply,
+            } => {
+                let result = match stack_txn(&stack, &txn_id) {
+                    Ok(txn) => {
+                        let caps = match ConnectionTrait::get_database_backend(txn) {
+                            DbBackend::Postgres => {
+                                bookclerk_plugin_sdk::DbConnectResult::postgres()
+                            }
+                            _ => bookclerk_plugin_sdk::DbConnectResult::sqlite(),
+                        };
+                        let timing_source = match ConnectionTrait::get_database_backend(txn) {
+                            DbBackend::Postgres => "postgres_txn",
+                            _ => "sqlite_txn",
+                        };
+                        let deadline =
+                            (request.deadline_unix_ms > 0).then_some(request.deadline_unix_ms);
+                        bookclerk_db_exec::execute_typed_on_txn(
+                            txn,
+                            &request,
+                            timing_source,
+                            bookclerk_db_exec::ExecCaps::from_connect(&caps),
+                            bookclerk_db_exec::AtomicSession::from_deadline(deadline),
+                            Some(&conn),
+                        )
+                        .await
+                        .map_err(|e| crate::plugin_error_from_db_err(&e))
+                    }
+                    Err(err) => Err(bookclerk_plugin_sdk::PluginError::internal(err)),
+                };
+                let _ = reply.send(result);
             }
         }
     }
@@ -1803,5 +1876,55 @@ mod tests {
                 "caller ordinal must be preserved and adapter ordinal stripped: {row}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn execute_atomic_on_open_txn_does_not_begin_again() {
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
+        };
+        let _lock = SESSION_LOCK.lock().await;
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        guest_execute(stmt(
+            "CREATE TABLE nested_typed (id INTEGER PRIMARY KEY, v TEXT)",
+        ))
+        .await
+        .unwrap();
+        let txn_id = guest_begin(None).await.unwrap();
+        let reply = guest_execute_atomic_on_txn(
+            txn_id.clone(),
+            ExecuteRequest {
+                operation_id: "nested".into(),
+                request_hash: String::new(),
+                statements: vec![TypedDbStatement {
+                    sql: "INSERT INTO nested_typed (id, v) VALUES (?, ?)".into(),
+                    parameters: vec![DbValue::Int64(1), DbValue::Text("a".into())],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                }],
+                outcome_index: 0,
+                payload_index: 0,
+                has_payload_index: false,
+                prior_receipt_index: 0,
+                has_prior_receipt_index: false,
+                receipt_select_index: 0,
+                has_receipt_select_index: false,
+                deadline_unix_ms: 0,
+            },
+        )
+        .await
+        .expect("typed on open txn");
+        assert_eq!(reply.statements[0].rows_affected, 1);
+        guest_commit(txn_id).await.unwrap();
+        let rows = guest_query(stmt("SELECT v FROM nested_typed WHERE id = 1"))
+            .await
+            .unwrap();
+        assert_eq!(rows.rows.len(), 1);
     }
 }

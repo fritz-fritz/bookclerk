@@ -34,8 +34,9 @@ mod token_hash;
 mod wishlist_merge;
 
 pub use atomic_ops::{atomic_status, DbAtomicParams, DbAtomicResult};
-pub use atomic_txn::AtomicTxnBackend;
+pub use atomic_txn::{AtomicTxnBackend, TypedAtomicExec};
 pub use backend_migrate::{migrate_library_backend, BackendMigrateOptions, BackendMigrateSummary};
+pub use bookclerk_plugin_abi::GuestSqlPolicy;
 pub use db_atomic::{
     db_atomic_operation_id, db_atomic_request_hash, execute_db_atomic, execute_named_atomic,
 };
