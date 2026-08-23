@@ -14,11 +14,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
-use bookclerk_plugin_sdk::v2::GuestDatabase;
+use bookclerk_plugin_sdk::v2::{
+    DatabaseSession, ExecResult, QueryPage, Statement as AbiStatement, Transaction,
+};
 use bookclerk_plugin_sdk::{
-    db_value_from_sea, exec_result_from_dto, proxy_rows_from_typed, DbAtomicPlan, DbAtomicRequest,
-    DbConnectParams, DbConnectResult, DbPlanStatement, DbPlanStatementKind, DbResultSelection,
-    ExecResultDto, ExecuteReply, ExecuteRequest, PluginError as AbiPluginError, TypedDbStatement,
+    db_value_from_sea, exec_result_from_dto, proxy_rows_from_dto, proxy_rows_from_typed,
+    sql_payload_exceeds, statement_to_dto, DbAtomicPlan, DbAtomicRequest, DbConnectParams,
+    DbConnectResult, DbPlanExecResult, DbPlanStatement, DbPlanStatementKind, DbResultSelection,
+    ExecResultDto, ExecuteReply, ExecuteRequest, PluginError as AbiPluginError, ProxyRowDto,
+    TypedDbStatement, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -105,8 +109,26 @@ impl ExternalDatabase {
         let ctx = serde_json::to_string(&params).map_err(|err| DbErr::Custom(err.to_string()))?;
         self.session.db_open(ctx).await.map_err(map_rpc_err)?;
 
-        let caps = self.session.db_capabilities().await.map_err(map_rpc_err)?;
-        let connect_result = caps.to_connect();
+        let connect_result = match self.session.db_capabilities().await {
+            Ok(caps) => caps.to_connect(),
+            Err(err) => {
+                if !matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported") {
+                    return Err(map_rpc_err(err));
+                }
+                let _ = self
+                    .session
+                    .db_query("SELECT 1", "[]")
+                    .await
+                    .map_err(map_rpc_err)?;
+                let page = self
+                    .session
+                    .db_query(DB_CAPABILITIES_SENTINEL, "[]")
+                    .await
+                    .map_err(map_rpc_err)?;
+                serde_json::from_str(&page.rows_json)
+                    .map_err(|err| DbErr::Custom(format!("database capabilities: {err}")))?
+            }
+        };
         if !connect_result.meets_host_minimums() {
             return Err(DbErr::Custom(connect_result.capability_failure_reason()));
         }
@@ -117,6 +139,7 @@ impl ExternalDatabase {
             session: self.session.clone(),
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
             caps: connect_result.clone(),
+            typed_atomic: Arc::new(AtomicBool::new(true)),
         }));
         let db = Database::connect_proxy(backend, proxy).await?;
         self.apply_host_schema(&db, &connect_result).await?;
@@ -262,7 +285,7 @@ pub async fn open_library_store(
 #[must_use]
 pub(crate) fn granted_job_database(
     store: bookclerk_library::LibraryStore,
-) -> Arc<dyn GuestDatabase> {
+) -> Arc<dyn DatabaseSession> {
     granted_job_database_with_policy(
         store,
         bookclerk_library::GuestSqlPolicy::allow_tables(["books"]),
@@ -274,11 +297,11 @@ pub(crate) fn granted_job_database(
 pub(crate) fn granted_job_database_with_policy(
     store: bookclerk_library::LibraryStore,
     policy: bookclerk_library::GuestSqlPolicy,
-) -> Arc<dyn GuestDatabase> {
+) -> Arc<dyn DatabaseSession> {
     Arc::new(GuestJobDatabase { store, policy })
 }
 
-/// Host-exported `GuestDatabase` for one `JobHandler.handle` invocation.
+/// Host-exported `DatabaseSession` for one `JobHandler.handle` invocation.
 struct GuestJobDatabase {
     /// Library used for capabilities and authorized `executeAtomic`.
     store: bookclerk_library::LibraryStore,
@@ -287,8 +310,42 @@ struct GuestJobDatabase {
 }
 
 #[async_trait(?Send)]
-impl GuestDatabase for GuestJobDatabase {
+impl DatabaseSession for GuestJobDatabase {
     async fn execute(
+        &self,
+        _statement: AbiStatement,
+    ) -> std::result::Result<ExecResult, AbiPluginError> {
+        Err(AbiPluginError::unsupported(
+            "legacy execute is not available on granted job sessions",
+        ))
+    }
+
+    async fn query(
+        &self,
+        _statement: AbiStatement,
+        _cursor: &str,
+        _limit: u32,
+    ) -> std::result::Result<QueryPage, AbiPluginError> {
+        Err(AbiPluginError::unsupported(
+            "legacy query is not available on granted job sessions",
+        ))
+    }
+
+    async fn begin(&self) -> std::result::Result<Box<dyn Transaction>, AbiPluginError> {
+        Err(AbiPluginError::unsupported(
+            "legacy begin is not available on granted job sessions",
+        ))
+    }
+
+    async fn capabilities(
+        &self,
+    ) -> std::result::Result<bookclerk_plugin_sdk::DbCapabilities, AbiPluginError> {
+        Ok(bookclerk_plugin_sdk::DbCapabilities::from_connect(
+            self.store.connect_result(),
+        ))
+    }
+
+    async fn execute_atomic(
         &self,
         request: ExecuteRequest,
     ) -> std::result::Result<ExecuteReply, AbiPluginError> {
@@ -360,6 +417,8 @@ struct RpcDatabaseProxy {
     txn_depth: Arc<Mutex<HashMap<TaskKey, usize>>>,
     /// Negotiated guest capabilities (statement/bind/request byte limits).
     caps: DbConnectResult,
+    /// False after `executeAtomic` returns `unsupported` (old-minor shim).
+    typed_atomic: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for RpcDatabaseProxy {
@@ -403,6 +462,13 @@ impl RpcDatabaseProxy {
             map.remove(&key);
         }
         Some(next)
+    }
+
+    /// Serializes a SeaORM statement into SQL + JSON bind values.
+    fn statement_parts(statement: &Statement) -> (String, String) {
+        let dto = statement_to_dto(statement);
+        let values_json = serde_json::to_string(&dto.values).unwrap_or_else(|_| "[]".into());
+        (dto.sql, values_json)
     }
 
     /// Typed `ExecuteRequest` for one SeaORM statement (no JSON `b64:` decoding).
@@ -451,7 +517,7 @@ impl RpcDatabaseProxy {
     }
 
     /// Validates `req` against negotiated caps, stamps the host request hash,
-    /// then sends typed `execute`.
+    /// then sends `executeAtomic`.
     ///
     /// Guest-supplied statement kinds are replaced with host-authored kinds
     /// derived from the SQL. After validation the host stamps the canonical
@@ -462,7 +528,7 @@ impl RpcDatabaseProxy {
     ///
     /// Returns a plugin ABI `invalid_params` error when the request exceeds
     /// negotiated caps or the retry hash does not match, and a plugin error
-    /// when `execute` fails.
+    /// when `executeAtomic` fails.
     async fn execute_typed_validated(
         &self,
         mut req: ExecuteRequest,
@@ -471,9 +537,9 @@ impl RpcDatabaseProxy {
             .map_err(|err| crate::PluginError::from_abi(Some("invalid_params"), err.to_string()))?;
         let cancel = Arc::new(AtomicBool::new(false));
         if self.depth() > 0 {
-            self.session.db_txn_execute_request(req, cancel).await
+            self.session.db_txn_execute_atomic(req, cancel).await
         } else {
-            self.session.db_execute_request(req, cancel).await
+            self.session.db_execute_atomic(req, cancel).await
         }
     }
 }
@@ -484,54 +550,136 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         if bookclerk_library::is_txn_broken() {
             return Err(bookclerk_library::txn_broken_err());
         }
-        let typed = Self::statement_to_typed(
-            &statement,
-            bookclerk_library::proxy_read_kind(&statement.sql),
-            DbResultSelection::Rows,
-        )?;
-        let req = Self::typed_request(typed, format!("proxy-query-{}", uuid::Uuid::new_v4()));
-        let reply = self.execute_typed_validated(req).await.map_err(map_rpc_err)?;
-        let stmt = reply.statements.into_iter().next().ok_or_else(|| {
-            DbErr::Custom("execute query returned no statement result".into())
-        })?;
-        proxy_rows_from_typed(&stmt).map_err(DbErr::Custom)
+        if self.typed_atomic.load(Ordering::SeqCst) {
+            let typed = Self::statement_to_typed(
+                &statement,
+                bookclerk_library::proxy_read_kind(&statement.sql),
+                DbResultSelection::Rows,
+            )?;
+            let req = Self::typed_request(typed, format!("proxy-query-{}", uuid::Uuid::new_v4()));
+            match self.execute_typed_validated(req).await {
+                Ok(reply) => {
+                    let stmt = reply.statements.into_iter().next().ok_or_else(|| {
+                        DbErr::Custom("executeAtomic query returned no statement result".into())
+                    })?;
+                    return proxy_rows_from_typed(&stmt).map_err(DbErr::Custom);
+                }
+                Err(err) if matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported") =>
+                {
+                    self.typed_atomic.store(false, Ordering::SeqCst);
+                }
+                Err(err) => return Err(map_rpc_err(err)),
+            }
+        }
+        let (sql, values_json) = Self::statement_parts(&statement);
+        if sql_payload_exceeds(&sql, &values_json, self.caps.max_payload_bytes) {
+            return Err(DbErr::Custom(format!(
+                "database statement payload is {} bytes; guest maxPayloadBytes is {}",
+                sql.len().saturating_add(values_json.len()),
+                self.caps.max_payload_bytes
+            )));
+        }
+        let mut rows = Vec::new();
+        let mut cursor = String::new();
+        // 4096 pages × MAX_LIST_PAGE (256) is a hard stop against a malicious next_cursor loop.
+        for _ in 0..4096 {
+            let page = self
+                .session
+                .db_query_page(sql.clone(), values_json.clone(), cursor.clone(), 0)
+                .await
+                .map_err(map_rpc_err)?;
+            let page_rows: Vec<ProxyRowDto> = if page.rows_json.trim().is_empty() {
+                Vec::new()
+            } else {
+                serde_json::from_str(&page.rows_json)
+                    .map_err(|err| DbErr::Custom(format!("database plugin query rows: {err}")))?
+            };
+            rows.extend(page_rows);
+            match page.next_cursor {
+                Some(next) if !next.is_empty() && next != cursor => cursor = next,
+                _ => return Ok(proxy_rows_from_dto(rows)),
+            }
+        }
+        Err(DbErr::Custom(
+            "database plugin query exceeded 4096 pages".into(),
+        ))
     }
 
     async fn execute(&self, statement: Statement) -> std::result::Result<ProxyExecResult, DbErr> {
         if bookclerk_library::is_txn_broken() {
             return Err(bookclerk_library::txn_broken_err());
         }
-        let typed = Self::statement_to_typed(
-            &statement,
-            bookclerk_library::proxy_write_kind(&statement.sql),
-            DbResultSelection::AffectedRows,
-        )?;
-        let req = Self::typed_request(typed, format!("proxy-exec-{}", uuid::Uuid::new_v4()));
-        let reply = self.execute_typed_validated(req).await.map_err(map_rpc_err)?;
-        let rows_affected = reply
-            .statements
-            .first()
-            .map(|s| s.rows_affected)
-            .unwrap_or(0);
+        if self.typed_atomic.load(Ordering::SeqCst) {
+            let typed = Self::statement_to_typed(
+                &statement,
+                bookclerk_library::proxy_write_kind(&statement.sql),
+                DbResultSelection::AffectedRows,
+            )?;
+            let req = Self::typed_request(typed, format!("proxy-exec-{}", uuid::Uuid::new_v4()));
+            match self.execute_typed_validated(req).await {
+                Ok(reply) => {
+                    let rows_affected = reply
+                        .statements
+                        .first()
+                        .map(|s| s.rows_affected)
+                        .unwrap_or(0);
+                    return Ok(exec_result_from_dto(ExecResultDto {
+                        last_insert_id: 0,
+                        rows_affected,
+                    }));
+                }
+                Err(err) if matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported") =>
+                {
+                    self.typed_atomic.store(false, Ordering::SeqCst);
+                }
+                Err(err) => return Err(map_rpc_err(err)),
+            }
+        }
+        let (sql, values_json) = Self::statement_parts(&statement);
+        if sql_payload_exceeds(&sql, &values_json, self.caps.max_payload_bytes) {
+            return Err(DbErr::Custom(format!(
+                "database statement payload is {} bytes; guest maxPayloadBytes is {}",
+                sql.len().saturating_add(values_json.len()),
+                self.caps.max_payload_bytes
+            )));
+        }
+        let result = self
+            .session
+            .db_execute(sql, values_json)
+            .await
+            .map_err(map_rpc_err)?;
         Ok(exec_result_from_dto(ExecResultDto {
-            last_insert_id: 0,
-            rows_affected,
+            last_insert_id: u64::try_from(result.last_insert_id).unwrap_or(0),
+            rows_affected: result.rows_affected,
         }))
     }
 
     async fn ping(&self) -> std::result::Result<(), DbErr> {
-        let typed = TypedDbStatement {
-            sql: "SELECT 1".into(),
-            parameters: Vec::new(),
-            kind: DbPlanStatementKind::Select,
-            max_rows: 1,
-            result_selection: DbResultSelection::Rows,
-        };
-        let req = RpcDatabaseProxy::typed_request(
-            typed,
-            format!("proxy-ping-{}", uuid::Uuid::new_v4()),
-        );
-        self.execute_typed_validated(req).await.map_err(map_rpc_err)?;
+        if self.typed_atomic.load(Ordering::SeqCst) {
+            let typed = TypedDbStatement {
+                sql: "SELECT 1".into(),
+                parameters: Vec::new(),
+                kind: DbPlanStatementKind::Select,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            };
+            let req = RpcDatabaseProxy::typed_request(
+                typed,
+                format!("proxy-ping-{}", uuid::Uuid::new_v4()),
+            );
+            match self.execute_typed_validated(req).await {
+                Ok(_) => return Ok(()),
+                Err(err) if matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported") =>
+                {
+                    self.typed_atomic.store(false, Ordering::SeqCst);
+                }
+                Err(err) => return Err(map_rpc_err(err)),
+            }
+        }
+        self.session
+            .db_query("SELECT 1", "[]")
+            .await
+            .map_err(map_rpc_err)?;
         Ok(())
     }
 
@@ -675,7 +823,7 @@ impl RpcAtomicBackend {
                     "deadline_exceeded: host RPC deadline elapsed".into(),
                 ))
             }
-            result = self.session.db_execute_request(typed, Arc::clone(&cancel)) => match result {
+            result = self.session.db_execute_atomic(typed, Arc::clone(&cancel)) => match result {
                 Ok(reply) => {
                     let exec = reply.into_plan_exec();
                     bookclerk_library::validate_exec_result(
@@ -690,8 +838,58 @@ impl RpcAtomicBackend {
                         &compiled.expected_hash,
                     ))
                 }
-                Err(err) => Err(map_atomic_rpc_err(err)),
+                Err(err) => {
+                    if matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported")
+                    {
+                        return self.send_compiled_sentinel(compiled, operation_id, request, cancel).await;
+                    }
+                    Err(map_atomic_rpc_err(err))
+                }
             }
+        }
+    }
+
+    /// Older guests: `bookclerk.atomic` JSON sentinel.
+    ///
+    /// # Errors
+    ///
+    /// Returns when JSON validation, the sentinel query, or result interpretation fails.
+    async fn send_compiled_sentinel(
+        &self,
+        compiled: bookclerk_library::CompiledAtomic,
+        operation_id: String,
+        request: DbAtomicRequest,
+        cancel: Arc<AtomicBool>,
+    ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
+        bookclerk_library::validate_atomic_request(&request, &self.caps)?;
+        let payload = serde_json::to_string(&request).map_err(|err| {
+            bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
+        })?;
+        match self
+            .session
+            .db_query_cancelable(DB_ATOMIC_SENTINEL, payload, cancel)
+            .await
+        {
+            Ok(page) => {
+                let exec: DbPlanExecResult =
+                    serde_json::from_str(&page.rows_json).map_err(|err| {
+                        bookclerk_library::LibraryError::Unavailable(format!(
+                            "database atomic result: {err}"
+                        ))
+                    })?;
+                bookclerk_library::validate_exec_result(
+                    &compiled.plan,
+                    &exec,
+                    &self.caps,
+                    &operation_id,
+                )?;
+                Ok(bookclerk_library::interpret_exec(
+                    &compiled.plan,
+                    &exec,
+                    &compiled.expected_hash,
+                ))
+            }
+            Err(err) => Err(map_atomic_rpc_err(err)),
         }
     }
 }
@@ -770,8 +968,21 @@ async fn exec_host_ddl_batch(
     let typed = ExecuteRequest::from_atomic(&req)
         .map_err(|err| bookclerk_library::LibraryError::Other(anyhow::anyhow!(err)))?;
     let cancel = Arc::new(AtomicBool::new(false));
-    match session.db_execute_request(typed, cancel).await {
+    match session.db_execute_atomic(typed, cancel).await {
         Ok(_) => Ok(()),
+        Err(err) if matches!(&err, crate::PluginError::Abi { code, .. } if code == "unsupported") =>
+        {
+            let payload = serde_json::to_string(&req).map_err(|err| {
+                bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
+            })?;
+            session
+                .db_query(DB_ATOMIC_SENTINEL, payload)
+                .await
+                .map_err(|err| {
+                    bookclerk_library::LibraryError::Orm(DbErr::Custom(err.to_string()))
+                })?;
+            Ok(())
+        }
         Err(err) => Err(bookclerk_library::LibraryError::Orm(DbErr::Custom(
             err.to_string(),
         ))),
@@ -831,7 +1042,7 @@ impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
             .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
         let cancel = Arc::new(AtomicBool::new(false));
         self.session
-            .db_execute_request(req, cancel)
+            .db_execute_atomic(req, cancel)
             .await
             .map_err(host_err_to_abi)
     }
@@ -1550,8 +1761,10 @@ mod tests {
         )
         .with_connect_result(DbConnectResult::sqlite());
         let session = granted_job_database(store);
+        let caps = session.capabilities().await.expect("capabilities");
+        assert_eq!(caps.diagnostic_engine, DbConnectResult::sqlite().dialect);
         session
-            .execute(ExecuteRequest {
+            .execute_atomic(ExecuteRequest {
                 operation_id: "job-books".into(),
                 request_hash: String::new(),
                 statements: vec![TypedDbStatement {
@@ -1573,7 +1786,7 @@ mod tests {
             .await
             .expect("books grant");
         let err = session
-            .execute(ExecuteRequest {
+            .execute_atomic(ExecuteRequest {
                 operation_id: "job-jobs".into(),
                 request_hash: String::new(),
                 statements: vec![TypedDbStatement {
@@ -1599,6 +1812,17 @@ mod tests {
             bookclerk_plugin_sdk::PluginErrorCode::InvalidParams
         );
         assert!(err.to_string().contains("unauthorized table"), "{err}");
+        let unsupported = session
+            .execute(AbiStatement {
+                sql: "SELECT 1".into(),
+                values_json: "[]".into(),
+            })
+            .await
+            .expect_err("legacy");
+        assert_eq!(
+            unsupported.code,
+            bookclerk_plugin_sdk::PluginErrorCode::Unsupported
+        );
     }
     #[tokio::test]
     async fn granted_job_database_binding_retries_and_conflicts_on_counters() {
