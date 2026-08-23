@@ -66,15 +66,168 @@ const DENIED_VERBS: &[&str] = &[
 ];
 
 /// Classifies guest SQL the same way the host stamps `DbStatement.kind`.
+///
+/// Leading `WITH` / `WITH RECURSIVE` CTE lists are skipped so the **main**
+/// statement decides the kind: `WITH … SELECT` is [`DbPlanStatementKind::Select`],
+/// `WITH … INSERT/UPDATE/DELETE` is [`DbPlanStatementKind::Execute`], and a
+/// top-level `RETURNING` on that main statement is [`DbPlanStatementKind::Returning`].
 #[must_use]
 pub fn guest_statement_kind(sql: &str) -> DbPlanStatementKind {
-    if has_top_level_keyword(sql, "RETURNING") {
+    let main = sql_after_leading_ctes(sql);
+    if has_top_level_keyword(main, "RETURNING") {
         return DbPlanStatementKind::Returning;
     }
-    match first_top_level_keyword(sql).as_deref() {
-        Some("SELECT" | "WITH" | "VALUES") => DbPlanStatementKind::Select,
+    match first_top_level_keyword(main).as_deref() {
+        Some("SELECT" | "VALUES") => DbPlanStatementKind::Select,
         _ => DbPlanStatementKind::Execute,
     }
+}
+
+/// Remainder after a leading `WITH [RECURSIVE] cte [, cte …]` list.
+///
+/// Returns `sql` unchanged when it does not start with `WITH` or the CTE list
+/// cannot be parsed (callers then classify from the original text).
+fn sql_after_leading_ctes(sql: &str) -> &str {
+    let mut i = skip_ws_comments(sql, 0);
+    if !keyword_at(sql, i, "WITH") {
+        return sql;
+    }
+    i += 4;
+    i = skip_ws_comments(sql, i);
+    if keyword_at(sql, i, "RECURSIVE") {
+        i += 9;
+        i = skip_ws_comments(sql, i);
+    }
+    loop {
+        let Some(next) = skip_ident_or_quoted(sql, i) else {
+            return sql;
+        };
+        i = skip_ws_comments(sql, next);
+        if sql.as_bytes().get(i) == Some(&b'(') {
+            let Some(next) = skip_balanced_parens(sql, i) else {
+                return sql;
+            };
+            i = skip_ws_comments(sql, next);
+        }
+        if !keyword_at(sql, i, "AS") {
+            return sql;
+        }
+        i = skip_ws_comments(sql, i + 2);
+        if keyword_at(sql, i, "NOT") {
+            let after_not = skip_ws_comments(sql, i + 3);
+            if keyword_at(sql, after_not, "MATERIALIZED") {
+                i = skip_ws_comments(sql, after_not + 12);
+            }
+        } else if keyword_at(sql, i, "MATERIALIZED") {
+            i = skip_ws_comments(sql, i + 12);
+        }
+        if sql.as_bytes().get(i) != Some(&b'(') {
+            return sql;
+        }
+        let Some(next) = skip_balanced_parens(sql, i) else {
+            return sql;
+        };
+        i = skip_ws_comments(sql, next);
+        if sql.as_bytes().get(i) == Some(&b',') {
+            i = skip_ws_comments(sql, i + 1);
+            continue;
+        }
+        return &sql[i..];
+    }
+}
+
+fn skip_ws_comments(sql: &str, mut i: usize) -> usize {
+    let bytes = sql.as_bytes();
+    loop {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b'-') && bytes.get(i + 1) == Some(&b'-') {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes.get(i) == Some(&b'/') && bytes.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = i.saturating_add(2).min(bytes.len());
+            continue;
+        }
+        break;
+    }
+    i
+}
+
+fn keyword_at(sql: &str, i: usize, kw: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let n = kw.len();
+    if i.saturating_add(n) > bytes.len() {
+        return false;
+    }
+    if !sql[i..i + n].eq_ignore_ascii_case(kw) {
+        return false;
+    }
+    let before_ok = i == 0 || !ident_cont(bytes[i - 1]);
+    let after = bytes.get(i + n).copied().unwrap_or(b' ');
+    before_ok && !ident_cont(after)
+}
+
+fn skip_ident_or_quoted(sql: &str, i: usize) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let c = *bytes.get(i)?;
+    if c == b'"' || c == b'`' || c == b'[' {
+        let end = if c == b'[' { b']' } else { c };
+        let mut j = i + 1;
+        while j < bytes.len() {
+            if bytes[j] == end {
+                if end != b']' && bytes.get(j + 1) == Some(&end) {
+                    j += 2;
+                    continue;
+                }
+                return Some(j + 1);
+            }
+            j += 1;
+        }
+        return None;
+    }
+    if ident_start(c) {
+        let mut j = i + 1;
+        while j < bytes.len() && ident_cont(bytes[j]) {
+            j += 1;
+        }
+        return Some(j);
+    }
+    None
+}
+
+fn skip_balanced_parens(sql: &str, start: usize) -> Option<usize> {
+    if sql.as_bytes().get(start) != Some(&b'(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut end = None;
+    let slice = &sql[start..];
+    for_each_unquoted(slice, |text, i| {
+        if end.is_some() {
+            return 1;
+        }
+        match text.as_bytes()[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end = Some(start + i + 1);
+                }
+            }
+            _ => {}
+        }
+        1
+    });
+    end
 }
 
 /// Rejects guest SQL that is outside the Bookclerk binding grammar.
@@ -767,5 +920,85 @@ mod tests {
             err.to_string().contains("affectedRows cannot set maxRows"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn cte_kind_follows_the_main_statement() {
+        assert_eq!(
+            guest_statement_kind("WITH seed AS (SELECT 1) SELECT * FROM seed"),
+            DbPlanStatementKind::Select
+        );
+        assert_eq!(
+            guest_statement_kind("WITH seed AS (SELECT 1) INSERT INTO t SELECT * FROM seed"),
+            DbPlanStatementKind::Execute
+        );
+        assert_eq!(
+            guest_statement_kind("WITH seed AS (SELECT 1) UPDATE t SET x = 1"),
+            DbPlanStatementKind::Execute
+        );
+        assert_eq!(
+            guest_statement_kind("WITH seed AS (SELECT 1) DELETE FROM t"),
+            DbPlanStatementKind::Execute
+        );
+        assert_eq!(
+            guest_statement_kind(
+                "WITH seed AS (SELECT 1) INSERT INTO t SELECT * FROM seed RETURNING id"
+            ),
+            DbPlanStatementKind::Returning
+        );
+        assert_eq!(
+            guest_statement_kind("WITH seed AS (SELECT 1) UPDATE t SET x = 1 RETURNING x"),
+            DbPlanStatementKind::Returning
+        );
+        assert_eq!(
+            guest_statement_kind("WITH seed AS (SELECT 1) DELETE FROM t RETURNING id"),
+            DbPlanStatementKind::Returning
+        );
+        assert_eq!(
+            guest_statement_kind(
+                "WITH x AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM x"
+            ),
+            DbPlanStatementKind::Select
+        );
+        assert_eq!(
+            guest_statement_kind(
+                "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM t WHERE x < 3) INSERT INTO u SELECT x FROM t"
+            ),
+            DbPlanStatementKind::Execute
+        );
+    }
+
+    #[test]
+    fn cte_dml_selection_matches_main_statement() {
+        validate_guest_execute_request(&req(
+            "WITH seed AS (SELECT 1) INSERT INTO books (id) SELECT * FROM seed",
+            vec![],
+            DbResultSelection::AffectedRows,
+            0,
+        ))
+        .unwrap();
+        let err = validate_guest_execute_request(&req(
+            "WITH seed AS (SELECT 1) INSERT INTO books (id) SELECT * FROM seed",
+            vec![],
+            DbResultSelection::Rows,
+            1,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("row-producing"), "{err}");
+        validate_guest_execute_request(&req(
+            "WITH seed AS (SELECT 1) INSERT INTO books (id) SELECT * FROM seed RETURNING id",
+            vec![],
+            DbResultSelection::Rows,
+            1,
+        ))
+        .unwrap();
+        let err = validate_guest_execute_request(&req(
+            "WITH seed AS (SELECT 1) SELECT * FROM seed",
+            vec![],
+            DbResultSelection::AffectedRows,
+            0,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("affectedRows"), "{err}");
     }
 }

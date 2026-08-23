@@ -481,14 +481,7 @@ fn select_limit_is_one(sql: &str) -> bool {
 
 /// Host-authored kind from the SQL this helper just wrote (not adapter sniffing).
 pub(crate) fn authored_kind(sql: &str) -> DbPlanStatementKind {
-    if find_returning_clause(sql).is_some() {
-        return DbPlanStatementKind::Returning;
-    }
-    let first = first_top_level_keyword(sql).unwrap_or_default();
-    match first.as_str() {
-        "SELECT" | "WITH" | "VALUES" => DbPlanStatementKind::Select,
-        _ => DbPlanStatementKind::Execute,
-    }
+    bookclerk_plugin_abi::guest_statement_kind(sql)
 }
 
 /// Byte offset of a top-level `RETURNING` keyword, if present.
@@ -499,17 +492,6 @@ fn find_returning_clause(sql: &str) -> Option<usize> {
 /// True when `keyword` appears at parenthesis depth 0 (not inside quotes).
 fn has_top_level_keyword(sql: &str, keyword: &str) -> bool {
     last_top_level_keyword(sql, keyword).is_some()
-}
-
-/// First top-level SQL keyword, uppercased.
-fn first_top_level_keyword(sql: &str) -> Option<String> {
-    let mut first = None;
-    for_each_top_level_keyword(sql, |_, kw| {
-        if first.is_none() {
-            first = Some(kw.to_ascii_uppercase());
-        }
-    });
-    first
 }
 
 /// Start index of the last top-level match of `keyword` (ASCII, case-insensitive).

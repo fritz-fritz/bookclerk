@@ -666,5 +666,25 @@ mod limits_tests {
             ),
             DbPlanStatementKind::Select
         );
+        assert_eq!(
+            super::host_statement_kind("WITH seed AS (SELECT 1) INSERT INTO t SELECT * FROM seed"),
+            DbPlanStatementKind::Execute
+        );
+        assert_eq!(
+            super::host_statement_kind("WITH seed AS (SELECT 1) UPDATE t SET x = 1"),
+            DbPlanStatementKind::Execute
+        );
+        assert_eq!(
+            super::host_statement_kind("WITH seed AS (SELECT 1) DELETE FROM t"),
+            DbPlanStatementKind::Execute
+        );
+        assert_eq!(
+            super::host_statement_kind("WITH seed AS (SELECT 1) UPDATE t SET x = 1 RETURNING x"),
+            DbPlanStatementKind::Returning
+        );
+        assert_eq!(
+            super::host_statement_kind("WITH seed AS (SELECT 1) DELETE FROM t RETURNING id"),
+            DbPlanStatementKind::Returning
+        );
     }
 }
