@@ -704,9 +704,11 @@ export class AdapterDatabaseSession extends RpcTarget {
   execute(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
     return Promise.reject(unsupported("execute"));
   }
+  /** Close the adapter session. */
   close(): Promise<void> {
     return Promise.resolve();
   }
+  /** Open a host-internal interactive transaction. */
   begin(): Promise<AdapterTransaction> {
     return Promise.reject(unsupported("begin"));
   }
@@ -723,6 +725,7 @@ export class GuestDatabase extends RpcTarget {
   execute(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
     return Promise.reject(unsupported("execute"));
   }
+  /** Close the granted database handle. */
   close(): Promise<void> {
     return Promise.resolve();
   }
@@ -740,9 +743,11 @@ export class AdapterTransaction extends RpcTarget {
   execute(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
     return Promise.reject(unsupported("execute"));
   }
+  /** Commit the open transaction. */
   commit(): Promise<void> {
     return Promise.reject(unsupported("commit"));
   }
+  /** Roll back the open transaction. */
   rollback(): Promise<void> {
     return Promise.reject(unsupported("rollback"));
   }
