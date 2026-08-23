@@ -290,7 +290,7 @@ pub fn plugin_error_from_d1(err: DbErr) -> PluginError {
             return PluginError::invalid_params(err.to_string());
         }
     }
-    bookclerk_db_guest::plugin_error_from_engine(err)
+    bookclerk_plugin_sdk::database_adapter::plugin_error_from_engine(err)
 }
 
 /// Extracts a permanent `D1 HTTP {status}` code from a [`DbErr`], if present.

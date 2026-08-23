@@ -10,12 +10,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
 
-use bookclerk_plugin_sdk::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
-use bookclerk_plugin_sdk::{
+use crate::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
+use crate::{
     proxy_rows_to_dto, statement_from_dto, DbAtomicRequest, DbCapabilities, DbConnectResult,
-    DbPlanExecResult, ExecResultDto, ExecuteReply, ExecuteRequest, ProxyRowDto, QueryResultDto,
-    StatementDto,
+    DbPlanExecResult, ExecResultDto, ExecuteReply, ExecuteRequest, ProxyRowDto,
+    QueryResultDto, StatementDto,
 };
+use super::plugin_error_from_db_err;
 use futures::TryStreamExt;
 use sea_orm::{
     from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
@@ -96,7 +97,7 @@ enum TxnOp {
         request: ExecuteRequest,
         /// Oneshot used to return the typed reply.
         reply:
-            oneshot::Sender<std::result::Result<ExecuteReply, bookclerk_plugin_sdk::PluginError>>,
+            oneshot::Sender<std::result::Result<ExecuteReply, crate::PluginError>>,
     },
 }
 
@@ -239,20 +240,20 @@ pub async fn guest_rollback(txn_id: String) -> Result<()> {
 /// engine rejects the work.
 pub async fn guest_atomic(
     req: DbAtomicRequest,
-) -> std::result::Result<DbPlanExecResult, bookclerk_plugin_sdk::PluginError> {
+) -> std::result::Result<DbPlanExecResult, crate::PluginError> {
     let gate = txn_gate();
     let _gate = gate.lock().await;
     let conn = connection()
         .await
-        .map_err(bookclerk_plugin_sdk::PluginError::internal)?;
+        .map_err(crate::PluginError::internal)?;
     let plan = req.plan.ok_or_else(|| {
-        bookclerk_plugin_sdk::PluginError::invalid_params(
+        crate::PluginError::invalid_params(
             "dbAtomic requires a host-authored executePlan",
         )
     })?;
     let caps = match conn.get_database_backend() {
-        DbBackend::Postgres => bookclerk_plugin_sdk::DbConnectResult::postgres(),
-        _ => bookclerk_plugin_sdk::DbConnectResult::sqlite(),
+        DbBackend::Postgres => crate::DbConnectResult::postgres(),
+        _ => crate::DbConnectResult::sqlite(),
     };
     let timing_source = match conn.get_database_backend() {
         DbBackend::Postgres => "postgres_txn",
@@ -267,7 +268,7 @@ pub async fn guest_atomic(
         bookclerk_db_exec::AtomicSession::from_deadline(req.deadline_unix_ms),
     )
     .await
-    .map_err(|e| crate::plugin_error_from_db_err(&e))
+    .map_err(|e| plugin_error_from_db_err(&e))
 }
 
 /// Typed `DatabaseSession.capabilities` for the connected engine.
@@ -276,10 +277,10 @@ pub async fn guest_atomic(
 ///
 /// Returns when no connection has been opened.
 pub async fn guest_capabilities(
-) -> std::result::Result<DbCapabilities, bookclerk_plugin_sdk::PluginError> {
+) -> std::result::Result<DbCapabilities, crate::PluginError> {
     let conn = connection()
         .await
-        .map_err(bookclerk_plugin_sdk::PluginError::internal)?;
+        .map_err(crate::PluginError::internal)?;
     let caps = match conn.get_database_backend() {
         DbBackend::Postgres => DbConnectResult::postgres(),
         _ => DbConnectResult::sqlite(),
@@ -298,15 +299,15 @@ pub async fn guest_capabilities(
 /// Returns when no connection is open or the engine rejects the work.
 pub async fn guest_execute_atomic(
     request: ExecuteRequest,
-) -> std::result::Result<ExecuteReply, bookclerk_plugin_sdk::PluginError> {
+) -> std::result::Result<ExecuteReply, crate::PluginError> {
     let gate = txn_gate();
     let _gate = gate.lock().await;
     let conn = connection()
         .await
-        .map_err(bookclerk_plugin_sdk::PluginError::internal)?;
+        .map_err(crate::PluginError::internal)?;
     let caps = match conn.get_database_backend() {
-        DbBackend::Postgres => bookclerk_plugin_sdk::DbConnectResult::postgres(),
-        _ => bookclerk_plugin_sdk::DbConnectResult::sqlite(),
+        DbBackend::Postgres => crate::DbConnectResult::postgres(),
+        _ => crate::DbConnectResult::sqlite(),
     };
     let timing_source = match conn.get_database_backend() {
         DbBackend::Postgres => "postgres_txn",
@@ -321,7 +322,7 @@ pub async fn guest_execute_atomic(
         bookclerk_db_exec::AtomicSession::from_deadline(deadline),
     )
     .await
-    .map_err(|e| crate::plugin_error_from_db_err(&e))
+    .map_err(|e| plugin_error_from_db_err(&e))
 }
 
 /// Typed `Transaction.executeAtomic` on an already-open guest transaction.
@@ -334,10 +335,10 @@ pub async fn guest_execute_atomic(
 pub async fn guest_execute_atomic_on_txn(
     txn_id: String,
     request: ExecuteRequest,
-) -> std::result::Result<ExecuteReply, bookclerk_plugin_sdk::PluginError> {
+) -> std::result::Result<ExecuteReply, crate::PluginError> {
     let tx = route(&txn_id)
         .await
-        .map_err(bookclerk_plugin_sdk::PluginError::internal)?;
+        .map_err(crate::PluginError::internal)?;
     let (reply, rx) = oneshot::channel();
     tx.send(TxnOp::ExecuteAtomic {
         txn_id,
@@ -346,10 +347,10 @@ pub async fn guest_execute_atomic_on_txn(
     })
     .await
     .map_err(|_| {
-        bookclerk_plugin_sdk::PluginError::internal("transaction worker closed".to_string())
+        crate::PluginError::internal("transaction worker closed".to_string())
     })?;
     rx.await.map_err(|_| {
-        bookclerk_plugin_sdk::PluginError::internal("transaction worker closed".to_string())
+        crate::PluginError::internal("transaction worker closed".to_string())
     })?
 }
 
@@ -614,9 +615,9 @@ async fn txn_worker(
                     Ok(txn) => {
                         let caps = match ConnectionTrait::get_database_backend(txn) {
                             DbBackend::Postgres => {
-                                bookclerk_plugin_sdk::DbConnectResult::postgres()
+                                crate::DbConnectResult::postgres()
                             }
-                            _ => bookclerk_plugin_sdk::DbConnectResult::sqlite(),
+                            _ => crate::DbConnectResult::sqlite(),
                         };
                         let timing_source = match ConnectionTrait::get_database_backend(txn) {
                             DbBackend::Postgres => "postgres_txn",
@@ -633,9 +634,9 @@ async fn txn_worker(
                             Some(&conn),
                         )
                         .await
-                        .map_err(|e| crate::plugin_error_from_db_err(&e))
+                        .map_err(|e| plugin_error_from_db_err(&e))
                     }
-                    Err(err) => Err(bookclerk_plugin_sdk::PluginError::internal(err)),
+                    Err(err) => Err(crate::PluginError::internal(err)),
                 };
                 let _ = reply.send(result);
             }
@@ -1252,7 +1253,7 @@ pub fn row_to_dto(row: &sea_orm::QueryResult) -> ProxyRowDto {
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
-    use bookclerk_plugin_sdk::StatementDto;
+    use crate::StatementDto;
     use sea_orm::{DbBackend, Statement};
     use std::sync::LazyLock;
     use tokio::sync::Mutex;
@@ -1528,7 +1529,7 @@ mod tests {
 
     #[tokio::test]
     async fn guest_atomic_unique_is_conflict_and_commit_is_unavailable() {
-        use bookclerk_plugin_sdk::{
+        use crate::{
             DbAtomicPlan, DbAtomicRequest, DbPlanStatement, DbPlanStatementKind, PluginErrorCode,
         };
         let _lock = SESSION_LOCK.lock().await;
@@ -1633,12 +1634,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
     async fn postgres_guest_atomic_unique_preserves_sqlstate_23505() {
-        use bookclerk_plugin_sdk::{
+        use crate::{
             DbAtomicPlan, DbAtomicRequest, DbPlanStatement, DbPlanStatementKind, PluginErrorCode,
         };
         let _lock = SESSION_LOCK.lock().await;
         let db = postgres_test_pool().await;
-        bookclerk_library::apply_host_schema(&db, bookclerk_library::HostSchemaKind::Postgres)
+        bookclerk_library::apply_host_schema(&db, bookclerk_library::HostSchemaKind::RowMarker)
             .await
             .expect("host postgres schema");
         set_connection(db).await;
@@ -1886,7 +1887,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_atomic_on_open_txn_does_not_begin_again() {
-        use bookclerk_plugin_sdk::{
+        use crate::{
             DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
         };
         let _lock = SESSION_LOCK.lock().await;
@@ -1936,7 +1937,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_atomic_on_open_txn_savepoint_rolls_back_partial_batch() {
-        use bookclerk_plugin_sdk::{
+        use crate::{
             DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
         };
         let _lock = SESSION_LOCK.lock().await;
@@ -2003,7 +2004,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_atomic_on_open_txn_savepoint_release_failure_poisons_outer_commit() {
-        use bookclerk_plugin_sdk::{
+        use crate::{
             DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
         };
         let _lock = SESSION_LOCK.lock().await;
@@ -2064,7 +2065,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_atomic_on_open_txn_savepoint_rollback_failure_poisons_outer_commit() {
-        use bookclerk_plugin_sdk::{
+        use crate::{
             DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
         };
         let _lock = SESSION_LOCK.lock().await;

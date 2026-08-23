@@ -3,17 +3,14 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use async_trait::async_trait;
-use bookclerk_db_guest::{
-    guest_execute, guest_query_page, plugin_error_from_engine, set_connection,
-};
+use bookclerk_plugin_sdk::database_adapter::set_connection;
 use bookclerk_plugin_sdk::v2::{
-    Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot, QueryPage,
-    ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
+    FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    serve, DbAtomicRequest, DbCapabilities, DbConnectParams, DbConnectResult, ExecuteReply,
-    ExecuteRequest, HandshakeResult, PluginError, StatementDto, DB_ATOMIC_SENTINEL,
-    DB_CAPABILITIES_SENTINEL,
+    serve, DbCapabilities, DbConnectParams, DbConnectResult, ExecuteReply, ExecuteRequest,
+    HandshakeResult, PluginError,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -34,25 +31,6 @@ fn describe_metadata() -> Result<String, PluginError> {
         sort_key: Some(5),
         ..HandshakeResult::default()
     })
-}
-
-fn map_guest(err: String) -> PluginError {
-    plugin_error_from_engine(err)
-}
-
-fn to_dto(statement: &Statement, txn_id: Option<String>) -> StatementDto {
-    StatementDto {
-        sql: statement.sql.clone(),
-        values: serde_json::from_str(&statement.values_json).unwrap_or_default(),
-        txn_id,
-    }
-}
-
-fn exec_from_dto(dto: bookclerk_plugin_sdk::ExecResultDto) -> ExecResult {
-    ExecResult {
-        last_insert_id: i64::try_from(dto.last_insert_id).unwrap_or(i64::MAX),
-        rows_affected: dto.rows_affected,
-    }
 }
 
 async fn connect_from_context(ctx: &DatabaseContext) -> Result<(), PluginError> {
@@ -83,7 +61,7 @@ async fn connect_from_context(ctx: &DatabaseContext) -> Result<(), PluginError> 
     Ok(())
 }
 
-/// Cloudflare D1 database guest; `describe` advertises query/execute/atomic RPCs.
+/// Cloudflare D1 database guest.
 struct D1Root;
 
 #[async_trait(?Send)]
@@ -112,7 +90,7 @@ struct D1Database;
 
 #[async_trait(?Send)]
 impl Database for D1Database {
-    async fn open_session(&self) -> Result<Box<dyn DatabaseSession>, PluginError> {
+    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>, PluginError> {
         Ok(Box::new(D1Session))
     }
 }
@@ -120,69 +98,26 @@ impl Database for D1Database {
 struct D1Session;
 
 #[async_trait(?Send)]
-impl DatabaseSession for D1Session {
-    async fn execute(&self, statement: Statement) -> Result<ExecResult, PluginError> {
-        if statement.sql == DB_ATOMIC_SENTINEL {
-            return Err(PluginError::unsupported(
-                "bookclerk.atomic is a query, not execute",
-            ));
-        }
-        let dto = guest_execute(to_dto(&statement, None))
-            .await
-            .map_err(map_guest)?;
-        Ok(exec_from_dto(dto))
-    }
-
-    async fn query(
-        &self,
-        statement: Statement,
-        cursor: &str,
-        limit: u32,
-    ) -> Result<QueryPage, PluginError> {
-        if statement.sql == DB_ATOMIC_SENTINEL {
-            let req: DbAtomicRequest = serde_json::from_str(&statement.values_json)
-                .map_err(|e| PluginError::invalid_params(e.to_string()))?;
-            let proxy = bookclerk_plugin_database_d1::shared_proxy()
-                .ok_or_else(|| PluginError::internal("d1 guest is not connected"))?;
-            let result = proxy
-                .run_atomic(req)
-                .await
-                .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)?;
-            return Ok(QueryPage {
-                rows_json: bookclerk_plugin_sdk::encode_atomic_result(result)?,
-                next_cursor: None,
-            });
-        }
-        if statement.sql == DB_CAPABILITIES_SENTINEL {
-            return Ok(QueryPage {
-                rows_json: bookclerk_plugin_sdk::encode_json(DbConnectResult::d1())?,
-                next_cursor: None,
-            });
-        }
-        let page = guest_query_page(to_dto(&statement, None), cursor, limit)
-            .await
-            .map_err(map_guest)?;
-        Ok(page)
-    }
-
-    async fn begin(&self) -> Result<Box<dyn Transaction>, PluginError> {
-        Err(PluginError::unsupported(
-            "D1 does not support interactive transactions; each HTTP request commits immediately. \
-             Atomic library operations use executeAtomic (one HTTP batch / one SQL transaction)",
-        ))
-    }
-
+impl AdapterDatabaseSession for D1Session {
     async fn capabilities(&self) -> Result<DbCapabilities, PluginError> {
         Ok(DbCapabilities::from_connect(&DbConnectResult::d1()))
     }
 
-    async fn execute_atomic(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {
+    async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {
         let proxy = bookclerk_plugin_database_d1::shared_proxy()
             .ok_or_else(|| PluginError::internal("d1 guest is not connected"))?;
         proxy
             .run_typed_atomic(&request)
             .await
             .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
+    }
+
+    async fn begin(
+        &self,
+    ) -> Result<Box<dyn bookclerk_plugin_sdk::v2::AdapterTransaction>, PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not support interactive transactions; use typed execute batches",
+        ))
     }
 }
 

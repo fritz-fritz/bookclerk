@@ -16,6 +16,7 @@
 //! | Workerd / Wasm guests | [`workerd`] + npm `@bookclerk/plugin-sdk` |
 //! | ABI DTOs / method names | [`protocol`] (re-exports `bookclerk-plugin-abi`) |
 //! | SeaORM ↔ wire helpers | feature `db` (crate-root re-exports) |
+//! | Database guest session / atomic execution | feature `db` → [`database_adapter`] |
 //! | Author CLI (`check` / `fmt` / `package` / `smoke`) | feature `tools` → [`tools`] |
 //!
 //! ```toml
@@ -50,6 +51,8 @@
 //! module-level docs.
 
 pub mod callback_tunnel;
+#[cfg(feature = "db")]
+pub mod database_adapter;
 #[cfg(feature = "db")]
 mod db;
 mod db_binding;
@@ -96,15 +99,15 @@ pub use protocol::{
     PROTOCOL_NAME,
 };
 pub use v2::{
-    decode_json, encode_atomic_result, encode_json, page_rows, serve, serve_v2, ContentSource,
-    Database, DatabaseSession, Integration, PluginDescribe, PluginRoot, Transaction,
-    FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    decode_json, encode_atomic_result, encode_json, page_rows, serve, serve_v2, AdapterDatabaseSession,
+    AdapterTransaction, ContentSource, Database, GuestDatabase, Integration, PluginDescribe,
+    PluginRoot, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 
 pub use bookclerk_plugin_abi::{
     canonical_execute_request_hash, db_value_from_json, db_value_to_json, decode_db_value_bytes,
-    decode_execute_atomic_reply_bytes, decode_execute_request_bytes, encoded_db_value_bytes,
-    encoded_execute_atomic_reply_bytes, encoded_execute_reply_bytes, encoded_execute_request_bytes,
+    decode_execute_request_bytes, decode_execute_result_reply_bytes, encoded_db_value_bytes,
+    encoded_execute_reply_bytes, encoded_execute_request_bytes, encoded_execute_result_reply_bytes,
     encoded_statement_result_bytes, sql_payload_bytes, sql_payload_exceeds, DbCapabilities,
     DbColumn, DbResultSelection, DbRow, DbTiming, DbType, DbValue, DiagnoseResult, ExecuteReply,
     ExecuteRequest, HandshakeParams, HostToPluginEvent, PluginError, PluginErrorCode,

@@ -247,7 +247,7 @@ pub async fn open_memory() -> bookclerk_library::Result<DatabaseConnection> {
     let db = open_memory_unmigrated()
         .await
         .map_err(bookclerk_library::LibraryError::Orm)?;
-    apply_host_schema(&db, HostSchemaKind::SqliteFile).await?;
+    apply_host_schema(&db, HostSchemaKind::PragmaMarker).await?;
     Ok(db)
 }
 
@@ -284,7 +284,7 @@ pub async fn open_store(path: &Path) -> bookclerk_library::Result<LibraryStore> 
     let db = open(path)
         .await
         .map_err(bookclerk_library::LibraryError::Orm)?;
-    apply_host_schema(&db, HostSchemaKind::SqliteFile).await?;
+    apply_host_schema(&db, HostSchemaKind::PragmaMarker).await?;
     Ok(LibraryStore::from_connection(db))
 }
 
@@ -664,7 +664,7 @@ fn db_type_from_decl(decl: Option<&str>) -> DbType {
 /// Maps a rusqlite cell back to SeaORM, using `decl_type` for typed NULLs.
 fn rusqlite_to_sea(v: rusqlite::types::Value, decl_type: Option<&str>, column: &str) -> Value {
     match v {
-        rusqlite::types::Value::Null => bookclerk_db_guest::migrate::typed_null(decl_type, column),
+        rusqlite::types::Value::Null => bookclerk_plugin_sdk::database_adapter::typed_null(decl_type, column),
         rusqlite::types::Value::Integer(n) => Value::BigInt(Some(n)),
         rusqlite::types::Value::Real(n) => Value::Double(Some(n)),
         rusqlite::types::Value::Text(s) => Value::String(Some(s)),

@@ -41,7 +41,7 @@ async fn title_request_select_survives_guest_dto_roundtrip() {
     let mut dto_rows = Vec::new();
     for row in &rows {
         // Same helper the guest uses on the wire.
-        dto_rows.push(bookclerk_db_guest::row_to_dto(row));
+        dto_rows.push(bookclerk_plugin_sdk::database_adapter::row_to_dto(row));
     }
     let dto = QueryResultDto { rows: dto_rows };
     assert_eq!(

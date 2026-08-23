@@ -564,7 +564,7 @@ fn is_binary_column(column: &str) -> bool {
 fn json_to_sea_value(v: &JsonValue, column: &str) -> std::result::Result<Value, DbErr> {
     reject_oversized_json_cell(v, column)?;
     match v {
-        JsonValue::Null => Ok(bookclerk_db_guest::migrate::typed_null(None, column)),
+        JsonValue::Null => Ok(bookclerk_plugin_sdk::database_adapter::typed_null(None, column)),
         JsonValue::Bool(b) => Ok(Value::Bool(Some(*b))),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -1276,8 +1276,8 @@ mod tests {
         let db = Database::connect_proxy(DbBackend::Sqlite, Arc::new(Box::new(proxy)))
             .await
             .unwrap();
-        bookclerk_db_guest::set_connection(db).await;
-        let page = bookclerk_db_guest::guest_query_page(
+        bookclerk_plugin_sdk::database_adapter::set_connection(db).await;
+        let page = bookclerk_plugin_sdk::database_adapter::guest_query_page(
             bookclerk_plugin_sdk::StatementDto {
                 sql: "SELECT id FROM t".into(),
                 values: Vec::new(),
@@ -1798,7 +1798,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::D1,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -1869,7 +1869,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         let err = bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::D1,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -1884,7 +1884,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::D1,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -1906,7 +1906,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::D1,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -1983,7 +1983,7 @@ mod tests {
         let (a, b) = tokio::join!(
             bookclerk_library::apply_host_schema_with_batch(
                 &db1,
-                bookclerk_library::HostSchemaKind::D1,
+                bookclerk_library::HostSchemaKind::AtomicBatchMarker,
                 move |stmts| {
                     let proxy = p1.clone();
                     async move { run_schema_batch(proxy, stmts).await }
@@ -1991,7 +1991,7 @@ mod tests {
             ),
             bookclerk_library::apply_host_schema_with_batch(
                 &db2,
-                bookclerk_library::HostSchemaKind::D1,
+                bookclerk_library::HostSchemaKind::AtomicBatchMarker,
                 move |stmts| {
                     let proxy = p2.clone();
                     async move { run_schema_batch(proxy, stmts).await }
@@ -2080,7 +2080,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::D1,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }

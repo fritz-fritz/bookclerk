@@ -48,7 +48,6 @@ required-features = ["host-helpers"]
 anyhow.workspace = true
 async-trait.workspace = true
 bookclerk-db-exec.workspace = true
-bookclerk-db-guest.workspace = true
 bookclerk-library = { workspace = true, optional = true }
 bookclerk-plugin-sdk = { workspace = true, features = ["db"] }
 rusqlite.workspace = true

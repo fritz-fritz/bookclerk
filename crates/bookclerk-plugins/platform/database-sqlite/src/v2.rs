@@ -3,42 +3,19 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use async_trait::async_trait;
-use bookclerk_db_guest::{
-    guest_atomic, guest_begin, guest_capabilities, guest_commit, guest_execute,
-    guest_execute_atomic, guest_execute_atomic_on_txn, guest_query_page, guest_rollback,
-    plugin_error_from_engine, set_connection,
+use bookclerk_plugin_sdk::database_adapter::{
+    guest_begin, guest_capabilities, guest_commit, guest_execute_atomic,
+    guest_execute_atomic_on_txn, guest_rollback, plugin_error_from_engine, set_connection,
 };
 use bookclerk_plugin_sdk::v2::{
-    Database, DatabaseContext, DatabaseSession, ExecResult, PluginDescribe, PluginRoot, QueryPage,
-    ScalarLimits, Statement, Transaction, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    AdapterDatabaseSession, AdapterTransaction, Database, DatabaseContext, PluginDescribe,
+    PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
-use bookclerk_plugin_sdk::{
-    DbAtomicRequest, DbCapabilities, DbConnectResult, ExecuteReply, ExecuteRequest, PluginError,
-    StatementDto, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
-};
+use bookclerk_plugin_sdk::{DbCapabilities, ExecuteReply, ExecuteRequest, PluginError};
 
 use crate::ID;
 
 type Result<T> = std::result::Result<T, PluginError>;
-
-fn map_guest(err: String) -> PluginError {
-    plugin_error_from_engine(err)
-}
-
-fn to_dto(statement: &Statement, txn_id: Option<String>) -> StatementDto {
-    StatementDto {
-        sql: statement.sql.clone(),
-        values: serde_json::from_str(&statement.values_json).unwrap_or_default(),
-        txn_id,
-    }
-}
-
-fn exec_from_dto(dto: bookclerk_plugin_sdk::ExecResultDto) -> ExecResult {
-    ExecResult {
-        last_insert_id: i64::try_from(dto.last_insert_id).unwrap_or(i64::MAX),
-        rows_affected: dto.rows_affected,
-    }
-}
 
 /// Root capability for the platform SQLite database guest.
 pub struct SqliteRoot;
@@ -65,9 +42,6 @@ impl PluginRoot for SqliteRoot {
 }
 
 async fn connect_from_context(ctx: &DatabaseContext) -> Result<()> {
-    // Jail-granted path from spawn (`BOOKCLERK_SQLITE_PATH`) or v2 context
-    // (`sqlitePath`). Do not call `upload_file_path`: that waits on an SCM_RIGHTS
-    // send the v2 host does not perform, and deadlocks `database()`.
     let path = std::env::var("BOOKCLERK_SQLITE_PATH")
         .ok()
         .filter(|s| !s.is_empty())
@@ -97,7 +71,7 @@ struct SqliteDatabase;
 
 #[async_trait(?Send)]
 impl Database for SqliteDatabase {
-    async fn open_session(&self) -> Result<Box<dyn DatabaseSession>> {
+    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>> {
         Ok(Box::new(SqliteSession))
     }
 }
@@ -105,52 +79,20 @@ impl Database for SqliteDatabase {
 struct SqliteSession;
 
 #[async_trait(?Send)]
-impl DatabaseSession for SqliteSession {
-    async fn execute(&self, statement: Statement) -> Result<ExecResult> {
-        if statement.sql == DB_ATOMIC_SENTINEL {
-            return Err(PluginError::unsupported(
-                "bookclerk.atomic is a query, not execute",
-            ));
-        }
-        let dto = guest_execute(to_dto(&statement, None))
-            .await
-            .map_err(map_guest)?;
-        Ok(exec_from_dto(dto))
-    }
-
-    async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage> {
-        if statement.sql == DB_ATOMIC_SENTINEL {
-            let req: DbAtomicRequest = serde_json::from_str(&statement.values_json)
-                .map_err(|e| PluginError::invalid_params(e.to_string()))?;
-            let result = guest_atomic(req).await?;
-            return Ok(QueryPage {
-                rows_json: bookclerk_plugin_sdk::encode_atomic_result(result)?,
-                next_cursor: None,
-            });
-        }
-        if statement.sql == DB_CAPABILITIES_SENTINEL {
-            return Ok(QueryPage {
-                rows_json: bookclerk_plugin_sdk::encode_json(DbConnectResult::sqlite())?,
-                next_cursor: None,
-            });
-        }
-        let page = guest_query_page(to_dto(&statement, None), cursor, limit)
-            .await
-            .map_err(map_guest)?;
-        Ok(page)
-    }
-
-    async fn begin(&self) -> Result<Box<dyn Transaction>> {
-        let txn_id = guest_begin(None).await.map_err(map_guest)?;
-        Ok(Box::new(SqliteTxn { txn_id }))
-    }
-
+impl AdapterDatabaseSession for SqliteSession {
     async fn capabilities(&self) -> Result<DbCapabilities> {
         guest_capabilities().await
     }
 
-    async fn execute_atomic(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
+    async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
         guest_execute_atomic(request).await
+    }
+
+    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>> {
+        let txn_id = guest_begin(None)
+            .await
+            .map_err(plugin_error_from_engine)?;
+        Ok(Box::new(SqliteTxn { txn_id }))
     }
 }
 
@@ -159,30 +101,20 @@ struct SqliteTxn {
 }
 
 #[async_trait(?Send)]
-impl Transaction for SqliteTxn {
-    async fn execute(&self, statement: Statement) -> Result<ExecResult> {
-        let dto = guest_execute(to_dto(&statement, Some(self.txn_id.clone())))
-            .await
-            .map_err(map_guest)?;
-        Ok(exec_from_dto(dto))
-    }
-
-    async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage> {
-        let page = guest_query_page(to_dto(&statement, Some(self.txn_id.clone())), cursor, limit)
-            .await
-            .map_err(map_guest)?;
-        Ok(page)
+impl AdapterTransaction for SqliteTxn {
+    async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
+        guest_execute_atomic_on_txn(self.txn_id.clone(), request).await
     }
 
     async fn commit(&self) -> Result<()> {
-        guest_commit(self.txn_id.clone()).await.map_err(map_guest)
+        guest_commit(self.txn_id.clone())
+            .await
+            .map_err(plugin_error_from_engine)
     }
 
     async fn rollback(&self) -> Result<()> {
-        guest_rollback(self.txn_id.clone()).await.map_err(map_guest)
-    }
-
-    async fn execute_atomic(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
-        guest_execute_atomic_on_txn(self.txn_id.clone(), request).await
+        guest_rollback(self.txn_id.clone())
+            .await
+            .map_err(plugin_error_from_engine)
     }
 }

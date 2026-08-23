@@ -4,7 +4,7 @@
 //! `"unique"` are not the primary signal. COMMIT-time and connection-loss
 //! failures are `unavailable` so the host retries the same `operationId`.
 
-use bookclerk_plugin_sdk::{PluginError, PluginErrorCode};
+use crate::{PluginError, PluginErrorCode};
 use sea_orm::{DbErr, RuntimeErr};
 use serde_json::json;
 use std::ops::Deref;
