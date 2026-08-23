@@ -704,11 +704,17 @@ export class AdapterDatabaseSession extends RpcTarget {
   execute(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
     return Promise.reject(unsupported("execute"));
   }
-  /** Close the adapter session. */
+  /** Close the adapter session.
+   *
+   * @returns Resolves when the session is closed.
+   */
   close(): Promise<void> {
     return Promise.resolve();
   }
-  /** Open a host-internal interactive transaction. */
+  /** Open a host-internal interactive transaction.
+   *
+   * @returns The opened adapter transaction.
+   */
   begin(): Promise<AdapterTransaction> {
     return Promise.reject(unsupported("begin"));
   }
@@ -725,7 +731,10 @@ export class GuestDatabase extends RpcTarget {
   execute(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
     return Promise.reject(unsupported("execute"));
   }
-  /** Close the granted database handle. */
+  /** Close the granted database handle.
+   *
+   * @returns Resolves when the grant is released.
+   */
   close(): Promise<void> {
     return Promise.resolve();
   }
@@ -743,11 +752,17 @@ export class AdapterTransaction extends RpcTarget {
   execute(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
     return Promise.reject(unsupported("execute"));
   }
-  /** Commit the open transaction. */
+  /** Commit the open transaction.
+   *
+   * @returns Resolves when the transaction is committed.
+   */
   commit(): Promise<void> {
     return Promise.reject(unsupported("commit"));
   }
-  /** Roll back the open transaction. */
+  /** Roll back the open transaction.
+   *
+   * @returns Resolves when the transaction is rolled back.
+   */
   rollback(): Promise<void> {
     return Promise.reject(unsupported("rollback"));
   }
