@@ -13,6 +13,9 @@ use serde_json::Value as JsonValue;
 use super::{compile_named_request, interpret_exec, SqlFamily};
 use crate::atomic_ops::{atomic_status, DbAtomicParams};
 
+/// Injected `maxResultRows` for conn-vector row-cap cases (sqlite / postgres).
+pub const CONTRACT_VECTOR_ROW_CAP: u32 = 5;
+
 /// Runs the contract suite on a SeaORM connection (sqlite / postgres).
 ///
 /// # Panics
@@ -21,7 +24,7 @@ use crate::atomic_ops::{atomic_status, DbAtomicParams};
 pub async fn run_conn_vectors(db: &DatabaseConnection, family: SqlFamily, timing: &str) {
     let db = db.clone();
     let timing = timing.to_string();
-    run_contract_vectors(family, 5, move |req, cap| {
+    run_contract_vectors(family, CONTRACT_VECTOR_ROW_CAP, move |req, cap| {
         let db = db.clone();
         let timing = timing.clone();
         async move {

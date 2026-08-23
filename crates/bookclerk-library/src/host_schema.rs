@@ -28,11 +28,11 @@ use crate::sql_plan::execute_statements_on;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostSchemaKind {
     /// `PRAGMA user_version` on an interactive SQLite-family connection.
-    SqliteFile,
+    PragmaMarker,
     /// `schema_migrations` rows without requiring atomic HTTP batches.
-    Postgres,
+    RowMarker,
     /// `schema_migrations` plus one atomic batch per version (D1-style).
-    D1,
+    AtomicBatchMarker,
 }
 
 impl HostSchemaKind {
@@ -57,11 +57,11 @@ impl HostSchemaKind {
             && !caps.schema_migrations
             && !caps.atomic_schema_batch
         {
-            Self::SqliteFile
+            Self::PragmaMarker
         } else if caps.schema_migrations && caps.atomic_schema_batch && !caps.pragma_user_version {
-            Self::D1
+            Self::AtomicBatchMarker
         } else if caps.schema_migrations && !caps.atomic_schema_batch && !caps.pragma_user_version {
-            Self::Postgres
+            Self::RowMarker
         } else {
             return Err(LibraryError::Other(anyhow::anyhow!(
                 "database guest schema flags are not a known versioning contract \
@@ -83,9 +83,9 @@ impl HostSchemaKind {
     /// versioning scheme than this kind requires.
     pub fn advertised_flags_match(self, caps: &DbConnectResult) -> Result<()> {
         let ok = match self {
-            Self::SqliteFile => caps.pragma_user_version && !caps.atomic_schema_batch,
-            Self::D1 => caps.schema_migrations && caps.atomic_schema_batch,
-            Self::Postgres => {
+            Self::PragmaMarker => caps.pragma_user_version && !caps.atomic_schema_batch,
+            Self::AtomicBatchMarker => caps.schema_migrations && caps.atomic_schema_batch,
+            Self::RowMarker => {
                 caps.schema_migrations && !caps.atomic_schema_batch && !caps.pragma_user_version
             }
         };
@@ -108,8 +108,8 @@ impl HostSchemaKind {
 /// Returns [`LibraryError`] when a version read or DDL statement fails.
 pub async fn apply_host_schema(db: &DatabaseConnection, kind: HostSchemaKind) -> Result<()> {
     match kind {
-        HostSchemaKind::SqliteFile => apply_sqlite_user_version(db).await,
-        HostSchemaKind::Postgres => {
+        HostSchemaKind::PragmaMarker => apply_sqlite_user_version(db).await,
+        HostSchemaKind::RowMarker => {
             let backend = db.get_database_backend();
             let (backend, sql, timing) = match backend {
                 DbBackend::Postgres => (backend, migration_sql_postgres(), "postgres_txn"),
@@ -117,7 +117,7 @@ pub async fn apply_host_schema(db: &DatabaseConnection, kind: HostSchemaKind) ->
             };
             apply_schema_migrations(db, backend, timing, sql).await
         }
-        HostSchemaKind::D1 => {
+        HostSchemaKind::AtomicBatchMarker => {
             apply_schema_migrations(db, DbBackend::Sqlite, "sqlite_txn", migration_sql_d1())
                 .await?;
             let v27 = migration_v27_schema_version();
@@ -147,10 +147,10 @@ where
     Fut: Future<Output = Result<()>>,
 {
     match kind {
-        HostSchemaKind::SqliteFile => {
+        HostSchemaKind::PragmaMarker => {
             apply_sqlite_user_version_with_batch(db, &mut run_batch).await
         }
-        HostSchemaKind::Postgres => {
+        HostSchemaKind::RowMarker => {
             let backend = db.get_database_backend();
             match backend {
                 DbBackend::Postgres => {
@@ -173,7 +173,7 @@ where
                 }
             }
         }
-        HostSchemaKind::D1 => apply_host_schema(db, kind).await,
+        HostSchemaKind::AtomicBatchMarker => apply_host_schema(db, kind).await,
     }
 }
 
@@ -191,7 +191,7 @@ where
     F: FnMut(Vec<String>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    if kind != HostSchemaKind::D1 {
+    if kind != HostSchemaKind::AtomicBatchMarker {
         return apply_host_schema_native_or_batch(db, kind, run_batch).await;
     }
     ensure_schema_migrations(db, DbBackend::Sqlite).await?;
@@ -772,14 +772,14 @@ mod tests {
         sqlite.interactive_txn = false;
         assert_eq!(
             HostSchemaKind::from_capabilities(&sqlite).unwrap(),
-            HostSchemaKind::SqliteFile
+            HostSchemaKind::PragmaMarker
         );
 
         let mut pg = DbConnectResult::postgres();
         pg.dialect = "conformance-sql".into();
         assert_eq!(
             HostSchemaKind::from_capabilities(&pg).unwrap(),
-            HostSchemaKind::Postgres
+            HostSchemaKind::RowMarker
         );
 
         let mut d1 = DbConnectResult::d1();
@@ -788,7 +788,7 @@ mod tests {
         d1.interactive_txn = true;
         assert_eq!(
             HostSchemaKind::from_capabilities(&d1).unwrap(),
-            HostSchemaKind::D1
+            HostSchemaKind::AtomicBatchMarker
         );
 
         let mut mixed = DbConnectResult::sqlite();
@@ -797,7 +797,7 @@ mod tests {
         let mut none = DbConnectResult::sqlite();
         none.pragma_user_version = false;
         assert!(HostSchemaKind::from_capabilities(&none).is_err());
-        assert!(HostSchemaKind::SqliteFile
+        assert!(HostSchemaKind::PragmaMarker
             .advertised_flags_match(&none)
             .is_err());
     }
@@ -807,7 +807,7 @@ mod tests {
         let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
             .await
             .expect("unmigrated sqlite");
-        apply_host_schema(&db, HostSchemaKind::Postgres)
+        apply_host_schema(&db, HostSchemaKind::RowMarker)
             .await
             .expect("canonical sqlite pack on sqlite backend");
         let cols = db
@@ -829,7 +829,7 @@ mod tests {
             .await
             .expect("unmigrated sqlite");
         let db_batch = db.clone();
-        apply_host_schema_with_batch(&db, HostSchemaKind::D1, move |stmts| {
+        apply_host_schema_with_batch(&db, HostSchemaKind::AtomicBatchMarker, move |stmts| {
             let db_batch = db_batch.clone();
             async move {
                 run_atomic_ddl(
@@ -889,12 +889,12 @@ mod tests {
             crate::AtomicInterruptKind::Cancel,
             ddl,
         );
-        let err = apply_host_schema(&db, HostSchemaKind::SqliteFile)
+        let err = apply_host_schema(&db, HostSchemaKind::PragmaMarker)
             .await
             .expect_err("interrupt before version marker");
         assert!(err.to_string().to_lowercase().contains("cancel"), "{err}");
         assert_eq!(sqlite_user_version(&db).await.unwrap(), 0);
-        apply_host_schema(&db, HostSchemaKind::SqliteFile)
+        apply_host_schema(&db, HostSchemaKind::PragmaMarker)
             .await
             .expect("retry after crash");
         assert!(sqlite_user_version(&db).await.unwrap() > 0);
@@ -911,8 +911,8 @@ mod tests {
             .await
             .expect("open 2");
         let (a, b) = tokio::join!(
-            apply_host_schema(&db1, HostSchemaKind::SqliteFile),
-            apply_host_schema(&db2, HostSchemaKind::SqliteFile),
+            apply_host_schema(&db1, HostSchemaKind::PragmaMarker),
+            apply_host_schema(&db2, HostSchemaKind::PragmaMarker),
         );
         a.expect("first apply");
         b.expect("second apply");
@@ -958,11 +958,11 @@ mod tests {
             crate::AtomicInterruptKind::Cancel,
             ddl,
         );
-        let err = apply_host_schema(&db, HostSchemaKind::Postgres)
+        let err = apply_host_schema(&db, HostSchemaKind::RowMarker)
             .await
             .expect_err("interrupt");
         assert!(err.to_string().to_lowercase().contains("cancel"), "{err}");
-        apply_host_schema(&db, HostSchemaKind::Postgres)
+        apply_host_schema(&db, HostSchemaKind::RowMarker)
             .await
             .expect("retry");
     }
@@ -1002,8 +1002,8 @@ mod tests {
         let db1 = sea_orm::Database::connect(&db_url).await.expect("c1");
         let db2 = sea_orm::Database::connect(&db_url).await.expect("c2");
         let (a, b) = tokio::join!(
-            apply_host_schema(&db1, HostSchemaKind::Postgres),
-            apply_host_schema(&db2, HostSchemaKind::Postgres),
+            apply_host_schema(&db1, HostSchemaKind::RowMarker),
+            apply_host_schema(&db2, HostSchemaKind::RowMarker),
         );
         a.expect("first apply");
         b.expect("second apply");

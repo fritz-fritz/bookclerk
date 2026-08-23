@@ -4,9 +4,31 @@ use crate::atomic_ops::{atomic_status, DbAtomicParams};
 
 use super::{
     compile_named_request, execute_plan_on, execute_statements_on_session, AtomicSession, SqlFamily,
+    vectors::CONTRACT_VECTOR_ROW_CAP,
 };
 use std::path::PathBuf;
 use std::process::Command;
+
+/// True when Postgres conformance tests should run (URL present).
+///
+/// `BOOKCLERK_REQUIRE_POSTGRES_TESTS=1` without a URL is a hard failure so CI
+/// cannot skip these cases.
+fn postgres_conformance_enabled() -> bool {
+    let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    if url.is_some() {
+        return true;
+    }
+    assert!(
+        std::env::var("BOOKCLERK_REQUIRE_POSTGRES_TESTS")
+            .ok()
+            .as_deref()
+            != Some("1"),
+        "BOOKCLERK_TEST_POSTGRES_URL is required when BOOKCLERK_REQUIRE_POSTGRES_TESTS=1"
+    );
+    false
+}
 
 /// Opens an in-memory sqlite library and applies migrations.
 async fn mem_db() -> sea_orm::DatabaseConnection {
@@ -32,12 +54,8 @@ async fn shared_vectors_on_sqlite() {
 
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
-async fn shared_vectors_on_postgres() {
-    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
+async fn postgres_shared_vectors() {
+    if !postgres_conformance_enabled() {
         return;
     }
     let db = postgres_migrated_db().await;
@@ -520,11 +538,7 @@ fn postgres_renderer_lowers_canonical_placeholders() {
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_plan_receipt_replay() {
-    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
+    if !postgres_conformance_enabled() {
         return;
     }
     let db = postgres_migrated_db().await;
@@ -592,7 +606,7 @@ async fn postgres_migrated_db() -> sea_orm::DatabaseConnection {
     let db = sea_orm::Database::connect(&db_url)
         .await
         .expect("connect to disposable postgres database");
-    crate::apply_host_schema(&db, crate::HostSchemaKind::Postgres)
+    crate::apply_host_schema(&db, crate::HostSchemaKind::RowMarker)
         .await
         .expect("host-applied postgres schema");
     db
@@ -601,11 +615,7 @@ async fn postgres_migrated_db() -> sea_orm::DatabaseConnection {
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_claim_malformed_json_is_quarantined() {
-    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
+    if !postgres_conformance_enabled() {
         return;
     }
     let db = postgres_migrated_db().await;
@@ -959,11 +969,7 @@ async fn execute_caps_collected_rows_at_max_result_rows() {
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_plan_commit_inserts_receipt() {
-    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
+    if !postgres_conformance_enabled() {
         return;
     }
     let db = postgres_migrated_db().await;
@@ -1020,11 +1026,7 @@ async fn postgres_plan_exceeds_max_binds_is_rejected() {
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_execute_caps_collected_rows() {
-    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
+    if !postgres_conformance_enabled() {
         return;
     }
     let db = postgres_migrated_db().await;
@@ -1072,7 +1074,7 @@ async fn host_applies_schema_to_unmigrated_sqlite() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .expect("unmigrated sqlite");
-    crate::apply_host_schema(&db, crate::HostSchemaKind::SqliteFile)
+    crate::apply_host_schema(&db, crate::HostSchemaKind::PragmaMarker)
         .await
         .expect("host schema");
     let rows = sea_orm::ConnectionTrait::query_all_raw(
@@ -1201,11 +1203,7 @@ async fn plan_deadline_before_begin() {
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_plan_cancel_before_begin() {
-    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
+    if !postgres_conformance_enabled() {
         return;
     }
     let db = postgres_migrated_db().await;
@@ -1228,11 +1226,7 @@ async fn postgres_plan_cancel_before_begin() {
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_plan_cancel_during_statements() {
-    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
+    if !postgres_conformance_enabled() {
         return;
     }
     let db = postgres_migrated_db().await;
@@ -1255,11 +1249,7 @@ async fn postgres_plan_cancel_during_statements() {
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_host_applies_schema() {
-    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
+    if !postgres_conformance_enabled() {
         return;
     }
     let db = postgres_migrated_db().await;
@@ -1277,11 +1267,7 @@ async fn postgres_host_applies_schema() {
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_plan_cancel_around_commit_is_unavailable() {
-    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
+    if !postgres_conformance_enabled() {
         return;
     }
     let db = postgres_migrated_db().await;
@@ -1430,7 +1416,7 @@ async fn typed_sqlite_select_stops_after_cap_plus_one() {
     let req = typed_query("cap", "SELECT x FROM typed_rowcap");
     let mut caps =
         bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite());
-    caps.max_result_rows = 5;
+    caps.max_result_rows = CONTRACT_VECTOR_ROW_CAP;
     let err = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &req,
@@ -1564,11 +1550,7 @@ async fn typed_sqlite_per_statement_max_result_bytes() {
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
-    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
+    if !postgres_conformance_enabled() {
         return;
     }
     let db = postgres_migrated_db().await;
@@ -1635,11 +1617,7 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn typed_postgres_empty_select_describe_does_not_reexecute() {
-    if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_none()
-    {
+    if !postgres_conformance_enabled() {
         return;
     }
     let db = postgres_migrated_db().await;

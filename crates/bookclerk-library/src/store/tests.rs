@@ -3171,7 +3171,7 @@ async fn dispatch_snapshot_cas_two_stores_agree() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("lib.db");
     let db1 = bookclerk_plugin_database_sqlite::open(&path).await.unwrap();
-    crate::apply_host_schema(&db1, crate::HostSchemaKind::SqliteFile)
+    crate::apply_host_schema(&db1, crate::HostSchemaKind::PragmaMarker)
         .await
         .unwrap();
     let db2 = bookclerk_plugin_database_sqlite::open(&path).await.unwrap();
