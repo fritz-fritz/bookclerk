@@ -27,7 +27,10 @@ use crate::proxy_txn::{
     consume_commit_injection, is_txn_broken, take_txn_fault, with_exec_budget,
     AtomicInterruptPhase, ExecBudget,
 };
-use crate::{cap_query_sql, record_query_rows_seen, take_positional_result_columns};
+use crate::{
+    cap_query_sql, record_query_rows_seen, set_positional_result_columns,
+    take_positional_result_columns,
+};
 
 /// Convert a typed bind into a SeaORM value without JSON / `b64:` decoding.
 #[must_use]
@@ -142,8 +145,9 @@ fn db_value_cell_len(v: &DbValue) -> usize {
 ///
 /// Column names and declared types come from rusqlite/SQLite metadata when the
 /// adapter recorded them ([`take_positional_result_columns`]), otherwise from
-/// `QueryResult::column_names` in engine order. Duplicate names are rejected
-/// here, before any name-keyed map conversion. Empty results keep that metadata.
+/// the first engine row (Postgres `type_info`, else `column_names`). Duplicate
+/// names are rejected here, before any name-keyed map conversion. Empty
+/// Postgres `SELECT`s record metadata via a one-row probe first.
 ///
 /// # Errors
 ///
@@ -165,15 +169,7 @@ fn statement_result_from_query_results(
     let mut db_columns = take_positional_result_columns().unwrap_or_else(|| {
         engine_rows
             .first()
-            .map(|row| {
-                row.column_names()
-                    .into_iter()
-                    .map(|name| DbColumn {
-                        name,
-                        db_type: DbType::Unspecified,
-                    })
-                    .collect()
-            })
+            .map(db_columns_from_engine_row)
             .unwrap_or_default()
     });
     reject_duplicate_column_names(&db_columns)?;
@@ -216,6 +212,78 @@ fn statement_result_from_query_results(
     result.rows_affected = rows_affected_for_kind(kind, result.rows.len());
     reject_statement_result_bytes(&result, caps.max_result_bytes)?;
     Ok(result)
+}
+
+/// Records column names/types for a Postgres `SELECT` that returned no rows.
+///
+/// sqlx only exposes `RowDescription` on a `PgRow`. A `LEFT JOIN` against a
+/// one-row dummy yields a single all-NULL row with the inner query's names and
+/// type OIDs, without counting against the request row cap. Types come from
+/// `PgColumn::type_info`, not from decoding NULL cells (`Option<T>` succeeds
+/// for every SQL NULL).
+///
+/// # Errors
+///
+/// Returns when the metadata probe statement fails.
+async fn record_postgres_empty_result_columns(
+    txn: &sea_orm::DatabaseTransaction,
+    sql: &str,
+    values: Vec<SeaValue>,
+) -> Result<(), DbErr> {
+    let probe = Statement::from_sql_and_values(
+        sea_orm::DatabaseBackend::Postgres,
+        postgres_empty_metadata_sql(sql),
+        values,
+    );
+    let probe_rows = txn.query_all_raw(probe).await?;
+    let Some(row) = probe_rows.first() else {
+        return Ok(());
+    };
+    set_positional_result_columns(db_columns_from_engine_row(row));
+    Ok(())
+}
+
+/// One-row Postgres probe that preserves inner `SELECT` column metadata.
+fn postgres_empty_metadata_sql(sql: &str) -> String {
+    let inner = sql.trim().trim_end_matches(';');
+    format!(
+        "SELECT q.* FROM (SELECT 1::int AS _bc_dummy) AS _bc_d LEFT JOIN ({inner}) AS q ON TRUE LIMIT 1"
+    )
+}
+
+/// Positional [`DbColumn`]s from one engine row (Postgres OIDs when present).
+fn db_columns_from_engine_row(row: &QueryResult) -> Vec<DbColumn> {
+    if let Some(pg) = row.try_as_pg_row() {
+        use sea_orm::sqlx::{Column, TypeInfo};
+        return pg
+            .columns()
+            .iter()
+            .map(|c| DbColumn {
+                name: c.name().to_string(),
+                db_type: db_type_from_pg_type_name(c.type_info().name()),
+            })
+            .collect();
+    }
+    row.column_names()
+        .into_iter()
+        .map(|name| DbColumn {
+            name,
+            db_type: DbType::Unspecified,
+        })
+        .collect()
+}
+
+/// Maps a sqlx Postgres `TypeInfo::name` onto the universal [`DbType`].
+fn db_type_from_pg_type_name(name: &str) -> DbType {
+    match name {
+        "BOOL" => DbType::Bool,
+        "INT2" | "INT4" | "INT8" | "SMALLINT" | "INT" | "INTEGER" | "BIGINT" | "SMALLSERIAL"
+        | "SERIAL" | "BIGSERIAL" | "OID" => DbType::Int64,
+        "FLOAT4" | "FLOAT8" | "REAL" | "DOUBLE PRECISION" => DbType::Float64,
+        "BYTEA" => DbType::Bytes,
+        "TEXT" | "VARCHAR" | "NAME" | "BPCHAR" | "CHAR" | "CSTRING" | "UNKNOWN" => DbType::Text,
+        _ => DbType::Unspecified,
+    }
 }
 
 /// Fails when two positional columns share a name.
@@ -456,7 +524,7 @@ async fn execute_typed_body(
             stmt.sql.clone()
         };
         let sql = lower_canonical_sql(backend, &sql);
-        let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
+        let sea_stmt = Statement::from_sql_and_values(backend, &sql, values.clone());
         let stmt_result =
             match stmt.result_selection {
                 DbResultSelection::Rows | DbResultSelection::Cursor => {
@@ -471,6 +539,18 @@ async fn execute_typed_body(
                                 return Err(err);
                             }
                         };
+                    if engine_rows.is_empty()
+                        && backend == sea_orm::DatabaseBackend::Postgres
+                        && stmt.kind.wrap_select_limit()
+                    {
+                        if let Err(err) =
+                            record_postgres_empty_result_columns(&txn, &sql, values.clone()).await
+                        {
+                            let _ = txn.rollback().await;
+                            let _ = take_txn_fault();
+                            return Err(err);
+                        }
+                    }
                     match statement_result_from_query_results(&engine_rows, stmt.kind, caps) {
                         Ok(result) => result,
                         Err(err) => {
@@ -635,5 +715,27 @@ mod tests {
         };
         let v = db_value_for_column(&SeaValue::Bytes(None), &col).unwrap();
         assert!(matches!(v, DbValue::Null(DbType::Int64)));
+    }
+
+    #[test]
+    fn postgres_empty_metadata_sql_selects_inner_columns_only() {
+        let sql = postgres_empty_metadata_sql(
+            "SELECT * FROM (SELECT x FROM typed_probe WHERE false) AS _bc_cap LIMIT 11",
+        );
+        assert!(sql.contains("LEFT JOIN (SELECT * FROM (SELECT x FROM typed_probe WHERE false) AS _bc_cap LIMIT 11) AS q"));
+        assert!(sql.contains("SELECT q.*"));
+        assert!(!sql.contains("_bc_dummy,"));
+    }
+
+    #[test]
+    fn postgres_type_names_map_onto_universal_db_type() {
+        assert_eq!(db_type_from_pg_type_name("INT4"), DbType::Int64);
+        assert_eq!(db_type_from_pg_type_name("INT8"), DbType::Int64);
+        assert_eq!(db_type_from_pg_type_name("TEXT"), DbType::Text);
+        assert_eq!(db_type_from_pg_type_name("BYTEA"), DbType::Bytes);
+        assert_eq!(db_type_from_pg_type_name("BOOL"), DbType::Bool);
+        assert_eq!(db_type_from_pg_type_name("FLOAT8"), DbType::Float64);
+        assert_eq!(db_type_from_pg_type_name("INTERVAL"), DbType::Unspecified);
+        assert_eq!(db_type_from_pg_type_name("NUMERIC"), DbType::Unspecified);
     }
 }

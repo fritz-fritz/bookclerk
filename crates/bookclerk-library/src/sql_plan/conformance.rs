@@ -1545,7 +1545,12 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
     .await
     .unwrap();
     assert!(reply.statements[0].rows.is_empty());
+    assert_eq!(reply.statements[0].columns.len(), 1);
     assert_eq!(reply.statements[0].columns[0].name, "x");
+    assert_eq!(
+        reply.statements[0].columns[0].db_type,
+        bookclerk_plugin_abi::DbType::Int64
+    );
 
     let nulls = typed_query("nulls", "SELECT x FROM typed_probe");
     let reply = bookclerk_db_exec::execute_typed_on_session(
@@ -1559,8 +1564,12 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        reply.statements[0].columns[0].db_type,
+        bookclerk_plugin_abi::DbType::Int64
+    );
     assert!(matches!(
         reply.statements[0].rows[0].values[0],
-        bookclerk_plugin_abi::DbValue::Null(_)
+        bookclerk_plugin_abi::DbValue::Null(bookclerk_plugin_abi::DbType::Int64)
     ));
 }
