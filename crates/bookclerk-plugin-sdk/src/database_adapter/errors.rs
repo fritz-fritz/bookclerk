@@ -219,6 +219,8 @@ fn is_syntax(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::missing_panics_doc)]
+
     use super::*;
 
     #[test]

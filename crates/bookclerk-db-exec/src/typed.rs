@@ -293,6 +293,10 @@ fn db_type_from_pg_type_name(name: &str) -> DbType {
 }
 
 /// Fails when two positional columns share a name.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when a duplicate column name is present.
 fn reject_duplicate_column_names(columns: &[DbColumn]) -> Result<(), DbErr> {
     let mut seen = HashSet::new();
     for col in columns {
@@ -307,6 +311,10 @@ fn reject_duplicate_column_names(columns: &[DbColumn]) -> Result<(), DbErr> {
 }
 
 /// Fails when the Cap'n-encoded [`StatementResult`] exceeds `max_result_bytes`.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when the encoded result exceeds `max_result_bytes`.
 fn reject_statement_result_bytes(
     result: &StatementResult,
     max_result_bytes: u32,
@@ -327,6 +335,10 @@ fn reject_statement_result_bytes(
 }
 
 /// Positional cells from one engine row (proxy rows looked up by recorded name).
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a column is missing or a cell cannot be decoded.
 fn db_values_from_query_result(
     row: &QueryResult,
     columns: &[DbColumn],
@@ -350,6 +362,10 @@ fn db_values_from_query_result(
 }
 
 /// Converts a SeaORM cell, stamping declared column type onto SQL NULL.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the SeaORM value is outside the universal domain.
 fn db_value_for_column(sea: &SeaValue, col: &DbColumn) -> Result<DbValue, DbErr> {
     let value = db_value_from_sea(sea).map_err(DbErr::Custom)?;
     Ok(match value {
@@ -363,6 +379,10 @@ fn db_value_for_column(sea: &SeaValue, col: &DbColumn) -> Result<DbValue, DbErr>
 /// `Option<T>` succeeds for every SQL NULL, so the declared [`DbType`] is tried
 /// first. Untyped nulls stay `Null(Unspecified)` rather than the first match
 /// (`Bytes`).
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the cell cannot be decoded for any preferred type.
 fn sea_value_from_index(row: &QueryResult, idx: usize, prefer: DbType) -> Result<SeaValue, DbErr> {
     let order: &[DbType] = match prefer {
         DbType::Bytes => &[
@@ -536,6 +556,10 @@ const NESTED_ATOMIC_SAVEPOINT: &str = "bookclerk_nested_atomic";
 
 /// Runs `f` inside `SAVEPOINT bookclerk_nested_atomic` and rolls back to it
 /// on any error so a later outer commit cannot persist a partial batch.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when savepoint setup, `f`, or savepoint release fails.
 async fn nested_savepoint<F, Fut, T>(txn: &DatabaseTransaction, f: F) -> Result<T, DbErr>
 where
     F: FnOnce() -> Fut,
@@ -606,6 +630,10 @@ where
 }
 
 /// Statement loop for [`execute_typed_on_txn`] (no COMMIT / ROLLBACK).
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails, encoding fails, or a result budget is exceeded.
 async fn execute_typed_join_body(
     txn: &DatabaseTransaction,
     describe: Option<&DatabaseConnection>,

@@ -7,6 +7,8 @@
 //! `dbBegin` and implement `dbAtomic` (one HTTP batch). SQLite and Postgres
 //! also implement `dbAtomic` as one native transaction plus a durable receipt.
 
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
 

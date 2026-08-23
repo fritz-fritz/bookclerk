@@ -1,6 +1,10 @@
 //! ABI v2 database factory for the platform SQLite guest.
 
-#![allow(clippy::missing_docs_in_private_items)]
+#![allow(
+    clippy::missing_docs_in_private_items,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc
+)]
 
 use async_trait::async_trait;
 use bookclerk_plugin_sdk::database_adapter::{

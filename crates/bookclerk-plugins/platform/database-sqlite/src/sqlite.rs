@@ -38,6 +38,10 @@ struct SqliteState {
 
 impl SqliteState {
     /// Starts `BEGIN IMMEDIATE` or a numbered savepoint; increments `txn_depth`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a rusqlite error when the engine rejects `BEGIN` or `SAVEPOINT`.
     fn begin(&mut self) -> rusqlite::Result<()> {
         if self.txn_depth == 0 {
             self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -50,6 +54,10 @@ impl SqliteState {
     }
 
     /// Commits the outer transaction or releases the innermost savepoint; no-op at depth 0.
+    ///
+    /// # Errors
+    ///
+    /// Returns a rusqlite error when the engine rejects `COMMIT` or `RELEASE`.
     fn commit(&mut self) -> rusqlite::Result<()> {
         if self.txn_depth == 0 {
             return Ok(());
@@ -65,6 +73,10 @@ impl SqliteState {
     }
 
     /// Rolls back the outer transaction or the innermost savepoint; no-op at depth 0.
+    ///
+    /// # Errors
+    ///
+    /// Returns a rusqlite error when the engine rejects `ROLLBACK` or savepoint cleanup.
     fn rollback(&mut self) -> rusqlite::Result<()> {
         if self.txn_depth == 0 {
             return Ok(());

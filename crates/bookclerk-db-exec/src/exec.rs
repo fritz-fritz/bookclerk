@@ -157,6 +157,10 @@ pub async fn execute_statements_on_session(
 }
 
 /// Body of [`execute_statements_on_session`] after the request budget is armed.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails, a result budget is exceeded, or the session is interrupted.
 async fn execute_statements_body(
     db: &DatabaseConnection,
     plan: &DbAtomicPlan,
@@ -345,6 +349,10 @@ pub(crate) async fn collect_capped_query_results(
 }
 
 /// Collects at most `max_result_rows + 1` rows, checking cell/result bytes first.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the engine query fails or a result budget is exceeded.
 async fn collect_capped_query_rows(
     txn: &sea_orm::DatabaseTransaction,
     stmt: Statement,
@@ -382,6 +390,10 @@ fn row_stop_after(max_result_rows: u32) -> usize {
 }
 
 /// Converts one engine row, enforcing cell then statement byte budgets.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a cell or statement byte budget is exceeded.
 fn push_capped_json_row(
     json_rows: &mut Vec<JsonValue>,
     used: &mut usize,
@@ -407,6 +419,10 @@ fn atomic_result_envelope_len(operation_id: &str) -> usize {
 }
 
 /// Adds one encoded statement result (plus array comma) toward the aggregate cap.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when the running aggregate would exceed `max_atomic_result_bytes`.
 fn note_atomic_stmt_bytes(
     used: &mut usize,
     stmt_index: usize,
@@ -435,6 +451,10 @@ fn note_atomic_stmt_bytes(
 }
 
 /// Exact encoded-size check of the finished result (including timing).
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when the encoded result exceeds `max_atomic_result_bytes`.
 fn note_atomic_result_bytes(
     result: &DbPlanExecResult,
     max_atomic_result_bytes: u32,
@@ -455,6 +475,10 @@ fn note_atomic_result_bytes(
 }
 
 /// Maps a SeaORM query row onto the generic JSON result object.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the row cannot be converted to JSON.
 fn query_row_to_json(row: QueryResult) -> Result<JsonValue, DbErr> {
     let proxy = from_query_result_to_proxy_row(&row);
     let mut map = serde_json::Map::new();
@@ -474,6 +498,10 @@ pub fn json_cell_utf8_len(v: &JsonValue) -> usize {
 }
 
 /// Fails when any string/blob cell in `row` exceeds `max_cell_bytes`.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when a cell exceeds `max_cell_bytes`.
 fn reject_row_cell_bytes(row: &JsonValue, max_cell_bytes: u32) -> Result<(), DbErr> {
     if max_cell_bytes == 0 {
         return Ok(());
@@ -500,6 +528,10 @@ fn reject_row_cell_bytes(row: &JsonValue, max_cell_bytes: u32) -> Result<(), DbE
 }
 
 /// Accumulates JSON bytes of `row` and fails when the statement budget is exceeded.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when the running total would exceed `max_result_bytes`.
 fn note_result_row_bytes(
     row: &JsonValue,
     used: &mut usize,
@@ -533,6 +565,10 @@ pub fn note_encoded_result_bytes(
 
 /// Fails closed when `rows` exceeds a positive cap (the extra row was fetched
 /// only to detect overflow).
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when `rows` exceeds `max_result_rows`.
 fn json_rows_respecting_cap(
     json_rows: Vec<JsonValue>,
     max_result_rows: u32,

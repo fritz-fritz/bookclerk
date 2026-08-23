@@ -7,6 +7,8 @@
 //! ([`migrations`]), typed [`entities`], and the store API. See
 //! `docs/database.md`.
 
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+
 mod atomic_ops;
 mod atomic_txn;
 mod backend_migrate;
