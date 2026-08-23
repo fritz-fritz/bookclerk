@@ -176,23 +176,28 @@ impl LibraryStore {
     {
         crate::authorize_guest_typed_request(&mut req, self.connect_result(), policy)
             .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
-        if let Some(exec) = &self.typed_exec {
-            return exec.execute_typed(req).await;
-        }
-        let timing = match self.db.get_database_backend() {
-            sea_orm::DatabaseBackend::Postgres => "postgres_txn",
-            _ => "sqlite_txn",
+        let guest_len = req.statements.len();
+        let guest_hash = req.request_hash.clone();
+        let wrapped = crate::sql_plan::wrap_guest_typed_request(req);
+        let reply = if let Some(exec) = &self.typed_exec {
+            exec.execute_typed(wrapped).await?
+        } else {
+            let timing = match self.db.get_database_backend() {
+                sea_orm::DatabaseBackend::Postgres => "postgres_txn",
+                _ => "sqlite_txn",
+            };
+            let deadline = (wrapped.deadline_unix_ms > 0).then_some(wrapped.deadline_unix_ms);
+            bookclerk_db_exec::execute_typed_on_session(
+                &self.db,
+                &wrapped,
+                timing,
+                bookclerk_db_exec::ExecCaps::from_connect(self.connect_result()),
+                bookclerk_db_exec::AtomicSession::from_deadline(deadline),
+            )
+            .await
+            .map_err(plugin_err_from_db)?
         };
-        let deadline = (req.deadline_unix_ms > 0).then_some(req.deadline_unix_ms);
-        bookclerk_db_exec::execute_typed_on_session(
-            &self.db,
-            &req,
-            timing,
-            bookclerk_db_exec::ExecCaps::from_connect(self.connect_result()),
-            bookclerk_db_exec::AtomicSession::from_deadline(deadline),
-        )
-        .await
-        .map_err(plugin_err_from_db)
+        crate::sql_plan::unwrap_guest_typed_reply(reply, guest_len, &guest_hash)
     }
 
     /// Subscribers packed into one dispatch plan (receipt overhead is ~12 statements).

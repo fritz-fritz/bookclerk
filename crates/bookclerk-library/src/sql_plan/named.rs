@@ -568,9 +568,13 @@ fn for_each_top_level_keyword(sql: &str, mut on_keyword: impl FnMut(usize, &str)
 }
 
 /// Inserts a write gate before top-level `RETURNING`, or as `WHERE`/`AND` on DML.
-fn apply_write_predicate(sql: &str, kind: DbPlanStatementKind, pred: &str) -> String {
+///
+/// `INSERT … VALUES` is rewritten to `INSERT … SELECT` first so a trailing
+/// `WHERE` is valid SQL.
+pub(super) fn apply_write_predicate(sql: &str, kind: DbPlanStatementKind, pred: &str) -> String {
+    let sql = rewrite_insert_values_to_select(sql);
     let splice_at = match kind {
-        DbPlanStatementKind::Returning | DbPlanStatementKind::Query => find_returning_clause(sql),
+        DbPlanStatementKind::Returning | DbPlanStatementKind::Query => find_returning_clause(&sql),
         _ => None,
     };
     if let Some(idx) = splice_at {
@@ -578,7 +582,111 @@ fn apply_write_predicate(sql: &str, kind: DbPlanStatementKind, pred: &str) -> St
         let returning = sql[idx..].trim_start();
         return format!("{} {} {pred} {returning}", prefix, where_or_and(prefix));
     }
-    format!("{sql} {} {pred}", where_or_and(sql))
+    format!("{sql} {} {pred}", where_or_and(&sql))
+}
+
+/// Rewrites a top-level `INSERT … VALUES (…)` tuple into `INSERT … SELECT …`.
+///
+/// Multi-row `VALUES (…), (…)` and `DEFAULT VALUES` are left unchanged.
+pub(super) fn rewrite_insert_values_to_select(sql: &str) -> String {
+    if find_first_top_level_keyword(sql, "SELECT").is_some() {
+        return sql.to_string();
+    }
+    let Some(values_at) = find_first_top_level_keyword(sql, "VALUES") else {
+        return sql.to_string();
+    };
+    let after = skip_ascii_ws(sql, values_at + "VALUES".len());
+    if sql.as_bytes().get(after) != Some(&b'(') {
+        return sql.to_string();
+    }
+    let Some(end) = skip_balanced_parens(sql, after) else {
+        return sql.to_string();
+    };
+    if sql[end..].trim_start().starts_with(',') {
+        return sql.to_string();
+    }
+    let inner = sql[after + 1..end - 1].trim();
+    format!("{}SELECT {inner}{}", &sql[..values_at], &sql[end..])
+}
+
+/// Byte offset of the first top-level keyword matching `want`, if present.
+fn find_first_top_level_keyword(sql: &str, want: &str) -> Option<usize> {
+    let mut found = None;
+    for_each_top_level_keyword(sql, |idx, kw| {
+        if found.is_none() && kw.eq_ignore_ascii_case(want) {
+            found = Some(idx);
+        }
+    });
+    found
+}
+
+/// Advances `i` past ASCII whitespace.
+fn skip_ascii_ws(sql: &str, mut i: usize) -> usize {
+    let bytes = sql.as_bytes();
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Index just past a balanced `(...)` group starting at `start`.
+fn skip_balanced_parens(sql: &str, start: usize) -> Option<usize> {
+    if sql.as_bytes().get(start) != Some(&b'(') {
+        return None;
+    }
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut i = start;
+    let mut in_s = false;
+    let mut in_d = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_s {
+            if c == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_s = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_d {
+            if c == b'"' {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
+                in_d = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => {
+                in_s = true;
+                i += 1;
+            }
+            b'"' => {
+                in_d = true;
+                i += 1;
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// `AND` when `sql` already has a top-level `WHERE`; otherwise `WHERE`.
