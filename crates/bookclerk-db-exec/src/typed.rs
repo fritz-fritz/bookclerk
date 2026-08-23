@@ -254,7 +254,7 @@ fn postgres_empty_metadata_sql(sql: &str) -> String {
 /// Positional [`DbColumn`]s from one engine row (Postgres OIDs when present).
 fn db_columns_from_engine_row(row: &QueryResult) -> Vec<DbColumn> {
     if let Some(pg) = row.try_as_pg_row() {
-        use sea_orm::sqlx::{Column, TypeInfo};
+        use sea_orm::sqlx::{Column, Row, TypeInfo};
         return pg
             .columns()
             .iter()
