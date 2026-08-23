@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::ThreadId;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,6 +42,17 @@ static INJECT_BEGIN: LazyLock<Mutex<HashMap<TaskKey, u32>>> =
 /// Remaining injected `COMMIT` failures for tests, keyed by task.
 static INJECT_COMMIT: LazyLock<Mutex<HashMap<TaskKey, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Remaining injected savepoint `RELEASE` failures for tests, keyed by task.
+static INJECT_SAVEPOINT_RELEASE: LazyLock<Mutex<HashMap<TaskKey, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Remaining injected savepoint `ROLLBACK TO` failures for tests, keyed by task.
+static INJECT_SAVEPOINT_ROLLBACK: LazyLock<Mutex<HashMap<TaskKey, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Process-wide savepoint `RELEASE` injections so a txn worker task can observe
+/// faults armed by the test task that opened the transaction.
+static GLOBAL_SAVEPOINT_RELEASE: AtomicU32 = AtomicU32::new(0);
+/// Process-wide savepoint `ROLLBACK TO` injections (see [`GLOBAL_SAVEPOINT_RELEASE`]).
+static GLOBAL_SAVEPOINT_ROLLBACK: AtomicU32 = AtomicU32::new(0);
 /// Injected atomic session interrupt (cancel or deadline) for tests.
 static INJECT_INTERRUPT: LazyLock<Mutex<HashMap<TaskKey, InjectedInterrupt>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -231,6 +242,30 @@ pub fn inject_commit_failures(n: u32) {
         .insert(task_key(), n);
 }
 
+/// Queue `n` injected nested-savepoint `RELEASE` failures for this task.
+///
+/// Also arms a process-wide counter so a txn worker (different Tokio task)
+/// can observe the fault.
+pub fn inject_savepoint_release_failures(n: u32) {
+    INJECT_SAVEPOINT_RELEASE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(task_key(), n);
+    GLOBAL_SAVEPOINT_RELEASE.store(n, Ordering::SeqCst);
+}
+
+/// Queue `n` injected nested-savepoint `ROLLBACK TO` failures for this task.
+///
+/// Also arms a process-wide counter so a txn worker (different Tokio task)
+/// can observe the fault.
+pub fn inject_savepoint_rollback_failures(n: u32) {
+    INJECT_SAVEPOINT_ROLLBACK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(task_key(), n);
+    GLOBAL_SAVEPOINT_ROLLBACK.store(n, Ordering::SeqCst);
+}
+
 /// Consume one injected begin failure if any remain for this task.
 #[must_use]
 pub fn consume_begin_injection() -> bool {
@@ -241,6 +276,18 @@ pub fn consume_begin_injection() -> bool {
 #[must_use]
 pub fn consume_commit_injection() -> bool {
     consume_injection(&INJECT_COMMIT)
+}
+
+/// Consume one injected savepoint `RELEASE` failure if any remain for this task.
+#[must_use]
+pub fn consume_savepoint_release_injection() -> bool {
+    consume_injection_or_global(&INJECT_SAVEPOINT_RELEASE, &GLOBAL_SAVEPOINT_RELEASE)
+}
+
+/// Consume one injected savepoint `ROLLBACK TO` failure if any remain for this task.
+#[must_use]
+pub fn consume_savepoint_rollback_injection() -> bool {
+    consume_injection_or_global(&INJECT_SAVEPOINT_ROLLBACK, &GLOBAL_SAVEPOINT_ROLLBACK)
 }
 
 /// Queue an atomic session interrupt for this task (cancel or deadline at `phase`).
@@ -295,6 +342,27 @@ fn consume_injection(map: &Mutex<HashMap<TaskKey, u32>>) -> bool {
         }
         _ => false,
     }
+}
+
+/// Consumes a task-local injection, then a process-wide counter.
+///
+/// Nested `executeAtomic` runs on a txn worker task, so tests that arm
+/// savepoint faults from the caller still need the worker to observe them.
+/// Both counters are decremented together so same-task unit tests do not
+/// double-fire.
+fn consume_injection_or_global(map: &Mutex<HashMap<TaskKey, u32>>, global: &AtomicU32) -> bool {
+    let task_hit = consume_injection(map);
+    let global_hit = loop {
+        let n = global.load(Ordering::SeqCst);
+        if n == 0 {
+            break false;
+        }
+        match global.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => break true,
+            Err(_) => continue,
+        }
+    };
+    task_hit || global_hit
 }
 
 /// Unix time in milliseconds.

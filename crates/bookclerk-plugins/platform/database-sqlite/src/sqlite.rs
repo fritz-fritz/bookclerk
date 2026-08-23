@@ -509,6 +509,17 @@ impl ProxyDatabaseTrait for SqliteProxy {
     }
 
     async fn commit(&self) {
+        if is_txn_broken() {
+            let depth = {
+                let mut state = self.lock_state();
+                if let Err(err) = state.rollback() {
+                    tracing::error!(error = %err, "sqlite rollback of poisoned transaction");
+                }
+                state.txn_depth
+            };
+            self.release_lease_if_idle(depth);
+            return;
+        }
         if consume_commit_injection() {
             note_commit_failed("injected commit failure");
             let depth = {

@@ -704,6 +704,12 @@ async fn pop_finish(
     }
     let (_, txn) = stack.pop().expect("checked last");
     if commit {
+        if bookclerk_db_exec::is_txn_broken() {
+            let fault = bookclerk_db_exec::take_txn_fault()
+                .unwrap_or_else(|| "database transaction is broken".into());
+            let _ = txn.rollback().await;
+            return Err(fault);
+        }
         txn.commit()
             .await
             .map_err(|e| format!("database commit failed: {e}"))?;
@@ -1992,6 +1998,138 @@ mod tests {
         assert!(
             rows.rows.is_empty(),
             "partial nested batch must not survive outer commit: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_atomic_on_open_txn_savepoint_release_failure_poisons_outer_commit() {
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
+        };
+        let _lock = SESSION_LOCK.lock().await;
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        guest_execute(stmt(
+            "CREATE TABLE nested_release (id INTEGER PRIMARY KEY, v TEXT)",
+        ))
+        .await
+        .unwrap();
+        let txn_id = guest_begin(None).await.unwrap();
+        bookclerk_db_exec::inject_savepoint_release_failures(1);
+        let err = guest_execute_atomic_on_txn(
+            txn_id.clone(),
+            ExecuteRequest {
+                operation_id: "nested-release".into(),
+                request_hash: String::new(),
+                statements: vec![TypedDbStatement {
+                    sql: "INSERT INTO nested_release (id, v) VALUES (?, ?)".into(),
+                    parameters: vec![DbValue::Int64(1), DbValue::Text("x".into())],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                }],
+                outcome_index: 0,
+                payload_index: 0,
+                has_payload_index: false,
+                prior_receipt_index: 0,
+                has_prior_receipt_index: false,
+                receipt_select_index: 0,
+                has_receipt_select_index: false,
+                deadline_unix_ms: 0,
+            },
+        )
+        .await
+        .expect_err("injected RELEASE must fail");
+        assert!(
+            err.to_string().to_lowercase().contains("release")
+                || err.to_string().to_lowercase().contains("savepoint")
+                || err.to_string().to_lowercase().contains("broken"),
+            "{err}"
+        );
+        guest_commit(txn_id)
+            .await
+            .expect_err("poisoned txn must not commit");
+        let rows = guest_query(stmt("SELECT v FROM nested_release"))
+            .await
+            .unwrap();
+        assert!(
+            rows.rows.is_empty(),
+            "nested work must not persist after RELEASE poison: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_atomic_on_open_txn_savepoint_rollback_failure_poisons_outer_commit() {
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
+        };
+        let _lock = SESSION_LOCK.lock().await;
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        guest_execute(stmt(
+            "CREATE TABLE nested_rollback (id INTEGER PRIMARY KEY, v TEXT)",
+        ))
+        .await
+        .unwrap();
+        let txn_id = guest_begin(None).await.unwrap();
+        bookclerk_db_exec::inject_savepoint_rollback_failures(1);
+        let err = guest_execute_atomic_on_txn(
+            txn_id.clone(),
+            ExecuteRequest {
+                operation_id: "nested-rollback".into(),
+                request_hash: String::new(),
+                statements: vec![
+                    TypedDbStatement {
+                        sql: "INSERT INTO nested_rollback (id, v) VALUES (?, ?)".into(),
+                        parameters: vec![DbValue::Int64(1), DbValue::Text("keep".into())],
+                        kind: DbPlanStatementKind::Execute,
+                        max_rows: 0,
+                        result_selection: DbResultSelection::AffectedRows,
+                    },
+                    TypedDbStatement {
+                        sql: "INSERT INTO nested_rollback (id, v) VALUES (?, ?)".into(),
+                        parameters: vec![DbValue::Int64(1), DbValue::Text("dup".into())],
+                        kind: DbPlanStatementKind::Execute,
+                        max_rows: 0,
+                        result_selection: DbResultSelection::AffectedRows,
+                    },
+                ],
+                outcome_index: 0,
+                payload_index: 0,
+                has_payload_index: false,
+                prior_receipt_index: 0,
+                has_prior_receipt_index: false,
+                receipt_select_index: 0,
+                has_receipt_select_index: false,
+                deadline_unix_ms: 0,
+            },
+        )
+        .await
+        .expect_err("injected ROLLBACK must fail after inner unique error");
+        assert!(
+            err.to_string().to_lowercase().contains("rollback")
+                || err.to_string().to_lowercase().contains("savepoint")
+                || err.to_string().to_lowercase().contains("broken")
+                || err.to_string().to_lowercase().contains("unique"),
+            "{err}"
+        );
+        guest_commit(txn_id)
+            .await
+            .expect_err("poisoned txn must not commit");
+        let rows = guest_query(stmt("SELECT v FROM nested_rollback"))
+            .await
+            .unwrap();
+        assert!(
+            rows.rows.is_empty(),
+            "partial nested work must not persist after ROLLBACK poison: {rows:?}"
         );
     }
 }

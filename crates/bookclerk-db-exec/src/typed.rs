@@ -24,8 +24,9 @@ use crate::exec::{
 };
 use crate::lower_canonical_sql;
 use crate::proxy_txn::{
-    consume_commit_injection, is_txn_broken, take_txn_fault, with_exec_budget,
-    AtomicInterruptPhase, ExecBudget,
+    consume_commit_injection, consume_savepoint_release_injection,
+    consume_savepoint_rollback_injection, is_txn_broken, note_commit_failed, take_txn_fault,
+    with_exec_budget, AtomicInterruptPhase, ExecBudget,
 };
 use crate::{
     cap_query_sql, record_query_rows_seen, set_positional_result_columns,
@@ -548,28 +549,58 @@ where
     .await?;
     match f().await {
         Ok(value) => {
-            let _ = txn
+            if consume_savepoint_release_injection() {
+                let msg = "database savepoint RELEASE failed: injected savepoint RELEASE failure";
+                note_commit_failed(msg);
+                return Err(DbErr::Custom(msg.into()));
+            }
+            if let Err(err) = txn
                 .execute_raw(Statement::from_string(
                     backend,
                     format!("RELEASE SAVEPOINT {NESTED_ATOMIC_SAVEPOINT}"),
                 ))
-                .await;
+                .await
+            {
+                note_commit_failed(format!("database savepoint RELEASE failed: {err}"));
+                return Err(err);
+            }
             Ok(value)
         }
         Err(err) => {
-            let _ = txn
-                .execute_raw(Statement::from_string(
+            let rollback_err = if consume_savepoint_rollback_injection() {
+                Some("injected savepoint ROLLBACK failure".to_string())
+            } else {
+                txn.execute_raw(Statement::from_string(
                     backend,
                     format!("ROLLBACK TO SAVEPOINT {NESTED_ATOMIC_SAVEPOINT}"),
                 ))
-                .await;
-            let _ = txn
-                .execute_raw(Statement::from_string(
+                .await
+                .err()
+                .map(|e| e.to_string())
+            };
+            let release_err = if consume_savepoint_release_injection() {
+                Some("injected savepoint RELEASE failure".to_string())
+            } else {
+                txn.execute_raw(Statement::from_string(
                     backend,
                     format!("RELEASE SAVEPOINT {NESTED_ATOMIC_SAVEPOINT}"),
                 ))
-                .await;
-            Err(err)
+                .await
+                .err()
+                .map(|e| e.to_string())
+            };
+            if rollback_err.is_none() && release_err.is_none() {
+                return Err(err);
+            }
+            let cleanup = [rollback_err.as_deref(), release_err.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("; ");
+            note_commit_failed(format!(
+                "database savepoint cleanup failed after inner error: {cleanup}"
+            ));
+            Err(DbErr::Custom(format!("{err}; {cleanup}")))
         }
     }
 }
