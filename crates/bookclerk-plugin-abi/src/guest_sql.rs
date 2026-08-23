@@ -65,6 +65,188 @@ const DENIED_VERBS: &[&str] = &[
     "VACUUM",
 ];
 
+/// Host-issued scope for one granted database binding.
+///
+/// Empty [`Self::deny_all`] denies every table. Catalog identifiers
+/// (`encrypted_secrets`, `sqlite_*`, `pg_*`, `information_schema`) are always
+/// refused even if listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestSqlPolicy {
+    tables: std::collections::BTreeSet<String>,
+    columns: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    functions: std::collections::BTreeSet<String>,
+}
+
+impl Default for GuestSqlPolicy {
+    fn default() -> Self {
+        Self::deny_all()
+    }
+}
+
+impl GuestSqlPolicy {
+    /// No tables, columns, or functions.
+    #[must_use]
+    pub fn deny_all() -> Self {
+        Self {
+            tables: std::collections::BTreeSet::new(),
+            columns: std::collections::BTreeMap::new(),
+            functions: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Allows `tables` with builtin scalar functions and any column on those tables.
+    #[must_use]
+    pub fn allow_tables(tables: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        Self {
+            tables: tables
+                .into_iter()
+                .map(|t| normalize_ident(t.as_ref()))
+                .filter(|t| !t.is_empty())
+                .collect(),
+            columns: std::collections::BTreeMap::new(),
+            functions: builtin_functions(),
+        }
+    }
+
+    /// Restricts `table` to `cols` (must already be an allowed table).
+    #[must_use]
+    pub fn restrict_columns(
+        mut self,
+        table: &str,
+        cols: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
+        self.columns.insert(
+            normalize_ident(table),
+            cols.into_iter()
+                .map(|c| normalize_ident(c.as_ref()))
+                .filter(|c| !c.is_empty())
+                .collect(),
+        );
+        self
+    }
+
+    /// Authorizes parsed refs against this allowlist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::invalid_params`] when a table, column, or
+    /// function is outside this policy.
+    fn authorize(&self, index: usize, refs: &GuestSqlRefs) -> Result<()> {
+        for table in &refs.tables {
+            self.authorize_table(index, table)?;
+        }
+        for (table, column) in &refs.columns {
+            if column == "*" {
+                if let Some(table) = table {
+                    if self.columns.contains_key(table) {
+                        return Err(PluginError::invalid_params(format!(
+                            "statement {index} SELECT * is not allowed on column-restricted table {table}"
+                        )));
+                    }
+                }
+                continue;
+            }
+            if let Some(table) = table {
+                self.authorize_table(index, table)?;
+                if let Some(allowed) = self.columns.get(table) {
+                    if !allowed.contains(column) {
+                        return Err(PluginError::invalid_params(format!(
+                            "statement {index} names unauthorized column {table}.{column}"
+                        )));
+                    }
+                }
+            }
+        }
+        for func in &refs.functions {
+            if !self.functions.contains(func) {
+                return Err(PluginError::invalid_params(format!(
+                    "statement {index} names unauthorized function {func}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Authorizes one table name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::invalid_params`] when `table` is catalog-denied
+    /// or not in this policy.
+    fn authorize_table(&self, index: usize, table: &str) -> Result<()> {
+        if table_denied(table) || !self.tables.contains(&normalize_ident(table)) {
+            return Err(PluginError::invalid_params(format!(
+                "statement {index} names unauthorized table {table}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn builtin_functions() -> std::collections::BTreeSet<String> {
+    [
+        "abs",
+        "avg",
+        "cast",
+        "coalesce",
+        "count",
+        "date",
+        "datetime",
+        "group_concat",
+        "hex",
+        "ifnull",
+        "iif",
+        "instr",
+        "json_array",
+        "json_extract",
+        "json_object",
+        "json_valid",
+        "length",
+        "lower",
+        "max",
+        "min",
+        "nullif",
+        "quote",
+        "replace",
+        "round",
+        "strftime",
+        "substr",
+        "sum",
+        "time",
+        "total",
+        "trim",
+        "typeof",
+        "upper",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+/// Tables, columns, and functions referenced by guest SQL.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GuestSqlRefs {
+    /// FROM/JOIN/INTO/UPDATE/TABLE names.
+    pub tables: Vec<String>,
+    /// `(table, column)` pairs; `table` is `None` when unqualified.
+    pub columns: Vec<(Option<String>, String)>,
+    /// Function names (`ident(`).
+    pub functions: Vec<String>,
+}
+
+/// Authorizes parsed table/column/function refs against a host-issued policy.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a referenced object is outside
+/// `policy`.
+pub fn authorize_guest_sql_policy(req: &ExecuteRequest, policy: &GuestSqlPolicy) -> Result<()> {
+    for (i, stmt) in req.statements.iter().enumerate() {
+        policy.authorize(i, &parse_guest_sql_refs(&stmt.sql))?;
+    }
+    Ok(())
+}
+
 /// Classifies guest SQL the same way the host stamps `DbStatement.kind`.
 ///
 /// Leading `WITH` / `WITH RECURSIVE` CTE lists are skipped so the **main**
@@ -336,17 +518,153 @@ fn validate_selection(
 
 fn table_denied(name: &str) -> bool {
     name.split('.').any(|part| {
-        let lower = part
-            .trim()
-            .trim_matches('"')
-            .trim_matches('`')
-            .trim_matches('[')
-            .trim_matches(']')
-            .to_ascii_lowercase();
+        let lower = normalize_ident(part);
         DENIED_TABLES.iter().any(|t| *t == lower)
             || lower.starts_with("sqlite_")
             || lower.starts_with("pg_")
     })
+}
+
+fn normalize_ident(name: &str) -> String {
+    name.trim()
+        .trim_matches('"')
+        .trim_matches('`')
+        .trim_matches('[')
+        .trim_matches(']')
+        .to_ascii_lowercase()
+}
+
+/// Parsed table, column, and function names from one guest statement.
+#[must_use]
+pub fn parse_guest_sql_refs(sql: &str) -> GuestSqlRefs {
+    let tables = named_tables(sql)
+        .into_iter()
+        .map(|t| normalize_ident(&t))
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>();
+    let mut columns = Vec::new();
+    let mut functions = Vec::new();
+    let mut prev_ident: Option<String> = None;
+    let mut depth = 0usize;
+    for_each_unquoted(sql, |slice, i| {
+        let bytes = slice.as_bytes();
+        let c = bytes[i];
+        if c == b'(' {
+            depth = depth.saturating_add(1);
+            prev_ident = None;
+            return 1;
+        }
+        if c == b')' {
+            depth = depth.saturating_sub(1);
+            prev_ident = None;
+            return 1;
+        }
+        if c == b'.' {
+            if let Some(table) = prev_ident.take() {
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && ident_start(bytes[j]) {
+                    let start = j;
+                    j += 1;
+                    while j < bytes.len() && ident_cont(bytes[j]) {
+                        j += 1;
+                    }
+                    let col = normalize_ident(&slice[start..j]);
+                    if !col.is_empty() {
+                        columns.push((Some(normalize_ident(&table)), col));
+                    }
+                    return j - i;
+                }
+            }
+            return 1;
+        }
+        if ident_start(c) {
+            let mut j = i + 1;
+            while j < bytes.len() && ident_cont(bytes[j]) {
+                j += 1;
+            }
+            let ident = normalize_ident(&slice[i..j]);
+            let mut k = j;
+            while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            if bytes.get(k) == Some(&b'(') && !sql_keyword(&ident) {
+                functions.push(ident);
+                prev_ident = None;
+                return k - i;
+            }
+            if ident == "*" && depth == 0 {
+                columns.push((tables.first().cloned(), "*".into()));
+                prev_ident = None;
+                return j - i;
+            }
+            prev_ident = Some(ident);
+            return j - i;
+        }
+        if !c.is_ascii_whitespace() {
+            prev_ident = None;
+        }
+        1
+    });
+    GuestSqlRefs {
+        tables,
+        columns,
+        functions,
+    }
+}
+
+fn sql_keyword(ident: &str) -> bool {
+    matches!(
+        ident,
+        "and"
+            | "as"
+            | "asc"
+            | "between"
+            | "by"
+            | "case"
+            | "collate"
+            | "cross"
+            | "desc"
+            | "distinct"
+            | "else"
+            | "end"
+            | "exists"
+            | "from"
+            | "full"
+            | "group"
+            | "having"
+            | "in"
+            | "inner"
+            | "insert"
+            | "into"
+            | "is"
+            | "join"
+            | "left"
+            | "like"
+            | "limit"
+            | "not"
+            | "null"
+            | "offset"
+            | "on"
+            | "or"
+            | "order"
+            | "outer"
+            | "over"
+            | "recursive"
+            | "returning"
+            | "right"
+            | "select"
+            | "set"
+            | "then"
+            | "union"
+            | "update"
+            | "values"
+            | "when"
+            | "where"
+            | "with"
+    )
 }
 
 /// Positional `?` count (or unique `$n` when the SQL has no `?`).
@@ -1000,5 +1318,50 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.to_string().contains("affectedRows"), "{err}");
+    }
+
+    #[test]
+    fn policy_allowlist_rejects_unrelated_tables_and_functions() {
+        let books = GuestSqlPolicy::allow_tables(["books"]);
+        authorize_guest_sql_policy(
+            &req("SELECT id FROM books", vec![], DbResultSelection::Rows, 1),
+            &books,
+        )
+        .unwrap();
+        let err = authorize_guest_sql_policy(
+            &req("SELECT id FROM jobs", vec![], DbResultSelection::Rows, 1),
+            &books,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unauthorized table"), "{err}");
+        let err = authorize_guest_sql_policy(
+            &req(
+                "SELECT load_extension('x') FROM books",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &books,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unauthorized function"), "{err}");
+        let restricted = GuestSqlPolicy::allow_tables(["books"]).restrict_columns("books", ["id"]);
+        let err = authorize_guest_sql_policy(
+            &req(
+                "SELECT books.token FROM books",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &restricted,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unauthorized column"), "{err}");
+        let err = authorize_guest_sql_policy(
+            &req("SELECT id FROM books", vec![], DbResultSelection::Rows, 1),
+            &GuestSqlPolicy::deny_all(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unauthorized table"), "{err}");
     }
 }

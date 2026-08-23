@@ -191,8 +191,11 @@ pub fn authorize_typed_request(
 pub fn authorize_guest_typed_request(
     req: &mut ExecuteRequest,
     caps: &DbConnectResult,
+    policy: &bookclerk_plugin_abi::GuestSqlPolicy,
 ) -> crate::error::Result<()> {
     bookclerk_plugin_abi::validate_guest_execute_request(req)
+        .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
+    bookclerk_plugin_abi::authorize_guest_sql_policy(req, policy)
         .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
     authorize_typed_request(req, caps)
 }
@@ -566,6 +569,7 @@ mod limits_tests {
     fn authorize_guest_typed_request_rejects_ddl_tables_binds_and_selection() {
         use bookclerk_plugin_abi::{DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement};
         let caps = DbConnectResult::sqlite();
+        let books = bookclerk_plugin_abi::GuestSqlPolicy::allow_tables(["books"]);
         let mut ddl = ExecuteRequest {
             operation_id: "g".into(),
             request_hash: String::new(),
@@ -585,20 +589,20 @@ mod limits_tests {
             has_receipt_select_index: false,
             deadline_unix_ms: 0,
         };
-        let err = super::authorize_guest_typed_request(&mut ddl, &caps).unwrap_err();
+        let err = super::authorize_guest_typed_request(&mut ddl, &caps, &books).unwrap_err();
         assert!(err.to_string().contains("disallowed"), "{err}");
 
         let mut secrets = ddl.clone();
         secrets.statements[0].sql = "SELECT token FROM encrypted_secrets".into();
         secrets.statements[0].result_selection = DbResultSelection::Rows;
-        let err = super::authorize_guest_typed_request(&mut secrets, &caps).unwrap_err();
+        let err = super::authorize_guest_typed_request(&mut secrets, &caps, &books).unwrap_err();
         assert!(err.to_string().contains("unauthorized"), "{err}");
 
         let mut binds = ddl.clone();
         binds.statements[0].sql = "SELECT ? FROM books WHERE id = ?".into();
         binds.statements[0].parameters = vec![DbValue::Int64(1)];
         binds.statements[0].result_selection = DbResultSelection::Rows;
-        let err = super::authorize_guest_typed_request(&mut binds, &caps).unwrap_err();
+        let err = super::authorize_guest_typed_request(&mut binds, &caps, &books).unwrap_err();
         assert!(err.to_string().contains("placeholder"), "{err}");
 
         let mut rows_on_insert = ddl.clone();
@@ -606,16 +610,22 @@ mod limits_tests {
         rows_on_insert.statements[0].parameters = vec![DbValue::Int64(1)];
         rows_on_insert.statements[0].result_selection = DbResultSelection::Rows;
         rows_on_insert.statements[0].max_rows = 1;
-        let err = super::authorize_guest_typed_request(&mut rows_on_insert, &caps).unwrap_err();
+        let err =
+            super::authorize_guest_typed_request(&mut rows_on_insert, &caps, &books).unwrap_err();
         assert!(err.to_string().contains("row-producing"), "{err}");
 
         let mut select = ddl.clone();
         select.statements[0].sql = "SELECT id FROM books".into();
         select.statements[0].kind = DbPlanStatementKind::Query;
         select.statements[0].result_selection = DbResultSelection::Rows;
-        super::authorize_guest_typed_request(&mut select, &caps).unwrap();
+        super::authorize_guest_typed_request(&mut select, &caps, &books).unwrap();
         assert_eq!(select.statements[0].kind, DbPlanStatementKind::Select);
         assert!(!select.request_hash.is_empty());
+
+        let mut jobs = select.clone();
+        jobs.statements[0].sql = "SELECT id FROM jobs".into();
+        let err = super::authorize_guest_typed_request(&mut jobs, &caps, &books).unwrap_err();
+        assert!(err.to_string().contains("unauthorized table"), "{err}");
     }
 
     #[test]

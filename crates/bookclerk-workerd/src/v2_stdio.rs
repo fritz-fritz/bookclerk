@@ -19,7 +19,7 @@ use bookclerk_plugin_abi::v2::{
     ScalarLimitsDto, Source, SourceContext, WorkerContext, WriteOptions, MAX_LIST_PAGE,
     MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
-use bookclerk_plugin_abi::{PluginError, Result as AbiResult};
+use bookclerk_plugin_abi::{GuestSqlPolicy, PluginError, Result as AbiResult};
 use tokio::io::AsyncRead;
 
 use crate::granted::{GrantedSlot, GrantedTable};
@@ -533,6 +533,7 @@ impl JobHandler for HttpJobHandler {
                 allow_progress: true,
                 database: context.database.map(Rc::from),
                 allow_database,
+                sql_policy: GuestSqlPolicy::deny_all(),
                 max_atomic_request_bytes,
             },
         );

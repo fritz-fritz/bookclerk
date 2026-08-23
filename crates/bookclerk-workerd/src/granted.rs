@@ -19,8 +19,8 @@ use bookclerk_plugin_abi::v2::{
     Source, WriteOptions,
 };
 use bookclerk_plugin_abi::{
-    canonical_execute_request_hash, encoded_execute_request_bytes, guest_statement_kind,
-    validate_guest_execute_request, PluginError,
+    authorize_guest_sql_policy, canonical_execute_request_hash, encoded_execute_request_bytes,
+    guest_statement_kind, validate_guest_execute_request, GuestSqlPolicy, PluginError,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -45,6 +45,8 @@ pub struct GrantedSlot {
     pub database: Option<Rc<dyn DatabaseSession>>,
     /// Whether `executeAtomic` is permitted on this grant.
     pub allow_database: bool,
+    /// Host-issued table/column/function allowlist for guest SQL.
+    pub sql_policy: GuestSqlPolicy,
     /// Negotiated `maxAtomicRequestBytes`. Zero is fail-closed (empty body
     /// only), never unlimited; grants with a database must store `1..=MAX_SCALAR_BYTES`.
     pub max_atomic_request_bytes: u32,
@@ -320,8 +322,10 @@ fn dispatch_atomic_budget(table: &GrantedTable, invocation: String) -> Result<u3
 fn authorize_granted_request(
     req: &mut bookclerk_plugin_abi::ExecuteRequest,
     max_bytes: u32,
+    policy: &GuestSqlPolicy,
 ) -> Result<(), PluginError> {
     validate_guest_execute_request(req)?;
+    authorize_guest_sql_policy(req, policy)?;
     for stmt in &mut req.statements {
         stmt.kind = guest_statement_kind(&stmt.sql);
     }
@@ -352,7 +356,7 @@ async fn dispatch_execute_atomic(
     request_bytes: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
     let mut req = decode_execute_request_bytes(&request_bytes).map_err(|err| err.to_string())?;
-    let (db, cap) = {
+    let (db, cap, policy) = {
         let mut table = table.borrow_mut();
         let slot = table
             .get_mut(&invocation)
@@ -368,9 +372,9 @@ async fn dispatch_execute_atomic(
             .database
             .clone()
             .ok_or_else(|| "database not granted".to_string())?;
-        (db, slot.max_atomic_request_bytes)
+        (db, slot.max_atomic_request_bytes, slot.sql_policy.clone())
     };
-    if let Err(err) = authorize_granted_request(&mut req, cap) {
+    if let Err(err) = authorize_granted_request(&mut req, cap, &policy) {
         return encoded_execute_atomic_reply_bytes(Err(err)).map_err(|err| err.to_string());
     }
     let outcome = db.execute_atomic(req).await;
@@ -972,6 +976,7 @@ mod tests {
                 allow_progress: true,
                 database: None,
                 allow_database: false,
+                sql_policy: GuestSqlPolicy::deny_all(),
                 max_atomic_request_bytes: 0,
             },
         );
@@ -1015,6 +1020,7 @@ mod tests {
                 allow_progress: true,
                 database: None,
                 allow_database: false,
+                sql_policy: GuestSqlPolicy::deny_all(),
                 max_atomic_request_bytes: 0,
             },
         );
@@ -1045,6 +1051,7 @@ mod tests {
                 allow_progress: true,
                 database: None,
                 allow_database: false,
+                sql_policy: GuestSqlPolicy::deny_all(),
                 max_atomic_request_bytes: 0,
             },
         );
@@ -1183,6 +1190,7 @@ mod tests {
                 allow_progress: true,
                 database: Some(session.clone()),
                 allow_database: true,
+                sql_policy: GuestSqlPolicy::allow_tables(["books"]),
                 max_atomic_request_bytes: 0,
             },
         );
@@ -1248,6 +1256,17 @@ mod tests {
                 1,
             ),
             "row-producing",
+        )
+        .await;
+        assert_granted_policy_rejects(
+            guest_sql_bytes(
+                "SELECT id FROM jobs",
+                vec![],
+                DbPlanStatementKind::Select,
+                DbResultSelection::Rows,
+                1,
+            ),
+            "unauthorized table",
         )
         .await;
     }

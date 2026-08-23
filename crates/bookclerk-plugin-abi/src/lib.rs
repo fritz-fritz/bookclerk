@@ -98,7 +98,10 @@ pub use db_execute::{
 pub use db_value::{db_value_from_json, db_value_to_json, DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use events::{HostToPluginEvent, PluginToHostEvent};
-pub use guest_sql::{guest_statement_kind, validate_guest_execute_request};
+pub use guest_sql::{
+    authorize_guest_sql_policy, guest_statement_kind, parse_guest_sql_refs,
+    validate_guest_execute_request, GuestSqlPolicy, GuestSqlRefs,
+};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
 pub use types::*;
