@@ -1136,8 +1136,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let modules = dir.path().join("modules");
         std::fs::create_dir_all(&modules).expect("modules dir");
-        std::fs::write(modules.join("plugin.py"), "from bookclerk_plugin_sdk.workerd import BookclerkPlugin\n")
-            .expect("plugin.py");
+        std::fs::write(
+            modules.join("plugin.py"),
+            "from bookclerk_plugin_sdk.workerd import BookclerkPlugin\n",
+        )
+        .expect("plugin.py");
         let manifest = PluginManifest {
             api_version: 2,
             id: "echo_py".into(),
