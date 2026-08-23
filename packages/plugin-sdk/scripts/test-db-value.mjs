@@ -16,8 +16,8 @@ const {
   decodeExecuteRequest,
   createDatabaseBinding,
   canonicalExecuteRequestHash,
-  encodeExecuteAtomicReply,
-  decodeExecuteAtomicReply,
+  encodeExecuteResultReply,
+  decodeExecuteResultReply,
 } = await import(join(dist, "db-execute.js"));
 
 function hex(bytes) {
@@ -142,7 +142,7 @@ assert.deepEqual(Array.from(back.statements[0].parameters[2].value), [0xff]);
 let encodedByBinding = 0;
 const binding = createDatabaseBinding(
   {
-    async executeAtomic(req) {
+    async execute(req) {
       encodedByBinding = encodeExecuteRequest(req).byteLength;
       return {
         operationId: req.operationId,
@@ -159,7 +159,7 @@ assert.equal(encodedByBinding, reqBytes.byteLength);
 
 const sequentialIds = [];
 const seqBinding = createDatabaseBinding({
-  async executeAtomic(req) {
+  async execute(req) {
     sequentialIds.push(req.operationId);
     assert.notEqual(req.operationId, "op");
     assert.equal(req.requestHash, "");
@@ -204,7 +204,7 @@ assert.equal(await canonicalExecuteRequestHash(deadlineReq), GOLDEN_DEADLINE_HAS
 
 const firstSeen = [];
 const firstBinding = createDatabaseBinding({
-  async executeAtomic(req) {
+  async execute(req) {
     firstSeen.push({
       maxRows: req.statements[0].maxRows,
       resultSelection: req.statements[0].resultSelection,
@@ -234,7 +234,7 @@ assert.equal(row.n.value, 1n);
 
 const mixedSeen = [];
 const mixBinding = createDatabaseBinding({
-  async executeAtomic(req) {
+  async execute(req) {
     mixedSeen.push(
       req.statements.map((s) => ({
         selection: s.resultSelection,
@@ -290,8 +290,8 @@ const i64Reply = {
   ],
   timing: { attemptElapsedUs: 1, dbExecutionUs: 2, dbTimingSource: "test" },
 };
-const atomicOk = encodeExecuteAtomicReply({ ok: i64Reply });
-const decodedOk = decodeExecuteAtomicReply(atomicOk);
+const atomicOk = encodeExecuteResultReply({ ok: i64Reply });
+const decodedOk = decodeExecuteResultReply(atomicOk);
 assert.equal(decodedOk.statements[0].rows[0].values[0].value, I64_MIN);
 assert.equal(decodedOk.statements[0].rows[0].values[1].value, I64_MAX);
 assert.deepEqual(
@@ -301,11 +301,11 @@ assert.deepEqual(
 assert.equal(decodedOk.statements[0].rows[0].values[3].value, "b64:not-bytes");
 assert.equal(decodedOk.statements[0].rows[0].values[4].value, "int64");
 
-const atomicErr = encodeExecuteAtomicReply({
+const atomicErr = encodeExecuteResultReply({
   err: { code: "unavailable", message: "retry me" },
 });
 try {
-  decodeExecuteAtomicReply(atomicErr);
+  decodeExecuteResultReply(atomicErr);
   assert.fail("expected PluginError");
 } catch (err) {
   assert.equal(err.code, "unavailable");

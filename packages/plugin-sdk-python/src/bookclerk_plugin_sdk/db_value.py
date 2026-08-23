@@ -106,7 +106,7 @@ class TypedDbStatement(TypedDict):
 
 
 class ExecuteRequest(TypedDict):
-    """Typed ``DatabaseSession.executeAtomic`` request."""
+    """Typed ``execute`` request."""
 
     operationId: str
     requestHash: str
@@ -139,7 +139,7 @@ class DbTiming(TypedDict):
 
 
 class ExecuteReply(TypedDict):
-    """Typed ``executeAtomic`` reply."""
+    """Typed ``execute`` reply."""
 
     operationId: str
     statements: list[StatementResult]
@@ -232,7 +232,7 @@ def encode_execute_request(request: ExecuteRequest) -> bytes:
         ValueError: If ``statements`` is empty.
     """
     if not request["statements"]:
-        raise ValueError("executeAtomic statements must be non-empty")
+        raise ValueError("execute statements must be non-empty")
     msg = _CapnpMessage()
     root = msg.init_root(4, 3)
     root.set_text(0, request["operationId"])
@@ -267,7 +267,7 @@ def decode_execute_request(data: bytes) -> ExecuteRequest:
     root = reader.root(4, 3)
     stmt_structs = root.get_struct_list(2, 1, 2)
     if not stmt_structs:
-        raise ValueError("executeAtomic statements must be non-empty")
+        raise ValueError("execute statements must be non-empty")
     return {
         "operationId": root.get_text(0),
         "requestHash": root.get_text(1),
@@ -283,10 +283,10 @@ def decode_execute_request(data: bytes) -> ExecuteRequest:
     }
 
 
-def encode_execute_atomic_reply(
+def encode_execute_result_reply(
     outcome: ExecuteReply | tuple[str, str],
 ) -> bytes:
-    """Encode ``ExecuteAtomicReply`` (``ok`` reply or ``(code, message)`` err)."""
+    """Encode ``ExecuteResultReply`` (``ok`` reply or ``(code, message)`` err)."""
     msg = _CapnpMessage()
     root = msg.init_root(1, 1)
     if isinstance(outcome, tuple):
@@ -300,8 +300,8 @@ def encode_execute_atomic_reply(
     return msg.finish()
 
 
-def decode_execute_atomic_reply(data: bytes) -> ExecuteReply:
-    """Decode ``ExecuteAtomicReply``. ``err`` is raised as ``PluginError``."""
+def decode_execute_result_reply(data: bytes) -> ExecuteReply:
+    """Decode ``ExecuteResultReply``. ``err`` is raised as ``PluginError``."""
     root = _CapnpReader(data).root(1, 1)
     disc = root.get_u16(0)
     if disc == 0:
@@ -311,7 +311,7 @@ def decode_execute_atomic_reply(data: bytes) -> ExecuteReply:
         from bookclerk_plugin_sdk.workerd import PluginError
 
         raise PluginError.from_wire(err.get_text(0), err.get_text(1))
-    raise ValueError("unknown ExecuteAtomicReply union member")
+    raise ValueError("unknown ExecuteResultReply union member")
 
 
 def _write_execute_reply(root: _CapnpStruct, reply: ExecuteReply) -> None:
@@ -374,7 +374,7 @@ class DatabaseBinding:
     """Host-mediated Cloudflare-style SQL binding for plugin guests.
 
     Public surface is ``prepare().bind().run()/first()/all()`` and
-    ``batch()``. Raw ``executeAtomic`` is an internal transport used by those
+    ``batch()``. Raw ``execute`` is an internal transport used by those
     methods. Each call without an explicit :class:`RetryToken` mints a fresh
     operation id and leaves ``requestHash`` empty so the trusted host can stamp
     the canonical digest after validation. A :class:`RetryToken` reuses both.
@@ -382,7 +382,7 @@ class DatabaseBinding:
 
     def __init__(
         self,
-        execute_atomic: Callable[[ExecuteRequest], ExecuteReply],
+        execute: Callable[[ExecuteRequest], ExecuteReply],
         *,
         max_request_bytes: int = 0,
         max_result_rows: int = 0,
@@ -390,17 +390,17 @@ class DatabaseBinding:
         request_hash: str = "",
         deadline_unix_ms: int = 0,
     ) -> None:
-        """Create a binding over a host ``executeAtomic`` transport.
+        """Create a binding over a host ``execute`` transport.
 
         Args:
-            execute_atomic: Host session projection.
+            execute: Host session projection.
             max_request_bytes: Negotiated cap (``0`` = unlimited).
             max_result_rows: Default ``maxRows`` for :meth:`PreparedStatement.all`.
             operation_id: Default retry id; omitted calls mint a UUID.
             request_hash: Default retry hash; empty lets the host stamp one.
             deadline_unix_ms: Guest-visible deadline (unix ms).
         """
-        self._execute_atomic = execute_atomic
+        self._execute = execute
         self._max_request_bytes = max_request_bytes
         self._max_result_rows = max_result_rows
         self._operation_id = operation_id
@@ -444,7 +444,7 @@ class DatabaseBinding:
                     "batch statement is missing terminal intent (as_run/as_first/as_all)"
                 )
             typed.append(stmt._as_typed())  # noqa: SLF001
-        return self._execute_atomic_batch(typed, retry=retry)
+        return self._execute_batch(typed, retry=retry)
 
     def execute(
         self,
@@ -453,16 +453,16 @@ class DatabaseBinding:
         retry: RetryToken | None = None,
     ) -> ExecuteReply:
         """Internal typed-batch transport. Prefer :meth:`prepare` / :meth:`batch`."""
-        return self._execute_atomic_batch(batch, retry=retry)
+        return self._execute_batch(batch, retry=retry)
 
-    def _execute_atomic_batch(
+    def _execute_batch(
         self,
         batch: list[TypedDbStatement],
         *,
         retry: RetryToken | None = None,
     ) -> ExecuteReply:
         if not batch:
-            raise ValueError("executeAtomic statements must be non-empty")
+            raise ValueError("execute statements must be non-empty")
         if retry is not None:
             operation_id = retry.operation_id
             request_hash = retry.request_hash
@@ -491,7 +491,7 @@ class DatabaseBinding:
                 f"atomic request is {len(encoded)} bytes; guest maxRequestBytes is "
                 f"{self._max_request_bytes}"
             )
-        return self._execute_atomic(request)
+        return self._execute(request)
 
 
 class RetryToken:

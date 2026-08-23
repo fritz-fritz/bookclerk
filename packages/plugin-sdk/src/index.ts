@@ -43,9 +43,9 @@ export type { DbType, DbValue } from "./db-value.js";
 export {
   canonicalExecuteRequestHash,
   createDatabaseBinding,
-  decodeExecuteAtomicReply,
+  decodeExecuteResultReply,
   decodeExecuteRequest,
-  encodeExecuteAtomicReply,
+  encodeExecuteResultReply,
   encodeExecuteRequest,
 } from "./db-execute.js";
 export type {

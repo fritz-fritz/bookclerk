@@ -28,6 +28,9 @@ export {
   PluginError,
   ProgressSink,
   Source,
+  AdapterDatabaseSession,
+  AdapterTransaction,
+  GuestDatabase,
   wrapV2PluginFromBinding,
   wrapV2PluginFromNative,
   PRODUCT_API_VERSION,
@@ -67,9 +70,9 @@ export type {
 export {
   canonicalExecuteRequestHash,
   createDatabaseBinding,
-  decodeExecuteAtomicReply,
+  decodeExecuteResultReply,
   decodeExecuteRequest,
-  encodeExecuteAtomicReply,
+  encodeExecuteResultReply,
   encodeExecuteRequest,
 } from "./db-execute.js";
 export { decodeDbValue, encodeDbValue, parseDbValue } from "./db-value.js";

@@ -3,7 +3,7 @@
  *
  * `encodeExecuteRequest` emits the same unpacked Cap'n stream as the Rust SDK.
  * `DatabaseBinding.execute` builds that message (for `maxRequestBytes`) and
- * forwards the structured request through a host `executeAtomic` transport.
+ * forwards the structured request through a host `execute` transport.
  */
 
 import { CapnpMessage, CapnpReader, type CapnpStruct, type StructReader } from "./db-capnp.js";
@@ -61,7 +61,7 @@ export interface TypedDbStatement {
 }
 
 /**
- * Typed `DatabaseSession.executeAtomic` request.
+ * Typed `execute` request.
  */
 export interface ExecuteRequest {
   /** Caller-chosen idempotency key. */
@@ -133,7 +133,7 @@ export interface DbTiming {
 }
 
 /**
- * Typed `executeAtomic` reply.
+ * Typed `execute` reply.
  */
 export interface ExecuteReply {
   /** Echo of the request `operationId`. */
@@ -145,7 +145,7 @@ export interface ExecuteReply {
 }
 
 /**
- * Host `DatabaseSession.executeAtomic` projection.
+ * Host `GuestDatabase.execute` projection.
  */
 export interface AtomicTransport {
   /**
@@ -154,7 +154,7 @@ export interface AtomicTransport {
    * @param request Structured Cap'n `ExecuteRequest`.
    * @returns Structured `ExecuteReply`.
    */
-  executeAtomic(request: ExecuteRequest): Promise<ExecuteReply>;
+  execute(request: ExecuteRequest): Promise<ExecuteReply>;
 }
 
 /**
@@ -226,7 +226,7 @@ export interface PreparedStatement {
  * Host-mediated typed SQL surface for plugin guests.
  *
  * Public API is Cloudflare-style `prepare().bind().run()/first()/all()` plus
- * atomic `batch()`. Raw `executeAtomic` stays internal.
+ * atomic `batch()`. Raw `execute` stays internal.
  */
 export interface DatabaseBinding {
   /**
@@ -267,7 +267,7 @@ export interface DatabaseBinding {
  */
 export function encodeExecuteRequest(request: ExecuteRequest): Uint8Array {
   if (request.statements.length === 0) {
-    throw new Error("executeAtomic statements must be non-empty");
+    throw new Error("execute statements must be non-empty");
   }
   const msg = new CapnpMessage();
   const root = msg.initRoot(4, 3);
@@ -300,7 +300,7 @@ export function decodeExecuteRequest(bytes: Uint8Array): ExecuteRequest {
   const root = reader.root(4, 3);
   const stmtStructs = root.getStructList(2, 1, 2);
   if (stmtStructs.length === 0) {
-    throw new Error("executeAtomic statements must be non-empty");
+    throw new Error("execute statements must be non-empty");
   }
   return {
     operationId: root.getText(0),
@@ -331,12 +331,12 @@ export function encodeExecuteReply(reply: ExecuteReply): Uint8Array {
 }
 
 /**
- * Encodes `ExecuteAtomicReply` (`ok` or `err`).
+ * Encodes `ExecuteResultReply` (`ok` or `err`).
  *
  * @param outcome Successful reply or a wire `PluginError`.
  * @returns Unpacked Cap'n stream bytes.
  */
-export function encodeExecuteAtomicReply(
+export function encodeExecuteResultReply(
   outcome: { ok: ExecuteReply } | { err: { code: string; message: string } },
 ): Uint8Array {
   const msg = new CapnpMessage();
@@ -354,13 +354,13 @@ export function encodeExecuteAtomicReply(
 }
 
 /**
- * Decodes a standalone `ExecuteAtomicReply`. `err` is thrown as `PluginError`.
+ * Decodes a standalone `ExecuteResultReply`. `err` is thrown as `PluginError`.
  *
  * @param bytes Unpacked Cap'n stream.
  * @returns Structured `ExecuteReply`.
  * @throws When the union is `err` or the buffer is invalid.
  */
-export function decodeExecuteAtomicReply(bytes: Uint8Array): ExecuteReply {
+export function decodeExecuteResultReply(bytes: Uint8Array): ExecuteReply {
   const root = new CapnpReader(bytes).root(1, 1);
   const disc = root.getUint16(0);
   if (disc === 0) {
@@ -390,7 +390,7 @@ export function decodeExecuteAtomicReply(bytes: Uint8Array): ExecuteReply {
       wireCode: code,
     });
   }
-  throw new Error("unknown ExecuteAtomicReply union member");
+  throw new Error("unknown ExecuteResultReply union member");
 }
 
 function writeExecuteReply(root: CapnpStruct, reply: ExecuteReply): void {
@@ -457,7 +457,7 @@ function readStatementResult(s: StructReader): StatementResult {
 }
 
 /**
- * Builds a host-mediated {@link DatabaseBinding} over an `executeAtomic` transport.
+ * Builds a host-mediated {@link DatabaseBinding} over an `execute` transport.
  *
  * @param transport Host session projection.
  * @param options Request-budget and idempotency knobs.
@@ -467,12 +467,12 @@ export function createDatabaseBinding(
   transport: AtomicTransport,
   options: DatabaseBindingOptions = {},
 ): DatabaseBinding {
-  const executeAtomic = async (
+  const runExecute = async (
     batch: TypedDbStatement[],
     retry?: RetryToken,
   ): Promise<ExecuteReply> => {
     if (!Array.isArray(batch) || batch.length === 0) {
-      throw new Error("executeAtomic statements must be non-empty");
+      throw new Error("execute statements must be non-empty");
     }
     const request = await executeRequestFromBatch(batch, options, retry);
     const encoded = encodeExecuteRequest(request);
@@ -482,7 +482,7 @@ export function createDatabaseBinding(
         `atomic request is ${encoded.byteLength} bytes; guest maxRequestBytes is ${cap}`,
       );
     }
-    return transport.executeAtomic(request);
+    return transport.execute(request);
   };
 
   const binding: DatabaseBinding = {
@@ -499,10 +499,10 @@ export function createDatabaseBinding(
         }
         return (s as PreparedInternal)._asTyped();
       });
-      return executeAtomic(typed, opts?.retry);
+      return runExecute(typed, opts?.retry);
     },
     execute(batch, opts) {
-      return executeAtomic(batch, opts?.retry);
+      return runExecute(batch, opts?.retry);
     },
   };
   return binding;

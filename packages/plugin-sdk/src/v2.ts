@@ -8,7 +8,7 @@
 
 import "./cloudflare-workers.d.ts";
 import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
-import { createDatabaseBinding, decodeExecuteAtomicReply, encodeExecuteRequest } from "./db-execute.js";
+import { createDatabaseBinding, decodeExecuteResultReply, encodeExecuteRequest } from "./db-execute.js";
 import type { ExecuteReply, ExecuteRequest } from "./db-execute.js";
 
 /** Product ABI version (`plugin.toml` `api_version` and `describe().apiVersion`). */
@@ -680,27 +680,13 @@ export class Integration extends RpcTarget {
 
 /** Database factory. Sessions cannot survive suspension. */
 export class Database extends RpcTarget {
-  openSession(): Promise<DatabaseSession> {
+  openSession(): Promise<AdapterDatabaseSession> {
     return Promise.reject(unsupported("openSession"));
   }
 }
 
-/** Invocation-scoped database session. */
-export class DatabaseSession extends RpcTarget {
-  execute(_sql: string, _valuesJson?: string): Promise<{ lastInsertId: number; rowsAffected: number }> {
-    return Promise.reject(unsupported("execute"));
-  }
-  query(
-    _sql: string,
-    _valuesJson?: string,
-    _cursor?: string,
-    _limit?: number,
-  ): Promise<{ rowsJson: string; nextCursor?: string }> {
-    return Promise.reject(unsupported("query"));
-  }
-  begin(): Promise<DbTransaction> {
-    return Promise.reject(unsupported("begin"));
-  }
+/** Host ↔ database adapter session (`capabilities` + typed `execute`). */
+export class AdapterDatabaseSession extends RpcTarget {
   /**
    * Typed SQL-contract advertisement (`abiMinor` ≥ 7).
    *
@@ -715,33 +701,35 @@ export class DatabaseSession extends RpcTarget {
    * @param _request - Cap'n `ExecuteRequest` (structured Workers RPC object).
    * @returns `ExecuteReply`.
    */
-  executeAtomic(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
-    return Promise.reject(unsupported("executeAtomic"));
+  execute(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
+    return Promise.reject(unsupported("execute"));
+  }
+  close(): Promise<void> {
+    return Promise.resolve();
+  }
+  begin(): Promise<AdapterTransaction> {
+    return Promise.reject(unsupported("begin"));
+  }
+}
+
+/** Host-granted SQL transport for job plugin authors (no `capabilities`). */
+export class GuestDatabase extends RpcTarget {
+  /**
+   * Host-mediated typed batch (`ExecuteRequest` → `ExecuteReply`).
+   *
+   * @param _request - Cap'n `ExecuteRequest`.
+   * @returns `ExecuteReply`.
+   */
+  execute(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
+    return Promise.reject(unsupported("execute"));
   }
   close(): Promise<void> {
     return Promise.resolve();
   }
 }
 
-/** Invocation-scoped transaction. */
-export class DbTransaction extends RpcTarget {
-  execute(_sql: string, _valuesJson?: string): Promise<{ lastInsertId: number; rowsAffected: number }> {
-    return Promise.reject(unsupported("execute"));
-  }
-  query(
-    _sql: string,
-    _valuesJson?: string,
-    _cursor?: string,
-    _limit?: number,
-  ): Promise<{ rowsJson: string; nextCursor?: string }> {
-    return Promise.reject(unsupported("query"));
-  }
-  commit(): Promise<void> {
-    return Promise.reject(unsupported("commit"));
-  }
-  rollback(): Promise<void> {
-    return Promise.reject(unsupported("rollback"));
-  }
+/** Host-internal transaction on an adapter connection. */
+export class AdapterTransaction extends RpcTarget {
   /**
    * Typed statements on this open transaction (`abiMinor` ≥ 9).
    * Does not BEGIN or COMMIT.
@@ -749,8 +737,14 @@ export class DbTransaction extends RpcTarget {
    * @param _request - Cap'n `ExecuteRequest`.
    * @returns `ExecuteReply`.
    */
-  executeAtomic(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
-    return Promise.reject(unsupported("executeAtomic"));
+  execute(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
+    return Promise.reject(unsupported("execute"));
+  }
+  commit(): Promise<void> {
+    return Promise.reject(unsupported("commit"));
+  }
+  rollback(): Promise<void> {
+    return Promise.reject(unsupported("rollback"));
   }
 }
 
@@ -897,9 +891,9 @@ class GrantedDatabaseTransport {
     this.#signal = signal;
   }
 
-  async executeAtomic(request: ExecuteRequest): Promise<ExecuteReply> {
+  async execute(request: ExecuteRequest): Promise<ExecuteReply> {
     const body = encodeExecuteRequest(request);
-    const resp = await this.#granted.fetch(`http://granted/db/executeAtomic`, {
+    const resp = await this.#granted.fetch(`http://granted/db/execute`, {
       method: "POST",
       headers: { ...this.#auth, "content-type": "application/octet-stream" },
       body,
@@ -910,7 +904,7 @@ class GrantedDatabaseTransport {
     }
     const bytes = new Uint8Array(await resp.arrayBuffer());
     try {
-      return decodeExecuteAtomicReply(bytes);
+      return decodeExecuteResultReply(bytes);
     } catch (err) {
       if (err && typeof err === "object" && "wireCode" in err && "message" in err) {
         throw PluginError.fromWire(

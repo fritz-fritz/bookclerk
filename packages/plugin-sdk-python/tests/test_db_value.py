@@ -9,10 +9,10 @@ from bookclerk_plugin_sdk.db_value import (
     RetryToken,
     canonical_execute_request_hash,
     decode_db_value,
-    decode_execute_atomic_reply,
+    decode_execute_result_reply,
     decode_execute_request,
     encode_db_value,
-    encode_execute_atomic_reply,
+    encode_execute_result_reply,
     encode_execute_request,
     parse_db_value,
 )
@@ -336,7 +336,7 @@ class DbValueGoldens(unittest.TestCase):
         self.assertEqual(stmts[0]["maxRows"], 0)
         self.assertEqual(stmts[1]["resultSelection"], "rows")
 
-    def test_execute_atomic_reply_preserves_i64_bytes_and_error_code(self) -> None:
+    def test_execute_result_reply_preserves_i64_bytes_and_error_code(self) -> None:
         reply = {
             "operationId": "op",
             "statements": [
@@ -369,7 +369,7 @@ class DbValueGoldens(unittest.TestCase):
                 "dbTimingSource": "test",
             },
         }
-        back = decode_execute_atomic_reply(encode_execute_atomic_reply(reply))
+        back = decode_execute_result_reply(encode_execute_result_reply(reply))
         cells = back["statements"][0]["rows"][0]["values"]
         self.assertEqual(cells[0]["value"], I64_MIN)
         self.assertEqual(cells[1]["value"], I64_MAX)
@@ -378,8 +378,8 @@ class DbValueGoldens(unittest.TestCase):
         from bookclerk_plugin_sdk.workerd import PluginError
 
         with self.assertRaises(PluginError) as ctx:
-            decode_execute_atomic_reply(
-                encode_execute_atomic_reply(("unavailable", "retry me"))
+            decode_execute_result_reply(
+                encode_execute_result_reply(("unavailable", "retry me"))
             )
         self.assertEqual(ctx.exception.code, "unavailable")
         self.assertEqual(ctx.exception.wire_code, "unavailable")
