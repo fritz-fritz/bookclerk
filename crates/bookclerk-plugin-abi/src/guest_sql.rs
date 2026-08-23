@@ -69,12 +69,15 @@ const DENIED_VERBS: &[&str] = &[
 ///
 /// Empty [`Self::deny_all`] denies every table. Catalog identifiers
 /// (`encrypted_secrets`, `sqlite_*`, `pg_*`, `information_schema`) are always
-/// refused even if listed.
+/// refused even if listed. [`Self::host_authoritative`] skips this layer so a
+/// Cap'n `DatabaseSession` can be the single authorization authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestSqlPolicy {
     tables: std::collections::BTreeSet<String>,
     columns: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     functions: std::collections::BTreeSet<String>,
+    /// When true, table/column/function checks are deferred to the host session.
+    host_authoritative: bool,
 }
 
 impl Default for GuestSqlPolicy {
@@ -91,6 +94,19 @@ impl GuestSqlPolicy {
             tables: std::collections::BTreeSet::new(),
             columns: std::collections::BTreeMap::new(),
             functions: std::collections::BTreeSet::new(),
+            host_authoritative: false,
+        }
+    }
+
+    /// Broker passthrough: grammar/size checks still run; table scope is the
+    /// host `DatabaseSession`'s responsibility.
+    #[must_use]
+    pub fn host_authoritative() -> Self {
+        Self {
+            tables: std::collections::BTreeSet::new(),
+            columns: std::collections::BTreeMap::new(),
+            functions: std::collections::BTreeSet::new(),
+            host_authoritative: true,
         }
     }
 
@@ -105,6 +121,7 @@ impl GuestSqlPolicy {
                 .collect(),
             columns: std::collections::BTreeMap::new(),
             functions: builtin_functions(),
+            host_authoritative: false,
         }
     }
 
@@ -132,28 +149,51 @@ impl GuestSqlPolicy {
     /// Returns [`PluginError::invalid_params`] when a table, column, or
     /// function is outside this policy.
     fn authorize(&self, index: usize, refs: &GuestSqlRefs) -> Result<()> {
+        if self.host_authoritative {
+            return Ok(());
+        }
         for table in &refs.tables {
             self.authorize_table(index, table)?;
         }
         for (table, column) in &refs.columns {
             if column == "*" {
-                if let Some(table) = table {
-                    if self.columns.contains_key(table) {
-                        return Err(PluginError::invalid_params(format!(
-                            "statement {index} SELECT * is not allowed on column-restricted table {table}"
-                        )));
+                match table {
+                    Some(table) => {
+                        if self.columns.contains_key(table) {
+                            return Err(PluginError::invalid_params(format!(
+                                "statement {index} SELECT * is not allowed on column-restricted table {table}"
+                            )));
+                        }
+                    }
+                    None => {
+                        for table in &refs.tables {
+                            if self.columns.contains_key(table) {
+                                return Err(PluginError::invalid_params(format!(
+                                    "statement {index} SELECT * is not allowed on column-restricted table {table}"
+                                )));
+                            }
+                        }
                     }
                 }
                 continue;
             }
-            if let Some(table) = table {
-                self.authorize_table(index, table)?;
-                if let Some(allowed) = self.columns.get(table) {
-                    if !allowed.contains(column) {
+            let table = match table {
+                Some(table) => table.clone(),
+                None => {
+                    if refs.tables.len() != 1 {
                         return Err(PluginError::invalid_params(format!(
-                            "statement {index} names unauthorized column {table}.{column}"
+                            "statement {index} unqualified column {column} cannot be resolved"
                         )));
                     }
+                    refs.tables[0].clone()
+                }
+            };
+            self.authorize_table(index, &table)?;
+            if let Some(allowed) = self.columns.get(&table) {
+                if !allowed.contains(column) {
+                    return Err(PluginError::invalid_params(format!(
+                        "statement {index} names unauthorized column {table}.{column}"
+                    )));
                 }
             }
         }
@@ -242,7 +282,7 @@ pub struct GuestSqlRefs {
 /// `policy`.
 pub fn authorize_guest_sql_policy(req: &ExecuteRequest, policy: &GuestSqlPolicy) -> Result<()> {
     for (i, stmt) in req.statements.iter().enumerate() {
-        policy.authorize(i, &parse_guest_sql_refs(&stmt.sql))?;
+        policy.authorize(i, &parse_guest_sql_refs(&stmt.sql)?)?;
     }
     Ok(())
 }
@@ -458,7 +498,7 @@ fn validate_guest_statement(index: usize, stmt: &TypedDbStatement) -> Result<()>
             "statement {index} uses disallowed SQL verb {verb}"
         )));
     }
-    for table in named_tables(&stmt.sql) {
+    for table in named_tables(&stmt.sql)? {
         if table_denied(&table) {
             return Err(PluginError::invalid_params(format!(
                 "statement {index} names unauthorized table {table}"
@@ -535,84 +575,425 @@ fn normalize_ident(name: &str) -> String {
 }
 
 /// Parsed table, column, and function names from one guest statement.
-#[must_use]
-pub fn parse_guest_sql_refs(sql: &str) -> GuestSqlRefs {
-    let tables = named_tables(sql)
-        .into_iter()
-        .map(|t| normalize_ident(&t))
-        .filter(|t| !t.is_empty())
-        .collect::<Vec<_>>();
-    let mut columns = Vec::new();
-    let mut functions = Vec::new();
-    let mut prev_ident: Option<String> = None;
-    let mut depth = 0usize;
-    for_each_unquoted(sql, |slice, i| {
-        let bytes = slice.as_bytes();
-        let c = bytes[i];
-        if c == b'(' {
-            depth = depth.saturating_add(1);
-            prev_ident = None;
-            return 1;
-        }
-        if c == b')' {
-            depth = depth.saturating_sub(1);
-            prev_ident = None;
-            return 1;
-        }
-        if c == b'.' {
-            if let Some(table) = prev_ident.take() {
-                let mut j = i + 1;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j < bytes.len() && ident_start(bytes[j]) {
-                    let start = j;
-                    j += 1;
-                    while j < bytes.len() && ident_cont(bytes[j]) {
-                        j += 1;
-                    }
-                    let col = normalize_ident(&slice[start..j]);
-                    if !col.is_empty() {
-                        columns.push((Some(normalize_ident(&table)), col));
-                    }
-                    return j - i;
-                }
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the statement uses a form the
+/// authorizer cannot fully resolve (fail closed).
+pub fn parse_guest_sql_refs(sql: &str) -> Result<GuestSqlRefs> {
+    let mut scan = Scan { sql, i: 0 };
+    let mut refs = GuestSqlRefs::default();
+    let mut ctes = Vec::new();
+    if scan.take_kw("WITH") {
+        let _ = scan.take_kw("RECURSIVE");
+        loop {
+            let name = scan.read_ident().ok_or_else(|| unresolved("CTE name"))?;
+            if scan.take_byte(b'(') {
+                scan.take_balanced_inner()
+                    .ok_or_else(|| unresolved("CTE column list"))?;
             }
-            return 1;
+            if !scan.take_kw("AS") {
+                return Err(unresolved("CTE AS"));
+            }
+            let _ = scan.take_kw("NOT");
+            let _ = scan.take_kw("MATERIALIZED");
+            if !scan.take_byte(b'(') {
+                return Err(unresolved("CTE body"));
+            }
+            let body = scan
+                .take_balanced_inner()
+                .ok_or_else(|| unresolved("CTE body"))?;
+            parse_statement_into(body, &mut refs, &ctes)?;
+            ctes.push(name);
+            if !scan.take_byte(b',') {
+                break;
+            }
         }
-        if ident_start(c) {
-            let mut j = i + 1;
-            while j < bytes.len() && ident_cont(bytes[j]) {
-                j += 1;
-            }
-            let ident = normalize_ident(&slice[i..j]);
-            let mut k = j;
-            while k < bytes.len() && bytes[k].is_ascii_whitespace() {
-                k += 1;
-            }
-            if bytes.get(k) == Some(&b'(') && !sql_keyword(&ident) {
-                functions.push(ident);
-                prev_ident = None;
-                return k - i;
-            }
-            if ident == "*" && depth == 0 {
-                columns.push((tables.first().cloned(), "*".into()));
-                prev_ident = None;
-                return j - i;
-            }
-            prev_ident = Some(ident);
-            return j - i;
-        }
-        if !c.is_ascii_whitespace() {
-            prev_ident = None;
-        }
-        1
-    });
-    GuestSqlRefs {
-        tables,
-        columns,
-        functions,
     }
+    parse_statement_into(scan.rest(), &mut refs, &ctes)?;
+    refs.tables.sort();
+    refs.tables.dedup();
+    Ok(refs)
+}
+
+fn unresolved(what: &str) -> PluginError {
+    PluginError::invalid_params(format!(
+        "guest SQL is not fully resolvable for authorization ({what})"
+    ))
+}
+
+struct Scan<'a> {
+    /// Remaining SQL being scanned.
+    sql: &'a str,
+    /// Byte offset into [`Self::sql`].
+    i: usize,
+}
+
+impl<'a> Scan<'a> {
+    fn skip(&mut self) {
+        self.i = skip_ws_comments(self.sql, self.i);
+    }
+
+    fn rest(&self) -> &'a str {
+        &self.sql[self.i..]
+    }
+
+    fn take_kw(&mut self, kw: &str) -> bool {
+        self.skip();
+        if keyword_at(self.sql, self.i, kw) {
+            self.i += kw.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek_kw(&mut self, kw: &str) -> bool {
+        self.skip();
+        keyword_at(self.sql, self.i, kw)
+    }
+
+    fn take_byte(&mut self, b: u8) -> bool {
+        self.skip();
+        if self.sql.as_bytes().get(self.i) == Some(&b) {
+            self.i += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek_byte(&mut self, b: u8) -> bool {
+        self.skip();
+        self.sql.as_bytes().get(self.i) == Some(&b)
+    }
+
+    fn read_ident(&mut self) -> Option<String> {
+        self.skip();
+        let start = self.i;
+        let end = skip_ident_or_quoted(self.sql, self.i)?;
+        self.i = end;
+        let ident = normalize_ident(&self.sql[start..end]);
+        if ident.is_empty() {
+            None
+        } else {
+            Some(ident)
+        }
+    }
+
+    fn take_balanced_inner(&mut self) -> Option<&'a str> {
+        let start = self.i.saturating_sub(1);
+        let end = skip_balanced_parens(self.sql, start)?;
+        let inner = &self.sql[start + 1..end - 1];
+        self.i = end;
+        Some(inner)
+    }
+}
+
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the statement cannot be fully
+/// resolved for authorization.
+fn parse_statement_into(sql: &str, refs: &mut GuestSqlRefs, ctes: &[String]) -> Result<()> {
+    let mut scan = Scan { sql, i: 0 };
+    if scan.take_kw("INSERT") || scan.take_kw("REPLACE") {
+        let _ = scan.take_kw("OR");
+        let _ = scan.take_kw("IGNORE");
+        let _ = scan.take_kw("REPLACE");
+        if !scan.take_kw("INTO") {
+            return Err(unresolved("INSERT INTO"));
+        }
+        collect_physical_table(&mut scan, refs, ctes)?;
+        if scan.take_byte(b'(') {
+            collect_ident_list(&mut scan, refs)?;
+            if !scan.take_byte(b')') {
+                return Err(unresolved("INSERT column list"));
+            }
+        }
+        collect_expr_tail(&mut scan, refs, ctes)?;
+        return Ok(());
+    }
+    if scan.take_kw("UPDATE") {
+        collect_physical_table(&mut scan, refs, ctes)?;
+        collect_expr_tail(&mut scan, refs, ctes)?;
+        return Ok(());
+    }
+    if scan.take_kw("DELETE") {
+        if !scan.take_kw("FROM") {
+            return Err(unresolved("DELETE FROM"));
+        }
+        collect_physical_table(&mut scan, refs, ctes)?;
+        collect_expr_tail(&mut scan, refs, ctes)?;
+        return Ok(());
+    }
+    if scan.take_kw("SELECT") || scan.take_kw("VALUES") {
+        collect_expr_tail(&mut scan, refs, ctes)?;
+        return Ok(());
+    }
+    if scan.take_kw("WITH") {
+        return parse_guest_sql_refs(sql).map(|nested| {
+            refs.tables.extend(nested.tables);
+            refs.columns.extend(nested.columns);
+            refs.functions.extend(nested.functions);
+        });
+    }
+    Err(unresolved("statement verb"))
+}
+
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the table name cannot be read.
+fn collect_physical_table(
+    scan: &mut Scan<'_>,
+    refs: &mut GuestSqlRefs,
+    ctes: &[String],
+) -> Result<String> {
+    if scan.peek_byte(b'(') {
+        return Err(unresolved("derived table"));
+    }
+    let mut name = scan.read_ident().ok_or_else(|| unresolved("table name"))?;
+    if scan.take_byte(b'.') {
+        let second = scan
+            .read_ident()
+            .ok_or_else(|| unresolved("qualified table"))?;
+        name = format!("{name}.{second}");
+    }
+    let last = name.rsplit('.').next().unwrap_or(name.as_str());
+    if !ctes.iter().any(|c| c == last || c == &name) {
+        refs.tables.push(name.clone());
+    }
+    Ok(name)
+}
+
+fn take_alias(scan: &mut Scan<'_>) -> Option<String> {
+    if scan.take_kw("AS") {
+        return scan.read_ident();
+    }
+    if scan.peek_kw("WHERE")
+        || scan.peek_kw("SET")
+        || scan.peek_kw("JOIN")
+        || scan.peek_kw("LEFT")
+        || scan.peek_kw("RIGHT")
+        || scan.peek_kw("INNER")
+        || scan.peek_kw("FULL")
+        || scan.peek_kw("CROSS")
+        || scan.peek_kw("OUTER")
+        || scan.peek_kw("ON")
+        || scan.peek_kw("USING")
+        || scan.peek_kw("GROUP")
+        || scan.peek_kw("HAVING")
+        || scan.peek_kw("ORDER")
+        || scan.peek_kw("LIMIT")
+        || scan.peek_kw("OFFSET")
+        || scan.peek_kw("RETURNING")
+        || scan.peek_kw("UNION")
+        || scan.peek_kw("EXCEPT")
+        || scan.peek_kw("INTERSECT")
+        || scan.peek_kw("FROM")
+        || scan.peek_kw("INTO")
+        || scan.peek_kw("VALUES")
+        || scan.peek_kw("SELECT")
+        || scan.peek_kw("AND")
+        || scan.peek_kw("OR")
+        || scan.peek_byte(b',')
+        || scan.peek_byte(b')')
+        || scan.peek_byte(b';')
+    {
+        return None;
+    }
+    scan.read_ident()
+}
+
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a column identifier is missing.
+fn collect_ident_list(scan: &mut Scan<'_>, refs: &mut GuestSqlRefs) -> Result<()> {
+    loop {
+        if scan.peek_byte(b')') {
+            return Ok(());
+        }
+        let ident = scan.read_ident().ok_or_else(|| unresolved("column list"))?;
+        refs.columns.push((None, ident));
+        if !scan.take_byte(b',') {
+            return Ok(());
+        }
+    }
+}
+
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when an expression or table ref
+/// cannot be fully resolved.
+fn collect_expr_tail(scan: &mut Scan<'_>, refs: &mut GuestSqlRefs, ctes: &[String]) -> Result<()> {
+    let mut aliases: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    while !scan_at_end(scan) {
+        if scan.take_kw("FROM") {
+            parse_table_refs(scan, refs, ctes, &mut aliases)?;
+            continue;
+        }
+        if scan.take_kw("JOIN")
+            || (scan.take_kw("INNER") && scan.take_kw("JOIN"))
+            || (scan.take_kw("CROSS") && scan.take_kw("JOIN"))
+            || join_with_outer(scan)
+        {
+            parse_one_table_ref(scan, refs, ctes, &mut aliases)?;
+            if scan.take_kw("ON") {
+                continue;
+            }
+            if scan.take_kw("USING") {
+                if !scan.take_byte(b'(') {
+                    return Err(unresolved("USING"));
+                }
+                collect_ident_list(scan, refs)?;
+                if !scan.take_byte(b')') {
+                    return Err(unresolved("USING"));
+                }
+            }
+            continue;
+        }
+        collect_one_expr_atom(scan, refs, &aliases)?;
+    }
+    Ok(())
+}
+
+fn join_with_outer(scan: &mut Scan<'_>) -> bool {
+    if scan.take_kw("LEFT") || scan.take_kw("RIGHT") || scan.take_kw("FULL") {
+        let _ = scan.take_kw("OUTER");
+        return scan.take_kw("JOIN");
+    }
+    false
+}
+
+fn scan_at_end(scan: &mut Scan<'_>) -> bool {
+    scan.skip();
+    scan.i >= scan.sql.len() || scan.peek_byte(b';')
+}
+
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a FROM/JOIN source cannot be
+/// resolved.
+fn parse_table_refs(
+    scan: &mut Scan<'_>,
+    refs: &mut GuestSqlRefs,
+    ctes: &[String],
+    aliases: &mut std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    parse_one_table_ref(scan, refs, ctes, aliases)?;
+    while scan.take_byte(b',') {
+        parse_one_table_ref(scan, refs, ctes, aliases)?;
+    }
+    Ok(())
+}
+
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the table, subquery, or
+/// table-valued function cannot be resolved.
+fn parse_one_table_ref(
+    scan: &mut Scan<'_>,
+    refs: &mut GuestSqlRefs,
+    ctes: &[String],
+    aliases: &mut std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    if scan.take_byte(b'(') {
+        let inner = scan
+            .take_balanced_inner()
+            .ok_or_else(|| unresolved("subquery"))?;
+        parse_statement_into(inner, refs, ctes)?;
+        let alias = take_alias(scan);
+        let _ = alias;
+        return Ok(());
+    }
+    let table = collect_physical_table(scan, refs, ctes)?;
+    if scan.peek_byte(b'(') {
+        return Err(unresolved("table-valued function"));
+    }
+    if let Some(alias) = take_alias(scan) {
+        aliases.insert(alias, table);
+    }
+    Ok(())
+}
+
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a qualified column cannot be
+/// read.
+fn collect_one_expr_atom(
+    scan: &mut Scan<'_>,
+    refs: &mut GuestSqlRefs,
+    aliases: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    scan.skip();
+    if scan.i >= scan.sql.len() {
+        return Ok(());
+    }
+    let c = scan.sql.as_bytes()[scan.i];
+    if c == b'\'' {
+        skip_quoted_string(scan, b'\'');
+        return Ok(());
+    }
+    if let Some(ident) = scan.read_ident() {
+        if scan.take_byte(b'(') {
+            if !sql_keyword(&ident) {
+                refs.functions.push(ident);
+            }
+            return Ok(());
+        }
+        if scan.take_byte(b'.') {
+            if scan.take_byte(b'*') {
+                let table = aliases.get(&ident).cloned().unwrap_or(ident);
+                refs.columns.push((Some(table), "*".into()));
+                return Ok(());
+            }
+            let col = scan
+                .read_ident()
+                .ok_or_else(|| unresolved("qualified column"))?;
+            if scan.take_byte(b'(') {
+                if !sql_keyword(&col) {
+                    refs.functions.push(col);
+                }
+                return Ok(());
+            }
+            let table = aliases.get(&ident).cloned().unwrap_or(ident);
+            refs.columns.push((Some(table), col));
+            return Ok(());
+        }
+        if ident == "*" {
+            refs.columns.push((None, "*".into()));
+            return Ok(());
+        }
+        if !sql_keyword(&ident) {
+            refs.columns.push((None, ident));
+        }
+        return Ok(());
+    }
+    scan.i += 1;
+    Ok(())
+}
+
+fn skip_quoted_string(scan: &mut Scan<'_>, q: u8) {
+    scan.i += 1;
+    let bytes = scan.sql.as_bytes();
+    while scan.i < bytes.len() {
+        if bytes[scan.i] == q {
+            if bytes.get(scan.i + 1) == Some(&q) {
+                scan.i += 2;
+                continue;
+            }
+            scan.i += 1;
+            return;
+        }
+        scan.i += 1;
+    }
+}
+
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when table refs cannot be fully
+/// resolved.
+fn named_tables(sql: &str) -> Result<Vec<String>> {
+    Ok(parse_guest_sql_refs(sql)?.tables)
 }
 
 fn sql_keyword(ident: &str) -> bool {
@@ -653,13 +1034,16 @@ fn sql_keyword(ident: &str) -> bool {
             | "outer"
             | "over"
             | "recursive"
+            | "replace"
             | "returning"
             | "right"
             | "select"
             | "set"
+            | "table"
             | "then"
             | "union"
             | "update"
+            | "using"
             | "values"
             | "when"
             | "where"
@@ -704,175 +1088,6 @@ fn count_placeholders(sql: &str) -> usize {
         n_q
     } else {
         dollars.len()
-    }
-}
-
-fn named_tables(sql: &str) -> Vec<String> {
-    let mut tables = Vec::new();
-    let bytes = sql.as_bytes();
-    let mut i = 0;
-    let mut in_s = false;
-    let mut in_d = false;
-    let mut in_line = false;
-    let mut in_block = false;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_line {
-            if c == b'\n' {
-                in_line = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_block {
-            if c == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                in_block = false;
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if in_s {
-            if c == b'\'' {
-                if bytes.get(i + 1) == Some(&b'\'') {
-                    i += 2;
-                    continue;
-                }
-                in_s = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_d {
-            if c == b'"' {
-                if bytes.get(i + 1) == Some(&b'"') {
-                    i += 2;
-                    continue;
-                }
-                in_d = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == b'-' && bytes.get(i + 1) == Some(&b'-') {
-            in_line = true;
-            i += 2;
-            continue;
-        }
-        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            in_block = true;
-            i += 2;
-            continue;
-        }
-        if c == b'\'' {
-            in_s = true;
-            i += 1;
-            continue;
-        }
-        if c == b'"' {
-            in_d = true;
-            i += 1;
-            continue;
-        }
-        if ident_start(c) {
-            let start = i;
-            i += 1;
-            while i < bytes.len() && ident_cont(bytes[i]) {
-                i += 1;
-            }
-            let word = sql[start..i].to_ascii_uppercase();
-            if matches!(word.as_str(), "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE") {
-                skip_ws_and_comments(bytes, &mut i);
-                if let Some(name) = read_table_name(sql, &mut i) {
-                    tables.push(name);
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
-    tables
-}
-
-fn skip_ws_and_comments(bytes: &[u8], i: &mut usize) {
-    loop {
-        while *i < bytes.len() && bytes[*i].is_ascii_whitespace() {
-            *i += 1;
-        }
-        if bytes.get(*i) == Some(&b'-') && bytes.get(*i + 1) == Some(&b'-') {
-            *i += 2;
-            while *i < bytes.len() && bytes[*i] != b'\n' {
-                *i += 1;
-            }
-            continue;
-        }
-        if bytes.get(*i) == Some(&b'/') && bytes.get(*i + 1) == Some(&b'*') {
-            *i += 2;
-            while *i + 1 < bytes.len() && !(bytes[*i] == b'*' && bytes[*i + 1] == b'/') {
-                *i += 1;
-            }
-            *i = (*i + 2).min(bytes.len());
-            continue;
-        }
-        break;
-    }
-}
-
-fn read_table_name(sql: &str, i: &mut usize) -> Option<String> {
-    let bytes = sql.as_bytes();
-    skip_ws_and_comments(bytes, i);
-    if *i >= bytes.len() {
-        return None;
-    }
-    if bytes[*i] == b'(' {
-        return None;
-    }
-    let start = *i;
-    if bytes[*i] == b'"' || bytes[*i] == b'`' {
-        let q = bytes[*i];
-        *i += 1;
-        while *i < bytes.len() && bytes[*i] != q {
-            *i += 1;
-        }
-        if *i < bytes.len() {
-            *i += 1;
-        }
-    } else if ident_start(bytes[*i]) {
-        *i += 1;
-        while *i < bytes.len() && ident_cont(bytes[*i]) {
-            *i += 1;
-        }
-    } else {
-        return None;
-    }
-    skip_ws_and_comments(bytes, i);
-    if bytes.get(*i) == Some(&b'.') {
-        *i += 1;
-        skip_ws_and_comments(bytes, i);
-        if *i < bytes.len() && (ident_start(bytes[*i]) || bytes[*i] == b'"' || bytes[*i] == b'`') {
-            if bytes[*i] == b'"' || bytes[*i] == b'`' {
-                let q = bytes[*i];
-                *i += 1;
-                while *i < bytes.len() && bytes[*i] != q {
-                    *i += 1;
-                }
-                if *i < bytes.len() {
-                    *i += 1;
-                }
-            } else {
-                *i += 1;
-                while *i < bytes.len() && ident_cont(bytes[*i]) {
-                    *i += 1;
-                }
-            }
-        }
-    }
-    let raw = sql[start..*i].trim();
-    if raw.is_empty() {
-        None
-    } else {
-        Some(raw.to_string())
     }
 }
 
@@ -1363,5 +1578,81 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("unauthorized table"), "{err}");
+    }
+
+    #[test]
+    fn policy_fail_closed_on_joins_quotes_and_unqualified_columns() {
+        let books = GuestSqlPolicy::allow_tables(["books"]);
+        let err = authorize_guest_sql_policy(
+            &req("SELECT * FROM [jobs]", vec![], DbResultSelection::Rows, 1),
+            &books,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unauthorized table"), "{err}");
+        let err = authorize_guest_sql_policy(
+            &req(
+                "SELECT secret FROM books, jobs",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &books,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unauthorized table")
+                || err.to_string().contains("cannot be resolved"),
+            "{err}"
+        );
+        let err = authorize_guest_sql_policy(
+            &req(
+                "SELECT secret FROM books JOIN jobs USING (id)",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &books,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unauthorized table"), "{err}");
+        authorize_guest_sql_policy(
+            &req(
+                "WITH recent AS (SELECT id FROM books) SELECT id FROM recent",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &books,
+        )
+        .unwrap();
+        let restricted = GuestSqlPolicy::allow_tables(["books"]).restrict_columns("books", ["id"]);
+        let err = authorize_guest_sql_policy(
+            &req(
+                "SELECT token FROM books",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &restricted,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unauthorized column"), "{err}");
+        authorize_guest_sql_policy(
+            &req(
+                "SELECT \"hex\"(id) FROM books",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &books,
+        )
+        .unwrap();
+        let err = parse_guest_sql_refs("SELECT id FROM generate_series(1, 2)").unwrap_err();
+        assert!(err.to_string().contains("not fully resolvable"), "{err}");
+        authorize_guest_sql_policy(
+            &req("SELECT id FROM jobs", vec![], DbResultSelection::Rows, 1),
+            &GuestSqlPolicy::host_authoritative(),
+        )
+        .unwrap();
     }
 }
