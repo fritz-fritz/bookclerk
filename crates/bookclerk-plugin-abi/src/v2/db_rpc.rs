@@ -459,12 +459,12 @@ pub fn encoded_execute_request_bytes(req: &ExecuteRequest) -> Result<Vec<u8>> {
     write_message_bytes(&message)
 }
 
-/// SHA-256 hex of the Cap'n-encoded request with `operationId` and
-/// `requestHash` cleared.
+/// SHA-256 hex of the Cap'n-encoded request with transport metadata cleared.
 ///
-/// The trusted host stamps this after validation so guests cannot collide
-/// unrelated mutations on one idempotency key. A retry token reuses both
-/// the caller-chosen id and this digest.
+/// `operationId`, `requestHash`, and `deadlineUnixMs` are not part of the
+/// digest: a retry of the same mutation may mint a remaining deadline without
+/// hash-conflicting. The trusted host stamps `requestHash` after validation
+/// so guests cannot collide unrelated mutations on one idempotency key.
 ///
 /// # Errors
 ///
@@ -474,6 +474,7 @@ pub fn canonical_execute_request_hash(req: &ExecuteRequest) -> Result<String> {
     let mut canonical = req.clone();
     canonical.operation_id.clear();
     canonical.request_hash.clear();
+    canonical.deadline_unix_ms = 0;
     let bytes = encoded_execute_request_bytes(&canonical)?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }

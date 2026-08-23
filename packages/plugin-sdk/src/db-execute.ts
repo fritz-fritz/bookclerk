@@ -422,7 +422,12 @@ async function executeRequestFromBatch(
  * @returns Hex digest matching the host canonical hash.
  */
 export async function canonicalExecuteRequestHash(request: ExecuteRequest): Promise<string> {
-  const canonical: ExecuteRequest = { ...request, operationId: "", requestHash: "" };
+  const canonical: ExecuteRequest = {
+    ...request,
+    operationId: "",
+    requestHash: "",
+    deadlineUnixMs: 0,
+  };
   const bytes = encodeExecuteRequest(canonical);
   if (globalThis.crypto?.subtle) {
     const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);

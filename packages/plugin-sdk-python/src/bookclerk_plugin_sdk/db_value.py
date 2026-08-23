@@ -459,12 +459,17 @@ class PreparedStatement:
 
 
 def canonical_execute_request_hash(request: ExecuteRequest) -> str:
-    """SHA-256 hex of the Cap'n request with id and hash cleared.
+    """SHA-256 hex of the Cap'n request with transport metadata cleared.
 
-    Matches the host ``canonical_execute_request_hash`` digest so a retry
-    token can reuse both id and hash.
+    ``operationId``, ``requestHash``, and ``deadlineUnixMs`` are omitted so a
+    retry can refresh the remaining deadline. Matches the host digest.
     """
-    canonical: ExecuteRequest = {**request, "operationId": "", "requestHash": ""}
+    canonical: ExecuteRequest = {
+        **request,
+        "operationId": "",
+        "requestHash": "",
+        "deadlineUnixMs": 0,
+    }
     return hashlib.sha256(encode_execute_request(canonical)).hexdigest()
 
 
