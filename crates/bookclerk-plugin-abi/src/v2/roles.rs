@@ -5,9 +5,9 @@ use std::pin::Pin;
 use tokio::io::AsyncRead;
 
 use super::types::{
-    CopyResult, DestinationContext, DomainEvent, EventResult, ExecResult, JobInvocation,
-    JobOutcome, ListOptions, ListPage, ObjectMetadata, PluginDescribe, PutResult, QueryPage,
-    SourceContext, Statement, WorkerContext, WriteOptions,
+    CopyResult, DestinationContext, DomainEvent, EventResult, JobInvocation, JobOutcome,
+    ListOptions, ListPage, ObjectMetadata, PluginDescribe, PutResult, SourceContext, WorkerContext,
+    WriteOptions,
 };
 use crate::{PluginError, Result};
 
@@ -107,7 +107,8 @@ pub struct JobHandlerContext {
     /// Progress sink (durable job row).
     pub progress: Box<dyn ProgressSink>,
     /// Host-mediated typed SQL session when the invocation grant includes one.
-    pub database: Option<Box<dyn DatabaseSession>>,
+    /// Host-granted typed SQL binding for one job invocation (`abiMinor` ≥ 11).
+    pub database: Option<Box<dyn GuestDatabase>>,
     /// Cancellation capability (host fence / lease).
     pub cancel: Box<dyn Cancellation>,
 }
@@ -253,68 +254,52 @@ pub trait Integration {
 /// Database factory. Sessions cannot survive suspension.
 #[async_trait::async_trait(?Send)]
 pub trait Database {
-    /// Opens an invocation-scoped session.
-    async fn open_session(&self) -> Result<Box<dyn DatabaseSession>>;
+    /// Opens an invocation-scoped adapter session.
+    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>>;
 }
 
-/// Invocation-scoped database session.
+/// Host ↔ database adapter session (`capabilities` + typed `execute`).
 #[async_trait::async_trait(?Send)]
-pub trait DatabaseSession {
-    /// Execute a statement.
-    async fn execute(&self, statement: Statement) -> Result<ExecResult>;
+pub trait AdapterDatabaseSession {
+    /// Typed SQL-contract advertisement.
+    async fn capabilities(&self) -> Result<crate::DbCapabilities>;
 
-    /// Query a bounded page (or streaming cursor via `cursor`).
-    async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage>;
-
-    /// Begin an invocation-scoped transaction.
-    async fn begin(&self) -> Result<Box<dyn Transaction>>;
+    /// Typed atomic batch (`execute`). Every request is a non-empty ordered statement list.
+    async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply>;
 
     /// Close the session.
     async fn close(&self) -> Result<()> {
         Ok(())
     }
 
-    /// Typed SQL-contract advertisement (`abiMinor` ≥ 7).
-    ///
-    /// Older guests return [`PluginError::unsupported`]; hosts may fall back
-    /// to the `bookclerk.capabilities` query sentinel.
-    async fn capabilities(&self) -> Result<crate::DbCapabilities> {
-        Err(PluginError::unsupported("capabilities"))
-    }
-
-    /// Typed atomic batch (`abiMinor` ≥ 7). Every request is a non-empty
-    /// ordered statement list (batch-of-one for ordinary reads/mutations).
-    ///
-    /// Older guests return [`PluginError::unsupported`]; hosts may fall back
-    /// to the `bookclerk.atomic` query sentinel.
-    async fn execute_atomic(&self, _request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
-        Err(PluginError::unsupported("executeAtomic"))
-    }
+    /// Opens a host-internal interactive transaction (SeaORM proxy).
+    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>>;
 }
 
-/// Invocation-scoped transaction.
+/// Host-internal transaction on an adapter connection.
 #[async_trait::async_trait(?Send)]
-pub trait Transaction {
-    /// Execute a statement inside the transaction.
-    async fn execute(&self, statement: Statement) -> Result<ExecResult>;
-
-    /// Query a bounded page inside the transaction.
-    async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage>;
+pub trait AdapterTransaction {
+    /// Typed statements on this open transaction (no second `BEGIN`).
+    async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply>;
 
     /// Commit.
     async fn commit(&self) -> Result<()>;
 
     /// Rollback.
     async fn rollback(&self) -> Result<()>;
-
-    /// Typed statements on this open transaction (`abiMinor` ≥ 9).
-    ///
-    /// Does not BEGIN or COMMIT. Older guests return [`PluginError::unsupported`].
-    async fn execute_atomic(&self, _request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
-        Err(PluginError::unsupported("executeAtomic"))
-    }
 }
 
+/// Host-granted SQL transport for job plugin authors (no `capabilities`).
+#[async_trait::async_trait(?Send)]
+pub trait GuestDatabase {
+    /// Host-mediated typed batch (`execute`).
+    async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply>;
+
+    /// Close the grant.
+    async fn close(&self) -> Result<()> {
+        Ok(())
+    }
+}
 /// Injected factory context for storefronts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContentSourceContext {

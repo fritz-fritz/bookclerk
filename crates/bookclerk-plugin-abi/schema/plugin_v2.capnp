@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 10;
+const abiMinor :UInt32 = 11;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -494,16 +494,23 @@ struct QueryReply {
   }
 }
 
-struct SessionReply {
+struct AdapterSessionReply {
   union {
-    ok @0 :DatabaseSession;
+    ok @0 :AdapterDatabaseSession;
     err @1 :PluginError;
   }
 }
 
-struct TransactionReply {
+struct AdapterTransactionReply {
   union {
-    ok @0 :Transaction;
+    ok @0 :AdapterTransaction;
+    err @1 :PluginError;
+  }
+}
+
+struct GuestDatabaseReply {
+  union {
+    ok @0 :GuestDatabase;
     err @1 :PluginError;
   }
 }
@@ -551,7 +558,7 @@ interface JobHandler {
       progress :ProgressSink,
       cancel :Cancellation,
       # Append-only (abiMinor 8). Host-mediated typed SQL session.
-      database :DatabaseSession)
+      database :GuestDatabase)
       -> (result :HandleReply);
 }
 
@@ -671,7 +678,7 @@ struct ExecuteReply {
   timing @2 :DbTiming;
 }
 
-struct ExecuteAtomicReply {
+struct ExecuteResultReply {
   union {
     ok @0 :ExecuteReply;
     err @1 :PluginError;
@@ -712,28 +719,28 @@ struct DbCapabilitiesReply {
 }
 
 interface Database {
-  openSession @0 () -> (result :SessionReply);
+  openSession @0 () -> (result :AdapterSessionReply);
 }
 
-# Invocation-scoped. Must not survive suspension.
-# `execute`/`query`/`begin` remain for older abiMinor guests. First-party
-# hosts use `capabilities` + `executeAtomic` (the #178 data plane).
-interface DatabaseSession {
-  execute @0 (statement :Statement) -> (result :ExecReply);
-  query @1 (statement :Statement, cursor :Text, limit :UInt32) -> (result :QueryReply);
-  begin @2 () -> (result :TransactionReply);
-  close @3 () -> (result :EmptyReply);
-  capabilities @4 () -> (result :DbCapabilitiesReply);
-  executeAtomic @5 (request :ExecuteRequest) -> (result :ExecuteAtomicReply);
+# Host ↔ database adapter plugin. Capability negotiation + typed execute only.
+interface AdapterDatabaseSession {
+  capabilities @0 () -> (result :DbCapabilitiesReply);
+  execute @1 (request :ExecuteRequest) -> (result :ExecuteResultReply);
+  close @2 () -> (result :EmptyReply);
+  # Host-internal SeaORM interactive txn (not the plugin-author binding).
+  begin @3 () -> (result :AdapterTransactionReply);
 }
 
-interface Transaction {
-  execute @0 (statement :Statement) -> (result :ExecReply);
-  query @1 (statement :Statement, cursor :Text, limit :UInt32) -> (result :QueryReply);
-  commit @2 () -> (result :EmptyReply);
-  rollback @3 () -> (result :EmptyReply);
-  # Append-only (abiMinor 9). Typed statements on the open txn; no BEGIN/COMMIT.
-  executeAtomic @4 (request :ExecuteRequest) -> (result :ExecuteAtomicReply);
+interface AdapterTransaction {
+  execute @0 (request :ExecuteRequest) -> (result :ExecuteResultReply);
+  commit @1 () -> (result :EmptyReply);
+  rollback @2 () -> (result :EmptyReply);
+}
+
+# Host-granted SQL for job plugin authors (SDK DatabaseBinding transport).
+interface GuestDatabase {
+  execute @0 (request :ExecuteRequest) -> (result :ExecuteResultReply);
+  close @1 () -> (result :EmptyReply);
 }
 
 interface BookclerkPlugin {

@@ -10,13 +10,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
 
+use super::plugin_error_from_db_err;
 use crate::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use crate::{
     proxy_rows_to_dto, statement_from_dto, DbAtomicRequest, DbCapabilities, DbConnectResult,
-    DbPlanExecResult, ExecResultDto, ExecuteReply, ExecuteRequest, ProxyRowDto,
-    QueryResultDto, StatementDto,
+    DbPlanExecResult, ExecResultDto, ExecuteReply, ExecuteRequest, ProxyRowDto, QueryResultDto,
+    StatementDto,
 };
-use super::plugin_error_from_db_err;
 use futures::TryStreamExt;
 use sea_orm::{
     from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
@@ -96,8 +96,7 @@ enum TxnOp {
         /// Typed statements to run on the open transaction.
         request: ExecuteRequest,
         /// Oneshot used to return the typed reply.
-        reply:
-            oneshot::Sender<std::result::Result<ExecuteReply, crate::PluginError>>,
+        reply: oneshot::Sender<std::result::Result<ExecuteReply, crate::PluginError>>,
     },
 }
 
@@ -243,13 +242,9 @@ pub async fn guest_atomic(
 ) -> std::result::Result<DbPlanExecResult, crate::PluginError> {
     let gate = txn_gate();
     let _gate = gate.lock().await;
-    let conn = connection()
-        .await
-        .map_err(crate::PluginError::internal)?;
+    let conn = connection().await.map_err(crate::PluginError::internal)?;
     let plan = req.plan.ok_or_else(|| {
-        crate::PluginError::invalid_params(
-            "dbAtomic requires a host-authored executePlan",
-        )
+        crate::PluginError::invalid_params("dbAtomic requires a host-authored executePlan")
     })?;
     let caps = match conn.get_database_backend() {
         DbBackend::Postgres => crate::DbConnectResult::postgres(),
@@ -276,11 +271,8 @@ pub async fn guest_atomic(
 /// # Errors
 ///
 /// Returns when no connection has been opened.
-pub async fn guest_capabilities(
-) -> std::result::Result<DbCapabilities, crate::PluginError> {
-    let conn = connection()
-        .await
-        .map_err(crate::PluginError::internal)?;
+pub async fn guest_capabilities() -> std::result::Result<DbCapabilities, crate::PluginError> {
+    let conn = connection().await.map_err(crate::PluginError::internal)?;
     let caps = match conn.get_database_backend() {
         DbBackend::Postgres => DbConnectResult::postgres(),
         _ => DbConnectResult::sqlite(),
@@ -302,9 +294,7 @@ pub async fn guest_execute_atomic(
 ) -> std::result::Result<ExecuteReply, crate::PluginError> {
     let gate = txn_gate();
     let _gate = gate.lock().await;
-    let conn = connection()
-        .await
-        .map_err(crate::PluginError::internal)?;
+    let conn = connection().await.map_err(crate::PluginError::internal)?;
     let caps = match conn.get_database_backend() {
         DbBackend::Postgres => crate::DbConnectResult::postgres(),
         _ => crate::DbConnectResult::sqlite(),
@@ -336,9 +326,7 @@ pub async fn guest_execute_atomic_on_txn(
     txn_id: String,
     request: ExecuteRequest,
 ) -> std::result::Result<ExecuteReply, crate::PluginError> {
-    let tx = route(&txn_id)
-        .await
-        .map_err(crate::PluginError::internal)?;
+    let tx = route(&txn_id).await.map_err(crate::PluginError::internal)?;
     let (reply, rx) = oneshot::channel();
     tx.send(TxnOp::ExecuteAtomic {
         txn_id,
@@ -346,12 +334,9 @@ pub async fn guest_execute_atomic_on_txn(
         reply,
     })
     .await
-    .map_err(|_| {
-        crate::PluginError::internal("transaction worker closed".to_string())
-    })?;
-    rx.await.map_err(|_| {
-        crate::PluginError::internal("transaction worker closed".to_string())
-    })?
+    .map_err(|_| crate::PluginError::internal("transaction worker closed".to_string()))?;
+    rx.await
+        .map_err(|_| crate::PluginError::internal("transaction worker closed".to_string()))?
 }
 
 /// Runs a read-only SQL query through the guest database bridge.
@@ -614,9 +599,7 @@ async fn txn_worker(
                 let result = match stack_txn(&stack, &txn_id) {
                     Ok(txn) => {
                         let caps = match ConnectionTrait::get_database_backend(txn) {
-                            DbBackend::Postgres => {
-                                crate::DbConnectResult::postgres()
-                            }
+                            DbBackend::Postgres => crate::DbConnectResult::postgres(),
                             _ => crate::DbConnectResult::sqlite(),
                         };
                         let timing_source = match ConnectionTrait::get_database_backend(txn) {

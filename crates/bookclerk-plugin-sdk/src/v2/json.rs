@@ -7,8 +7,8 @@
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use super::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use crate::PluginError;
+use bookclerk_plugin_abi::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 
 /// Deserialize a role-method JSON argument.
 ///

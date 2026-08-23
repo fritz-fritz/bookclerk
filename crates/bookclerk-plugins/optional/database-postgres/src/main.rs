@@ -111,9 +111,7 @@ impl AdapterDatabaseSession for PostgresSession {
     }
 
     async fn begin(&self) -> Result<Box<dyn AdapterTransaction>, PluginError> {
-        let txn_id = guest_begin(None)
-            .await
-            .map_err(plugin_error_from_engine)?;
+        let txn_id = guest_begin(None).await.map_err(plugin_error_from_engine)?;
         Ok(Box::new(PostgresTxn { txn_id }))
     }
 }

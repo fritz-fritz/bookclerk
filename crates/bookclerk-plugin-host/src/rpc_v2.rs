@@ -139,19 +139,6 @@ enum Work {
         ctx_json: String,
         reply: oneshot::Sender<Result<()>>,
     },
-    DbExecute {
-        sql: String,
-        values_json: String,
-        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::v2::ExecResult>>,
-    },
-    DbQuery {
-        sql: String,
-        values_json: String,
-        cursor: String,
-        limit: u32,
-        cancel: Arc<AtomicBool>,
-        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::v2::QueryPage>>,
-    },
     DbBegin {
         reply: oneshot::Sender<Result<()>>,
     },
@@ -164,12 +151,12 @@ enum Work {
     DbCapabilities {
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::DbCapabilities>>,
     },
-    DbExecuteAtomic {
+    DbExecuteRequest {
         request: bookclerk_plugin_sdk::ExecuteRequest,
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
-    DbTxnExecuteAtomic {
+    DbTxnExecuteRequest {
         request: bookclerk_plugin_sdk::ExecuteRequest,
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
@@ -714,108 +701,7 @@ impl V2PluginSession {
         .await
     }
 
-    /// Session execute.
-    ///
-    /// # Errors
-    ///
-    /// Returns a plugin error when execute fails.
-    pub async fn db_execute(
-        &self,
-        sql: impl Into<String>,
-        values_json: impl Into<String>,
-    ) -> Result<bookclerk_plugin_sdk::v2::ExecResult> {
-        let sql = sql.into();
-        let values_json = values_json.into();
-        reject_oversize_sql(&sql, &values_json)?;
-        self.call(|reply| Work::DbExecute {
-            sql,
-            values_json,
-            reply,
-        })
-        .await
-    }
-
-    /// Session query.
-    ///
-    /// # Errors
-    ///
-    /// Returns a plugin error when query fails.
-    pub async fn db_query(
-        &self,
-        sql: impl Into<String>,
-        values_json: impl Into<String>,
-    ) -> Result<bookclerk_plugin_sdk::v2::QueryPage> {
-        self.db_query_page_cancelable(sql, values_json, "", 0, Arc::new(AtomicBool::new(false)))
-            .await
-    }
-
-    /// Session query raced against a host cancel flag (atomic RPC abort).
-    ///
-    /// # Errors
-    ///
-    /// Returns a plugin error when query fails or `cancel` is set.
-    pub async fn db_query_cancelable(
-        &self,
-        sql: impl Into<String>,
-        values_json: impl Into<String>,
-        cancel: Arc<AtomicBool>,
-    ) -> Result<bookclerk_plugin_sdk::v2::QueryPage> {
-        self.db_query_page_cancelable(sql, values_json, "", 0, cancel)
-            .await
-    }
-
-    /// Session query for one bounded page.
-    ///
-    /// `limit == 0` means the guest's `MAX_LIST_PAGE`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a plugin error when query fails.
-    pub async fn db_query_page(
-        &self,
-        sql: impl Into<String>,
-        values_json: impl Into<String>,
-        cursor: impl Into<String>,
-        limit: u32,
-    ) -> Result<bookclerk_plugin_sdk::v2::QueryPage> {
-        self.db_query_page_cancelable(
-            sql,
-            values_json,
-            cursor,
-            limit,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-    }
-
-    /// Session query for one bounded page, aborted when `cancel` is set.
-    ///
-    /// # Errors
-    ///
-    /// Returns a plugin error when query fails or is cancelled.
-    pub async fn db_query_page_cancelable(
-        &self,
-        sql: impl Into<String>,
-        values_json: impl Into<String>,
-        cursor: impl Into<String>,
-        limit: u32,
-        cancel: Arc<AtomicBool>,
-    ) -> Result<bookclerk_plugin_sdk::v2::QueryPage> {
-        let sql = sql.into();
-        let values_json = values_json.into();
-        reject_oversize_sql(&sql, &values_json)?;
-        self.call(|reply| Work::DbQuery {
-            sql,
-            values_json,
-            cursor: cursor.into(),
-            limit,
-            cancel,
-            reply,
-        })
-        .await
-    }
-
-    /// Typed `DatabaseSession.capabilities`.
+    /// Typed `AdapterDatabaseSession.capabilities`.
     ///
     /// # Errors
     ///
@@ -824,17 +710,17 @@ impl V2PluginSession {
         self.call(|reply| Work::DbCapabilities { reply }).await
     }
 
-    /// Typed `DatabaseSession.executeAtomic`.
+    /// Typed `AdapterDatabaseSession.execute`.
     ///
     /// # Errors
     ///
     /// Returns a plugin error when the guest rejects the call or `cancel` is set.
-    pub async fn db_execute_atomic(
+    pub async fn db_execute_request(
         &self,
         request: bookclerk_plugin_sdk::ExecuteRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
-        self.call(|reply| Work::DbExecuteAtomic {
+        self.call(|reply| Work::DbExecuteRequest {
             request,
             cancel,
             reply,
@@ -842,18 +728,18 @@ impl V2PluginSession {
         .await
     }
 
-    /// Typed `Transaction.executeAtomic` on the vat-held open transaction.
+    /// Typed `AdapterTransaction.execute` on the vat-held open transaction.
     ///
     /// # Errors
     ///
     /// Returns a plugin error when no transaction is open, the guest rejects
     /// the call, or `cancel` is set.
-    pub async fn db_txn_execute_atomic(
+    pub async fn db_txn_execute_request(
         &self,
         request: bookclerk_plugin_sdk::ExecuteRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
-        self.call(|reply| Work::DbTxnExecuteAtomic {
+        self.call(|reply| Work::DbTxnExecuteRequest {
             request,
             cancel,
             reply,
@@ -893,20 +779,6 @@ impl Drop for V2PluginSession {
     fn drop(&mut self) {
         let _ = self.tx.send(Work::Shutdown);
     }
-}
-
-/// Rejects ordinary `dbQuery`/`dbExecute` payloads above the v2 scalar ceiling.
-fn reject_oversize_sql(sql: &str, values_json: &str) -> Result<()> {
-    if bookclerk_plugin_sdk::sql_payload_exceeds(sql, values_json, MAX_SCALAR_BYTES) {
-        let n = sql.len().saturating_add(values_json.len());
-        return Err(PluginError::from_abi(
-            Some("payload_too_large"),
-            format!(
-                "database statement payload is {n} bytes; maxPayloadBytes is {MAX_SCALAR_BYTES}"
-            ),
-        ));
-    }
-    Ok(())
 }
 
 /// Maps ABI errors onto host [`PluginError`].
@@ -1104,9 +976,11 @@ fn vat_thread(
                     }
                 };
                 let mut dest: Option<bookclerk_plugin_sdk::v2::DestinationClient> = None;
-                let mut db_session: Option<Box<dyn bookclerk_plugin_sdk::v2::DatabaseSession>> =
+                let mut db_session: Option<
+                    Box<dyn bookclerk_plugin_sdk::v2::AdapterDatabaseSession>,
+                > = None;
+                let mut db_txn: Option<Box<dyn bookclerk_plugin_sdk::v2::AdapterTransaction>> =
                     None;
-                let mut db_txn: Option<Box<dyn bookclerk_plugin_sdk::v2::Transaction>> = None;
                 while let Some(work) = rx.recv().await {
                     match work {
                         Work::Shutdown => break,
@@ -1248,55 +1122,16 @@ fn vat_thread(
                             .await;
                             let _ = reply.send(out);
                         }
-                        Work::DbExecute {
-                            sql,
-                            values_json,
-                            reply,
-                        } => {
-                            let stmt = bookclerk_plugin_sdk::v2::Statement { sql, values_json };
+                        Work::DbCapabilities { reply } => {
                             let out = async {
-                                if let Some(txn) = db_txn.as_mut() {
-                                    txn.execute(stmt).await.map_err(map_abi)
-                                } else {
-                                    match db_session.as_mut() {
-                                        Some(s) => s.execute(stmt).await.map_err(map_abi),
-                                        None => Err(PluginError::message(
-                                            "v2 database session not open",
-                                        )),
+                                match db_session.as_mut() {
+                                    Some(s) => s.capabilities().await.map_err(map_abi),
+                                    None => {
+                                        Err(PluginError::message("v2 database session not open"))
                                     }
                                 }
                             }
                             .await;
-                            let _ = reply.send(out);
-                        }
-                        Work::DbQuery {
-                            sql,
-                            values_json,
-                            cursor,
-                            limit,
-                            cancel,
-                            reply,
-                        } => {
-                            let stmt = bookclerk_plugin_sdk::v2::Statement { sql, values_json };
-                            let out = tokio::select! {
-                                () = wait_flag(Arc::clone(&cancel)) => {
-                                    Err(PluginError::from_abi(Some("cancelled"), "rpc cancelled"))
-                                }
-                                out = async {
-                                    if let Some(txn) = db_txn.as_mut() {
-                                        txn.query(stmt, &cursor, limit).await.map_err(map_abi)
-                                    } else {
-                                        match db_session.as_mut() {
-                                            Some(s) => {
-                                                s.query(stmt, &cursor, limit).await.map_err(map_abi)
-                                            }
-                                            None => Err(PluginError::message(
-                                                "v2 database session not open",
-                                            )),
-                                        }
-                                    }
-                                } => out,
-                            };
                             let _ = reply.send(out);
                         }
                         Work::DbBegin { reply } => {
@@ -1330,19 +1165,7 @@ fn vat_thread(
                             .await;
                             let _ = reply.send(out);
                         }
-                        Work::DbCapabilities { reply } => {
-                            let out = async {
-                                match db_session.as_mut() {
-                                    Some(s) => s.capabilities().await.map_err(map_abi),
-                                    None => {
-                                        Err(PluginError::message("v2 database session not open"))
-                                    }
-                                }
-                            }
-                            .await;
-                            let _ = reply.send(out);
-                        }
-                        Work::DbExecuteAtomic {
+                        Work::DbExecuteRequest {
                             request,
                             cancel,
                             reply,
@@ -1353,7 +1176,7 @@ fn vat_thread(
                                 }
                                 out = async {
                                     match db_session.as_mut() {
-                                        Some(s) => s.execute_atomic(request).await.map_err(map_abi),
+                                        Some(s) => s.execute(request).await.map_err(map_abi),
                                         None => Err(PluginError::message(
                                             "v2 database session not open",
                                         )),
@@ -1362,7 +1185,7 @@ fn vat_thread(
                             };
                             let _ = reply.send(out);
                         }
-                        Work::DbTxnExecuteAtomic {
+                        Work::DbTxnExecuteRequest {
                             request,
                             cancel,
                             reply,
@@ -1374,7 +1197,7 @@ fn vat_thread(
                                 out = async {
                                     match db_txn.as_mut() {
                                         Some(txn) => {
-                                            txn.execute_atomic(request).await.map_err(map_abi)
+                                            txn.execute(request).await.map_err(map_abi)
                                         }
                                         None => Err(PluginError::message(
                                             "v2 database transaction not open",

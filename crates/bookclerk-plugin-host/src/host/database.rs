@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
-use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::v2::GuestDatabase;
+use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
     db_value_from_sea, exec_result_from_dto, proxy_rows_from_typed, DbAtomicPlan, DbAtomicRequest,
     DbConnectParams, DbConnectResult, DbPlanStatement, DbPlanStatementKind, DbResultSelection,
@@ -494,10 +494,14 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             DbResultSelection::Rows,
         )?;
         let req = Self::typed_request(typed, format!("proxy-query-{}", uuid::Uuid::new_v4()));
-        let reply = self.execute_typed_validated(req).await.map_err(map_rpc_err)?;
-        let stmt = reply.statements.into_iter().next().ok_or_else(|| {
-            DbErr::Custom("execute query returned no statement result".into())
-        })?;
+        let reply = self
+            .execute_typed_validated(req)
+            .await
+            .map_err(map_rpc_err)?;
+        let stmt =
+            reply.statements.into_iter().next().ok_or_else(|| {
+                DbErr::Custom("execute query returned no statement result".into())
+            })?;
         proxy_rows_from_typed(&stmt).map_err(DbErr::Custom)
     }
 
@@ -511,7 +515,10 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             DbResultSelection::AffectedRows,
         )?;
         let req = Self::typed_request(typed, format!("proxy-exec-{}", uuid::Uuid::new_v4()));
-        let reply = self.execute_typed_validated(req).await.map_err(map_rpc_err)?;
+        let reply = self
+            .execute_typed_validated(req)
+            .await
+            .map_err(map_rpc_err)?;
         let rows_affected = reply
             .statements
             .first()
@@ -531,11 +538,11 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             max_rows: 1,
             result_selection: DbResultSelection::Rows,
         };
-        let req = RpcDatabaseProxy::typed_request(
-            typed,
-            format!("proxy-ping-{}", uuid::Uuid::new_v4()),
-        );
-        self.execute_typed_validated(req).await.map_err(map_rpc_err)?;
+        let req =
+            RpcDatabaseProxy::typed_request(typed, format!("proxy-ping-{}", uuid::Uuid::new_v4()));
+        self.execute_typed_validated(req)
+            .await
+            .map_err(map_rpc_err)?;
         Ok(())
     }
 
@@ -1399,9 +1406,8 @@ fn connect_params(
 #[cfg(test)]
 fn schema_kind_to_backend(kind: bookclerk_library::HostSchemaKind) -> DbBackend {
     match kind {
-        bookclerk_library::HostSchemaKind::PragmaMarker | bookclerk_library::HostSchemaKind::AtomicBatchMarker => {
-            DbBackend::Sqlite
-        }
+        bookclerk_library::HostSchemaKind::PragmaMarker
+        | bookclerk_library::HostSchemaKind::AtomicBatchMarker => DbBackend::Sqlite,
         bookclerk_library::HostSchemaKind::RowMarker => DbBackend::Postgres,
     }
 }

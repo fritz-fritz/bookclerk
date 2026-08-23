@@ -664,7 +664,9 @@ fn db_type_from_decl(decl: Option<&str>) -> DbType {
 /// Maps a rusqlite cell back to SeaORM, using `decl_type` for typed NULLs.
 fn rusqlite_to_sea(v: rusqlite::types::Value, decl_type: Option<&str>, column: &str) -> Value {
     match v {
-        rusqlite::types::Value::Null => bookclerk_plugin_sdk::database_adapter::typed_null(decl_type, column),
+        rusqlite::types::Value::Null => {
+            bookclerk_plugin_sdk::database_adapter::typed_null(decl_type, column)
+        }
         rusqlite::types::Value::Integer(n) => Value::BigInt(Some(n)),
         rusqlite::types::Value::Real(n) => Value::Double(Some(n)),
         rusqlite::types::Value::Text(s) => Value::String(Some(s)),

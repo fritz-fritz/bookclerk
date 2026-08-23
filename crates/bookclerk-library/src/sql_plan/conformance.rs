@@ -3,8 +3,8 @@
 use crate::atomic_ops::{atomic_status, DbAtomicParams};
 
 use super::{
-    compile_named_request, execute_plan_on, execute_statements_on_session, AtomicSession, SqlFamily,
-    vectors::CONTRACT_VECTOR_ROW_CAP,
+    compile_named_request, execute_plan_on, execute_statements_on_session,
+    vectors::CONTRACT_VECTOR_ROW_CAP, AtomicSession, SqlFamily,
 };
 use std::path::PathBuf;
 use std::process::Command;

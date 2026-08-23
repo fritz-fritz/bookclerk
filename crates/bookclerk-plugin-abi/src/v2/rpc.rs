@@ -21,27 +21,29 @@ use super::limits::{
     ScalarLimits, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_STREAM_WINDOW_BYTES,
 };
 use super::plugin_v2_capnp::{
-    bookclerk_plugin, byte_source, cancellation, content_source as content_source_capnp,
-    content_source_reply, copy_reply, database as database_capnp, database_reply,
-    database_session as database_session_capnp, describe_reply, destination as dest_iface,
-    destination_reply, domain_event, empty_reply, event_result as event_result_capnp,
-    event_result_reply, exec_reply, get_reply, handle_reply, head_reply, health_reply,
+    adapter_database_session as adapter_database_session_capnp, adapter_session_reply,
+    adapter_transaction as adapter_transaction_capnp, adapter_transaction_reply, bookclerk_plugin,
+    byte_source, cancellation, content_source as content_source_capnp, content_source_reply,
+    copy_reply, database as database_capnp, database_reply, describe_reply,
+    destination as dest_iface, destination_reply, domain_event, empty_reply,
+    event_result as event_result_capnp, event_result_reply, get_reply,
+    guest_database as guest_database_capnp, handle_reply, head_reply, health_reply,
     integration as integration_capnp, integration_reply, job_handler, job_invocation, job_outcome,
     json_reply, list_reply, object_metadata, oidc_client_template, oidc_clients_reply, open_reply,
-    plugin_describe, plugin_error, progress_sink, pull_reply, put_reply, query_reply,
-    session_reply, source as source_capnp, source_reply, transaction as transaction_capnp,
-    transaction_reply, worker_reply, write_options,
+    plugin_describe, plugin_error, progress_sink, pull_reply, put_reply, source as source_capnp,
+    source_reply, worker_reply, write_options,
 };
 use super::roles::{
-    ByteRange, Cancellation, ContentSource, ContentSourceContext, Database, DatabaseContext,
-    DatabaseSession, Destination, Integration, IntegrationContext, JobHandler, JobHandlerContext,
-    NeverCancel, PluginRoot, ProgressSink, ReadResult, Source, Transaction,
+    AdapterDatabaseSession, AdapterTransaction, ByteRange, Cancellation, ContentSource,
+    ContentSourceContext, Database, DatabaseContext, Destination, GuestDatabase, Integration,
+    IntegrationContext, JobHandler, JobHandlerContext, NeverCancel, PluginRoot, ProgressSink,
+    ReadResult, Source,
 };
 use super::types::{
-    CopyResult, DestinationContext, DomainEvent, EventResult, ExecResult, HealthOk, JobCheckpoint,
+    CopyResult, DestinationContext, DomainEvent, EventResult, HealthOk, JobCheckpoint,
     JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo, ObjectMetadata,
-    OidcClientTemplate, PluginDescribe, PutResult, QueryPage, SourceContext, Statement,
-    WorkerContext, WriteOptions, ENVELOPE_VERSION, MAX_CHECKPOINT_BYTES,
+    OidcClientTemplate, PluginDescribe, PutResult, SourceContext, WorkerContext, WriteOptions,
+    ENVELOPE_VERSION, MAX_CHECKPOINT_BYTES,
 };
 use crate::{PluginError, Result};
 
@@ -1614,42 +1616,6 @@ fn read_domain_event(r: domain_event::Reader<'_>) -> Result<DomainEvent> {
     })
 }
 
-/// Decode a SQL [`Statement`] from Cap'n Proto.
-///
-/// # Errors
-///
-/// Returns when a text field cannot be read from the message.
-fn read_statement(r: super::plugin_v2_capnp::statement::Reader<'_>) -> Result<Statement> {
-    Ok(Statement {
-        sql: text_of(r.get_sql().map_err(from_capnp)?),
-        values_json: text_of(r.get_values_json().map_err(from_capnp)?),
-    })
-}
-
-fn write_exec_reply(result: exec_reply::Builder<'_>, outcome: Result<ExecResult>) {
-    match outcome {
-        Ok(exec) => {
-            let mut ok = result.init_ok();
-            ok.set_last_insert_id(exec.last_insert_id);
-            ok.set_rows_affected(exec.rows_affected);
-        }
-        Err(err) => write_error(result.init_err(), &err),
-    }
-}
-
-fn write_query_reply(result: query_reply::Builder<'_>, outcome: Result<QueryPage>) {
-    match outcome {
-        Ok(page) => {
-            let mut ok = result.init_ok();
-            ok.set_rows_json(&page.rows_json);
-            if let Some(c) = &page.next_cursor {
-                ok.set_next_cursor(c);
-            }
-        }
-        Err(err) => write_error(result.init_err(), &err),
-    }
-}
-
 struct ContentSourceServer {
     inner: Arc<dyn ContentSource>,
 }
@@ -2015,8 +1981,8 @@ impl database_capnp::Server for DatabaseServer {
         let mut result = results.get().init_result();
         match self.inner.open_session().await {
             Ok(session) => {
-                let client: database_session_capnp::Client =
-                    capnp_rpc::new_client(DatabaseSessionServer {
+                let client: adapter_database_session_capnp::Client =
+                    capnp_rpc::new_client(AdapterDatabaseSessionServer {
                         inner: Arc::from(session),
                     });
                 result.set_ok(client);
@@ -2027,79 +1993,15 @@ impl database_capnp::Server for DatabaseServer {
     }
 }
 
-struct DatabaseSessionServer {
-    inner: Arc<dyn DatabaseSession>,
+struct AdapterDatabaseSessionServer {
+    inner: Arc<dyn AdapterDatabaseSession>,
 }
 
-impl database_session_capnp::Server for DatabaseSessionServer {
-    async fn execute(
-        self: Rc<Self>,
-        params: database_session_capnp::ExecuteParams,
-        mut results: database_session_capnp::ExecuteResults,
-    ) -> capnp::Result<()> {
-        let stmt = params
-            .get()?
-            .get_statement()
-            .map_err(|err| capnp::Error::failed(err.to_string()))
-            .and_then(|r| read_statement(r).map_err(|err| capnp::Error::failed(err.to_string())))?;
-        write_exec_reply(results.get().init_result(), self.inner.execute(stmt).await);
-        Ok(())
-    }
-
-    async fn query(
-        self: Rc<Self>,
-        params: database_session_capnp::QueryParams,
-        mut results: database_session_capnp::QueryResults,
-    ) -> capnp::Result<()> {
-        let p = params.get()?;
-        let stmt = p
-            .get_statement()
-            .map_err(|err| capnp::Error::failed(err.to_string()))
-            .and_then(|r| read_statement(r).map_err(|err| capnp::Error::failed(err.to_string())))?;
-        let cursor = p.get_cursor().ok().map(text_of).unwrap_or_default();
-        let limit = p.get_limit();
-        write_query_reply(
-            results.get().init_result(),
-            self.inner.query(stmt, &cursor, limit).await,
-        );
-        Ok(())
-    }
-
-    async fn begin(
-        self: Rc<Self>,
-        _params: database_session_capnp::BeginParams,
-        mut results: database_session_capnp::BeginResults,
-    ) -> capnp::Result<()> {
-        let mut result = results.get().init_result();
-        match self.inner.begin().await {
-            Ok(txn) => {
-                let client: transaction_capnp::Client = capnp_rpc::new_client(TransactionServer {
-                    inner: Arc::from(txn),
-                });
-                result.set_ok(client);
-            }
-            Err(err) => write_error(result.init_err(), &err),
-        }
-        Ok(())
-    }
-
-    async fn close(
-        self: Rc<Self>,
-        _params: database_session_capnp::CloseParams,
-        mut results: database_session_capnp::CloseResults,
-    ) -> capnp::Result<()> {
-        let mut result = results.get().init_result();
-        match self.inner.close().await {
-            Ok(()) => result.set_ok(()),
-            Err(err) => write_error(result.init_err(), &err),
-        }
-        Ok(())
-    }
-
+impl adapter_database_session_capnp::Server for AdapterDatabaseSessionServer {
     async fn capabilities(
         self: Rc<Self>,
-        _params: database_session_capnp::CapabilitiesParams,
-        mut results: database_session_capnp::CapabilitiesResults,
+        _params: adapter_database_session_capnp::CapabilitiesParams,
+        mut results: adapter_database_session_capnp::CapabilitiesResults,
     ) -> capnp::Result<()> {
         super::db_rpc::write_db_capabilities_reply(
             results.get().init_result(),
@@ -2108,10 +2010,10 @@ impl database_session_capnp::Server for DatabaseSessionServer {
         Ok(())
     }
 
-    async fn execute_atomic(
+    async fn execute(
         self: Rc<Self>,
-        params: database_session_capnp::ExecuteAtomicParams,
-        mut results: database_session_capnp::ExecuteAtomicResults,
+        params: adapter_database_session_capnp::ExecuteParams,
+        mut results: adapter_database_session_capnp::ExecuteResults,
     ) -> capnp::Result<()> {
         let request = params
             .get()?
@@ -2121,56 +2023,75 @@ impl database_session_capnp::Server for DatabaseSessionServer {
                 super::db_rpc::read_execute_request(r)
                     .map_err(|err| capnp::Error::failed(err.to_string()))
             })?;
-        super::db_rpc::write_execute_atomic_reply(
+        super::db_rpc::write_execute_result_reply(
             results.get().init_result(),
-            self.inner.execute_atomic(request).await,
+            self.inner.execute(request).await,
         );
         Ok(())
     }
-}
 
-struct TransactionServer {
-    inner: Arc<dyn Transaction>,
-}
-
-impl transaction_capnp::Server for TransactionServer {
-    async fn execute(
+    async fn close(
         self: Rc<Self>,
-        params: transaction_capnp::ExecuteParams,
-        mut results: transaction_capnp::ExecuteResults,
+        _params: adapter_database_session_capnp::CloseParams,
+        mut results: adapter_database_session_capnp::CloseResults,
     ) -> capnp::Result<()> {
-        let stmt = params
-            .get()?
-            .get_statement()
-            .map_err(|err| capnp::Error::failed(err.to_string()))
-            .and_then(|r| read_statement(r).map_err(|err| capnp::Error::failed(err.to_string())))?;
-        write_exec_reply(results.get().init_result(), self.inner.execute(stmt).await);
+        let mut result = results.get().init_result();
+        match self.inner.close().await {
+            Ok(()) => result.set_ok(()),
+            Err(err) => write_error(result.init_err(), &err),
+        }
         Ok(())
     }
 
-    async fn query(
+    async fn begin(
         self: Rc<Self>,
-        params: transaction_capnp::QueryParams,
-        mut results: transaction_capnp::QueryResults,
+        _params: adapter_database_session_capnp::BeginParams,
+        mut results: adapter_database_session_capnp::BeginResults,
     ) -> capnp::Result<()> {
-        let p = params.get()?;
-        let stmt = p
-            .get_statement()
+        let mut result = results.get().init_result();
+        match self.inner.begin().await {
+            Ok(txn) => {
+                let client: adapter_transaction_capnp::Client =
+                    capnp_rpc::new_client(AdapterTransactionServer {
+                        inner: Arc::from(txn),
+                    });
+                result.set_ok(client);
+            }
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
+}
+
+struct AdapterTransactionServer {
+    inner: Arc<dyn AdapterTransaction>,
+}
+
+impl adapter_transaction_capnp::Server for AdapterTransactionServer {
+    async fn execute(
+        self: Rc<Self>,
+        params: adapter_transaction_capnp::ExecuteParams,
+        mut results: adapter_transaction_capnp::ExecuteResults,
+    ) -> capnp::Result<()> {
+        let request = params
+            .get()?
+            .get_request()
             .map_err(|err| capnp::Error::failed(err.to_string()))
-            .and_then(|r| read_statement(r).map_err(|err| capnp::Error::failed(err.to_string())))?;
-        let cursor = p.get_cursor().ok().map(text_of).unwrap_or_default();
-        let limit = p.get_limit();
-        write_query_reply(
+            .and_then(|r| {
+                super::db_rpc::read_execute_request(r)
+                    .map_err(|err| capnp::Error::failed(err.to_string()))
+            })?;
+        super::db_rpc::write_execute_result_reply(
             results.get().init_result(),
-            self.inner.query(stmt, &cursor, limit).await,
+            self.inner.execute(request).await,
         );
         Ok(())
     }
 
     async fn commit(
         self: Rc<Self>,
-        _params: transaction_capnp::CommitParams,
-        mut results: transaction_capnp::CommitResults,
+        _params: adapter_transaction_capnp::CommitParams,
+        mut results: adapter_transaction_capnp::CommitResults,
     ) -> capnp::Result<()> {
         let mut result = results.get().init_result();
         match self.inner.commit().await {
@@ -2182,8 +2103,8 @@ impl transaction_capnp::Server for TransactionServer {
 
     async fn rollback(
         self: Rc<Self>,
-        _params: transaction_capnp::RollbackParams,
-        mut results: transaction_capnp::RollbackResults,
+        _params: adapter_transaction_capnp::RollbackParams,
+        mut results: adapter_transaction_capnp::RollbackResults,
     ) -> capnp::Result<()> {
         let mut result = results.get().init_result();
         match self.inner.rollback().await {
@@ -2192,11 +2113,17 @@ impl transaction_capnp::Server for TransactionServer {
         }
         Ok(())
     }
+}
 
-    async fn execute_atomic(
+struct GuestDatabaseServer {
+    inner: Arc<dyn GuestDatabase>,
+}
+
+impl guest_database_capnp::Server for GuestDatabaseServer {
+    async fn execute(
         self: Rc<Self>,
-        params: transaction_capnp::ExecuteAtomicParams,
-        mut results: transaction_capnp::ExecuteAtomicResults,
+        params: guest_database_capnp::ExecuteParams,
+        mut results: guest_database_capnp::ExecuteResults,
     ) -> capnp::Result<()> {
         let request = params
             .get()?
@@ -2206,10 +2133,23 @@ impl transaction_capnp::Server for TransactionServer {
                 super::db_rpc::read_execute_request(r)
                     .map_err(|err| capnp::Error::failed(err.to_string()))
             })?;
-        super::db_rpc::write_execute_atomic_reply(
+        super::db_rpc::write_execute_result_reply(
             results.get().init_result(),
-            self.inner.execute_atomic(request).await,
+            self.inner.execute(request).await,
         );
+        Ok(())
+    }
+
+    async fn close(
+        self: Rc<Self>,
+        _params: guest_database_capnp::CloseParams,
+        mut results: guest_database_capnp::CloseResults,
+    ) -> capnp::Result<()> {
+        let mut result = results.get().init_result();
+        match self.inner.close().await {
+            Ok(()) => result.set_ok(()),
+            Err(err) => write_error(result.init_err(), &err),
+        }
         Ok(())
     }
 }
@@ -2254,8 +2194,8 @@ impl job_handler::Server for JobHandlerServer {
             Some(client) => Box::new(CancellationClient { client }),
             None => Box::new(NeverCancel),
         };
-        let database: Option<Box<dyn DatabaseSession>> = match p.get_database().ok() {
-            Some(client) => Some(Box::new(DatabaseSessionClient { client })),
+        let database: Option<Box<dyn GuestDatabase>> = match p.get_database().ok() {
+            Some(client) => Some(Box::new(GuestDatabaseClient { client })),
             None => None,
         };
         let ctx = JobHandlerContext {
@@ -2532,7 +2472,7 @@ impl PluginClient {
         output: Arc<dyn Destination>,
         progress: Arc<dyn ProgressSink>,
         cancel: Arc<dyn Cancellation>,
-        database: Option<Arc<dyn DatabaseSession>>,
+        database: Option<Arc<dyn GuestDatabase>>,
     ) -> Result<JobOutcome> {
         let mut req = handler.handle_request();
         fill_invocation(req.get().get_invocation().map_err(from_capnp)?, &invocation)
@@ -2550,7 +2490,7 @@ impl PluginClient {
             .set_cancel(capnp_rpc::new_client(CancellationServer { inner: cancel }));
         if let Some(db) = database {
             req.get()
-                .set_database(capnp_rpc::new_client(DatabaseSessionServer { inner: db }));
+                .set_database(capnp_rpc::new_client(GuestDatabaseServer { inner: db }));
         }
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
@@ -3100,7 +3040,7 @@ pub struct DatabaseClient {
 
 #[async_trait::async_trait(?Send)]
 impl Database for DatabaseClient {
-    async fn open_session(&self) -> Result<Box<dyn DatabaseSession>> {
+    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>> {
         let req = self.client.open_session_request();
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
@@ -3109,119 +3049,20 @@ impl Database for DatabaseClient {
             .get_result()
             .map_err(from_capnp)?;
         match result.which().map_err(from_capnp)? {
-            session_reply::Ok(sess) => Ok(Box::new(DatabaseSessionClient {
+            adapter_session_reply::Ok(sess) => Ok(Box::new(AdapterDatabaseSessionClient {
                 client: sess.map_err(from_capnp)?,
             })),
-            session_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+            adapter_session_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
         }
     }
 }
 
-struct DatabaseSessionClient {
-    client: database_session_capnp::Client,
-}
-
-fn write_statement(mut b: super::plugin_v2_capnp::statement::Builder<'_>, statement: &Statement) {
-    b.set_sql(&statement.sql);
-    b.set_values_json(&statement.values_json);
-}
-
-/// Decode an execute success/error union.
-///
-/// # Errors
-///
-/// Returns the nested [`PluginError`] or a Cap'n Proto read failure.
-fn read_exec_reply(result: exec_reply::Reader<'_>) -> Result<ExecResult> {
-    match result.which().map_err(from_capnp)? {
-        exec_reply::Ok(ok) => {
-            let ok = ok.map_err(from_capnp)?;
-            Ok(ExecResult {
-                last_insert_id: ok.get_last_insert_id(),
-                rows_affected: ok.get_rows_affected(),
-            })
-        }
-        exec_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
-    }
-}
-
-/// Decode a query-page success/error union.
-///
-/// # Errors
-///
-/// Returns the nested [`PluginError`] or a Cap'n Proto read failure.
-fn read_query_reply(result: query_reply::Reader<'_>) -> Result<QueryPage> {
-    match result.which().map_err(from_capnp)? {
-        query_reply::Ok(ok) => {
-            let ok = ok.map_err(from_capnp)?;
-            let cursor = text_of(ok.get_next_cursor().map_err(from_capnp)?);
-            Ok(QueryPage {
-                rows_json: text_of(ok.get_rows_json().map_err(from_capnp)?),
-                next_cursor: if cursor.is_empty() {
-                    None
-                } else {
-                    Some(cursor)
-                },
-            })
-        }
-        query_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
-    }
+struct AdapterDatabaseSessionClient {
+    client: adapter_database_session_capnp::Client,
 }
 
 #[async_trait::async_trait(?Send)]
-impl DatabaseSession for DatabaseSessionClient {
-    async fn execute(&self, statement: Statement) -> Result<ExecResult> {
-        let mut req = self.client.execute_request();
-        write_statement(req.get().get_statement().map_err(from_capnp)?, &statement);
-        let reply = req.send().promise.await.map_err(from_capnp)?;
-        read_exec_reply(
-            reply
-                .get()
-                .map_err(from_capnp)?
-                .get_result()
-                .map_err(from_capnp)?,
-        )
-    }
-    async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage> {
-        let mut req = self.client.query_request();
-        write_statement(req.get().get_statement().map_err(from_capnp)?, &statement);
-        req.get().set_cursor(cursor);
-        req.get().set_limit(limit);
-        let reply = req.send().promise.await.map_err(from_capnp)?;
-        read_query_reply(
-            reply
-                .get()
-                .map_err(from_capnp)?
-                .get_result()
-                .map_err(from_capnp)?,
-        )
-    }
-    async fn begin(&self) -> Result<Box<dyn Transaction>> {
-        let req = self.client.begin_request();
-        let reply = req.send().promise.await.map_err(from_capnp)?;
-        let result = reply
-            .get()
-            .map_err(from_capnp)?
-            .get_result()
-            .map_err(from_capnp)?;
-        match result.which().map_err(from_capnp)? {
-            transaction_reply::Ok(txn) => Ok(Box::new(TransactionClient {
-                client: txn.map_err(from_capnp)?,
-            })),
-            transaction_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
-        }
-    }
-    async fn close(&self) -> Result<()> {
-        let req = self.client.close_request();
-        let reply = req.send().promise.await.map_err(from_capnp)?;
-        read_empty(
-            reply
-                .get()
-                .map_err(from_capnp)?
-                .get_result()
-                .map_err(from_capnp)?,
-        )
-    }
-
+impl AdapterDatabaseSession for AdapterDatabaseSessionClient {
     async fn capabilities(&self) -> Result<crate::DbCapabilities> {
         let req = self.client.capabilities_request();
         let reply = req.send().promise.await.map_err(from_capnp)?;
@@ -3234,11 +3075,11 @@ impl DatabaseSession for DatabaseSessionClient {
         )
     }
 
-    async fn execute_atomic(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
-        let mut req = self.client.execute_atomic_request();
+    async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
+        let mut req = self.client.execute_request();
         super::db_rpc::write_execute_request(req.get().init_request(), &request);
         let reply = req.send().promise.await.map_err(from_capnp)?;
-        super::db_rpc::read_execute_atomic_reply(
+        super::db_rpc::read_execute_result_reply(
             reply
                 .get()
                 .map_err(from_capnp)?
@@ -3246,19 +3087,47 @@ impl DatabaseSession for DatabaseSessionClient {
                 .map_err(from_capnp)?,
         )
     }
+
+    async fn close(&self) -> Result<()> {
+        let req = self.client.close_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_empty(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+
+    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>> {
+        let req = self.client.begin_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        let result = reply
+            .get()
+            .map_err(from_capnp)?
+            .get_result()
+            .map_err(from_capnp)?;
+        match result.which().map_err(from_capnp)? {
+            adapter_transaction_reply::Ok(txn) => Ok(Box::new(AdapterTransactionClient {
+                client: txn.map_err(from_capnp)?,
+            })),
+            adapter_transaction_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        }
+    }
 }
 
-struct TransactionClient {
-    client: transaction_capnp::Client,
+struct AdapterTransactionClient {
+    client: adapter_transaction_capnp::Client,
 }
 
 #[async_trait::async_trait(?Send)]
-impl Transaction for TransactionClient {
-    async fn execute(&self, statement: Statement) -> Result<ExecResult> {
+impl AdapterTransaction for AdapterTransactionClient {
+    async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
         let mut req = self.client.execute_request();
-        write_statement(req.get().get_statement().map_err(from_capnp)?, &statement);
+        super::db_rpc::write_execute_request(req.get().init_request(), &request);
         let reply = req.send().promise.await.map_err(from_capnp)?;
-        read_exec_reply(
+        super::db_rpc::read_execute_result_reply(
             reply
                 .get()
                 .map_err(from_capnp)?
@@ -3266,20 +3135,7 @@ impl Transaction for TransactionClient {
                 .map_err(from_capnp)?,
         )
     }
-    async fn query(&self, statement: Statement, cursor: &str, limit: u32) -> Result<QueryPage> {
-        let mut req = self.client.query_request();
-        write_statement(req.get().get_statement().map_err(from_capnp)?, &statement);
-        req.get().set_cursor(cursor);
-        req.get().set_limit(limit);
-        let reply = req.send().promise.await.map_err(from_capnp)?;
-        read_query_reply(
-            reply
-                .get()
-                .map_err(from_capnp)?
-                .get_result()
-                .map_err(from_capnp)?,
-        )
-    }
+
     async fn commit(&self) -> Result<()> {
         let req = self.client.commit_request();
         let reply = req.send().promise.await.map_err(from_capnp)?;
@@ -3291,6 +3147,7 @@ impl Transaction for TransactionClient {
                 .map_err(from_capnp)?,
         )
     }
+
     async fn rollback(&self) -> Result<()> {
         let req = self.client.rollback_request();
         let reply = req.send().promise.await.map_err(from_capnp)?;
@@ -3302,12 +3159,31 @@ impl Transaction for TransactionClient {
                 .map_err(from_capnp)?,
         )
     }
+}
 
-    async fn execute_atomic(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
-        let mut req = self.client.execute_atomic_request();
+struct GuestDatabaseClient {
+    client: guest_database_capnp::Client,
+}
+
+#[async_trait::async_trait(?Send)]
+impl GuestDatabase for GuestDatabaseClient {
+    async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
+        let mut req = self.client.execute_request();
         super::db_rpc::write_execute_request(req.get().init_request(), &request);
         let reply = req.send().promise.await.map_err(from_capnp)?;
-        super::db_rpc::read_execute_atomic_reply(
+        super::db_rpc::read_execute_result_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+
+    async fn close(&self) -> Result<()> {
+        let req = self.client.close_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_empty(
             reply
                 .get()
                 .map_err(from_capnp)?
@@ -3389,15 +3265,15 @@ where
 mod tests {
     use super::*;
     use crate::v2::{
-        ByteRange, Cancellation, CopyResult, DatabaseSession, Destination, DestinationContext,
-        DomainEvent, EventResult, ExecResult, HealthOk, Integration, IntegrationContext,
-        JobHandler, JobHandlerContext, JobInvocation, JobOutcome, ListOptions, ListPage,
-        ObjectInfo, ObjectMetadata, PluginDescribe, PluginRoot, ProgressSink, PutResult, QueryPage,
-        ReadResult, ScalarLimits, Source, SourceContext, Statement, Transaction, WorkerContext,
-        WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS, MAX_CHECKPOINT_BYTES,
-        MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, PRODUCT_API_VERSION,
+        ByteRange, Cancellation, CopyResult, Destination, DestinationContext, DomainEvent,
+        EventResult, GuestDatabase, HealthOk, Integration, IntegrationContext, JobHandler,
+        JobHandlerContext, JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo,
+        ObjectMetadata, PluginDescribe, PluginRoot, ProgressSink, PutResult, ReadResult,
+        ScalarLimits, Source, SourceContext, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS,
+        FEATURE_STREAMS, MAX_CHECKPOINT_BYTES, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE,
+        PRODUCT_API_VERSION,
     };
-    use crate::{DbCapabilities, DbConnectResult, PluginError, PluginErrorCode, Result};
+    use crate::{ExecuteRequest, PluginError, PluginErrorCode, Result};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
@@ -3618,26 +3494,12 @@ mod tests {
         }
     }
 
-    struct CapsSession;
+    struct GuestDbProbe;
 
     #[async_trait::async_trait(?Send)]
-    impl DatabaseSession for CapsSession {
-        async fn execute(&self, _statement: Statement) -> Result<ExecResult> {
+    impl GuestDatabase for GuestDbProbe {
+        async fn execute(&self, _request: ExecuteRequest) -> Result<crate::ExecuteReply> {
             Err(PluginError::unsupported("execute"))
-        }
-        async fn query(
-            &self,
-            _statement: Statement,
-            _cursor: &str,
-            _limit: u32,
-        ) -> Result<QueryPage> {
-            Err(PluginError::unsupported("query"))
-        }
-        async fn begin(&self) -> Result<Box<dyn Transaction>> {
-            Err(PluginError::unsupported("begin"))
-        }
-        async fn capabilities(&self) -> Result<DbCapabilities> {
-            Ok(DbCapabilities::from_connect(&DbConnectResult::sqlite()))
         }
     }
 
@@ -3653,13 +3515,7 @@ mod tests {
             let Some(db) = context.database else {
                 return Err(PluginError::internal("database capability missing"));
             };
-            let caps = db.capabilities().await?;
-            if caps.diagnostic_engine != DbConnectResult::sqlite().dialect {
-                return Err(PluginError::internal(format!(
-                    "unexpected engine {}",
-                    caps.diagnostic_engine
-                )));
-            }
+            db.close().await?;
             Ok(JobOutcome::Completed {
                 message: "database-injected".into(),
                 bytes_copied: 0,
@@ -3982,7 +3838,7 @@ mod tests {
                         granted as Arc<dyn Destination>,
                         Arc::new(NoopProgress),
                         Arc::new(TestCancel(Arc::new(AtomicBool::new(false)))),
-                        Some(Arc::new(CapsSession) as Arc<dyn DatabaseSession>),
+                        Some(Arc::new(GuestDbProbe) as Arc<dyn GuestDatabase>),
                     )
                     .await
                     .expect("handle");

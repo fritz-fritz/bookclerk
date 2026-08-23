@@ -5,10 +5,10 @@
 use super::plugin_v2_capnp::{
     db_capabilities as db_caps_capnp, db_capabilities_reply, db_column as db_column_capnp,
     db_row as db_row_capnp, db_statement as db_statement_capnp, db_timing as db_timing_capnp,
-    db_value as db_value_capnp, execute_atomic_reply, execute_reply as execute_reply_capnp,
-    execute_request as execute_request_capnp, statement_result as statement_result_capnp,
-    DbResultSelection as CapnpDbResultSelection, DbStatementKind as CapnpDbStatementKind,
-    DbType as CapnpDbType,
+    db_value as db_value_capnp, execute_reply as execute_reply_capnp,
+    execute_request as execute_request_capnp, execute_result_reply,
+    statement_result as statement_result_capnp, DbResultSelection as CapnpDbResultSelection,
+    DbStatementKind as CapnpDbStatementKind, DbType as CapnpDbType,
 };
 use super::rpc::{from_capnp, read_error, text_of, write_error};
 use crate::{
@@ -333,8 +333,8 @@ pub(super) fn read_execute_reply(r: execute_reply_capnp::Reader<'_>) -> Result<E
     })
 }
 
-pub(super) fn write_execute_atomic_reply(
-    result: execute_atomic_reply::Builder<'_>,
+pub(super) fn write_execute_result_reply(
+    result: execute_result_reply::Builder<'_>,
     outcome: Result<ExecuteReply>,
 ) {
     match outcome {
@@ -346,12 +346,12 @@ pub(super) fn write_execute_atomic_reply(
 /// # Errors
 ///
 /// Returns the guest [`PluginError`] on `err`, or a decode failure on `ok`.
-pub(super) fn read_execute_atomic_reply(
-    result: execute_atomic_reply::Reader<'_>,
+pub(super) fn read_execute_result_reply(
+    result: execute_result_reply::Reader<'_>,
 ) -> Result<ExecuteReply> {
     match result.which().map_err(from_capnp)? {
-        execute_atomic_reply::Ok(ok) => read_execute_reply(ok.map_err(from_capnp)?),
-        execute_atomic_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        execute_result_reply::Ok(ok) => read_execute_reply(ok.map_err(from_capnp)?),
+        execute_result_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
     }
 }
 
@@ -497,9 +497,9 @@ pub fn encoded_execute_reply_bytes(reply: &ExecuteReply) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns [`PluginError::internal`] when the message cannot be serialized.
-pub fn encoded_execute_atomic_reply_bytes(outcome: Result<ExecuteReply>) -> Result<Vec<u8>> {
+pub fn encoded_execute_result_reply_bytes(outcome: Result<ExecuteReply>) -> Result<Vec<u8>> {
     let mut message = capnp::message::Builder::new_default();
-    write_execute_atomic_reply(message.init_root(), outcome);
+    write_execute_result_reply(message.init_root(), outcome);
     write_message_bytes(&message)
 }
 
@@ -508,11 +508,11 @@ pub fn encoded_execute_atomic_reply_bytes(outcome: Result<ExecuteReply>) -> Resu
 /// # Errors
 ///
 /// Returns the guest [`PluginError`] on `err`, or a decode failure on `ok`.
-pub fn decode_execute_atomic_reply_bytes(bytes: &[u8]) -> Result<ExecuteReply> {
+pub fn decode_execute_result_reply_bytes(bytes: &[u8]) -> Result<ExecuteReply> {
     let mut cursor = std::io::Cursor::new(bytes);
     let reader = capnp::serialize::read_message(&mut cursor, capnp::message::ReaderOptions::new())
         .map_err(from_capnp)?;
-    read_execute_atomic_reply(reader.get_root().map_err(from_capnp)?)
+    read_execute_result_reply(reader.get_root().map_err(from_capnp)?)
 }
 
 /// Encodes a standalone Cap'n `StatementResult` message (unpacked stream).

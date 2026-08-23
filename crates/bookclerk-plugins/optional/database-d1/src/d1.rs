@@ -564,7 +564,9 @@ fn is_binary_column(column: &str) -> bool {
 fn json_to_sea_value(v: &JsonValue, column: &str) -> std::result::Result<Value, DbErr> {
     reject_oversized_json_cell(v, column)?;
     match v {
-        JsonValue::Null => Ok(bookclerk_plugin_sdk::database_adapter::typed_null(None, column)),
+        JsonValue::Null => Ok(bookclerk_plugin_sdk::database_adapter::typed_null(
+            None, column,
+        )),
         JsonValue::Bool(b) => Ok(Value::Bool(Some(*b))),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() {

@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_plugin_abi::v2::{
-    serve_plugin_stdio, ByteRange, CopyResult, Destination, DestinationContext, GuestDatabase,
-    DomainEvent, EventResult, HealthOk, Integration, IntegrationContext, JobHandler,
+    serve_plugin_stdio, ByteRange, CopyResult, Destination, DestinationContext, DomainEvent,
+    EventResult, GuestDatabase, HealthOk, Integration, IntegrationContext, JobHandler,
     JobHandlerContext, JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo,
     ObjectMetadata, OidcClientTemplate, PluginDescribe, PluginRoot, PutResult, ReadResult,
     ScalarLimitsDto, Source, SourceContext, WorkerContext, WriteOptions, MAX_LIST_PAGE,

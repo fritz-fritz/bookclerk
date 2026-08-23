@@ -89,9 +89,7 @@ impl AdapterDatabaseSession for SqliteSession {
     }
 
     async fn begin(&self) -> Result<Box<dyn AdapterTransaction>> {
-        let txn_id = guest_begin(None)
-            .await
-            .map_err(plugin_error_from_engine)?;
+        let txn_id = guest_begin(None).await.map_err(plugin_error_from_engine)?;
         Ok(Box::new(SqliteTxn { txn_id }))
     }
 }

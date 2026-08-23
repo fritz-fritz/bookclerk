@@ -14,9 +14,10 @@ mod types;
 pub use crate::plugin_v2_capnp;
 
 pub use db_rpc::{
-    canonical_execute_request_hash, decode_db_value_bytes, decode_execute_atomic_reply_bytes,
-    decode_execute_request_bytes, encoded_db_value_bytes, encoded_execute_atomic_reply_bytes,
-    encoded_execute_reply_bytes, encoded_execute_request_bytes, encoded_statement_result_bytes,
+    canonical_execute_request_hash, decode_db_value_bytes, decode_execute_request_bytes,
+    decode_execute_result_reply_bytes, encoded_db_value_bytes, encoded_execute_reply_bytes,
+    encoded_execute_request_bytes, encoded_execute_result_reply_bytes,
+    encoded_statement_result_bytes,
 };
 pub use features::{
     negotiate_rpc_features, RpcFeature, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY,
@@ -28,9 +29,10 @@ pub use limits::{
     MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 pub use roles::{
-    ByteRange, Cancellation, ContentSource, ContentSourceContext, Database, DatabaseContext,
-    DatabaseSession, Destination, Integration, IntegrationContext, JobHandler, JobHandlerContext,
-    NeverCancel, PluginRoot, ProgressSink, ReadResult, Source, Transaction,
+    AdapterDatabaseSession, AdapterTransaction, ByteRange, Cancellation, ContentSource,
+    ContentSourceContext, Database, DatabaseContext, Destination, GuestDatabase, Integration,
+    IntegrationContext, JobHandler, JobHandlerContext, NeverCancel, PluginRoot, ProgressSink,
+    ReadResult, Source,
 };
 pub use rpc::{
     byte_source_from_async_read, connect_plugin, pull_byte_source_to_writer, serve_plugin,

@@ -1,4 +1,4 @@
-//! Host-mediated Cloudflare-style SQL binding over `executeAtomic`.
+//! Host-mediated Cloudflare-style SQL binding over typed `execute`.
 
 #![allow(clippy::missing_docs_in_private_items)]
 
@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bookclerk_plugin_abi::v2::{DatabaseSession, JobHandlerContext};
+use bookclerk_plugin_abi::v2::{GuestDatabase, JobHandlerContext};
 use bookclerk_plugin_abi::{
     encoded_execute_request_bytes, DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply,
     ExecuteRequest, PluginError, Result, TypedDbStatement,
@@ -45,21 +45,21 @@ struct TerminalIntent {
 /// Host-mediated typed SQL surface for plugin guests.
 #[derive(Clone)]
 pub struct DatabaseBinding {
-    session: Arc<dyn DatabaseSession>,
+    session: Arc<dyn GuestDatabase>,
     options: DatabaseBindingOptions,
 }
 
 impl DatabaseBinding {
-    /// Wraps a host-granted [`DatabaseSession`].
+    /// Wraps a host-granted [`GuestDatabase`].
     #[must_use]
-    pub fn from_session(session: Arc<dyn DatabaseSession>) -> Self {
+    pub fn from_session(session: Arc<dyn GuestDatabase>) -> Self {
         Self::from_session_with(session, DatabaseBindingOptions::default())
     }
 
     /// Wraps a host-granted session with request-budget knobs.
     #[must_use]
     pub fn from_session_with(
-        session: Arc<dyn DatabaseSession>,
+        session: Arc<dyn GuestDatabase>,
         options: DatabaseBindingOptions,
     ) -> Self {
         Self { session, options }
@@ -89,7 +89,7 @@ impl DatabaseBinding {
     /// # Errors
     ///
     /// Returns when a statement is missing terminal intent, the encoded
-    /// request exceeds `maxRequestBytes`, or `executeAtomic` fails.
+    /// request exceeds `maxRequestBytes`, or `execute` fails.
     pub async fn batch(
         &self,
         statements: Vec<PreparedStatement>,
@@ -107,7 +107,7 @@ impl DatabaseBinding {
     /// # Errors
     ///
     /// Returns when the batch is empty, the encoded request exceeds the
-    /// negotiated cap, or `executeAtomic` fails.
+    /// negotiated cap, or `execute` fails.
     pub async fn execute(
         &self,
         batch: Vec<TypedDbStatement>,
@@ -115,7 +115,7 @@ impl DatabaseBinding {
     ) -> Result<ExecuteReply> {
         if batch.is_empty() {
             return Err(PluginError::invalid_params(
-                "executeAtomic statements must be non-empty",
+                "execute statements must be non-empty",
             ));
         }
         let token = retry.or_else(|| self.options.retry.clone());
@@ -144,7 +144,7 @@ impl DatabaseBinding {
                 encoded.len()
             )));
         }
-        self.session.execute_atomic(request).await
+        self.session.execute(request).await
     }
 }
 
@@ -203,7 +203,7 @@ impl PreparedStatement {
     ///
     /// # Errors
     ///
-    /// Returns when `executeAtomic` fails.
+    /// Returns when `execute` fails.
     pub async fn run(self, retry: Option<RetryToken>) -> Result<ExecuteReply> {
         let bound = self.as_run();
         let binding = bound.binding.clone();
@@ -214,7 +214,7 @@ impl PreparedStatement {
     ///
     /// # Errors
     ///
-    /// Returns when `executeAtomic` fails.
+    /// Returns when `execute` fails.
     pub async fn first(self, retry: Option<RetryToken>) -> Result<Option<Vec<(String, DbValue)>>> {
         let bound = self.as_first();
         let binding = bound.binding.clone();
@@ -239,7 +239,7 @@ impl PreparedStatement {
     ///
     /// # Errors
     ///
-    /// Returns when `executeAtomic` fails.
+    /// Returns when `execute` fails.
     pub async fn all(self, retry: Option<RetryToken>) -> Result<ExecuteReply> {
         let bound = self.as_all();
         let binding = bound.binding.clone();
@@ -288,7 +288,7 @@ fn new_operation_id() -> String {
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
-    use bookclerk_plugin_abi::v2::{ExecResult, QueryPage, Statement, Transaction};
+    use bookclerk_plugin_abi::v2::GuestDatabase;
     use std::sync::Mutex;
 
     struct RecordingSession {
@@ -296,25 +296,8 @@ mod tests {
     }
 
     #[async_trait::async_trait(?Send)]
-    impl DatabaseSession for RecordingSession {
-        async fn execute(&self, _statement: Statement) -> Result<ExecResult> {
-            Err(PluginError::unsupported("execute"))
-        }
-
-        async fn query(
-            &self,
-            _statement: Statement,
-            _cursor: &str,
-            _limit: u32,
-        ) -> Result<QueryPage> {
-            Err(PluginError::unsupported("query"))
-        }
-
-        async fn begin(&self) -> Result<Box<dyn Transaction>> {
-            Err(PluginError::unsupported("begin"))
-        }
-
-        async fn execute_atomic(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
+    impl GuestDatabase for RecordingSession {
+        async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
             let n = request.statements.len();
             *self.last.lock().expect("lock") = Some(request);
             Ok(ExecuteReply {

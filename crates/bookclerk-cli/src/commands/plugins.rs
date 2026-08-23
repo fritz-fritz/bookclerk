@@ -1061,7 +1061,7 @@ async fn probe_database(
     session
         .db_open(toml_table_to_json(&settings).to_string())
         .await?;
-    let _ = session.db_query("SELECT 1 AS ok", "[]").await?;
+    let _ = session.db_capabilities().await?;
     Ok(())
 }
 

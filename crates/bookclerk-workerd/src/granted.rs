@@ -630,12 +630,7 @@ where
             return Ok(());
         }
         if transfer_encoding_is_chunked(&headers) {
-            write_status(
-                &mut writer,
-                400,
-                "chunked execute bodies are not supported",
-            )
-            .await?;
+            write_status(&mut writer, 400, "chunked execute bodies are not supported").await?;
             return Ok(());
         }
         let rest = match read_content(&mut reader, &headers, prefix, cap).await {
