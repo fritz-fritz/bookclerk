@@ -468,6 +468,52 @@ impl DbCapabilities {
         }
     }
 
+    /// True when this guest meets the host's compiled minimum SQL contract.
+    #[must_use]
+    pub fn meets_host_minimums(&self) -> bool {
+        self.capability_failure_reason_opt().is_none()
+    }
+
+    /// Operator-facing reason when [`Self::meets_host_minimums`] is false.
+    #[must_use]
+    pub fn capability_failure_reason(&self) -> String {
+        self.capability_failure_reason_opt()
+            .unwrap_or_else(|| "database guest failed capability negotiation".into())
+    }
+
+    /// Failure reason, or `None` when the guest meets host minima.
+    fn capability_failure_reason_opt(&self) -> Option<String> {
+        if !self.affected_rows {
+            return Some("database guest does not advertise affectedRows".into());
+        }
+        if !self.cancellation {
+            return Some("database guest does not advertise cancellation".into());
+        }
+        let family = self.sql_family.to_ascii_lowercase();
+        if family.is_empty() {
+            return Some("database guest sqlFamily is required".into());
+        }
+        if family != "sqlite" && family != "postgres" {
+            return Some(format!(
+                "database guest sqlFamily {:?} is not sqlite or postgres (SQL-like backends only)",
+                self.sql_family
+            ));
+        }
+        if !self.diagnostic_engine.is_empty()
+            && !dialect_matches_sql_family_bootstrap(&self.diagnostic_engine, &family)
+        {
+            return Some(format!(
+                "database guest dialect {:?} does not match sqlFamily {:?}",
+                self.diagnostic_engine, self.sql_family
+            ));
+        }
+        let connect = self.to_connect();
+        if !connect.meets_host_minimums() {
+            return Some(connect.capability_failure_reason());
+        }
+        None
+    }
+
     /// JSON connect result used by existing host negotiation.
     ///
     /// When [`Self::sql_family`] is non-empty it is the SeaORM family identity.
@@ -509,6 +555,17 @@ impl DbCapabilities {
             atomic_schema_batch: self.atomic_schema_batch,
             timing: self.timing,
         }
+    }
+}
+
+/// Bootstrap-only dialect/sqlFamily consistency (not used for schema plan selection).
+fn dialect_matches_sql_family_bootstrap(dialect: &str, sql_family: &str) -> bool {
+    match sql_family {
+        "sqlite" => dialect.eq_ignore_ascii_case("sqlite"),
+        "postgres" => {
+            dialect.eq_ignore_ascii_case("postgres") || dialect.eq_ignore_ascii_case("postgresql")
+        }
+        _ => false,
     }
 }
 
@@ -633,6 +690,14 @@ mod tests {
         let big = "x".repeat(MAX_SCALAR_BYTES as usize);
         assert!(sql_payload_exceeds(&big, "[]", MAX_SCALAR_BYTES));
         assert!(!sql_payload_exceeds("SELECT 1", "[]", MAX_SCALAR_BYTES + 1));
+    }
+
+    #[test]
+    fn capabilities_reject_missing_affected_rows() {
+        let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
+        caps.affected_rows = false;
+        assert!(!caps.meets_host_minimums());
+        assert!(caps.capability_failure_reason().contains("affectedRows"));
     }
 
     #[test]

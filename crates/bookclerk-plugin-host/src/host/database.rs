@@ -105,17 +105,17 @@ impl ExternalDatabase {
         let ctx = serde_json::to_string(&params).map_err(|err| DbErr::Custom(err.to_string()))?;
         self.session.db_open(ctx).await.map_err(map_rpc_err)?;
 
-        let connect_result = self
+        let caps = self
             .session
             .db_capabilities()
             .await
-            .map_err(map_rpc_err)?
-            .to_connect();
-        if !connect_result.meets_host_minimums() {
-            return Err(DbErr::Custom(connect_result.capability_failure_reason()));
+            .map_err(map_rpc_err)?;
+        if !caps.meets_host_minimums() {
+            return Err(DbErr::Custom(caps.capability_failure_reason()));
         }
-        let _kind = bookclerk_library::HostSchemaKind::from_capabilities(&connect_result)
+        let _kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
+        let connect_result = caps.to_connect();
         let backend = sql_family_to_backend(&connect_result.sql_family)?;
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
             session: self.session.clone(),

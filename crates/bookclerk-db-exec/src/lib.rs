@@ -57,5 +57,6 @@ pub use proxy_txn::{
     txn_broken_err, with_exec_budget, AtomicInterruptKind, AtomicInterruptPhase, ExecBudget,
 };
 pub use typed::{
-    db_value_from_sea, db_value_to_sea, execute_typed_on_session, execute_typed_on_txn,
+    db_value_from_sea, db_value_to_sea, execute_typed_on_session, execute_typed_on_session_then,
+    execute_typed_on_txn,
 };

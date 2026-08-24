@@ -11,7 +11,7 @@ use std::time::Instant;
 use bookclerk_plugin_abi::v2::{encoded_execute_reply_bytes, encoded_statement_result_bytes};
 use bookclerk_plugin_abi::{
     DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
-    ExecuteReply, ExecuteRequest, StatementResult,
+    ExecuteReply, ExecuteRequest, StatementResult, TypedDbStatement,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, Statement,
@@ -506,7 +506,43 @@ pub async fn execute_typed_on_session(
     let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
     let seen_budget = Arc::clone(&budget);
     let result = with_exec_budget(Arc::clone(&budget), || {
-        execute_typed_body(db, req, timing_source, caps, session)
+        execute_typed_body(
+            db,
+            req,
+            timing_source,
+            caps,
+            session,
+            None::<fn(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>>,
+        )
+    })
+    .await;
+    record_query_rows_seen(seen_budget.rows_seen());
+    result
+}
+
+/// Like [`execute_typed_on_session`], running extra statements in the same transaction
+/// before COMMIT (used to persist guest replay payloads on `db_atomic_receipts`).
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails, `then` fails, encoding fails, or COMMIT fails.
+pub async fn execute_typed_on_session_then<F>(
+    db: &DatabaseConnection,
+    req: &ExecuteRequest,
+    timing_source: &str,
+    caps: impl Into<ExecCaps>,
+    session: AtomicSession,
+    then: F,
+) -> Result<ExecuteReply, DbErr>
+where
+    F: FnOnce(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>,
+{
+    let caps = caps.into();
+    session.check(AtomicInterruptPhase::BeforeBegin)?;
+    let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
+    let seen_budget = Arc::clone(&budget);
+    let result = with_exec_budget(Arc::clone(&budget), || {
+        execute_typed_body(db, req, timing_source, caps, session, Some(then))
     })
     .await;
     record_query_rows_seen(seen_budget.rows_seen());
@@ -722,13 +758,17 @@ async fn execute_typed_join_body(
 /// # Errors
 ///
 /// Returns [`DbErr`] when a statement fails, encoding fails, or COMMIT fails.
-async fn execute_typed_body(
+async fn execute_typed_body<F>(
     db: &DatabaseConnection,
     req: &ExecuteRequest,
     timing_source: &str,
     caps: ExecCaps,
     session: AtomicSession,
-) -> Result<ExecuteReply, DbErr> {
+    then: Option<F>,
+) -> Result<ExecuteReply, DbErr>
+where
+    F: FnOnce(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>,
+{
     if req.statements.is_empty() {
         return Err(DbErr::Custom(
             "executeAtomic statements must be non-empty".into(),
@@ -822,6 +862,37 @@ async fn execute_typed_body(
             }
         };
         statements.push(stmt_result);
+    }
+    if let Some(then) = then {
+        let partial = ExecuteReply {
+            operation_id: req.operation_id.clone(),
+            statements: statements.clone(),
+            timing: DbTiming {
+                attempt_elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                db_execution_us: u64::try_from(sql_started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                db_timing_source: timing_source.to_string(),
+            },
+        };
+        for stmt in then(partial)? {
+            if let Err(err) = session.check(AtomicInterruptPhase::BetweenStatements) {
+                let _ = txn.rollback().await;
+                let _ = take_txn_fault();
+                return Err(err);
+            }
+            let values: Vec<SeaValue> = stmt.parameters.iter().map(db_value_to_sea).collect();
+            let sql = lower_canonical_sql(backend, &stmt.sql);
+            let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
+            match txn.execute_raw(sea_stmt).await {
+                Ok(exec) => {
+                    statements.push(StatementResult::from_affected(exec.rows_affected()));
+                }
+                Err(err) => {
+                    let _ = txn.rollback().await;
+                    let _ = take_txn_fault();
+                    return Err(err);
+                }
+            }
+        }
     }
     if consume_commit_injection() {
         let _ = txn.rollback().await;

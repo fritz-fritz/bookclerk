@@ -15,6 +15,9 @@ use super::named::apply_write_predicate;
 /// Host `operationKind` stored on guest-typed receipts.
 const GUEST_TYPED_KIND: &str = "guestTyped";
 
+/// Maximum UTF-8 bytes stored in `db_atomic_receipts.payload` for guest replay.
+pub const GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES: usize = 65536;
+
 /// Prune + prior-select prefix ahead of the guest statements.
 const WRAP_PREFIX: usize = 2;
 /// Receipt insert after the guest statements.
@@ -88,7 +91,7 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> ExecuteReques
     req
 }
 
-/// Interprets a wrapped guest reply: conflict on hash mismatch, else strip wrapper rows.
+/// Interprets a wrapped guest reply: replay from stored payload, else strip wrapper rows.
 ///
 /// # Errors
 ///
@@ -108,11 +111,16 @@ pub(crate) fn unwrap_guest_typed_reply(
             reply.statements.len()
         )));
     }
-    if let Some(prior_hash) = receipt_hash_from(&reply.statements[1]) {
-        if prior_hash != guest_hash {
-            return Err(PluginError::conflict(
-                "executeAtomic operationId was already committed with a different requestHash",
-            ));
+    if let Some(prior) = reply.statements.get(1) {
+        if let Some(prior_hash) = receipt_hash_from(prior) {
+            if prior_hash != guest_hash {
+                return Err(PluginError::conflict(
+                    "executeAtomic operationId was already committed with a different requestHash",
+                ));
+            }
+            if let Some(replayed) = decode_guest_replay_payload(prior)? {
+                return Ok(replayed);
+            }
         }
     }
     reply.statements = reply
@@ -120,6 +128,119 @@ pub(crate) fn unwrap_guest_typed_reply(
         .drain(WRAP_PREFIX..WRAP_PREFIX + guest_len)
         .collect();
     Ok(reply)
+}
+
+/// Builds follow-up statements to persist a guest reply for idempotent replay.
+///
+/// Returns an empty list when the prior receipt row already carries payload.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the envelope is malformed or the payload exceeds
+/// [`GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES`].
+pub(crate) fn guest_receipt_persist_stmts(
+    partial: &ExecuteReply,
+    guest_len: usize,
+    guest_hash: &str,
+) -> Result<Vec<TypedDbStatement>, sea_orm::DbErr> {
+    let expected = WRAP_PREFIX.saturating_add(guest_len).saturating_add(WRAP_SUFFIX);
+    if partial.statements.len() != expected {
+        return Err(sea_orm::DbErr::Custom(format!(
+            "guest atomic receipt wrap returned {} statements; expected {expected}",
+            partial.statements.len()
+        )));
+    }
+    if let Some(prior) = partial.statements.get(1) {
+        if let Some(prior_hash) = receipt_hash_from(prior) {
+            if prior_hash != guest_hash {
+                return Err(sea_orm::DbErr::Custom(
+                    "executeAtomic operationId was already committed with a different requestHash"
+                        .into(),
+                ));
+            }
+            if receipt_payload_text(prior).is_some() {
+                return Ok(Vec::new());
+            }
+        }
+    }
+    let guest_reply = ExecuteReply {
+        operation_id: partial.operation_id.clone(),
+        statements: partial
+            .statements
+            .iter()
+            .skip(WRAP_PREFIX)
+            .take(guest_len)
+            .cloned()
+            .collect(),
+        timing: partial.timing.clone(),
+    };
+    let payload = encode_guest_replay_payload(&guest_reply)?;
+    Ok(vec![typed_exec(
+        "UPDATE db_atomic_receipts SET payload = ? WHERE operation_id = ? AND status = 'ok'",
+        vec![
+            DbValue::Text(payload),
+            DbValue::Text(partial.operation_id.clone()),
+        ],
+    )])
+}
+
+/// Reconstructs a guest [`ExecuteReply`] from a prior-receipt select row.
+fn decode_guest_replay_payload(
+    prior: &bookclerk_plugin_abi::StatementResult,
+) -> Result<Option<ExecuteReply>, PluginError> {
+    let Some(text) = receipt_payload_text(prior) else {
+        return Ok(None);
+    };
+    let payload: GuestReplayPayload = serde_json::from_str(&text).map_err(|err| {
+        PluginError::internal(format!("guest replay payload is not valid JSON: {err}"))
+    })?;
+    Ok(Some(ExecuteReply {
+        operation_id: payload.operation_id,
+        statements: payload.statements,
+        timing: payload.timing,
+    }))
+}
+
+/// Serializes guest statement results for durable replay.
+fn encode_guest_replay_payload(reply: &ExecuteReply) -> Result<String, sea_orm::DbErr> {
+    let payload = GuestReplayPayload {
+        operation_id: reply.operation_id.clone(),
+        statements: reply.statements.clone(),
+        timing: reply.timing.clone(),
+    };
+    let text = serde_json::to_string(&payload).map_err(|err| {
+        sea_orm::DbErr::Custom(format!("guest replay payload encode failed: {err}"))
+    })?;
+    if text.len() > GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES {
+        return Err(sea_orm::DbErr::Custom(format!(
+            "guest replay payload is {} bytes; max is {}",
+            text.len(),
+            GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES
+        )));
+    }
+    Ok(text)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GuestReplayPayload {
+    operation_id: String,
+    statements: Vec<bookclerk_plugin_abi::StatementResult>,
+    timing: bookclerk_plugin_abi::DbTiming,
+}
+
+/// Reads `payload` from a prior-receipt select row, if present.
+fn receipt_payload_text(prior: &bookclerk_plugin_abi::StatementResult) -> Option<String> {
+    let row = prior.rows.first()?;
+    let idx = prior
+        .columns
+        .iter()
+        .position(|c| c.name.eq_ignore_ascii_case("payload"))
+        .or(Some(4))?;
+    match row.values.get(idx)? {
+        DbValue::Text(s) if !s.is_empty() => Some(s.clone()),
+        DbValue::Null(_) => None,
+        _ => None,
+    }
 }
 
 /// True for DML kinds that must be receipt-gated.
@@ -219,6 +340,65 @@ mod tests {
             gated.sql
         );
         assert_eq!(gated.parameters.len(), 3);
+    }
+
+    #[test]
+    fn unwrap_replays_stored_guest_reply_on_hash_match() {
+        let guest = guest_insert();
+        let payload = encode_guest_replay_payload(&ExecuteReply {
+            operation_id: guest.operation_id.clone(),
+            statements: vec![bookclerk_plugin_abi::StatementResult::from_affected(1)],
+            timing: bookclerk_plugin_abi::DbTiming::default(),
+        })
+        .expect("encode");
+        let prior = bookclerk_plugin_abi::StatementResult {
+            rows: vec![bookclerk_plugin_abi::DbRow {
+                values: vec![
+                    DbValue::Text("guest-op".into()),
+                    DbValue::Text("a".repeat(64)),
+                    DbValue::Text("ok".into()),
+                    DbValue::Text(payload),
+                    DbValue::Text("2026-01-01T00:00:00Z".into()),
+                ],
+            }],
+            columns: vec![
+                bookclerk_plugin_abi::DbColumn {
+                    name: "operation_id".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "request_hash".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "status".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "payload".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "created_at".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+            ],
+            rows_affected: 0,
+            cursor: String::new(),
+        };
+        let reply = ExecuteReply {
+            operation_id: "guest-op".into(),
+            statements: vec![
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+                prior,
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+            ],
+            timing: bookclerk_plugin_abi::DbTiming::default(),
+        };
+        let replayed = unwrap_guest_typed_reply(reply, 1, &"a".repeat(64)).expect("replay");
+        assert_eq!(replayed.statements.len(), 1);
+        assert_eq!(replayed.statements[0].rows_affected, 1);
     }
 
     #[test]

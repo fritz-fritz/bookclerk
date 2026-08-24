@@ -99,6 +99,57 @@ impl HostSchemaKind {
             )))
         }
     }
+
+    /// Selects a schema apply mechanic from typed [`DbCapabilities`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Other`] when capabilities are missing, mixed, or
+    /// contradictory.
+    pub fn from_db_capabilities(caps: &bookclerk_plugin_abi::DbCapabilities) -> Result<Self> {
+        let kind = if caps.pragma_user_version
+            && !caps.schema_migrations
+            && !caps.atomic_schema_batch
+        {
+            Self::PragmaMarker
+        } else if caps.schema_migrations && caps.atomic_schema_batch && !caps.pragma_user_version {
+            Self::AtomicBatchMarker
+        } else if caps.schema_migrations && !caps.atomic_schema_batch && !caps.pragma_user_version {
+            Self::RowMarker
+        } else {
+            return Err(LibraryError::Other(anyhow::anyhow!(
+                "database guest schema flags are not a known versioning contract \
+                 (pragmaUserVersion={}, schemaMigrations={}, atomicSchemaBatch={})",
+                caps.pragma_user_version,
+                caps.schema_migrations,
+                caps.atomic_schema_batch
+            )));
+        };
+        kind.advertised_db_capabilities_match(caps)?;
+        Ok(kind)
+    }
+
+    /// Checks typed capability flags against this marker kind.
+    pub fn advertised_db_capabilities_match(
+        self,
+        caps: &bookclerk_plugin_abi::DbCapabilities,
+    ) -> Result<()> {
+        let ok = match self {
+            Self::PragmaMarker => caps.pragma_user_version && !caps.atomic_schema_batch,
+            Self::AtomicBatchMarker => caps.schema_migrations && caps.atomic_schema_batch,
+            Self::RowMarker => {
+                caps.schema_migrations && !caps.atomic_schema_batch && !caps.pragma_user_version
+            }
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(LibraryError::Other(anyhow::anyhow!(
+                "database plugin advertised schema flags do not match {:?}",
+                self
+            )))
+        }
+    }
 }
 
 /// Applies pending host-authored DDL. D1 V27 is skipped (use

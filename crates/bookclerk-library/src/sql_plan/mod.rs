@@ -27,7 +27,9 @@ pub use exec::{
     execute_plan_on, execute_plan_on_capped, execute_statements_on, execute_statements_on_session,
     AtomicSession,
 };
-pub(crate) use guest_receipt::{unwrap_guest_typed_reply, wrap_guest_typed_request};
+pub(crate) use guest_receipt::{
+    guest_receipt_persist_stmts, unwrap_guest_typed_reply, wrap_guest_typed_request,
+};
 pub use interpret::{interpret_exec, interpret_plan, validate_exec_result, PlanStmtResult};
 pub use named::{compile_claim_event_delivery, compile_named_request};
 pub use slots::{event_inflight_slot, lock_serialization_slot, JOB_QUEUE_SLOT};
