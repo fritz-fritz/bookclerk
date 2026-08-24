@@ -848,12 +848,25 @@ fn toml_to_json(value: &toml::Value) -> Value {
 mod tests {
     use super::*;
     use bookclerk_library::configure_master_key;
-    use tempfile::tempdir;
+    use std::sync::OnceLock;
+    use tempfile::TempDir;
+
+    static MASTER_KEY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn shared_test_master_key() {
+        static SHARED: OnceLock<TempDir> = OnceLock::new();
+        let dir = SHARED.get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            configure_master_key(dir.path()).unwrap();
+            dir
+        });
+        configure_master_key(dir.path()).unwrap();
+    }
 
     #[tokio::test]
     async fn scan_credentials_only_from_this_scope() {
-        let dir = tempdir().unwrap();
-        configure_master_key(dir.path()).unwrap();
+        let _guard = MASTER_KEY_TEST_LOCK.lock().await;
+        shared_test_master_key();
         let store = bookclerk_plugin_database_sqlite::open_store_memory()
             .await
             .unwrap();
@@ -883,8 +896,8 @@ mod tests {
 
     #[tokio::test]
     async fn scan_credentials_skips_scan_disabled_unless_explicit() {
-        let dir = tempdir().unwrap();
-        configure_master_key(dir.path()).unwrap();
+        let _guard = MASTER_KEY_TEST_LOCK.lock().await;
+        shared_test_master_key();
         let store = bookclerk_plugin_database_sqlite::open_store_memory()
             .await
             .unwrap();
