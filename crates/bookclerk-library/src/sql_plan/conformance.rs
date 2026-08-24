@@ -100,7 +100,7 @@ async fn sqlite_recursive_cte_honors_deadline() {
         statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM t WHERE x < 200000000) SELECT COUNT(*) AS n FROM t".into(),
             binds: vec![],
-            kind: crate::sql_plan::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Returning,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -157,7 +157,7 @@ async fn sqlite_query_stops_after_cap_plus_one() {
         statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "SELECT x FROM rowcap_probe".into(),
             binds: vec![],
-            kind: crate::sql_plan::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Returning,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -210,7 +210,7 @@ async fn concurrent_attempts_keep_independent_deadlines_and_caps() {
         statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM t WHERE x < 200000000) SELECT COUNT(*) AS n FROM t".into(),
             binds: vec![],
-            kind: crate::sql_plan::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Returning,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -222,7 +222,7 @@ async fn concurrent_attempts_keep_independent_deadlines_and_caps() {
         statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "SELECT x FROM rowcap_probe".into(),
             binds: vec![],
-            kind: crate::sql_plan::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Returning,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -448,7 +448,7 @@ async fn conditional_update_zero_rows_is_ok_execute() {
             crate::sql_plan::DbPlanStatement {
                 sql: "SELECT 'ok' AS status".into(),
                 binds: vec![],
-                kind: crate::sql_plan::DbPlanStatementKind::Query,
+                kind: crate::sql_plan::DbPlanStatementKind::Returning,
                 max_rows: 0,
             },
         ],
@@ -816,8 +816,7 @@ fn d1_compat_execute(
         };
         let rows_affected = match stmt.kind {
             crate::sql_plan::DbPlanStatementKind::Select => 0,
-            crate::sql_plan::DbPlanStatementKind::Returning
-            | crate::sql_plan::DbPlanStatementKind::Query => u64::try_from(rows.len()).unwrap_or(0),
+            crate::sql_plan::DbPlanStatementKind::Returning => u64::try_from(rows.len()).unwrap_or(0),
             crate::sql_plan::DbPlanStatementKind::Execute => engine_changes,
         };
         statements.push(crate::sql_plan::DbPlanStmtExecResult {
@@ -902,7 +901,7 @@ fn d1_compat_rejects_more_than_100_binds() {
         statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "SELECT 1".into(),
             binds: vec![serde_json::json!(1); 101],
-            kind: crate::sql_plan::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Returning,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -969,7 +968,7 @@ async fn execute_caps_collected_rows_at_max_result_rows() {
             sql: "SELECT slot_key FROM db_serialization_slots WHERE slot_key LIKE 'cap-%' ORDER BY slot_key"
                 .into(),
             binds: vec![],
-            kind: crate::sql_plan::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Returning,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -1035,7 +1034,7 @@ async fn postgres_plan_exceeds_max_binds_is_rejected() {
                 serde_json::json!(2),
                 serde_json::json!(3),
             ],
-            kind: crate::sql_plan::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Returning,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -1072,7 +1071,7 @@ async fn postgres_execute_caps_collected_rows() {
             sql: "SELECT slot_key FROM db_serialization_slots WHERE slot_key LIKE 'pg-cap-%' ORDER BY slot_key"
                 .into(),
             binds: vec![],
-            kind: crate::sql_plan::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Returning,
             max_rows: 0,
         }],
         outcome_index: 0,

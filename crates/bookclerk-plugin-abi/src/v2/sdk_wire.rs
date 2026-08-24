@@ -175,8 +175,8 @@ fn db_type_ord(ty: DbType) -> u16 {
 
 fn kind_ord(kind: DbPlanStatementKind) -> u16 {
     match kind {
-        DbPlanStatementKind::Query | DbPlanStatementKind::Select => 1,
         DbPlanStatementKind::Execute => 0,
+        DbPlanStatementKind::Select => 1,
         DbPlanStatementKind::Returning => 2,
     }
 }

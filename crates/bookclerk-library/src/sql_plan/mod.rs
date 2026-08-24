@@ -344,7 +344,7 @@ pub fn host_statement_kind(sql: &str) -> bookclerk_plugin_abi::DbPlanStatementKi
 
 /// Kind for a SeaORM proxy **read**. `SELECT`/`WITH`/`VALUES` become `Select`
 /// (LIMIT-wrapped). `RETURNING` stays `Returning`. Everything else (PRAGMA,
-/// schema introspection) is `Query` so it is not LIMIT-wrapped.
+/// schema introspection) is `Returning` so it is not LIMIT-wrapped.
 #[must_use]
 pub fn proxy_read_kind(sql: &str) -> bookclerk_plugin_abi::DbPlanStatementKind {
     match named::authored_kind(sql) {
@@ -354,7 +354,11 @@ pub fn proxy_read_kind(sql: &str) -> bookclerk_plugin_abi::DbPlanStatementKind {
         bookclerk_plugin_abi::DbPlanStatementKind::Returning => {
             bookclerk_plugin_abi::DbPlanStatementKind::Returning
         }
-        _ => bookclerk_plugin_abi::DbPlanStatementKind::Query,
+        // Execute-classified SQL on the read path (PRAGMA, etc.): treat as
+        // non-wrappable row-producing work.
+        bookclerk_plugin_abi::DbPlanStatementKind::Execute => {
+            bookclerk_plugin_abi::DbPlanStatementKind::Returning
+        }
     }
 }
 
@@ -386,7 +390,7 @@ mod limits_tests {
     }
 
     fn stmt(sql: &str, binds: Vec<serde_json::Value>) -> DbPlanStatement {
-        DbPlanStatement::new(sql, binds, DbPlanStatementKind::Query)
+        DbPlanStatement::new(sql, binds, DbPlanStatementKind::Returning)
     }
 
     #[test]
@@ -644,7 +648,7 @@ mod limits_tests {
 
         let mut select = ddl.clone();
         select.statements[0].sql = "SELECT id FROM books".into();
-        select.statements[0].kind = DbPlanStatementKind::Query;
+        select.statements[0].kind = DbPlanStatementKind::Returning;
         select.statements[0].result_selection = DbResultSelection::Rows;
         super::authorize_guest_typed_request(&mut select, &caps, &books).unwrap();
         assert_eq!(select.statements[0].kind, DbPlanStatementKind::Select);

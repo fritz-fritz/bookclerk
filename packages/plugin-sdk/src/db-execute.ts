@@ -11,10 +11,9 @@ import { readDbValue, writeDbValue, type DbType, type DbValue } from "./db-value
 import { guestStatementKind, splitExecQueries } from "./guest-sql.js";
 
 /** Host-authored statement kind on `DbStatement.kind`. */
-export type DbStatementKind = "query" | "execute" | "select" | "returning";
+export type DbStatementKind = "execute" | "select" | "returning";
 
 const KIND_ORD: Record<DbStatementKind, number> = {
-  query: 1,
   execute: 0,
   select: 1,
   returning: 2,

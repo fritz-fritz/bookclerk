@@ -246,7 +246,7 @@ mod tests {
             statements: vec![DbPlanStatement {
                 sql: "SELECT 1".into(),
                 binds: vec![],
-                kind: DbPlanStatementKind::Query,
+                kind: DbPlanStatementKind::Returning,
                 max_rows: 0,
             }],
             outcome_index: 0,

@@ -356,9 +356,7 @@ fn reject_unbounded_returning(plan: &DbAtomicPlan) -> std::result::Result<(), Db
                 "D1 statement {i} contains multiple SQL statements; maxResultRows is {cap}"
             )));
         }
-        let looks_returning = matches!(stmt.kind, DbPlanStatementKind::Returning)
-            || (matches!(stmt.kind, DbPlanStatementKind::Query)
-                && has_top_level_keyword(&stmt.sql, "RETURNING"));
+        let looks_returning = matches!(stmt.kind, DbPlanStatementKind::Returning);
         if !looks_returning {
             continue;
         }
@@ -395,9 +393,7 @@ fn reject_unbounded_returning_typed(
                 "D1 statement {i} contains multiple SQL statements; maxResultRows is {cap}"
             )));
         }
-        let looks_returning = matches!(stmt.kind, DbPlanStatementKind::Returning)
-            || (matches!(stmt.kind, DbPlanStatementKind::Query)
-                && has_top_level_keyword(&stmt.sql, "RETURNING"));
+        let looks_returning = matches!(stmt.kind, DbPlanStatementKind::Returning);
         if !looks_returning {
             continue;
         }
@@ -670,7 +666,7 @@ fn parse_typed_batch(
                 let mut result = StatementResult::from_rows(columns, rows).map_err(ambiguous_d1)?;
                 result.rows_affected = match kind {
                     DbPlanStatementKind::Select => 0,
-                    DbPlanStatementKind::Returning | DbPlanStatementKind::Query => {
+                    DbPlanStatementKind::Returning => {
                         u64::try_from(result.rows.len()).unwrap_or(u64::MAX)
                     }
                     DbPlanStatementKind::Execute => changes,
@@ -1048,10 +1044,10 @@ fn parse_batch_results(
             .statements
             .get(i)
             .map(|s| s.kind)
-            .unwrap_or(DbPlanStatementKind::Query);
+            .unwrap_or(DbPlanStatementKind::Returning);
         let rows_affected = match kind {
             DbPlanStatementKind::Select => 0,
-            DbPlanStatementKind::Returning | DbPlanStatementKind::Query => {
+            DbPlanStatementKind::Returning => {
                 u64::try_from(rows.len()).unwrap_or(u64::MAX)
             }
             DbPlanStatementKind::Execute => changes,
@@ -1110,7 +1106,7 @@ mod tests {
             statements: vec![bookclerk_db_exec::DbPlanStatement {
                 sql: "SELECT 1".into(),
                 binds: vec![],
-                kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                kind: bookclerk_plugin_sdk::DbPlanStatementKind::Returning,
                 max_rows: 0,
             }],
             outcome_index: 0,

@@ -16,20 +16,22 @@ use crate::v2::MAX_SCALAR_BYTES;
 /// How a guest should run one statement inside an atomic plan.
 ///
 /// `Select` versus `Returning` is explicit so adapters never reparse SQL to
-/// decide whether `SELECT * FROM (…)` wrapping is valid. Legacy [`Self::Query`]
-/// remains on the wire and is treated as a row-producing statement that must
-/// **not** be rewritten as a subquery (it may be DML `RETURNING`).
+/// decide whether `SELECT * FROM (…)` wrapping is valid. Matches Cap'n
+/// `DbStatementKind` (`execute` | `select` | `returning`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum DbPlanStatementKind {
-    /// Legacy row-producing statement (`SELECT` or `RETURNING`). Not wrapped.
-    #[default]
-    Query,
     /// Statement is DML; only `rowsAffected` is required.
     Execute,
     /// Read-only `SELECT` / read-only `WITH` CTE. May be wrapped with `LIMIT`.
     Select,
-    /// DML that returns rows (`INSERT`/`UPDATE`/`DELETE … RETURNING`).
+    /// DML that returns rows (`INSERT`/`UPDATE`/`DELETE … RETURNING`), or
+    /// row-producing introspection (`PRAGMA`, schema reads) that must **not**
+    /// be rewritten as a subquery.
+    ///
+    /// Legacy wire/JSON `"query"` deserializes as this variant.
+    #[default]
+    #[serde(alias = "query")]
     Returning,
 }
 
@@ -609,5 +611,39 @@ mod tests {
         let back = decode_execute_request_bytes(&bytes).unwrap();
         assert_eq!(back.operation_id, req.operation_id);
         assert_eq!(back.statements, req.statements);
+    }
+
+    #[test]
+    fn public_statement_kind_matches_capnp_ordinals() {
+        use crate::{decode_execute_request_bytes, encoded_execute_request_bytes};
+        // Cap'n `DbStatementKind`: execute@0, select@1, returning@2.
+        for kind in [
+            DbPlanStatementKind::Execute,
+            DbPlanStatementKind::Select,
+            DbPlanStatementKind::Returning,
+        ] {
+            let req = ExecuteRequest {
+                operation_id: "op".into(),
+                request_hash: String::new(),
+                statements: vec![TypedDbStatement {
+                    sql: "SELECT 1".into(),
+                    parameters: vec![],
+                    kind,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::Rows,
+                }],
+                deadline_unix_ms: 0,
+            };
+            let bytes = encoded_execute_request_bytes(&req).unwrap();
+            let back = decode_execute_request_bytes(&bytes).unwrap();
+            assert_eq!(back.statements[0].kind, kind);
+        }
+        // Legacy JSON `"query"` deserializes as Returning (host-compat only).
+        let kind: DbPlanStatementKind = serde_json::from_str("\"query\"").unwrap();
+        assert_eq!(kind, DbPlanStatementKind::Returning);
+        assert_eq!(
+            serde_json::to_string(&DbPlanStatementKind::Returning).unwrap(),
+            "\"returning\""
+        );
     }
 }

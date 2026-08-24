@@ -40,8 +40,7 @@ _DB_TYPE_FROM = (
     "bytes",
 )
 
-_KIND_ORD = {"query": 1, "execute": 0, "select": 1, "returning": 2}
-_KIND_FROM = ("execute", "select", "returning")
+_KIND_ORD = {"execute": 0, "select": 1, "returning": 2}
 _KIND_FROM = ("execute", "select", "returning")
 _SELECT_ORD = {"discard": 0, "affectedRows": 1, "rows": 2}
 _SELECT_FROM = ("discard", "affectedRows", "rows")
@@ -93,7 +92,7 @@ class BytesValue(TypedDict):
 
 DbValue = Union[NullValue, BoolValue, Int64Value, Float64Value, TextValue, BytesValue]
 
-DbStatementKind = Literal["query", "execute", "select", "returning"]
+DbStatementKind = Literal["execute", "select", "returning"]
 DbResultSelection = Literal["discard", "affectedRows", "rows"]
 
 

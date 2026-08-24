@@ -133,9 +133,8 @@ or an oversized HTTP body after a committed batch is `unavailable` (replay
 the same `operationId`); only a definitive non-retryable 4xx is permanent.
 Receipt rows live in host-authored SQL against `db_atomic_receipts`.
 Guests must not parse Bookclerk operation names or interpret receipts.
-`rowsAffected` is uniform by kind: `select` is `0`; `returning` (and
-legacy `query`) is the number of returned rows; `execute` is the engine
-change count.
+`rowsAffected` is uniform by kind: `select` is `0`; `returning` is the
+number of returned rows; `execute` is the engine change count.
 
 Stable error categories come from SQLSTATE / rusqlite codes (not English
 `"unique"` matching): constraint → `conflict`; serialization/busy/locked →

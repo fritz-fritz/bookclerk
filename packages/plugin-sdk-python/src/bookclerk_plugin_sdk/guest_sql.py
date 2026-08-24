@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-DbStatementKind = Literal["query", "execute", "select", "returning"]
+DbStatementKind = Literal["execute", "select", "returning"]
 
 
 def _ident_start(c: str) -> bool:

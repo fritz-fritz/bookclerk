@@ -568,7 +568,7 @@ fn for_each_top_level_keyword(sql: &str, mut on_keyword: impl FnMut(usize, &str)
 pub(super) fn apply_write_predicate(sql: &str, kind: DbPlanStatementKind, pred: &str) -> String {
     let sql = rewrite_insert_values_to_select(sql);
     let splice_at = match kind {
-        DbPlanStatementKind::Returning | DbPlanStatementKind::Query => find_returning_clause(&sql),
+        DbPlanStatementKind::Returning => find_returning_clause(&sql),
         _ => None,
     };
     if let Some(idx) = splice_at {
@@ -762,7 +762,7 @@ fn select_receipt(ctx: &ReceiptCtx) -> SqlStmt {
 fn gate_write(mut stmt: SqlStmt, operation_id: &str) -> SqlStmt {
     if !matches!(
         stmt.kind,
-        DbPlanStatementKind::Execute | DbPlanStatementKind::Returning | DbPlanStatementKind::Query
+        DbPlanStatementKind::Execute | DbPlanStatementKind::Returning
     ) {
         return stmt;
     }
@@ -782,7 +782,7 @@ fn gate_write(mut stmt: SqlStmt, operation_id: &str) -> SqlStmt {
 fn gate_write_when_outcome_ok(mut stmt: SqlStmt, operation_id: &str, outcome: &SqlStmt) -> SqlStmt {
     if !matches!(
         stmt.kind,
-        DbPlanStatementKind::Execute | DbPlanStatementKind::Returning | DbPlanStatementKind::Query
+        DbPlanStatementKind::Execute | DbPlanStatementKind::Returning
     ) {
         return stmt;
     }

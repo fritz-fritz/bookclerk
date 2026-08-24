@@ -1674,7 +1674,7 @@ mod tests {
                 statements: vec![bookclerk_db_exec::DbPlanStatement {
                     sql: "SELECT 1".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Returning,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -1702,7 +1702,7 @@ mod tests {
                 statements: vec![bookclerk_db_exec::DbPlanStatement {
                     sql: "SELECT 1".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Returning,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -1735,7 +1735,7 @@ mod tests {
                 statements: vec![bookclerk_db_exec::DbPlanStatement {
                     sql: "SELECT 1".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Returning,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -1773,7 +1773,7 @@ mod tests {
                 statements: vec![bookclerk_db_exec::DbPlanStatement {
                     sql: "SELECT x FROM rowcap".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Returning,
                     max_rows: 0,
                 }],
                 outcome_index: 0,

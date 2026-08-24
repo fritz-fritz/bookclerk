@@ -83,7 +83,7 @@ pub(super) fn read_db_value(r: db_value_capnp::Reader<'_>) -> Result<DbValue> {
 
 fn write_kind(kind: DbPlanStatementKind) -> CapnpDbStatementKind {
     match kind {
-        DbPlanStatementKind::Query | DbPlanStatementKind::Select => CapnpDbStatementKind::Select,
+        DbPlanStatementKind::Select => CapnpDbStatementKind::Select,
         DbPlanStatementKind::Execute => CapnpDbStatementKind::Execute,
         DbPlanStatementKind::Returning => CapnpDbStatementKind::Returning,
     }
