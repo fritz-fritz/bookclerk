@@ -13,7 +13,7 @@
 //! | [`crate::methods::db_begin`] | [`DbBeginParams`] | [`DbBeginResult`] |
 //! | [`crate::methods::db_commit`] | [`DbTxnParams`] | success / [`crate::PluginError`] |
 //! | [`crate::methods::db_rollback`] | [`DbTxnParams`] | success / [`crate::PluginError`] |
-//! | [`crate::methods::db_atomic`] | [`DbAtomicRequest`] | [`DbPlanExecResult`] |
+//! | [`crate::methods::db_atomic`] | legacy JSON plan (see `schema/abi.json`) | legacy JSON exec result |
 //!
 //! Wire fields use camelCase. The `backend` tag on [`DbConnectParams`] is
 //! lowercase (`sqlite`, `d1`, `postgres`).
@@ -254,7 +254,7 @@ pub struct DbConnectResult {
     /// (`0` is unspecified and fails closed).
     #[serde(default)]
     pub max_cell_bytes: u32,
-    /// Maximum encoded bytes of one [`ExecuteRequest`]
+    /// Maximum encoded bytes of one [`crate::ExecuteRequest`]
     /// (`0` is unspecified and fails closed). Must be `<=` [`crate::v2::MAX_SCALAR_BYTES`].
     #[serde(default)]
     pub max_atomic_request_bytes: u32,
@@ -274,7 +274,7 @@ pub struct DbConnectResult {
     /// Each schema version must be applied as one atomic batch (D1 HTTP).
     #[serde(default)]
     pub atomic_schema_batch: bool,
-    /// Guest can fill [`DbAtomicTiming::db_execution_us`].
+    /// Guest can fill [`crate::DbTiming::db_execution_us`].
     #[serde(default = "default_true")]
     pub timing: bool,
 }

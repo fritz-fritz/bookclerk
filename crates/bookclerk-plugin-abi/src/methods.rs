@@ -369,10 +369,13 @@ pub mod db_rollback {
 
 /// Run a host-authored generic SQL plan as one guest SQL transaction.
 ///
-/// Params: [`crate::db::DbAtomicRequest`]. Result: [`crate::db::DbPlanExecResult`].
-/// Every bundled database guest implements this (D1 as one HTTP `batch()`,
-/// SQLite / Postgres as one native transaction). Guests execute `plan`
-/// statements only and must not parse Bookclerk operation names.
+/// Params: legacy JSON `DbAtomicRequest` (see `schema/abi.json`). Result: legacy
+/// JSON `DbPlanExecResult`. Every bundled database guest implements this (D1 as
+/// one HTTP `batch()`, SQLite / Postgres as one native transaction). Guests
+/// execute `plan` statements only and must not parse Bookclerk operation names.
+///
+/// Product v2 database plugins use typed [`crate::ExecuteRequest`] /
+/// [`crate::ExecuteReply`] via Cap'n Proto instead.
 pub mod db_atomic {
     /// Wire method name `"dbAtomic"`.
     pub const NAME: &str = "dbAtomic";

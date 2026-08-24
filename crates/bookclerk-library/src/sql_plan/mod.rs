@@ -1,7 +1,7 @@
 //! Host-owned SQL atomic plans for database plugins.
 //!
 //! The library compiles Bookclerk domain operations into a generic
-//! [`host_ir::DbAtomicPlan`]. Database guests execute the
+//! [`crate::sql_plan::host_ir::DbAtomicPlan`]. Database guests execute the
 //! statements as one transaction and return rows; they must not parse
 //! domain operation names.
 

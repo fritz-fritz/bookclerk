@@ -158,7 +158,7 @@ pub fn exec_result_to_dto(result: ProxyExecResult) -> ExecResultDto {
 /// Encodes one SeaORM [`Value`] as JSON for Workers RPC.
 ///
 /// Typed `None` variants become `{"$sea_null": "<Kind>"}`. Bytes become a
-/// `b64:`-prefixed string via [`bytes_to_b64_string`]. Chrono / UUID values
+/// `b64:`-prefixed string via `bytes_to_b64_string`. Chrono / UUID values
 /// stringify; nested arrays recurse.
 ///
 /// # Arguments
