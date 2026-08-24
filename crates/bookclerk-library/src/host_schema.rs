@@ -100,7 +100,7 @@ impl HostSchemaKind {
         }
     }
 
-    /// Selects a schema apply mechanic from typed [`DbCapabilities`].
+    /// Selects a schema apply mechanic from typed [`bookclerk_plugin_abi::DbCapabilities`].
     ///
     /// # Errors
     ///
