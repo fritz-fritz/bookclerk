@@ -190,6 +190,11 @@ fn selection_ord(sel: DbResultSelection) -> u16 {
     }
 }
 
+/// Writes one `DbValue` into a `(2, 1)` SDK struct slot.
+///
+/// # Errors
+///
+/// Returns when a float64 bind is not finite.
 fn write_db_value(msg: &mut CapnpMessage, word: usize, value: &DbValue) -> Result<()> {
     match value {
         DbValue::Null(ty) => {
@@ -223,6 +228,11 @@ fn write_db_value(msg: &mut CapnpMessage, word: usize, value: &DbValue) -> Resul
     Ok(())
 }
 
+/// Writes one `TypedDbStatement` into a `(1, 2)` SDK struct slot.
+///
+/// # Errors
+///
+/// Returns when a parameter bind cannot be encoded.
 fn write_statement(msg: &mut CapnpMessage, word: usize, stmt: &TypedDbStatement) -> Result<()> {
     const DATA_WORDS: usize = 1;
     msg.set_text(msg.pointer_word(word, DATA_WORDS, 0), &stmt.sql);
@@ -276,6 +286,11 @@ mod tests {
     use super::*;
     use crate::{DbPlanStatementKind, DbResultSelection};
 
+    /// Golden bytes must match `packages/plugin-sdk-python` `encode_execute_request`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the fixed golden request cannot be encoded.
     #[test]
     fn sdk_layout_matches_python_golden_bytes() {
         let req = ExecuteRequest {
@@ -291,7 +306,7 @@ mod tests {
             deadline_unix_ms: 0,
             ..Default::default()
         };
-        let bytes = encoded_execute_request_sdk_bytes(&req).unwrap();
+        let bytes = encoded_execute_request_sdk_bytes(&req).expect("golden request encodes");
         const PYTHON_GOLDEN: &str = "000000001100000000000000040003000000000000000000000000000000000000000000000000000000000000000000090000000a000000090000000a000000090000001f0000000000000000000000000000000000000004000000010002000200020001000000050000004a000000090000000700000053454c454354203100000000000000000000000002000100";
         assert_eq!(hex::encode(bytes), PYTHON_GOLDEN);
     }
