@@ -10,8 +10,8 @@ mod tests {
     use serde_json::Value;
 
     use crate::{
-        DbConnectParams, ExecResultDto, FetchTitleParams, LoginParams, LoginResultDto, PutParams,
-        ScanParams, ScanSummaryDto,
+        db::ExecResultDto, DbConnectParams, FetchTitleParams, LoginParams, LoginResultDto,
+        PutParams, ScanParams, ScanSummaryDto,
     };
 
     fn load(name: &str) -> Value {

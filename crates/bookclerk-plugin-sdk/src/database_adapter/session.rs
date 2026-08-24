@@ -17,10 +17,9 @@ use crate::db::{
     proxy_rows_to_dto, statement_from_dto, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
 };
 use crate::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
-use bookclerk_plugin_abi::{
-    DbAtomicRequest, DbCapabilities, DbConnectResult, DbPlanExecResult, ExecuteReply,
-    ExecuteRequest,
-};
+use bookclerk_db_exec::{DbAtomicRequest, DbPlanExecResult};
+use bookclerk_plugin_abi::DbConnectResult;
+use bookclerk_plugin_abi::{DbCapabilities, ExecuteReply, ExecuteRequest};
 use futures::TryStreamExt;
 use sea_orm::{
     from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
@@ -1518,9 +1517,10 @@ mod tests {
 
     #[tokio::test]
     async fn guest_atomic_unique_is_conflict_and_commit_is_unavailable() {
-        use bookclerk_plugin_abi::{
-            DbAtomicPlan, DbAtomicRequest, DbPlanStatement, DbPlanStatementKind, PluginErrorCode,
+        use bookclerk_db_exec::{
+            DbAtomicPlan, DbAtomicRequest, DbPlanStatement, DbPlanStatementKind,
         };
+        use bookclerk_plugin_abi::PluginErrorCode;
         let _lock = SESSION_LOCK.lock().await;
         set_connection(
             bookclerk_plugin_database_sqlite::open_memory()
@@ -1623,9 +1623,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
     async fn postgres_guest_atomic_unique_preserves_sqlstate_23505() {
-        use bookclerk_plugin_abi::{
-            DbAtomicPlan, DbAtomicRequest, DbPlanStatement, DbPlanStatementKind, PluginErrorCode,
+        use bookclerk_db_exec::{
+            DbAtomicPlan, DbAtomicRequest, DbPlanStatement, DbPlanStatementKind,
         };
+        use bookclerk_plugin_abi::PluginErrorCode;
         let _lock = SESSION_LOCK.lock().await;
         let db = postgres_test_pool().await;
         bookclerk_library::apply_host_schema(&db, bookclerk_library::HostSchemaKind::RowMarker)

@@ -1,12 +1,12 @@
 //! Host-private adapter session helpers (first-party database guests only).
 
+#![allow(clippy::missing_docs_in_private_items)]
+
 use bookclerk_plugin_abi::v2::{AdapterTransaction, HostAdapterDatabaseSession};
 use bookclerk_plugin_abi::{ExecuteReply, ExecuteRequest, Result};
 
 use super::errors::plugin_error_from_engine;
-use super::session::{
-    guest_begin, guest_commit, guest_execute_atomic_on_txn, guest_rollback,
-};
+use super::session::{guest_begin, guest_commit, guest_execute_atomic_on_txn, guest_rollback};
 
 /// In-process SeaORM transaction bridge for host `begin` RPC.
 pub struct GuestHostAdapterSession;

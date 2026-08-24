@@ -113,9 +113,7 @@ fn read_selection(sel: CapnpDbResultSelection) -> Result<DbResultSelection> {
     match sel {
         CapnpDbResultSelection::Discard => Ok(DbResultSelection::Discard),
         CapnpDbResultSelection::AffectedRows => Ok(DbResultSelection::AffectedRows),
-        CapnpDbResultSelection::Rows | CapnpDbResultSelection::ObsoleteCursor => {
-            Ok(DbResultSelection::Rows)
-        }
+        CapnpDbResultSelection::Rows => Ok(DbResultSelection::Rows),
     }
 }
 
@@ -370,12 +368,7 @@ pub(super) fn write_db_capabilities(mut b: db_caps_capnp::Builder<'_>, caps: &Db
     b.set_max_atomic_result_bytes(caps.max_atomic_result_bytes);
 }
 
-/// # Errors
-///
-/// Returns when obsolete bootstrap tombstones cannot be decoded (ignored when empty).
 pub(super) fn read_db_capabilities(r: db_caps_capnp::Reader<'_>) -> Result<DbCapabilities> {
-    let _ = r.get_obsolete_diagnostic_engine().map_err(from_capnp)?;
-    let _ = r.get_obsolete_sql_family().map_err(from_capnp)?;
     Ok(DbCapabilities {
         sql_contract_version: r.get_sql_contract_version(),
         atomic_batch: r.get_atomic_batch(),

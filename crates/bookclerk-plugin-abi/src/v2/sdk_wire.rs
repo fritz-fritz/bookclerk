@@ -1,7 +1,7 @@
 //! Hand-packed Cap'n Proto layout matching the JS/Python plugin SDKs.
 //!
 //! The typed SDKs encode `ExecuteRequest` with a compact `(4, 3)` struct that
-//! omits obsolete host-only slots and ABI-minor-14 guest-receipt hints. The
+//! omits guest-receipt hints present on the full Cap'n `ExecuteRequest`. The
 //! canonical idempotency digest must use that layout so Rust, TypeScript, and
 //! Python agree across ABI bumps that extend the generated Cap'n schema.
 

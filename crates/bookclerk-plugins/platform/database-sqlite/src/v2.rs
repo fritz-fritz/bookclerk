@@ -78,9 +78,7 @@ impl Database for SqliteDatabase {
         Ok(Box::new(SqliteSession))
     }
 
-    async fn host_adapter_session(
-        &self,
-    ) -> Result<Option<Box<dyn HostAdapterDatabaseSession>>> {
+    async fn host_adapter_session(&self) -> Result<Option<Box<dyn HostAdapterDatabaseSession>>> {
         Ok(Some(Box::new(host_session())))
     }
 }

@@ -9,12 +9,43 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{
-    DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbConnectResult, DbPlanExecResult,
-    DbPlanStatement, DbPlanStatementKind, DbPlanStmtExecResult,
-};
-use crate::db_value::{db_value_from_json, db_value_to_json, DbType, DbValue};
+use crate::db::DbConnectResult;
+use crate::db_value::{DbType, DbValue};
 use crate::v2::MAX_SCALAR_BYTES;
+
+/// How a guest should run one statement inside an atomic plan.
+///
+/// `Select` versus `Returning` is explicit so adapters never reparse SQL to
+/// decide whether `SELECT * FROM (…)` wrapping is valid. Legacy [`Self::Query`]
+/// remains on the wire and is treated as a row-producing statement that must
+/// **not** be rewritten as a subquery (it may be DML `RETURNING`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum DbPlanStatementKind {
+    /// Legacy row-producing statement (`SELECT` or `RETURNING`). Not wrapped.
+    #[default]
+    Query,
+    /// Statement is DML; only `rowsAffected` is required.
+    Execute,
+    /// Read-only `SELECT` / read-only `WITH` CTE. May be wrapped with `LIMIT`.
+    Select,
+    /// DML that returns rows (`INSERT`/`UPDATE`/`DELETE … RETURNING`).
+    Returning,
+}
+
+impl DbPlanStatementKind {
+    /// True when the guest must collect `rows` (not only `rowsAffected`).
+    #[must_use]
+    pub const fn collects_rows(self) -> bool {
+        !matches!(self, Self::Execute)
+    }
+
+    /// True when the guest may wrap SQL as `SELECT * FROM (sql) LIMIT cap+1`.
+    #[must_use]
+    pub const fn wrap_select_limit(self) -> bool {
+        matches!(self, Self::Select)
+    }
+}
 
 /// How the guest should return results for one statement.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -63,47 +94,6 @@ pub struct TypedDbStatement {
     pub result_selection: DbResultSelection,
 }
 
-impl TypedDbStatement {
-    /// Converts a JSON-bind plan statement onto the typed wire.
-    ///
-    /// # Errors
-    ///
-    /// Returns when a bind is outside the universal [`DbValue`] domain.
-    pub fn from_plan_statement(stmt: &DbPlanStatement) -> Result<Self, String> {
-        let parameters = stmt
-            .binds
-            .iter()
-            .map(db_value_from_json)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            sql: stmt.sql.clone(),
-            parameters,
-            kind: stmt.kind,
-            max_rows: stmt.max_rows,
-            result_selection: selection_for_kind(stmt.kind),
-        })
-    }
-
-    /// JSON-bind plan statement used by in-process executors.
-    #[must_use]
-    pub fn to_plan_statement(&self) -> DbPlanStatement {
-        DbPlanStatement {
-            sql: self.sql.clone(),
-            binds: self.parameters.iter().map(db_value_to_json).collect(),
-            kind: self.kind,
-            max_rows: self.max_rows,
-        }
-    }
-}
-
-/// Default result selection from the host-authored kind.
-fn selection_for_kind(kind: DbPlanStatementKind) -> DbResultSelection {
-    match kind {
-        DbPlanStatementKind::Execute => DbResultSelection::AffectedRows,
-        _ => DbResultSelection::Rows,
-    }
-}
-
 /// Host-only hint for adapters to persist guest replay payload before COMMIT.
 ///
 /// Plugin authors must not set this field. The host stamps it when wrapping
@@ -126,9 +116,6 @@ impl GuestReceiptPersist {
 }
 
 /// Typed atomic batch. Every request is a non-empty ordered statement list.
-///
-/// Host interpretation metadata (outcome / payload / receipt indices) lives on
-/// [`DbAtomicPlan`] only, not on the wire request adapters execute.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecuteRequest {
@@ -145,66 +132,6 @@ pub struct ExecuteRequest {
     pub guest_receipt_persist: GuestReceiptPersist,
 }
 
-impl ExecuteRequest {
-    /// Typed request from a JSON [`DbAtomicRequest`].
-    ///
-    /// # Errors
-    ///
-    /// Returns when the plan is missing, empty, or a bind is not a [`DbValue`].
-    pub fn from_atomic(req: &DbAtomicRequest) -> Result<Self, String> {
-        let plan = req
-            .plan
-            .as_ref()
-            .ok_or_else(|| "executeAtomic requires a host-authored plan".to_string())?;
-        if plan.statements.is_empty() {
-            return Err("executeAtomic statements must be non-empty".into());
-        }
-        let statements = plan
-            .statements
-            .iter()
-            .map(TypedDbStatement::from_plan_statement)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            operation_id: req.operation_id.clone(),
-            request_hash: req.request_hash.clone().unwrap_or_default(),
-            statements,
-            deadline_unix_ms: req.deadline_unix_ms.unwrap_or(0),
-            guest_receipt_persist: GuestReceiptPersist::default(),
-        })
-    }
-
-    /// JSON atomic envelope used by in-process executors.
-    ///
-    /// # Errors
-    ///
-    /// Returns when the statement list is empty.
-    pub fn into_atomic(self) -> Result<DbAtomicRequest, String> {
-        if self.statements.is_empty() {
-            return Err("executeAtomic statements must be non-empty".into());
-        }
-        let plan = DbAtomicPlan {
-            statements: self
-                .statements
-                .iter()
-                .map(TypedDbStatement::to_plan_statement)
-                .collect(),
-            outcome_index: 0,
-            payload_index: None,
-            prior_receipt_index: None,
-            receipt_select_index: None,
-        };
-        Ok(DbAtomicRequest {
-            operation_id: self.operation_id,
-            request_hash: if self.request_hash.is_empty() {
-                None
-            } else {
-                Some(self.request_hash)
-            },
-            plan: Some(plan),
-            deadline_unix_ms: (self.deadline_unix_ms > 0).then_some(self.deadline_unix_ms),
-        })
-    }
-}
 /// Result of one statement in [`ExecuteReply`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -267,32 +194,6 @@ impl StatementResult {
         }
         Ok(())
     }
-
-    /// Converts JSON plan rows onto typed columns + positional cells.
-    ///
-    /// # Errors
-    ///
-    /// Returns when a JSON cell is outside the universal domain, a row width
-    /// does not match the column list, or column names are duplicated.
-    pub fn from_plan_stmt(stmt: &DbPlanStmtExecResult) -> Result<Self, String> {
-        let (columns, rows) = json_rows_to_typed(&stmt.rows)?;
-        let result = Self {
-            rows,
-            columns,
-            rows_affected: stmt.rows_affected,
-        };
-        result.validate_positional()?;
-        Ok(result)
-    }
-
-    /// JSON object rows used by host `interpret_exec`.
-    #[must_use]
-    pub fn to_plan_stmt(&self) -> DbPlanStmtExecResult {
-        DbPlanStmtExecResult {
-            rows: typed_rows_to_json(&self.columns, &self.rows),
-            rows_affected: self.rows_affected,
-        }
-    }
 }
 
 /// Engine timing on [`ExecuteReply`].
@@ -305,26 +206,6 @@ pub struct DbTiming {
     pub db_execution_us: u64,
     /// How `db_execution_us` was measured.
     pub db_timing_source: String,
-}
-
-impl From<DbAtomicTiming> for DbTiming {
-    fn from(t: DbAtomicTiming) -> Self {
-        Self {
-            attempt_elapsed_us: t.attempt_elapsed_us,
-            db_execution_us: t.db_execution_us.unwrap_or(0),
-            db_timing_source: t.db_timing_source.unwrap_or_default(),
-        }
-    }
-}
-
-impl From<DbTiming> for DbAtomicTiming {
-    fn from(t: DbTiming) -> Self {
-        Self {
-            attempt_elapsed_us: t.attempt_elapsed_us,
-            db_execution_us: (t.db_execution_us > 0).then_some(t.db_execution_us),
-            db_timing_source: (!t.db_timing_source.is_empty()).then_some(t.db_timing_source),
-        }
-    }
 }
 
 /// Typed atomic reply.
@@ -351,41 +232,6 @@ impl ExecuteReply {
                 .map_err(|err| format!("statement {i}: {err}"))?;
         }
         Ok(())
-    }
-
-    /// Typed reply from a JSON [`DbPlanExecResult`].
-    ///
-    /// # Errors
-    ///
-    /// Returns when a JSON cell is outside the universal domain or a result
-    /// row is not positional.
-    pub fn from_plan_exec(result: &DbPlanExecResult) -> Result<Self, String> {
-        let statements = result
-            .statements
-            .iter()
-            .map(StatementResult::from_plan_stmt)
-            .collect::<Result<Vec<_>, _>>()?;
-        let reply = Self {
-            operation_id: result.operation_id.clone(),
-            statements,
-            timing: result.timing.clone().map(Into::into).unwrap_or_default(),
-        };
-        reply.validate_positional()?;
-        Ok(reply)
-    }
-
-    /// JSON plan result used by host interpretation.
-    #[must_use]
-    pub fn into_plan_exec(self) -> DbPlanExecResult {
-        DbPlanExecResult {
-            operation_id: self.operation_id,
-            statements: self
-                .statements
-                .iter()
-                .map(StatementResult::to_plan_stmt)
-                .collect(),
-            timing: Some(self.timing.into()),
-        }
     }
 }
 
@@ -530,103 +376,10 @@ pub fn sql_payload_exceeds(sql: &str, values_json: &str, max_payload_bytes: u32)
     sql_payload_bytes(sql, values_json) > cap
 }
 
-/// Converts JSON object rows onto typed columns + positional cells.
-///
-/// # Errors
-///
-/// Returns when a row is not a JSON object or a cell is outside [`DbValue`].
-fn json_rows_to_typed(rows: &[serde_json::Value]) -> Result<(Vec<DbColumn>, Vec<DbRow>), String> {
-    let Some(first) = rows.first() else {
-        return Ok((Vec::new(), Vec::new()));
-    };
-    let serde_json::Value::Object(map) = first else {
-        return Err("atomic result row is not an object".into());
-    };
-    let columns: Vec<DbColumn> = map
-        .keys()
-        .map(|name| DbColumn {
-            name: name.clone(),
-            db_type: DbType::Unspecified,
-        })
-        .collect();
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let serde_json::Value::Object(cells) = row else {
-            return Err("atomic result row is not an object".into());
-        };
-        let mut values = Vec::with_capacity(columns.len());
-        for col in &columns {
-            let cell = cells.get(&col.name).unwrap_or(&serde_json::Value::Null);
-            values.push(db_value_from_json(cell)?);
-        }
-        out.push(DbRow { values });
-    }
-    Ok((columns, out))
-}
-
-/// Converts typed rows back to JSON objects keyed by column name.
-fn typed_rows_to_json(columns: &[DbColumn], rows: &[DbRow]) -> Vec<serde_json::Value> {
-    rows.iter()
-        .map(|row| {
-            let mut map = serde_json::Map::new();
-            for (i, value) in row.values.iter().enumerate() {
-                let name = columns
-                    .get(i)
-                    .map(|c| c.name.clone())
-                    .unwrap_or_else(|| format!("_{i}"));
-                map.insert(name, db_value_to_json(value));
-            }
-            serde_json::Value::Object(map)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn atomic_request_roundtrip_preserves_binds() {
-        let plan = DbAtomicPlan {
-            statements: vec![DbPlanStatement::new(
-                "SELECT ?",
-                vec![json!(i64::MIN), json!("héllo\u{0}")],
-                DbPlanStatementKind::Select,
-            )],
-            outcome_index: 0,
-            payload_index: Some(0),
-            prior_receipt_index: None,
-            receipt_select_index: None,
-        };
-        let req = DbAtomicRequest::with_plan("op", "abc", plan);
-        let typed = ExecuteRequest::from_atomic(&req).unwrap();
-        assert_eq!(typed.statements[0].parameters[0], DbValue::Int64(i64::MIN));
-        let back = typed.into_atomic().unwrap();
-        assert_eq!(back.operation_id, "op");
-        assert_eq!(back.request_hash.as_deref(), Some("abc"));
-        assert_eq!(back.plan.unwrap().statements[0].binds[0], json!(i64::MIN));
-    }
-
-    #[test]
-    fn empty_plan_is_rejected() {
-        let req = DbAtomicRequest {
-            operation_id: "op".into(),
-            request_hash: None,
-            plan: Some(DbAtomicPlan {
-                statements: Vec::new(),
-                outcome_index: 0,
-                payload_index: None,
-                prior_receipt_index: None,
-                receipt_select_index: None,
-            }),
-            deadline_unix_ms: None,
-        };
-        assert!(ExecuteRequest::from_atomic(&req)
-            .unwrap_err()
-            .contains("non-empty"));
-    }
 
     #[test]
     fn payload_cap_is_scalar_ceiling() {
@@ -842,7 +595,7 @@ mod tests {
         assert_eq!(back, req);
         assert_eq!(
             hex::encode(&bytes),
-            "000000001e000000000000000400040000000000000000000000000000000000000000000000000000000000000000000d0000001a0000000d000000220000000d0000001f00000000000000000000006f70000000000000616263000000000004000000010002000200020001000000050000004a000000090000004f00000053454c454354203f00000000000000000c00000002000100000002000000000000000000000000800000000000000000000004000000000000000000000000000d0000007200000000000500000000000000000000000000090000000a0000006236343a6e6f742d6279746573000000ff00000000000000"
+            "000000001c0000000000000002000400000000000000000000000000000000000d0000001a0000000d000000220000000d0000001f00000000000000000000006f70000000000000616263000000000004000000010002000200020001000000050000004a000000090000004f00000053454c454354203f00000000000000000c00000002000100000002000000000000000000000000800000000000000000000004000000000000000000000000000d0000007200000000000500000000000000000000000000090000000a0000006236343a6e6f742d6279746573000000ff00000000000000"
         );
     }
 }

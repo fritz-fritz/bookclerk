@@ -4,8 +4,8 @@
 
 mod db_rpc;
 mod features;
-mod host_rpc;
 mod host_roles;
+mod host_rpc;
 mod jobs;
 mod limits;
 mod roles;
@@ -29,13 +29,13 @@ pub use features::{
     negotiate_rpc_features, RpcFeature, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY,
     FEATURE_STREAMS,
 };
+pub use host_roles::{AdapterTransaction, HostAdapterDatabaseSession};
+pub use host_rpc::HostAdapterDatabaseSessionClient;
 pub use jobs::{read_all, stream_copy_keys, StreamCopyHandler, StreamCopySpec};
 pub use limits::{
     ScalarLimits, ABI_MAJOR, ABI_MINOR, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
     MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
-pub use host_rpc::HostAdapterDatabaseSessionClient;
-pub use host_roles::{AdapterTransaction, HostAdapterDatabaseSession};
 pub use roles::{
     AdapterDatabaseSession, ByteRange, Cancellation, ContentSource, ContentSourceContext, Database,
     DatabaseContext, Destination, GuestDatabase, Integration, IntegrationContext, JobHandler,

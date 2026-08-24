@@ -8,6 +8,26 @@ use serde::{Deserialize, Serialize};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 
+/// JSON object key for a typed SQL null (`{"$sea_null": "Bytes"}`).
+pub(crate) const SEA_NULL_KEY: &str = "$sea_null";
+
+/// Wire JSON for a typed null bind of SeaORM `kind`.
+#[must_use]
+pub(crate) fn sea_null(kind: &str) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        SEA_NULL_KEY.into(),
+        serde_json::Value::String(kind.to_string()),
+    );
+    serde_json::Value::Object(map)
+}
+
+/// Returns the `$sea_null` kind when `v` is a typed-null object.
+#[must_use]
+pub(crate) fn sea_null_kind(v: &serde_json::Value) -> Option<&str> {
+    v.get(SEA_NULL_KEY)?.as_str()
+}
+
 /// Expected SQL type for a typed null (Cap'n `DbType`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -63,7 +83,7 @@ impl DbValue {
 ///
 /// Returns a static reason when the JSON value is outside the universal domain.
 pub fn db_value_from_json(v: &serde_json::Value) -> Result<DbValue, String> {
-    if let Some(kind) = crate::sea_null_kind(v) {
+    if let Some(kind) = sea_null_kind(v) {
         let ty = match kind {
             "Bytes" => DbType::Bytes,
             "BigInt" | "Int" | "TinyInt" | "SmallInt" | "TinyUnsigned" | "SmallUnsigned"
@@ -112,10 +132,10 @@ pub fn db_value_from_json(v: &serde_json::Value) -> Result<DbValue, String> {
 #[must_use]
 pub fn db_value_to_json(v: &DbValue) -> serde_json::Value {
     match v {
-        DbValue::Null(DbType::Bytes) => crate::sea_null("Bytes"),
-        DbValue::Null(DbType::Int64) => crate::sea_null("BigInt"),
-        DbValue::Null(DbType::Bool) => crate::sea_null("Bool"),
-        DbValue::Null(DbType::Float64) => crate::sea_null("Double"),
+        DbValue::Null(DbType::Bytes) => sea_null("Bytes"),
+        DbValue::Null(DbType::Int64) => sea_null("BigInt"),
+        DbValue::Null(DbType::Bool) => sea_null("Bool"),
+        DbValue::Null(DbType::Float64) => sea_null("Double"),
         DbValue::Null(DbType::Text | DbType::Unspecified) => serde_json::Value::Null,
         DbValue::Boolean(b) => serde_json::Value::Bool(*b),
         DbValue::Int64(n) => serde_json::json!(*n),
@@ -133,9 +153,9 @@ mod tests {
 
     #[test]
     fn typed_null_bytes_roundtrip() {
-        let v = db_value_from_json(&crate::sea_null("Bytes")).unwrap();
+        let v = db_value_from_json(&sea_null("Bytes")).unwrap();
         assert_eq!(v, DbValue::Null(DbType::Bytes));
-        assert_eq!(crate::sea_null_kind(&db_value_to_json(&v)), Some("Bytes"));
+        assert_eq!(sea_null_kind(&db_value_to_json(&v)), Some("Bytes"));
     }
 
     #[test]

@@ -17,15 +17,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use super::host_roles::HostAdapterDatabaseSession;
 use super::limits::{
     ScalarLimits, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_STREAM_WINDOW_BYTES,
 };
-use super::host_roles::HostAdapterDatabaseSession;
 use super::plugin_v2_capnp::{
     adapter_database_session as adapter_database_session_capnp, adapter_session_reply,
-    bookclerk_plugin,
-    byte_source, cancellation, content_source as content_source_capnp, content_source_reply,
-    copy_reply, database as database_capnp, database_reply, describe_reply,
+    bookclerk_plugin, byte_source, cancellation, content_source as content_source_capnp,
+    content_source_reply, copy_reply, database as database_capnp, database_reply, describe_reply,
     destination as dest_iface, destination_reply, domain_event, empty_reply,
     event_result as event_result_capnp, event_result_reply, get_reply,
     guest_database as guest_database_capnp, handle_reply, head_reply, health_reply,

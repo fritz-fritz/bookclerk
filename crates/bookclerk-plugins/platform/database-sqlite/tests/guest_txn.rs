@@ -2,11 +2,11 @@
 
 use std::sync::LazyLock;
 
+use bookclerk_plugin_sdk::database_adapter::session::{guest_execute, guest_query};
 use bookclerk_plugin_sdk::database_adapter::{
     session::{guest_begin, guest_commit, guest_rollback},
     set_connection,
 };
-use bookclerk_plugin_sdk::database_adapter::session::{guest_execute, guest_query};
 use bookclerk_plugin_sdk::{QueryResultDto, StatementDto};
 use tokio::sync::Mutex;
 
