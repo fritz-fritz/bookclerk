@@ -1315,8 +1315,6 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
     ]
 }
 
-/// SQLite DDL for D1 guest `schema_migrations` versions through V26.
-///
 /// D1 HTTP applies each guest-migrator statement as autocommit. The file-SQLite
 /// V27 rebuild drops `domain_events` while `event_deliveries` still cascades, so
 /// D1 must not send that rebuild through statement-by-statement `execute_raw`.
@@ -1324,6 +1322,73 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
 /// Later additive steps (V28+) are applied after the V27 batch.
 const D1_PRE_V27_STEPS: usize = 27;
 
+/// One host-owned schema version in the canonical Bookclerk migration plan.
+///
+/// Marker capabilities ([`crate::HostSchemaKind`]) choose only how each version
+/// is recorded (`PRAGMA user_version`, `schema_migrations` row, or one atomic
+/// batch). The live connection backend selects [`HostMigrationStep::postgres`]
+/// vs [`HostMigrationStep::sqlite`]; marker kind never selects a different plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostMigrationStep {
+    /// `PRAGMA user_version` / `schema_migrations.version` for this step.
+    pub version: i64,
+    /// Canonical SQLite-shaped DDL (also used for D1 / file SQLite).
+    pub sqlite: &'static str,
+    /// Postgres-shaped DDL for the same logical version.
+    pub postgres: &'static str,
+}
+
+/// Returns the canonical host migration plan shared by every marker kind.
+#[must_use]
+pub fn host_migration_plan() -> Vec<HostMigrationStep> {
+    migration_sql()
+        .iter()
+        .zip(migration_sql_postgres().iter())
+        .enumerate()
+        .map(|(idx, (sqlite, postgres))| HostMigrationStep {
+            version: i64::try_from(idx + 1).expect("migration index fits i64"),
+            sqlite,
+            postgres,
+        })
+        .collect()
+}
+
+/// SQL text for `step` on the live connection backend (never marker-driven).
+#[must_use]
+pub fn host_migration_sql(backend: sea_orm::DbBackend, step: &HostMigrationStep) -> &'static str {
+    match backend {
+        sea_orm::DbBackend::Postgres => step.postgres,
+        _ => step.sqlite,
+    }
+}
+
+/// SQLite-family steps applied before the V27 atomic batch bookkeeping version.
+///
+/// On engines that require one HTTP batch per version, the step at
+/// [`migration_v27_schema_version`] uses [`migration_v27_d1_batch`] instead of
+/// the file-SQLite V27 rebuild at [`HostMigrationStep::sqlite`] index 27.
+#[must_use]
+pub fn host_migration_plan_pre_atomic_sqlite_batch() -> Vec<HostMigrationStep> {
+    host_migration_plan()
+        .into_iter()
+        .take(D1_PRE_V27_STEPS)
+        .collect()
+}
+
+/// SQLite-family steps applied after the V27 atomic batch bookkeeping version.
+#[must_use]
+pub fn host_migration_plan_post_atomic_sqlite_batch() -> Vec<HostMigrationStep> {
+    let plan = host_migration_plan();
+    if plan.len() > D1_PRE_V27_STEPS + 1 {
+        plan.into_iter().skip(D1_PRE_V27_STEPS + 1).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// SQLite DDL for D1 guest `schema_migrations` versions through V26.
+///
+/// Legacy slice view of [`host_migration_plan_pre_atomic_sqlite_batch`].
 /// SQLite steps D1 may apply autocommit (everything before the V27 rebuild).
 #[must_use]
 pub fn migration_sql_d1() -> &'static [&'static str] {
@@ -1339,6 +1404,12 @@ pub fn migration_sql_d1_post_v27() -> &'static [&'static str] {
     } else {
         &[]
     }
+}
+
+/// Collects canonical SQLite DDL for `steps` (shared plan, not a D1-only pack).
+#[must_use]
+pub fn host_migration_sqlite_steps(steps: &[HostMigrationStep]) -> Vec<&'static str> {
+    steps.iter().map(|step| step.sqlite).collect()
 }
 
 /// `schema_migrations.version` for the V27 D1 batch (frozen; extra V3 portal step).
@@ -1928,6 +1999,18 @@ mod tests {
             [],
         );
         assert!(dup.is_err(), "namespaced unique must hold after D1 V27");
+    }
+
+    #[test]
+    fn host_migration_plan_partitions_atomic_sqlite_batch_without_changing_versions() {
+        let plan = host_migration_plan();
+        let pre = host_migration_plan_pre_atomic_sqlite_batch();
+        let post = host_migration_plan_post_atomic_sqlite_batch();
+        assert_eq!(migration_sql_d1().len(), D1_PRE_V27_STEPS);
+        assert_eq!(migration_sql_d1_post_v27().len(), post.len());
+        assert_eq!(pre.len() + 1 + post.len(), plan.len());
+        assert_eq!(pre.last().map(|s| s.version), Some(27));
+        assert_eq!(post.first().map(|s| s.version), Some(29));
     }
 
     #[test]

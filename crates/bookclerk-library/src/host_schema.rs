@@ -13,8 +13,9 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, Value};
 
 use crate::error::{LibraryError, Result};
 use crate::migrations::{
-    migration_sql, migration_sql_d1, migration_sql_d1_post_v27, migration_sql_postgres,
-    migration_v27_d1_batch, migration_v27_schema_version,
+    host_migration_plan, host_migration_plan_post_atomic_sqlite_batch,
+    host_migration_plan_pre_atomic_sqlite_batch, host_migration_sql, migration_v27_d1_batch,
+    migration_v27_schema_version, HostMigrationStep,
 };
 use crate::sql_plan::execute_statements_on;
 
@@ -111,22 +112,28 @@ pub async fn apply_host_schema(db: &DatabaseConnection, kind: HostSchemaKind) ->
         HostSchemaKind::PragmaMarker => apply_sqlite_user_version(db).await,
         HostSchemaKind::RowMarker => {
             let backend = db.get_database_backend();
-            let (backend, sql, timing) = match backend {
-                DbBackend::Postgres => (backend, migration_sql_postgres(), "postgres_txn"),
-                _ => (DbBackend::Sqlite, migration_sql(), "sqlite_txn"),
+            let timing = if backend == DbBackend::Postgres {
+                "postgres_txn"
+            } else {
+                "sqlite_txn"
             };
-            apply_schema_migrations(db, backend, timing, sql).await
+            apply_schema_migrations_from_plan(db, backend, timing, &host_migration_plan()).await
         }
         HostSchemaKind::AtomicBatchMarker => {
-            apply_schema_migrations(db, DbBackend::Sqlite, "sqlite_txn", migration_sql_d1())
-                .await?;
+            apply_schema_migrations_from_plan(
+                db,
+                DbBackend::Sqlite,
+                "sqlite_txn",
+                &host_migration_plan_pre_atomic_sqlite_batch(),
+            )
+            .await?;
             let v27 = migration_v27_schema_version();
             if !schema_version_applied(db, DbBackend::Sqlite, v27).await? {
                 return Err(LibraryError::Other(anyhow::anyhow!(
                     "D1 V27 must be applied as one atomic batch (apply_host_schema_with_batch)"
                 )));
             }
-            apply_d1_post_v27_versions(db).await
+            apply_post_atomic_sqlite_batch_versions(db).await
         }
     }
 }
@@ -152,26 +159,13 @@ where
         }
         HostSchemaKind::RowMarker => {
             let backend = db.get_database_backend();
-            match backend {
-                DbBackend::Postgres => {
-                    apply_schema_migrations_with_batch(
-                        db,
-                        backend,
-                        migration_sql_postgres(),
-                        &mut run_batch,
-                    )
-                    .await
-                }
-                _ => {
-                    apply_schema_migrations_with_batch(
-                        db,
-                        DbBackend::Sqlite,
-                        migration_sql(),
-                        &mut run_batch,
-                    )
-                    .await
-                }
-            }
+            apply_schema_migrations_with_batch(
+                db,
+                backend,
+                &host_migration_plan(),
+                &mut run_batch,
+            )
+            .await
         }
         HostSchemaKind::AtomicBatchMarker => apply_host_schema(db, kind).await,
     }
@@ -196,9 +190,9 @@ where
     }
     ensure_schema_migrations(db, DbBackend::Sqlite).await?;
     let mut applied = schema_versions_applied(db, DbBackend::Sqlite).await?;
-    for (idx, schema) in migration_sql_d1().iter().enumerate() {
-        let version = (idx + 1) as i64;
-        let mut stmts = split_sql_statements(schema);
+    for step in host_migration_plan_pre_atomic_sqlite_batch() {
+        let version = step.version;
+        let mut stmts = split_sql_statements(step.sqlite);
         stmts.push(format!(
             "INSERT INTO schema_migrations (version) VALUES ({version})"
         ));
@@ -215,10 +209,9 @@ where
         )
         .await?;
     }
-    let mut version = v27;
-    for schema in migration_sql_d1_post_v27() {
-        version += 1;
-        let mut stmts = split_sql_statements(schema);
+    for step in host_migration_plan_post_atomic_sqlite_batch() {
+        let version = step.version;
+        let mut stmts = split_sql_statements(step.sqlite);
         stmts.push(format!(
             "INSERT INTO schema_migrations (version) VALUES ({version})"
         ));
@@ -287,10 +280,10 @@ where
 {
     let backend = DbBackend::Sqlite;
     exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
-    let steps = migration_sql();
-    for (idx, schema) in steps.iter().enumerate() {
-        let version = (idx + 1) as i64;
-        apply_one_sqlite_version_with_batch(db, backend, version, schema, run_batch).await?;
+    let steps = host_migration_plan();
+    for step in &steps {
+        apply_one_sqlite_version_with_batch(db, backend, step.version, step.sqlite, run_batch)
+            .await?;
     }
     exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
     Ok(())
@@ -348,7 +341,7 @@ where
 async fn apply_schema_migrations_with_batch<F, Fut>(
     db: &DatabaseConnection,
     backend: DbBackend,
-    steps: &[&str],
+    steps: &[HostMigrationStep],
     run_batch: &mut F,
 ) -> Result<()>
 where
@@ -356,8 +349,9 @@ where
     Fut: Future<Output = Result<()>>,
 {
     ensure_schema_migrations(db, backend).await?;
-    for (idx, schema) in steps.iter().enumerate() {
-        let version = (idx + 1) as i64;
+    for step in steps {
+        let version = step.version;
+        let schema = host_migration_sql(backend, step);
         let mut delay_ms = 20u64;
         let mut last_err = None;
         for attempt in 0..8 {
@@ -401,10 +395,9 @@ where
 async fn apply_sqlite_user_version(db: &DatabaseConnection) -> Result<()> {
     let backend = DbBackend::Sqlite;
     exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
-    let steps = migration_sql();
-    for (idx, schema) in steps.iter().enumerate() {
-        let version = (idx + 1) as i64;
-        apply_one_sqlite_version(db, backend, version, schema).await?;
+    let steps = host_migration_plan();
+    for step in &steps {
+        apply_one_sqlite_version(db, backend, step.version, step.sqlite).await?;
     }
     exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
     Ok(())
@@ -454,22 +447,18 @@ async fn apply_one_sqlite_version(
     Err(last_applied_err.expect("sqlite schema version retry"))
 }
 
-/// Additive sqlite steps after the D1 V27 batch (versions 29+).
-///
-/// File-SQLite V28 is `PRAGMA user_version` 28, but D1 already recorded 28 for
-/// the V27 batch, so post-V27 steps are numbered from 29.
-async fn apply_d1_post_v27_versions(db: &DatabaseConnection) -> Result<()> {
+/// Additive sqlite steps after the V27 atomic batch (frozen bookkeeping version).
+async fn apply_post_atomic_sqlite_batch_versions(db: &DatabaseConnection) -> Result<()> {
     let backend = DbBackend::Sqlite;
-    let mut version = migration_v27_schema_version();
-    for schema in migration_sql_d1_post_v27() {
-        version += 1;
+    for step in host_migration_plan_post_atomic_sqlite_batch() {
+        let version = step.version;
         if schema_versions_applied(db, backend)
             .await?
             .contains(&version)
         {
             continue;
         }
-        let mut stmts = split_sql_statements(schema);
+        let mut stmts = split_sql_statements(step.sqlite);
         stmts.push(format!(
             "INSERT INTO schema_migrations (version) VALUES ({version})"
         ));
@@ -477,7 +466,7 @@ async fn apply_d1_post_v27_versions(db: &DatabaseConnection) -> Result<()> {
             db,
             backend,
             "sqlite_txn",
-            &format!("migrate-d1-post-{version}"),
+            &format!("migrate-post-atomic-{version}"),
             stmts,
         )
         .await
@@ -517,17 +506,17 @@ async fn sqlite_user_version(db: &DatabaseConnection) -> Result<i64> {
     Ok(0)
 }
 
-/// Applies `steps` not yet recorded in `schema_migrations` (version = index + 1).
-async fn apply_schema_migrations(
+/// Applies pending `schema_migrations` versions from the canonical host plan.
+async fn apply_schema_migrations_from_plan(
     db: &DatabaseConnection,
     backend: DbBackend,
     timing: &str,
-    steps: &[&str],
+    steps: &[HostMigrationStep],
 ) -> Result<()> {
     ensure_schema_migrations(db, backend).await?;
-    for (idx, schema) in steps.iter().enumerate() {
-        let version = (idx + 1) as i64;
-        apply_one_schema_migration(db, backend, timing, version, schema).await?;
+    for step in steps {
+        let schema = host_migration_sql(backend, step);
+        apply_one_schema_migration(db, backend, timing, step.version, schema).await?;
     }
     Ok(())
 }
@@ -765,6 +754,25 @@ mod tests {
     use bookclerk_plugin_abi::DbConnectResult;
 
     #[test]
+    fn host_migration_plan_is_marker_independent() {
+        use crate::migrations::{
+            host_migration_plan, host_migration_plan_post_atomic_sqlite_batch,
+            host_migration_plan_pre_atomic_sqlite_batch, migration_sql,
+        };
+        let plan = host_migration_plan();
+        let pre = host_migration_plan_pre_atomic_sqlite_batch();
+        let post = host_migration_plan_post_atomic_sqlite_batch();
+        assert_eq!(plan.len(), migration_sql().len());
+        assert_eq!(pre.len() + 1 + post.len(), plan.len());
+        for (step, sqlite) in plan.iter().zip(migration_sql().iter()) {
+            assert_eq!(step.sqlite, *sqlite);
+            assert!(step.version > 0);
+        }
+        assert_eq!(pre.first().map(|s| s.version), Some(1));
+        assert_eq!(post.first().map(|s| s.version), Some(29));
+    }
+
+    #[test]
     fn from_capabilities_selects_kind_from_flags_not_identity() {
         let mut sqlite = DbConnectResult::sqlite();
         sqlite.dialect = "not-a-real-engine".into();
@@ -849,7 +857,7 @@ mod tests {
             .unwrap();
         let v27 = migration_v27_schema_version();
         assert!(applied.contains(&v27), "V27 batch marker {v27}");
-        let post = i64::try_from(migration_sql_d1_post_v27().len()).unwrap();
+        let post = i64::try_from(host_migration_plan_post_atomic_sqlite_batch().len()).unwrap();
         assert!(
             applied.contains(&(v27 + post)),
             "last post-V27 version {}, applied={applied:?}",
@@ -883,7 +891,7 @@ mod tests {
         let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
             .await
             .expect("unmigrated sqlite");
-        let ddl = split_sql_statements(migration_sql()[0]).len() as u32;
+        let ddl = split_sql_statements(host_migration_plan()[0].sqlite).len() as u32;
         crate::inject_atomic_interrupt_after(
             crate::AtomicInterruptPhase::BetweenStatements,
             crate::AtomicInterruptKind::Cancel,
@@ -952,7 +960,7 @@ mod tests {
             None => format!("{}/{db_name}", &trimmed[..slash]),
         };
         let db = sea_orm::Database::connect(&db_url).await.expect("connect");
-        let ddl = split_sql_statements(migration_sql_postgres()[0]).len() as u32;
+        let ddl = split_sql_statements(host_migration_plan()[0].postgres).len() as u32;
         crate::inject_atomic_interrupt_after(
             crate::AtomicInterruptPhase::BetweenStatements,
             crate::AtomicInterruptKind::Cancel,
