@@ -1835,19 +1835,18 @@ mod tests {
             &restricted,
         )
         .unwrap_err();
-        assert!(
-            err.to_string().contains("SELECT * is not allowed"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("SELECT * is not allowed"), "{err}");
         let err = authorize_guest_sql_policy(
-            &req("SELECT books.* FROM books", vec![], DbResultSelection::Rows, 1),
+            &req(
+                "SELECT books.* FROM books",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
             &restricted,
         )
         .unwrap_err();
-        assert!(
-            err.to_string().contains("SELECT * is not allowed"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("SELECT * is not allowed"), "{err}");
         authorize_guest_sql_policy(
             &req(
                 "SELECT id AS label FROM books",
