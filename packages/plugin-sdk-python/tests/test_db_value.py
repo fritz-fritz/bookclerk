@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 
 from bookclerk_plugin_sdk.db_value import (
@@ -143,7 +144,7 @@ class DbValueGoldens(unittest.TestCase):
 
         seen = {"n": 0}
 
-        def transport(req):
+        async def transport(req):
             seen["n"] = len(encode_execute_request(req))
             return {
                 "operationId": req["operationId"],
@@ -156,14 +157,19 @@ class DbValueGoldens(unittest.TestCase):
             }
 
         binding = DatabaseBinding(transport, operation_id="op", request_hash="abc")
-        reply = binding.execute(request["statements"])
-        self.assertEqual(reply["operationId"], "op")
-        self.assertEqual(seen["n"], len(encoded))
+
+        async def run() -> None:
+            reply = await binding.execute(request["statements"])
+            self.assertEqual(reply["operationId"], "op")
+            self.assertEqual(seen["n"], len(encoded))
+
+        asyncio.run(run())
 
     def test_two_sequential_batches_use_distinct_operation_ids(self) -> None:
         seen: list[str] = []
+        hashes: list[str] = []
 
-        def transport(req):
+        async def transport(req):
             seen.append(req["operationId"])
             self.assertNotEqual(req["operationId"], "op")
             return {
@@ -178,53 +184,54 @@ class DbValueGoldens(unittest.TestCase):
                 },
             }
 
-        hashes: list[str] = []
-
-        def recording(req):
+        async def recording(req):
             hashes.append(req["requestHash"])
-            return transport(req)
+            return await transport(req)
 
-        binding = DatabaseBinding(recording)
-        first = [{"kind": "int64", "value": 1}]
-        second = [{"kind": "int64", "value": 2}]
-        binding.prepare("INSERT INTO t VALUES (?)").bind(*first).run()
-        binding.prepare("INSERT INTO t VALUES (?)").bind(*second).run()
-        self.assertEqual(len(seen), 2)
-        self.assertNotEqual(seen[0], seen[1])
-        self.assertNotEqual(seen[0], "op")
-        self.assertNotEqual(seen[1], "op")
-        self.assertEqual(hashes, ["", ""])
-        retry = RetryToken(seen[0], canonical_execute_request_hash({
-            "operationId": seen[0],
-            "requestHash": "",
-            "statements": [
-                {
-                    "sql": "INSERT INTO t VALUES (?)",
-                    "parameters": first,
-                    "kind": "execute",
-                    "maxRows": 0,
-                    "resultSelection": "affectedRows",
-                }
-            ],
-            "outcomeIndex": 0,
-            "payloadIndex": 0,
-            "hasPayloadIndex": False,
-            "priorReceiptIndex": 0,
-            "hasPriorReceiptIndex": False,
-            "receiptSelectIndex": 0,
-            "hasReceiptSelectIndex": False,
-            "deadlineUnixMs": 0,
-        }))
-        replayed = []
+        async def run() -> None:
+            binding = DatabaseBinding(recording)
+            first = [{"kind": "int64", "value": 1}]
+            second = [{"kind": "int64", "value": 2}]
+            await binding.prepare("INSERT INTO t VALUES (?)").bind(*first).run()
+            await binding.prepare("INSERT INTO t VALUES (?)").bind(*second).run()
+            self.assertEqual(len(seen), 2)
+            self.assertNotEqual(seen[0], seen[1])
+            self.assertNotEqual(seen[0], "op")
+            self.assertNotEqual(seen[1], "op")
+            self.assertEqual(hashes, ["", ""])
+            retry = RetryToken(seen[0], canonical_execute_request_hash({
+                "operationId": seen[0],
+                "requestHash": "",
+                "statements": [
+                    {
+                        "sql": "INSERT INTO t VALUES (?)",
+                        "parameters": first,
+                        "kind": "execute",
+                        "maxRows": 0,
+                        "resultSelection": "affectedRows",
+                    }
+                ],
+                "outcomeIndex": 0,
+                "payloadIndex": 0,
+                "hasPayloadIndex": False,
+                "priorReceiptIndex": 0,
+                "hasPriorReceiptIndex": False,
+                "receiptSelectIndex": 0,
+                "hasReceiptSelectIndex": False,
+                "deadlineUnixMs": 0,
+            }))
+            replayed = []
 
-        def replay_transport(req):
-            replayed.append((req["operationId"], req["requestHash"]))
-            return transport(req)
+            async def replay_transport(req):
+                replayed.append((req["operationId"], req["requestHash"]))
+                return await transport(req)
 
-        replay = DatabaseBinding(replay_transport)
-        replay.prepare("INSERT INTO t VALUES (?)").bind(*first).run(retry=retry)
-        self.assertEqual(replayed[0][0], seen[0])
-        self.assertEqual(replayed[0][1], retry.request_hash)
+            replay = DatabaseBinding(replay_transport)
+            await replay.prepare("INSERT INTO t VALUES (?)").bind(*first).run(retry=retry)
+            self.assertEqual(replayed[0][0], seen[0])
+            self.assertEqual(replayed[0][1], retry.request_hash)
+
+        asyncio.run(run())
 
     def test_capnp_reader_rejects_truncated_multisegment_and_oversized_count(self) -> None:
         with self.assertRaisesRegex(ValueError, "truncated"):
@@ -295,7 +302,7 @@ class DbValueGoldens(unittest.TestCase):
     def test_first_sends_max_rows_one_and_mixed_batch_keeps_per_statement_intent(self) -> None:
         seen: list[dict] = []
 
-        def transport(req):
+        async def transport(req):
             seen.append(req["statements"][0] if len(req["statements"]) == 1 else req["statements"])
             n = len(req["statements"])
             return {
@@ -316,25 +323,28 @@ class DbValueGoldens(unittest.TestCase):
                 },
             }
 
-        binding = DatabaseBinding(transport)
-        row = binding.prepare("SELECT n FROM t").first()
-        self.assertEqual(seen[0]["maxRows"], 1)
-        self.assertEqual(seen[0]["resultSelection"], "rows")
-        self.assertEqual(row["n"]["value"], 1)
+        async def run() -> None:
+            binding = DatabaseBinding(transport)
+            row = await binding.prepare("SELECT n FROM t").first()
+            self.assertEqual(seen[0]["maxRows"], 1)
+            self.assertEqual(seen[0]["resultSelection"], "rows")
+            self.assertEqual(row["n"]["value"], 1)
 
-        seen.clear()
-        binding.batch(
-            [
-                binding.prepare("INSERT INTO t VALUES (?)").bind(
-                    {"kind": "int64", "value": 1}
-                ).as_run(),
-                binding.prepare("SELECT n FROM t").as_all(),
-            ]
-        )
-        stmts = seen[0]
-        self.assertEqual(stmts[0]["resultSelection"], "affectedRows")
-        self.assertEqual(stmts[0]["maxRows"], 0)
-        self.assertEqual(stmts[1]["resultSelection"], "rows")
+            seen.clear()
+            await binding.batch(
+                [
+                    binding.prepare("INSERT INTO t VALUES (?)").bind(
+                        {"kind": "int64", "value": 1}
+                    ).as_run(),
+                    binding.prepare("SELECT n FROM t").as_all(),
+                ]
+            )
+            stmts = seen[0]
+            self.assertEqual(stmts[0]["resultSelection"], "affectedRows")
+            self.assertEqual(stmts[0]["maxRows"], 0)
+            self.assertEqual(stmts[1]["resultSelection"], "rows")
+
+        asyncio.run(run())
 
     def test_execute_result_reply_preserves_i64_bytes_and_error_code(self) -> None:
         reply = {

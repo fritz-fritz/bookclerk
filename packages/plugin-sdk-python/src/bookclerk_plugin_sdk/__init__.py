@@ -28,6 +28,7 @@ from .abi import (
 from .db_value import (
     DatabaseBinding,
     RetryToken,
+    create_database_binding,
     canonical_execute_request_hash,
     decode_db_value,
     decode_execute_result_reply,
@@ -50,6 +51,7 @@ __all__ = [
     "CliSchema",
     "DatabaseBinding",
     "RetryToken",
+    "create_database_binding",
     "canonical_execute_request_hash",
     "decode_db_value",
     "decode_execute_result_reply",

@@ -12,9 +12,8 @@ import hashlib
 import math
 import struct
 import uuid
-from typing import Any, Callable, Literal, TypedDict, Union
-
-DbType = Literal["unspecified", "bool", "int64", "float64", "text", "bytes"]
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal, TypedDict, Union
 
 KINDS = frozenset({"null", "boolean", "int64", "float64", "text", "bytes"})
 TYPES = frozenset({"unspecified", "bool", "int64", "float64", "text", "bytes"})
@@ -382,7 +381,7 @@ class DatabaseBinding:
 
     def __init__(
         self,
-        execute: Callable[[ExecuteRequest], ExecuteReply],
+        execute: AtomicTransport,
         *,
         max_request_bytes: int = 0,
         max_result_rows: int = 0,
@@ -418,7 +417,7 @@ class DatabaseBinding:
         """
         return PreparedStatement(self, sql, [], max_result_rows=self._max_result_rows)
 
-    def batch(
+    async def batch(
         self,
         statements: list[PreparedStatement],
         *,
@@ -444,18 +443,18 @@ class DatabaseBinding:
                     "batch statement is missing terminal intent (as_run/as_first/as_all)"
                 )
             typed.append(stmt._as_typed())  # noqa: SLF001
-        return self._execute_batch(typed, retry=retry)
+        return await self._execute_batch(typed, retry=retry)
 
-    def execute(
+    async def execute(
         self,
         batch: list[TypedDbStatement],
         *,
         retry: RetryToken | None = None,
     ) -> ExecuteReply:
         """Internal typed-batch transport. Prefer :meth:`prepare` / :meth:`batch`."""
-        return self._execute_batch(batch, retry=retry)
+        return await self._execute_batch(batch, retry=retry)
 
-    def _execute_batch(
+    async def _execute_batch(
         self,
         batch: list[TypedDbStatement],
         *,
@@ -491,7 +490,30 @@ class DatabaseBinding:
                 f"atomic request is {len(encoded)} bytes; guest maxRequestBytes is "
                 f"{self._max_request_bytes}"
             )
-        return self._execute(request)
+        return await self._execute(request)
+
+
+AtomicTransport = Callable[[ExecuteRequest], Awaitable[ExecuteReply]]
+
+
+def create_database_binding(
+    transport: AtomicTransport,
+    *,
+    max_request_bytes: int = 0,
+    max_result_rows: int = 0,
+    operation_id: str | None = None,
+    request_hash: str = "",
+    deadline_unix_ms: int = 0,
+) -> DatabaseBinding:
+    """Build a host-mediated :class:`DatabaseBinding` over an async transport."""
+    return DatabaseBinding(
+        transport,
+        max_request_bytes=max_request_bytes,
+        max_result_rows=max_result_rows,
+        operation_id=operation_id,
+        request_hash=request_hash,
+        deadline_unix_ms=deadline_unix_ms,
+    )
 
 
 class RetryToken:
@@ -571,13 +593,13 @@ class PreparedStatement:
             intent=("rows", self._max_result_rows),
         )
 
-    def run(self, *, retry: RetryToken | None = None) -> ExecuteReply:
+    async def run(self, *, retry: RetryToken | None = None) -> ExecuteReply:
         """Execute as DML (``affectedRows``)."""
-        return self._binding.batch([self.as_run()], retry=retry)
+        return await self._binding.batch([self.as_run()], retry=retry)
 
-    def first(self, *, retry: RetryToken | None = None) -> dict[str, Any] | None:
+    async def first(self, *, retry: RetryToken | None = None) -> dict[str, Any] | None:
         """Return the first row as a name→value map, or ``None``."""
-        reply = self._binding.batch([self.as_first()], retry=retry)
+        reply = await self._binding.batch([self.as_first()], retry=retry)
         result = reply["statements"][0] if reply["statements"] else None
         if result is None or not result["rows"]:
             return None
@@ -586,9 +608,9 @@ class PreparedStatement:
         cells = row["values"] if isinstance(row, dict) else []
         return {col["name"]: cell for col, cell in zip(columns, cells)}
 
-    def all(self, *, retry: RetryToken | None = None) -> ExecuteReply:
+    async def all(self, *, retry: RetryToken | None = None) -> ExecuteReply:
         """Execute as a row-returning query."""
-        return self._binding.batch([self.as_all()], retry=retry)
+        return await self._binding.batch([self.as_all()], retry=retry)
 
     def _as_typed(self) -> TypedDbStatement:
         if self._intent is None:

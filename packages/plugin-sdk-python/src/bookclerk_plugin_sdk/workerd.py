@@ -18,6 +18,7 @@ from bookclerk_plugin_sdk.db_value import (
     DatabaseBinding,
     ExecuteReply,
     ExecuteRequest,
+    create_database_binding,
     decode_execute_result_reply,
     encode_execute_request,
 )
@@ -352,21 +353,18 @@ def granted_job_context(
 ) -> JobContext:
     """Build a :class:`JobContext` with host-mediated SQL over ``POST /db/execute``.
 
-    The returned :attr:`JobContext.database` is a :class:`DatabaseBinding` whose
-    transport encodes batches and delegates execution to
-    :attr:`JobContext.guest_database` (async). Job handlers should call
-    ``await context.guest_database.execute(request)`` or use the binding helpers
-    that build requests, then execute via the guest transport.
+    The returned :attr:`JobContext.database` is an awaitable
+    :class:`DatabaseBinding` wired to the granted transport.
     """
     guest = _GrantedGuestDatabase(granted, grant_token, signal)
 
-    def execute(request: ExecuteRequest) -> ExecuteReply:
-        raise PluginError.from_wire(
-            "unsupported",
-            "granted database execute is async; await context.guest_database.execute(request)",
-        )
+    async def execute(request: ExecuteRequest) -> ExecuteReply:
+        return await guest.execute(request)
 
-    return JobContext(database=DatabaseBinding(execute), guest_database=guest)
+    return JobContext(
+        database=create_database_binding(execute),
+        guest_database=guest,
+    )
 
 
 class Integration:

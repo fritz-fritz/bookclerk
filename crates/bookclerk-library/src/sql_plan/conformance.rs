@@ -53,6 +53,12 @@ async fn shared_vectors_on_sqlite() {
 }
 
 #[tokio::test]
+async fn typed_shared_vectors_on_sqlite() {
+    let db = mem_db().await;
+    super::typed_vectors::run_typed_conn_vectors(&db, SqlFamily::Sqlite, "sqlite_txn").await;
+}
+
+#[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_shared_vectors() {
     if !postgres_conformance_enabled() {
@@ -60,6 +66,16 @@ async fn postgres_shared_vectors() {
     }
     let db = postgres_migrated_db().await;
     super::vectors::run_conn_vectors(&db, SqlFamily::Postgres, "postgres_txn").await;
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn typed_shared_vectors_on_postgres() {
+    if !postgres_conformance_enabled() {
+        return;
+    }
+    let db = postgres_migrated_db().await;
+    super::typed_vectors::run_typed_conn_vectors(&db, SqlFamily::Postgres, "postgres_txn").await;
 }
 
 #[tokio::test]
