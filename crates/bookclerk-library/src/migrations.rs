@@ -1155,14 +1155,13 @@ const MIGRATION_V26_WAKE_PENDING_POSTGRES: &str = r#"
         ON domain_events(created_at, id) WHERE wake_pending = 1;
 "#;
 
-/// Tenant/producer dedup, claimed wake slices, and host-derived wake grants (file SQLite).
+/// Tenant/producer dedup, claimed wake slices, and host-derived wake grants (SQLite family).
 ///
-/// File SQLite applies this under `PRAGMA foreign_keys=OFF` (rusqlite_migration).
-/// Dropping `domain_events` while `event_deliveries.event_id` still has
-/// `ON DELETE CASCADE` is therefore safe locally. D1 enforces FKs and must use
-/// [`migration_v27_d1_statements`] as one `run_batch` (drop child, then parent).
+/// Rebuilds `domain_events` and `event_deliveries` in FK-safe order (child copy,
+/// parent copy, drop child, drop parent, rename). File SQLite applies this under
+/// `PRAGMA foreign_keys=OFF`; D1 / [`HostSchemaKind::AtomicBatchMarker`] apply
+/// the same text as one atomic batch per plan version.
 const MIGRATION_V27_DEDUP_WAKE_CLAIM_SQLITE: &str = r#"
-    ALTER TABLE event_deliveries ADD COLUMN wake_grants_json TEXT NOT NULL DEFAULT '';
     CREATE TABLE domain_events_v27 (
         id TEXT PRIMARY KEY NOT NULL,
         event_type TEXT NOT NULL,
@@ -1193,14 +1192,62 @@ const MIGRATION_V27_DEDUP_WAKE_CLAIM_SQLITE: &str = r#"
         correlation_id, causation_id, dedup_key, payload, ordering_key,
         dispatch_state, created_at, wake_pending
     FROM domain_events;
+    CREATE TABLE event_deliveries_v27 (
+        id TEXT PRIMARY KEY NOT NULL,
+        event_id TEXT NOT NULL,
+        plugin_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 8,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        lease_generation INTEGER NOT NULL DEFAULT 0,
+        run_after TEXT NOT NULL,
+        invocation_sequence INTEGER NOT NULL DEFAULT 0,
+        resume_pending INTEGER NOT NULL DEFAULT 0,
+        checkpoint_json TEXT,
+        checkpoint_schema_version INTEGER NOT NULL DEFAULT 0,
+        ordering_key TEXT NOT NULL DEFAULT '',
+        outcome TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        resource_class TEXT NOT NULL DEFAULT 'network',
+        wake_event_type TEXT NOT NULL DEFAULT '',
+        wake_filter_json TEXT NOT NULL DEFAULT '',
+        wake_grants_json TEXT NOT NULL DEFAULT '',
+        UNIQUE(event_id, plugin_id),
+        FOREIGN KEY(event_id) REFERENCES domain_events_v27(id) ON DELETE CASCADE
+    );
+    INSERT INTO event_deliveries_v27 (
+        id, event_id, plugin_id, idempotency_key, state, attempt_count,
+        max_attempts, lease_owner, lease_expires_at, lease_generation, run_after,
+        invocation_sequence, resume_pending, checkpoint_json,
+        checkpoint_schema_version, ordering_key, outcome, error_message,
+        created_at, updated_at, cancel_requested, resource_class,
+        wake_event_type, wake_filter_json, wake_grants_json
+    ) SELECT
+        id, event_id, plugin_id, idempotency_key, state, attempt_count,
+        max_attempts, lease_owner, lease_expires_at, lease_generation, run_after,
+        invocation_sequence, resume_pending, checkpoint_json,
+        checkpoint_schema_version, ordering_key, outcome, error_message,
+        created_at, updated_at, cancel_requested, resource_class,
+        wake_event_type, wake_filter_json, ''
+    FROM event_deliveries;
+    DROP TABLE event_deliveries;
     DROP TABLE domain_events;
     ALTER TABLE domain_events_v27 RENAME TO domain_events;
-    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch
-        ON domain_events(dispatch_state, created_at);
-    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch_created
-        ON domain_events(dispatch_state, created_at, id);
-    CREATE INDEX IF NOT EXISTS idx_domain_events_wake_pending
-        ON domain_events(created_at, id) WHERE wake_pending = 1;
+    ALTER TABLE event_deliveries_v27 RENAME TO event_deliveries;
+    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch ON domain_events(dispatch_state, created_at);
+    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch_created ON domain_events(dispatch_state, created_at, id);
+    CREATE INDEX IF NOT EXISTS idx_domain_events_wake_pending ON domain_events(created_at, id) WHERE wake_pending = 1;
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_claim ON event_deliveries(state, run_after, created_at);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_plugin_order ON event_deliveries(plugin_id, ordering_key, created_at);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_state ON event_deliveries(state);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_wake ON event_deliveries(state, wake_event_type);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_plugin_running ON event_deliveries(plugin_id, state);
 "#;
 
 /// Tenant/producer dedup, claimed wake slices, and host-derived wake grants (Postgres).
@@ -1315,11 +1362,10 @@ pub fn migration_sql_postgres() -> &'static [&'static str] {
     ]
 }
 
-/// D1 HTTP applies each guest-migrator statement as autocommit. The file-SQLite
-/// V27 rebuild drops `domain_events` while `event_deliveries` still cascades, so
-/// D1 must not send that rebuild through statement-by-statement `execute_raw`.
-/// The extra V3 portal step means V27 DDL is frozen bookkeeping version 28.
-/// Later additive steps (V28+) are applied after the V27 batch.
+/// SQLite-family migration steps before the V27 FK-safe rebuild (through wake-pending).
+///
+/// Legacy helper for tests and isolation checks; the host applies
+/// [`host_migration_plan`] for every marker kind.
 const D1_PRE_V27_STEPS: usize = 27;
 
 /// One host-owned schema version in the canonical Bookclerk migration plan.
@@ -1362,48 +1408,16 @@ pub fn host_migration_sql(backend: sea_orm::DbBackend, step: &HostMigrationStep)
     }
 }
 
-/// SQLite-family steps applied before the V27 atomic batch bookkeeping version.
-///
-/// On engines that require one HTTP batch per version, the step at
-/// [`migration_v27_schema_version`] uses [`migration_v27_d1_batch`] instead of
-/// the file-SQLite V27 rebuild at [`HostMigrationStep::sqlite`] index 27.
-#[must_use]
-pub fn host_migration_plan_pre_atomic_sqlite_batch() -> Vec<HostMigrationStep> {
-    host_migration_plan()
-        .into_iter()
-        .take(D1_PRE_V27_STEPS)
-        .collect()
-}
-
-/// SQLite-family steps applied after the V27 atomic batch bookkeeping version.
-#[must_use]
-pub fn host_migration_plan_post_atomic_sqlite_batch() -> Vec<HostMigrationStep> {
-    let plan = host_migration_plan();
-    if plan.len() > D1_PRE_V27_STEPS + 1 {
-        plan.into_iter().skip(D1_PRE_V27_STEPS + 1).collect()
-    } else {
-        Vec::new()
-    }
-}
-
-/// SQLite DDL for D1 guest `schema_migrations` versions through V26.
-///
-/// Legacy slice view of [`host_migration_plan_pre_atomic_sqlite_batch`].
-/// SQLite steps D1 may apply autocommit (everything before the V27 rebuild).
+/// SQLite DDL through the step before the V27 rebuild (legacy test helper).
 #[must_use]
 pub fn migration_sql_d1() -> &'static [&'static str] {
     &migration_sql()[..D1_PRE_V27_STEPS]
 }
 
-/// Additive sqlite steps after the D1 V27 batch (V28+).
+/// Additive sqlite steps after the V27 rebuild (serialization slots, dispatch snapshot).
 #[must_use]
 pub fn migration_sql_d1_post_v27() -> &'static [&'static str] {
-    let all = migration_sql();
-    if all.len() > D1_PRE_V27_STEPS + 1 {
-        &all[D1_PRE_V27_STEPS + 1..]
-    } else {
-        &[]
-    }
+    &migration_sql()[D1_PRE_V27_STEPS + 1..]
 }
 
 /// Collects canonical SQLite DDL for `steps` (shared plan, not a D1-only pack).
@@ -1412,10 +1426,14 @@ pub fn host_migration_sqlite_steps(steps: &[HostMigrationStep]) -> Vec<&'static 
     steps.iter().map(|step| step.sqlite).collect()
 }
 
-/// `schema_migrations.version` for the V27 D1 batch (frozen; extra V3 portal step).
+/// `schema_migrations.version` / plan step for the V27 FK-safe rebuild.
+///
+/// Bookkeeping version 28 (extra V3 portal step in the chain). Legacy D1
+/// deployments may already record this version from the pre-unification batch
+/// path; see TODO(#squash) in [`crate::host_schema`].
 #[must_use]
 pub fn migration_v27_schema_version() -> i64 {
-    28
+    i64::try_from(D1_PRE_V27_STEPS + 1).expect("V27 version fits i64")
 }
 
 /// One-transaction D1 V27: rebuild both tables, drop child then parent, record 27.
@@ -1966,8 +1984,8 @@ mod tests {
         assert_eq!(grants, "");
         let version: i64 = conn
             .query_row(
-                "SELECT version FROM schema_migrations WHERE version = 28",
-                [],
+                "SELECT version FROM schema_migrations WHERE version = ?1",
+                [migration_v27_schema_version()],
                 |r| r.get(0),
             )
             .unwrap();
@@ -2002,15 +2020,21 @@ mod tests {
     }
 
     #[test]
-    fn host_migration_plan_partitions_atomic_sqlite_batch_without_changing_versions() {
+    fn host_migration_plan_aligns_with_legacy_d1_slices() {
         let plan = host_migration_plan();
-        let pre = host_migration_plan_pre_atomic_sqlite_batch();
-        let post = host_migration_plan_post_atomic_sqlite_batch();
         assert_eq!(migration_sql_d1().len(), D1_PRE_V27_STEPS);
-        assert_eq!(migration_sql_d1_post_v27().len(), post.len());
-        assert_eq!(pre.len() + 1 + post.len(), plan.len());
-        assert_eq!(pre.last().map(|s| s.version), Some(27));
-        assert_eq!(post.first().map(|s| s.version), Some(29));
+        assert_eq!(
+            migration_sql_d1_post_v27().len(),
+            plan.len().saturating_sub(D1_PRE_V27_STEPS + 1)
+        );
+        assert_eq!(
+            plan[D1_PRE_V27_STEPS].version,
+            migration_v27_schema_version()
+        );
+        assert_eq!(
+            migration_sql_d1_post_v27().first(),
+            Some(&plan[D1_PRE_V27_STEPS + 1].sqlite)
+        );
     }
 
     #[test]
