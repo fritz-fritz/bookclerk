@@ -86,6 +86,10 @@ pub fn guest_receipt_finalize_stmts(
 }
 
 /// Guest statement results from a wrapped partial reply.
+///
+/// # Errors
+///
+/// Never returns an error; the `Result` preserves the surrounding receipt API.
 fn guest_slice_reply(partial: &ExecuteReply, guest_len: usize) -> Result<ExecuteReply, DbErr> {
     Ok(ExecuteReply {
         operation_id: partial.operation_id.clone(),
@@ -101,6 +105,11 @@ fn guest_slice_reply(partial: &ExecuteReply, guest_len: usize) -> Result<Execute
 }
 
 /// Serializes guest statement results for durable replay.
+///
+/// # Errors
+///
+/// Returns when JSON serialization fails or the payload exceeds
+/// [`GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES`].
 fn encode_guest_replay_payload(reply: &ExecuteReply) -> Result<String, DbErr> {
     let payload = GuestReplayPayload {
         operation_id: reply.operation_id.clone(),
