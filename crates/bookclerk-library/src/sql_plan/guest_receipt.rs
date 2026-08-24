@@ -143,7 +143,9 @@ pub(crate) fn guest_receipt_persist_stmts(
     guest_len: usize,
     guest_hash: &str,
 ) -> Result<Vec<TypedDbStatement>, sea_orm::DbErr> {
-    let expected = WRAP_PREFIX.saturating_add(guest_len).saturating_add(WRAP_SUFFIX);
+    let expected = WRAP_PREFIX
+        .saturating_add(guest_len)
+        .saturating_add(WRAP_SUFFIX);
     if partial.statements.len() != expected {
         return Err(sea_orm::DbErr::Custom(format!(
             "guest atomic receipt wrap returned {} statements; expected {expected}",

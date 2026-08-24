@@ -210,13 +210,8 @@ where
         }
         HostSchemaKind::RowMarker => {
             let backend = db.get_database_backend();
-            apply_schema_migrations_with_batch(
-                db,
-                backend,
-                &host_migration_plan(),
-                &mut run_batch,
-            )
-            .await
+            apply_schema_migrations_with_batch(db, backend, &host_migration_plan(), &mut run_batch)
+                .await
         }
         HostSchemaKind::AtomicBatchMarker => apply_host_schema(db, kind).await,
     }

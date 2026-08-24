@@ -105,11 +105,7 @@ impl ExternalDatabase {
         let ctx = serde_json::to_string(&params).map_err(|err| DbErr::Custom(err.to_string()))?;
         self.session.db_open(ctx).await.map_err(map_rpc_err)?;
 
-        let caps = self
-            .session
-            .db_capabilities()
-            .await
-            .map_err(map_rpc_err)?;
+        let caps = self.session.db_capabilities().await.map_err(map_rpc_err)?;
         if !caps.meets_host_minimums() {
             return Err(DbErr::Custom(caps.capability_failure_reason()));
         }

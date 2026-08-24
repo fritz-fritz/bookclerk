@@ -868,8 +868,10 @@ where
             operation_id: req.operation_id.clone(),
             statements: statements.clone(),
             timing: DbTiming {
-                attempt_elapsed_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-                db_execution_us: u64::try_from(sql_started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                attempt_elapsed_us: u64::try_from(started.elapsed().as_micros())
+                    .unwrap_or(u64::MAX),
+                db_execution_us: u64::try_from(sql_started.elapsed().as_micros())
+                    .unwrap_or(u64::MAX),
                 db_timing_source: timing_source.to_string(),
             },
         };

@@ -181,8 +181,9 @@ impl LibraryStore {
         let wrapped = crate::sql_plan::wrap_guest_typed_request(req);
         let reply = if let Some(exec) = &self.typed_exec {
             let reply = exec.execute_typed(wrapped).await?;
-            let persist = crate::sql_plan::guest_receipt_persist_stmts(&reply, guest_len, &guest_hash)
-                .map_err(|err| bookclerk_plugin_abi::PluginError::internal(err.to_string()))?;
+            let persist =
+                crate::sql_plan::guest_receipt_persist_stmts(&reply, guest_len, &guest_hash)
+                    .map_err(|err| bookclerk_plugin_abi::PluginError::internal(err.to_string()))?;
             if !persist.is_empty() {
                 let update_req = bookclerk_plugin_abi::ExecuteRequest {
                     operation_id: format!("{}:replay-persist", reply.operation_id),
