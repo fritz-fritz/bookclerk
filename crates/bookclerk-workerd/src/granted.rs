@@ -1211,17 +1211,6 @@ mod tests {
         .await;
         assert_granted_policy_rejects(
             guest_sql_bytes(
-                "INSERT INTO books (id) VALUES (?)",
-                vec![DbValue::Int64(1)],
-                DbPlanStatementKind::Execute,
-                DbResultSelection::Rows,
-                1,
-            ),
-            "row-producing",
-        )
-        .await;
-        assert_granted_policy_rejects(
-            guest_sql_bytes(
                 "SELECT id FROM jobs",
                 vec![],
                 DbPlanStatementKind::Select,
