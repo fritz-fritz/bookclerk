@@ -8,6 +8,7 @@
 
 import { CapnpMessage, CapnpReader, type CapnpStruct, type StructReader } from "./db-capnp.js";
 import { readDbValue, writeDbValue, type DbType, type DbValue } from "./db-value.js";
+import { guestStatementKind, splitExecQueries } from "./guest-sql.js";
 
 /** Host-authored statement kind on `DbStatement.kind`. */
 export type DbStatementKind = "query" | "execute" | "select" | "returning";
@@ -481,9 +482,9 @@ function rowMapFromStatement(result: StatementResult): Record<string, DbValue> |
 function columnValueFromRow(
   row: Record<string, DbValue>,
   colName: string,
-): DbValue | null {
+): DbValue {
   if (colName in row) {
-    return row[colName];
+    return row[colName]!;
   }
   const lower = colName.toLowerCase();
   for (const [name, value] of Object.entries(row)) {
@@ -491,7 +492,7 @@ function columnValueFromRow(
       return value;
     }
   }
-  return null;
+  throw new Error(`column ${colName} not found in first() result`);
 }
 
 function writeExecuteReply(root: CapnpStruct, reply: ExecuteReply): void {
@@ -593,10 +594,15 @@ export function createDatabaseBinding(
       return runExecute(typed, opts?.retry).then(executeReplyToD1Results);
     },
     exec(query, opts) {
-      return binding
-        .prepare(query)
-        .run(opts)
-        .then((result) => ({ count: 1, duration: result.meta.duration }));
+      const queries = splitExecQueries(query);
+      if (queries.length === 0) {
+        return Promise.reject(new Error("exec query is empty"));
+      }
+      const prepared = queries.map((sql) => binding.prepare(sql));
+      return binding.batch(prepared, opts).then((results) => ({
+        count: results.length,
+        duration: results.reduce((sum, r) => sum + r.meta.duration, 0),
+      }));
     },
     execute(batch, opts) {
       return runExecute(batch, opts?.retry);
@@ -641,17 +647,10 @@ function makePrepared(
       });
     },
     asFirst() {
-      const inner = sql.trim().replace(/;+\s*$/, "");
-      return makePrepared(
-        binding,
-        `SELECT * FROM (${inner}) AS _bc_first LIMIT 1`,
-        parameters,
-        defaultAllRows,
-        {
-          resultSelection: "rows",
-          maxRows: 1,
-        },
-      );
+      return makePrepared(binding, sql, parameters, defaultAllRows, {
+        resultSelection: "rows",
+        maxRows: 1,
+      });
     },
     asAll() {
       return makePrepared(binding, sql, parameters, defaultAllRows, {
@@ -706,7 +705,7 @@ function makePrepared(
         kind:
           used.resultSelection === "affectedRows" || used.resultSelection === "discard"
             ? "execute"
-            : "select",
+            : guestStatementKind(sql),
         maxRows: used.maxRows,
         resultSelection: used.resultSelection,
       };

@@ -157,7 +157,7 @@ enum Work {
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
     DbExecuteEnvelopeRequest {
-        envelope: bookclerk_plugin_sdk::HostExecuteEnvelope,
+        envelope: bookclerk_plugin_sdk::host_db::HostExecuteEnvelope,
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
@@ -740,7 +740,7 @@ impl V2PluginSession {
     /// Returns a plugin error when the guest rejects the call or `cancel` is set.
     pub async fn db_execute_envelope_request(
         &self,
-        envelope: bookclerk_plugin_sdk::HostExecuteEnvelope,
+        envelope: bookclerk_plugin_sdk::host_db::HostExecuteEnvelope,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
         self.call(|reply| Work::DbExecuteEnvelopeRequest {

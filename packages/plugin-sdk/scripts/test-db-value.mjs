@@ -19,6 +19,7 @@ const {
   encodeExecuteResultReply,
   decodeExecuteResultReply,
 } = await import(join(dist, "db-execute.js"));
+const { guestStatementKind } = await import(join(dist, "guest-sql.js"));
 
 function hex(bytes) {
   return Buffer.from(bytes).toString("hex");
@@ -256,6 +257,66 @@ const runResult = await runBinding.prepare("SELECT n FROM t").run();
 assert.equal(runSeen[0].resultSelection, "rows");
 assert.equal(runSeen[0].kind, "select");
 assert.equal(runResult.results[0].n.value, 2n);
+
+const dmlInsertReq = {
+  operationId: "",
+  requestHash: "",
+  deadlineUnixMs: 0,
+  statements: [
+    {
+      sql: "INSERT INTO t VALUES (?)",
+      parameters: [{ kind: "int64", value: 1n }],
+      kind: guestStatementKind("INSERT INTO t VALUES (?)"),
+      maxRows: 0,
+      resultSelection: "rows",
+    },
+  ],
+};
+assert.equal(dmlInsertReq.statements[0].kind, "execute");
+assert.equal(guestStatementKind("INSERT INTO t VALUES (?) RETURNING id"), "returning");
+const dmlHash = await canonicalExecuteRequestHash(dmlInsertReq);
+assert.equal(dmlHash.length, 64);
+
+const execSeen = [];
+const execBinding = createDatabaseBinding({
+  async execute(req) {
+    execSeen.push(req.statements.length);
+    return {
+      operationId: req.operationId,
+      statements: req.statements.map(() => ({
+        rows: [],
+        columns: [],
+        rowsAffected: 1,
+        cursor: "",
+      })),
+      timing: { attemptElapsedUs: 0, dbExecutionUs: 0, dbTimingSource: "test" },
+    };
+  },
+});
+const execOut = await execBinding.exec("INSERT INTO t VALUES (1)\nSELECT 1");
+assert.equal(execOut.count, 2);
+assert.deepEqual(execSeen[0], 2);
+
+const missingColBinding = createDatabaseBinding({
+  async execute(req) {
+    return {
+      operationId: req.operationId,
+      statements: [
+        {
+          rows: [{ values: [{ kind: "int64", value: 1n }] }],
+          columns: [{ name: "n", dbType: "int64" }],
+          rowsAffected: 0,
+          cursor: "",
+        },
+      ],
+      timing: { attemptElapsedUs: 0, dbExecutionUs: 0, dbTimingSource: "test" },
+    };
+  },
+});
+await assert.rejects(
+  () => missingColBinding.prepare("SELECT 1 AS n").first("missing"),
+  /column missing not found in first\(\) result/,
+);
 
 const mixedSeen = [];
 const mixBinding = createDatabaseBinding({

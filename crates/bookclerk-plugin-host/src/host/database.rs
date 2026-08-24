@@ -14,12 +14,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_db_exec::db_value_from_sea;
+use bookclerk_plugin_sdk::host_db::HostExecuteEnvelope;
 use bookclerk_plugin_sdk::v2::GuestDatabase;
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
     exec_result_from_dto, proxy_rows_from_typed, DbConnectParams, DbConnectResult,
     DbPlanStatementKind, DbResultSelection, ExecResultDto, ExecuteReply, ExecuteRequest,
-    HostExecuteEnvelope, PluginError as AbiPluginError, TypedDbStatement,
+    PluginError as AbiPluginError, TypedDbStatement,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,

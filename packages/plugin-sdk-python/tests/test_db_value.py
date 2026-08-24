@@ -395,6 +395,95 @@ class DbValueGoldens(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "unavailable")
         self.assertEqual(ctx.exception.wire_code, "unavailable")
 
+    def test_guest_statement_kind_matches_host(self) -> None:
+        from bookclerk_plugin_sdk.guest_sql import guest_statement_kind
+
+        self.assertEqual(guest_statement_kind("INSERT INTO t VALUES (?)"), "execute")
+        self.assertEqual(
+            guest_statement_kind("INSERT INTO t VALUES (?) RETURNING id"), "returning"
+        )
+        self.assertEqual(guest_statement_kind("SELECT 1"), "select")
+
+    def test_dml_run_canonical_hash_uses_execute_kind(self) -> None:
+        from bookclerk_plugin_sdk.guest_sql import guest_statement_kind
+
+        req = {
+            "operationId": "",
+            "requestHash": "",
+            "deadlineUnixMs": 0,
+            "statements": [
+                {
+                    "sql": "INSERT INTO t VALUES (?)",
+                    "parameters": [{"kind": "int64", "value": 1}],
+                    "kind": guest_statement_kind("INSERT INTO t VALUES (?)"),
+                    "maxRows": 0,
+                    "resultSelection": "rows",
+                }
+            ],
+        }
+        self.assertEqual(len(canonical_execute_request_hash(req)), 64)
+
+    async def _test_exec_two_queries(self) -> None:
+        seen: list[int] = []
+
+        async def transport(req):
+            seen.append(len(req["statements"]))
+            return {
+                "operationId": req["operationId"],
+                "statements": [
+                    {
+                        "rows": [],
+                        "columns": [],
+                        "rowsAffected": 1,
+                        "cursor": "",
+                    }
+                    for _ in req["statements"]
+                ],
+                "timing": {
+                    "attemptElapsedUs": 0,
+                    "dbExecutionUs": 0,
+                    "dbTimingSource": "test",
+                },
+            }
+
+        binding = DatabaseBinding(transport)
+        out = await binding.exec("INSERT INTO t VALUES (1)\nSELECT 1")
+        self.assertEqual(out["count"], 2)
+        self.assertEqual(seen[0], 2)
+
+    def test_exec_two_queries(self) -> None:
+        import asyncio
+
+        asyncio.run(self._test_exec_two_queries())
+
+    async def _test_first_missing_column_errors(self) -> None:
+        async def transport(_req):
+            return {
+                "operationId": "op",
+                "statements": [
+                    {
+                        "rows": [{"values": [{"kind": "int64", "value": 1}]}],
+                        "columns": [{"name": "n", "dbType": "int64"}],
+                        "rowsAffected": 0,
+                        "cursor": "",
+                    }
+                ],
+                "timing": {
+                    "attemptElapsedUs": 0,
+                    "dbExecutionUs": 0,
+                    "dbTimingSource": "test",
+                },
+            }
+
+        binding = DatabaseBinding(transport)
+        with self.assertRaises(ValueError, msg="column missing not found in first() result"):
+            await binding.prepare("SELECT 1 AS n").first("missing")
+
+    def test_first_missing_column_errors(self) -> None:
+        import asyncio
+
+        asyncio.run(self._test_first_missing_column_errors())
+
 
 if __name__ == "__main__":
     unittest.main()

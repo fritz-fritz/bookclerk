@@ -109,7 +109,7 @@ impl D1Proxy {
     pub async fn run_typed_atomic(
         &self,
         req: &ExecuteRequest,
-        guest_receipt: bookclerk_plugin_sdk::GuestReceiptPersist,
+        guest_receipt: bookclerk_plugin_sdk::host_db::GuestReceiptPersist,
     ) -> std::result::Result<ExecuteReply, DbErr> {
         let started = std::time::Instant::now();
         let deadline = (req.deadline_unix_ms > 0).then_some(req.deadline_unix_ms);
@@ -313,6 +313,9 @@ pub fn is_ambiguous_d1(err: &DbErr) -> bool {
 /// client 4xx → `invalid_params`, engine codes via the shared mapper.
 #[must_use]
 pub fn plugin_error_from_d1(err: DbErr) -> PluginError {
+    if bookclerk_db_exec::is_guest_receipt_result_lost(&err) {
+        return PluginError::unavailable(err.to_string());
+    }
     if is_ambiguous_d1(&err) {
         return PluginError::unavailable(err.to_string());
     }

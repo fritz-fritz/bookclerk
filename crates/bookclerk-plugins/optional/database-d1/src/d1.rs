@@ -1609,6 +1609,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plugin_error_from_d1_maps_guest_receipt_result_lost_to_unavailable() {
+        let err = DbErr::Custom(bookclerk_db_exec::GUEST_RECEIPT_RESULT_LOST.into());
+        let mapped = crate::atomic::plugin_error_from_d1(err);
+        assert_eq!(
+            mapped.code,
+            bookclerk_plugin_sdk::PluginErrorCode::Unavailable,
+            "{mapped}"
+        );
+    }
+
+    #[tokio::test]
     async fn executing_mock_unique_constraint_fails_closed() {
         let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
         proxy
@@ -1919,7 +1930,7 @@ mod tests {
                     proxy
                         .run_typed_atomic(
                             &req,
-                            bookclerk_plugin_sdk::GuestReceiptPersist::default(),
+                            bookclerk_plugin_sdk::host_db::GuestReceiptPersist::default(),
                         )
                         .await
                 }
@@ -1957,7 +1968,7 @@ mod tests {
                 deadline_unix_ms: 0,
             };
             let reply = proxy
-                .run_typed_atomic(&req, bookclerk_plugin_sdk::GuestReceiptPersist::default())
+                .run_typed_atomic(&req, bookclerk_plugin_sdk::host_db::GuestReceiptPersist::default())
                 .await
                 .unwrap_or_else(|e| panic!("{label}: {e}"));
             let got = reply.statements[0].rows[0].values[0].clone();
@@ -2138,7 +2149,7 @@ mod tests {
     impl bookclerk_library::TypedAtomicExec for ProxyTypedExec {
         async fn execute_typed(
             &self,
-            envelope: bookclerk_plugin_sdk::HostExecuteEnvelope,
+            envelope: bookclerk_plugin_sdk::host_db::HostExecuteEnvelope,
         ) -> std::result::Result<
             bookclerk_plugin_sdk::ExecuteReply,
             bookclerk_plugin_sdk::PluginError,
@@ -2212,5 +2223,71 @@ mod tests {
             replay.statements[0].rows_affected, 1,
             "replay must return the stored caller-visible rowsAffected, not gated 0"
         );
+    }
+
+    /// After commit with a lost HTTP reply, a retry must not fabricate a no-op
+    /// result; the caller receives `unavailable` and the mutation applies once.
+    #[tokio::test]
+    async fn executing_mock_guest_typed_committed_reply_lost_is_unavailable() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, PluginErrorCode,
+            TypedDbStatement,
+        };
+
+        let (_server, proxy, conn, _interrupt, drop_reply, _oversize) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema for lost-reply guest typed");
+
+        let store = bookclerk_library::LibraryStore::from_connection(db)
+            .with_connect_result(bookclerk_plugin_sdk::DbConnectResult::d1())
+            .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
+                proxy: proxy.clone(),
+            }));
+        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"]);
+        drop_reply.store(true, std::sync::atomic::Ordering::SeqCst);
+        let req = ExecuteRequest {
+            operation_id: "d1-guest-lost-reply".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('lost-reply', 1)"
+                    .into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let err = store
+            .execute_guest_atomic(req, &policy)
+            .await
+            .expect_err("lost reply before finalize must be unavailable");
+        assert_eq!(err.code, PluginErrorCode::Unavailable, "{err}");
+        let count: i64 = conn
+            .lock()
+            .expect("sqlite")
+            .query_row(
+                "SELECT COUNT(*) FROM db_serialization_slots WHERE slot_key = 'lost-reply'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count slot rows");
+        assert_eq!(count, 1, "mutation must commit exactly once");
     }
 }

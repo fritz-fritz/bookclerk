@@ -15,6 +15,8 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, TypedDict, Union
 
+from .guest_sql import guest_statement_kind, split_exec_queries
+
 KINDS = frozenset({"null", "boolean", "int64", "float64", "text", "bytes"})
 TYPES = frozenset({"unspecified", "bool", "int64", "float64", "text", "bytes"})
 
@@ -418,14 +420,14 @@ def _row_map_from_statement(result: StatementResult) -> dict[str, Any] | None:
     return {col["name"]: cell for col, cell in zip(columns, cells, strict=False)}
 
 
-def _column_value_from_row(row: dict[str, Any], col_name: str) -> Any | None:
+def _column_value_from_row(row: dict[str, Any], col_name: str) -> Any:
     if col_name in row:
         return row[col_name]
     lower = col_name.lower()
     for name, value in row.items():
         if name.lower() == lower:
             return value
-    return None
+    raise ValueError(f"column {col_name} not found in first() result")
 
 
 class DatabaseBinding:
@@ -499,8 +501,15 @@ class DatabaseBinding:
         retry: RetryToken | None = None,
     ) -> D1ExecResult:
         """Execute raw SQL without bind parameters (Cloudflare ``D1Database.exec``)."""
-        result = await self.prepare(query).run(retry=retry)
-        return {"count": 1, "duration": result["meta"]["duration"]}
+        queries = split_exec_queries(query)
+        if not queries:
+            raise ValueError("exec query is empty")
+        prepared = [self.prepare(sql) for sql in queries]
+        results = await self.batch(prepared, retry=retry)
+        return {
+            "count": len(results),
+            "duration": sum(r["meta"]["duration"] for r in results),
+        }
 
     async def execute(
         self,
@@ -620,14 +629,10 @@ class PreparedStatement:
         )
 
     def as_first(self) -> PreparedStatement:
-        """Mark ``maxRows = 1`` row intent for :meth:`DatabaseBinding.batch`.
-
-        Wraps the SQL so the engine returns at most one row.
-        """
-        inner = self.sql.strip().rstrip(";").strip()
+        """Mark ``maxRows = 1`` row intent for :meth:`DatabaseBinding.batch`."""
         return PreparedStatement(
             self._binding,
-            f"SELECT * FROM ({inner}) AS _bc_first LIMIT 1",
+            self.sql,
             self.parameters,
             max_result_rows=self._max_result_rows,
             intent=("rows", 1),
@@ -690,7 +695,9 @@ class PreparedStatement:
     def _as_typed(self) -> TypedDbStatement:
         result_selection, max_rows = self._intent or ("rows", self._max_result_rows)
         kind: DbStatementKind = (
-            "execute" if result_selection in ("affectedRows", "discard") else "select"
+            "execute"
+            if result_selection in ("affectedRows", "discard")
+            else guest_statement_kind(self.sql)
         )
         return {
             "sql": self.sql,

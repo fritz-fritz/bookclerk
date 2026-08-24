@@ -1,7 +1,7 @@
 //! Adapter-boundary typed conformance for the platform SQLite guest.
 
 use bookclerk_plugin_sdk::database_adapter::guest_execute_atomic;
-use bookclerk_plugin_sdk::{GuestReceiptPersist, HostExecuteEnvelope};
+use bookclerk_plugin_sdk::host_db::{GuestReceiptPersist, HostExecuteEnvelope};
 
 #[tokio::test]
 async fn platform_sqlite_guest_execute_passes_typed_vectors() {

@@ -14,6 +14,16 @@ use sea_orm::DbErr;
 /// Maximum UTF-8 bytes stored in `db_atomic_receipts.payload` for guest replay.
 pub const GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES: usize = 65536;
 
+/// Error text when a receipt committed but the caller-visible payload was lost.
+pub const GUEST_RECEIPT_RESULT_LOST: &str =
+    "guest receipt committed without payload; original response lost";
+
+/// True when `err` is [`GUEST_RECEIPT_RESULT_LOST`].
+#[must_use]
+pub fn is_guest_receipt_result_lost(err: &DbErr) -> bool {
+    err.to_string().contains(GUEST_RECEIPT_RESULT_LOST)
+}
+
 /// Prune + prior-select prefix ahead of the guest statements.
 pub const GUEST_RECEIPT_WRAP_PREFIX: usize = 2;
 
@@ -54,9 +64,7 @@ pub fn guest_receipt_finalize_stmts(
                 return Ok(Vec::new());
             }
             if is_gated_guest_replay(partial, prior)? {
-                return Err(DbErr::Custom(
-                    "guest receipt committed without payload; original response lost".into(),
-                ));
+                return Err(DbErr::Custom(GUEST_RECEIPT_RESULT_LOST.into()));
             }
             let guest_reply = guest_slice_reply(partial, guest_len)?;
             let payload = encode_guest_replay_payload(&guest_reply)?;

@@ -79,6 +79,7 @@ pub use db_binding::{
     DatabaseBinding, DatabaseBindingOptions, PreparedStatement, RetryToken,
 };
 pub use error::{Result, SdkError};
+pub mod host_db;
 pub use fetch_dir::{fetch_work_dir, upload_file_path, FetchWorkDir, UploadFile};
 pub use pass_fd::{fd_proc_path, recv_passed_fd, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
 pub use protocol::{
@@ -110,7 +111,7 @@ pub use bookclerk_plugin_abi::{
     encoded_execute_request_bytes, encoded_execute_result_reply_bytes,
     encoded_statement_result_bytes, sql_payload_bytes, sql_payload_exceeds, DbCapabilities,
     DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
-    DiagnoseResult, ExecuteReply, ExecuteRequest, GuestReceiptPersist, HandshakeParams,
-    HostExecuteEnvelope, HostToPluginEvent, PluginError, PluginErrorCode, PluginToHostEvent,
-    StatementResult, TypedDbStatement, API_VERSION, SQL_CONTRACT_VERSION,
+    DiagnoseResult, ExecuteReply, ExecuteRequest, HandshakeParams, HostToPluginEvent, PluginError,
+    PluginErrorCode, PluginToHostEvent, StatementResult, TypedDbStatement, API_VERSION,
+    SQL_CONTRACT_VERSION,
 };

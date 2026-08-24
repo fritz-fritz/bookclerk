@@ -140,18 +140,31 @@ impl DatabaseBinding {
 
     /// Execute raw SQL without bind parameters (Cloudflare `D1Database::exec`).
     ///
+    /// Bookclerk accepts one or more newline-separated statements like D1.
+    /// Each non-empty line is executed as one prepared statement in a single
+    /// typed atomic batch.
+    ///
     /// # Errors
     ///
-    /// Returns when `run` fails.
+    /// Returns when the query is empty or `batch` fails.
     pub async fn exec(
         &self,
         query: impl Into<String>,
         retry: Option<RetryToken>,
     ) -> Result<D1ExecResult> {
-        let result = self.prepare(query).run(retry).await?;
+        let queries = split_exec_queries(&query.into());
+        if queries.is_empty() {
+            return Err(PluginError::invalid_params("exec query is empty"));
+        }
+        let mut prepared = Vec::with_capacity(queries.len());
+        for sql in &queries {
+            prepared.push(self.prepare(sql.clone()));
+        }
+        let results = self.batch(prepared, retry).await?;
+        let duration: f64 = results.iter().map(|r| r.meta.duration).sum();
         Ok(D1ExecResult {
-            count: 1,
-            duration: result.meta.duration,
+            count: u32::try_from(queries.len()).unwrap_or(u32::MAX),
+            duration,
         })
     }
 
@@ -238,11 +251,9 @@ impl PreparedStatement {
 
     /// Mark `maxRows = 1` row intent for [`DatabaseBinding::batch`].
     ///
-    /// Wraps the SQL so the engine returns at most one row and the proven
-    /// `maxRows` bound holds.
+    /// Preserves the caller SQL; the host enforces the one-row bound at execution.
     #[must_use]
     pub fn as_first(mut self) -> Self {
-        self.sql = wrap_first_sql(&self.sql);
         self.intent = Some(TerminalIntent {
             selection: DbResultSelection::Rows,
             max_rows: 1,
@@ -287,11 +298,12 @@ impl PreparedStatement {
         Ok(Some(row.into_iter().collect()))
     }
 
-    /// One column from the first row, or `None` (Cloudflare `first(colName)`).
+    /// One column from the first row, or `None` when no row exists.
     ///
     /// # Errors
     ///
-    /// Returns when `execute` fails.
+    /// Returns when `execute` fails or the named column is absent from the row
+    /// (Cloudflare `first(colName)` throws `D1_ERROR` in that case).
     pub async fn first_column(
         self,
         col_name: &str,
@@ -306,7 +318,7 @@ impl PreparedStatement {
         let Some(row) = row_map_from_statement(&result) else {
             return Ok(None);
         };
-        Ok(column_value_from_row(&row, col_name))
+        Ok(Some(column_value_from_row(&row, col_name)?))
     }
 
     /// Positional cell values per row (Cloudflare `raw()`).
@@ -371,9 +383,29 @@ fn default_terminal_intent(options: &DatabaseBindingOptions) -> TerminalIntent {
     }
 }
 
-fn wrap_first_sql(sql: &str) -> String {
-    let inner = sql.trim().trim_end_matches(';').trim();
-    format!("SELECT * FROM ({inner}) AS _bc_first LIMIT 1")
+fn split_exec_queries(query: &str) -> Vec<String> {
+    query
+        .split('\n')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.trim_end_matches(';').trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn column_value_from_row(row: &HashMap<String, DbValue>, col_name: &str) -> Result<DbValue> {
+    if let Some(v) = row.get(col_name) {
+        return Ok(v.clone());
+    }
+    let lower = col_name.to_ascii_lowercase();
+    for (k, v) in row {
+        if k.eq_ignore_ascii_case(&lower) {
+            return Ok(v.clone());
+        }
+    }
+    Err(PluginError::invalid_params(format!(
+        "column {col_name} not found in first() result"
+    )))
 }
 
 /// Maps one typed statement result to Cloudflare [`D1Result`].
@@ -433,16 +465,6 @@ fn row_map_from_statement(result: &StatementResult) -> Option<HashMap<String, Db
     )
 }
 
-fn column_value_from_row(row: &HashMap<String, DbValue>, col_name: &str) -> Option<DbValue> {
-    if let Some(v) = row.get(col_name) {
-        return Some(v.clone());
-    }
-    let lower = col_name.to_ascii_lowercase();
-    row.iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(&lower))
-        .map(|(_, v)| v.clone())
-}
-
 fn new_operation_id() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -455,6 +477,7 @@ fn new_operation_id() -> String {
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
+    use bookclerk_plugin_abi::PluginErrorCode;
     use bookclerk_plugin_abi::v2::GuestDatabase;
     use std::sync::Mutex;
 
@@ -527,11 +550,7 @@ mod tests {
         let req = session.last.lock().expect("lock").clone().expect("req");
         assert_eq!(req.statements[0].max_rows, 1);
         assert_eq!(req.statements[0].result_selection, DbResultSelection::Rows);
-        assert!(
-            req.statements[0].sql.contains("LIMIT 1"),
-            "{}",
-            req.statements[0].sql
-        );
+        assert_eq!(req.statements[0].sql, "SELECT n FROM t");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -589,5 +608,59 @@ mod tests {
             DbResultSelection::AffectedRows
         );
         assert_eq!(req.statements[1].result_selection, DbResultSelection::Rows);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exec_runs_newline_separated_queries() {
+        let session = Arc::new(RecordingSession {
+            last: Mutex::new(None),
+        });
+        let binding = DatabaseBinding::from_session(session.clone());
+        let out = binding
+            .exec("INSERT INTO t VALUES (1)\nSELECT 1", None)
+            .await
+            .unwrap();
+        assert_eq!(out.count, 2);
+        let req = session.last.lock().expect("lock").clone().expect("req");
+        assert_eq!(req.statements.len(), 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn first_column_errors_when_column_missing() {
+        let session = Arc::new(RecordingSession {
+            last: Mutex::new(None),
+        });
+        let binding = DatabaseBinding::from_session(session.clone());
+        let err = binding
+            .prepare("SELECT 1 AS n")
+            .first_column("missing", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, PluginErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn dml_run_canonical_hash_matches_host_classification() {
+        use bookclerk_plugin_abi::canonical_execute_request_hash;
+        let req = ExecuteRequest {
+            operation_id: String::new(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "INSERT INTO t VALUES (?)".into(),
+                parameters: vec![DbValue::Int64(1)],
+                kind: guest_statement_kind("INSERT INTO t VALUES (?)"),
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        assert_eq!(req.statements[0].kind, DbPlanStatementKind::Execute);
+        let hash = canonical_execute_request_hash(&req).expect("hash");
+        assert_eq!(hash.len(), 64);
+        assert_eq!(
+            guest_statement_kind("INSERT INTO t VALUES (?) RETURNING id"),
+            DbPlanStatementKind::Returning
+        );
+        let _ = hash;
     }
 }

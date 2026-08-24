@@ -4,13 +4,14 @@
 
 use async_trait::async_trait;
 use bookclerk_plugin_sdk::database_adapter::set_connection;
+use bookclerk_plugin_sdk::host_db::GuestReceiptPersist;
 use bookclerk_plugin_sdk::v2::{
     AdapterDatabaseSession, Database, DatabaseContext, HostAdapterDatabaseSession, PluginDescribe,
     PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
     serve, DbCapabilities, DbConnectParams, DbConnectResult, ExecuteReply, ExecuteRequest,
-    GuestReceiptPersist, HandshakeResult, HostExecuteEnvelope, PluginError,
+    HandshakeResult, PluginError,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -115,7 +116,7 @@ impl HostAdapterDatabaseSession for D1HostSession {
 
     async fn execute_envelope(
         &self,
-        envelope: HostExecuteEnvelope,
+        envelope: bookclerk_plugin_sdk::host_db::HostExecuteEnvelope,
     ) -> Result<ExecuteReply, PluginError> {
         let proxy = bookclerk_plugin_database_d1::shared_proxy()
             .ok_or_else(|| PluginError::internal("d1 guest is not connected"))?;
