@@ -393,6 +393,11 @@ fn split_exec_queries(query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Resolves a column value from a row map, matching case-insensitively.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `col_name` is absent from the row.
 fn column_value_from_row(row: &HashMap<String, DbValue>, col_name: &str) -> Result<DbValue> {
     if let Some(v) = row.get(col_name) {
         return Ok(v.clone());
