@@ -1554,15 +1554,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_rows_on_plain_dml() {
-        let err = validate_guest_execute_request(&req(
+    fn allows_rows_on_plain_dml_for_d1_run_parity() {
+        validate_guest_execute_request(&req(
             "INSERT INTO books (id) VALUES (?)",
             vec![DbValue::Int64(1)],
             DbResultSelection::Rows,
             1,
         ))
-        .unwrap_err();
-        assert!(err.to_string().contains("row-producing"), "{err}");
+        .unwrap();
     }
 
     #[test]

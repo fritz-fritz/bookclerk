@@ -91,10 +91,7 @@ async fn external_adapter_replays_named_atomic_after_commit() {
     )
     .expect("compile");
     let typed = compiled.clone().into_typed_request("host-replay-op");
-    let envelope = HostExecuteEnvelope::new(
-        typed.clone(),
-        GuestReceiptPersist::default(),
-    );
+    let envelope = HostExecuteEnvelope::new(typed.clone(), GuestReceiptPersist::default());
     let first = adapter
         .execute_typed(envelope.clone())
         .await

@@ -640,9 +640,7 @@ mod limits_tests {
         rows_on_insert.statements[0].parameters = vec![DbValue::Int64(1)];
         rows_on_insert.statements[0].result_selection = DbResultSelection::Rows;
         rows_on_insert.statements[0].max_rows = 1;
-        let err =
-            super::authorize_guest_typed_request(&mut rows_on_insert, &caps, &books).unwrap_err();
-        assert!(err.to_string().contains("row-producing"), "{err}");
+        super::authorize_guest_typed_request(&mut rows_on_insert, &caps, &books).unwrap();
 
         let mut select = ddl.clone();
         select.statements[0].sql = "SELECT id FROM books".into();
