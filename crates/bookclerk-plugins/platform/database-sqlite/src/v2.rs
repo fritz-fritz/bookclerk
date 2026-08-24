@@ -14,7 +14,10 @@ use bookclerk_plugin_sdk::v2::{
     AdapterDatabaseSession, Database, DatabaseContext, HostAdapterDatabaseSession, PluginDescribe,
     PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
-use bookclerk_plugin_sdk::{DbCapabilities, ExecuteReply, ExecuteRequest, PluginError};
+use bookclerk_plugin_sdk::{
+    DbCapabilities, ExecuteReply, ExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope,
+    PluginError,
+};
 
 use crate::ID;
 
@@ -92,6 +95,10 @@ impl AdapterDatabaseSession for SqliteSession {
     }
 
     async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
-        guest_execute_atomic(request).await
+        guest_execute_atomic(HostExecuteEnvelope::new(
+            request,
+            GuestReceiptPersist::default(),
+        ))
+        .await
     }
 }

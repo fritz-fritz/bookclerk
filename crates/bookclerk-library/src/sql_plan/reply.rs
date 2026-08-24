@@ -202,7 +202,6 @@ mod tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         }
     }
 
@@ -288,7 +287,6 @@ mod tests {
                 result_selection: DbResultSelection::AffectedRows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         };
         let reply = rows_reply("op-1", 1);
         let err = validate_execute_reply(&req, &reply, &tiny_caps()).unwrap_err();

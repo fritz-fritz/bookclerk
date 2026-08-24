@@ -293,7 +293,7 @@ pub async fn guest_capabilities() -> std::result::Result<DbCapabilities, crate::
 ///
 /// Returns when no connection is open or the engine rejects the work.
 pub async fn guest_execute_atomic(
-    request: ExecuteRequest,
+    envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
 ) -> std::result::Result<ExecuteReply, crate::PluginError> {
     let gate = txn_gate();
     let _gate = gate.lock().await;
@@ -306,10 +306,12 @@ pub async fn guest_execute_atomic(
         DbBackend::Postgres => "postgres_txn",
         _ => "sqlite_txn",
     };
-    let deadline = (request.deadline_unix_ms > 0).then_some(request.deadline_unix_ms);
+    let deadline =
+        (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
     bookclerk_db_exec::execute_typed_on_session(
         &conn,
-        &request,
+        &envelope.request,
+        envelope.guest_receipt,
         timing_source,
         bookclerk_db_exec::ExecCaps::from_connect(&caps),
         bookclerk_db_exec::AtomicSession::from_deadline(deadline),
@@ -1906,7 +1908,6 @@ mod tests {
                     result_selection: DbResultSelection::AffectedRows,
                 }],
                 deadline_unix_ms: 0,
-                ..Default::default()
             },
         )
         .await
@@ -1959,7 +1960,6 @@ mod tests {
                     },
                 ],
                 deadline_unix_ms: 0,
-                ..Default::default()
             },
         )
         .await
@@ -2012,7 +2012,6 @@ mod tests {
                     result_selection: DbResultSelection::AffectedRows,
                 }],
                 deadline_unix_ms: 0,
-                ..Default::default()
             },
         )
         .await
@@ -2076,7 +2075,6 @@ mod tests {
                     },
                 ],
                 deadline_unix_ms: 0,
-                ..Default::default()
             },
         )
         .await

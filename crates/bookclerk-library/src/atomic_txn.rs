@@ -159,6 +159,6 @@ pub trait TypedAtomicExec: Send + Sync {
     /// rejects the batch.
     async fn execute_typed(
         &self,
-        req: bookclerk_plugin_abi::ExecuteRequest,
+        envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
     ) -> std::result::Result<bookclerk_plugin_abi::ExecuteReply, bookclerk_plugin_abi::PluginError>;
 }

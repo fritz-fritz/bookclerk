@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use bookclerk_library::{compile_named_request, DbAtomicParams, TypedAtomicExec};
 use bookclerk_plugin_sdk::{
     DbColumn, DbConnectResult, DbPlanStatementKind, DbResultSelection, DbRow, DbType, DbValue,
-    ExecuteReply, ExecuteRequest, PluginError as AbiPluginError, PluginErrorCode, StatementResult,
-    TypedDbStatement,
+    ExecuteReply, ExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope,
+    PluginError as AbiPluginError, PluginErrorCode, StatementResult, TypedDbStatement,
 };
 
 struct SessionTypedAdapter {
@@ -18,11 +18,13 @@ struct SessionTypedAdapter {
 impl TypedAtomicExec for SessionTypedAdapter {
     async fn execute_typed(
         &self,
-        req: ExecuteRequest,
+        envelope: HostExecuteEnvelope,
     ) -> std::result::Result<ExecuteReply, AbiPluginError> {
+        let req = envelope.request.clone();
         let reply = bookclerk_db_exec::execute_typed_on_session(
             &self.db,
-            &req,
+            &envelope.request,
+            envelope.guest_receipt,
             "sqlite_txn",
             bookclerk_db_exec::ExecCaps::from_connect(&DbConnectResult::sqlite()),
             bookclerk_db_exec::AtomicSession::from_deadline(None),
@@ -43,7 +45,7 @@ struct MaliciousAdapter {
 impl TypedAtomicExec for MaliciousAdapter {
     async fn execute_typed(
         &self,
-        _req: ExecuteRequest,
+        _envelope: HostExecuteEnvelope,
     ) -> std::result::Result<ExecuteReply, AbiPluginError> {
         Ok(self.reply.clone())
     }
@@ -89,8 +91,15 @@ async fn external_adapter_replays_named_atomic_after_commit() {
     )
     .expect("compile");
     let typed = compiled.clone().into_typed_request("host-replay-op");
-    let first = adapter.execute_typed(typed.clone()).await.expect("first");
-    let replay = adapter.execute_typed(typed).await.expect("replay");
+    let envelope = HostExecuteEnvelope::new(
+        typed.clone(),
+        GuestReceiptPersist::default(),
+    );
+    let first = adapter
+        .execute_typed(envelope.clone())
+        .await
+        .expect("first");
+    let replay = adapter.execute_typed(envelope).await.expect("replay");
     assert_eq!(first.operation_id, replay.operation_id);
     assert_eq!(
         first.statements[0].rows_affected,
@@ -125,7 +134,6 @@ async fn malicious_adapter_wrong_operation_id_rejected_by_host() {
             result_selection: DbResultSelection::Rows,
         }],
         deadline_unix_ms: 0,
-        ..Default::default()
     };
     let err = store
         .execute_guest_atomic(
@@ -163,7 +171,6 @@ async fn malicious_adapter_statement_count_mismatch_rejected_by_host() {
             result_selection: DbResultSelection::Rows,
         }],
         deadline_unix_ms: 0,
-        ..Default::default()
     };
     let err = store
         .execute_guest_atomic(

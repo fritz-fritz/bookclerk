@@ -7,7 +7,7 @@
 use bookclerk_db_exec::GUEST_RECEIPT_WRAP_PREFIX;
 use bookclerk_plugin_abi::{
     DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, ExecuteRequest,
-    GuestReceiptPersist, PluginError, TypedDbStatement,
+    GuestReceiptPersist, HostExecuteEnvelope, PluginError, TypedDbStatement,
 };
 use chrono::{Duration, Utc};
 
@@ -24,7 +24,7 @@ const GUEST_TYPED_KIND: &str = "guestTyped";
 /// not the original guest SQL, and stamps a host-only finalize hint so
 /// adapters persist replay payload before COMMIT.
 #[must_use]
-pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> ExecuteRequest {
+pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> HostExecuteEnvelope {
     let now = Utc::now();
     let created = now.to_rfc3339();
     let operation_id = req.operation_id.clone();
@@ -78,11 +78,13 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> ExecuteReques
 
     req.statements = statements;
     req.request_hash.clear();
-    req.guest_receipt_persist = GuestReceiptPersist {
-        guest_statement_len: guest_len,
-        guest_request_hash: request_hash,
-    };
-    req
+    HostExecuteEnvelope::new(
+        req,
+        GuestReceiptPersist {
+            guest_statement_len: guest_len,
+            guest_request_hash: request_hash,
+        },
+    )
 }
 
 /// Interprets a wrapped guest reply: replay from stored payload, else strip wrapper rows.
@@ -218,8 +220,7 @@ fn receipt_hash_from(stmt: &bookclerk_plugin_abi::StatementResult) -> Option<Str
 mod replay_finalize {
     use super::*;
     use bookclerk_plugin_abi::{
-        DbPlanStatementKind, DbResultSelection, ExecuteRequest, GuestReceiptPersist,
-        TypedDbStatement,
+        DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
     };
 
     #[tokio::test]
@@ -241,14 +242,14 @@ mod replay_finalize {
                 result_selection: DbResultSelection::AffectedRows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         };
         let wrapped = wrap_guest_typed_request(req);
-        assert!(!wrapped.guest_receipt_persist.is_absent());
-        let guest_len = wrapped.guest_receipt_persist.guest_statement_len as usize;
+        assert!(!wrapped.guest_receipt.is_absent());
+        let guest_len = wrapped.guest_receipt.guest_statement_len as usize;
         let reply = bookclerk_db_exec::execute_typed_on_session(
             &db,
-            &wrapped,
+            &wrapped.request,
+            wrapped.guest_receipt.clone(),
             "sqlite_txn",
             bookclerk_db_exec::ExecCaps::from_connect(
                 &bookclerk_plugin_abi::DbConnectResult::sqlite(),
@@ -272,11 +273,11 @@ mod replay_finalize {
                 result_selection: DbResultSelection::AffectedRows,
             }],
             deadline_unix_ms: 0,
-            guest_receipt_persist: GuestReceiptPersist::default(),
         });
         let replay = bookclerk_db_exec::execute_typed_on_session(
             &db,
-            &replay_wrapped,
+            &replay_wrapped.request,
+            replay_wrapped.guest_receipt.clone(),
             "sqlite_txn",
             bookclerk_db_exec::ExecCaps::from_connect(
                 &bookclerk_plugin_abi::DbConnectResult::sqlite(),
@@ -307,21 +308,22 @@ mod tests {
                 result_selection: DbResultSelection::AffectedRows,
             }],
             deadline_unix_ms: 0,
-            guest_receipt_persist: GuestReceiptPersist::default(),
         }
     }
 
     #[test]
     fn wrap_rewrites_insert_values_and_gates_writes() {
         let wrapped = wrap_guest_typed_request(guest_insert());
-        assert!(wrapped.request_hash.is_empty());
-        assert_eq!(wrapped.statements.len(), 4);
-        assert!(!wrapped.guest_receipt_persist.is_absent());
+        assert!(wrapped.request.request_hash.is_empty());
+        assert_eq!(wrapped.request.statements.len(), 4);
+        assert!(!wrapped.guest_receipt.is_absent());
         assert!(
-            wrapped.statements[1].sql.contains("db_atomic_receipts"),
+            wrapped.request.statements[1]
+                .sql
+                .contains("db_atomic_receipts"),
             "prior receipt select at index 1"
         );
-        let gated = &wrapped.statements[2];
+        let gated = &wrapped.request.statements[2];
         assert!(
             gated.sql.to_ascii_uppercase().contains("SELECT"),
             "INSERT VALUES must become INSERT SELECT: {}",

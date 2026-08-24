@@ -316,6 +316,22 @@ class DbValueGoldens(unittest.TestCase):
             self.assertEqual(all_result["results"][0]["n"]["value"], 1)
             self.assertEqual(all_result["meta"]["rows_read"], 1)
 
+            run_result = await binding.prepare("SELECT n FROM t").run()
+            self.assertEqual(run_result["results"][0]["n"]["value"], 1)
+
+            seen.clear()
+            await binding.batch(
+                [
+                    binding.prepare("INSERT INTO t VALUES (?)").bind(
+                        {"kind": "int64", "value": 1}
+                    ),
+                    binding.prepare("SELECT n FROM t"),
+                ]
+            )
+            stmts = seen[0]
+            self.assertEqual(stmts[0]["resultSelection"], "rows")
+            self.assertEqual(stmts[1]["resultSelection"], "rows")
+
             seen.clear()
             await binding.batch(
                 [

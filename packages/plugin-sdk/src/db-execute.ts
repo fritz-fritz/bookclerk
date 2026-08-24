@@ -271,10 +271,10 @@ export interface DatabaseBinding {
   /**
    * Run prepared statements as one typed atomic batch.
    *
-   * Each statement must already carry a terminal intent (`asRun` / `asFirst` /
-   * `asAll`, or a prior `run`/`first`/`all` builder). `batch` does not apply
-   * a default `resultSelection`. Returns one Cloudflare-shaped {@link D1Result}
-   * per statement.
+   * Ordinary bound prepared statements use Cloudflare `run()` semantics
+   * (`resultSelection: rows`) by default. Optional `asRun` / `asFirst` /
+   * `asAll` override per-statement intent. Returns one Cloudflare-shaped
+   * {@link D1Result} per statement.
    *
    * @param statements Prepared statements (binds and intent already applied).
    * @param options Retry token.
@@ -586,18 +586,10 @@ export function createDatabaseBinding(
 
   const binding: DatabaseBinding = {
     prepare(sql: string): PreparedStatement {
-      return makePrepared(binding, sql, [], options.maxResultRows ?? 0);
+      return makePrepared(binding, sql, [], options.maxResultRows ?? 0, defaultIntent(options));
     },
     batch(statements, opts) {
-      const typed = statements.map((s) => {
-        const intent = (s as PreparedInternal)._intent;
-        if (!intent) {
-          throw new Error(
-            "batch statement is missing terminal intent (asRun/asFirst/asAll)",
-          );
-        }
-        return (s as PreparedInternal)._asTyped();
-      });
+      const typed = statements.map((s) => (s as PreparedInternal)._asTyped());
       return runExecute(typed, opts?.retry).then(executeReplyToD1Results);
     },
     exec(query, opts) {
@@ -621,6 +613,13 @@ interface TerminalIntent {
 interface PreparedInternal extends PreparedStatement {
   _intent?: TerminalIntent;
   _asTyped(): TypedDbStatement;
+}
+
+function defaultIntent(options: DatabaseBindingOptions): TerminalIntent {
+  return {
+    resultSelection: "rows",
+    maxRows: options.maxResultRows ?? 0,
+  };
 }
 
 function makePrepared(
@@ -662,7 +661,7 @@ function makePrepared(
     },
     run(options) {
       return binding
-        .execute([(this.asRun() as PreparedInternal)._asTyped()], options)
+        .execute([(this.asAll() as PreparedInternal)._asTyped()], options)
         .then((reply) => statementResultToD1Result(reply.statements[0]!, reply.timing));
     },
     first(colName?: string, options?: { retry?: RetryToken }) {
@@ -700,10 +699,7 @@ function makePrepared(
         .then((reply) => statementResultToD1Result(reply.statements[0]!, reply.timing));
     },
     _asTyped(): TypedDbStatement {
-      const used = intent;
-      if (!used) {
-        throw new Error("prepared statement is missing terminal intent");
-      }
+      const used = intent ?? defaultIntent({ maxResultRows: defaultAllRows });
       return {
         sql,
         parameters,

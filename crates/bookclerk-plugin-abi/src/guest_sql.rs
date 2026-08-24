@@ -553,14 +553,7 @@ fn validate_selection(
                 )));
             }
         }
-        DbResultSelection::Rows => {
-            if matches!(kind, DbPlanStatementKind::Execute) {
-                return Err(PluginError::invalid_params(format!(
-                    "statement {index} resultSelection {:?} requires a row-producing statement",
-                    selection
-                )));
-            }
-        }
+        DbResultSelection::Rows => {}
     }
     Ok(())
 }
@@ -1479,7 +1472,6 @@ mod tests {
                 result_selection: selection,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         }
     }
 
@@ -1693,14 +1685,13 @@ mod tests {
             0,
         ))
         .unwrap();
-        let err = validate_guest_execute_request(&req(
+        validate_guest_execute_request(&req(
             "WITH seed AS (SELECT 1) INSERT INTO books (id) SELECT * FROM seed",
             vec![],
             DbResultSelection::Rows,
             1,
         ))
-        .unwrap_err();
-        assert!(err.to_string().contains("row-producing"), "{err}");
+        .unwrap();
         validate_guest_execute_request(&req(
             "WITH seed AS (SELECT 1) INSERT INTO books (id) SELECT * FROM seed RETURNING id",
             vec![],

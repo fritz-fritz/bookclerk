@@ -19,7 +19,7 @@ use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
     exec_result_from_dto, proxy_rows_from_typed, DbConnectParams, DbConnectResult,
     DbPlanStatementKind, DbResultSelection, ExecResultDto, ExecuteReply, ExecuteRequest,
-    PluginError as AbiPluginError, TypedDbStatement,
+    HostExecuteEnvelope, PluginError as AbiPluginError, TypedDbStatement,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -443,7 +443,6 @@ impl RpcDatabaseProxy {
             request_hash: String::new(),
             statements: vec![stmt],
             deadline_unix_ms: 0,
-            ..Default::default()
         }
     }
 
@@ -771,7 +770,6 @@ async fn exec_host_ddl_batch(
             })
             .collect(),
         deadline_unix_ms: 0,
-        ..Default::default()
     };
     let validate_req = typed.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -830,17 +828,27 @@ fn decode_payload<T: serde::de::DeserializeOwned>(
 impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
     async fn execute_typed(
         &self,
-        mut req: ExecuteRequest,
+        envelope: HostExecuteEnvelope,
     ) -> std::result::Result<ExecuteReply, AbiPluginError> {
-        bookclerk_library::authorize_typed_request(&mut req, &self.caps)
+        let mut request = envelope.request.clone();
+        bookclerk_library::authorize_typed_request(&mut request, &self.caps)
             .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
-        let validate_req = req.clone();
+        let validate_req = request.clone();
         let cancel = Arc::new(AtomicBool::new(false));
-        let reply = self
-            .session
-            .db_execute_request(req, cancel)
-            .await
-            .map_err(host_err_to_abi)?;
+        let reply = if envelope.guest_receipt.is_absent() {
+            self.session
+                .db_execute_request(request, cancel)
+                .await
+                .map_err(host_err_to_abi)?
+        } else {
+            self.session
+                .db_execute_envelope_request(
+                    HostExecuteEnvelope::new(request, envelope.guest_receipt),
+                    cancel,
+                )
+                .await
+                .map_err(host_err_to_abi)?
+        };
         bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)
             .map_err(map_reply_validation_abi)?;
         Ok(reply)
@@ -1649,7 +1657,6 @@ mod tests {
                     result_selection: DbResultSelection::Rows,
                 }],
                 deadline_unix_ms: 0,
-                ..Default::default()
             })
             .await
             .expect("books grant");
@@ -1665,7 +1672,6 @@ mod tests {
                     result_selection: DbResultSelection::Rows,
                 }],
                 deadline_unix_ms: 0,
-                ..Default::default()
             })
             .await
             .expect_err("jobs denied");

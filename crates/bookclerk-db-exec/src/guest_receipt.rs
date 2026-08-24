@@ -53,6 +53,11 @@ pub fn guest_receipt_finalize_stmts(
             if receipt_payload_text(prior).is_some() {
                 return Ok(Vec::new());
             }
+            if is_gated_guest_replay(partial, prior)? {
+                return Err(DbErr::Custom(
+                    "guest receipt committed without payload; original response lost".into(),
+                ));
+            }
             let guest_reply = guest_slice_reply(partial, guest_len)?;
             let payload = encode_guest_replay_payload(&guest_reply)?;
             return Ok(vec![typed_exec(
@@ -73,6 +78,21 @@ pub fn guest_receipt_finalize_stmts(
             DbValue::Text(partial.operation_id.clone()),
         ],
     )])
+}
+
+/// True when a prior receipt row exists but the stub INSERT was gated off (replay after commit).
+fn is_gated_guest_replay(partial: &ExecuteReply, prior: &StatementResult) -> Result<bool, DbErr> {
+    if prior.rows.is_empty() {
+        return Ok(false);
+    }
+    if receipt_payload_text(prior).is_some() {
+        return Ok(false);
+    }
+    let stub = partial
+        .statements
+        .last()
+        .ok_or_else(|| DbErr::Custom("guest receipt wrap missing stub suffix".into()))?;
+    Ok(stub.rows_affected == 0)
 }
 
 /// Guest statement results from a wrapped partial reply.
@@ -163,5 +183,86 @@ fn typed_exec(sql: &str, parameters: Vec<DbValue>) -> TypedDbStatement {
         kind: DbPlanStatementKind::Execute,
         max_rows: 0,
         result_selection: DbResultSelection::AffectedRows,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookclerk_plugin_abi::{DbColumn, DbRow, DbTiming, DbType};
+
+    fn prior_receipt_row(payload: &str) -> StatementResult {
+        StatementResult {
+            rows: vec![DbRow {
+                values: vec![
+                    DbValue::Text("guest-op".into()),
+                    DbValue::Text("a".repeat(64)),
+                    DbValue::Text("ok".into()),
+                    DbValue::Text(payload.into()),
+                    DbValue::Text("2026-01-01T00:00:00Z".into()),
+                ],
+            }],
+            columns: vec![
+                DbColumn {
+                    name: "operation_id".into(),
+                    db_type: DbType::Text,
+                },
+                DbColumn {
+                    name: "request_hash".into(),
+                    db_type: DbType::Text,
+                },
+                DbColumn {
+                    name: "status".into(),
+                    db_type: DbType::Text,
+                },
+                DbColumn {
+                    name: "payload".into(),
+                    db_type: DbType::Text,
+                },
+                DbColumn {
+                    name: "created_at".into(),
+                    db_type: DbType::Text,
+                },
+            ],
+            rows_affected: 0,
+        }
+    }
+
+    fn wrapped_partial(guest_rows_affected: u64, stub_rows_affected: u64) -> ExecuteReply {
+        ExecuteReply {
+            operation_id: "guest-op".into(),
+            statements: vec![
+                StatementResult::from_affected(0),
+                prior_receipt_row(""),
+                StatementResult::from_affected(guest_rows_affected),
+                StatementResult::from_affected(stub_rows_affected),
+            ],
+            timing: DbTiming::default(),
+        }
+    }
+
+    #[test]
+    fn finalize_persists_payload_on_first_commit() {
+        let partial = wrapped_partial(1, 1);
+        let stmts = guest_receipt_finalize_stmts(&partial, 1, &"a".repeat(64)).expect("finalize");
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0]
+            .sql
+            .contains("UPDATE db_atomic_receipts SET payload"));
+    }
+
+    #[test]
+    fn finalize_skips_when_payload_already_present() {
+        let mut partial = wrapped_partial(1, 1);
+        partial.statements[1] = prior_receipt_row("{\"operationId\":\"guest-op\"}");
+        let stmts = guest_receipt_finalize_stmts(&partial, 1, &"a".repeat(64)).expect("finalize");
+        assert!(stmts.is_empty());
+    }
+
+    #[test]
+    fn finalize_rejects_gated_replay_without_payload() {
+        let partial = wrapped_partial(0, 0);
+        let err = guest_receipt_finalize_stmts(&partial, 1, &"a".repeat(64)).unwrap_err();
+        assert!(err.to_string().contains("original response lost"), "{err}");
     }
 }

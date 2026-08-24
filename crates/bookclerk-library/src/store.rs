@@ -178,10 +178,10 @@ impl LibraryStore {
             .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
         let guest_len = req.statements.len();
         let guest_hash = req.request_hash.clone();
-        let wrapped = crate::sql_plan::wrap_guest_typed_request(req);
+        let envelope = crate::sql_plan::wrap_guest_typed_request(req);
         let reply = if let Some(exec) = &self.typed_exec {
-            let reply = exec.execute_typed(wrapped.clone()).await?;
-            crate::validate_execute_reply(&wrapped, &reply, self.connect_result())
+            let reply = exec.execute_typed(envelope.clone()).await?;
+            crate::validate_execute_reply(&envelope.request, &reply, self.connect_result())
                 .map_err(|err| bookclerk_plugin_abi::PluginError::unavailable(err.to_string()))?;
             reply
         } else {
@@ -189,17 +189,19 @@ impl LibraryStore {
                 sea_orm::DatabaseBackend::Postgres => "postgres_txn",
                 _ => "sqlite_txn",
             };
-            let deadline = (wrapped.deadline_unix_ms > 0).then_some(wrapped.deadline_unix_ms);
+            let deadline = (envelope.request.deadline_unix_ms > 0)
+                .then_some(envelope.request.deadline_unix_ms);
             let reply = bookclerk_db_exec::execute_typed_on_session(
                 &self.db,
-                &wrapped,
+                &envelope.request,
+                envelope.guest_receipt.clone(),
                 timing,
                 bookclerk_db_exec::ExecCaps::from_connect(self.connect_result()),
                 bookclerk_db_exec::AtomicSession::from_deadline(deadline),
             )
             .await
             .map_err(plugin_err_from_db)?;
-            crate::validate_execute_reply(&wrapped, &reply, self.connect_result())
+            crate::validate_execute_reply(&envelope.request, &reply, self.connect_result())
                 .map_err(|err| bookclerk_plugin_abi::PluginError::unavailable(err.to_string()))?;
             reply
         };

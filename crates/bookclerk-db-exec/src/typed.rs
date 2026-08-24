@@ -11,7 +11,7 @@ use std::time::Instant;
 use bookclerk_plugin_abi::v2::{encoded_execute_reply_bytes, encoded_statement_result_bytes};
 use bookclerk_plugin_abi::{
     DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
-    ExecuteReply, ExecuteRequest, StatementResult, TypedDbStatement,
+    ExecuteReply, ExecuteRequest, GuestReceiptPersist, StatementResult, TypedDbStatement,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, Statement,
@@ -497,11 +497,12 @@ fn sea_value_from_index(row: &QueryResult, idx: usize, prefer: DbType) -> Result
 pub async fn execute_typed_on_session(
     db: &DatabaseConnection,
     req: &ExecuteRequest,
+    guest_receipt: GuestReceiptPersist,
     timing_source: &str,
     caps: impl Into<ExecCaps>,
     session: AtomicSession,
 ) -> Result<ExecuteReply, DbErr> {
-    if req.guest_receipt_persist.is_absent() {
+    if guest_receipt.is_absent() {
         let caps = caps.into();
         session.check(AtomicInterruptPhase::BeforeBegin)?;
         let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
@@ -520,7 +521,7 @@ pub async fn execute_typed_on_session(
         record_query_rows_seen(seen_budget.rows_seen());
         return result;
     }
-    let hint = req.guest_receipt_persist.clone();
+    let hint = guest_receipt;
     execute_typed_on_session_then(db, req, timing_source, caps, session, move |partial| {
         crate::guest_receipt::guest_receipt_finalize_stmts(
             &partial,
@@ -706,16 +707,23 @@ async fn execute_typed_join_body(
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = match stmt.result_selection {
             DbResultSelection::Rows => {
-                let engine_rows = collect_capped_query_results(txn, sea_stmt, row_cap).await?;
-                if engine_rows.is_empty()
-                    && backend == sea_orm::DatabaseBackend::Postgres
-                    && stmt.kind.wrap_select_limit()
-                {
-                    if let Some(db) = describe {
-                        record_postgres_empty_result_columns(db, &sql).await?;
+                if matches!(stmt.kind, DbPlanStatementKind::Execute) {
+                    let exec = txn.execute_raw(sea_stmt).await?;
+                    let result = StatementResult::from_affected(exec.rows_affected());
+                    reject_statement_result_bytes(&result, caps.max_result_bytes)?;
+                    result
+                } else {
+                    let engine_rows = collect_capped_query_results(txn, sea_stmt, row_cap).await?;
+                    if engine_rows.is_empty()
+                        && backend == sea_orm::DatabaseBackend::Postgres
+                        && stmt.kind.wrap_select_limit()
+                    {
+                        if let Some(db) = describe {
+                            record_postgres_empty_result_columns(db, &sql).await?;
+                        }
                     }
+                    statement_result_from_query_results(&engine_rows, stmt.kind, caps, row_cap)?
                 }
-                statement_result_from_query_results(&engine_rows, stmt.kind, caps, row_cap)?
             }
             DbResultSelection::AffectedRows | DbResultSelection::Discard => {
                 let exec = txn.execute_raw(sea_stmt).await?;
@@ -821,31 +829,55 @@ where
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = match stmt.result_selection {
             DbResultSelection::Rows => {
-                let engine_rows = match collect_capped_query_results(&txn, sea_stmt, row_cap).await
-                {
-                    Ok(rows) => rows,
-                    Err(err) => {
+                if matches!(stmt.kind, DbPlanStatementKind::Execute) {
+                    let exec = match txn.execute_raw(sea_stmt).await {
+                        Ok(exec) => exec,
+                        Err(err) => {
+                            let _ = txn.rollback().await;
+                            let _ = take_txn_fault();
+                            return Err(err);
+                        }
+                    };
+                    let result = StatementResult::from_affected(exec.rows_affected());
+                    if let Err(err) = reject_statement_result_bytes(&result, caps.max_result_bytes)
+                    {
                         let _ = txn.rollback().await;
                         let _ = take_txn_fault();
                         return Err(err);
                     }
-                };
-                if engine_rows.is_empty()
-                    && backend == sea_orm::DatabaseBackend::Postgres
-                    && stmt.kind.wrap_select_limit()
-                {
-                    if let Err(err) = record_postgres_empty_result_columns(db, &sql).await {
-                        let _ = txn.rollback().await;
-                        let _ = take_txn_fault();
-                        return Err(err);
+                    result
+                } else {
+                    let engine_rows =
+                        match collect_capped_query_results(&txn, sea_stmt, row_cap).await {
+                            Ok(rows) => rows,
+                            Err(err) => {
+                                let _ = txn.rollback().await;
+                                let _ = take_txn_fault();
+                                return Err(err);
+                            }
+                        };
+                    if engine_rows.is_empty()
+                        && backend == sea_orm::DatabaseBackend::Postgres
+                        && stmt.kind.wrap_select_limit()
+                    {
+                        if let Err(err) = record_postgres_empty_result_columns(db, &sql).await {
+                            let _ = txn.rollback().await;
+                            let _ = take_txn_fault();
+                            return Err(err);
+                        }
                     }
-                }
-                match statement_result_from_query_results(&engine_rows, stmt.kind, caps, row_cap) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        let _ = txn.rollback().await;
-                        let _ = take_txn_fault();
-                        return Err(err);
+                    match statement_result_from_query_results(
+                        &engine_rows,
+                        stmt.kind,
+                        caps,
+                        row_cap,
+                    ) {
+                        Ok(result) => result,
+                        Err(err) => {
+                            let _ = txn.rollback().await;
+                            let _ = take_txn_fault();
+                            return Err(err);
+                        }
                     }
                 }
             }

@@ -63,6 +63,7 @@ pub async fn run_typed_conn_vectors(
                 let reply = bookclerk_db_exec::execute_typed_on_session(
                     &db,
                     &typed,
+                    bookclerk_plugin_abi::GuestReceiptPersist::default(),
                     &timing,
                     caps,
                     AtomicSession::from_deadline(None),
@@ -149,7 +150,6 @@ mod typed_value_matrix {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         }
     }
 
@@ -157,6 +157,7 @@ mod typed_value_matrix {
         let reply = bookclerk_db_exec::execute_typed_on_session(
             db,
             req,
+            bookclerk_plugin_abi::GuestReceiptPersist::default(),
             "sqlite_txn",
             sqlite_caps(),
             AtomicSession::from_deadline(None),
@@ -231,11 +232,11 @@ mod typed_value_matrix {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         };
         let reply = bookclerk_db_exec::execute_typed_on_session(
             &db,
             &req,
+            bookclerk_plugin_abi::GuestReceiptPersist::default(),
             "sqlite_txn",
             sqlite_caps(),
             AtomicSession::from_deadline(None),
@@ -304,11 +305,11 @@ mod typed_value_matrix {
                 },
             ],
             deadline_unix_ms: 0,
-            ..Default::default()
         };
         let err = bookclerk_db_exec::execute_typed_on_session(
             &db,
             &req,
+            bookclerk_plugin_abi::GuestReceiptPersist::default(),
             "sqlite_txn",
             sqlite_caps(),
             AtomicSession::from_deadline(None),
@@ -333,11 +334,11 @@ mod typed_value_matrix {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         };
         let reply = bookclerk_db_exec::execute_typed_on_session(
             &db,
             &check,
+            bookclerk_plugin_abi::GuestReceiptPersist::default(),
             "sqlite_txn",
             sqlite_caps(),
             AtomicSession::from_deadline(None),

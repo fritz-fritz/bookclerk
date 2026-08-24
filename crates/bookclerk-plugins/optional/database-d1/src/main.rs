@@ -5,12 +5,12 @@
 use async_trait::async_trait;
 use bookclerk_plugin_sdk::database_adapter::set_connection;
 use bookclerk_plugin_sdk::v2::{
-    AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
-    FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    AdapterDatabaseSession, Database, DatabaseContext, HostAdapterDatabaseSession, PluginDescribe,
+    PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
     serve, DbCapabilities, DbConnectParams, DbConnectResult, ExecuteReply, ExecuteRequest,
-    HandshakeResult, PluginError,
+    GuestReceiptPersist, HandshakeResult, HostExecuteEnvelope, PluginError,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -93,6 +93,37 @@ impl Database for D1Database {
     async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>, PluginError> {
         Ok(Box::new(D1Session))
     }
+
+    async fn host_adapter_session(
+        &self,
+    ) -> Result<Option<Box<dyn HostAdapterDatabaseSession>>, PluginError> {
+        Ok(Some(Box::new(D1HostSession)))
+    }
+}
+
+struct D1HostSession;
+
+#[async_trait(?Send)]
+impl HostAdapterDatabaseSession for D1HostSession {
+    async fn begin(
+        &self,
+    ) -> Result<Box<dyn bookclerk_plugin_sdk::v2::AdapterTransaction>, PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not support interactive transactions",
+        ))
+    }
+
+    async fn execute_envelope(
+        &self,
+        envelope: HostExecuteEnvelope,
+    ) -> Result<ExecuteReply, PluginError> {
+        let proxy = bookclerk_plugin_database_d1::shared_proxy()
+            .ok_or_else(|| PluginError::internal("d1 guest is not connected"))?;
+        proxy
+            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+            .await
+            .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
+    }
 }
 
 struct D1Session;
@@ -107,7 +138,7 @@ impl AdapterDatabaseSession for D1Session {
         let proxy = bookclerk_plugin_database_d1::shared_proxy()
             .ok_or_else(|| PluginError::internal("d1 guest is not connected"))?;
         proxy
-            .run_typed_atomic(&request)
+            .run_typed_atomic(&request, GuestReceiptPersist::default())
             .await
             .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
     }

@@ -191,7 +191,6 @@ pub(super) fn read_execute_request(r: execute_request_capnp::Reader<'_>) -> Resu
         request_hash: text_of(r.get_request_hash().map_err(from_capnp)?),
         statements,
         deadline_unix_ms: r.get_deadline_unix_ms(),
-        guest_receipt_persist: GuestReceiptPersist::default(),
     })
 }
 
@@ -461,7 +460,6 @@ pub fn canonical_execute_request_hash(req: &ExecuteRequest) -> Result<String> {
     canonical.operation_id.clear();
     canonical.request_hash.clear();
     canonical.deadline_unix_ms = 0;
-    canonical.guest_receipt_persist = GuestReceiptPersist::default();
     let bytes = super::sdk_wire::encoded_execute_request_sdk_bytes(&canonical)?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }

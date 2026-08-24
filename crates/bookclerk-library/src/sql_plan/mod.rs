@@ -79,7 +79,6 @@ impl CompiledAtomic {
             request_hash: self.expected_hash,
             statements,
             deadline_unix_ms: 0,
-            ..Default::default()
         }
     }
 }
@@ -512,7 +511,6 @@ mod limits_tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         };
         let err = super::authorize_typed_request(&mut req, &caps).unwrap_err();
         assert!(err.to_string().contains("maxBinds"), "{err}");
@@ -544,7 +542,6 @@ mod limits_tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         };
         let empty_len = encoded_execute_request_bytes(&req).unwrap().len();
         let mut stamped = req.clone();
@@ -579,7 +576,6 @@ mod limits_tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         };
         let a = canonical_execute_request_hash(&req).unwrap();
         req.deadline_unix_ms = 1;
@@ -622,7 +618,6 @@ mod limits_tests {
                 result_selection: DbResultSelection::AffectedRows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         };
         let err = super::authorize_guest_typed_request(&mut ddl, &caps, &books).unwrap_err();
         assert!(err.to_string().contains("disallowed"), "{err}");
@@ -679,7 +674,6 @@ mod limits_tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         };
         const GOLDEN: &str = "648cd28b3223c825c55ea99a7c6e52321ea733656f5965abfe4c7ed4ca21d111";
         assert_eq!(canonical_execute_request_hash(&req).unwrap(), GOLDEN);

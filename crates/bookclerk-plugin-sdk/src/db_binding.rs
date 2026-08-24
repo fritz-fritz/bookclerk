@@ -9,8 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bookclerk_plugin_abi::v2::{GuestDatabase, JobHandlerContext};
 use bookclerk_plugin_abi::{
-    encoded_execute_request_bytes, DbPlanStatementKind, DbResultSelection, DbTiming, DbValue,
-    ExecuteReply, ExecuteRequest, PluginError, Result, StatementResult, TypedDbStatement,
+    encoded_execute_request_bytes, guest_statement_kind, DbPlanStatementKind, DbResultSelection,
+    DbTiming, DbValue, ExecuteReply, ExecuteRequest, PluginError, Result, StatementResult,
+    TypedDbStatement,
 };
 
 static OP_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -118,7 +119,7 @@ impl DatabaseBinding {
             binding: self.clone(),
             sql: sql.into(),
             parameters: Vec::new(),
-            intent: None,
+            intent: Some(default_terminal_intent(&self.options)),
         }
     }
 
@@ -180,7 +181,6 @@ impl DatabaseBinding {
             request_hash,
             statements: batch,
             deadline_unix_ms: self.options.deadline_unix_ms,
-            ..Default::default()
         };
         let encoded = encoded_execute_request_bytes(&request)?;
         let cap = self.options.max_request_bytes;
@@ -260,21 +260,13 @@ impl PreparedStatement {
         self
     }
 
-    /// Execute as DML. Returns a Cloudflare-shaped [`D1Result`].
+    /// Execute as Cloudflare `run()` (functionally equivalent to [`Self::all`]).
     ///
     /// # Errors
     ///
     /// Returns when `execute` fails.
     pub async fn run(self, retry: Option<RetryToken>) -> Result<D1Result> {
-        let bound = self.as_run();
-        let binding = bound.binding.clone();
-        let reply = binding.batch_reply(vec![bound], retry).await?;
-        let stmt = reply
-            .statements
-            .into_iter()
-            .next()
-            .ok_or_else(|| PluginError::internal("execute reply missing statement result"))?;
-        Ok(statement_result_to_d1_result(&stmt, &reply.timing))
+        self.all(retry).await
     }
 
     /// First row as a name→value map, or `None` (Cloudflare `first()` without `colName`).
@@ -353,16 +345,14 @@ impl PreparedStatement {
     ///
     /// Returns [`PluginError::invalid_params`] when terminal intent is missing.
     fn as_typed(&self) -> Result<TypedDbStatement> {
-        let intent = self.intent.ok_or_else(|| {
-            PluginError::invalid_params(
-                "batch statement is missing terminal intent (as_run/as_first/as_all)",
-            )
-        })?;
+        let intent = self
+            .intent
+            .unwrap_or_else(|| default_terminal_intent(&self.binding.options));
         let kind = match intent.selection {
             DbResultSelection::AffectedRows | DbResultSelection::Discard => {
                 DbPlanStatementKind::Execute
             }
-            _ => DbPlanStatementKind::Select,
+            _ => guest_statement_kind(&self.sql),
         };
         Ok(TypedDbStatement {
             sql: self.sql.clone(),
@@ -371,6 +361,13 @@ impl PreparedStatement {
             max_rows: intent.max_rows,
             result_selection: intent.selection,
         })
+    }
+}
+
+fn default_terminal_intent(options: &DatabaseBindingOptions) -> TerminalIntent {
+    TerminalIntent {
+        selection: DbResultSelection::Rows,
+        max_rows: options.max_result_rows,
     }
 }
 
@@ -535,7 +532,14 @@ mod tests {
             "{}",
             req.statements[0].sql
         );
+    }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_and_all_stamp_rows_selection_for_select_and_dml() {
+        let session = Arc::new(RecordingSession {
+            last: Mutex::new(None),
+        });
+        let binding = DatabaseBinding::from_session(session.clone());
         binding
             .prepare("INSERT INTO t VALUES (?)")
             .bind(vec![DbValue::Int64(1)])
@@ -544,10 +548,27 @@ mod tests {
             .unwrap();
         let req = session.last.lock().expect("lock").clone().expect("req");
         assert_eq!(req.statements[0].max_rows, 0);
-        assert_eq!(
-            req.statements[0].result_selection,
-            DbResultSelection::AffectedRows
-        );
+        assert_eq!(req.statements[0].result_selection, DbResultSelection::Rows);
+        assert_eq!(req.statements[0].kind, DbPlanStatementKind::Execute);
+
+        binding.prepare("SELECT n FROM t").run(None).await.unwrap();
+        let req = session.last.lock().expect("lock").clone().expect("req");
+        assert_eq!(req.statements[0].result_selection, DbResultSelection::Rows);
+        assert_eq!(req.statements[0].kind, DbPlanStatementKind::Select);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn batch_accepts_default_intent_and_optional_overrides() {
+        let session = Arc::new(RecordingSession {
+            last: Mutex::new(None),
+        });
+        let binding = DatabaseBinding::from_session(session.clone());
+        binding
+            .batch(vec![binding.prepare("SELECT n FROM t")], None)
+            .await
+            .unwrap();
+        let req = session.last.lock().expect("lock").clone().expect("req");
+        assert_eq!(req.statements[0].result_selection, DbResultSelection::Rows);
 
         binding
             .batch(
@@ -568,18 +589,5 @@ mod tests {
             DbResultSelection::AffectedRows
         );
         assert_eq!(req.statements[1].result_selection, DbResultSelection::Rows);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn batch_rejects_missing_terminal_intent() {
-        let session = Arc::new(RecordingSession {
-            last: Mutex::new(None),
-        });
-        let binding = DatabaseBinding::from_session(session);
-        let err = binding
-            .batch(vec![binding.prepare("SELECT 1")], None)
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("terminal intent"), "{err}");
     }
 }

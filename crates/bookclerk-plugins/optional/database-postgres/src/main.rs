@@ -12,7 +12,8 @@ use bookclerk_plugin_sdk::v2::{
 };
 use bookclerk_plugin_sdk::DbConnectParams;
 use bookclerk_plugin_sdk::{
-    serve, DbCapabilities, ExecuteReply, ExecuteRequest, HandshakeResult, PluginError,
+    serve, DbCapabilities, ExecuteReply, ExecuteRequest, GuestReceiptPersist, HandshakeResult,
+    HostExecuteEnvelope, PluginError,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -112,7 +113,11 @@ impl AdapterDatabaseSession for PostgresSession {
     }
 
     async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {
-        guest_execute_atomic(request).await
+        guest_execute_atomic(HostExecuteEnvelope::new(
+            request,
+            GuestReceiptPersist::default(),
+        ))
+        .await
     }
 }
 

@@ -15,7 +15,7 @@ pub use bookclerk_db_exec::host_ir::{
 use bookclerk_db_exec::{db_value_from_json, db_value_to_json};
 use bookclerk_plugin_abi::{
     DbPlanStatementKind, DbResultSelection, DbTiming, ExecuteReply, ExecuteRequest,
-    GuestReceiptPersist, StatementResult, TypedDbStatement,
+    StatementResult, TypedDbStatement,
 };
 
 /// Converts a host IR statement onto the typed wire.
@@ -79,7 +79,6 @@ pub fn execute_request_from_atomic(req: &DbAtomicRequest) -> Result<ExecuteReque
         request_hash: req.request_hash.clone().unwrap_or_default(),
         statements,
         deadline_unix_ms: req.deadline_unix_ms.unwrap_or(0),
-        guest_receipt_persist: GuestReceiptPersist::default(),
     })
 }
 

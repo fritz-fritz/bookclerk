@@ -227,6 +227,36 @@ assert.ok(Array.isArray(allResult.results));
 assert.equal(allResult.results[0].n.value, 1n);
 assert.equal(allResult.meta.rows_read, 1);
 
+const runSeen = [];
+const runBinding = createDatabaseBinding({
+  async execute(req) {
+    runSeen.push({
+      resultSelection: req.statements[0].resultSelection,
+      kind: req.statements[0].kind,
+    });
+    return {
+      operationId: req.operationId,
+      statements: [
+        {
+          rows: [
+            {
+              values: [{ kind: "int64", value: 2n }],
+            },
+          ],
+          columns: [{ name: "n", dbType: "int64" }],
+          rowsAffected: 0,
+          cursor: "",
+        },
+      ],
+      timing: { attemptElapsedUs: 0, dbExecutionUs: 0, dbTimingSource: "test" },
+    };
+  },
+});
+const runResult = await runBinding.prepare("SELECT n FROM t").run();
+assert.equal(runSeen[0].resultSelection, "rows");
+assert.equal(runSeen[0].kind, "select");
+assert.equal(runResult.results[0].n.value, 2n);
+
 const mixedSeen = [];
 const mixBinding = createDatabaseBinding({
   async execute(req) {
@@ -249,17 +279,26 @@ const mixBinding = createDatabaseBinding({
   },
 });
 await mixBinding.batch([
+  mixBinding.prepare("INSERT INTO t VALUES (?)").bind({ kind: "int64", value: 1n }),
+  mixBinding.prepare("SELECT n FROM t"),
+]);
+assert.deepEqual(mixedSeen[0], [
+  { selection: "rows", maxRows: 0 },
+  { selection: "rows", maxRows: 0 },
+]);
+
+await mixBinding.batch([
   mixBinding.prepare("INSERT INTO t VALUES (?)").bind({ kind: "int64", value: 1n }).asRun(),
   mixBinding.prepare("SELECT n FROM t").asAll(),
 ]);
-assert.deepEqual(mixedSeen[0], [
+assert.deepEqual(mixedSeen[1], [
   { selection: "affectedRows", maxRows: 0 },
   { selection: "rows", maxRows: 0 },
 ]);
 
 const batchResults = await mixBinding.batch([
-  mixBinding.prepare("INSERT INTO t VALUES (?)").bind({ kind: "int64", value: 1n }).asRun(),
-  mixBinding.prepare("SELECT n FROM t").asAll(),
+  mixBinding.prepare("INSERT INTO t VALUES (?)").bind({ kind: "int64", value: 1n }),
+  mixBinding.prepare("SELECT n FROM t"),
 ]);
 assert.equal(batchResults.length, 2);
 assert.equal(batchResults[0].success, true);

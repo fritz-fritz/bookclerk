@@ -1915,7 +1915,14 @@ mod tests {
             bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows,
             |req| {
                 let proxy = proxy.clone();
-                async move { proxy.run_typed_atomic(&req).await }
+                async move {
+                    proxy
+                        .run_typed_atomic(
+                            &req,
+                            bookclerk_plugin_sdk::GuestReceiptPersist::default(),
+                        )
+                        .await
+                }
             },
         )
         .await;
@@ -1948,10 +1955,9 @@ mod tests {
                     result_selection: DbResultSelection::Rows,
                 }],
                 deadline_unix_ms: 0,
-                ..Default::default()
             };
             let reply = proxy
-                .run_typed_atomic(&req)
+                .run_typed_atomic(&req, bookclerk_plugin_sdk::GuestReceiptPersist::default())
                 .await
                 .unwrap_or_else(|e| panic!("{label}: {e}"));
             let got = reply.statements[0].rows[0].values[0].clone();
@@ -2122,5 +2128,89 @@ mod tests {
         )
         .await
         .expect("reload after committed-but-lost HTTP reply");
+    }
+
+    struct ProxyTypedExec {
+        proxy: D1Proxy,
+    }
+
+    #[async_trait::async_trait]
+    impl bookclerk_library::TypedAtomicExec for ProxyTypedExec {
+        async fn execute_typed(
+            &self,
+            envelope: bookclerk_plugin_sdk::HostExecuteEnvelope,
+        ) -> std::result::Result<
+            bookclerk_plugin_sdk::ExecuteReply,
+            bookclerk_plugin_sdk::PluginError,
+        > {
+            self.proxy
+                .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                .await
+                .map_err(crate::atomic::plugin_error_from_d1)
+        }
+    }
+
+    /// Guest `executeAtomic` over the D1 HTTP batch path must replay the stored
+    /// caller-visible result (not a gated no-op `rowsAffected = 0`).
+    #[tokio::test]
+    async fn executing_mock_guest_typed_replay_preserves_rows_affected() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+        };
+
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema for guest typed replay");
+
+        let store = bookclerk_library::LibraryStore::from_connection(db)
+            .with_connect_result(bookclerk_plugin_sdk::DbConnectResult::d1())
+            .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
+                proxy: proxy.clone(),
+            }));
+        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"]);
+        let guest_hash = String::new();
+        let req = ExecuteRequest {
+            operation_id: "d1-guest-replay".into(),
+            request_hash: guest_hash,
+            statements: vec![TypedDbStatement {
+                sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('d1-guest', 1)"
+                    .into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let first = store
+            .execute_guest_atomic(req.clone(), &policy)
+            .await
+            .expect("first guest typed batch");
+        assert_eq!(first.statements[0].rows_affected, 1);
+
+        let replay = store
+            .execute_guest_atomic(req, &policy)
+            .await
+            .expect("replay guest typed batch");
+        assert_eq!(
+            replay.statements[0].rows_affected, 1,
+            "replay must return the stored caller-visible rowsAffected, not gated 0"
+        );
     }
 }

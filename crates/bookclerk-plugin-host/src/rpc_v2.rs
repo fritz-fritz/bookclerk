@@ -156,6 +156,11 @@ enum Work {
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
+    DbExecuteEnvelopeRequest {
+        envelope: bookclerk_plugin_sdk::HostExecuteEnvelope,
+        cancel: Arc<AtomicBool>,
+        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
+    },
     DbTxnExecuteRequest {
         request: bookclerk_plugin_sdk::ExecuteRequest,
         cancel: Arc<AtomicBool>,
@@ -728,6 +733,24 @@ impl V2PluginSession {
         .await
     }
 
+    /// Typed `HostAdapterDatabaseSession.executeEnvelope`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the guest rejects the call or `cancel` is set.
+    pub async fn db_execute_envelope_request(
+        &self,
+        envelope: bookclerk_plugin_sdk::HostExecuteEnvelope,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
+        self.call(|reply| Work::DbExecuteEnvelopeRequest {
+            envelope,
+            cancel,
+            reply,
+        })
+        .await
+    }
+
     /// Typed `AdapterTransaction.execute` on the vat-held open transaction.
     ///
     /// # Errors
@@ -1180,22 +1203,29 @@ fn vat_thread(
                                 }
                                 out = async {
                                     match db_session.as_mut() {
-                                        Some(s) => {
-                                            if request.guest_receipt_persist.is_absent() {
-                                                s.execute(request).await.map_err(map_abi)
-                                            } else {
-                                                let host = db_host_session.as_ref().ok_or_else(|| {
-                                                    PluginError::message("v2 database session not open")
-                                                })?;
-                                                let envelope =
-                                                    bookclerk_plugin_sdk::HostExecuteEnvelope::from_execute_request(request);
-                                                host.execute_envelope(envelope).await.map_err(map_abi)
-                                            }
-                                        }
+                                        Some(s) => s.execute(request).await.map_err(map_abi),
                                         None => Err(PluginError::message(
                                             "v2 database session not open",
                                         )),
                                     }
+                                } => out,
+                            };
+                            let _ = reply.send(out);
+                        }
+                        Work::DbExecuteEnvelopeRequest {
+                            envelope,
+                            cancel,
+                            reply,
+                        } => {
+                            let out = tokio::select! {
+                                () = wait_flag(Arc::clone(&cancel)) => {
+                                    Err(PluginError::from_abi(Some("cancelled"), "rpc cancelled"))
+                                }
+                                out = async {
+                                    let host = db_host_session.as_ref().ok_or_else(|| {
+                                        PluginError::message("v2 database session not open")
+                                    })?;
+                                    host.execute_envelope(envelope).await.map_err(map_abi)
                                 } => out,
                             };
                             let _ = reply.send(out);

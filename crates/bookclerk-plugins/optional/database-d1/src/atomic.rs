@@ -109,6 +109,7 @@ impl D1Proxy {
     pub async fn run_typed_atomic(
         &self,
         req: &ExecuteRequest,
+        guest_receipt: bookclerk_plugin_sdk::GuestReceiptPersist,
     ) -> std::result::Result<ExecuteReply, DbErr> {
         let started = std::time::Instant::now();
         let deadline = (req.deadline_unix_ms > 0).then_some(req.deadline_unix_ms);
@@ -155,11 +156,11 @@ impl D1Proxy {
             };
             match parse_typed_batch(req, &raw, started) {
                 Ok(reply) => {
-                    if !req.guest_receipt_persist.is_absent() {
+                    if !guest_receipt.is_absent() {
                         // Guest-receipt finalize needs statement results, so D1 runs a
                         // follow-up HTTP batch after the main batch commits. Same-batch
                         // finalize would require provider support for dependent SQL.
-                        let hint = &req.guest_receipt_persist;
+                        let hint = &guest_receipt;
                         let finalize = bookclerk_db_exec::guest_receipt_finalize_stmts(
                             &reply,
                             usize::try_from(hint.guest_statement_len).unwrap_or(usize::MAX),
@@ -1202,7 +1203,6 @@ mod tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         }
     }
 

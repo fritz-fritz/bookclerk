@@ -1326,7 +1326,6 @@ fn typed_query(id: &str, sql: &str) -> bookclerk_plugin_abi::ExecuteRequest {
             result_selection: DbResultSelection::Rows,
         }],
         deadline_unix_ms: 0,
-        ..Default::default()
     }
 }
 
@@ -1354,6 +1353,7 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
     let reply = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &dup,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "sqlite_txn",
         bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite()),
         bookclerk_db_exec::AtomicSession::from_deadline(None),
@@ -1376,6 +1376,7 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
     let reply = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &empty,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "sqlite_txn",
         bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite()),
         bookclerk_db_exec::AtomicSession::from_deadline(None),
@@ -1390,6 +1391,7 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
     let reply = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &nulls,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "sqlite_txn",
         bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite()),
         bookclerk_db_exec::AtomicSession::from_deadline(None),
@@ -1438,6 +1440,7 @@ async fn typed_sqlite_select_stops_after_cap_plus_one() {
     let err = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &req,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
         bookclerk_db_exec::AtomicSession::from_deadline(None),
@@ -1475,7 +1478,6 @@ async fn typed_sqlite_statement_max_rows_is_a_proven_bound() {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
-            ..Default::default()
         }
     }
     let caps =
@@ -1483,6 +1485,7 @@ async fn typed_sqlite_statement_max_rows_is_a_proven_bound() {
     let err = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &req("SELECT x FROM typed_probe ORDER BY x"),
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
         bookclerk_db_exec::AtomicSession::from_deadline(None),
@@ -1494,6 +1497,7 @@ async fn typed_sqlite_statement_max_rows_is_a_proven_bound() {
     let reply = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &req("SELECT x FROM typed_probe ORDER BY x LIMIT 1"),
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
         bookclerk_db_exec::AtomicSession::from_deadline(None),
@@ -1535,7 +1539,6 @@ async fn typed_sqlite_per_statement_max_result_bytes() {
             },
         ],
         deadline_unix_ms: 0,
-        ..Default::default()
     };
     let mut caps =
         bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite());
@@ -1544,6 +1547,7 @@ async fn typed_sqlite_per_statement_max_result_bytes() {
     let err = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &req,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
         bookclerk_db_exec::AtomicSession::from_deadline(None),
@@ -1565,6 +1569,7 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
     let err = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &dup,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "postgres_txn",
         bookclerk_db_exec::ExecCaps::from_connect(
             &bookclerk_plugin_abi::DbConnectResult::postgres(),
@@ -1582,6 +1587,7 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
     let reply = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &empty,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "postgres_txn",
         bookclerk_db_exec::ExecCaps::from_connect(
             &bookclerk_plugin_abi::DbConnectResult::postgres(),
@@ -1602,6 +1608,7 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
     let reply = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &nulls,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "postgres_txn",
         bookclerk_db_exec::ExecCaps::from_connect(
             &bookclerk_plugin_abi::DbConnectResult::postgres(),
@@ -1641,6 +1648,7 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
     let reply = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &empty,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "postgres_txn",
         bookclerk_db_exec::ExecCaps::from_connect(
             &bookclerk_plugin_abi::DbConnectResult::postgres(),
@@ -1656,6 +1664,7 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
     let reply = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &count,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
         "postgres_txn",
         bookclerk_db_exec::ExecCaps::from_connect(
             &bookclerk_plugin_abi::DbConnectResult::postgres(),

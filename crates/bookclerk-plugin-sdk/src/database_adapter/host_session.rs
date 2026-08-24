@@ -21,7 +21,7 @@ impl HostAdapterDatabaseSession for GuestHostAdapterSession {
     }
 
     async fn execute_envelope(&self, envelope: HostExecuteEnvelope) -> Result<ExecuteReply> {
-        guest_execute_atomic(envelope.into_execute_request())
+        guest_execute_atomic(envelope)
             .await
             .map_err(plugin_error_from_engine)
     }

@@ -488,10 +488,6 @@ class DatabaseBinding:
         """
         typed = []
         for stmt in statements:
-            if stmt._intent is None:  # noqa: SLF001
-                raise ValueError(
-                    "batch statement is missing terminal intent (as_run/as_first/as_all)"
-                )
             typed.append(stmt._as_typed())  # noqa: SLF001
         reply = await self._execute_batch(typed, retry=retry)
         return execute_reply_to_d1_results(reply)
@@ -601,7 +597,7 @@ class PreparedStatement:
         elif result_selection is not None:
             self._intent = (result_selection, 0 if max_rows is None else max_rows)
         else:
-            self._intent = None
+            self._intent = ("rows", max_result_rows)
 
     def bind(self, *values: DbValue) -> PreparedStatement:
         """Replace bound parameters with ``values`` (universal ``DbValue`` only)."""
@@ -648,12 +644,8 @@ class PreparedStatement:
         )
 
     async def run(self, *, retry: RetryToken | None = None) -> D1Result:
-        """Execute as DML. Returns a Cloudflare-shaped :class:`D1Result`."""
-        reply = await self._binding.execute(
-            [self.as_run()._as_typed()],  # noqa: SLF001
-            retry=retry,
-        )
-        return statement_result_to_d1_result(reply["statements"][0], reply["timing"])
+        """Execute as Cloudflare ``run()`` (functionally equivalent to :meth:`all`)."""
+        return await self.all(retry=retry)
 
     async def first(
         self,
@@ -696,9 +688,7 @@ class PreparedStatement:
         return statement_result_to_d1_result(reply["statements"][0], reply["timing"])
 
     def _as_typed(self) -> TypedDbStatement:
-        if self._intent is None:
-            raise ValueError("prepared statement is missing terminal intent")
-        result_selection, max_rows = self._intent
+        result_selection, max_rows = self._intent or ("rows", self._max_result_rows)
         kind: DbStatementKind = (
             "execute" if result_selection in ("affectedRows", "discard") else "select"
         )
