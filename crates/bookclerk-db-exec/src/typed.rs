@@ -501,23 +501,34 @@ pub async fn execute_typed_on_session(
     caps: impl Into<ExecCaps>,
     session: AtomicSession,
 ) -> Result<ExecuteReply, DbErr> {
-    let caps = caps.into();
-    session.check(AtomicInterruptPhase::BeforeBegin)?;
-    let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
-    let seen_budget = Arc::clone(&budget);
-    let result = with_exec_budget(Arc::clone(&budget), || {
-        execute_typed_body(
-            db,
-            req,
-            timing_source,
-            caps,
-            session,
-            None::<fn(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>>,
+    if req.guest_receipt_persist.is_absent() {
+        let caps = caps.into();
+        session.check(AtomicInterruptPhase::BeforeBegin)?;
+        let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
+        let seen_budget = Arc::clone(&budget);
+        let result = with_exec_budget(Arc::clone(&budget), || {
+            execute_typed_body(
+                db,
+                req,
+                timing_source,
+                caps,
+                session,
+                None::<fn(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>>,
+            )
+        })
+        .await;
+        record_query_rows_seen(seen_budget.rows_seen());
+        return result;
+    }
+    let hint = req.guest_receipt_persist.clone();
+    execute_typed_on_session_then(db, req, timing_source, caps, session, move |partial| {
+        crate::guest_receipt::guest_receipt_finalize_stmts(
+            &partial,
+            usize::try_from(hint.guest_statement_len).unwrap_or(usize::MAX),
+            &hint.guest_request_hash,
         )
     })
-    .await;
-    record_query_rows_seen(seen_budget.rows_seen());
-    result
+    .await
 }
 
 /// Like [`execute_typed_on_session`], running extra statements in the same transaction

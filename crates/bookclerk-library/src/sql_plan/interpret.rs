@@ -1,6 +1,9 @@
 //! Decode generic atomic-plan statement results into [`DbAtomicResult`].
 
-use bookclerk_plugin_abi::{DbAtomicPlan, DbConnectResult, DbPlanExecResult, DbPlanStmtExecResult};
+use super::CompiledAtomic;
+use bookclerk_plugin_abi::{
+    DbAtomicPlan, DbConnectResult, DbPlanExecResult, DbPlanStmtExecResult, ExecuteReply,
+};
 use serde_json::Value as JsonValue;
 
 use crate::atomic_ops::{atomic_status, DbAtomicResult};
@@ -38,6 +41,17 @@ pub fn interpret_exec(
         result.timing = exec.timing.clone();
     }
     result
+}
+
+/// Maps a typed [`ExecuteReply`] onto a host [`DbAtomicResult`].
+#[must_use]
+pub fn interpret_typed_exec(
+    compiled: &CompiledAtomic,
+    reply: &ExecuteReply,
+    expected_hash: &str,
+) -> DbAtomicResult {
+    let exec = reply.clone().into_plan_exec();
+    interpret_exec(&compiled.plan, &exec, expected_hash)
 }
 
 /// Rejects a guest atomic result that does not match the sent plan or caps.

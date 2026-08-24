@@ -1,0 +1,168 @@
+//! Guest-typed durable receipt finalize (same-transaction payload capture).
+//!
+//! Host wrap lives in `bookclerk-library`; adapters run
+//! [`guest_receipt_finalize_stmts`] in the same atomic transaction before COMMIT.
+
+#![allow(clippy::missing_docs_in_private_items)]
+
+use bookclerk_plugin_abi::{
+    DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, StatementResult,
+    TypedDbStatement,
+};
+use chrono::{Duration, Utc};
+use sea_orm::DbErr;
+
+/// Host `operationKind` stored on guest-typed receipts.
+const GUEST_TYPED_KIND: &str = "guestTyped";
+
+/// Maximum UTF-8 bytes stored in `db_atomic_receipts.payload` for guest replay.
+pub const GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES: usize = 65536;
+
+/// Prune + prior-select prefix ahead of the guest statements.
+pub const GUEST_RECEIPT_WRAP_PREFIX: usize = 2;
+
+/// Builds finalize statements to persist a guest reply before COMMIT.
+///
+/// Returns an empty list when the prior receipt row already carries payload.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the envelope is malformed or the payload exceeds
+/// [`GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES`].
+pub fn guest_receipt_finalize_stmts(
+    partial: &ExecuteReply,
+    guest_len: usize,
+    guest_hash: &str,
+) -> Result<Vec<TypedDbStatement>, DbErr> {
+    let expected = GUEST_RECEIPT_WRAP_PREFIX.saturating_add(guest_len);
+    if partial.statements.len() != expected {
+        return Err(DbErr::Custom(format!(
+            "guest atomic receipt wrap returned {} statements; expected {expected}",
+            partial.statements.len()
+        )));
+    }
+    if let Some(prior) = partial.statements.get(1) {
+        if let Some(prior_hash) = receipt_hash_from(prior) {
+            if prior_hash != guest_hash {
+                return Err(DbErr::Custom(
+                    "executeAtomic operationId was already committed with a different requestHash"
+                        .into(),
+                ));
+            }
+            if receipt_payload_text(prior).is_some() {
+                return Ok(Vec::new());
+            }
+            let guest_reply = guest_slice_reply(partial, guest_len)?;
+            let payload = encode_guest_replay_payload(&guest_reply)?;
+            return Ok(vec![typed_exec(
+                "UPDATE db_atomic_receipts SET payload = ? WHERE operation_id = ? AND status = 'ok'",
+                vec![
+                    DbValue::Text(payload),
+                    DbValue::Text(partial.operation_id.clone()),
+                ],
+            )]);
+        }
+    }
+    let guest_reply = guest_slice_reply(partial, guest_len)?;
+    let payload = encode_guest_replay_payload(&guest_reply)?;
+    let now = Utc::now();
+    let created = now.to_rfc3339();
+    let expires = (now + Duration::hours(24)).to_rfc3339();
+    Ok(vec![typed_exec(
+        "INSERT INTO db_atomic_receipts (\
+            operation_id, operation_kind, request_hash, status, payload, created_at, expires_at\
+         ) SELECT ?, ?, ?, 'ok', ?, ?, ? \
+           WHERE NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)",
+        vec![
+            DbValue::Text(partial.operation_id.clone()),
+            DbValue::Text(GUEST_TYPED_KIND.into()),
+            DbValue::Text(guest_hash.into()),
+            DbValue::Text(payload),
+            DbValue::Text(created),
+            DbValue::Text(expires),
+            DbValue::Text(partial.operation_id.clone()),
+        ],
+    )])
+}
+
+/// Guest statement results from a wrapped partial reply.
+fn guest_slice_reply(partial: &ExecuteReply, guest_len: usize) -> Result<ExecuteReply, DbErr> {
+    Ok(ExecuteReply {
+        operation_id: partial.operation_id.clone(),
+        statements: partial
+            .statements
+            .iter()
+            .skip(GUEST_RECEIPT_WRAP_PREFIX)
+            .take(guest_len)
+            .cloned()
+            .collect(),
+        timing: partial.timing.clone(),
+    })
+}
+
+/// Serializes guest statement results for durable replay.
+fn encode_guest_replay_payload(reply: &ExecuteReply) -> Result<String, DbErr> {
+    let payload = GuestReplayPayload {
+        operation_id: reply.operation_id.clone(),
+        statements: reply.statements.clone(),
+        timing: reply.timing.clone(),
+    };
+    let text = serde_json::to_string(&payload)
+        .map_err(|err| DbErr::Custom(format!("guest replay payload encode failed: {err}")))?;
+    if text.len() > GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES {
+        return Err(DbErr::Custom(format!(
+            "guest replay payload is {} bytes; max is {}",
+            text.len(),
+            GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES
+        )));
+    }
+    Ok(text)
+}
+
+/// JSON envelope stored in `db_atomic_receipts.payload` for guest replay.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GuestReplayPayload {
+    operation_id: String,
+    statements: Vec<StatementResult>,
+    timing: bookclerk_plugin_abi::DbTiming,
+}
+
+/// Reads `payload` from a prior-receipt select row, if present.
+fn receipt_payload_text(prior: &StatementResult) -> Option<String> {
+    let row = prior.rows.first()?;
+    let idx = prior
+        .columns
+        .iter()
+        .position(|c| c.name.eq_ignore_ascii_case("payload"))
+        .or(Some(3))?;
+    match row.values.get(idx)? {
+        DbValue::Text(s) if !s.is_empty() => Some(s.clone()),
+        DbValue::Null(_) => None,
+        _ => None,
+    }
+}
+
+/// Reads `request_hash` from a prior-receipt select result, if any row exists.
+fn receipt_hash_from(stmt: &StatementResult) -> Option<String> {
+    let row = stmt.rows.first()?;
+    let idx = stmt
+        .columns
+        .iter()
+        .position(|c| c.name.eq_ignore_ascii_case("request_hash"))
+        .or(Some(1))?;
+    match row.values.get(idx)? {
+        DbValue::Text(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Host-authored execute statement used in the receipt envelope.
+fn typed_exec(sql: &str, parameters: Vec<DbValue>) -> TypedDbStatement {
+    TypedDbStatement {
+        sql: sql.into(),
+        parameters,
+        kind: DbPlanStatementKind::Execute,
+        max_rows: 0,
+        result_selection: DbResultSelection::AffectedRows,
+    }
+}

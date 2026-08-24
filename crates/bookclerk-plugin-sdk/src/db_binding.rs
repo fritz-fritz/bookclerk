@@ -128,6 +128,7 @@ impl DatabaseBinding {
             request_hash,
             statements: batch,
             deadline_unix_ms: self.options.deadline_unix_ms,
+            ..Default::default()
         };
         let encoded = encoded_execute_request_bytes(&request)?;
         let cap = self.options.max_request_bytes;

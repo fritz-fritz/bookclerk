@@ -1479,6 +1479,7 @@ mod tests {
                 result_selection: selection,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         }
     }
 

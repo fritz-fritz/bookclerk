@@ -15,6 +15,7 @@ mod reply;
 mod slots;
 mod typed_vectors;
 pub mod vectors;
+mod vectors_typed;
 
 #[cfg(test)]
 use bookclerk_plugin_abi::DbPlanStatementKind;
@@ -27,14 +28,15 @@ pub use exec::{
     execute_plan_on, execute_plan_on_capped, execute_statements_on, execute_statements_on_session,
     AtomicSession,
 };
-pub(crate) use guest_receipt::{
-    guest_receipt_persist_stmts, unwrap_guest_typed_reply, wrap_guest_typed_request,
+pub(crate) use guest_receipt::{unwrap_guest_typed_reply, wrap_guest_typed_request};
+pub use interpret::{
+    interpret_exec, interpret_plan, interpret_typed_exec, validate_exec_result, PlanStmtResult,
 };
-pub use interpret::{interpret_exec, interpret_plan, validate_exec_result, PlanStmtResult};
 pub use named::{compile_claim_event_delivery, compile_named_request};
 pub use reply::validate_execute_reply;
 pub use slots::{event_inflight_slot, lock_serialization_slot, JOB_QUEUE_SLOT};
 pub use typed_vectors::{run_typed_conn_vectors, run_typed_request_vectors};
+pub use vectors_typed::run_typed_contract_vectors;
 
 /// Compiled plan plus the hash stored on the receipt.
 #[derive(Debug, Clone)]
@@ -50,6 +52,31 @@ impl CompiledAtomic {
     #[must_use]
     pub fn into_request(self, operation_id: impl Into<String>) -> DbAtomicRequest {
         DbAtomicRequest::with_plan(operation_id, self.expected_hash, self.plan)
+    }
+
+    /// Typed [`ExecuteRequest`] for adapter conformance (`executeAtomic`).
+    ///
+    /// # Panics
+    ///
+    /// Panics when a plan bind is outside the universal [`DbValue`] domain.
+    #[must_use]
+    pub fn into_typed_request(self, operation_id: impl Into<String>) -> ExecuteRequest {
+        let statements = self
+            .plan
+            .statements
+            .iter()
+            .map(|stmt| {
+                bookclerk_plugin_abi::TypedDbStatement::from_plan_statement(stmt)
+                    .expect("contract vector bind must be a DbValue")
+            })
+            .collect();
+        ExecuteRequest {
+            operation_id: operation_id.into(),
+            request_hash: self.expected_hash,
+            statements,
+            deadline_unix_ms: 0,
+            ..Default::default()
+        }
     }
 }
 
@@ -481,6 +508,7 @@ mod limits_tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         };
         let err = super::authorize_typed_request(&mut req, &caps).unwrap_err();
         assert!(err.to_string().contains("maxBinds"), "{err}");
@@ -512,6 +540,7 @@ mod limits_tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         };
         let empty_len = encoded_execute_request_bytes(&req).unwrap().len();
         let mut stamped = req.clone();
@@ -546,6 +575,7 @@ mod limits_tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         };
         let a = canonical_execute_request_hash(&req).unwrap();
         req.deadline_unix_ms = 1;
@@ -588,6 +618,7 @@ mod limits_tests {
                 result_selection: DbResultSelection::AffectedRows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         };
         let err = super::authorize_guest_typed_request(&mut ddl, &caps, &books).unwrap_err();
         assert!(err.to_string().contains("disallowed"), "{err}");
@@ -644,6 +675,7 @@ mod limits_tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         };
         const GOLDEN: &str = "e368ef90b76963c5e93c5e6db37fdb6d7f809d23c10295352a0ba3cd26885f02";
         assert_eq!(canonical_execute_request_hash(&req).unwrap(), GOLDEN);

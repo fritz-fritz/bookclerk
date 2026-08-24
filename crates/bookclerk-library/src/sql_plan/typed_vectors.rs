@@ -77,31 +77,21 @@ pub async fn run_typed_conn_vectors(
     .await;
 }
 
-/// Drives [`vectors::run_contract_vectors`] with typed requests and replies.
+/// Native typed contract suite (`ExecuteRequest` → `ExecuteReply`).
 async fn run_typed_contract_vectors<F, Fut>(connect: DbConnectResult, row_cap: u32, mut run: F)
 where
     F: FnMut(ExecuteRequest, u32) -> Fut,
     Fut: Future<Output = Result<ExecuteReply, String>>,
 {
     let connect_for_validate = connect.clone();
-    vectors::run_contract_vectors(connect, row_cap, move |atomic_req, cap| {
+    super::run_typed_contract_vectors(connect, row_cap, move |typed, cap| {
         let connect = connect_for_validate.clone();
-        let typed_result: Result<ExecuteRequest, String> = atomic_req
-            .plan
-            .as_ref()
-            .ok_or_else(|| "vector plan".to_string())
-            .and_then(|_| ExecuteRequest::from_atomic(&atomic_req).map_err(|err| err.to_string()));
-        let typed_for_validate = typed_result.as_ref().ok().cloned();
-        let prep_err = typed_result.as_ref().err().cloned();
-        let run_fut = typed_result.ok().map(|typed| run(typed, cap));
+        let typed_for_validate = typed.clone();
+        let fut = run(typed, cap);
         async move {
-            if let Some(err) = prep_err {
-                return Err(err);
-            }
-            let typed = typed_for_validate.expect("typed request prepared");
-            let reply = run_fut.expect("typed runner prepared").await?;
-            validate_typed_reply(&connect, &typed, &reply)?;
-            Ok(reply.into_plan_exec())
+            let reply = fut.await?;
+            validate_typed_reply(&connect, &typed_for_validate, &reply)?;
+            Ok(reply)
         }
     })
     .await;
@@ -159,6 +149,7 @@ mod typed_value_matrix {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         }
     }
 
@@ -240,6 +231,7 @@ mod typed_value_matrix {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         };
         let reply = bookclerk_db_exec::execute_typed_on_session(
             &db,
@@ -312,6 +304,7 @@ mod typed_value_matrix {
                 },
             ],
             deadline_unix_ms: 0,
+            ..Default::default()
         };
         let err = bookclerk_db_exec::execute_typed_on_session(
             &db,
@@ -340,6 +333,7 @@ mod typed_value_matrix {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         };
         let reply = bookclerk_db_exec::execute_typed_on_session(
             &db,

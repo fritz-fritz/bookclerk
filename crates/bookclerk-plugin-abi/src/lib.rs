@@ -93,7 +93,7 @@ pub use db::{
 };
 pub use db_execute::{
     sql_payload_bytes, sql_payload_exceeds, DbCapabilities, DbColumn, DbResultSelection, DbRow,
-    DbTiming, ExecuteReply, ExecuteRequest, StatementResult, TypedDbStatement,
+    DbTiming, ExecuteReply, ExecuteRequest, GuestReceiptPersist, StatementResult, TypedDbStatement,
 };
 pub use db_value::{db_value_from_json, db_value_to_json, DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};

@@ -13,7 +13,8 @@ use super::plugin_v2_capnp::{
 use super::rpc::{from_capnp, read_error, text_of, write_error};
 use crate::{
     DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType,
-    DbValue, ExecuteReply, ExecuteRequest, PluginError, Result, StatementResult, TypedDbStatement,
+    DbValue, ExecuteReply, ExecuteRequest, GuestReceiptPersist, PluginError, Result,
+    StatementResult, TypedDbStatement,
 };
 
 pub(super) fn write_db_type(ty: DbType) -> CapnpDbType {
@@ -164,6 +165,13 @@ pub(super) fn write_execute_request(
     b.set_operation_id(&req.operation_id);
     b.set_request_hash(&req.request_hash);
     b.set_deadline_unix_ms(req.deadline_unix_ms);
+    if req.guest_receipt_persist.is_absent() {
+        b.set_guest_receipt_guest_len(0);
+        b.set_guest_receipt_guest_hash("");
+    } else {
+        b.set_guest_receipt_guest_len(req.guest_receipt_persist.guest_statement_len);
+        b.set_guest_receipt_guest_hash(&req.guest_receipt_persist.guest_request_hash);
+    }
     let mut stmts = b.reborrow().init_statements(req.statements.len() as u32);
     for (i, s) in req.statements.iter().enumerate() {
         write_db_statement(stmts.reborrow().get(i as u32), s);
@@ -185,11 +193,17 @@ pub(super) fn read_execute_request(r: execute_request_capnp::Reader<'_>) -> Resu
             "executeAtomic statements must be non-empty",
         ));
     }
+    let guest_len = r.get_guest_receipt_guest_len();
+    let guest_hash = text_of(r.get_guest_receipt_guest_hash().map_err(from_capnp)?);
     Ok(ExecuteRequest {
         operation_id: text_of(r.get_operation_id().map_err(from_capnp)?),
         request_hash: text_of(r.get_request_hash().map_err(from_capnp)?),
         statements,
         deadline_unix_ms: r.get_deadline_unix_ms(),
+        guest_receipt_persist: GuestReceiptPersist {
+            guest_statement_len: guest_len,
+            guest_request_hash: guest_hash,
+        },
     })
 }
 
@@ -459,6 +473,7 @@ pub fn canonical_execute_request_hash(req: &ExecuteRequest) -> Result<String> {
     canonical.operation_id.clear();
     canonical.request_hash.clear();
     canonical.deadline_unix_ms = 0;
+    canonical.guest_receipt_persist = GuestReceiptPersist::default();
     let bytes = encoded_execute_request_bytes(&canonical)?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }

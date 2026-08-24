@@ -104,6 +104,27 @@ fn selection_for_kind(kind: DbPlanStatementKind) -> DbResultSelection {
     }
 }
 
+/// Host-only hint for adapters to persist guest replay payload before COMMIT.
+///
+/// Plugin authors must not set this field. The host stamps it when wrapping
+/// guest `executeAtomic` batches with a durable receipt envelope.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GuestReceiptPersist {
+    /// Guest statement count inside the receipt wrap (excluding prune/select).
+    pub guest_statement_len: u32,
+    /// Guest `requestHash` compared on replay.
+    pub guest_request_hash: String,
+}
+
+impl GuestReceiptPersist {
+    /// True when the host did not stamp a guest-receipt finalize hint.
+    #[must_use]
+    pub fn is_absent(&self) -> bool {
+        self.guest_statement_len == 0
+    }
+}
+
 /// Typed atomic batch. Every request is a non-empty ordered statement list.
 ///
 /// Host interpretation metadata (outcome / payload / receipt indices) lives on
@@ -119,6 +140,9 @@ pub struct ExecuteRequest {
     pub statements: Vec<TypedDbStatement>,
     /// Guest-visible deadline (unix ms). Zero means omitted.
     pub deadline_unix_ms: u64,
+    /// Host-only finalize hint for guest durable receipts (`0` = absent).
+    #[serde(default, skip_serializing_if = "GuestReceiptPersist::is_absent")]
+    pub guest_receipt_persist: GuestReceiptPersist,
 }
 
 impl ExecuteRequest {
@@ -145,6 +169,7 @@ impl ExecuteRequest {
             request_hash: req.request_hash.clone().unwrap_or_default(),
             statements,
             deadline_unix_ms: req.deadline_unix_ms.unwrap_or(0),
+            guest_receipt_persist: GuestReceiptPersist::default(),
         })
     }
 
@@ -180,7 +205,6 @@ impl ExecuteRequest {
         })
     }
 }
-
 /// Result of one statement in [`ExecuteReply`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -779,6 +803,7 @@ mod tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         };
         let _ = (
             &req.operation_id,
@@ -810,6 +835,7 @@ mod tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         };
         let bytes = encoded_execute_request_bytes(&req).unwrap();
         let back = decode_execute_request_bytes(&bytes).unwrap();

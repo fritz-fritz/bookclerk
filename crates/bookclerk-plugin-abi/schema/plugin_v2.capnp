@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 13;
+const abiMinor :UInt32 = 14;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -658,6 +658,9 @@ struct ExecuteRequest {
   obsoleteReceiptSelectIndex @8 :UInt32;
   obsoleteHasReceiptSelectIndex @9 :Bool;
   deadlineUnixMs @10 :UInt64;
+  # Host-only guest receipt finalize (abiMinor 14). Zero len = absent.
+  guestReceiptGuestLen @11 :UInt32;
+  guestReceiptGuestHash @12 :Text;
 }
 
 struct StatementResult {
@@ -731,6 +734,7 @@ interface AdapterDatabaseSession {
   begin @3 () -> (result :AdapterTransactionReply);
 }
 
+# Host-internal SeaORM interactive txn (not the plugin-author binding).
 interface AdapterTransaction {
   execute @0 (request :ExecuteRequest) -> (result :ExecuteResultReply);
   commit @1 () -> (result :EmptyReply);

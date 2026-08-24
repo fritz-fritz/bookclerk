@@ -11,6 +11,7 @@ use bookclerk_plugin_abi::DbColumn;
 
 mod b64;
 mod exec;
+pub mod guest_receipt;
 mod lower;
 pub mod proxy_txn;
 mod typed;
@@ -46,6 +47,7 @@ pub use exec::{
     cap_query_sql, encoded_proxy_row_len, execute_statements_on, execute_statements_on_session,
     json_cell_utf8_len, note_encoded_result_bytes, sea_value_to_json, AtomicSession, ExecCaps,
 };
+pub use guest_receipt::{guest_receipt_finalize_stmts, GUEST_RECEIPT_WRAP_PREFIX};
 pub use lower::{lower_canonical_sql, lower_canonical_to_postgres};
 pub use proxy_txn::{
     arm_exec_budget, clear_exec_budget, consume_atomic_interrupt, consume_begin_injection,

@@ -4,35 +4,29 @@
 //! `executeAtomic` must use the same envelope so a D1 (or any) adapter cannot
 //! apply guest mutations twice after an ambiguous commit.
 
+use bookclerk_db_exec::GUEST_RECEIPT_WRAP_PREFIX;
 use bookclerk_plugin_abi::{
-    DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, ExecuteRequest, PluginError,
-    TypedDbStatement,
+    DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, ExecuteRequest,
+    GuestReceiptPersist, PluginError, TypedDbStatement,
 };
-use chrono::{Duration, Utc};
+use chrono::Utc;
 
 use super::named::apply_write_predicate;
 
-/// Host `operationKind` stored on guest-typed receipts.
-const GUEST_TYPED_KIND: &str = "guestTyped";
-
-/// Maximum UTF-8 bytes stored in `db_atomic_receipts.payload` for guest replay.
-pub const GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES: usize = 65536;
-
 /// Prune + prior-select prefix ahead of the guest statements.
-const WRAP_PREFIX: usize = 2;
-/// Receipt insert after the guest statements.
-const WRAP_SUFFIX: usize = 1;
+const WRAP_PREFIX: usize = GUEST_RECEIPT_WRAP_PREFIX;
 
 /// Wraps an already-authorized guest batch with prune / prior-select / gated
-/// DML / receipt-insert. Clears `requestHash` so a later host re-authorize
-/// stamps the wrapper, not the original guest SQL.
+/// DML. Clears `requestHash` so a later host re-authorize stamps the wrapper,
+/// not the original guest SQL, and stamps a host-only finalize hint so
+/// adapters persist replay payload before COMMIT.
 #[must_use]
 pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> ExecuteRequest {
     let now = Utc::now();
     let created = now.to_rfc3339();
-    let expires = (now + Duration::hours(24)).to_rfc3339();
     let operation_id = req.operation_id.clone();
     let request_hash = req.request_hash.clone();
+    let guest_len = u32::try_from(req.statements.len()).unwrap_or(u32::MAX);
 
     let prune = typed_exec(
         "DELETE FROM db_atomic_receipts WHERE expires_at <= ? AND operation_id != ?",
@@ -58,29 +52,18 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> ExecuteReques
         }
         gated.push(stmt);
     }
-    let insert = typed_exec(
-        "INSERT INTO db_atomic_receipts (\
-            operation_id, operation_kind, request_hash, status, payload, created_at, expires_at\
-         ) SELECT ?, ?, ?, 'ok', NULL, ?, ? \
-           WHERE NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)",
-        vec![
-            DbValue::Text(operation_id.clone()),
-            DbValue::Text(GUEST_TYPED_KIND.into()),
-            DbValue::Text(request_hash),
-            DbValue::Text(created),
-            DbValue::Text(expires),
-            DbValue::Text(operation_id.clone()),
-        ],
-    );
 
-    let mut statements = Vec::with_capacity(WRAP_PREFIX + gated.len() + WRAP_SUFFIX);
+    let mut statements = Vec::with_capacity(WRAP_PREFIX + gated.len());
     statements.push(prune);
     statements.push(select);
     statements.extend(gated);
-    statements.push(insert);
 
     req.statements = statements;
     req.request_hash.clear();
+    req.guest_receipt_persist = GuestReceiptPersist {
+        guest_statement_len: guest_len,
+        guest_request_hash: request_hash,
+    };
     req
 }
 
@@ -95,9 +78,7 @@ pub(crate) fn unwrap_guest_typed_reply(
     guest_len: usize,
     guest_hash: &str,
 ) -> Result<ExecuteReply, PluginError> {
-    let expected = WRAP_PREFIX
-        .saturating_add(guest_len)
-        .saturating_add(WRAP_SUFFIX);
+    let expected = WRAP_PREFIX.saturating_add(guest_len);
     if reply.statements.len() != expected {
         return Err(PluginError::internal(format!(
             "guest atomic receipt wrap returned {} statements; expected {expected}",
@@ -123,62 +104,6 @@ pub(crate) fn unwrap_guest_typed_reply(
     Ok(reply)
 }
 
-/// Builds follow-up statements to persist a guest reply for idempotent replay.
-///
-/// Returns an empty list when the prior receipt row already carries payload.
-///
-/// # Errors
-///
-/// Returns [`DbErr`] when the envelope is malformed or the payload exceeds
-/// [`GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES`].
-pub(crate) fn guest_receipt_persist_stmts(
-    partial: &ExecuteReply,
-    guest_len: usize,
-    guest_hash: &str,
-) -> Result<Vec<TypedDbStatement>, sea_orm::DbErr> {
-    let expected = WRAP_PREFIX
-        .saturating_add(guest_len)
-        .saturating_add(WRAP_SUFFIX);
-    if partial.statements.len() != expected {
-        return Err(sea_orm::DbErr::Custom(format!(
-            "guest atomic receipt wrap returned {} statements; expected {expected}",
-            partial.statements.len()
-        )));
-    }
-    if let Some(prior) = partial.statements.get(1) {
-        if let Some(prior_hash) = receipt_hash_from(prior) {
-            if prior_hash != guest_hash {
-                return Err(sea_orm::DbErr::Custom(
-                    "executeAtomic operationId was already committed with a different requestHash"
-                        .into(),
-                ));
-            }
-            if receipt_payload_text(prior).is_some() {
-                return Ok(Vec::new());
-            }
-        }
-    }
-    let guest_reply = ExecuteReply {
-        operation_id: partial.operation_id.clone(),
-        statements: partial
-            .statements
-            .iter()
-            .skip(WRAP_PREFIX)
-            .take(guest_len)
-            .cloned()
-            .collect(),
-        timing: partial.timing.clone(),
-    };
-    let payload = encode_guest_replay_payload(&guest_reply)?;
-    Ok(vec![typed_exec(
-        "UPDATE db_atomic_receipts SET payload = ? WHERE operation_id = ? AND status = 'ok'",
-        vec![
-            DbValue::Text(payload),
-            DbValue::Text(partial.operation_id.clone()),
-        ],
-    )])
-}
-
 /// Reconstructs a guest [`ExecuteReply`] from a prior-receipt select row.
 fn decode_guest_replay_payload(
     prior: &bookclerk_plugin_abi::StatementResult,
@@ -194,26 +119,6 @@ fn decode_guest_replay_payload(
         statements: payload.statements,
         timing: payload.timing,
     }))
-}
-
-/// Serializes guest statement results for durable replay.
-fn encode_guest_replay_payload(reply: &ExecuteReply) -> Result<String, sea_orm::DbErr> {
-    let payload = GuestReplayPayload {
-        operation_id: reply.operation_id.clone(),
-        statements: reply.statements.clone(),
-        timing: reply.timing.clone(),
-    };
-    let text = serde_json::to_string(&payload).map_err(|err| {
-        sea_orm::DbErr::Custom(format!("guest replay payload encode failed: {err}"))
-    })?;
-    if text.len() > GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES {
-        return Err(sea_orm::DbErr::Custom(format!(
-            "guest replay payload is {} bytes; max is {}",
-            text.len(),
-            GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES
-        )));
-    }
-    Ok(text)
 }
 
 /// JSON envelope stored in `db_atomic_receipts.payload` for guest replay.
@@ -232,7 +137,7 @@ fn receipt_payload_text(prior: &bookclerk_plugin_abi::StatementResult) -> Option
         .columns
         .iter()
         .position(|c| c.name.eq_ignore_ascii_case("payload"))
-        .or(Some(4))?;
+        .or(Some(3))?;
     match row.values.get(idx)? {
         DbValue::Text(s) if !s.is_empty() => Some(s.clone()),
         DbValue::Null(_) => None,
@@ -285,6 +190,82 @@ fn receipt_hash_from(stmt: &bookclerk_plugin_abi::StatementResult) -> Option<Str
 }
 
 #[cfg(test)]
+mod replay_finalize {
+    use super::*;
+    use bookclerk_plugin_abi::{
+        DbPlanStatementKind, DbResultSelection, ExecuteRequest, GuestReceiptPersist,
+        TypedDbStatement,
+    };
+
+    #[tokio::test]
+    async fn guest_receipt_finalize_enables_replay_after_commit() {
+        let db = bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .expect("mem db");
+        let guest_hash = "a".repeat(64);
+        let req = ExecuteRequest {
+            operation_id: "guest-replay-op".into(),
+            request_hash: guest_hash.clone(),
+            statements: vec![TypedDbStatement {
+                sql:
+                    "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('guest-replay', 1)"
+                        .into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+            ..Default::default()
+        };
+        let wrapped = wrap_guest_typed_request(req);
+        assert!(!wrapped.guest_receipt_persist.is_absent());
+        let guest_len = wrapped.guest_receipt_persist.guest_statement_len as usize;
+        let reply = bookclerk_db_exec::execute_typed_on_session(
+            &db,
+            &wrapped,
+            "sqlite_txn",
+            bookclerk_db_exec::ExecCaps::from_connect(
+                &bookclerk_plugin_abi::DbConnectResult::sqlite(),
+            ),
+            bookclerk_db_exec::AtomicSession::from_deadline(None),
+        )
+        .await
+        .expect("first execute");
+        let guest = unwrap_guest_typed_reply(reply, guest_len, &guest_hash).expect("unwrap");
+        assert_eq!(guest.statements[0].rows_affected, 1);
+
+        let replay_wrapped = wrap_guest_typed_request(ExecuteRequest {
+            operation_id: "guest-replay-op".into(),
+            request_hash: guest_hash.clone(),
+            statements: vec![TypedDbStatement {
+                sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('guest-replay', 99)"
+                    .into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+            guest_receipt_persist: GuestReceiptPersist::default(),
+        });
+        let replay = bookclerk_db_exec::execute_typed_on_session(
+            &db,
+            &replay_wrapped,
+            "sqlite_txn",
+            bookclerk_db_exec::ExecCaps::from_connect(
+                &bookclerk_plugin_abi::DbConnectResult::sqlite(),
+            ),
+            bookclerk_db_exec::AtomicSession::from_deadline(None),
+        )
+        .await
+        .expect("replay execute");
+        let replayed = unwrap_guest_typed_reply(replay, guest_len, &guest_hash).expect("replay");
+        assert_eq!(replayed.statements[0].rows_affected, 1);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use bookclerk_plugin_abi::DbPlanStatementKind;
@@ -301,6 +282,7 @@ mod tests {
                 result_selection: DbResultSelection::AffectedRows,
             }],
             deadline_unix_ms: 0,
+            guest_receipt_persist: GuestReceiptPersist::default(),
         }
     }
 
@@ -308,7 +290,8 @@ mod tests {
     fn wrap_rewrites_insert_values_and_gates_writes() {
         let wrapped = wrap_guest_typed_request(guest_insert());
         assert!(wrapped.request_hash.is_empty());
-        assert_eq!(wrapped.statements.len(), 4);
+        assert_eq!(wrapped.statements.len(), 3);
+        assert!(!wrapped.guest_receipt_persist.is_absent());
         assert!(
             wrapped.statements[1].sql.contains("db_atomic_receipts"),
             "prior receipt select at index 1"
@@ -337,7 +320,7 @@ mod tests {
     #[test]
     fn unwrap_replays_stored_guest_reply_on_hash_match() {
         let guest = guest_insert();
-        let payload = encode_guest_replay_payload(&ExecuteReply {
+        let payload = serde_json::to_string(&GuestReplayPayload {
             operation_id: guest.operation_id.clone(),
             statements: vec![bookclerk_plugin_abi::StatementResult::from_affected(1)],
             timing: bookclerk_plugin_abi::DbTiming::default(),
@@ -383,7 +366,6 @@ mod tests {
                 bookclerk_plugin_abi::StatementResult::from_affected(0),
                 prior,
                 bookclerk_plugin_abi::StatementResult::from_affected(0),
-                bookclerk_plugin_abi::StatementResult::from_affected(0),
             ],
             timing: bookclerk_plugin_abi::DbTiming::default(),
         };
@@ -418,7 +400,6 @@ mod tests {
             statements: vec![
                 bookclerk_plugin_abi::StatementResult::from_affected(0),
                 prior,
-                bookclerk_plugin_abi::StatementResult::from_affected(0),
                 bookclerk_plugin_abi::StatementResult::from_affected(0),
             ],
             timing: bookclerk_plugin_abi::DbTiming::default(),

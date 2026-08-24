@@ -154,7 +154,31 @@ impl D1Proxy {
                 Err(err) => return Err(err.into()),
             };
             match parse_typed_batch(req, &raw, started) {
-                Ok(reply) => return Ok(reply),
+                Ok(reply) => {
+                    if !req.guest_receipt_persist.is_absent() {
+                        let hint = &req.guest_receipt_persist;
+                        let finalize = bookclerk_db_exec::guest_receipt_finalize_stmts(
+                            &reply,
+                            usize::try_from(hint.guest_statement_len).unwrap_or(usize::MAX),
+                            &hint.guest_request_hash,
+                        )?;
+                        if !finalize.is_empty() {
+                            let fin_stmts: Vec<SqlStmt> = finalize
+                                .iter()
+                                .map(|s| {
+                                    let sql = if s.kind.wrap_select_limit() {
+                                        bookclerk_db_exec::cap_query_sql(&s.sql, cap)
+                                    } else {
+                                        s.sql.clone()
+                                    };
+                                    (sql, d1_typed_binds(&s.parameters))
+                                })
+                                .collect();
+                            self.run_batch_with_timeout(&fin_stmts, timeout).await?;
+                        }
+                    }
+                    return Ok(reply);
+                }
                 Err(err) if is_ambiguous_d1(&err) && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
                     sleep_before_d1_retry_bounded(attempt, None, deadline).await?;
                     last_err = Some(err);
@@ -1178,6 +1202,7 @@ mod tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         }
     }
 

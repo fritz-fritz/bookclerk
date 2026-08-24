@@ -180,41 +180,19 @@ impl LibraryStore {
         let guest_hash = req.request_hash.clone();
         let wrapped = crate::sql_plan::wrap_guest_typed_request(req);
         let reply = if let Some(exec) = &self.typed_exec {
-            let reply = exec.execute_typed(wrapped).await?;
-            let persist =
-                crate::sql_plan::guest_receipt_persist_stmts(&reply, guest_len, &guest_hash)
-                    .map_err(plugin_err_from_db)?;
-            if !persist.is_empty() {
-                let update_req = bookclerk_plugin_abi::ExecuteRequest {
-                    operation_id: format!("{}:replay-persist", reply.operation_id),
-                    request_hash: String::new(),
-                    statements: persist,
-                    deadline_unix_ms: 0,
-                };
-                exec.execute_typed(update_req).await?;
-            }
-            reply
+            exec.execute_typed(wrapped).await?
         } else {
             let timing = match self.db.get_database_backend() {
                 sea_orm::DatabaseBackend::Postgres => "postgres_txn",
                 _ => "sqlite_txn",
             };
             let deadline = (wrapped.deadline_unix_ms > 0).then_some(wrapped.deadline_unix_ms);
-            let guest_len_for_then = guest_len;
-            let guest_hash_for_then = guest_hash.clone();
-            bookclerk_db_exec::execute_typed_on_session_then(
+            bookclerk_db_exec::execute_typed_on_session(
                 &self.db,
                 &wrapped,
                 timing,
                 bookclerk_db_exec::ExecCaps::from_connect(self.connect_result()),
                 bookclerk_db_exec::AtomicSession::from_deadline(deadline),
-                move |partial| {
-                    crate::sql_plan::guest_receipt_persist_stmts(
-                        &partial,
-                        guest_len_for_then,
-                        &guest_hash_for_then,
-                    )
-                },
             )
             .await
             .map_err(plugin_err_from_db)?

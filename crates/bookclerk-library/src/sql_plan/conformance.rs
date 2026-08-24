@@ -1328,6 +1328,7 @@ fn typed_query(id: &str, sql: &str) -> bookclerk_plugin_abi::ExecuteRequest {
             result_selection: DbResultSelection::Rows,
         }],
         deadline_unix_ms: 0,
+        ..Default::default()
     }
 }
 
@@ -1476,6 +1477,7 @@ async fn typed_sqlite_statement_max_rows_is_a_proven_bound() {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         }
     }
     let caps =
@@ -1535,6 +1537,7 @@ async fn typed_sqlite_per_statement_max_result_bytes() {
             },
         ],
         deadline_unix_ms: 0,
+        ..Default::default()
     };
     let mut caps =
         bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite());

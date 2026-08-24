@@ -6434,6 +6434,7 @@ fn guest_select(sql: &str) -> bookclerk_plugin_abi::ExecuteRequest {
             result_selection: DbResultSelection::Rows,
         }],
         deadline_unix_ms: 0,
+        ..Default::default()
     }
 }
 
