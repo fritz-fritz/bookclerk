@@ -112,7 +112,10 @@ impl ExternalDatabase {
         let _kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         let connect_result = caps.to_connect();
-        let backend = sql_family_to_backend(&connect_result.sql_family)?;
+        if let Some(reason) = connect_result.bootstrap_backend_failure_reason() {
+            return Err(DbErr::Custom(reason));
+        }
+        let backend = seaorm_backend_from_connect(&connect_result)?;
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
             session: self.session.clone(),
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
@@ -237,12 +240,8 @@ pub async fn open_library_store(
         .connect(config)
         .await
         .map_err(bookclerk_library::LibraryError::Orm)?;
-    let family = bookclerk_library::family_from_connect(&caps).ok_or_else(|| {
-        bookclerk_library::LibraryError::Other(anyhow::anyhow!(caps.capability_failure_reason()))
-    })?;
     let backend = Arc::new(RpcAtomicBackend {
         session: ext.session.clone(),
-        family,
         caps: caps.clone(),
     });
     let store = bookclerk_library::LibraryStore::from_connection(db)
@@ -626,8 +625,6 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
 struct RpcAtomicBackend {
     /// Cap'n Proto v2 session used for a single `bookclerk.atomic` query per operation.
     session: Arc<V2PluginSession>,
-    /// Negotiated SQL family for host-authored plans.
-    family: bookclerk_library::SqlFamily,
     /// Full negotiated capabilities used to reject oversized plans before RPC.
     caps: DbConnectResult,
 }
@@ -650,7 +647,7 @@ impl RpcAtomicBackend {
     ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
         let now = chrono::Utc::now().to_rfc3339();
         let compiled =
-            bookclerk_library::compile_named_request(&operation_id, &params, &now, self.family)
+            bookclerk_library::compile_named_request(&operation_id, &params, &now, bookclerk_library::SqlFamily::Sqlite)
                 .map_err(bookclerk_library::LibraryError::Orm)?;
         self.send_compiled(compiled, operation_id).await
     }
@@ -1265,7 +1262,7 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
             resource_class,
             i64::from(max_in_flight),
             &now,
-            self.family,
+            bookclerk_library::SqlFamily::Sqlite,
         )
         .map_err(bookclerk_library::LibraryError::Orm)?;
         let result = self
@@ -1398,7 +1395,7 @@ fn connect_params(
 /// Maps advertised schema capabilities to a SeaORM [`DbBackend`].
 ///
 /// Schema kind is the versioning mechanic, not SQL-family identity. Prefer
-/// [`sql_family_to_backend`] when opening the SeaORM proxy.
+/// [`seaorm_backend_from_connect`] when opening the SeaORM proxy.
 #[cfg(test)]
 fn schema_kind_to_backend(kind: bookclerk_library::HostSchemaKind) -> DbBackend {
     match kind {
@@ -1408,11 +1405,18 @@ fn schema_kind_to_backend(kind: bookclerk_library::HostSchemaKind) -> DbBackend 
     }
 }
 
-/// SeaORM proxy backend from advertised `sqlFamily` (not schema-version flags).
-fn sql_family_to_backend(sql_family: &str) -> Result<DbBackend, DbErr> {
-    bookclerk_library::SqlFamily::parse(sql_family)
-        .map(bookclerk_library::SqlFamily::sea_backend)
-        .ok_or_else(|| DbErr::Custom(format!("unknown sqlFamily `{sql_family}`")))
+/// SeaORM proxy backend from bootstrap metadata on a connect result.
+fn seaorm_backend_from_connect(connect: &DbConnectResult) -> Result<DbBackend, DbErr> {
+    if let Some(family) = bookclerk_library::SqlFamily::parse(&connect.sql_family) {
+        return Ok(family.sea_backend());
+    }
+    match connect.dialect.to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" | "pg" => Ok(DbBackend::Postgres),
+        "sqlite" => Ok(DbBackend::Sqlite),
+        other => Err(DbErr::Custom(format!(
+            "unknown database bootstrap dialect `{other}`"
+        ))),
+    }
 }
 
 /// SQLite `db.connect` params for first-party `sqlite` and arbitrary sqlite-family ids.
@@ -1469,7 +1473,7 @@ mod tests {
         let kind = bookclerk_library::HostSchemaKind::from_capabilities(&caps).unwrap();
         assert_eq!(kind, bookclerk_library::HostSchemaKind::RowMarker);
         assert_eq!(
-            sql_family_to_backend(&caps.sql_family).unwrap(),
+            seaorm_backend_from_connect(&caps).unwrap(),
             DbBackend::Sqlite
         );
     }

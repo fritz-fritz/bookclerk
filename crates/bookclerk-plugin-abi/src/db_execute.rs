@@ -437,7 +437,8 @@ pub struct DbCapabilities {
     pub max_atomic_result_bytes: u32,
     /// Observability-only engine name (`sqlite`, `postgres`, …).
     pub diagnostic_engine: String,
-    /// SQL family identity (`sqlite` / `postgres`). Empty on older guests.
+    /// Bootstrap-only SeaORM proxy hint (`sqlite` / `postgres`). Not used for
+    /// host schema or plan selection; may be empty on conforming adapters.
     pub sql_family: String,
 }
 
@@ -489,24 +490,6 @@ impl DbCapabilities {
         if !self.cancellation {
             return Some("database guest does not advertise cancellation".into());
         }
-        let family = self.sql_family.to_ascii_lowercase();
-        if family.is_empty() {
-            return Some("database guest sqlFamily is required".into());
-        }
-        if family != "sqlite" && family != "postgres" {
-            return Some(format!(
-                "database guest sqlFamily {:?} is not sqlite or postgres (SQL-like backends only)",
-                self.sql_family
-            ));
-        }
-        if !self.diagnostic_engine.is_empty()
-            && !dialect_matches_sql_family_bootstrap(&self.diagnostic_engine, &family)
-        {
-            return Some(format!(
-                "database guest dialect {:?} does not match sqlFamily {:?}",
-                self.diagnostic_engine, self.sql_family
-            ));
-        }
         let connect = self.to_connect();
         if !connect.meets_host_minimums() {
             return Some(connect.capability_failure_reason());
@@ -514,31 +497,41 @@ impl DbCapabilities {
         None
     }
 
+    /// SeaORM proxy backend from bootstrap metadata only (not schema flags).
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when bootstrap metadata does not name a supported engine.
+    pub fn bootstrap_backend_failure_reason(&self) -> Option<String> {
+        let connect = self.to_connect();
+        connect.bootstrap_backend_failure_reason()
+    }
+
     /// JSON connect result used by existing host negotiation.
     ///
-    /// When [`Self::sql_family`] is non-empty it is the SeaORM family identity.
-    /// An empty value (legacy guests) falls back to schema capability flags.
-    /// [`Self::diagnostic_engine`] is never used for dialect selection.
+    /// Schema flags and limits come from typed capabilities. [`Self::sql_family`]
+    /// and [`Self::diagnostic_engine`] are passed through as bootstrap metadata
+    /// for SeaORM proxy open only; they do not select host schema packs.
     #[must_use]
     pub fn to_connect(&self) -> DbConnectResult {
-        let (dialect, sql_family, interactive_txn) = if !self.sql_family.is_empty() {
+        let interactive_txn = !self.atomic_schema_batch;
+        let sql_family = self.sql_family.clone();
+        let dialect = if !self.sql_family.is_empty() {
             match self.sql_family.to_ascii_lowercase().as_str() {
-                "postgres" | "postgresql" | "pg" => ("postgres", "postgres", true),
-                _ => ("sqlite", "sqlite", !self.atomic_schema_batch),
+                "postgres" | "postgresql" | "pg" => "postgres".into(),
+                _ => "sqlite".into(),
             }
+        } else if !self.diagnostic_engine.is_empty() {
+            self.diagnostic_engine.clone()
         } else if self.pragma_user_version {
-            ("sqlite", "sqlite", true)
-        } else if self.schema_migrations && self.atomic_schema_batch {
-            ("sqlite", "sqlite", false)
-        } else if self.schema_migrations {
-            ("postgres", "postgres", true)
+            "sqlite".into()
         } else {
-            ("sqlite", "sqlite", !self.atomic_schema_batch)
+            String::new()
         };
         DbConnectResult {
-            dialect: dialect.into(),
+            dialect,
             interactive_txn,
-            sql_family: sql_family.into(),
+            sql_family,
             atomic_batch: self.atomic_batch,
             returning: self.returning,
             max_binds: self.max_binds,
@@ -555,17 +548,6 @@ impl DbCapabilities {
             atomic_schema_batch: self.atomic_schema_batch,
             timing: self.timing,
         }
-    }
-}
-
-/// Bootstrap-only dialect/sqlFamily consistency (not used for schema plan selection).
-fn dialect_matches_sql_family_bootstrap(dialect: &str, sql_family: &str) -> bool {
-    match sql_family {
-        "sqlite" => dialect.eq_ignore_ascii_case("sqlite"),
-        "postgres" => {
-            dialect.eq_ignore_ascii_case("postgres") || dialect.eq_ignore_ascii_case("postgresql")
-        }
-        _ => false,
     }
 }
 
@@ -733,16 +715,42 @@ mod tests {
     }
 
     #[test]
-    fn to_connect_sql_family_overrides_schema_migration_flags() {
-        let caps = DbCapabilities::from_connect(&DbConnectResult::sqlite_row_migrations());
-        assert!(caps.schema_migrations);
-        assert!(!caps.atomic_schema_batch);
-        assert_eq!(caps.sql_family, "sqlite");
+    fn to_connect_preserves_schema_flags_when_sql_family_differs() {
+        let mut caps = DbCapabilities::from_connect(&DbConnectResult::d1());
+        caps.sql_family = "postgres".into();
         let back = caps.to_connect();
-        assert_eq!(back.dialect, "sqlite");
-        assert_eq!(back.sql_family, "sqlite");
         assert!(back.schema_migrations);
-        assert!(!back.atomic_schema_batch);
+        assert!(back.atomic_schema_batch);
+        assert!(!back.interactive_txn);
+        assert_eq!(back.sql_family, "postgres");
+        assert_eq!(back.dialect, "postgres");
+    }
+
+    #[test]
+    fn capabilities_meet_minimums_without_sql_family() {
+        let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
+        caps.sql_family.clear();
+        assert!(caps.meets_host_minimums(), "{}", caps.capability_failure_reason());
+    }
+
+    #[test]
+    fn to_connect_does_not_infer_postgres_from_row_marker_flags() {
+        let mut caps = DbCapabilities::from_connect(&DbConnectResult::d1());
+        caps.sql_family.clear();
+        let back = caps.to_connect();
+        assert!(back.schema_migrations);
+        assert!(back.atomic_schema_batch);
+        assert!(back.sql_family.is_empty());
+        assert_eq!(back.dialect, "sqlite");
+    }
+
+    #[test]
+    fn bootstrap_rejects_unknown_sql_family() {
+        let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
+        caps.sql_family = "mystery".into();
+        let connect = caps.to_connect();
+        let reason = connect.bootstrap_backend_failure_reason().expect("reject");
+        assert!(reason.contains("sqlFamily"), "{reason}");
     }
 
     #[test]

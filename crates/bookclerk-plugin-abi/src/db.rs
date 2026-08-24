@@ -217,9 +217,10 @@ pub struct DbConnectResult {
     /// guests (treated as `true`).
     #[serde(default = "default_true")]
     pub interactive_txn: bool,
-    /// SQL dialect family for host-authored plans (`sqlite` or `postgres`).
+    /// SQL dialect family for SeaORM proxy bootstrap (`sqlite` or `postgres`).
     ///
-    /// Empty on older guests; the host then fails closed for generic plans.
+    /// Bootstrap-only metadata; host schema and plan selection must not branch
+    /// on this field. Empty on older guests.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sql_family: String,
     /// Guest can run a bounded statement list as one SQL transaction.
@@ -401,18 +402,6 @@ impl DbConnectResult {
         if !self.atomic_batch {
             return Some("database guest does not advertise atomicBatch".into());
         }
-        if self.sql_family != "sqlite" && self.sql_family != "postgres" {
-            return Some(format!(
-                "database guest sqlFamily {:?} is not sqlite or postgres (SQL-like backends only)",
-                self.sql_family
-            ));
-        }
-        if !dialect_matches_sql_family(&self.dialect, &self.sql_family) {
-            return Some(format!(
-                "database guest dialect {:?} does not match sqlFamily {:?}",
-                self.dialect, self.sql_family
-            ));
-        }
         if !self.returning {
             return Some(
                 "database guest does not advertise returning (host plans require RETURNING)".into(),
@@ -497,6 +486,42 @@ impl DbConnectResult {
             return Some("database guest atomicSchemaBatch requires schemaMigrations".into());
         }
         None
+    }
+
+    /// SeaORM proxy backend failure from bootstrap metadata (`dialect` / `sqlFamily`).
+    #[must_use]
+    pub fn bootstrap_backend_failure_reason(&self) -> Option<String> {
+        let family = self.sql_family.to_ascii_lowercase();
+        if !family.is_empty() {
+            if family != "sqlite" && family != "postgres" {
+                return Some(format!(
+                    "database guest sqlFamily {:?} is not sqlite or postgres (SQL-like backends only)",
+                    self.sql_family
+                ));
+            }
+            if !self.dialect.is_empty() && !dialect_matches_sql_family(&self.dialect, &family) {
+                return Some(format!(
+                    "database guest dialect {:?} does not match sqlFamily {:?}",
+                    self.dialect, self.sql_family
+                ));
+            }
+            return None;
+        }
+        let dialect = self.dialect.to_ascii_lowercase();
+        if dialect.is_empty() {
+            return Some("database guest dialect is required for SeaORM proxy bootstrap".into());
+        }
+        if dialect == "sqlite"
+            || dialect == "postgres"
+            || dialect == "postgresql"
+            || dialect == "pg"
+        {
+            return None;
+        }
+        Some(format!(
+            "database guest dialect {:?} is not sqlite or postgres (SQL-like backends only)",
+            self.dialect
+        ))
     }
 }
 
