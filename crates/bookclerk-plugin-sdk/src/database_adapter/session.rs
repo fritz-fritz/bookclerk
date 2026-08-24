@@ -13,14 +13,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
 
 use super::plugin_error_from_db_err;
+use crate::db::{
+    proxy_rows_to_dto, statement_from_dto, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
+};
 use crate::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use bookclerk_plugin_abi::{
     DbAtomicRequest, DbCapabilities, DbConnectResult, DbPlanExecResult, ExecuteReply,
     ExecuteRequest,
-};
-use crate::db::{
-    proxy_rows_to_dto, statement_from_dto, ExecResultDto, ProxyRowDto, QueryResultDto,
-    StatementDto,
 };
 use futures::TryStreamExt;
 use sea_orm::{
@@ -604,7 +603,9 @@ async fn txn_worker(
                 let result = match stack_txn(&stack, &txn_id) {
                     Ok(txn) => {
                         let caps = match ConnectionTrait::get_database_backend(txn) {
-                            DbBackend::Postgres => bookclerk_plugin_abi::DbConnectResult::postgres(),
+                            DbBackend::Postgres => {
+                                bookclerk_plugin_abi::DbConnectResult::postgres()
+                            }
                             _ => bookclerk_plugin_abi::DbConnectResult::sqlite(),
                         };
                         let timing_source = match ConnectionTrait::get_database_backend(txn) {

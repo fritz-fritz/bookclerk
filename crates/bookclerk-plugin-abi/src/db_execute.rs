@@ -110,7 +110,7 @@ fn selection_for_kind(kind: DbPlanStatementKind) -> DbResultSelection {
 ///
 /// Host interpretation metadata (outcome / payload / receipt indices) lives on
 /// [`DbAtomicPlan`] only, not on the wire request adapters execute.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecuteRequest {
     /// Caller-chosen idempotency key.
@@ -121,17 +121,6 @@ pub struct ExecuteRequest {
     pub statements: Vec<TypedDbStatement>,
     /// Guest-visible deadline (unix ms). Zero means omitted.
     pub deadline_unix_ms: u64,
-}
-
-impl Default for ExecuteRequest {
-    fn default() -> Self {
-        Self {
-            operation_id: String::new(),
-            request_hash: String::new(),
-            statements: Vec::new(),
-            deadline_unix_ms: 0,
-        }
-    }
 }
 
 impl ExecuteRequest {
@@ -719,7 +708,11 @@ mod tests {
     fn capabilities_meet_minimums_without_sql_family() {
         let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
         caps.sql_family.clear();
-        assert!(caps.meets_host_minimums(), "{}", caps.capability_failure_reason());
+        assert!(
+            caps.meets_host_minimums(),
+            "{}",
+            caps.capability_failure_reason()
+        );
     }
 
     #[test]

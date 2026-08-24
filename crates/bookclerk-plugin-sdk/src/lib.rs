@@ -55,12 +55,12 @@ pub mod callback_tunnel;
 pub mod database_adapter;
 #[cfg(feature = "db")]
 mod db;
-#[cfg(feature = "db")]
-#[doc(hidden)]
-pub mod legacy_db;
 mod db_binding;
 mod error;
 mod fetch_dir;
+#[cfg(feature = "db")]
+#[doc(hidden)]
+pub mod legacy_db;
 mod pass_fd;
 pub mod protocol;
 pub mod tools;

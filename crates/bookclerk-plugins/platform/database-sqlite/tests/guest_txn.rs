@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 use bookclerk_plugin_sdk::database_adapter::{
     guest_begin, guest_commit, guest_execute, guest_query, guest_rollback, set_connection,
 };
-use bookclerk_plugin_sdk::{QueryResultDto, StatementDto};
+use bookclerk_plugin_sdk::legacy_db::{QueryResultDto, StatementDto};
 use tokio::sync::Mutex;
 
 static SESSION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

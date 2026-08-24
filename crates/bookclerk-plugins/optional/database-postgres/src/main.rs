@@ -7,13 +7,13 @@ use bookclerk_plugin_sdk::database_adapter::{
     guest_begin, guest_capabilities, guest_commit, guest_execute_atomic,
     guest_execute_atomic_on_txn, guest_rollback, plugin_error_from_engine, set_connection,
 };
+use bookclerk_plugin_sdk::legacy_db::DbConnectParams;
 use bookclerk_plugin_sdk::v2::{
     AdapterDatabaseSession, AdapterTransaction, Database, DatabaseContext, PluginDescribe,
     PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    serve, DbCapabilities, DbConnectParams, ExecuteReply, ExecuteRequest, HandshakeResult,
-    PluginError,
+    serve, DbCapabilities, ExecuteReply, ExecuteRequest, HandshakeResult, PluginError,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {

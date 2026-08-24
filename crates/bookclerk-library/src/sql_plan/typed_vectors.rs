@@ -1,9 +1,7 @@
 //! Typed adapter conformance (`ExecuteRequest` / `ExecuteReply`).
 
 use bookclerk_db_exec::{AtomicSession, ExecCaps};
-use bookclerk_plugin_abi::{
-    DbAtomicRequest, DbConnectResult, DbPlanExecResult, ExecuteRequest,
-};
+use bookclerk_plugin_abi::{DbAtomicRequest, DbConnectResult, DbPlanExecResult, ExecuteRequest};
 
 use super::vectors;
 use super::SqlFamily;

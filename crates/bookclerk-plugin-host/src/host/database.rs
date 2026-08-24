@@ -13,12 +13,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
+use bookclerk_plugin_sdk::legacy_db::{
+    db_value_from_sea, exec_result_from_dto, proxy_rows_from_typed, DbAtomicPlan, DbAtomicRequest,
+    DbConnectParams, DbConnectResult, DbPlanStatement, DbPlanStatementKind, ExecResultDto,
+};
 use bookclerk_plugin_sdk::v2::GuestDatabase;
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
-    db_value_from_sea, exec_result_from_dto, proxy_rows_from_typed, DbAtomicPlan, DbAtomicRequest,
-    DbConnectParams, DbConnectResult, DbPlanStatement, DbPlanStatementKind, DbResultSelection,
-    ExecResultDto, ExecuteReply, ExecuteRequest, PluginError as AbiPluginError, TypedDbStatement,
+    DbResultSelection, ExecuteReply, ExecuteRequest, PluginError as AbiPluginError,
+    TypedDbStatement,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -639,9 +642,13 @@ impl RpcAtomicBackend {
         params: bookclerk_library::DbAtomicParams,
     ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
         let now = chrono::Utc::now().to_rfc3339();
-        let compiled =
-            bookclerk_library::compile_named_request(&operation_id, &params, &now, bookclerk_library::SqlFamily::Sqlite)
-                .map_err(bookclerk_library::LibraryError::Orm)?;
+        let compiled = bookclerk_library::compile_named_request(
+            &operation_id,
+            &params,
+            &now,
+            bookclerk_library::SqlFamily::Sqlite,
+        )
+        .map_err(bookclerk_library::LibraryError::Orm)?;
         self.send_compiled(compiled, operation_id).await
     }
 
@@ -1525,9 +1532,10 @@ mod tests {
 
     #[test]
     fn omitted_rows_affected_fails_deserialize() {
-        let err =
-            serde_json::from_str::<bookclerk_plugin_abi::DbPlanStmtExecResult>(r#"{"rows":[]}"#)
-                .unwrap_err();
+        let err = serde_json::from_str::<bookclerk_plugin_sdk::legacy_db::DbPlanStmtExecResult>(
+            r#"{"rows":[]}"#,
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("rowsAffected") || err.to_string().contains("missing field"),
             "{err}"

@@ -310,9 +310,7 @@ mod tests {
         assert!(wrapped.request_hash.is_empty());
         assert_eq!(wrapped.statements.len(), 4);
         assert!(
-            wrapped.statements[1]
-                .sql
-                .contains("db_atomic_receipts"),
+            wrapped.statements[1].sql.contains("db_atomic_receipts"),
             "prior receipt select at index 1"
         );
         let gated = &wrapped.statements[2];

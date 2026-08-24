@@ -6,11 +6,14 @@
 
 use std::time::Duration;
 
-use bookclerk_plugin_abi::{
-    encoded_execute_reply_bytes, encoded_statement_result_bytes, sea_null_kind, DbAtomicPlan,
-    DbAtomicRequest, DbAtomicTiming, DbColumn, DbConnectResult, DbPlanExecResult,
-    DbPlanStatementKind, DbPlanStmtExecResult, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
-    ExecuteReply, ExecuteRequest, PluginError, StatementResult, TypedDbStatement,
+use bookclerk_plugin_sdk::legacy_db::{
+    sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbConnectResult,
+    DbPlanExecResult, DbPlanStatementKind, DbPlanStmtExecResult,
+};
+use bookclerk_plugin_sdk::{
+    encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbResultSelection,
+    DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, StatementResult,
+    TypedDbStatement,
 };
 use sea_orm::DbErr;
 use serde_json::Value as JsonValue;
@@ -1052,7 +1055,7 @@ mod tests {
     #[test]
     fn statement_failure_is_not_ambiguous() {
         let plan = DbAtomicPlan {
-            statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+            statements: vec![bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
                 sql: "INSERT INTO t (k) VALUES ('a')".into(),
                 binds: vec![],
                 kind: DbPlanStatementKind::Execute,
@@ -1073,10 +1076,10 @@ mod tests {
     #[test]
     fn parse_caps_result_rows() {
         let plan = DbAtomicPlan {
-            statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+            statements: vec![bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
                 sql: "SELECT 1".into(),
                 binds: vec![],
-                kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+                kind: bookclerk_plugin_sdk::legacy_db::DbPlanStatementKind::Query,
                 max_rows: 0,
             }],
             outcome_index: 0,
@@ -1108,8 +1111,11 @@ mod tests {
         assert_eq!(exec.statements[0].rows.len(), 1_000);
     }
 
-    fn stmt(sql: &str, kind: DbPlanStatementKind) -> bookclerk_plugin_abi::DbPlanStatement {
-        bookclerk_plugin_abi::DbPlanStatement::new(sql, vec![], kind)
+    fn stmt(
+        sql: &str,
+        kind: DbPlanStatementKind,
+    ) -> bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
+        bookclerk_plugin_sdk::legacy_db::DbPlanStatement::new(sql, vec![], kind)
     }
 
     fn plan_of(sql: &str, kind: DbPlanStatementKind) -> DbAtomicPlan {
