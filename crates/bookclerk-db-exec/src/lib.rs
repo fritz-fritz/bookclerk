@@ -4,7 +4,7 @@
 //! This crate runs those statements as one native transaction and records
 //! fail-closed begin/commit faults. It must not import Bookclerk entities or
 //! host domain planners. Engine-specific schema DDL lowering for Postgres lives
-//! in [`schema_postgres`].
+//! in [`schema_sql_for_backend`] and related helpers.
 
 use std::cell::RefCell;
 
