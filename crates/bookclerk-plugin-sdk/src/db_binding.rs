@@ -477,8 +477,8 @@ fn new_operation_id() -> String {
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
-    use bookclerk_plugin_abi::PluginErrorCode;
     use bookclerk_plugin_abi::v2::GuestDatabase;
+    use bookclerk_plugin_abi::PluginErrorCode;
     use std::sync::Mutex;
 
     struct RecordingSession {

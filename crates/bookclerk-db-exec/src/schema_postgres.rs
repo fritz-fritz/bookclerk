@@ -772,7 +772,6 @@ pub fn latest_schema_postgres() -> &'static str {
 /// Ordered DDL for Postgres `schema_migrations` versioning.
 #[must_use]
 pub fn migration_sql_postgres() -> &'static [&'static str] {
-
     &[
         POSTGRES_SCHEMA,
         MIGRATION_V2_OPERATOR_SESSIONS_POSTGRES,

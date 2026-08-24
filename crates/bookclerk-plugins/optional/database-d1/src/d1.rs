@@ -1968,7 +1968,10 @@ mod tests {
                 deadline_unix_ms: 0,
             };
             let reply = proxy
-                .run_typed_atomic(&req, bookclerk_plugin_sdk::host_db::GuestReceiptPersist::default())
+                .run_typed_atomic(
+                    &req,
+                    bookclerk_plugin_sdk::host_db::GuestReceiptPersist::default(),
+                )
                 .await
                 .unwrap_or_else(|e| panic!("{label}: {e}"));
             let got = reply.statements[0].rows[0].values[0].clone();

@@ -369,9 +369,7 @@ async fn collect_capped_query_rows(
 pub(crate) fn rows_affected_for_kind(kind: DbPlanStatementKind, returned_rows: usize) -> u64 {
     match kind {
         DbPlanStatementKind::Select => 0,
-        DbPlanStatementKind::Returning => {
-            u64::try_from(returned_rows).unwrap_or(u64::MAX)
-        }
+        DbPlanStatementKind::Returning => u64::try_from(returned_rows).unwrap_or(u64::MAX),
         DbPlanStatementKind::Execute => 0,
     }
 }

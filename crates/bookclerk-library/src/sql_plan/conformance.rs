@@ -816,7 +816,9 @@ fn d1_compat_execute(
         };
         let rows_affected = match stmt.kind {
             crate::sql_plan::DbPlanStatementKind::Select => 0,
-            crate::sql_plan::DbPlanStatementKind::Returning => u64::try_from(rows.len()).unwrap_or(0),
+            crate::sql_plan::DbPlanStatementKind::Returning => {
+                u64::try_from(rows.len()).unwrap_or(0)
+            }
             crate::sql_plan::DbPlanStatementKind::Execute => engine_changes,
         };
         statements.push(crate::sql_plan::DbPlanStmtExecResult {

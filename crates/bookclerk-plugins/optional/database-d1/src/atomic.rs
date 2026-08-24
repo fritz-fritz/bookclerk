@@ -1047,9 +1047,7 @@ fn parse_batch_results(
             .unwrap_or(DbPlanStatementKind::Returning);
         let rows_affected = match kind {
             DbPlanStatementKind::Select => 0,
-            DbPlanStatementKind::Returning => {
-                u64::try_from(rows.len()).unwrap_or(u64::MAX)
-            }
+            DbPlanStatementKind::Returning => u64::try_from(rows.len()).unwrap_or(u64::MAX),
             DbPlanStatementKind::Execute => changes,
         };
         out.push(DbPlanStmtExecResult {

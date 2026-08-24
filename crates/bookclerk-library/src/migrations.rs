@@ -386,7 +386,6 @@ const MIGRATION_V2_OPERATOR_SESSIONS_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_operator_sessions_hash ON operator_sessions(token_hash);
 "#;
 
-
 /// Additive migration: first-party `users` + bridge column on portal identities (#117).
 ///
 /// Data backfill (portal row → member user, prefs subject remap) runs in
@@ -406,14 +405,12 @@ const MIGRATION_V3_USERS_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
 "#;
 
-
 /// SQLite cannot add a FK column in one statement portably; add nullable `user_id`
 /// then index. Existing rows are bridged in Rust.
 const MIGRATION_V3_PORTAL_USER_ID_SQLITE: &str = r#"
     ALTER TABLE portal_identities ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
     CREATE INDEX IF NOT EXISTS idx_portal_identities_user ON portal_identities(user_id);
 "#;
-
 
 /// Additive migration: elevate / impersonate metadata + security audit (#117 Phase 2).
 const MIGRATION_V4_ELEVATE_AUDIT_SQLITE: &str = r#"
@@ -428,7 +425,6 @@ const MIGRATION_V4_ELEVATE_AUDIT_SQLITE: &str = r#"
     );
     CREATE INDEX IF NOT EXISTS idx_security_audit_at ON security_audit_events(at);
 "#;
-
 
 /// Additive migration: local login_name + user invites (#117 Phase 3).
 const MIGRATION_V5_PROVISIONING_SQLITE: &str = r#"
@@ -447,7 +443,6 @@ const MIGRATION_V5_PROVISIONING_SQLITE: &str = r#"
     );
     CREATE INDEX IF NOT EXISTS idx_user_invites_hash ON user_invites(token_hash);
 "#;
-
 
 /// Additive migration: OIDC authorization server tables (#117 Phase 4).
 const MIGRATION_V6_OIDC_SQLITE: &str = r#"
@@ -486,12 +481,10 @@ const MIGRATION_V6_OIDC_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_oidc_refresh_hash ON oidc_refresh_tokens(token_hash);
 "#;
 
-
 /// Exclusive account_links: one portal identity per store account (#117 Phase 5).
 const MIGRATION_V7_EXCLUSIVE_LINKS_SQLITE: &str = r#"
     CREATE UNIQUE INDEX IF NOT EXISTS idx_account_links_account_exclusive ON account_links(account_id);
 "#;
-
 
 /// Additive migration: session client metadata for operator/portal session lists.
 ///
@@ -507,13 +500,11 @@ const MIGRATION_V8_SESSION_CLIENT_SQLITE: &str = r#"
     ALTER TABLE portal_sessions ADD COLUMN last_used_at TEXT;
 "#;
 
-
 /// Optional contact email on first-party users (invites / notifications).
 const MIGRATION_V9_USER_EMAIL_SQLITE: &str = r#"
     ALTER TABLE users ADD COLUMN email TEXT;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
 "#;
-
 
 /// OIDC RP login state + WebAuthn credentials / challenges.
 const MIGRATION_V10_SSO_WEBAUTHN_SQLITE: &str = r#"
@@ -565,8 +556,6 @@ const MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_db_atomic_receipts_expires ON db_atomic_receipts(expires_at);
 "#;
 
-
-
 /// Durable daemon job queue and associated scratch-path ledger (SQLite).
 const MIGRATION_V12_JOBS_SQLITE: &str = r#"
     CREATE TABLE IF NOT EXISTS jobs (
@@ -604,7 +593,6 @@ const MIGRATION_V12_JOBS_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_job_temp_paths_job ON job_temp_paths(job_id);
 "#;
 
-
 /// Lease generation, active-key uniqueness, and reserved scratch bytes (SQLite).
 const MIGRATION_V13_JOB_FENCE_SQLITE: &str = r#"
     ALTER TABLE jobs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0;
@@ -615,7 +603,6 @@ const MIGRATION_V13_JOB_FENCE_SQLITE: &str = r#"
         ON job_temp_paths(job_id, path);
 "#;
 
-
 /// Singleton row that serializes admission and quota updates (SQLite).
 const MIGRATION_V14_JOB_QUEUE_CONTROL_SQLITE: &str = r#"
     CREATE TABLE IF NOT EXISTS job_queue_control (
@@ -623,7 +610,6 @@ const MIGRATION_V14_JOB_QUEUE_CONTROL_SQLITE: &str = r#"
     );
     INSERT OR IGNORE INTO job_queue_control (id) VALUES (1);
 "#;
-
 
 /// Durable `users.last_seen_at` for presence after logout (SQLite).
 ///
@@ -640,7 +626,6 @@ const MIGRATION_V15_USER_LAST_SEEN_SQLITE: &str = r#"
     WHERE last_seen_at IS NULL;
 "#;
 
-
 /// Profile picture choice plus IdP-supplied avatar URLs (SQLite).
 ///
 /// `users.avatar_source` is `NULL`/`auto`, `monogram`, `gravatar`, `upload`, or
@@ -651,20 +636,17 @@ const MIGRATION_V16_AVATAR_SOURCE_SQLITE: &str = r#"
     ALTER TABLE portal_identities ADD COLUMN picture_url TEXT;
 "#;
 
-
 /// Passkey display names plus a durable TOTP-enrolled flag on users.
 const MIGRATION_V17_PASSKEY_NAME_TOTP_SQLITE: &str = r#"
     ALTER TABLE webauthn_credentials ADD COLUMN name TEXT;
     ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0;
 "#;
 
-
 /// OIDC AS client token policy (refresh + allowed scopes).
 const MIGRATION_V18_OIDC_CLIENT_POLICY_SQLITE: &str = r#"
     ALTER TABLE oidc_clients ADD COLUMN issue_refresh_token INTEGER NOT NULL DEFAULT 1;
     ALTER TABLE oidc_clients ADD COLUMN allowed_scopes_json TEXT NOT NULL DEFAULT '["openid","profile","email"]';
 "#;
-
 
 /// OIDC client enable flag + plugin ownership (see docs/adr/plugin-oidc-clients.md).
 const MIGRATION_V19_OIDC_CLIENT_PLUGIN_SQLITE: &str = r#"
@@ -673,12 +655,10 @@ const MIGRATION_V19_OIDC_CLIENT_PLUGIN_SQLITE: &str = r#"
     UPDATE oidc_clients SET plugin_id = 'audiobookshelf' WHERE client_id = 'audiobookshelf';
 "#;
 
-
 /// Appearance preference (`system` / `light` / `dark`) on user_preferences.
 const MIGRATION_V20_THEME_SQLITE: &str = r#"
     ALTER TABLE user_preferences ADD COLUMN theme TEXT NOT NULL DEFAULT 'system';
 "#;
-
 
 /// Durable domain-event outbox + per-subscriber deliveries (SQLite).
 const MIGRATION_V21_EVENT_OUTBOX_SQLITE: &str = r#"
@@ -726,12 +706,10 @@ const MIGRATION_V21_EVENT_OUTBOX_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_event_deliveries_state ON event_deliveries(state);
 "#;
 
-
 /// Persist producer FIFO keys on the outbox envelope (SQLite).
 const MIGRATION_V22_EVENT_ORDERING_SQLITE: &str = r#"
     ALTER TABLE domain_events ADD COLUMN ordering_key TEXT NOT NULL DEFAULT '';
 "#;
-
 
 /// Cluster subscriber catalog plus delivery cancel/resource-class columns (SQLite).
 const MIGRATION_V23_EVENT_CATALOG_SQLITE: &str = r#"
@@ -744,7 +722,6 @@ const MIGRATION_V23_EVENT_CATALOG_SQLITE: &str = r#"
         updated_at TEXT NOT NULL
     );
 "#;
-
 
 /// Per-node live catalog + durable outbox counters (SQLite).
 const MIGRATION_V24_EVENT_NODES_SQLITE: &str = r#"
@@ -777,7 +754,6 @@ const MIGRATION_V24_EVENT_NODES_SQLITE: &str = r#"
     DROP TABLE IF EXISTS event_subscribers;
 "#;
 
-
 /// Producer `source` on the envelope plus wake-on-event delivery columns (SQLite).
 const MIGRATION_V25_EVENT_SOURCE_WAKE_SQLITE: &str = r#"
     ALTER TABLE domain_events ADD COLUMN source TEXT NOT NULL DEFAULT '';
@@ -789,14 +765,12 @@ const MIGRATION_V25_EVENT_SOURCE_WAKE_SQLITE: &str = r#"
         ON event_deliveries(plugin_id, state);
 "#;
 
-
 /// Durable wake replay flag so Duplicate publish and dispatcher crashes retry.
 const MIGRATION_V26_WAKE_PENDING_SQLITE: &str = r#"
     ALTER TABLE domain_events ADD COLUMN wake_pending INTEGER NOT NULL DEFAULT 1;
     CREATE INDEX IF NOT EXISTS idx_domain_events_wake_pending
         ON domain_events(created_at, id) WHERE wake_pending = 1;
 "#;
-
 
 /// Tenant/producer dedup, claimed wake slices, and host-derived wake grants (SQLite family).
 ///
@@ -893,7 +867,6 @@ const MIGRATION_V27_DEDUP_WAKE_CLAIM_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_event_deliveries_plugin_running ON event_deliveries(plugin_id, state);
 "#;
 
-
 /// Portable COUNT+mutate serialization slots (replaces advisory locks).
 const MIGRATION_V28_SERIALIZATION_SLOTS_SQLITE: &str = r#"
     CREATE TABLE IF NOT EXISTS db_serialization_slots (
@@ -902,12 +875,10 @@ const MIGRATION_V28_SERIALIZATION_SLOTS_SQLITE: &str = r#"
     );
 "#;
 
-
 /// Frozen subscriber snapshot so paged dispatch receipts stay stable.
 const MIGRATION_V29_DISPATCH_SNAPSHOT_SQLITE: &str = r#"
     ALTER TABLE domain_events ADD COLUMN dispatch_snapshot_json TEXT NOT NULL DEFAULT '';
 "#;
-
 
 /// Ordered migration list for local SQLite files (`PRAGMA user_version`).
 #[must_use]
@@ -945,7 +916,6 @@ pub fn migration_sql() -> &'static [&'static str] {
         MIGRATION_V29_DISPATCH_SNAPSHOT_SQLITE,
     ]
 }
-
 
 /// SQLite-family migration steps before the V27 FK-safe rebuild (through wake-pending).
 ///
@@ -998,9 +968,6 @@ pub fn host_migration_sql(backend: sea_orm::DbBackend, step: &HostMigrationStep)
 pub fn latest_schema_postgres() -> &'static str {
     bookclerk_db_exec::latest_schema_postgres()
 }
-
-
-
 
 /// SQLite DDL through the step before the V27 rebuild (legacy test helper).
 #[cfg(test)]
@@ -1153,8 +1120,6 @@ pub fn migration_v27_d1_batch() -> Vec<String> {
 pub fn migrations() -> Migrations<'static> {
     Migrations::new(migration_sql().iter().map(|sql| M::up(sql)).collect())
 }
-
-
 
 #[cfg(test)]
 mod tests {
