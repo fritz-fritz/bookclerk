@@ -274,7 +274,12 @@ function firstTopLevelKeyword(sql: string): string | undefined {
   return first;
 }
 
-/** Classify guest SQL kind to match the host canonical request hash. */
+/**
+ * Classify guest SQL kind to match the host canonical request hash.
+ *
+ * @param sql Canonical Bookclerk SQL (`?` placeholders).
+ * @returns Cap'n `DbStatementKind` (`execute` | `select` | `returning`).
+ */
 export function guestStatementKind(sql: string): DbStatementKind {
   const main = sqlAfterLeadingCtes(sql);
   if (hasTopLevelKeyword(main, "RETURNING")) {
@@ -287,7 +292,12 @@ export function guestStatementKind(sql: string): DbStatementKind {
   return "execute";
 }
 
-/** Split Cloudflare-style `exec()` newline-separated queries. */
+/**
+ * Split Cloudflare-style `exec()` newline-separated queries.
+ *
+ * @param query Multi-statement SQL with one statement per line.
+ * @returns Trimmed statements with trailing semicolons removed.
+ */
 export function splitExecQueries(query: string): string[] {
   return query
     .split("\n")
