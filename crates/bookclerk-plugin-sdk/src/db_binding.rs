@@ -142,7 +142,11 @@ impl DatabaseBinding {
     /// # Errors
     ///
     /// Returns when `run` fails.
-    pub async fn exec(&self, query: impl Into<String>, retry: Option<RetryToken>) -> Result<D1ExecResult> {
+    pub async fn exec(
+        &self,
+        query: impl Into<String>,
+        retry: Option<RetryToken>,
+    ) -> Result<D1ExecResult> {
         let result = self.prepare(query).run(retry).await?;
         Ok(D1ExecResult {
             count: 1,

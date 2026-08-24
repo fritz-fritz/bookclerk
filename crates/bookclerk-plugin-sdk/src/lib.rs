@@ -75,8 +75,8 @@ pub use db::{
     statement_to_dto,
 };
 pub use db_binding::{
-    DatabaseBinding, DatabaseBindingOptions, D1ExecResult, D1Meta, D1Result, PreparedStatement,
-    RetryToken, execute_reply_to_d1_results, statement_result_to_d1_result,
+    execute_reply_to_d1_results, statement_result_to_d1_result, D1ExecResult, D1Meta, D1Result,
+    DatabaseBinding, DatabaseBindingOptions, PreparedStatement, RetryToken,
 };
 pub use error::{Result, SdkError};
 pub use fetch_dir::{fetch_work_dir, upload_file_path, FetchWorkDir, UploadFile};
