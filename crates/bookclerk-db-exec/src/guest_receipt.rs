@@ -81,6 +81,10 @@ pub fn guest_receipt_finalize_stmts(
 }
 
 /// True when a prior receipt row exists but the stub INSERT was gated off (replay after commit).
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when the wrapped reply is missing the receipt stub suffix.
 fn is_gated_guest_replay(partial: &ExecuteReply, prior: &StatementResult) -> Result<bool, DbErr> {
     if prior.rows.is_empty() {
         return Ok(false);
