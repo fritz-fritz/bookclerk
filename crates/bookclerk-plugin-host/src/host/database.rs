@@ -138,9 +138,11 @@ impl ExternalDatabase {
         let kind = bookclerk_library::HostSchemaKind::from_capabilities(caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         let session = self.session.clone();
+        let caps = caps.clone();
         bookclerk_library::apply_host_schema_with_batch(db, kind, move |stmts| {
             let session = session.clone();
-            async move { exec_host_ddl_batch(&session, stmts).await }
+            let caps = caps.clone();
+            async move { exec_host_ddl_batch(&session, &caps, stmts).await }
         })
         .await
         .map_err(|err| DbErr::Custom(err.to_string()))
@@ -464,12 +466,16 @@ impl RpcDatabaseProxy {
     ) -> Result<bookclerk_plugin_sdk::ExecuteReply, crate::PluginError> {
         bookclerk_library::authorize_typed_request(&mut req, &self.caps)
             .map_err(|err| crate::PluginError::from_abi(Some("invalid_params"), err.to_string()))?;
+        let validate_req = req.clone();
         let cancel = Arc::new(AtomicBool::new(false));
-        if self.depth() > 0 {
+        let reply = if self.depth() > 0 {
             self.session.db_txn_execute_request(req, cancel).await
         } else {
             self.session.db_execute_request(req, cancel).await
-        }
+        }?;
+        bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)
+            .map_err(map_reply_validation_err)?;
+        Ok(reply)
     }
 }
 
@@ -664,6 +670,7 @@ impl RpcAtomicBackend {
         let typed = ExecuteRequest::from_atomic(&request)
             .map_err(|err| bookclerk_library::LibraryError::Other(anyhow::anyhow!(err)))?;
         bookclerk_library::validate_execute_request(&typed, &self.caps)?;
+        let validate_req = typed.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let _guard = CancelOnDrop(Arc::clone(&cancel));
         let remaining_ms = deadline_unix_ms.saturating_sub(unix_now_ms()).max(1);
@@ -676,6 +683,7 @@ impl RpcAtomicBackend {
             }
             result = self.session.db_execute_request(typed, Arc::clone(&cancel)) => match result {
                 Ok(reply) => {
+                    bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)?;
                     let exec = reply.into_plan_exec();
                     bookclerk_library::validate_exec_result(
                         &compiled.plan,
@@ -744,6 +752,7 @@ fn unix_now_ms() -> u64 {
 /// Runs host DDL as one `bookclerk.atomic` batch (D1 V27).
 async fn exec_host_ddl_batch(
     session: &V2PluginSession,
+    caps: &DbConnectResult,
     stmts: Vec<String>,
 ) -> bookclerk_library::Result<()> {
     if stmts.is_empty() {
@@ -768,11 +777,13 @@ async fn exec_host_ddl_batch(
     };
     let typed = ExecuteRequest::from_atomic(&req)
         .map_err(|err| bookclerk_library::LibraryError::Other(anyhow::anyhow!(err)))?;
+    let validate_req = typed.clone();
     let cancel = Arc::new(AtomicBool::new(false));
-    session
+    let reply = session
         .db_execute_request(typed, cancel)
         .await
         .map_err(|err| bookclerk_library::LibraryError::Orm(DbErr::Custom(err.to_string())))?;
+    bookclerk_library::validate_execute_reply(&validate_req, &reply, caps)?;
     Ok(())
 }
 
@@ -827,11 +838,16 @@ impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
     ) -> std::result::Result<ExecuteReply, AbiPluginError> {
         bookclerk_library::authorize_typed_request(&mut req, &self.caps)
             .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
+        let validate_req = req.clone();
         let cancel = Arc::new(AtomicBool::new(false));
-        self.session
+        let reply = self
+            .session
             .db_execute_request(req, cancel)
             .await
-            .map_err(host_err_to_abi)
+            .map_err(host_err_to_abi)?;
+        bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)
+            .map_err(map_reply_validation_abi)?;
+        Ok(reply)
     }
 }
 
@@ -1426,6 +1442,24 @@ fn sqlite_connect_params(config: &Config, plugin_data_dir: &Path) -> DbConnectPa
     DbConnectParams::Sqlite {
         plugin_data_dir: plugin_data_dir.display().to_string(),
         sqlite_path: Some(path.display().to_string()),
+    }
+}
+
+/// Maps host reply validation onto a plugin-host RPC error.
+fn map_reply_validation_err(err: bookclerk_library::LibraryError) -> crate::PluginError {
+    match err {
+        bookclerk_library::LibraryError::Unavailable(message) => {
+            crate::PluginError::Unavailable(message)
+        }
+        other => crate::PluginError::from_abi(Some("invalid_params"), other.to_string()),
+    }
+}
+
+/// Maps host reply validation onto the ABI error returned to guests.
+fn map_reply_validation_abi(err: bookclerk_library::LibraryError) -> AbiPluginError {
+    match err {
+        bookclerk_library::LibraryError::Unavailable(message) => AbiPluginError::unavailable(message),
+        other => AbiPluginError::invalid_params(other.to_string()),
     }
 }
 

@@ -11,6 +11,7 @@ mod exec;
 mod guest_receipt;
 mod interpret;
 mod named;
+mod reply;
 mod slots;
 mod typed_vectors;
 pub mod vectors;
@@ -30,6 +31,7 @@ pub(crate) use guest_receipt::{
     guest_receipt_persist_stmts, unwrap_guest_typed_reply, wrap_guest_typed_request,
 };
 pub use interpret::{interpret_exec, interpret_plan, validate_exec_result, PlanStmtResult};
+pub use reply::validate_execute_reply;
 pub use named::{compile_claim_event_delivery, compile_named_request};
 pub use slots::{event_inflight_slot, lock_serialization_slot, JOB_QUEUE_SLOT};
 pub use typed_vectors::run_typed_conn_vectors;
