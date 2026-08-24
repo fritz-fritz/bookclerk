@@ -18,7 +18,7 @@
 //! | Engine error → structured [`crate::PluginError`] | [`plugin_error_from_engine`], [`plugin_error_from_db_err`] |
 //! | Host-provided SQL scripts (no Bookclerk migrations) | [`execute_sql_scripts`] |
 //! | Typed SQL `NULL` for proxy row decode | [`typed_null`] |
-//! | SeaORM ↔ wire DTO helpers | crate-root `db` re-exports ([`crate::StatementDto`], [`crate::proxy_rows_to_dto`], …) |
+//! | SeaORM ↔ wire DTO helpers (first-party only) | [`legacy_db`](crate::legacy_db) ([`crate::legacy_db::StatementDto`], [`crate::legacy_db::proxy_rows_to_dto`], …) |
 //!
 //! Engine-specific connect/proxy code stays in your guest crate; this module
 //! owns the shared session worker and generic SQL-string execution. Hosts

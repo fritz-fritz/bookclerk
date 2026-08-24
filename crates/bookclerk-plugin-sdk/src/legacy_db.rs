@@ -1,6 +1,6 @@
 //! Hidden JSON / sentinel compatibility surface for first-party database guests.
 //!
-//! Third-party plugin authors should use typed [`ExecuteRequest`] /
+//! Third-party plugin authors should use typed [`crate::ExecuteRequest`] /
 //! [`DatabaseBinding`](crate::DatabaseBinding) instead. These items remain
 //! available for in-tree adapters migrating off `bookclerk.atomic` sentinels.
 
