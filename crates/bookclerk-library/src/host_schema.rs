@@ -553,16 +553,20 @@ fn is_already_applied_ddl(err: &LibraryError) -> bool {
         || s.contains("sqlite_constraint")
 }
 
-/// True when a concurrent migrator should retry this version.
+/// True when a concurrent migrator or ambiguous D1 commit should retry this version.
 fn is_schema_lock_err(err: &LibraryError) -> bool {
-    let s = format!("{err}\n{err:?}");
-    s.contains("SQLITE_BUSY")
-        || s.contains("SQLITE_LOCKED")
+    let s = format!("{err}\n{err:?}").to_ascii_lowercase();
+    s.contains("sqlite_busy")
+        || s.contains("sqlite_locked")
         || s.contains("database is locked")
         || s.contains("begin failed")
-        || s.contains("40P01")
+        || s.contains("40p01")
         || s.contains("40001")
-        || s.contains("55P03")
+        || s.contains("55p03")
+        // D1 committed-but-lost / 5xx after commit: retry; version marker makes re-apply safe.
+        || s.contains("d1 ambiguous")
+        || s.contains("ambiguous response")
+        || s.contains("commit reply lost")
 }
 
 /// Loads `schema_migrations.version` rows.
