@@ -78,7 +78,8 @@ pub struct ExecResultDto {
 /// Discriminant is wire field `backend` with lowercase tags. SQLite guests
 /// open `library.db` at [`Self::Sqlite::sqlite_path`] (also injected as
 /// `BOOKCLERK_SQLITE_PATH`); D1 / Postgres receive host-injected credentials
-/// in the params.
+/// in the params. Third-party adapters receive [`Self::Guest`] and read
+/// connection settings from plugin-owned config / secrets bindings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum DbConnectParams {
@@ -114,6 +115,17 @@ pub enum DbConnectParams {
         plugin_data_dir: String,
         /// Full Postgres connection URL (host-injected; may contain secrets).
         url: String,
+    },
+    /// Third-party / conformance database guest (`backend: "guest"`).
+    ///
+    /// The host does not inject first-party secrets. Connection knobs come from
+    /// plugin-owned settings (vat `config` binding) and optional `secrets`
+    /// bindings. The guest must return bootstrap `sqlFamily` / `dialect` on
+    /// connect so the host can open the SeaORM proxy.
+    #[serde(rename_all = "camelCase")]
+    Guest {
+        /// Scoped writable directory for this plugin (wire `pluginDataDir`).
+        plugin_data_dir: String,
     },
 }
 

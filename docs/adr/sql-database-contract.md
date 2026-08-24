@@ -101,6 +101,14 @@ forbids `bookclerk-library` production sources from reading bootstrap fields
 (or defining planner-side `SqlFamily`). SeaORM proxy open maps bootstrap in
 `bookclerk-plugin-host` after typed capability negotiation succeeds.
 
+First-party connect wiring (`DbConnectParams::{Sqlite,D1,Postgres}`) injects
+host-resolved paths and secrets for `sqlite` / `d1` / `postgres`. That is a
+convenience, not the contract: any other `kind = "database"` plugin id receives
+`DbConnectParams::Guest { pluginDataDir }` and must read connection settings
+from plugin-owned config / secrets bindings, then return bootstrap
+`sqlFamily` / `dialect` on connect. Missing or mismatched bootstrap fields
+fail closed.
+
 ### Generic atomic execute
 
 The data plane is typed `DatabaseSession.executeAtomic(ExecuteRequest) ->

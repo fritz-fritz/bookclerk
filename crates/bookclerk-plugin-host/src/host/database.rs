@@ -1372,20 +1372,11 @@ struct AtomicWebauthnChallenge {
     state_json: String,
 }
 
-/// Resolves a configured database plugin id to a first-party kind.
+/// Builds guest `db.connect` params from host config.
 ///
-/// Unknown ids fail closed; generic adapters must supply bootstrap metadata on
-/// `db.connect` instead of relying on host plugin-id tables.
-fn resolve_database_plugin_kind(plugin_id: &str) -> Result<DatabasePluginKind, DbErr> {
-    DatabasePluginKind::parse(plugin_id).ok_or_else(|| {
-        DbErr::Custom(format!(
-            "unknown database plugin id `{plugin_id}` — configure a first-party plugin \
-             (sqlite, d1, postgres) or supply bootstrap sqlFamily/dialect on db.connect"
-        ))
-    })
-}
-
-/// Builds guest `db.connect` params (SQLite path, D1 token, or Postgres URL) from host config.
+/// First-party ids (`sqlite`, `d1`, `postgres`) receive host-injected paths /
+/// secrets. Unknown ids get [`DbConnectParams::Guest`] so third-party adapters
+/// can bootstrap from plugin-owned settings without a host registry change.
 fn connect_params(
     config: &Config,
     plugin_id: &str,
@@ -1393,9 +1384,9 @@ fn connect_params(
     session: &V2PluginSession,
 ) -> Result<DbConnectParams, DbErr> {
     let data_dir = plugin_data_dir.display().to_string();
-    match resolve_database_plugin_kind(plugin_id)? {
-        DatabasePluginKind::Sqlite => Ok(sqlite_connect_params(config, plugin_data_dir)),
-        DatabasePluginKind::D1 => {
+    match DatabasePluginKind::parse(plugin_id) {
+        Some(DatabasePluginKind::Sqlite) => Ok(sqlite_connect_params(config, plugin_data_dir)),
+        Some(DatabasePluginKind::D1) => {
             session
                 .require_binding("secrets")
                 .map_err(|err| DbErr::Custom(err.to_string()))?;
@@ -1407,7 +1398,7 @@ fn connect_params(
                 api_token: resolve_d1_api_token().map_err(map_config_err)?,
             })
         }
-        DatabasePluginKind::Postgres => {
+        Some(DatabasePluginKind::Postgres) => {
             session
                 .require_binding("secrets")
                 .map_err(|err| DbErr::Custom(err.to_string()))?;
@@ -1416,6 +1407,9 @@ fn connect_params(
                 url: resolve_postgres_url(config).map_err(map_config_err)?,
             })
         }
+        None => Ok(DbConnectParams::Guest {
+            plugin_data_dir: data_dir,
+        }),
     }
 }
 
@@ -1580,13 +1574,18 @@ mod tests {
     }
 
     #[test]
-    fn unknown_plugin_id_fails_connect_params() {
+    fn unknown_plugin_id_uses_guest_connect_params() {
         assert!(DatabasePluginKind::parse("sql-conformance").is_none());
-        let err = resolve_database_plugin_kind("sql-conformance").unwrap_err();
-        assert!(
-            err.to_string().contains("unknown database plugin id"),
-            "{err}"
-        );
+        let dir = std::path::Path::new("/tmp/plugins/sql-conformance/data");
+        // Mirrors `connect_params` for unknown ids (no host-injected secrets).
+        let params = DbConnectParams::Guest {
+            plugin_data_dir: dir.display().to_string(),
+        };
+        let v = serde_json::to_value(&params).unwrap();
+        assert_eq!(v["backend"], "guest");
+        assert_eq!(v["pluginDataDir"], dir.display().to_string());
+        let back: DbConnectParams = serde_json::from_value(v).unwrap();
+        assert_eq!(back, params);
     }
 
     #[test]

@@ -162,6 +162,16 @@ mod tests {
     }
 
     #[test]
+    fn db_connect_guest_roundtrip() {
+        roundtrip_fixture::<DbConnectParams>("dbConnect.guest.json");
+        let v = load("dbConnect.guest.json");
+        assert_eq!(v["backend"], "guest");
+        assert!(v.get("pluginDataDir").is_some());
+        assert!(v.get("sqlitePath").is_none());
+        assert!(v.get("url").is_none());
+    }
+
+    #[test]
     fn db_execute_result_roundtrip() {
         roundtrip_fixture::<ExecResultDto>("dbExecute.result.json");
         let v = load("dbExecute.result.json");
@@ -188,6 +198,7 @@ mod tests {
             "fetchTitle.request.json",
             "put.s3.request.json",
             "dbConnect.sqlite.json",
+            "dbConnect.guest.json",
             "dbExecute.result.json",
         ] {
             assert!(

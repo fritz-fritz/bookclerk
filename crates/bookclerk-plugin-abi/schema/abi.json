@@ -1086,6 +1086,21 @@
               "type": "string"
             }
           }
+        },
+        {
+          "type": "object",
+          "required": [
+            "backend",
+            "pluginDataDir"
+          ],
+          "properties": {
+            "backend": {
+              "const": "guest"
+            },
+            "pluginDataDir": {
+              "type": "string"
+            }
+          }
         }
       ]
     },

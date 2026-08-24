@@ -115,9 +115,13 @@ in-process engine fallback.
 External `kind = "database"` guests also load for **D1** and **Postgres** when
 discovered and `[database].plugin` matches the plugin id. SeaORM proxy calls
 (`db.query` / `db.execute`) forward through the guest; `master.key` never leaves
-the host. Connect params are a tagged `DbConnectParams` shape; the guest returns
-`{ "dialect": "sqlite" | "postgres" }` so the host builds the RPC proxy without
-hardcoding backends.
+the host. Connect params are a tagged `DbConnectParams` shape; first-party
+ids receive host-injected paths/secrets (`sqlite` / `d1` / `postgres`), while
+any other database plugin id receives `backend: "guest"` with only
+`pluginDataDir` — connection knobs come from plugin-owned settings and
+`secrets`/`config` bindings. The guest returns bootstrap
+`{ "sqlFamily", "dialect" }` (and related capability fields) so the host
+builds the RPC proxy without hardcoding backends.
 
 First-party guests: `bookclerk-plugin-database-sqlite` (platform),
 `bookclerk-plugin-database-d1` and `bookclerk-plugin-database-postgres` (optional).
