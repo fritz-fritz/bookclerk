@@ -653,6 +653,14 @@ mod tests {
     }
 
     #[test]
+    fn capabilities_reject_missing_cancellation() {
+        let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
+        caps.cancellation = false;
+        assert!(!caps.meets_host_minimums());
+        assert!(caps.capability_failure_reason().contains("cancellation"));
+    }
+
+    #[test]
     fn capabilities_reject_missing_affected_rows() {
         let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
         caps.affected_rows = false;

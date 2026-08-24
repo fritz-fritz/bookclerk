@@ -927,6 +927,9 @@ fn collect_expr_atoms_with_aliases(
             continue;
         }
         collect_one_expr_atom(scan, refs, ctes, aliases)?;
+        if scan.take_kw("AS") {
+            let _ = scan.read_ident();
+        }
     }
     Ok(())
 }
@@ -1112,6 +1115,11 @@ fn collect_one_expr_atom(
             let mut inner_scan = Scan { sql: inner, i: 0 };
             collect_expr_atoms_with_aliases(&mut inner_scan, refs, ctes, aliases)?;
         }
+        return Ok(());
+    }
+    if scan.peek_byte(b'*') {
+        scan.i += 1;
+        refs.columns.push((None, "*".into()));
         return Ok(());
     }
     if let Some(ident) = scan.read_ident() {
@@ -1819,6 +1827,35 @@ mod tests {
                 1,
             ),
             &books,
+        )
+        .unwrap();
+        let restricted = GuestSqlPolicy::allow_tables(["books"]).restrict_columns("books", ["id"]);
+        let err = authorize_guest_sql_policy(
+            &req("SELECT * FROM books", vec![], DbResultSelection::Rows, 1),
+            &restricted,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("SELECT * is not allowed"),
+            "{err}"
+        );
+        let err = authorize_guest_sql_policy(
+            &req("SELECT books.* FROM books", vec![], DbResultSelection::Rows, 1),
+            &restricted,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("SELECT * is not allowed"),
+            "{err}"
+        );
+        authorize_guest_sql_policy(
+            &req(
+                "SELECT id AS label FROM books",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &restricted,
         )
         .unwrap();
         let err = parse_guest_sql_refs("SELECT id FROM generate_series(1, 2)").unwrap_err();

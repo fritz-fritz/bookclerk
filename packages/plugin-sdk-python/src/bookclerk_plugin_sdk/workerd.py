@@ -353,8 +353,9 @@ def granted_job_context(
 ) -> JobContext:
     """Build a :class:`JobContext` with host-mediated SQL over ``POST /db/execute``.
 
-    The returned :attr:`JobContext.database` is an awaitable
-    :class:`DatabaseBinding` wired to the granted transport.
+    The returned :attr:`JobContext.database` is a :class:`DatabaseBinding`
+    whose terminal methods (``first``, ``run``, ``all``, ``batch``) are async
+    and route through the granted transport.
     """
     guest = _GrantedGuestDatabase(granted, grant_token, signal)
 
