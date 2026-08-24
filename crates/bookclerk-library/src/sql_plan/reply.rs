@@ -60,6 +60,7 @@ pub fn validate_execute_reply(
     Ok(())
 }
 
+/// Validates one statement result against the request's selection and negotiated caps.
 fn validate_statement_result(
     index: usize,
     selection: DbResultSelection,
@@ -138,6 +139,7 @@ fn validate_statement_result(
     Ok(())
 }
 
+/// Effective row upper bound from statement and negotiated caps (`None` = unlimited).
 fn effective_row_cap(stmt_max_rows: u32, caps_max_result_rows: u32) -> Option<u32> {
     match (stmt_max_rows, caps_max_result_rows) {
         (0, 0) => None,
@@ -147,6 +149,7 @@ fn effective_row_cap(stmt_max_rows: u32, caps_max_result_rows: u32) -> Option<u3
     }
 }
 
+/// Encoded whole-reply byte budget from negotiated caps (`None` = unlimited).
 fn atomic_result_cap_bytes(caps: &DbConnectResult) -> Option<usize> {
     if caps.max_atomic_result_bytes == 0 {
         return None;
@@ -160,6 +163,7 @@ fn atomic_result_cap_bytes(caps: &DbConnectResult) -> Option<usize> {
     )
 }
 
+/// UTF-8 / byte length counted toward `maxCellBytes` for text and blob cells.
 fn db_value_cell_len(v: &DbValue) -> usize {
     match v {
         DbValue::Text(s) => s.len(),

@@ -1922,6 +1922,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn executing_mock_typed_shared_vectors() {
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host D1 schema");
+        bookclerk_library::sql_plan::run_typed_request_vectors(
+            bookclerk_plugin_sdk::legacy_db::DbConnectResult::d1(),
+            bookclerk_plugin_sdk::legacy_db::DbConnectResult::d1().max_result_rows,
+            |req| {
+                let proxy = proxy.clone();
+                async move { proxy.run_typed_atomic(&req).await }
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn executing_mock_deadline_includes_http_mutex_wait() {
         let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
         let _hold = proxy.lock_http_for_test().await;

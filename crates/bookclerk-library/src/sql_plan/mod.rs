@@ -34,7 +34,7 @@ pub use interpret::{interpret_exec, interpret_plan, validate_exec_result, PlanSt
 pub use named::{compile_claim_event_delivery, compile_named_request};
 pub use reply::validate_execute_reply;
 pub use slots::{event_inflight_slot, lock_serialization_slot, JOB_QUEUE_SLOT};
-pub use typed_vectors::run_typed_conn_vectors;
+pub use typed_vectors::{run_typed_conn_vectors, run_typed_request_vectors};
 
 /// Compiled plan plus the hash stored on the receipt.
 #[derive(Debug, Clone)]
