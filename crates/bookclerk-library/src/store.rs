@@ -189,13 +189,6 @@ impl LibraryStore {
                     operation_id: format!("{}:replay-persist", reply.operation_id),
                     request_hash: String::new(),
                     statements: persist,
-                    outcome_index: 0,
-                    payload_index: 0,
-                    has_payload_index: false,
-                    prior_receipt_index: 0,
-                    has_prior_receipt_index: false,
-                    receipt_select_index: 0,
-                    has_receipt_select_index: false,
                     deadline_unix_ms: 0,
                 };
                 exec.execute_typed(update_req).await?;

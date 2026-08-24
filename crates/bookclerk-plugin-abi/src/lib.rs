@@ -285,10 +285,11 @@ mod tests {
 
         let mut mismatch = DbConnectResult::sqlite();
         mismatch.dialect = "postgres".into();
-        assert!(!mismatch.meets_host_minimums());
-        assert!(mismatch
-            .capability_failure_reason()
-            .contains("does not match"));
+        assert!(mismatch.meets_host_minimums());
+        let reason = mismatch
+            .bootstrap_backend_failure_reason()
+            .expect("bootstrap mismatch");
+        assert!(reason.contains("does not match"), "{reason}");
     }
 
     #[test]

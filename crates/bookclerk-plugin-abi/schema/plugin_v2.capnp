@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 11;
+const abiMinor :UInt32 = 12;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -649,6 +649,9 @@ struct ExecuteRequest {
   operationId @0 :Text;
   requestHash @1 :Text;
   statements @2 :List(DbStatement);
+  # Reserved @3–@9: host-only plan selectors (outcome/payload/receipt indices)
+  # were removed from the adapter contract in abiMinor 12. Hosts keep them on
+  # DbAtomicPlan / CompiledAtomic only.
   outcomeIndex @3 :UInt32;
   payloadIndex @4 :UInt32;
   hasPayloadIndex @5 :Bool;

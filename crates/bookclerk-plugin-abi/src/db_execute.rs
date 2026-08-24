@@ -107,6 +107,9 @@ fn selection_for_kind(kind: DbPlanStatementKind) -> DbResultSelection {
 }
 
 /// Typed atomic batch. Every request is a non-empty ordered statement list.
+///
+/// Host interpretation metadata (outcome / payload / receipt indices) lives on
+/// [`DbAtomicPlan`] only, not on the wire request adapters execute.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecuteRequest {
@@ -116,22 +119,19 @@ pub struct ExecuteRequest {
     pub request_hash: String,
     /// Ordered statements (must be non-empty).
     pub statements: Vec<TypedDbStatement>,
-    /// Index of the application-status statement.
-    pub outcome_index: u32,
-    /// Payload statement index when [`Self::has_payload_index`] is true.
-    pub payload_index: u32,
-    /// Whether [`Self::payload_index`] is set.
-    pub has_payload_index: bool,
-    /// Prior-receipt statement index when [`Self::has_prior_receipt_index`] is true.
-    pub prior_receipt_index: u32,
-    /// Whether [`Self::prior_receipt_index`] is set.
-    pub has_prior_receipt_index: bool,
-    /// Receipt-select index when [`Self::has_receipt_select_index`] is true.
-    pub receipt_select_index: u32,
-    /// Whether [`Self::receipt_select_index`] is set.
-    pub has_receipt_select_index: bool,
     /// Guest-visible deadline (unix ms). Zero means omitted.
     pub deadline_unix_ms: u64,
+}
+
+impl Default for ExecuteRequest {
+    fn default() -> Self {
+        Self {
+            operation_id: String::new(),
+            request_hash: String::new(),
+            statements: Vec::new(),
+            deadline_unix_ms: 0,
+        }
+    }
 }
 
 impl ExecuteRequest {
@@ -157,13 +157,6 @@ impl ExecuteRequest {
             operation_id: req.operation_id.clone(),
             request_hash: req.request_hash.clone().unwrap_or_default(),
             statements,
-            outcome_index: plan.outcome_index,
-            payload_index: plan.payload_index.unwrap_or(0),
-            has_payload_index: plan.payload_index.is_some(),
-            prior_receipt_index: plan.prior_receipt_index.unwrap_or(0),
-            has_prior_receipt_index: plan.prior_receipt_index.is_some(),
-            receipt_select_index: plan.receipt_select_index.unwrap_or(0),
-            has_receipt_select_index: plan.receipt_select_index.is_some(),
             deadline_unix_ms: req.deadline_unix_ms.unwrap_or(0),
         })
     }
@@ -183,14 +176,10 @@ impl ExecuteRequest {
                 .iter()
                 .map(TypedDbStatement::to_plan_statement)
                 .collect(),
-            outcome_index: self.outcome_index,
-            payload_index: self.has_payload_index.then_some(self.payload_index),
-            prior_receipt_index: self
-                .has_prior_receipt_index
-                .then_some(self.prior_receipt_index),
-            receipt_select_index: self
-                .has_receipt_select_index
-                .then_some(self.receipt_select_index),
+            outcome_index: 0,
+            payload_index: None,
+            prior_receipt_index: None,
+            receipt_select_index: None,
         };
         Ok(DbAtomicRequest {
             operation_id: self.operation_id,
@@ -855,13 +844,6 @@ mod tests {
                 max_rows: 1,
                 result_selection: DbResultSelection::Rows,
             }],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         };
         let bytes = encoded_execute_request_bytes(&req).unwrap();

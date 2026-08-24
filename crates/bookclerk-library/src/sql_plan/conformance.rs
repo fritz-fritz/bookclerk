@@ -1317,13 +1317,6 @@ fn typed_query(id: &str, sql: &str) -> bookclerk_plugin_abi::ExecuteRequest {
             max_rows: 0,
             result_selection: DbResultSelection::Rows,
         }],
-        outcome_index: 0,
-        payload_index: 0,
-        has_payload_index: false,
-        prior_receipt_index: 0,
-        has_prior_receipt_index: false,
-        receipt_select_index: 0,
-        has_receipt_select_index: false,
         deadline_unix_ms: 0,
     }
 }
@@ -1472,13 +1465,6 @@ async fn typed_sqlite_statement_max_rows_is_a_proven_bound() {
                 max_rows: 1,
                 result_selection: DbResultSelection::Rows,
             }],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         }
     }
@@ -1538,13 +1524,6 @@ async fn typed_sqlite_per_statement_max_result_bytes() {
                 result_selection: DbResultSelection::Rows,
             },
         ],
-        outcome_index: 0,
-        payload_index: 0,
-        has_payload_index: false,
-        prior_receipt_index: 0,
-        has_prior_receipt_index: false,
-        receipt_select_index: 0,
-        has_receipt_select_index: false,
         deadline_unix_ms: 0,
     };
     let mut caps =

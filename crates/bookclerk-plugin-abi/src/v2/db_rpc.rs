@@ -163,13 +163,6 @@ pub(super) fn write_execute_request(
 ) {
     b.set_operation_id(&req.operation_id);
     b.set_request_hash(&req.request_hash);
-    b.set_outcome_index(req.outcome_index);
-    b.set_payload_index(req.payload_index);
-    b.set_has_payload_index(req.has_payload_index);
-    b.set_prior_receipt_index(req.prior_receipt_index);
-    b.set_has_prior_receipt_index(req.has_prior_receipt_index);
-    b.set_receipt_select_index(req.receipt_select_index);
-    b.set_has_receipt_select_index(req.has_receipt_select_index);
     b.set_deadline_unix_ms(req.deadline_unix_ms);
     let mut stmts = b.reborrow().init_statements(req.statements.len() as u32);
     for (i, s) in req.statements.iter().enumerate() {
@@ -196,13 +189,6 @@ pub(super) fn read_execute_request(r: execute_request_capnp::Reader<'_>) -> Resu
         operation_id: text_of(r.get_operation_id().map_err(from_capnp)?),
         request_hash: text_of(r.get_request_hash().map_err(from_capnp)?),
         statements,
-        outcome_index: r.get_outcome_index(),
-        payload_index: r.get_payload_index(),
-        has_payload_index: r.get_has_payload_index(),
-        prior_receipt_index: r.get_prior_receipt_index(),
-        has_prior_receipt_index: r.get_has_prior_receipt_index(),
-        receipt_select_index: r.get_receipt_select_index(),
-        has_receipt_select_index: r.get_has_receipt_select_index(),
         deadline_unix_ms: r.get_deadline_unix_ms(),
     })
 }

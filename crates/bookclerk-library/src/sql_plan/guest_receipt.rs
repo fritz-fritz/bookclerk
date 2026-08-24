@@ -81,13 +81,6 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> ExecuteReques
 
     req.statements = statements;
     req.request_hash.clear();
-    req.prior_receipt_index = 1;
-    req.has_prior_receipt_index = true;
-    req.outcome_index = 0;
-    req.payload_index = 0;
-    req.has_payload_index = false;
-    req.receipt_select_index = 0;
-    req.has_receipt_select_index = false;
     req
 }
 
@@ -307,13 +300,6 @@ mod tests {
                 max_rows: 0,
                 result_selection: DbResultSelection::AffectedRows,
             }],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         }
     }
@@ -322,9 +308,13 @@ mod tests {
     fn wrap_rewrites_insert_values_and_gates_writes() {
         let wrapped = wrap_guest_typed_request(guest_insert());
         assert!(wrapped.request_hash.is_empty());
-        assert!(wrapped.has_prior_receipt_index);
-        assert_eq!(wrapped.prior_receipt_index, 1);
         assert_eq!(wrapped.statements.len(), 4);
+        assert!(
+            wrapped.statements[1]
+                .sql
+                .contains("db_atomic_receipts"),
+            "prior receipt select at index 1"
+        );
         let gated = &wrapped.statements[2];
         assert!(
             gated.sql.to_ascii_uppercase().contains("SELECT"),

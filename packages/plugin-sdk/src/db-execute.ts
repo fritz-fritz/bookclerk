@@ -70,20 +70,6 @@ export interface ExecuteRequest {
   requestHash: string;
   /** Ordered statements (must be non-empty). */
   statements: TypedDbStatement[];
-  /** Index of the application-status statement. */
-  outcomeIndex: number;
-  /** Payload statement index when `hasPayloadIndex` is true. */
-  payloadIndex: number;
-  /** Whether `payloadIndex` is set. */
-  hasPayloadIndex: boolean;
-  /** Prior-receipt statement index when `hasPriorReceiptIndex` is true. */
-  priorReceiptIndex: number;
-  /** Whether `priorReceiptIndex` is set. */
-  hasPriorReceiptIndex: boolean;
-  /** Receipt-select index when `hasReceiptSelectIndex` is true. */
-  receiptSelectIndex: number;
-  /** Whether `receiptSelectIndex` is set. */
-  hasReceiptSelectIndex: boolean;
   /** Guest-visible deadline (unix ms). Zero means omitted. */
   deadlineUnixMs: number;
 }
@@ -273,13 +259,6 @@ export function encodeExecuteRequest(request: ExecuteRequest): Uint8Array {
   const root = msg.initRoot(4, 3);
   root.setText(0, request.operationId);
   root.setText(1, request.requestHash);
-  root.setUint32(0, request.outcomeIndex);
-  root.setUint32(1, request.payloadIndex);
-  root.setBool(64, request.hasPayloadIndex);
-  root.setUint32(3, request.priorReceiptIndex);
-  root.setBool(65, request.hasPriorReceiptIndex);
-  root.setUint32(4, request.receiptSelectIndex);
-  root.setBool(66, request.hasReceiptSelectIndex);
   root.setUint64(3, BigInt(request.deadlineUnixMs));
   const stmts = root.initStructList(2, request.statements.length, 1, 2);
   for (let i = 0; i < request.statements.length; i++) {
@@ -306,13 +285,6 @@ export function decodeExecuteRequest(bytes: Uint8Array): ExecuteRequest {
     operationId: root.getText(0),
     requestHash: root.getText(1),
     statements: stmtStructs.map(readStatement),
-    outcomeIndex: root.getUint32(0),
-    payloadIndex: root.getUint32(1),
-    hasPayloadIndex: root.getBool(64),
-    priorReceiptIndex: root.getUint32(3),
-    hasPriorReceiptIndex: root.getBool(65),
-    receiptSelectIndex: root.getUint32(4),
-    hasReceiptSelectIndex: root.getBool(66),
     deadlineUnixMs: Number(root.getUint64(3)),
   };
 }
@@ -603,13 +575,6 @@ async function executeRequestFromBatch(
     operationId: token?.operationId ?? options.operationId ?? newOperationId(),
     requestHash: token?.requestHash ?? options.requestHash ?? "",
     statements: batch,
-    outcomeIndex: 0,
-    payloadIndex: 0,
-    hasPayloadIndex: false,
-    priorReceiptIndex: 0,
-    hasPriorReceiptIndex: false,
-    receiptSelectIndex: 0,
-    hasReceiptSelectIndex: false,
     deadlineUnixMs: options.deadlineUnixMs ?? 0,
   };
 }

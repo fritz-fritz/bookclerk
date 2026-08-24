@@ -438,13 +438,6 @@ impl RpcDatabaseProxy {
             operation_id,
             request_hash: String::new(),
             statements: vec![stmt],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         }
     }
@@ -1533,7 +1526,7 @@ mod tests {
     #[test]
     fn omitted_rows_affected_fails_deserialize() {
         let err =
-            serde_json::from_str::<bookclerk_plugin_sdk::DbPlanStmtExecResult>(r#"{"rows":[]}"#)
+            serde_json::from_str::<bookclerk_plugin_abi::DbPlanStmtExecResult>(r#"{"rows":[]}"#)
                 .unwrap_err();
         assert!(
             err.to_string().contains("rowsAffected") || err.to_string().contains("missing field"),
@@ -1570,13 +1563,6 @@ mod tests {
                     max_rows: 8,
                     result_selection: DbResultSelection::Rows,
                 }],
-                outcome_index: 0,
-                payload_index: 0,
-                has_payload_index: false,
-                prior_receipt_index: 0,
-                has_prior_receipt_index: false,
-                receipt_select_index: 0,
-                has_receipt_select_index: false,
                 deadline_unix_ms: 0,
             })
             .await
@@ -1592,13 +1578,6 @@ mod tests {
                     max_rows: 8,
                     result_selection: DbResultSelection::Rows,
                 }],
-                outcome_index: 0,
-                payload_index: 0,
-                has_payload_index: false,
-                prior_receipt_index: 0,
-                has_prior_receipt_index: false,
-                receipt_select_index: 0,
-                has_receipt_select_index: false,
                 deadline_unix_ms: 0,
             })
             .await

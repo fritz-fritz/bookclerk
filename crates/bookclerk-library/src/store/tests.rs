@@ -6433,13 +6433,6 @@ fn guest_select(sql: &str) -> bookclerk_plugin_abi::ExecuteRequest {
             max_rows: 8,
             result_selection: DbResultSelection::Rows,
         }],
-        outcome_index: 0,
-        payload_index: 0,
-        has_payload_index: false,
-        prior_receipt_index: 0,
-        has_prior_receipt_index: false,
-        receipt_select_index: 0,
-        has_receipt_select_index: false,
         deadline_unix_ms: 0,
     }
 }

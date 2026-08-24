@@ -127,13 +127,6 @@ impl DatabaseBinding {
             operation_id,
             request_hash,
             statements: batch,
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: self.options.deadline_unix_ms,
         };
         let encoded = encoded_execute_request_bytes(&request)?;

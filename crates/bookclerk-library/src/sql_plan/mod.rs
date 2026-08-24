@@ -128,16 +128,45 @@ pub fn validate_execute_request(
     req: &ExecuteRequest,
     caps: &DbConnectResult,
 ) -> crate::error::Result<()> {
-    let atomic = req
-        .clone()
-        .into_atomic()
-        .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!(err)))?;
-    let plan = atomic.plan.as_ref().ok_or_else(|| {
-        crate::LibraryError::Other(anyhow::anyhow!(
-            "executeAtomic requires a host-authored plan"
-        ))
-    })?;
-    validate_plan(plan, caps)?;
+    if req.statements.is_empty() {
+        return Err(crate::LibraryError::Other(anyhow::anyhow!(
+            "executeAtomic statements must be non-empty"
+        )));
+    }
+    let n_stmt = u32::try_from(req.statements.len()).unwrap_or(u32::MAX);
+    if caps.max_statements > 0 && n_stmt > caps.max_statements {
+        return Err(crate::LibraryError::Other(anyhow::anyhow!(
+            "atomic request has {n_stmt} statements; guest maxStatements is {}",
+            caps.max_statements
+        )));
+    }
+    for (i, stmt) in req.statements.iter().enumerate() {
+        let n_binds = u32::try_from(stmt.parameters.len()).unwrap_or(u32::MAX);
+        if caps.max_binds > 0 && n_binds > caps.max_binds {
+            return Err(crate::LibraryError::Other(anyhow::anyhow!(
+                "atomic request statement {i} has {n_binds} binds; guest maxBinds is {}",
+                caps.max_binds
+            )));
+        }
+        if caps.max_payload_bytes > 0 {
+            let mut binds_len = 0usize;
+            for param in &stmt.parameters {
+                binds_len = binds_len.saturating_add(
+                    bookclerk_plugin_abi::encoded_db_value_bytes(param)
+                        .map(|b| b.len())
+                        .unwrap_or(usize::MAX),
+                );
+            }
+            let payload = stmt.sql.len().saturating_add(binds_len);
+            let cap = usize::try_from(caps.max_payload_bytes).unwrap_or(usize::MAX);
+            if payload > cap {
+                return Err(crate::LibraryError::Other(anyhow::anyhow!(
+                    "atomic request statement {i} encoded payload is {payload} bytes; guest maxPayloadBytes is {}",
+                    caps.max_payload_bytes
+                )));
+            }
+        }
+    }
     let cap = atomic_request_cap_bytes(caps);
     if cap == 0 {
         return Ok(());
@@ -458,13 +487,6 @@ mod limits_tests {
                 max_rows: 0,
                 result_selection: DbResultSelection::Rows,
             }],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         };
         let err = super::authorize_typed_request(&mut req, &caps).unwrap_err();
@@ -496,13 +518,6 @@ mod limits_tests {
                 max_rows: 1,
                 result_selection: DbResultSelection::Rows,
             }],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         };
         let empty_len = encoded_execute_request_bytes(&req).unwrap().len();
@@ -537,13 +552,6 @@ mod limits_tests {
                 max_rows: 1,
                 result_selection: DbResultSelection::Rows,
             }],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         };
         let a = canonical_execute_request_hash(&req).unwrap();
@@ -586,13 +594,6 @@ mod limits_tests {
                 max_rows: 0,
                 result_selection: DbResultSelection::AffectedRows,
             }],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         };
         let err = super::authorize_guest_typed_request(&mut ddl, &caps, &books).unwrap_err();
@@ -649,13 +650,6 @@ mod limits_tests {
                 max_rows: 1,
                 result_selection: DbResultSelection::Rows,
             }],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         };
         const GOLDEN: &str = "e368ef90b76963c5e93c5e6db37fdb6d7f809d23c10295352a0ba3cd26885f02";

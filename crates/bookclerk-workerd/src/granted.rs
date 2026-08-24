@@ -1059,13 +1059,6 @@ mod tests {
                 max_rows: 1,
                 result_selection: DbResultSelection::Rows,
             }],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         };
         let bytes = encoded_execute_request_bytes(&req).expect("encode");
@@ -1133,13 +1126,6 @@ mod tests {
                 max_rows,
                 result_selection,
             }],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         })
         .expect("encode")

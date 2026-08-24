@@ -105,18 +105,11 @@ class TypedDbStatement(TypedDict):
 
 
 class ExecuteRequest(TypedDict):
-    """Typed ``execute`` request."""
+    """Typed ``execute`` request (adapter wire: statements + transport metadata only)."""
 
     operationId: str
     requestHash: str
     statements: list[TypedDbStatement]
-    outcomeIndex: int
-    payloadIndex: int
-    hasPayloadIndex: bool
-    priorReceiptIndex: int
-    hasPriorReceiptIndex: bool
-    receiptSelectIndex: int
-    hasReceiptSelectIndex: bool
     deadlineUnixMs: int
 
 
@@ -236,13 +229,6 @@ def encode_execute_request(request: ExecuteRequest) -> bytes:
     root = msg.init_root(4, 3)
     root.set_text(0, request["operationId"])
     root.set_text(1, request["requestHash"])
-    root.set_u32(0, request["outcomeIndex"])
-    root.set_u32(1, request["payloadIndex"])
-    root.set_bool(64, request["hasPayloadIndex"])
-    root.set_u32(3, request["priorReceiptIndex"])
-    root.set_bool(65, request["hasPriorReceiptIndex"])
-    root.set_u32(4, request["receiptSelectIndex"])
-    root.set_bool(66, request["hasReceiptSelectIndex"])
     root.set_u64(3, request["deadlineUnixMs"])
     stmts = root.init_struct_list(2, len(request["statements"]), 1, 2)
     for i, stmt in enumerate(request["statements"]):
@@ -271,13 +257,6 @@ def decode_execute_request(data: bytes) -> ExecuteRequest:
         "operationId": root.get_text(0),
         "requestHash": root.get_text(1),
         "statements": [_read_statement(s) for s in stmt_structs],
-        "outcomeIndex": root.get_u32(0),
-        "payloadIndex": root.get_u32(1),
-        "hasPayloadIndex": root.get_bool(64),
-        "priorReceiptIndex": root.get_u32(3),
-        "hasPriorReceiptIndex": root.get_bool(65),
-        "receiptSelectIndex": root.get_u32(4),
-        "hasReceiptSelectIndex": root.get_bool(66),
         "deadlineUnixMs": root.get_u64(3),
     }
 
@@ -475,13 +454,6 @@ class DatabaseBinding:
             "operationId": operation_id,
             "requestHash": request_hash,
             "statements": batch,
-            "outcomeIndex": 0,
-            "payloadIndex": 0,
-            "hasPayloadIndex": False,
-            "priorReceiptIndex": 0,
-            "hasPriorReceiptIndex": False,
-            "receiptSelectIndex": 0,
-            "hasReceiptSelectIndex": False,
             "deadlineUnixMs": self._deadline_unix_ms,
         }
         encoded = encode_execute_request(request)

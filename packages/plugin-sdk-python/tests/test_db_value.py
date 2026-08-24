@@ -125,13 +125,6 @@ class DbValueGoldens(unittest.TestCase):
                     "resultSelection": "rows",
                 }
             ],
-            "outcomeIndex": 0,
-            "payloadIndex": 0,
-            "hasPayloadIndex": False,
-            "priorReceiptIndex": 0,
-            "hasPriorReceiptIndex": False,
-            "receiptSelectIndex": 0,
-            "hasReceiptSelectIndex": False,
             "deadlineUnixMs": 0,
         }
         encoded = encode_execute_request(request)
@@ -285,13 +278,6 @@ class DbValueGoldens(unittest.TestCase):
                     "resultSelection": "rows",
                 }
             ],
-            "outcomeIndex": 0,
-            "payloadIndex": 0,
-            "hasPayloadIndex": False,
-            "priorReceiptIndex": 0,
-            "hasPriorReceiptIndex": False,
-            "receiptSelectIndex": 0,
-            "hasReceiptSelectIndex": False,
             "deadlineUnixMs": 0,
         }
         golden = "e368ef90b76963c5e93c5e6db37fdb6d7f809d23c10295352a0ba3cd26885f02"
