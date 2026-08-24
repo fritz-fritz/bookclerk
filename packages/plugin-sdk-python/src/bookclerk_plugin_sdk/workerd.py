@@ -262,26 +262,6 @@ class AdapterDatabaseSession:
         """Close the session."""
         return None
 
-    async def begin(self) -> "AdapterTransaction":
-        """Open a host-internal interactive transaction."""
-        raise PluginError.from_wire("unsupported", "begin not implemented")
-
-
-class AdapterTransaction:
-    """Host-internal transaction on an adapter connection."""
-
-    async def execute(self, _request: ExecuteRequest) -> ExecuteReply:
-        """Typed statements on this open transaction (no second ``BEGIN``)."""
-        raise PluginError.from_wire("unsupported", "execute not implemented")
-
-    async def commit(self) -> None:
-        """Commit."""
-        raise PluginError.from_wire("unsupported", "commit not implemented")
-
-    async def rollback(self) -> None:
-        """Rollback."""
-        raise PluginError.from_wire("unsupported", "rollback not implemented")
-
 
 @dataclass
 class JobContext:

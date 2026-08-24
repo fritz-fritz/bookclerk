@@ -711,13 +711,6 @@ export class AdapterDatabaseSession extends RpcTarget {
   close(): Promise<void> {
     return Promise.resolve();
   }
-  /** Open a host-internal interactive transaction.
-   *
-   * @returns The opened adapter transaction.
-   */
-  begin(): Promise<AdapterTransaction> {
-    return Promise.reject(unsupported("begin"));
-  }
 }
 
 /** Host-granted SQL transport for job plugin authors (no `capabilities`). */
@@ -737,34 +730,6 @@ export class GuestDatabase extends RpcTarget {
    */
   close(): Promise<void> {
     return Promise.resolve();
-  }
-}
-
-/** Host-internal transaction on an adapter connection. */
-export class AdapterTransaction extends RpcTarget {
-  /**
-   * Typed statements on this open transaction (`abiMinor` ≥ 9).
-   * Does not BEGIN or COMMIT.
-   *
-   * @param _request - Cap'n `ExecuteRequest`.
-   * @returns `ExecuteReply`.
-   */
-  execute(_request: import("./db-execute.js").ExecuteRequest): Promise<import("./db-execute.js").ExecuteReply> {
-    return Promise.reject(unsupported("execute"));
-  }
-  /** Commit the open transaction.
-   *
-   * @returns Resolves when the transaction is committed.
-   */
-  commit(): Promise<void> {
-    return Promise.reject(unsupported("commit"));
-  }
-  /** Roll back the open transaction.
-   *
-   * @returns Resolves when the transaction is rolled back.
-   */
-  rollback(): Promise<void> {
-    return Promise.reject(unsupported("rollback"));
   }
 }
 

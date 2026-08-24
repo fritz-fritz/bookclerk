@@ -8,11 +8,10 @@
 
 use async_trait::async_trait;
 use bookclerk_plugin_sdk::database_adapter::{
-    guest_begin, guest_capabilities, guest_commit, guest_execute_atomic,
-    guest_execute_atomic_on_txn, guest_rollback, plugin_error_from_engine, set_connection,
+    guest_capabilities, guest_execute_atomic, host_session, set_connection,
 };
 use bookclerk_plugin_sdk::v2::{
-    AdapterDatabaseSession, AdapterTransaction, Database, DatabaseContext, PluginDescribe,
+    AdapterDatabaseSession, Database, DatabaseContext, HostAdapterDatabaseSession, PluginDescribe,
     PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{DbCapabilities, ExecuteReply, ExecuteRequest, PluginError};
@@ -78,6 +77,12 @@ impl Database for SqliteDatabase {
     async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>> {
         Ok(Box::new(SqliteSession))
     }
+
+    async fn host_adapter_session(
+        &self,
+    ) -> Result<Option<Box<dyn HostAdapterDatabaseSession>>> {
+        Ok(Some(Box::new(host_session())))
+    }
 }
 
 struct SqliteSession;
@@ -90,33 +95,5 @@ impl AdapterDatabaseSession for SqliteSession {
 
     async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
         guest_execute_atomic(request).await
-    }
-
-    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>> {
-        let txn_id = guest_begin(None).await.map_err(plugin_error_from_engine)?;
-        Ok(Box::new(SqliteTxn { txn_id }))
-    }
-}
-
-struct SqliteTxn {
-    txn_id: String,
-}
-
-#[async_trait(?Send)]
-impl AdapterTransaction for SqliteTxn {
-    async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
-        guest_execute_atomic_on_txn(self.txn_id.clone(), request).await
-    }
-
-    async fn commit(&self) -> Result<()> {
-        guest_commit(self.txn_id.clone())
-            .await
-            .map_err(plugin_error_from_engine)
-    }
-
-    async fn rollback(&self) -> Result<()> {
-        guest_rollback(self.txn_id.clone())
-            .await
-            .map_err(plugin_error_from_engine)
     }
 }

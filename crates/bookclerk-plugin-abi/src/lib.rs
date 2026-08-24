@@ -79,21 +79,36 @@ pub mod plugin_v2_capnp {
     include!(concat!(env!("OUT_DIR"), "/plugin_v2_capnp.rs"));
 }
 
+/// Host-private Cap'n Proto RPC interfaces (`schema/plugin_v2_host.capnp`).
+#[allow(
+    dead_code,
+    missing_docs,
+    unused_imports,
+    unused_parens,
+    clippy::all,
+    clippy::pedantic,
+    rustdoc::all,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_docs_in_private_items
+)]
+pub mod plugin_v2_host_capnp {
+    include!(concat!(env!("OUT_DIR"), "/plugin_v2_host_capnp.rs"));
+}
+
 #[cfg(test)]
 mod wire_fixtures;
 
 pub use db::{
-    sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbBeginParams,
-    DbBeginResult, DbConnectParams, DbConnectResult, DbPlanExecResult, DbPlanStatement,
-    DbPlanStatementKind, DbPlanStmtExecResult, DbTxnParams, ExecResultDto, ProxyRowDto,
-    QueryResultDto, StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, D1_MAX_BINDS,
     FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
     HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS,
-    POSTGRES_MAX_BINDS, SEA_NULL_KEY, SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
+    POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
 };
 pub use db_execute::{
-    sql_payload_bytes, sql_payload_exceeds, DbCapabilities, DbColumn, DbResultSelection, DbRow,
-    DbTiming, ExecuteReply, ExecuteRequest, GuestReceiptPersist, StatementResult, TypedDbStatement,
+    sql_payload_bytes, sql_payload_exceeds, DbCapabilities, DbColumn, DbPlanStatementKind,
+    DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest, GuestReceiptPersist,
+    StatementResult, TypedDbStatement,
 };
 pub use db_value::{db_value_from_json, db_value_to_json, DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
@@ -139,14 +154,6 @@ mod tests {
     }
 
     #[test]
-    fn sea_null_wire_shape() {
-        let v = sea_null("Bytes");
-        assert_eq!(v, serde_json::json!({ "$sea_null": "Bytes" }));
-        assert_eq!(sea_null_kind(&v), Some("Bytes"));
-        assert_eq!(sea_null_kind(&serde_json::json!(null)), None);
-    }
-
-    #[test]
     fn handshake_roundtrip_camel_case() {
         let hs = HandshakeResult {
             api_version: API_VERSION,
@@ -178,58 +185,6 @@ mod tests {
             schema_names, expected,
             "abi.json methods keys must match methods.rs METHOD_NAMES"
         );
-    }
-
-    #[test]
-    fn db_atomic_plan_wire_omits_named_operations() {
-        let plan_req = DbAtomicRequest::with_plan(
-            "op-plan",
-            "abc",
-            DbAtomicPlan {
-                statements: vec![DbPlanStatement {
-                    sql: "SELECT 1".into(),
-                    binds: vec![],
-                    kind: DbPlanStatementKind::Query,
-                    max_rows: 0,
-                }],
-                outcome_index: 0,
-                payload_index: None,
-                prior_receipt_index: None,
-                receipt_select_index: None,
-            },
-        );
-        let pv = serde_json::to_value(&plan_req).unwrap();
-        assert_eq!(pv["operationId"], "op-plan");
-        assert_eq!(pv["requestHash"], "abc");
-        assert_eq!(pv["plan"]["statements"][0]["sql"], "SELECT 1");
-        assert_eq!(pv["plan"]["statements"][0]["kind"], "query");
-        assert!(
-            pv.get("operation").is_none(),
-            "named operations stay off the guest wire"
-        );
-
-        let exec = DbPlanExecResult {
-            operation_id: "op-plan".into(),
-            statements: vec![DbPlanStmtExecResult {
-                rows: vec![serde_json::json!({"status": "ok"})],
-                rows_affected: 0,
-            }],
-            timing: None,
-        };
-        let ev = serde_json::to_value(&exec).unwrap();
-        assert_eq!(ev["operationId"], "op-plan");
-        assert_eq!(ev["statements"][0]["rowsAffected"], 0);
-        assert!(ev.get("status").is_none());
-
-        let d1 = DbConnectResult::d1();
-        let rv = serde_json::to_value(&d1).unwrap();
-        assert_eq!(rv["dialect"], "sqlite");
-        assert_eq!(rv["interactiveTxn"], false);
-        assert_eq!(rv["sqlFamily"], "sqlite");
-        assert_eq!(rv["maxBinds"], D1_MAX_BINDS);
-        assert!(d1.meets_host_minimums());
-        assert!(DbConnectResult::sqlite().meets_host_minimums());
-        assert!(DbConnectResult::postgres().meets_host_minimums());
     }
 
     #[test]
@@ -290,19 +245,5 @@ mod tests {
             .bootstrap_backend_failure_reason()
             .expect("bootstrap mismatch");
         assert!(reason.contains("does not match"), "{reason}");
-    }
-
-    #[test]
-    fn stmt_exec_result_requires_rows_and_rows_affected() {
-        let err = serde_json::from_str::<DbPlanStmtExecResult>(r#"{"rows":[]}"#).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("rowsAffected") || msg.contains("missing field"),
-            "{msg}"
-        );
-        let ok: DbPlanStmtExecResult =
-            serde_json::from_str(r#"{"rows":[],"rowsAffected":0}"#).unwrap();
-        assert!(ok.rows.is_empty());
-        assert_eq!(ok.rows_affected, 0);
     }
 }

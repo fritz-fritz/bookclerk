@@ -17,11 +17,11 @@ use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_plugin_sdk::v2::{
     connect_plugin, negotiate_rpc_features, ByteRange as AbiByteRange, Cancellation, CopyResult,
-    Database, Destination, DestinationContext, JobInvocation, JobInvocationLease, ListOptions,
-    ObjectMetadata, OidcClientTemplate, PluginClient, PluginDescribe, PutResult, ReadResult,
-    ScalarLimits, Source, StreamCopySpec, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS,
-    FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES,
-    PRODUCT_API_VERSION,
+    Destination, DestinationContext, HostAdapterDatabaseSession, JobInvocation,
+    JobInvocationLease, ListOptions, ObjectMetadata, OidcClientTemplate, PluginClient,
+    PluginDescribe, PutResult, ReadResult, ScalarLimits, Source, StreamCopySpec, WorkerContext,
+    WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_SCALAR_BYTES,
+    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_storage::{
     ByteRange, ListPage, ObjectInfo, ObjectMeta, ObjectProbe, PutStreamResult, StorageBackend,
@@ -979,6 +979,9 @@ fn vat_thread(
                 let mut db_session: Option<
                     Box<dyn bookclerk_plugin_sdk::v2::AdapterDatabaseSession>,
                 > = None;
+                let mut db_host_session: Option<
+                    bookclerk_plugin_sdk::v2::HostAdapterDatabaseSessionClient,
+                > = None;
                 let mut db_txn: Option<Box<dyn bookclerk_plugin_sdk::v2::AdapterTransaction>> =
                     None;
                 while let Some(work) = rx.recv().await {
@@ -1114,8 +1117,9 @@ fn vat_thread(
                                     })
                                     .await
                                     .map_err(map_abi)?;
-                                let sess = db.open_session().await.map_err(map_abi)?;
-                                db_session = Some(sess);
+                                let handle = db.open_session_handle().await.map_err(map_abi)?;
+                                db_session = Some(handle.session);
+                                db_host_session = Some(handle.host);
                                 db_txn = None;
                                 Ok(())
                             }
@@ -1136,10 +1140,10 @@ fn vat_thread(
                         }
                         Work::DbBegin { reply } => {
                             let out = async {
-                                let sess = db_session.as_mut().ok_or_else(|| {
+                                let host = db_host_session.as_ref().ok_or_else(|| {
                                     PluginError::message("v2 database session not open")
                                 })?;
-                                db_txn = Some(sess.begin().await.map_err(map_abi)?);
+                                db_txn = Some(host.begin().await.map_err(map_abi)?);
                                 Ok(())
                             }
                             .await;

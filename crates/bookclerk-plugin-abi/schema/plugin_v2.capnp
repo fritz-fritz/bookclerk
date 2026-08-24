@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 14;
+const abiMinor :UInt32 = 15;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -501,13 +501,6 @@ struct AdapterSessionReply {
   }
 }
 
-struct AdapterTransactionReply {
-  union {
-    ok @0 :AdapterTransaction;
-    err @1 :PluginError;
-  }
-}
-
 struct GuestDatabaseReply {
   union {
     ok @0 :GuestDatabase;
@@ -634,7 +627,6 @@ enum DbResultSelection {
   discard @0;
   affectedRows @1;
   rows @2;
-  obsoleteCursor @3;  # deleted abiMinor 13 — map to rows on read; never emit
 }
 
 struct DbStatement {
@@ -649,25 +641,16 @@ struct ExecuteRequest {
   operationId @0 :Text;
   requestHash @1 :Text;
   statements @2 :List(DbStatement);
-  # Reserved @3–@9: host-only plan selectors removed from adapter contract (abiMinor 12/13).
-  obsoleteOutcomeIndex @3 :UInt32;
-  obsoletePayloadIndex @4 :UInt32;
-  obsoleteHasPayloadIndex @5 :Bool;
-  obsoletePriorReceiptIndex @6 :UInt32;
-  obsoleteHasPriorReceiptIndex @7 :Bool;
-  obsoleteReceiptSelectIndex @8 :UInt32;
-  obsoleteHasReceiptSelectIndex @9 :Bool;
-  deadlineUnixMs @10 :UInt64;
-  # Host-only guest receipt finalize (abiMinor 14). Zero len = absent.
-  guestReceiptGuestLen @11 :UInt32;
-  guestReceiptGuestHash @12 :Text;
+  deadlineUnixMs @3 :UInt64;
+  # Host-only guest receipt finalize. Zero len = absent.
+  guestReceiptGuestLen @4 :UInt32;
+  guestReceiptGuestHash @5 :Text;
 }
 
 struct StatementResult {
   rows @0 :List(DbRow);
   columns @1 :List(DbColumn);
   rowsAffected @2 :UInt64;
-  obsoleteCursor @3 :Text;  # deleted abiMinor 13 — ignore on read/write
 }
 
 struct DbTiming {
@@ -691,7 +674,7 @@ struct ExecuteResultReply {
 
 # Semantic SQL-contract advertisement. Bootstrap metadata (`sqlFamily`,
 # `diagnosticEngine`) is not part of the capability plane — see JSON
-# `DbConnectResult` / connect handshake (abiMinor 13 tombstones @17/@18).
+# `DbConnectResult` / connect handshake.
 struct DbCapabilities {
   sqlContractVersion @0 :UInt32;
   atomicBatch @1 :Bool;
@@ -710,8 +693,6 @@ struct DbCapabilities {
   maxCellBytes @14 :UInt32;
   maxRequestBytes @15 :UInt32;
   maxAtomicResultBytes @16 :UInt32;
-  obsoleteDiagnosticEngine @17 :Text;  # deleted abiMinor 13 — ignore on read; never emit
-  obsoleteSqlFamily @18 :Text;  # deleted abiMinor 13 — ignore on read; never emit
 }
 
 struct DbCapabilitiesReply {
@@ -730,15 +711,6 @@ interface AdapterDatabaseSession {
   capabilities @0 () -> (result :DbCapabilitiesReply);
   execute @1 (request :ExecuteRequest) -> (result :ExecuteResultReply);
   close @2 () -> (result :EmptyReply);
-  # Host-internal SeaORM interactive txn (not the plugin-author binding).
-  begin @3 () -> (result :AdapterTransactionReply);
-}
-
-# Host-internal SeaORM interactive txn (not the plugin-author binding).
-interface AdapterTransaction {
-  execute @0 (request :ExecuteRequest) -> (result :ExecuteResultReply);
-  commit @1 () -> (result :EmptyReply);
-  rollback @2 () -> (result :EmptyReply);
 }
 
 # Host-granted SQL for job plugin authors (SDK DatabaseBinding transport).

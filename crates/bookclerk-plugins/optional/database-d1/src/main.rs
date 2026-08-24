@@ -4,13 +4,13 @@
 
 use async_trait::async_trait;
 use bookclerk_plugin_sdk::database_adapter::set_connection;
-use bookclerk_plugin_sdk::legacy_db::{DbConnectParams, DbConnectResult};
 use bookclerk_plugin_sdk::v2::{
     AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
     FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    serve, DbCapabilities, ExecuteReply, ExecuteRequest, HandshakeResult, PluginError,
+    serve, DbCapabilities, DbConnectParams, DbConnectResult, ExecuteReply, ExecuteRequest,
+    HandshakeResult, PluginError,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -110,14 +110,6 @@ impl AdapterDatabaseSession for D1Session {
             .run_typed_atomic(&request)
             .await
             .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
-    }
-
-    async fn begin(
-        &self,
-    ) -> Result<Box<dyn bookclerk_plugin_sdk::v2::AdapterTransaction>, PluginError> {
-        Err(PluginError::unsupported(
-            "D1 does not support interactive transactions; use typed execute batches",
-        ))
     }
 }
 

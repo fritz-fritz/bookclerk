@@ -29,7 +29,6 @@ export {
   ProgressSink,
   Source,
   AdapterDatabaseSession,
-  AdapterTransaction,
   GuestDatabase,
   wrapV2PluginFromBinding,
   wrapV2PluginFromNative,

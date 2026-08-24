@@ -256,6 +256,15 @@ pub trait Integration {
 pub trait Database {
     /// Opens an invocation-scoped adapter session.
     async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>>;
+
+    /// Host-only interactive transaction support (first-party adapters).
+    ///
+    /// Third-party database plugins should leave the default (`None`).
+    async fn host_adapter_session(
+        &self,
+    ) -> Result<Option<Box<dyn super::host_roles::HostAdapterDatabaseSession>>> {
+        Ok(None)
+    }
 }
 
 /// Host ↔ database adapter session (`capabilities` + typed `execute`).
@@ -271,22 +280,6 @@ pub trait AdapterDatabaseSession {
     async fn close(&self) -> Result<()> {
         Ok(())
     }
-
-    /// Opens a host-internal interactive transaction (SeaORM proxy).
-    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>>;
-}
-
-/// Host-internal transaction on an adapter connection.
-#[async_trait::async_trait(?Send)]
-pub trait AdapterTransaction {
-    /// Typed statements on this open transaction (no second `BEGIN`).
-    async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply>;
-
-    /// Commit.
-    async fn commit(&self) -> Result<()>;
-
-    /// Rollback.
-    async fn rollback(&self) -> Result<()>;
 }
 
 /// Host-granted SQL transport for job plugin authors (no `capabilities`).

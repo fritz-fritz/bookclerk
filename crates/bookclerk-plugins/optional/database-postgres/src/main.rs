@@ -4,12 +4,11 @@
 
 use async_trait::async_trait;
 use bookclerk_plugin_sdk::database_adapter::{
-    guest_begin, guest_capabilities, guest_commit, guest_execute_atomic,
-    guest_execute_atomic_on_txn, guest_rollback, plugin_error_from_engine, set_connection,
+    guest_capabilities, guest_execute_atomic, host_session, set_connection,
 };
-use bookclerk_plugin_sdk::legacy_db::DbConnectParams;
+use bookclerk_plugin_sdk::DbConnectParams;
 use bookclerk_plugin_sdk::v2::{
-    AdapterDatabaseSession, AdapterTransaction, Database, DatabaseContext, PluginDescribe,
+    AdapterDatabaseSession, Database, DatabaseContext, HostAdapterDatabaseSession, PluginDescribe,
     PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
@@ -96,6 +95,12 @@ impl Database for PostgresDatabase {
     async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>, PluginError> {
         Ok(Box::new(PostgresSession))
     }
+
+    async fn host_adapter_session(
+        &self,
+    ) -> Result<Option<Box<dyn HostAdapterDatabaseSession>>, PluginError> {
+        Ok(Some(Box::new(host_session())))
+    }
 }
 
 struct PostgresSession;
@@ -108,34 +113,6 @@ impl AdapterDatabaseSession for PostgresSession {
 
     async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {
         guest_execute_atomic(request).await
-    }
-
-    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>, PluginError> {
-        let txn_id = guest_begin(None).await.map_err(plugin_error_from_engine)?;
-        Ok(Box::new(PostgresTxn { txn_id }))
-    }
-}
-
-struct PostgresTxn {
-    txn_id: String,
-}
-
-#[async_trait(?Send)]
-impl AdapterTransaction for PostgresTxn {
-    async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {
-        guest_execute_atomic_on_txn(self.txn_id.clone(), request).await
-    }
-
-    async fn commit(&self) -> Result<(), PluginError> {
-        guest_commit(self.txn_id.clone())
-            .await
-            .map_err(plugin_error_from_engine)
-    }
-
-    async fn rollback(&self) -> Result<(), PluginError> {
-        guest_rollback(self.txn_id.clone())
-            .await
-            .map_err(plugin_error_from_engine)
     }
 }
 

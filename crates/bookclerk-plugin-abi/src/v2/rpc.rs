@@ -20,9 +20,10 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use super::limits::{
     ScalarLimits, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_STREAM_WINDOW_BYTES,
 };
+use super::host_roles::HostAdapterDatabaseSession;
 use super::plugin_v2_capnp::{
     adapter_database_session as adapter_database_session_capnp, adapter_session_reply,
-    adapter_transaction as adapter_transaction_capnp, adapter_transaction_reply, bookclerk_plugin,
+    bookclerk_plugin,
     byte_source, cancellation, content_source as content_source_capnp, content_source_reply,
     copy_reply, database as database_capnp, database_reply, describe_reply,
     destination as dest_iface, destination_reply, domain_event, empty_reply,
@@ -33,11 +34,11 @@ use super::plugin_v2_capnp::{
     plugin_describe, plugin_error, progress_sink, pull_reply, put_reply, source as source_capnp,
     source_reply, worker_reply, write_options,
 };
+use super::plugin_v2_host_capnp::host_adapter_database_session as host_adapter_database_session_capnp;
 use super::roles::{
-    AdapterDatabaseSession, AdapterTransaction, ByteRange, Cancellation, ContentSource,
-    ContentSourceContext, Database, DatabaseContext, Destination, GuestDatabase, Integration,
-    IntegrationContext, JobHandler, JobHandlerContext, NeverCancel, PluginRoot, ProgressSink,
-    ReadResult, Source,
+    AdapterDatabaseSession, ByteRange, Cancellation, ContentSource, ContentSourceContext, Database,
+    DatabaseContext, Destination, GuestDatabase, Integration, IntegrationContext, JobHandler,
+    JobHandlerContext, NeverCancel, PluginRoot, ProgressSink, ReadResult, Source,
 };
 use super::types::{
     CopyResult, DestinationContext, DomainEvent, EventResult, HealthOk, JobCheckpoint,
@@ -1981,9 +1982,17 @@ impl database_capnp::Server for DatabaseServer {
         let mut result = results.get().init_result();
         match self.inner.open_session().await {
             Ok(session) => {
+                let host = self
+                    .inner
+                    .host_adapter_session()
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(Arc::from);
                 let client: adapter_database_session_capnp::Client =
                     capnp_rpc::new_client(AdapterDatabaseSessionServer {
                         inner: Arc::from(session),
+                        host,
                     });
                 result.set_ok(client);
             }
@@ -1995,6 +2004,7 @@ impl database_capnp::Server for DatabaseServer {
 
 struct AdapterDatabaseSessionServer {
     inner: Arc<dyn AdapterDatabaseSession>,
+    host: Option<Arc<dyn HostAdapterDatabaseSession>>,
 }
 
 impl adapter_database_session_capnp::Server for AdapterDatabaseSessionServer {
@@ -2042,74 +2052,28 @@ impl adapter_database_session_capnp::Server for AdapterDatabaseSessionServer {
         }
         Ok(())
     }
+}
 
+impl host_adapter_database_session_capnp::Server for AdapterDatabaseSessionServer {
     async fn begin(
         self: Rc<Self>,
-        _params: adapter_database_session_capnp::BeginParams,
-        mut results: adapter_database_session_capnp::BeginResults,
+        _params: host_adapter_database_session_capnp::BeginParams,
+        mut results: host_adapter_database_session_capnp::BeginResults,
     ) -> capnp::Result<()> {
         let mut result = results.get().init_result();
-        match self.inner.begin().await {
-            Ok(txn) => {
-                let client: adapter_transaction_capnp::Client =
-                    capnp_rpc::new_client(AdapterTransactionServer {
-                        inner: Arc::from(txn),
-                    });
-                result.set_ok(client);
-            }
-            Err(err) => write_error(result.init_err(), &err),
-        }
-        Ok(())
-    }
-}
-
-struct AdapterTransactionServer {
-    inner: Arc<dyn AdapterTransaction>,
-}
-
-impl adapter_transaction_capnp::Server for AdapterTransactionServer {
-    async fn execute(
-        self: Rc<Self>,
-        params: adapter_transaction_capnp::ExecuteParams,
-        mut results: adapter_transaction_capnp::ExecuteResults,
-    ) -> capnp::Result<()> {
-        let request = params
-            .get()?
-            .get_request()
-            .map_err(|err| capnp::Error::failed(err.to_string()))
-            .and_then(|r| {
-                super::db_rpc::read_execute_request(r)
-                    .map_err(|err| capnp::Error::failed(err.to_string()))
-            })?;
-        super::db_rpc::write_execute_result_reply(
-            results.get().init_result(),
-            self.inner.execute(request).await,
-        );
-        Ok(())
-    }
-
-    async fn commit(
-        self: Rc<Self>,
-        _params: adapter_transaction_capnp::CommitParams,
-        mut results: adapter_transaction_capnp::CommitResults,
-    ) -> capnp::Result<()> {
-        let mut result = results.get().init_result();
-        match self.inner.commit().await {
-            Ok(()) => result.set_ok(()),
-            Err(err) => write_error(result.init_err(), &err),
-        }
-        Ok(())
-    }
-
-    async fn rollback(
-        self: Rc<Self>,
-        _params: adapter_transaction_capnp::RollbackParams,
-        mut results: adapter_transaction_capnp::RollbackResults,
-    ) -> capnp::Result<()> {
-        let mut result = results.get().init_result();
-        match self.inner.rollback().await {
-            Ok(()) => result.set_ok(()),
-            Err(err) => write_error(result.init_err(), &err),
+        match &self.host {
+            Some(host) => match host.begin().await {
+                Ok(txn) => {
+                    result.set_ok(super::host_rpc::new_adapter_transaction_client(Arc::from(
+                        txn,
+                    )));
+                }
+                Err(err) => write_error(result.init_err(), &err),
+            },
+            None => write_error(
+                result.init_err(),
+                &PluginError::unsupported("interactive adapter transactions"),
+            ),
         }
         Ok(())
     }
@@ -3038,6 +3002,45 @@ pub struct DatabaseClient {
     client: database_capnp::Client,
 }
 
+/// Public adapter session plus host-private interactive transaction client.
+pub struct AdapterSessionHandle {
+    /// Typed `capabilities` / `execute` / `close`.
+    pub session: Box<dyn AdapterDatabaseSession>,
+    /// Host-only `begin` (capability cast on the same session object).
+    pub host: super::host_rpc::HostAdapterDatabaseSessionClient,
+}
+
+impl DatabaseClient {
+    /// Opens a session and host-private transaction client on one capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns when `openSession` fails on the guest.
+    pub async fn open_session_handle(&self) -> Result<AdapterSessionHandle> {
+        let req = self.client.open_session_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        let result = reply
+            .get()
+            .map_err(from_capnp)?
+            .get_result()
+            .map_err(from_capnp)?;
+        match result.which().map_err(from_capnp)? {
+            adapter_session_reply::Ok(sess) => {
+                let cap_client = sess.map_err(from_capnp)?;
+                Ok(AdapterSessionHandle {
+                    session: Box::new(AdapterDatabaseSessionClient {
+                        client: cap_client.clone(),
+                    }),
+                    host: super::host_rpc::HostAdapterDatabaseSessionClient::from_session_client(
+                        cap_client,
+                    ),
+                })
+            }
+            adapter_session_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        }
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl Database for DatabaseClient {
     async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>> {
@@ -3090,66 +3093,6 @@ impl AdapterDatabaseSession for AdapterDatabaseSessionClient {
 
     async fn close(&self) -> Result<()> {
         let req = self.client.close_request();
-        let reply = req.send().promise.await.map_err(from_capnp)?;
-        read_empty(
-            reply
-                .get()
-                .map_err(from_capnp)?
-                .get_result()
-                .map_err(from_capnp)?,
-        )
-    }
-
-    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>> {
-        let req = self.client.begin_request();
-        let reply = req.send().promise.await.map_err(from_capnp)?;
-        let result = reply
-            .get()
-            .map_err(from_capnp)?
-            .get_result()
-            .map_err(from_capnp)?;
-        match result.which().map_err(from_capnp)? {
-            adapter_transaction_reply::Ok(txn) => Ok(Box::new(AdapterTransactionClient {
-                client: txn.map_err(from_capnp)?,
-            })),
-            adapter_transaction_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
-        }
-    }
-}
-
-struct AdapterTransactionClient {
-    client: adapter_transaction_capnp::Client,
-}
-
-#[async_trait::async_trait(?Send)]
-impl AdapterTransaction for AdapterTransactionClient {
-    async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
-        let mut req = self.client.execute_request();
-        super::db_rpc::write_execute_request(req.get().init_request(), &request);
-        let reply = req.send().promise.await.map_err(from_capnp)?;
-        super::db_rpc::read_execute_result_reply(
-            reply
-                .get()
-                .map_err(from_capnp)?
-                .get_result()
-                .map_err(from_capnp)?,
-        )
-    }
-
-    async fn commit(&self) -> Result<()> {
-        let req = self.client.commit_request();
-        let reply = req.send().promise.await.map_err(from_capnp)?;
-        read_empty(
-            reply
-                .get()
-                .map_err(from_capnp)?
-                .get_result()
-                .map_err(from_capnp)?,
-        )
-    }
-
-    async fn rollback(&self) -> Result<()> {
-        let req = self.client.rollback_request();
         let reply = req.send().promise.await.map_err(from_capnp)?;
         read_empty(
             reply

@@ -4,6 +4,8 @@
 
 mod db_rpc;
 mod features;
+mod host_rpc;
+mod host_roles;
 mod jobs;
 mod limits;
 mod roles;
@@ -13,6 +15,9 @@ mod types;
 
 /// Generated Cap'n Proto RPC interfaces (`schema/plugin_v2.capnp`).
 pub use crate::plugin_v2_capnp;
+
+/// Host-private Cap'n Proto RPC interfaces (`schema/plugin_v2_host.capnp`).
+pub use crate::plugin_v2_host_capnp;
 
 pub use db_rpc::{
     canonical_execute_request_hash, decode_db_value_bytes, decode_execute_request_bytes,
@@ -29,16 +34,18 @@ pub use limits::{
     ScalarLimits, ABI_MAJOR, ABI_MINOR, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
     MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
+pub use host_rpc::HostAdapterDatabaseSessionClient;
+pub use host_roles::{AdapterTransaction, HostAdapterDatabaseSession};
 pub use roles::{
-    AdapterDatabaseSession, AdapterTransaction, ByteRange, Cancellation, ContentSource,
-    ContentSourceContext, Database, DatabaseContext, Destination, GuestDatabase, Integration,
-    IntegrationContext, JobHandler, JobHandlerContext, NeverCancel, PluginRoot, ProgressSink,
-    ReadResult, Source,
+    AdapterDatabaseSession, ByteRange, Cancellation, ContentSource, ContentSourceContext, Database,
+    DatabaseContext, Destination, GuestDatabase, Integration, IntegrationContext, JobHandler,
+    JobHandlerContext, NeverCancel, PluginRoot, ProgressSink, ReadResult, Source,
 };
 pub use rpc::{
     byte_source_from_async_read, connect_plugin, pull_byte_source_to_writer, serve_plugin,
-    serve_plugin_stdio, ContentSourceClient, DatabaseClient, DestinationClient, DestinationServer,
-    IntegrationClient, PluginClient, PluginServer, SourceClient, SourceServer,
+    serve_plugin_stdio, AdapterSessionHandle, ContentSourceClient, DatabaseClient,
+    DestinationClient, DestinationServer, IntegrationClient, PluginClient, PluginServer,
+    SourceClient, SourceServer,
 };
 pub use types::{
     CopyResult, DestinationContext, DomainEvent, EventResult, ExecResult, ExtensibleConfig,
