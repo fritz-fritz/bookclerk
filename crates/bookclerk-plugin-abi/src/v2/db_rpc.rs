@@ -368,6 +368,11 @@ pub(super) fn write_db_capabilities(mut b: db_caps_capnp::Builder<'_>, caps: &Db
     b.set_max_atomic_result_bytes(caps.max_atomic_result_bytes);
 }
 
+/// Decodes negotiated database capabilities from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Currently infallible for well-formed readers; reserved for future validation.
 pub(super) fn read_db_capabilities(r: db_caps_capnp::Reader<'_>) -> Result<DbCapabilities> {
     Ok(DbCapabilities {
         sql_contract_version: r.get_sql_contract_version(),

@@ -17,6 +17,11 @@ use super::plugin_v2_host_capnp::{
 use super::rpc::{from_capnp, read_error};
 use crate::{PluginError, Result};
 
+/// Decodes an empty success reply or guest error union.
+///
+/// # Errors
+///
+/// Returns a decode failure or the guest [`PluginError`] on `err`.
 fn read_empty(reader: super::plugin_v2_capnp::empty_reply::Reader<'_>) -> Result<()> {
     match reader.which().map_err(from_capnp)? {
         super::plugin_v2_capnp::empty_reply::Ok(()) => Ok(()),
