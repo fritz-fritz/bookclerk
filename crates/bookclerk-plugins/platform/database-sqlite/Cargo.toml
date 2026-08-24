@@ -44,6 +44,10 @@ required-features = ["host-helpers"]
 name = "totp_txn"
 required-features = ["host-helpers"]
 
+[[test]]
+name = "typed_conformance"
+required-features = ["host-helpers"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true

@@ -1409,12 +1409,14 @@ pub fn host_migration_sql(backend: sea_orm::DbBackend, step: &HostMigrationStep)
 }
 
 /// SQLite DDL through the step before the V27 rebuild (legacy test helper).
+#[cfg(test)]
 #[must_use]
 pub fn migration_sql_d1() -> &'static [&'static str] {
     &migration_sql()[..D1_PRE_V27_STEPS]
 }
 
 /// Additive sqlite steps after the V27 rebuild (serialization slots, dispatch snapshot).
+#[cfg(test)]
 #[must_use]
 pub fn migration_sql_d1_post_v27() -> &'static [&'static str] {
     &migration_sql()[D1_PRE_V27_STEPS + 1..]
@@ -1442,6 +1444,7 @@ pub fn migration_v27_schema_version() -> i64 {
 /// SQL transaction) and must not send them through statement-by-statement
 /// `execute_raw`. The version row is the last statement so it appears only if
 /// the whole batch committed.
+#[cfg(test)]
 #[must_use]
 pub fn migration_v27_d1_statements() -> &'static [&'static str] {
     &[
@@ -1535,6 +1538,7 @@ pub fn migration_v27_d1_statements() -> &'static [&'static str] {
 }
 
 /// D1 `{ "batch": [...] }` statements for V27, including the version row.
+#[cfg(test)]
 #[must_use]
 pub fn migration_v27_d1_batch() -> Vec<String> {
     let mut stmts: Vec<String> = migration_v27_d1_statements()

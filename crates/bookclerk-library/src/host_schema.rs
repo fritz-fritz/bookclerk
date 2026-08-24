@@ -13,12 +13,12 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;
 
-use bookclerk_plugin_abi::{DbAtomicPlan, DbConnectResult, DbPlanStatement, DbPlanStatementKind};
+use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatementKind};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 
 use crate::error::{LibraryError, Result};
 use crate::migrations::{host_migration_plan, host_migration_sql, HostMigrationStep};
-use crate::sql_plan::execute_statements_on;
+use crate::sql_plan::{execute_statements_on, DbAtomicPlan, DbPlanStatement};
 
 /// Which versioning mechanic the host should use.
 ///

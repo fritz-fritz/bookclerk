@@ -268,7 +268,7 @@ mod replay_finalize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bookclerk_plugin_abi::DbPlanStatementKind;
+    use crate::sql_plan::DbPlanStatementKind;
 
     fn guest_insert() -> ExecuteRequest {
         ExecuteRequest {
