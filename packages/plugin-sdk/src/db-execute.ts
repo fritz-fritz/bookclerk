@@ -420,7 +420,13 @@ export function decodeExecuteResultReply(bytes: Uint8Array): ExecuteReply {
   throw new Error("unknown ExecuteResultReply union member");
 }
 
-/** Maps one typed statement result to Cloudflare {@link D1Result}. */
+/**
+ * Maps one typed statement result to Cloudflare {@link D1Result}.
+ *
+ * @param stmt Per-statement rows, columns, and `rowsAffected`.
+ * @param timing Handler/engine timing from the execute reply.
+ * @returns Cloudflare-shaped `{ success, results, meta }`.
+ */
 export function statementResultToD1Result(
   stmt: StatementResult,
   timing: DbTiming,
@@ -451,7 +457,12 @@ export function statementResultToD1Result(
   };
 }
 
-/** Maps a typed execute reply to Cloudflare {@link D1Result} per statement. */
+/**
+ * Maps a typed execute reply to Cloudflare {@link D1Result} per statement.
+ *
+ * @param reply Decoded `ExecuteReply` from the host transport.
+ * @returns One `D1Result` per statement, in plan order.
+ */
 export function executeReplyToD1Results(reply: ExecuteReply): D1Result[] {
   return reply.statements.map((stmt) => statementResultToD1Result(stmt, reply.timing));
 }
