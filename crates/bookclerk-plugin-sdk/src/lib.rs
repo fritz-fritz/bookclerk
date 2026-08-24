@@ -15,7 +15,7 @@
 //! | OAuth callback without guest listen | [`callback_tunnel`] |
 //! | Workerd / Wasm guests | [`workerd`] + npm `@bookclerk/plugin-sdk` |
 //! | ABI DTOs / method names | [`protocol`] (re-exports `bookclerk-plugin-abi`) |
-//! | SeaORM ↔ wire helpers | feature `db` (crate-root re-exports) |
+//! | SeaORM ↔ wire helpers (first-party only) | feature `db` → [`legacy_db`] |
 //! | Database guest session / atomic execution | feature `db` → [`database_adapter`] |
 //! | Author CLI (`check` / `fmt` / `package` / `smoke`) | feature `tools` → [`tools`] |
 //!
@@ -55,6 +55,9 @@ pub mod callback_tunnel;
 pub mod database_adapter;
 #[cfg(feature = "db")]
 mod db;
+#[cfg(feature = "db")]
+#[doc(hidden)]
+pub mod legacy_db;
 mod db_binding;
 mod error;
 mod fetch_dir;
@@ -63,18 +66,6 @@ pub mod protocol;
 pub mod tools;
 pub mod v2;
 pub mod workerd;
-
-#[cfg(feature = "db")]
-pub use db::{
-    b64_string_to_bytes, bytes_to_b64_string, db_value_from_sea, db_value_to_sea,
-    exec_result_from_dto, exec_result_to_dto, json_to_sea_value, proxy_rows_from_dto,
-    proxy_rows_from_typed, proxy_rows_to_dto, sea_null, sea_null_kind, sea_value_to_json,
-    statement_from_dto, statement_to_dto, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming,
-    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbPlanExecResult,
-    DbPlanStatement, DbPlanStatementKind, DbPlanStmtExecResult, DbTxnParams, ExecResultDto,
-    ProxyRowDto, QueryResultDto, StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL,
-    DB_CAPABILITIES_SENTINEL, SEA_NULL_KEY,
-};
 
 pub use callback_tunnel::{TunnelGuest, TunnelHost, TunnelStream};
 pub use db_binding::{DatabaseBinding, DatabaseBindingOptions, PreparedStatement, RetryToken};

@@ -14,12 +14,8 @@ use base64::Engine;
 use sea_orm::{ProxyExecResult, ProxyRow, Statement, Value};
 use serde_json::Value as JsonValue;
 
-pub use bookclerk_plugin_abi::{
-    sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbBeginParams,
-    DbBeginResult, DbConnectParams, DbConnectResult, DbPlanExecResult, DbPlanStatement,
-    DbPlanStatementKind, DbPlanStmtExecResult, DbTxnParams, ExecResultDto, ProxyRowDto,
-    QueryResultDto, StatementDto, D1_MAX_BINDS, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
-    SEA_NULL_KEY,
+pub(crate) use bookclerk_plugin_abi::{
+    sea_null, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto, SEA_NULL_KEY,
 };
 
 /// Converts a SeaORM [`Statement`] into the wire [`StatementDto`] used by `dbQuery` / `dbExecute`.
@@ -512,6 +508,7 @@ pub fn b64_string_to_bytes(s: &str) -> Option<Vec<u8>> {
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
+    use bookclerk_plugin_abi::{DbConnectParams, DbConnectResult};
 
     #[test]
     fn b64_roundtrip() {

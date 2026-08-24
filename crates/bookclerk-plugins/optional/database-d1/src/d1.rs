@@ -663,7 +663,7 @@ mod tests {
     fn named_plan(
         operation_id: &str,
         operation: bookclerk_library::DbAtomicParams,
-    ) -> bookclerk_plugin_sdk::DbAtomicRequest {
+    ) -> bookclerk_plugin_abi::DbAtomicRequest {
         let now = chrono::Utc::now().to_rfc3339();
         bookclerk_library::compile_named_request(
             operation_id,
@@ -1280,7 +1280,7 @@ mod tests {
             .unwrap();
         bookclerk_plugin_sdk::database_adapter::set_connection(db).await;
         let page = bookclerk_plugin_sdk::database_adapter::guest_query_page(
-            bookclerk_plugin_sdk::StatementDto {
+            bookclerk_plugin_abi::StatementDto {
                 sql: "SELECT id FROM t".into(),
                 values: Vec::new(),
                 txn_id: None,
@@ -1620,21 +1620,21 @@ mod tests {
             .run_batch(&[("CREATE TABLE t (k TEXT PRIMARY KEY)".into(), Vec::new())])
             .await
             .unwrap();
-        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+        let req = bookclerk_plugin_abi::DbAtomicRequest {
             operation_id: "dup".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
+            plan: Some(bookclerk_plugin_abi::DbAtomicPlan {
                 statements: vec![
-                    bookclerk_plugin_sdk::DbPlanStatement {
+                    bookclerk_plugin_abi::DbPlanStatement {
                         sql: "INSERT INTO t (k) VALUES ('a')".into(),
                         binds: vec![],
-                        kind: bookclerk_plugin_sdk::DbPlanStatementKind::Execute,
+                        kind: bookclerk_plugin_abi::DbPlanStatementKind::Execute,
                         max_rows: 0,
                     },
-                    bookclerk_plugin_sdk::DbPlanStatement {
+                    bookclerk_plugin_abi::DbPlanStatement {
                         sql: "INSERT INTO t (k) VALUES ('a')".into(),
                         binds: vec![],
-                        kind: bookclerk_plugin_sdk::DbPlanStatementKind::Execute,
+                        kind: bookclerk_plugin_abi::DbPlanStatementKind::Execute,
                         max_rows: 0,
                     },
                 ],
@@ -1661,14 +1661,14 @@ mod tests {
             bookclerk_library::AtomicInterruptPhase::BeforeBegin,
             bookclerk_library::AtomicInterruptKind::Cancel,
         );
-        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+        let req = bookclerk_plugin_abi::DbAtomicRequest {
             operation_id: "c".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+            plan: Some(bookclerk_plugin_abi::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_abi::DbPlanStatement {
                     sql: "SELECT 1".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -1689,14 +1689,14 @@ mod tests {
             bookclerk_library::AtomicInterruptPhase::AroundCommit,
             bookclerk_library::AtomicInterruptKind::Cancel,
         );
-        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+        let req = bookclerk_plugin_abi::DbAtomicRequest {
             operation_id: "c2".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+            plan: Some(bookclerk_plugin_abi::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_abi::DbPlanStatement {
                     sql: "SELECT 1".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -1722,14 +1722,14 @@ mod tests {
             .mount(&server)
             .await;
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
-        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+        let req = bookclerk_plugin_abi::DbAtomicRequest {
             operation_id: "t".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+            plan: Some(bookclerk_plugin_abi::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_abi::DbPlanStatement {
                     sql: "SELECT 1".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -1751,7 +1751,7 @@ mod tests {
     #[tokio::test]
     async fn executing_mock_row_cap_fails_closed() {
         let (_server, proxy, conn, _interrupt, _drop, _oversize) = executing_proxy().await;
-        let cap = bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows as usize;
+        let cap = bookclerk_plugin_abi::DbConnectResult::d1().max_result_rows as usize;
         {
             let db = conn.lock().expect("sqlite mutex");
             db.execute_batch("CREATE TABLE rowcap (x INTEGER)").unwrap();
@@ -1760,14 +1760,14 @@ mod tests {
                     .unwrap();
             }
         }
-        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+        let req = bookclerk_plugin_abi::DbAtomicRequest {
             operation_id: "row-cap".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+            plan: Some(bookclerk_plugin_abi::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_abi::DbPlanStatement {
                     sql: "SELECT x FROM rowcap".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -1918,7 +1918,7 @@ mod tests {
         .expect("host D1 schema");
         bookclerk_library::sql_plan::vectors::run_request_vectors(
             bookclerk_library::SqlFamily::Sqlite,
-            bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows,
+            bookclerk_plugin_abi::DbConnectResult::d1().max_result_rows,
             |req| {
                 let proxy = proxy.clone();
                 async move { proxy.run_atomic(req).await }
@@ -1936,14 +1936,14 @@ mod tests {
             .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0)
             .saturating_add(80);
-        let req = bookclerk_plugin_sdk::DbAtomicRequest {
+        let req = bookclerk_plugin_abi::DbAtomicRequest {
             operation_id: "op-dl".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+            plan: Some(bookclerk_plugin_abi::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_abi::DbPlanStatement {
                     sql: "SELECT 1 AS n".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Select,
+                    kind: bookclerk_plugin_abi::DbPlanStatementKind::Select,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -2004,15 +2004,15 @@ mod tests {
         b.expect("independent proxy 2 schema");
     }
 
-    fn select_one_req(op: &str) -> bookclerk_plugin_sdk::DbAtomicRequest {
-        bookclerk_plugin_sdk::DbAtomicRequest {
+    fn select_one_req(op: &str) -> bookclerk_plugin_abi::DbAtomicRequest {
+        bookclerk_plugin_abi::DbAtomicRequest {
             operation_id: op.into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+            plan: Some(bookclerk_plugin_abi::DbAtomicPlan {
+                statements: vec![bookclerk_plugin_abi::DbPlanStatement {
                     sql: "SELECT 1 AS n".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Select,
+                    kind: bookclerk_plugin_abi::DbPlanStatementKind::Select,
                     max_rows: 0,
                 }],
                 outcome_index: 0,

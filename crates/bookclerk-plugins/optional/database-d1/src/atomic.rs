@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use bookclerk_plugin_sdk::{
+use bookclerk_plugin_abi::{
     encoded_execute_reply_bytes, encoded_statement_result_bytes, sea_null_kind, DbAtomicPlan,
     DbAtomicRequest, DbAtomicTiming, DbColumn, DbConnectResult, DbPlanExecResult,
     DbPlanStatementKind, DbPlanStmtExecResult, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
@@ -1052,7 +1052,7 @@ mod tests {
     #[test]
     fn statement_failure_is_not_ambiguous() {
         let plan = DbAtomicPlan {
-            statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+            statements: vec![bookclerk_plugin_abi::DbPlanStatement {
                 sql: "INSERT INTO t (k) VALUES ('a')".into(),
                 binds: vec![],
                 kind: DbPlanStatementKind::Execute,
@@ -1073,10 +1073,10 @@ mod tests {
     #[test]
     fn parse_caps_result_rows() {
         let plan = DbAtomicPlan {
-            statements: vec![bookclerk_plugin_sdk::DbPlanStatement {
+            statements: vec![bookclerk_plugin_abi::DbPlanStatement {
                 sql: "SELECT 1".into(),
                 binds: vec![],
-                kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
+                kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
                 max_rows: 0,
             }],
             outcome_index: 0,
@@ -1108,8 +1108,8 @@ mod tests {
         assert_eq!(exec.statements[0].rows.len(), 1_000);
     }
 
-    fn stmt(sql: &str, kind: DbPlanStatementKind) -> bookclerk_plugin_sdk::DbPlanStatement {
-        bookclerk_plugin_sdk::DbPlanStatement::new(sql, vec![], kind)
+    fn stmt(sql: &str, kind: DbPlanStatementKind) -> bookclerk_plugin_abi::DbPlanStatement {
+        bookclerk_plugin_abi::DbPlanStatement::new(sql, vec![], kind)
     }
 
     fn plan_of(sql: &str, kind: DbPlanStatementKind) -> DbAtomicPlan {
@@ -1171,13 +1171,6 @@ mod tests {
                 max_rows: 8,
                 result_selection: DbResultSelection::Rows,
             }],
-            outcome_index: 0,
-            payload_index: 0,
-            has_payload_index: false,
-            prior_receipt_index: 0,
-            has_prior_receipt_index: false,
-            receipt_select_index: 0,
-            has_receipt_select_index: false,
             deadline_unix_ms: 0,
         }
     }

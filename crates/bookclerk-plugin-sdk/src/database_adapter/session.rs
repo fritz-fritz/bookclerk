@@ -14,9 +14,12 @@ use std::sync::{Arc, LazyLock, OnceLock};
 
 use super::plugin_error_from_db_err;
 use crate::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
-use crate::{
-    proxy_rows_to_dto, statement_from_dto, DbAtomicRequest, DbCapabilities, DbConnectResult,
-    DbPlanExecResult, ExecResultDto, ExecuteReply, ExecuteRequest, ProxyRowDto, QueryResultDto,
+use bookclerk_plugin_abi::{
+    DbAtomicRequest, DbCapabilities, DbConnectResult, DbPlanExecResult, ExecuteReply,
+    ExecuteRequest,
+};
+use crate::db::{
+    proxy_rows_to_dto, statement_from_dto, ExecResultDto, ProxyRowDto, QueryResultDto,
     StatementDto,
 };
 use futures::TryStreamExt;
@@ -249,8 +252,8 @@ pub async fn guest_atomic(
         crate::PluginError::invalid_params("dbAtomic requires a host-authored executePlan")
     })?;
     let caps = match conn.get_database_backend() {
-        DbBackend::Postgres => crate::DbConnectResult::postgres(),
-        _ => crate::DbConnectResult::sqlite(),
+        DbBackend::Postgres => bookclerk_plugin_abi::DbConnectResult::postgres(),
+        _ => bookclerk_plugin_abi::DbConnectResult::sqlite(),
     };
     let timing_source = match conn.get_database_backend() {
         DbBackend::Postgres => "postgres_txn",
@@ -298,8 +301,8 @@ pub async fn guest_execute_atomic(
     let _gate = gate.lock().await;
     let conn = connection().await.map_err(crate::PluginError::internal)?;
     let caps = match conn.get_database_backend() {
-        DbBackend::Postgres => crate::DbConnectResult::postgres(),
-        _ => crate::DbConnectResult::sqlite(),
+        DbBackend::Postgres => bookclerk_plugin_abi::DbConnectResult::postgres(),
+        _ => bookclerk_plugin_abi::DbConnectResult::sqlite(),
     };
     let timing_source = match conn.get_database_backend() {
         DbBackend::Postgres => "postgres_txn",
@@ -601,8 +604,8 @@ async fn txn_worker(
                 let result = match stack_txn(&stack, &txn_id) {
                     Ok(txn) => {
                         let caps = match ConnectionTrait::get_database_backend(txn) {
-                            DbBackend::Postgres => crate::DbConnectResult::postgres(),
-                            _ => crate::DbConnectResult::sqlite(),
+                            DbBackend::Postgres => bookclerk_plugin_abi::DbConnectResult::postgres(),
+                            _ => bookclerk_plugin_abi::DbConnectResult::sqlite(),
                         };
                         let timing_source = match ConnectionTrait::get_database_backend(txn) {
                             DbBackend::Postgres => "postgres_txn",
@@ -1238,7 +1241,7 @@ pub fn row_to_dto(row: &sea_orm::QueryResult) -> ProxyRowDto {
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
-    use crate::StatementDto;
+    use crate::db::StatementDto;
     use sea_orm::{DbBackend, Statement};
     use std::sync::LazyLock;
     use tokio::sync::Mutex;
@@ -1514,7 +1517,7 @@ mod tests {
 
     #[tokio::test]
     async fn guest_atomic_unique_is_conflict_and_commit_is_unavailable() {
-        use crate::{
+        use bookclerk_plugin_abi::{
             DbAtomicPlan, DbAtomicRequest, DbPlanStatement, DbPlanStatementKind, PluginErrorCode,
         };
         let _lock = SESSION_LOCK.lock().await;
@@ -1619,7 +1622,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
     async fn postgres_guest_atomic_unique_preserves_sqlstate_23505() {
-        use crate::{
+        use bookclerk_plugin_abi::{
             DbAtomicPlan, DbAtomicRequest, DbPlanStatement, DbPlanStatementKind, PluginErrorCode,
         };
         let _lock = SESSION_LOCK.lock().await;
@@ -1872,7 +1875,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_atomic_on_open_txn_does_not_begin_again() {
-        use crate::{
+        use bookclerk_plugin_abi::{
             DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
         };
         let _lock = SESSION_LOCK.lock().await;
@@ -1900,13 +1903,6 @@ mod tests {
                     max_rows: 0,
                     result_selection: DbResultSelection::AffectedRows,
                 }],
-                outcome_index: 0,
-                payload_index: 0,
-                has_payload_index: false,
-                prior_receipt_index: 0,
-                has_prior_receipt_index: false,
-                receipt_select_index: 0,
-                has_receipt_select_index: false,
                 deadline_unix_ms: 0,
             },
         )
@@ -1922,7 +1918,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_atomic_on_open_txn_savepoint_rolls_back_partial_batch() {
-        use crate::{
+        use bookclerk_plugin_abi::{
             DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
         };
         let _lock = SESSION_LOCK.lock().await;
@@ -1959,13 +1955,6 @@ mod tests {
                         result_selection: DbResultSelection::AffectedRows,
                     },
                 ],
-                outcome_index: 0,
-                payload_index: 0,
-                has_payload_index: false,
-                prior_receipt_index: 0,
-                has_prior_receipt_index: false,
-                receipt_select_index: 0,
-                has_receipt_select_index: false,
                 deadline_unix_ms: 0,
             },
         )
@@ -1989,7 +1978,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_atomic_on_open_txn_savepoint_release_failure_poisons_outer_commit() {
-        use crate::{
+        use bookclerk_plugin_abi::{
             DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
         };
         let _lock = SESSION_LOCK.lock().await;
@@ -2018,13 +2007,6 @@ mod tests {
                     max_rows: 0,
                     result_selection: DbResultSelection::AffectedRows,
                 }],
-                outcome_index: 0,
-                payload_index: 0,
-                has_payload_index: false,
-                prior_receipt_index: 0,
-                has_prior_receipt_index: false,
-                receipt_select_index: 0,
-                has_receipt_select_index: false,
                 deadline_unix_ms: 0,
             },
         )
@@ -2050,7 +2032,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_atomic_on_open_txn_savepoint_rollback_failure_poisons_outer_commit() {
-        use crate::{
+        use bookclerk_plugin_abi::{
             DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
         };
         let _lock = SESSION_LOCK.lock().await;
@@ -2088,13 +2070,6 @@ mod tests {
                         result_selection: DbResultSelection::AffectedRows,
                     },
                 ],
-                outcome_index: 0,
-                payload_index: 0,
-                has_payload_index: false,
-                prior_receipt_index: 0,
-                has_prior_receipt_index: false,
-                receipt_select_index: 0,
-                has_receipt_select_index: false,
                 deadline_unix_ms: 0,
             },
         )
