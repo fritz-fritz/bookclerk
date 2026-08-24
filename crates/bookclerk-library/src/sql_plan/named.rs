@@ -14,7 +14,6 @@ use crate::atomic_ops::DbAtomicResult;
 #[cfg(test)]
 use serde_json::json;
 
-use super::dialect::SqlFamily;
 use super::{wire_plan, CompiledAtomic};
 
 /// One statement in a planned batch (SQL, binds, and structural kind).
@@ -74,8 +73,7 @@ enum ConsumeOnceKind {
 
 /// Compiles a named `dbAtomic` request into canonical Bookclerk SQL.
 ///
-/// `family` is retained for callers (SeaORM dialect / tests) but does not
-/// rewrite SQL. Adapters lower placeholders and functions at execute time.
+/// Adapters lower placeholders and functions at execute time.
 ///
 /// # Errors
 ///
@@ -84,11 +82,9 @@ pub fn compile_named_request(
     operation_id: &str,
     params: &DbAtomicParams,
     now: &str,
-    family: SqlFamily,
 ) -> std::result::Result<CompiledAtomic, DbErr> {
     let inner = plan_atomic(operation_id, params, now)?;
     let expected_hash = inner.expected_hash.clone().unwrap_or_default();
-    let _ = family;
     // Canonical Bookclerk SQL (`?` placeholders, SQLite-shaped helpers).
     // Adapters lower placeholders and functions at execute time.
     Ok(CompiledAtomic {
@@ -118,7 +114,6 @@ pub fn compile_claim_event_delivery(
     resource_class: &str,
     max_in_flight: i64,
     now: &str,
-    family: SqlFamily,
 ) -> std::result::Result<CompiledAtomic, DbErr> {
     let inner = plan_claim_event_delivery_cas(
         delivery_id,
@@ -154,7 +149,6 @@ pub fn compile_claim_event_delivery(
         expires_at: receipt_expiry(now),
     };
     let wrapped = wrap_status_op(inner, &ctx, PayloadKind::JsonFromPlan);
-    let _ = family;
     Ok(CompiledAtomic {
         plan: wire_plan(
             wrapped.statements,
@@ -2889,7 +2883,6 @@ mod tests {
                 password_hash: Some("h".into()),
             },
             "2024-06-01T00:00:00Z",
-            crate::sql_plan::SqlFamily::Sqlite,
         )
         .unwrap();
         let update = compiled
@@ -2941,7 +2934,6 @@ mod tests {
             "del-op",
             &DbAtomicParams::DeleteUser { user_id: 1 },
             "2024-06-01T00:00:00Z",
-            crate::sql_plan::SqlFamily::Sqlite,
         )
         .unwrap();
         let snapshot_idx = compiled
@@ -3013,7 +3005,6 @@ mod tests {
                 mark_dispatched: true,
             },
             "2024-06-01T00:00:00Z",
-            crate::sql_plan::SqlFamily::Sqlite,
         )
         .unwrap();
         let insert = compiled
@@ -3927,13 +3918,9 @@ mod tests {
     #[test]
     fn totp_optional_blob_and_int_binds_are_typed_nulls() {
         let req = test_req(confirm_totp_params(7), "totp-typed-null");
-        let compiled = compile_named_request(
-            &req.operation_id,
-            &req.operation,
-            "2024-06-01T00:00:00Z",
-            SqlFamily::Postgres,
-        )
-        .unwrap();
+        let compiled =
+            compile_named_request(&req.operation_id, &req.operation, "2024-06-01T00:00:00Z")
+                .unwrap();
         let insert = compiled
             .plan
             .statements
@@ -4605,7 +4592,6 @@ mod tests {
             "network",
             1,
             now,
-            SqlFamily::Sqlite,
         )
         .unwrap();
         let result = run_compiled(&conn, &compiled);
@@ -4629,7 +4615,6 @@ mod tests {
             "network",
             1,
             now,
-            SqlFamily::Sqlite,
         )
         .unwrap();
         let claimed = run_compiled(&conn, &first);
@@ -4643,7 +4628,6 @@ mod tests {
             "network",
             1,
             now,
-            SqlFamily::Sqlite,
         )
         .unwrap();
         let conflict = run_compiled(&conn, &replay_changed);

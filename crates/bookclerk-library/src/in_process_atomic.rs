@@ -147,7 +147,6 @@ impl AtomicTxnBackend for InProcessSqliteAtomic {
                 mark_dispatched,
             },
             &now,
-            crate::SqlFamily::Sqlite,
         )
         .map_err(LibraryError::Orm)?;
         crate::validate_plan(
@@ -194,7 +193,6 @@ impl AtomicTxnBackend for InProcessSqliteAtomic {
             resource_class,
             i64::from(max_in_flight),
             &now,
-            crate::SqlFamily::Sqlite,
         )
         .map_err(LibraryError::Orm)?;
         let result =

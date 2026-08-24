@@ -4,8 +4,9 @@ use crate::atomic_ops::{atomic_status, DbAtomicParams};
 
 use super::{
     compile_named_request, execute_plan_on, execute_statements_on_session,
-    vectors::CONTRACT_VECTOR_ROW_CAP, AtomicSession, SqlFamily,
+    vectors::CONTRACT_VECTOR_ROW_CAP, AtomicSession,
 };
+use bookclerk_plugin_abi::DbConnectResult;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -49,13 +50,14 @@ fn named(id: &'static str, params: DbAtomicParams) -> NamedOp {
 #[tokio::test]
 async fn shared_vectors_on_sqlite() {
     let db = mem_db().await;
-    super::vectors::run_conn_vectors(&db, SqlFamily::Sqlite, "sqlite_txn").await;
+    super::vectors::run_conn_vectors(&db, DbConnectResult::sqlite(), "sqlite_txn").await;
 }
 
 #[tokio::test]
 async fn typed_shared_vectors_on_sqlite() {
     let db = mem_db().await;
-    super::typed_vectors::run_typed_conn_vectors(&db, SqlFamily::Sqlite, "sqlite_txn").await;
+    super::typed_vectors::run_typed_conn_vectors(&db, DbConnectResult::sqlite(), "sqlite_txn")
+        .await;
 }
 
 #[tokio::test]
@@ -65,7 +67,7 @@ async fn postgres_shared_vectors() {
         return;
     }
     let db = postgres_migrated_db().await;
-    super::vectors::run_conn_vectors(&db, SqlFamily::Postgres, "postgres_txn").await;
+    super::vectors::run_conn_vectors(&db, DbConnectResult::postgres(), "postgres_txn").await;
 }
 
 #[tokio::test]
@@ -75,7 +77,8 @@ async fn typed_shared_vectors_on_postgres() {
         return;
     }
     let db = postgres_migrated_db().await;
-    super::typed_vectors::run_typed_conn_vectors(&db, SqlFamily::Postgres, "postgres_txn").await;
+    super::typed_vectors::run_typed_conn_vectors(&db, DbConnectResult::postgres(), "postgres_txn")
+        .await;
 }
 
 #[tokio::test]
@@ -276,7 +279,7 @@ async fn plan_commit_inserts_receipt() {
             run_after: None,
         },
     );
-    let compiled = compile_named_request(req.id, &req.params, now, SqlFamily::Sqlite).unwrap();
+    let compiled = compile_named_request(req.id, &req.params, now).unwrap();
     let result = execute_plan_on(
         &db,
         &compiled.plan,
@@ -316,7 +319,7 @@ async fn plan_hash_conflict_is_idempotency_conflict() {
             run_after: None,
         },
     );
-    let compiled = compile_named_request(first.id, &first.params, now, SqlFamily::Sqlite).unwrap();
+    let compiled = compile_named_request(first.id, &first.params, now).unwrap();
     execute_plan_on(
         &db,
         &compiled.plan,
@@ -337,7 +340,7 @@ async fn plan_hash_conflict_is_idempotency_conflict() {
             run_after: None,
         },
     );
-    let other = compile_named_request(second.id, &second.params, now, SqlFamily::Sqlite).unwrap();
+    let other = compile_named_request(second.id, &second.params, now).unwrap();
     let result = execute_plan_on(
         &db,
         &compiled.plan,
@@ -468,7 +471,7 @@ async fn timing_receipt_shape_is_uniform() {
             run_after: None,
         },
     );
-    let compiled = compile_named_request(req.id, &req.params, now, SqlFamily::Sqlite).unwrap();
+    let compiled = compile_named_request(req.id, &req.params, now).unwrap();
     let result = execute_plan_on(
         &db,
         &compiled.plan,
@@ -521,7 +524,7 @@ fn postgres_renderer_lowers_canonical_placeholders() {
             run_after: None,
         },
     );
-    let compiled = compile_named_request(req.id, &req.params, now, SqlFamily::Postgres).unwrap();
+    let compiled = compile_named_request(req.id, &req.params, now).unwrap();
     let joined = compiled
         .plan
         .statements
@@ -570,7 +573,7 @@ async fn postgres_plan_receipt_replay() {
             run_after: None,
         },
     );
-    let compiled = compile_named_request(req.id, &req.params, now, SqlFamily::Postgres).unwrap();
+    let compiled = compile_named_request(req.id, &req.params, now).unwrap();
     let first = execute_plan_on(
         &db,
         &compiled.plan,
@@ -667,7 +670,7 @@ async fn postgres_claim_malformed_json_is_quarantined() {
             lease_secs: 60,
         },
     );
-    let compiled = compile_named_request(req.id, &req.params, now, SqlFamily::Postgres).unwrap();
+    let compiled = compile_named_request(req.id, &req.params, now).unwrap();
     let result = execute_plan_on(
         &db,
         &compiled.plan,
@@ -842,7 +845,7 @@ fn d1_compat_plan_commit_and_replay() {
     let conn = d1_compat_mem();
     let now = "2024-06-01T00:00:00Z";
     let op = enqueue_scan("d1-conf-enq", "a");
-    let compiled = compile_named_request(op.id, &op.params, now, SqlFamily::Sqlite).unwrap();
+    let compiled = compile_named_request(op.id, &op.params, now).unwrap();
     let exec = d1_compat_execute(&conn, &compiled.plan, op.id);
     let first = super::interpret_exec(&compiled.plan, &exec, &compiled.expected_hash);
     assert_eq!(first.status, atomic_status::OK);
@@ -858,10 +861,10 @@ fn d1_compat_hash_conflict_is_idempotency_conflict() {
     let conn = d1_compat_mem();
     let now = "2024-06-01T00:00:00Z";
     let first = enqueue_scan("d1-conflict", "a");
-    let compiled = compile_named_request(first.id, &first.params, now, SqlFamily::Sqlite).unwrap();
+    let compiled = compile_named_request(first.id, &first.params, now).unwrap();
     let _ = d1_compat_execute(&conn, &compiled.plan, first.id);
     let second = enqueue_scan("d1-conflict", "other");
-    let other = compile_named_request(second.id, &second.params, now, SqlFamily::Sqlite).unwrap();
+    let other = compile_named_request(second.id, &second.params, now).unwrap();
     let exec = d1_compat_execute(&conn, &compiled.plan, first.id);
     let result = super::interpret_exec(&compiled.plan, &exec, &other.expected_hash);
     assert_eq!(result.status, atomic_status::IDEMPOTENCY_CONFLICT);
@@ -991,7 +994,7 @@ async fn postgres_plan_commit_inserts_receipt() {
     let db = postgres_migrated_db().await;
     let now = "2024-06-01T00:00:00Z";
     let op = enqueue_scan("pg-conf-enq-2", "pg");
-    let compiled = compile_named_request(op.id, &op.params, now, SqlFamily::Postgres).unwrap();
+    let compiled = compile_named_request(op.id, &op.params, now).unwrap();
     let first = execute_plan_on(
         &db,
         &compiled.plan,

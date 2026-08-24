@@ -1,0 +1,55 @@
+{
+  "contractVersion": 1,
+  "description": "Normative Bookclerk SQL v1 corpus. See docs/sql-contract/v1.md.",
+  "lowering": [
+    {
+      "id": "placeholders-basic",
+      "canonical": "SELECT a FROM t WHERE id = ? AND name = ?",
+      "postgres": "SELECT a FROM t WHERE id = $1 AND name = $2"
+    },
+    {
+      "id": "placeholders-preserve-literals",
+      "canonical": "SELECT '?' AS literal, /* ? */ ? FROM t WHERE x = '?' -- ?\nAND y = ?",
+      "postgresContains": ["'?'", "/* ? */", "-- ?", "$1", "$2"],
+      "postgresNotContains": ["$3"]
+    },
+    {
+      "id": "json-extract",
+      "canonical": "SELECT json_extract(payload, '$.v') FROM t WHERE id = ?",
+      "postgres": "SELECT (CASE WHEN (payload) IS JSON THEN ((payload)::jsonb #>> '{v}') END) FROM t WHERE id = $1"
+    },
+    {
+      "id": "json-valid-invalid",
+      "canonical": "WHERE json_valid(payload) = 0 OR json_extract(payload, '$.v') IS NULL",
+      "postgresContains": ["(payload IS NOT JSON)", "IS JSON THEN"],
+      "postgresNotContains": ["json_valid", "FALSE"]
+    },
+    {
+      "id": "json-valid-valid",
+      "canonical": "AND json_valid(payload) = 1 AND json_extract(payload, '$.v') = '1'",
+      "postgresContains": ["(payload IS JSON)"],
+      "postgresNotContains": ["json_valid", "TRUE"]
+    },
+    {
+      "id": "insert-or-ignore-returning",
+      "canonical": "INSERT OR IGNORE INTO t (id) SELECT ? RETURNING id",
+      "postgres": "INSERT INTO t (id) SELECT $1 ON CONFLICT DO NOTHING RETURNING id"
+    },
+    {
+      "id": "json-object",
+      "canonical": "SELECT json_object('k', ?) AS o",
+      "postgres": "SELECT json_build_object('k', $1) AS o"
+    },
+    {
+      "id": "ifnull-greatest",
+      "canonical": "SELECT IFNULL(x, 0), MAX(attempt_count, 1)",
+      "postgres": "SELECT COALESCE(x, 0), GREATEST(attempt_count, 1)"
+    }
+  ],
+  "sqliteIdentity": [
+    {
+      "id": "sqlite-leaves-question-marks",
+      "canonical": "a = ? AND b = ?"
+    }
+  ]
+}

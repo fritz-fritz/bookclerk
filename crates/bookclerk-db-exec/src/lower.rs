@@ -369,4 +369,40 @@ mod tests {
         assert!(sql.contains("#>> '{a}'"), "{sql}");
         assert!(sql.contains("#>> '{b}'"), "{sql}");
     }
+
+    #[test]
+    fn sql_v1_corpus_drives_lowering() {
+        let raw = include_str!("../testdata/sql_v1/corpus.json");
+        let corpus: serde_json::Value = serde_json::from_str(raw).expect("sql_v1 corpus JSON");
+        assert_eq!(corpus["contractVersion"], 1);
+        for entry in corpus["lowering"].as_array().expect("lowering") {
+            let id = entry["id"].as_str().unwrap_or("?");
+            let canonical = entry["canonical"].as_str().expect("canonical");
+            let got = lower_canonical_to_postgres(canonical);
+            if let Some(exact) = entry["postgres"].as_str() {
+                assert_eq!(got, exact, "corpus {id}");
+            }
+            if let Some(contains) = entry["postgresContains"].as_array() {
+                for needle in contains {
+                    let n = needle.as_str().unwrap();
+                    assert!(got.contains(n), "corpus {id}: expected `{n}` in:\n{got}");
+                }
+            }
+            if let Some(forbidden) = entry["postgresNotContains"].as_array() {
+                for needle in forbidden {
+                    let n = needle.as_str().unwrap();
+                    assert!(!got.contains(n), "corpus {id}: unexpected `{n}` in:\n{got}");
+                }
+            }
+        }
+        for entry in corpus["sqliteIdentity"].as_array().expect("sqliteIdentity") {
+            let id = entry["id"].as_str().unwrap_or("?");
+            let canonical = entry["canonical"].as_str().expect("canonical");
+            assert_eq!(
+                lower_canonical_sql(DatabaseBackend::Sqlite, canonical),
+                canonical,
+                "corpus {id}"
+            );
+        }
+    }
 }

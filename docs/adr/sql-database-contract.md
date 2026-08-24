@@ -78,9 +78,25 @@ engine bind cap (host still chunks conservatively).
 
 The host compiler emits **canonical Bookclerk SQL** (`?` placeholders,
 SQLite-shaped helpers such as `INSERT OR IGNORE`, `json_extract`,
-`json_valid`). Adapter SDKs lower placeholders and functions at execute
-time (`bookclerk-db-exec::lower_canonical_sql`). Optional plan choices may
-branch only on semantic capabilities, not on plugin id or `sqlFamily`.
+`json_valid`). The normative grammar, types, helpers, result semantics, and
+version policy live in [`docs/sql-contract/v1.md`](../sql-contract/v1.md);
+machine-readable vectors are under
+`crates/bookclerk-db-exec/testdata/sql_v1/`. Adapter admission is “passes
+Bookclerk SQL v1 conformance,” not affinity with SQLite/PostgreSQL identity.
+
+Adapter SDKs lower placeholders and functions at execute time
+(`bookclerk-db-exec::lower_canonical_sql`). Optional plan choices may branch
+only on semantic capabilities, not on plugin id or `sqlFamily`.
+`sqlContractVersion` versions are monotonic supersets; hosts require
+`>= SQL_CONTRACT_VERSION`.
+
+### Bootstrap metadata isolation
+
+`sqlFamily` and `diagnosticEngine` are bootstrap/observability only. An
+architecture lint (`scripts/check-db-plugin-isolation.py`) forbids
+`bookclerk-library` production sources from reading them (or defining
+planner-side `SqlFamily`). SeaORM proxy open may still map bootstrap fields
+in `bookclerk-plugin-host` after typed capability negotiation succeeds.
 
 ### Generic atomic execute
 
@@ -151,7 +167,9 @@ limits is not loaded.
 - An architecture lint forbids plugin and `bookclerk-db-guest` production
   sources from importing Bookclerk migrations, embedding application table
   names, or interpreting named operations (`DbAtomicParams`, `atomic_status`,
-  `interpret_plan`).
+  `interpret_plan`). The same lint forbids `bookclerk-library` planners and
+  domain code from reading bootstrap-only `sqlFamily` / `diagnosticEngine`
+  (or reintroducing planner-side `SqlFamily`).
 - Equal performance across engines is not guaranteed.
 - Integration plugins never receive database credentials or raw
   connections.

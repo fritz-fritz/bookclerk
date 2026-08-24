@@ -4,7 +4,6 @@ use bookclerk_db_exec::{AtomicSession, ExecCaps};
 use bookclerk_plugin_abi::{DbAtomicRequest, DbConnectResult, DbPlanExecResult, ExecuteRequest};
 
 use super::vectors;
-use super::SqlFamily;
 use sea_orm::DatabaseConnection;
 
 /// Runs the shared contract suite through typed `execute_typed_on_session`.
@@ -12,14 +11,24 @@ use sea_orm::DatabaseConnection;
 /// # Panics
 ///
 /// Panics when a vector fails.
-pub async fn run_typed_conn_vectors(db: &DatabaseConnection, family: SqlFamily, timing: &str) {
+pub async fn run_typed_conn_vectors(
+    db: &DatabaseConnection,
+    connect: DbConnectResult,
+    timing: &str,
+) {
     let db = db.clone();
     let timing = timing.to_string();
-    vectors::run_contract_vectors(family, vectors::CONTRACT_VECTOR_ROW_CAP, move |req, cap| {
-        let db = db.clone();
-        let timing = timing.clone();
-        async move { run_typed_atomic_request(&db, &req, family, &timing, cap).await }
-    })
+    let connect_for_run = connect.clone();
+    vectors::run_contract_vectors(
+        connect,
+        vectors::CONTRACT_VECTOR_ROW_CAP,
+        move |req, cap| {
+            let db = db.clone();
+            let timing = timing.clone();
+            let connect = connect_for_run.clone();
+            async move { run_typed_atomic_request(&db, &req, &connect, &timing, cap).await }
+        },
+    )
     .await;
 }
 
@@ -27,17 +36,13 @@ pub async fn run_typed_conn_vectors(db: &DatabaseConnection, family: SqlFamily, 
 async fn run_typed_atomic_request(
     db: &DatabaseConnection,
     req: &DbAtomicRequest,
-    family: SqlFamily,
+    connect: &DbConnectResult,
     timing: &str,
     cap: u32,
 ) -> Result<DbPlanExecResult, String> {
     let _plan = req.plan.clone().ok_or_else(|| "vector plan".to_string())?;
     let typed = ExecuteRequest::from_atomic(req).map_err(|err| err.to_string())?;
-    let connect = match family {
-        SqlFamily::Sqlite => DbConnectResult::sqlite(),
-        SqlFamily::Postgres => DbConnectResult::postgres(),
-    };
-    let mut caps = ExecCaps::from_connect(&connect);
+    let mut caps = ExecCaps::from_connect(connect);
     if cap > 0 {
         caps.max_result_rows = cap;
     }

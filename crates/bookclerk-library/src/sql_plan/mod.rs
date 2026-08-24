@@ -7,7 +7,6 @@
 
 #[cfg(test)]
 mod conformance;
-pub mod dialect;
 mod exec;
 mod guest_receipt;
 mod interpret;
@@ -23,7 +22,6 @@ use bookclerk_plugin_abi::{
     ExecuteRequest,
 };
 
-pub use dialect::{rewrite_placeholders, SqlFamily};
 pub use exec::{
     execute_plan_on, execute_plan_on_capped, execute_statements_on, execute_statements_on_session,
     AtomicSession,
@@ -51,12 +49,6 @@ impl CompiledAtomic {
     pub fn into_request(self, operation_id: impl Into<String>) -> DbAtomicRequest {
         DbAtomicRequest::with_plan(operation_id, self.expected_hash, self.plan)
     }
-}
-
-/// SQL family from a negotiated [`DbConnectResult`].
-#[must_use]
-pub fn family_from_connect(caps: &DbConnectResult) -> Option<SqlFamily> {
-    SqlFamily::parse(&caps.sql_family)
 }
 
 /// Rejects a plan that exceeds negotiated guest limits or has out-of-range selectors.
@@ -418,7 +410,7 @@ mod limits_tests {
     #[test]
     fn validate_plan_rejects_oversized_dispatch_page() {
         use crate::atomic_ops::DbAtomicParams;
-        use crate::sql_plan::{compile_named_request, SqlFamily};
+        use crate::sql_plan::compile_named_request;
         let subs: Vec<serde_json::Value> = (0..50)
             .map(|i| serde_json::json!({ "pluginId": format!("p{i}") }))
             .collect();
@@ -430,7 +422,6 @@ mod limits_tests {
                 mark_dispatched: true,
             },
             "2024-06-01T00:00:00Z",
-            SqlFamily::Sqlite,
         )
         .unwrap();
         let mut caps = DbConnectResult::sqlite();

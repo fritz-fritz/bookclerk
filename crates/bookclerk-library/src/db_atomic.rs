@@ -49,12 +49,8 @@ pub async fn execute_named_atomic(
     operation_id: &str,
     params: &DbAtomicParams,
 ) -> Result<DbAtomicResult> {
-    let family = match db.get_database_backend() {
-        DbBackend::Postgres => crate::sql_plan::SqlFamily::Postgres,
-        _ => crate::sql_plan::SqlFamily::Sqlite,
-    };
     let now = Utc::now().to_rfc3339();
-    let compiled = crate::sql_plan::compile_named_request(operation_id, params, &now, family)
+    let compiled = crate::sql_plan::compile_named_request(operation_id, params, &now)
         .map_err(LibraryError::Orm)?;
     execute_db_atomic(db, compiled.into_request(operation_id)).await
 }

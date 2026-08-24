@@ -642,13 +642,8 @@ impl RpcAtomicBackend {
         params: bookclerk_library::DbAtomicParams,
     ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
         let now = chrono::Utc::now().to_rfc3339();
-        let compiled = bookclerk_library::compile_named_request(
-            &operation_id,
-            &params,
-            &now,
-            bookclerk_library::SqlFamily::Sqlite,
-        )
-        .map_err(bookclerk_library::LibraryError::Orm)?;
+        let compiled = bookclerk_library::compile_named_request(&operation_id, &params, &now)
+            .map_err(bookclerk_library::LibraryError::Orm)?;
         self.send_compiled(compiled, operation_id).await
     }
 
@@ -1262,7 +1257,6 @@ impl bookclerk_library::AtomicTxnBackend for RpcAtomicBackend {
             resource_class,
             i64::from(max_in_flight),
             &now,
-            bookclerk_library::SqlFamily::Sqlite,
         )
         .map_err(bookclerk_library::LibraryError::Orm)?;
         let result = self
@@ -1407,8 +1401,15 @@ fn schema_kind_to_backend(kind: bookclerk_library::HostSchemaKind) -> DbBackend 
 
 /// SeaORM proxy backend from bootstrap metadata on a connect result.
 fn seaorm_backend_from_connect(connect: &DbConnectResult) -> Result<DbBackend, DbErr> {
-    if let Some(family) = bookclerk_library::SqlFamily::parse(&connect.sql_family) {
-        return Ok(family.sea_backend());
+    match connect.sql_family.to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" | "pg" => return Ok(DbBackend::Postgres),
+        "sqlite" => return Ok(DbBackend::Sqlite),
+        "" => {}
+        other => {
+            return Err(DbErr::Custom(format!(
+                "unknown database bootstrap sqlFamily `{other}`"
+            )));
+        }
     }
     match connect.dialect.to_ascii_lowercase().as_str() {
         "postgres" | "postgresql" | "pg" => Ok(DbBackend::Postgres),

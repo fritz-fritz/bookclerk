@@ -665,14 +665,9 @@ mod tests {
         operation: bookclerk_library::DbAtomicParams,
     ) -> bookclerk_plugin_sdk::legacy_db::DbAtomicRequest {
         let now = chrono::Utc::now().to_rfc3339();
-        bookclerk_library::compile_named_request(
-            operation_id,
-            &operation,
-            &now,
-            bookclerk_library::SqlFamily::Sqlite,
-        )
-        .expect("compile named atomic request")
-        .into_request(operation_id)
+        bookclerk_library::compile_named_request(operation_id, &operation, &now)
+            .expect("compile named atomic request")
+            .into_request(operation_id)
     }
 
     fn query_ok() -> ResponseTemplate {
@@ -1820,7 +1815,6 @@ mod tests {
                 run_after: None,
             },
             now,
-            bookclerk_library::SqlFamily::Sqlite,
         )
         .unwrap();
         let req = compiled.clone().into_request("d1-enq");
@@ -1917,7 +1911,7 @@ mod tests {
         .await
         .expect("host D1 schema");
         bookclerk_library::sql_plan::vectors::run_request_vectors(
-            bookclerk_library::SqlFamily::Sqlite,
+            bookclerk_plugin_sdk::legacy_db::DbConnectResult::d1(),
             bookclerk_plugin_sdk::legacy_db::DbConnectResult::d1().max_result_rows,
             |req| {
                 let proxy = proxy.clone();

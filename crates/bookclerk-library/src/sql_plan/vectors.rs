@@ -10,7 +10,7 @@ use bookclerk_plugin_abi::{
 use sea_orm::DatabaseConnection;
 use serde_json::Value as JsonValue;
 
-use super::{compile_named_request, interpret_exec, SqlFamily};
+use super::{compile_named_request, interpret_exec};
 use crate::atomic_ops::{atomic_status, DbAtomicParams};
 
 /// Injected `maxResultRows` for conn-vector row-cap cases (sqlite / postgres).
@@ -21,18 +21,16 @@ pub const CONTRACT_VECTOR_ROW_CAP: u32 = 5;
 /// # Panics
 ///
 /// Panics when a vector fails.
-pub async fn run_conn_vectors(db: &DatabaseConnection, family: SqlFamily, timing: &str) {
+pub async fn run_conn_vectors(db: &DatabaseConnection, connect: DbConnectResult, timing: &str) {
     let db = db.clone();
     let timing = timing.to_string();
-    run_contract_vectors(family, CONTRACT_VECTOR_ROW_CAP, move |req, cap| {
+    let connect_for_run = connect.clone();
+    run_contract_vectors(connect, CONTRACT_VECTOR_ROW_CAP, move |req, cap| {
         let db = db.clone();
         let timing = timing.clone();
+        let connect = connect_for_run.clone();
         async move {
             let plan = req.plan.expect("vector plan");
-            let connect = match family {
-                SqlFamily::Sqlite => DbConnectResult::sqlite(),
-                SqlFamily::Postgres => DbConnectResult::postgres(),
-            };
             let mut caps = ExecCaps::from_connect(&connect);
             if cap > 0 {
                 caps.max_result_rows = cap;
@@ -53,13 +51,16 @@ pub async fn run_conn_vectors(db: &DatabaseConnection, family: SqlFamily, timing
 /// # Panics
 ///
 /// Panics when a vector fails.
-pub async fn run_request_vectors<F, Fut, E>(family: SqlFamily, advertised_cap: u32, mut run: F)
-where
+pub async fn run_request_vectors<F, Fut, E>(
+    connect: DbConnectResult,
+    advertised_cap: u32,
+    mut run: F,
+) where
     F: FnMut(DbAtomicRequest) -> Fut,
     Fut: Future<Output = Result<DbPlanExecResult, E>>,
     E: std::fmt::Display,
 {
-    run_contract_vectors(family, advertised_cap, move |req, _cap| {
+    run_contract_vectors(connect, advertised_cap, move |req, _cap| {
         let fut = run(req);
         async move { fut.await.map_err(|e| e.to_string()) }
     })
@@ -75,14 +76,14 @@ where
 /// # Panics
 ///
 /// Panics when a vector fails.
-pub async fn run_contract_vectors<F, Fut>(family: SqlFamily, row_cap: u32, mut run: F)
+pub async fn run_contract_vectors<F, Fut>(_connect: DbConnectResult, row_cap: u32, mut run: F)
 where
     F: FnMut(DbAtomicRequest, u32) -> Fut,
     Fut: Future<Output = Result<DbPlanExecResult, String>>,
 {
-    commit_and_replay(&mut run, family).await;
-    hash_conflict(&mut run, family).await;
-    password_replay_and_hash_conflict(&mut run, family).await;
+    commit_and_replay(&mut run).await;
+    hash_conflict(&mut run).await;
+    password_replay_and_hash_conflict(&mut run).await;
     unique_generic_insert_fails(&mut run).await;
     failed_statement_rolls_back(&mut run).await;
     row_cap_select(&mut run, row_cap).await;
@@ -91,12 +92,12 @@ where
     returning_delete_cap(&mut run, row_cap).await;
     rows_affected_by_kind(&mut run).await;
     values_returning_cap(&mut run, row_cap).await;
-    aggregate_scalar_cap(&mut run, family).await;
+    aggregate_scalar_cap(&mut run).await;
     wide_numeric_row_cap(&mut run).await;
 }
 
 /// Enqueue once, then replay the same `operationId`.
-async fn commit_and_replay<F, Fut>(run: &mut F, family: SqlFamily)
+async fn commit_and_replay<F, Fut>(run: &mut F)
 where
     F: FnMut(DbAtomicRequest, u32) -> Fut,
     Fut: Future<Output = Result<DbPlanExecResult, String>>,
@@ -112,7 +113,6 @@ where
             run_after: None,
         },
         "2024-06-01T00:00:00Z",
-        family,
     )
     .expect("compile enqueue");
     let first = run(compiled.clone().into_request("vec-enq"), 0)
@@ -128,7 +128,7 @@ where
 }
 
 /// Same `operationId` with a different request hash is an idempotency conflict.
-async fn hash_conflict<F, Fut>(run: &mut F, family: SqlFamily)
+async fn hash_conflict<F, Fut>(run: &mut F)
 where
     F: FnMut(DbAtomicRequest, u32) -> Fut,
     Fut: Future<Output = Result<DbPlanExecResult, String>>,
@@ -144,7 +144,6 @@ where
             run_after: None,
         },
         "2024-06-01T00:00:00Z",
-        family,
     )
     .unwrap();
     let exec = run(first.clone().into_request("vec-conflict"), 0)
@@ -165,7 +164,6 @@ where
             run_after: None,
         },
         "2024-06-01T00:00:00Z",
-        family,
     )
     .unwrap();
     let snapshot = job_payloads(&mut *run).await;
@@ -203,7 +201,7 @@ where
 }
 
 /// Outcome-first mutating op: exact replay and mismatched hash leave the user row unchanged.
-async fn password_replay_and_hash_conflict<F, Fut>(run: &mut F, family: SqlFamily)
+async fn password_replay_and_hash_conflict<F, Fut>(run: &mut F)
 where
     F: FnMut(DbAtomicRequest, u32) -> Fut,
     Fut: Future<Output = Result<DbPlanExecResult, String>>,
@@ -225,7 +223,6 @@ where
             password_hash: Some("hash-one".into()),
         },
         "2024-06-01T00:00:00Z",
-        family,
     )
     .unwrap();
     let exec = run(first.clone().into_request("vec-pw"), 0)
@@ -255,7 +252,6 @@ where
             password_hash: Some("hash-two".into()),
         },
         "2024-06-01T00:00:00Z",
-        family,
     )
     .unwrap();
     let conflict = run(other.clone().into_request("vec-pw"), 0)
@@ -549,15 +545,14 @@ where
 }
 
 /// Two individually-valid row-producing statements whose aggregate exceeds the RPC scalar.
-async fn aggregate_scalar_cap<F, Fut>(run: &mut F, family: SqlFamily)
+async fn aggregate_scalar_cap<F, Fut>(run: &mut F)
 where
     F: FnMut(DbAtomicRequest, u32) -> Fut,
     Fut: Future<Output = Result<DbPlanExecResult, String>>,
 {
-    let pad = match family {
-        SqlFamily::Sqlite => "SELECT hex(zeroblob(70000)) AS pad",
-        SqlFamily::Postgres => "SELECT repeat('a', 140000) AS pad",
-    };
+    // Canonical large text — works on every adapter after lowering (no dialect branch).
+    // Two ~150 KiB cells exceed FIRST_PARTY_MAX_RESULT_BYTES (256 KiB aggregate).
+    let pad = format!("SELECT '{}' AS pad", "a".repeat(150_000));
     run(
         request(
             "vec-agg-setup",
@@ -576,7 +571,7 @@ where
             "vec-agg",
             DbAtomicPlan {
                 statements: vec![
-                    DbPlanStatement::new(pad, vec![], DbPlanStatementKind::Select),
+                    DbPlanStatement::new(pad.clone(), vec![], DbPlanStatementKind::Select),
                     DbPlanStatement::new(pad, vec![], DbPlanStatementKind::Select),
                 ],
                 outcome_index: 0,

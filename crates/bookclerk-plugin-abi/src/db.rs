@@ -196,6 +196,13 @@ pub const HOST_MIN_CELL_BYTES: u32 = 1_024;
 pub const FIRST_PARTY_MAX_RESULT_BYTES: u32 = crate::v2::MAX_SCALAR_BYTES;
 
 /// Bookclerk SQL contract version advertised by first-party adapters.
+///
+/// Contract versions are **monotonic supersets** (see `docs/sql-contract/v1.md`):
+/// every guarantee in version *N* remains valid in *N+1*. Guests advertise the
+/// highest version they implement; hosts require
+/// `sqlContractVersion >= SQL_CONTRACT_VERSION`. A non-superset change must bump
+/// this constant and document a new major contract — do not weaken `>=` into a
+/// negotiated range until then.
 pub const SQL_CONTRACT_VERSION: u32 = 1;
 
 /// Result of a successful [`crate::methods::db_connect`].
