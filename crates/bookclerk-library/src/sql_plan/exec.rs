@@ -1,6 +1,6 @@
 //! Run a generic [`DbAtomicPlan`] on a SeaORM connection (one native transaction).
 
-use bookclerk_plugin_abi::{DbAtomicPlan, DbPlanExecResult};
+use super::host_ir::{DbAtomicPlan, DbPlanExecResult};
 
 use crate::atomic_ops::DbAtomicResult;
 use crate::error::{LibraryError, Result};

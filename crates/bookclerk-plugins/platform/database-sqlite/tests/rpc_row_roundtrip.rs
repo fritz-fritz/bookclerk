@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_library::entities::title_requests;
-use bookclerk_plugin_sdk::legacy_db::{proxy_rows_from_dto, QueryResultDto};
+use bookclerk_plugin_sdk::{proxy_rows_from_dto, QueryResultDto};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, Database, DbBackend, DbErr, EntityTrait, ProxyDatabaseTrait,
     ProxyExecResult, ProxyRow, QueryFilter, QueryTrait, Statement,

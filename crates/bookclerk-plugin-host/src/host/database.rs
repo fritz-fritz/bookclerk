@@ -13,15 +13,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
-use bookclerk_plugin_sdk::legacy_db::{
-    db_value_from_sea, exec_result_from_dto, proxy_rows_from_typed, DbAtomicPlan, DbAtomicRequest,
-    DbConnectParams, DbConnectResult, DbPlanStatement, DbPlanStatementKind, ExecResultDto,
-};
+use bookclerk_db_exec::db_value_from_sea;
 use bookclerk_plugin_sdk::v2::GuestDatabase;
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
-    DbResultSelection, ExecuteReply, ExecuteRequest, PluginError as AbiPluginError,
-    TypedDbStatement,
+    exec_result_from_dto, proxy_rows_from_typed, DbConnectParams, DbConnectResult,
+    DbPlanStatementKind, DbResultSelection, ExecResultDto, ExecuteReply, ExecuteRequest,
+    PluginError as AbiPluginError, TypedDbStatement,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -666,11 +664,9 @@ impl RpcAtomicBackend {
         operation_id: String,
     ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
         bookclerk_library::validate_plan(&compiled.plan, &self.caps)?;
-        let mut request = compiled.clone().into_request(operation_id.clone());
         let deadline_unix_ms = unix_now_ms().saturating_add(120_000);
-        request.deadline_unix_ms = Some(deadline_unix_ms);
-        let typed = ExecuteRequest::from_atomic(&request)
-            .map_err(|err| bookclerk_library::LibraryError::Other(anyhow::anyhow!(err)))?;
+        let mut typed = compiled.clone().into_typed_request(operation_id.clone());
+        typed.deadline_unix_ms = deadline_unix_ms;
         bookclerk_library::validate_execute_request(&typed, &self.caps)?;
         let validate_req = typed.clone();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -686,7 +682,7 @@ impl RpcAtomicBackend {
             result = self.session.db_execute_request(typed, Arc::clone(&cancel)) => match result {
                 Ok(reply) => {
                     bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)?;
-                    let exec = reply.into_plan_exec();
+                    let exec = bookclerk_library::plan_exec_from_execute_reply(reply);
                     bookclerk_library::validate_exec_result(
                         &compiled.plan,
                         &exec,
@@ -760,25 +756,23 @@ async fn exec_host_ddl_batch(
     if stmts.is_empty() {
         return Ok(());
     }
-    let statements: Vec<DbPlanStatement> = stmts
-        .into_iter()
-        .map(|sql| DbPlanStatement::new(sql, Vec::new(), DbPlanStatementKind::Execute))
-        .collect();
-    let plan = DbAtomicPlan {
-        statements,
-        outcome_index: 0,
-        payload_index: None,
-        prior_receipt_index: None,
-        receipt_select_index: None,
+    let operation_id = format!("host-schema-{}", uuid::Uuid::new_v4());
+    let typed = ExecuteRequest {
+        operation_id: operation_id.clone(),
+        request_hash: String::new(),
+        statements: stmts
+            .into_iter()
+            .map(|sql| TypedDbStatement {
+                sql,
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            })
+            .collect(),
+        deadline_unix_ms: 0,
+        ..Default::default()
     };
-    let req = DbAtomicRequest {
-        operation_id: format!("host-schema-{}", uuid::Uuid::new_v4()),
-        request_hash: None,
-        plan: Some(plan),
-        deadline_unix_ms: None,
-    };
-    let typed = ExecuteRequest::from_atomic(&req)
-        .map_err(|err| bookclerk_library::LibraryError::Other(anyhow::anyhow!(err)))?;
     let validate_req = typed.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let reply = session
@@ -1369,6 +1363,19 @@ struct AtomicWebauthnChallenge {
     state_json: String,
 }
 
+/// Resolves a configured database plugin id to a first-party kind.
+///
+/// Unknown ids fail closed; generic adapters must supply bootstrap metadata on
+/// `db.connect` instead of relying on host plugin-id tables.
+fn resolve_database_plugin_kind(plugin_id: &str) -> Result<DatabasePluginKind, DbErr> {
+    DatabasePluginKind::parse(plugin_id).ok_or_else(|| {
+        DbErr::Custom(format!(
+            "unknown database plugin id `{plugin_id}` — configure a first-party plugin \
+             (sqlite, d1, postgres) or supply bootstrap sqlFamily/dialect on db.connect"
+        ))
+    })
+}
+
 /// Builds guest `db.connect` params (SQLite path, D1 token, or Postgres URL) from host config.
 fn connect_params(
     config: &Config,
@@ -1377,9 +1384,9 @@ fn connect_params(
     session: &V2PluginSession,
 ) -> Result<DbConnectParams, DbErr> {
     let data_dir = plugin_data_dir.display().to_string();
-    match DatabasePluginKind::parse(plugin_id) {
-        Some(DatabasePluginKind::Sqlite) => Ok(sqlite_connect_params(config, plugin_data_dir)),
-        Some(DatabasePluginKind::D1) => {
+    match resolve_database_plugin_kind(plugin_id)? {
+        DatabasePluginKind::Sqlite => Ok(sqlite_connect_params(config, plugin_data_dir)),
+        DatabasePluginKind::D1 => {
             session
                 .require_binding("secrets")
                 .map_err(|err| DbErr::Custom(err.to_string()))?;
@@ -1391,7 +1398,7 @@ fn connect_params(
                 api_token: resolve_d1_api_token().map_err(map_config_err)?,
             })
         }
-        Some(DatabasePluginKind::Postgres) => {
+        DatabasePluginKind::Postgres => {
             session
                 .require_binding("secrets")
                 .map_err(|err| DbErr::Custom(err.to_string()))?;
@@ -1400,7 +1407,6 @@ fn connect_params(
                 url: resolve_postgres_url(config).map_err(map_config_err)?,
             })
         }
-        None => Ok(sqlite_connect_params(config, plugin_data_dir)),
     }
 }
 
@@ -1448,9 +1454,8 @@ fn apply_bootstrap_metadata(connect: &mut DbConnectResult, plugin_id: &str) {
     }
     let (sql_family, dialect) = match DatabasePluginKind::parse(plugin_id) {
         Some(DatabasePluginKind::Postgres) => ("postgres", "postgres"),
-        Some(DatabasePluginKind::D1) | Some(DatabasePluginKind::Sqlite) | None => {
-            ("sqlite", "sqlite")
-        }
+        Some(DatabasePluginKind::D1) | Some(DatabasePluginKind::Sqlite) => ("sqlite", "sqlite"),
+        None => return,
     };
     if connect.sql_family.is_empty() {
         connect.sql_family = sql_family.into();
@@ -1523,6 +1528,8 @@ mod tests {
         assert_eq!(pg.dialect, "postgres");
 
         let mut unknown = DbCapabilities::from_connect(&DbConnectResult::sqlite()).to_connect();
+        unknown.sql_family = "sqlite".into();
+        unknown.dialect = "sqlite".into();
         apply_bootstrap_metadata(&mut unknown, "sql-conformance");
         assert_eq!(unknown.sql_family, "sqlite");
         assert_eq!(unknown.dialect, "sqlite");
@@ -1564,26 +1571,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_plugin_id_uses_sqlite_connect_params() {
+    fn unknown_plugin_id_fails_connect_params() {
         assert!(DatabasePluginKind::parse("sql-conformance").is_none());
-        let files = tempfile::tempdir().expect("tempdir");
-        let config = Config {
-            paths: Some(bookclerk_config::Paths::from_files_dir(
-                files.path().to_path_buf(),
-            )),
-            ..Config::default()
-        };
-        let params = sqlite_connect_params(&config, Path::new("/tmp/plugin-data"));
-        match params {
-            DbConnectParams::Sqlite {
-                sqlite_path,
-                plugin_data_dir,
-            } => {
-                assert!(sqlite_path.is_some(), "{sqlite_path:?}");
-                assert_eq!(plugin_data_dir, "/tmp/plugin-data");
-            }
-            other => panic!("expected sqlite params, got {other:?}"),
-        }
+        let err = resolve_database_plugin_kind("sql-conformance").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown database plugin id"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1617,10 +1611,8 @@ mod tests {
 
     #[test]
     fn omitted_rows_affected_fails_deserialize() {
-        let err = serde_json::from_str::<bookclerk_plugin_sdk::legacy_db::DbPlanStmtExecResult>(
-            r#"{"rows":[]}"#,
-        )
-        .unwrap_err();
+        let err = serde_json::from_str::<bookclerk_db_exec::DbPlanStmtExecResult>(r#"{"rows":[]}"#)
+            .unwrap_err();
         assert!(
             err.to_string().contains("rowsAffected") || err.to_string().contains("missing field"),
             "{err}"

@@ -14,8 +14,9 @@ use base64::Engine;
 use sea_orm::{ProxyExecResult, ProxyRow, Statement, Value};
 use serde_json::Value as JsonValue;
 
-pub(crate) use bookclerk_plugin_abi::{
-    sea_null, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto, SEA_NULL_KEY,
+pub(crate) use bookclerk_db_exec::{sea_null, SEA_NULL_KEY};
+pub(crate) use bookclerk_plugin_abi::db::{
+    ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
 };
 
 /// Converts a SeaORM [`Statement`] into the wire [`StatementDto`] used by `dbQuery` / `dbExecute`.
@@ -233,6 +234,7 @@ pub fn sea_value_to_json(v: &Value) -> JsonValue {
 /// # Errors
 ///
 /// Returns a static reason when the SeaORM value is outside the universal domain.
+#[allow(dead_code)] // first-party host bridge; exercised in unit tests and external callers
 pub fn db_value_from_sea(v: &Value) -> Result<bookclerk_plugin_abi::DbValue, String> {
     use bookclerk_plugin_abi::{DbType, DbValue};
     match v {

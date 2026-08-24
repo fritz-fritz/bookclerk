@@ -14,7 +14,7 @@ use bookclerk_db_exec::{
 };
 #[cfg(feature = "host-helpers")]
 use bookclerk_library::{apply_host_schema, HostSchemaKind, LibraryStore};
-use bookclerk_plugin_sdk::legacy_db::DbConnectResult;
+use bookclerk_plugin_sdk::DbConnectResult;
 use bookclerk_plugin_sdk::{DbColumn, DbType};
 use rusqlite::Connection;
 use sea_orm::{

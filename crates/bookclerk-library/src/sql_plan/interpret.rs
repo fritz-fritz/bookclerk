@@ -1,9 +1,8 @@
 //! Decode generic atomic-plan statement results into [`DbAtomicResult`].
 
+use super::host_ir::{DbAtomicPlan, DbPlanExecResult, DbPlanStmtExecResult};
 use super::CompiledAtomic;
-use bookclerk_plugin_abi::{
-    DbAtomicPlan, DbConnectResult, DbPlanExecResult, DbPlanStmtExecResult, ExecuteReply,
-};
+use bookclerk_plugin_abi::{DbConnectResult, ExecuteReply};
 use serde_json::Value as JsonValue;
 
 use crate::atomic_ops::{atomic_status, DbAtomicResult};
@@ -50,7 +49,7 @@ pub fn interpret_typed_exec(
     reply: &ExecuteReply,
     expected_hash: &str,
 ) -> DbAtomicResult {
-    let exec = reply.clone().into_plan_exec();
+    let exec = super::host_ir::plan_exec_from_execute_reply(reply.clone());
     interpret_exec(&compiled.plan, &exec, expected_hash)
 }
 
@@ -238,8 +237,9 @@ fn decode_receipt_payload(value: Option<&JsonValue>) -> Option<JsonValue> {
 #[cfg(test)]
 mod tests {
     use super::{validate_exec_result, DbAtomicPlan, DbPlanExecResult, DbPlanStmtExecResult};
+    use crate::sql_plan::DbPlanStatement;
     use crate::LibraryError;
-    use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatement, DbPlanStatementKind};
+    use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatementKind};
 
     fn one_stmt_plan() -> DbAtomicPlan {
         DbAtomicPlan {

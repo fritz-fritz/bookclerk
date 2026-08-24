@@ -663,7 +663,7 @@ mod tests {
     fn named_plan(
         operation_id: &str,
         operation: bookclerk_library::DbAtomicParams,
-    ) -> bookclerk_plugin_sdk::legacy_db::DbAtomicRequest {
+    ) -> bookclerk_db_exec::DbAtomicRequest {
         let now = chrono::Utc::now().to_rfc3339();
         bookclerk_library::compile_named_request(operation_id, &operation, &now)
             .expect("compile named atomic request")
@@ -1275,7 +1275,7 @@ mod tests {
             .unwrap();
         bookclerk_plugin_sdk::database_adapter::set_connection(db).await;
         let page = bookclerk_plugin_sdk::database_adapter::guest_query_page(
-            bookclerk_plugin_sdk::legacy_db::StatementDto {
+            bookclerk_plugin_sdk::StatementDto {
                 sql: "SELECT id FROM t".into(),
                 values: Vec::new(),
                 txn_id: None,
@@ -1615,21 +1615,21 @@ mod tests {
             .run_batch(&[("CREATE TABLE t (k TEXT PRIMARY KEY)".into(), Vec::new())])
             .await
             .unwrap();
-        let req = bookclerk_plugin_sdk::legacy_db::DbAtomicRequest {
+        let req = bookclerk_db_exec::DbAtomicRequest {
             operation_id: "dup".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::legacy_db::DbAtomicPlan {
+            plan: Some(bookclerk_db_exec::DbAtomicPlan {
                 statements: vec![
-                    bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
+                    bookclerk_db_exec::DbPlanStatement {
                         sql: "INSERT INTO t (k) VALUES ('a')".into(),
                         binds: vec![],
-                        kind: bookclerk_plugin_sdk::legacy_db::DbPlanStatementKind::Execute,
+                        kind: bookclerk_plugin_sdk::DbPlanStatementKind::Execute,
                         max_rows: 0,
                     },
-                    bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
+                    bookclerk_db_exec::DbPlanStatement {
                         sql: "INSERT INTO t (k) VALUES ('a')".into(),
                         binds: vec![],
-                        kind: bookclerk_plugin_sdk::legacy_db::DbPlanStatementKind::Execute,
+                        kind: bookclerk_plugin_sdk::DbPlanStatementKind::Execute,
                         max_rows: 0,
                     },
                 ],
@@ -1656,14 +1656,14 @@ mod tests {
             bookclerk_library::AtomicInterruptPhase::BeforeBegin,
             bookclerk_library::AtomicInterruptKind::Cancel,
         );
-        let req = bookclerk_plugin_sdk::legacy_db::DbAtomicRequest {
+        let req = bookclerk_db_exec::DbAtomicRequest {
             operation_id: "c".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::legacy_db::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
+            plan: Some(bookclerk_db_exec::DbAtomicPlan {
+                statements: vec![bookclerk_db_exec::DbPlanStatement {
                     sql: "SELECT 1".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::legacy_db::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -1684,14 +1684,14 @@ mod tests {
             bookclerk_library::AtomicInterruptPhase::AroundCommit,
             bookclerk_library::AtomicInterruptKind::Cancel,
         );
-        let req = bookclerk_plugin_sdk::legacy_db::DbAtomicRequest {
+        let req = bookclerk_db_exec::DbAtomicRequest {
             operation_id: "c2".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::legacy_db::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
+            plan: Some(bookclerk_db_exec::DbAtomicPlan {
+                statements: vec![bookclerk_db_exec::DbPlanStatement {
                     sql: "SELECT 1".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::legacy_db::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -1717,14 +1717,14 @@ mod tests {
             .mount(&server)
             .await;
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
-        let req = bookclerk_plugin_sdk::legacy_db::DbAtomicRequest {
+        let req = bookclerk_db_exec::DbAtomicRequest {
             operation_id: "t".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::legacy_db::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
+            plan: Some(bookclerk_db_exec::DbAtomicPlan {
+                statements: vec![bookclerk_db_exec::DbPlanStatement {
                     sql: "SELECT 1".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::legacy_db::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -1746,7 +1746,7 @@ mod tests {
     #[tokio::test]
     async fn executing_mock_row_cap_fails_closed() {
         let (_server, proxy, conn, _interrupt, _drop, _oversize) = executing_proxy().await;
-        let cap = bookclerk_plugin_sdk::legacy_db::DbConnectResult::d1().max_result_rows as usize;
+        let cap = bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows as usize;
         {
             let db = conn.lock().expect("sqlite mutex");
             db.execute_batch("CREATE TABLE rowcap (x INTEGER)").unwrap();
@@ -1755,14 +1755,14 @@ mod tests {
                     .unwrap();
             }
         }
-        let req = bookclerk_plugin_sdk::legacy_db::DbAtomicRequest {
+        let req = bookclerk_db_exec::DbAtomicRequest {
             operation_id: "row-cap".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::legacy_db::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
+            plan: Some(bookclerk_db_exec::DbAtomicPlan {
+                statements: vec![bookclerk_db_exec::DbPlanStatement {
                     sql: "SELECT x FROM rowcap".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::legacy_db::DbPlanStatementKind::Query,
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -1891,37 +1891,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executing_mock_shared_vectors() {
-        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
-        let db = sea_orm::Database::connect_proxy(
-            DatabaseBackend::Sqlite,
-            std::sync::Arc::new(Box::new(proxy.clone())),
-        )
-        .await
-        .unwrap();
-        let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
-        .await
-        .expect("host D1 schema");
-        bookclerk_library::sql_plan::vectors::run_request_vectors(
-            bookclerk_plugin_sdk::legacy_db::DbConnectResult::d1(),
-            bookclerk_plugin_sdk::legacy_db::DbConnectResult::d1().max_result_rows,
-            |req| {
-                let proxy = proxy.clone();
-                async move { proxy.run_atomic(req).await }
-            },
-        )
-        .await;
-    }
-
-    #[tokio::test]
     async fn executing_mock_typed_shared_vectors() {
         let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
         let db = sea_orm::Database::connect_proxy(
@@ -1942,14 +1911,52 @@ mod tests {
         .await
         .expect("host D1 schema");
         bookclerk_library::sql_plan::run_typed_request_vectors(
-            bookclerk_plugin_sdk::legacy_db::DbConnectResult::d1(),
-            bookclerk_plugin_sdk::legacy_db::DbConnectResult::d1().max_result_rows,
+            bookclerk_plugin_sdk::DbConnectResult::d1(),
+            bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows,
             |req| {
                 let proxy = proxy.clone();
                 async move { proxy.run_typed_atomic(&req).await }
             },
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn executing_mock_i64_http_boundary_roundtrip() {
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
+        };
+
+        const JS_MAX_SAFE: i64 = 9_007_199_254_740_991;
+        const JS_UNSAFE: i64 = 9_007_199_254_740_992;
+
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
+        for (label, value) in [
+            ("min", i64::MIN),
+            ("max", i64::MAX),
+            ("js_max_safe", JS_MAX_SAFE),
+            ("js_unsafe", JS_UNSAFE),
+        ] {
+            let req = ExecuteRequest {
+                operation_id: format!("d1-i64-{label}"),
+                request_hash: String::new(),
+                statements: vec![TypedDbStatement {
+                    sql: "SELECT ? AS v".into(),
+                    parameters: vec![DbValue::Int64(value)],
+                    kind: DbPlanStatementKind::Select,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::Rows,
+                }],
+                deadline_unix_ms: 0,
+                ..Default::default()
+            };
+            let reply = proxy
+                .run_typed_atomic(&req)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: {e}"));
+            let got = reply.statements[0].rows[0].values[0].clone();
+            assert_eq!(got, DbValue::Int64(value), "{label}");
+        }
     }
 
     #[tokio::test]
@@ -1961,14 +1968,14 @@ mod tests {
             .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0)
             .saturating_add(80);
-        let req = bookclerk_plugin_sdk::legacy_db::DbAtomicRequest {
+        let req = bookclerk_db_exec::DbAtomicRequest {
             operation_id: "op-dl".into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::legacy_db::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
+            plan: Some(bookclerk_db_exec::DbAtomicPlan {
+                statements: vec![bookclerk_db_exec::DbPlanStatement {
                     sql: "SELECT 1 AS n".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::legacy_db::DbPlanStatementKind::Select,
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Select,
                     max_rows: 0,
                 }],
                 outcome_index: 0,
@@ -2029,15 +2036,15 @@ mod tests {
         b.expect("independent proxy 2 schema");
     }
 
-    fn select_one_req(op: &str) -> bookclerk_plugin_sdk::legacy_db::DbAtomicRequest {
-        bookclerk_plugin_sdk::legacy_db::DbAtomicRequest {
+    fn select_one_req(op: &str) -> bookclerk_db_exec::DbAtomicRequest {
+        bookclerk_db_exec::DbAtomicRequest {
             operation_id: op.into(),
             request_hash: None,
-            plan: Some(bookclerk_plugin_sdk::legacy_db::DbAtomicPlan {
-                statements: vec![bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
+            plan: Some(bookclerk_db_exec::DbAtomicPlan {
+                statements: vec![bookclerk_db_exec::DbPlanStatement {
                     sql: "SELECT 1 AS n".into(),
                     binds: vec![],
-                    kind: bookclerk_plugin_sdk::legacy_db::DbPlanStatementKind::Select,
+                    kind: bookclerk_plugin_sdk::DbPlanStatementKind::Select,
                     max_rows: 0,
                 }],
                 outcome_index: 0,

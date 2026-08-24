@@ -714,7 +714,7 @@ fn j_opt_str(s: Option<&str>) -> JsonValue {
 fn j_opt_i64(n: Option<i64>) -> JsonValue {
     match n {
         Some(v) => JsonValue::from(v),
-        None => bookclerk_plugin_abi::sea_null("BigInt"),
+        None => crate::sql_plan::sea_null("BigInt"),
     }
 }
 
@@ -722,7 +722,7 @@ fn j_opt_i64(n: Option<i64>) -> JsonValue {
 fn j_opt_blob(s: Option<&str>) -> JsonValue {
     match s {
         Some(v) => JsonValue::String(v.to_string()),
-        None => bookclerk_plugin_abi::sea_null("Bytes"),
+        None => crate::sql_plan::sea_null("Bytes"),
     }
 }
 
@@ -3123,7 +3123,7 @@ mod tests {
     }
 
     fn json_to_rusqlite(v: &JsonValue) -> rusqlite::types::Value {
-        if bookclerk_plugin_abi::sea_null_kind(v).is_some() {
+        if crate::sql_plan::sea_null_kind(v).is_some() {
             return rusqlite::types::Value::Null;
         }
         match v {

@@ -5,7 +5,7 @@
 //! transaction and is not part of the request hash.
 
 use crate::atomic_ops::{atomic_status, DbAtomicParams, DbAtomicResult};
-use bookclerk_plugin_abi::DbAtomicRequest;
+use crate::sql_plan::DbAtomicRequest;
 use chrono::{DateTime, Utc};
 use sea_orm::{DatabaseConnection, DbBackend};
 use serde_json::Value as JsonValue;

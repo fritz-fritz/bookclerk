@@ -1,7 +1,7 @@
 //! Host-owned SQL atomic plans for database plugins.
 //!
 //! The library compiles Bookclerk domain operations into a generic
-//! [`bookclerk_plugin_abi::DbAtomicPlan`]. Database guests execute the
+//! [`host_ir::DbAtomicPlan`]. Database guests execute the
 //! statements as one transaction and return rows; they must not parse
 //! domain operation names.
 
@@ -9,6 +9,7 @@
 mod conformance;
 mod exec;
 mod guest_receipt;
+pub mod host_ir;
 mod interpret;
 mod named;
 mod reply;
@@ -17,11 +18,14 @@ mod typed_vectors;
 pub mod vectors;
 mod vectors_typed;
 
-#[cfg(test)]
-use bookclerk_plugin_abi::DbPlanStatementKind;
-use bookclerk_plugin_abi::{
-    encoded_execute_request_bytes, DbAtomicPlan, DbAtomicRequest, DbConnectResult, DbPlanStatement,
-    ExecuteRequest,
+use bookclerk_plugin_abi::{encoded_execute_request_bytes, DbConnectResult, ExecuteRequest};
+
+pub use bookclerk_plugin_abi::DbPlanStatementKind;
+pub use host_ir::{
+    atomic_from_execute_request, execute_request_from_atomic, plan_exec_from_execute_reply,
+    sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
+    DbPlanStatement, DbPlanStmtExecResult, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    SEA_NULL_KEY,
 };
 
 pub use exec::{
@@ -66,7 +70,7 @@ impl CompiledAtomic {
             .statements
             .iter()
             .map(|stmt| {
-                bookclerk_plugin_abi::TypedDbStatement::from_plan_statement(stmt)
+                crate::sql_plan::host_ir::typed_statement_from_plan(stmt)
                     .expect("contract vector bind must be a DbValue")
             })
             .collect();
@@ -480,7 +484,7 @@ mod limits_tests {
         let req = DbAtomicRequest::with_plan("op", "abc", plan);
         let err = validate_atomic_request(&req, &caps).unwrap_err();
         assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
-        let typed = bookclerk_plugin_abi::ExecuteRequest::from_atomic(&req).unwrap();
+        let typed = super::host_ir::execute_request_from_atomic(&req).unwrap();
         let err = validate_execute_request(&typed, &caps).unwrap_err();
         assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
         let mut typed = typed;

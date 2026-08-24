@@ -77,7 +77,8 @@ fn on_event_book_acquired_wire_shape() {
 /// Kind/db wire DTOs use camelCase (see `fixtures/wire/` goldens + #130).
 #[test]
 fn kind_db_wire_dto_camel_case() {
-    use bookclerk_plugin_abi::{DbConnectParams, ExecResultDto, LoginParams};
+    use bookclerk_plugin_abi::{DbConnectParams, LoginParams};
+    use bookclerk_plugin_sdk::ExecResultDto;
 
     let login = LoginParams {
         plugin_data_dir: "/tmp/p".into(),

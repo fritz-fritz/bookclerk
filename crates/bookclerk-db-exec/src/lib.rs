@@ -1,6 +1,6 @@
 //! Neutral SQL executor for Bookclerk database guests.
 //!
-//! Hosts compile domain work into a generic [`bookclerk_plugin_abi::DbAtomicPlan`].
+//! Hosts compile domain work into a generic [`host_ir::DbAtomicPlan`].
 //! This crate runs those statements as one native transaction and records
 //! fail-closed begin/commit faults. It must not import Bookclerk entities or
 //! migrations.
@@ -12,6 +12,7 @@ use bookclerk_plugin_abi::DbColumn;
 mod b64;
 mod exec;
 pub mod guest_receipt;
+pub mod host_ir;
 mod lower;
 pub mod proxy_txn;
 mod typed;
@@ -43,11 +44,17 @@ pub fn take_positional_result_columns() -> Option<Vec<DbColumn>> {
 }
 
 pub use b64::{b64_string_to_bytes, bytes_to_b64_string};
+pub use bookclerk_plugin_abi::DbPlanStatementKind;
 pub use exec::{
     cap_query_sql, encoded_proxy_row_len, execute_statements_on, execute_statements_on_session,
     json_cell_utf8_len, note_encoded_result_bytes, sea_value_to_json, AtomicSession, ExecCaps,
 };
 pub use guest_receipt::{guest_receipt_finalize_stmts, GUEST_RECEIPT_WRAP_PREFIX};
+pub use host_ir::{
+    sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
+    DbPlanStatement, DbPlanStmtExecResult, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
+    SEA_NULL_KEY,
+};
 pub use lower::{lower_canonical_sql, lower_canonical_to_postgres};
 pub use proxy_txn::{
     arm_exec_budget, clear_exec_budget, consume_atomic_interrupt, consume_begin_injection,

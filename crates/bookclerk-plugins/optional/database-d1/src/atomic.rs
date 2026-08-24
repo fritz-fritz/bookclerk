@@ -6,14 +6,14 @@
 
 use std::time::Duration;
 
-use bookclerk_plugin_sdk::legacy_db::{
-    sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbConnectResult,
-    DbPlanExecResult, DbPlanStatementKind, DbPlanStmtExecResult,
+use bookclerk_db_exec::{
+    sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
+    DbPlanStatementKind, DbPlanStmtExecResult,
 };
 use bookclerk_plugin_sdk::{
-    encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbResultSelection,
-    DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, StatementResult,
-    TypedDbStatement,
+    encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbConnectResult,
+    DbResultSelection, DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError,
+    StatementResult, TypedDbStatement,
 };
 use sea_orm::DbErr;
 use serde_json::Value as JsonValue;
@@ -156,6 +156,9 @@ impl D1Proxy {
             match parse_typed_batch(req, &raw, started) {
                 Ok(reply) => {
                     if !req.guest_receipt_persist.is_absent() {
+                        // Guest-receipt finalize needs statement results, so D1 runs a
+                        // follow-up HTTP batch after the main batch commits. Same-batch
+                        // finalize would require provider support for dependent SQL.
                         let hint = &req.guest_receipt_persist;
                         let finalize = bookclerk_db_exec::guest_receipt_finalize_stmts(
                             &reply,
@@ -1079,7 +1082,7 @@ mod tests {
     #[test]
     fn statement_failure_is_not_ambiguous() {
         let plan = DbAtomicPlan {
-            statements: vec![bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
+            statements: vec![bookclerk_db_exec::DbPlanStatement {
                 sql: "INSERT INTO t (k) VALUES ('a')".into(),
                 binds: vec![],
                 kind: DbPlanStatementKind::Execute,
@@ -1100,10 +1103,10 @@ mod tests {
     #[test]
     fn parse_caps_result_rows() {
         let plan = DbAtomicPlan {
-            statements: vec![bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
+            statements: vec![bookclerk_db_exec::DbPlanStatement {
                 sql: "SELECT 1".into(),
                 binds: vec![],
-                kind: bookclerk_plugin_sdk::legacy_db::DbPlanStatementKind::Query,
+                kind: bookclerk_plugin_sdk::DbPlanStatementKind::Query,
                 max_rows: 0,
             }],
             outcome_index: 0,
@@ -1135,11 +1138,8 @@ mod tests {
         assert_eq!(exec.statements[0].rows.len(), 1_000);
     }
 
-    fn stmt(
-        sql: &str,
-        kind: DbPlanStatementKind,
-    ) -> bookclerk_plugin_sdk::legacy_db::DbPlanStatement {
-        bookclerk_plugin_sdk::legacy_db::DbPlanStatement::new(sql, vec![], kind)
+    fn stmt(sql: &str, kind: DbPlanStatementKind) -> bookclerk_db_exec::DbPlanStatement {
+        bookclerk_db_exec::DbPlanStatement::new(sql, vec![], kind)
     }
 
     fn plan_of(sql: &str, kind: DbPlanStatementKind) -> DbAtomicPlan {

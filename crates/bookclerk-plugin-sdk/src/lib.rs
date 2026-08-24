@@ -15,7 +15,6 @@
 //! | OAuth callback without guest listen | [`callback_tunnel`] |
 //! | Workerd / Wasm guests | [`workerd`] + npm `@bookclerk/plugin-sdk` |
 //! | ABI DTOs / method names | [`protocol`] (re-exports `bookclerk-plugin-abi`) |
-//! | SeaORM ↔ wire helpers (first-party only) | feature `db` → [`legacy_db`] |
 //! | Database guest session / atomic execution | feature `db` → [`database_adapter`] |
 //! | Author CLI (`check` / `fmt` / `package` / `smoke`) | feature `tools` → [`tools`] |
 //!
@@ -58,16 +57,23 @@ mod db;
 mod db_binding;
 mod error;
 mod fetch_dir;
-#[cfg(feature = "db")]
-#[doc(hidden)]
-pub mod legacy_db;
 mod pass_fd;
 pub mod protocol;
 pub mod tools;
 pub mod v2;
 pub mod workerd;
 
+#[cfg(feature = "db")]
+pub use bookclerk_plugin_abi::db::{
+    DbConnectParams, DbConnectResult, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
+};
 pub use callback_tunnel::{TunnelGuest, TunnelHost, TunnelStream};
+#[cfg(feature = "db")]
+pub use db::{
+    exec_result_from_dto, exec_result_to_dto, json_to_sea_value, proxy_rows_from_dto,
+    proxy_rows_from_typed, proxy_rows_to_dto, sea_value_to_json, statement_from_dto,
+    statement_to_dto,
+};
 pub use db_binding::{DatabaseBinding, DatabaseBindingOptions, PreparedStatement, RetryToken};
 pub use error::{Result, SdkError};
 pub use fetch_dir::{fetch_work_dir, upload_file_path, FetchWorkDir, UploadFile};
@@ -91,8 +97,8 @@ pub use protocol::{
 };
 pub use v2::{
     decode_json, encode_atomic_result, encode_json, page_rows, serve, serve_v2,
-    AdapterDatabaseSession, AdapterTransaction, ContentSource, Database, GuestDatabase,
-    Integration, PluginDescribe, PluginRoot, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    AdapterDatabaseSession, ContentSource, Database, GuestDatabase, Integration, PluginDescribe,
+    PluginRoot, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 
 pub use bookclerk_plugin_abi::{
@@ -100,7 +106,8 @@ pub use bookclerk_plugin_abi::{
     decode_execute_request_bytes, decode_execute_result_reply_bytes, encoded_db_value_bytes,
     encoded_execute_reply_bytes, encoded_execute_request_bytes, encoded_execute_result_reply_bytes,
     encoded_statement_result_bytes, sql_payload_bytes, sql_payload_exceeds, DbCapabilities,
-    DbColumn, DbResultSelection, DbRow, DbTiming, DbType, DbValue, DiagnoseResult, ExecuteReply,
-    ExecuteRequest, HandshakeParams, HostToPluginEvent, PluginError, PluginErrorCode,
-    PluginToHostEvent, StatementResult, TypedDbStatement, API_VERSION, SQL_CONTRACT_VERSION,
+    DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
+    DiagnoseResult, ExecuteReply, ExecuteRequest, HandshakeParams, HostToPluginEvent, PluginError,
+    PluginErrorCode, PluginToHostEvent, StatementResult, TypedDbStatement, API_VERSION,
+    SQL_CONTRACT_VERSION,
 };

@@ -6,11 +6,11 @@ use async_trait::async_trait;
 use bookclerk_plugin_sdk::database_adapter::{
     guest_capabilities, guest_execute_atomic, host_session, set_connection,
 };
-use bookclerk_plugin_sdk::DbConnectParams;
 use bookclerk_plugin_sdk::v2::{
     AdapterDatabaseSession, Database, DatabaseContext, HostAdapterDatabaseSession, PluginDescribe,
     PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
+use bookclerk_plugin_sdk::DbConnectParams;
 use bookclerk_plugin_sdk::{
     serve, DbCapabilities, ExecuteReply, ExecuteRequest, HandshakeResult, PluginError,
 };

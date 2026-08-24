@@ -24,6 +24,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 ABI = ROOT / "crates/bookclerk-plugin-abi/schema/abi.json"
 METHODS_RS = ROOT / "crates/bookclerk-plugin-abi/src/methods.rs"
+ABI_LIB_RS = ROOT / "crates/bookclerk-plugin-abi/src/lib.rs"
 TS_GENERATED = ROOT / "packages/plugin-sdk/src/generated.ts"
 PY_ABI = ROOT / "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/abi.py"
 PLUGIN_TOML_SCHEMA = ROOT / "crates/bookclerk-plugin-abi/schema/plugin-toml.json"
@@ -139,6 +140,34 @@ def check_wire_fixtures() -> list[str]:
     return errors
 
 
+# Legacy host-IR types must not be re-exported from the public plugin ABI crate root.
+FORBIDDEN_ABI_LIB_EXPORTS = (
+    "DbAtomicRequest",
+    "DbAtomicPlan",
+    "DbPlanExecResult",
+    "DbPlanStatement",
+    "StatementDto",
+    "QueryResultDto",
+    "DB_ATOMIC_SENTINEL",
+    "DB_CAPABILITIES_SENTINEL",
+    "sea_null",
+)
+
+
+def check_abi_lib_exports() -> list[str]:
+    """Fail when removed legacy database DTOs reappear in lib.rs `pub use`."""
+    text = ABI_LIB_RS.read_text(encoding="utf-8")
+    errors: list[str] = []
+    for name in FORBIDDEN_ABI_LIB_EXPORTS:
+        if re.search(rf"\bpub use\b[^;]*\b{name}\b", text):
+            errors.append(f"lib.rs must not publicly export legacy `{name}`")
+        if re.search(rf"^\s*pub use db::\{{[^}}]*\b{name}\b", text, re.MULTILINE):
+            errors.append(f"lib.rs must not publicly export legacy `{name}` from db::")
+    if "from_atomic" in text or "into_plan_exec" in text:
+        errors.append("lib.rs must not document legacy ExecuteRequest bridges")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true")
@@ -210,11 +239,19 @@ def main() -> int:
         for err in wire_errors:
             print(f"wire fixtures: {err}", file=sys.stderr)
 
-    if wire_errors:
+    export_errors = check_abi_lib_exports()
+    if export_errors:
+        for err in export_errors:
+            print(f"abi exports: {err}", file=sys.stderr)
+
+    if wire_errors or export_errors:
         return 1
     if drift and args.check and not args.write:
         return 1
-    print(f"ok methods={len(names)} wire_fixtures={len(REQUIRED_WIRE_FIXTURES)}")
+    print(
+        f"ok methods={len(names)} wire_fixtures={len(REQUIRED_WIRE_FIXTURES)} "
+        f"abi_export_guard={len(FORBIDDEN_ABI_LIB_EXPORTS)}"
+    )
     return 0
 
 

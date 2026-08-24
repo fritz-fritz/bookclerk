@@ -96,11 +96,11 @@ async fn sqlite_recursive_cte_honors_deadline() {
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
         .saturating_add(80);
-    let plan = bookclerk_plugin_abi::DbAtomicPlan {
-        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+    let plan = crate::sql_plan::DbAtomicPlan {
+        statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM t WHERE x < 200000000) SELECT COUNT(*) AS n FROM t".into(),
             binds: vec![],
-            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Query,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -153,11 +153,11 @@ async fn sqlite_query_stops_after_cap_plus_one() {
         .await
         .unwrap();
     }
-    let plan = bookclerk_plugin_abi::DbAtomicPlan {
-        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+    let plan = crate::sql_plan::DbAtomicPlan {
+        statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "SELECT x FROM rowcap_probe".into(),
             binds: vec![],
-            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Query,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -206,11 +206,11 @@ async fn concurrent_attempts_keep_independent_deadlines_and_caps() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0);
-    let cte = bookclerk_plugin_abi::DbAtomicPlan {
-        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+    let cte = crate::sql_plan::DbAtomicPlan {
+        statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "WITH RECURSIVE t(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM t WHERE x < 200000000) SELECT COUNT(*) AS n FROM t".into(),
             binds: vec![],
-            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Query,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -218,11 +218,11 @@ async fn concurrent_attempts_keep_independent_deadlines_and_caps() {
         prior_receipt_index: None,
         receipt_select_index: None,
     };
-    let select = bookclerk_plugin_abi::DbAtomicPlan {
-        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+    let select = crate::sql_plan::DbAtomicPlan {
+        statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "SELECT x FROM rowcap_probe".into(),
             binds: vec![],
-            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Query,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -363,18 +363,18 @@ async fn plan_hash_conflict_is_idempotency_conflict() {
 #[tokio::test]
 async fn unique_constraint_on_generic_insert_is_engine_error() {
     let db = mem_db().await;
-    let plan = bookclerk_plugin_abi::DbAtomicPlan {
+    let plan = crate::sql_plan::DbAtomicPlan {
         statements: vec![
-            bookclerk_plugin_abi::DbPlanStatement {
+            crate::sql_plan::DbPlanStatement {
                 sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('dup', 0)".into(),
                 binds: vec![],
-                kind: bookclerk_plugin_abi::DbPlanStatementKind::Execute,
+                kind: crate::sql_plan::DbPlanStatementKind::Execute,
                 max_rows: 0,
             },
-            bookclerk_plugin_abi::DbPlanStatement {
+            crate::sql_plan::DbPlanStatement {
                 sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('dup', 1)".into(),
                 binds: vec![],
-                kind: bookclerk_plugin_abi::DbPlanStatementKind::Execute,
+                kind: crate::sql_plan::DbPlanStatementKind::Execute,
                 max_rows: 0,
             },
         ],
@@ -396,18 +396,18 @@ async fn unique_constraint_on_generic_insert_is_engine_error() {
 #[tokio::test]
 async fn failed_statement_rolls_back_earlier_inserts() {
     let db = mem_db().await;
-    let plan = bookclerk_plugin_abi::DbAtomicPlan {
+    let plan = crate::sql_plan::DbAtomicPlan {
         statements: vec![
-            bookclerk_plugin_abi::DbPlanStatement {
+            crate::sql_plan::DbPlanStatement {
                 sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('rb', 0)".into(),
                 binds: vec![],
-                kind: bookclerk_plugin_abi::DbPlanStatementKind::Execute,
+                kind: crate::sql_plan::DbPlanStatementKind::Execute,
                 max_rows: 0,
             },
-            bookclerk_plugin_abi::DbPlanStatement {
+            crate::sql_plan::DbPlanStatement {
                 sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('rb', 1)".into(),
                 binds: vec![],
-                kind: bookclerk_plugin_abi::DbPlanStatementKind::Execute,
+                kind: crate::sql_plan::DbPlanStatementKind::Execute,
                 max_rows: 0,
             },
         ],
@@ -437,18 +437,18 @@ async fn failed_statement_rolls_back_earlier_inserts() {
 #[tokio::test]
 async fn conditional_update_zero_rows_is_ok_execute() {
     let db = mem_db().await;
-    let plan = bookclerk_plugin_abi::DbAtomicPlan {
+    let plan = crate::sql_plan::DbAtomicPlan {
         statements: vec![
-            bookclerk_plugin_abi::DbPlanStatement {
+            crate::sql_plan::DbPlanStatement {
                 sql: "UPDATE db_serialization_slots SET bump = 1 WHERE slot_key = 'missing'".into(),
                 binds: vec![],
-                kind: bookclerk_plugin_abi::DbPlanStatementKind::Execute,
+                kind: crate::sql_plan::DbPlanStatementKind::Execute,
                 max_rows: 0,
             },
-            bookclerk_plugin_abi::DbPlanStatement {
+            crate::sql_plan::DbPlanStatement {
                 sql: "SELECT 'ok' AS status".into(),
                 binds: vec![],
-                kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+                kind: crate::sql_plan::DbPlanStatementKind::Query,
                 max_rows: 0,
             },
         ],
@@ -736,7 +736,7 @@ fn enqueue_scan(id: &'static str, account: &str) -> NamedOp {
 }
 
 fn d1_json_to_rusqlite(v: &serde_json::Value) -> rusqlite::types::Value {
-    if bookclerk_plugin_abi::sea_null_kind(v).is_some() {
+    if crate::sql_plan::sea_null_kind(v).is_some() {
         return rusqlite::types::Value::Null;
     }
     match v {
@@ -759,9 +759,9 @@ fn d1_json_to_rusqlite(v: &serde_json::Value) -> rusqlite::types::Value {
 /// Executes sqlite-dialect plan SQL in one rusqlite transaction (D1 bind flattening).
 fn d1_compat_execute(
     conn: &rusqlite::Connection,
-    plan: &bookclerk_plugin_abi::DbAtomicPlan,
+    plan: &crate::sql_plan::DbAtomicPlan,
     operation_id: &str,
-) -> bookclerk_plugin_abi::DbPlanExecResult {
+) -> crate::sql_plan::DbPlanExecResult {
     const D1_BIND_CAP: usize = 100;
     let txn = conn.unchecked_transaction().unwrap();
     let mut statements = Vec::new();
@@ -815,23 +815,21 @@ fn d1_compat_execute(
             0
         };
         let rows_affected = match stmt.kind {
-            bookclerk_plugin_abi::DbPlanStatementKind::Select => 0,
-            bookclerk_plugin_abi::DbPlanStatementKind::Returning
-            | bookclerk_plugin_abi::DbPlanStatementKind::Query => {
-                u64::try_from(rows.len()).unwrap_or(0)
-            }
-            bookclerk_plugin_abi::DbPlanStatementKind::Execute => engine_changes,
+            crate::sql_plan::DbPlanStatementKind::Select => 0,
+            crate::sql_plan::DbPlanStatementKind::Returning
+            | crate::sql_plan::DbPlanStatementKind::Query => u64::try_from(rows.len()).unwrap_or(0),
+            crate::sql_plan::DbPlanStatementKind::Execute => engine_changes,
         };
-        statements.push(bookclerk_plugin_abi::DbPlanStmtExecResult {
+        statements.push(crate::sql_plan::DbPlanStmtExecResult {
             rows,
             rows_affected,
         });
     }
     txn.commit().unwrap();
-    bookclerk_plugin_abi::DbPlanExecResult {
+    crate::sql_plan::DbPlanExecResult {
         operation_id: operation_id.into(),
         statements,
-        timing: Some(bookclerk_plugin_abi::DbAtomicTiming {
+        timing: Some(crate::sql_plan::DbAtomicTiming {
             attempt_elapsed_us: 1,
             db_execution_us: Some(1),
             db_timing_source: Some("d1_compat_rusqlite".into()),
@@ -900,11 +898,11 @@ fn d1_compat_unique_constraint_is_engine_error() {
 
 #[test]
 fn d1_compat_rejects_more_than_100_binds() {
-    let plan = bookclerk_plugin_abi::DbAtomicPlan {
-        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+    let plan = crate::sql_plan::DbAtomicPlan {
+        statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "SELECT 1".into(),
             binds: vec![serde_json::json!(1); 101],
-            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Query,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -923,11 +921,11 @@ fn d1_compat_rejects_more_than_100_binds() {
 async fn plan_cancel_hook_aborts_before_commit() {
     let db = mem_db().await;
     crate::inject_commit_failures(1);
-    let plan = bookclerk_plugin_abi::DbAtomicPlan {
-        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+    let plan = crate::sql_plan::DbAtomicPlan {
+        statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('cancel', 0)".into(),
             binds: vec![],
-            kind: bookclerk_plugin_abi::DbPlanStatementKind::Execute,
+            kind: crate::sql_plan::DbPlanStatementKind::Execute,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -966,12 +964,12 @@ async fn execute_caps_collected_rows_at_max_result_rows() {
         .await
         .unwrap();
     }
-    let plan = bookclerk_plugin_abi::DbAtomicPlan {
-        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+    let plan = crate::sql_plan::DbAtomicPlan {
+        statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "SELECT slot_key FROM db_serialization_slots WHERE slot_key LIKE 'cap-%' ORDER BY slot_key"
                 .into(),
             binds: vec![],
-            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Query,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -1029,15 +1027,15 @@ async fn postgres_plan_commit_inserts_receipt() {
 async fn postgres_plan_exceeds_max_binds_is_rejected() {
     let mut caps = bookclerk_plugin_abi::DbConnectResult::postgres();
     caps.max_binds = 2;
-    let plan = bookclerk_plugin_abi::DbAtomicPlan {
-        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+    let plan = crate::sql_plan::DbAtomicPlan {
+        statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "SELECT $1, $2, $3".into(),
             binds: vec![
                 serde_json::json!(1),
                 serde_json::json!(2),
                 serde_json::json!(3),
             ],
-            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Query,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -1069,12 +1067,12 @@ async fn postgres_execute_caps_collected_rows() {
         .await
         .unwrap();
     }
-    let plan = bookclerk_plugin_abi::DbAtomicPlan {
-        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+    let plan = crate::sql_plan::DbAtomicPlan {
+        statements: vec![crate::sql_plan::DbPlanStatement {
             sql: "SELECT slot_key FROM db_serialization_slots WHERE slot_key LIKE 'pg-cap-%' ORDER BY slot_key"
                 .into(),
             binds: vec![],
-            kind: bookclerk_plugin_abi::DbPlanStatementKind::Query,
+            kind: crate::sql_plan::DbPlanStatementKind::Query,
             max_rows: 0,
         }],
         outcome_index: 0,
@@ -1115,14 +1113,14 @@ async fn host_applies_schema_to_unmigrated_sqlite() {
     assert_eq!(rows.len(), 1);
 }
 
-fn interrupt_plan(slot: &str) -> bookclerk_plugin_abi::DbAtomicPlan {
-    bookclerk_plugin_abi::DbAtomicPlan {
-        statements: vec![bookclerk_plugin_abi::DbPlanStatement {
+fn interrupt_plan(slot: &str) -> crate::sql_plan::DbAtomicPlan {
+    crate::sql_plan::DbAtomicPlan {
+        statements: vec![crate::sql_plan::DbPlanStatement {
             sql: format!(
                 "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{slot}', 0)"
             ),
             binds: vec![],
-            kind: bookclerk_plugin_abi::DbPlanStatementKind::Execute,
+            kind: crate::sql_plan::DbPlanStatementKind::Execute,
             max_rows: 0,
         }],
         outcome_index: 0,

@@ -4,10 +4,8 @@
 
 use std::future::Future;
 
-use bookclerk_plugin_abi::{
-    DbAtomicPlan, DbConnectResult, DbPlanStatement, DbPlanStatementKind, ExecuteReply,
-    ExecuteRequest,
-};
+use super::host_ir::{DbAtomicPlan, DbPlanStatement};
+use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatementKind, ExecuteReply, ExecuteRequest};
 use serde_json::Value as JsonValue;
 
 use super::{compile_named_request, interpret_typed_exec, CompiledAtomic};

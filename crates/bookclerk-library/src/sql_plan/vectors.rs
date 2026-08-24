@@ -2,11 +2,9 @@
 
 use std::future::Future;
 
+use super::host_ir::{DbAtomicPlan, DbAtomicRequest, DbPlanExecResult, DbPlanStatement};
 use bookclerk_db_exec::ExecCaps;
-use bookclerk_plugin_abi::{
-    DbAtomicPlan, DbAtomicRequest, DbConnectResult, DbPlanExecResult, DbPlanStatement,
-    DbPlanStatementKind,
-};
+use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatementKind};
 use sea_orm::DatabaseConnection;
 use serde_json::Value as JsonValue;
 

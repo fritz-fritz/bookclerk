@@ -1,10 +1,10 @@
 //! Host-owned named atomic operations and interpreted results.
 //!
-//! Database guests execute generic [`bookclerk_plugin_abi::DbAtomicPlan`]
-//! statements and return [`bookclerk_plugin_abi::DbPlanExecResult`]. The host
+//! Database guests execute generic [`crate::sql_plan::DbAtomicPlan`]
+//! statements and return [`crate::sql_plan::DbPlanExecResult`]. The host
 //! compiles [`DbAtomicParams`] and interprets [`DbAtomicResult`].
 
-use bookclerk_plugin_abi::DbAtomicTiming;
+use crate::sql_plan::DbAtomicTiming;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 

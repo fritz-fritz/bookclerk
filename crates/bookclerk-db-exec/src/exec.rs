@@ -4,10 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use bookclerk_plugin_abi::{
-    DbAtomicPlan, DbAtomicTiming, DbConnectResult, DbPlanExecResult, DbPlanStatementKind,
-    DbPlanStmtExecResult,
-};
+use crate::host_ir::{DbAtomicPlan, DbAtomicTiming, DbPlanExecResult, DbPlanStmtExecResult};
+use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatementKind};
 use futures::TryStreamExt;
 use sea_orm::{
     from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DbErr, QueryResult,
@@ -593,7 +591,7 @@ pub(crate) fn exceeds_result_row_cap(n: usize, max_result_rows: u32) -> bool {
 
 /// Maps a JSON bind onto a SeaORM [`Value`], decoding `b64:` strings as blobs.
 fn json_to_sea(v: &JsonValue) -> Value {
-    if let Some(kind) = bookclerk_plugin_abi::sea_null_kind(v) {
+    if let Some(kind) = crate::host_ir::sea_null_kind(v) {
         return match kind {
             "Bytes" => Value::Bytes(None),
             "BigInt" | "Int" | "TinyInt" | "SmallInt" | "TinyUnsigned" | "SmallUnsigned"
@@ -663,7 +661,8 @@ pub fn encoded_proxy_row_len<'a>(
 #[cfg(test)]
 mod tests {
     use super::{cap_query_sql, json_to_sea};
-    use bookclerk_plugin_abi::{DbPlanExecResult, DbPlanStatementKind, DbPlanStmtExecResult};
+    use crate::host_ir::{DbPlanExecResult, DbPlanStmtExecResult};
+    use bookclerk_plugin_abi::DbPlanStatementKind;
     use sea_orm::Value;
     use serde_json::json;
 
