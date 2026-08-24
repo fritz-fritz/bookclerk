@@ -183,7 +183,7 @@ impl LibraryStore {
             let reply = exec.execute_typed(wrapped).await?;
             let persist =
                 crate::sql_plan::guest_receipt_persist_stmts(&reply, guest_len, &guest_hash)
-                    .map_err(|err| bookclerk_plugin_abi::PluginError::internal(err.to_string()))?;
+                    .map_err(plugin_err_from_db)?;
             if !persist.is_empty() {
                 let update_req = bookclerk_plugin_abi::ExecuteRequest {
                     operation_id: format!("{}:replay-persist", reply.operation_id),
@@ -6906,6 +6906,11 @@ fn plugin_err_from_db(err: sea_orm::DbErr) -> bookclerk_plugin_abi::PluginError 
         bookclerk_plugin_abi::PluginError::cancelled(msg)
     } else if msg.contains("deadline_exceeded") {
         bookclerk_plugin_abi::PluginError::deadline_exceeded(msg)
+    } else if msg.contains("different requestHash")
+        || msg.contains("different request")
+        || msg.contains("requestHash does not match")
+    {
+        bookclerk_plugin_abi::PluginError::conflict(msg)
     } else {
         bookclerk_plugin_abi::PluginError::internal(msg)
     }
