@@ -6170,7 +6170,7 @@ async fn postgres_test_store() -> LibraryStore {
     let db = sea_orm::Database::connect(opt)
         .await
         .expect("connect to disposable postgres database");
-    for step in crate::migrations::migration_sql_postgres() {
+    for step in bookclerk_db_exec::migration_sql_postgres() {
         for stmt in step.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             db.execute_raw(sea_orm::Statement::from_string(backend, stmt.to_string()))
                 .await

@@ -174,13 +174,13 @@ BOOKCLERK_DATABASE_POSTGRES_URL_FILE=/run/secrets/postgres_url
 ```
 
 **Schema migrations**: Fresh Postgres databases apply
-[`latest_schema_postgres`](../crates/bookclerk-library/src/migrations.rs)
+[`latest_schema_postgres`](../crates/bookclerk-db-exec/src/schema_postgres.rs)
 (the single greenfield DDL, with `BIGSERIAL` / `BIGINT` / `BYTEA` so integer
 columns match the shared `i64` entities) and record version `1` in
 `schema_migrations`. Every statement is `IF NOT EXISTS`, so re-application is a
 no-op. Because the schema is greenfield rather than an incremental chain,
-changing it means editing `latest_schema_postgres` and recreating (or manually
-altering) an existing Postgres DB.
+changing it means editing the Postgres pack in `bookclerk-db-exec` and
+recreating (or manually altering) an existing Postgres DB.
 
 **Compiled features**: `sqlx-postgres` + `runtime-tokio-rustls` are enabled on
 the `sea-orm` workspace dependency. `sqlx-sqlite` is intentionally excluded to
@@ -289,10 +289,13 @@ Admin→Owner upgrade; testing and development hosts should recreate
 ### Single greenfield schema
 
 Bookclerk is mostly greenfield: [`migrations.rs`](../crates/bookclerk-library/src/migrations.rs)
-exposes `latest_schema_sqlite()` / `latest_schema_postgres()` as the base DDL,
-plus a short ordered list (`migration_sql` / `migration_sql_postgres`) so
-additive columns (e.g. Discover preference fields on `user_preferences`) can
-bump `PRAGMA user_version` / `schema_migrations` without wiping data. Base
+exposes `latest_schema_sqlite()` as the canonical base DDL, and
+[`schema_postgres.rs`](../crates/bookclerk-db-exec/src/schema_postgres.rs)
+holds the Postgres adapter-edge pack (`latest_schema_postgres()` /
+`migration_sql_postgres`). Canonical SQLite also keeps a short ordered list
+(`migration_sql`) so additive columns (e.g. Discover preference fields on
+`user_preferences`) can bump `PRAGMA user_version` / `schema_migrations`
+without wiping data. Base
 statements use `CREATE TABLE/INDEX IF NOT EXISTS`. Tables:
 `accounts`, `books`, `ignored_titles`, `saved_filters`, `portal_identities`,
 `claim_tickets`, `portal_sessions`, `account_links`, `works`, `work_editions`,

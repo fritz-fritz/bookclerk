@@ -1,0 +1,828 @@
+//! PostgreSQL schema pack (adapter-edge lowering of host canonical DDL).
+//!
+//! `bookclerk-library` owns the canonical SQLite-shaped migration plan.
+//! This module holds the parallel Postgres DDL used when the live connection
+//! backend is Postgres. Structural divergences (for example V27 rebuild vs
+//! alter) are intentional and must stay hand-authored — do not fold this into
+//! [`crate::lower_canonical_sql`].
+
+use std::sync::OnceLock;
+
+use sea_orm::DatabaseBackend;
+
+/// Postgres DDL adding hashed operator sessions (mirrors SQLite v2).
+const MIGRATION_V2_OPERATOR_SESSIONS_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS operator_sessions (
+        id BIGSERIAL PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_operator_sessions_hash ON operator_sessions(token_hash);
+"#;
+
+/// Postgres DDL creating first-party `users` (mirrors SQLite v3).
+const MIGRATION_V3_USERS_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS users (
+        id BIGSERIAL PRIMARY KEY,
+        role TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        display_name TEXT,
+        password_hash TEXT,
+        security_version BIGINT NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+    CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+"#;
+
+/// Postgres DDL adding nullable `portal_identities.user_id` with `IF NOT EXISTS`.
+const MIGRATION_V3_PORTAL_USER_ID_POSTGRES: &str = r#"
+    ALTER TABLE portal_identities ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE SET NULL;
+    CREATE INDEX IF NOT EXISTS idx_portal_identities_user ON portal_identities(user_id);
+"#;
+
+/// Postgres DDL for elevate/impersonate session columns and `security_audit_events`.
+const MIGRATION_V4_ELEVATE_AUDIT_POSTGRES: &str = r#"
+    ALTER TABLE operator_sessions ADD COLUMN IF NOT EXISTS elevated_from_user_id BIGINT;
+    ALTER TABLE operator_sessions ADD COLUMN IF NOT EXISTS impersonating_user_id BIGINT;
+    CREATE TABLE IF NOT EXISTS security_audit_events (
+        id BIGSERIAL PRIMARY KEY,
+        at TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        action TEXT NOT NULL,
+        detail_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_security_audit_at ON security_audit_events(at);
+"#;
+
+/// Postgres DDL adding `users.login_name` and `user_invites`.
+const MIGRATION_V5_PROVISIONING_POSTGRES: &str = r#"
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS login_name TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_name ON users(login_name);
+    CREATE TABLE IF NOT EXISTS user_invites (
+        id BIGSERIAL PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        role TEXT NOT NULL,
+        login_name TEXT,
+        display_name TEXT,
+        expires_at TEXT NOT NULL,
+        redeemed_at TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_invites_hash ON user_invites(token_hash);
+"#;
+
+/// Postgres DDL for OIDC clients, auth codes, and refresh tokens.
+const MIGRATION_V6_OIDC_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS oidc_clients (
+        id BIGSERIAL PRIMARY KEY,
+        client_id TEXT NOT NULL UNIQUE,
+        client_secret_hash TEXT,
+        redirect_uris_json TEXT NOT NULL,
+        name TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS oidc_auth_codes (
+        id BIGSERIAL PRIMARY KEY,
+        code_hash TEXT NOT NULL UNIQUE,
+        client_id TEXT NOT NULL,
+        user_id BIGINT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        code_challenge TEXT NOT NULL,
+        code_challenge_method TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_oidc_auth_codes_hash ON oidc_auth_codes(code_hash);
+    CREATE TABLE IF NOT EXISTS oidc_refresh_tokens (
+        id BIGSERIAL PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        client_id TEXT NOT NULL,
+        user_id BIGINT NOT NULL,
+        scope TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_oidc_refresh_hash ON oidc_refresh_tokens(token_hash);
+"#;
+
+/// Postgres unique index so one portal identity owns each store account.
+const MIGRATION_V7_EXCLUSIVE_LINKS_POSTGRES: &str = r#"
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_account_links_account_exclusive ON account_links(account_id);
+"#;
+
+/// Postgres session client-metadata columns (`IF NOT EXISTS` is valid here).
+const MIGRATION_V8_SESSION_CLIENT_POSTGRES: &str = r#"
+    ALTER TABLE operator_sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
+    ALTER TABLE operator_sessions ADD COLUMN IF NOT EXISTS device_type TEXT;
+    ALTER TABLE operator_sessions ADD COLUMN IF NOT EXISTS client_label TEXT;
+    ALTER TABLE portal_sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
+    ALTER TABLE portal_sessions ADD COLUMN IF NOT EXISTS device_type TEXT;
+    ALTER TABLE portal_sessions ADD COLUMN IF NOT EXISTS client_label TEXT;
+    ALTER TABLE portal_sessions ADD COLUMN IF NOT EXISTS last_used_at TEXT;
+"#;
+
+/// Postgres optional unique `users.email` for invites and notifications.
+const MIGRATION_V9_USER_EMAIL_POSTGRES: &str = r#"
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+"#;
+
+/// Postgres DDL for OIDC RP login state and WebAuthn credentials/challenges.
+const MIGRATION_V10_SSO_WEBAUTHN_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS oidc_rp_states (
+        id BIGSERIAL PRIMARY KEY,
+        state_hash TEXT NOT NULL UNIQUE,
+        provider_id TEXT NOT NULL,
+        pkce_verifier TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        user_id BIGINT,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS webauthn_credentials (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        credential_id TEXT NOT NULL UNIQUE,
+        passkey_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_used_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_webauthn_credentials_user ON webauthn_credentials(user_id);
+    CREATE TABLE IF NOT EXISTS webauthn_challenges (
+        id BIGSERIAL PRIMARY KEY,
+        challenge_id TEXT NOT NULL UNIQUE,
+        user_id BIGINT,
+        kind TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_oidc_rp_states_expires ON oidc_rp_states(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at);
+"#;
+
+/// Postgres durable `dbAtomic` receipts for idempotent replay after a lost response.
+const MIGRATION_V11_ATOMIC_RECEIPTS_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS db_atomic_receipts (
+        operation_id TEXT PRIMARY KEY NOT NULL,
+        operation_kind TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consume_key TEXT UNIQUE
+    );
+    CREATE INDEX IF NOT EXISTS idx_db_atomic_receipts_expires ON db_atomic_receipts(expires_at);
+"#;
+
+/// Durable daemon job queue and associated scratch-path ledger (Postgres / D1).
+const MIGRATION_V12_JOBS_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS jobs (
+        id TEXT PRIMARY KEY NOT NULL,
+        kind TEXT NOT NULL,
+        state TEXT NOT NULL,
+        priority BIGINT NOT NULL DEFAULT 0,
+        resource_class TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        progress TEXT,
+        attempt_count BIGINT NOT NULL DEFAULT 0,
+        max_attempts BIGINT NOT NULL DEFAULT 3,
+        run_after TEXT NOT NULL,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        dedup_key TEXT NOT NULL,
+        error_kind TEXT,
+        error_message TEXT,
+        cancel_requested BIGINT NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs(resource_class, state, run_after, priority);
+    CREATE INDEX IF NOT EXISTS idx_jobs_dedup ON jobs(dedup_key, state);
+    CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
+    CREATE TABLE IF NOT EXISTS job_temp_paths (
+        id BIGSERIAL PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_temp_paths_job ON job_temp_paths(job_id);
+"#;
+
+/// Lease generation, active-key uniqueness, and reserved scratch bytes (Postgres / D1).
+const MIGRATION_V13_JOB_FENCE_POSTGRES: &str = r#"
+    ALTER TABLE jobs ADD COLUMN lease_generation BIGINT NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedup_active
+        ON jobs(dedup_key) WHERE state IN ('pending', 'running');
+    ALTER TABLE job_temp_paths ADD COLUMN reserved_bytes BIGINT NOT NULL DEFAULT 0;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_job_temp_paths_job_path
+        ON job_temp_paths(job_id, path);
+"#;
+
+/// Singleton row that serializes admission and quota updates (Postgres / D1).
+const MIGRATION_V14_JOB_QUEUE_CONTROL_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS job_queue_control (
+        id BIGINT PRIMARY KEY CHECK (id = 1)
+    );
+    INSERT INTO job_queue_control (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+"#;
+
+/// Durable `users.last_seen_at` for presence after logout (Postgres / D1).
+const MIGRATION_V15_USER_LAST_SEEN_POSTGRES: &str = r#"
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TEXT;
+    UPDATE users SET last_seen_at = (
+        SELECT MAX(COALESCE(ps.last_used_at, ps.created_at))
+        FROM portal_sessions ps
+        INNER JOIN portal_identities pi ON pi.id = ps.identity_id
+        WHERE pi.user_id = users.id
+    )
+    WHERE last_seen_at IS NULL;
+"#;
+
+/// Profile picture choice plus IdP-supplied avatar URLs (Postgres / D1).
+const MIGRATION_V16_AVATAR_SOURCE_POSTGRES: &str = r#"
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_source TEXT;
+    ALTER TABLE portal_identities ADD COLUMN IF NOT EXISTS picture_url TEXT;
+"#;
+
+/// Postgres passkey names and TOTP enrolled flag.
+const MIGRATION_V17_PASSKEY_NAME_TOTP_POSTGRES: &str = r#"
+    ALTER TABLE webauthn_credentials ADD COLUMN IF NOT EXISTS name TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled BIGINT NOT NULL DEFAULT 0;
+"#;
+
+/// Postgres OIDC AS client token policy.
+const MIGRATION_V18_OIDC_CLIENT_POLICY_POSTGRES: &str = r#"
+    ALTER TABLE oidc_clients ADD COLUMN IF NOT EXISTS issue_refresh_token BIGINT NOT NULL DEFAULT 1;
+    ALTER TABLE oidc_clients ADD COLUMN IF NOT EXISTS allowed_scopes_json TEXT NOT NULL DEFAULT '["openid","profile","email"]';
+"#;
+
+/// Postgres OIDC client enable flag + plugin ownership.
+const MIGRATION_V19_OIDC_CLIENT_PLUGIN_POSTGRES: &str = r#"
+    ALTER TABLE oidc_clients ADD COLUMN IF NOT EXISTS enabled BIGINT NOT NULL DEFAULT 1;
+    ALTER TABLE oidc_clients ADD COLUMN IF NOT EXISTS plugin_id TEXT;
+    UPDATE oidc_clients SET plugin_id = 'audiobookshelf' WHERE client_id = 'audiobookshelf' AND plugin_id IS NULL;
+"#;
+
+/// Postgres appearance preference on user_preferences.
+const MIGRATION_V20_THEME_POSTGRES: &str = r#"
+    ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS theme TEXT NOT NULL DEFAULT 'system';
+"#;
+
+/// Durable domain-event outbox + per-subscriber deliveries (Postgres / D1).
+const MIGRATION_V21_EVENT_OUTBOX_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS domain_events (
+        id TEXT PRIMARY KEY NOT NULL,
+        event_type TEXT NOT NULL,
+        schema_version BIGINT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        account_id TEXT NOT NULL DEFAULT '',
+        correlation_id TEXT NOT NULL DEFAULT '',
+        causation_id TEXT NOT NULL DEFAULT '',
+        dedup_key TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        dispatch_state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(event_type, dedup_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch ON domain_events(dispatch_state, created_at);
+    CREATE TABLE IF NOT EXISTS event_deliveries (
+        id TEXT PRIMARY KEY NOT NULL,
+        event_id TEXT NOT NULL,
+        plugin_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL,
+        attempt_count BIGINT NOT NULL DEFAULT 0,
+        max_attempts BIGINT NOT NULL DEFAULT 8,
+        lease_owner TEXT,
+        lease_expires_at TEXT,
+        lease_generation BIGINT NOT NULL DEFAULT 0,
+        run_after TEXT NOT NULL,
+        invocation_sequence BIGINT NOT NULL DEFAULT 0,
+        resume_pending BIGINT NOT NULL DEFAULT 0,
+        checkpoint_json TEXT,
+        checkpoint_schema_version BIGINT NOT NULL DEFAULT 0,
+        ordering_key TEXT NOT NULL DEFAULT '',
+        outcome TEXT,
+        error_message TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(event_id, plugin_id),
+        FOREIGN KEY(event_id) REFERENCES domain_events(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_claim ON event_deliveries(state, run_after, created_at);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_plugin_order ON event_deliveries(plugin_id, ordering_key, created_at);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_state ON event_deliveries(state);
+"#;
+
+/// Persist producer FIFO keys on the outbox envelope (Postgres / D1).
+const MIGRATION_V22_EVENT_ORDERING_POSTGRES: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS ordering_key TEXT NOT NULL DEFAULT '';
+"#;
+
+/// Cluster subscriber catalog plus delivery cancel/resource-class columns (Postgres / D1).
+const MIGRATION_V23_EVENT_CATALOG_POSTGRES: &str = r#"
+    ALTER TABLE event_deliveries ADD COLUMN IF NOT EXISTS cancel_requested BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE event_deliveries ADD COLUMN IF NOT EXISTS resource_class TEXT NOT NULL DEFAULT 'network';
+    CREATE TABLE IF NOT EXISTS event_subscribers (
+        plugin_id TEXT PRIMARY KEY NOT NULL,
+        subscriptions_json TEXT NOT NULL,
+        enabled BIGINT NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+    );
+"#;
+
+/// Per-node live catalog + durable outbox counters (Postgres / D1).
+const MIGRATION_V24_EVENT_NODES_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS event_subscriber_nodes (
+        node_id TEXT NOT NULL,
+        plugin_id TEXT NOT NULL,
+        subscriptions_json TEXT NOT NULL,
+        enabled BIGINT NOT NULL DEFAULT 1,
+        heartbeat_at TEXT NOT NULL,
+        PRIMARY KEY (node_id, plugin_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_subscriber_nodes_heartbeat
+        ON event_subscriber_nodes(heartbeat_at);
+    CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch_created
+        ON domain_events(dispatch_state, created_at, id);
+    CREATE TABLE IF NOT EXISTS event_outbox_stats (
+        id BIGINT PRIMARY KEY NOT NULL,
+        retries_total BIGINT NOT NULL DEFAULT 0,
+        suspensions_total BIGINT NOT NULL DEFAULT 0,
+        dead_letters_total BIGINT NOT NULL DEFAULT 0,
+        dispatch_latency_ms_sum BIGINT NOT NULL DEFAULT 0,
+        dispatch_count BIGINT NOT NULL DEFAULT 0,
+        handler_latency_ms_sum BIGINT NOT NULL DEFAULT 0,
+        handler_count BIGINT NOT NULL DEFAULT 0
+    );
+    INSERT INTO event_outbox_stats (
+        id, retries_total, suspensions_total, dead_letters_total,
+        dispatch_latency_ms_sum, dispatch_count, handler_latency_ms_sum, handler_count
+    ) VALUES (1, 0, 0, 0, 0, 0, 0, 0)
+    ON CONFLICT (id) DO NOTHING;
+    DROP TABLE IF EXISTS event_subscribers;
+"#;
+
+/// Producer `source` on the envelope plus wake-on-event delivery columns (Postgres / D1).
+const MIGRATION_V25_EVENT_SOURCE_WAKE_POSTGRES: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
+    ALTER TABLE event_deliveries ADD COLUMN IF NOT EXISTS wake_event_type TEXT NOT NULL DEFAULT '';
+    ALTER TABLE event_deliveries ADD COLUMN IF NOT EXISTS wake_filter_json TEXT NOT NULL DEFAULT '';
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_wake
+        ON event_deliveries(state, wake_event_type);
+    CREATE INDEX IF NOT EXISTS idx_event_deliveries_plugin_running
+        ON event_deliveries(plugin_id, state);
+"#;
+
+/// Durable wake replay flag so Duplicate publish and dispatcher crashes retry.
+const MIGRATION_V26_WAKE_PENDING_POSTGRES: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS wake_pending BIGINT NOT NULL DEFAULT 1;
+    CREATE INDEX IF NOT EXISTS idx_domain_events_wake_pending
+        ON domain_events(created_at, id) WHERE wake_pending = 1;
+"#;
+
+/// Tenant/producer dedup, claimed wake slices, and host-derived wake grants (Postgres).
+const MIGRATION_V27_DEDUP_WAKE_CLAIM_POSTGRES: &str = r#"
+    ALTER TABLE domain_events DROP CONSTRAINT IF EXISTS domain_events_event_type_dedup_key_key;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_domain_events_dedup_ns
+        ON domain_events(account_id, source, event_type, dedup_key);
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS wake_lease_owner TEXT;
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS wake_lease_expires_at TEXT;
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS wake_cursor_at TEXT NOT NULL DEFAULT '';
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS wake_cursor_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE event_deliveries ADD COLUMN IF NOT EXISTS wake_grants_json TEXT NOT NULL DEFAULT '';
+"#;
+
+/// Portable COUNT+mutate serialization slots for Postgres / D1.
+const MIGRATION_V28_SERIALIZATION_SLOTS_POSTGRES: &str = r#"
+    CREATE TABLE IF NOT EXISTS db_serialization_slots (
+        slot_key TEXT PRIMARY KEY NOT NULL,
+        bump BIGINT NOT NULL DEFAULT 0
+    );
+"#;
+
+/// Frozen subscriber snapshot for Postgres / D1.
+const MIGRATION_V29_DISPATCH_SNAPSHOT_POSTGRES: &str = r#"
+    ALTER TABLE domain_events ADD COLUMN IF NOT EXISTS dispatch_snapshot_json TEXT NOT NULL DEFAULT '';
+"#;
+
+/// Greenfield Postgres/D1 DDL mirroring [`SQLITE_SCHEMA`] with `BIGINT` / `BIGSERIAL`.
+const POSTGRES_SCHEMA: &str = r#"
+        CREATE TABLE IF NOT EXISTS accounts (
+            id BIGSERIAL PRIMARY KEY,
+            account_id TEXT NOT NULL UNIQUE,
+            marketplace TEXT NOT NULL,
+            label TEXT,
+            scan_enabled BIGINT NOT NULL DEFAULT 1,
+            source TEXT NOT NULL DEFAULT 'audible',
+            connection_status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS books (
+            id BIGSERIAL PRIMARY KEY,
+            uuid TEXT NOT NULL UNIQUE,
+            source TEXT NOT NULL,
+            account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+            product_id TEXT NOT NULL,
+            asin TEXT,
+            isbn TEXT,
+            marketplace TEXT NOT NULL,
+            title TEXT NOT NULL,
+            authors TEXT,
+            narrators TEXT,
+            series TEXT,
+            series_index TEXT,
+            series_asin TEXT,
+            acquire_status TEXT NOT NULL DEFAULT 'not_acquired',
+            storage_key TEXT,
+            error_message TEXT,
+            purchased_at TEXT,
+            tags TEXT,
+            rating_overall DOUBLE PRECISION,
+            rating_performance DOUBLE PRECISION,
+            rating_story DOUBLE PRECISION,
+            is_finished BIGINT NOT NULL DEFAULT 0,
+            pdf_status TEXT NOT NULL DEFAULT 'not_acquired',
+            pdf_storage_key TEXT,
+            publisher TEXT,
+            length_minutes BIGINT,
+            is_abridged BIGINT NOT NULL DEFAULT 0,
+            content_kind TEXT NOT NULL DEFAULT 'book',
+            categories TEXT,
+            subtitle TEXT,
+            published_at TEXT,
+            description TEXT,
+            language TEXT,
+            cover_url TEXT,
+            subjects TEXT,
+            enrich_source TEXT,
+            enrich_confidence DOUBLE PRECISION,
+            enrich_updated_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source, account_id, product_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_books_uuid ON books(uuid);
+        CREATE INDEX IF NOT EXISTS idx_books_status ON books(acquire_status);
+        CREATE INDEX IF NOT EXISTS idx_books_account ON books(account_id);
+        CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
+        CREATE INDEX IF NOT EXISTS idx_books_pdf_status ON books(pdf_status);
+        CREATE INDEX IF NOT EXISTS idx_books_tags ON books(tags);
+        CREATE INDEX IF NOT EXISTS idx_books_series_asin ON books(series_asin);
+        CREATE INDEX IF NOT EXISTS idx_books_content_kind ON books(content_kind);
+        CREATE INDEX IF NOT EXISTS idx_books_isbn ON books(isbn);
+        CREATE INDEX IF NOT EXISTS idx_books_source ON books(source);
+        CREATE INDEX IF NOT EXISTS idx_books_asin ON books(asin);
+        CREATE INDEX IF NOT EXISTS idx_books_product_id ON books(product_id);
+
+        CREATE TABLE IF NOT EXISTS ignored_titles (
+            source TEXT NOT NULL,
+            account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+            product_id TEXT NOT NULL,
+            reason TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (source, account_id, product_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS saved_filters (
+            id BIGSERIAL PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            query TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGSERIAL PRIMARY KEY,
+            role TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            display_name TEXT,
+            password_hash TEXT,
+            security_version BIGINT NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+        CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+
+        CREATE TABLE IF NOT EXISTS portal_identities (
+            id BIGSERIAL PRIMARY KEY,
+            provider TEXT NOT NULL,
+            external_user_id TEXT NOT NULL,
+            label TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(provider, external_user_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS claim_tickets (
+            id BIGSERIAL PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            identity_id BIGINT REFERENCES portal_identities(id) ON DELETE SET NULL,
+            expires_at TEXT NOT NULL,
+            redeemed_at TEXT,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_claim_tickets_hash ON claim_tickets(token_hash);
+        CREATE INDEX IF NOT EXISTS idx_claim_tickets_identity ON claim_tickets(identity_id);
+
+        CREATE TABLE IF NOT EXISTS portal_sessions (
+            id BIGSERIAL PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            identity_id BIGINT NOT NULL REFERENCES portal_identities(id) ON DELETE CASCADE,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_portal_sessions_hash ON portal_sessions(token_hash);
+
+        CREATE TABLE IF NOT EXISTS operator_sessions (
+            id BIGSERIAL PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_operator_sessions_hash ON operator_sessions(token_hash);
+
+        CREATE TABLE IF NOT EXISTS security_audit_events (
+            id BIGSERIAL PRIMARY KEY,
+            at TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            action TEXT NOT NULL,
+            detail_json TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_security_audit_at ON security_audit_events(at);
+
+        CREATE TABLE IF NOT EXISTS account_links (
+            id BIGSERIAL PRIMARY KEY,
+            identity_id BIGINT NOT NULL REFERENCES portal_identities(id) ON DELETE CASCADE,
+            account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+            source TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(identity_id, account_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_account_links_account ON account_links(account_id);
+
+        CREATE TABLE IF NOT EXISTS works (
+            id TEXT PRIMARY KEY,
+            canonical_asin TEXT,
+            canonical_isbn TEXT,
+            title TEXT NOT NULL,
+            authors TEXT,
+            narrators TEXT,
+            description TEXT,
+            subjects TEXT,
+            categories TEXT,
+            language TEXT,
+            series TEXT,
+            series_index TEXT,
+            cover_url TEXT,
+            openlibrary_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_works_asin ON works(canonical_asin);
+        CREATE INDEX IF NOT EXISTS idx_works_isbn ON works(canonical_isbn);
+        CREATE INDEX IF NOT EXISTS idx_works_title ON works(title);
+
+        CREATE TABLE IF NOT EXISTS work_editions (
+            work_id TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+            book_uuid TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (work_id, book_uuid)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_work_editions_book ON work_editions(book_uuid);
+
+        CREATE TABLE IF NOT EXISTS listening_progress (
+            id BIGSERIAL PRIMARY KEY,
+            identity_id BIGINT REFERENCES portal_identities(id) ON DELETE SET NULL,
+            provider TEXT NOT NULL,
+            external_user_id TEXT NOT NULL,
+            book_uuid TEXT,
+            work_id TEXT,
+            external_item_id TEXT NOT NULL,
+            title TEXT,
+            authors TEXT,
+            asin TEXT,
+            isbn TEXT,
+            progress DOUBLE PRECISION,
+            current_time_seconds DOUBLE PRECISION,
+            duration_seconds DOUBLE PRECISION,
+            is_finished BIGINT NOT NULL DEFAULT 0,
+            last_listened_at TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE(provider, external_user_id, external_item_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_listening_book ON listening_progress(book_uuid);
+        CREATE INDEX IF NOT EXISTS idx_listening_work ON listening_progress(work_id);
+        CREATE INDEX IF NOT EXISTS idx_listening_user ON listening_progress(provider, external_user_id);
+
+        CREATE TABLE IF NOT EXISTS title_requests (
+            id BIGSERIAL PRIMARY KEY,
+            uuid TEXT NOT NULL UNIQUE,
+            identity_id BIGINT REFERENCES portal_identities(id) ON DELETE SET NULL,
+            title TEXT NOT NULL,
+            authors TEXT,
+            asin TEXT,
+            isbn TEXT,
+            notes TEXT,
+            status TEXT NOT NULL DEFAULT 'open',
+            preferred_source TEXT,
+            work_id TEXT,
+            work_key TEXT NOT NULL DEFAULT '',
+            resolved_book_uuid TEXT,
+            cover_url TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_title_requests_status ON title_requests(status);
+        CREATE INDEX IF NOT EXISTS idx_title_requests_identity ON title_requests(identity_id);
+        CREATE INDEX IF NOT EXISTS idx_title_requests_work_key ON title_requests(work_key);
+        CREATE INDEX IF NOT EXISTS idx_title_requests_identity_status ON title_requests(identity_id, status);
+
+        CREATE TABLE IF NOT EXISTS title_request_sources (
+            id BIGSERIAL PRIMARY KEY,
+            title_request_id BIGINT NOT NULL REFERENCES title_requests(id) ON DELETE CASCADE,
+            source TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            title TEXT,
+            subtitle TEXT,
+            authors TEXT,
+            narrators TEXT,
+            series TEXT,
+            series_index TEXT,
+            asin TEXT,
+            isbn TEXT,
+            description TEXT,
+            publisher TEXT,
+            length_minutes BIGINT,
+            published_at TEXT,
+            categories TEXT,
+            language TEXT,
+            cover_url TEXT,
+            url TEXT,
+            price_cents BIGINT,
+            currency TEXT,
+            price_label TEXT,
+            list_price_cents BIGINT,
+            list_price_label TEXT,
+            member_price_cents BIGINT,
+            member_price_label TEXT,
+            observed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(title_request_id, source, product_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_trs_request ON title_request_sources(title_request_id);
+
+        CREATE TABLE IF NOT EXISTS embeddings (
+            id BIGSERIAL PRIMARY KEY,
+            target_kind TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            dims BIGINT NOT NULL,
+            vector BYTEA NOT NULL,
+            text_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(target_kind, target_id, model)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_embeddings_target ON embeddings(target_kind, target_id);
+
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            id BIGSERIAL PRIMARY KEY,
+            subject_key TEXT NOT NULL UNIQUE,
+            identity_id BIGINT REFERENCES portal_identities(id) ON DELETE CASCADE,
+            default_view TEXT NOT NULL DEFAULT 'discover',
+            disabled_shelves_json TEXT NOT NULL DEFAULT '[]',
+            discover_sort TEXT NOT NULL DEFAULT 'relevance',
+            discover_sort_dir TEXT NOT NULL DEFAULT 'desc',
+            discover_language TEXT,
+            discover_excluded_sources_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_user_preferences_identity ON user_preferences(identity_id);
+
+        CREATE TABLE IF NOT EXISTS encrypted_secrets (
+            id BIGSERIAL PRIMARY KEY,
+            kind TEXT NOT NULL,
+            provider TEXT,
+            account_type TEXT NOT NULL DEFAULT 'integration',
+            account_id TEXT,
+            name TEXT NOT NULL,
+            format TEXT NOT NULL DEFAULT 'json',
+            ciphertext BYTEA NOT NULL,
+            kdf_algorithm TEXT,
+            kdf_salt BYTEA,
+            kdf_m_cost BIGINT,
+            kdf_t_cost BIGINT,
+            kdf_p_cost BIGINT,
+            cipher_algorithm TEXT,
+            cipher_nonce BYTEA,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(kind, provider, account_type, account_id, name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_kind ON encrypted_secrets(kind);
+        CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_account ON encrypted_secrets(account_id);
+        CREATE INDEX IF NOT EXISTS idx_encrypted_secrets_account_type ON encrypted_secrets(account_type);
+        "#;
+
+/// Final PostgreSQL DDL for a fresh Bookclerk library database.
+///
+/// Mirrors the host canonical greenfield schema with Postgres-native types.
+/// Integer columns use `BIGINT` / `BIGSERIAL` so shared SeaORM entities (all
+/// `i64`) load on both the SQLite proxy and native Postgres backends.
+#[must_use]
+pub fn latest_schema_postgres() -> &'static str {
+    POSTGRES_SCHEMA
+}
+
+/// Ordered DDL for Postgres `schema_migrations` versioning.
+#[must_use]
+pub fn migration_sql_postgres() -> &'static [&'static str] {
+
+    &[
+        POSTGRES_SCHEMA,
+        MIGRATION_V2_OPERATOR_SESSIONS_POSTGRES,
+        MIGRATION_V3_USERS_POSTGRES,
+        MIGRATION_V3_PORTAL_USER_ID_POSTGRES,
+        MIGRATION_V4_ELEVATE_AUDIT_POSTGRES,
+        MIGRATION_V5_PROVISIONING_POSTGRES,
+        MIGRATION_V6_OIDC_POSTGRES,
+        MIGRATION_V7_EXCLUSIVE_LINKS_POSTGRES,
+        MIGRATION_V8_SESSION_CLIENT_POSTGRES,
+        MIGRATION_V9_USER_EMAIL_POSTGRES,
+        MIGRATION_V10_SSO_WEBAUTHN_POSTGRES,
+        MIGRATION_V11_ATOMIC_RECEIPTS_POSTGRES,
+        MIGRATION_V12_JOBS_POSTGRES,
+        MIGRATION_V13_JOB_FENCE_POSTGRES,
+        MIGRATION_V14_JOB_QUEUE_CONTROL_POSTGRES,
+        MIGRATION_V15_USER_LAST_SEEN_POSTGRES,
+        MIGRATION_V16_AVATAR_SOURCE_POSTGRES,
+        MIGRATION_V17_PASSKEY_NAME_TOTP_POSTGRES,
+        MIGRATION_V18_OIDC_CLIENT_POLICY_POSTGRES,
+        MIGRATION_V19_OIDC_CLIENT_PLUGIN_POSTGRES,
+        MIGRATION_V20_THEME_POSTGRES,
+        MIGRATION_V21_EVENT_OUTBOX_POSTGRES,
+        MIGRATION_V22_EVENT_ORDERING_POSTGRES,
+        MIGRATION_V23_EVENT_CATALOG_POSTGRES,
+        MIGRATION_V24_EVENT_NODES_POSTGRES,
+        MIGRATION_V25_EVENT_SOURCE_WAKE_POSTGRES,
+        MIGRATION_V26_WAKE_PENDING_POSTGRES,
+        MIGRATION_V27_DEDUP_WAKE_CLAIM_POSTGRES,
+        MIGRATION_V28_SERIALIZATION_SLOTS_POSTGRES,
+        MIGRATION_V29_DISPATCH_SNAPSHOT_POSTGRES,
+    ]
+}
+
+/// Postgres lowering of the greenfield baseline (adapter edge).
+fn greenfield_baseline_postgres() -> &'static str {
+    static BASELINE: OnceLock<&'static str> = OnceLock::new();
+    BASELINE.get_or_init(|| migration_sql_postgres().join("\n").leak())
+}
+
+/// SQL text for a host migration step on the live connection backend.
+///
+/// SQLite-family backends return `canonical` unchanged. Postgres returns the
+/// squashed Postgres greenfield baseline.
+///
+/// `canonical` must be a `'static` string from the host migration plan.
+#[must_use]
+pub fn schema_sql_for_backend(backend: DatabaseBackend, canonical: &'static str) -> &'static str {
+    match backend {
+        DatabaseBackend::Postgres => greenfield_baseline_postgres(),
+        _ => canonical,
+    }
+}

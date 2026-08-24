@@ -3,7 +3,8 @@
 //! Hosts compile domain work into a generic [`host_ir::DbAtomicPlan`].
 //! This crate runs those statements as one native transaction and records
 //! fail-closed begin/commit faults. It must not import Bookclerk entities or
-//! migrations.
+//! host domain planners. Engine-specific schema DDL lowering for Postgres lives
+//! in [`schema_postgres`].
 
 use std::cell::RefCell;
 
@@ -16,6 +17,7 @@ pub mod host_ir;
 mod json_bridge;
 mod lower;
 pub mod proxy_txn;
+mod schema_postgres;
 mod typed;
 
 thread_local! {
@@ -61,6 +63,9 @@ pub use host_ir::{
 };
 pub use json_bridge::{db_value_from_json, db_value_to_json};
 pub use lower::{lower_canonical_sql, lower_canonical_to_postgres};
+pub use schema_postgres::{
+    latest_schema_postgres, migration_sql_postgres, schema_sql_for_backend,
+};
 pub use proxy_txn::{
     arm_exec_budget, clear_exec_budget, consume_atomic_interrupt, consume_begin_injection,
     consume_commit_injection, current_exec_budget, exec_deadline_expired,

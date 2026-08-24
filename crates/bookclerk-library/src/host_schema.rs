@@ -2,10 +2,13 @@
 //!
 //! Guests open a connection and ping. The host reads the current version and
 //! applies each remaining step from [`crate::migrations::host_migration_plan`]
-//! as **one** atomic unit (DDL + version marker last). Marker kind selects
-//! only the versioning mechanic (`PRAGMA user_version`, `schema_migrations`
-//! row, or one HTTP `{ "batch": [...] }` per version); SQL text comes from the
-//! live connection backend via [`crate::migrations::host_migration_sql`].
+//! as **one** atomic unit (DDL + version marker last). Marker kind (schema
+//! capability flags) selects only the versioning mechanic (`PRAGMA
+//! user_version`, `schema_migrations` row, or one HTTP `{ "batch": [...] }`
+//! per version). Canonical DDL lives in the host plan; the live connection
+//! backend chooses adapter-edge lowering via
+//! [`bookclerk_db_exec::schema_sql_for_backend`] (see
+//! [`crate::migrations::host_migration_sql`]).
 //!
 //! TODO(#squash): collapse the long migration chain to a single baseline version.
 
@@ -24,9 +27,10 @@ use crate::sql_plan::{execute_statements_on, DbAtomicPlan, DbPlanStatement};
 ///
 /// Flags choose **how** versions are stored and applied, not which SQL pack
 /// to emit. Canonical Bookclerk SQL is [`crate::migrations::migration_sql`].
-/// Postgres connections receive the postgres lowering of that pack; SQLite
-/// connections always get the canonical pack — including a new adapter whose
-/// plugin id is not `postgres` / `d1` / `sqlite`.
+/// Postgres connections receive the adapter-edge pack from
+/// [`bookclerk_db_exec::schema_sql_for_backend`]; SQLite connections always get
+/// the canonical pack — including a new adapter whose plugin id is not
+/// `postgres` / `d1` / `sqlite`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostSchemaKind {
     /// `PRAGMA user_version` on an interactive SQLite-family connection.
@@ -42,9 +46,9 @@ impl HostSchemaKind {
     ///
     /// Plugin identity, `dialect`, `sqlFamily`, and `diagnosticEngine` are not
     /// consulted. SQL text is chosen from the live connection backend when
-    /// applying (canonical SQLite pack, or its postgres lowering), not from
-    /// these flags. A conforming adapter may use any plugin id as long as it
-    /// advertises exactly one of:
+    /// applying (canonical SQLite pack, or the Postgres adapter-edge pack in
+    /// `bookclerk-db-exec`), not from these flags. A conforming adapter may
+    /// use any plugin id as long as it advertises exactly one of:
     ///
     /// - `pragmaUserVersion` (`PRAGMA user_version` marker)
     /// - `schemaMigrations` without `atomicSchemaBatch` (row marker)
