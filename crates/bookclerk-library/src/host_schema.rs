@@ -221,7 +221,7 @@ where
     exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
     let steps = host_migration_plan();
     for step in &steps {
-        apply_one_sqlite_version_with_batch(db, backend, step.version, step.sqlite, run_batch)
+        apply_one_sqlite_version_with_batch(db, backend, step.version, step.canonical, run_batch)
             .await?;
     }
     exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
@@ -336,7 +336,7 @@ async fn apply_sqlite_user_version(db: &DatabaseConnection) -> Result<()> {
     exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
     let steps = host_migration_plan();
     for step in &steps {
-        apply_one_sqlite_version(db, backend, step.version, step.sqlite).await?;
+        apply_one_sqlite_version(db, backend, step.version, step.canonical).await?;
     }
     exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
     Ok(())
@@ -616,16 +616,15 @@ mod tests {
     use bookclerk_plugin_abi::DbConnectResult;
 
     #[test]
-    fn host_migration_plan_is_marker_independent() {
-        use crate::migrations::{host_migration_plan, migration_sql};
+    fn host_migration_plan_is_single_greenfield_baseline() {
+        use crate::migrations::{
+            greenfield_baseline_canonical, host_migration_plan, migration_sql,
+        };
         let plan = host_migration_plan();
-        assert_eq!(plan.len(), migration_sql().len());
-        for (step, sqlite) in plan.iter().zip(migration_sql().iter()) {
-            assert_eq!(step.sqlite, *sqlite);
-            assert!(step.version > 0);
-        }
-        assert_eq!(plan.first().map(|s| s.version), Some(1));
-        assert_eq!(plan.last().map(|s| s.version), Some(plan.len() as i64));
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].version, 1);
+        assert_eq!(plan[0].canonical, greenfield_baseline_canonical());
+        assert!(plan[0].canonical.contains(migration_sql()[0]));
     }
 
     #[test]
@@ -744,13 +743,12 @@ mod tests {
         let applied = schema_versions_applied(&db, DbBackend::Sqlite)
             .await
             .unwrap();
-        let last = i64::try_from(plan.len()).unwrap();
+        let last = plan.last().map(|s| s.version).unwrap_or(0);
         assert!(
             applied.contains(&last),
             "last plan version {last}, applied={applied:?}"
         );
-        let v27 = crate::migrations::migration_v27_schema_version();
-        assert!(applied.contains(&v27), "V27 rebuild at version {v27}");
+        assert_eq!(plan.len(), 1, "greenfield baseline is one squashed version");
         let cols = db
             .query_all_raw(Statement::from_string(
                 DbBackend::Sqlite,
@@ -779,7 +777,7 @@ mod tests {
         let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
             .await
             .expect("unmigrated sqlite");
-        let ddl = split_sql_statements(host_migration_plan()[0].sqlite).len() as u32;
+        let ddl = split_sql_statements(host_migration_plan()[0].canonical).len() as u32;
         crate::inject_atomic_interrupt_after(
             crate::AtomicInterruptPhase::BetweenStatements,
             crate::AtomicInterruptKind::Cancel,
@@ -848,7 +846,11 @@ mod tests {
             None => format!("{}/{db_name}", &trimmed[..slash]),
         };
         let db = sea_orm::Database::connect(&db_url).await.expect("connect");
-        let ddl = split_sql_statements(host_migration_plan()[0].postgres).len() as u32;
+        let ddl = split_sql_statements(host_migration_sql(
+            DbBackend::Postgres,
+            &host_migration_plan()[0],
+        ))
+        .len() as u32;
         crate::inject_atomic_interrupt_after(
             crate::AtomicInterruptPhase::BetweenStatements,
             crate::AtomicInterruptKind::Cancel,

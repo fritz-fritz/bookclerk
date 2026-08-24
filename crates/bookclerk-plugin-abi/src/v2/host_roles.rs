@@ -2,7 +2,7 @@
 
 use crate::Result;
 
-/// Host-internal transaction on an adapter connection (SeaORM proxy).
+/// Host-only interactive transaction on an adapter connection (SeaORM proxy).
 #[async_trait::async_trait(?Send)]
 pub trait AdapterTransaction {
     /// Typed statements on this open transaction (no second `BEGIN`).
@@ -20,4 +20,15 @@ pub trait AdapterTransaction {
 pub trait HostAdapterDatabaseSession {
     /// Opens a host-internal interactive transaction (SeaORM proxy).
     async fn begin(&self) -> Result<Box<dyn AdapterTransaction>>;
+
+    /// Typed execute with a host-only guest receipt finalize hint.
+    async fn execute_envelope(
+        &self,
+        envelope: crate::HostExecuteEnvelope,
+    ) -> Result<crate::ExecuteReply> {
+        let _ = envelope;
+        Err(crate::PluginError::unsupported(
+            "host executeEnvelope not implemented",
+        ))
+    }
 }

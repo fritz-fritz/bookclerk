@@ -138,7 +138,7 @@ where
                     serde_json::Value::Array(
                         row.values
                             .iter()
-                            .map(bookclerk_plugin_abi::db_value_to_json)
+                            .map(bookclerk_db_exec::db_value_to_json)
                             .collect(),
                     )
                 })
@@ -239,7 +239,7 @@ where
                     serde_json::Value::Array(
                         row.values
                             .iter()
-                            .map(bookclerk_plugin_abi::db_value_to_json)
+                            .map(bookclerk_db_exec::db_value_to_json)
                             .collect(),
                     )
                 })
@@ -672,7 +672,7 @@ where
                     serde_json::Value::Array(
                         row.values
                             .iter()
-                            .map(bookclerk_plugin_abi::db_value_to_json)
+                            .map(bookclerk_db_exec::db_value_to_json)
                             .collect(),
                     )
                 })

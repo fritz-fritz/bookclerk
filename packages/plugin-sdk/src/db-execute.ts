@@ -12,17 +12,17 @@ import { readDbValue, writeDbValue, type DbType, type DbValue } from "./db-value
 /** Host-authored statement kind on `DbStatement.kind`. */
 export type DbStatementKind = "query" | "execute" | "select" | "returning";
 
-/** Which result fields the caller needs. */
-export type DbResultSelection = "discard" | "affectedRows" | "rows";
-
 const KIND_ORD: Record<DbStatementKind, number> = {
-  query: 0,
-  execute: 1,
-  select: 2,
-  returning: 3,
+  query: 1,
+  execute: 0,
+  select: 1,
+  returning: 2,
 };
 
-const KIND_FROM = ["query", "execute", "select", "returning"] as const;
+const KIND_FROM = ["execute", "select", "returning"] as const;
+
+/** Which result fields the caller needs. */
+export type DbResultSelection = "discard" | "affectedRows" | "rows";
 
 const SELECT_ORD: Record<DbResultSelection, number> = {
   discard: 0,

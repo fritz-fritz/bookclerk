@@ -171,4 +171,20 @@ impl HostAdapterDatabaseSession for HostAdapterDatabaseSessionClient {
             adapter_transaction_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
         }
     }
+
+    async fn execute_envelope(
+        &self,
+        envelope: crate::HostExecuteEnvelope,
+    ) -> Result<crate::ExecuteReply> {
+        let mut req = self.client.execute_envelope_request();
+        super::db_rpc::write_host_execute_envelope(req.get().init_envelope(), &envelope);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        super::db_rpc::read_execute_result_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
 }

@@ -681,7 +681,7 @@ mod limits_tests {
             deadline_unix_ms: 0,
             ..Default::default()
         };
-        const GOLDEN: &str = "e368ef90b76963c5e93c5e6db37fdb6d7f809d23c10295352a0ba3cd26885f02";
+        const GOLDEN: &str = "648cd28b3223c825c55ea99a7c6e52321ea733656f5965abfe4c7ed4ca21d111";
         assert_eq!(canonical_execute_request_hash(&req).unwrap(), GOLDEN);
         req.deadline_unix_ms = 9_999_999_999;
         assert_eq!(canonical_execute_request_hash(&req).unwrap(), GOLDEN);

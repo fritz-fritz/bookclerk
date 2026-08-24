@@ -175,10 +175,9 @@ fn db_type_ord(ty: DbType) -> u16 {
 
 fn kind_ord(kind: DbPlanStatementKind) -> u16 {
     match kind {
-        DbPlanStatementKind::Query => 0,
-        DbPlanStatementKind::Execute => 1,
-        DbPlanStatementKind::Select => 2,
-        DbPlanStatementKind::Returning => 3,
+        DbPlanStatementKind::Query | DbPlanStatementKind::Select => 1,
+        DbPlanStatementKind::Execute => 0,
+        DbPlanStatementKind::Returning => 2,
     }
 }
 
@@ -307,7 +306,7 @@ mod tests {
             ..Default::default()
         };
         let bytes = encoded_execute_request_sdk_bytes(&req).expect("golden request encodes");
-        const PYTHON_GOLDEN: &str = "000000001100000000000000040003000000000000000000000000000000000000000000000000000000000000000000090000000a000000090000000a000000090000001f0000000000000000000000000000000000000004000000010002000200020001000000050000004a000000090000000700000053454c454354203100000000000000000000000002000100";
+        const PYTHON_GOLDEN: &str = "000000001100000000000000040003000000000000000000000000000000000000000000000000000000000000000000090000000a000000090000000a000000090000001f0000000000000000000000000000000000000004000000010002000100020001000000050000004a000000090000000700000053454c454354203100000000000000000000000002000100";
         assert_eq!(hex::encode(bytes), PYTHON_GOLDEN);
     }
 }

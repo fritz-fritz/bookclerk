@@ -19,7 +19,17 @@ interface AdapterTransaction {
   rollback @2 () -> (result :PluginV2.EmptyReply);
 }
 
-# Host-only view of an open adapter session (capability cast from public session).
+struct HostGuestReceiptPersist {
+  guestLen @0 :UInt32;
+  guestHash @1 :Text;
+}
+
+struct HostExecuteEnvelope {
+  request @0 :PluginV2.ExecuteRequest;
+  guestReceipt @1 :HostGuestReceiptPersist;
+}
+
 interface HostAdapterDatabaseSession {
   begin @0 () -> (result :AdapterTransactionReply);
+  executeEnvelope @1 (envelope :HostExecuteEnvelope) -> (result :PluginV2.ExecuteResultReply);
 }

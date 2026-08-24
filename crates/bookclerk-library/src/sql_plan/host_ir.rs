@@ -12,9 +12,10 @@ pub use bookclerk_db_exec::host_ir::{
     SEA_NULL_KEY,
 };
 
+use bookclerk_db_exec::{db_value_from_json, db_value_to_json};
 use bookclerk_plugin_abi::{
-    db_value_from_json, db_value_to_json, DbPlanStatementKind, DbResultSelection, DbTiming,
-    ExecuteReply, ExecuteRequest, GuestReceiptPersist, StatementResult, TypedDbStatement,
+    DbPlanStatementKind, DbResultSelection, DbTiming, ExecuteReply, ExecuteRequest,
+    GuestReceiptPersist, StatementResult, TypedDbStatement,
 };
 
 /// Converts a host IR statement onto the typed wire.

@@ -9,12 +9,15 @@ use bookclerk_plugin_abi::{
     DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, ExecuteRequest,
     GuestReceiptPersist, PluginError, TypedDbStatement,
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 
 use super::named::apply_write_predicate;
 
 /// Prune + prior-select prefix ahead of the guest statements.
 const WRAP_PREFIX: usize = GUEST_RECEIPT_WRAP_PREFIX;
+
+/// Host `operationKind` stored on guest-typed receipts.
+const GUEST_TYPED_KIND: &str = "guestTyped";
 
 /// Wraps an already-authorized guest batch with prune / prior-select / gated
 /// DML. Clears `requestHash` so a later host re-authorize stamps the wrapper,
@@ -53,10 +56,25 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> ExecuteReques
         gated.push(stmt);
     }
 
-    let mut statements = Vec::with_capacity(WRAP_PREFIX + gated.len());
+    let mut statements = Vec::with_capacity(WRAP_PREFIX + gated.len() + 1);
     statements.push(prune);
     statements.push(select);
     statements.extend(gated);
+    let expires = (now + Duration::hours(24)).to_rfc3339();
+    statements.push(typed_exec(
+        "INSERT INTO db_atomic_receipts (\
+            operation_id, operation_kind, request_hash, status, payload, created_at, expires_at\
+         ) SELECT ?, ?, ?, 'ok', '', ?, ? \
+           WHERE NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)",
+        vec![
+            DbValue::Text(operation_id.clone()),
+            DbValue::Text(GUEST_TYPED_KIND.into()),
+            DbValue::Text(request_hash.clone()),
+            DbValue::Text(created),
+            DbValue::Text(expires),
+            DbValue::Text(operation_id),
+        ],
+    ));
 
     req.statements = statements;
     req.request_hash.clear();
@@ -78,7 +96,9 @@ pub(crate) fn unwrap_guest_typed_reply(
     guest_len: usize,
     guest_hash: &str,
 ) -> Result<ExecuteReply, PluginError> {
-    let expected = WRAP_PREFIX.saturating_add(guest_len);
+    let expected = WRAP_PREFIX
+        .saturating_add(guest_len)
+        .saturating_add(bookclerk_db_exec::GUEST_RECEIPT_STUB_SUFFIX);
     if reply.statements.len() != expected {
         return Err(PluginError::internal(format!(
             "guest atomic receipt wrap returned {} statements; expected {expected}",
@@ -90,6 +110,11 @@ pub(crate) fn unwrap_guest_typed_reply(
             if prior_hash != guest_hash {
                 return Err(PluginError::conflict(
                     "executeAtomic operationId was already committed with a different requestHash",
+                ));
+            }
+            if receipt_payload_text(prior).is_none() {
+                return Err(PluginError::unavailable(
+                    "executeAtomic committed with an empty guest receipt payload; retry after finalize",
                 ));
             }
             if let Some(replayed) = decode_guest_replay_payload(prior)? {
@@ -290,7 +315,7 @@ mod tests {
     fn wrap_rewrites_insert_values_and_gates_writes() {
         let wrapped = wrap_guest_typed_request(guest_insert());
         assert!(wrapped.request_hash.is_empty());
-        assert_eq!(wrapped.statements.len(), 3);
+        assert_eq!(wrapped.statements.len(), 4);
         assert!(!wrapped.guest_receipt_persist.is_absent());
         assert!(
             wrapped.statements[1].sql.contains("db_atomic_receipts"),
@@ -366,6 +391,7 @@ mod tests {
                 bookclerk_plugin_abi::StatementResult::from_affected(0),
                 prior,
                 bookclerk_plugin_abi::StatementResult::from_affected(0),
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
             ],
             timing: bookclerk_plugin_abi::DbTiming::default(),
         };
@@ -400,6 +426,7 @@ mod tests {
             statements: vec![
                 bookclerk_plugin_abi::StatementResult::from_affected(0),
                 prior,
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
                 bookclerk_plugin_abi::StatementResult::from_affected(0),
             ],
             timing: bookclerk_plugin_abi::DbTiming::default(),

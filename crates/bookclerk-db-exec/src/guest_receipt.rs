@@ -9,17 +9,16 @@ use bookclerk_plugin_abi::{
     DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, StatementResult,
     TypedDbStatement,
 };
-use chrono::{Duration, Utc};
 use sea_orm::DbErr;
-
-/// Host `operationKind` stored on guest-typed receipts.
-const GUEST_TYPED_KIND: &str = "guestTyped";
 
 /// Maximum UTF-8 bytes stored in `db_atomic_receipts.payload` for guest replay.
 pub const GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES: usize = 65536;
 
 /// Prune + prior-select prefix ahead of the guest statements.
 pub const GUEST_RECEIPT_WRAP_PREFIX: usize = 2;
+
+/// Same-batch receipt stub INSERT after gated guest statements.
+pub const GUEST_RECEIPT_STUB_SUFFIX: usize = 1;
 
 /// Builds finalize statements to persist a guest reply before COMMIT.
 ///
@@ -34,7 +33,9 @@ pub fn guest_receipt_finalize_stmts(
     guest_len: usize,
     guest_hash: &str,
 ) -> Result<Vec<TypedDbStatement>, DbErr> {
-    let expected = GUEST_RECEIPT_WRAP_PREFIX.saturating_add(guest_len);
+    let expected = GUEST_RECEIPT_WRAP_PREFIX
+        .saturating_add(guest_len)
+        .saturating_add(GUEST_RECEIPT_STUB_SUFFIX);
     if partial.statements.len() != expected {
         return Err(DbErr::Custom(format!(
             "guest atomic receipt wrap returned {} statements; expected {expected}",
@@ -65,21 +66,10 @@ pub fn guest_receipt_finalize_stmts(
     }
     let guest_reply = guest_slice_reply(partial, guest_len)?;
     let payload = encode_guest_replay_payload(&guest_reply)?;
-    let now = Utc::now();
-    let created = now.to_rfc3339();
-    let expires = (now + Duration::hours(24)).to_rfc3339();
     Ok(vec![typed_exec(
-        "INSERT INTO db_atomic_receipts (\
-            operation_id, operation_kind, request_hash, status, payload, created_at, expires_at\
-         ) SELECT ?, ?, ?, 'ok', ?, ?, ? \
-           WHERE NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)",
+        "UPDATE db_atomic_receipts SET payload = ? WHERE operation_id = ? AND status = 'ok'",
         vec![
-            DbValue::Text(partial.operation_id.clone()),
-            DbValue::Text(GUEST_TYPED_KIND.into()),
-            DbValue::Text(guest_hash.into()),
             DbValue::Text(payload),
-            DbValue::Text(created),
-            DbValue::Text(expires),
             DbValue::Text(partial.operation_id.clone()),
         ],
     )])

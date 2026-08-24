@@ -121,7 +121,7 @@ fn kind_db_wire_dto_camel_case() {
     assert!(ev.get("rowsAffected").is_some());
     assert!(ev.get("last_insert_id").is_none());
 
-    let begin = bookclerk_plugin_abi::DbBeginParams {
+    let begin = bookclerk_plugin_abi::host_db::DbBeginParams {
         parent_txn_id: Some("txn-1".into()),
     };
     let bv = serde_json::to_value(&begin).unwrap();

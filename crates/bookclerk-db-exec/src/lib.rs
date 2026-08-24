@@ -13,6 +13,7 @@ mod b64;
 mod exec;
 pub mod guest_receipt;
 pub mod host_ir;
+mod json_bridge;
 mod lower;
 pub mod proxy_txn;
 mod typed;
@@ -49,12 +50,15 @@ pub use exec::{
     cap_query_sql, encoded_proxy_row_len, execute_statements_on, execute_statements_on_session,
     json_cell_utf8_len, note_encoded_result_bytes, sea_value_to_json, AtomicSession, ExecCaps,
 };
-pub use guest_receipt::{guest_receipt_finalize_stmts, GUEST_RECEIPT_WRAP_PREFIX};
+pub use guest_receipt::{
+    guest_receipt_finalize_stmts, GUEST_RECEIPT_STUB_SUFFIX, GUEST_RECEIPT_WRAP_PREFIX,
+};
 pub use host_ir::{
     sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
     DbPlanStatement, DbPlanStmtExecResult, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
     SEA_NULL_KEY,
 };
+pub use json_bridge::{db_value_from_json, db_value_to_json};
 pub use lower::{lower_canonical_sql, lower_canonical_to_postgres};
 pub use proxy_txn::{
     arm_exec_budget, clear_exec_budget, consume_atomic_interrupt, consume_begin_injection,

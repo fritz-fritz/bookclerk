@@ -7,6 +7,7 @@
 //! `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`.
 
 use rusqlite_migration::{Migrations, M};
+use std::sync::OnceLock;
 
 /// Final SQLite DDL for a fresh Bookclerk library database.
 ///
@@ -1372,39 +1373,43 @@ const D1_PRE_V27_STEPS: usize = 27;
 ///
 /// Marker capabilities ([`crate::HostSchemaKind`]) choose only how each version
 /// is recorded (`PRAGMA user_version`, `schema_migrations` row, or one atomic
-/// batch). The live connection backend selects [`HostMigrationStep::postgres`]
-/// vs [`HostMigrationStep::sqlite`]; marker kind never selects a different plan.
+/// batch). The live connection backend lowers [`Self::canonical`] at the adapter
+/// boundary (Postgres) or applies it verbatim (SQLite / D1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostMigrationStep {
     /// `PRAGMA user_version` / `schema_migrations.version` for this step.
     pub version: i64,
-    /// Canonical SQLite-shaped DDL (also used for D1 / file SQLite).
-    pub sqlite: &'static str,
-    /// Postgres-shaped DDL for the same logical version.
-    pub postgres: &'static str,
+    /// Canonical SQLite-shaped Bookclerk DDL for this version.
+    pub canonical: &'static str,
 }
 
 /// Returns the canonical host migration plan shared by every marker kind.
 #[must_use]
 pub fn host_migration_plan() -> Vec<HostMigrationStep> {
-    migration_sql()
-        .iter()
-        .zip(migration_sql_postgres().iter())
-        .enumerate()
-        .map(|(idx, (sqlite, postgres))| HostMigrationStep {
-            version: i64::try_from(idx + 1).expect("migration index fits i64"),
-            sqlite,
-            postgres,
-        })
-        .collect()
+    vec![HostMigrationStep {
+        version: 1,
+        canonical: greenfield_baseline_canonical(),
+    }]
+}
+
+/// Concatenated canonical sqlite-shaped baseline DDL (greenfield squash).
+pub(crate) fn greenfield_baseline_canonical() -> &'static str {
+    static BASELINE: OnceLock<&'static str> = OnceLock::new();
+    BASELINE.get_or_init(|| migration_sql().join("\n").leak())
+}
+
+/// Postgres lowering of the greenfield baseline (adapter edge).
+fn greenfield_baseline_postgres() -> &'static str {
+    static BASELINE: OnceLock<&'static str> = OnceLock::new();
+    BASELINE.get_or_init(|| migration_sql_postgres().join("\n").leak())
 }
 
 /// SQL text for `step` on the live connection backend (never marker-driven).
 #[must_use]
 pub fn host_migration_sql(backend: sea_orm::DbBackend, step: &HostMigrationStep) -> &'static str {
     match backend {
-        sea_orm::DbBackend::Postgres => step.postgres,
-        _ => step.sqlite,
+        sea_orm::DbBackend::Postgres => greenfield_baseline_postgres(),
+        _ => step.canonical,
     }
 }
 
@@ -1425,7 +1430,7 @@ pub fn migration_sql_d1_post_v27() -> &'static [&'static str] {
 /// Collects canonical SQLite DDL for `steps` (shared plan, not a D1-only pack).
 #[must_use]
 pub fn host_migration_sqlite_steps(steps: &[HostMigrationStep]) -> Vec<&'static str> {
-    steps.iter().map(|step| step.sqlite).collect()
+    steps.iter().map(|step| step.canonical).collect()
 }
 
 /// `schema_migrations.version` / plan step for the V27 FK-safe rebuild.
@@ -2024,21 +2029,17 @@ mod tests {
     }
 
     #[test]
-    fn host_migration_plan_aligns_with_legacy_d1_slices() {
+    fn host_migration_plan_is_single_baseline_containing_legacy_steps() {
         let plan = host_migration_plan();
-        assert_eq!(migration_sql_d1().len(), D1_PRE_V27_STEPS);
-        assert_eq!(
-            migration_sql_d1_post_v27().len(),
-            plan.len().saturating_sub(D1_PRE_V27_STEPS + 1)
-        );
-        assert_eq!(
-            plan[D1_PRE_V27_STEPS].version,
-            migration_v27_schema_version()
-        );
-        assert_eq!(
-            migration_sql_d1_post_v27().first(),
-            Some(&plan[D1_PRE_V27_STEPS + 1].sqlite)
-        );
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].version, 1);
+        let canonical = plan[0].canonical;
+        for step in migration_sql() {
+            assert!(
+                canonical.contains(step),
+                "baseline must include legacy step fragment"
+            );
+        }
     }
 
     #[test]

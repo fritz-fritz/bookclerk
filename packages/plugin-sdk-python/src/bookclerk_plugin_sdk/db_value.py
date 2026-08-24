@@ -38,8 +38,9 @@ _DB_TYPE_FROM = (
     "bytes",
 )
 
-_KIND_ORD = {"query": 0, "execute": 1, "select": 2, "returning": 3}
-_KIND_FROM = ("query", "execute", "select", "returning")
+_KIND_ORD = {"query": 1, "execute": 0, "select": 1, "returning": 2}
+_KIND_FROM = ("execute", "select", "returning")
+_KIND_FROM = ("execute", "select", "returning")
 _SELECT_ORD = {"discard": 0, "affectedRows": 1, "rows": 2}
 _SELECT_FROM = ("discard", "affectedRows", "rows")
 

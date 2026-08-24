@@ -1180,7 +1180,18 @@ fn vat_thread(
                                 }
                                 out = async {
                                     match db_session.as_mut() {
-                                        Some(s) => s.execute(request).await.map_err(map_abi),
+                                        Some(s) => {
+                                            if request.guest_receipt_persist.is_absent() {
+                                                s.execute(request).await.map_err(map_abi)
+                                            } else {
+                                                let host = db_host_session.as_ref().ok_or_else(|| {
+                                                    PluginError::message("v2 database session not open")
+                                                })?;
+                                                let envelope =
+                                                    bookclerk_plugin_sdk::HostExecuteEnvelope::from_execute_request(request);
+                                                host.execute_envelope(envelope).await.map_err(map_abi)
+                                            }
+                                        }
                                         None => Err(PluginError::message(
                                             "v2 database session not open",
                                         )),

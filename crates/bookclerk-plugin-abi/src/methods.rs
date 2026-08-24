@@ -345,7 +345,7 @@ pub mod db_execute {
 
 /// Begin a database transaction (or nested savepoint) on the guest.
 ///
-/// Params: [`crate::db::DbBeginParams`]. Result: [`crate::db::DbBeginResult`].
+/// Params: [`crate::host_db::DbBeginParams`]. Result: [`crate::host_db::DbBeginResult`].
 pub mod db_begin {
     /// Wire method name `"dbBegin"`.
     pub const NAME: &str = "dbBegin";
@@ -353,7 +353,7 @@ pub mod db_begin {
 
 /// Commit a guest transaction previously returned by [`db_begin`].
 ///
-/// Params: [`crate::db::DbTxnParams`].
+/// Params: [`crate::host_db::DbTxnParams`].
 pub mod db_commit {
     /// Wire method name `"dbCommit"`.
     pub const NAME: &str = "dbCommit";
@@ -361,7 +361,7 @@ pub mod db_commit {
 
 /// Roll back a guest transaction previously returned by [`db_begin`].
 ///
-/// Params: [`crate::db::DbTxnParams`].
+/// Params: [`crate::host_db::DbTxnParams`].
 pub mod db_rollback {
     /// Wire method name `"dbRollback"`.
     pub const NAME: &str = "dbRollback";

@@ -55,6 +55,7 @@ pub mod db_value;
 pub mod error;
 pub mod events;
 pub mod guest_sql;
+pub mod host_db;
 pub mod kind;
 pub mod methods;
 pub mod types;
@@ -100,17 +101,17 @@ pub mod plugin_v2_host_capnp {
 mod wire_fixtures;
 
 pub use db::{
-    DbBeginParams, DbBeginResult, DbConnectParams, DbConnectResult, DbTxnParams, D1_MAX_BINDS,
-    FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
-    HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS,
-    POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
+    DbConnectParams, DbConnectResult, D1_MAX_BINDS, FIRST_PARTY_MAX_RESULT_BYTES,
+    FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES, HOST_MIN_PAYLOAD_BYTES,
+    HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS,
+    SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
 };
 pub use db_execute::{
     sql_payload_bytes, sql_payload_exceeds, DbCapabilities, DbColumn, DbPlanStatementKind,
     DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest, GuestReceiptPersist,
-    StatementResult, TypedDbStatement,
+    HostExecuteEnvelope, StatementResult, TypedDbStatement,
 };
-pub use db_value::{db_value_from_json, db_value_to_json, DbType, DbValue};
+pub use db_value::{DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use events::{HostToPluginEvent, PluginToHostEvent};
 pub use guest_sql::{

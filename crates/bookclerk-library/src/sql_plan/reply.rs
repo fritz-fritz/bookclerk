@@ -145,7 +145,7 @@ fn effective_row_cap(stmt_max_rows: u32, caps_max_result_rows: u32) -> Option<u3
         (0, 0) => None,
         (a, 0) => Some(a),
         (0, b) => Some(b),
-        (a, b) => Some(a.max(b)),
+        (a, b) => Some(a.min(b)),
     }
 }
 
@@ -259,6 +259,20 @@ mod tests {
         let err = validate_execute_reply(&req, &reply, &tiny_caps()).unwrap_err();
         assert!(matches!(err, LibraryError::Unavailable(_)), "{err}");
         assert!(err.to_string().contains("rows"), "{err}");
+    }
+
+    #[test]
+    fn validate_execute_reply_uses_min_of_statement_and_adapter_row_caps() {
+        let mut caps = DbConnectResult::sqlite();
+        caps.max_result_rows = 10;
+        let req = rows_request(1);
+        let reply = rows_reply("op-1", 2);
+        let err = validate_execute_reply(&req, &reply, &caps).unwrap_err();
+        assert!(matches!(err, LibraryError::Unavailable(_)), "{err}");
+        assert!(
+            err.to_string().contains("rows"),
+            "stmt maxRows=1 must bind below adapter max_result_rows=10: {err}"
+        );
     }
 
     #[test]

@@ -2076,6 +2076,29 @@ impl host_adapter_database_session_capnp::Server for AdapterDatabaseSessionServe
         }
         Ok(())
     }
+
+    async fn execute_envelope(
+        self: Rc<Self>,
+        params: host_adapter_database_session_capnp::ExecuteEnvelopeParams,
+        mut results: host_adapter_database_session_capnp::ExecuteEnvelopeResults,
+    ) -> capnp::Result<()> {
+        let envelope = params
+            .get()?
+            .get_envelope()
+            .map_err(|err| capnp::Error::failed(err.to_string()))
+            .and_then(|r| {
+                super::db_rpc::read_host_execute_envelope(r)
+                    .map_err(|err| capnp::Error::failed(err.to_string()))
+            })?;
+        super::db_rpc::write_execute_result_reply(
+            results.get().init_result(),
+            match &self.host {
+                Some(host) => host.execute_envelope(envelope).await,
+                None => self.inner.execute(envelope.into_execute_request()).await,
+            },
+        );
+        Ok(())
+    }
 }
 
 struct GuestDatabaseServer {

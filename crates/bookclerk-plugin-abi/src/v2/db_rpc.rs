@@ -10,11 +10,15 @@ use super::plugin_v2_capnp::{
     statement_result as statement_result_capnp, DbResultSelection as CapnpDbResultSelection,
     DbStatementKind as CapnpDbStatementKind, DbType as CapnpDbType,
 };
+use super::plugin_v2_host_capnp::{
+    host_execute_envelope as host_execute_envelope_capnp,
+    host_guest_receipt_persist as host_guest_receipt_persist_capnp,
+};
 use super::rpc::{from_capnp, read_error, text_of, write_error};
 use crate::{
     DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType,
-    DbValue, ExecuteReply, ExecuteRequest, GuestReceiptPersist, PluginError, Result,
-    StatementResult, TypedDbStatement,
+    DbValue, ExecuteReply, ExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope, PluginError,
+    Result, StatementResult, TypedDbStatement,
 };
 
 pub(super) fn write_db_type(ty: DbType) -> CapnpDbType {
@@ -79,9 +83,8 @@ pub(super) fn read_db_value(r: db_value_capnp::Reader<'_>) -> Result<DbValue> {
 
 fn write_kind(kind: DbPlanStatementKind) -> CapnpDbStatementKind {
     match kind {
-        DbPlanStatementKind::Query => CapnpDbStatementKind::Query,
+        DbPlanStatementKind::Query | DbPlanStatementKind::Select => CapnpDbStatementKind::Select,
         DbPlanStatementKind::Execute => CapnpDbStatementKind::Execute,
-        DbPlanStatementKind::Select => CapnpDbStatementKind::Select,
         DbPlanStatementKind::Returning => CapnpDbStatementKind::Returning,
     }
 }
@@ -91,7 +94,6 @@ fn write_kind(kind: DbPlanStatementKind) -> CapnpDbStatementKind {
 /// Returns [`PluginError::unsupported`] when the wire tag is unknown.
 fn read_kind(kind: CapnpDbStatementKind) -> Result<DbPlanStatementKind> {
     match kind {
-        CapnpDbStatementKind::Query => Ok(DbPlanStatementKind::Query),
         CapnpDbStatementKind::Execute => Ok(DbPlanStatementKind::Execute),
         CapnpDbStatementKind::Select => Ok(DbPlanStatementKind::Select),
         CapnpDbStatementKind::Returning => Ok(DbPlanStatementKind::Returning),
@@ -163,10 +165,6 @@ pub(super) fn write_execute_request(
     b.set_operation_id(&req.operation_id);
     b.set_request_hash(&req.request_hash);
     b.set_deadline_unix_ms(req.deadline_unix_ms);
-    if !req.guest_receipt_persist.is_absent() {
-        b.set_guest_receipt_guest_len(req.guest_receipt_persist.guest_statement_len);
-        b.set_guest_receipt_guest_hash(&req.guest_receipt_persist.guest_request_hash);
-    }
     let mut stmts = b.reborrow().init_statements(req.statements.len() as u32);
     for (i, s) in req.statements.iter().enumerate() {
         write_db_statement(stmts.reborrow().get(i as u32), s);
@@ -188,17 +186,12 @@ pub(super) fn read_execute_request(r: execute_request_capnp::Reader<'_>) -> Resu
             "executeAtomic statements must be non-empty",
         ));
     }
-    let guest_len = r.get_guest_receipt_guest_len();
-    let guest_hash = text_of(r.get_guest_receipt_guest_hash().map_err(from_capnp)?);
     Ok(ExecuteRequest {
         operation_id: text_of(r.get_operation_id().map_err(from_capnp)?),
         request_hash: text_of(r.get_request_hash().map_err(from_capnp)?),
         statements,
         deadline_unix_ms: r.get_deadline_unix_ms(),
-        guest_receipt_persist: GuestReceiptPersist {
-            guest_statement_len: guest_len,
-            guest_request_hash: guest_hash,
-        },
+        guest_receipt_persist: GuestReceiptPersist::default(),
     })
 }
 
@@ -543,4 +536,41 @@ pub fn decode_execute_request_bytes(bytes: &[u8]) -> Result<ExecuteRequest> {
     let reader = capnp::serialize::read_message(&mut cursor, capnp::message::ReaderOptions::new())
         .map_err(from_capnp)?;
     read_execute_request(reader.get_root().map_err(from_capnp)?)
+}
+
+pub(super) fn write_guest_receipt_persist(
+    mut b: host_guest_receipt_persist_capnp::Builder<'_>,
+    receipt: &GuestReceiptPersist,
+) {
+    b.set_guest_len(receipt.guest_statement_len);
+    b.set_guest_hash(&receipt.guest_request_hash);
+}
+
+fn read_guest_receipt_persist(
+    r: host_guest_receipt_persist_capnp::Reader<'_>,
+) -> Result<GuestReceiptPersist> {
+    Ok(GuestReceiptPersist {
+        guest_statement_len: r.get_guest_len(),
+        guest_request_hash: text_of(r.get_guest_hash().map_err(from_capnp)?),
+    })
+}
+
+pub(super) fn write_host_execute_envelope(
+    mut b: host_execute_envelope_capnp::Builder<'_>,
+    envelope: &HostExecuteEnvelope,
+) {
+    write_execute_request(b.reborrow().init_request(), &envelope.request);
+    write_guest_receipt_persist(b.init_guest_receipt(), &envelope.guest_receipt);
+}
+
+/// # Errors
+///
+/// Returns when nested fields cannot be decoded.
+pub(super) fn read_host_execute_envelope(
+    r: host_execute_envelope_capnp::Reader<'_>,
+) -> Result<HostExecuteEnvelope> {
+    Ok(HostExecuteEnvelope {
+        request: read_execute_request(r.get_request().map_err(from_capnp)?)?,
+        guest_receipt: read_guest_receipt_persist(r.get_guest_receipt().map_err(from_capnp)?)?,
+    })
 }

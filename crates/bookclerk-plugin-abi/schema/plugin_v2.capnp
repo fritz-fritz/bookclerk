@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 15;
+const abiMinor :UInt32 = 16;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -617,10 +617,9 @@ struct DbRow {
 }
 
 enum DbStatementKind {
-  query @0;
-  execute @1;
-  select @2;
-  returning @3;
+  execute @0;
+  select @1;
+  returning @2;
 }
 
 enum DbResultSelection {
@@ -642,9 +641,6 @@ struct ExecuteRequest {
   requestHash @1 :Text;
   statements @2 :List(DbStatement);
   deadlineUnixMs @3 :UInt64;
-  # Host-only guest receipt finalize. Zero len = absent.
-  guestReceiptGuestLen @4 :UInt32;
-  guestReceiptGuestHash @5 :Text;
 }
 
 struct StatementResult {

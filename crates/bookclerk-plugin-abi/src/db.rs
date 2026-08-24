@@ -10,9 +10,7 @@
 //! | [`crate::methods::db_ping`] | (none) | success / [`crate::PluginError`] |
 //! | [`crate::methods::db_query`] | [`StatementDto`] | [`QueryResultDto`] |
 //! | [`crate::methods::db_execute`] | [`StatementDto`] | [`ExecResultDto`] |
-//! | [`crate::methods::db_begin`] | [`DbBeginParams`] | [`DbBeginResult`] |
-//! | [`crate::methods::db_commit`] | [`DbTxnParams`] | success / [`crate::PluginError`] |
-//! | [`crate::methods::db_rollback`] | [`DbTxnParams`] | success / [`crate::PluginError`] |
+//! | Host-internal `db_begin` / `db_commit` / `db_rollback` | see [`crate::host_db`] | (host-only) |
 //! | [`crate::methods::db_atomic`] | legacy JSON plan (see `schema/abi.json`) | legacy JSON exec result |
 //!
 //! Wire fields use camelCase. The `backend` tag on [`DbConnectParams`] is
@@ -43,35 +41,6 @@ pub struct StatementDto {
     /// statement inside that transaction (or nested savepoint).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub txn_id: Option<String>,
-}
-
-/// Params for [`crate::methods::db_begin`].
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DbBeginParams {
-    /// Existing transaction to nest a savepoint under (wire `parentTxnId`).
-    ///
-    /// Omitted to start a top-level transaction. The guest serializes
-    /// top-level begins so SQLite / D1 never interleave writers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_txn_id: Option<String>,
-}
-
-/// Result of a successful [`crate::methods::db_begin`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DbBeginResult {
-    /// Opaque id the host must send on subsequent statements and
-    /// commit/rollback (wire `txnId`).
-    pub txn_id: String,
-}
-
-/// Params for [`crate::methods::db_commit`] and [`crate::methods::db_rollback`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct DbTxnParams {
-    /// Transaction id returned by [`crate::methods::db_begin`] (wire `txnId`).
-    pub txn_id: String,
 }
 
 /// One result row from [`crate::methods::db_query`].

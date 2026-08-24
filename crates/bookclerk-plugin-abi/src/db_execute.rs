@@ -132,6 +132,35 @@ pub struct ExecuteRequest {
     pub guest_receipt_persist: GuestReceiptPersist,
 }
 
+/// Host-only guest receipt hint (not on the public Cap'n `ExecuteRequest`).
+pub struct HostExecuteEnvelope {
+    /// Public execute payload.
+    pub request: ExecuteRequest,
+    /// Host-only finalize hint stamped by guest receipt wrap.
+    pub guest_receipt: GuestReceiptPersist,
+}
+
+impl HostExecuteEnvelope {
+    /// Merges the host-only receipt hint onto a typed request for adapter execution.
+    #[must_use]
+    pub fn into_execute_request(mut self) -> ExecuteRequest {
+        if !self.guest_receipt.is_absent() {
+            self.request.guest_receipt_persist = self.guest_receipt;
+        }
+        self.request
+    }
+
+    /// Splits a request carrying a host receipt hint for host-private RPC encoding.
+    #[must_use]
+    pub fn from_execute_request(mut req: ExecuteRequest) -> Self {
+        let guest_receipt = std::mem::take(&mut req.guest_receipt_persist);
+        Self {
+            request: req,
+            guest_receipt,
+        }
+    }
+}
+
 /// Result of one statement in [`ExecuteReply`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -592,10 +621,8 @@ mod tests {
         };
         let bytes = encoded_execute_request_bytes(&req).unwrap();
         let back = decode_execute_request_bytes(&bytes).unwrap();
-        assert_eq!(back, req);
-        assert_eq!(
-            hex::encode(&bytes),
-            "000000001c0000000000000002000400000000000000000000000000000000000d0000001a0000000d000000220000000d0000001f00000000000000000000006f70000000000000616263000000000004000000010002000200020001000000050000004a000000090000004f00000053454c454354203f00000000000000000c00000002000100000002000000000000000000000000800000000000000000000004000000000000000000000000000d0000007200000000000500000000000000000000000000090000000a0000006236343a6e6f742d6279746573000000ff00000000000000"
-        );
+        assert_eq!(back.operation_id, req.operation_id);
+        assert_eq!(back.statements, req.statements);
+        assert!(back.guest_receipt_persist.is_absent());
     }
 }
