@@ -218,6 +218,15 @@ assert.equal(firstSeen[0].maxRows, 1);
 assert.equal(firstSeen[0].resultSelection, "rows");
 assert.equal(row.n.value, 1n);
 
+const col = await firstBinding.prepare("SELECT n FROM t").first("n");
+assert.equal(col.value, 1n);
+
+const allResult = await firstBinding.prepare("SELECT n FROM t").all();
+assert.equal(allResult.success, true);
+assert.ok(Array.isArray(allResult.results));
+assert.equal(allResult.results[0].n.value, 1n);
+assert.equal(allResult.meta.rows_read, 1);
+
 const mixedSeen = [];
 const mixBinding = createDatabaseBinding({
   async execute(req) {
@@ -247,6 +256,15 @@ assert.deepEqual(mixedSeen[0], [
   { selection: "affectedRows", maxRows: 0 },
   { selection: "rows", maxRows: 0 },
 ]);
+
+const batchResults = await mixBinding.batch([
+  mixBinding.prepare("INSERT INTO t VALUES (?)").bind({ kind: "int64", value: 1n }).asRun(),
+  mixBinding.prepare("SELECT n FROM t").asAll(),
+]);
+assert.equal(batchResults.length, 2);
+assert.equal(batchResults[0].success, true);
+assert.equal(batchResults[0].meta.changes, 1);
+assert.equal(batchResults[1].success, true);
 
 const i64Reply = {
   operationId: "op",

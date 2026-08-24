@@ -74,7 +74,10 @@ pub use db::{
     proxy_rows_from_typed, proxy_rows_to_dto, sea_value_to_json, statement_from_dto,
     statement_to_dto,
 };
-pub use db_binding::{DatabaseBinding, DatabaseBindingOptions, PreparedStatement, RetryToken};
+pub use db_binding::{
+    DatabaseBinding, DatabaseBindingOptions, D1ExecResult, D1Meta, D1Result, PreparedStatement,
+    RetryToken, execute_reply_to_d1_results, statement_result_to_d1_result,
+};
 pub use error::{Result, SdkError};
 pub use fetch_dir::{fetch_work_dir, upload_file_path, FetchWorkDir, UploadFile};
 pub use pass_fd::{fd_proc_path, recv_passed_fd, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};

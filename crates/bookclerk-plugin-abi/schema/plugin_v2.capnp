@@ -709,7 +709,10 @@ interface AdapterDatabaseSession {
   close @2 () -> (result :EmptyReply);
 }
 
-# Host-granted SQL for job plugin authors (SDK DatabaseBinding transport).
+# Host-granted SQL for job plugin authors. SDK `DatabaseBinding` mirrors the
+# Cloudflare Workers D1 surface (`prepare`/`bind`/`run`/`first`/`all`/`raw`,
+# `batch`, `exec`) over this typed `execute` transport; wire types stay Cap'n
+# `ExecuteRequest`/`ExecuteReply`.
 interface GuestDatabase {
   execute @0 (request :ExecuteRequest) -> (result :ExecuteResultReply);
   close @1 () -> (result :EmptyReply);

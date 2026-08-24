@@ -346,6 +346,88 @@ def _read_statement_result(s: _StructReader) -> StatementResult:
     }
 
 
+class D1Meta(TypedDict):
+    """Cloudflare D1Result.meta projection."""
+
+    duration: float
+    changes: int
+    last_row_id: int
+    changed_db: bool
+    rows_read: int
+    rows_written: int
+
+
+class D1Result(TypedDict):
+    """Cloudflare D1Result projection for plugin guests."""
+
+    success: bool
+    results: list[dict[str, Any]] | None
+    meta: D1Meta
+
+
+class D1ExecResult(TypedDict):
+    """Cloudflare D1ExecResult projection."""
+
+    count: int
+    duration: float
+
+
+def statement_result_to_d1_result(stmt: StatementResult, timing: DbTiming) -> D1Result:
+    """Map one statement result to Cloudflare :class:`D1Result`."""
+    changes = int(stmt["rowsAffected"])
+    duration_ms = timing["dbExecutionUs"] / 1000.0
+    columns = stmt.get("columns") or []
+    rows = stmt.get("rows") or []
+    results: list[dict[str, Any]] | None
+    if columns:
+        mapped: list[dict[str, Any]] = []
+        for row in rows:
+            cells = row["values"] if isinstance(row, dict) else []
+            mapped.append(
+                {col["name"]: cell for col, cell in zip(columns, cells, strict=False)}
+            )
+        results = mapped
+    else:
+        results = None
+    return {
+        "success": True,
+        "results": results,
+        "meta": {
+            "duration": duration_ms,
+            "changes": changes,
+            "last_row_id": 0,
+            "changed_db": changes > 0,
+            "rows_read": len(rows),
+            "rows_written": changes,
+        },
+    }
+
+
+def execute_reply_to_d1_results(reply: ExecuteReply) -> list[D1Result]:
+    """Map an execute reply to one Cloudflare :class:`D1Result` per statement."""
+    timing = reply["timing"]
+    return [statement_result_to_d1_result(stmt, timing) for stmt in reply["statements"]]
+
+
+def _row_map_from_statement(result: StatementResult) -> dict[str, Any] | None:
+    rows = result.get("rows") or []
+    columns = result.get("columns") or []
+    if not rows or not columns:
+        return None
+    cells = rows[0]["values"] if isinstance(rows[0], dict) else []
+    return {col["name"]: cell for col, cell in zip(columns, cells, strict=False)}
+
+
+def _column_value_from_row(row: dict[str, Any], col_name: str) -> Any | None:
+    if col_name in row:
+        return row[col_name]
+    lower = col_name.lower()
+    for name, value in row.items():
+        if name.lower() == lower:
+            return value
+    return None
+
+
 class DatabaseBinding:
     """Host-mediated Cloudflare-style SQL binding for plugin guests.
 
@@ -399,19 +481,10 @@ class DatabaseBinding:
         statements: list[PreparedStatement],
         *,
         retry: RetryToken | None = None,
-    ) -> ExecuteReply:
+    ) -> list[D1Result]:
         """Run ``statements`` as one typed atomic batch.
 
-        Each statement must already carry a terminal intent (``as_run`` /
-        ``as_first`` / ``as_all``). ``batch`` does not apply a default
-        ``resultSelection``.
-
-        Args:
-            statements: Prepared statements (binds and intent already applied).
-            retry: Reuse a prior operation id and request hash.
-
-        Returns:
-            Decoded ``ExecuteReply``.
+        Returns one Cloudflare-shaped :class:`D1Result` per statement.
         """
         typed = []
         for stmt in statements:
@@ -420,7 +493,18 @@ class DatabaseBinding:
                     "batch statement is missing terminal intent (as_run/as_first/as_all)"
                 )
             typed.append(stmt._as_typed())  # noqa: SLF001
-        return await self._execute_batch(typed, retry=retry)
+        reply = await self._execute_batch(typed, retry=retry)
+        return execute_reply_to_d1_results(reply)
+
+    async def exec(
+        self,
+        query: str,
+        *,
+        retry: RetryToken | None = None,
+    ) -> D1ExecResult:
+        """Execute raw SQL without bind parameters (Cloudflare ``D1Database.exec``)."""
+        result = await self.prepare(query).run(retry=retry)
+        return {"count": 1, "duration": result["meta"]["duration"]}
 
     async def execute(
         self,
@@ -563,24 +647,53 @@ class PreparedStatement:
             intent=("rows", self._max_result_rows),
         )
 
-    async def run(self, *, retry: RetryToken | None = None) -> ExecuteReply:
-        """Execute as DML (``affectedRows``)."""
-        return await self._binding.batch([self.as_run()], retry=retry)
+    async def run(self, *, retry: RetryToken | None = None) -> D1Result:
+        """Execute as DML. Returns a Cloudflare-shaped :class:`D1Result`."""
+        reply = await self._binding.execute(
+            [self.as_run()._as_typed()],  # noqa: SLF001
+            retry=retry,
+        )
+        return statement_result_to_d1_result(reply["statements"][0], reply["timing"])
 
-    async def first(self, *, retry: RetryToken | None = None) -> dict[str, Any] | None:
-        """Return the first row as a name→value map, or ``None``."""
-        reply = await self._binding.batch([self.as_first()], retry=retry)
+    async def first(
+        self,
+        col_name: str | None = None,
+        *,
+        retry: RetryToken | None = None,
+    ) -> dict[str, Any] | Any | None:
+        """Return the first row, or one column when ``col_name`` is set."""
+        reply = await self._binding.execute(
+            [self.as_first()._as_typed()],  # noqa: SLF001
+            retry=retry,
+        )
         result = reply["statements"][0] if reply["statements"] else None
-        if result is None or not result["rows"]:
+        if result is None:
             return None
-        columns = result["columns"]
-        row = result["rows"][0]
-        cells = row["values"] if isinstance(row, dict) else []
-        return {col["name"]: cell for col, cell in zip(columns, cells)}
+        row = _row_map_from_statement(result)
+        if row is None:
+            return None
+        if col_name is not None:
+            return _column_value_from_row(row, col_name)
+        return row
 
-    async def all(self, *, retry: RetryToken | None = None) -> ExecuteReply:
-        """Execute as a row-returning query."""
-        return await self._binding.batch([self.as_all()], retry=retry)
+    async def raw(self, *, retry: RetryToken | None = None) -> list[list[Any]]:
+        """Return positional cell values per row (Cloudflare ``raw()``)."""
+        reply = await self._binding.execute(
+            [self.as_all()._as_typed()],  # noqa: SLF001
+            retry=retry,
+        )
+        result = reply["statements"][0] if reply["statements"] else None
+        if result is None:
+            return []
+        return [row["values"] if isinstance(row, dict) else [] for row in result.get("rows") or []]
+
+    async def all(self, *, retry: RetryToken | None = None) -> D1Result:
+        """Execute as a row-returning query. Returns a Cloudflare-shaped :class:`D1Result`."""
+        reply = await self._binding.execute(
+            [self.as_all()._as_typed()],  # noqa: SLF001
+            retry=retry,
+        )
+        return statement_result_to_d1_result(reply["statements"][0], reply["timing"])
 
     def _as_typed(self) -> TypedDbStatement:
         if self._intent is None:

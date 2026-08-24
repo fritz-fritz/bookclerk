@@ -73,6 +73,8 @@ export {
   decodeExecuteRequest,
   encodeExecuteResultReply,
   encodeExecuteRequest,
+  executeReplyToD1Results,
+  statementResultToD1Result,
 } from "./db-execute.js";
 export { decodeDbValue, encodeDbValue, parseDbValue } from "./db-value.js";
 export type { DbType, DbValue } from "./db-value.js";
@@ -80,6 +82,9 @@ export type {
   AtomicTransport,
   DatabaseBinding,
   DatabaseBindingOptions,
+  D1ExecResult,
+  D1Meta,
+  D1Result,
   DbColumn,
   DbResultSelection,
   DbRow,

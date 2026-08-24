@@ -308,6 +308,14 @@ class DbValueGoldens(unittest.TestCase):
             self.assertEqual(seen[0]["resultSelection"], "rows")
             self.assertEqual(row["n"]["value"], 1)
 
+            col = await binding.prepare("SELECT n FROM t").first("n")
+            self.assertEqual(col["value"], 1)
+
+            all_result = await binding.prepare("SELECT n FROM t").all()
+            self.assertTrue(all_result["success"])
+            self.assertEqual(all_result["results"][0]["n"]["value"], 1)
+            self.assertEqual(all_result["meta"]["rows_read"], 1)
+
             seen.clear()
             await binding.batch(
                 [

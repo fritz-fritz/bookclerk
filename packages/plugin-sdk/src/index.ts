@@ -47,11 +47,16 @@ export {
   decodeExecuteRequest,
   encodeExecuteResultReply,
   encodeExecuteRequest,
+  executeReplyToD1Results,
+  statementResultToD1Result,
 } from "./db-execute.js";
 export type {
   AtomicTransport,
   DatabaseBinding,
   DatabaseBindingOptions,
+  D1ExecResult,
+  D1Meta,
+  D1Result,
   DbColumn,
   DbResultSelection,
   DbRow,

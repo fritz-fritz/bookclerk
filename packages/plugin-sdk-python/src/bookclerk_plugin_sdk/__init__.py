@@ -27,6 +27,9 @@ from .abi import (
 )
 from .db_value import (
     DatabaseBinding,
+    D1ExecResult,
+    D1Meta,
+    D1Result,
     RetryToken,
     create_database_binding,
     canonical_execute_request_hash,
@@ -36,7 +39,9 @@ from .db_value import (
     encode_db_value,
     encode_execute_result_reply,
     encode_execute_request,
+    execute_reply_to_d1_results,
     parse_db_value,
+    statement_result_to_d1_result,
 )
 from .native import BookclerkPlugin, BookclerkPluginGuest
 
@@ -50,6 +55,9 @@ __all__ = [
     "CliInvokeResult",
     "CliSchema",
     "DatabaseBinding",
+    "D1ExecResult",
+    "D1Meta",
+    "D1Result",
     "RetryToken",
     "create_database_binding",
     "canonical_execute_request_hash",

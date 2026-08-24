@@ -2,14 +2,15 @@
 
 #![allow(clippy::missing_docs_in_private_items)]
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bookclerk_plugin_abi::v2::{GuestDatabase, JobHandlerContext};
 use bookclerk_plugin_abi::{
-    encoded_execute_request_bytes, DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply,
-    ExecuteRequest, PluginError, Result, TypedDbStatement,
+    encoded_execute_request_bytes, DbPlanStatementKind, DbResultSelection, DbTiming, DbValue,
+    ExecuteReply, ExecuteRequest, PluginError, Result, StatementResult, TypedDbStatement,
 };
 
 static OP_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -21,6 +22,43 @@ pub struct RetryToken {
     pub operation_id: String,
     /// Canonical Cap'n request hash stamped by the host.
     pub request_hash: String,
+}
+
+/// Cloudflare [`D1Result::meta`](https://developers.cloudflare.com/d1/worker-api/return-object/) shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct D1Meta {
+    /// Engine-reported SQL duration in milliseconds.
+    pub duration: f64,
+    /// Rows changed by the statement (`rowsAffected`).
+    pub changes: u64,
+    /// Last inserted row id when the adapter exposes it (else `0`).
+    pub last_row_id: i64,
+    /// `true` when `changes > 0`.
+    pub changed_db: bool,
+    /// Rows returned to the guest for this statement.
+    pub rows_read: u32,
+    /// Rows written (`changes` for DML).
+    pub rows_written: u64,
+}
+
+/// Cloudflare [`D1Result`](https://developers.cloudflare.com/d1/worker-api/return-object/) projection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct D1Result {
+    /// Always `true` on success; errors are returned as `Result::Err`.
+    pub success: bool,
+    /// Row maps for selects; `None` when not applicable (DML).
+    pub results: Option<Vec<HashMap<String, DbValue>>>,
+    /// Cloudflare-shaped timing and change metadata.
+    pub meta: D1Meta,
+}
+
+/// Cloudflare [`D1ExecResult`](https://developers.cloudflare.com/d1/worker-api/return-object/).
+#[derive(Debug, Clone, PartialEq)]
+pub struct D1ExecResult {
+    /// Number of statements executed (always `1` for Bookclerk `exec`).
+    pub count: u32,
+    /// Total duration in milliseconds.
+    pub duration: f64,
 }
 
 /// Options for [`DatabaseBinding`].
@@ -94,12 +132,22 @@ impl DatabaseBinding {
         &self,
         statements: Vec<PreparedStatement>,
         retry: Option<RetryToken>,
-    ) -> Result<ExecuteReply> {
-        let mut typed = Vec::with_capacity(statements.len());
-        for stmt in &statements {
-            typed.push(stmt.as_typed()?);
-        }
-        self.execute(typed, retry).await
+    ) -> Result<Vec<D1Result>> {
+        let reply = self.batch_reply(statements, retry).await?;
+        Ok(execute_reply_to_d1_results(&reply))
+    }
+
+    /// Execute raw SQL without bind parameters (Cloudflare `D1Database::exec`).
+    ///
+    /// # Errors
+    ///
+    /// Returns when `run` fails.
+    pub async fn exec(&self, query: impl Into<String>, retry: Option<RetryToken>) -> Result<D1ExecResult> {
+        let result = self.prepare(query).run(retry).await?;
+        Ok(D1ExecResult {
+            count: 1,
+            duration: result.meta.duration,
+        })
     }
 
     /// Internal typed-batch transport. Prefer [`Self::prepare`].
@@ -139,6 +187,18 @@ impl DatabaseBinding {
             )));
         }
         self.session.execute(request).await
+    }
+
+    async fn batch_reply(
+        &self,
+        statements: Vec<PreparedStatement>,
+        retry: Option<RetryToken>,
+    ) -> Result<ExecuteReply> {
+        let mut typed = Vec::with_capacity(statements.len());
+        for stmt in &statements {
+            typed.push(stmt.as_typed()?);
+        }
+        self.execute(typed, retry).await
     }
 }
 
@@ -193,18 +253,24 @@ impl PreparedStatement {
         self
     }
 
-    /// Execute as DML (`affectedRows`).
+    /// Execute as DML. Returns a Cloudflare-shaped [`D1Result`].
     ///
     /// # Errors
     ///
     /// Returns when `execute` fails.
-    pub async fn run(self, retry: Option<RetryToken>) -> Result<ExecuteReply> {
+    pub async fn run(self, retry: Option<RetryToken>) -> Result<D1Result> {
         let bound = self.as_run();
         let binding = bound.binding.clone();
-        binding.batch(vec![bound], retry).await
+        let reply = binding.batch_reply(vec![bound], retry).await?;
+        let stmt = reply
+            .statements
+            .into_iter()
+            .next()
+            .ok_or_else(|| PluginError::internal("execute reply missing statement result"))?;
+        Ok(statement_result_to_d1_result(&stmt, &reply.timing))
     }
 
-    /// First row as a name→value map, or `None`.
+    /// First row as a name→value map, or `None` (Cloudflare `first()` without `colName`).
     ///
     /// # Errors
     ///
@@ -212,32 +278,68 @@ impl PreparedStatement {
     pub async fn first(self, retry: Option<RetryToken>) -> Result<Option<Vec<(String, DbValue)>>> {
         let bound = self.as_first();
         let binding = bound.binding.clone();
-        let reply = binding.batch(vec![bound], retry).await?;
+        let reply = binding.batch_reply(vec![bound], retry).await?;
         let Some(result) = reply.statements.into_iter().next() else {
             return Ok(None);
         };
-        let Some(row) = result.rows.into_iter().next() else {
+        let Some(row) = row_map_from_statement(&result) else {
             return Ok(None);
         };
-        Ok(Some(
-            result
-                .columns
-                .into_iter()
-                .zip(row.values)
-                .map(|(c, v)| (c.name, v))
-                .collect(),
-        ))
+        Ok(Some(row.into_iter().collect()))
     }
 
-    /// Execute as a row-returning query.
+    /// One column from the first row, or `None` (Cloudflare `first(colName)`).
     ///
     /// # Errors
     ///
     /// Returns when `execute` fails.
-    pub async fn all(self, retry: Option<RetryToken>) -> Result<ExecuteReply> {
+    pub async fn first_column(
+        self,
+        col_name: &str,
+        retry: Option<RetryToken>,
+    ) -> Result<Option<DbValue>> {
+        let bound = self.as_first();
+        let binding = bound.binding.clone();
+        let reply = binding.batch_reply(vec![bound], retry).await?;
+        let Some(result) = reply.statements.into_iter().next() else {
+            return Ok(None);
+        };
+        let Some(row) = row_map_from_statement(&result) else {
+            return Ok(None);
+        };
+        Ok(column_value_from_row(&row, col_name))
+    }
+
+    /// Positional cell values per row (Cloudflare `raw()`).
+    ///
+    /// # Errors
+    ///
+    /// Returns when `execute` fails.
+    pub async fn raw(self, retry: Option<RetryToken>) -> Result<Vec<Vec<DbValue>>> {
         let bound = self.as_all();
         let binding = bound.binding.clone();
-        binding.batch(vec![bound], retry).await
+        let reply = binding.batch_reply(vec![bound], retry).await?;
+        let Some(result) = reply.statements.into_iter().next() else {
+            return Ok(Vec::new());
+        };
+        Ok(result.rows.into_iter().map(|r| r.values).collect())
+    }
+
+    /// Execute as a row-returning query. Returns a Cloudflare-shaped [`D1Result`].
+    ///
+    /// # Errors
+    ///
+    /// Returns when `execute` fails.
+    pub async fn all(self, retry: Option<RetryToken>) -> Result<D1Result> {
+        let bound = self.as_all();
+        let binding = bound.binding.clone();
+        let reply = binding.batch_reply(vec![bound], retry).await?;
+        let stmt = reply
+            .statements
+            .into_iter()
+            .next()
+            .ok_or_else(|| PluginError::internal("execute reply missing statement result"))?;
+        Ok(statement_result_to_d1_result(&stmt, &reply.timing))
     }
 
     /// # Errors
@@ -268,6 +370,73 @@ impl PreparedStatement {
 fn wrap_first_sql(sql: &str) -> String {
     let inner = sql.trim().trim_end_matches(';').trim();
     format!("SELECT * FROM ({inner}) AS _bc_first LIMIT 1")
+}
+
+/// Maps one typed statement result to Cloudflare [`D1Result`].
+#[must_use]
+pub fn statement_result_to_d1_result(stmt: &StatementResult, timing: &DbTiming) -> D1Result {
+    let changes = stmt.rows_affected;
+    let duration_ms = timing.db_execution_us as f64 / 1000.0;
+    let results = if stmt.columns.is_empty() {
+        None
+    } else {
+        Some(
+            stmt.rows
+                .iter()
+                .map(|row| {
+                    stmt.columns
+                        .iter()
+                        .zip(&row.values)
+                        .map(|(c, v)| (c.name.clone(), v.clone()))
+                        .collect()
+                })
+                .collect(),
+        )
+    };
+    D1Result {
+        success: true,
+        results,
+        meta: D1Meta {
+            duration: duration_ms,
+            changes,
+            last_row_id: 0,
+            changed_db: changes > 0,
+            rows_read: stmt.rows.len() as u32,
+            rows_written: changes,
+        },
+    }
+}
+
+/// Maps a typed execute reply to Cloudflare [`D1Result`] per statement.
+#[must_use]
+pub fn execute_reply_to_d1_results(reply: &ExecuteReply) -> Vec<D1Result> {
+    reply
+        .statements
+        .iter()
+        .map(|stmt| statement_result_to_d1_result(stmt, &reply.timing))
+        .collect()
+}
+
+fn row_map_from_statement(result: &StatementResult) -> Option<HashMap<String, DbValue>> {
+    let row = result.rows.first()?;
+    Some(
+        result
+            .columns
+            .iter()
+            .zip(&row.values)
+            .map(|(c, v)| (c.name.clone(), v.clone()))
+            .collect(),
+    )
+}
+
+fn column_value_from_row(row: &HashMap<String, DbValue>, col_name: &str) -> Option<DbValue> {
+    if let Some(v) = row.get(col_name) {
+        return Some(v.clone());
+    }
+    let lower = col_name.to_ascii_lowercase();
+    row.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(&lower))
+        .map(|(_, v)| v.clone())
 }
 
 fn new_operation_id() -> String {
@@ -315,6 +484,27 @@ mod tests {
                 },
             })
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn d1_result_projection_and_first_column() {
+        let session = Arc::new(RecordingSession {
+            last: Mutex::new(None),
+        });
+        let binding = DatabaseBinding::from_session(session.clone());
+        let all = binding.prepare("SELECT n FROM t").all(None).await.unwrap();
+        assert!(all.success);
+        assert_eq!(all.meta.rows_read, 1);
+        let results = all.results.expect("results");
+        assert_eq!(results[0].get("n"), Some(&DbValue::Int64(1)));
+
+        let col = binding
+            .prepare("SELECT n FROM t")
+            .first_column("n", None)
+            .await
+            .unwrap()
+            .expect("column");
+        assert_eq!(col, DbValue::Int64(1));
     }
 
     #[tokio::test(flavor = "current_thread")]

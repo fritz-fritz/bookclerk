@@ -151,6 +151,46 @@ export interface RetryToken {
 }
 
 /**
+ * Cloudflare {@link https://developers.cloudflare.com/d1/worker-api/return-object/ | D1Result.meta}
+ * shape (Bookclerk fills fields available from the typed execute reply).
+ */
+export interface D1Meta {
+  /** Engine-reported SQL duration in milliseconds. */
+  duration: number;
+  /** Rows changed by the statement (`rowsAffected`). */
+  changes: number;
+  /** Last inserted row id when the adapter exposes it (else `0`). */
+  last_row_id: number;
+  /** `true` when `changes > 0`. */
+  changed_db: boolean;
+  /** Rows returned to the guest for this statement. */
+  rows_read: number;
+  /** Rows written (`changes` for DML). */
+  rows_written: number;
+}
+
+/**
+ * Cloudflare {@link https://developers.cloudflare.com/d1/worker-api/return-object/ | D1Result}
+ * projection for plugin guests. Errors throw; successful calls always set `success: true`.
+ */
+export interface D1Result<T = Record<string, DbValue>> {
+  success: true;
+  /** Row objects for selects; `[]` when empty; `null` when not applicable (DML). */
+  results: T[] | null;
+  meta: D1Meta;
+}
+
+/**
+ * Cloudflare {@link https://developers.cloudflare.com/d1/worker-api/return-object/ | D1ExecResult}.
+ */
+export interface D1ExecResult {
+  /** Number of statements executed (always `1` for Bookclerk `exec`). */
+  count: number;
+  /** Total duration in milliseconds. */
+  duration: number;
+}
+
+/**
  * Options for {@link createDatabaseBinding}.
  */
 export interface DatabaseBindingOptions {
@@ -180,23 +220,33 @@ export interface PreparedStatement {
    */
   bind(...values: DbValue[]): PreparedStatement;
   /**
-   * Execute as DML (`affectedRows`).
+   * Execute as DML. Returns a Cloudflare-shaped {@link D1Result}.
    *
    * @param options Optional retry token.
    */
-  run(options?: { retry?: RetryToken }): Promise<ExecuteReply>;
+  run(options?: { retry?: RetryToken }): Promise<D1Result>;
   /**
-   * First row as a name→value map, or `null`. Sends `maxRows = 1`.
+   * First row as a name→value map, or one column when `colName` is set.
    *
+   * @param colName Optional column name (Cloudflare `first(colName)`).
    * @param options Optional retry token.
    */
-  first(options?: { retry?: RetryToken }): Promise<Record<string, DbValue> | null>;
+  first(
+    colName?: string,
+    options?: { retry?: RetryToken },
+  ): Promise<Record<string, DbValue> | DbValue | null>;
   /**
-   * Execute as a row-returning query.
+   * Positional cell values per row (Cloudflare `raw()`).
    *
    * @param options Optional retry token.
    */
-  all(options?: { retry?: RetryToken }): Promise<ExecuteReply>;
+  raw(options?: { retry?: RetryToken }): Promise<DbValue[][]>;
+  /**
+   * Execute as a row-returning query. Returns a Cloudflare-shaped {@link D1Result}.
+   *
+   * @param options Optional retry token.
+   */
+  all(options?: { retry?: RetryToken }): Promise<D1Result>;
   /** Mark DML intent for {@link DatabaseBinding.batch}. */
   asRun(): PreparedStatement;
   /** Mark `maxRows = 1` row intent for {@link DatabaseBinding.batch}. */
@@ -223,7 +273,8 @@ export interface DatabaseBinding {
    *
    * Each statement must already carry a terminal intent (`asRun` / `asFirst` /
    * `asAll`, or a prior `run`/`first`/`all` builder). `batch` does not apply
-   * a default `resultSelection`.
+   * a default `resultSelection`. Returns one Cloudflare-shaped {@link D1Result}
+   * per statement.
    *
    * @param statements Prepared statements (binds and intent already applied).
    * @param options Retry token.
@@ -231,7 +282,14 @@ export interface DatabaseBinding {
   batch(
     statements: PreparedStatement[],
     options?: { retry?: RetryToken },
-  ): Promise<ExecuteReply>;
+  ): Promise<D1Result[]>;
+  /**
+   * Execute raw SQL without bind parameters (Cloudflare `D1Database.exec`).
+   *
+   * @param query Canonical SQL string.
+   * @param options Optional retry token.
+   */
+  exec(query: string, options?: { retry?: RetryToken }): Promise<D1ExecResult>;
   /**
    * Internal typed-batch transport. Prefer {@link DatabaseBinding.prepare}.
    *
@@ -362,6 +420,69 @@ export function decodeExecuteResultReply(bytes: Uint8Array): ExecuteReply {
   throw new Error("unknown ExecuteResultReply union member");
 }
 
+/** Maps one typed statement result to Cloudflare {@link D1Result}. */
+export function statementResultToD1Result(
+  stmt: StatementResult,
+  timing: DbTiming,
+): D1Result {
+  const changes = stmt.rowsAffected;
+  const durationMs = timing.dbExecutionUs / 1000;
+  const results =
+    stmt.columns.length > 0
+      ? stmt.rows.map((row) => {
+          const obj: Record<string, DbValue> = {};
+          for (let i = 0; i < stmt.columns.length; i++) {
+            obj[stmt.columns[i].name] = row.values[i];
+          }
+          return obj;
+        })
+      : null;
+  return {
+    success: true,
+    results,
+    meta: {
+      duration: durationMs,
+      changes,
+      last_row_id: 0,
+      changed_db: changes > 0,
+      rows_read: stmt.rows.length,
+      rows_written: changes,
+    },
+  };
+}
+
+/** Maps a typed execute reply to Cloudflare {@link D1Result} per statement. */
+export function executeReplyToD1Results(reply: ExecuteReply): D1Result[] {
+  return reply.statements.map((stmt) => statementResultToD1Result(stmt, reply.timing));
+}
+
+function rowMapFromStatement(result: StatementResult): Record<string, DbValue> | null {
+  if (result.rows.length === 0) {
+    return null;
+  }
+  const row: Record<string, DbValue> = {};
+  for (let i = 0; i < result.columns.length; i++) {
+    row[result.columns[i].name] = result.rows[0].values[i];
+  }
+  return row;
+}
+
+function columnValueFromRow(
+  row: Record<string, DbValue>,
+  colName: string,
+): DbValue | null {
+  if (colName in row) {
+    return row[colName];
+  }
+  const lower = colName.toLowerCase();
+  for (const [name, value] of Object.entries(row)) {
+    if (name.toLowerCase() === lower) {
+      return value;
+    }
+  }
+  return null;
+}
+
 function writeExecuteReply(root: CapnpStruct, reply: ExecuteReply): void {
   root.setText(0, reply.operationId);
   const stmts = root.initStructList(1, reply.statements.length, 1, 2);
@@ -466,7 +587,13 @@ export function createDatabaseBinding(
         }
         return (s as PreparedInternal)._asTyped();
       });
-      return runExecute(typed, opts?.retry);
+      return runExecute(typed, opts?.retry).then(executeReplyToD1Results);
+    },
+    exec(query, opts) {
+      return binding
+        .prepare(query)
+        .run(opts)
+        .then((result) => ({ count: 1, duration: result.meta.duration }));
     },
     execute(batch, opts) {
       return runExecute(batch, opts?.retry);
@@ -523,22 +650,43 @@ function makePrepared(
       });
     },
     run(options) {
-      return binding.batch([stmt.asRun()], { retry: options?.retry });
+      return binding
+        .execute([(this.asRun() as PreparedInternal)._asTyped()], options)
+        .then((reply) => statementResultToD1Result(reply.statements[0]!, reply.timing));
     },
-    async first(options) {
-      const reply = await binding.batch([stmt.asFirst()], { retry: options?.retry });
-      const result = reply.statements[0];
-      if (!result || result.rows.length === 0) {
-        return null;
-      }
-      const row: Record<string, DbValue> = {};
-      for (let i = 0; i < result.columns.length; i++) {
-        row[result.columns[i].name] = result.rows[0].values[i];
-      }
-      return row;
+    first(colName?: string, options?: { retry?: RetryToken }) {
+      return binding
+        .execute([(this.asFirst() as PreparedInternal)._asTyped()], options)
+        .then((reply) => {
+          const result = reply.statements[0];
+          if (!result) {
+            return null;
+          }
+          const row = rowMapFromStatement(result);
+          if (row === null) {
+            return null;
+          }
+          if (colName !== undefined) {
+            return columnValueFromRow(row, colName);
+          }
+          return row;
+        });
+    },
+    raw(options) {
+      return binding
+        .execute([(this.asAll() as PreparedInternal)._asTyped()], options)
+        .then((reply) => {
+          const result = reply.statements[0];
+          if (!result) {
+            return [];
+          }
+          return result.rows.map((row) => row.values);
+        });
     },
     all(options) {
-      return binding.batch([stmt.asAll()], { retry: options?.retry });
+      return binding
+        .execute([(this.asAll() as PreparedInternal)._asTyped()], options)
+        .then((reply) => statementResultToD1Result(reply.statements[0]!, reply.timing));
     },
     _asTyped(): TypedDbStatement {
       const used = intent;
