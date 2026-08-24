@@ -553,7 +553,7 @@ fn validate_selection(
                 )));
             }
         }
-        DbResultSelection::Rows | DbResultSelection::Cursor => {
+        DbResultSelection::Rows => {
             if matches!(kind, DbPlanStatementKind::Execute) {
                 return Err(PluginError::invalid_params(format!(
                     "statement {index} resultSelection {:?} requires a row-producing statement",

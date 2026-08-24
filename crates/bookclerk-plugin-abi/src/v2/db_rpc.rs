@@ -102,7 +102,6 @@ fn write_selection(sel: DbResultSelection) -> CapnpDbResultSelection {
         DbResultSelection::Discard => CapnpDbResultSelection::Discard,
         DbResultSelection::AffectedRows => CapnpDbResultSelection::AffectedRows,
         DbResultSelection::Rows => CapnpDbResultSelection::Rows,
-        DbResultSelection::Cursor => CapnpDbResultSelection::Cursor,
     }
 }
 
@@ -113,8 +112,9 @@ fn read_selection(sel: CapnpDbResultSelection) -> Result<DbResultSelection> {
     match sel {
         CapnpDbResultSelection::Discard => Ok(DbResultSelection::Discard),
         CapnpDbResultSelection::AffectedRows => Ok(DbResultSelection::AffectedRows),
-        CapnpDbResultSelection::Rows => Ok(DbResultSelection::Rows),
-        CapnpDbResultSelection::Cursor => Ok(DbResultSelection::Cursor),
+        CapnpDbResultSelection::Rows | CapnpDbResultSelection::ObsoleteCursor => {
+            Ok(DbResultSelection::Rows)
+        }
     }
 }
 
@@ -139,10 +139,10 @@ fn read_db_statement(r: db_statement_capnp::Reader<'_>) -> Result<TypedDbStateme
             .map_err(|_| PluginError::unsupported("unknown DbStatementKind"))?,
     )?;
     let max_rows = r.get_max_rows();
-    let result_selection = read_selection(
-        r.get_result_selection()
-            .map_err(|_| PluginError::unsupported("unknown DbResultSelection"))?,
-    )?;
+    let result_selection = match r.get_result_selection() {
+        Ok(sel) => read_selection(sel).unwrap_or(DbResultSelection::Rows),
+        Err(_) => DbResultSelection::Rows,
+    };
     let list = r.get_parameters().map_err(from_capnp)?;
     let mut parameters = Vec::with_capacity(list.len() as usize);
     for item in list.iter() {
@@ -232,7 +232,6 @@ fn read_row(r: db_row_capnp::Reader<'_>) -> Result<DbRow> {
 
 fn write_statement_result(mut b: statement_result_capnp::Builder<'_>, stmt: &StatementResult) {
     b.set_rows_affected(stmt.rows_affected);
-    b.set_cursor(&stmt.cursor);
     let mut cols = b.reborrow().init_columns(stmt.columns.len() as u32);
     for (i, c) in stmt.columns.iter().enumerate() {
         write_column(cols.reborrow().get(i as u32), c);
@@ -262,7 +261,6 @@ fn read_statement_result(r: statement_result_capnp::Reader<'_>) -> Result<Statem
         rows,
         columns,
         rows_affected: r.get_rows_affected(),
-        cursor: text_of(r.get_cursor().map_err(from_capnp)?),
     };
     result
         .validate_positional()

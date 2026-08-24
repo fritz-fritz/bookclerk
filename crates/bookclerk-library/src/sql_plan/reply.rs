@@ -80,11 +80,6 @@ fn validate_statement_result(
                     "execute reply statement {index} returned columns for affectedRows selection"
                 )));
             }
-            if !stmt.cursor.is_empty() {
-                return Err(LibraryError::Unavailable(format!(
-                    "execute reply statement {index} returned a cursor for affectedRows selection"
-                )));
-            }
         }
         DbResultSelection::Discard => {
             if !stmt.rows.is_empty() {
@@ -98,19 +93,9 @@ fn validate_statement_result(
                     "execute reply statement {index} returned columns for discard selection"
                 )));
             }
-            if !stmt.cursor.is_empty() {
-                return Err(LibraryError::Unavailable(format!(
-                    "execute reply statement {index} returned a cursor for discard selection"
-                )));
-            }
             return Ok(());
         }
         DbResultSelection::Rows => {
-            if !stmt.cursor.is_empty() {
-                return Err(LibraryError::Unavailable(format!(
-                    "execute reply statement {index} returned a cursor for rows selection"
-                )));
-            }
             if let Some(cap) = effective_row_cap(stmt_max_rows, caps.max_result_rows) {
                 let n_rows = u32::try_from(stmt.rows.len()).unwrap_or(u32::MAX);
                 if n_rows > cap {
@@ -231,7 +216,6 @@ mod tests {
                     db_type: DbType::Int64,
                 }],
                 rows_affected: 0,
-                cursor: String::new(),
             }],
             timing: Default::default(),
         }

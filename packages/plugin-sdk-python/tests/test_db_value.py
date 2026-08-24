@@ -168,7 +168,7 @@ class DbValueGoldens(unittest.TestCase):
             return {
                 "operationId": req["operationId"],
                 "statements": [
-                    {"rows": [], "columns": [], "rowsAffected": 0, "cursor": ""}
+                    {"rows": [], "columns": [], "rowsAffected": 0}
                 ],
                 "timing": {
                     "attemptElapsedUs": 0,
@@ -204,13 +204,6 @@ class DbValueGoldens(unittest.TestCase):
                         "resultSelection": "affectedRows",
                     }
                 ],
-                "outcomeIndex": 0,
-                "payloadIndex": 0,
-                "hasPayloadIndex": False,
-                "priorReceiptIndex": 0,
-                "hasPriorReceiptIndex": False,
-                "receiptSelectIndex": 0,
-                "hasReceiptSelectIndex": False,
                 "deadlineUnixMs": 0,
             }))
             replayed = []
@@ -298,8 +291,7 @@ class DbValueGoldens(unittest.TestCase):
                         "rows": [{"values": [{"kind": "int64", "value": 1}]}],
                         "columns": [{"name": "n", "dbType": "int64"}],
                         "rowsAffected": 0,
-                        "cursor": "",
-                    }
+                                            }
                     for _ in range(n)
                 ],
                 "timing": {
@@ -356,8 +348,7 @@ class DbValueGoldens(unittest.TestCase):
                         {"name": "n", "dbType": "int64"},
                     ],
                     "rowsAffected": 0,
-                    "cursor": "",
-                }
+                                    }
             ],
             "timing": {
                 "attemptElapsedUs": 1,

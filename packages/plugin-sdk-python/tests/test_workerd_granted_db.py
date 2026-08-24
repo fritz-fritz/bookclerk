@@ -30,8 +30,7 @@ class _MockFetcher:
                                 "rows": [{"values": [{"kind": "int64", "value": 1}]}],
                                 "columns": [{"name": "n", "dbType": "int64"}],
                                 "rowsAffected": 0,
-                                "cursor": "",
-                            }
+                                                            }
                         ],
                         "timing": {
                             "attemptElapsedUs": 0,

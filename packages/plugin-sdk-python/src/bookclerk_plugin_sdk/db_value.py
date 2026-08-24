@@ -40,8 +40,8 @@ _DB_TYPE_FROM = (
 
 _KIND_ORD = {"query": 0, "execute": 1, "select": 2, "returning": 3}
 _KIND_FROM = ("query", "execute", "select", "returning")
-_SELECT_ORD = {"discard": 0, "affectedRows": 1, "rows": 2, "cursor": 3}
-_SELECT_FROM = ("discard", "affectedRows", "rows", "cursor")
+_SELECT_ORD = {"discard": 0, "affectedRows": 1, "rows": 2}
+_SELECT_FROM = ("discard", "affectedRows", "rows")
 
 WORD = 8
 
@@ -91,7 +91,7 @@ class BytesValue(TypedDict):
 DbValue = Union[NullValue, BoolValue, Int64Value, Float64Value, TextValue, BytesValue]
 
 DbStatementKind = Literal["query", "execute", "select", "returning"]
-DbResultSelection = Literal["discard", "affectedRows", "rows", "cursor"]
+DbResultSelection = Literal["discard", "affectedRows", "rows"]
 
 
 class TypedDbStatement(TypedDict):
@@ -119,7 +119,6 @@ class StatementResult(TypedDict):
     rows: list[dict[str, Any]]
     columns: list[dict[str, Any]]
     rowsAffected: int
-    cursor: str
 
 
 class DbTiming(TypedDict):
@@ -294,7 +293,7 @@ def decode_execute_result_reply(data: bytes) -> ExecuteReply:
 
 def _write_execute_reply(root: _CapnpStruct, reply: ExecuteReply) -> None:
     root.set_text(0, reply["operationId"])
-    stmts = root.init_struct_list(1, len(reply["statements"]), 1, 3)
+    stmts = root.init_struct_list(1, len(reply["statements"]), 1, 2)
     for i, stmt in enumerate(reply["statements"]):
         _write_statement_result(stmts[i], stmt)
     timing = root.init_struct(2, 2, 1)
@@ -308,7 +307,7 @@ def _read_execute_reply(root: _StructReader) -> ExecuteReply:
     t = root.get_struct(2, 2, 1)
     return {
         "operationId": root.get_text(0),
-        "statements": [_read_statement_result(s) for s in root.get_struct_list(1, 1, 3)],
+        "statements": [_read_statement_result(s) for s in root.get_struct_list(1, 1, 2)],
         "timing": {
             "attemptElapsedUs": t.get_u64(0),
             "dbExecutionUs": t.get_u64(1),
@@ -328,7 +327,6 @@ def _write_statement_result(s: _CapnpStruct, stmt: StatementResult) -> None:
     for i, col in enumerate(stmt["columns"]):
         cols[i].set_text(0, col["name"])
         cols[i].set_u16(0, _DB_TYPE_ORD[col["dbType"]])
-    s.set_text(2, stmt["cursor"])
 
 
 def _read_statement_result(s: _StructReader) -> StatementResult:
@@ -344,7 +342,6 @@ def _read_statement_result(s: _StructReader) -> StatementResult:
         "rows": rows,
         "columns": columns,
         "rowsAffected": s.get_u64(0),
-        "cursor": s.get_text(2),
     }
 
 
@@ -1041,7 +1038,8 @@ def _write_statement(s: _CapnpStruct, stmt: TypedDbStatement) -> None:
 
 def _read_statement(s: _StructReader) -> TypedDbStatement:
     kind = _KIND_FROM[s.get_u16(0)]
-    selection = _SELECT_FROM[s.get_u16(1)]
+    selection_raw = s.get_u16(1)
+    selection = _SELECT_FROM[selection_raw] if selection_raw < len(_SELECT_FROM) else "rows"
     return {
         "sql": s.get_text(0),
         "parameters": [_read_db_value(p) for p in s.get_struct_list(1, 2, 1)],

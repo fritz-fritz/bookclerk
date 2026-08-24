@@ -305,7 +305,6 @@ mod tests {
                             db_type: bookclerk_plugin_abi::DbType::Int64,
                         }],
                         rows_affected: 1,
-                        cursor: String::new(),
                     })
                     .collect(),
                 timing: bookclerk_plugin_abi::DbTiming {

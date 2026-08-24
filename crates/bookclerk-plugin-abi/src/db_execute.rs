@@ -27,8 +27,6 @@ pub enum DbResultSelection {
     AffectedRows,
     /// Return positional rows plus column metadata.
     Rows,
-    /// Return a result cursor (transport, not a second mutation primitive).
-    Cursor,
 }
 
 /// One column in a typed result set.
@@ -193,8 +191,6 @@ pub struct StatementResult {
     pub columns: Vec<DbColumn>,
     /// Engine-reported rows affected.
     pub rows_affected: u64,
-    /// Result cursor when [`DbResultSelection::Cursor`] was requested.
-    pub cursor: String,
 }
 
 impl StatementResult {
@@ -209,7 +205,6 @@ impl StatementResult {
             rows,
             columns,
             rows_affected: 0,
-            cursor: String::new(),
         };
         stmt.validate_positional()?;
         Ok(stmt)
@@ -222,7 +217,6 @@ impl StatementResult {
             rows: Vec::new(),
             columns: Vec::new(),
             rows_affected,
-            cursor: String::new(),
         }
     }
 
@@ -262,7 +256,6 @@ impl StatementResult {
             rows,
             columns,
             rows_affected: stmt.rows_affected,
-            cursor: String::new(),
         };
         result.validate_positional()?;
         Ok(result)
@@ -760,7 +753,6 @@ mod tests {
                 values: vec![DbValue::Int64(1), DbValue::Text("x".into())],
             }],
             rows_affected: 1,
-            cursor: String::new(),
         };
         let err = stmt.validate_positional().unwrap_err();
         assert!(err.contains("duplicate"), "{err}");
@@ -777,7 +769,6 @@ mod tests {
                 values: vec![DbValue::Int64(1), DbValue::Int64(2)],
             }],
             rows_affected: 1,
-            cursor: String::new(),
         };
         let err = stmt.validate_positional().unwrap_err();
         assert!(err.contains("values"), "{err}");
@@ -826,6 +817,32 @@ mod tests {
             hex::encode(encoded_db_value_bytes(&DbValue::Null(DbType::Bytes)).unwrap()),
             "00000000040000000000000002000100050000000000000000000000000000000000000000000000"
         );
+    }
+
+    #[test]
+    fn execute_request_struct_excludes_host_plan_selectors() {
+        let req = ExecuteRequest {
+            operation_id: "op".into(),
+            request_hash: "abc".into(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 1".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let _ = (
+            &req.operation_id,
+            &req.request_hash,
+            &req.statements,
+            req.deadline_unix_ms,
+        );
+        use crate::{decode_execute_request_bytes, encoded_execute_request_bytes};
+        let bytes = encoded_execute_request_bytes(&req).unwrap();
+        let back = decode_execute_request_bytes(&bytes).unwrap();
+        assert_eq!(back, req);
     }
 
     #[test]

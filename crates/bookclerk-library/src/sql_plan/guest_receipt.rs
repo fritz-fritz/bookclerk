@@ -376,7 +376,6 @@ mod tests {
                 },
             ],
             rows_affected: 0,
-            cursor: String::new(),
         };
         let reply = ExecuteReply {
             operation_id: "guest-op".into(),
@@ -413,7 +412,6 @@ mod tests {
                 },
             ],
             rows_affected: 0,
-            cursor: String::new(),
         };
         let reply = ExecuteReply {
             operation_id: "guest-op".into(),

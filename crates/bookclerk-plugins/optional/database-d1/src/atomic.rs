@@ -607,7 +607,7 @@ fn parse_typed_batch(
                 };
                 StatementResult::from_affected(n)
             }
-            DbResultSelection::Rows | DbResultSelection::Cursor => {
+            DbResultSelection::Rows => {
                 let raw_rows = entry
                     .get("results")
                     .and_then(JsonValue::as_array)

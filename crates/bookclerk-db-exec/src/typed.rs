@@ -694,7 +694,7 @@ async fn execute_typed_join_body(
         let sql = lower_canonical_sql(backend, &sql);
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = match stmt.result_selection {
-            DbResultSelection::Rows | DbResultSelection::Cursor => {
+            DbResultSelection::Rows => {
                 let engine_rows = collect_capped_query_results(txn, sea_stmt, row_cap).await?;
                 if engine_rows.is_empty()
                     && backend == sea_orm::DatabaseBackend::Postgres
@@ -809,7 +809,7 @@ where
         let sql = lower_canonical_sql(backend, &sql);
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = match stmt.result_selection {
-            DbResultSelection::Rows | DbResultSelection::Cursor => {
+            DbResultSelection::Rows => {
                 let engine_rows = match collect_capped_query_results(&txn, sea_stmt, row_cap).await
                 {
                     Ok(rows) => rows,

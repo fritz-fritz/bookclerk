@@ -13,7 +13,7 @@ import { readDbValue, writeDbValue, type DbType, type DbValue } from "./db-value
 export type DbStatementKind = "query" | "execute" | "select" | "returning";
 
 /** Which result fields the caller needs. */
-export type DbResultSelection = "discard" | "affectedRows" | "rows" | "cursor";
+export type DbResultSelection = "discard" | "affectedRows" | "rows";
 
 const KIND_ORD: Record<DbStatementKind, number> = {
   query: 0,
@@ -28,10 +28,9 @@ const SELECT_ORD: Record<DbResultSelection, number> = {
   discard: 0,
   affectedRows: 1,
   rows: 2,
-  cursor: 3,
 };
 
-const SELECT_FROM = ["discard", "affectedRows", "rows", "cursor"] as const;
+const SELECT_FROM = ["discard", "affectedRows", "rows"] as const;
 
 const COL_TYPE_ORD: Record<DbType, number> = {
   unspecified: 0,
@@ -102,8 +101,6 @@ export interface StatementResult {
   columns: DbColumn[];
   /** Engine `rowsAffected` (0 for `Select`). */
   rowsAffected: number;
-  /** Optional result cursor. */
-  cursor: string;
 }
 
 /**
@@ -367,7 +364,7 @@ export function decodeExecuteResultReply(bytes: Uint8Array): ExecuteReply {
 
 function writeExecuteReply(root: CapnpStruct, reply: ExecuteReply): void {
   root.setText(0, reply.operationId);
-  const stmts = root.initStructList(1, reply.statements.length, 1, 3);
+  const stmts = root.initStructList(1, reply.statements.length, 1, 2);
   for (let i = 0; i < reply.statements.length; i++) {
     writeStatementResult(stmts[i], reply.statements[i]);
   }
@@ -380,7 +377,7 @@ function writeExecuteReply(root: CapnpStruct, reply: ExecuteReply): void {
 function readExecuteReply(root: StructReader): ExecuteReply {
   return {
     operationId: root.getText(0),
-    statements: root.getStructList(1, 1, 3).map(readStatementResult),
+    statements: root.getStructList(1, 1, 2).map(readStatementResult),
     timing: (() => {
       const t = root.getStruct(2, 2, 1);
       return {
@@ -406,7 +403,6 @@ function writeStatementResult(s: CapnpStruct, stmt: StatementResult): void {
     cols[i].setText(0, stmt.columns[i].name);
     cols[i].setUint16(0, COL_TYPE_ORD[stmt.columns[i].dbType]);
   }
-  s.setText(2, stmt.cursor);
 }
 
 function readStatementResult(s: StructReader): StatementResult {
@@ -424,7 +420,6 @@ function readStatementResult(s: StructReader): StatementResult {
     rows,
     columns,
     rowsAffected: Number(s.getUint64(0)),
-    cursor: s.getText(2),
   };
 }
 
@@ -625,12 +620,10 @@ function writeStatement(s: CapnpStruct, stmt: TypedDbStatement): void {
 
 function readStatement(s: StructReader): TypedDbStatement {
   const kind = KIND_FROM[s.getUint16(0)];
-  const selection = SELECT_FROM[s.getUint16(1)];
+  const selectionRaw = s.getUint16(1);
+  const selection = SELECT_FROM[selectionRaw] ?? "rows";
   if (kind === undefined) {
     throw new Error("unknown DbStatementKind");
-  }
-  if (selection === undefined) {
-    throw new Error("unknown DbResultSelection");
   }
   return {
     sql: s.getText(0),

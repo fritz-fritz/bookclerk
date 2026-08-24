@@ -634,7 +634,7 @@ enum DbResultSelection {
   discard @0;
   affectedRows @1;
   rows @2;
-  cursor @3;
+  obsoleteCursor @3;  # deleted abiMinor 13 — map to rows on read; never emit
 }
 
 struct DbStatement {
@@ -649,16 +649,14 @@ struct ExecuteRequest {
   operationId @0 :Text;
   requestHash @1 :Text;
   statements @2 :List(DbStatement);
-  # Reserved @3–@9: host-only plan selectors (outcome/payload/receipt indices)
-  # were removed from the adapter contract in abiMinor 12. Hosts keep them on
-  # DbAtomicPlan / CompiledAtomic only.
-  outcomeIndex @3 :UInt32;
-  payloadIndex @4 :UInt32;
-  hasPayloadIndex @5 :Bool;
-  priorReceiptIndex @6 :UInt32;
-  hasPriorReceiptIndex @7 :Bool;
-  receiptSelectIndex @8 :UInt32;
-  hasReceiptSelectIndex @9 :Bool;
+  # Reserved @3–@9: host-only plan selectors removed from adapter contract (abiMinor 12/13).
+  obsoleteOutcomeIndex @3 :UInt32;
+  obsoletePayloadIndex @4 :UInt32;
+  obsoleteHasPayloadIndex @5 :Bool;
+  obsoletePriorReceiptIndex @6 :UInt32;
+  obsoleteHasPriorReceiptIndex @7 :Bool;
+  obsoleteReceiptSelectIndex @8 :UInt32;
+  obsoleteHasReceiptSelectIndex @9 :Bool;
   deadlineUnixMs @10 :UInt64;
 }
 
@@ -666,7 +664,7 @@ struct StatementResult {
   rows @0 :List(DbRow);
   columns @1 :List(DbColumn);
   rowsAffected @2 :UInt64;
-  cursor @3 :Text;
+  obsoleteCursor @3 :Text;  # deleted abiMinor 13 — ignore on read/write
 }
 
 struct DbTiming {

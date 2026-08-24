@@ -1458,7 +1458,9 @@ fn map_reply_validation_err(err: bookclerk_library::LibraryError) -> crate::Plug
 /// Maps host reply validation onto the ABI error returned to guests.
 fn map_reply_validation_abi(err: bookclerk_library::LibraryError) -> AbiPluginError {
     match err {
-        bookclerk_library::LibraryError::Unavailable(message) => AbiPluginError::unavailable(message),
+        bookclerk_library::LibraryError::Unavailable(message) => {
+            AbiPluginError::unavailable(message)
+        }
         other => AbiPluginError::invalid_params(other.to_string()),
     }
 }

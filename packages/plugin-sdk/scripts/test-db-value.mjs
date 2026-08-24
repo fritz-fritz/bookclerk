@@ -121,13 +121,6 @@ const request = {
       resultSelection: "rows",
     },
   ],
-  outcomeIndex: 0,
-  payloadIndex: 0,
-  hasPayloadIndex: false,
-  priorReceiptIndex: 0,
-  hasPriorReceiptIndex: false,
-  receiptSelectIndex: 0,
-  hasReceiptSelectIndex: false,
   deadlineUnixMs: 0,
 };
 
@@ -165,7 +158,7 @@ const seqBinding = createDatabaseBinding({
     assert.equal(req.requestHash, "");
     return {
       operationId: req.operationId,
-      statements: [{ rows: [], columns: [], rowsAffected: 0, cursor: "" }],
+      statements: [{ rows: [], columns: [], rowsAffected: 0 }],
       timing: { attemptElapsedUs: 0, dbExecutionUs: 0, dbTimingSource: "test" },
     };
   },
@@ -189,13 +182,6 @@ const deadlineReq = {
       resultSelection: "rows",
     },
   ],
-  outcomeIndex: 0,
-  payloadIndex: 0,
-  hasPayloadIndex: false,
-  priorReceiptIndex: 0,
-  hasPriorReceiptIndex: false,
-  receiptSelectIndex: 0,
-  hasReceiptSelectIndex: false,
   deadlineUnixMs: 0,
 };
 assert.equal(await canonicalExecuteRequestHash(deadlineReq), GOLDEN_DEADLINE_HASH);
