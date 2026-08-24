@@ -193,6 +193,9 @@ impl DatabaseBinding {
         self.session.execute(request).await
     }
 
+    /// # Errors
+    ///
+    /// Returns when a statement is missing terminal intent or `execute` fails.
     async fn batch_reply(
         &self,
         statements: Vec<PreparedStatement>,

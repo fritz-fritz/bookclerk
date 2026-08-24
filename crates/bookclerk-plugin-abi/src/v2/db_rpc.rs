@@ -546,6 +546,9 @@ pub(super) fn write_guest_receipt_persist(
     b.set_guest_hash(&receipt.guest_request_hash);
 }
 
+/// # Errors
+///
+/// Returns when nested Cap'n fields cannot be decoded.
 fn read_guest_receipt_persist(
     r: host_guest_receipt_persist_capnp::Reader<'_>,
 ) -> Result<GuestReceiptPersist> {
