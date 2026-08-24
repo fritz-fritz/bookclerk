@@ -885,9 +885,7 @@ where
             let sql = lower_canonical_sql(backend, &stmt.sql);
             let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
             match txn.execute_raw(sea_stmt).await {
-                Ok(exec) => {
-                    statements.push(StatementResult::from_affected(exec.rows_affected()));
-                }
+                Ok(_) => {}
                 Err(err) => {
                     let _ = txn.rollback().await;
                     let _ = take_txn_fault();
