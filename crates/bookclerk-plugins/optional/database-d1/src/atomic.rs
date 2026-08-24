@@ -1106,7 +1106,7 @@ mod tests {
             statements: vec![bookclerk_db_exec::DbPlanStatement {
                 sql: "SELECT 1".into(),
                 binds: vec![],
-                kind: bookclerk_plugin_sdk::DbPlanStatementKind::Returning,
+                kind: bookclerk_plugin_sdk::DbPlanStatementKind::Select,
                 max_rows: 0,
             }],
             outcome_index: 0,

@@ -1467,7 +1467,7 @@ mod tests {
             statements: vec![TypedDbStatement {
                 sql: sql.into(),
                 parameters: params,
-                kind: DbPlanStatementKind::Returning,
+                kind: guest_statement_kind(sql),
                 max_rows,
                 result_selection: selection,
             }],
