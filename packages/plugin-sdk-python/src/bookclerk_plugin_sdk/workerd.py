@@ -12,16 +12,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from bookclerk_plugin_sdk.db_value import (
-    DatabaseBinding,
-    ExecuteReply,
-    ExecuteRequest,
-    create_database_binding,
-    decode_execute_result_reply,
-    encode_execute_request,
-)
+if TYPE_CHECKING:
+    from bookclerk_plugin_sdk.db_value import DatabaseBinding, ExecuteReply, ExecuteRequest
 
 try:
     from js import JSON, Response
@@ -238,7 +232,7 @@ class BookclerkPlugin(WorkerEntrypoint):
 class GuestDatabase:
     """Host-granted SQL transport for job plugin authors (no ``capabilities``)."""
 
-    async def execute(self, _request: ExecuteRequest) -> ExecuteReply:
+    async def execute(self, _request: "ExecuteRequest") -> "ExecuteReply":
         """Host-mediated typed batch (``ExecuteRequest`` → ``ExecuteReply``)."""
         raise PluginError.from_wire("unsupported", "execute not implemented")
 
@@ -254,7 +248,7 @@ class AdapterDatabaseSession:
         """Typed SQL-contract advertisement."""
         raise PluginError.from_wire("unsupported", "capabilities not implemented")
 
-    async def execute(self, _request: ExecuteRequest) -> ExecuteReply:
+    async def execute(self, _request: "ExecuteRequest") -> "ExecuteReply":
         """Typed atomic batch (``ExecuteRequest`` → ``ExecuteReply``)."""
         raise PluginError.from_wire("unsupported", "execute not implemented")
 
@@ -267,7 +261,7 @@ class AdapterDatabaseSession:
 class JobContext:
     """Granted stubs for one :class:`JobHandler.handle` invocation."""
 
-    database: DatabaseBinding | None = None
+    database: "DatabaseBinding | None" = None
     guest_database: GuestDatabase | None = None
 
 
@@ -296,7 +290,12 @@ class _GrantedGuestDatabase(GuestDatabase):
         self._auth = {"Authorization": f"Bearer {grant_token}"}
         self._signal = signal
 
-    async def execute(self, request: ExecuteRequest) -> ExecuteReply:
+    async def execute(self, request: "ExecuteRequest") -> "ExecuteReply":
+        from bookclerk_plugin_sdk.db_value import (
+            decode_execute_result_reply,
+            encode_execute_request,
+        )
+
         body = encode_execute_request(request)
         kwargs: dict[str, Any] = {
             "method": "POST",
@@ -337,6 +336,12 @@ def granted_job_context(
     whose terminal methods (``first``, ``run``, ``all``, ``batch``) are async
     and route through the granted transport.
     """
+    from bookclerk_plugin_sdk.db_value import (
+        ExecuteReply,
+        ExecuteRequest,
+        create_database_binding,
+    )
+
     guest = _GrantedGuestDatabase(granted, grant_token, signal)
 
     async def execute(request: ExecuteRequest) -> ExecuteReply:
