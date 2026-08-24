@@ -58,7 +58,7 @@ impl CompiledAtomic {
     ///
     /// # Panics
     ///
-    /// Panics when a plan bind is outside the universal [`DbValue`] domain.
+    /// Panics when a plan bind is outside the universal [`bookclerk_plugin_abi::DbValue`] domain.
     #[must_use]
     pub fn into_typed_request(self, operation_id: impl Into<String>) -> ExecuteRequest {
         let statements = self
