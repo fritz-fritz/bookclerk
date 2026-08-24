@@ -1060,6 +1060,7 @@ mod tests {
                 result_selection: DbResultSelection::Rows,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         };
         let bytes = encoded_execute_request_bytes(&req).expect("encode");
         let err = dispatch_execute(&table, "g-db".into(), bytes)
@@ -1127,6 +1128,7 @@ mod tests {
                 result_selection,
             }],
             deadline_unix_ms: 0,
+            ..Default::default()
         })
         .expect("encode")
     }

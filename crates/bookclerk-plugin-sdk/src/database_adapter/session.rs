@@ -1905,6 +1905,7 @@ mod tests {
                     result_selection: DbResultSelection::AffectedRows,
                 }],
                 deadline_unix_ms: 0,
+                ..Default::default()
             },
         )
         .await
@@ -1957,6 +1958,7 @@ mod tests {
                     },
                 ],
                 deadline_unix_ms: 0,
+                ..Default::default()
             },
         )
         .await
@@ -2009,6 +2011,7 @@ mod tests {
                     result_selection: DbResultSelection::AffectedRows,
                 }],
                 deadline_unix_ms: 0,
+                ..Default::default()
             },
         )
         .await
@@ -2072,6 +2075,7 @@ mod tests {
                     },
                 ],
                 deadline_unix_ms: 0,
+                ..Default::default()
             },
         )
         .await

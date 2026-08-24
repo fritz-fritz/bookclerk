@@ -445,6 +445,7 @@ impl RpcDatabaseProxy {
             request_hash: String::new(),
             statements: vec![stmt],
             deadline_unix_ms: 0,
+            ..Default::default()
         }
     }
 
@@ -1656,6 +1657,7 @@ mod tests {
                     result_selection: DbResultSelection::Rows,
                 }],
                 deadline_unix_ms: 0,
+                ..Default::default()
             })
             .await
             .expect("books grant");
@@ -1671,6 +1673,7 @@ mod tests {
                     result_selection: DbResultSelection::Rows,
                 }],
                 deadline_unix_ms: 0,
+                ..Default::default()
             })
             .await
             .expect_err("jobs denied");

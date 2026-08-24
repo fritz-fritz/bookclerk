@@ -165,10 +165,7 @@ pub(super) fn write_execute_request(
     b.set_operation_id(&req.operation_id);
     b.set_request_hash(&req.request_hash);
     b.set_deadline_unix_ms(req.deadline_unix_ms);
-    if req.guest_receipt_persist.is_absent() {
-        b.set_guest_receipt_guest_len(0);
-        b.set_guest_receipt_guest_hash("");
-    } else {
+    if !req.guest_receipt_persist.is_absent() {
         b.set_guest_receipt_guest_len(req.guest_receipt_persist.guest_statement_len);
         b.set_guest_receipt_guest_hash(&req.guest_receipt_persist.guest_request_hash);
     }
@@ -474,7 +471,7 @@ pub fn canonical_execute_request_hash(req: &ExecuteRequest) -> Result<String> {
     canonical.request_hash.clear();
     canonical.deadline_unix_ms = 0;
     canonical.guest_receipt_persist = GuestReceiptPersist::default();
-    let bytes = encoded_execute_request_bytes(&canonical)?;
+    let bytes = super::sdk_wire::encoded_execute_request_sdk_bytes(&canonical)?;
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 

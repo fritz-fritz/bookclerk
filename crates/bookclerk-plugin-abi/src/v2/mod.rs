@@ -8,6 +8,7 @@ mod jobs;
 mod limits;
 mod roles;
 mod rpc;
+mod sdk_wire;
 mod types;
 
 /// Generated Cap'n Proto RPC interfaces (`schema/plugin_v2.capnp`).
