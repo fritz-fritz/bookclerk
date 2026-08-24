@@ -223,7 +223,9 @@ fn encode_guest_replay_payload(reply: &ExecuteReply) -> Result<String, sea_orm::
     Ok(text)
 }
 
+/// JSON envelope stored in `db_atomic_receipts.payload` for guest replay.
 #[derive(serde::Serialize, serde::Deserialize)]
+#[allow(clippy::missing_docs_in_private_items)]
 struct GuestReplayPayload {
     operation_id: String,
     statements: Vec<bookclerk_plugin_abi::StatementResult>,
