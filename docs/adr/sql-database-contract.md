@@ -50,10 +50,12 @@ execution semantics (`atomicBatch`, `returning`, `affectedRows`,
 `schemaMigrations` / `atomicSchemaBatch`), and all numeric limits
 (`maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`,
 `maxResultBytes`, `maxCellBytes`, `maxRequestBytes`,
-`maxAtomicResultBytes`). `diagnosticEngine` is observability only; hosts
-must not branch on it for plan compilation or schema selection. Schema
-kind is chosen from the schema flags (exactly one of `pragmaUserVersion`
-or `schemaMigrations`; `atomicSchemaBatch` requires `schemaMigrations`).
+`maxAtomicResultBytes`). Schema kind is chosen from the schema flags
+(exactly one of `pragmaUserVersion` or `schemaMigrations`;
+`atomicSchemaBatch` requires `schemaMigrations`). Bootstrap metadata
+(`sqlFamily`, SeaORM `dialect`) is **not** on typed `DbCapabilities`
+(`abiMinor` 13 tombstones ordinals @17/@18); it travels on JSON
+`DbConnectResult` / the host connect path after semantic negotiation succeeds.
 
 Older guests may still answer the `bookclerk.capabilities` query sentinel
 with a JSON `DbConnectResult`. The host must not invent capabilities from
@@ -92,11 +94,12 @@ only on semantic capabilities, not on plugin id or `sqlFamily`.
 
 ### Bootstrap metadata isolation
 
-`sqlFamily` and `diagnosticEngine` are bootstrap/observability only. An
-architecture lint (`scripts/check-db-plugin-isolation.py`) forbids
-`bookclerk-library` production sources from reading them (or defining
-planner-side `SqlFamily`). SeaORM proxy open may still map bootstrap fields
-in `bookclerk-plugin-host` after typed capability negotiation succeeds.
+`sqlFamily` and SeaORM `dialect` are bootstrap-only (JSON `DbConnectResult` or
+the plugin-host connect path). Typed `DbCapabilities` no longer carry them
+(`abiMinor` 13). An architecture lint (`scripts/check-db-plugin-isolation.py`)
+forbids `bookclerk-library` production sources from reading bootstrap fields
+(or defining planner-side `SqlFamily`). SeaORM proxy open maps bootstrap in
+`bookclerk-plugin-host` after typed capability negotiation succeeds.
 
 ### Generic atomic execute
 

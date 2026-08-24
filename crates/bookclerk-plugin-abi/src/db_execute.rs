@@ -367,8 +367,8 @@ impl ExecuteReply {
 
 /// Semantic SQL-contract advertisement (`DatabaseSession.capabilities`).
 ///
-/// `diagnostic_engine` is observability only. Hosts must not branch on it for
-/// plan compilation or schema selection.
+/// Bootstrap metadata (`sql_family`, `diagnostic_engine`, SeaORM `dialect`) lives
+/// on JSON [`DbConnectResult`] only — not on this typed capability plane.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbCapabilities {
@@ -406,11 +406,6 @@ pub struct DbCapabilities {
     pub max_request_bytes: u32,
     /// Maximum encoded bytes of one [`ExecuteReply`].
     pub max_atomic_result_bytes: u32,
-    /// Observability-only engine name (`sqlite`, `postgres`, …).
-    pub diagnostic_engine: String,
-    /// Bootstrap-only SeaORM proxy hint (`sqlite` / `postgres`). Not used for
-    /// host schema or plan selection; may be empty on conforming adapters.
-    pub sql_family: String,
 }
 
 impl DbCapabilities {
@@ -435,8 +430,6 @@ impl DbCapabilities {
             max_cell_bytes: caps.max_cell_bytes,
             max_request_bytes: caps.max_atomic_request_bytes.max(caps.max_payload_bytes),
             max_atomic_result_bytes: caps.max_atomic_result_bytes,
-            diagnostic_engine: caps.dialect.clone(),
-            sql_family: caps.sql_family.clone(),
         }
     }
 
@@ -468,41 +461,16 @@ impl DbCapabilities {
         None
     }
 
-    /// SeaORM proxy backend from bootstrap metadata only (not schema flags).
+    /// JSON connect result with semantic flags and limits only.
     ///
-    /// # Errors
-    ///
-    /// Returns a message when bootstrap metadata does not name a supported engine.
-    pub fn bootstrap_backend_failure_reason(&self) -> Option<String> {
-        let connect = self.to_connect();
-        connect.bootstrap_backend_failure_reason()
-    }
-
-    /// JSON connect result used by existing host negotiation.
-    ///
-    /// Schema flags and limits come from typed capabilities. [`Self::sql_family`]
-    /// and [`Self::diagnostic_engine`] are passed through as bootstrap metadata
-    /// for SeaORM proxy open only; they do not select host schema packs.
+    /// Bootstrap metadata (`dialect`, `sql_family`) is left empty; the host
+    /// connect path merges it from JSON `dbConnect` / plugin bootstrap rules.
     #[must_use]
     pub fn to_connect(&self) -> DbConnectResult {
-        let interactive_txn = !self.atomic_schema_batch;
-        let sql_family = self.sql_family.clone();
-        let dialect = if !self.sql_family.is_empty() {
-            match self.sql_family.to_ascii_lowercase().as_str() {
-                "postgres" | "postgresql" | "pg" => "postgres".into(),
-                _ => "sqlite".into(),
-            }
-        } else if !self.diagnostic_engine.is_empty() {
-            self.diagnostic_engine.clone()
-        } else if self.pragma_user_version {
-            "sqlite".into()
-        } else {
-            String::new()
-        };
         DbConnectResult {
-            dialect,
-            interactive_txn,
-            sql_family,
+            dialect: String::new(),
+            interactive_txn: !self.atomic_schema_batch,
+            sql_family: String::new(),
             atomic_batch: self.atomic_batch,
             returning: self.returning,
             max_binds: self.max_binds,
@@ -674,6 +642,8 @@ mod tests {
             assert_eq!(back.schema_migrations, caps.schema_migrations);
             assert_eq!(back.atomic_schema_batch, caps.atomic_schema_batch);
             assert_eq!(back.interactive_txn, caps.interactive_txn);
+            assert!(back.sql_family.is_empty());
+            assert!(back.dialect.is_empty());
             assert!(
                 back.meets_host_minimums(),
                 "{}",
@@ -683,32 +653,8 @@ mod tests {
     }
 
     #[test]
-    fn to_connect_ignores_diagnostic_engine() {
-        let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
-        caps.diagnostic_engine = "postgres".into();
-        let back = caps.to_connect();
-        assert_eq!(back.dialect, "sqlite");
-        assert_eq!(back.sql_family, "sqlite");
-        assert!(back.interactive_txn);
-        assert!(back.pragma_user_version);
-    }
-
-    #[test]
-    fn to_connect_preserves_schema_flags_when_sql_family_differs() {
-        let mut caps = DbCapabilities::from_connect(&DbConnectResult::d1());
-        caps.sql_family = "postgres".into();
-        let back = caps.to_connect();
-        assert!(back.schema_migrations);
-        assert!(back.atomic_schema_batch);
-        assert!(!back.interactive_txn);
-        assert_eq!(back.sql_family, "postgres");
-        assert_eq!(back.dialect, "postgres");
-    }
-
-    #[test]
-    fn capabilities_meet_minimums_without_sql_family() {
-        let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
-        caps.sql_family.clear();
+    fn capabilities_meet_minimums_without_bootstrap_metadata() {
+        let caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
         assert!(
             caps.meets_host_minimums(),
             "{}",
@@ -717,23 +663,24 @@ mod tests {
     }
 
     #[test]
-    fn to_connect_does_not_infer_postgres_from_row_marker_flags() {
-        let mut caps = DbCapabilities::from_connect(&DbConnectResult::d1());
-        caps.sql_family.clear();
+    fn to_connect_leaves_bootstrap_empty() {
+        let caps = DbCapabilities::from_connect(&DbConnectResult::d1());
         let back = caps.to_connect();
         assert!(back.schema_migrations);
         assert!(back.atomic_schema_batch);
+        assert!(!back.interactive_txn);
         assert!(back.sql_family.is_empty());
-        assert_eq!(back.dialect, "sqlite");
+        assert!(back.dialect.is_empty());
     }
 
     #[test]
-    fn bootstrap_rejects_unknown_sql_family() {
-        let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
-        caps.sql_family = "mystery".into();
-        let connect = caps.to_connect();
+    fn bootstrap_failure_checked_on_connect_result_not_capabilities() {
+        let mut connect = DbConnectResult::sqlite();
+        connect.sql_family = "mystery".into();
         let reason = connect.bootstrap_backend_failure_reason().expect("reject");
         assert!(reason.contains("sqlFamily"), "{reason}");
+        let typed = DbCapabilities::from_connect(&DbConnectResult::sqlite());
+        assert!(typed.meets_host_minimums());
     }
 
     #[test]

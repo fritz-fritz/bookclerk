@@ -114,7 +114,8 @@ impl ExternalDatabase {
         }
         let _kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
-        let connect_result = caps.to_connect();
+        let mut connect_result = caps.to_connect();
+        apply_bootstrap_metadata(&mut connect_result, &self.plugin_id);
         if let Some(reason) = connect_result.bootstrap_backend_failure_reason() {
             return Err(DbErr::Custom(reason));
         }
@@ -1436,6 +1437,28 @@ fn seaorm_backend_from_connect(connect: &DbConnectResult) -> Result<DbBackend, D
     }
 }
 
+/// Fills bootstrap-only SeaORM proxy metadata on a semantic connect result.
+///
+/// Typed `DbCapabilities` omit `sqlFamily` / `dialect`; v2 hosts derive bootstrap
+/// from the configured plugin id (JSON `dbConnect` guests may pre-fill these fields).
+fn apply_bootstrap_metadata(connect: &mut DbConnectResult, plugin_id: &str) {
+    if !connect.sql_family.is_empty() && !connect.dialect.is_empty() {
+        return;
+    }
+    let (sql_family, dialect) = match DatabasePluginKind::parse(plugin_id) {
+        Some(DatabasePluginKind::Postgres) => ("postgres", "postgres"),
+        Some(DatabasePluginKind::D1) | Some(DatabasePluginKind::Sqlite) | None => {
+            ("sqlite", "sqlite")
+        }
+    };
+    if connect.sql_family.is_empty() {
+        connect.sql_family = sql_family.into();
+    }
+    if connect.dialect.is_empty() {
+        connect.dialect = dialect.into();
+    }
+}
+
 /// SQLite `db.connect` params for first-party `sqlite` and arbitrary sqlite-family ids.
 fn sqlite_connect_params(config: &Config, plugin_data_dir: &Path) -> DbConnectParams {
     let path = config.database.sqlite_path(&config.paths().files_dir);
@@ -1483,6 +1506,30 @@ fn toml_to_json(value: &toml::Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookclerk_plugin_sdk::DbCapabilities;
+
+    #[test]
+    fn apply_bootstrap_metadata_from_plugin_id() {
+        let mut connect = DbCapabilities::from_connect(&DbConnectResult::d1()).to_connect();
+        apply_bootstrap_metadata(&mut connect, "d1");
+        assert_eq!(connect.sql_family, "sqlite");
+        assert_eq!(connect.dialect, "sqlite");
+        assert!(connect.bootstrap_backend_failure_reason().is_none());
+
+        let mut pg = DbCapabilities::from_connect(&DbConnectResult::postgres()).to_connect();
+        apply_bootstrap_metadata(&mut pg, "postgres");
+        assert_eq!(pg.sql_family, "postgres");
+        assert_eq!(pg.dialect, "postgres");
+
+        let mut unknown = DbCapabilities::from_connect(&DbConnectResult::sqlite()).to_connect();
+        apply_bootstrap_metadata(&mut unknown, "sql-conformance");
+        assert_eq!(unknown.sql_family, "sqlite");
+        assert_eq!(unknown.dialect, "sqlite");
+        assert_eq!(
+            seaorm_backend_from_connect(&unknown).unwrap(),
+            DbBackend::Sqlite
+        );
+    }
 
     #[test]
     fn maps_schema_kind_to_backend() {

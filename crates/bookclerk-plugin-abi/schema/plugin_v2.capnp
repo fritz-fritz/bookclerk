@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 12;
+const abiMinor :UInt32 = 13;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -686,8 +686,9 @@ struct ExecuteResultReply {
   }
 }
 
-# Semantic SQL-contract advertisement. `diagnosticEngine` is observability
-# only; hosts must not branch on it for correctness.
+# Semantic SQL-contract advertisement. Bootstrap metadata (`sqlFamily`,
+# `diagnosticEngine`) is not part of the capability plane — see JSON
+# `DbConnectResult` / connect handshake (abiMinor 13 tombstones @17/@18).
 struct DbCapabilities {
   sqlContractVersion @0 :UInt32;
   atomicBatch @1 :Bool;
@@ -706,10 +707,8 @@ struct DbCapabilities {
   maxCellBytes @14 :UInt32;
   maxRequestBytes @15 :UInt32;
   maxAtomicResultBytes @16 :UInt32;
-  diagnosticEngine @17 :Text;
-  # Append-only (abiMinor 10). SQL family identity (`sqlite` / `postgres`).
-  # Not derived from schemaMigrations / atomicSchemaBatch.
-  sqlFamily @18 :Text;
+  obsoleteDiagnosticEngine @17 :Text;  # deleted abiMinor 13 — ignore on read; never emit
+  obsoleteSqlFamily @18 :Text;  # deleted abiMinor 13 — ignore on read; never emit
 }
 
 struct DbCapabilitiesReply {
