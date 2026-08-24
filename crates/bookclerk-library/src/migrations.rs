@@ -1430,7 +1430,7 @@ pub fn host_migration_sqlite_steps(steps: &[HostMigrationStep]) -> Vec<&'static 
 ///
 /// Bookkeeping version 28 (extra V3 portal step in the chain). Legacy D1
 /// deployments may already record this version from the pre-unification batch
-/// path; see TODO(#squash) in [`crate::host_schema`].
+/// path; see TODO(#squash) on host schema apply for a greenfield baseline.
 #[must_use]
 pub fn migration_v27_schema_version() -> i64 {
     i64::try_from(D1_PRE_V27_STEPS + 1).expect("V27 version fits i64")
