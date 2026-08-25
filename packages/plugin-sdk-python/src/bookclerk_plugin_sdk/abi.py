@@ -459,91 +459,6 @@ class KeyParams(TypedDict, total=False):
     key: str
 
 
-class StatementDto(TypedDict, total=False):
-    """SQL statement DTO for ``dbQuery`` / ``dbExecute`` (wire camelCase).
-
-    Attributes:
-        sql: SQL text with placeholders as understood by the guest dialect.
-        values: Ordered bind values for the statement (default empty).
-    """
-
-    sql: str
-    values: list[Any]
-    txnId: str
-
-
-class DbBeginParams(TypedDict, total=False):
-    """Params for ``dbBegin`` (wire camelCase).
-
-    Attributes:
-        parentTxnId: Existing transaction to nest a savepoint under.
-    """
-
-    parentTxnId: str
-
-
-class DbBeginResult(TypedDict):
-    """Result of a successful ``dbBegin``.
-
-    Attributes:
-        txnId: Opaque id for subsequent statements and commit/rollback.
-    """
-
-    txnId: str
-
-
-class DbTxnParams(TypedDict):
-    """Params for ``dbCommit`` / ``dbRollback``.
-
-    Attributes:
-        txnId: Transaction id returned by ``dbBegin``.
-    """
-
-    txnId: str
-
-
-class DbAtomicRequest(TypedDict, total=False):
-    """Envelope for ``dbAtomic`` (wire camelCase).
-
-    Attributes:
-        operationId: Idempotency key reused after an ambiguous outcome.
-        operation: Named operation params (``deleteUser``, ``takeOidcRpState``, ``confirmTotpEnrollment``, …).
-    """
-
-    operationId: str
-    operation: DbAtomicParams
-
-
-class DbAtomicParams(TypedDict, total=False):
-    """Params for ``dbAtomic`` (wire camelCase tagged ``op``).
-
-    Attributes:
-        op: Named operation (``deleteUser``, ``redeemClaimTicket``, ``takeOidcRpState``, ``confirmTotpEnrollment``, ``disableUserTotp``, …).
-    """
-
-    op: str
-
-
-class DbAtomicResult(TypedDict, total=False):
-    """Result of ``dbAtomic``.
-
-    Attributes:
-        status: Application outcome (``ok``, ``lastOwner``, ``empty``, …).
-        payload: Library record JSON when ``status`` is ``ok``.
-        operationId: Echo of the request idempotency key.
-        replayed: True when the result came from a durable receipt.
-        receiptCreatedAt: RFC 3339 timestamp when the receipt was first written.
-        timing: Handler/engine timing; not part of the idempotency hash.
-    """
-
-    status: str
-    payload: Any
-    operationId: str
-    replayed: bool
-    receiptCreatedAt: str
-    timing: Any
-
-
 __all__ = [
     "API_VERSION",
     "METHOD_NAMES",
@@ -557,12 +472,6 @@ __all__ = [
     "ConfigOptionDto",
     "ConfigOptionValueDto",
     "CredentialsUpdateParams",
-    "DbBeginParams",
-    "DbBeginResult",
-    "DbAtomicParams",
-    "DbAtomicRequest",
-    "DbAtomicResult",
-    "DbTxnParams",
     "DiagnoseResult",
     "FetchTitleParams",
     "HandshakeParams",
@@ -578,5 +487,4 @@ __all__ = [
     "PutParams",
     "ScanParams",
     "SearchCatalogParams",
-    "StatementDto",
 ]

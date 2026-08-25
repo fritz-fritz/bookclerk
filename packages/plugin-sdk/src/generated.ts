@@ -718,104 +718,17 @@ export interface TouchFileParams extends OutputS3Context {
 export type DbConnectParams = JsonObject;
 
 /**
- * SQL statement DTO for `dbQuery` / `dbExecute`.
- *
- * Wire field names are camelCase (`sql`, `values`).
- */
-export interface StatementDto {
-  /**
-   * SQL text with positional or named placeholders as understood by the guest
-   * dialect (SQLite `?`, Postgres `$1`, …).
-   */
-  sql: string;
-  /**
-   * Ordered bind values for the statement (null, bool, number, string, or nested
-   * arrays matching the host RPC encoding). Defaults to an empty list.
-   */
-  values?: unknown[];
-  /**
-   * Guest transaction id from `dbBegin`. Omitted for autocommit statements.
-   */
-  txnId?: string;
-}
-
-/**
- * Parameters for database `dbBegin`.
- */
-export interface DbBeginParams {
-  /**
-   * Existing transaction to nest a savepoint under. Omitted to start a
-   * top-level transaction.
-   */
-  parentTxnId?: string;
-}
-
-/**
- * Result of a successful `dbBegin`.
- */
-export interface DbBeginResult {
-  /**
-   * Opaque id the host must send on subsequent statements and commit/rollback.
-   */
-  txnId: string;
-}
-
-/**
- * Parameters for `dbCommit` / `dbRollback`.
- */
-export interface DbTxnParams {
-  /**
-   * Transaction id returned by `dbBegin`.
-   */
-  txnId: string;
-}
-
-/**
- * Result of `dbConnect`. D1 sets `interactiveTxn` to false and implements
- * `dbAtomic` instead of interactive `dbBegin`.
+ * Result of `dbConnect` (JSON handshake). Typed SQL uses v2 Cap'n Proto
+ * `capabilities` / `execute` after connect.
  */
 export interface DbConnectResult {
   /** SeaORM dialect (`sqlite` or `postgres`). D1 reports `sqlite`. */
   dialect: string;
   /**
-   * When false, the host must not use SeaORM `begin()` / `dbBegin`.
-   * Omitted by older guests (treated as true).
+   * When false, the host must not open interactive transactions on this guest.
+   * Omitted guests are treated as supporting interactive transactions.
    */
   interactiveTxn?: boolean;
-}
-
-/**
- * Named atomic library operation for `dbAtomic`.
- * Tagged `op`: `deleteUser`, `redeemClaimTicket`, `takeOidcRpState`,
- * `takeWebauthnChallenge`, `confirmTotpEnrollment`, `disableUserTotp`, …
- */
-export type DbAtomicParams = JsonObject;
-
-/**
- * Idempotency envelope for `dbAtomic`.
- */
-export interface DbAtomicRequest {
-  /** Caller-chosen idempotency key; retries must reuse it. */
-  operationId: string;
-  operation: DbAtomicParams;
-}
-
-/**
- * Application result of `dbAtomic`.
- */
-export interface DbAtomicResult {
-  /** `ok`, `empty`, `notFound`, `lastOwner`, `claimInvalid`, `passwordRequired`, `idempotencyConflict`. */
-  status: string;
-  /** Library record JSON when `status` is `ok`. */
-  payload?: unknown;
-  operationId?: string;
-  replayed?: boolean;
-  receiptCreatedAt?: string;
-  timing?: {
-    attemptElapsedUs: number;
-    dbExecutionUs?: number;
-    dbTimingSource?: string;
-  };
 }
 
 /**

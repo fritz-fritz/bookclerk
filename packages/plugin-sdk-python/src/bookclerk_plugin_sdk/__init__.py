@@ -23,7 +23,6 @@ from .abi import (
     LoginParams,
     PluginError,
     ScanParams,
-    StatementDto,
 )
 from .db_value import (
     DatabaseBinding,
@@ -75,5 +74,4 @@ __all__ = [
     "parse_db_value",
     "PluginError",
     "ScanParams",
-    "StatementDto",
 ]
