@@ -410,11 +410,17 @@ pub(super) fn read_db_capabilities_reply(
     }
 }
 
+/// Writes bootstrap-only SeaORM proxy metadata into a Cap'n builder.
 pub(super) fn write_db_bootstrap(mut b: db_bootstrap_capnp::Builder<'_>, bootstrap: &DbBootstrap) {
     b.set_sql_family(&bootstrap.sql_family);
     b.set_dialect(&bootstrap.dialect);
 }
 
+/// Decodes bootstrap-only SeaORM proxy metadata from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns a decode failure when Cap'n text fields cannot be read.
 pub(super) fn read_db_bootstrap(r: db_bootstrap_capnp::Reader<'_>) -> Result<DbBootstrap> {
     Ok(DbBootstrap {
         sql_family: text_of(r.get_sql_family().map_err(from_capnp)?),
@@ -422,6 +428,7 @@ pub(super) fn read_db_bootstrap(r: db_bootstrap_capnp::Reader<'_>) -> Result<DbB
     })
 }
 
+/// Writes a `DbBootstrapReply` union (`ok` or guest `err`).
 pub(super) fn write_db_bootstrap_reply(
     result: db_bootstrap_reply::Builder<'_>,
     outcome: Result<DbBootstrap>,
