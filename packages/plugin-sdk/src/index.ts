@@ -150,6 +150,5 @@ export {
   type ScanLibraryParams,
   type ScanParams,
   type SearchCatalogParams,
-  type StatementDto,
   type TouchFileParams,
 } from "./generated.js";

@@ -116,24 +116,6 @@
         },
         "dbPing": {
           "type": "null"
-        },
-        "dbQuery": {
-          "$ref": "#/$defs/StatementDto"
-        },
-        "dbExecute": {
-          "$ref": "#/$defs/StatementDto"
-        },
-        "dbBegin": {
-          "$ref": "#/$defs/DbBeginParams"
-        },
-        "dbCommit": {
-          "$ref": "#/$defs/DbTxnParams"
-        },
-        "dbRollback": {
-          "$ref": "#/$defs/DbTxnParams"
-        },
-        "dbAtomic": {
-          "$ref": "#/$defs/DbAtomicRequest"
         }
       }
     }

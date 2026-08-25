@@ -32,6 +32,7 @@ pub(crate) use bookclerk_plugin_abi::db::{
 ///
 /// DTO safe to serialize as camelCase Workers RPC params.
 #[must_use]
+#[allow(dead_code)] // host-private legacy JSON wire helper
 pub fn statement_to_dto(statement: &Statement) -> StatementDto {
     StatementDto {
         sql: statement.sql.clone(),
@@ -84,6 +85,7 @@ pub fn statement_from_dto(dto: StatementDto, backend: sea_orm::DatabaseBackend) 
 ///
 /// SeaORM proxy rows ready for entity hydration.
 #[must_use]
+#[allow(dead_code)] // host-private legacy JSON wire helper
 pub fn proxy_rows_from_dto(rows: Vec<ProxyRowDto>) -> Vec<ProxyRow> {
     rows.into_iter()
         .map(|row| ProxyRow {
@@ -131,6 +133,7 @@ pub fn proxy_rows_to_dto(rows: Vec<ProxyRow>) -> Vec<ProxyRowDto> {
 ///
 /// SeaORM exec result for host adapters.
 #[must_use]
+#[allow(dead_code)] // host-private legacy JSON wire helper
 pub fn exec_result_from_dto(dto: ExecResultDto) -> ProxyExecResult {
     ProxyExecResult {
         last_insert_id: dto.last_insert_id,
@@ -148,6 +151,7 @@ pub fn exec_result_from_dto(dto: ExecResultDto) -> ProxyExecResult {
 ///
 /// DTO for the `dbExecute` RPC response.
 #[must_use]
+#[allow(dead_code)] // host-private legacy JSON wire helper
 pub fn exec_result_to_dto(result: ProxyExecResult) -> ExecResultDto {
     ExecResultDto {
         last_insert_id: result.last_insert_id,
@@ -301,6 +305,7 @@ pub fn db_value_from_sea(v: &Value) -> Result<bookclerk_plugin_abi::DbValue, Str
 
 /// Convert a typed bind into a SeaORM value without JSON / `b64:` decoding.
 #[must_use]
+#[allow(dead_code)] // host-private legacy JSON wire helper
 pub fn db_value_to_sea(value: &bookclerk_plugin_abi::DbValue) -> Value {
     use bookclerk_plugin_abi::{DbType, DbValue};
     match value {
@@ -322,6 +327,7 @@ pub fn db_value_to_sea(value: &bookclerk_plugin_abi::DbValue) -> Value {
 /// # Errors
 ///
 /// Returns when the result is not positional.
+#[allow(dead_code)] // host-private legacy JSON wire helper
 pub fn proxy_rows_from_typed(
     stmt: &bookclerk_plugin_abi::StatementResult,
 ) -> Result<Vec<ProxyRow>, String> {

@@ -53,12 +53,6 @@ METHOD_NAMES: tuple[str, ...] = (
     "touchFile",
     "dbConnect",
     "dbPing",
-    "dbQuery",
-    "dbExecute",
-    "dbBegin",
-    "dbCommit",
-    "dbRollback",
-    "dbAtomic",
 )
 """Canonical Workers RPC method names exposed on the guest surface (camelCase wire)."""
 

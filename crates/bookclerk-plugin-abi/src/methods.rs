@@ -47,12 +47,6 @@ pub const METHOD_NAMES: &[&str] = &[
     touch_file::NAME,
     db_connect::NAME,
     db_ping::NAME,
-    db_query::NAME,
-    db_execute::NAME,
-    db_begin::NAME,
-    db_commit::NAME,
-    db_rollback::NAME,
-    db_atomic::NAME,
 ];
 
 /// Negotiate ABI version, plugin id/kind, capabilities, and optional brand/CLI.
@@ -327,60 +321,6 @@ pub mod db_ping {
     pub const NAME: &str = "dbPing";
 }
 
-/// Run a read SQL statement through the database guest proxy.
-///
-/// Params: [`crate::db::StatementDto`]. Result: [`crate::db::QueryResultDto`].
-pub mod db_query {
-    /// Wire method name `"dbQuery"`.
-    pub const NAME: &str = "dbQuery";
-}
-
-/// Run a write SQL statement through the database guest proxy.
-///
-/// Params: [`crate::db::StatementDto`]. Result: [`crate::db::ExecResultDto`].
-pub mod db_execute {
-    /// Wire method name `"dbExecute"`.
-    pub const NAME: &str = "dbExecute";
-}
-
-/// Begin a database transaction (or nested savepoint) on the guest.
-///
-/// Params: [`crate::host_db::DbBeginParams`]. Result: [`crate::host_db::DbBeginResult`].
-pub mod db_begin {
-    /// Wire method name `"dbBegin"`.
-    pub const NAME: &str = "dbBegin";
-}
-
-/// Commit a guest transaction previously returned by [`db_begin`].
-///
-/// Params: [`crate::host_db::DbTxnParams`].
-pub mod db_commit {
-    /// Wire method name `"dbCommit"`.
-    pub const NAME: &str = "dbCommit";
-}
-
-/// Roll back a guest transaction previously returned by [`db_begin`].
-///
-/// Params: [`crate::host_db::DbTxnParams`].
-pub mod db_rollback {
-    /// Wire method name `"dbRollback"`.
-    pub const NAME: &str = "dbRollback";
-}
-
-/// Run a host-authored generic SQL plan as one guest SQL transaction.
-///
-/// Params: legacy JSON `DbAtomicRequest` (see `schema/abi.json`). Result: legacy
-/// JSON `DbPlanExecResult`. Every bundled database guest implements this (D1 as
-/// one HTTP `batch()`, SQLite / Postgres as one native transaction). Guests
-/// execute `plan` statements only and must not parse Bookclerk operation names.
-///
-/// Product v2 database plugins use typed [`crate::ExecuteRequest`] /
-/// [`crate::ExecuteReply`] via Cap'n Proto instead.
-pub mod db_atomic {
-    /// Wire method name `"dbAtomic"`.
-    pub const NAME: &str = "dbAtomic";
-}
-
 /// Flat `UPPER_SNAKE` aliases matching historical `protocol::methods` usage.
 ///
 /// Prefer the namespaced modules (`login_start::NAME`) in new code; these
@@ -398,22 +338,10 @@ pub mod names {
     pub use super::copy::NAME as COPY;
     /// Alias of [`super::credentials_update::NAME`] (`"credentialsUpdate"`).
     pub use super::credentials_update::NAME as CREDENTIALS_UPDATE;
-    /// Alias of [`super::db_atomic::NAME`] (`"dbAtomic"`).
-    pub use super::db_atomic::NAME as DB_ATOMIC;
-    /// Alias of [`super::db_begin::NAME`] (`"dbBegin"`).
-    pub use super::db_begin::NAME as DB_BEGIN;
-    /// Alias of [`super::db_commit::NAME`] (`"dbCommit"`).
-    pub use super::db_commit::NAME as DB_COMMIT;
     /// Alias of [`super::db_connect::NAME`] (`"dbConnect"`).
     pub use super::db_connect::NAME as DB_CONNECT;
-    /// Alias of [`super::db_execute::NAME`] (`"dbExecute"`).
-    pub use super::db_execute::NAME as DB_EXECUTE;
     /// Alias of [`super::db_ping::NAME`] (`"dbPing"`).
     pub use super::db_ping::NAME as DB_PING;
-    /// Alias of [`super::db_query::NAME`] (`"dbQuery"`).
-    pub use super::db_query::NAME as DB_QUERY;
-    /// Alias of [`super::db_rollback::NAME`] (`"dbRollback"`).
-    pub use super::db_rollback::NAME as DB_ROLLBACK;
     /// Alias of [`super::delete::NAME`] (`"delete"`).
     pub use super::delete::NAME as DELETE;
     /// Alias of [`super::diagnose::NAME`] (`"diagnose"`).
@@ -468,4 +396,16 @@ pub mod names {
     pub use super::sync_listening::NAME as SYNC_LISTENING;
     /// Alias of [`super::touch_file::NAME`] (`"touchFile"`).
     pub use super::touch_file::NAME as TOUCH_FILE;
+    /// Alias of [`super::legacy_db_methods::db_atomic::NAME`] (`"dbAtomic"`).
+    pub use crate::legacy_db_methods::db_atomic::NAME as DB_ATOMIC;
+    /// Alias of [`super::legacy_db_methods::db_begin::NAME`] (`"dbBegin"`).
+    pub use crate::legacy_db_methods::db_begin::NAME as DB_BEGIN;
+    /// Alias of [`super::legacy_db_methods::db_commit::NAME`] (`"dbCommit"`).
+    pub use crate::legacy_db_methods::db_commit::NAME as DB_COMMIT;
+    /// Alias of [`super::legacy_db_methods::db_execute::NAME`] (`"dbExecute"`).
+    pub use crate::legacy_db_methods::db_execute::NAME as DB_EXECUTE;
+    /// Alias of [`super::legacy_db_methods::db_query::NAME`] (`"dbQuery"`).
+    pub use crate::legacy_db_methods::db_query::NAME as DB_QUERY;
+    /// Alias of [`super::legacy_db_methods::db_rollback::NAME`] (`"dbRollback"`).
+    pub use crate::legacy_db_methods::db_rollback::NAME as DB_ROLLBACK;
 }

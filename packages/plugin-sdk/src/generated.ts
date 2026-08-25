@@ -857,12 +857,6 @@ export const METHOD_NAMES = [
   "touchFile",
   "dbConnect",
   "dbPing",
-  "dbQuery",
-  "dbExecute",
-  "dbBegin",
-  "dbCommit",
-  "dbRollback",
-  "dbAtomic",
 ] as const;
 
 /**

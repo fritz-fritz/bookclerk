@@ -57,6 +57,7 @@ pub mod events;
 pub mod guest_sql;
 pub mod host_db;
 pub mod kind;
+pub(crate) mod legacy_db_methods;
 pub mod methods;
 pub mod types;
 pub mod v2;
@@ -107,9 +108,9 @@ pub use db::{
     SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
 };
 pub use db_execute::{
-    sql_payload_bytes, sql_payload_exceeds, DbCapabilities, DbColumn, DbPlanStatementKind,
-    DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest, GuestReceiptPersist,
-    HostExecuteEnvelope, StatementResult, TypedDbStatement,
+    sql_payload_bytes, sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn,
+    DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest,
+    GuestReceiptPersist, HostExecuteEnvelope, StatementResult, TypedDbStatement,
 };
 pub use db_value::{DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
