@@ -28,6 +28,7 @@ use crate::proxy_txn::{
     consume_savepoint_rollback_injection, is_txn_broken, note_commit_failed, take_txn_fault,
     with_exec_budget, AtomicInterruptPhase, ExecBudget,
 };
+use crate::schema_postgres::expand_host_schema_execute_request;
 use crate::{
     cap_query_sql, record_query_rows_seen, set_positional_result_columns,
     take_positional_result_columns,
@@ -801,6 +802,7 @@ where
         return Err(DbErr::Custom(fault));
     }
     let backend = ConnectionTrait::get_database_backend(&txn);
+    let req = expand_host_schema_execute_request(backend, req);
     if backend == sea_orm::DatabaseBackend::Postgres {
         if let Some(ms) = remaining_deadline_ms(session.deadline_unix_ms) {
             let sql = format!("SET LOCAL statement_timeout = '{ms}ms'");

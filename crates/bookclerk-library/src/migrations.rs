@@ -1,8 +1,8 @@
 //! Greenfield schema for the Bookclerk library DB.
 //!
 //! Fresh databases apply a single version-1 DDL via [`migration_sql`] (SQLite
-//! `PRAGMA user_version` / canonical plan). Postgres connections receive the
-//! adapter-edge pack from [`bookclerk_db_exec::schema_sql_for_backend`].
+//! `PRAGMA user_version` / canonical plan). Adapters lower canonical DDL at the
+//! execution edge (see [`bookclerk_db_exec::expand_host_schema_batch`]).
 //! [`latest_schema_sqlite`] / [`latest_schema_postgres`] expose greenfield DDL
 //! for introspection. Base DDL uses `CREATE TABLE IF NOT EXISTS` /
 //! `CREATE INDEX IF NOT EXISTS`.
@@ -952,13 +952,12 @@ pub(crate) fn greenfield_baseline_canonical() -> &'static str {
     BASELINE.get_or_init(|| migration_sql().join("\n").leak())
 }
 
-/// SQL text for `step` on the live connection backend (never marker-driven).
+/// Canonical SQLite-shaped DDL for `step` (never backend-selected at the host).
 ///
-/// Canonical DDL comes from the host plan; Postgres receives the adapter-edge
-/// pack from [`bookclerk_db_exec::schema_sql_for_backend`].
+/// Adapters lower this at execution via [`bookclerk_db_exec::expand_host_schema_batch`].
 #[must_use]
-pub fn host_migration_sql(backend: sea_orm::DbBackend, step: &HostMigrationStep) -> &'static str {
-    bookclerk_db_exec::schema_sql_for_backend(backend, step.canonical)
+pub fn host_migration_sql(_backend: sea_orm::DbBackend, step: &HostMigrationStep) -> &'static str {
+    step.canonical
 }
 
 /// Final PostgreSQL DDL for a fresh Bookclerk library database.

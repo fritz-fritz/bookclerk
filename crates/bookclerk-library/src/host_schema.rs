@@ -7,8 +7,7 @@
 //! user_version`, `schema_migrations` row, or one HTTP `{ "batch": [...] }`
 //! per version). Canonical DDL lives in the host plan; the live connection
 //! backend chooses adapter-edge lowering via
-//! [`bookclerk_db_exec::schema_sql_for_backend`] (see
-//! [`crate::migrations::host_migration_sql`]).
+//! [`bookclerk_db_exec::expand_host_schema_batch`] at execution time.
 //!
 //! TODO(#squash): collapse the long migration chain to a single baseline version.
 
@@ -20,17 +19,15 @@ use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatementKind};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 
 use crate::error::{LibraryError, Result};
-use crate::migrations::{host_migration_plan, host_migration_sql, HostMigrationStep};
+use crate::migrations::{host_migration_plan, HostMigrationStep};
 use crate::sql_plan::{execute_statements_on, DbAtomicPlan, DbPlanStatement};
 
 /// Which versioning mechanic the host should use.
 ///
 /// Flags choose **how** versions are stored and applied, not which SQL pack
 /// to emit. Canonical Bookclerk SQL is [`crate::migrations::migration_sql`].
-/// Postgres connections receive the adapter-edge pack from
-/// [`bookclerk_db_exec::schema_sql_for_backend`]; SQLite connections always get
-/// the canonical pack — including a new adapter whose plugin id is not
-/// `postgres` / `d1` / `sqlite`.
+/// Adapters lower canonical DDL for the live connection backend at execution
+/// (see [`bookclerk_db_exec::expand_host_schema_batch`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostSchemaKind {
     /// `PRAGMA user_version` on an interactive SQLite-family connection.
@@ -254,8 +251,10 @@ where
         if version <= sqlite_user_version(db).await? {
             return Ok(());
         }
-        let mut stmts = split_sql_statements(schema);
-        stmts.push(format!("PRAGMA user_version = {version}"));
+        let stmts = vec![
+            schema.to_string(),
+            format!("PRAGMA user_version = {version}"),
+        ];
         match run_batch(stmts).await {
             Ok(()) => return Ok(()),
             Err(err) if is_already_applied_ddl(&err) => {
@@ -294,7 +293,7 @@ where
     ensure_schema_migrations(db, backend).await?;
     for step in steps {
         let version = step.version;
-        let schema = host_migration_sql(backend, step);
+        let schema = step.canonical;
         let mut delay_ms = 20u64;
         let mut last_err = None;
         for attempt in 0..8 {
@@ -304,10 +303,10 @@ where
             {
                 break;
             }
-            let mut stmts = split_sql_statements(schema);
-            stmts.push(format!(
-                "INSERT INTO schema_migrations (version) VALUES ({version})"
-            ));
+            let stmts = vec![
+                schema.to_string(),
+                format!("INSERT INTO schema_migrations (version) VALUES ({version})"),
+            ];
             match run_batch(stmts).await {
                 Ok(()) => break,
                 Err(err) if is_already_applied_ddl(&err) => {
@@ -359,8 +358,10 @@ async fn apply_one_sqlite_version(
         if version <= sqlite_user_version(db).await? {
             return Ok(());
         }
-        let mut stmts = split_sql_statements(schema);
-        stmts.push(format!("PRAGMA user_version = {version}"));
+        let stmts = vec![
+            schema.to_string(),
+            format!("PRAGMA user_version = {version}"),
+        ];
         match run_atomic_ddl(
             db,
             backend,
@@ -423,7 +424,7 @@ async fn apply_schema_migrations_from_plan(
 ) -> Result<()> {
     ensure_schema_migrations(db, backend).await?;
     for step in steps {
-        let schema = host_migration_sql(backend, step);
+        let schema = step.canonical;
         apply_one_schema_migration(db, backend, timing, step.version, schema).await?;
     }
     Ok(())
@@ -446,10 +447,10 @@ async fn apply_one_schema_migration(
         {
             return Ok(());
         }
-        let mut stmts = split_sql_statements(schema);
-        stmts.push(format!(
-            "INSERT INTO schema_migrations (version) VALUES ({version})"
-        ));
+        let stmts = vec![
+            schema.to_string(),
+            format!("INSERT INTO schema_migrations (version) VALUES ({version})"),
+        ];
         match run_atomic_ddl(
             db,
             backend,
@@ -532,7 +533,7 @@ async fn run_atomic_ddl(
     if stmts.is_empty() {
         return Ok(());
     }
-    let _ = backend;
+    let stmts = bookclerk_db_exec::expand_host_schema_batch(backend, &stmts).unwrap_or(stmts);
     let plan = DbAtomicPlan {
         statements: stmts
             .into_iter()
@@ -603,15 +604,6 @@ async fn exec_sql(db: &DatabaseConnection, backend: DbBackend, sql: &str) -> Res
         .await
         .map_err(LibraryError::Orm)?;
     Ok(())
-}
-
-/// Splits a migration script on `;` and drops empty fragments.
-fn split_sql_statements(sql: &str) -> Vec<String> {
-    sql.split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
 }
 
 #[cfg(test)]
@@ -781,7 +773,8 @@ mod tests {
         let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
             .await
             .expect("unmigrated sqlite");
-        let ddl = split_sql_statements(host_migration_plan()[0].canonical).len() as u32;
+        let ddl = bookclerk_db_exec::split_schema_statements(host_migration_plan()[0].canonical)
+            .len() as u32;
         crate::inject_atomic_interrupt_after(
             crate::AtomicInterruptPhase::BetweenStatements,
             crate::AtomicInterruptKind::Cancel,
@@ -850,11 +843,17 @@ mod tests {
             None => format!("{}/{db_name}", &trimmed[..slash]),
         };
         let db = sea_orm::Database::connect(&db_url).await.expect("connect");
-        let ddl = split_sql_statements(host_migration_sql(
+        let canonical = host_migration_plan()[0].canonical;
+        let ddl = bookclerk_db_exec::expand_host_schema_batch(
             DbBackend::Postgres,
-            &host_migration_plan()[0],
-        ))
-        .len() as u32;
+            &[
+                canonical.to_string(),
+                "INSERT INTO schema_migrations (version) VALUES (1)".to_string(),
+            ],
+        )
+        .expect("postgres schema batch")
+        .len()
+        .saturating_sub(1) as u32;
         crate::inject_atomic_interrupt_after(
             crate::AtomicInterruptPhase::BetweenStatements,
             crate::AtomicInterruptKind::Cancel,
