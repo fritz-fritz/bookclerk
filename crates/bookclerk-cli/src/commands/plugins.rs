@@ -1057,10 +1057,8 @@ async fn probe_database(
     config: &Config,
     plugin: &DiscoveredPlugin,
 ) -> anyhow::Result<()> {
-    let settings = bookclerk_plugin_host::settings_table(config, plugin);
-    session
-        .db_open(toml_table_to_json(&settings).to_string())
-        .await?;
+    let ctx = bookclerk_plugin_host::database_connect_context(config, plugin, session)?;
+    session.db_open(ctx).await?;
     let _ = session.db_capabilities().await?;
     Ok(())
 }

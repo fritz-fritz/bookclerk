@@ -82,10 +82,10 @@ pub use destinations::{build_acquire_destinations, build_storage_backend};
 pub use discover::{discover_plugins, plugin_search_dirs, settings_table, DiscoveredPlugin};
 pub use error::{PluginError, Result};
 pub use host::{
-    load_external_database, load_external_destinations, load_external_integrations,
-    load_external_sources, migrate_database_plugin, open_library_store,
-    open_library_store_for_plugin, DatabaseRegistry, DestinationRegistry, ExternalDatabase,
-    ExternalIntegration, ExternalSource,
+    database_connect_context, load_external_database, load_external_destinations,
+    load_external_integrations, load_external_sources, migrate_database_plugin,
+    open_library_store, open_library_store_for_plugin, DatabaseRegistry, DestinationRegistry,
+    ExternalDatabase, ExternalIntegration, ExternalSource,
 };
 pub use jail::plugin_data_dir;
 pub use manifest::{

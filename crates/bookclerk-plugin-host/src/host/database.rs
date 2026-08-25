@@ -1383,6 +1383,30 @@ struct AtomicWebauthnChallenge {
     state_json: String,
 }
 
+/// Builds a v2 [`bookclerk_plugin_sdk::v2::DatabaseContext`] for `database.openSession`.
+///
+/// Used by the CLI diagnose probe and mirrors [`ExternalDatabase::connect`].
+///
+/// # Errors
+///
+/// Returns an error when plugin data paths, secrets, or context encoding fail.
+pub fn database_connect_context(
+    config: &Config,
+    plugin: &DiscoveredPlugin,
+    session: &V2PluginSession,
+) -> PluginResult<bookclerk_plugin_sdk::v2::DatabaseContext> {
+    let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
+    let params = connect_params(
+        config,
+        &plugin.manifest.id,
+        &plugin_data_dir,
+        session,
+    )
+    .map_err(|err| PluginError::message(err.to_string()))?;
+    bookclerk_plugin_sdk::database_context_from_params(&params)
+        .map_err(|err| PluginError::message(err.to_string()))
+}
+
 /// Builds guest `db.connect` params from host config.
 ///
 /// First-party ids (`sqlite`, `d1`, `postgres`) receive host-injected paths /

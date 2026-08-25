@@ -8,8 +8,8 @@ mod source;
 
 pub(crate) use database::granted_job_database;
 pub use database::{
-    load_external_database, migrate_database_plugin, open_library_store,
-    open_library_store_for_plugin, DatabaseRegistry, ExternalDatabase,
+    database_connect_context, load_external_database, migrate_database_plugin,
+    open_library_store, open_library_store_for_plugin, DatabaseRegistry, ExternalDatabase,
 };
 pub use destination::{load_external_destinations, DestinationRegistry};
 pub use integration::{load_external_integrations, ExternalIntegration};
