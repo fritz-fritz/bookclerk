@@ -16,10 +16,11 @@ use super::plugin_v2_host_capnp::{
     host_guest_receipt_persist as host_guest_receipt_persist_capnp,
 };
 use super::rpc::{from_capnp, read_error, text_of, write_error};
+use crate::host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
 use crate::{
     DbBootstrap, DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming,
-    DbType, DbValue, ExecuteReply, ExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope,
-    PluginError, Result, StatementResult, TypedDbStatement,
+    DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, Result, StatementResult,
+    TypedDbStatement,
 };
 
 pub(super) fn write_db_type(ty: DbType) -> CapnpDbType {

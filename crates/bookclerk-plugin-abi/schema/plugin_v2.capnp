@@ -465,35 +465,6 @@ struct HealthReply {
   }
 }
 
-struct Statement {
-  sql @0 :Text;
-  valuesJson @1 :Text;
-}
-
-struct ExecResult {
-  lastInsertId @0 :Int64;
-  rowsAffected @1 :UInt64;
-}
-
-struct QueryPage {
-  rowsJson @0 :Text;
-  nextCursor @1 :Text;
-}
-
-struct ExecReply {
-  union {
-    ok @0 :ExecResult;
-    err @1 :PluginError;
-  }
-}
-
-struct QueryReply {
-  union {
-    ok @0 :QueryPage;
-    err @1 :PluginError;
-  }
-}
-
 struct AdapterSessionReply {
   union {
     ok @0 :AdapterDatabaseSession;

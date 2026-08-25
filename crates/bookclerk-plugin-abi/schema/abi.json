@@ -110,12 +110,6 @@
         },
         "touchFile": {
           "$ref": "#/$defs/TouchFileParams"
-        },
-        "dbConnect": {
-          "$ref": "#/$defs/DbConnectParams"
-        },
-        "dbPing": {
-          "type": "null"
         }
       }
     }
@@ -1160,120 +1154,6 @@
         "atomicSchemaBatch": {
           "type": "boolean",
           "description": "Each schema version must be applied as one atomic batch (D1 HTTP)."
-        }
-      }
-    },
-    "DbPlanStatement": {
-      "type": "object",
-      "required": [
-        "sql"
-      ],
-      "properties": {
-        "sql": {
-          "type": "string"
-        },
-        "binds": {
-          "type": "array"
-        },
-        "kind": {
-          "type": "string",
-          "enum": [
-            "query",
-            "execute",
-            "select",
-            "returning"
-          ]
-        },
-        "maxRows": {
-          "type": "integer",
-          "description": "Proven upper bound on rows this statement returns. 0 is unproven. D1 Returning requires 1."
-        }
-      }
-    },
-    "DbAtomicPlan": {
-      "type": "object",
-      "required": [
-        "statements"
-      ],
-      "properties": {
-        "statements": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/DbPlanStatement"
-          }
-        },
-        "outcomeIndex": {
-          "type": "integer"
-        },
-        "payloadIndex": {
-          "type": "integer"
-        },
-        "priorReceiptIndex": {
-          "type": "integer"
-        },
-        "receiptSelectIndex": {
-          "type": "integer"
-        }
-      }
-    },
-    "DbAtomicRequest": {
-      "type": "object",
-      "required": [
-        "operationId",
-        "plan"
-      ],
-      "properties": {
-        "operationId": {
-          "type": "string",
-          "description": "Caller-chosen idempotency key. Retries after an ambiguous outcome must reuse it."
-        },
-        "requestHash": {
-          "type": "string",
-          "description": "SHA-256 hex of the idempotency-relevant request; compared on receipt replay."
-        },
-        "plan": {
-          "$ref": "#/$defs/DbAtomicPlan",
-          "description": "Host-authored generic SQL batch. Guests must not parse Bookclerk operation names."
-        },
-        "deadlineUnixMs": {
-          "type": "integer",
-          "description": "Optional guest-visible deadline (unix milliseconds). Transport metadata; not hashed for idempotency."
-        }
-      }
-    },
-    "DbPlanStmtExecResult": {
-      "type": "object",
-      "required": [
-        "rows",
-        "rowsAffected"
-      ],
-      "properties": {
-        "rows": {
-          "type": "array"
-        },
-        "rowsAffected": {
-          "type": "integer"
-        }
-      }
-    },
-    "DbPlanExecResult": {
-      "type": "object",
-      "required": [
-        "operationId",
-        "statements"
-      ],
-      "properties": {
-        "operationId": {
-          "type": "string"
-        },
-        "statements": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/DbPlanStmtExecResult"
-          }
-        },
-        "timing": {
-          "type": "object"
         }
       }
     },

@@ -24,7 +24,7 @@ pub trait HostAdapterDatabaseSession {
     /// Typed execute with a host-only guest receipt finalize hint.
     async fn execute_envelope(
         &self,
-        envelope: crate::HostExecuteEnvelope,
+        envelope: crate::host_envelope::HostExecuteEnvelope,
     ) -> Result<crate::ExecuteReply> {
         let _ = envelope;
         Err(crate::PluginError::unsupported(

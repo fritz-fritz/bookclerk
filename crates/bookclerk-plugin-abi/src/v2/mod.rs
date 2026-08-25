@@ -37,9 +37,10 @@ pub use limits::{
     MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 pub use roles::{
-    AdapterDatabaseSession, ByteRange, Cancellation, ContentSource, ContentSourceContext, Database,
-    DatabaseContext, Destination, GuestDatabase, Integration, IntegrationContext, JobHandler,
-    JobHandlerContext, NeverCancel, PluginRoot, ProgressSink, ReadResult, Source,
+    AdapterDatabaseSession, AdapterSessionOpen, ByteRange, Cancellation, ContentSource,
+    ContentSourceContext, Database, DatabaseContext, Destination, GuestDatabase, Integration,
+    IntegrationContext, JobHandler, JobHandlerContext, NeverCancel, PluginRoot, ProgressSink,
+    ReadResult, Source,
 };
 pub use rpc::{
     byte_source_from_async_read, connect_plugin, pull_byte_source_to_writer, serve_plugin,
@@ -48,9 +49,9 @@ pub use rpc::{
     SourceClient, SourceServer,
 };
 pub use types::{
-    CopyResult, DestinationContext, DomainEvent, EventResult, ExecResult, ExtensibleConfig,
-    HealthOk, JobCheckpoint, JobInvocation, JobInvocationLease, JobOutcome, ListOptions, ListPage,
+    CopyResult, DestinationContext, DomainEvent, EventResult, ExtensibleConfig, HealthOk,
+    JobCheckpoint, JobInvocation, JobInvocationLease, JobOutcome, ListOptions, ListPage,
     ObjectInfo, ObjectMetadata, OidcClientTemplate, PluginDescribe, PutResult, QueryPage,
-    ScalarLimitsDto, SourceContext, Statement, WorkerContext, WriteOptions, ENVELOPE_VERSION,
+    ScalarLimitsDto, SourceContext, WorkerContext, WriteOptions, ENVELOPE_VERSION,
     MAX_CHECKPOINT_BYTES,
 };

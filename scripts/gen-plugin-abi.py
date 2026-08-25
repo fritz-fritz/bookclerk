@@ -38,7 +38,6 @@ REQUIRED_WIRE_FIXTURES = (
     "scan.result.json",
     "fetchTitle.request.json",
     "put.s3.request.json",
-    "dbConnect.sqlite.json",
 )
 
 # Matches `METHOD_NAMES: tuple[str, ...] = ( ... )` including a trailing comma.
@@ -147,8 +146,31 @@ FORBIDDEN_ABI_LIB_EXPORTS = (
     "QueryResultDto",
     "DB_ATOMIC_SENTINEL",
     "DB_CAPABILITIES_SENTINEL",
+    "GuestReceiptPersist",
+    "HostExecuteEnvelope",
     "sea_null",
 )
+
+FORBIDDEN_ABI_SCHEMA_DEFS = (
+    "DbAtomicRequest",
+    "DbAtomicPlan",
+    "DbPlanExecResult",
+    "DbPlanStatement",
+    "DbPlanStmtExecResult",
+    "StatementDto",
+    "QueryResultDto",
+)
+
+
+def check_abi_schema_defs() -> list[str]:
+    """Fail when host planner IR reappears in abi.json `$defs`."""
+    data = json.loads(ABI.read_text(encoding="utf-8"))
+    defs = data.get("$defs", {})
+    errors: list[str] = []
+    for name in FORBIDDEN_ABI_SCHEMA_DEFS:
+        if name in defs:
+            errors.append(f"abi.json must not define legacy host IR `{name}`")
+    return errors
 
 
 def check_abi_lib_exports() -> list[str]:
@@ -241,13 +263,19 @@ def main() -> int:
         for err in export_errors:
             print(f"abi exports: {err}", file=sys.stderr)
 
-    if wire_errors or export_errors:
+    schema_errors = check_abi_schema_defs()
+    if schema_errors:
+        for err in schema_errors:
+            print(f"abi schema: {err}", file=sys.stderr)
+
+    if wire_errors or export_errors or schema_errors:
         return 1
     if drift and args.check and not args.write:
         return 1
     print(
         f"ok methods={len(names)} wire_fixtures={len(REQUIRED_WIRE_FIXTURES)} "
-        f"abi_export_guard={len(FORBIDDEN_ABI_LIB_EXPORTS)}"
+        f"abi_export_guard={len(FORBIDDEN_ABI_LIB_EXPORTS)} "
+        f"abi_schema_guard={len(FORBIDDEN_ABI_SCHEMA_DEFS)}"
     )
     return 0
 

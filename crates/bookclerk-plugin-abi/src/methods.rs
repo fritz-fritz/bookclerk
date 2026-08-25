@@ -45,8 +45,6 @@ pub const METHOD_NAMES: &[&str] = &[
     copy::NAME,
     delete::NAME,
     touch_file::NAME,
-    db_connect::NAME,
-    db_ping::NAME,
 ];
 
 /// Negotiate ABI version, plugin id/kind, capabilities, and optional brand/CLI.
@@ -307,20 +305,6 @@ pub mod touch_file {
     pub const NAME: &str = "touchFile";
 }
 
-/// Open a database backend and return the SeaORM dialect.
-///
-/// Params: [`crate::db::DbConnectParams`]. Result: [`crate::db::DbConnectResult`].
-pub mod db_connect {
-    /// Wire method name `"dbConnect"`.
-    pub const NAME: &str = "dbConnect";
-}
-
-/// Verify the connected database backend is reachable.
-pub mod db_ping {
-    /// Wire method name `"dbPing"`.
-    pub const NAME: &str = "dbPing";
-}
-
 /// Flat `UPPER_SNAKE` aliases matching historical `protocol::methods` usage.
 ///
 /// Prefer the namespaced modules (`login_start::NAME`) in new code; these
@@ -338,10 +322,6 @@ pub mod names {
     pub use super::copy::NAME as COPY;
     /// Alias of [`super::credentials_update::NAME`] (`"credentialsUpdate"`).
     pub use super::credentials_update::NAME as CREDENTIALS_UPDATE;
-    /// Alias of [`super::db_connect::NAME`] (`"dbConnect"`).
-    pub use super::db_connect::NAME as DB_CONNECT;
-    /// Alias of [`super::db_ping::NAME`] (`"dbPing"`).
-    pub use super::db_ping::NAME as DB_PING;
     /// Alias of [`super::delete::NAME`] (`"delete"`).
     pub use super::delete::NAME as DELETE;
     /// Alias of [`super::diagnose::NAME`] (`"diagnose"`).

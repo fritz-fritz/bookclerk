@@ -174,7 +174,7 @@ impl HostAdapterDatabaseSession for HostAdapterDatabaseSessionClient {
 
     async fn execute_envelope(
         &self,
-        envelope: crate::HostExecuteEnvelope,
+        envelope: crate::host_envelope::HostExecuteEnvelope,
     ) -> Result<crate::ExecuteReply> {
         let mut req = self.client.execute_envelope_request();
         super::db_rpc::write_host_execute_envelope(req.get().init_envelope(), &envelope);

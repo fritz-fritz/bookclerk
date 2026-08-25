@@ -55,6 +55,8 @@ pub mod db_value;
 pub mod error;
 pub mod events;
 pub mod guest_sql;
+#[doc(hidden)]
+pub mod host_envelope;
 pub mod kind;
 pub mod methods;
 pub mod types;
@@ -99,16 +101,18 @@ pub mod plugin_v2_host_capnp {
 #[cfg(test)]
 mod wire_fixtures;
 
+#[doc(hidden)]
+pub use db::DbConnectResult;
 pub use db::{
-    DbConnectParams, DbConnectResult, D1_MAX_BINDS, FIRST_PARTY_MAX_RESULT_BYTES,
-    FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES, HOST_MIN_PAYLOAD_BYTES,
-    HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS,
-    SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
+    connect_params_from_context, database_context_from_params, DbConnectParams, D1_MAX_BINDS,
+    FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
+    HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS,
+    POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
 };
 pub use db_execute::{
     sql_payload_bytes, sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn,
     DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest,
-    GuestReceiptPersist, HostExecuteEnvelope, StatementResult, TypedDbStatement,
+    StatementResult, TypedDbStatement,
 };
 pub use db_value::{DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
@@ -145,6 +149,7 @@ pub const PLUGIN_TOML_SCHEMA_JSON: &str = include_str!("../schema/plugin-toml.js
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
+    use crate::db::DbConnectResult;
 
     #[test]
     fn schema_parses_as_json() {
@@ -245,5 +250,29 @@ mod tests {
             .bootstrap_backend_failure_reason()
             .expect("bootstrap mismatch");
         assert!(reason.contains("does not match"), "{reason}");
+    }
+
+    #[test]
+    fn capnp_schema_has_no_legacy_json_row_fields() {
+        let schema = include_str!("../schema/plugin_v2.capnp");
+        assert!(
+            !schema.contains("valuesJson"),
+            "plugin_v2.capnp must not contain valuesJson"
+        );
+        assert!(
+            !schema.contains("rowsJson"),
+            "plugin_v2.capnp must not contain rowsJson"
+        );
+    }
+
+    #[test]
+    fn host_envelope_not_exported_from_crate_root() {
+        let src = include_str!("lib.rs");
+        for name in ["GuestReceiptPersist", "HostExecuteEnvelope"] {
+            assert!(
+                !src.contains(&format!("pub use db_execute::{name}")),
+                "lib.rs must not re-export `{name}` from db_execute"
+            );
+        }
     }
 }

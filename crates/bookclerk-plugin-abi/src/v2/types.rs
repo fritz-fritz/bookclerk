@@ -220,32 +220,11 @@ pub struct HealthOk {
     pub detail: String,
 }
 
-/// Database statement (typed Cap'n Proto execute contract).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Statement {
-    /// SQL text.
-    pub sql: String,
-    /// JSON-encoded parameter values (migration bridge).
-    #[serde(default)]
-    pub values_json: String,
-}
-
-/// Execute result.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExecResult {
-    /// Last insert id when the engine provides one.
-    pub last_insert_id: i64,
-    /// Rows affected.
-    pub rows_affected: u64,
-}
-
-/// Bounded query page. Never requires materializing an unbounded result set.
+/// Bounded query page for host-internal SeaORM session helpers (not Cap'n ABI).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryPage {
-    /// JSON-encoded rows (migration bridge).
+    /// JSON-encoded rows.
     #[serde(default)]
     pub rows_json: String,
     /// Continuation token.

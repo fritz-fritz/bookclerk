@@ -9,7 +9,10 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::DbConnectResult;
+use crate::db::{
+    DbConnectResult, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES, HOST_MIN_PAYLOAD_BYTES,
+    HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS, SQL_CONTRACT_VERSION,
+};
 use crate::db_value::{DbType, DbValue};
 use crate::v2::MAX_SCALAR_BYTES;
 
@@ -60,10 +63,7 @@ pub enum DbPlanStatementKind {
     /// DML that returns rows (`INSERT`/`UPDATE`/`DELETE … RETURNING`), or
     /// row-producing introspection (`PRAGMA`, schema reads) that must **not**
     /// be rewritten as a subquery.
-    ///
-    /// Legacy wire/JSON `"query"` deserializes as this variant.
     #[default]
-    #[serde(alias = "query")]
     Returning,
 }
 
@@ -128,27 +128,6 @@ pub struct TypedDbStatement {
     pub result_selection: DbResultSelection,
 }
 
-/// Host-only hint for adapters to persist guest replay payload before COMMIT.
-///
-/// Plugin authors must not set this field. The host stamps it when wrapping
-/// guest `executeAtomic` batches with a durable receipt envelope.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct GuestReceiptPersist {
-    /// Guest statement count inside the receipt wrap (excluding prune/select).
-    pub guest_statement_len: u32,
-    /// Guest `requestHash` compared on replay.
-    pub guest_request_hash: String,
-}
-
-impl GuestReceiptPersist {
-    /// True when the host did not stamp a guest-receipt finalize hint.
-    #[must_use]
-    pub fn is_absent(&self) -> bool {
-        self.guest_statement_len == 0
-    }
-}
-
 /// Typed atomic batch. Every request is a non-empty ordered statement list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -161,26 +140,6 @@ pub struct ExecuteRequest {
     pub statements: Vec<TypedDbStatement>,
     /// Guest-visible deadline (unix ms). Zero means omitted.
     pub deadline_unix_ms: u64,
-}
-
-/// Host-only guest receipt hint (not on the public Cap'n `ExecuteRequest`).
-#[derive(Clone)]
-pub struct HostExecuteEnvelope {
-    /// Public execute payload.
-    pub request: ExecuteRequest,
-    /// Host-only finalize hint stamped by guest receipt wrap.
-    pub guest_receipt: GuestReceiptPersist,
-}
-
-impl HostExecuteEnvelope {
-    /// Builds a host-private envelope for adapter execution.
-    #[must_use]
-    pub fn new(request: ExecuteRequest, guest_receipt: GuestReceiptPersist) -> Self {
-        Self {
-            request,
-            guest_receipt,
-        }
-    }
 }
 
 /// Result of one statement in [`ExecuteReply`].
@@ -288,8 +247,8 @@ impl ExecuteReply {
 
 /// Semantic SQL-contract advertisement (`DatabaseSession.capabilities`).
 ///
-/// Bootstrap metadata (`sql_family`, `diagnostic_engine`, SeaORM `dialect`) lives
-/// on JSON [`DbConnectResult`] only — not on this typed capability plane.
+/// Bootstrap metadata (`sql_family`, `diagnostic_engine`, SeaORM `dialect`) is
+/// negotiated separately via [`DbBootstrap`] — not on this typed capability plane.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbCapabilities {
@@ -330,7 +289,8 @@ pub struct DbCapabilities {
 }
 
 impl DbCapabilities {
-    /// Typed advertisement from a JSON connect result.
+    /// Host-internal bridge from legacy connect fixtures and tests.
+    #[doc(hidden)]
     #[must_use]
     pub fn from_connect(caps: &DbConnectResult) -> Self {
         Self {
@@ -375,17 +335,85 @@ impl DbCapabilities {
         if !self.cancellation {
             return Some("database guest does not advertise cancellation".into());
         }
-        let connect = self.to_connect();
-        if !connect.meets_host_minimums() {
-            return Some(connect.capability_failure_reason());
+        if !self.atomic_batch {
+            return Some("database guest does not advertise atomicBatch".into());
+        }
+        if !self.returning {
+            return Some(
+                "database guest does not advertise returning (host plans require RETURNING)".into(),
+            );
+        }
+        if self.max_binds < HOST_MIN_BINDS {
+            return Some(format!(
+                "database guest maxBinds {} is below host minimum {HOST_MIN_BINDS}",
+                self.max_binds
+            ));
+        }
+        if self.max_statements < HOST_MIN_STATEMENTS {
+            return Some(format!(
+                "database guest maxStatements {} is below host minimum {HOST_MIN_STATEMENTS}",
+                self.max_statements
+            ));
+        }
+        if self.max_result_rows < HOST_MIN_RESULT_ROWS {
+            return Some(format!(
+                "database guest maxResultRows {} is below host minimum {HOST_MIN_RESULT_ROWS}",
+                self.max_result_rows
+            ));
+        }
+        if self.max_payload_bytes < HOST_MIN_PAYLOAD_BYTES
+            || self.max_payload_bytes > MAX_SCALAR_BYTES
+        {
+            return Some(format!(
+                "database guest maxPayloadBytes {} must be between {HOST_MIN_PAYLOAD_BYTES} and {MAX_SCALAR_BYTES}",
+                self.max_payload_bytes
+            ));
+        }
+        if self.max_result_bytes < HOST_MIN_RESULT_BYTES {
+            return Some(format!(
+                "database guest maxResultBytes {} is below host minimum {HOST_MIN_RESULT_BYTES}",
+                self.max_result_bytes
+            ));
+        }
+        if self.max_cell_bytes < HOST_MIN_CELL_BYTES {
+            return Some(format!(
+                "database guest maxCellBytes {} is below host minimum {HOST_MIN_CELL_BYTES}",
+                self.max_cell_bytes
+            ));
+        }
+        if self.max_request_bytes < HOST_MIN_RESULT_BYTES
+            || self.max_request_bytes > MAX_SCALAR_BYTES
+        {
+            return Some(format!(
+                "database guest maxRequestBytes {} must be between {HOST_MIN_RESULT_BYTES} and {MAX_SCALAR_BYTES}",
+                self.max_request_bytes
+            ));
+        }
+        if self.max_atomic_result_bytes < HOST_MIN_RESULT_BYTES
+            || self.max_atomic_result_bytes > MAX_SCALAR_BYTES
+        {
+            return Some(format!(
+                "database guest maxAtomicResultBytes {} must be between {HOST_MIN_RESULT_BYTES} and {MAX_SCALAR_BYTES}",
+                self.max_atomic_result_bytes
+            ));
+        }
+        if self.max_result_bytes > self.max_atomic_result_bytes {
+            return Some(format!(
+                "database guest maxResultBytes {} exceeds maxAtomicResultBytes {}",
+                self.max_result_bytes, self.max_atomic_result_bytes
+            ));
+        }
+        if self.sql_contract_version < SQL_CONTRACT_VERSION {
+            return Some(format!(
+                "database guest sqlContractVersion {} is below host minimum {SQL_CONTRACT_VERSION}",
+                self.sql_contract_version
+            ));
         }
         None
     }
 
-    /// JSON connect result with semantic flags and limits only.
-    ///
-    /// Bootstrap metadata (`dialect`, `sql_family`) is left empty; the host
-    /// connect path merges it from JSON `dbConnect` / plugin bootstrap rules.
+    /// Host-internal SeaORM proxy connect snapshot (bootstrap metadata empty).
+    #[doc(hidden)]
     #[must_use]
     pub fn to_connect(&self) -> DbConnectResult {
         DbConnectResult {
@@ -408,6 +436,24 @@ impl DbCapabilities {
             atomic_schema_batch: self.atomic_schema_batch,
             timing: self.timing,
         }
+    }
+
+    /// First-party SQLite capability advertisement.
+    #[must_use]
+    pub fn advertised_sqlite() -> Self {
+        Self::from_connect(&DbConnectResult::sqlite())
+    }
+
+    /// First-party Cloudflare D1 capability advertisement.
+    #[must_use]
+    pub fn advertised_d1() -> Self {
+        Self::from_connect(&DbConnectResult::d1())
+    }
+
+    /// First-party PostgreSQL capability advertisement.
+    #[must_use]
+    pub fn advertised_postgres() -> Self {
+        Self::from_connect(&DbConnectResult::postgres())
     }
 }
 
@@ -670,9 +716,6 @@ mod tests {
             let back = decode_execute_request_bytes(&bytes).unwrap();
             assert_eq!(back.statements[0].kind, kind);
         }
-        // Legacy JSON `"query"` deserializes as Returning (host-compat only).
-        let kind: DbPlanStatementKind = serde_json::from_str("\"query\"").unwrap();
-        assert_eq!(kind, DbPlanStatementKind::Returning);
         assert_eq!(
             serde_json::to_string(&DbPlanStatementKind::Returning).unwrap(),
             "\"returning\""
