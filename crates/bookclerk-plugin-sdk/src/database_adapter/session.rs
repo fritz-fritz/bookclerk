@@ -19,6 +19,7 @@ use super::sql::{
 };
 use crate::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use bookclerk_db_exec::{DbAtomicRequest, DbPlanExecResult};
+use bookclerk_plugin_abi::host_envelope::HostExecuteEnvelope;
 use bookclerk_plugin_abi::DbConnectResult;
 use bookclerk_plugin_abi::{DbCapabilities, ExecuteReply, ExecuteRequest};
 use futures::TryStreamExt;
@@ -308,7 +309,7 @@ pub async fn guest_bootstrap(
 ///
 /// Returns when no connection is open or the engine rejects the work.
 pub async fn guest_execute_atomic(
-    envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
+    envelope: HostExecuteEnvelope,
 ) -> std::result::Result<ExecuteReply, crate::PluginError> {
     let gate = txn_gate();
     let _gate = gate.lock().await;

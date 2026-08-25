@@ -35,9 +35,10 @@ use super::plugin_v2_capnp::{
 };
 use super::plugin_v2_host_capnp::host_adapter_database_session as host_adapter_database_session_capnp;
 use super::roles::{
-    AdapterDatabaseSession, ByteRange, Cancellation, ContentSource, ContentSourceContext, Database,
-    DatabaseContext, Destination, GuestDatabase, Integration, IntegrationContext, JobHandler,
-    JobHandlerContext, NeverCancel, PluginRoot, ProgressSink, ReadResult, Source,
+    AdapterDatabaseSession, AdapterSessionOpen, ByteRange, Cancellation, ContentSource,
+    ContentSourceContext, Database, DatabaseContext, Destination, GuestDatabase, Integration,
+    IntegrationContext, JobHandler, JobHandlerContext, NeverCancel, PluginRoot, ProgressSink,
+    ReadResult, Source,
 };
 use super::types::{
     CopyResult, DestinationContext, DomainEvent, EventResult, HealthOk, JobCheckpoint,
@@ -53,6 +54,16 @@ pub(super) fn from_capnp(err: impl std::fmt::Display) -> PluginError {
 
 pub(super) fn text_of(r: capnp::text::Reader<'_>) -> String {
     r.to_string().unwrap_or_default()
+}
+
+pub(super) fn read_extensible_config(
+    r: super::plugin_v2_capnp::extensible_config::Reader<'_>,
+) -> crate::v2::ExtensibleConfig {
+    crate::v2::ExtensibleConfig {
+        schema_version: r.get_schema_version(),
+        media_type: r.get_media_type().ok().map(text_of).unwrap_or_default(),
+        payload: r.get_payload().ok().map(|d| d.to_vec()).unwrap_or_default(),
+    }
 }
 
 pub(super) fn write_error(mut b: plugin_error::Builder<'_>, err: &PluginError) {
@@ -1413,6 +1424,7 @@ impl bookclerk_plugin::Server for PluginServer {
         let c = params.get()?.get_context()?;
         let ctx = DatabaseContext {
             json: c.get_json().ok().map(text_of).unwrap_or_default(),
+            config: read_extensible_config(c.get_config()?),
         };
         let mut result = results.get().init_result();
         match self.inner.database(ctx).await {
@@ -1980,17 +1992,11 @@ impl database_capnp::Server for DatabaseServer {
     ) -> capnp::Result<()> {
         let mut result = results.get().init_result();
         match self.inner.open_session().await {
-            Ok(session) => {
-                let host = self
-                    .inner
-                    .host_adapter_session()
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(Arc::from);
+            Ok(open) => {
+                let host = open.host.map(Arc::from);
                 let client: adapter_database_session_capnp::Client =
                     capnp_rpc::new_client(AdapterDatabaseSessionServer {
-                        inner: Arc::from(session),
+                        inner: Arc::from(open.session),
                         host,
                     });
                 result.set_ok(client);
@@ -3077,7 +3083,7 @@ impl DatabaseClient {
 
 #[async_trait::async_trait(?Send)]
 impl Database for DatabaseClient {
-    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>> {
+    async fn open_session(&self) -> Result<AdapterSessionOpen> {
         let req = self.client.open_session_request();
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
@@ -3086,9 +3092,12 @@ impl Database for DatabaseClient {
             .get_result()
             .map_err(from_capnp)?;
         match result.which().map_err(from_capnp)? {
-            adapter_session_reply::Ok(sess) => Ok(Box::new(AdapterDatabaseSessionClient {
-                client: sess.map_err(from_capnp)?,
-            })),
+            adapter_session_reply::Ok(sess) => Ok(AdapterSessionOpen {
+                session: Box::new(AdapterDatabaseSessionClient {
+                    client: sess.map_err(from_capnp)?,
+                }),
+                host: None,
+            }),
             adapter_session_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
         }
     }

@@ -136,7 +136,7 @@ enum Work {
         reply: oneshot::Sender<Result<Vec<OidcClientTemplate>>>,
     },
     DbOpen {
-        ctx_json: String,
+        ctx: bookclerk_plugin_sdk::v2::DatabaseContext,
         reply: oneshot::Sender<Result<()>>,
     },
     DbBegin {
@@ -701,12 +701,8 @@ impl V2PluginSession {
     /// # Errors
     ///
     /// Returns a plugin error when `database` / `openSession` fails.
-    pub async fn db_open(&self, ctx_json: impl Into<String>) -> Result<()> {
-        self.call(|reply| Work::DbOpen {
-            ctx_json: ctx_json.into(),
-            reply,
-        })
-        .await
+    pub async fn db_open(&self, ctx: bookclerk_plugin_sdk::v2::DatabaseContext) -> Result<()> {
+        self.call(|reply| Work::DbOpen { ctx, reply }).await
     }
 
     /// Typed `AdapterDatabaseSession.capabilities`.
@@ -1144,14 +1140,9 @@ fn vat_thread(
                         Work::OidcClients { reply } => {
                             let _ = reply.send(client.oidc_clients().await.map_err(map_abi));
                         }
-                        Work::DbOpen { ctx_json, reply } => {
+                        Work::DbOpen { ctx, reply } => {
                             let out = async {
-                                let db = client
-                                    .database(bookclerk_plugin_sdk::v2::DatabaseContext {
-                                        json: ctx_json,
-                                    })
-                                    .await
-                                    .map_err(map_abi)?;
+                                let db = client.database(ctx).await.map_err(map_abi)?;
                                 let handle = db.open_session_handle().await.map_err(map_abi)?;
                                 db_session = Some(handle.session);
                                 db_host_session = Some(handle.host);

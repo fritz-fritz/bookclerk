@@ -2,17 +2,10 @@
 //!
 //! Guests such as `sqlite` / `d1` / `postgres` implement the SeaORM proxy
 //! boundary. The host never links SQL engines; it opens the library through
-//! these RPC methods after [`crate::methods::db_connect`].
+//! v2 `DatabaseContext` + typed adapter sessions after Cap'n Proto spawn.
 //!
-//! Public JSON methods in `METHOD_NAMES` / `abi.json`:
-//!
-//! | Method | Params | Result |
-//! | --- | --- | --- |
-//! | [`crate::methods::db_connect`] | [`DbConnectParams`] | [`DbConnectResult`] |
-//! | [`crate::methods::db_ping`] | (none) | success / [`crate::PluginError`] |
-//!
-//! Product v2 guests use Cap'n Proto `capabilities` / `execute` / `close` /
-//! `bootstrap` for all SQL work.
+//! [`DbConnectParams`] / [`DbConnectResult`] remain host-internal serde types
+//! for connect-param building and SeaORM proxy bootstrap — not public JSON RPC.
 //!
 //! Wire fields use camelCase. The `backend` tag on [`DbConnectParams`] is
 //! lowercase (`sqlite`, `d1`, `postgres`).
@@ -460,4 +453,54 @@ fn dialect_matches_sql_family(dialect: &str, sql_family: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Media type for [`crate::v2::DatabaseContext::config`] connect payloads.
+pub const DATABASE_CONTEXT_MEDIA_TYPE: &str = "application/vnd.bookclerk.db-connect+json";
+
+/// Schema version for [`crate::v2::DatabaseContext::config`] connect payloads.
+pub const DATABASE_CONTEXT_SCHEMA_VERSION: u32 = 1;
+
+/// Builds a v2 [`crate::v2::DatabaseContext`] from host-internal connect params.
+///
+/// # Errors
+///
+/// Returns when JSON serialization fails.
+pub fn database_context_from_params(
+    params: &DbConnectParams,
+) -> crate::Result<crate::v2::DatabaseContext> {
+    let payload = serde_json::to_vec(params).map_err(|err| {
+        crate::PluginError::internal(format!("database context encode failed: {err}"))
+    })?;
+    Ok(crate::v2::DatabaseContext {
+        json: String::new(),
+        config: crate::v2::ExtensibleConfig {
+            schema_version: DATABASE_CONTEXT_SCHEMA_VERSION,
+            media_type: DATABASE_CONTEXT_MEDIA_TYPE.into(),
+            payload,
+        },
+    })
+}
+
+/// Decodes host-internal connect params from a v2 database factory context.
+///
+/// # Errors
+///
+/// Returns when the context omits connect params or JSON is invalid.
+pub fn connect_params_from_context(
+    ctx: &crate::v2::DatabaseContext,
+) -> crate::Result<DbConnectParams> {
+    if !ctx.config.payload.is_empty() {
+        return serde_json::from_slice(&ctx.config.payload).map_err(|err| {
+            crate::PluginError::invalid_params(format!("database context decode failed: {err}"))
+        });
+    }
+    if ctx.json.trim().is_empty() {
+        return Err(crate::PluginError::invalid_params(
+            "database context is missing connect params",
+        ));
+    }
+    serde_json::from_str(&ctx.json).map_err(|err| {
+        crate::PluginError::invalid_params(format!("database context decode failed: {err}"))
+    })
 }

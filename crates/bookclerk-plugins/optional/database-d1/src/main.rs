@@ -6,11 +6,12 @@ use async_trait::async_trait;
 use bookclerk_plugin_sdk::database_adapter::set_connection;
 use bookclerk_plugin_sdk::host_db::GuestReceiptPersist;
 use bookclerk_plugin_sdk::v2::{
-    AdapterDatabaseSession, Database, DatabaseContext, HostAdapterDatabaseSession, PluginDescribe,
-    PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    AdapterDatabaseSession, AdapterSessionOpen, Database, DatabaseContext,
+    HostAdapterDatabaseSession, PluginDescribe, PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS,
+    PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    serve, DbBootstrap, DbCapabilities, DbConnectParams, DbConnectResult, ExecuteReply,
+    connect_params_from_context, serve, DbBootstrap, DbCapabilities, DbConnectParams, ExecuteReply,
     ExecuteRequest, HandshakeResult, PluginError,
 };
 
@@ -20,26 +21,14 @@ fn describe_metadata() -> Result<String, PluginError> {
         id: "d1".into(),
         kind: "database".into(),
         display_name: Some("Cloudflare D1".into()),
-        capabilities: vec![
-            "health".into(),
-            "diagnose".into(),
-            "dbConnect".into(),
-            "dbPing".into(),
-        ],
+        capabilities: vec!["health".into(), "diagnose".into()],
         sort_key: Some(5),
         ..HandshakeResult::default()
     })
 }
 
 async fn connect_from_context(ctx: &DatabaseContext) -> Result<(), PluginError> {
-    let params: DbConnectParams = if ctx.json.trim().is_empty() {
-        return Err(PluginError::invalid_params(
-            "d1 database context is missing connect params",
-        ));
-    } else {
-        serde_json::from_str(&ctx.json)
-            .map_err(|err| PluginError::invalid_params(err.to_string()))?
-    };
+    let params = connect_params_from_context(ctx)?;
     let DbConnectParams::D1 {
         plugin_data_dir: _,
         account_id,
@@ -88,14 +77,11 @@ struct D1Database;
 
 #[async_trait(?Send)]
 impl Database for D1Database {
-    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>, PluginError> {
-        Ok(Box::new(D1Session))
-    }
-
-    async fn host_adapter_session(
-        &self,
-    ) -> Result<Option<Box<dyn HostAdapterDatabaseSession>>, PluginError> {
-        Ok(Some(Box::new(D1HostSession)))
+    async fn open_session(&self) -> Result<AdapterSessionOpen, PluginError> {
+        Ok(AdapterSessionOpen {
+            session: Box::new(D1Session),
+            host: Some(Box::new(D1HostSession)),
+        })
     }
 }
 
@@ -129,7 +115,7 @@ struct D1Session;
 #[async_trait(?Send)]
 impl AdapterDatabaseSession for D1Session {
     async fn capabilities(&self) -> Result<DbCapabilities, PluginError> {
-        Ok(DbCapabilities::from_connect(&DbConnectResult::d1()))
+        Ok(DbCapabilities::advertised_d1())
     }
 
     async fn bootstrap(&self) -> Result<DbBootstrap, PluginError> {

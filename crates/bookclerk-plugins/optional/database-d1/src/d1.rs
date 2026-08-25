@@ -1274,7 +1274,7 @@ mod tests {
             .await
             .unwrap();
         bookclerk_plugin_sdk::database_adapter::set_connection(db).await;
-        let page = bookclerk_plugin_sdk::database_adapter::guest_query_page(
+        let page = bookclerk_plugin_sdk::database_adapter::session::guest_query_page(
             bookclerk_plugin_sdk::database_adapter::guest_sql("SELECT id FROM t"),
             "",
             10,

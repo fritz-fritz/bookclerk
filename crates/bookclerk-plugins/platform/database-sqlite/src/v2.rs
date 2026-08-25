@@ -12,11 +12,12 @@ use bookclerk_plugin_sdk::database_adapter::{
 };
 use bookclerk_plugin_sdk::host_db::{GuestReceiptPersist, HostExecuteEnvelope};
 use bookclerk_plugin_sdk::v2::{
-    AdapterDatabaseSession, Database, DatabaseContext, HostAdapterDatabaseSession, PluginDescribe,
+    AdapterDatabaseSession, AdapterSessionOpen, Database, DatabaseContext, PluginDescribe,
     PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, PluginError,
+    connect_params_from_context, DbBootstrap, DbCapabilities, DbConnectParams, ExecuteReply,
+    ExecuteRequest, PluginError,
 };
 
 use crate::ID;
@@ -52,6 +53,14 @@ async fn connect_from_context(ctx: &DatabaseContext) -> Result<()> {
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| {
+            connect_params_from_context(ctx).ok().and_then(|params| {
+                let DbConnectParams::Sqlite { sqlite_path, .. } = params else {
+                    return None;
+                };
+                sqlite_path
+            })
+        })
+        .or_else(|| {
             serde_json::from_str::<serde_json::Value>(&ctx.json)
                 .ok()
                 .and_then(|v| {
@@ -77,12 +86,11 @@ struct SqliteDatabase;
 
 #[async_trait(?Send)]
 impl Database for SqliteDatabase {
-    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>> {
-        Ok(Box::new(SqliteSession))
-    }
-
-    async fn host_adapter_session(&self) -> Result<Option<Box<dyn HostAdapterDatabaseSession>>> {
-        Ok(Some(Box::new(host_session())))
+    async fn open_session(&self) -> Result<AdapterSessionOpen> {
+        Ok(AdapterSessionOpen {
+            session: Box::new(SqliteSession),
+            host: Some(Box::new(host_session())),
+        })
     }
 }
 

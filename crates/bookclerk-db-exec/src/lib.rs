@@ -47,6 +47,7 @@ pub fn take_positional_result_columns() -> Option<Vec<DbColumn>> {
 }
 
 pub use b64::{b64_string_to_bytes, bytes_to_b64_string};
+pub use bookclerk_plugin_abi::host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
 pub use bookclerk_plugin_abi::DbPlanStatementKind;
 pub use exec::{
     cap_query_sql, encoded_proxy_row_len, execute_statements_on, execute_statements_on_session,

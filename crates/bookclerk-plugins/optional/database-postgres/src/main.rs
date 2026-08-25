@@ -8,12 +8,12 @@ use bookclerk_plugin_sdk::database_adapter::{
 };
 use bookclerk_plugin_sdk::host_db::{GuestReceiptPersist, HostExecuteEnvelope};
 use bookclerk_plugin_sdk::v2::{
-    AdapterDatabaseSession, Database, DatabaseContext, HostAdapterDatabaseSession, PluginDescribe,
+    AdapterDatabaseSession, AdapterSessionOpen, Database, DatabaseContext, PluginDescribe,
     PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
-use bookclerk_plugin_sdk::DbConnectParams;
 use bookclerk_plugin_sdk::{
-    serve, DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, HandshakeResult, PluginError,
+    connect_params_from_context, serve, DbBootstrap, DbCapabilities, DbConnectParams, ExecuteReply,
+    ExecuteRequest, HandshakeResult, PluginError,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -22,26 +22,14 @@ fn describe_metadata() -> Result<String, PluginError> {
         id: "postgres".into(),
         kind: "database".into(),
         display_name: Some("PostgreSQL".into()),
-        capabilities: vec![
-            "health".into(),
-            "diagnose".into(),
-            "dbConnect".into(),
-            "dbPing".into(),
-        ],
+        capabilities: vec!["health".into(), "diagnose".into()],
         sort_key: Some(5),
         ..HandshakeResult::default()
     })
 }
 
 async fn connect_from_context(ctx: &DatabaseContext) -> Result<(), PluginError> {
-    let params: DbConnectParams = if ctx.json.trim().is_empty() {
-        return Err(PluginError::invalid_params(
-            "postgres database context is missing connect params",
-        ));
-    } else {
-        serde_json::from_str(&ctx.json)
-            .map_err(|err| PluginError::invalid_params(err.to_string()))?
-    };
+    let params = connect_params_from_context(ctx)?;
     let DbConnectParams::Postgres {
         plugin_data_dir: _,
         url,
@@ -87,14 +75,11 @@ struct PostgresDatabase;
 
 #[async_trait(?Send)]
 impl Database for PostgresDatabase {
-    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>, PluginError> {
-        Ok(Box::new(PostgresSession))
-    }
-
-    async fn host_adapter_session(
-        &self,
-    ) -> Result<Option<Box<dyn HostAdapterDatabaseSession>>, PluginError> {
-        Ok(Some(Box::new(host_session())))
+    async fn open_session(&self) -> Result<AdapterSessionOpen, PluginError> {
+        Ok(AdapterSessionOpen {
+            session: Box::new(PostgresSession),
+            host: Some(Box::new(host_session())),
+        })
     }
 }
 

@@ -105,7 +105,8 @@ impl ExternalDatabase {
             &self.plugin_data_dir,
             &self.session,
         )?;
-        let ctx = serde_json::to_string(&params).map_err(|err| DbErr::Custom(err.to_string()))?;
+        let ctx = bookclerk_plugin_sdk::database_context_from_params(&params)
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
         self.session.db_open(ctx).await.map_err(map_rpc_err)?;
 
         let caps = self.session.db_capabilities().await.map_err(map_rpc_err)?;

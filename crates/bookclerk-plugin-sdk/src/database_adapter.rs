@@ -14,34 +14,33 @@
 //!
 //! | Need | Entry point |
 //! | --- | --- |
-//! | Per-process SeaORM session (ping/query/execute/atomic) | [`set_connection`], [`guest_execute_atomic`], … |
 //! | Engine error → structured [`crate::PluginError`] | [`plugin_error_from_engine`], [`plugin_error_from_db_err`] |
 //! | Host-provided SQL scripts (no Bookclerk migrations) | [`execute_sql_scripts`] |
 //! | Typed SQL `NULL` for proxy row decode | [`typed_null`] |
 //!
-//! Engine-specific connect/proxy code stays in your guest crate; this module
-//! owns the shared session worker and generic SQL-string execution. Hosts
-//! select schema versions and author execution plans.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use bookclerk_plugin_sdk::database_adapter::{
-//!     guest_capabilities, guest_execute_atomic, plugin_error_from_engine, set_connection,
-//! };
-//! ```
+//! First-party database guests enable `host-db-session` for SeaORM session
+//! workers (`guest_execute_atomic`, `set_connection`, …). Those helpers are not
+//! part of the stable third-party author API.
 
 pub mod errors;
+#[cfg(feature = "host-db-session")]
 pub mod host_session;
 pub mod migrate;
+#[cfg(feature = "host-db-session")]
 pub mod session;
-mod sql;
+#[cfg(feature = "host-db-session")]
+pub mod sql;
+
+#[cfg(test)]
+mod public_surface;
 
 pub use errors::{plugin_error_from_db_err, plugin_error_from_engine};
+#[cfg(feature = "host-db-session")]
 pub use host_session::{host_session, GuestHostAdapterSession};
 pub use migrate::{execute_sql_scripts, split_sql_statements, typed_null};
+#[cfg(feature = "host-db-session")]
 pub use session::{
-    guest_atomic, guest_bootstrap, guest_capabilities, guest_execute, guest_execute_atomic,
-    guest_ping, guest_query, guest_query_page, row_to_dto, set_connection,
+    guest_bootstrap, guest_capabilities, guest_execute_atomic, guest_ping, set_connection,
 };
+#[cfg(feature = "host-db-session")]
 pub use sql::{guest_sql, GuestStatement};

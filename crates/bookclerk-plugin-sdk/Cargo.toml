@@ -20,6 +20,8 @@ db = [
     "dep:futures",
     "dep:uuid",
 ]
+# First-party database guest SeaORM session worker (not a public author API).
+host-db-session = ["db"]
 # Author CLI (`bookclerk-plugin`) including workerd `smoke`. Guest plugins
 # should leave this off so they do not pull `bookclerk-workerd` / download deps.
 tools = ["dep:bookclerk-workerd"]

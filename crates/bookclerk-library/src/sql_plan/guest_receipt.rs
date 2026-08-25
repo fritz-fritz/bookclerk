@@ -4,10 +4,10 @@
 //! `executeAtomic` must use the same envelope so a D1 (or any) adapter cannot
 //! apply guest mutations twice after an ambiguous commit.
 
-use bookclerk_db_exec::GUEST_RECEIPT_WRAP_PREFIX;
+use bookclerk_db_exec::{GuestReceiptPersist, HostExecuteEnvelope, GUEST_RECEIPT_WRAP_PREFIX};
 use bookclerk_plugin_abi::{
-    DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, ExecuteRequest,
-    GuestReceiptPersist, HostExecuteEnvelope, PluginError, TypedDbStatement,
+    DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, ExecuteRequest, PluginError,
+    TypedDbStatement,
 };
 use chrono::{Duration, Utc};
 

@@ -255,16 +255,16 @@ pub trait Integration {
 #[async_trait::async_trait(?Send)]
 pub trait Database {
     /// Opens an invocation-scoped adapter session.
-    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>>;
+    async fn open_session(&self) -> Result<AdapterSessionOpen>;
+}
 
-    /// Host-only interactive transaction support (first-party adapters).
-    ///
-    /// Third-party database plugins should leave the default (`None`).
-    async fn host_adapter_session(
-        &self,
-    ) -> Result<Option<Box<dyn super::host_roles::HostAdapterDatabaseSession>>> {
-        Ok(None)
-    }
+/// Public adapter session plus optional host-private interactive transaction view.
+pub struct AdapterSessionOpen {
+    /// Typed `capabilities` / `bootstrap` / `execute` / `close`.
+    pub session: Box<dyn AdapterDatabaseSession>,
+    /// Host-only interactive transaction support (first-party adapters only).
+    #[doc(hidden)]
+    pub host: Option<Box<dyn super::host_roles::HostAdapterDatabaseSession>>,
 }
 
 /// Host ↔ database adapter session (`capabilities` + typed `execute`).
@@ -319,6 +319,8 @@ pub struct IntegrationContext {
 pub struct DatabaseContext {
     /// Opaque JSON knobs (migration bridge).
     pub json: String,
+    /// Structured connect/config payload (preferred over [`Self::json`]).
+    pub config: crate::v2::ExtensibleConfig,
 }
 
 /// Root `BookclerkPlugin` capability (`describe` / role factories / shutdown).

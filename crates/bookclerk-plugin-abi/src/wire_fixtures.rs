@@ -187,8 +187,6 @@ mod tests {
             "scan.result.json",
             "fetchTitle.request.json",
             "put.s3.request.json",
-            "dbConnect.sqlite.json",
-            "dbConnect.guest.json",
         ] {
             assert!(
                 names.contains(required),
