@@ -64,14 +64,14 @@ pub mod v2;
 pub mod workerd;
 
 #[cfg(feature = "db")]
-#[doc(hidden)]
-pub use bookclerk_plugin_abi::db::ExecResultDto;
-#[cfg(feature = "db")]
 pub use bookclerk_plugin_abi::db::{DbConnectParams, DbConnectResult};
+#[cfg(feature = "db")]
+#[doc(hidden)]
+pub use bookclerk_plugin_abi::db::{ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto};
 pub use callback_tunnel::{TunnelGuest, TunnelHost, TunnelStream};
 #[cfg(feature = "db")]
 #[doc(hidden)]
-pub use db::{exec_result_from_dto, proxy_rows_from_typed};
+pub use db::{exec_result_from_dto, proxy_rows_from_dto, proxy_rows_from_typed};
 pub use db_binding::{
     execute_reply_to_d1_results, statement_result_to_d1_result, D1ExecResult, D1Meta, D1Result,
     DatabaseBinding, DatabaseBindingOptions, PreparedStatement, RetryToken,
