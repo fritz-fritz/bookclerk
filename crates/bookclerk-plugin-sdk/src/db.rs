@@ -32,6 +32,7 @@ pub(crate) use bookclerk_plugin_abi::db::{
 ///
 /// DTO safe to serialize as camelCase Workers RPC params.
 #[must_use]
+#[doc(hidden)]
 #[allow(dead_code)] // host-private legacy JSON wire helper
 pub fn statement_to_dto(statement: &Statement) -> StatementDto {
     StatementDto {
@@ -47,7 +48,7 @@ pub fn statement_to_dto(statement: &Statement) -> StatementDto {
 /// Rebuilds a SeaORM [`Statement`] from a wire [`StatementDto`].
 ///
 /// Empty `dto.values` yields [`Statement::from_string`]; otherwise values are
-/// decoded with [`json_to_sea_value`] (column hint empty for positional binds).
+/// decoded with `json_to_sea_value` (column hint empty for positional binds).
 ///
 /// # Arguments
 ///
@@ -58,6 +59,7 @@ pub fn statement_to_dto(statement: &Statement) -> StatementDto {
 ///
 /// Executable SeaORM statement for the given backend.
 #[must_use]
+#[doc(hidden)]
 pub fn statement_from_dto(dto: StatementDto, backend: sea_orm::DatabaseBackend) -> Statement {
     if dto.values.is_empty() {
         Statement::from_string(backend, dto.sql)
@@ -73,7 +75,7 @@ pub fn statement_from_dto(dto: StatementDto, backend: sea_orm::DatabaseBackend) 
 
 /// Converts wire [`ProxyRowDto`] rows into SeaORM [`ProxyRow`] values.
 ///
-/// Column names from the DTO are passed as type hints to [`json_to_sea_value`]
+/// Column names from the DTO are passed as type hints to `json_to_sea_value`
 /// so binary / integer / real nulls decode correctly for known Bookclerk
 /// columns.
 ///
@@ -85,6 +87,7 @@ pub fn statement_from_dto(dto: StatementDto, backend: sea_orm::DatabaseBackend) 
 ///
 /// SeaORM proxy rows ready for entity hydration.
 #[must_use]
+#[doc(hidden)]
 #[allow(dead_code)] // host-private legacy JSON wire helper
 pub fn proxy_rows_from_dto(rows: Vec<ProxyRowDto>) -> Vec<ProxyRow> {
     rows.into_iter()
@@ -111,6 +114,7 @@ pub fn proxy_rows_from_dto(rows: Vec<ProxyRowDto>) -> Vec<ProxyRow> {
 ///
 /// DTOs safe to return from `dbQuery`.
 #[must_use]
+#[doc(hidden)]
 pub fn proxy_rows_to_dto(rows: Vec<ProxyRow>) -> Vec<ProxyRowDto> {
     rows.into_iter()
         .map(|row| ProxyRowDto {
@@ -362,6 +366,7 @@ pub fn proxy_rows_from_typed(
 ///
 /// SeaORM value; unknown shapes stringify as [`Value::String`].
 #[must_use]
+#[doc(hidden)]
 pub fn json_to_sea_value(v: &JsonValue, column: &str) -> Value {
     if let Some(value) = json_sea_null(v) {
         return value;
