@@ -399,26 +399,6 @@ export abstract class BookclerkPlugin extends WorkerEntrypoint<BookclerkEnv> {
   async touchFile(_params: unknown): Promise<void> {
     throw unsupported("touchFile");
   }
-
-  /**
-   * Opens a database session for a database-kind guest.
-   *
-   * @param _params - Connection / DSN options.
-   * @returns Connection handle or session descriptor.
-   * @throws {Error} With `code: "unsupported"` unless overridden.
-   */
-  async dbConnect(_params: unknown): Promise<unknown> {
-    throw unsupported("dbConnect");
-  }
-
-  /**
-   * Pings an open database session.
-   *
-   * @throws {Error} With `code: "unsupported"` unless overridden.
-   */
-  async dbPing(): Promise<void> {
-    throw unsupported("dbPing");
-  }
 }
 
 function unsupported(method: string): Error {

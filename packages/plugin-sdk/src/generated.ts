@@ -768,8 +768,6 @@ export const METHOD_NAMES = [
   "copy",
   "delete",
   "touchFile",
-  "dbConnect",
-  "dbPing",
 ] as const;
 
 /**

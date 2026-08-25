@@ -19,7 +19,6 @@ const REQUIRED_WIRE_FIXTURES = [
   "scan.result.json",
   "fetchTitle.request.json",
   "put.s3.request.json",
-  "dbConnect.sqlite.json",
 ];
 
 function collectSnakeKeys(value, path = "$") {

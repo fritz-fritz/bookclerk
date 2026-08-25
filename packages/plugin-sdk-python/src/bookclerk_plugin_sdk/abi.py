@@ -51,8 +51,6 @@ METHOD_NAMES: tuple[str, ...] = (
     "copy",
     "delete",
     "touchFile",
-    "dbConnect",
-    "dbPing",
 )
 """Canonical Workers RPC method names exposed on the guest surface (camelCase wire)."""
 

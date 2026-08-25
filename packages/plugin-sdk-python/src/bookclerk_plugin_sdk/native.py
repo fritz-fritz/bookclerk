@@ -912,61 +912,6 @@ class BookclerkPlugin:
         """
         return self.touch_file(params)
 
-    def db_connect(self, _params: Mapping[str, Any]) -> Any:
-        """Open a database session (snake_case form).
-
-        Args:
-            _params: Connection parameters from the host.
-
-        Returns:
-            Plugin-defined connection handle / status.
-
-        Raises:
-            RuntimeError: With ``code="unsupported"`` when not overridden.
-        """
-        err = RuntimeError("dbConnect not implemented")
-        err.code = "unsupported"  # type: ignore[attr-defined]
-        raise err
-
-    def dbConnect(self, params: Mapping[str, Any]) -> Any:  # noqa: N802
-        """Open a database session (Workers RPC name).
-
-        Args:
-            params: Connection parameters from the host.
-
-        Returns:
-            Result of :meth:`db_connect`.
-
-        Raises:
-            RuntimeError: If :meth:`db_connect` is not overridden.
-        """
-        return self.db_connect(params)
-
-    def db_ping(self) -> Any:
-        """Ping the database backend (snake_case form).
-
-        Returns:
-            Plugin-defined ping result.
-
-        Raises:
-            RuntimeError: With ``code="unsupported"`` when not overridden.
-        """
-        err = RuntimeError("dbPing not implemented")
-        err.code = "unsupported"  # type: ignore[attr-defined]
-        raise err
-
-    def dbPing(self) -> Any:  # noqa: N802
-        """Ping the database backend (Workers RPC name).
-
-        Returns:
-            Result of :meth:`db_ping`.
-
-        Raises:
-            RuntimeError: If :meth:`db_ping` is not overridden.
-        """
-        return self.db_ping()
-
-
 
 class BookclerkPluginGuest:
     """Native guest runner — hosts a BookclerkPlugin on stdin/stdout (Workers RPC).
@@ -1254,22 +1199,6 @@ def _dispatch_from_plugin(plugin: Any) -> dict[str, Callable[[Any], Any]]:
             raise err
         return fn(p or {})
 
-    def _on_db_connect(p: Any) -> Any:
-        fn = invoke("dbConnect", "db_connect")
-        if not fn:
-            err = RuntimeError("dbConnect not implemented")
-            err.code = "unsupported"  # type: ignore[attr-defined]
-            raise err
-        return fn(p or {})
-
-    def _on_db_ping(_p: Any) -> Any:
-        fn = invoke("dbPing", "db_ping")
-        if not fn:
-            err = RuntimeError("dbPing not implemented")
-            err.code = "unsupported"  # type: ignore[attr-defined]
-            raise err
-        return fn()
-
     return {
         "handshake": lambda p: hs(p or {}),
         "shutdown": on_shutdown,
@@ -1304,8 +1233,6 @@ def _dispatch_from_plugin(plugin: Any) -> dict[str, Callable[[Any], Any]]:
         "copy": _on_copy,
         "delete": _on_delete,
         "touchFile": _on_touch_file,
-        "dbConnect": _on_db_connect,
-        "dbPing": _on_db_ping,
     }
 
 

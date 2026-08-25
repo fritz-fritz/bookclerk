@@ -258,19 +258,6 @@ export type BookclerkPluginLike = {
    */
   touchFile?(params: unknown): Promise<void> | void;
   /**
-   * Opens a database session for a database-kind guest.
-   *
-   * @param params - Connection / DSN options (`backend`, paths, tokens).
-   * @returns Connection handle or session descriptor.
-   */
-  dbConnect?(params: unknown): Promise<unknown> | unknown;
-  /**
-   * Pings an open database session.
-   *
-   * @returns Resolves when the backend responds successfully.
-   */
-  dbPing?(): Promise<void> | void;
-  /**
    * Fallback dispatcher for unknown wire method names.
    *
    * Prefer declaring known methods on the guest; hosts call this only when the
@@ -640,26 +627,6 @@ export abstract class BookclerkPlugin implements BookclerkPluginLike {
    */
   async touchFile(_params: unknown): Promise<void> {
     throw unsupported("touchFile");
-  }
-
-  /**
-   * Opens a database session for a database-kind guest.
-   *
-   * @param _params - Connection / DSN options.
-   * @returns Connection handle or session descriptor.
-   * @throws {Error} With `code: "unsupported"` unless overridden.
-   */
-  async dbConnect(_params: unknown): Promise<unknown> {
-    throw unsupported("dbConnect");
-  }
-
-  /**
-   * Pings an open database session.
-   *
-   * @throws {Error} With `code: "unsupported"` unless overridden.
-   */
-  async dbPing(): Promise<void> {
-    throw unsupported("dbPing");
   }
 
   /**
