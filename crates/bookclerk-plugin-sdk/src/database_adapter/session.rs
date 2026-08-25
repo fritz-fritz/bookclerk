@@ -3,9 +3,9 @@
 //! Each RPC arrives on a new Tokio task. SQLite's in-process proxy leases an
 //! open `BEGIN` to the task that called `begin`, so routing statements through
 //! a dedicated worker task keeps that lease valid until commit/rollback.
-//! The same worker serializes Postgres connection use. D1 guests reject
-//! `dbBegin` and implement `dbAtomic` (one HTTP batch). SQLite and Postgres
-//! also implement `dbAtomic` as one native transaction plus a durable receipt.
+//! The same worker serializes Postgres connection use. D1 guests use v2 typed
+//! `execute` batches; SQLite and Postgres run named security ops via host IR
+//! envelopes and durable receipts.
 
 #![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 
@@ -13,8 +13,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
 
 use super::plugin_error_from_db_err;
-use crate::db::{
-    proxy_rows_to_dto, statement_from_dto, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
+use super::sql::{
+    guest_statement_to_seaorm, row_to_guest_row, GuestExecResult, GuestQueryResult, GuestRow,
+    GuestStatement,
 };
 use crate::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use bookclerk_db_exec::{DbAtomicRequest, DbPlanExecResult};
@@ -22,8 +23,8 @@ use bookclerk_plugin_abi::DbConnectResult;
 use bookclerk_plugin_abi::{DbCapabilities, ExecuteReply, ExecuteRequest};
 use futures::TryStreamExt;
 use sea_orm::{
-    from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    DbBackend, StreamTrait, TransactionSession, TransactionTrait,
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, StreamTrait,
+    TransactionSession, TransactionTrait,
 };
 use tokio::sync::{mpsc, oneshot, Mutex, OwnedMutexGuard};
 
@@ -45,16 +46,16 @@ enum TxnOp {
         /// Opaque txn id the host attached to this statement or finish call.
         txn_id: String,
         /// RPC statement DTO (SQL + params) from the host bridge.
-        dto: StatementDto,
+        dto: GuestStatement,
         /// Oneshot used to return query rows to the RPC task.
-        reply: oneshot::Sender<Result<QueryResultDto>>,
+        reply: oneshot::Sender<Result<GuestQueryResult>>,
     },
     /// Paged read: adapter fetches at most `limit + 1` rows.
     QueryPage {
         /// Opaque txn id the host attached to this statement or finish call.
         txn_id: String,
         /// RPC statement DTO (SQL + params) from the host bridge.
-        dto: StatementDto,
+        dto: GuestStatement,
         /// Numeric offset cursor (`""` for the first page).
         cursor: String,
         /// Page size; `0` means [`MAX_LIST_PAGE`].
@@ -67,9 +68,9 @@ enum TxnOp {
         /// Opaque txn id the host attached to this statement or finish call.
         txn_id: String,
         /// RPC statement DTO (SQL + params) from the host bridge.
-        dto: StatementDto,
+        dto: GuestStatement,
         /// Oneshot used to return last-insert id / rows-affected to the RPC task.
-        reply: oneshot::Sender<Result<ExecResultDto>>,
+        reply: oneshot::Sender<Result<GuestExecResult>>,
     },
     /// Opens a nested savepoint on the parent worker and returns a new txn id.
     BeginNested {
@@ -366,12 +367,12 @@ pub async fn guest_execute_atomic_on_txn(
 ///
 /// # Returns
 ///
-/// Query rows projected into [`QueryResultDto`].
+/// Query rows projected into [`GuestQueryResult`].
 ///
 /// # Errors
 ///
 /// Returns an error string when not connected or the engine rejects the statement.
-pub async fn guest_query(dto: StatementDto) -> Result<QueryResultDto> {
+pub async fn guest_query(dto: GuestStatement) -> Result<GuestQueryResult> {
     if let Some(txn_id) = dto.txn_id.clone() {
         let tx = route(&txn_id).await?;
         let (reply, rx) = oneshot::channel();
@@ -412,7 +413,7 @@ pub async fn guest_query(dto: StatementDto) -> Result<QueryResultDto> {
 /// Returns an error string when not connected, the cursor is invalid, the
 /// engine rejects the statement, a row exceeds the scalar budget, or the
 /// driver returns more than `limit + 1` rows.
-pub async fn guest_query_page(dto: StatementDto, cursor: &str, limit: u32) -> Result<QueryPage> {
+pub async fn guest_query_page(dto: GuestStatement, cursor: &str, limit: u32) -> Result<QueryPage> {
     if let Some(txn_id) = dto.txn_id.clone() {
         let tx = route(&txn_id).await?;
         let (reply, rx) = oneshot::channel();
@@ -450,12 +451,12 @@ pub async fn guest_query_page(dto: StatementDto, cursor: &str, limit: u32) -> Re
 ///
 /// # Returns
 ///
-/// Last-insert id and rows-affected in an [`ExecResultDto`].
+/// Last-insert id and rows-affected in an [`GuestExecResult`].
 ///
 /// # Errors
 ///
 /// Returns an error string when not connected or the engine rejects the statement.
-pub async fn guest_execute(dto: StatementDto) -> Result<ExecResultDto> {
+pub async fn guest_execute(dto: GuestStatement) -> Result<GuestExecResult> {
     if let Some(txn_id) = dto.txn_id.clone() {
         let tx = route(&txn_id).await?;
         let (reply, rx) = oneshot::channel();
@@ -736,28 +737,20 @@ async fn rollback_stack(stack: &mut Vec<(String, DatabaseTransaction)>) -> Resul
 }
 
 /// Rebuilds a SeaORM statement after adapter-side canonical SQL lowering.
-fn statement_from_dto_lowered(dto: StatementDto, backend: DbBackend) -> sea_orm::Statement {
-    let sql = bookclerk_db_exec::lower_canonical_sql(backend, &dto.sql);
-    statement_from_dto(
-        StatementDto {
-            sql,
-            values: dto.values,
-            txn_id: dto.txn_id,
-        },
-        backend,
-    )
+fn statement_lowered(stmt: GuestStatement, backend: DbBackend) -> sea_orm::Statement {
+    guest_statement_to_seaorm(stmt, backend)
 }
 
-/// Executes a read-only statement and projects rows into [`QueryResultDto`].
-async fn query_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<QueryResultDto> {
+/// Executes a read-only statement and projects rows into [`GuestQueryResult`].
+async fn query_on<C: ConnectionTrait>(conn: &C, dto: GuestStatement) -> Result<GuestQueryResult> {
     let backend = conn.get_database_backend();
-    let stmt = statement_from_dto_lowered(dto, backend);
+    let stmt = statement_lowered(dto, backend);
     let rows = conn.query_all_raw(stmt).await.map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        out.push(row_to_dto(&row));
+        out.push(row_to_guest_row(&row));
     }
-    Ok(QueryResultDto { rows: out })
+    Ok(GuestQueryResult { rows: out })
 }
 
 /// Page size for a guest query; `limit == 0` means [`MAX_LIST_PAGE`].
@@ -943,11 +936,7 @@ fn parse_query_cursor(cursor: &str) -> Result<usize> {
 }
 
 /// Accumulates one JSON-encoded row into a page, stopping at [`MAX_SCALAR_BYTES`].
-fn push_bounded_row(
-    rows: &mut Vec<ProxyRowDto>,
-    encoded: &mut usize,
-    row: ProxyRowDto,
-) -> Result<()> {
+fn push_bounded_row(rows: &mut Vec<GuestRow>, encoded: &mut usize, row: GuestRow) -> Result<()> {
     let piece = serde_json::to_string(&row).map_err(|e| e.to_string())?;
     let extra = piece.len() + usize::from(!rows.is_empty());
     if encoded.saturating_add(extra).saturating_add(1) > MAX_SCALAR_BYTES as usize {
@@ -1024,10 +1013,10 @@ fn postgres_probe_max_bytes(row: &sea_orm::QueryResult) -> Result<u64> {
 /// the protocol/decode cap.
 async fn postgres_query_page_once<C>(
     conn: &C,
-    dto: StatementDto,
+    dto: GuestStatement,
     fetch: usize,
     isolation: PostgresPageIsolation,
-) -> Result<Vec<ProxyRowDto>>
+) -> Result<Vec<GuestRow>>
 where
     C: ConnectionTrait + StreamTrait + TransactionTrait,
     <C as TransactionTrait>::Transaction: ConnectionTrait + StreamTrait + TransactionSession,
@@ -1054,9 +1043,9 @@ where
 /// CREATE TEMP → size probe → ordered stream → DROP on one connection.
 async fn postgres_run_temp_page<C>(
     conn: &C,
-    dto: StatementDto,
+    dto: GuestStatement,
     fetch: usize,
-) -> Result<Vec<ProxyRowDto>>
+) -> Result<Vec<GuestRow>>
 where
     C: ConnectionTrait + StreamTrait,
 {
@@ -1064,18 +1053,18 @@ where
     let txn_id = dto.txn_id.clone();
     let mut create = dto;
     create.sql = postgres_create_temp_page_sql(&names.table, &names.ord_col, &create.sql);
-    conn.execute_raw(statement_from_dto_lowered(create, DbBackend::Postgres))
+    conn.execute_raw(statement_lowered(create, DbBackend::Postgres))
         .await
         .map_err(|e| e.to_string())?;
 
     let fetched = async {
-        let probe = StatementDto {
+        let probe = GuestStatement {
             sql: postgres_temp_size_sql(&names.table),
             values: Vec::new(),
             txn_id: txn_id.clone(),
         };
         if let Some(row) = conn
-            .query_one_raw(statement_from_dto_lowered(probe, DbBackend::Postgres))
+            .query_one_raw(statement_lowered(probe, DbBackend::Postgres))
             .await
             .map_err(|e| e.to_string())?
         {
@@ -1086,17 +1075,14 @@ where
                 ));
             }
         }
-        let select = StatementDto {
+        let select = GuestStatement {
             sql: postgres_temp_select_sql(&names.table, &names.ord_col),
             values: Vec::new(),
             txn_id: txn_id.clone(),
         };
-        let mut rows = stream_rows_bounded(
-            conn,
-            statement_from_dto_lowered(select, DbBackend::Postgres),
-            fetch,
-        )
-        .await?;
+        let mut rows =
+            stream_rows_bounded(conn, statement_lowered(select, DbBackend::Postgres), fetch)
+                .await?;
         for row in &mut rows {
             row.values.remove(&names.ord_col);
         }
@@ -1104,13 +1090,13 @@ where
     }
     .await;
 
-    let drop = StatementDto {
+    let drop = GuestStatement {
         sql: postgres_drop_temp_sql(&names.table),
         values: Vec::new(),
         txn_id,
     };
     let _ = conn
-        .execute_raw(statement_from_dto_lowered(drop, DbBackend::Postgres))
+        .execute_raw(statement_lowered(drop, DbBackend::Postgres))
         .await;
     fetched
 }
@@ -1120,7 +1106,7 @@ async fn stream_rows_bounded<C: ConnectionTrait + StreamTrait>(
     conn: &C,
     stmt: sea_orm::Statement,
     fetch: usize,
-) -> Result<Vec<ProxyRowDto>> {
+) -> Result<Vec<GuestRow>> {
     let stream = conn.stream_raw(stmt).await.map_err(|e| e.to_string())?;
     futures::pin_mut!(stream);
     let mut rows = Vec::new();
@@ -1129,7 +1115,7 @@ async fn stream_rows_bounded<C: ConnectionTrait + StreamTrait>(
         if rows.len() >= fetch {
             return Err(format!("database adapter fetched more than {fetch} rows"));
         }
-        push_bounded_row(&mut rows, &mut encoded, row_to_dto(&row))?;
+        push_bounded_row(&mut rows, &mut encoded, row_to_guest_row(&row))?;
     }
     Ok(rows)
 }
@@ -1142,7 +1128,7 @@ async fn fetch_page_all_raw<C: ConnectionTrait>(
     conn: &C,
     stmt: sea_orm::Statement,
     fetch: usize,
-) -> Result<Vec<ProxyRowDto>> {
+) -> Result<Vec<GuestRow>> {
     let fetched = conn.query_all_raw(stmt).await.map_err(|e| e.to_string())?;
     if fetched.len() > fetch {
         return Err(format!(
@@ -1153,7 +1139,7 @@ async fn fetch_page_all_raw<C: ConnectionTrait>(
     let mut rows = Vec::new();
     let mut encoded = 1usize;
     for row in fetched {
-        push_bounded_row(&mut rows, &mut encoded, row_to_dto(&row))?;
+        push_bounded_row(&mut rows, &mut encoded, row_to_guest_row(&row))?;
     }
     Ok(rows)
 }
@@ -1161,7 +1147,7 @@ async fn fetch_page_all_raw<C: ConnectionTrait>(
 /// Fetches one bounded page, failing if the adapter materializes more than `limit + 1` rows.
 async fn query_page_on<C>(
     conn: &C,
-    dto: StatementDto,
+    dto: GuestStatement,
     cursor: &str,
     limit: u32,
     postgres_isolation: PostgresPageIsolation,
@@ -1181,7 +1167,7 @@ where
             postgres_query_page_once(conn, paged, fetch, postgres_isolation).await?
         }
         _ => {
-            let stmt = statement_from_dto_lowered(paged, backend);
+            let stmt = statement_lowered(paged, backend);
             fetch_page_all_raw(conn, stmt, fetch).await?
         }
     };
@@ -1221,43 +1207,27 @@ where
 }
 
 /// Executes a mutating statement and returns last-insert id plus rows-affected.
-async fn execute_on<C: ConnectionTrait>(conn: &C, dto: StatementDto) -> Result<ExecResultDto> {
+async fn execute_on<C: ConnectionTrait>(conn: &C, dto: GuestStatement) -> Result<GuestExecResult> {
     let backend = conn.get_database_backend();
-    let stmt = statement_from_dto_lowered(dto, backend);
+    let stmt = statement_lowered(dto, backend);
     let result = conn.execute_raw(stmt).await.map_err(|e| e.to_string())?;
-    Ok(ExecResultDto {
+    Ok(GuestExecResult {
         last_insert_id: result.last_insert_id(),
         rows_affected: result.rows_affected(),
     })
 }
 
-/// Convert a SeaORM query row into the RPC DTO (also used by integration tests).
-///
-/// # Arguments
-///
-/// * `row` - SeaORM query row to project into an RPC DTO.
-///
-/// # Returns
-///
-/// `ProxyRowDto` result.
-///
-/// # Panics
-///
-/// Panics when an internal invariant does not hold.
+/// Projects one SeaORM query row into a [`GuestRow`] (integration tests).
 #[must_use]
-pub fn row_to_dto(row: &sea_orm::QueryResult) -> ProxyRowDto {
-    let proxy = from_query_result_to_proxy_row(row);
-    proxy_rows_to_dto(vec![proxy])
-        .into_iter()
-        .next()
-        .expect("proxy_rows_to_dto preserves one row")
+pub fn row_to_dto(row: &sea_orm::QueryResult) -> GuestRow {
+    row_to_guest_row(row)
 }
 
 #[cfg(test)]
 #[allow(clippy::missing_panics_doc)]
 mod tests {
+    use super::GuestStatement;
     use super::*;
-    use crate::db::StatementDto;
     use sea_orm::{DbBackend, Statement};
     use std::sync::LazyLock;
     use tokio::sync::Mutex;
@@ -1265,8 +1235,8 @@ mod tests {
     /// Serializes tests that mutate the process-wide SeaORM session.
     static SESSION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-    fn stmt(sql: &str) -> StatementDto {
-        StatementDto {
+    fn stmt(sql: &str) -> GuestStatement {
+        GuestStatement {
             sql: sql.into(),
             values: Vec::new(),
             txn_id: None,

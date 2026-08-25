@@ -39,7 +39,6 @@ REQUIRED_WIRE_FIXTURES = (
     "fetchTitle.request.json",
     "put.s3.request.json",
     "dbConnect.sqlite.json",
-    "dbExecute.result.json",
 )
 
 # Matches `METHOD_NAMES: tuple[str, ...] = ( ... )` including a trailing comma.
@@ -133,8 +132,6 @@ def check_wire_fixtures() -> list[str]:
         # Spot-check a few multi-word fields against abi.json $defs naming.
         if path.name == "login.request.json" and "pluginDataDir" not in data:
             errors.append(f"{path.name}: expected pluginDataDir")
-        if path.name == "dbExecute.result.json" and "lastInsertId" not in data:
-            errors.append(f"{path.name}: expected lastInsertId")
         if path.name == "put.s3.request.json" and "forcePathStyle" not in data:
             errors.append(f"{path.name}: expected forcePathStyle")
     return errors

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://bookclerk.dev/schemas/plugin-abi/v1/abi.json",
   "title": "BookclerkPluginAbi",
-  "description": "Authoritative host↔plugin Workers RPC contract (api_version = 1). Generates Rust and TypeScript SDKs.",
+  "description": "Authoritative host\u2194plugin Workers RPC contract (api_version = 1). Generates Rust and TypeScript SDKs.",
   "type": "object",
   "properties": {
     "apiVersion": {
@@ -1085,53 +1085,6 @@
           }
         }
       ]
-    },
-    "StatementDto": {
-      "type": "object",
-      "required": [
-        "sql"
-      ],
-      "properties": {
-        "sql": {
-          "type": "string"
-        },
-        "values": {
-          "type": "array"
-        },
-        "txnId": {
-          "type": "string"
-        }
-      }
-    },
-    "DbBeginParams": {
-      "type": "object",
-      "properties": {
-        "parentTxnId": {
-          "type": "string"
-        }
-      }
-    },
-    "DbBeginResult": {
-      "type": "object",
-      "required": [
-        "txnId"
-      ],
-      "properties": {
-        "txnId": {
-          "type": "string"
-        }
-      }
-    },
-    "DbTxnParams": {
-      "type": "object",
-      "required": [
-        "txnId"
-      ],
-      "properties": {
-        "txnId": {
-          "type": "string"
-        }
-      }
     },
     "DbConnectResult": {
       "type": "object",

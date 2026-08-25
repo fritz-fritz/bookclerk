@@ -18,9 +18,9 @@ use bookclerk_plugin_sdk::host_db::HostExecuteEnvelope;
 use bookclerk_plugin_sdk::v2::GuestDatabase;
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
-    exec_result_from_dto, proxy_rows_from_typed, DbConnectParams, DbConnectResult,
-    DbPlanStatementKind, DbResultSelection, ExecResultDto, ExecuteReply, ExecuteRequest,
-    PluginError as AbiPluginError, TypedDbStatement,
+    proxy_rows_from_typed, DbConnectParams, DbConnectResult, DbPlanStatementKind,
+    DbResultSelection, ExecuteReply, ExecuteRequest, PluginError as AbiPluginError,
+    TypedDbStatement,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -531,10 +531,10 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             .first()
             .map(|s| s.rows_affected)
             .unwrap_or(0);
-        Ok(exec_result_from_dto(ExecResultDto {
+        Ok(ProxyExecResult {
             last_insert_id: 0,
             rows_affected,
-        }))
+        })
     }
 
     async fn ping(&self) -> std::result::Result<(), DbErr> {

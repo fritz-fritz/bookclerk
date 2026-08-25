@@ -18,7 +18,6 @@
 //! | Engine error → structured [`crate::PluginError`] | [`plugin_error_from_engine`], [`plugin_error_from_db_err`] |
 //! | Host-provided SQL scripts (no Bookclerk migrations) | [`execute_sql_scripts`] |
 //! | Typed SQL `NULL` for proxy row decode | [`typed_null`] |
-//! | SeaORM ↔ wire DTO helpers (host-internal only) | `StatementDto` and legacy row DTO converters (`#[doc(hidden)]` crate-root re-exports; feature `db`) |
 //!
 //! Engine-specific connect/proxy code stays in your guest crate; this module
 //! owns the shared session worker and generic SQL-string execution. Hosts
@@ -36,6 +35,7 @@ pub mod errors;
 pub mod host_session;
 pub mod migrate;
 pub mod session;
+mod sql;
 
 pub use errors::{plugin_error_from_db_err, plugin_error_from_engine};
 pub use host_session::{host_session, GuestHostAdapterSession};
@@ -44,3 +44,4 @@ pub use session::{
     guest_atomic, guest_bootstrap, guest_capabilities, guest_execute, guest_execute_atomic,
     guest_ping, guest_query, guest_query_page, row_to_dto, set_connection,
 };
+pub use sql::{guest_sql, GuestStatement};

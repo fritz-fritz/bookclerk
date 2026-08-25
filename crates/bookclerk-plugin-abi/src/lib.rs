@@ -55,11 +55,7 @@ pub mod db_value;
 pub mod error;
 pub mod events;
 pub mod guest_sql;
-pub mod host_db;
 pub mod kind;
-/// Host-private legacy JSON database RPC method names (not in `METHOD_NAMES`).
-#[doc(hidden)]
-pub mod legacy_db_methods;
 pub mod methods;
 pub mod types;
 pub mod v2;

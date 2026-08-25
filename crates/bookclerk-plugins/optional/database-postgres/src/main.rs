@@ -27,12 +27,6 @@ fn describe_metadata() -> Result<String, PluginError> {
             "diagnose".into(),
             "dbConnect".into(),
             "dbPing".into(),
-            "dbQuery".into(),
-            "dbExecute".into(),
-            "dbBegin".into(),
-            "dbCommit".into(),
-            "dbRollback".into(),
-            "dbAtomic".into(),
         ],
         sort_key: Some(5),
         ..HandshakeResult::default()

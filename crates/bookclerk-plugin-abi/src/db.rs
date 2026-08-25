@@ -12,68 +12,12 @@
 //! | [`crate::methods::db_ping`] | (none) | success / [`crate::PluginError`] |
 //!
 //! Product v2 guests use Cap'n Proto `capabilities` / `execute` / `close` /
-//! `bootstrap`. Host-private JSON query/execute/txn/atomic names live under
-//! [`crate::legacy_db_methods`] (not part of the public plugin contract).
+//! `bootstrap` for all SQL work.
 //!
 //! Wire fields use camelCase. The `backend` tag on [`DbConnectParams`] is
 //! lowercase (`sqlite`, `d1`, `postgres`).
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
-
-/// SQL statement plus bind parameters crossing the host↔database-guest boundary.
-///
-/// Used as params for host-private [`crate::legacy_db_methods::db_query`] and
-/// [`crate::legacy_db_methods::db_execute`]. Bind values are JSON (null, bool, number,
-/// string, or nested arrays) matching SeaORM's RPC proxy encoding.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct StatementDto {
-    /// SQL text with positional or named placeholders as understood by the
-    /// guest dialect (SQLite `?`, Postgres `$1`, …).
-    pub sql: String,
-    /// Ordered bind values for the statement (wire `values`; default empty).
-    #[serde(default)]
-    pub values: Vec<JsonValue>,
-    /// Guest transaction id from [`crate::legacy_db_methods::db_begin`] (wire `txnId`).
-    ///
-    /// Omitted for autocommit statements. When set, the guest runs the
-    /// statement inside that transaction (or nested savepoint).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub txn_id: Option<String>,
-}
-
-/// One result row from host-private [`crate::legacy_db_methods::db_query`].
-///
-/// Column names are the keys the guest returns (typically the SQL alias or
-/// table column name); values are JSON-encoded cell data.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ProxyRowDto {
-    /// Column name → JSON cell value map for this row (wire `values`).
-    pub values: BTreeMap<String, JsonValue>,
-}
-
-/// Successful result of host-private [`crate::legacy_db_methods::db_query`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct QueryResultDto {
-    /// Zero or more rows in result-set order.
-    pub rows: Vec<ProxyRowDto>,
-}
-
-/// Successful result of host-private [`crate::legacy_db_methods::db_execute`] (INSERT/UPDATE/DELETE).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ExecResultDto {
-    /// Last auto-increment / identity value when the backend provides one
-    /// (wire `lastInsertId`); `0` when not applicable.
-    pub last_insert_id: u64,
-    /// Number of rows affected by the statement (wire `rowsAffected`).
-    pub rows_affected: u64,
-}
 
 /// Tagged connect params for [`crate::methods::db_connect`].
 ///
@@ -184,21 +128,19 @@ pub const SQL_CONTRACT_VERSION: u32 = 1;
 
 /// Result of a successful [`crate::methods::db_connect`].
 ///
-/// Tells the host which SeaORM dialect to use when composing subsequent
-/// `dbQuery` / `dbExecute` statements against this guest, and the negotiated
-/// SQL-adapter capabilities. The host must not invent these from the plugin id.
+/// Tells the host which SeaORM dialect to use for the typed execute proxy,
+/// and the negotiated SQL-adapter capabilities.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbConnectResult {
     /// SeaORM dialect string the host should use for the RPC proxy
     /// (`"sqlite"` or `"postgres"`; D1 guests report `"sqlite"`).
     pub dialect: String,
-    /// When `false`, the host must not use SeaORM `begin()` / `dbBegin`.
+    /// When `false`, the host must not use SeaORM interactive transactions.
     ///
     /// SQLite and Postgres default to `true`. D1 HTTP cannot keep `BEGIN`
-    /// open across RPCs; those guests set `false` and implement
-    /// [`crate::legacy_db_methods::db_atomic`] instead. Omitted on the wire by older
-    /// guests (treated as `true`).
+    /// open across RPCs; those guests set `false` and use typed atomic
+    /// execute batches instead. Omitted on the wire by older guests (treated as `true`).
     #[serde(default = "default_true")]
     pub interactive_txn: bool,
     /// SQL dialect family for SeaORM proxy bootstrap (`sqlite` or `postgres`).

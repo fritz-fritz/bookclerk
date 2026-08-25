@@ -77,7 +77,7 @@ fn on_event_book_acquired_wire_shape() {
 /// Kind/db wire DTOs use camelCase (see `fixtures/wire/` goldens + #130).
 #[test]
 fn kind_db_wire_dto_camel_case() {
-    use bookclerk_plugin_abi::db::{DbConnectParams, ExecResultDto};
+    use bookclerk_plugin_abi::db::DbConnectParams;
     use bookclerk_plugin_abi::LoginParams;
 
     let login = LoginParams {
@@ -111,20 +111,4 @@ fn kind_db_wire_dto_camel_case() {
     assert!(cv.get("pluginDataDir").is_some());
     assert!(cv.get("sqlitePath").is_some());
     assert!(cv.get("sqlite_path").is_none());
-
-    let exec = ExecResultDto {
-        last_insert_id: 1,
-        rows_affected: 1,
-    };
-    let ev = serde_json::to_value(&exec).unwrap();
-    assert!(ev.get("lastInsertId").is_some());
-    assert!(ev.get("rowsAffected").is_some());
-    assert!(ev.get("last_insert_id").is_none());
-
-    let begin = bookclerk_plugin_abi::host_db::DbBeginParams {
-        parent_txn_id: Some("txn-1".into()),
-    };
-    let bv = serde_json::to_value(&begin).unwrap();
-    assert_eq!(bv["parentTxnId"], "txn-1");
-    assert!(bv.get("parent_txn_id").is_none());
 }

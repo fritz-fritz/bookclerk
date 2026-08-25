@@ -220,7 +220,7 @@ pub struct HealthOk {
     pub detail: String,
 }
 
-/// Database statement (typed ABI; not opaque `StatementDto` JSON).
+/// Database statement (typed Cap'n Proto execute contract).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Statement {
