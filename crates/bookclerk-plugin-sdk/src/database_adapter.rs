@@ -41,6 +41,6 @@ pub use errors::{plugin_error_from_db_err, plugin_error_from_engine};
 pub use host_session::{host_session, GuestHostAdapterSession};
 pub use migrate::{execute_sql_scripts, split_sql_statements, typed_null};
 pub use session::{
-    guest_atomic, guest_capabilities, guest_execute, guest_execute_atomic, guest_ping, guest_query,
-    guest_query_page, row_to_dto, set_connection,
+    guest_atomic, guest_bootstrap, guest_capabilities, guest_execute, guest_execute_atomic,
+    guest_ping, guest_query, guest_query_page, row_to_dto, set_connection,
 };

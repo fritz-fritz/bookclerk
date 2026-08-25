@@ -151,6 +151,9 @@ enum Work {
     DbCapabilities {
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::DbCapabilities>>,
     },
+    DbBootstrap {
+        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::DbBootstrap>>,
+    },
     DbExecuteRequest {
         request: bookclerk_plugin_sdk::ExecuteRequest,
         cancel: Arc<AtomicBool>,
@@ -715,6 +718,15 @@ impl V2PluginSession {
         self.call(|reply| Work::DbCapabilities { reply }).await
     }
 
+    /// Typed `AdapterDatabaseSession.bootstrap`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the guest rejects the call or lacks `bootstrap`.
+    pub async fn db_bootstrap(&self) -> Result<bookclerk_plugin_sdk::DbBootstrap> {
+        self.call(|reply| Work::DbBootstrap { reply }).await
+    }
+
     /// Typed `AdapterDatabaseSession.execute`.
     ///
     /// # Errors
@@ -1153,6 +1165,18 @@ fn vat_thread(
                             let out = async {
                                 match db_session.as_mut() {
                                     Some(s) => s.capabilities().await.map_err(map_abi),
+                                    None => {
+                                        Err(PluginError::message("v2 database session not open"))
+                                    }
+                                }
+                            }
+                            .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbBootstrap { reply } => {
+                            let out = async {
+                                match db_session.as_mut() {
+                                    Some(s) => s.bootstrap().await.map_err(map_abi),
                                     None => {
                                         Err(PluginError::message("v2 database session not open"))
                                     }

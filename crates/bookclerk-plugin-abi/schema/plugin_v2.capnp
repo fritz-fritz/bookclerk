@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 16;
+const abiMinor :UInt32 = 17;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -691,6 +691,18 @@ struct DbCapabilities {
   maxAtomicResultBytes @16 :UInt32;
 }
 
+struct DbBootstrapReply {
+  union {
+    ok @0 :DbBootstrap;
+    err @1 :PluginError;
+  }
+}
+
+struct DbBootstrap {
+  sqlFamily @0 :Text;
+  dialect @1 :Text;
+}
+
 struct DbCapabilitiesReply {
   union {
     ok @0 :DbCapabilities;
@@ -707,6 +719,8 @@ interface AdapterDatabaseSession {
   capabilities @0 () -> (result :DbCapabilitiesReply);
   execute @1 (request :ExecuteRequest) -> (result :ExecuteResultReply);
   close @2 () -> (result :EmptyReply);
+  # Bootstrap-only SeaORM proxy metadata (not part of DbCapabilities).
+  bootstrap @3 () -> (result :DbBootstrapReply);
 }
 
 # Host-granted SQL for job plugin authors. SDK `DatabaseBinding` mirrors the

@@ -64,13 +64,14 @@ impl ExternalDatabase {
         let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
         let extra_env = match DatabasePluginKind::parse(&plugin.manifest.id) {
             Some(DatabasePluginKind::D1) | Some(DatabasePluginKind::Postgres) => Vec::new(),
-            Some(DatabasePluginKind::Sqlite) | None => {
+            Some(DatabasePluginKind::Sqlite) => {
                 let path = config.database.sqlite_path(&config.paths().files_dir);
                 vec![(
                     "BOOKCLERK_SQLITE_PATH",
                     std::ffi::OsString::from(path.as_os_str()),
                 )]
             }
+            None => Vec::new(),
         };
         let session = Arc::new(
             V2PluginSession::spawn_for_account_with_env(
@@ -114,7 +115,16 @@ impl ExternalDatabase {
         let _kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         let mut connect_result = caps.to_connect();
-        apply_bootstrap_metadata(&mut connect_result, &self.plugin_id);
+        if let Ok(bootstrap) = self.session.db_bootstrap().await {
+            if !bootstrap.sql_family.is_empty() {
+                connect_result.sql_family = bootstrap.sql_family;
+            }
+            if !bootstrap.dialect.is_empty() {
+                connect_result.dialect = bootstrap.dialect;
+            }
+        } else {
+            apply_bootstrap_metadata(&mut connect_result, &self.plugin_id);
+        }
         if let Some(reason) = connect_result.bootstrap_backend_failure_reason() {
             return Err(DbErr::Custom(reason));
         }
@@ -1586,6 +1596,19 @@ mod tests {
         assert_eq!(v["pluginDataDir"], dir.display().to_string());
         let back: DbConnectParams = serde_json::from_value(v).unwrap();
         assert_eq!(back, params);
+    }
+
+    #[test]
+    fn guest_bootstrap_from_session_overrides_plugin_id_inference() {
+        let bootstrap = bookclerk_plugin_sdk::DbBootstrap::sqlite();
+        let mut connect = DbCapabilities::from_connect(&DbConnectResult::postgres()).to_connect();
+        connect.sql_family = bootstrap.sql_family.clone();
+        connect.dialect = bootstrap.dialect.clone();
+        assert!(connect.bootstrap_backend_failure_reason().is_none());
+        assert_eq!(
+            seaorm_backend_from_connect(&connect).unwrap(),
+            DbBackend::Sqlite
+        );
     }
 
     #[test]

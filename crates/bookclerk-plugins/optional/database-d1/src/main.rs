@@ -10,8 +10,8 @@ use bookclerk_plugin_sdk::v2::{
     PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    serve, DbCapabilities, DbConnectParams, DbConnectResult, ExecuteReply, ExecuteRequest,
-    HandshakeResult, PluginError,
+    serve, DbBootstrap, DbCapabilities, DbConnectParams, DbConnectResult, ExecuteReply,
+    ExecuteRequest, HandshakeResult, PluginError,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -133,6 +133,10 @@ struct D1Session;
 impl AdapterDatabaseSession for D1Session {
     async fn capabilities(&self) -> Result<DbCapabilities, PluginError> {
         Ok(DbCapabilities::from_connect(&DbConnectResult::d1()))
+    }
+
+    async fn bootstrap(&self) -> Result<DbBootstrap, PluginError> {
+        Ok(DbBootstrap::sqlite())
     }
 
     async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {

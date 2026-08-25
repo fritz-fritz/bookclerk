@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use bookclerk_plugin_sdk::database_adapter::{
-    guest_capabilities, guest_execute_atomic, host_session, set_connection,
+    guest_bootstrap, guest_capabilities, guest_execute_atomic, host_session, set_connection,
 };
 use bookclerk_plugin_sdk::host_db::{GuestReceiptPersist, HostExecuteEnvelope};
 use bookclerk_plugin_sdk::v2::{
@@ -13,7 +13,7 @@ use bookclerk_plugin_sdk::v2::{
 };
 use bookclerk_plugin_sdk::DbConnectParams;
 use bookclerk_plugin_sdk::{
-    serve, DbCapabilities, ExecuteReply, ExecuteRequest, HandshakeResult, PluginError,
+    serve, DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, HandshakeResult, PluginError,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -110,6 +110,10 @@ struct PostgresSession;
 impl AdapterDatabaseSession for PostgresSession {
     async fn capabilities(&self) -> Result<DbCapabilities, PluginError> {
         guest_capabilities().await
+    }
+
+    async fn bootstrap(&self) -> Result<DbBootstrap, PluginError> {
+        guest_bootstrap().await
     }
 
     async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {

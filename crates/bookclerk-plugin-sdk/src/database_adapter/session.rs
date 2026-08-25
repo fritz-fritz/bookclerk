@@ -283,6 +283,20 @@ pub async fn guest_capabilities() -> std::result::Result<DbCapabilities, crate::
     Ok(DbCapabilities::from_connect(&caps))
 }
 
+/// Bootstrap-only SeaORM proxy metadata for the connected engine.
+///
+/// # Errors
+///
+/// Returns when no connection has been opened.
+pub async fn guest_bootstrap(
+) -> std::result::Result<bookclerk_plugin_abi::DbBootstrap, crate::PluginError> {
+    let conn = connection().await.map_err(crate::PluginError::internal)?;
+    Ok(match conn.get_database_backend() {
+        DbBackend::Postgres => bookclerk_plugin_abi::DbBootstrap::postgres(),
+        _ => bookclerk_plugin_abi::DbBootstrap::sqlite(),
+    })
+}
+
 /// Typed `DatabaseSession.executeAtomic`.
 ///
 /// Runs [`ExecuteRequest`] directly (no JSON `DbAtomicRequest` conversion).

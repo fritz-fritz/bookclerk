@@ -2051,6 +2051,18 @@ impl adapter_database_session_capnp::Server for AdapterDatabaseSessionServer {
         }
         Ok(())
     }
+
+    async fn bootstrap(
+        self: Rc<Self>,
+        _params: adapter_database_session_capnp::BootstrapParams,
+        mut results: adapter_database_session_capnp::BootstrapResults,
+    ) -> capnp::Result<()> {
+        super::db_rpc::write_db_bootstrap_reply(
+            results.get().init_result(),
+            self.inner.bootstrap().await,
+        );
+        Ok(())
+    }
 }
 
 impl host_adapter_database_session_capnp::Server for AdapterDatabaseSessionServer {
@@ -3117,6 +3129,18 @@ impl AdapterDatabaseSession for AdapterDatabaseSessionClient {
         let req = self.client.close_request();
         let reply = req.send().promise.await.map_err(from_capnp)?;
         read_empty(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+
+    async fn bootstrap(&self) -> Result<crate::DbBootstrap> {
+        let req = self.client.bootstrap_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        super::db_rpc::read_db_bootstrap_reply(
             reply
                 .get()
                 .map_err(from_capnp)?

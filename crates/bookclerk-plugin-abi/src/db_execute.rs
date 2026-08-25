@@ -13,6 +13,38 @@ use crate::db::DbConnectResult;
 use crate::db_value::{DbType, DbValue};
 use crate::v2::MAX_SCALAR_BYTES;
 
+/// Bootstrap-only SeaORM proxy metadata returned by `AdapterDatabaseSession.bootstrap`.
+///
+/// Not part of the typed [`DbCapabilities`] plane.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DbBootstrap {
+    /// SQL family for SeaORM proxy bootstrap (`sqlite` or `postgres`).
+    pub sql_family: String,
+    /// Engine dialect name (`sqlite`, `postgres`, or `postgresql`).
+    pub dialect: String,
+}
+
+impl DbBootstrap {
+    /// Bootstrap metadata for a sqlite-family connection.
+    #[must_use]
+    pub fn sqlite() -> Self {
+        Self {
+            sql_family: "sqlite".into(),
+            dialect: "sqlite".into(),
+        }
+    }
+
+    /// Bootstrap metadata for a postgres-family connection.
+    #[must_use]
+    pub fn postgres() -> Self {
+        Self {
+            sql_family: "postgres".into(),
+            dialect: "postgres".into(),
+        }
+    }
+}
+
 /// How a guest should run one statement inside an atomic plan.
 ///
 /// `Select` versus `Returning` is explicit so adapters never reparse SQL to

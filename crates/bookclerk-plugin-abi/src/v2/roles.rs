@@ -273,6 +273,13 @@ pub trait AdapterDatabaseSession {
     /// Typed SQL-contract advertisement.
     async fn capabilities(&self) -> Result<crate::DbCapabilities>;
 
+    /// Bootstrap-only SeaORM proxy metadata for the open session.
+    async fn bootstrap(&self) -> Result<crate::DbBootstrap> {
+        Err(crate::PluginError::unsupported(
+            "AdapterDatabaseSession.bootstrap",
+        ))
+    }
+
     /// Typed atomic batch (`execute`). Every request is a non-empty ordered statement list.
     async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply>;
 

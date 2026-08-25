@@ -8,14 +8,16 @@
 
 use async_trait::async_trait;
 use bookclerk_plugin_sdk::database_adapter::{
-    guest_capabilities, guest_execute_atomic, host_session, set_connection,
+    guest_bootstrap, guest_capabilities, guest_execute_atomic, host_session, set_connection,
 };
 use bookclerk_plugin_sdk::host_db::{GuestReceiptPersist, HostExecuteEnvelope};
 use bookclerk_plugin_sdk::v2::{
     AdapterDatabaseSession, Database, DatabaseContext, HostAdapterDatabaseSession, PluginDescribe,
     PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
-use bookclerk_plugin_sdk::{DbCapabilities, ExecuteReply, ExecuteRequest, PluginError};
+use bookclerk_plugin_sdk::{
+    DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, PluginError,
+};
 
 use crate::ID;
 
@@ -90,6 +92,10 @@ struct SqliteSession;
 impl AdapterDatabaseSession for SqliteSession {
     async fn capabilities(&self) -> Result<DbCapabilities> {
         guest_capabilities().await
+    }
+
+    async fn bootstrap(&self) -> Result<DbBootstrap> {
+        guest_bootstrap().await
     }
 
     async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply> {

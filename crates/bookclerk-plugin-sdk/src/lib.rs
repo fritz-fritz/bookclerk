@@ -64,16 +64,14 @@ pub mod v2;
 pub mod workerd;
 
 #[cfg(feature = "db")]
-pub use bookclerk_plugin_abi::db::{
-    DbConnectParams, DbConnectResult, ExecResultDto, ProxyRowDto, QueryResultDto, StatementDto,
-};
+#[doc(hidden)]
+pub use bookclerk_plugin_abi::db::ExecResultDto;
+#[cfg(feature = "db")]
+pub use bookclerk_plugin_abi::db::{DbConnectParams, DbConnectResult};
 pub use callback_tunnel::{TunnelGuest, TunnelHost, TunnelStream};
 #[cfg(feature = "db")]
-pub use db::{
-    exec_result_from_dto, exec_result_to_dto, json_to_sea_value, proxy_rows_from_dto,
-    proxy_rows_from_typed, proxy_rows_to_dto, sea_value_to_json, statement_from_dto,
-    statement_to_dto,
-};
+#[doc(hidden)]
+pub use db::{exec_result_from_dto, proxy_rows_from_typed};
 pub use db_binding::{
     execute_reply_to_d1_results, statement_result_to_d1_result, D1ExecResult, D1Meta, D1Result,
     DatabaseBinding, DatabaseBindingOptions, PreparedStatement, RetryToken,
@@ -109,9 +107,9 @@ pub use bookclerk_plugin_abi::{
     canonical_execute_request_hash, decode_db_value_bytes, decode_execute_request_bytes,
     decode_execute_result_reply_bytes, encoded_db_value_bytes, encoded_execute_reply_bytes,
     encoded_execute_request_bytes, encoded_execute_result_reply_bytes,
-    encoded_statement_result_bytes, sql_payload_bytes, sql_payload_exceeds, DbCapabilities,
-    DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
-    DiagnoseResult, ExecuteReply, ExecuteRequest, HandshakeParams, HostToPluginEvent, PluginError,
-    PluginErrorCode, PluginToHostEvent, StatementResult, TypedDbStatement, API_VERSION,
-    SQL_CONTRACT_VERSION,
+    encoded_statement_result_bytes, sql_payload_bytes, sql_payload_exceeds, DbBootstrap,
+    DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType,
+    DbValue, DiagnoseResult, ExecuteReply, ExecuteRequest, HandshakeParams, HostToPluginEvent,
+    PluginError, PluginErrorCode, PluginToHostEvent, StatementResult, TypedDbStatement,
+    API_VERSION, SQL_CONTRACT_VERSION,
 };

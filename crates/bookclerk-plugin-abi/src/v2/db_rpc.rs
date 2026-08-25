@@ -3,12 +3,13 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use super::plugin_v2_capnp::{
-    db_capabilities as db_caps_capnp, db_capabilities_reply, db_column as db_column_capnp,
-    db_row as db_row_capnp, db_statement as db_statement_capnp, db_timing as db_timing_capnp,
-    db_value as db_value_capnp, execute_reply as execute_reply_capnp,
-    execute_request as execute_request_capnp, execute_result_reply,
-    statement_result as statement_result_capnp, DbResultSelection as CapnpDbResultSelection,
-    DbStatementKind as CapnpDbStatementKind, DbType as CapnpDbType,
+    db_bootstrap as db_bootstrap_capnp, db_bootstrap_reply, db_capabilities as db_caps_capnp,
+    db_capabilities_reply, db_column as db_column_capnp, db_row as db_row_capnp,
+    db_statement as db_statement_capnp, db_timing as db_timing_capnp, db_value as db_value_capnp,
+    execute_reply as execute_reply_capnp, execute_request as execute_request_capnp,
+    execute_result_reply, statement_result as statement_result_capnp,
+    DbResultSelection as CapnpDbResultSelection, DbStatementKind as CapnpDbStatementKind,
+    DbType as CapnpDbType,
 };
 use super::plugin_v2_host_capnp::{
     host_execute_envelope as host_execute_envelope_capnp,
@@ -16,9 +17,9 @@ use super::plugin_v2_host_capnp::{
 };
 use super::rpc::{from_capnp, read_error, text_of, write_error};
 use crate::{
-    DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType,
-    DbValue, ExecuteReply, ExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope, PluginError,
-    Result, StatementResult, TypedDbStatement,
+    DbBootstrap, DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming,
+    DbType, DbValue, ExecuteReply, ExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope,
+    PluginError, Result, StatementResult, TypedDbStatement,
 };
 
 pub(super) fn write_db_type(ty: DbType) -> CapnpDbType {
@@ -406,6 +407,40 @@ pub(super) fn read_db_capabilities_reply(
     match result.which().map_err(from_capnp)? {
         db_capabilities_reply::Ok(ok) => read_db_capabilities(ok.map_err(from_capnp)?),
         db_capabilities_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+    }
+}
+
+pub(super) fn write_db_bootstrap(mut b: db_bootstrap_capnp::Builder<'_>, bootstrap: &DbBootstrap) {
+    b.set_sql_family(&bootstrap.sql_family);
+    b.set_dialect(&bootstrap.dialect);
+}
+
+pub(super) fn read_db_bootstrap(r: db_bootstrap_capnp::Reader<'_>) -> Result<DbBootstrap> {
+    Ok(DbBootstrap {
+        sql_family: text_of(r.get_sql_family().map_err(from_capnp)?),
+        dialect: text_of(r.get_dialect().map_err(from_capnp)?),
+    })
+}
+
+pub(super) fn write_db_bootstrap_reply(
+    result: db_bootstrap_reply::Builder<'_>,
+    outcome: Result<DbBootstrap>,
+) {
+    match outcome {
+        Ok(bootstrap) => write_db_bootstrap(result.init_ok(), &bootstrap),
+        Err(err) => write_error(result.init_err(), &err),
+    }
+}
+
+/// # Errors
+///
+/// Returns the guest [`PluginError`] on `err`, or a decode failure on `ok`.
+pub(super) fn read_db_bootstrap_reply(
+    result: db_bootstrap_reply::Reader<'_>,
+) -> Result<DbBootstrap> {
+    match result.which().map_err(from_capnp)? {
+        db_bootstrap_reply::Ok(ok) => read_db_bootstrap(ok.map_err(from_capnp)?),
+        db_bootstrap_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
     }
 }
 
