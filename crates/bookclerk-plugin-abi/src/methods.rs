@@ -396,16 +396,16 @@ pub mod names {
     pub use super::sync_listening::NAME as SYNC_LISTENING;
     /// Alias of [`super::touch_file::NAME`] (`"touchFile"`).
     pub use super::touch_file::NAME as TOUCH_FILE;
-    /// Alias of [`super::legacy_db_methods::db_atomic::NAME`] (`"dbAtomic"`).
+    /// Alias of [`crate::legacy_db_methods::db_atomic::NAME`] (`"dbAtomic"`).
     pub use crate::legacy_db_methods::db_atomic::NAME as DB_ATOMIC;
-    /// Alias of [`super::legacy_db_methods::db_begin::NAME`] (`"dbBegin"`).
+    /// Alias of [`crate::legacy_db_methods::db_begin::NAME`] (`"dbBegin"`).
     pub use crate::legacy_db_methods::db_begin::NAME as DB_BEGIN;
-    /// Alias of [`super::legacy_db_methods::db_commit::NAME`] (`"dbCommit"`).
+    /// Alias of [`crate::legacy_db_methods::db_commit::NAME`] (`"dbCommit"`).
     pub use crate::legacy_db_methods::db_commit::NAME as DB_COMMIT;
-    /// Alias of [`super::legacy_db_methods::db_execute::NAME`] (`"dbExecute"`).
+    /// Alias of [`crate::legacy_db_methods::db_execute::NAME`] (`"dbExecute"`).
     pub use crate::legacy_db_methods::db_execute::NAME as DB_EXECUTE;
-    /// Alias of [`super::legacy_db_methods::db_query::NAME`] (`"dbQuery"`).
+    /// Alias of [`crate::legacy_db_methods::db_query::NAME`] (`"dbQuery"`).
     pub use crate::legacy_db_methods::db_query::NAME as DB_QUERY;
-    /// Alias of [`super::legacy_db_methods::db_rollback::NAME`] (`"dbRollback"`).
+    /// Alias of [`crate::legacy_db_methods::db_rollback::NAME`] (`"dbRollback"`).
     pub use crate::legacy_db_methods::db_rollback::NAME as DB_ROLLBACK;
 }

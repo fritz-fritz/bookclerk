@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Params for host-internal [`crate::methods::db_begin`].
+/// Params for host-internal [`crate::legacy_db_methods::db_begin`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbBeginParams {
@@ -14,7 +14,7 @@ pub struct DbBeginParams {
     pub parent_txn_id: Option<String>,
 }
 
-/// Result of a successful host-internal [`crate::methods::db_begin`].
+/// Result of a successful host-internal [`crate::legacy_db_methods::db_begin`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbBeginResult {
@@ -22,10 +22,11 @@ pub struct DbBeginResult {
     pub txn_id: String,
 }
 
-/// Params for host-internal [`crate::methods::db_commit`] / [`crate::methods::db_rollback`].
+/// Params for host-internal [`crate::legacy_db_methods::db_commit`] /
+/// [`crate::legacy_db_methods::db_rollback`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbTxnParams {
-    /// Transaction id returned by [`crate::methods::db_begin`].
+    /// Transaction id returned by [`crate::legacy_db_methods::db_begin`].
     pub txn_id: String,
 }

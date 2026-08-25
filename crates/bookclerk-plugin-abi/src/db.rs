@@ -4,14 +4,16 @@
 //! boundary. The host never links SQL engines; it opens the library through
 //! these RPC methods after [`crate::methods::db_connect`].
 //!
+//! Public JSON methods in `METHOD_NAMES` / `abi.json`:
+//!
 //! | Method | Params | Result |
 //! | --- | --- | --- |
 //! | [`crate::methods::db_connect`] | [`DbConnectParams`] | [`DbConnectResult`] |
 //! | [`crate::methods::db_ping`] | (none) | success / [`crate::PluginError`] |
-//! | [`crate::methods::db_query`] | [`StatementDto`] | [`QueryResultDto`] |
-//! | [`crate::methods::db_execute`] | [`StatementDto`] | [`ExecResultDto`] |
-//! | Host-internal `db_begin` / `db_commit` / `db_rollback` | see [`crate::host_db`] | (host-only) |
-//! | [`crate::methods::db_atomic`] | legacy JSON plan (see `schema/abi.json`) | legacy JSON exec result |
+//!
+//! Product v2 guests use Cap'n Proto `capabilities` / `execute` / `close` /
+//! `bootstrap`. Host-private JSON query/execute/txn/atomic names live under
+//! [`crate::legacy_db_methods`] (not part of the public plugin contract).
 //!
 //! Wire fields use camelCase. The `backend` tag on [`DbConnectParams`] is
 //! lowercase (`sqlite`, `d1`, `postgres`).
@@ -23,8 +25,8 @@ use serde_json::Value as JsonValue;
 
 /// SQL statement plus bind parameters crossing the host↔database-guest boundary.
 ///
-/// Used as params for both [`crate::methods::db_query`] and
-/// [`crate::methods::db_execute`]. Bind values are JSON (null, bool, number,
+/// Used as params for host-private [`crate::legacy_db_methods::db_query`] and
+/// [`crate::legacy_db_methods::db_execute`]. Bind values are JSON (null, bool, number,
 /// string, or nested arrays) matching SeaORM's RPC proxy encoding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -35,7 +37,7 @@ pub struct StatementDto {
     /// Ordered bind values for the statement (wire `values`; default empty).
     #[serde(default)]
     pub values: Vec<JsonValue>,
-    /// Guest transaction id from [`crate::methods::db_begin`] (wire `txnId`).
+    /// Guest transaction id from [`crate::legacy_db_methods::db_begin`] (wire `txnId`).
     ///
     /// Omitted for autocommit statements. When set, the guest runs the
     /// statement inside that transaction (or nested savepoint).
@@ -43,7 +45,7 @@ pub struct StatementDto {
     pub txn_id: Option<String>,
 }
 
-/// One result row from [`crate::methods::db_query`].
+/// One result row from host-private [`crate::legacy_db_methods::db_query`].
 ///
 /// Column names are the keys the guest returns (typically the SQL alias or
 /// table column name); values are JSON-encoded cell data.
@@ -54,7 +56,7 @@ pub struct ProxyRowDto {
     pub values: BTreeMap<String, JsonValue>,
 }
 
-/// Successful result of [`crate::methods::db_query`].
+/// Successful result of host-private [`crate::legacy_db_methods::db_query`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResultDto {
@@ -62,7 +64,7 @@ pub struct QueryResultDto {
     pub rows: Vec<ProxyRowDto>,
 }
 
-/// Successful result of [`crate::methods::db_execute`] (INSERT/UPDATE/DELETE).
+/// Successful result of host-private [`crate::legacy_db_methods::db_execute`] (INSERT/UPDATE/DELETE).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecResultDto {
@@ -195,7 +197,7 @@ pub struct DbConnectResult {
     ///
     /// SQLite and Postgres default to `true`. D1 HTTP cannot keep `BEGIN`
     /// open across RPCs; those guests set `false` and implement
-    /// [`crate::methods::db_atomic`] instead. Omitted on the wire by older
+    /// [`crate::legacy_db_methods::db_atomic`] instead. Omitted on the wire by older
     /// guests (treated as `true`).
     #[serde(default = "default_true")]
     pub interactive_txn: bool,
