@@ -236,7 +236,7 @@ where
 /// Returns when the batch fails.
 async fn apply_one_sqlite_version_with_batch<F, Fut>(
     db: &DatabaseConnection,
-    _backend: DbBackend,
+    backend: DbBackend,
     version: i64,
     schema: &str,
     run_batch: &mut F,
@@ -255,6 +255,7 @@ where
             schema.to_string(),
             format!("PRAGMA user_version = {version}"),
         ];
+        let stmts = bookclerk_db_exec::expand_host_schema_batch(backend, &stmts).unwrap_or(stmts);
         match run_batch(stmts).await {
             Ok(()) => return Ok(()),
             Err(err) if is_already_applied_ddl(&err) => {
@@ -307,6 +308,8 @@ where
                 schema.to_string(),
                 format!("INSERT INTO schema_migrations (version) VALUES ({version})"),
             ];
+            let stmts =
+                bookclerk_db_exec::expand_host_schema_batch(backend, &stmts).unwrap_or(stmts);
             match run_batch(stmts).await {
                 Ok(()) => break,
                 Err(err) if is_already_applied_ddl(&err) => {
