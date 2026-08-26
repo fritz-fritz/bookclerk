@@ -63,7 +63,9 @@ pub use host_ir::{
     SEA_NULL_KEY,
 };
 pub use json_bridge::{db_value_from_json, db_value_to_json};
-pub use lower::{lower_canonical_sql, lower_canonical_to_postgres};
+pub use lower::{
+    lower_canonical_ddl_to_postgres, lower_canonical_sql, lower_canonical_to_postgres,
+};
 pub use proxy_txn::{
     arm_exec_budget, clear_exec_budget, consume_atomic_interrupt, consume_begin_injection,
     consume_commit_injection, current_exec_budget, exec_deadline_expired,
@@ -75,8 +77,7 @@ pub use proxy_txn::{
 };
 pub use schema_postgres::{
     collapse_host_schema_results, expand_host_schema_batch, expand_host_schema_execute_request,
-    is_host_schema_version_marker, latest_schema_postgres, migration_sql_postgres,
-    schema_sql_for_backend, split_schema_statements,
+    is_host_schema_version_marker, schema_sql_for_backend, split_schema_statements,
 };
 pub use typed::{
     db_value_from_sea, db_value_to_sea, execute_typed_on_session, execute_typed_on_session_then,

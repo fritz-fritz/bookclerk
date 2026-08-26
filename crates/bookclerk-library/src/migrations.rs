@@ -962,10 +962,15 @@ pub fn host_migration_sql(_backend: sea_orm::DbBackend, step: &HostMigrationStep
 
 /// Final PostgreSQL DDL for a fresh Bookclerk library database.
 ///
-/// Delegates to [`bookclerk_db_exec::latest_schema_postgres`].
+/// The canonical baseline lowered mechanically per statement at the adapter
+/// edge — there is no hand-authored parallel Postgres schema.
 #[must_use]
-pub fn latest_schema_postgres() -> &'static str {
-    bookclerk_db_exec::latest_schema_postgres()
+pub fn latest_schema_postgres() -> String {
+    bookclerk_db_exec::split_schema_statements(greenfield_baseline_canonical())
+        .iter()
+        .map(|stmt| bookclerk_db_exec::lower_canonical_ddl_to_postgres(stmt))
+        .collect::<Vec<_>>()
+        .join(";\n")
 }
 
 /// SQLite DDL through the step before the V27 rebuild (legacy test helper).
@@ -1246,6 +1251,38 @@ mod tests {
                 "baseline must include legacy step fragment"
             );
         }
+    }
+
+    #[test]
+    fn postgres_lowering_of_baseline_is_mechanically_complete() {
+        let lowered = latest_schema_postgres();
+        // No SQLite-isms may survive the mechanical lowering; the CI Postgres
+        // sidecar applies this exact output (`postgres_test_store`).
+        for token in [
+            "AUTOINCREMENT",
+            " INTEGER",
+            " BLOB",
+            " REAL",
+            "INSERT OR IGNORE",
+        ] {
+            assert!(
+                !lowered.contains(token),
+                "sqlite-ism `{token}` survived postgres lowering"
+            );
+        }
+        assert!(lowered.contains("BIGSERIAL PRIMARY KEY"), "serial ids");
+        assert!(
+            lowered.contains("ON CONFLICT DO NOTHING"),
+            "insert-or-ignore"
+        );
+        assert!(lowered.contains(" BYTEA"), "blob columns");
+        assert!(lowered.contains(" DOUBLE PRECISION"), "real columns");
+        // The greenfield V27 rebuild stays mechanically executable on
+        // Postgres (empty tables: create + copy + drop + rename).
+        assert!(lowered.contains("ALTER TABLE domain_events_v27 RENAME TO domain_events"));
+        assert!(lowered.contains("UNIQUE(account_id, source, event_type, dedup_key)"));
+        // Word-boundary safety: string literals stay untouched.
+        assert!(lowered.contains(r#"'["openid","profile","email"]'"#));
     }
 
     #[test]

@@ -6170,12 +6170,26 @@ async fn postgres_test_store() -> LibraryStore {
     let db = sea_orm::Database::connect(opt)
         .await
         .expect("connect to disposable postgres database");
-    for step in bookclerk_db_exec::migration_sql_postgres() {
-        for stmt in step.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-            db.execute_raw(sea_orm::Statement::from_string(backend, stmt.to_string()))
-                .await
-                .unwrap_or_else(|err| panic!("postgres migration `{stmt}` failed: {err}"));
-        }
+    // Apply the canonical baseline through the adapter-edge mechanical
+    // lowering, exactly as a Postgres adapter would at execution.
+    let canonical = crate::migrations::host_migration_plan()[0].canonical;
+    let batch = vec![
+        canonical.to_string(),
+        "INSERT INTO schema_migrations (version) VALUES (1)".to_string(),
+    ];
+    db.execute_raw(sea_orm::Statement::from_string(
+        backend,
+        "CREATE TABLE IF NOT EXISTS schema_migrations (version BIGINT PRIMARY KEY)".to_string(),
+    ))
+    .await
+    .expect("create schema_migrations");
+    let stmts =
+        bookclerk_db_exec::expand_host_schema_batch(sea_orm::DatabaseBackend::Postgres, &batch)
+            .expect("expand host schema batch");
+    for stmt in stmts {
+        db.execute_raw(sea_orm::Statement::from_string(backend, stmt.clone()))
+            .await
+            .unwrap_or_else(|err| panic!("postgres migration `{stmt}` failed: {err}"));
     }
     LibraryStore::from_connection(db)
 }

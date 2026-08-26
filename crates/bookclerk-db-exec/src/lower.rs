@@ -174,6 +174,67 @@ fn rewrite_julianday_delta(sql: &str) -> String {
     replace_in_code(sql, NEEDLE, REPL)
 }
 
+/// Lowers one canonical Bookclerk **DDL** statement onto PostgreSQL.
+///
+/// Mechanical type/identity rewrites for the host schema pack, applied at
+/// the adapter execution edge before [`lower_canonical_to_postgres`]:
+///
+/// - `INTEGER PRIMARY KEY AUTOINCREMENT` → `BIGSERIAL PRIMARY KEY`
+/// - `INTEGER` → `BIGINT` (shared SeaORM entities use `i64` everywhere)
+/// - `REAL` → `DOUBLE PRECISION`
+/// - `BLOB` → `BYTEA`
+///
+/// Rewrites are word-boundary and code-span aware; string literals and
+/// comments are copied verbatim.
+#[must_use]
+pub fn lower_canonical_ddl_to_postgres(sql: &str) -> String {
+    let sql = replace_word_in_code(
+        sql,
+        "INTEGER PRIMARY KEY AUTOINCREMENT",
+        "BIGSERIAL PRIMARY KEY",
+    );
+    let sql = replace_word_in_code(&sql, "INTEGER", "BIGINT");
+    let sql = replace_word_in_code(&sql, "REAL", "DOUBLE PRECISION");
+    let sql = replace_word_in_code(&sql, "BLOB", "BYTEA");
+    lower_canonical_to_postgres(&sql)
+}
+
+/// True when the byte at `idx` (or the string edge) is not an identifier char.
+fn word_boundary(sql: &str, idx: Option<usize>) -> bool {
+    match idx.and_then(|i| sql.as_bytes().get(i)) {
+        Some(b) => !(b.is_ascii_alphanumeric() || *b == b'_'),
+        None => true,
+    }
+}
+
+/// Replaces whole-word `from` with `to` in SQL code spans only.
+fn replace_word_in_code(sql: &str, from: &str, to: &str) -> String {
+    if from.is_empty() {
+        return sql.to_string();
+    }
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len());
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        if sql[i..].starts_with(from)
+            && word_boundary(sql, i.checked_sub(1))
+            && word_boundary(sql, Some(i + from.len()))
+        {
+            out.push_str(to);
+            i += from.len();
+            continue;
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// Replaces `from` with `to` only in SQL code spans (not strings/comments).
 fn replace_in_code(sql: &str, from: &str, to: &str) -> String {
     if from.is_empty() {
