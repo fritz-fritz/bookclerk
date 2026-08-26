@@ -31,7 +31,7 @@ pub struct PluginDescribe {
     /// Advertised factories. Host intersects with the signed manifest allowlist.
     #[serde(default)]
     pub supported_roles: Vec<String>,
-    /// Handshake-era extras (brand, CLI, method names). Bounded JSON.
+    /// Identity extras (brand, CLI, method names). Bounded JSON.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub metadata_json: String,
 }

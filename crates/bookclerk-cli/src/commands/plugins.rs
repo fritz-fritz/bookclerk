@@ -99,7 +99,7 @@ pub enum PluginsCommand {
         /// Plugin id (default: all discovered that are enabled).
         id: Option<String>,
     },
-    /// Check install integrity, target, jail, and handshake health.
+    /// Check install integrity, target, jail, and describe/health status.
     Doctor {
         /// Plugin id (default: all discovered).
         id: Option<String>,
@@ -183,7 +183,7 @@ struct PluginListItem {
     kind: String,
     /// Whether this plugin is enabled in `config.toml`.
     enabled: bool,
-    /// Guest executable path used for handshake and CLI invoke.
+    /// Guest executable path used for describe and CLI invoke.
     command: String,
     /// Optional human-readable name from the manifest.
     name: Option<String>,
@@ -314,7 +314,7 @@ pub async fn run(
                 }
                 if schema.commands.is_empty() {
                     println!(
-                        "cli commands: (none in plugin.toml; may still advertise via handshake)"
+                        "cli commands: (none in plugin.toml; may still advertise via describe)"
                     );
                 } else {
                     println!("cli commands:");
@@ -681,7 +681,7 @@ fn run_remove(
     })
 }
 
-/// Reports receipt integrity, executable digest, and handshake health for one or all plugins.
+/// Reports receipt integrity, executable digest, and describe/health status for one or all plugins.
 async fn run_doctor(
     config: &Config,
     id: Option<String>,
@@ -858,7 +858,7 @@ async fn spawn_cli_session(
     .await?)
 }
 
-/// Spawns the guest, handshakes, and calls `health` when advertised.
+/// Spawns the guest, calls `describe()`, and calls `health` when advertised.
 async fn health_check_installed(config: &Config, id: &str) -> anyhow::Result<String> {
     let plugin = find_plugin(config, id)?;
     let session = spawn_cli_session(config, &plugin).await?;
@@ -882,9 +882,9 @@ async fn health_check_installed(config: &Config, id: &str) -> anyhow::Result<Str
                 );
             }
         }
-        Ok(format!("health=ok handshake_api={api} caps={caps}"))
+        Ok(format!("health=ok api={api} roles={caps}"))
     } else {
-        Ok(format!("handshake_api={api} caps={caps}"))
+        Ok(format!("api={api} roles={caps}"))
     }
 }
 
@@ -1036,7 +1036,7 @@ pub fn augment_plugins_command(mut plugins_cmd: clap::Command, config: &Config) 
     plugins_cmd
 }
 
-/// Prefers live `cli.describe`, then handshake CLI, then the on-disk manifest schema.
+/// Prefers live `cli.describe`, then the describe-metadata CLI schema, then the on-disk manifest schema.
 async fn resolve_schema(
     session: &PluginSession,
     plugin: &DiscoveredPlugin,
@@ -1045,7 +1045,7 @@ async fn resolve_schema(
         let raw = session.cli_describe().await?;
         return Ok(serde_json::from_str(&raw)?);
     }
-    if let Some(cli) = session.handshake_metadata().cli {
+    if let Some(cli) = session.plugin_metadata().cli {
         return Ok(cli);
     }
     Ok(plugin.manifest.cli.clone().unwrap_or_default())

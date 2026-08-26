@@ -7,5 +7,5 @@
 pub mod guest;
 pub mod plugin;
 
-/// Plugin id string advertised in handshake and config (`[output.s3]`).
+/// Plugin id string advertised in describe() and config (`[output.s3]`).
 pub const ID: &str = "s3";

@@ -7,7 +7,7 @@
  * @example
  * ```ts
  * import { BookclerkPlugin } from "@bookclerk/plugin-sdk/workerd";
- * import type { HandshakeParams, HandshakeResult } from "@bookclerk/plugin-sdk/workerd";
+ * import type { PluginDescribe } from "@bookclerk/plugin-sdk/workerd";
  *
  * export default class MyPlugin extends BookclerkPlugin {
  *   async describe(): Promise<PluginDescribe> {
@@ -55,16 +55,14 @@ export type {
   PluginDescribe,
   WorkerContext,
 } from "./plugin.js";
+export type { BookclerkEnv } from "./env.js";
 export type {
-  BookclerkEnv,
-  HandshakeParams,
-  HandshakeResult,
+  PluginMetadata,
   HealthResult,
   DiagnoseResult,
   CliSchema,
   CliInvokeParams,
   CliInvokeResult,
-  HostToPluginEvent,
 } from "./generated.js";
 export {
   canonicalExecuteRequestHash,

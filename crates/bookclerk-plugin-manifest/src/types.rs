@@ -150,7 +150,7 @@ pub struct BindingCapabilities {
 /// `[capabilities.methods]` — declared RPC surface for discovery / consent.
 ///
 /// Lists method names the guest intends to implement; used for operator UI
-/// and tooling, not as a hard ABI gate at handshake.
+/// and tooling, not as a hard ABI gate at describe().
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct MethodCapabilities {

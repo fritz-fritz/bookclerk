@@ -8,7 +8,7 @@ use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
 use bookclerk_plugin_abi::{AdapterTransaction, HostAdapterDatabaseSession};
 use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
 use bookclerk_plugin_sdk::{
-    serve, DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, HandshakeResult, PluginError,
+    serve, DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, PluginError, PluginMetadata,
 };
 use bookclerk_plugin_sdk::{
     AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
@@ -16,14 +16,14 @@ use bookclerk_plugin_sdk::{
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
-    bookclerk_plugin_sdk::encode_json(HandshakeResult {
+    bookclerk_plugin_sdk::encode_json(PluginMetadata {
         api_version: PRODUCT_API_VERSION,
         id: "d1".into(),
         kind: "database".into(),
         display_name: Some("Cloudflare D1".into()),
         capabilities: vec!["health".into(), "diagnose".into()],
         sort_key: Some(5),
-        ..HandshakeResult::default()
+        ..PluginMetadata::default()
     })
 }
 

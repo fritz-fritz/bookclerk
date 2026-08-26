@@ -775,9 +775,9 @@ pub fn require_binding(grant: &PluginGrant, name: &str) -> Result<()> {
     }
 }
 
-/// Handshake `config` payload: non-empty settings only when the grant includes `config`.
+/// Spawn `config` payload: non-empty settings only when the grant includes `config`.
 #[must_use]
-pub fn handshake_config_for_grant(
+pub fn spawn_config_for_grant(
     grant: &PluginGrant,
     config_table: serde_json::Value,
 ) -> serde_json::Value {
@@ -877,12 +877,12 @@ fn is_safe_platform_request(grant: &PluginGrant) -> bool {
             .all(|b| b == "config" || b == "work_fs")
 }
 
-/// Reject handshake claims that exceed the manifest (and covering grant).
+/// Reject `describe()` capability claims that exceed the manifest (and covering grant).
 ///
 /// # Errors
 ///
 /// Returns an error when the operation fails.
-pub fn validate_handshake_capabilities(
+pub fn validate_described_capabilities(
     manifest: &PluginManifest,
     grant: &PluginGrant,
     capabilities: &[String],
@@ -895,7 +895,7 @@ pub fn validate_handshake_capabilities(
     if oauth_mode || oauth_methods {
         if !manifest.capabilities.bindings.oauth {
             return Err(PluginError::message(format!(
-                "plugin `{}` handshake advertises OAuth without bindings.oauth in plugin.toml",
+                "plugin `{}` describe() advertises OAuth without bindings.oauth in plugin.toml",
                 manifest.id
             )));
         }
@@ -905,7 +905,7 @@ pub fn validate_handshake_capabilities(
     // Lifecycle / entrypoint methods are always implied; kind-specific surfaces
     // in `capabilities.methods` are what consent is meant to bound.
     const CORE_CAPS: &[&str] = &[
-        "handshake",
+        "describe",
         "shutdown",
         "health",
         "diagnose",
@@ -927,7 +927,7 @@ pub fn validate_handshake_capabilities(
         }
         if !declared.iter().any(|name| name.eq_ignore_ascii_case(cap)) {
             return Err(PluginError::message(format!(
-                "plugin `{}` handshake advertises capability `{cap}` not listed in \
+                "plugin `{}` describe() advertises capability `{cap}` not listed in \
                  capabilities.methods",
                 manifest.id
             )));
@@ -1051,16 +1051,15 @@ mod tests {
     }
 
     #[test]
-    fn handshake_config_omitted_without_config_binding() {
+    fn spawn_config_omitted_without_config_binding() {
         let grant = sample_grant(&[], &["secrets"], &[]);
-        let delivered = handshake_config_for_grant(
+        let delivered = spawn_config_for_grant(
             &grant,
             serde_json::json!({ "greeting": "hi", "enabled": true }),
         );
         assert_eq!(delivered, serde_json::json!({}));
         let with_config = sample_grant(&[], &["config"], &[]);
-        let kept =
-            handshake_config_for_grant(&with_config, serde_json::json!({ "greeting": "hi" }));
+        let kept = spawn_config_for_grant(&with_config, serde_json::json!({ "greeting": "hi" }));
         assert_eq!(kept["greeting"], "hi");
     }
 
@@ -1372,7 +1371,7 @@ plugin_kv = true
     }
 
     #[test]
-    fn validate_handshake_rejects_oauth_without_binding() {
+    fn validate_describe_rejects_oauth_without_binding() {
         let manifest = PluginManifest::parse(
             r#"
 api_version = 2
@@ -1390,7 +1389,7 @@ config = true
         )
         .unwrap();
         let grant = consent_request(&manifest);
-        let err = validate_handshake_capabilities(
+        let err = validate_described_capabilities(
             &manifest,
             &grant,
             &["loginStart".into()],
@@ -1402,7 +1401,7 @@ config = true
     }
 
     #[test]
-    fn validate_handshake_rejects_undeclared_methods() {
+    fn validate_describe_rejects_undeclared_methods() {
         let manifest = PluginManifest::parse(
             r#"
 api_version = 2
@@ -1415,15 +1414,15 @@ command = "./demo"
 mode = "deny"
 
 [capabilities.methods]
-list = ["handshake", "health"]
+list = ["health"]
 "#,
         )
         .unwrap();
         let grant = consent_request(&manifest);
-        let err = validate_handshake_capabilities(
+        let err = validate_described_capabilities(
             &manifest,
             &grant,
-            &["handshake".into(), "scanLibrary".into()],
+            &["health".into(), "scanLibrary".into()],
             None,
         )
         .unwrap_err()
@@ -1432,7 +1431,7 @@ list = ["handshake", "health"]
     }
 
     #[test]
-    fn validate_handshake_allows_core_entrypoint_methods() {
+    fn validate_describe_allows_core_entrypoint_methods() {
         let manifest = PluginManifest::parse(
             r#"
 api_version = 2
@@ -1445,16 +1444,16 @@ command = "./demo"
 mode = "deny"
 
 [capabilities.methods]
-list = ["handshake", "health", "diagnose", "onEvent", "cli"]
+list = ["health", "diagnose", "onEvent", "cli"]
 "#,
         )
         .unwrap();
         let grant = consent_request(&manifest);
-        validate_handshake_capabilities(
+        validate_described_capabilities(
             &manifest,
             &grant,
             &[
-                "handshake".into(),
+                "describe".into(),
                 "health".into(),
                 "start".into(),
                 "cli".into(),

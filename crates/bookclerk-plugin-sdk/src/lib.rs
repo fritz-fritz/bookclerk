@@ -45,7 +45,7 @@
 //! # Re-exports
 //!
 //! Crate-root `pub use` items are the stable import surface for guests
-//! (handshake DTOs, [`PluginError`], fetch path helpers, tunnel types). Prefer
+//! (describe-metadata DTOs, [`PluginError`], fetch path helpers, tunnel types). Prefer
 //! `use bookclerk_plugin_sdk::…` over reaching into submodules unless you need
 //! module-level docs.
 
@@ -77,19 +77,18 @@ pub use pass_fd::{fd_proc_path, recv_passed_fd, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHA
 pub use protocol::{
     methods, AuthenticateUserParams, BookAcquiredDto, BrandDto, CatalogDetailParams, CatalogHitDto,
     CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams, CliInvokeResult, CliSchema,
-    ConfigOptionDto, ConfigOptionValueDto, CopyParams, CredentialsUpdateParams, EventPollResultDto,
-    ExistsResultDto, ExpandCandidatesParams, ExternalUserDto, FetchTitleParams, GetParams,
-    GetResultDto, HandshakeResult, HealthDto, HealthResult, KeyParams, ListAccountsParams,
-    ListDealsParams, ListParams, ListeningProgressDto, LocalCopyParams, LocalGetParams,
-    LocalKeyParams, LocalListParams, LocalPutFileParams, LocalPutParams, LocalTouchFileParams,
-    LoginCompleteParams, LoginParams, LoginResultDto, LoginStartParams, LoginStartResultDto,
-    ObjectInfoDto, ObjectMetaDto, ObjectProbeDto, OutputCopyParams, OutputGetParams,
-    OutputKeyParams, OutputListParams, OutputLocalContextDto, OutputPutFileParams, OutputPutParams,
-    OutputS3ContextDto, OutputTouchFileParams, PlainPartDto, PurchaseHintDto, PurchaseHintParams,
-    PutFileParams, PutParams, S3CredentialsDto, ScanBookDto, ScanLibraryParams, ScanParams,
-    ScanSummaryDto, SearchCatalogParams, SourceAccountDto, SourceFetchDto, SyncListeningResultDto,
-    TouchFileParams, HOST_MANIFEST_API_VERSION_MAX, MAX_RPC_LINE_BYTES, PLUGIN_API_VERSION,
-    PROTOCOL_NAME,
+    ConfigOptionDto, ConfigOptionValueDto, CopyParams, EventPollResultDto, ExistsResultDto,
+    ExpandCandidatesParams, ExternalUserDto, FetchTitleParams, GetParams, GetResultDto, HealthDto,
+    HealthResult, KeyParams, ListAccountsParams, ListDealsParams, ListParams, ListeningProgressDto,
+    LocalCopyParams, LocalGetParams, LocalKeyParams, LocalListParams, LocalPutFileParams,
+    LocalPutParams, LocalTouchFileParams, LoginCompleteParams, LoginParams, LoginResultDto,
+    LoginStartParams, LoginStartResultDto, ObjectInfoDto, ObjectMetaDto, ObjectProbeDto,
+    OutputCopyParams, OutputGetParams, OutputKeyParams, OutputListParams, OutputLocalContextDto,
+    OutputPutFileParams, OutputPutParams, OutputS3ContextDto, OutputTouchFileParams, PlainPartDto,
+    PluginMetadata, PurchaseHintDto, PurchaseHintParams, PutFileParams, PutParams,
+    S3CredentialsDto, ScanBookDto, ScanLibraryParams, ScanParams, ScanSummaryDto,
+    SearchCatalogParams, SourceAccountDto, SourceFetchDto, SyncListeningResultDto, TouchFileParams,
+    HOST_MANIFEST_API_VERSION_MAX, MAX_RPC_LINE_BYTES, PROTOCOL_NAME,
 };
 
 pub use bookclerk_plugin_abi::{
@@ -103,16 +102,15 @@ pub use bookclerk_plugin_abi::{
     DatabaseContext, DbBootstrap, DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection,
     DbRow, DbTiming, DbType, DbValue, Destination, DestinationClient, DestinationContext,
     DestinationServer, DiagnoseResult, DomainEvent, EventResult, ExecuteReply, ExecuteRequest,
-    GuestDatabase, HandshakeParams, HealthOk, HostToPluginEvent, Integration, IntegrationClient,
-    IntegrationContext, JobCheckpoint, JobHandler, JobHandlerContext, JobInvocation,
-    JobInvocationLease, JobOutcome, ListOptions, ListPage, NeverCancel, ObjectInfo, ObjectMetadata,
-    OidcClientTemplate, PluginClient, PluginDescribe, PluginError, PluginErrorCode, PluginRoot,
-    PluginServer, PluginToHostEvent, ProgressSink, PutResult, QueryPage, ReadResult, ScalarLimits,
-    Source, SourceClient, SourceContext, SourceServer, StatementResult, StreamCopyHandler,
-    StreamCopySpec, TypedDbStatement, WorkerContext, WriteOptions, ABI_MAJOR, ABI_MINOR,
-    API_VERSION, ENVELOPE_VERSION, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS,
-    MAX_LIST_PAGE, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
-    SQL_CONTRACT_VERSION,
+    GuestDatabase, HealthOk, Integration, IntegrationClient, IntegrationContext, JobCheckpoint,
+    JobHandler, JobHandlerContext, JobInvocation, JobInvocationLease, JobOutcome, ListOptions,
+    ListPage, NeverCancel, ObjectInfo, ObjectMetadata, OidcClientTemplate, PluginClient,
+    PluginDescribe, PluginError, PluginErrorCode, PluginRoot, PluginServer, ProgressSink,
+    PutResult, QueryPage, ReadResult, ScalarLimits, Source, SourceClient, SourceContext,
+    SourceServer, StatementResult, StreamCopyHandler, StreamCopySpec, TypedDbStatement,
+    WorkerContext, WriteOptions, ABI_MAJOR, ABI_MINOR, ENVELOPE_VERSION, FEATURE_SCALAR_LIMITS,
+    FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
+    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION, SQL_CONTRACT_VERSION,
 };
 
 /// Serves a [`PluginRoot`] on stdin/stdout (Cap'n Proto RPC).

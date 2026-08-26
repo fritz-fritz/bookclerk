@@ -42,7 +42,7 @@ On native guests, `serve` is the stdin/stdout Cap'n Proto runner for
 | --- | --- | --- |
 | TypeScript | [`@bookclerk/plugin-sdk`](../packages/plugin-sdk/) | `/workerd` exports `BookclerkPlugin`; authors export the raw class |
 | Python | [`bookclerk-plugin-sdk`](../packages/plugin-sdk-python/) | `from bookclerk_plugin_sdk.workerd import BookclerkPlugin` |
-| Rust | [`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/) | `PluginRoot` + `serve`; workerd embed + `wasmBookclerkPlugin` |
+| Rust | [`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/) | `PluginRoot` + `serve`; workerd guests pair `BookclerkPlugin` JS glue with Wasm dispatch |
 
 Runtimes in `plugin.toml`:
 
@@ -94,7 +94,7 @@ cargo build-app --optional --examples   # optional + Cargo examples
 cargo install-platform                  # sqlite + local → FILES_DIR/plugins
 cargo stage-plugins --optional          # optional → target/plugin-artifacts
 cargo stage-plugins --examples --skip-build
-cargo test-staged                       # handshake smoke
+cargo test-staged                       # describe/health conformance smoke
 ```
 
 Add `--release` to any alias for release builds. Override staging dir with
@@ -391,7 +391,7 @@ it describes, so anything it can ask for is something a hostile plugin can ask
 for too — consent and review are the operator controls.
 
 Optional `[capabilities.methods]` lists RPC method names for discovery/consent
-UI (e.g. `handshake`, `health`, `onEvent`, `cli`).
+UI (e.g. `health`, `onEvent`, `cli`).
 
 ### Isolation modes
 
@@ -579,7 +579,7 @@ missing path, and the launcher refuses rather than silently narrowing the jail.
 guest that needs host data should be asking for it over RPC; the filesystem
 allowlist is not negotiable from a manifest.
 
-**Everything fails right after `handshake`** — check the guest's stderr, which is
+**Everything fails right after spawn** — check the guest's stderr, which is
 inherited by the host and lands in the daemon log directly under the
 `bookclerk-jail:` line reporting what was applied.
 
@@ -597,7 +597,7 @@ covers the current manifest).
 
 The plugin (or its installer) drops a directory under a search root. Bookclerk
 scans for `plugin.toml`, spawns the native `command` or `bookclerk-workerd`, and
-passes the matching main-config table on `handshake`. Users never put `command`
+passes the matching main-config table in the spawn config. Users never put `command`
 in `config.toml`.
 
 ## Layout
@@ -656,14 +656,14 @@ mode = "deny"
 config = true
 
 [capabilities.methods]
-list = ["handshake", "health", "diagnose", "onEvent", "cli"]
+list = ["health", "diagnose", "onEvent", "cli"]
 
 [capabilities.events]
 subscriptions = [
   { type = "book_acquired", schema_versions = [1], supports_suspend = false },
 ]
 
-# Optional: CLI help without spawning (handshake / cliDescribe win at invoke)
+# Optional: CLI help without spawning (describe / cliDescribe win at invoke)
 [cli]
 [[cli.commands]]
 name = "ping"
@@ -727,7 +727,7 @@ the raw SVG. `img-src` allows sanitized embedded rasters; scripts stay blocked. 
 `jpeg` / …) are unchanged. Do **not** invent `capabilities.network.domains`
 on native plugins just for icons — domains remain **workerd-only** allowlists.
 
-This is separate from handshake **`BrandDto.icon_url`**: that field is the live
+This is separate from describe-metadata **`BrandDto.icon_url`**: that field is the live
 portal/Accounts brand returned by the guest after spawn (includes optional brand
 colors `bg` / `fg` / `accent` plus `icon_url`). Optional `plugin.toml` `logo` is
 install metadata so Settings can show an icon **without** spawning. When a
@@ -756,7 +756,7 @@ a first-party plugin of the same kind is also rejected.
 
 Third-party (and newly installed) plugins require an explicit permission grant
 before **enable** and again before **every external spawn**. Privileged delivery
-also checks individual bindings: handshake `config`, host-injected secrets,
+also checks individual bindings: spawn `config`, host-injected secrets,
 `work_fs` (jail `tmp` / streams), and OAuth callback proxy setup.
 
 **Operator Settings** shows a branded consent dialog when enabling a plugin that
@@ -832,7 +832,7 @@ disabled**; sources follow the usual `[sources.<id>]` rules (missing → enabled
 ```toml
 [integrations.echo]
 enabled = true
-# greeting = "hi"   # opaque knobs → handshake config
+# greeting = "hi"   # opaque knobs → spawn config
 
 [sources.my_store]
 enabled = true
@@ -917,7 +917,7 @@ zero/unsafe limits.
 | **native** | Guest SDK `serve` serves `schema/plugin.capnp` (`capnp-rpc`) with windowed byte streams |
 
 FD passing / `localPath` remain native-only optimizations behind the stream
-adapter, never author-facing. Handshake rejects unsupported versions.
+adapter, never author-facing. Describe rejects unsupported versions.
 
 First-party destinations (`local`, `s3`) and remaining product guests speak the object-capability ABI.
 Echo examples are `api_version = 2` Integration.
@@ -929,7 +929,7 @@ payload. `bookclerk-workerd` wires the isolate `HOST` binding to a loopback
 HTTP callback: events are POSTed to the launcher, buffered in memory for the
 session, and logged (event `type` + size only — not the full JSON body).
 
-Bridge loopback RPC (`/rpc`, `/health`) and the notify reverse channel share a
+Bridge loopback role routes (`/describe`, `/health`, …) and the notify reverse channel share a
 **per-isolate bearer token** (`BRIDGE_TOKEN` Cap’n Proto binding on both the
 bridge and host workers). The launcher generates the token, injects it into the
 workerd config, and sends `Authorization: Bearer …` on every bridge request;
@@ -946,7 +946,7 @@ integrations/jobs.
 
 | Method | Purpose |
 | --- | --- |
-| `handshake` | Negotiate version, id, kind, capabilities, brand |
+| `describe` | Identity, version, capabilities, brand (`metadataJson`) |
 | `shutdown` | Graceful teardown |
 | `health` | Connectivity / config check |
 | `diagnose` | Human-readable CLI probe lines |
@@ -954,15 +954,15 @@ integrations/jobs.
 | `cliInvoke` | Run a declared command (`CliInvokeParams` → `CliInvokeResult`) |
 | `oidcClients` | Bookclerk-as-IdP relying-party templates (`OidcClientTemplate[]`; empty when unused) |
 
-Handshake params include `{ "apiVersion": 2, "config": {…} }` — the plugin’s
-`[sources.<id>]` / `[integrations.<id>]` table from **main** `config.toml` as JSON
-(empty object if the table is missing).
+Role contexts carry the plugin’s `[sources.<id>]` / `[integrations.<id>]` table
+from **main** `config.toml` as opaque JSON (empty object if the table is
+missing).
 
-Optional handshake field `cli` may embed the same schema as `cliDescribe`. Prefer
-advertising capability `cli` and implementing both methods. You may also mirror
-the schema in `plugin.toml` under `[cli]` so `bookclerk plugins <id> --help`
-works without spawning the plugin; at invoke time handshake / `cliDescribe`
-remain authoritative.
+The optional `metadataJson` field `cli` may embed the same schema as
+`cliDescribe`. Prefer advertising capability `cli` and implementing both
+methods. You may also mirror the schema in `plugin.toml` under `[cli]` so
+`bookclerk plugins <id> --help` works without spawning the plugin; at invoke
+time `describe` / `cliDescribe` remain authoritative.
 
 ### Plugin CLI
 
@@ -974,7 +974,7 @@ Host commands that apply to every plugin stay on Bookclerk verbs
 bookclerk plugins <plugin-id> <command> [args…]
 ```
 
-Example schema (JSON / handshake `cli` / `cliDescribe`):
+Example schema (JSON / `metadataJson` `cli` / `cliDescribe`):
 
 ```json
 {
@@ -1001,8 +1001,9 @@ Result: `{ "exitCode": 0, "stdout": "…", "stderr": "…", "json": … }`.
 
 ### Integration capabilities
 
-Advertise in `handshake.capabilities`: `start`, `onEvent`, `health`,
-`diagnose`, `scanLibrary`, `syncListening`, `authenticateUser`, `cli`.
+Advertise in `describe()` metadata `capabilities`: `start`, `onEvent`,
+`health`, `diagnose`, `scanLibrary`, `syncListening`, `authenticateUser`,
+`cli`.
 
 | Method | Notes |
 | --- | --- |

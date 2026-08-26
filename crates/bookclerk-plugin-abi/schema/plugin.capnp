@@ -120,7 +120,7 @@ struct PluginDescribe {
   # Advertised factories (`destination`, `source`, `worker`, `contentSource`,
   # `integration`, `database`). Host still intersects with the manifest allowlist.
   supportedRoles @8 :List(Text);
-  # Handshake-era identity extras (brand, cli schema, method names, aliases).
+  # Identity extras (brand, cli schema, method names, aliases).
   # Versioned JSON escape hatch; not a substitute for typed fields.
   metadataJson @9 :Text;
 }
@@ -560,6 +560,392 @@ interface Integration {
   authenticateUser @7 (paramsJson :Text) -> (result :JsonReply);
   pollEvents @8 () -> (result :JsonReply);
 }
+
+#############################################################################
+# JSON payload contracts
+#
+# The structs below never travel as Cap'n Proto bytes. They are the schema
+# for the JSON payloads carried inside `Text` fields of this ABI
+# (`describe().metadataJson`, `ContentSource`/`Integration` `paramsJson`,
+# `cliInvoke` params/results). Field names are the literal JSON keys
+# (camelCase). SDK projections (TypeScript / Python) and drift checks against
+# the Rust serde types are generated from these declarations by
+# `scripts/gen-plugin-abi.py`.
+#############################################################################
+
+# Marks a JSON payload field that must be present (no default).
+annotation required @0xab302cbc0dbdd123 (field) :Void;
+# Marks a Text-typed field whose JSON value is an arbitrary JSON value or
+# object (projected as a loose JSON type, not a string).
+annotation jsonValue @0xe691f0f5a4b30449 (field) :Void;
+# Marks an enum whose JSON wire strings are the snake_case form of the
+# enumerant names (`payloadTooLarge` -> "payload_too_large").
+annotation jsonEnum @0xba425910028861ab (enum) :Void;
+
+# Stable `PluginError.code` strings. Unknown future codes are forwarded
+# as-is; SDKs surface them as a local `unknown` while keeping the raw wire
+# code.
+enum PluginErrorCode $jsonEnum {
+  # Request params failed validation or are missing required fields.
+  invalidParams @0;
+  # Caller is not authenticated for this method (credentials / token).
+  unauthorized @1;
+  # Caller is authenticated but not allowed to perform this operation.
+  forbidden @2;
+  # Requested account, object key, session, or row does not exist.
+  notFound @3;
+  # Backend or dependency is temporarily unreachable (store API, DB, ...).
+  unavailable @4;
+  # Method or capability is not implemented by this guest.
+  unsupported @5;
+  # Unexpected guest or host failure; see `PluginError.message`.
+  internal @6;
+  # A scalar RPC value exceeded `maxScalarBytes`.
+  payloadTooLarge @7;
+  # The invocation deadline elapsed before the call completed.
+  deadlineExceeded @8;
+  # List cursor is missing, stale, or not from this backend.
+  invalidCursor @9;
+  # The invocation was cancelled (host fence / guest abort).
+  cancelled @10;
+  # The operation conflicts with current state (conditional put, ...).
+  conflict @11;
+}
+
+# Identity extras carried as JSON in `describe().metadataJson`: portal auth,
+# brand colors, config option discovery, and an embedded CLI schema.
+struct PluginMetadata {
+  # ABI version the guest speaks; must equal `apiVersion`.
+  apiVersion @0 :UInt32 $required;
+  # Stable plugin id matching `plugin.toml` / install directory name.
+  id @1 :Text $required;
+  # Plugin kind: "source", "integration", "output", or "database".
+  kind @2 :Text $required;
+  # Human-readable name for UI lists; omitted when absent.
+  displayName @3 :Text;
+  # Declared capability method names the guest implements (e.g. "health",
+  # "login", "fetchTitle").
+  capabilities @4 :List(Text);
+  # Portal Accounts connect mode: "oauth" or "password".
+  portalAuthMode @5 :Text;
+  # Optional env var name operators may set for password helpers; never
+  # required for Accounts UI connect.
+  passwordEnvVar @6 :Text;
+  # Alternate ids accepted for config / CLI targeting; omitted when empty.
+  aliases @7 :List(Text);
+  # Optional UI sort weight among peers of the same kind.
+  sortKey @8 :UInt32;
+  # Portal brand colors and icon URL for Accounts / library chrome.
+  brand @9 :Brand;
+  # Discoverable config option groups for source UIs.
+  configOptions @10 :List(ConfigOption);
+  # Optional embedded CLI schema (same shape as `cliDescribe`).
+  cli @11 :CliSchema;
+}
+
+# Portal brand crossing the RPC boundary. Distinct from `plugin.toml`
+# `logo`: `iconUrl` is the live URL or data URI the SPA renders.
+struct Brand {
+  # Brand id (often matches the plugin id).
+  id @0 :Text $required;
+  # Display name shown next to the brand swatch.
+  name @1 :Text $required;
+  # Background CSS color (hex or named).
+  bg @2 :Text $required;
+  # Foreground CSS color for text on `bg`.
+  fg @3 :Text $required;
+  # Accent CSS color for highlights / CTAs.
+  accent @4 :Text $required;
+  # Icon URL or data URI for the portal.
+  iconUrl @5 :Text $required;
+}
+
+# One discoverable config option group advertised for sources.
+struct ConfigOption {
+  # Config key under the plugin's `config.toml` table.
+  key @0 :Text $required;
+  # Operator-facing label for the option group.
+  label @1 :Text $required;
+  # Allowed selectable values for this key.
+  values @2 :List(ConfigOptionValue) $required;
+}
+
+# One selectable value under a `ConfigOption`.
+struct ConfigOptionValue {
+  # Value written to config when selected.
+  id @0 :Text $required;
+  # Operator-facing label for this value.
+  label @1 :Text $required;
+}
+
+# Declared plugin CLI surface (`cliDescribe` / metadata `cli` / `plugin.toml`).
+struct CliSchema {
+  # Commands exposed as `bookclerk plugins <id> <command> ...`.
+  commands @0 :List(CliCommandSpec);
+}
+
+# One plugin CLI command under `CliSchema`.
+struct CliCommandSpec {
+  # Command verb after the plugin id (for example "ping").
+  name @0 :Text $required;
+  # Short help text for `--help`; omitted when absent.
+  about @1 :Text;
+  # Argument / flag specs for this command (default empty).
+  args @2 :List(CliArgSpec);
+}
+
+# Value kind for a `CliArgSpec` (wire lowercase: "string" / "bool" / ...).
+enum CliArgKind $jsonEnum {
+  # Free-form string argument (default).
+  string @0;
+  # Boolean flag ("true" / "false").
+  bool @1;
+  # Integer argument.
+  int @2;
+  # Filesystem path argument.
+  path @3;
+}
+
+# One CLI argument or flag under a `CliCommandSpec`.
+struct CliArgSpec {
+  # Internal arg name used as the key in `CliInvokeParams.args`.
+  name @0 :Text $required;
+  # Long flag without leading dashes (e.g. "message" -> `--message`).
+  long @1 :Text;
+  # Optional short flag character (e.g. "m" -> `-m`).
+  short @2 :Text;
+  # Parsed value kind (default "string").
+  kind @3 :CliArgKind;
+  # When true, the host rejects invoke if the arg is missing.
+  required @4 :Bool;
+  # Default string form when the operator omits the arg.
+  default @5 :Text;
+  # Help text for this arg; omitted when absent.
+  about @6 :Text;
+  # When true, the arg is positional rather than a flagged option.
+  positional @7 :Bool;
+}
+
+# Params JSON for `cliInvoke`.
+struct CliInvokeParams {
+  # Command name matching a `CliCommandSpec.name`.
+  command @0 :Text $required;
+  # Named argument values (keys match `CliArgSpec.name`; default `{}`).
+  args @1 :Text $jsonValue;
+}
+
+# Result JSON for `cliInvoke`.
+struct CliInvokeResult {
+  # Process-style exit code (0 = success).
+  exitCode @0 :Int32;
+  # Captured standard output text.
+  stdout @1 :Text;
+  # Captured standard error text.
+  stderr @2 :Text;
+  # Optional structured payload for machine consumers; omitted when absent.
+  json @3 :Text $jsonValue;
+}
+
+# JSON health payload for guests that report identity alongside liveness.
+# Role-level `health` RPCs return the typed `HealthOk` instead.
+struct HealthResult {
+  # When true, the guest considers itself healthy enough for traffic.
+  ok @0 :Bool;
+  # Plugin id echo; omitted when the guest does not duplicate identity.
+  id @1 :Text;
+  # Whether the guest believes it is enabled in config; omitted when unknown.
+  enabled @2 :Bool;
+  # Short human detail for CLI / UI status lines; omitted when absent.
+  detail @3 :Text;
+}
+
+# JSON result of `diagnose`. Each line is printed by
+# `bookclerk plugins diagnose` / the control plane.
+struct DiagnoseResult {
+  # Human-readable probe lines (default empty).
+  lines @0 :List(Text);
+}
+
+# Params JSON for `ContentSource.login`. Password sources fill
+# email/password; OAuth sources use callback / external fields. There is no
+# files-dir root or library DB path -- only `pluginDataDir`.
+struct LoginParams {
+  # Scoped writable directory for this plugin only (`.../plugins/<id>/data`).
+  pluginDataDir @0 :Text $required;
+  # Marketplace / locale for the storefront (default empty -> guest default).
+  marketplace @1 :Text;
+  # Optional operator label stored on the account row.
+  label @2 :Text;
+  # Account email / username for password logins; omitted for pure OAuth.
+  email @3 :Text;
+  # Account password for password logins; never logged; omitted for OAuth.
+  password @4 :Text;
+  # When true, overwrite an existing sealed credential for this account.
+  force @5 :Bool;
+  # Optional bind address for OAuth callback servers (`host:port`). Ignored
+  # when `callbackIpc` is set (host owns the TCP listener).
+  callbackBind @6 :Text;
+  # Host-owned callback IPC endpoint the guest must connect to. When set
+  # (with `callbackPublicBase`), the guest must not bind a TCP listener.
+  callbackIpc @7 :Text;
+  # Public base URL for the host TCP listener, e.g. `http://127.0.0.1:12345`.
+  callbackPublicBase @8 :Text;
+  # When true, use external / paste-redirect OAuth instead of a local
+  # callback server.
+  external @9 :Bool;
+  # Pre-supplied OAuth redirect URL (paste flow); omitted otherwise.
+  responseUrl @10 :Text;
+  # Prefer QR output when the guest supports it.
+  showQr @11 :Bool;
+  # Seconds to wait for OAuth callback capture; guest default when omitted.
+  timeoutSecs @12 :UInt64;
+  # Store-specific knobs as a JSON object; guests may ignore unknowns.
+  extra @13 :Text $jsonValue;
+}
+
+# Params JSON for `ContentSource.loginStart` -- same shape as `LoginParams`.
+using LoginStartParams = LoginParams;
+
+# Params JSON for `ContentSource.loginComplete`.
+struct LoginCompleteParams {
+  # Session id previously returned by `loginStart`.
+  sessionId @0 :Text $required;
+}
+
+# Params JSON for `ContentSource.scan`. Host injects sealed credentials so
+# the plugin does not need a private credential store under `pluginDataDir`.
+struct ScanParams {
+  # Scoped plugin data directory.
+  pluginDataDir @0 :Text $required;
+  # Account ids to scan; empty means all scan-enabled accounts.
+  accounts @1 :List(Text);
+  # Storefront page size (default 50).
+  pageSize @2 :UInt32;
+  # When true, import podcast/episode-style rows (default true).
+  importEpisodes @3 :Bool;
+  # When true, import Plus/catalog entitlement titles (default true).
+  importPlusTitles @4 :Bool;
+  # Host-loaded credential blobs keyed by account id (JSON object).
+  credentials @5 :Text $jsonValue;
+}
+
+# Params JSON for `ContentSource.fetchTitle`. Plugin writes media under
+# `cacheDir` and returns plain (DRM-free) paths. Host injects credentials;
+# guests must not open `library.db` or `master.key`.
+struct FetchTitleParams {
+  # Scoped plugin data directory.
+  pluginDataDir @0 :Text $required;
+  # Account whose credentials apply.
+  accountId @1 :Text $required;
+  # Library / storefront title id to download.
+  titleId @2 :Text $required;
+  # Absolute path the guest should write media into (jail-granted TMPDIR).
+  cacheDir @3 :Text $required;
+  # Host-loaded credential blob for this account; omitted when unavailable.
+  credentials @4 :Text $jsonValue;
+  # Opaque plugin table from `[sources.<id>]`.
+  sourceConfig @5 :Text $jsonValue;
+  # Host acquire/download options (JSON object matching host DownloadOptions).
+  download @6 :Text $jsonValue;
+}
+
+# Params JSON for `ContentSource.searchCatalog`.
+struct SearchCatalogParams {
+  # Free-text search query.
+  query @0 :Text $required;
+  # Storefront region / marketplace code (default empty -> guest default).
+  region @1 :Text;
+  # Maximum hits to return (default 20).
+  limit @2 :UInt32;
+  # 1-based page for storefronts that page (default 1).
+  page @3 :UInt32;
+  # Sort key: "relevance" / "popularity" / "rating" / "title" / "author".
+  sort @4 :Text;
+  # Optional facet ("author" / "narrator" / "series" / "genre").
+  field @5 :Text;
+  # Preferred content language (soft-prioritize; e.g. "en").
+  language @6 :Text;
+}
+
+# Params JSON for `ContentSource.expandCandidates`. Seed fields identify a
+# known title; the guest returns related catalog hits.
+struct ExpandCandidatesParams {
+  # Source plugin id hint when expanding across storefronts.
+  source @0 :Text;
+  # Seed storefront product id.
+  productId @1 :Text;
+  # Seed title text.
+  title @2 :Text;
+  # Seed authors string.
+  authors @3 :Text;
+  # Seed narrators string.
+  narrators @4 :Text;
+  # Seed series name.
+  series @5 :Text;
+  # Seed series ASIN when known.
+  seriesAsin @6 :Text;
+  # Seed Amazon ASIN.
+  asin @7 :Text;
+  # Seed ISBN.
+  isbn @8 :Text;
+  # Storefront region / marketplace code.
+  region @9 :Text;
+  # Maximum candidates to return (default 20).
+  limit @10 :UInt32;
+}
+
+# Params JSON for `ContentSource.purchaseHint`. At least one identity field
+# (`productId` / `asin` / `isbn` / title+authors) should be set; guests may
+# return `invalid_params` when none are usable.
+struct PurchaseHintParams {
+  # Storefront product id when known.
+  productId @0 :Text;
+  # Title text for fuzzy lookup.
+  title @1 :Text;
+  # Authors string for fuzzy lookup.
+  authors @2 :Text;
+  # Amazon ASIN when known.
+  asin @3 :Text;
+  # ISBN when known.
+  isbn @4 :Text;
+  # Storefront region / marketplace code.
+  region @5 :Text;
+  # When true, guests should include live price fields when available.
+  withPrice @6 :Bool;
+}
+
+# Params JSON for `ContentSource.listDeals`.
+struct ListDealsParams {
+  # Optional maximum number of deals to return; guest default when omitted.
+  limit @0 :UInt32;
+}
+
+# Params JSON for `ContentSource.catalogDetail`.
+struct CatalogDetailParams {
+  # Store product id (Libro ISBN or ISBN-slug).
+  productId @0 :Text $required;
+  # Optional ISBN when it differs from `productId`.
+  isbn @1 :Text;
+}
+
+# Params JSON for `Integration.scanLibrary` (remote library sync).
+struct ScanLibraryParams {
+  # When true, force a full rescan even if the guest would otherwise
+  # incremental-sync.
+  force @0 :Bool;
+}
+
+# Params JSON for `Integration.authenticateUser`.
+struct AuthenticateUserParams {
+  # Integration username / login id.
+  username @0 :Text $required;
+  # Integration password; never logged by the host.
+  password @1 :Text $required;
+}
+
+#############################################################################
+# End of JSON payload contracts
+#############################################################################
 
 # Universal database cell/parameter domain. Engine-native arrays, enums,
 # unsigned integers, and JSON text sentinels are not baseline ABI values.

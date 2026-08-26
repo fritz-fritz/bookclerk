@@ -99,7 +99,7 @@ try_write() {
         };
         body.push_str(&format!("{verb} {name} \"{}\"\n", path.display()));
     }
-    // Answer requests so the host completes its handshake, then stay alive until
+    // Answer requests so the host completes its Cap'n Proto handshake, then stay alive until
     // stdin closes. The id is echoed back rather than assumed, so this does not
     // depend on where the host's request counter started.
     body.push_str(
@@ -184,7 +184,7 @@ impl Fixture {
     async fn probe_results(&self) -> BTreeMap<String, String> {
         let plugin = self.plugin();
         // Shell probe guests cannot speak Cap'n Proto; spawn still applies the
-        // jail and runs probes before the handshake fails.
+        // jail and runs probes before the Cap'n Proto handshake fails.
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             PluginSession::spawn_for_account(

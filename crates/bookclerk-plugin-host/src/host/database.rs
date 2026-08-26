@@ -49,7 +49,7 @@ pub struct ExternalDatabase {
 }
 
 impl ExternalDatabase {
-    /// Spawn and handshake a database plugin (connection happens later).
+    /// Spawn and describe a database plugin (connection happens later).
     ///
     /// # Errors
     ///
@@ -156,7 +156,7 @@ impl ExternalDatabase {
 /// Long-lived external database plugin for the active `[database].plugin`.
 #[derive(Default, Clone)]
 pub struct DatabaseRegistry {
-    /// Spawned guest matching `[database].plugin`, if handshake succeeded.
+    /// Spawned guest matching `[database].plugin`, if describe succeeded.
     active: Option<Arc<ExternalDatabase>>,
 }
 

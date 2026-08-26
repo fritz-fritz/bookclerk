@@ -25,11 +25,11 @@ pub struct ExternalIntegration {
     session: Arc<PluginSession>,
     /// JSON factory context (plugin config table).
     ctx_json: String,
-    /// Operator-facing name from the handshake (falls back to the manifest id).
+    /// Operator-facing name from describe metadata (falls back to the manifest id).
     display_name: String,
-    /// Whether this integration is enabled in host config after handshake.
+    /// Whether this integration is enabled in host config after describe.
     enabled: bool,
-    /// Portal brand colors/icon leaked from the handshake DTO, if the guest supplied one.
+    /// Portal brand colors/icon leaked from describe metadata, if the guest supplied one.
     brand: Option<Brand>,
     /// When true, the host may call the guest credential-login RPC (username/password).
     allow_credential_login: bool,
@@ -42,7 +42,7 @@ pub struct ExternalIntegration {
 }
 
 impl ExternalIntegration {
-    /// Spawn and handshake an integration plugin.
+    /// Spawn and describe an integration plugin.
     ///
     /// # Errors
     ///
@@ -74,8 +74,8 @@ impl ExternalIntegration {
             )
             .await?,
         );
-        let source_config = crate::handshake_config_for_grant(session.grant(), config_json);
-        let hs = session.handshake_metadata();
+        let source_config = crate::spawn_config_for_grant(session.grant(), config_json);
+        let hs = session.plugin_metadata();
         let display_name = hs
             .display_name
             .clone()
@@ -521,7 +521,7 @@ fn parse_diagnose_lines(raw: &str) -> Vec<String> {
     vec![raw.to_string()]
 }
 
-/// Copies a handshake brand DTO into a `'static` [`Brand`] (strings are leaked once at load).
+/// Copies a describe-metadata brand DTO into a `'static` [`Brand`] (strings are leaked once at load).
 fn brand_from_dto(dto: Option<&crate::protocol::BrandDto>) -> Option<Brand> {
     let b = dto?;
     Some(Brand {

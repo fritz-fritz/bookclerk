@@ -25,7 +25,7 @@ use bookclerk_config::Config;
 use bookclerk_integrations::{IntegrationRegistry, Result};
 use tracing::info;
 
-/// Integration id used in handshake and `[integrations.audiobookshelf]`.
+/// Integration id used in describe() and `[integrations.audiobookshelf]`.
 pub const ID: &str = "audiobookshelf";
 
 /// Bookclerk-as-IdP client templates declared by this plugin (`oidcClients`).

@@ -1,4 +1,4 @@
-//! Host↔guest handshake against staged optional/example artifacts (+ platform in FILES_DIR).
+//! Host↔guest describe conformance against staged optional/example artifacts (+ platform in FILES_DIR).
 //!
 //! Requires:
 //! - `BOOKCLERK_PLUGIN_ARTIFACTS` — optional + examples (`cargo stage-plugins --optional --examples`)
@@ -18,7 +18,7 @@ fn artifacts_dir() -> Option<PathBuf> {
 }
 
 #[tokio::test]
-async fn staged_first_party_plugins_handshake() {
+async fn staged_first_party_plugins_describe() {
     let Some(artifacts) = artifacts_dir() else {
         eprintln!(
             "skipping: set BOOKCLERK_PLUGIN_ARTIFACTS after `cargo stage-plugins --optional --examples`"

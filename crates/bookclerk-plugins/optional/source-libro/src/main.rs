@@ -9,8 +9,8 @@ use bookclerk_plugin_sdk::{
 };
 use bookclerk_plugin_sdk::{
     serve, BrandDto, CatalogDetailParams, CatalogHitDto, ConfigOptionDto, ConfigOptionValueDto,
-    ExpandCandidatesParams, FetchTitleParams, HandshakeResult, ListDealsParams, LoginParams,
-    PluginError, PurchaseHintParams, ScanParams, SearchCatalogParams,
+    ExpandCandidatesParams, FetchTitleParams, ListDealsParams, LoginParams, PluginError,
+    PluginMetadata, PurchaseHintParams, ScanParams, SearchCatalogParams,
 };
 use bookclerk_source::{
     CatalogSearchOpts, CatalogSearchSort, ContentSource, ExpandSeed, PurchaseHintOpts,
@@ -18,7 +18,7 @@ use bookclerk_source::{
 use serde_json::Value;
 
 fn describe_metadata() -> Result<String, PluginError> {
-    encode_json(HandshakeResult {
+    encode_json(PluginMetadata {
         api_version: PRODUCT_API_VERSION,
         id: "libro".into(),
         kind: "source".into(),
@@ -61,7 +61,7 @@ fn describe_metadata() -> Result<String, PluginError> {
                 },
             ],
         }],
-        ..HandshakeResult::default()
+        ..PluginMetadata::default()
     })
 }
 

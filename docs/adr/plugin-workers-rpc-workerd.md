@@ -46,8 +46,8 @@ contract must be **identical** across runtimes.
      traits.
 3. **v1 newline JSON is removed.** Guests speak Cap'n Proto `api_version = 2`
    (or workerd Workers RPC mapped onto the same contract). Scalar JSON remains
-   only as a versioned escape hatch for plugin-specific config, not as a spawn
-   handshake.
+   only as a versioned escape hatch for plugin-specific config, not as a
+   transport envelope.
 4. **Greenfield (no `protocol` key).** No dual-stack product ABI with legacy
    JSON-RPC stdio framing.
 5. **Isolation:** instances are keyed by `(plugin_id, account_id)`. Different

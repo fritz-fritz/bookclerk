@@ -284,8 +284,8 @@ pub struct PluginSession {
     grant: crate::PluginGrant,
     /// Guest TMPDIR.
     scratch: std::path::PathBuf,
-    /// Handshake/config JSON captured at spawn.
-    handshake_config: Value,
+    /// Spawn config JSON captured at spawn.
+    spawn_config: Value,
     /// AppContainer package SID.
     #[cfg(windows)]
     package_sid: Option<String>,
@@ -360,7 +360,7 @@ impl PluginSession {
         let data = spawned.data.clone();
         let scratch = spawned.scratch.clone();
         let grant = spawned.grant.clone();
-        let handshake_config = spawned.handshake_config.clone();
+        let spawn_config = spawned.spawn_config.clone();
         #[cfg(windows)]
         let package_sid = spawned.package_sid.clone();
         let guest_pid = spawned.child.id();
@@ -394,7 +394,7 @@ impl PluginSession {
             describe: desc,
             grant,
             scratch,
-            handshake_config,
+            spawn_config,
             #[cfg(windows)]
             package_sid,
         })
@@ -570,32 +570,32 @@ impl PluginSession {
         None
     }
 
-    /// Handshake/config JSON captured at spawn.
+    /// Spawn config JSON captured at spawn.
     #[must_use]
-    pub fn handshake_config(&self) -> &Value {
-        &self.handshake_config
+    pub fn spawn_config(&self) -> &Value {
+        &self.spawn_config
     }
 
-    /// Handshake-era extras parsed from `describe.metadataJson`.
+    /// Identity extras parsed from `describe().metadataJson`.
     #[must_use]
-    pub fn handshake_metadata(&self) -> crate::HandshakeResult {
+    pub fn plugin_metadata(&self) -> crate::PluginMetadata {
         if self.describe.metadata_json.trim().is_empty() {
-            return crate::HandshakeResult {
+            return crate::PluginMetadata {
                 api_version: PRODUCT_API_VERSION,
                 id: self.describe.id.clone(),
                 kind: self.describe.kind.clone(),
                 display_name: self.describe.display_name.clone(),
                 capabilities: self.describe.supported_roles.clone(),
-                ..crate::HandshakeResult::default()
+                ..crate::PluginMetadata::default()
             };
         }
         serde_json::from_str(&self.describe.metadata_json).unwrap_or_else(|_| {
-            crate::HandshakeResult {
+            crate::PluginMetadata {
                 api_version: PRODUCT_API_VERSION,
                 id: self.describe.id.clone(),
                 kind: self.describe.kind.clone(),
                 display_name: self.describe.display_name.clone(),
-                ..crate::HandshakeResult::default()
+                ..crate::PluginMetadata::default()
             }
         })
     }
@@ -603,7 +603,7 @@ impl PluginSession {
     /// True when `describe.metadataJson` lists a v1-style capability name.
     #[must_use]
     pub fn has_capability(&self, cap: &str) -> bool {
-        let hs = self.handshake_metadata();
+        let hs = self.plugin_metadata();
         hs.capabilities.iter().any(|c| c == cap)
             || self.describe.supported_roles.iter().any(|c| c == cap)
     }

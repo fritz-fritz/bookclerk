@@ -268,7 +268,6 @@ jobs:
           python3 scripts/sync-workerd-pin.py --check
           cd packages/plugin-sdk
           npm ci
-          npm run check-schema
           npm run build
           npm run lint
           npm run test:tools

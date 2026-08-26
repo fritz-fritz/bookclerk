@@ -43,26 +43,26 @@ pub struct ExternalSource {
     session: Arc<PluginSession>,
     /// JSON factory context (plugin config table).
     ctx_json: String,
-    /// Operator-facing storefront name from handshake or the manifest.
+    /// Operator-facing storefront name from describe metadata or the manifest.
     display_name: String,
-    /// UI brand colors and icon from handshake, or a slate fallback.
+    /// UI brand colors and icon from describe metadata, or a slate fallback.
     brand: SourceBrand,
-    /// `oauth` vs password login, from the guest handshake.
+    /// `oauth` vs password login, from the guest describe metadata.
     auth_mode: PortalAuthMode,
-    /// Leaked handshake aliases used as extra storefront ids.
+    /// Leaked describe-metadata aliases used as extra storefront ids.
     aliases: &'static [&'static str],
     /// Optional env var the guest accepts for a password (never put on argv).
     password_env: Option<&'static str>,
-    /// Registry sort order from handshake (`200` when the guest omits it).
+    /// Registry sort order from describe metadata (`200` when the guest omits it).
     sort_key: u32,
     /// Scoped data directory for this plugin only.
     plugin_data_dir: PathBuf,
-    /// `[sources.<id>]` table from main config (also sent on handshake).
+    /// `[sources.<id>]` table from main config (also delivered in the spawn config).
     source_config: Value,
 }
 
 impl ExternalSource {
-    /// Spawn and handshake a source plugin.
+    /// Spawn and describe a source plugin.
     ///
     /// # Errors
     ///
@@ -85,8 +85,8 @@ impl ExternalSource {
             )
             .await?,
         );
-        let source_config = crate::handshake_config_for_grant(session.grant(), config_json);
-        let hs = session.handshake_metadata();
+        let source_config = crate::spawn_config_for_grant(session.grant(), config_json);
+        let hs = session.plugin_metadata();
         let display_name = hs
             .display_name
             .clone()
@@ -790,7 +790,7 @@ async fn seal_login_result(
     Ok(account)
 }
 
-/// Leaks handshake strings into `'static` slices for [`SourceBrand`] / aliases.
+/// Leaks describe-metadata strings into `'static` slices for [`SourceBrand`] / aliases.
 fn leak_str_slice(owned: &[String], fallback: &[&'static str]) -> &'static [&'static str] {
     if owned.is_empty() {
         return Box::leak(fallback.to_vec().into_boxed_slice());
@@ -802,7 +802,7 @@ fn leak_str_slice(owned: &[String], fallback: &[&'static str]) -> &'static [&'st
     Box::leak(leaked.into_boxed_slice())
 }
 
-/// Builds a [`SourceBrand`] from handshake, or a slate fallback using plugin id/name.
+/// Builds a [`SourceBrand`] from describe metadata, or a slate fallback using plugin id/name.
 fn brand_from_dto(dto: Option<&crate::protocol::BrandDto>, id: &str, name: &str) -> SourceBrand {
     if let Some(b) = dto {
         SourceBrand {
@@ -825,7 +825,7 @@ fn brand_from_dto(dto: Option<&crate::protocol::BrandDto>, id: &str, name: &str)
     }
 }
 
-/// Converts a TOML value tree into JSON for handshake `config` delivery.
+/// Converts a TOML value tree into JSON for spawn `config` delivery.
 fn toml_to_json(value: &toml::Value) -> Value {
     match value {
         toml::Value::String(s) => Value::String(s.clone()),

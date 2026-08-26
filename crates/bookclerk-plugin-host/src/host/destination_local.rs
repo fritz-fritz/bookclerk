@@ -127,7 +127,7 @@ async fn spawn_local_guest(
     Ok((PluginStorage::new(Arc::clone(&session)), session))
 }
 
-/// Converts a plugin settings TOML table to JSON for guest handshake; `Null` on failure.
+/// Converts a plugin settings TOML table to JSON for the guest spawn config; `Null` on failure.
 fn toml_to_json(value: &toml::Value) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }

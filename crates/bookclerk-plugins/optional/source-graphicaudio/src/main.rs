@@ -8,8 +8,8 @@ use bookclerk_plugin_sdk::{
     PluginDescribe, PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    serve, BrandDto, CatalogHitDto, ExpandCandidatesParams, FetchTitleParams, HandshakeResult,
-    ListDealsParams, LoginParams, PluginError, PurchaseHintParams, ScanParams, SearchCatalogParams,
+    serve, BrandDto, CatalogHitDto, ExpandCandidatesParams, FetchTitleParams, ListDealsParams,
+    LoginParams, PluginError, PluginMetadata, PurchaseHintParams, ScanParams, SearchCatalogParams,
 };
 use bookclerk_source::{
     CatalogSearchOpts, CatalogSearchSort, ContentSource, ExpandSeed, PurchaseHintOpts,
@@ -17,7 +17,7 @@ use bookclerk_source::{
 use serde_json::Value;
 
 fn describe_metadata() -> Result<String, PluginError> {
-    encode_json(HandshakeResult {
+    encode_json(PluginMetadata {
         api_version: PRODUCT_API_VERSION,
         id: "graphicaudio".into(),
         kind: "source".into(),
@@ -45,7 +45,7 @@ fn describe_metadata() -> Result<String, PluginError> {
             accent: "#DC2626".into(),
             icon_url: "https://www.google.com/s2/favicons?domain=graphicaudio.com&sz=128".into(),
         }),
-        ..HandshakeResult::default()
+        ..PluginMetadata::default()
     })
 }
 

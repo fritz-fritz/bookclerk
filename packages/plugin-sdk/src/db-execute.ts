@@ -6,42 +6,35 @@
  * forwards the structured request through a host `execute` transport.
  */
 
+import {
+  DB_COLUMN_TYPES,
+  DB_RESULT_SELECTIONS,
+  DB_STATEMENT_KINDS,
+  type DbResultSelection,
+  type DbStatementKind,
+} from "./abi.js";
 import { CapnpMessage, CapnpReader, type CapnpStruct, type StructReader } from "./db-capnp.js";
 import { readDbValue, writeDbValue, type DbType, type DbValue } from "./db-value.js";
 import { guestStatementKind, splitExecQueries } from "./guest-sql.js";
 
-/** Host-authored statement kind on `DbStatement.kind`. */
-export type DbStatementKind = "execute" | "select" | "returning";
+// Ordinal tables come from the generated `abi.ts` projection of
+// `schema/plugin.capnp` (index = Cap'n Proto ordinal).
+export type { DbResultSelection, DbStatementKind } from "./abi.js";
 
-const KIND_ORD: Record<DbStatementKind, number> = {
-  execute: 0,
-  select: 1,
-  returning: 2,
-};
+const KIND_FROM = DB_STATEMENT_KINDS;
+const KIND_ORD: Record<DbStatementKind, number> = Object.fromEntries(
+  DB_STATEMENT_KINDS.map((kind, ord) => [kind, ord]),
+) as Record<DbStatementKind, number>;
 
-const KIND_FROM = ["execute", "select", "returning"] as const;
+const SELECT_FROM = DB_RESULT_SELECTIONS;
+const SELECT_ORD: Record<DbResultSelection, number> = Object.fromEntries(
+  DB_RESULT_SELECTIONS.map((sel, ord) => [sel, ord]),
+) as Record<DbResultSelection, number>;
 
-/** Which result fields the caller needs. */
-export type DbResultSelection = "discard" | "affectedRows" | "rows";
-
-const SELECT_ORD: Record<DbResultSelection, number> = {
-  discard: 0,
-  affectedRows: 1,
-  rows: 2,
-};
-
-const SELECT_FROM = ["discard", "affectedRows", "rows"] as const;
-
-const COL_TYPE_ORD: Record<DbType, number> = {
-  unspecified: 0,
-  bool: 1,
-  int64: 2,
-  float64: 3,
-  text: 4,
-  bytes: 5,
-};
-
-const COL_TYPE_FROM = ["unspecified", "bool", "int64", "float64", "text", "bytes"] as const;
+const COL_TYPE_FROM = DB_COLUMN_TYPES;
+const COL_TYPE_ORD: Record<DbType, number> = Object.fromEntries(
+  DB_COLUMN_TYPES.map((ty, ord) => [ty, ord]),
+) as Record<DbType, number>;
 
 /**
  * One statement in a typed atomic batch.

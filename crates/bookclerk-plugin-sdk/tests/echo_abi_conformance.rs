@@ -1,18 +1,16 @@
 //! Shared ABI conformance expectations for native + workerd Echo guests.
 //!
 //! These checks are schema/constant level so they do not require spawning a
-//! workerd binary. Runtime Echo guests (native `BookclerkPlugin` + workerd
-//! `modules/index.js`) must implement the same method names and handshake shape.
+//! workerd binary. Runtime Echo guests (native + workerd `modules/index.js`)
+//! must implement the same capability names and `describe()` metadata shape.
 #![allow(clippy::missing_panics_doc)]
 
-use bookclerk_plugin_abi::{
-    methods, HandshakeResult, HostToPluginEvent, API_VERSION, METHOD_NAMES,
-};
+use bookclerk_plugin_abi::{methods, PluginMetadata, METHOD_NAMES, PRODUCT_API_VERSION};
 use bookclerk_plugin_sdk::PROTOCOL_NAME;
 
 #[test]
-fn abi_version_is_one() {
-    assert_eq!(API_VERSION, 1);
+fn abi_version_is_two() {
+    assert_eq!(PRODUCT_API_VERSION, 2);
 }
 
 #[test]
@@ -23,7 +21,6 @@ fn logical_protocol_is_workers_rpc() {
 #[test]
 fn core_methods_present() {
     for name in [
-        methods::handshake::NAME,
         methods::shutdown::NAME,
         methods::health::NAME,
         methods::diagnose::NAME,
@@ -38,9 +35,9 @@ fn core_methods_present() {
 }
 
 #[test]
-fn echo_handshake_shape_roundtrips() {
-    let hs = HandshakeResult {
-        api_version: API_VERSION,
+fn echo_metadata_shape_roundtrips() {
+    let meta = PluginMetadata {
+        api_version: PRODUCT_API_VERSION,
         id: "echo".into(),
         kind: "integration".into(),
         display_name: Some("Echo Integration".into()),
@@ -50,28 +47,13 @@ fn echo_handshake_shape_roundtrips() {
             "onEvent".into(),
             "cli".into(),
         ],
-        ..HandshakeResult::default()
+        ..PluginMetadata::default()
     };
-    let v = serde_json::to_value(&hs).unwrap();
-    assert_eq!(v["apiVersion"], 1);
+    let v = serde_json::to_value(&meta).unwrap();
+    assert_eq!(v["apiVersion"], 2);
     assert_eq!(v["id"], "echo");
-    let back: HandshakeResult = serde_json::from_value(v).unwrap();
-    assert_eq!(back.capabilities, hs.capabilities);
-}
-
-#[test]
-fn on_event_book_acquired_wire_shape() {
-    let event =
-        HostToPluginEvent::BookAcquired(bookclerk_plugin_abi::events::BookAcquiredPayload {
-            title_id: "t1".into(),
-            source: "audible".into(),
-            asin: Some("B00".into()),
-            isbn: None,
-            path_keys: vec!["Books/t1.m4b".into()],
-        });
-    let v = serde_json::to_value(&event).unwrap();
-    assert_eq!(v["type"], "book_acquired");
-    assert_eq!(v["payload"]["titleId"], "t1");
+    let back: PluginMetadata = serde_json::from_value(v).unwrap();
+    assert_eq!(back.capabilities, meta.capabilities);
 }
 
 /// Kind wire DTOs use camelCase (see `fixtures/wire/` goldens + #130).

@@ -57,7 +57,7 @@ class EchoIntegration extends Integration {
     try {
       call("onEvent", event);
     } catch {
-      // wasm may still export handshake-era dispatch; ack anyway
+      // wasm dispatch may not handle onEvent; ack anyway
     }
     if (event?.type === "book_acquired" && this.env?.HOST?.notify) {
       const titleId = event.payload?.titleId ?? "";

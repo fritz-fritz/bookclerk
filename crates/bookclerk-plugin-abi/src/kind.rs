@@ -8,7 +8,7 @@
 //! | --- | --- |
 //! | `source` | [`crate::methods::login`], [`crate::methods::scan`], [`crate::methods::fetch_title`], catalog helpers |
 //! | `integration` | [`crate::methods::start`], [`crate::methods::poll_events`], [`crate::methods::sync_listening`] |
-//! | `output` | [`crate::methods::put`], [`crate::methods::put_file`], [`crate::methods::get`], … |
+//! | `output` | [`crate::methods::put`], `putFile`, [`crate::methods::get`], … |
 //!
 //! Untagged enums such as [`OutputPutParams`] accept either the local or S3
 //! param shape so the host can share one dispatcher across destinations.
@@ -38,9 +38,9 @@ fn default_catalog_page() -> u32 {
 
 /// Book-acquired notify payload used by some host→plugin paths (opaque book JSON).
 ///
-/// Prefer [`crate::events::BookAcquiredPayload`] for the typed
-/// [`crate::methods::on_event`] envelope. This DTO carries a fuller library-row
-/// JSON plus storage location for guests that need the raw book document.
+/// The typed [`crate::methods::on_event`] envelope carries a `DomainEvent`
+/// with a bounded payload; this DTO carries a fuller library-row JSON plus
+/// storage location for guests that need the raw book document.
 ///
 /// `book` is opaque JSON shaped like the host library row; guests may deserialize
 /// a subset without depending on `bookclerk-library`.
@@ -180,17 +180,6 @@ pub struct LoginCompleteParams {
     /// Session id previously returned by [`LoginStartResultDto::session_id`]
     /// (wire `sessionId`).
     pub session_id: String,
-}
-
-/// Params for [`crate::methods::credentials_update`] — guest-requested
-/// credential write-back after a silent refresh.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CredentialsUpdateParams {
-    /// Account whose sealed blob should be replaced (wire `accountId`).
-    pub account_id: String,
-    /// Replacement opaque credential JSON for the host to re-seal.
-    pub credentials: Value,
 }
 
 /// One external user observed by an integration (ABS-style concerns; host workflows).
@@ -693,8 +682,8 @@ pub struct ListeningProgressDto {
 
 /// Object metadata for output plugins (mirrors host `bookclerk_storage::ObjectMeta`).
 ///
-/// Attached to [`crate::methods::put`] / [`crate::methods::put_file`] and
-/// returned from [`crate::methods::probe`].
+/// Attached to [`crate::methods::put`] / `putFile` and
+/// returned from `probe`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectMetaDto {
@@ -730,7 +719,7 @@ pub struct ObjectInfoDto {
     pub size: u64,
 }
 
-/// Probe result for output plugins from [`crate::methods::probe`].
+/// Probe result for output plugins from `probe`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectProbeDto {
@@ -834,7 +823,7 @@ pub struct LocalPutParams {
     pub meta: ObjectMetaDto,
 }
 
-/// Params for [`crate::methods::put_file`] against a local filesystem output.
+/// Params for `putFile` against a local filesystem output.
 ///
 /// Destinations ingest via streamed `put`; this DTO remains for native
 /// guests that still expose `putFile`. [`Self::local_path`] is the source file.
@@ -900,7 +889,7 @@ pub struct LocalCopyParams {
     pub to: String,
 }
 
-/// Params for [`crate::methods::touch_file`] against a local filesystem output.
+/// Params for `touchFile` against a local filesystem output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalTouchFileParams {
@@ -934,7 +923,7 @@ pub struct PutParams {
     pub meta: ObjectMetaDto,
 }
 
-/// Params for [`crate::methods::put_file`] against an S3-compatible output.
+/// Params for `putFile` against an S3-compatible output.
 ///
 /// Destinations ingest via streamed `put`; this DTO remains for native
 /// guests that still expose `putFile`. [`Self::local_path`] is the source file.
@@ -1008,7 +997,7 @@ pub struct CopyParams {
     pub to: String,
 }
 
-/// Params for [`crate::methods::touch_file`] against an S3-compatible output.
+/// Params for `touchFile` against an S3-compatible output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TouchFileParams {
@@ -1037,7 +1026,7 @@ pub enum OutputPutParams {
     S3(PutParams),
 }
 
-/// Wire params for [`crate::methods::put_file`].
+/// Wire params for `putFile`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OutputPutFileParams {
@@ -1087,7 +1076,7 @@ pub enum OutputCopyParams {
     S3(CopyParams),
 }
 
-/// Wire params for [`crate::methods::touch_file`].
+/// Wire params for `touchFile`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OutputTouchFileParams {

@@ -7,16 +7,11 @@
  * always uses the domain types.
  */
 
+import { DB_COLUMN_TYPES, type DbColumnType } from "./abi.js";
 import { CapnpMessage, CapnpReader } from "./db-capnp.js";
 
 /** Column / typed-null type tag on the Cap'n `DbValue` wire. */
-export type DbType =
-  | "unspecified"
-  | "bool"
-  | "int64"
-  | "float64"
-  | "text"
-  | "bytes";
+export type DbType = DbColumnType;
 
 /**
  * Closed Cap'n `DbValue` union.
@@ -33,35 +28,17 @@ export type DbValue =
   | { kind: "bytes"; value: Uint8Array };
 
 const KINDS = new Set(["null", "boolean", "int64", "float64", "text", "bytes"]);
-const TYPES = new Set([
-  "unspecified",
-  "bool",
-  "int64",
-  "float64",
-  "text",
-  "bytes",
-]);
+const TYPES = new Set<string>(DB_COLUMN_TYPES);
 
 const I64_MIN = -0x8000_0000_0000_0000n;
 const I64_MAX = 0x7fff_ffff_ffff_ffffn;
 
-const DB_TYPE_ORD: Record<DbType, number> = {
-  unspecified: 0,
-  bool: 1,
-  int64: 2,
-  float64: 3,
-  text: 4,
-  bytes: 5,
-};
-
-const DB_TYPE_FROM_ORD: DbType[] = [
-  "unspecified",
-  "bool",
-  "int64",
-  "float64",
-  "text",
-  "bytes",
-];
+// Ordinal tables come from the generated `abi.ts` projection of
+// `schema/plugin.capnp` (index = Cap'n Proto ordinal).
+const DB_TYPE_FROM_ORD = DB_COLUMN_TYPES;
+const DB_TYPE_ORD: Record<DbType, number> = Object.fromEntries(
+  DB_COLUMN_TYPES.map((ty, ord) => [ty, ord]),
+) as Record<DbType, number>;
 
 /**
  * Parses a JSON `DbValue`. Unknown union members throw.

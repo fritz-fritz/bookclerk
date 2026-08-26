@@ -9,15 +9,15 @@ use bookclerk_plugin_sdk::{
 };
 use bookclerk_plugin_sdk::{
     serve, BrandDto, CatalogHitDto, ConfigOptionDto, ConfigOptionValueDto, ExpandCandidatesParams,
-    FetchTitleParams, HandshakeResult, ListDealsParams, LoginCompleteParams, LoginStartParams,
-    PluginError, PurchaseHintParams, ScanParams, SearchCatalogParams,
+    FetchTitleParams, ListDealsParams, LoginCompleteParams, LoginStartParams, PluginError,
+    PluginMetadata, PurchaseHintParams, ScanParams, SearchCatalogParams,
 };
 use bookclerk_source::{
     CatalogSearchOpts, CatalogSearchSort, ContentSource, ExpandSeed, PurchaseHintOpts,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
-    encode_json(HandshakeResult {
+    encode_json(PluginMetadata {
         api_version: PRODUCT_API_VERSION,
         id: "audible".into(),
         kind: "source".into(),
@@ -58,7 +58,7 @@ fn describe_metadata() -> Result<String, PluginError> {
                 },
             ],
         }],
-        ..HandshakeResult::default()
+        ..PluginMetadata::default()
     })
 }
 

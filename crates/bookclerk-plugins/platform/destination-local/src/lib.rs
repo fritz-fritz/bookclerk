@@ -8,5 +8,5 @@
 pub mod guest;
 pub mod plugin;
 
-/// Plugin id string advertised in handshake and config (`[output.local]`).
+/// Plugin id string advertised in describe() and config (`[output.local]`).
 pub const ID: &str = "local";

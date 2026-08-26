@@ -1,18 +1,18 @@
 //! Authoritative Bookclerk plugin ABI (`api_version` 2).
 //!
 //! Version 2 is the product object-capability ABI (Cap'n Proto RPC, role
-//! classes, transferred byte streams). JSON DTOs in this crate remain as a
-//! versioned escape hatch for plugin-specific config and wrapped guest
-//! internals — not as a spawn handshake.
+//! classes, transferred byte streams). JSON DTOs in this crate describe the
+//! payloads carried inside `Text` fields of that ABI (`describe().metadataJson`,
+//! role `paramsJson`, `cliInvoke` params/results) — never a transport of their
+//! own.
 //!
 //! # Audience
 //!
-//! - **Guest authors** — implement Workers RPC methods against these DTOs
+//! - **Guest authors** — implement the Cap'n Proto roles against these DTOs
 //!   (via `bookclerk-plugin-sdk`, `@bookclerk/plugin-sdk`, or a language binding
 //!   generated from the same schema).
-//! - **Host / SDK maintainers** — deserialize stdio or workerd frames, seal
-//!   credentials, and upsert library rows without depending on store-specific
-//!   crates.
+//! - **Host / SDK maintainers** — drive role capabilities, seal credentials,
+//!   and upsert library rows without depending on store-specific crates.
 //!
 //! Product narrative (jail, consent, install layout) lives in
 //! [`docs/plugins.md`](https://github.com/bookclerk/bookclerk/blob/main/docs/plugins.md).
@@ -20,29 +20,30 @@
 //!
 //! # Schema
 //!
-//! The JSON Schema at [`schema/abi.json`](https://github.com/bookclerk/bookclerk/blob/main/crates/bookclerk-plugin-abi/schema/abi.json)
-//! (also embedded as [`ABI_SCHEMA_JSON`]) is the canonical contract. Types here
-//! are the Rust projection used by host and guest SDKs. Wire DTO fields
-//! serialize as **camelCase** to match Workers RPC / TypeScript (`abi.json`
-//! `$defs`). Method names on the wire are camelCase strings listed in
-//! [`methods::METHOD_NAMES`] (for example `loginStart`, `fetchTitle`).
+//! The Cap'n Proto schema at
+//! [`schema/plugin.capnp`](https://github.com/bookclerk/bookclerk/blob/main/crates/bookclerk-plugin-abi/schema/plugin.capnp)
+//! is the single source of truth: RPC interfaces, product constants, database
+//! enums, and the "JSON payload contracts" section that types the JSON carried
+//! in `Text` fields. Types here are the Rust projection; the TypeScript and
+//! Python SDK projections are generated from the same schema by
+//! `scripts/gen-plugin-abi.py`, which also drift-checks this crate. Wire DTO
+//! fields serialize as **camelCase**.
 //!
 //! Install manifests validate against [`PLUGIN_TOML_SCHEMA_JSON`]
 //! (`schema/plugin-toml.json`).
 //!
 //! # Versioning
 //!
-//! [`API_VERSION`] is the JSON DTO schema version used by wrapped guest
-//! handshake payloads. [`PRODUCT_API_VERSION`] is `2` (object-capability
-//! Cap'n Proto / Workers RPC). Product spawn requires `plugin.toml`
-//! `api_version = 2`. There is no `protocol` key.
+//! [`PRODUCT_API_VERSION`] is `2` (object-capability Cap'n Proto / Workers
+//! RPC). Product spawn requires `plugin.toml` `api_version = 2`. There is no
+//! `protocol` key.
 //!
 //! # Modules
 //!
 //! | Module | Contents |
 //! | --- | --- |
-//! | [`methods`] | Wire method name constants (`handshake`, `onEvent`, …) |
-//! | [`types`] | Shared DTOs (handshake, health, CLI, stdio RPC frames) |
+//! | [`methods`] | Capability / consent method name constants (`login`, `onEvent`, …) |
+//! | [`types`] | Shared DTOs (identity metadata, health, CLI) |
 //! | [`kind`] | Kind-specific DTOs (source / integration / output) |
 //! | [`db`] | Host-private database connect params (feature `host`) |
 //! | [`error`] | [`PluginError`] / [`PluginErrorCode`] |
@@ -53,7 +54,6 @@ pub mod db_execute;
 mod db_rpc;
 pub mod db_value;
 pub mod error;
-pub mod events;
 mod features;
 pub mod guest_sql;
 #[cfg(feature = "host")]
@@ -124,7 +124,6 @@ pub use db_execute::{
 };
 pub use db_value::{DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
-pub use events::{HostToPluginEvent, PluginToHostEvent};
 pub use guest_sql::{
     authorize_guest_sql_policy, guest_statement_kind, parse_guest_sql_refs,
     validate_guest_execute_request, GuestSqlPolicy, GuestSqlRefs,
@@ -175,16 +174,6 @@ pub use rpc_types::{
     MAX_CHECKPOINT_BYTES,
 };
 
-/// Negotiated JSON-adapter API version (`1`).
-///
-/// Sent as wire field `apiVersion` on v1 handshake params/results. Product
-/// object-capability guests use [`PRODUCT_API_VERSION`] (`2`) instead.
-pub const API_VERSION: u32 = 1;
-
-/// Embedded bytes of `schema/abi.json` (CI and docs tooling can compare
-/// generators against this exact string).
-pub const ABI_SCHEMA_JSON: &str = include_str!("../schema/abi.json");
-
 /// Embedded JSON Schema for install `plugin.toml` files (shared with language
 /// SDK author tools and `bookclerk plugins` validation).
 pub const PLUGIN_TOML_SCHEMA_JSON: &str = include_str!("../schema/plugin-toml.json");
@@ -195,44 +184,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_parses_as_json() {
-        let v: serde_json::Value =
-            serde_json::from_str(ABI_SCHEMA_JSON).expect("abi.json must be valid JSON");
-        assert_eq!(v["title"], "BookclerkPluginAbi");
-    }
-
-    #[test]
-    fn handshake_roundtrip_camel_case() {
-        let hs = HandshakeResult {
-            api_version: API_VERSION,
+    fn metadata_roundtrip_camel_case() {
+        let meta = PluginMetadata {
+            api_version: PRODUCT_API_VERSION,
             id: "echo".into(),
             kind: "integration".into(),
             capabilities: vec!["health".into()],
-            ..HandshakeResult::default()
+            ..PluginMetadata::default()
         };
-        let v = serde_json::to_value(&hs).unwrap();
+        let v = serde_json::to_value(&meta).unwrap();
         assert!(v.get("apiVersion").is_some());
         assert!(v.get("api_version").is_none());
-        let back: HandshakeResult = serde_json::from_value(v).unwrap();
+        let back: PluginMetadata = serde_json::from_value(v).unwrap();
         assert_eq!(back.id, "echo");
-    }
-
-    #[test]
-    fn method_names_match_schema() {
-        let v: serde_json::Value = serde_json::from_str(ABI_SCHEMA_JSON).unwrap();
-        let mut schema_names: Vec<&str> = v["properties"]["methods"]["properties"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(|s| s.as_str())
-            .collect();
-        let mut expected: Vec<&str> = METHOD_NAMES.to_vec();
-        schema_names.sort_unstable();
-        expected.sort_unstable();
-        assert_eq!(
-            schema_names, expected,
-            "abi.json methods keys must match methods.rs METHOD_NAMES"
-        );
     }
 
     #[test]

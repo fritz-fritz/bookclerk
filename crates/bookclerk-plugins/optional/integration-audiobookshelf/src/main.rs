@@ -15,7 +15,7 @@ use bookclerk_plugin_sdk::{
     PluginDescribe, PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    serve, AuthenticateUserParams, BrandDto, HandshakeResult, PluginError, ScanLibraryParams,
+    serve, AuthenticateUserParams, BrandDto, PluginError, PluginMetadata, ScanLibraryParams,
 };
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -54,7 +54,7 @@ impl AbsRoot {
 }
 
 fn describe_metadata() -> Result<String, PluginError> {
-    encode_json(HandshakeResult {
+    encode_json(PluginMetadata {
         api_version: PRODUCT_API_VERSION,
         id: "audiobookshelf".into(),
         kind: "integration".into(),
@@ -78,7 +78,7 @@ fn describe_metadata() -> Result<String, PluginError> {
             accent: BRAND.accent.into(),
             icon_url: BRAND.icon_url.into(),
         }),
-        ..HandshakeResult::default()
+        ..PluginMetadata::default()
     })
 }
 

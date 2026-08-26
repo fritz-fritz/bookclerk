@@ -23,7 +23,7 @@ const S3_PLUGIN_ID: &str = "s3";
 /// Long-lived external output plugins loaded at host startup.
 #[derive(Default, Clone)]
 pub struct DestinationRegistry {
-    /// Spawned S3 output backend when `[output.s3].enabled` and handshake succeeded.
+    /// Spawned S3 output backend when `[output.s3].enabled` and describe succeeded.
     s3: Option<Arc<dyn StorageBackend>>,
     /// Spawned local-filesystem output backend when that plugin loaded.
     local: Option<Arc<dyn StorageBackend>>,

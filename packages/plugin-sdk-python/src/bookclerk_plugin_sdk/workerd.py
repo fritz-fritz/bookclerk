@@ -54,12 +54,16 @@ def js(value):
     return JSON.parse(json.dumps(value))
 
 
-PRODUCT_API_VERSION = 2
-ENVELOPE_VERSION = 1
-MAX_SCALAR_BYTES = 262_144
-FEATURE_SCALAR_LIMITS = "rpc.scalarLimits"
-FEATURE_STREAMS = "rpc.streams"
-FEATURE_STORAGE_COPY = "storage.copy"
+# Product constants come from the generated ``_abi`` projection of
+# ``schema/plugin.capnp`` — re-exported here for guest convenience.
+from ._abi import (  # noqa: E402  (re-export)
+    ENVELOPE_VERSION,
+    FEATURE_SCALAR_LIMITS,
+    FEATURE_STORAGE_COPY,
+    FEATURE_STREAMS,
+    MAX_SCALAR_BYTES,
+    PRODUCT_API_VERSION,
+)
 
 
 class PluginError(RuntimeError):

@@ -1,13 +1,12 @@
 /**
  * Bookclerk bridge worker — HTTP ↔ Workers RPC service binding.
  *
- * v1: bookclerk-workerd POSTs `{ id, method, params }` to `/rpc`.
  * Role routes (`/describe`, `/destination/*`, …): one invocation envelope per
- * HTTP request. The bridge creates the role
- * capability, invokes the method, and disposes the stub before completing.
- * No dest-id table is retained across requests.
+ * HTTP request. The bridge creates the role capability, invokes the method,
+ * and disposes the stub before completing. No dest-id table is retained
+ * across requests.
  *
- * All `/rpc`, role-route, and `/health` requests require `Authorization: Bearer`
+ * All role-route and `/health` requests require `Authorization: Bearer`
  * matching the per-isolate `BRIDGE_TOKEN` binding.
  */
 
@@ -408,59 +407,6 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") {
       return new Response("ok", { status: 200 });
     }
-    if (url.pathname.startsWith("/")) {
-      return handleRoleInvoke(request, env, url);
-    }
-    if (request.method !== "POST" || url.pathname !== "/rpc") {
-      return new Response("not found", { status: 404 });
-    }
-
-    let body;
-    try {
-      body = await request.json();
-    } catch {
-      return Response.json(
-        { error: { code: "invalid_params", message: "invalid JSON body" } },
-        { status: 400 },
-      );
-    }
-
-    const id = body?.id ?? null;
-    const method = body?.method;
-    if (typeof method !== "string" || !method) {
-      return Response.json(
-        {
-          id,
-          error: { code: "invalid_params", message: "method required" },
-        },
-        { status: 400 },
-      );
-    }
-
-    const plugin = env.PLUGIN;
-    if (!plugin || typeof plugin[method] !== "function") {
-      return Response.json({
-        id,
-        error: {
-          code: "unsupported",
-          message: `method \`${method}\` not exported by plugin entrypoint`,
-        },
-      });
-    }
-
-    try {
-      const params = body.params;
-      const result =
-        params === undefined || params === null
-          ? await plugin[method]()
-          : await plugin[method](params);
-      return Response.json({ id, result: result ?? null });
-    } catch (err) {
-      const { code, message } = catchErr(err);
-      return Response.json({
-        id,
-        error: { code, message },
-      });
-    }
+    return handleRoleInvoke(request, env, url);
   },
 };

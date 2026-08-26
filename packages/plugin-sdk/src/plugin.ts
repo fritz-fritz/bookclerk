@@ -8,29 +8,24 @@
 
 import "./cloudflare-workers.d.ts";
 import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
+import { MAX_LIST_PAGE, MAX_SCALAR_BYTES, PRODUCT_API_VERSION } from "./abi.js";
 import { createDatabaseBinding, decodeExecuteResultReply, encodeExecuteRequest } from "./db-execute.js";
 import type { ExecuteReply, ExecuteRequest } from "./db-execute.js";
 
-/** Product ABI version (`plugin.toml` `api_version` and `describe().apiVersion`). */
-export const PRODUCT_API_VERSION = 2 as const;
-
-/** Maximum decoded size of an ordinary RPC scalar value (not a stream window). */
-export const MAX_SCALAR_BYTES = 262_144;
-
-/** Maximum bytes returned by one stream pull window. */
-export const MAX_STREAM_WINDOW_BYTES = 1_048_576;
-
-/** Maximum objects in one `Destination.list` page. */
-export const MAX_LIST_PAGE = 256;
-
-/** Guest honors scalar / stream-window / list-page caps. */
-export const FEATURE_SCALAR_LIMITS = "rpc.scalarLimits";
-
-/** Media moves through transferred ReadableStream / ByteSource streams. */
-export const FEATURE_STREAMS = "rpc.streams";
-
-/** Guest implements server-side {@link Destination.copy}. */
-export const FEATURE_STORAGE_COPY = "storage.copy";
+// Product constants come from the generated `abi.ts` projection of
+// `schema/plugin.capnp` — re-exported here for guest convenience.
+export {
+  ENVELOPE_VERSION,
+  FEATURE_SCALAR_LIMITS,
+  FEATURE_STORAGE_COPY,
+  FEATURE_STREAMS,
+  MAX_CHECKPOINT_BYTES,
+  MAX_EVENT_PAYLOAD_BYTES,
+  MAX_LIST_PAGE,
+  MAX_SCALAR_BYTES,
+  MAX_STREAM_WINDOW_BYTES,
+  PRODUCT_API_VERSION,
+} from "./abi.js";
 
 /** Negotiated numeric limits advertised at {@link PluginDescribe}. */
 export interface ScalarLimits {
@@ -38,12 +33,6 @@ export interface ScalarLimits {
   maxStreamWindowBytes: number;
   maxListPage: number;
 }
-
-/** Maximum checkpoint payload size (bytes). */
-export const MAX_CHECKPOINT_BYTES = 65_536;
-
-/** Maximum domain-event scalar payload size (bytes). */
-export const MAX_EVENT_PAYLOAD_BYTES = 65_536;
 
 /** Guest identity returned by `BookclerkPlugin.describe`. */
 export interface PluginDescribe {
@@ -85,9 +74,6 @@ export interface WorkerContext {
   jobId?: string;
   json?: string;
 }
-
-/** Current envelope schema version for {@link JobInvocation}. */
-export const ENVELOPE_VERSION = 1 as const;
 
 /** Bounded, versioned checkpoint. */
 export interface JobCheckpoint {

@@ -15,35 +15,24 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, TypedDict, Union
 
+from ._abi import DB_COLUMN_TYPES, DB_RESULT_SELECTIONS, DB_STATEMENT_KINDS
 from .guest_sql import guest_statement_kind, split_exec_queries
 
 KINDS = frozenset({"null", "boolean", "int64", "float64", "text", "bytes"})
-TYPES = frozenset({"unspecified", "bool", "int64", "float64", "text", "bytes"})
+TYPES = frozenset(DB_COLUMN_TYPES)
 
 I64_MIN = -(2**63)
 I64_MAX = 2**63 - 1
 
-_DB_TYPE_ORD = {
-    "unspecified": 0,
-    "bool": 1,
-    "int64": 2,
-    "float64": 3,
-    "text": 4,
-    "bytes": 5,
-}
-_DB_TYPE_FROM = (
-    "unspecified",
-    "bool",
-    "int64",
-    "float64",
-    "text",
-    "bytes",
-)
+# Ordinal tables come from the generated ``_abi`` projection of
+# ``schema/plugin.capnp`` (index = Cap'n Proto ordinal).
+_DB_TYPE_FROM = DB_COLUMN_TYPES
+_DB_TYPE_ORD = {name: ord_ for ord_, name in enumerate(DB_COLUMN_TYPES)}
 
-_KIND_ORD = {"execute": 0, "select": 1, "returning": 2}
-_KIND_FROM = ("execute", "select", "returning")
-_SELECT_ORD = {"discard": 0, "affectedRows": 1, "rows": 2}
-_SELECT_FROM = ("discard", "affectedRows", "rows")
+_KIND_FROM = DB_STATEMENT_KINDS
+_KIND_ORD = {name: ord_ for ord_, name in enumerate(DB_STATEMENT_KINDS)}
+_SELECT_FROM = DB_RESULT_SELECTIONS
+_SELECT_ORD = {name: ord_ for ord_, name in enumerate(DB_RESULT_SELECTIONS)}
 
 WORD = 8
 
