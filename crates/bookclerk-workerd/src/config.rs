@@ -26,6 +26,12 @@ const SDK_WORKERD_PY: &str =
 /// Injected as `bookclerk_plugin_sdk/db_value.py` (imported by `workerd.py`).
 const SDK_DB_VALUE_PY: &str =
     include_str!("../../../packages/plugin-sdk-python/src/bookclerk_plugin_sdk/db_value.py");
+/// Injected as `bookclerk_plugin_sdk/_abi.py` (generated product constants).
+const SDK_PRODUCT_ABI_PY: &str =
+    include_str!("../../../packages/plugin-sdk-python/src/bookclerk_plugin_sdk/_abi.py");
+/// Injected as `bookclerk_plugin_sdk/guest_sql.py` (imported by `db_value.py`).
+const SDK_GUEST_SQL_PY: &str =
+    include_str!("../../../packages/plugin-sdk-python/src/bookclerk_plugin_sdk/guest_sql.py");
 /// First-party adapter isolate: owns GRANTED / BRIDGE_TOKEN (author `PLUGIN`).
 const ADAPTER_JS: &str = r#"import { wrapPluginFromBinding } from "@bookclerk/plugin-sdk/workerd";
 export default wrapPluginFromBinding();
@@ -49,6 +55,10 @@ pub const SDK_JS_MODULE_NAMES: &[&str] =
 pub const SDK_PY_WORKERD_MODULE: &str = "bookclerk_plugin_sdk/workerd.py";
 /// Python module path for typed SQL value / execute codec helpers.
 pub const SDK_PY_DB_VALUE_MODULE: &str = "bookclerk_plugin_sdk/db_value.py";
+/// Python module path for the generated product ABI constants.
+pub const SDK_PY_PRODUCT_ABI_MODULE: &str = "bookclerk_plugin_sdk/_abi.py";
+/// Python module path for guest-side SQL statement classification helpers.
+pub const SDK_PY_GUEST_SQL_MODULE: &str = "bookclerk_plugin_sdk/guest_sql.py";
 /// Python module path that initializes the sparse workerd guest SDK.
 pub const SDK_PY_INIT_MODULE: &str = "bookclerk_plugin_sdk/__init__.py";
 
@@ -739,27 +749,24 @@ pub fn materialize(
     if needs_python {
         fs::write(bookclerk_dir.join("sdk-workerd.py"), SDK_WORKERD_PY)?;
         fs::write(bookclerk_dir.join("sdk-db-value.py"), SDK_DB_VALUE_PY)?;
+        fs::write(bookclerk_dir.join("sdk-product-abi.py"), SDK_PRODUCT_ABI_PY)?;
+        fs::write(bookclerk_dir.join("sdk-guest-sql.py"), SDK_GUEST_SQL_PY)?;
         fs::write(bookclerk_dir.join("sdk-init.py"), SDK_PY_INIT)?;
-        if !seen_names.contains(SDK_PY_INIT_MODULE) {
+        for (module_name, embed_file) in [
+            (SDK_PY_INIT_MODULE, "sdk-init.py"),
+            (SDK_PY_PRODUCT_ABI_MODULE, "sdk-product-abi.py"),
+            (SDK_PY_GUEST_SQL_MODULE, "sdk-guest-sql.py"),
+            (SDK_PY_DB_VALUE_MODULE, "sdk-db-value.py"),
+            (SDK_PY_WORKERD_MODULE, "sdk-workerd.py"),
+        ] {
+            if seen_names.contains(module_name) {
+                continue;
+            }
             module_embeds.push(format!(
-                r#"(name = "{}", pythonModule = embed ".bookclerk/sdk-init.py")"#,
-                escape_capnp(SDK_PY_INIT_MODULE)
+                r#"(name = "{}", pythonModule = embed ".bookclerk/{embed_file}")"#,
+                escape_capnp(module_name)
             ));
-            seen_names.insert(SDK_PY_INIT_MODULE.to_string());
-        }
-        if !seen_names.contains(SDK_PY_DB_VALUE_MODULE) {
-            module_embeds.push(format!(
-                r#"(name = "{}", pythonModule = embed ".bookclerk/sdk-db-value.py")"#,
-                escape_capnp(SDK_PY_DB_VALUE_MODULE)
-            ));
-            seen_names.insert(SDK_PY_DB_VALUE_MODULE.to_string());
-        }
-        if !seen_names.contains(SDK_PY_WORKERD_MODULE) {
-            module_embeds.push(format!(
-                r#"(name = "{}", pythonModule = embed ".bookclerk/sdk-workerd.py")"#,
-                escape_capnp(SDK_PY_WORKERD_MODULE)
-            ));
-            seen_names.insert(SDK_PY_WORKERD_MODULE.to_string());
+            seen_names.insert(module_name.to_string());
         }
     }
 
@@ -1049,6 +1056,8 @@ fn is_legacy_sdk_embed(name: &str) -> bool {
             | "@bookclerk/plugin-sdk/workerd.js"
             | "bookclerk_plugin_sdk/workerd.py"
             | "bookclerk_plugin_sdk/db_value.py"
+            | "bookclerk_plugin_sdk/_abi.py"
+            | "bookclerk_plugin_sdk/guest_sql.py"
             | "bookclerk_plugin_sdk/__init__.py"
     )
 }
