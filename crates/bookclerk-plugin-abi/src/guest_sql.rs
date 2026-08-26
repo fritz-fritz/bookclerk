@@ -452,6 +452,11 @@ fn authorize_binding_ddl(index: usize, sql: &str) -> Result<()> {
 ///
 /// A trailing `.` after the identifier means a schema-qualified name, which
 /// could escape a pinned PostgreSQL `search_path` — fail closed.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the next token is missing, a
+/// reserved host bookkeeping name, or schema-qualified.
 fn check_binding_ddl_name(index: usize, scan: &mut Scan<'_>, what: &str) -> Result<()> {
     let name = scan.read_ident().ok_or_else(|| {
         PluginError::invalid_params(format!(
@@ -1807,6 +1812,11 @@ mod tests {
     }
 
     /// Validates + policy-authorizes one statement under `binding_owned`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::invalid_params`] when the statement is outside
+    /// `GuestSqlPolicy::binding_owned`.
     fn binding_check(sql: &str, selection: DbResultSelection, max_rows: u32) -> Result<()> {
         let policy = GuestSqlPolicy::binding_owned();
         let request = req(sql, vec![], selection, max_rows);
