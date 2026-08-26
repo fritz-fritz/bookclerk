@@ -25,8 +25,15 @@ ROOT = Path(__file__).resolve().parents[1]
 ABI = ROOT / "crates/bookclerk-plugin-abi/schema/abi.json"
 METHODS_RS = ROOT / "crates/bookclerk-plugin-abi/src/methods.rs"
 ABI_LIB_RS = ROOT / "crates/bookclerk-plugin-abi/src/lib.rs"
+DB_EXECUTE_RS = ROOT / "crates/bookclerk-plugin-abi/src/db_execute.rs"
+CAPNP_SCHEMAS = (
+    ROOT / "crates/bookclerk-plugin-abi/schema/plugin_v2.capnp",
+    ROOT / "crates/bookclerk-plugin-abi/schema/plugin_v2_host.capnp",
+)
 TS_GENERATED = ROOT / "packages/plugin-sdk/src/generated.ts"
+TS_DB_EXECUTE = ROOT / "packages/plugin-sdk/src/db-execute.ts"
 PY_ABI = ROOT / "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/abi.py"
+PY_DB_VALUE = ROOT / "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/db_value.py"
 PLUGIN_TOML_SCHEMA = ROOT / "crates/bookclerk-plugin-abi/schema/plugin-toml.json"
 MANIFEST_SCHEMA = ROOT / "crates/bookclerk-plugin-manifest/schema/plugin-toml.json"
 WIRE_FIXTURES = ROOT / "crates/bookclerk-plugin-abi/fixtures/wire"
@@ -173,6 +180,104 @@ def check_abi_schema_defs() -> list[str]:
     return errors
 
 
+def statement_kinds_rust() -> list[str]:
+    """Wire names of `DbPlanStatementKind` variants (camelCase serde)."""
+    text = DB_EXECUTE_RS.read_text(encoding="utf-8")
+    match = re.search(r"pub enum DbPlanStatementKind \{(.*?)\n\}", text, re.DOTALL)
+    if not match:
+        raise SystemExit(f"DbPlanStatementKind not found in {DB_EXECUTE_RS}")
+    variants = re.findall(r"^\s{4}([A-Z][A-Za-z0-9]*),", match.group(1), re.MULTILINE)
+    return [v[0].lower() + v[1:] for v in variants]
+
+
+def statement_kinds_capnp() -> list[str]:
+    """Ordinal-ordered enumerants of the Cap'n statement-kind enum."""
+    text = CAPNP_SCHEMAS[0].read_text(encoding="utf-8")
+    match = re.search(r"enum Db(?:Plan)?StatementKind \{(.*?)\}", text, re.DOTALL)
+    if not match:
+        raise SystemExit(f"DbStatementKind enum not found in {CAPNP_SCHEMAS[0]}")
+    entries = re.findall(r"(\w+)\s*@(\d+);", match.group(1))
+    entries.sort(key=lambda e: int(e[1]))
+    return [name for name, _ in entries]
+
+
+def statement_kinds_ts() -> list[str]:
+    """`KIND_FROM` ordinal decode table in the TS SDK."""
+    text = TS_DB_EXECUTE.read_text(encoding="utf-8")
+    match = re.search(r"const KIND_FROM = \[(.*?)\]", text, re.DOTALL)
+    if not match:
+        raise SystemExit(f"KIND_FROM not found in {TS_DB_EXECUTE}")
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def statement_kinds_py() -> list[str]:
+    """`_KIND_FROM` ordinal decode table in the Python SDK."""
+    text = PY_DB_VALUE.read_text(encoding="utf-8")
+    match = re.search(r"_KIND_FROM = \((.*?)\)", text, re.DOTALL)
+    if not match:
+        raise SystemExit(f"_KIND_FROM not found in {PY_DB_VALUE}")
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def check_statement_kinds() -> list[str]:
+    """Statement kinds must agree, in order, across Rust / Cap'n / TS / Python."""
+    rust = statement_kinds_rust()
+    capnp = statement_kinds_capnp()
+    ts = statement_kinds_ts()
+    py = statement_kinds_py()
+    errors: list[str] = []
+    for label, kinds in (("capnp", capnp), ("ts", ts), ("python", py)):
+        if kinds != rust:
+            errors.append(f"statement kinds drift rust={rust} {label}={kinds}")
+    for label, kinds in (("rust", rust), ("capnp", capnp), ("ts", ts), ("python", py)):
+        if "query" in kinds:
+            errors.append(f'legacy "query" statement kind must not reappear in {label}')
+    return errors
+
+
+# JSON-era database RPC names and DTOs deleted from the public ABI; none may
+# reappear in schemas or generated SDK sources.
+LEGACY_DB_TOKENS = (
+    "StatementDto",
+    "QueryResultDto",
+    "valuesJson",
+    "rowsJson",
+    "dbConnect",
+    "dbQuery",
+    "dbExecute",
+    "dbBegin",
+    "dbCommit",
+    "dbRollback",
+    "dbAtomic",
+    "DbConnectResult",
+    "DbConnectParams",
+)
+
+
+def check_legacy_db_tokens() -> list[str]:
+    """Fail when deleted JSON-era database names reappear in public artifacts."""
+    targets = (
+        *CAPNP_SCHEMAS,
+        ABI,
+        TS_GENERATED,
+        TS_DB_EXECUTE,
+        PY_ABI,
+        PY_DB_VALUE,
+    )
+    errors: list[str] = []
+    for path in targets:
+        if not path.is_file():
+            errors.append(f"missing legacy-token scan target: {path}")
+            continue
+        text = path.read_text(encoding="utf-8")
+        for token in LEGACY_DB_TOKENS:
+            if re.search(rf"\b{token}\b", text):
+                errors.append(
+                    f"{path.relative_to(ROOT)}: legacy `{token}` must not reappear"
+                )
+    return errors
+
+
 def check_abi_lib_exports() -> list[str]:
     """Fail when removed legacy database DTOs reappear in lib.rs `pub use`."""
     text = ABI_LIB_RS.read_text(encoding="utf-8")
@@ -273,14 +378,26 @@ def main() -> int:
         for err in schema_errors:
             print(f"abi schema: {err}", file=sys.stderr)
 
-    if wire_errors or export_errors or schema_errors:
+    kind_errors = check_statement_kinds()
+    if kind_errors:
+        for err in kind_errors:
+            print(f"statement kinds: {err}", file=sys.stderr)
+
+    legacy_errors = check_legacy_db_tokens()
+    if legacy_errors:
+        for err in legacy_errors:
+            print(f"legacy names: {err}", file=sys.stderr)
+
+    if wire_errors or export_errors or schema_errors or kind_errors or legacy_errors:
         return 1
     if drift and args.check and not args.write:
         return 1
     print(
         f"ok methods={len(names)} wire_fixtures={len(REQUIRED_WIRE_FIXTURES)} "
         f"abi_export_guard={len(FORBIDDEN_ABI_LIB_EXPORTS)} "
-        f"abi_schema_guard={len(FORBIDDEN_ABI_SCHEMA_DEFS)}"
+        f"abi_schema_guard={len(FORBIDDEN_ABI_SCHEMA_DEFS)} "
+        f"statement_kinds={len(statement_kinds_rust())} "
+        f"legacy_name_guard={len(LEGACY_DB_TOKENS)}"
     )
     return 0
 

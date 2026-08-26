@@ -257,6 +257,10 @@ jobs:
           npm run test:safe-html
           npm run build
 
+      - name: Author surface check
+        if: needs.plan.outputs.run_sdk == 'true' || needs.plan.outputs.run_rust == 'true'
+        run: ./scripts/check-author-surface.sh
+
       - name: Plugin SDK ABI schema drift check
         if: needs.plan.outputs.run_sdk == 'true'
         run: |

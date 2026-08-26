@@ -202,15 +202,4 @@ mod tests {
             "plugin_v2.capnp must not contain rowsJson"
         );
     }
-
-    #[test]
-    fn host_envelope_not_exported_from_crate_root() {
-        let src = include_str!("lib.rs");
-        for name in ["GuestReceiptPersist", "HostExecuteEnvelope"] {
-            assert!(
-                !src.contains(&format!("pub use db_execute::{name}")),
-                "lib.rs must not re-export `{name}` from db_execute"
-            );
-        }
-    }
 }

@@ -25,8 +25,5 @@
 pub mod errors;
 pub mod migrate;
 
-#[cfg(test)]
-mod public_surface;
-
 pub use errors::{plugin_error_from_db_err, plugin_error_from_engine};
 pub use migrate::{execute_sql_scripts, split_sql_statements, typed_null};
