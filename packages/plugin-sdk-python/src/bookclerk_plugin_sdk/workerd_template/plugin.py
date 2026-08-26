@@ -60,7 +60,7 @@ class Default(BookclerkPlugin):
     """Template workerd entrypoint exported as the default Workers binding."""
 
     async def describe(self):
-        """Return the guest identity for the host describe() call.
+        """Return the guest identity advertised on the host describe RPC.
 
         Returns:
             JS object with ``apiVersion``, ``id``, ``kind``, and roles.
