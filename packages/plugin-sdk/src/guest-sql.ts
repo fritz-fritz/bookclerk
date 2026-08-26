@@ -303,6 +303,20 @@ export function splitExecQueries(query: string): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .map((line) => line.replace(/;+\s*$/, "").trim())
+    .map((line) => stripTrailingSemicolons(line).trim())
     .filter((line) => line.length > 0);
+}
+
+/**
+ * Remove trailing `;` characters with a linear scan (no backtracking regex).
+ *
+ * @param line Already-trimmed SQL line.
+ * @returns Line without its trailing semicolon run.
+ */
+function stripTrailingSemicolons(line: string): string {
+  let end = line.length;
+  while (end > 0 && line[end - 1] === ";") {
+    end -= 1;
+  }
+  return line.slice(0, end);
 }

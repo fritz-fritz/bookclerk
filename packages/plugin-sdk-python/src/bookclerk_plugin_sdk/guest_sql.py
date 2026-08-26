@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Literal
 
 DbStatementKind = Literal["execute", "select", "returning"]
@@ -251,7 +250,8 @@ def split_exec_queries(query: str) -> list[str]:
         trimmed = line.strip()
         if not trimmed:
             continue
-        trimmed = re.sub(r";+\s*$", "", trimmed).strip()
+        # Linear strip of the trailing semicolon run (no backtracking regex).
+        trimmed = trimmed.rstrip(";").strip()
         if trimmed:
             out.append(trimmed)
     return out
