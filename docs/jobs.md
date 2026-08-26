@@ -116,7 +116,7 @@ pending → running → succeeded
 | `acquire` | `acquire:title={id\|all}:account={id\|all}` | `network` | `run_acquire` |
 | `listen_sync` | `listen_sync` | `network` | `run_listen_sync` |
 | `integration_scan` | `integration_scan:id={id}:force={0\|1}` | `network` | `run_integration_scan` |
-| `plugin_copy` | `plugin_copy:plugin={id}:from={key}:to={key}` | `network` | ABI v2 `JobHandler` stream-copy (`run_plugin_copy`) |
+| `plugin_copy` | `plugin_copy:plugin={id}:from={key}:to={key}` | `network` | ABI `JobHandler` stream-copy (`run_plugin_copy`) |
 
 Reserved classes (no worker in this release): `media`, `transcription`,
 `indexing`.

@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn describe_v2() {
+    fn describe_reports_api_version() {
         let out = dispatch_json("describe", "{}").unwrap();
         assert!(out.contains("\"apiVersion\":2"));
         assert!(out.contains("echo_workerd_rust"));

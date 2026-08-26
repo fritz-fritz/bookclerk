@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use bookclerk_config::{Config, Paths};
 use bookclerk_plugin_host::{
     consent_request, discover_plugins, CatalogHitDto, CliInvokeParams, CliInvokeResult,
-    PluginGrantStore, PluginKind, SearchCatalogParams, V2PluginSession, HOST_SHARED_ACCOUNT,
+    PluginGrantStore, PluginKind, PluginSession, SearchCatalogParams, HOST_SHARED_ACCOUNT,
     OPERATOR_ACCOUNT,
 };
 
@@ -100,14 +100,14 @@ async fn staged_first_party_plugins_handshake() {
             _ => OPERATOR_ACCOUNT,
         };
         let session =
-            V2PluginSession::spawn_for_account(plugin, &config, serde_json::json!({}), account)
+            PluginSession::spawn_for_account(plugin, &config, serde_json::json!({}), account)
                 .await
-                .unwrap_or_else(|e| panic!("spawn v2 {}: {e}", plugin.manifest.id));
+                .unwrap_or_else(|e| panic!("spawn {}: {e}", plugin.manifest.id));
         assert_eq!(session.id(), plugin.manifest.id);
         let desc = session
             .describe()
             .await
-            .unwrap_or_else(|e| panic!("describe v2 {}: {e}", plugin.manifest.id));
+            .unwrap_or_else(|e| panic!("describe {}: {e}", plugin.manifest.id));
         assert_eq!(desc.api_version, 2);
         assert_eq!(desc.id, plugin.manifest.id);
         match plugin.manifest.kind {

@@ -3,8 +3,8 @@
 fn main() {
     capnpc::CompilerCommand::new()
         .src_prefix("schema")
-        .file("schema/plugin_v2.capnp")
-        .file("schema/plugin_v2_host.capnp")
+        .file("schema/plugin.capnp")
+        .file("schema/plugin_host.capnp")
         .run()
         .expect("compile plugin capnp schemas");
 }

@@ -8,8 +8,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bookclerk_plugin_abi::v2::{encoded_execute_reply_bytes, encoded_statement_result_bytes};
 use bookclerk_plugin_abi::GuestReceiptPersist;
+use bookclerk_plugin_abi::{encoded_execute_reply_bytes, encoded_statement_result_bytes};
 use bookclerk_plugin_abi::{
     DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
     ExecuteReply, ExecuteRequest, StatementResult, TypedDbStatement,

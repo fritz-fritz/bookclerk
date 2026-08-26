@@ -1,7 +1,7 @@
 /**
  * Workerd JS entry — Rust/Wasm Echo via `dispatch` (api_version = 2).
  *
- * `describe` + `integration` live in JS so the guest matches BookclerkPlugin v2
+ * `describe` + `integration` live in JS so the guest matches the BookclerkPlugin contract
  * without a Wasm rebuild. Health / diagnose / CLI still forward to Wasm.
  */
 

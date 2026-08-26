@@ -200,7 +200,7 @@ impl LibraryStore {
     pub async fn suspend_job(
         &self,
         fence: &JobFence,
-        checkpoint: &bookclerk_plugin_abi::v2::JobCheckpoint,
+        checkpoint: &bookclerk_plugin_abi::JobCheckpoint,
         wake_at: chrono::DateTime<Utc>,
     ) -> Result<bool> {
         let Some(model) = jobs::Entity::find_by_id(&fence.job_id)
@@ -218,11 +218,11 @@ impl LibraryStore {
         }
         let mut payload: JobPayload = serde_json::from_str(&model.payload)
             .map_err(|err| LibraryError::Other(anyhow::anyhow!("job payload: {err}")))?;
-        if checkpoint.json.len() > bookclerk_plugin_abi::v2::MAX_CHECKPOINT_BYTES as usize {
+        if checkpoint.json.len() > bookclerk_plugin_abi::MAX_CHECKPOINT_BYTES as usize {
             return Err(LibraryError::Other(anyhow::anyhow!(
                 "checkpoint of {} bytes exceeds {}",
                 checkpoint.json.len(),
-                bookclerk_plugin_abi::v2::MAX_CHECKPOINT_BYTES
+                bookclerk_plugin_abi::MAX_CHECKPOINT_BYTES
             )));
         }
         payload.checkpoint = Some(checkpoint.clone());

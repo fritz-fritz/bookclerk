@@ -157,7 +157,7 @@ fn atomic_result_cap_bytes(caps: &DbCapabilities) -> Option<usize> {
     Some(
         usize::try_from(
             caps.max_atomic_result_bytes
-                .min(bookclerk_plugin_abi::v2::MAX_SCALAR_BYTES),
+                .min(bookclerk_plugin_abi::MAX_SCALAR_BYTES),
         )
         .unwrap_or(usize::MAX),
     )

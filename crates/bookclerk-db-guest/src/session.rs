@@ -3,7 +3,7 @@
 //! Each RPC arrives on a new Tokio task. SQLite's in-process proxy leases an
 //! open `BEGIN` to the task that called `begin`, so routing statements through
 //! a dedicated worker task keeps that lease valid until commit/rollback.
-//! The same worker serializes Postgres connection use. D1 guests use v2 typed
+//! The same worker serializes Postgres connection use. D1 guests use typed
 //! `execute` batches; SQLite and Postgres run named security ops via host IR
 //! envelopes and durable receipts.
 
@@ -20,7 +20,7 @@ use bookclerk_db_exec::{DbAtomicRequest, DbPlanExecResult};
 use bookclerk_plugin_abi::HostExecuteEnvelope;
 use bookclerk_plugin_abi::{DbCapabilities, ExecuteReply, ExecuteRequest};
 use bookclerk_plugin_sdk::database_adapter::plugin_error_from_db_err;
-use bookclerk_plugin_sdk::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
+use bookclerk_plugin_sdk::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use futures::TryStreamExt;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, StreamTrait,

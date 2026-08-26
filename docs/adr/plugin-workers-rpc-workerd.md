@@ -39,7 +39,7 @@ contract must be **identical** across runtimes.
      sandbox; it launches workerd and the trusted native broker. The broker
      launches or connects to the verified native guest. Plugin-controlled
      input cannot choose the executable or weaken the sandbox.
-   - **Native:** guests serve [`plugin_v2.capnp`](../../crates/bookclerk-plugin-abi/schema/plugin_v2.capnp)
+   - **Native:** guests serve [`plugin.capnp`](../../crates/bookclerk-plugin-abi/schema/plugin.capnp)
      via `capnp-rpc` (`serve`). They do **not** speak newline JSON as the
      product ABI. Native DRM plugins do not implement Cloudflare’s private
      `worker-interface.capnp`; the host maps both adapters onto the same Rust
@@ -102,8 +102,8 @@ contract must be **identical** across runtimes.
 - Catalog script archives ship `plugin.toml` + `modules/` only.
 - Native publishers still build per-arch when they need native capabilities.
 - CI must fail on ABI schema drift vs generated SDK outputs.
-- CI requires the pinned `workerd` binary for the v2 contract suite; the job
-  fails if the workerd adapter cannot start (`BOOKCLERK_V2_SKIP_WORKERD=1` is
+- CI requires the pinned `workerd` binary for the workerd contract suite; the job
+  fails if the workerd adapter cannot start (`BOOKCLERK_SKIP_WORKERD=1` is
   local native-only).
 
 ### Distribution tiers

@@ -7,12 +7,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bookclerk_plugin_abi::v2::{GuestDatabase, JobHandlerContext};
 use bookclerk_plugin_abi::{
     encoded_execute_request_bytes, guest_statement_kind, DbPlanStatementKind, DbResultSelection,
     DbTiming, DbValue, ExecuteReply, ExecuteRequest, PluginError, Result, StatementResult,
     TypedDbStatement,
 };
+use bookclerk_plugin_abi::{GuestDatabase, JobHandlerContext};
 
 static OP_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -482,7 +482,7 @@ fn new_operation_id() -> String {
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
-    use bookclerk_plugin_abi::v2::GuestDatabase;
+    use bookclerk_plugin_abi::GuestDatabase;
     use bookclerk_plugin_abi::PluginErrorCode;
     use std::sync::Mutex;
 

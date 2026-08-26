@@ -57,10 +57,10 @@ mod db;
 mod db_binding;
 mod error;
 mod fetch_dir;
+mod json;
 mod pass_fd;
 pub mod protocol;
 pub mod tools;
-pub mod v2;
 pub mod workerd;
 
 pub use callback_tunnel::{TunnelGuest, TunnelHost, TunnelStream};
@@ -72,6 +72,7 @@ pub use db_binding::{
 };
 pub use error::{Result, SdkError};
 pub use fetch_dir::{fetch_work_dir, upload_file_path, FetchWorkDir, UploadFile};
+pub use json::{decode as decode_json, encode as encode_json, encode_atomic_result, page_rows};
 pub use pass_fd::{fd_proc_path, recv_passed_fd, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
 pub use protocol::{
     methods, AuthenticateUserParams, BookAcquiredDto, BrandDto, CatalogDetailParams, CatalogHitDto,
@@ -90,19 +91,45 @@ pub use protocol::{
     TouchFileParams, HOST_MANIFEST_API_VERSION_MAX, MAX_RPC_LINE_BYTES, PLUGIN_API_VERSION,
     PROTOCOL_NAME,
 };
-pub use v2::{
-    decode_json, encode_atomic_result, encode_json, page_rows, serve, serve_v2,
-    AdapterDatabaseSession, ContentSource, Database, GuestDatabase, Integration, PluginDescribe,
-    PluginRoot, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
-};
 
 pub use bookclerk_plugin_abi::{
-    canonical_execute_request_hash, decode_db_value_bytes, decode_execute_request_bytes,
-    decode_execute_result_reply_bytes, encoded_db_value_bytes, encoded_execute_reply_bytes,
-    encoded_execute_request_bytes, encoded_execute_result_reply_bytes,
-    encoded_statement_result_bytes, sql_payload_bytes, sql_payload_exceeds, DbBootstrap,
-    DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType,
-    DbValue, DiagnoseResult, ExecuteReply, ExecuteRequest, HandshakeParams, HostToPluginEvent,
-    PluginError, PluginErrorCode, PluginToHostEvent, StatementResult, TypedDbStatement,
-    API_VERSION, SQL_CONTRACT_VERSION,
+    byte_source_from_async_read, canonical_execute_request_hash, connect_plugin,
+    decode_db_value_bytes, decode_execute_request_bytes, decode_execute_result_reply_bytes,
+    encoded_db_value_bytes, encoded_execute_reply_bytes, encoded_execute_request_bytes,
+    encoded_execute_result_reply_bytes, encoded_statement_result_bytes, negotiate_rpc_features,
+    pull_byte_source_to_writer, serve_plugin, serve_plugin_stdio, sql_payload_bytes,
+    sql_payload_exceeds, stream_copy_keys, AdapterDatabaseSession, ByteRange, Cancellation,
+    ContentSource, ContentSourceClient, ContentSourceContext, CopyResult, Database, DatabaseClient,
+    DatabaseContext, DbBootstrap, DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection,
+    DbRow, DbTiming, DbType, DbValue, Destination, DestinationClient, DestinationContext,
+    DestinationServer, DiagnoseResult, DomainEvent, EventResult, ExecuteReply, ExecuteRequest,
+    GuestDatabase, HandshakeParams, HealthOk, HostToPluginEvent, Integration, IntegrationClient,
+    IntegrationContext, JobCheckpoint, JobHandler, JobHandlerContext, JobInvocation,
+    JobInvocationLease, JobOutcome, ListOptions, ListPage, NeverCancel, ObjectInfo, ObjectMetadata,
+    OidcClientTemplate, PluginClient, PluginDescribe, PluginError, PluginErrorCode, PluginRoot,
+    PluginServer, PluginToHostEvent, ProgressSink, PutResult, QueryPage, ReadResult, ScalarLimits,
+    Source, SourceClient, SourceContext, SourceServer, StatementResult, StreamCopyHandler,
+    StreamCopySpec, TypedDbStatement, WorkerContext, WriteOptions, ABI_MAJOR, ABI_MINOR,
+    API_VERSION, ENVELOPE_VERSION, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS,
+    MAX_LIST_PAGE, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+    SQL_CONTRACT_VERSION,
 };
+
+/// Serves a [`PluginRoot`] on stdin/stdout (Cap'n Proto RPC).
+///
+/// Must run on a current-thread tokio runtime inside a `LocalSet` (this helper
+/// creates the `LocalSet`). Abort is capability drop / stream cancel.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the vat fails.
+pub async fn serve(plugin: impl PluginRoot + 'static) -> Result<()> {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(serve_plugin_stdio(
+            std::sync::Arc::new(plugin),
+            MAX_STREAM_WINDOW_BYTES,
+        ))
+        .await
+        .map_err(|err| SdkError::message(err.to_string()))
+}

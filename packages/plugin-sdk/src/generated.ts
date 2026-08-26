@@ -651,7 +651,7 @@ export interface PutParams extends OutputS3Context {
 /**
  * Parameters for destination `putFile`.
  *
- * v2 destinations ingest via streamed `put`. Native guests that still expose
+ * Destinations ingest via streamed `put`. Native guests that still expose
  * `putFile` take {@link PutFileParams.localPath}.
  */
 export interface PutFileParams extends OutputS3Context {

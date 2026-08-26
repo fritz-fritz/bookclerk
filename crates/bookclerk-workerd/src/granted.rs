@@ -14,13 +14,13 @@ use std::task::{Context, Poll};
 
 use anyhow::{bail, Context as _, Result};
 use bookclerk_plugin_abi::decode_execute_request_bytes;
-use bookclerk_plugin_abi::v2::{
-    encoded_execute_result_reply_bytes, Destination, GuestDatabase, ObjectMetadata, ProgressSink,
-    Source, WriteOptions,
-};
 use bookclerk_plugin_abi::{
     authorize_guest_sql_policy, canonical_execute_request_hash, encoded_execute_request_bytes,
     guest_statement_kind, validate_guest_execute_request, GuestSqlPolicy, PluginError,
+};
+use bookclerk_plugin_abi::{
+    encoded_execute_result_reply_bytes, Destination, GuestDatabase, ObjectMetadata, ProgressSink,
+    Source, WriteOptions,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};

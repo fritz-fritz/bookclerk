@@ -129,7 +129,7 @@ export class PluginError extends Error {
   }
 }
 
-function v2Unsupported(method) {
+function unsupportedMethod(method) {
   return PluginError.fromWire("unsupported", `${method} not implemented`);
 }
 
@@ -147,49 +147,49 @@ export const MAX_CHECKPOINT_BYTES = 65536;
 /** Destination capability — subclass and override methods. Abort is stream cancel. */
 export class Destination extends RpcTarget {
   async head(_key) {
-    throw v2Unsupported("head");
+    throw unsupportedMethod("head");
   }
   async list(_options) {
-    throw v2Unsupported("list");
+    throw unsupportedMethod("list");
   }
   async get(_key, _options) {
-    throw v2Unsupported("get");
+    throw unsupportedMethod("get");
   }
   async put(_key, _body, _options) {
-    throw v2Unsupported("put");
+    throw unsupportedMethod("put");
   }
   async copy(_from, _to) {
-    throw v2Unsupported("copy");
+    throw unsupportedMethod("copy");
   }
   async delete(_key) {
-    throw v2Unsupported("delete");
+    throw unsupportedMethod("delete");
   }
   async commit(_key, _commitToken) {
-    throw v2Unsupported("commit");
+    throw unsupportedMethod("commit");
   }
   async abortStage(_key, _commitToken) {
-    throw v2Unsupported("abortStage");
+    throw unsupportedMethod("abortStage");
   }
 }
 
 /** Source capability. */
 export class Source extends RpcTarget {
   async open(_key) {
-    throw v2Unsupported("open");
+    throw unsupportedMethod("open");
   }
 }
 
 /** Progress reports (never media). */
 export class ProgressSink extends RpcTarget {
   async report(_percent, _message) {
-    throw v2Unsupported("report");
+    throw unsupportedMethod("report");
   }
 }
 
 /** Job handler for one durable invocation. */
 export class JobHandler extends RpcTarget {
   async handle(_invocation, _context) {
-    throw v2Unsupported("handle");
+    throw unsupportedMethod("handle");
   }
 }
 
@@ -212,7 +212,7 @@ export class Integration extends RpcTarget {
     return { lines: [] };
   }
   async onEvent(_event) {
-    throw v2Unsupported("onEvent");
+    throw unsupportedMethod("onEvent");
   }
   async start() {}
   async stop() {}
@@ -320,7 +320,7 @@ class GrantedProgress extends RpcTarget {
   }
 }
 
-function v2GrantedContext(env, grantToken, controller) {
+function grantedContext(env, grantToken, controller) {
   const granted = env.GRANTED;
   if (!granted || typeof grantToken !== "string" || !grantToken) {
     throw PluginError.fromWire("internal", "granted reverse channel missing");
@@ -333,7 +333,7 @@ function v2GrantedContext(env, grantToken, controller) {
   };
 }
 
-function v2MetaHeaders(meta) {
+function metaHeaders(meta) {
   const headers = {
     "x-bookclerk-key": meta?.key || "",
     "x-bookclerk-size": String(meta?.size ?? 0),
@@ -349,7 +349,7 @@ function v2MetaHeaders(meta) {
   return headers;
 }
 
-function v2ErrResponse(err) {
+function errResponse(err) {
   const code =
     err && typeof err === "object" && typeof err.wireCode === "string"
       ? err.wireCode
@@ -371,36 +371,35 @@ export class BookclerkPlugin extends WorkerEntrypoint {
     return new Response(null, { status: 404 });
   }
   async describe() {
-    throw v2Unsupported("describe");
+    throw unsupportedMethod("describe");
   }
   destination(_context) {
-    throw v2Unsupported("destination");
+    throw unsupportedMethod("destination");
   }
   source(_context) {
-    throw v2Unsupported("source");
+    throw unsupportedMethod("source");
   }
   worker(_context) {
-    throw v2Unsupported("worker");
+    throw unsupportedMethod("worker");
   }
   contentSource(_ctx) {
-    throw v2Unsupported("contentSource");
+    throw unsupportedMethod("contentSource");
   }
   integration(_ctx) {
-    throw v2Unsupported("integration");
+    throw unsupportedMethod("integration");
   }
   database(_ctx) {
-    throw v2Unsupported("database");
+    throw unsupportedMethod("database");
   }
   async cliDescribe() {
     return "{}";
   }
   async cliInvoke(_paramsJson) {
-    throw v2Unsupported("cliInvoke");
+    throw unsupportedMethod("cliInvoke");
   }
   async shutdown() {}
 }
 
-export { BookclerkPlugin as BookclerkPluginV2 };
 
 async function disposeRpc(stub) {
   if (stub == null || typeof stub !== "object") return;
@@ -417,7 +416,7 @@ async function disposeRpc(stub) {
   }
 }
 
-export function wrapV2Plugin(Author) {
+export function wrapPlugin(Author) {
   return class WrappedAuthor extends Author {
     constructor(ctx, env) {
       const authorEnv = { ...env };
@@ -430,11 +429,11 @@ export function wrapV2Plugin(Author) {
   };
 }
 
-export function wrapV2PluginFromBinding() {
+export function wrapPluginFromBinding() {
   return createInvocationAdapter();
 }
 
-export function wrapV2PluginFromNative() {
+export function wrapPluginFromNative() {
   return createInvocationAdapter();
 }
 
@@ -467,14 +466,14 @@ class HttpNativeDest extends Destination {
     return value;
   }
   async head(key) {
-    const v = await this.#json("POST", "/v2/destination/head", { key, json: this.ctx.json });
+    const v = await this.#json("POST", "/destination/head", { key, json: this.ctx.json });
     return v.found ? v.meta : null;
   }
   async list(options) {
-    return this.#json("POST", "/v2/destination/list", { options, json: this.ctx.json });
+    return this.#json("POST", "/destination/list", { options, json: this.ctx.json });
   }
   async get(key, options) {
-    let path = `/v2/destination/get?key=${encodeURIComponent(key)}`;
+    let path = `/destination/get?key=${encodeURIComponent(key)}`;
     if (options?.range) {
       path += `&offset=${options.range.offset}`;
       if (options.range.length != null) path += `&length=${options.range.length}`;
@@ -502,7 +501,7 @@ class HttpNativeDest extends Destination {
     if (options?.commitToken) headers["x-bookclerk-commit-token"] = options.commitToken;
     if (options?.stageOnly) headers["x-bookclerk-stage-only"] = "1";
     const resp = await this.fetcher.fetch(
-      `http://backend/v2/destination/put?key=${encodeURIComponent(key)}`,
+      `http://backend/destination/put?key=${encodeURIComponent(key)}`,
       { method: "PUT", headers, body },
     );
     const value = await resp.json().catch(() => ({}));
@@ -515,20 +514,20 @@ class HttpNativeDest extends Destination {
     return value;
   }
   async copy(from, to) {
-    return this.#json("POST", "/v2/destination/copy", { from, to, json: this.ctx.json });
+    return this.#json("POST", "/destination/copy", { from, to, json: this.ctx.json });
   }
   async delete(key) {
-    await this.#json("POST", "/v2/destination/delete", { key, json: this.ctx.json });
+    await this.#json("POST", "/destination/delete", { key, json: this.ctx.json });
   }
   async commit(key, commitToken) {
-    return this.#json("POST", "/v2/destination/commit", {
+    return this.#json("POST", "/destination/commit", {
       key,
       commitToken,
       json: this.ctx.json,
     });
   }
   async abortStage(key, commitToken) {
-    await this.#json("POST", "/v2/destination/abortStage", {
+    await this.#json("POST", "/destination/abortStage", {
       key,
       commitToken,
       json: this.ctx.json,
@@ -544,7 +543,7 @@ class HttpNativeSource extends Source {
   }
   async open(key) {
     const resp = await this.fetcher.fetch(
-      `http://backend/v2/source/open?key=${encodeURIComponent(key)}`,
+      `http://backend/source/open?key=${encodeURIComponent(key)}`,
       {
         headers: { "x-bookclerk-context": JSON.stringify(this.ctx) },
       },
@@ -569,7 +568,7 @@ class HttpNativeRoot {
     this.fetcher = fetcher;
   }
   async describe() {
-    const resp = await this.fetcher.fetch("http://backend/v2/describe", {
+    const resp = await this.fetcher.fetch("http://backend/describe", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",
@@ -696,7 +695,7 @@ function createInvocationAdapter() {
       const handler = await this.plugin().worker(ctx ?? {});
       const controller = new AbortController();
       try {
-        const context = v2GrantedContext(this.env, grantToken, controller);
+        const context = grantedContext(this.env, grantToken, controller);
         return await handler.handle(invocation, context);
       } finally {
         controller.abort();

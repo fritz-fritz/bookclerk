@@ -446,8 +446,8 @@ jobs:
           BOOKCLERK_WORKERD_BIN: ${{ github.workspace }}/target/debug/workerd
         run: |
           set -euo pipefail
-          if [ -n "${BOOKCLERK_V2_SKIP_WORKERD:-}" ]; then
-            echo "CI must run the workerd v2 contract (do not set BOOKCLERK_V2_SKIP_WORKERD)" >&2
+          if [ -n "${BOOKCLERK_SKIP_WORKERD:-}" ]; then
+            echo "CI must run the workerd contract (do not set BOOKCLERK_SKIP_WORKERD)" >&2
             exit 1
           fi
           export PATH="${{ github.workspace }}/target/debug:$PATH"

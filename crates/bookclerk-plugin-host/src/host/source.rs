@@ -33,14 +33,14 @@ use crate::protocol::{
     PurchaseHintParams, ScanBookDto, ScanParams, ScanSummaryDto, SearchCatalogParams,
     SourceAccountDto, SourceFetchDto,
 };
-use crate::rpc_v2::{V2PluginSession, HOST_SHARED_ACCOUNT};
+use crate::rpc_session::{PluginSession, HOST_SHARED_ACCOUNT};
 use crate::Result;
-use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
+use bookclerk_plugin_sdk::PRODUCT_API_VERSION;
 
 /// External content source backed by a discovered plugin binary.
 pub struct ExternalSource {
-    /// Cap'n Proto v2 session (never given `library.db`).
-    session: Arc<V2PluginSession>,
+    /// Cap'n Proto session (never given `library.db`).
+    session: Arc<PluginSession>,
     /// JSON factory context (plugin config table).
     ctx_json: String,
     /// Operator-facing storefront name from handshake or the manifest.
@@ -70,14 +70,14 @@ impl ExternalSource {
     pub async fn spawn(plugin: &DiscoveredPlugin, config: &Config) -> Result<Self> {
         if plugin.manifest.api_version != PRODUCT_API_VERSION {
             return Err(crate::PluginError::message(format!(
-                "plugin `{}` api_version {} is not v2",
+                "plugin `{}` api_version {} is not supported",
                 plugin.manifest.id, plugin.manifest.api_version
             )));
         }
         let table = crate::settings_table(config, plugin);
         let config_json = toml_to_json(&toml::Value::Table(table));
         let session = Arc::new(
-            V2PluginSession::spawn_for_account(
+            PluginSession::spawn_for_account(
                 plugin,
                 config,
                 config_json.clone(),
@@ -118,7 +118,7 @@ impl ExternalSource {
         })
     }
 
-    /// Forwards one content-source RPC through the v2 session and deserializes the JSON result.
+    /// Forwards one content-source RPC through the plugin session and deserializes the JSON result.
     ///
     /// # Errors
     ///

@@ -8,8 +8,8 @@
 /// Plugin id advertised in describe and `plugin.toml`.
 pub const ID: &str = "sqlite";
 
+pub mod plugin;
 pub mod sqlite;
-pub mod v2;
 
 pub use sqlite::{open, open_memory_unmigrated};
 #[cfg(feature = "host-helpers")]

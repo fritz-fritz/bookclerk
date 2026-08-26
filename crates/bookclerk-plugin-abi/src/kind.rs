@@ -342,7 +342,7 @@ pub struct FetchTitleParams {
     /// Library / storefront title id to download (wire `titleId`).
     pub title_id: String,
     /// Absolute path the guest should write media into (wire `cacheDir`).
-    /// v2 hosts pass a jail-granted directory under the guest `TMPDIR`.
+    /// Hosts pass a jail-granted directory under the guest `TMPDIR`.
     pub cache_dir: String,
     /// Host-loaded credential blob for this account (sealed in DB; plugin never
     /// opens DB). `None` when unavailable.
@@ -778,7 +778,7 @@ impl std::fmt::Debug for S3CredentialsDto {
 #[serde(rename_all = "camelCase")]
 pub struct OutputS3ContextDto {
     /// Scoped writable directory for this plugin only (`…/plugins/<id>/data`,
-    /// wire `pluginDataDir`). Empty on the v2 logical ABI (jail layout is
+    /// wire `pluginDataDir`). Empty on the logical ABI (jail layout is
     /// transport-private).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub plugin_data_dir: String,
@@ -806,11 +806,11 @@ pub struct OutputS3ContextDto {
 #[serde(rename_all = "camelCase")]
 pub struct OutputLocalContextDto {
     /// Scoped writable directory for this plugin only (`…/plugins/<id>/data`,
-    /// wire `pluginDataDir`). Empty on the v2 logical ABI (jail layout is
+    /// wire `pluginDataDir`). Empty on the logical ABI (jail layout is
     /// transport-private).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub plugin_data_dir: String,
-    /// Library output root (`[output.local].root`). Empty on the v2 logical
+    /// Library output root (`[output.local].root`). Empty on the logical
     /// ABI; native guests read `BOOKCLERK_OUTPUT_LOCAL_ROOT` instead.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub root: String,
@@ -836,7 +836,7 @@ pub struct LocalPutParams {
 
 /// Params for [`crate::methods::put_file`] against a local filesystem output.
 ///
-/// v2 destinations ingest via streamed `put`; this DTO remains for native
+/// Destinations ingest via streamed `put`; this DTO remains for native
 /// guests that still expose `putFile`. [`Self::local_path`] is the source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -936,7 +936,7 @@ pub struct PutParams {
 
 /// Params for [`crate::methods::put_file`] against an S3-compatible output.
 ///
-/// v2 destinations ingest via streamed `put`; this DTO remains for native
+/// Destinations ingest via streamed `put`; this DTO remains for native
 /// guests that still expose `putFile`. [`Self::local_path`] is the source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

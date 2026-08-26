@@ -27,7 +27,8 @@
 //! grow a new host-cache directory per `fetchTitle`. Granting the whole cache
 //! would let one plugin read or overwrite every other fetch's scratch. Plugin
 //! `tmp` is already in the spawn allowlist and is this guest's principal only.
-//! v1 passed a per-call directory over `SCM_RIGHTS` on fd 3; v2 does not arm
+//! v1 JSON adapters passed a per-call directory over `SCM_RIGHTS` on fd 3; the
+//! product ABI does not arm
 //! that channel (workerd cannot `recvmsg`; destinations stream).
 //!
 //! # Why a launcher
@@ -291,7 +292,7 @@ impl GuestJail {
                                 }
                             }
                         }
-                        // v2 does not pass per-RPC descriptors; fetch scratch is
+                        // The product ABI does not pass per-RPC descriptors; fetch scratch is
                         // plugin `tmp` and sqlite paths are spawn-time grants.
                         let preserve_fds: Vec<i32> = Vec::new();
 

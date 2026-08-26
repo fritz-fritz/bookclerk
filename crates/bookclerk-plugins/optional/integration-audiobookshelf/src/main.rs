@@ -10,7 +10,7 @@ use bookclerk_plugin_integration_audiobookshelf::guest::{
     guest_scan_library, guest_start, guest_sync_listening, AbsGuestState,
 };
 use bookclerk_plugin_integration_audiobookshelf::BRAND;
-use bookclerk_plugin_sdk::v2::{
+use bookclerk_plugin_sdk::{
     decode_json, encode_json, DomainEvent, EventResult, HealthOk, Integration, IntegrationContext,
     PluginDescribe, PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
@@ -100,7 +100,7 @@ impl PluginRoot for AbsRoot {
 
     async fn oidc_clients(
         &self,
-    ) -> Result<Vec<bookclerk_plugin_sdk::v2::OidcClientTemplate>, PluginError> {
+    ) -> Result<Vec<bookclerk_plugin_sdk::OidcClientTemplate>, PluginError> {
         Ok(bookclerk_plugin_integration_audiobookshelf::oidc_client_templates())
     }
 

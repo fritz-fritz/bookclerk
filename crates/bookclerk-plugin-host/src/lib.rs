@@ -44,7 +44,7 @@ mod jail;
 mod manifest;
 mod registry;
 mod rpc;
-mod rpc_v2;
+mod rpc_session;
 mod spawn_stdio;
 
 pub use bookclerk_plugin_sdk::protocol;
@@ -58,7 +58,7 @@ pub use bookclerk_plugin_sdk::{
     HOST_MANIFEST_API_VERSION_MAX, PLUGIN_API_VERSION, PROTOCOL_NAME,
 };
 
-pub use bookclerk_plugin_sdk::v2::{JobCheckpoint, JobInvocationLease, JobOutcome};
+pub use bookclerk_plugin_sdk::{JobCheckpoint, JobInvocationLease, JobOutcome};
 pub use builtins::{
     load_integrations, load_sources, register_builtin_integrations, register_builtin_sources,
 };
@@ -98,8 +98,8 @@ pub use registry::{
     host_target_triple, kind_keyword, validate_plugin_id, BookclerkPackageMetadata,
     PluginCatalogEntry, PluginCrateName, CRATE_NAME_PREFIX, PRODUCT_KEYWORD, REGISTRY_KEYWORD,
 };
-pub use rpc_v2::{
-    plugin_instance_key, ExecutorIdentity, V2PluginSession, V2Storage, HOST_SHARED_ACCOUNT,
+pub use rpc_session::{
+    plugin_instance_key, ExecutorIdentity, PluginSession, PluginStorage, HOST_SHARED_ACCOUNT,
     OPERATOR_ACCOUNT,
 };
 

@@ -2132,7 +2132,7 @@ async fn stale_fence_cannot_finalize_or_heartbeat() {
 
 #[tokio::test]
 async fn suspend_job_commits_checkpoint_and_stale_fence_cannot() {
-    use bookclerk_plugin_abi::v2::JobCheckpoint;
+    use bookclerk_plugin_abi::JobCheckpoint;
 
     let store = test_store().await;
     let created = store
@@ -2190,7 +2190,7 @@ async fn suspend_job_commits_checkpoint_and_stale_fence_cannot() {
 
 #[tokio::test]
 async fn suspend_lost_fence_does_not_commit_and_reclaim_sees_checkpoint() {
-    use bookclerk_plugin_abi::v2::JobCheckpoint;
+    use bookclerk_plugin_abi::JobCheckpoint;
 
     let store = test_store().await;
     let created = store
@@ -2265,7 +2265,7 @@ async fn suspend_lost_fence_does_not_commit_and_reclaim_sees_checkpoint() {
 
 #[tokio::test]
 async fn suspend_resume_then_retryable_failures_still_reach_max_attempts() {
-    use bookclerk_plugin_abi::v2::JobCheckpoint;
+    use bookclerk_plugin_abi::JobCheckpoint;
 
     let store = test_store().await;
     let created = store

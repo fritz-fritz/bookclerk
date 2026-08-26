@@ -27,12 +27,12 @@ const SDK_WORKERD_PY: &str =
 const SDK_DB_VALUE_PY: &str =
     include_str!("../../../packages/plugin-sdk-python/src/bookclerk_plugin_sdk/db_value.py");
 /// First-party adapter isolate: owns GRANTED / BRIDGE_TOKEN (author `PLUGIN`).
-const ADAPTER_JS: &str = r#"import { wrapV2PluginFromBinding } from "@bookclerk/plugin-sdk/workerd";
-export default wrapV2PluginFromBinding();
+const ADAPTER_JS: &str = r#"import { wrapPluginFromBinding } from "@bookclerk/plugin-sdk/workerd";
+export default wrapPluginFromBinding();
 "#;
 /// Generated native-behind-workerd adapter: `PLUGIN_BACKEND` only (no author isolate).
-const NATIVE_ADAPTER_JS: &str = r#"import { wrapV2PluginFromNative } from "@bookclerk/plugin-sdk/workerd";
-export default wrapV2PluginFromNative();
+const NATIVE_ADAPTER_JS: &str = r#"import { wrapPluginFromNative } from "@bookclerk/plugin-sdk/workerd";
+export default wrapPluginFromNative();
 "#;
 /// Sparse `bookclerk_plugin_sdk/__init__.py` pointing authors at the workerd guest SDK.
 const SDK_PY_INIT: &str = concat!(
@@ -846,7 +846,7 @@ pub fn materialize(
         None => bridge_token_binding.clone(),
     };
     // Bridge talks to the adapter isolate. GRANTED / BRIDGE_TOKEN are adapter-private
-    // (not author `pluginWorker` bindings). wrapV2Plugin stripping keys is hygiene.
+    // (not author `pluginWorker` bindings). wrapPlugin stripping keys is hygiene.
     let bridge_bindings = format!("{adapter_service_binding},\n    {bridge_token_binding}");
     let mut adapter_bindings = format!("{plugin_service_binding},\n    {bridge_token_binding}");
     let plugin_bindings = String::from(r#"(name = "HOST", service = "host")"#);
@@ -1396,7 +1396,7 @@ mod tests {
         std::fs::write(modules.join("index.js"), "export default {};").expect("index.js");
         let manifest = PluginManifest {
             api_version: 2,
-            id: "v2_stream".into(),
+            id: "stream_fixture".into(),
             name: None,
             kind: PluginKind::Output,
             version: None,
@@ -1499,8 +1499,8 @@ mod tests {
                 module_source,
                 entrypoint,
             } => {
-                assert!(module_source.contains("wrapV2PluginFromNative"));
-                assert!(!module_source.contains("wrapV2PluginFromBinding"));
+                assert!(module_source.contains("wrapPluginFromNative"));
+                assert!(!module_source.contains("wrapPluginFromBinding"));
                 assert_eq!(entrypoint, "default");
             }
             EntrypointSource::AuthorModules { .. } => panic!("expected generated proxy"),

@@ -10,19 +10,19 @@ use bookclerk_integrations::{
     Brand, EventSubscription, ExternalUser, Integration, IntegrationContext, IntegrationEvent,
     IntegrationHealth, IntegrationRegistry, ProvidedOidcClient,
 };
-use bookclerk_plugin_sdk::v2::{DomainEvent, EventResult, HealthOk, PRODUCT_API_VERSION};
+use bookclerk_plugin_sdk::{DomainEvent, EventResult, HealthOk, PRODUCT_API_VERSION};
 use serde_json::Value;
 use tracing::warn;
 
 use crate::discover::DiscoveredPlugin;
 use crate::protocol::EventPollResultDto;
-use crate::rpc_v2::{V2PluginSession, HOST_SHARED_ACCOUNT};
+use crate::rpc_session::{PluginSession, HOST_SHARED_ACCOUNT};
 use crate::Result;
 
 /// External integration backed by a discovered plugin binary.
 pub struct ExternalIntegration {
-    /// Cap'n Proto v2 session (never given `library.db`).
-    session: Arc<V2PluginSession>,
+    /// Cap'n Proto session (never given `library.db`).
+    session: Arc<PluginSession>,
     /// JSON factory context (plugin config table).
     ctx_json: String,
     /// Operator-facing name from the handshake (falls back to the manifest id).
@@ -50,7 +50,7 @@ impl ExternalIntegration {
     pub async fn spawn(plugin: &DiscoveredPlugin, config: &Config) -> Result<Self> {
         if plugin.manifest.api_version != PRODUCT_API_VERSION {
             return Err(crate::PluginError::message(format!(
-                "plugin `{}` api_version {} is not v2",
+                "plugin `{}` api_version {} is not supported",
                 plugin.manifest.id, plugin.manifest.api_version
             )));
         }
@@ -66,7 +66,7 @@ impl ExternalIntegration {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
         let session = Arc::new(
-            V2PluginSession::spawn_for_account(
+            PluginSession::spawn_for_account(
                 plugin,
                 config,
                 config_json.clone(),
@@ -113,7 +113,7 @@ impl ExternalIntegration {
         })
     }
 
-    /// Forwards one integration RPC through the v2 session.
+    /// Forwards one integration RPC through the plugin session.
     ///
     /// # Errors
     ///

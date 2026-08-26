@@ -2,11 +2,12 @@
  * Bookclerk bridge worker — HTTP ↔ Workers RPC service binding.
  *
  * v1: bookclerk-workerd POSTs `{ id, method, params }` to `/rpc`.
- * v2: one invocation envelope per HTTP request. The bridge creates the role
+ * Role routes (`/describe`, `/destination/*`, …): one invocation envelope per
+ * HTTP request. The bridge creates the role
  * capability, invokes the method, and disposes the stub before completing.
  * No dest-id table is retained across requests.
  *
- * All `/rpc`, `/v2/*`, and `/health` requests require `Authorization: Bearer`
+ * All `/rpc`, role-route, and `/health` requests require `Authorization: Bearer`
  * matching the per-isolate `BRIDGE_TOKEN` binding.
  */
 
@@ -154,13 +155,13 @@ function contextFrom(request, body) {
   return { json: "" };
 }
 
-async function handleV2(request, env, url) {
+async function handleRoleInvoke(request, env, url) {
   const plugin = env.PLUGIN;
   if (!plugin) {
     return errJson(null, "unavailable", "PLUGIN binding missing", 500);
   }
 
-  if (request.method === "POST" && url.pathname === "/v2/describe") {
+  if (request.method === "POST" && url.pathname === "/describe") {
     try {
       const result = await plugin.describe();
       return Response.json(result);
@@ -170,7 +171,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "POST" && url.pathname === "/v2/destination/head") {
+  if (request.method === "POST" && url.pathname === "/destination/head") {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
@@ -182,7 +183,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "POST" && url.pathname === "/v2/destination/list") {
+  if (request.method === "POST" && url.pathname === "/destination/list") {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
@@ -195,7 +196,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "GET" && url.pathname === "/v2/destination/get") {
+  if (request.method === "GET" && url.pathname === "/destination/get") {
     try {
       const ctx = contextFrom(request, null);
       const key = url.searchParams.get("key") || "";
@@ -218,7 +219,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "PUT" && url.pathname === "/v2/destination/put") {
+  if (request.method === "PUT" && url.pathname === "/destination/put") {
     try {
       const ctx = contextFrom(request, null);
       const key = url.searchParams.get("key") || "";
@@ -240,7 +241,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "POST" && url.pathname === "/v2/destination/copy") {
+  if (request.method === "POST" && url.pathname === "/destination/copy") {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
@@ -253,7 +254,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "POST" && url.pathname === "/v2/destination/delete") {
+  if (request.method === "POST" && url.pathname === "/destination/delete") {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
@@ -265,7 +266,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "POST" && url.pathname === "/v2/destination/commit") {
+  if (request.method === "POST" && url.pathname === "/destination/commit") {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
@@ -281,7 +282,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "POST" && url.pathname === "/v2/destination/abortStage") {
+  if (request.method === "POST" && url.pathname === "/destination/abortStage") {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
@@ -296,7 +297,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "GET" && url.pathname === "/v2/source/open") {
+  if (request.method === "GET" && url.pathname === "/source/open") {
     try {
       const ctx = contextFrom(request, null);
       const key = url.searchParams.get("key") || "";
@@ -308,7 +309,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "POST" && url.pathname === "/v2/worker/handle") {
+  if (request.method === "POST" && url.pathname === "/worker/handle") {
     try {
       const body = await request.json();
       const ctx = contextFrom(request, body);
@@ -331,7 +332,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "POST" && url.pathname === "/v2/cliDescribe") {
+  if (request.method === "POST" && url.pathname === "/cliDescribe") {
     try {
       const json = typeof plugin.cliDescribe === "function" ? await plugin.cliDescribe() : "{}";
       return Response.json({ json: typeof json === "string" ? json : JSON.stringify(json) });
@@ -341,7 +342,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "POST" && url.pathname === "/v2/cliInvoke") {
+  if (request.method === "POST" && url.pathname === "/cliInvoke") {
     try {
       const body = await request.json();
       const paramsJson = body.paramsJson || JSON.stringify(body);
@@ -356,7 +357,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  if (request.method === "POST" && url.pathname === "/v2/oidcClients") {
+  if (request.method === "POST" && url.pathname === "/oidcClients") {
     try {
       const clients =
         typeof plugin.oidcClients === "function" ? await plugin.oidcClients() : [];
@@ -367,7 +368,7 @@ async function handleV2(request, env, url) {
     }
   }
 
-  const roleMatch = url.pathname.match(/^\/v2\/(contentSource|integration)\/([^/]+)$/);
+  const roleMatch = url.pathname.match(/^\/(contentSource|integration)\/([^/]+)$/);
   if (roleMatch && request.method === "POST") {
     try {
       const role = roleMatch[1];
@@ -407,8 +408,8 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") {
       return new Response("ok", { status: 200 });
     }
-    if (url.pathname.startsWith("/v2/")) {
-      return handleV2(request, env, url);
+    if (url.pathname.startsWith("/")) {
+      return handleRoleInvoke(request, env, url);
     }
     if (request.method !== "POST" || url.pathname !== "/rpc") {
       return new Response("not found", { status: 404 });

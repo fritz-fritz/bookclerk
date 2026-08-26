@@ -1,7 +1,7 @@
 /**
  * Unpacked Cap'n Proto helpers for the typed SQL ABI.
  *
- * Not a public SDK export. Layouts match `schema/plugin_v2.capnp` as compiled
+ * Not a public SDK export. Layouts match `schema/plugin.capnp` as compiled
  * by `capnpc-rust` (`write_message` single-segment stream).
  */
 

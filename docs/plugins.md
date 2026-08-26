@@ -19,15 +19,15 @@ binding identifiers — never an in-memory `RpcTarget`, adapter map id, PID,
 or open connection. Decision record:
 [`docs/adr/plugin-workers-rpc-workerd.md`](adr/plugin-workers-rpc-workerd.md).
 Authoritative artifacts: Cap'n Proto
-[`schema/plugin_v2.capnp`](../crates/bookclerk-plugin-abi/schema/plugin_v2.capnp)
+[`schema/plugin.capnp`](../crates/bookclerk-plugin-abi/schema/plugin.capnp)
 (append-only ordinals; unknown union members fail closed or return typed
 `unsupported`) and TypeScript
-[`packages/plugin-sdk/src/v2.ts`](../packages/plugin-sdk/src/v2.ts).
+[`packages/plugin-sdk/src/plugin.ts`](../packages/plugin-sdk/src/plugin.ts).
 
 Authors implement the branded guest base **`BookclerkPlugin`** (`describe` /
 `destination` / `source` / `worker` / `contentSource` / `integration` /
 `database` / `oidcClients`). Native guests implement Rust `PluginRoot` and call `serve` (alias
-`serve_v2`). The trusted adapter constructs a frozen `BookclerkContext`
+`serve`). The trusted adapter constructs a frozen `BookclerkContext`
 (`bindings`, optional `native`, `invocation`). Authors never see
 `PLUGIN_BACKEND`, HTTP endpoints, PIDs, credentials, or Cap'n Proto.
 `PLUGIN_BACKEND` may exist as private workerd config only. Byte `Source` is
@@ -35,7 +35,7 @@ the job input opener; storefronts use a separately named `contentSource()`
 factory. JSON is allowed only for plugin-specific extensible config
 (`schemaVersion` + `mediaType`/`schemaId` + bounded payload).
 
-On native guests, `serve` / `serve_v2` is the stdin/stdout Cap'n Proto runner for
+On native guests, `serve` is the stdin/stdout Cap'n Proto runner for
 `api_version = 2`.
 
 | Language | Package | Notes |
@@ -250,12 +250,12 @@ scratch.
 The host therefore never grants the cache root. `fetchTitle` receives a
 `cache_dir` under the guest's already-granted `TMPDIR` (`plugins/<id>/tmp/fetch`).
 Returned media paths are under that directory; the unconfined host reads them
-afterward. Destinations ingest **byte streams** over the v2 ABI rather than a
+afterward. Destinations ingest **byte streams** over the plugin ABI rather than a
 host file descriptor. SQLite gets spawn-time file grants for `library.db` and
 its journal sidecars (never the files-dir parent).
 
 v1 passed a per-call directory over a Unix socket with `SCM_RIGHTS` on fd 3.
-v2 does not arm that channel: workerd cannot `recvmsg`, and a live
+The product ABI does not arm that channel: workerd cannot `recvmsg`, and a live
 `BOOKCLERK_PLUGIN_FD_CHANNEL` with no matching send deadlocks the guest. A
 native SCM_RIGHTS shortcut remains a possible host-selected optimization behind
 streams, not the public contract.
@@ -466,7 +466,7 @@ unique profile per job.
 Fetch scratch and plugin state are the spawn-time `data` / `tmp` grants (already
 ACLed for the Package SID). SQLite adds file-level ACLs for `library.db` and
 journal sidecars at confine time. Destinations stream bytes and do not receive
-host cache paths. v2 does not apply a per-RPC extra path ACL for fetch/upload.
+host cache paths. The host does not apply a per-RPC extra path ACL for fetch/upload.
 
 #### Interactive listeners (OAuth and similar)
 
@@ -903,7 +903,7 @@ unsorted directory without an index.
 
 Scalar RPC values are capped at **256 KiB** (`payload_too_large` if exceeded).
 List pages are clamped. Integrity metadata (etag / sha256) rides on
-`PutResult` / `ReadResult`. Optional facilities *within* v2 are feature flags
+`PutResult` / `ReadResult`. Optional facilities *within* the ABI are feature flags
 (`rpc.streams`, `rpc.scalarLimits`, `storage.copy`), not a substitute for
 `apiVersion`. Spawn **negotiates** `apiVersion == 2`, matching signed
 `id`/`kind`, required `rpc.streams` + `rpc.scalarLimits`, and rejects
@@ -914,12 +914,12 @@ zero/unsafe limits.
 | Runtime | Wire |
 | --- | --- |
 | **workerd** | Isolate keeps `RpcTarget` stubs; `bookclerk-workerd` serves Bookclerk Cap'n Proto on stdio and talks HTTP/JSRPC to the isolate with streamed bodies (`capnpConnectHost = "plugin"` on the rpc socket) |
-| **native** | Guest SDK `serve_v2` serves `schema/plugin_v2.capnp` (`capnp-rpc`) with windowed byte streams |
+| **native** | Guest SDK `serve` serves `schema/plugin.capnp` (`capnp-rpc`) with windowed byte streams |
 
 FD passing / `localPath` remain native-only optimizations behind the stream
 adapter, never author-facing. Handshake rejects unsupported versions.
 
-First-party destinations (`local`, `s3`) and remaining product guests speak v2.
+First-party destinations (`local`, `s3`) and remaining product guests speak the object-capability ABI.
 Echo examples are `api_version = 2` Integration.
 
 ## Reverse channel (`HOST.notify`)
@@ -1007,7 +1007,7 @@ Advertise in `handshake.capabilities`: `start`, `onEvent`, `health`,
 | Method | Notes |
 | --- | --- |
 | `start` | Background watchers |
-| `onEvent` | Versioned [`DomainEvent`](../packages/plugin-sdk/src/v2.ts) (`eventId`, `eventType`, `schemaVersion`, correlation/causation, `source`, `deduplicationKey`, `deliveryAttempt`, bounded payload). A `suspended` result (`abiMinor` 4) parks a checkpoint; the next `onEvent` copies `checkpointJson`, `checkpointSchemaVersion`, `invocationSequence`, and `resumePending` (`abiMinor` 5). `wakeOnEventType` / `wakeOnFilterJson` (`abiMinor` 6) ask the host to wake on a matching later event (empty = timestamp-only). Return `EventResult`: `ack`, `retry` (`retryAtUnixMs`; exhausted attempts dead-letter), `reject`, `deadLetter`, or `suspended` (`checkpointJson`, `checkpointSchemaVersion`, `wakeAtUnixMs`, optional wake-on-event fields). Host delivery is at-least-once; guests must be idempotent on `deduplicationKey`. |
+| `onEvent` | Versioned [`DomainEvent`](../packages/plugin-sdk/src/plugin.ts) (`eventId`, `eventType`, `schemaVersion`, correlation/causation, `source`, `deduplicationKey`, `deliveryAttempt`, bounded payload). A `suspended` result (`abiMinor` 4) parks a checkpoint; the next `onEvent` copies `checkpointJson`, `checkpointSchemaVersion`, `invocationSequence`, and `resumePending` (`abiMinor` 5). `wakeOnEventType` / `wakeOnFilterJson` (`abiMinor` 6) ask the host to wake on a matching later event (empty = timestamp-only). Return `EventResult`: `ack`, `retry` (`retryAtUnixMs`; exhausted attempts dead-letter), `reject`, `deadLetter`, or `suspended` (`checkpointJson`, `checkpointSchemaVersion`, `wakeAtUnixMs`, optional wake-on-event fields). Host delivery is at-least-once; guests must be idempotent on `deduplicationKey`. |
 | `scanLibrary` | `{ "force": bool }` |
 | `syncListening` | Return listening progress snapshots; host upserts tagged with plugin id |
 | `authenticateUser` | `{ "username", "password" }` → external user |
@@ -1090,14 +1090,14 @@ content keys on the wire — decrypt in the guest when needed.
 
 ### Output plugins
 
-`kind = "output"` guests on **v2** implement [`Destination`](../packages/plugin-sdk/src/v2.ts):
+`kind = "output"` guests implement [`Destination`](../packages/plugin-sdk/src/plugin.ts):
 `head` / `list` (paginated) / streamed `get` / streamed `put` / optional
 `copy`. The host never reassembles a large object into `Bytes` and never writes
 the full object to guest scratch then `put_file`. S3 guests feed the existing
 multipart sink as bytes arrive.
 
 Oversized scalar `put`/`get` fail closed. There is no public `handleId` /
-`readChunk` / `writeChunk` protocol: v2 destinations transfer media through
+`readChunk` / `writeChunk` protocol: destinations transfer media through
 `ByteSource` streams. Range, multipart, and checkpoint product work in
 issue #120 builds on this contract without another public ABI redesign.
 

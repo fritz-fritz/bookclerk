@@ -27,8 +27,8 @@ export {
   PluginError,
   ProgressSink,
   Source,
-  wrapV2PluginFromBinding,
-  wrapV2PluginFromNative,
+  wrapPluginFromBinding,
+  wrapPluginFromNative,
   PRODUCT_API_VERSION,
   MAX_SCALAR_BYTES,
   MAX_STREAM_WINDOW_BYTES,
@@ -37,7 +37,7 @@ export {
   FEATURE_STREAMS,
   FEATURE_STORAGE_COPY,
   ENVELOPE_VERSION,
-} from "./v2.js";
+} from "./plugin.js";
 export { decodeDbValue, encodeDbValue, parseDbValue } from "./db-value.js";
 export type { DbType, DbValue } from "./db-value.js";
 export {
@@ -80,7 +80,7 @@ export type {
   JobOutcome,
   ListOptions,
   ListPage,
-  ObjectInfo as V2ObjectInfo,
+  ObjectInfo,
   ObjectMetadata,
   OidcClientTemplate,
   PluginDescribe,
@@ -91,7 +91,7 @@ export type {
   SourceContext,
   WorkerContext,
   WriteOptions,
-} from "./v2.js";
+} from "./plugin.js";
 
 export {
   API_VERSION,

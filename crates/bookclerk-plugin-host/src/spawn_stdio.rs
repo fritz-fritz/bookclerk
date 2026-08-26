@@ -44,7 +44,7 @@ pub(crate) struct SpawnedStdio {
     pub appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
 }
 
-/// Spawns the jailed guest with piped stdio. Caller performs v2 Cap'n Proto connect.
+/// Spawns the jailed guest with piped stdio. Caller performs Cap'n Proto connect.
 ///
 /// # Errors
 ///

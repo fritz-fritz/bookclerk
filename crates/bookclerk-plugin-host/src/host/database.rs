@@ -18,8 +18,8 @@ use bookclerk_plugin_abi::HostExecuteEnvelope;
 use bookclerk_plugin_abi::{
     database_context_from_params, DbBootstrap, DbCapabilities, DbConnectParams,
 };
-use bookclerk_plugin_sdk::v2::GuestDatabase;
-use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
+use bookclerk_plugin_sdk::GuestDatabase;
+use bookclerk_plugin_sdk::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
     proxy_rows_from_typed, DbPlanStatementKind, DbResultSelection, ExecuteReply, ExecuteRequest,
     PluginError as AbiPluginError, TypedDbStatement,
@@ -33,15 +33,15 @@ use tokio::task::{try_id, Id as TaskId};
 
 use crate::discover::DiscoveredPlugin;
 use crate::jail::plugin_data_dir;
-use crate::rpc_v2::{V2PluginSession, OPERATOR_ACCOUNT};
+use crate::rpc_session::{PluginSession, OPERATOR_ACCOUNT};
 use crate::{PluginError, Result as PluginResult};
 use bookclerk_library::{atomic_status, DbAtomicParams};
 
 /// External database backend spawned for `[database].plugin`.
 #[derive(Clone)]
 pub struct ExternalDatabase {
-    /// Cap'n Proto v2 session (vat holds the database session).
-    session: Arc<V2PluginSession>,
+    /// Cap'n Proto session (vat holds the database session).
+    session: Arc<PluginSession>,
     /// Manifest id (`sqlite`, `d1`, `postgres`) used to build connect params.
     plugin_id: String,
     /// Guest HOME / data directory passed in the connect params.
@@ -57,7 +57,7 @@ impl ExternalDatabase {
     pub async fn spawn(plugin: &DiscoveredPlugin, config: &Config) -> PluginResult<Self> {
         if plugin.manifest.api_version != PRODUCT_API_VERSION {
             return Err(PluginError::message(format!(
-                "plugin `{}` api_version {} is not v2",
+                "plugin `{}` api_version {} is not supported",
                 plugin.manifest.id, plugin.manifest.api_version
             )));
         }
@@ -76,7 +76,7 @@ impl ExternalDatabase {
             None => Vec::new(),
         };
         let session = Arc::new(
-            V2PluginSession::spawn_for_account_with_env(
+            PluginSession::spawn_for_account_with_env(
                 plugin,
                 config,
                 config_json,
@@ -362,8 +362,8 @@ fn task_key() -> TaskKey {
 #[derive(Clone)]
 /// SeaORM [`ProxyDatabaseTrait`] that forwards query/exec/txn RPCs to the guest.
 struct RpcDatabaseProxy {
-    /// Cap'n Proto v2 session shared with [`ExternalDatabase`].
-    session: Arc<V2PluginSession>,
+    /// Cap'n Proto session shared with [`ExternalDatabase`].
+    session: Arc<PluginSession>,
     /// Per-task nested begin depth (vat holds a single transaction).
     txn_depth: Arc<Mutex<HashMap<TaskKey, usize>>>,
     /// Negotiated guest capabilities (statement/bind/request byte limits).
@@ -629,8 +629,8 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
 
 /// Host [`AtomicTxnBackend`] that runs named security ops as one guest atomic batch.
 struct RpcAtomicBackend {
-    /// Cap'n Proto v2 session used for a single `bookclerk.atomic` query per operation.
-    session: Arc<V2PluginSession>,
+    /// Cap'n Proto session used for a single `bookclerk.atomic` query per operation.
+    session: Arc<PluginSession>,
     /// Full negotiated capabilities used to reject oversized plans before RPC.
     caps: DbCapabilities,
 }
@@ -753,7 +753,7 @@ fn unix_now_ms() -> u64 {
 
 /// Runs host DDL as one `bookclerk.atomic` batch (D1 V27).
 async fn exec_host_ddl_batch(
-    session: &V2PluginSession,
+    session: &PluginSession,
     caps: &DbCapabilities,
     stmts: Vec<String>,
 ) -> bookclerk_library::Result<()> {
@@ -1376,7 +1376,7 @@ struct AtomicWebauthnChallenge {
     state_json: String,
 }
 
-/// Builds a v2 [`bookclerk_plugin_sdk::v2::DatabaseContext`] for `database.openSession`.
+/// Builds a [`bookclerk_plugin_sdk::DatabaseContext`] for `database.openSession`.
 ///
 /// Used by the CLI diagnose probe and mirrors [`ExternalDatabase::connect`].
 ///
@@ -1386,8 +1386,8 @@ struct AtomicWebauthnChallenge {
 pub fn database_connect_context(
     config: &Config,
     plugin: &DiscoveredPlugin,
-    session: &V2PluginSession,
-) -> PluginResult<bookclerk_plugin_sdk::v2::DatabaseContext> {
+    session: &PluginSession,
+) -> PluginResult<bookclerk_plugin_sdk::DatabaseContext> {
     let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
     let params = connect_params(config, &plugin.manifest.id, &plugin_data_dir, session)
         .map_err(|err| PluginError::message(err.to_string()))?;
@@ -1403,7 +1403,7 @@ fn connect_params(
     config: &Config,
     plugin_id: &str,
     plugin_data_dir: &Path,
-    session: &V2PluginSession,
+    session: &PluginSession,
 ) -> Result<DbConnectParams, DbErr> {
     let data_dir = plugin_data_dir.display().to_string();
     match DatabasePluginKind::parse(plugin_id) {

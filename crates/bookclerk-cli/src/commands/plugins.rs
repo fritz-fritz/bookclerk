@@ -11,7 +11,7 @@ use bookclerk_plugin_catalog::{
 use bookclerk_plugin_host::{
     consent_request, consent_summary, host_target_triple, require_grant, search_crates_io,
     CliInvokeParams, CliInvokeResult, CliSchema, DiscoveredPlugin, PluginGrantStore, PluginKind,
-    V2PluginSession, CRATE_NAME_PREFIX, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
+    PluginSession, CRATE_NAME_PREFIX, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
@@ -843,13 +843,13 @@ fn cli_account(plugin: &DiscoveredPlugin) -> &'static str {
     }
 }
 
-/// Spawns a v2 guest for CLI health / invoke / diagnose.
+/// Spawns a plugin guest for CLI health / invoke / diagnose.
 async fn spawn_cli_session(
     config: &Config,
     plugin: &DiscoveredPlugin,
-) -> anyhow::Result<V2PluginSession> {
+) -> anyhow::Result<PluginSession> {
     let settings = bookclerk_plugin_host::settings_table(config, plugin);
-    Ok(V2PluginSession::spawn_for_account(
+    Ok(PluginSession::spawn_for_account(
         plugin,
         config,
         toml_table_to_json(&settings),
@@ -1038,7 +1038,7 @@ pub fn augment_plugins_command(mut plugins_cmd: clap::Command, config: &Config) 
 
 /// Prefers live `cli.describe`, then handshake CLI, then the on-disk manifest schema.
 async fn resolve_schema(
-    session: &V2PluginSession,
+    session: &PluginSession,
     plugin: &DiscoveredPlugin,
 ) -> anyhow::Result<CliSchema> {
     if session.has_capability("cli") {
@@ -1053,7 +1053,7 @@ async fn resolve_schema(
 
 /// Opens the database guest and issues `SELECT 1` as the health/diagnose probe.
 async fn probe_database(
-    session: &V2PluginSession,
+    session: &PluginSession,
     config: &Config,
     plugin: &DiscoveredPlugin,
 ) -> anyhow::Result<()> {

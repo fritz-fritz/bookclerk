@@ -30,8 +30,8 @@ export {
   Source,
   AdapterDatabaseSession,
   GuestDatabase,
-  wrapV2PluginFromBinding,
-  wrapV2PluginFromNative,
+  wrapPluginFromBinding,
+  wrapPluginFromNative,
   PRODUCT_API_VERSION,
   MAX_SCALAR_BYTES,
   MAX_STREAM_WINDOW_BYTES,
@@ -40,7 +40,7 @@ export {
   FEATURE_STREAMS,
   FEATURE_STORAGE_COPY,
   ENVELOPE_VERSION,
-} from "./v2.js";
+} from "./plugin.js";
 export type {
   AdapterEnv,
   BookclerkContext,
@@ -54,7 +54,7 @@ export type {
   OidcClientTemplate,
   PluginDescribe,
   WorkerContext,
-} from "./v2.js";
+} from "./plugin.js";
 export type {
   BookclerkEnv,
   HandshakeParams,

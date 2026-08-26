@@ -9,7 +9,7 @@ use bookclerk_plugin_abi::{
     CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams, CliInvokeResult, CliSchema,
     HandshakeResult,
 };
-use bookclerk_plugin_sdk::v2::{
+use bookclerk_plugin_sdk::{
     decode_json, encode_json, DomainEvent, EventResult, HealthOk, Integration, IntegrationContext,
     PluginDescribe, PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };

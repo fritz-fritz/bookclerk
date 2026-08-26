@@ -122,7 +122,7 @@ pub fn validate_exec_result(
         let bytes = serde_json::to_vec(exec).map(|b| b.len()).unwrap_or(0);
         let cap = usize::try_from(
             caps.max_atomic_result_bytes
-                .min(bookclerk_plugin_abi::v2::MAX_SCALAR_BYTES),
+                .min(bookclerk_plugin_abi::MAX_SCALAR_BYTES),
         )
         .unwrap_or(usize::MAX);
         if bytes > cap {

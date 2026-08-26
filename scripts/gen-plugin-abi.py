@@ -27,8 +27,8 @@ METHODS_RS = ROOT / "crates/bookclerk-plugin-abi/src/methods.rs"
 ABI_LIB_RS = ROOT / "crates/bookclerk-plugin-abi/src/lib.rs"
 DB_EXECUTE_RS = ROOT / "crates/bookclerk-plugin-abi/src/db_execute.rs"
 CAPNP_SCHEMAS = (
-    ROOT / "crates/bookclerk-plugin-abi/schema/plugin_v2.capnp",
-    ROOT / "crates/bookclerk-plugin-abi/schema/plugin_v2_host.capnp",
+    ROOT / "crates/bookclerk-plugin-abi/schema/plugin.capnp",
+    ROOT / "crates/bookclerk-plugin-abi/schema/plugin_host.capnp",
 )
 TS_GENERATED = ROOT / "packages/plugin-sdk/src/generated.ts"
 TS_DB_EXECUTE = ROOT / "packages/plugin-sdk/src/db-execute.ts"

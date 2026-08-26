@@ -1,5 +1,5 @@
 //! Typed Cap'n database data-plane (`ExecuteRequest` / `ExecuteReply`) and
-//! control-plane (`DbCapabilities`) mirrors of `plugin_v2.capnp`.
+//! control-plane (`DbCapabilities`) mirrors of `plugin.capnp`.
 //!
 //! Hosts call `DatabaseSession.capabilities` and
 //! `DatabaseSession.executeAtomic`. The `bookclerk.capabilities` /
@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::db_value::{DbType, DbValue};
-use crate::v2::MAX_SCALAR_BYTES;
+use crate::MAX_SCALAR_BYTES;
 
 /// SQLite family bind cap advertised by the platform sqlite guest.
 pub const SQLITE_MAX_BINDS: u32 = 32_766;
@@ -48,7 +48,7 @@ pub const HOST_MIN_RESULT_BYTES: u32 = 4_096;
 pub const HOST_MIN_CELL_BYTES: u32 = 1_024;
 
 /// First-party JSON-byte budget for one statement's rows and for one atomic
-/// request/result scalar. Must stay at or below [`crate::v2::MAX_SCALAR_BYTES`].
+/// request/result scalar. Must stay at or below [`crate::MAX_SCALAR_BYTES`].
 pub const FIRST_PARTY_MAX_RESULT_BYTES: u32 = MAX_SCALAR_BYTES;
 
 /// Bookclerk SQL contract version advertised by first-party adapters.

@@ -2,8 +2,8 @@
 
 #![allow(clippy::missing_docs_in_private_items)]
 
-use bookclerk_plugin_abi::v2::{AdapterTransaction, HostAdapterDatabaseSession};
 use bookclerk_plugin_abi::HostExecuteEnvelope;
+use bookclerk_plugin_abi::{AdapterTransaction, HostAdapterDatabaseSession};
 use bookclerk_plugin_abi::{ExecuteReply, ExecuteRequest, Result};
 
 use crate::session::{

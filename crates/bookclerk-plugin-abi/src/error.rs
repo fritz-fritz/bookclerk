@@ -32,7 +32,7 @@ pub enum PluginErrorCode {
     Unsupported,
     /// Unexpected guest or host failure; see [`PluginError::message`].
     Internal,
-    /// A scalar RPC value exceeded [`crate::v2::MAX_SCALAR_BYTES`].
+    /// A scalar RPC value exceeded [`crate::MAX_SCALAR_BYTES`].
     PayloadTooLarge,
     /// The invocation deadline elapsed before the call completed.
     DeadlineExceeded,

@@ -5,14 +5,14 @@
 use async_trait::async_trait;
 use bookclerk_db_guest::set_connection;
 use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
-use bookclerk_plugin_abi::v2::{AdapterTransaction, HostAdapterDatabaseSession};
+use bookclerk_plugin_abi::{AdapterTransaction, HostAdapterDatabaseSession};
 use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
-use bookclerk_plugin_sdk::v2::{
-    AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
-    FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
-};
 use bookclerk_plugin_sdk::{
     serve, DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, HandshakeResult, PluginError,
+};
+use bookclerk_plugin_sdk::{
+    AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
+    FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {

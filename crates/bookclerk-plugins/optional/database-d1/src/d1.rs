@@ -17,7 +17,7 @@ use base64::Engine as _;
 use bookclerk_db_exec::{
     b64_string_to_bytes, bytes_to_b64_string, is_txn_broken, note_begin_failed, txn_broken_err,
 };
-use bookclerk_plugin_sdk::v2::MAX_SCALAR_BYTES;
+use bookclerk_plugin_sdk::MAX_SCALAR_BYTES;
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
     Statement, Value,

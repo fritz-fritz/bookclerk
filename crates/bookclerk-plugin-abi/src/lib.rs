@@ -33,7 +33,7 @@
 //! # Versioning
 //!
 //! [`API_VERSION`] is the JSON DTO schema version used by wrapped guest
-//! handshake payloads. [`v2::PRODUCT_API_VERSION`] is `2` (object-capability
+//! handshake payloads. [`PRODUCT_API_VERSION`] is `2` (object-capability
 //! Cap'n Proto / Workers RPC). Product spawn requires `plugin.toml`
 //! `api_version = 2`. There is no `protocol` key.
 //!
@@ -46,24 +46,35 @@
 //! | [`kind`] | Kind-specific DTOs (source / integration / output) |
 //! | [`db`] | Host-private database connect params (feature `host`) |
 //! | [`error`] | [`PluginError`] / [`PluginErrorCode`] |
-//! | [`v2`] | Object-capability ABI (`apiVersion` 2, Cap'n Proto, streams) |
+//! | [`plugin_capnp`] | Generated Cap'n Proto RPC interfaces |
 
 pub mod db;
 pub mod db_execute;
+mod db_rpc;
 pub mod db_value;
 pub mod error;
 pub mod events;
+mod features;
 pub mod guest_sql;
 #[cfg(feature = "host")]
 pub(crate) mod host_envelope;
+#[cfg(feature = "host")]
+mod host_roles;
+#[cfg(feature = "host")]
+mod host_rpc;
+mod jobs;
 pub mod kind;
+mod limits;
 pub mod methods;
+mod roles;
+mod rpc;
+mod rpc_types;
+mod sdk_wire;
 pub mod types;
-pub mod v2;
 
-/// Generated Cap'n Proto RPC interfaces (`schema/plugin_v2.capnp`).
+/// Generated Cap'n Proto RPC interfaces (`schema/plugin.capnp`).
 ///
-/// Included at crate root because `capnpc` emits `crate::plugin_v2_capnp` paths.
+/// Included at crate root because `capnpc` emits `crate::plugin_capnp` paths.
 #[allow(
     dead_code,
     missing_docs,
@@ -76,11 +87,11 @@ pub mod v2;
     clippy::missing_panics_doc,
     clippy::missing_docs_in_private_items
 )]
-pub mod plugin_v2_capnp {
-    include!(concat!(env!("OUT_DIR"), "/plugin_v2_capnp.rs"));
+pub mod plugin_capnp {
+    include!(concat!(env!("OUT_DIR"), "/plugin_capnp.rs"));
 }
 
-/// Host-private Cap'n Proto RPC interfaces (`schema/plugin_v2_host.capnp`).
+/// Host-private Cap'n Proto RPC interfaces (`schema/plugin_host.capnp`).
 #[cfg(feature = "host")]
 #[allow(
     dead_code,
@@ -94,8 +105,8 @@ pub mod plugin_v2_capnp {
     clippy::missing_panics_doc,
     clippy::missing_docs_in_private_items
 )]
-pub mod plugin_v2_host_capnp {
-    include!(concat!(env!("OUT_DIR"), "/plugin_v2_host_capnp.rs"));
+pub mod plugin_host_capnp {
+    include!(concat!(env!("OUT_DIR"), "/plugin_host_capnp.rs"));
 }
 
 #[cfg(test)]
@@ -123,17 +134,51 @@ pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
 pub use types::*;
-pub use v2::{
+
+#[cfg(feature = "host")]
+pub use host_roles::{AdapterTransaction, HostAdapterDatabaseSession};
+#[cfg(feature = "host")]
+pub use host_rpc::HostAdapterDatabaseSessionClient;
+
+pub use db_rpc::{
     canonical_execute_request_hash, decode_db_value_bytes, decode_execute_request_bytes,
     decode_execute_result_reply_bytes, encoded_db_value_bytes, encoded_execute_reply_bytes,
     encoded_execute_request_bytes, encoded_execute_result_reply_bytes,
     encoded_statement_result_bytes,
 };
+pub use features::{
+    negotiate_rpc_features, RpcFeature, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY,
+    FEATURE_STREAMS,
+};
+pub use jobs::{read_all, stream_copy_keys, StreamCopyHandler, StreamCopySpec};
+pub use limits::{
+    ScalarLimits, ABI_MAJOR, ABI_MINOR, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
+    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+};
+pub use roles::{
+    AdapterDatabaseSession, ByteRange, Cancellation, ContentSource, ContentSourceContext, Database,
+    DatabaseContext, Destination, GuestDatabase, Integration, IntegrationContext, JobHandler,
+    JobHandlerContext, NeverCancel, PluginRoot, ProgressSink, ReadResult, Source,
+};
+#[cfg(feature = "host")]
+pub use rpc::AdapterSessionHandle;
+pub use rpc::{
+    byte_source_from_async_read, connect_plugin, pull_byte_source_to_writer, serve_plugin,
+    serve_plugin_stdio, ContentSourceClient, DatabaseClient, DestinationClient, DestinationServer,
+    IntegrationClient, PluginClient, PluginServer, SourceClient, SourceServer,
+};
+pub use rpc_types::{
+    CopyResult, DestinationContext, DomainEvent, EventResult, ExtensibleConfig, HealthOk,
+    JobCheckpoint, JobInvocation, JobInvocationLease, JobOutcome, ListOptions, ListPage,
+    ObjectInfo, ObjectMetadata, OidcClientTemplate, PluginDescribe, PutResult, QueryPage,
+    ScalarLimitsDto, SourceContext, WorkerContext, WriteOptions, ENVELOPE_VERSION,
+    MAX_CHECKPOINT_BYTES,
+};
 
 /// Negotiated JSON-adapter API version (`1`).
 ///
 /// Sent as wire field `apiVersion` on v1 handshake params/results. Product
-/// object-capability guests use [`v2::PRODUCT_API_VERSION`] (`2`) instead.
+/// object-capability guests use [`PRODUCT_API_VERSION`] (`2`) instead.
 pub const API_VERSION: u32 = 1;
 
 /// Embedded bytes of `schema/abi.json` (CI and docs tooling can compare
@@ -192,14 +237,14 @@ mod tests {
 
     #[test]
     fn capnp_schema_has_no_legacy_json_row_fields() {
-        let schema = include_str!("../schema/plugin_v2.capnp");
+        let schema = include_str!("../schema/plugin.capnp");
         assert!(
             !schema.contains("valuesJson"),
-            "plugin_v2.capnp must not contain valuesJson"
+            "plugin.capnp must not contain valuesJson"
         );
         assert!(
             !schema.contains("rowsJson"),
-            "plugin_v2.capnp must not contain rowsJson"
+            "plugin.capnp must not contain rowsJson"
         );
     }
 }

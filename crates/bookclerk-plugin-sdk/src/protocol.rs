@@ -35,7 +35,7 @@ pub use bookclerk_plugin_abi::{
 /// Internal handshake version for JSON DTOs still used on role methods.
 ///
 /// Same numeric value as `bookclerk_plugin_abi::API_VERSION`. Product spawn uses
-/// Cap'n Proto [`crate::v2::PRODUCT_API_VERSION`] (`2`).
+/// Cap'n Proto [`crate::PRODUCT_API_VERSION`] (`2`).
 pub const PLUGIN_API_VERSION: u32 = API_VERSION;
 
 /// Logical ABI identifier for diagnostics (not a `plugin.toml` field).
