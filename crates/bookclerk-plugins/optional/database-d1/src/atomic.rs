@@ -27,6 +27,21 @@ pub(crate) type SqlStmt = (String, Vec<JsonValue>);
 /// Maximum D1 HTTP batch attempts, including retries after ambiguous responses.
 const ATOMIC_HTTP_ATTEMPTS: usize = 3;
 
+/// True when every plan statement is a read (`Select`) — resubmitting after an
+/// ambiguous response cannot mutate state twice.
+fn plan_is_read_only(plan: &DbAtomicPlan) -> bool {
+    plan.statements
+        .iter()
+        .all(|s| matches!(s.kind, DbPlanStatementKind::Select))
+}
+
+/// True when every typed statement is a read (`Select`).
+fn typed_is_read_only(statements: &[TypedDbStatement]) -> bool {
+    statements
+        .iter()
+        .all(|s| matches!(s.kind, DbPlanStatementKind::Select))
+}
+
 impl D1Proxy {
     /// Runs a host-authored plan as one D1 HTTP batch (one SQL transaction).
     ///
@@ -47,6 +62,11 @@ impl D1Proxy {
             DbErr::Custom("atomic execute requires a host-authored executePlan".into())
         })?;
         reject_unbounded_returning(&plan)?;
+        // D1 `batch()` makes each attempt atomic, not retries across attempts.
+        // Resubmitting a possibly-committed mutation is exactly-once only when
+        // the plan is receipt-gated (replay detects the prior commit) or the
+        // batch cannot mutate at all.
+        let retry_safe = plan.prior_receipt_index.is_some() || plan_is_read_only(&plan);
         let d1_caps = DbCapabilities::advertised_d1();
         let cap = d1_caps.max_result_rows;
         let statements: Vec<SqlStmt> = plan
@@ -76,7 +96,9 @@ impl D1Proxy {
                     )?;
                     value
                 }
-                Err(err) if err.is_retryable() && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
+                Err(err)
+                    if err.is_retryable() && retry_safe && attempt + 1 < ATOMIC_HTTP_ATTEMPTS =>
+                {
                     sleep_before_d1_retry_bounded(attempt, err.retry_after(), req.deadline_unix_ms)
                         .await?;
                     last_err = Some(DbErr::from(err));
@@ -86,7 +108,11 @@ impl D1Proxy {
             };
             match parse_generic_batch(&plan, &raw, req.operation_id.clone(), started) {
                 Ok(result) => return Ok(result),
-                Err(err) if is_ambiguous_d1(&err) && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
+                Err(err)
+                    if is_ambiguous_d1(&err)
+                        && retry_safe
+                        && attempt + 1 < ATOMIC_HTTP_ATTEMPTS =>
+                {
                     sleep_before_d1_retry_bounded(attempt, None, req.deadline_unix_ms).await?;
                     last_err = Some(err);
                 }
@@ -98,9 +124,16 @@ impl D1Proxy {
 
     /// Runs a typed [`ExecuteRequest`] as one D1 HTTP batch.
     ///
-    /// [`DbValue::Text`] is sent as a JSON string even when it starts with
-    /// `b64:`. [`DbValue::Bytes`] uses the D1 HTTP `b64:` adapter convention.
-    /// After HTTP success, encode/size failures are ambiguous (`unavailable`).
+    /// [`DbValue::Bytes`] parameters are stored as true BLOBs: the placeholder
+    /// is rewritten to `unhex(?)` with hex text (JSON has no binary scalar).
+    /// BLOB result cells arrive as JSON byte arrays and decode back to
+    /// [`DbValue::Bytes`]; text is never re-encoded, so a [`DbValue::Text`]
+    /// cell cannot masquerade as bytes. After HTTP success, encode/size
+    /// failures are ambiguous (`unavailable`).
+    ///
+    /// Ambiguous (possibly committed) failures are retried only when the
+    /// request is receipt-gated or read-only; an unwrapped mutation returns
+    /// the ambiguous error without resubmitting.
     ///
     /// # Errors
     ///
@@ -117,19 +150,34 @@ impl D1Proxy {
             bookclerk_db_exec::AtomicInterruptPhase::BeforeBegin,
             deadline,
         )?;
+        // Host schema batches travel canonical; this adapter edge splits the
+        // pack for the SQLite family and collapses results back to the wire
+        // request shape after parsing.
+        let wire_len = req.statements.len();
+        let expanded = bookclerk_db_exec::expand_host_schema_execute_request(
+            sea_orm::DatabaseBackend::Sqlite,
+            req,
+        );
+        let req = &expanded;
         reject_unbounded_returning_typed(&req.statements)?;
+        // Retrying after an ambiguous (possibly committed) response is
+        // exactly-once only when the request is receipt-gated (replay detects
+        // the prior commit) or provably read-only. An unwrapped mutation must
+        // surface the ambiguity instead of resubmitting.
+        let retry_safe = !guest_receipt.is_absent() || typed_is_read_only(&req.statements);
         let d1_caps = DbCapabilities::advertised_d1();
         let cap = d1_caps.max_result_rows;
         let statements: Vec<SqlStmt> = req
             .statements
             .iter()
             .map(|s| {
+                let (sql, binds) = d1_typed_statement(&s.sql, &s.parameters);
                 let sql = if s.kind.wrap_select_limit() {
-                    bookclerk_db_exec::cap_query_sql(&s.sql, cap)
+                    bookclerk_db_exec::cap_query_sql(&sql, cap)
                 } else {
-                    s.sql.clone()
+                    sql
                 };
-                (sql, d1_typed_binds(&s.parameters))
+                (sql, binds)
             })
             .collect();
         let mut last_err = None;
@@ -147,7 +195,9 @@ impl D1Proxy {
                     )?;
                     value
                 }
-                Err(err) if err.is_retryable() && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
+                Err(err)
+                    if err.is_retryable() && retry_safe && attempt + 1 < ATOMIC_HTTP_ATTEMPTS =>
+                {
                     sleep_before_d1_retry_bounded(attempt, err.retry_after(), deadline).await?;
                     last_err = Some(DbErr::from(err));
                     continue;
@@ -155,7 +205,9 @@ impl D1Proxy {
                 Err(err) => return Err(err.into()),
             };
             match parse_typed_batch(req, &raw, started) {
-                Ok(reply) => {
+                Ok(mut reply) => {
+                    reply.statements =
+                        bookclerk_db_exec::collapse_host_schema_results(wire_len, reply.statements);
                     if !guest_receipt.is_absent() {
                         // Guest-receipt finalize needs statement results, so D1 runs a
                         // follow-up HTTP batch after the main batch commits. Same-batch
@@ -170,12 +222,13 @@ impl D1Proxy {
                             let fin_stmts: Vec<SqlStmt> = finalize
                                 .iter()
                                 .map(|s| {
+                                    let (sql, binds) = d1_typed_statement(&s.sql, &s.parameters);
                                     let sql = if s.kind.wrap_select_limit() {
-                                        bookclerk_db_exec::cap_query_sql(&s.sql, cap)
+                                        bookclerk_db_exec::cap_query_sql(&sql, cap)
                                     } else {
-                                        s.sql.clone()
+                                        sql
                                     };
-                                    (sql, d1_typed_binds(&s.parameters))
+                                    (sql, binds)
                                 })
                                 .collect();
                             self.run_batch_with_timeout(&fin_stmts, timeout).await?;
@@ -183,7 +236,11 @@ impl D1Proxy {
                     }
                     return Ok(reply);
                 }
-                Err(err) if is_ambiguous_d1(&err) && attempt + 1 < ATOMIC_HTTP_ATTEMPTS => {
+                Err(err)
+                    if is_ambiguous_d1(&err)
+                        && retry_safe
+                        && attempt + 1 < ATOMIC_HTTP_ATTEMPTS =>
+                {
                     sleep_before_d1_retry_bounded(attempt, None, deadline).await?;
                     last_err = Some(err);
                 }
@@ -242,9 +299,13 @@ fn d1_unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// D1 HTTP params: typed nulls become JSON null; text is never `b64:`-decoded.
-fn d1_typed_binds(params: &[DbValue]) -> Vec<JsonValue> {
-    params
+/// D1 HTTP statement for one typed statement: `Bytes` placeholders are
+/// rewritten to `unhex(?)` with hex-encoded text params so D1 stores true
+/// BLOBs (JSON has no binary scalar). All other values map directly; text is
+/// never re-encoded, so a `Text` cell can never masquerade as bytes.
+pub(crate) fn d1_typed_statement(sql: &str, params: &[DbValue]) -> SqlStmt {
+    let sql = wrap_bytes_placeholders(sql, params);
+    let binds = params
         .iter()
         .map(|v| match v {
             DbValue::Null(_) => JsonValue::Null,
@@ -252,12 +313,80 @@ fn d1_typed_binds(params: &[DbValue]) -> Vec<JsonValue> {
             DbValue::Int64(n) => JsonValue::from(*n),
             DbValue::Float64(n) => JsonValue::from(*n),
             DbValue::Text(s) => JsonValue::String(s.clone()),
-            DbValue::Bytes(b) => JsonValue::String(format!(
-                "b64:{}",
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b)
-            )),
+            DbValue::Bytes(b) => JsonValue::String(hex::encode(b)),
         })
-        .collect()
+        .collect();
+    (sql, binds)
+}
+
+/// Rewrites the i-th `?` placeholder to `unhex(?)` when parameter `i` is
+/// [`DbValue::Bytes`]. Quoted strings / identifiers are copied verbatim.
+fn wrap_bytes_placeholders(sql: &str, params: &[DbValue]) -> String {
+    if !params.iter().any(|p| matches!(p, DbValue::Bytes(_))) {
+        return sql.to_string();
+    }
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len() + 16);
+    let mut i = 0usize;
+    let mut param = 0usize;
+    let mut in_squote = false;
+    let mut in_dquote = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_squote {
+            if c == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    out.push_str("''");
+                    i += 2;
+                    continue;
+                }
+                in_squote = false;
+            }
+            out.push(c as char);
+            i += 1;
+            continue;
+        }
+        if in_dquote {
+            if c == b'"' {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    out.push_str("\"\"");
+                    i += 2;
+                    continue;
+                }
+                in_dquote = false;
+            }
+            out.push(c as char);
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => {
+                in_squote = true;
+                out.push('\'');
+                i += 1;
+            }
+            b'"' => {
+                in_dquote = true;
+                out.push('"');
+                i += 1;
+            }
+            b'?' => {
+                if matches!(params.get(param), Some(DbValue::Bytes(_))) {
+                    out.push_str("unhex(?)");
+                } else {
+                    out.push('?');
+                }
+                param += 1;
+                i += 1;
+            }
+            _ => {
+                let ch = sql[i..].chars().next().unwrap_or('\0');
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
 }
 
 /// D1 HTTP params are untyped JSON; typed `$sea_null` objects become SQL NULL.
@@ -416,9 +545,13 @@ fn reject_unbounded_returning_typed(
 
 /// Maps one D1 HTTP JSON cell onto a typed [`DbValue`] (strings stay text).
 ///
+/// BLOB cells arrive as JSON arrays of byte integers (Cloudflare D1
+/// type-conversion: BLOB reads as arrays) and decode to [`DbValue::Bytes`].
+///
 /// # Errors
 ///
-/// Returns when the cell is an array, object, or a non-finite number.
+/// Returns when the cell is a non-byte array, an object, or a non-finite
+/// number.
 fn d1_json_cell_to_db_value(v: &JsonValue) -> Result<DbValue, String> {
     match v {
         JsonValue::Null => Ok(DbValue::Null(DbType::Unspecified)),
@@ -441,34 +574,44 @@ fn d1_json_cell_to_db_value(v: &JsonValue) -> Result<DbValue, String> {
             Ok(DbValue::Float64(f))
         }
         JsonValue::String(s) => Ok(DbValue::Text(s.clone())),
-        JsonValue::Array(_) => Err("arrays are not a baseline DbValue".into()),
+        JsonValue::Array(cells) => {
+            let mut bytes = Vec::with_capacity(cells.len());
+            for cell in cells {
+                let n = cell
+                    .as_u64()
+                    .and_then(|n| u8::try_from(n).ok())
+                    .ok_or_else(|| "array cell is not a D1 BLOB byte array".to_string())?;
+                bytes.push(n);
+            }
+            Ok(DbValue::Bytes(bytes))
+        }
         JsonValue::Object(_) => Err("objects are not a baseline DbValue".into()),
     }
 }
 
 /// Column metadata for a D1 HTTP result page.
 ///
-/// Names come from the first row object when present. Empty pages (and `{}`
+/// JSON row objects are unordered, so the positional column order comes from
+/// the SELECT list whenever the parsed identifiers cover the row keys
+/// exactly; otherwise the first row's keys are used. Empty pages (and `{}`
 /// all-null objects that omit keys) fall back to the SELECT-list identifiers.
 fn d1_result_columns(sql: &str, raw_rows: &[JsonValue]) -> Vec<DbColumn> {
+    let unspecified = |name: String| DbColumn {
+        name,
+        db_type: DbType::Unspecified,
+    };
+    let select_names = select_list_column_names(sql);
     if let Some(map) = raw_rows.first().and_then(JsonValue::as_object) {
         if !map.is_empty() {
-            return map
-                .keys()
-                .map(|name| DbColumn {
-                    name: name.clone(),
-                    db_type: DbType::Unspecified,
-                })
-                .collect();
+            if select_names.len() == map.len()
+                && select_names.iter().all(|name| map.contains_key(name))
+            {
+                return select_names.into_iter().map(unspecified).collect();
+            }
+            return map.keys().cloned().map(unspecified).collect();
         }
     }
-    select_list_column_names(sql)
-        .into_iter()
-        .map(|name| DbColumn {
-            name,
-            db_type: DbType::Unspecified,
-        })
-        .collect()
+    select_names.into_iter().map(unspecified).collect()
 }
 
 /// Fills [`DbType`] from the first non-null cell in each column.

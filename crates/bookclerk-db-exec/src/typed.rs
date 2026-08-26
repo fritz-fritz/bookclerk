@@ -803,6 +803,10 @@ where
         return Err(DbErr::Custom(fault));
     }
     let backend = ConnectionTrait::get_database_backend(&txn);
+    // Host schema batches travel canonical; this adapter edge lowers/splits
+    // them for the live backend and collapses the results back to the wire
+    // request shape below.
+    let wire_len = req.statements.len();
     let req = expand_host_schema_execute_request(backend, req);
     if backend == sea_orm::DatabaseBackend::Postgres {
         if let Some(ms) = remaining_deadline_ms(session.deadline_unix_ms) {
@@ -909,6 +913,7 @@ where
         };
         statements.push(stmt_result);
     }
+    let statements = crate::schema_postgres::collapse_host_schema_results(wire_len, statements);
     if let Some(then) = then {
         let partial = ExecuteReply {
             operation_id: req.operation_id.clone(),

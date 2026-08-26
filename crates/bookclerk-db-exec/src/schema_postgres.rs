@@ -904,10 +904,64 @@ pub fn expand_host_schema_execute_request(
     }
 }
 
+/// Collapses statement results for an adapter-expanded host-schema request
+/// back to the original wire request shape.
+///
+/// The canonical pack (statement 0) reports the summed `rowsAffected` of its
+/// expanded statements; trailing statements (version marker, …) map
+/// one-to-one, so the reply stays positional against the request the host
+/// actually sent.
+#[must_use]
+pub fn collapse_host_schema_results(
+    original_len: usize,
+    results: Vec<bookclerk_plugin_abi::StatementResult>,
+) -> Vec<bookclerk_plugin_abi::StatementResult> {
+    if original_len == 0 || results.len() <= original_len {
+        return results;
+    }
+    let tail = original_len - 1;
+    let pack_len = results.len() - tail;
+    let pack_affected: u64 = results[..pack_len]
+        .iter()
+        .map(|r| r.rows_affected)
+        .fold(0, u64::saturating_add);
+    let mut out = Vec::with_capacity(original_len);
+    out.push(bookclerk_plugin_abi::StatementResult::from_affected(
+        pack_affected,
+    ));
+    out.extend(results.into_iter().skip(pack_len));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bookclerk_plugin_abi::{DbPlanStatementKind, DbResultSelection, TypedDbStatement};
+
+    #[test]
+    fn collapse_restores_wire_request_shape() {
+        use bookclerk_plugin_abi::StatementResult;
+        let results = vec![
+            StatementResult::from_affected(1),
+            StatementResult::from_affected(2),
+            StatementResult::from_affected(3),
+            StatementResult::from_affected(1),
+        ];
+        let out = collapse_host_schema_results(2, results);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].rows_affected, 6, "pack sums expanded statements");
+        assert_eq!(out[1].rows_affected, 1, "marker maps one-to-one");
+        // No-op when the adapter did not expand.
+        let same = collapse_host_schema_results(
+            2,
+            vec![
+                StatementResult::from_affected(4),
+                StatementResult::from_affected(1),
+            ],
+        );
+        assert_eq!(same.len(), 2);
+        assert_eq!(same[0].rows_affected, 4);
+    }
 
     #[test]
     fn expand_host_schema_batch_lowers_canonical_for_postgres() {

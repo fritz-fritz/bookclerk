@@ -74,9 +74,9 @@ pub use proxy_txn::{
     txn_broken_err, with_exec_budget, AtomicInterruptKind, AtomicInterruptPhase, ExecBudget,
 };
 pub use schema_postgres::{
-    expand_host_schema_batch, expand_host_schema_execute_request, is_host_schema_version_marker,
-    latest_schema_postgres, migration_sql_postgres, schema_sql_for_backend,
-    split_schema_statements,
+    collapse_host_schema_results, expand_host_schema_batch, expand_host_schema_execute_request,
+    is_host_schema_version_marker, latest_schema_postgres, migration_sql_postgres,
+    schema_sql_for_backend, split_schema_statements,
 };
 pub use typed::{
     db_value_from_sea, db_value_to_sea, execute_typed_on_session, execute_typed_on_session_then,

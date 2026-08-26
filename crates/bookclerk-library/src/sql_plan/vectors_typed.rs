@@ -30,6 +30,109 @@ where
     typed_values_returning_cap(&mut run, row_cap).await;
     typed_aggregate_scalar_cap(&mut run).await;
     typed_wide_numeric_row_cap(&mut run).await;
+    typed_universal_value_matrix(&mut run).await;
+}
+
+/// Universal `DbValue` round-trip through declared table columns.
+///
+/// Exactness contract for every admitted adapter:
+/// - `Int64` (including `i64::MIN` / `i64::MAX`), finite `Float64`, UTF-8
+///   `Text` (including adversarial `b64:`-prefixed text), and `Bytes`
+///   round-trip **exactly**.
+/// - `Boolean` input is accepted everywhere; reads are engine-typed — native
+///   BOOLEAN engines return `Boolean`, SQLite-family storage (including
+///   Cloudflare D1's documented numeric boolean reads) returns `Int64` 0/1.
+/// - SQL NULL round-trips as `Null`: adapters with column metadata type it
+///   (for example `Null(Int64)`); metadata-less channels return
+///   `Null(Unspecified)`. A NULL must never decay to a non-null value.
+async fn typed_universal_value_matrix<F, Fut>(run: &mut F)
+where
+    F: FnMut(ExecuteRequest, u32) -> Fut,
+    Fut: Future<Output = Result<ExecuteReply, String>>,
+{
+    use bookclerk_plugin_abi::{DbResultSelection, DbValue, TypedDbStatement};
+
+    run(
+        typed_request(
+            "vec-vals-setup",
+            exec_plan(&[
+                // BYTEA is a valid declared type on PostgreSQL and carries
+                // Bytes affinity metadata on SQLite-family adapters.
+                "CREATE TABLE IF NOT EXISTS vec_vals (id BIGINT PRIMARY KEY, i BIGINT, \
+                 f DOUBLE PRECISION, t TEXT, y BYTEA, b BOOLEAN, n BIGINT)",
+                "DELETE FROM vec_vals",
+            ]),
+        ),
+        0,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("value matrix setup: {e}"));
+
+    let rows: [(&str, i64, i64, bool, &str); 2] = [
+        ("vec-vals-min", 1, i64::MIN, true, "café 日本語"),
+        ("vec-vals-max", 2, i64::MAX, false, "b64:AAAA"),
+    ];
+    let bytes = vec![0u8, 127, 255, 42];
+    for (op, id, int, boolean, text) in rows {
+        let insert = ExecuteRequest {
+            operation_id: op.into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "INSERT INTO vec_vals (id, i, f, t, y, b, n) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    .into(),
+                parameters: vec![
+                    DbValue::Int64(id),
+                    DbValue::Int64(int),
+                    DbValue::Float64(1.25),
+                    DbValue::Text(text.into()),
+                    DbValue::Bytes(bytes.clone()),
+                    DbValue::Boolean(boolean),
+                    DbValue::Null(bookclerk_plugin_abi::DbType::Int64),
+                ],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let reply = run(insert, 0)
+            .await
+            .unwrap_or_else(|e| panic!("{op} insert: {e}"));
+        assert_eq!(reply.statements[0].rows_affected, 1, "{op}");
+    }
+    for (op, id, int, boolean, text) in rows {
+        let select = ExecuteRequest {
+            operation_id: format!("{op}-sel"),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT i, f, t, y, b, n FROM vec_vals WHERE id = ?".into(),
+                parameters: vec![DbValue::Int64(id)],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let reply = run(select, 0)
+            .await
+            .unwrap_or_else(|e| panic!("{op} select: {e}"));
+        let values = &reply.statements[0].rows[0].values;
+        assert_eq!(values[0], DbValue::Int64(int), "{op} int64");
+        assert_eq!(values[1], DbValue::Float64(1.25), "{op} float64");
+        assert_eq!(values[2], DbValue::Text(text.into()), "{op} text");
+        assert_eq!(values[3], DbValue::Bytes(bytes.clone()), "{op} bytes");
+        let expect_bool = if boolean { 1 } else { 0 };
+        assert!(
+            values[4] == DbValue::Boolean(boolean) || values[4] == DbValue::Int64(expect_bool),
+            "{op} boolean must read engine-typed (Boolean or Int64 0/1): {:?}",
+            values[4]
+        );
+        assert!(
+            matches!(values[5], DbValue::Null(_)),
+            "{op} SQL NULL must stay Null: {:?}",
+            values[5]
+        );
+    }
 }
 
 async fn typed_commit_and_replay<F, Fut>(run: &mut F)

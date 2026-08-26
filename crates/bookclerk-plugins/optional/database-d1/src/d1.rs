@@ -596,6 +596,24 @@ fn json_to_sea_value(v: &JsonValue, column: &str) -> std::result::Result<Value, 
             }
             Ok(Value::String(Some(s.clone())))
         }
+        JsonValue::Array(cells) => {
+            // Real D1 returns BLOB cells as JSON arrays of byte integers.
+            let bytes: Option<Vec<u8>> = cells
+                .iter()
+                .map(|c| c.as_u64().and_then(|n| u8::try_from(n).ok()))
+                .collect();
+            if let Some(bytes) = bytes {
+                if bytes.len() > MAX_SCALAR_BYTES as usize {
+                    return Err(oversized_cell_err(column, bytes.len()));
+                }
+                return Ok(Value::Bytes(Some(bytes)));
+            }
+            let encoded = v.to_string();
+            if encoded.len() > MAX_SCALAR_BYTES as usize {
+                return Err(oversized_cell_err(column, encoded.len()));
+            }
+            Ok(Value::String(Some(encoded)))
+        }
         other => {
             let encoded = other.to_string();
             if encoded.len() > MAX_SCALAR_BYTES as usize {
@@ -1530,10 +1548,11 @@ mod tests {
                         Some(rusqlite::types::ValueRef::Text(t)) => {
                             JsonValue::String(String::from_utf8_lossy(t).into_owned())
                         }
-                        Some(rusqlite::types::ValueRef::Blob(b)) => json!(base64::Engine::encode(
-                            &base64::engine::general_purpose::STANDARD,
-                            b
-                        )),
+                        // Real D1 returns BLOB cells as JSON arrays of byte
+                        // integers (Cloudflare type-conversion docs).
+                        Some(rusqlite::types::ValueRef::Blob(b)) => {
+                            JsonValue::Array(b.iter().map(|&x| json!(x)).collect())
+                        }
                     };
                     map.insert(name.clone(), json);
                 }
@@ -1837,6 +1856,10 @@ mod tests {
     }
 
     async fn run_schema_batch(proxy: D1Proxy, stmts: Vec<String>) -> bookclerk_library::Result<()> {
+        // Adapter edge: split the canonical host-schema pack for the SQLite
+        // family before the HTTP batch (mirrors `run_typed_atomic`).
+        let stmts = bookclerk_db_exec::expand_host_schema_batch(DatabaseBackend::Sqlite, &stmts)
+            .unwrap_or(stmts);
         let batch: Vec<(String, Vec<JsonValue>)> =
             stmts.into_iter().map(|sql| (sql, Vec::new())).collect();
         let raw = proxy
@@ -2285,5 +2308,167 @@ mod tests {
             )
             .expect("count slot rows");
         assert_eq!(count, 1, "mutation must commit exactly once");
+    }
+
+    /// A direct (unwrapped, non-receipt-gated) typed mutation whose reply is
+    /// lost after commit must NOT be resubmitted: state changes exactly once,
+    /// only one HTTP batch carries the mutation, and the caller receives the
+    /// documented ambiguous → `unavailable` outcome.
+    #[tokio::test]
+    async fn executing_mock_direct_typed_mutation_lost_reply_is_not_resubmitted() {
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, PluginErrorCode,
+            TypedDbStatement,
+        };
+
+        let (server, proxy, conn, _interrupt, drop_reply, _oversize) = executing_proxy().await;
+        proxy
+            .run_batch(&[("CREATE TABLE direct_ops (k TEXT)".into(), Vec::new())])
+            .await
+            .expect("create table");
+        let before = server.received_requests().await.unwrap().len();
+        drop_reply.store(true, std::sync::atomic::Ordering::SeqCst);
+        let req = ExecuteRequest {
+            operation_id: "direct-lost".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "INSERT INTO direct_ops (k) VALUES ('x')".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let err = proxy
+            .run_typed_atomic(&req, bookclerk_plugin_abi::GuestReceiptPersist::default())
+            .await
+            .expect_err("lost reply on an unwrapped mutation must not be retried");
+        assert!(crate::atomic::is_ambiguous_d1(&err), "{err}");
+        let mapped = crate::atomic::plugin_error_from_d1(err);
+        assert_eq!(mapped.code, PluginErrorCode::Unavailable, "{mapped}");
+        let count: i64 = conn
+            .lock()
+            .expect("sqlite")
+            .query_row("SELECT COUNT(*) FROM direct_ops", [], |row| row.get(0))
+            .expect("count rows");
+        assert_eq!(count, 1, "mutation must commit exactly once");
+        let after = server.received_requests().await.unwrap().len();
+        assert_eq!(
+            after - before,
+            1,
+            "no second HTTP batch may carry the mutation"
+        );
+    }
+
+    /// A guest `UPDATE … RETURNING` that can affect two rows but claims
+    /// `maxRows = 1` is rejected during host authorization — before any
+    /// adapter HTTP — and leaves state unchanged.
+    #[tokio::test]
+    async fn executing_mock_guest_update_returning_claim_rejected_before_execution() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, PluginErrorCode,
+            TypedDbStatement,
+        };
+
+        let (server, proxy, conn, _interrupt, _drop, _oversize) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema");
+        proxy
+            .run_batch(&[
+                (
+                    "CREATE TABLE claims (id INTEGER, v TEXT)".into(),
+                    Vec::new(),
+                ),
+                (
+                    "INSERT INTO claims VALUES (1, 'a'), (2, 'a')".into(),
+                    Vec::new(),
+                ),
+            ])
+            .await
+            .expect("seed rows");
+
+        let store = bookclerk_library::LibraryStore::from_connection(db)
+            .with_db_capabilities(bookclerk_plugin_abi::DbCapabilities::advertised_d1())
+            .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
+                proxy: proxy.clone(),
+            }));
+        let policy = GuestSqlPolicy::allow_tables(["claims", "db_atomic_receipts"]);
+        let before = server.received_requests().await.unwrap().len();
+        let req = ExecuteRequest {
+            operation_id: "claimed-bound".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "UPDATE claims SET v = 'b' RETURNING id".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Returning,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let err = store
+            .execute_guest_atomic(req, &policy)
+            .await
+            .expect_err("guest-asserted bound must be rejected before execution");
+        assert_eq!(err.code, PluginErrorCode::InvalidParams, "{err}");
+        let after = server.received_requests().await.unwrap().len();
+        assert_eq!(
+            after, before,
+            "no adapter HTTP may run for a rejected claim"
+        );
+        let changed: i64 = conn
+            .lock()
+            .expect("sqlite")
+            .query_row("SELECT COUNT(*) FROM claims WHERE v = 'b'", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(changed, 0, "state must be unchanged");
+    }
+
+    /// A read-only typed request whose reply is lost after HTTP success is
+    /// safe to resubmit: the retry succeeds without caller-visible failure.
+    #[tokio::test]
+    async fn executing_mock_read_only_lost_reply_is_retried() {
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
+        };
+
+        let (_server, proxy, _conn, _interrupt, drop_reply, _oversize) = executing_proxy().await;
+        drop_reply.store(true, std::sync::atomic::Ordering::SeqCst);
+        let req = ExecuteRequest {
+            operation_id: "read-lost".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 7 AS n".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let reply = proxy
+            .run_typed_atomic(&req, bookclerk_plugin_abi::GuestReceiptPersist::default())
+            .await
+            .expect("read-only lost reply must be retried transparently");
+        assert_eq!(reply.statements[0].rows[0].values[0], DbValue::Int64(7));
     }
 }

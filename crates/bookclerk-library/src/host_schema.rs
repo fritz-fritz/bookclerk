@@ -175,8 +175,7 @@ where
     exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
     let steps = host_migration_plan();
     for step in &steps {
-        apply_one_sqlite_version_with_batch(db, backend, step.version, step.canonical, run_batch)
-            .await?;
+        apply_one_sqlite_version_with_batch(db, step.version, step.canonical, run_batch).await?;
     }
     exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
     Ok(())
@@ -189,7 +188,6 @@ where
 /// Returns when the batch fails.
 async fn apply_one_sqlite_version_with_batch<F, Fut>(
     db: &DatabaseConnection,
-    backend: DbBackend,
     version: i64,
     schema: &str,
     run_batch: &mut F,
@@ -204,11 +202,12 @@ where
         if version <= sqlite_user_version(db).await? {
             return Ok(());
         }
+        // Canonical through planning/authorization/routing: adapters lower
+        // and split this pack at execution (see `expand_host_schema_batch`).
         let stmts = vec![
             schema.to_string(),
             format!("PRAGMA user_version = {version}"),
         ];
-        let stmts = bookclerk_db_exec::expand_host_schema_batch(backend, &stmts).unwrap_or(stmts);
         match run_batch(stmts).await {
             Ok(()) => return Ok(()),
             Err(err) if is_already_applied_ddl(&err) => {
@@ -257,12 +256,12 @@ where
             {
                 break;
             }
+            // Canonical through planning/authorization/routing: adapters
+            // lower and split this pack at execution.
             let stmts = vec![
                 schema.to_string(),
                 format!("INSERT INTO schema_migrations (version) VALUES ({version})"),
             ];
-            let stmts =
-                bookclerk_db_exec::expand_host_schema_batch(backend, &stmts).unwrap_or(stmts);
             match run_batch(stmts).await {
                 Ok(()) => break,
                 Err(err) if is_already_applied_ddl(&err) => {
