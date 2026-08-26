@@ -131,6 +131,36 @@ pub enum PluginsCommand {
         /// Nested registry list/add/remove action.
         command: RegistryCommand,
     },
+    /// Manage isolated plugin database bindings (`capabilities.bindings.databases`).
+    Db {
+        #[command(subcommand)]
+        /// Nested db list/drop action.
+        command: PluginDbCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+/// Nested `plugins db` actions over the `plugin_databases` registry.
+pub enum PluginDbCommand {
+    /// List provisioned plugin database bindings.
+    List {
+        /// Limit to one plugin id.
+        plugin: Option<String>,
+    },
+    /// Drop provisioned binding units and their registry rows.
+    ///
+    /// SQLite binding files are deleted. PostgreSQL schemas and Cloudflare D1
+    /// databases are unregistered here; the printed unit reference tells you
+    /// what to drop on the server (`DROP SCHEMA <name> CASCADE` / D1 delete).
+    Drop {
+        /// Plugin id.
+        plugin: String,
+        /// Binding name (default: every binding of the plugin).
+        binding: Option<String>,
+        /// Drop without interactive confirmation.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -369,6 +399,7 @@ pub async fn run(
         PluginsCommand::Disable { id } => set_plugin_enabled(config, &id, false, format),
         PluginsCommand::Approve { id, yes } => run_approve(config, &id, yes, format),
         PluginsCommand::Registry { command } => run_registry(config, command, format),
+        PluginsCommand::Db { command } => run_plugin_db(config, command, format).await,
     }
 }
 
@@ -740,6 +771,121 @@ async fn run_doctor(
             }
         }
     })
+}
+
+#[derive(Debug, Serialize)]
+/// One `plugins db list` row from the `plugin_databases` registry.
+struct PluginDbListItem {
+    /// Owning plugin id.
+    plugin_id: String,
+    /// Binding name from `plugin.toml` `capabilities.bindings.databases`.
+    binding: String,
+    /// Adapter family that provisioned the unit (`sqlite`, `postgres`, `d1`).
+    backend_kind: String,
+    /// Backend-native unit: file path, schema name, or D1 database name.
+    unit_ref: String,
+    /// RFC 3339 provisioning time.
+    created_at: String,
+}
+
+/// Lists or drops isolated plugin database bindings via the registry.
+async fn run_plugin_db(
+    config: &Config,
+    command: PluginDbCommand,
+    format: OutputFormat,
+) -> anyhow::Result<()> {
+    let store = crate::registry::open_library(config).await?;
+    match command {
+        PluginDbCommand::List { plugin } => {
+            let rows = store.list_plugin_databases(plugin.as_deref()).await?;
+            let items: Vec<PluginDbListItem> = rows
+                .into_iter()
+                .map(|r| PluginDbListItem {
+                    plugin_id: r.plugin_id,
+                    binding: r.binding,
+                    backend_kind: r.backend_kind,
+                    unit_ref: r.unit_ref,
+                    created_at: r.created_at,
+                })
+                .collect();
+            emit(format, &items, || {
+                if items.is_empty() {
+                    println!("no plugin database bindings provisioned");
+                    return;
+                }
+                for item in &items {
+                    println!(
+                        "{}/{}: backend={} unit={} created={}",
+                        item.plugin_id,
+                        item.binding,
+                        item.backend_kind,
+                        item.unit_ref,
+                        item.created_at
+                    );
+                }
+            })
+        }
+        PluginDbCommand::Drop {
+            plugin,
+            binding,
+            yes,
+        } => {
+            let rows = store.list_plugin_databases(Some(&plugin)).await?;
+            let rows: Vec<_> = rows
+                .into_iter()
+                .filter(|r| binding.as_deref().is_none_or(|b| r.binding == b))
+                .collect();
+            if rows.is_empty() {
+                anyhow::bail!(
+                    "no provisioned plugin database bindings match `{plugin}`{}",
+                    binding.map(|b| format!("/{b}")).unwrap_or_default()
+                );
+            }
+            if !yes {
+                anyhow::bail!(
+                    "refusing to drop {} binding unit(s) without --yes",
+                    rows.len()
+                );
+            }
+            for row in &rows {
+                match row.backend_kind.as_str() {
+                    "sqlite" => {
+                        // Delete the binding file and its journal sidecars.
+                        for suffix in ["", "-wal", "-shm", "-journal"] {
+                            let path = format!("{}{suffix}", row.unit_ref);
+                            match std::fs::remove_file(&path) {
+                                Ok(()) => {}
+                                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(err) => {
+                                    anyhow::bail!("could not delete {path}: {err}");
+                                }
+                            }
+                        }
+                        println!("deleted {}", row.unit_ref);
+                    }
+                    "postgres" => println!(
+                        "unregistered {}/{}: drop the schema manually with \
+                         `DROP SCHEMA \"{}\" CASCADE`",
+                        row.plugin_id, row.binding, row.unit_ref
+                    ),
+                    "d1" => println!(
+                        "unregistered {}/{}: delete the Cloudflare D1 database `{}` \
+                         via the dashboard or API",
+                        row.plugin_id, row.binding, row.unit_ref
+                    ),
+                    other => println!(
+                        "unregistered {}/{}: adapter `{other}` unit `{}` must be \
+                         removed by the adapter",
+                        row.plugin_id, row.binding, row.unit_ref
+                    ),
+                }
+                store
+                    .remove_plugin_databases(&row.plugin_id, Some(&row.binding))
+                    .await?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Lists, appends, or removes `[[plugins.registries]]` entries and writes `config.toml`.
