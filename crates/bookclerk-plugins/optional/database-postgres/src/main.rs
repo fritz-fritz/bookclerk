@@ -4,7 +4,8 @@
 
 use async_trait::async_trait;
 use bookclerk_db_guest::{
-    guest_bootstrap, guest_capabilities, guest_execute_atomic, host_session, set_connection,
+    bootstrap_for, capabilities_for, guest_bootstrap, guest_capabilities, guest_execute_atomic,
+    guest_execute_atomic_on, host_session, set_connection,
 };
 use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
 use bookclerk_plugin_abi::HostAdapterDatabaseSession;
@@ -31,11 +32,7 @@ fn describe_metadata() -> Result<String, PluginError> {
 
 async fn connect_from_context(ctx: &DatabaseContext) -> Result<(), PluginError> {
     let params = connect_params_from_context(ctx)?;
-    let DbConnectParams::Postgres {
-        plugin_data_dir: _,
-        url,
-    } = params
-    else {
+    let DbConnectParams::Postgres { url, .. } = params else {
         return Err(PluginError::invalid_params(
             "postgres guest received non-postgres database context",
         ));
@@ -45,6 +42,31 @@ async fn connect_from_context(ctx: &DatabaseContext) -> Result<(), PluginError> 
         .map_err(|e| PluginError::internal(e.to_string()))?;
     set_connection(db).await;
     Ok(())
+}
+
+/// Opens a dedicated per-binding connection when the context targets a named
+/// plugin database binding.
+async fn binding_from_context(
+    ctx: &DatabaseContext,
+) -> Result<Option<sea_orm::DatabaseConnection>, PluginError> {
+    let Ok(DbConnectParams::Postgres {
+        url,
+        binding: Some(binding),
+        schema,
+        ..
+    }) = connect_params_from_context(ctx)
+    else {
+        return Ok(None);
+    };
+    let schema = schema.ok_or_else(|| {
+        PluginError::invalid_params(format!(
+            "database binding `{binding}` open is missing its schema"
+        ))
+    })?;
+    let db = bookclerk_plugin_database_postgres::open_binding(&url, &schema)
+        .await
+        .map_err(|e| PluginError::internal(format!("database binding `{binding}`: {e}")))?;
+    Ok(Some(db))
 }
 
 /// Database guest that opens a Postgres URL and serves typed adapter RPC.
@@ -67,42 +89,65 @@ impl PluginRoot for PostgresRoot {
     }
 
     async fn database(&self, context: DatabaseContext) -> Result<Box<dyn Database>, PluginError> {
+        if let Some(conn) = binding_from_context(&context).await? {
+            return Ok(Box::new(PostgresDatabase {
+                dedicated: Some(conn),
+            }));
+        }
         connect_from_context(&context).await?;
-        Ok(Box::new(PostgresDatabase))
+        Ok(Box::new(PostgresDatabase { dedicated: None }))
     }
 }
 
-struct PostgresDatabase;
+/// Postgres database factory: shared library pool, or a dedicated schema-
+/// pinned pool for named plugin database bindings.
+struct PostgresDatabase {
+    dedicated: Option<sea_orm::DatabaseConnection>,
+}
 
 #[async_trait(?Send)]
 impl Database for PostgresDatabase {
     async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>, PluginError> {
-        Ok(Box::new(PostgresSession))
+        Ok(Box::new(PostgresSession {
+            dedicated: self.dedicated.clone(),
+        }))
     }
 
     fn host_session(&self) -> Option<Box<dyn HostAdapterDatabaseSession>> {
+        if self.dedicated.is_some() {
+            // Binding sessions are plugin-owned: no host interactive machinery.
+            return None;
+        }
         Some(Box::new(host_session()))
     }
 }
 
-struct PostgresSession;
+struct PostgresSession {
+    dedicated: Option<sea_orm::DatabaseConnection>,
+}
 
 #[async_trait(?Send)]
 impl AdapterDatabaseSession for PostgresSession {
     async fn capabilities(&self) -> Result<DbCapabilities, PluginError> {
-        guest_capabilities().await
+        match &self.dedicated {
+            Some(conn) => Ok(capabilities_for(conn)),
+            None => guest_capabilities().await,
+        }
     }
 
     async fn bootstrap(&self) -> Result<DbBootstrap, PluginError> {
-        guest_bootstrap().await
+        match &self.dedicated {
+            Some(conn) => Ok(bootstrap_for(conn)),
+            None => guest_bootstrap().await,
+        }
     }
 
     async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {
-        guest_execute_atomic(HostExecuteEnvelope::new(
-            request,
-            GuestReceiptPersist::default(),
-        ))
-        .await
+        let envelope = HostExecuteEnvelope::new(request, GuestReceiptPersist::default());
+        match &self.dedicated {
+            Some(conn) => guest_execute_atomic_on(conn, envelope).await,
+            None => guest_execute_atomic(envelope).await,
+        }
     }
 }
 

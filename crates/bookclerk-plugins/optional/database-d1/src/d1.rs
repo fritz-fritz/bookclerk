@@ -48,6 +48,81 @@ pub async fn open(
     Ok(db)
 }
 
+/// Resolves (and provisions) a Cloudflare D1 database by name, returning its UUID.
+///
+/// Used for named plugin database bindings: each binding gets its own D1
+/// database. Fails closed with an operator-facing error when the API token
+/// cannot list or create databases.
+///
+/// # Errors
+///
+/// Returns when the HTTP lookup/create fails or the response is malformed.
+pub async fn ensure_database(
+    api_base: &str,
+    account_id: &str,
+    api_token: &str,
+    name: &str,
+) -> std::result::Result<String, DbErr> {
+    let base = api_base.trim_end_matches('/');
+    let client = reqwest::Client::builder()
+        .timeout(D1_REQUEST_TIMEOUT)
+        .connect_timeout(D1_CONNECT_TIMEOUT)
+        .build()
+        .map_err(|e| DbErr::Custom(format!("d1 client: {e}")))?;
+    let list_url = format!("{base}/accounts/{account_id}/d1/database?name={name}");
+    let listed: JsonValue = client
+        .get(&list_url)
+        .bearer_auth(api_token)
+        .send()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?
+        .json()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?;
+    if let Some(uuid) = d1_database_uuid_by_name(&listed, name) {
+        return Ok(uuid);
+    }
+    let create_url = format!("{base}/accounts/{account_id}/d1/database");
+    let created: JsonValue = client
+        .post(&create_url)
+        .bearer_auth(api_token)
+        .json(&json!({ "name": name }))
+        .send()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 database create `{name}`: {e}")))?
+        .json()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 database create `{name}`: {e}")))?;
+    if created.get("success").and_then(JsonValue::as_bool) == Some(false) {
+        return Err(DbErr::Custom(format!(
+            "d1 database create `{name}` rejected (token may lack D1 edit permission): {}",
+            created.get("errors").cloned().unwrap_or(JsonValue::Null)
+        )));
+    }
+    created
+        .get("result")
+        .and_then(|r| r.get("uuid"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            DbErr::Custom(format!(
+                "d1 database create `{name}` returned no uuid (token may lack D1 edit permission)"
+            ))
+        })
+}
+
+/// Extracts the UUID of a D1 database named exactly `name` from a list reply.
+fn d1_database_uuid_by_name(listed: &JsonValue, name: &str) -> Option<String> {
+    listed
+        .get("result")?
+        .as_array()?
+        .iter()
+        .find(|entry| entry.get("name").and_then(JsonValue::as_str) == Some(name))?
+        .get("uuid")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Operator-facing reason recorded when SeaORM `begin` is rejected on D1 HTTP.
 const D1_INTERACTIVE_TXN_UNSUPPORTED: &str = "D1 does not support interactive transactions; \
      each HTTP request commits immediately. Use atomic execute for claim redeem, last-owner guards, and consume-once tokens";

@@ -8,7 +8,8 @@
 
 use async_trait::async_trait;
 use bookclerk_db_guest::{
-    guest_bootstrap, guest_capabilities, guest_execute_atomic, host_session, set_connection,
+    bootstrap_for, capabilities_for, guest_bootstrap, guest_capabilities, guest_execute_atomic,
+    guest_execute_atomic_on, host_session, set_connection,
 };
 use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
 use bookclerk_plugin_abi::HostAdapterDatabaseSession;
@@ -20,6 +21,7 @@ use bookclerk_plugin_sdk::{
 use bookclerk_plugin_sdk::{
     DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, PluginError,
 };
+use sea_orm::DatabaseConnection;
 
 use crate::ID;
 
@@ -44,9 +46,65 @@ impl PluginRoot for SqliteRoot {
     }
 
     async fn database(&self, context: DatabaseContext) -> Result<Box<dyn Database>> {
+        if let Some(binding) = binding_open(&context) {
+            let conn = open_binding_connection(&binding).await?;
+            return Ok(Box::new(SqliteDatabase {
+                dedicated: Some(conn),
+            }));
+        }
         connect_from_context(&context).await?;
-        Ok(Box::new(SqliteDatabase))
+        Ok(Box::new(SqliteDatabase { dedicated: None }))
     }
+}
+
+/// Per-binding open parsed from host-private connect params, if any.
+struct BindingOpen {
+    /// Binding name (used in operator-facing errors only).
+    binding: String,
+    /// Dedicated database file for this binding.
+    sqlite_path: String,
+}
+
+/// Returns the binding-open parameters when the context targets a named
+/// plugin database binding.
+fn binding_open(ctx: &DatabaseContext) -> Option<BindingOpen> {
+    let DbConnectParams::Sqlite {
+        sqlite_path,
+        binding: Some(binding),
+        ..
+    } = connect_params_from_context(ctx).ok()?
+    else {
+        return None;
+    };
+    Some(BindingOpen {
+        binding,
+        sqlite_path: sqlite_path.unwrap_or_default(),
+    })
+}
+
+/// Opens the dedicated per-binding database file, creating parent dirs.
+///
+/// The spawn `BOOKCLERK_SQLITE_PATH` override never applies here: bindings
+/// are isolated files, not the shared library database.
+async fn open_binding_connection(open: &BindingOpen) -> Result<DatabaseConnection> {
+    if open.sqlite_path.is_empty() {
+        return Err(PluginError::invalid_params(format!(
+            "database binding `{}` open is missing sqlitePath",
+            open.binding
+        )));
+    }
+    let path = std::path::Path::new(&open.sqlite_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            PluginError::internal(format!(
+                "database binding `{}` directory: {e}",
+                open.binding
+            ))
+        })?;
+    }
+    crate::open(path)
+        .await
+        .map_err(|e| PluginError::internal(format!("database binding `{}`: {e}", open.binding)))
 }
 
 async fn connect_from_context(ctx: &DatabaseContext) -> Result<()> {
@@ -83,36 +141,56 @@ async fn connect_from_context(ctx: &DatabaseContext) -> Result<()> {
     Ok(())
 }
 
-struct SqliteDatabase;
+/// SQLite database factory: shared library connection, or a dedicated
+/// per-binding connection for named plugin database bindings.
+struct SqliteDatabase {
+    /// Dedicated connection for a binding open; `None` = shared library.
+    dedicated: Option<DatabaseConnection>,
+}
 
 #[async_trait(?Send)]
 impl Database for SqliteDatabase {
     async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>> {
-        Ok(Box::new(SqliteSession))
+        Ok(Box::new(SqliteSession {
+            dedicated: self.dedicated.clone(),
+        }))
     }
 
     fn host_session(&self) -> Option<Box<dyn HostAdapterDatabaseSession>> {
+        if self.dedicated.is_some() {
+            // Binding sessions are plugin-owned: no host interactive machinery.
+            return None;
+        }
         Some(Box::new(host_session()))
     }
 }
 
-struct SqliteSession;
+struct SqliteSession {
+    /// Dedicated connection for a binding session; `None` = shared library.
+    dedicated: Option<DatabaseConnection>,
+}
 
 #[async_trait(?Send)]
 impl AdapterDatabaseSession for SqliteSession {
     async fn capabilities(&self) -> Result<DbCapabilities> {
-        guest_capabilities().await
+        match &self.dedicated {
+            Some(conn) => Ok(capabilities_for(conn)),
+            None => guest_capabilities().await,
+        }
     }
 
     async fn bootstrap(&self) -> Result<DbBootstrap> {
-        guest_bootstrap().await
+        match &self.dedicated {
+            Some(conn) => Ok(bootstrap_for(conn)),
+            None => guest_bootstrap().await,
+        }
     }
 
     async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
-        guest_execute_atomic(HostExecuteEnvelope::new(
-            request,
-            GuestReceiptPersist::default(),
-        ))
-        .await
+        let envelope = HostExecuteEnvelope::new(request, GuestReceiptPersist::default());
+        match &self.dedicated {
+            Some(conn) => guest_execute_atomic_on(conn, envelope).await,
+            None => guest_execute_atomic(envelope).await,
+        }
     }
 }

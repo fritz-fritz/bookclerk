@@ -771,6 +771,10 @@ struct DatabaseAdapterConfig {
   # Granted plugin settings (operator `[database.<id>]` table) as a JSON
   # object; `{}` when the operator configured nothing.
   config @1 :Text $jsonValue;
+  # Named plugin database binding this open serves; omitted for the primary
+  # library open. Adapters advertising `DbCapabilities.pluginDatabases` must
+  # serve each binding from its own isolated database.
+  binding @2 :Text;
 }
 
 # JSON health payload for guests that report identity alongside liveness.

@@ -100,8 +100,8 @@ pub use registry::{
     PluginCatalogEntry, PluginCrateName, CRATE_NAME_PREFIX, PRODUCT_KEYWORD, REGISTRY_KEYWORD,
 };
 pub use rpc_session::{
-    plugin_instance_key, ExecutorIdentity, PluginSession, PluginStorage, HOST_SHARED_ACCOUNT,
-    OPERATOR_ACCOUNT,
+    plugin_instance_key, ExecutorIdentity, GuestDatabaseFactory, PluginSession, PluginStorage,
+    HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
 
 /// Register discovered external plugins into the in-process registries.

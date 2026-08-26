@@ -6896,6 +6896,7 @@ fn plugin_err_from_db(err: sea_orm::DbErr) -> bookclerk_plugin_abi::PluginError 
 }
 
 pub(crate) mod event_outbox;
+pub(crate) mod plugin_databases;
 pub use event_outbox::{inject_dispatch_page_failures, set_dispatch_chunk_for_test};
 pub(crate) mod job_queue;
 

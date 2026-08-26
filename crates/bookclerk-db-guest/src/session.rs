@@ -324,10 +324,23 @@ pub async fn guest_execute_atomic(
     let conn = connection()
         .await
         .map_err(bookclerk_plugin_abi::PluginError::internal)?;
-    let caps = match conn.get_database_backend() {
-        DbBackend::Postgres => DbCapabilities::advertised_postgres(),
-        _ => DbCapabilities::advertised_sqlite(),
-    };
+    guest_execute_atomic_on(&conn, envelope).await
+}
+
+/// Typed `executeAtomic` on an explicit connection (per-binding sessions).
+///
+/// Unlike [`guest_execute_atomic`], no process-wide writer gate applies:
+/// plugin database bindings are independent databases, so their transactions
+/// never interleave with the shared library connection.
+///
+/// # Errors
+///
+/// Returns when the engine rejects the work.
+pub async fn guest_execute_atomic_on(
+    conn: &DatabaseConnection,
+    envelope: HostExecuteEnvelope,
+) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
+    let caps = capabilities_for(conn);
     let timing_source = match conn.get_database_backend() {
         DbBackend::Postgres => "postgres_txn",
         _ => "sqlite_txn",
@@ -335,7 +348,7 @@ pub async fn guest_execute_atomic(
     let deadline =
         (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
     bookclerk_db_exec::execute_typed_on_session(
-        &conn,
+        conn,
         &envelope.request,
         envelope.guest_receipt,
         timing_source,
@@ -344,6 +357,24 @@ pub async fn guest_execute_atomic(
     )
     .await
     .map_err(|e| plugin_error_from_db_err(&e))
+}
+
+/// Advertised capabilities for an explicit connection's engine family.
+#[must_use]
+pub fn capabilities_for(conn: &DatabaseConnection) -> DbCapabilities {
+    match conn.get_database_backend() {
+        DbBackend::Postgres => DbCapabilities::advertised_postgres(),
+        _ => DbCapabilities::advertised_sqlite(),
+    }
+}
+
+/// Bootstrap metadata for an explicit connection's engine family.
+#[must_use]
+pub fn bootstrap_for(conn: &DatabaseConnection) -> bookclerk_plugin_abi::DbBootstrap {
+    match conn.get_database_backend() {
+        DbBackend::Postgres => bookclerk_plugin_abi::DbBootstrap::postgres(),
+        _ => bookclerk_plugin_abi::DbBootstrap::sqlite(),
+    }
 }
 
 /// Typed `Transaction.executeAtomic` on an already-open guest transaction.

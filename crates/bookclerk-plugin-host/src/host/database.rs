@@ -318,6 +318,254 @@ impl GuestDatabase for GuestJobDatabase {
     }
 }
 
+/// One provisioned named plugin database binding served by the active adapter.
+///
+/// The adapter holds an isolated session (own file / schema / D1 database);
+/// guest SQL is authorized with [`bookclerk_library::GuestSqlPolicy::binding_owned`]
+/// and receipt-wrapped against the binding's own `db_atomic_receipts` table.
+struct BindingGuestDatabase {
+    /// Adapter vat session shared with the library connection.
+    session: Arc<PluginSession>,
+    /// Vat-unique binding session key (`<plugin>/<BINDING>`).
+    key: String,
+    /// Negotiated adapter capabilities.
+    caps: DbCapabilities,
+}
+
+#[async_trait(?Send)]
+impl GuestDatabase for BindingGuestDatabase {
+    async fn execute(
+        &self,
+        request: ExecuteRequest,
+    ) -> std::result::Result<ExecuteReply, AbiPluginError> {
+        let policy = bookclerk_library::GuestSqlPolicy::binding_owned();
+        bookclerk_library::execute_guest_atomic_with(request, &self.caps, &policy, |envelope| {
+            let session = Arc::clone(&self.session);
+            let key = self.key.clone();
+            async move {
+                session
+                    .db_execute_binding_request(
+                        &key,
+                        envelope.request,
+                        Arc::new(AtomicBool::new(false)),
+                    )
+                    .await
+                    .map_err(host_err_to_abi)
+            }
+        })
+        .await
+    }
+}
+
+/// Sanitizes one identifier segment (`[a-z0-9_]`, `-` and other bytes → `_`).
+fn binding_ident_segment(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Host-authored bootstrap request creating binding-local receipt tables.
+fn binding_bootstrap_request(owner: &str, binding: &str) -> ExecuteRequest {
+    let statements = bookclerk_db_exec::split_schema_statements(
+        bookclerk_library::migrations::binding_bootstrap_sql(),
+    )
+    .into_iter()
+    .map(|sql| TypedDbStatement {
+        sql,
+        parameters: Vec::new(),
+        kind: DbPlanStatementKind::Execute,
+        max_rows: 0,
+        result_selection: DbResultSelection::Discard,
+    })
+    .collect();
+    ExecuteRequest {
+        operation_id: format!("binding-bootstrap-{owner}-{binding}"),
+        request_hash: String::new(),
+        deadline_unix_ms: 0,
+        statements,
+    }
+}
+
+impl ExternalDatabase {
+    /// Opens (provisioning on first use) isolated sessions for the named
+    /// plugin database bindings of `owner_plugin_id`.
+    ///
+    /// Backend-native units: SQLite gets a file per binding under
+    /// `<files_dir>/plugin-databases/<plugin>/<BINDING>.db`, PostgreSQL a
+    /// dedicated schema with a pinned `search_path`, and D1 its own database
+    /// resolved (or created) by name. Third-party adapters advertising
+    /// `pluginDatabases` receive the binding name on the public
+    /// [`bookclerk_plugin_abi::DatabaseAdapterConfig`]. Each provisioned unit
+    /// is recorded in the `plugin_databases` registry (an existing row wins so
+    /// a re-open never re-targets a binding).
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when the adapter does not advertise
+    /// `DbCapabilities::plugin_databases`, when provisioning fails, or when
+    /// the registry cannot be recorded.
+    pub async fn open_binding_databases(
+        &self,
+        config: &Config,
+        store: &bookclerk_library::LibraryStore,
+        owner_plugin_id: &str,
+        bindings: &[String],
+    ) -> PluginResult<Vec<(String, crate::rpc_session::GuestDatabaseFactory)>> {
+        if bindings.is_empty() {
+            return Ok(Vec::new());
+        }
+        let caps = self.session.db_capabilities().await?;
+        if !caps.plugin_databases {
+            return Err(PluginError::message(format!(
+                "database plugin `{}` does not support isolated plugin database bindings \
+                 (plugin `{owner_plugin_id}` requests {bindings:?})",
+                self.plugin_id
+            )));
+        }
+        let kind = DatabasePluginKind::parse(&self.plugin_id);
+        let backend_kind = match kind {
+            Some(DatabasePluginKind::Sqlite) => "sqlite",
+            Some(DatabasePluginKind::Postgres) => "postgres",
+            Some(DatabasePluginKind::D1) => "d1",
+            None => self.plugin_id.as_str(),
+        };
+        let mut out = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            let default_unit = self.default_binding_unit(config, kind, owner_plugin_id, binding);
+            let record = store
+                .record_plugin_database(owner_plugin_id, binding, backend_kind, &default_unit)
+                .await
+                .map_err(|err| PluginError::message(err.to_string()))?;
+            if record.backend_kind != backend_kind {
+                return Err(PluginError::message(format!(
+                    "plugin database binding `{owner_plugin_id}/{binding}` was provisioned on \
+                     `{}` but the active adapter is `{backend_kind}`; migrate or drop it with \
+                     `bookclerk plugins db drop {owner_plugin_id} {binding}`",
+                    record.backend_kind
+                )));
+            }
+            let ctx = self.binding_connect_context(
+                config,
+                kind,
+                owner_plugin_id,
+                binding,
+                &record.unit_ref,
+            )?;
+            let key = format!("{owner_plugin_id}/{binding}");
+            self.session.db_open_binding(&key, ctx).await?;
+            self.session
+                .db_execute_binding_request(
+                    &key,
+                    binding_bootstrap_request(owner_plugin_id, binding),
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .await?;
+            let session = Arc::clone(&self.session);
+            let caps = caps.clone();
+            let factory_key = key.clone();
+            let factory: crate::rpc_session::GuestDatabaseFactory = Arc::new(move || {
+                Arc::new(BindingGuestDatabase {
+                    session: Arc::clone(&session),
+                    key: factory_key.clone(),
+                    caps: caps.clone(),
+                })
+            });
+            out.push((binding.clone(), factory));
+        }
+        Ok(out)
+    }
+
+    /// Backend-native default unit for one `(plugin, binding)` pair.
+    fn default_binding_unit(
+        &self,
+        config: &Config,
+        kind: Option<DatabasePluginKind>,
+        owner_plugin_id: &str,
+        binding: &str,
+    ) -> String {
+        match kind {
+            Some(DatabasePluginKind::Sqlite) => config
+                .paths()
+                .files_dir
+                .join("plugin-databases")
+                .join(owner_plugin_id)
+                .join(format!("{binding}.db"))
+                .display()
+                .to_string(),
+            Some(DatabasePluginKind::Postgres) => format!(
+                "pb_{}_{}",
+                binding_ident_segment(owner_plugin_id),
+                binding_ident_segment(binding)
+            ),
+            Some(DatabasePluginKind::D1) => format!(
+                "bookclerk-pb-{}-{}",
+                binding_ident_segment(owner_plugin_id).replace('_', "-"),
+                binding_ident_segment(binding).replace('_', "-")
+            ),
+            // Third-party adapters define their own units; record the binding name.
+            None => binding.to_string(),
+        }
+    }
+
+    /// Per-binding `database.openSession` factory context.
+    fn binding_connect_context(
+        &self,
+        config: &Config,
+        kind: Option<DatabasePluginKind>,
+        owner_plugin_id: &str,
+        binding: &str,
+        unit_ref: &str,
+    ) -> PluginResult<bookclerk_plugin_sdk::DatabaseContext> {
+        let data_dir = self.plugin_data_dir.display().to_string();
+        let params = match kind {
+            Some(DatabasePluginKind::Sqlite) => DbConnectParams::Sqlite {
+                plugin_data_dir: data_dir,
+                sqlite_path: Some(unit_ref.to_string()),
+                binding: Some(binding.to_string()),
+            },
+            Some(DatabasePluginKind::Postgres) => DbConnectParams::Postgres {
+                plugin_data_dir: data_dir,
+                url: resolve_postgres_url(config)
+                    .map_err(|err| PluginError::message(err.to_string()))?,
+                binding: Some(binding.to_string()),
+                schema: Some(unit_ref.to_string()),
+            },
+            Some(DatabasePluginKind::D1) => DbConnectParams::D1 {
+                plugin_data_dir: data_dir,
+                account_id: config.database.d1.account_id.clone(),
+                database_id: String::new(),
+                api_base: config.database.d1.api_base.clone(),
+                api_token: resolve_d1_api_token()
+                    .map_err(|err| PluginError::message(err.to_string()))?,
+                binding: Some(binding.to_string()),
+                database_name: Some(unit_ref.to_string()),
+            },
+            None => {
+                let adapter_config = bookclerk_plugin_abi::DatabaseAdapterConfig {
+                    plugin_data_dir: data_dir,
+                    config: if self.settings_json.is_null() {
+                        Value::Object(serde_json::Map::new())
+                    } else {
+                        self.settings_json.clone()
+                    },
+                    binding: Some(binding.to_string()),
+                };
+                let _ = owner_plugin_id;
+                return bookclerk_plugin_abi::database_context_from_adapter_config(&adapter_config)
+                    .map_err(|err| PluginError::message(err.to_string()));
+            }
+        };
+        database_context_from_params(&params).map_err(|err| PluginError::message(err.to_string()))
+    }
+}
+
 /// Open the library for a specific `[database].plugin` id (ignoring the active config value).
 ///
 /// # Errors
@@ -1442,6 +1690,8 @@ fn connect_context(
                 database_id: config.database.d1.database_id.clone(),
                 api_base: config.database.d1.api_base.clone(),
                 api_token: resolve_d1_api_token().map_err(map_config_err)?,
+                binding: None,
+                database_name: None,
             }
         }
         Some(DatabasePluginKind::Postgres) => {
@@ -1451,6 +1701,8 @@ fn connect_context(
             DbConnectParams::Postgres {
                 plugin_data_dir: data_dir,
                 url: resolve_postgres_url(config).map_err(map_config_err)?,
+                binding: None,
+                schema: None,
             }
         }
         None => return adapter_config_context(&data_dir, settings_json),
@@ -1470,6 +1722,7 @@ fn adapter_config_context(
         } else {
             settings_json.clone()
         },
+        binding: None,
     };
     bookclerk_plugin_abi::database_context_from_adapter_config(&adapter_config)
         .map_err(|err| DbErr::Custom(err.to_string()))
@@ -1536,6 +1789,7 @@ fn sqlite_connect_params(config: &Config, plugin_data_dir: &Path) -> DbConnectPa
     DbConnectParams::Sqlite {
         plugin_data_dir: plugin_data_dir.display().to_string(),
         sqlite_path: Some(path.display().to_string()),
+        binding: None,
     }
 }
 

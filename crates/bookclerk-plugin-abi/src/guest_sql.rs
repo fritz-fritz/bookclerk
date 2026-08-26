@@ -78,6 +78,9 @@ pub struct GuestSqlPolicy {
     functions: std::collections::BTreeSet<String>,
     /// When true, table/column/function checks are deferred to the host session.
     host_authoritative: bool,
+    /// Plugin-owned isolated database: any non-reserved unqualified table is
+    /// allowed and bounded DDL (`CREATE`/`ALTER`/`DROP` `TABLE`/`INDEX`) passes.
+    binding_owned: bool,
 }
 
 impl Default for GuestSqlPolicy {
@@ -95,6 +98,7 @@ impl GuestSqlPolicy {
             columns: std::collections::BTreeMap::new(),
             functions: std::collections::BTreeSet::new(),
             host_authoritative: false,
+            binding_owned: false,
         }
     }
 
@@ -107,7 +111,33 @@ impl GuestSqlPolicy {
             columns: std::collections::BTreeMap::new(),
             functions: std::collections::BTreeSet::new(),
             host_authoritative: true,
+            binding_owned: false,
         }
+    }
+
+    /// Plugin-owned isolated database binding (Workers-D1-like ownership).
+    ///
+    /// The plugin owns and migrates its own schema: bounded DDL
+    /// (`CREATE`/`ALTER`/`DROP` on `TABLE`/`INDEX`) is allowed and any table
+    /// may be named — except reserved host bookkeeping
+    /// (`db_atomic_receipts`, `schema_migrations`, `plugin_databases`),
+    /// catalog identifiers, and schema-qualified names (which could escape a
+    /// pinned PostgreSQL `search_path`). Grammar and size checks still run.
+    #[must_use]
+    pub fn binding_owned() -> Self {
+        Self {
+            tables: std::collections::BTreeSet::new(),
+            columns: std::collections::BTreeMap::new(),
+            functions: builtin_functions(),
+            host_authoritative: false,
+            binding_owned: true,
+        }
+    }
+
+    /// True when this policy is a plugin-owned binding scope.
+    #[must_use]
+    pub fn is_binding_owned(&self) -> bool {
+        self.binding_owned
     }
 
     /// Allows `tables` with builtin scalar functions and any column on those tables.
@@ -122,6 +152,7 @@ impl GuestSqlPolicy {
             columns: std::collections::BTreeMap::new(),
             functions: builtin_functions(),
             host_authoritative: false,
+            binding_owned: false,
         }
     }
 
@@ -159,6 +190,17 @@ impl GuestSqlPolicy {
             self.authorize_table(index, table)?;
         }
         for (table, column) in &refs.columns {
+            if self.binding_owned {
+                // No column restrictions inside a plugin-owned binding; table
+                // scope was already enforced above and qualified column tables
+                // are covered by the qualified-name denial.
+                if let Some(table) = table {
+                    if !is_cte_name(refs, table) {
+                        self.authorize_table(index, table)?;
+                    }
+                }
+                continue;
+            }
             if column == "*" {
                 match table {
                     Some(table) => {
@@ -221,6 +263,14 @@ impl GuestSqlPolicy {
     /// Returns [`PluginError::invalid_params`] when `table` is catalog-denied
     /// or not in this policy.
     fn authorize_table(&self, index: usize, table: &str) -> Result<()> {
+        if self.binding_owned {
+            if binding_table_denied(table) {
+                return Err(PluginError::invalid_params(format!(
+                    "statement {index} names reserved or qualified table {table}"
+                )));
+            }
+            return Ok(());
+        }
         if table_denied(table) || !self.tables.contains(&normalize_ident(table)) {
             return Err(PluginError::invalid_params(format!(
                 "statement {index} names unauthorized table {table}"
@@ -228,6 +278,26 @@ impl GuestSqlPolicy {
         }
         Ok(())
     }
+}
+
+/// Host bookkeeping tables reserved inside a plugin-owned binding database.
+const BINDING_RESERVED_TABLES: &[&str] = &[
+    "db_atomic_receipts",
+    "schema_migrations",
+    "plugin_databases",
+];
+
+/// True when `name` may not be touched inside a plugin-owned binding.
+///
+/// Denies catalog identifiers, reserved host bookkeeping, and any
+/// schema-qualified name (a qualified name could escape a pinned PostgreSQL
+/// `search_path`).
+fn binding_table_denied(name: &str) -> bool {
+    if name.contains('.') || table_denied(name) {
+        return true;
+    }
+    let lower = normalize_ident(name);
+    BINDING_RESERVED_TABLES.iter().any(|t| *t == lower)
 }
 
 fn builtin_functions() -> std::collections::BTreeSet<String> {
@@ -291,9 +361,103 @@ pub struct GuestSqlRefs {
 /// `policy`.
 pub fn authorize_guest_sql_policy(req: &ExecuteRequest, policy: &GuestSqlPolicy) -> Result<()> {
     for (i, stmt) in req.statements.iter().enumerate() {
+        if policy.is_binding_owned() && binding_ddl_verb(&stmt.sql).is_some() {
+            // Bounded DDL inside a plugin-owned binding; the ref parser does
+            // not understand DDL shapes, so target names are checked here.
+            authorize_binding_ddl(i, &stmt.sql)?;
+            continue;
+        }
         policy.authorize(i, &parse_guest_sql_refs(&stmt.sql)?)?;
     }
     Ok(())
+}
+
+/// The leading verb when `sql` is a binding-scope DDL statement.
+fn binding_ddl_verb(sql: &str) -> Option<String> {
+    let verb = first_top_level_keyword(sql)?;
+    ["CREATE", "ALTER", "DROP"]
+        .iter()
+        .any(|v| verb.eq_ignore_ascii_case(v))
+        .then_some(verb)
+}
+
+/// Authorizes one bounded DDL statement inside a plugin-owned binding.
+///
+/// Allowed forms (fail closed on anything else):
+/// `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table (...)`,
+/// `CREATE TABLE [IF NOT EXISTS] name (...)`,
+/// `ALTER TABLE name ...`, `DROP TABLE|INDEX [IF EXISTS] name`.
+/// Every named object must be unqualified and non-reserved.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the statement is outside the
+/// bounded binding DDL grammar or names a reserved / qualified object.
+fn authorize_binding_ddl(index: usize, sql: &str) -> Result<()> {
+    let mut scan = Scan { sql, i: 0 };
+    let deny = |what: &str| {
+        PluginError::invalid_params(format!(
+            "statement {index} is not allowed binding DDL ({what})"
+        ))
+    };
+    let check_name = |name: &str| -> Result<()> {
+        if binding_table_denied(name) {
+            return Err(PluginError::invalid_params(format!(
+                "statement {index} names reserved or qualified object {name}"
+            )));
+        }
+        Ok(())
+    };
+    if scan.take_kw("CREATE") {
+        let _unique = scan.take_kw("UNIQUE");
+        if scan.take_kw("TABLE") {
+            let _ = scan.take_kw("IF") && scan.take_kw("NOT") && scan.take_kw("EXISTS");
+            let name = scan.read_ident().ok_or_else(|| deny("table name"))?;
+            return check_name(&name);
+        }
+        if scan.take_kw("INDEX") {
+            let _ = scan.take_kw("IF") && scan.take_kw("NOT") && scan.take_kw("EXISTS");
+            let name = scan.read_ident().ok_or_else(|| deny("index name"))?;
+            check_name(&name)?;
+            if !scan.take_kw("ON") {
+                return Err(deny("CREATE INDEX requires ON <table>"));
+            }
+            let table = scan.read_ident().ok_or_else(|| deny("indexed table"))?;
+            return check_name(&table);
+        }
+        return Err(deny("only TABLE and INDEX may be created"));
+    }
+    if scan.take_kw("ALTER") {
+        if !scan.take_kw("TABLE") {
+            return Err(deny("only ALTER TABLE is allowed"));
+        }
+        let name = scan.read_ident().ok_or_else(|| deny("table name"))?;
+        check_name(&name)?;
+        // RENAME TO <new> must also stay unqualified and non-reserved.
+        let rest = &sql[scan.i..];
+        if let Some(refs) = rename_target(rest) {
+            check_name(&refs)?;
+        }
+        return Ok(());
+    }
+    if scan.take_kw("DROP") {
+        if !scan.take_kw("TABLE") && !scan.take_kw("INDEX") {
+            return Err(deny("only DROP TABLE / DROP INDEX are allowed"));
+        }
+        let _ = scan.take_kw("IF") && scan.take_kw("EXISTS");
+        let name = scan.read_ident().ok_or_else(|| deny("object name"))?;
+        return check_name(&name);
+    }
+    Err(deny("unsupported verb"))
+}
+
+/// The `RENAME TO` target identifier in an `ALTER TABLE` tail, if present.
+fn rename_target(rest: &str) -> Option<String> {
+    let mut scan = Scan { sql: rest, i: 0 };
+    if scan.take_kw("RENAME") && scan.take_kw("TO") {
+        return scan.read_ident();
+    }
+    None
 }
 
 /// Classifies guest SQL the same way the host stamps `DbStatement.kind`.
@@ -565,13 +729,30 @@ fn skip_balanced_parens(sql: &str, start: usize) -> Option<usize> {
 ///
 /// Returns [`PluginError::invalid_params`] when the request is not allowed.
 pub fn validate_guest_execute_request(req: &ExecuteRequest) -> Result<()> {
+    validate_guest_execute_request_for_policy(req, &GuestSqlPolicy::deny_all())
+}
+
+/// [`validate_guest_execute_request`] with policy-dependent grammar.
+///
+/// A [`GuestSqlPolicy::binding_owned`] policy admits bounded DDL verbs
+/// (`CREATE` / `ALTER` / `DROP`); shapes and names are then authorized by
+/// [`authorize_guest_sql_policy`]. Every other policy uses the fixed
+/// DML/SELECT grammar.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the request is not allowed.
+pub fn validate_guest_execute_request_for_policy(
+    req: &ExecuteRequest,
+    policy: &GuestSqlPolicy,
+) -> Result<()> {
     if req.statements.is_empty() {
         return Err(PluginError::invalid_params(
             "executeAtomic statements must be non-empty",
         ));
     }
     for (i, stmt) in req.statements.iter().enumerate() {
-        validate_guest_statement(i, stmt)?;
+        validate_guest_statement_for(i, stmt, policy.is_binding_owned())?;
     }
     Ok(())
 }
@@ -580,7 +761,11 @@ pub fn validate_guest_execute_request(req: &ExecuteRequest) -> Result<()> {
 ///
 /// Returns [`PluginError::invalid_params`] when the statement is outside the
 /// guest grammar.
-fn validate_guest_statement(index: usize, stmt: &TypedDbStatement) -> Result<()> {
+fn validate_guest_statement_for(
+    index: usize,
+    stmt: &TypedDbStatement,
+    allow_binding_ddl: bool,
+) -> Result<()> {
     if stmt.sql.trim().is_empty() {
         return Err(PluginError::invalid_params(format!(
             "statement {index} SQL is empty"
@@ -596,7 +781,9 @@ fn validate_guest_statement(index: usize, stmt: &TypedDbStatement) -> Result<()>
             "statement {index} is not valid Bookclerk SQL"
         )));
     };
-    if DENIED_VERBS.iter().any(|v| verb.eq_ignore_ascii_case(v)) {
+    let binding_ddl = allow_binding_ddl
+        && ["CREATE", "ALTER", "DROP"].contains(&verb.to_ascii_uppercase().as_str());
+    if !binding_ddl && DENIED_VERBS.iter().any(|v| verb.eq_ignore_ascii_case(v)) {
         return Err(PluginError::invalid_params(format!(
             "statement {index} uses disallowed SQL verb {verb}"
         )));

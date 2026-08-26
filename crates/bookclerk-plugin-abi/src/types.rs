@@ -200,6 +200,11 @@ pub struct DatabaseAdapterConfig {
     /// object; `{}` when the operator configured nothing.
     #[serde(default)]
     pub config: Value,
+    /// Named plugin database binding this open serves; `None` for the primary
+    /// library open. Adapters advertising `DbCapabilities::plugin_databases`
+    /// must serve each binding from its own isolated database.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
 }
 
 /// Result of [`crate::methods::cli_invoke`].

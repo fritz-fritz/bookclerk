@@ -254,6 +254,47 @@ pub fn authorize_typed_request(
     Ok(())
 }
 
+/// Authorizes, receipt-wraps, executes, and unwraps one guest typed batch.
+///
+/// The composable core of
+/// [`LibraryStore::execute_guest_atomic`](crate::LibraryStore::execute_guest_atomic)
+/// for callers that execute on something other than the library connection —
+/// e.g. an isolated plugin database binding session. `exec` receives the
+/// receipt-wrapped envelope and must run it atomically on the target
+/// database (which needs its own `db_atomic_receipts` table — see
+/// [`crate::migrations::binding_bootstrap_sql`]).
+///
+/// # Errors
+///
+/// Returns [`bookclerk_plugin_abi::PluginError::invalid_params`] when the SQL
+/// is outside the guest grammar or `policy`, and the executor's error or a
+/// validation error when the batch fails.
+pub async fn execute_guest_atomic_with<F, Fut>(
+    mut req: ExecuteRequest,
+    caps: &DbCapabilities,
+    policy: &bookclerk_plugin_abi::GuestSqlPolicy,
+    exec: F,
+) -> std::result::Result<bookclerk_plugin_abi::ExecuteReply, bookclerk_plugin_abi::PluginError>
+where
+    F: FnOnce(bookclerk_db_exec::HostExecuteEnvelope) -> Fut,
+    Fut: std::future::Future<
+        Output = std::result::Result<
+            bookclerk_plugin_abi::ExecuteReply,
+            bookclerk_plugin_abi::PluginError,
+        >,
+    >,
+{
+    authorize_guest_typed_request(&mut req, caps, policy)
+        .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
+    let guest_len = req.statements.len();
+    let guest_hash = req.request_hash.clone();
+    let envelope = wrap_guest_typed_request(req);
+    let reply = exec(envelope.clone()).await?;
+    crate::validate_execute_reply(&envelope.request, &reply, caps)
+        .map_err(|err| bookclerk_plugin_abi::PluginError::unavailable(err.to_string()))?;
+    unwrap_guest_typed_reply(reply, guest_len, &guest_hash)
+}
+
 /// Authorizes a **guest-authored** typed batch: grammar and table scope,
 /// bind counts, result selection, then [`authorize_typed_request`].
 ///
@@ -268,7 +309,7 @@ pub fn authorize_guest_typed_request(
     caps: &DbCapabilities,
     policy: &bookclerk_plugin_abi::GuestSqlPolicy,
 ) -> crate::error::Result<()> {
-    bookclerk_plugin_abi::validate_guest_execute_request(req)
+    bookclerk_plugin_abi::validate_guest_execute_request_for_policy(req, policy)
         .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!(err.to_string())))?;
     bookclerk_plugin_abi::authorize_guest_sql_policy(req, policy)
         .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!(err.to_string())))?;

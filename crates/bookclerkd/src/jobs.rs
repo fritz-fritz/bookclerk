@@ -235,6 +235,42 @@ pub async fn enqueue_plugin_copy(
 /// the row to `pending`.
 pub const JOB_SUSPENDED_DETAIL_PREFIX: &str = "suspended until ";
 
+/// Opens the consented named database bindings for one plugin invocation.
+///
+/// Reads the stored operator grant (`database:<NAME>` entries) and asks the
+/// active database adapter to open (provisioning on first use) one isolated
+/// session per binding. Fails closed: a granted binding that cannot be
+/// provisioned fails the job rather than running without isolation.
+async fn open_granted_binding_databases(
+    state: &AppState,
+    plugin_id: &str,
+    library: &bookclerk_library::LibraryStore,
+) -> anyhow::Result<Vec<(String, bookclerk_plugin_host::GuestDatabaseFactory)>> {
+    let config = state.config.read().await.clone();
+    let files_dir = config.paths().files_dir.clone();
+    let names = match bookclerk_plugin_host::PluginGrantStore::load(&files_dir) {
+        Ok(store) => store
+            .get(plugin_id)
+            .map(bookclerk_plugin_host::granted_database_bindings)
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let registry = state.database_registry.read().await;
+    let Some(active) = registry.active() else {
+        anyhow::bail!(
+            "plugin `{plugin_id}` has granted database bindings {names:?} but no active \
+             database plugin is loaded"
+        );
+    };
+    active
+        .open_binding_databases(&config, library, plugin_id, &names)
+        .await
+        .map_err(|err| anyhow::anyhow!(err.to_string()))
+}
+
 /// Runs `plugin.worker().handle(stream_copy)` on a loaded destination guest.
 pub async fn run_plugin_copy(
     state: &AppState,
@@ -285,6 +321,7 @@ pub async fn run_plugin_copy(
     let cancel = ctx
         .map(|c| std::sync::Arc::clone(&c.cancel))
         .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let databases = open_granted_binding_databases(state, plugin_id, &library).await?;
     let outcome = tokio::select! {
         () = async {
             loop {
@@ -296,12 +333,13 @@ pub async fn run_plugin_copy(
         } => {
             anyhow::bail!("cancelled");
         }
-        outcome = session.stream_copy_with_cancel(
+        outcome = session.stream_copy_with_databases(
             lease,
             from,
             to,
             cancel,
             ctx.map(|c| (library.clone(), c.fence.clone())),
+            databases,
         ) => outcome?,
     };
     match outcome {

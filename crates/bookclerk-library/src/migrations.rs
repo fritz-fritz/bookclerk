@@ -956,6 +956,17 @@ const MIGRATION_V2_PLUGIN_DATABASES: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_plugin_databases_plugin ON plugin_databases(plugin_id);
 "#;
 
+/// Canonical bootstrap DDL applied inside every isolated plugin binding
+/// database at first open.
+///
+/// Each binding database carries its own `db_atomic_receipts` table so guest
+/// retry tokens replay inside the binding, never against the library.
+/// SQLite-shaped; adapters lower it mechanically like the host schema.
+#[must_use]
+pub fn binding_bootstrap_sql() -> &'static str {
+    MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE
+}
+
 /// Returns the canonical host migration plan shared by every marker kind.
 #[must_use]
 pub fn host_migration_plan() -> Vec<HostMigrationStep> {

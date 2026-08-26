@@ -43,6 +43,11 @@ pub enum DbConnectParams {
         /// grants this file and its journal sidecars at spawn.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sqlite_path: Option<String>,
+        /// Named plugin database binding this open serves, if any. Binding
+        /// opens use a dedicated connection at `sqlite_path` (the spawn env
+        /// override never applies) so each binding is its own database file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<String>,
     },
     /// Cloudflare D1 HTTP API backend (`backend: "d1"`).
     #[serde(rename_all = "camelCase")]
@@ -51,12 +56,19 @@ pub enum DbConnectParams {
         plugin_data_dir: String,
         /// Cloudflare account id for the D1 API (wire `accountId`).
         account_id: String,
-        /// D1 database UUID (wire `databaseId`).
+        /// D1 database UUID (wire `databaseId`). Empty for binding opens: the
+        /// adapter resolves (and creates) the database by `databaseName`.
         database_id: String,
         /// API base URL (for example `https://api.cloudflare.com/client/v4`).
         api_base: String,
         /// Bearer / API token the host injects; guests must not read env for this.
         api_token: String,
+        /// Named plugin database binding this open serves, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<String>,
+        /// D1 database name to resolve/provision for a binding open.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        database_name: Option<String>,
     },
     /// PostgreSQL connection-string backend (`backend: "postgres"`).
     #[serde(rename_all = "camelCase")]
@@ -65,6 +77,13 @@ pub enum DbConnectParams {
         plugin_data_dir: String,
         /// Full Postgres connection URL (host-injected; may contain secrets).
         url: String,
+        /// Named plugin database binding this open serves, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<String>,
+        /// Dedicated schema for a binding open: the adapter creates it if
+        /// missing and pins the connection `search_path` to it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
     },
 }
 
@@ -187,6 +206,7 @@ mod host_tests {
         let sqlite = DbConnectParams::Sqlite {
             plugin_data_dir: "/tmp/p".into(),
             sqlite_path: Some("/tmp/library.db".into()),
+            binding: None,
         };
         let v = serde_json::to_value(&sqlite).unwrap();
         assert_eq!(v["backend"], "sqlite");
@@ -202,6 +222,8 @@ mod host_tests {
         let params = DbConnectParams::Postgres {
             plugin_data_dir: "/tmp/p".into(),
             url: "postgres://localhost/db".into(),
+            binding: None,
+            schema: None,
         };
         let ctx = database_context_from_params(&params).unwrap();
         assert_eq!(ctx.config.media_type, DATABASE_CONTEXT_MEDIA_TYPE);
@@ -214,6 +236,7 @@ mod host_tests {
         let cfg = crate::DatabaseAdapterConfig {
             plugin_data_dir: "/tmp/p".into(),
             config: serde_json::json!({ "url": "custom://x" }),
+            binding: None,
         };
         let ctx = database_context_from_adapter_config(&cfg).unwrap();
         connect_params_from_context(&ctx)
@@ -231,6 +254,7 @@ mod tests {
         let cfg = crate::DatabaseAdapterConfig {
             plugin_data_dir: "/tmp/plugins/custom/data".into(),
             config: serde_json::json!({ "url": "custom://host/db", "poolSize": 4 }),
+            binding: None,
         };
         let ctx = database_context_from_adapter_config(&cfg).unwrap();
         assert_eq!(ctx.config.media_type, DATABASE_ADAPTER_CONFIG_MEDIA_TYPE);

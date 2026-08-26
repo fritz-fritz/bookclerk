@@ -130,7 +130,8 @@ pub use db_value::{db_type_from_declared, normalize_db_value_for_column, DbType,
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use guest_sql::{
     authorize_guest_sql_policy, guest_statement_kind, parse_guest_sql_refs,
-    returning_single_row_proven, validate_guest_execute_request, GuestSqlPolicy, GuestSqlRefs,
+    returning_single_row_proven, validate_guest_execute_request,
+    validate_guest_execute_request_for_policy, GuestSqlPolicy, GuestSqlRefs,
 };
 #[cfg(feature = "host")]
 pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};

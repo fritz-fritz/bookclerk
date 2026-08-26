@@ -10,8 +10,9 @@ mod sql;
 
 pub use host_session::{host_session, GuestHostAdapterSession};
 pub use session::{
-    guest_begin, guest_bootstrap, guest_capabilities, guest_commit, guest_execute,
-    guest_execute_atomic, guest_execute_atomic_on_txn, guest_ping, guest_query, guest_query_page,
-    guest_rollback, row_to_dto, set_connection,
+    bootstrap_for, capabilities_for, guest_begin, guest_bootstrap, guest_capabilities,
+    guest_commit, guest_execute, guest_execute_atomic, guest_execute_atomic_on,
+    guest_execute_atomic_on_txn, guest_ping, guest_query, guest_query_page, guest_rollback,
+    row_to_dto, set_connection,
 };
 pub use sql::{guest_sql, GuestStatement};
