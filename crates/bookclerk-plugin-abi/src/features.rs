@@ -1,13 +1,13 @@
 //! Optional facilities negotiated inside the plugin ABI (not a substitute for versioning).
 
 /// Guest honors scalar / stream-window / list-page caps.
-pub const FEATURE_SCALAR_LIMITS: &str = "rpc.scalarLimits";
+pub const FEATURE_SCALAR_LIMITS: &str = crate::plugin_capnp::FEATURE_SCALAR_LIMITS;
 
 /// Media moves through transferred [`crate::roles::ByteRange`] / `ByteSource` streams.
-pub const FEATURE_STREAMS: &str = "rpc.streams";
+pub const FEATURE_STREAMS: &str = crate::plugin_capnp::FEATURE_STREAMS;
 
 /// Guest implements server-side [`super::Destination::copy`].
-pub const FEATURE_STORAGE_COPY: &str = "storage.copy";
+pub const FEATURE_STORAGE_COPY: &str = crate::plugin_capnp::FEATURE_STORAGE_COPY;
 
 /// Known RPC feature names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

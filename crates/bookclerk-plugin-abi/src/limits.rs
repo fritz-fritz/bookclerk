@@ -1,25 +1,29 @@
 //! Scalar and stream window limits for the plugin ABI.
+//!
+//! Every value aliases the constant declared in `schema/plugin.capnp` (via the
+//! generated [`crate::plugin_capnp`] module), so the schema is the single
+//! source of truth and Rust cannot drift from it.
 
 /// Product ABI version (`apiVersion` / `plugin.toml` `api_version`).
-pub const PRODUCT_API_VERSION: u32 = 2;
+pub const PRODUCT_API_VERSION: u32 = crate::plugin_capnp::API_VERSION;
 
 /// Major ABI number advertised on `describe().abiMajor`.
-pub const ABI_MAJOR: u32 = 2;
+pub const ABI_MAJOR: u32 = crate::plugin_capnp::ABI_MAJOR;
 
 /// Minor ABI number. Hosts ignore unknown optional fields.
-pub const ABI_MINOR: u32 = 16;
+pub const ABI_MINOR: u32 = crate::plugin_capnp::ABI_MINOR;
 
 /// Maximum decoded size of a domain-event scalar payload (not a stream).
-pub const MAX_EVENT_PAYLOAD_BYTES: u32 = 65_536;
+pub const MAX_EVENT_PAYLOAD_BYTES: u32 = crate::plugin_capnp::MAX_EVENT_PAYLOAD_BYTES;
 
 /// Maximum decoded size of an ordinary RPC scalar value (not a stream window).
-pub const MAX_SCALAR_BYTES: u32 = 262_144;
+pub const MAX_SCALAR_BYTES: u32 = crate::plugin_capnp::MAX_SCALAR_BYTES;
 
 /// Maximum bytes returned by one `ByteSource.pull` (flow-control window).
-pub const MAX_STREAM_WINDOW_BYTES: u32 = 1_048_576;
+pub const MAX_STREAM_WINDOW_BYTES: u32 = crate::plugin_capnp::MAX_STREAM_WINDOW_BYTES;
 
 /// Maximum objects in one `Destination.list` page.
-pub const MAX_LIST_PAGE: u32 = 256;
+pub const MAX_LIST_PAGE: u32 = crate::plugin_capnp::MAX_LIST_PAGE;
 
 /// Negotiated numeric limits advertised at [`super::PluginDescribe`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

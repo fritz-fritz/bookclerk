@@ -35,6 +35,11 @@ const maxIdentifierBytes :UInt32 = 64;
 const maxConfigPayloadBytes :UInt32 = 65536;
 const maxEventPayloadBytes :UInt32 = 65536;
 
+# Negotiable `rpcFeatures` wire names (see `PluginDescribe.rpcFeatures`).
+const featureScalarLimits :Text = "rpc.scalarLimits";
+const featureStreams :Text = "rpc.streams";
+const featureStorageCopy :Text = "storage.copy";
+
 struct ScalarLimits {
   maxScalarBytes @0 :UInt32;
   maxStreamWindowBytes @1 :UInt32;

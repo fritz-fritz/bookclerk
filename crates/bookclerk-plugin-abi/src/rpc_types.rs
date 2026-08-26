@@ -296,10 +296,10 @@ pub struct WorkerContext {
 }
 
 /// Current envelope schema version for [`JobInvocation`].
-pub const ENVELOPE_VERSION: u32 = 1;
+pub const ENVELOPE_VERSION: u32 = crate::plugin_capnp::ENVELOPE_VERSION;
 
 /// Maximum checkpoint payload size (bytes).
-pub const MAX_CHECKPOINT_BYTES: u32 = 65_536;
+pub const MAX_CHECKPOINT_BYTES: u32 = crate::plugin_capnp::MAX_CHECKPOINT_BYTES;
 
 /// Versioned durable command envelope (not a domain event).
 ///
