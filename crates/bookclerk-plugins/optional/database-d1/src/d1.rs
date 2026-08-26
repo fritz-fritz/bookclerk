@@ -8,9 +8,11 @@
 //! `{ "batch": [...] }` (a real SQL transaction) with control flow
 //! encoded in SQL and a durable `operationId` receipt.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+use bookclerk_plugin_abi::DbType;
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -78,6 +80,9 @@ struct D1Inner {
     client: reqwest::Client,
     /// Serializes HTTP requests to a single D1 database.
     http: AsyncMutex<()>,
+    /// Declared column types per table (`pragma_table_info`), lowercased
+    /// keys. Used for universal result normalization; cleared on DDL.
+    table_types: std::sync::Mutex<HashMap<String, HashMap<String, DbType>>>,
 }
 
 /// SeaORM proxy that executes statements against Cloudflare D1's HTTP API.
@@ -211,8 +216,37 @@ impl D1Proxy {
                 api_token,
                 client,
                 http: AsyncMutex::new(()),
+                table_types: std::sync::Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// Cached declared column types for a (lowercased) table name.
+    pub(crate) fn cached_table_types(&self, table: &str) -> Option<HashMap<String, DbType>> {
+        self.inner
+            .table_types
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(table)
+            .cloned()
+    }
+
+    /// Stores declared column types for a (lowercased) table name.
+    pub(crate) fn store_table_types(&self, table: String, columns: HashMap<String, DbType>) {
+        self.inner
+            .table_types
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(table, columns);
+    }
+
+    /// Clears the declared-type cache (called when a batch contains DDL).
+    pub(crate) fn clear_table_types(&self) {
+        self.inner
+            .table_types
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     /// Cloudflare D1 `/query` URL for this account and database.

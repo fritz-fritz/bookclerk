@@ -50,6 +50,59 @@ impl DbValue {
     }
 }
 
+/// Maps a declared SQL column type onto the universal [`DbType`].
+///
+/// Shared by every adapter so declared-type result normalization is
+/// identical across engines (SQLite decltype, D1 `pragma_table_info` type,
+/// PostgreSQL type names). Unknown declarations map to
+/// [`DbType::Unspecified`].
+#[must_use]
+pub fn db_type_from_declared(decl: &str) -> DbType {
+    let d = decl.to_ascii_uppercase();
+    if d.contains("BLOB") || d.contains("BYTEA") {
+        DbType::Bytes
+    } else if d.contains("INT") {
+        DbType::Int64
+    } else if d.contains("BOOL") {
+        DbType::Bool
+    } else if d.contains("REAL") || d.contains("FLOA") || d.contains("DOUB") {
+        DbType::Float64
+    } else if d.contains("CHAR") || d.contains("CLOB") || d.contains("TEXT") {
+        DbType::Text
+    } else {
+        DbType::Unspecified
+    }
+}
+
+/// Normalizes one result cell against its declared column [`DbType`].
+///
+/// The universal-value contract requires identical observable `DbValue`
+/// variants across adapters, so declared-type metadata (never engine storage
+/// affinity) decides the variant:
+///
+/// - every SQL NULL in a declared column becomes `Null(<declared>)`;
+/// - `0` / `1` integers in a declared `BOOL` column become [`DbValue::Boolean`]
+///   (SQLite-family engines store booleans as INTEGER);
+/// - integers in a declared `FLOAT64` column become [`DbValue::Float64`]
+///   (JSON channels drop the `.0` on whole floats).
+///
+/// Cells in undeclared / computed columns are returned unchanged.
+#[must_use]
+pub fn normalize_db_value_for_column(value: DbValue, declared: DbType) -> DbValue {
+    match (declared, value) {
+        (DbType::Unspecified, value) => value,
+        (ty, DbValue::Null(_)) => DbValue::Null(ty),
+        (DbType::Bool, DbValue::Int64(n @ (0 | 1))) => DbValue::Boolean(n == 1),
+        (DbType::Float64, DbValue::Int64(n)) => {
+            // Declared-double columns already went through the engine's REAL
+            // affinity; JSON channels may still render whole floats as ints.
+            #[allow(clippy::cast_precision_loss)]
+            DbValue::Float64(n as f64)
+        }
+        (_, value) => value,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::missing_panics_doc)]
 mod tests {

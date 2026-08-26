@@ -35,16 +35,15 @@ where
 
 /// Universal `DbValue` round-trip through declared table columns.
 ///
-/// Exactness contract for every admitted adapter:
-/// - `Int64` (including `i64::MIN` / `i64::MAX`), finite `Float64`, UTF-8
-///   `Text` (including adversarial `b64:`-prefixed text), and `Bytes`
-///   round-trip **exactly**.
-/// - `Boolean` input is accepted everywhere; reads are engine-typed — native
-///   BOOLEAN engines return `Boolean`, SQLite-family storage (including
-///   Cloudflare D1's documented numeric boolean reads) returns `Int64` 0/1.
-/// - SQL NULL round-trips as `Null`: adapters with column metadata type it
-///   (for example `Null(Int64)`); metadata-less channels return
-///   `Null(Unspecified)`. A NULL must never decay to a non-null value.
+/// Identical-observable-value contract (#178) for every admitted adapter:
+/// `Int64` (including `i64::MIN` / `i64::MAX`), finite `Float64`, UTF-8
+/// `Text` (including adversarial `b64:`-prefixed text), `Bytes`, `Boolean`,
+/// and typed SQL NULL all round-trip to the **same** `DbValue` variant on
+/// every adapter. Engine storage affinity must not leak: adapters normalize
+/// results from declared column metadata (SQLite decltype, PostgreSQL type
+/// info, D1 `pragma_table_info`), so a declared `BOOLEAN` column reads back
+/// [`bookclerk_plugin_abi::DbValue::Boolean`] and a NULL in a declared
+/// `BIGINT` column reads back `Null(Int64)` everywhere.
 async fn typed_universal_value_matrix<F, Fut>(run: &mut F)
 where
     F: FnMut(ExecuteRequest, u32) -> Fut,
@@ -121,16 +120,15 @@ where
         assert_eq!(values[1], DbValue::Float64(1.25), "{op} float64");
         assert_eq!(values[2], DbValue::Text(text.into()), "{op} text");
         assert_eq!(values[3], DbValue::Bytes(bytes.clone()), "{op} bytes");
-        let expect_bool = if boolean { 1 } else { 0 };
-        assert!(
-            values[4] == DbValue::Boolean(boolean) || values[4] == DbValue::Int64(expect_bool),
-            "{op} boolean must read engine-typed (Boolean or Int64 0/1): {:?}",
-            values[4]
+        assert_eq!(
+            values[4],
+            DbValue::Boolean(boolean),
+            "{op} declared BOOLEAN column must read back Boolean on every adapter"
         );
-        assert!(
-            matches!(values[5], DbValue::Null(_)),
-            "{op} SQL NULL must stay Null: {:?}",
-            values[5]
+        assert_eq!(
+            values[5],
+            DbValue::Null(bookclerk_plugin_abi::DbType::Int64),
+            "{op} NULL in a declared BIGINT column must read back Null(int64) on every adapter"
         );
     }
 }

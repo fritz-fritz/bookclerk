@@ -27,6 +27,25 @@ pub(crate) type SqlStmt = (String, Vec<JsonValue>);
 /// Maximum D1 HTTP batch attempts, including retries after ambiguous responses.
 const ATOMIC_HTTP_ATTEMPTS: usize = 3;
 
+/// True when any statement is DDL (`CREATE` / `ALTER` / `DROP`), which
+/// invalidates the declared-type cache.
+fn sql_is_ddl(sql: &str) -> bool {
+    let t = sql.trim_start();
+    ["CREATE", "ALTER", "DROP"]
+        .iter()
+        .any(|verb| t.len() >= verb.len() && t[..verb.len()].eq_ignore_ascii_case(verb))
+}
+
+/// Cache key for a parsed table reference (quotes stripped, lowercased).
+fn table_cache_key(name: &str) -> String {
+    name.trim()
+        .trim_matches('"')
+        .trim_matches('`')
+        .trim_matches('[')
+        .trim_matches(']')
+        .to_ascii_lowercase()
+}
+
 /// True when every plan statement is a read (`Select`) — resubmitting after an
 /// ambiguous response cannot mutate state twice.
 fn plan_is_read_only(plan: &DbAtomicPlan) -> bool {
@@ -61,6 +80,9 @@ impl D1Proxy {
         let plan = req.plan.clone().ok_or_else(|| {
             DbErr::Custom("atomic execute requires a host-authored executePlan".into())
         })?;
+        if plan.statements.iter().any(|s| sql_is_ddl(&s.sql)) {
+            self.clear_table_types();
+        }
         reject_unbounded_returning(&plan)?;
         // D1 `batch()` makes each attempt atomic, not retries across attempts.
         // Resubmitting a possibly-committed mutation is exactly-once only when
@@ -159,6 +181,9 @@ impl D1Proxy {
             req,
         );
         let req = &expanded;
+        if req.statements.iter().any(|s| sql_is_ddl(&s.sql)) {
+            self.clear_table_types();
+        }
         reject_unbounded_returning_typed(&req.statements)?;
         // Retrying after an ambiguous (possibly committed) response is
         // exactly-once only when the request is receipt-gated (replay detects
@@ -206,6 +231,8 @@ impl D1Proxy {
             };
             match parse_typed_batch(req, &raw, started) {
                 Ok(mut reply) => {
+                    self.normalize_reply_from_declared(req, &mut reply, timeout)
+                        .await;
                     reply.statements =
                         bookclerk_db_exec::collapse_host_schema_results(wire_len, reply.statements);
                     if !guest_receipt.is_absent() {
@@ -248,6 +275,125 @@ impl D1Proxy {
             }
         }
         Err(last_err.unwrap_or_else(|| ambiguous_d1("exhausted retries")))
+    }
+
+    /// Best-effort declared-type normalization of a typed reply.
+    ///
+    /// The universal-value contract requires identical observable `DbValue`
+    /// variants across adapters. D1's JSON channel carries no column
+    /// metadata, so declared types come from `pragma_table_info` on the
+    /// tables each `Rows` statement references (cached per table, cleared on
+    /// DDL). Aliased / computed columns and unparsable SQL keep engine-typed
+    /// cells; metadata fetch failures degrade gracefully rather than failing
+    /// the already-executed batch.
+    async fn normalize_reply_from_declared(
+        &self,
+        req: &ExecuteRequest,
+        reply: &mut ExecuteReply,
+        timeout: Duration,
+    ) {
+        use std::collections::{BTreeSet, HashMap, HashSet};
+
+        let mut per_stmt: Vec<Option<Vec<String>>> = Vec::with_capacity(req.statements.len());
+        let mut wanted: BTreeSet<String> = BTreeSet::new();
+        for stmt in &req.statements {
+            if stmt.result_selection != DbResultSelection::Rows {
+                per_stmt.push(None);
+                continue;
+            }
+            match bookclerk_plugin_abi::parse_guest_sql_refs(&stmt.sql) {
+                Ok(refs) => {
+                    let tables: Vec<String> =
+                        refs.tables.iter().map(|t| table_cache_key(t)).collect();
+                    wanted.extend(tables.iter().cloned());
+                    per_stmt.push(Some(tables));
+                }
+                Err(_) => per_stmt.push(None),
+            }
+        }
+        if wanted.is_empty() {
+            return;
+        }
+        let missing: Vec<String> = wanted
+            .iter()
+            .filter(|t| self.cached_table_types(t).is_none())
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            let stmts: Vec<SqlStmt> = missing
+                .iter()
+                .map(|t| {
+                    (
+                        "SELECT name, type FROM pragma_table_info(?)".to_string(),
+                        vec![JsonValue::String(t.clone())],
+                    )
+                })
+                .collect();
+            if let Ok(raw) = self.run_batch_with_timeout(&stmts, timeout).await {
+                if let Some(arr) = raw.get("result").and_then(JsonValue::as_array) {
+                    for (table, entry) in missing.iter().zip(arr) {
+                        let mut columns = HashMap::new();
+                        if let Some(rows) = entry.get("results").and_then(JsonValue::as_array) {
+                            for row in rows {
+                                let name = row.get("name").and_then(JsonValue::as_str);
+                                let decl = row.get("type").and_then(JsonValue::as_str);
+                                if let (Some(name), Some(decl)) = (name, decl) {
+                                    columns.insert(
+                                        name.to_ascii_lowercase(),
+                                        bookclerk_plugin_abi::db_type_from_declared(decl),
+                                    );
+                                }
+                            }
+                        }
+                        self.store_table_types(table.clone(), columns);
+                    }
+                }
+            }
+        }
+        for (i, tables) in per_stmt.iter().enumerate() {
+            let Some(tables) = tables else { continue };
+            let mut map: HashMap<String, DbType> = HashMap::new();
+            let mut conflicted: HashSet<String> = HashSet::new();
+            for table in tables {
+                let Some(columns) = self.cached_table_types(table) else {
+                    continue;
+                };
+                for (name, ty) in columns {
+                    if conflicted.contains(&name) {
+                        continue;
+                    }
+                    match map.get(&name) {
+                        None => {
+                            map.insert(name, ty);
+                        }
+                        Some(prev) if *prev != ty => {
+                            map.remove(&name);
+                            conflicted.insert(name);
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+            if map.is_empty() {
+                continue;
+            }
+            let Some(stmt) = reply.statements.get_mut(i) else {
+                continue;
+            };
+            for col_idx in 0..stmt.columns.len() {
+                let key = stmt.columns[col_idx].name.to_ascii_lowercase();
+                let Some(&ty) = map.get(&key) else { continue };
+                if stmt.columns[col_idx].db_type == DbType::Unspecified {
+                    stmt.columns[col_idx].db_type = ty;
+                }
+                for row in &mut stmt.rows {
+                    if let Some(cell) = row.values.get_mut(col_idx) {
+                        *cell =
+                            bookclerk_plugin_abi::normalize_db_value_for_column(cell.clone(), ty);
+                    }
+                }
+            }
+        }
     }
 }
 

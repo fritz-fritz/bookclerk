@@ -656,22 +656,10 @@ fn sea_to_rusqlite(v: &Value) -> rusqlite::types::Value {
 
 /// Maps a SQLite `decl_type` onto the universal [`DbType`] (empty → Unspecified).
 fn db_type_from_decl(decl: Option<&str>) -> DbType {
-    let Some(decl) = decl else {
-        return DbType::Unspecified;
-    };
-    if decl.contains("BLOB") || decl.contains("BYTEA") {
-        DbType::Bytes
-    } else if decl.contains("INT") {
-        DbType::Int64
-    } else if decl.contains("BOOL") {
-        DbType::Bool
-    } else if decl.contains("REAL") || decl.contains("FLOA") || decl.contains("DOUB") {
-        DbType::Float64
-    } else if decl.contains("CHAR") || decl.contains("CLOB") || decl.contains("TEXT") {
-        DbType::Text
-    } else {
-        DbType::Unspecified
-    }
+    decl.map_or(
+        DbType::Unspecified,
+        bookclerk_plugin_abi::db_type_from_declared,
+    )
 }
 
 /// Maps a rusqlite cell back to SeaORM, using `decl_type` for typed NULLs.

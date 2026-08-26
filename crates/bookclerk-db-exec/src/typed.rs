@@ -363,17 +363,22 @@ fn db_values_from_query_result(
     Ok(values)
 }
 
-/// Converts a SeaORM cell, stamping declared column type onto SQL NULL.
+/// Converts a SeaORM cell, normalizing against the declared column type.
+///
+/// Declared metadata decides the observable variant (typed NULLs, `Boolean`
+/// for `0`/`1` in BOOL columns) so every adapter reports identical
+/// `DbValue`s — see
+/// [`bookclerk_plugin_abi::normalize_db_value_for_column`].
 ///
 /// # Errors
 ///
 /// Returns [`DbErr`] when the SeaORM value is outside the universal domain.
 fn db_value_for_column(sea: &SeaValue, col: &DbColumn) -> Result<DbValue, DbErr> {
     let value = db_value_from_sea(sea).map_err(DbErr::Custom)?;
-    Ok(match value {
-        DbValue::Null(_) if col.db_type != DbType::Unspecified => DbValue::Null(col.db_type),
-        other => other,
-    })
+    Ok(bookclerk_plugin_abi::normalize_db_value_for_column(
+        value,
+        col.db_type,
+    ))
 }
 
 /// Decodes one positional cell without going through a name-keyed map.
