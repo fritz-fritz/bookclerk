@@ -255,45 +255,15 @@ pub trait Integration {
 #[async_trait::async_trait(?Send)]
 pub trait Database {
     /// Opens an invocation-scoped adapter session.
-    async fn open_session(&self) -> Result<AdapterSessionOpen>;
-}
+    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>>;
 
-/// Public adapter session plus optional host-private interactive transaction view.
-pub struct AdapterSessionOpen {
-    session: Box<dyn AdapterDatabaseSession>,
-    host: Option<Box<dyn super::host_roles::HostAdapterDatabaseSession>>,
-}
-
-impl AdapterSessionOpen {
-    /// Opens a typed adapter session without host-private interactive transactions.
-    #[must_use]
-    pub fn new(session: Box<dyn AdapterDatabaseSession>) -> Self {
-        Self {
-            session,
-            host: None,
-        }
-    }
-
-    /// First-party adapters only; requires `bookclerk-plugin-abi` feature `host`.
+    /// Host-private interactive-transaction view of the adapter connection.
+    ///
+    /// First-party adapters override this. The default advertises no host
+    /// machinery; hosts then fall back to the public typed `execute` plane.
     #[cfg(feature = "host")]
-    #[must_use]
-    pub fn with_host(
-        session: Box<dyn AdapterDatabaseSession>,
-        host: Box<dyn super::host_roles::HostAdapterDatabaseSession>,
-    ) -> Self {
-        Self {
-            session,
-            host: Some(host),
-        }
-    }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Box<dyn AdapterDatabaseSession>,
-        Option<Box<dyn super::host_roles::HostAdapterDatabaseSession>>,
-    ) {
-        (self.session, self.host)
+    fn host_session(&self) -> Option<Box<dyn super::host_roles::HostAdapterDatabaseSession>> {
+        None
     }
 }
 

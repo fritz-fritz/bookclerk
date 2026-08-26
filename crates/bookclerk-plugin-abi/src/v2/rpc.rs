@@ -17,6 +17,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+#[cfg(feature = "host")]
 use super::host_roles::HostAdapterDatabaseSession;
 use super::limits::{
     ScalarLimits, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_STREAM_WINDOW_BYTES,
@@ -33,12 +34,12 @@ use super::plugin_v2_capnp::{
     plugin_describe, plugin_error, progress_sink, pull_reply, put_reply, source as source_capnp,
     source_reply, worker_reply, write_options,
 };
+#[cfg(feature = "host")]
 use super::plugin_v2_host_capnp::host_adapter_database_session as host_adapter_database_session_capnp;
 use super::roles::{
-    AdapterDatabaseSession, AdapterSessionOpen, ByteRange, Cancellation, ContentSource,
-    ContentSourceContext, Database, DatabaseContext, Destination, GuestDatabase, Integration,
-    IntegrationContext, JobHandler, JobHandlerContext, NeverCancel, PluginRoot, ProgressSink,
-    ReadResult, Source,
+    AdapterDatabaseSession, ByteRange, Cancellation, ContentSource, ContentSourceContext, Database,
+    DatabaseContext, Destination, GuestDatabase, Integration, IntegrationContext, JobHandler,
+    JobHandlerContext, NeverCancel, PluginRoot, ProgressSink, ReadResult, Source,
 };
 use super::types::{
     CopyResult, DestinationContext, DomainEvent, EventResult, HealthOk, JobCheckpoint,
@@ -1992,13 +1993,12 @@ impl database_capnp::Server for DatabaseServer {
     ) -> capnp::Result<()> {
         let mut result = results.get().init_result();
         match self.inner.open_session().await {
-            Ok(open) => {
-                let (session, host) = open.into_parts();
-                let host = host.map(Arc::from);
+            Ok(session) => {
                 let client: adapter_database_session_capnp::Client =
                     capnp_rpc::new_client(AdapterDatabaseSessionServer {
                         inner: Arc::from(session),
-                        host,
+                        #[cfg(feature = "host")]
+                        host: self.inner.host_session().map(Arc::from),
                     });
                 result.set_ok(client);
             }
@@ -2010,6 +2010,7 @@ impl database_capnp::Server for DatabaseServer {
 
 struct AdapterDatabaseSessionServer {
     inner: Arc<dyn AdapterDatabaseSession>,
+    #[cfg(feature = "host")]
     host: Option<Arc<dyn HostAdapterDatabaseSession>>,
 }
 
@@ -2072,6 +2073,7 @@ impl adapter_database_session_capnp::Server for AdapterDatabaseSessionServer {
     }
 }
 
+#[cfg(feature = "host")]
 impl host_adapter_database_session_capnp::Server for AdapterDatabaseSessionServer {
     async fn begin(
         self: Rc<Self>,
@@ -3044,6 +3046,7 @@ pub struct DatabaseClient {
 }
 
 /// Public adapter session plus host-private interactive transaction client.
+#[cfg(feature = "host")]
 pub struct AdapterSessionHandle {
     /// Typed `capabilities` / `execute` / `close`.
     pub session: Box<dyn AdapterDatabaseSession>,
@@ -3051,6 +3054,7 @@ pub struct AdapterSessionHandle {
     pub host: super::host_rpc::HostAdapterDatabaseSessionClient,
 }
 
+#[cfg(feature = "host")]
 impl DatabaseClient {
     /// Opens a session and host-private transaction client on one capability.
     ///
@@ -3084,7 +3088,7 @@ impl DatabaseClient {
 
 #[async_trait::async_trait(?Send)]
 impl Database for DatabaseClient {
-    async fn open_session(&self) -> Result<AdapterSessionOpen> {
+    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>> {
         let req = self.client.open_session_request();
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
@@ -3093,11 +3097,9 @@ impl Database for DatabaseClient {
             .get_result()
             .map_err(from_capnp)?;
         match result.which().map_err(from_capnp)? {
-            adapter_session_reply::Ok(sess) => Ok(AdapterSessionOpen::new(Box::new(
-                AdapterDatabaseSessionClient {
-                    client: sess.map_err(from_capnp)?,
-                },
-            ))),
+            adapter_session_reply::Ok(sess) => Ok(Box::new(AdapterDatabaseSessionClient {
+                client: sess.map_err(from_capnp)?,
+            })),
             adapter_session_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
         }
     }

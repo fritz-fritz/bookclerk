@@ -4,7 +4,9 @@
 
 mod db_rpc;
 mod features;
+#[cfg(feature = "host")]
 mod host_roles;
+#[cfg(feature = "host")]
 mod host_rpc;
 mod jobs;
 mod limits;
@@ -16,6 +18,7 @@ mod types;
 /// Generated Cap'n Proto RPC interfaces (`schema/plugin_v2.capnp`).
 pub use crate::plugin_v2_capnp;
 
+#[cfg(feature = "host")]
 pub(crate) use crate::plugin_v2_host_capnp;
 
 #[cfg(feature = "host")]
@@ -39,16 +42,16 @@ pub use limits::{
     MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 pub use roles::{
-    AdapterDatabaseSession, AdapterSessionOpen, ByteRange, Cancellation, ContentSource,
-    ContentSourceContext, Database, DatabaseContext, Destination, GuestDatabase, Integration,
-    IntegrationContext, JobHandler, JobHandlerContext, NeverCancel, PluginRoot, ProgressSink,
-    ReadResult, Source,
+    AdapterDatabaseSession, ByteRange, Cancellation, ContentSource, ContentSourceContext, Database,
+    DatabaseContext, Destination, GuestDatabase, Integration, IntegrationContext, JobHandler,
+    JobHandlerContext, NeverCancel, PluginRoot, ProgressSink, ReadResult, Source,
 };
+#[cfg(feature = "host")]
+pub use rpc::AdapterSessionHandle;
 pub use rpc::{
     byte_source_from_async_read, connect_plugin, pull_byte_source_to_writer, serve_plugin,
-    serve_plugin_stdio, AdapterSessionHandle, ContentSourceClient, DatabaseClient,
-    DestinationClient, DestinationServer, IntegrationClient, PluginClient, PluginServer,
-    SourceClient, SourceServer,
+    serve_plugin_stdio, ContentSourceClient, DatabaseClient, DestinationClient, DestinationServer,
+    IntegrationClient, PluginClient, PluginServer, SourceClient, SourceServer,
 };
 pub use types::{
     CopyResult, DestinationContext, DomainEvent, EventResult, ExtensibleConfig, HealthOk,

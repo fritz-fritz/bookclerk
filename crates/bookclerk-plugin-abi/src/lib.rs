@@ -55,6 +55,7 @@ pub mod db_value;
 pub mod error;
 pub mod events;
 pub mod guest_sql;
+#[cfg(feature = "host")]
 pub(crate) mod host_envelope;
 pub mod kind;
 pub mod methods;
@@ -81,6 +82,7 @@ pub mod plugin_v2_capnp {
 }
 
 /// Host-private Cap'n Proto RPC interfaces (`schema/plugin_v2_host.capnp`).
+#[cfg(feature = "host")]
 #[allow(
     dead_code,
     missing_docs,

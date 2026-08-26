@@ -11,11 +11,13 @@ use super::plugin_v2_capnp::{
     DbResultSelection as CapnpDbResultSelection, DbStatementKind as CapnpDbStatementKind,
     DbType as CapnpDbType,
 };
+#[cfg(feature = "host")]
 use super::plugin_v2_host_capnp::{
     host_execute_envelope as host_execute_envelope_capnp,
     host_guest_receipt_persist as host_guest_receipt_persist_capnp,
 };
 use super::rpc::{from_capnp, read_error, text_of, write_error};
+#[cfg(feature = "host")]
 use crate::host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
 use crate::{
     DbBootstrap, DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming,
@@ -579,6 +581,7 @@ pub fn decode_execute_request_bytes(bytes: &[u8]) -> Result<ExecuteRequest> {
     read_execute_request(reader.get_root().map_err(from_capnp)?)
 }
 
+#[cfg(feature = "host")]
 pub(super) fn write_guest_receipt_persist(
     mut b: host_guest_receipt_persist_capnp::Builder<'_>,
     receipt: &GuestReceiptPersist,
@@ -590,6 +593,7 @@ pub(super) fn write_guest_receipt_persist(
 /// # Errors
 ///
 /// Returns when nested Cap'n fields cannot be decoded.
+#[cfg(feature = "host")]
 fn read_guest_receipt_persist(
     r: host_guest_receipt_persist_capnp::Reader<'_>,
 ) -> Result<GuestReceiptPersist> {
@@ -599,6 +603,7 @@ fn read_guest_receipt_persist(
     })
 }
 
+#[cfg(feature = "host")]
 pub(super) fn write_host_execute_envelope(
     mut b: host_execute_envelope_capnp::Builder<'_>,
     envelope: &HostExecuteEnvelope,
@@ -610,6 +615,7 @@ pub(super) fn write_host_execute_envelope(
 /// # Errors
 ///
 /// Returns when nested fields cannot be decoded.
+#[cfg(feature = "host")]
 pub(super) fn read_host_execute_envelope(
     r: host_execute_envelope_capnp::Reader<'_>,
 ) -> Result<HostExecuteEnvelope> {

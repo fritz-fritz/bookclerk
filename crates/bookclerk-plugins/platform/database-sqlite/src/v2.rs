@@ -11,7 +11,7 @@ use bookclerk_db_guest::{
     guest_bootstrap, guest_capabilities, guest_execute_atomic, host_session, set_connection,
 };
 use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
-use bookclerk_plugin_abi::v2::AdapterSessionOpen;
+use bookclerk_plugin_abi::v2::HostAdapterDatabaseSession;
 use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
 use bookclerk_plugin_sdk::v2::{
     AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
@@ -87,11 +87,12 @@ struct SqliteDatabase;
 
 #[async_trait(?Send)]
 impl Database for SqliteDatabase {
-    async fn open_session(&self) -> Result<AdapterSessionOpen> {
-        Ok(AdapterSessionOpen::with_host(
-            Box::new(SqliteSession),
-            Box::new(host_session()),
-        ))
+    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>> {
+        Ok(Box::new(SqliteSession))
+    }
+
+    fn host_session(&self) -> Option<Box<dyn HostAdapterDatabaseSession>> {
+        Some(Box::new(host_session()))
     }
 }
 

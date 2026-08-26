@@ -92,8 +92,8 @@ pub use protocol::{
 };
 pub use v2::{
     decode_json, encode_atomic_result, encode_json, page_rows, serve, serve_v2,
-    AdapterDatabaseSession, AdapterSessionOpen, ContentSource, Database, GuestDatabase,
-    Integration, PluginDescribe, PluginRoot, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    AdapterDatabaseSession, ContentSource, Database, GuestDatabase, Integration, PluginDescribe,
+    PluginRoot, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 
 pub use bookclerk_plugin_abi::{

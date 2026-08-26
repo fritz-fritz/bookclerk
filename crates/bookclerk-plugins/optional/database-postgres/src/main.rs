@@ -7,7 +7,7 @@ use bookclerk_db_guest::{
     guest_bootstrap, guest_capabilities, guest_execute_atomic, host_session, set_connection,
 };
 use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
-use bookclerk_plugin_abi::v2::AdapterSessionOpen;
+use bookclerk_plugin_abi::v2::HostAdapterDatabaseSession;
 use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
 use bookclerk_plugin_sdk::v2::{
     AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
@@ -76,11 +76,12 @@ struct PostgresDatabase;
 
 #[async_trait(?Send)]
 impl Database for PostgresDatabase {
-    async fn open_session(&self) -> Result<AdapterSessionOpen, PluginError> {
-        Ok(AdapterSessionOpen::with_host(
-            Box::new(PostgresSession),
-            Box::new(host_session()),
-        ))
+    async fn open_session(&self) -> Result<Box<dyn AdapterDatabaseSession>, PluginError> {
+        Ok(Box::new(PostgresSession))
+    }
+
+    fn host_session(&self) -> Option<Box<dyn HostAdapterDatabaseSession>> {
+        Some(Box::new(host_session()))
     }
 }
 
