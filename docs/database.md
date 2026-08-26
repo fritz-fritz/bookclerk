@@ -115,19 +115,31 @@ in-process engine fallback.
 External `kind = "database"` guests also load for **D1** and **Postgres** when
 discovered and `[database].plugin` matches the plugin id. SeaORM proxy calls
 (`db.query` / `db.execute`) forward through the guest; `master.key` never leaves
-the host. Connect params are a tagged `DbConnectParams` shape; first-party
-ids receive host-injected paths/secrets (`sqlite` / `d1` / `postgres`), while
-any other database plugin id receives `backend: "guest"` with only
-`pluginDataDir` — connection knobs come from plugin-owned settings and
-`secrets`/`config` bindings. The guest returns bootstrap
-`{ "sqlFamily", "dialect" }` (and related capability fields) so the host
-builds the RPC proxy without hardcoding backends.
+the host. First-party ids receive host-private connect params with
+host-injected paths/secrets (`sqlite` / `d1` / `postgres`), while any other
+database plugin id receives the public `DatabaseAdapterConfig` payload
+(`pluginDataDir` plus its granted `[database.<id>]` settings). The guest
+returns bootstrap `{ "sqlFamily", "dialect" }` (and related capability fields)
+so the host builds the RPC proxy without hardcoding backends.
 
 First-party guests: `bookclerk-plugin-database-sqlite` (platform),
 `bookclerk-plugin-database-d1` and `bookclerk-plugin-database-postgres` (optional).
 Each is a full Workers-RPC guest with its own binary and `plugin.toml`. Install
 platform sqlite under `$BOOKCLERK_FILES_DIR/plugins/sqlite/`; stage optional DB
 guests with `cargo stage-plugins --optional`.
+
+### Isolated plugin database bindings
+
+Plugins that declare `capabilities.bindings.databases = ["DB", ...]` get
+Workers-style **named database bindings**: one isolated database per binding,
+provisioned by the active adapter (SQLite file / PostgreSQL schema with pinned
+`search_path` / Cloudflare D1 database by name) and recorded in the host
+`plugin_databases` registry. Bindings are consented per name
+(`database:<NAME>` grant entries), carry their own `db_atomic_receipts` for
+retry-token replay, and allow plugin-owned schema (full DML plus bounded
+`CREATE`/`ALTER`/`DROP` `TABLE`/`INDEX`). Operator lifecycle:
+`bookclerk plugins db list` / `bookclerk plugins db drop <plugin> [binding]`.
+See [plugins.md — Isolated plugin database bindings](plugins.md#isolated-plugin-database-bindings).
 
 ### Switching backends (opt-in migration)
 

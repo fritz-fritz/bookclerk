@@ -1144,6 +1144,54 @@ receipt-persist envelope. D1 keeps `begin` unsupported and routes
 
 Built-in ids: `sqlite`, `d1`, `postgres` (match `[database].plugin`).
 
+### Isolated plugin database bindings
+
+Plugins may declare Workers-style **named database bindings** in the manifest:
+
+```toml
+[capabilities.bindings]
+databases = ["DB", "CACHE"]   # [A-Z][A-Z0-9_]*, unique, max 8
+```
+
+Each name is an **isolated, plugin-owned database** provisioned by the active
+database adapter — separate from the Bookclerk library and from every other
+plugin (near-equivalent to a Cloudflare Workers D1 binding):
+
+- **SQLite** — one file per binding under
+  `$BOOKCLERK_FILES_DIR/plugin-databases/<plugin>/<BINDING>.db` (the sqlite
+  adapter jail grants that directory).
+- **PostgreSQL** — one schema per binding (`pb_<plugin>_<binding>`) with the
+  connection `search_path` pinned to it; schema-qualified names are denied by
+  the binding grammar so a guest cannot escape its schema.
+- **Cloudflare D1** — one D1 database per binding
+  (`bookclerk-pb-<plugin>-<binding>`), resolved or created by name through the
+  REST API. Provisioning fails closed with an operator-facing error when the
+  API token cannot create databases.
+- **Third-party adapters** — advertise `DbCapabilities.pluginDatabases` and
+  receive the binding name on the public `DatabaseAdapterConfig`; adapters
+  that do not advertise support fail the job rather than sharing a database.
+
+Consent: each binding appears as a `database:<NAME>` grant entry and requires
+operator approval before enable, like other capabilities. Provisioned units
+are recorded in the host `plugin_databases` registry (an existing row wins so
+re-opens never re-target a binding); inspect and remove them with
+`bookclerk plugins db list` / `bookclerk plugins db drop <plugin> [binding]`.
+
+Inside a binding the plugin **owns its schema**: full DML plus bounded DDL
+(`CREATE`/`ALTER`/`DROP` on `TABLE`/`INDEX`, prefer `IF [NOT] EXISTS` so
+retried batches replay cleanly). The guest grammar still applies — single
+statement, no `ATTACH`/`PRAGMA`/session verbs, no schema-qualified names, and
+the binding's own `db_atomic_receipts` bookkeeping table stays host-owned so
+retry tokens replay inside the binding, never against the library.
+
+Delivery: `JobHandler.handle` receives the bindings as the append-only
+`databases :List(NamedDatabase)` argument. Rust guests call
+`DatabaseBinding::take_named_from_job_context(&mut ctx, "DB")`; workerd guests
+get one grant token per binding on the invocation envelope — the TS SDK
+exposes `context.databases.get("DB")` and the Python SDK
+`context.databases["DB"]`, each a full `prepare`/`bind`/`run`/`all`/`first`/
+`raw`/`batch` `DatabaseBinding`.
+
 ## Examples
 
 Native Echo:

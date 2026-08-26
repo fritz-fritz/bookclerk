@@ -808,6 +808,73 @@ mod tests {
         }))
     }
 
+    #[tokio::test]
+    async fn ensure_database_resolves_existing_by_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/accounts/acct/d1/database$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": [
+                    { "name": "other", "uuid": "not-this-one" },
+                    { "name": "bookclerk-pb-demo-db", "uuid": "uuid-existing" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let id = ensure_database(&server.uri(), "acct", "token", "bookclerk-pb-demo-db")
+            .await
+            .expect("resolve existing database");
+        assert_eq!(id, "uuid-existing");
+    }
+
+    #[tokio::test]
+    async fn ensure_database_creates_when_missing_and_fails_closed_without_permission() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/accounts/acct/d1/database$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "success": true, "result": [] })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/accounts/acct/d1/database$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": { "name": "bookclerk-pb-demo-db", "uuid": "uuid-created" }
+            })))
+            .mount(&server)
+            .await;
+        let id = ensure_database(&server.uri(), "acct", "token", "bookclerk-pb-demo-db")
+            .await
+            .expect("create missing database");
+        assert_eq!(id, "uuid-created");
+
+        // A token without D1 edit permission must fail closed with an
+        // operator-facing reason, never fall through to a bogus id.
+        let denied = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/accounts/acct/d1/database$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "success": true, "result": [] })),
+            )
+            .mount(&denied)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/accounts/acct/d1/database$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": false,
+                "errors": [{ "code": 10000, "message": "Authentication error" }]
+            })))
+            .mount(&denied)
+            .await;
+        let err = ensure_database(&denied.uri(), "acct", "token", "bookclerk-pb-demo-db")
+            .await
+            .expect_err("create without permission fails closed");
+        assert!(err.to_string().contains("permission"), "{err}");
+    }
+
     fn incomplete_batch_ok() -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(json!({
             "success": true,

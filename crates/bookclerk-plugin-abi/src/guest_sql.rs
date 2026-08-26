@@ -381,6 +381,15 @@ fn binding_ddl_verb(sql: &str) -> Option<String> {
         .then_some(verb)
 }
 
+/// True when `sql` is a DDL statement (`CREATE` / `ALTER` / `DROP`).
+///
+/// Used by hosts to skip receipt write-predicates (DDL has no `WHERE`
+/// clause); classification only, never authorization.
+#[must_use]
+pub fn statement_is_ddl(sql: &str) -> bool {
+    binding_ddl_verb(sql).is_some()
+}
+
 /// Authorizes one bounded DDL statement inside a plugin-owned binding.
 ///
 /// Allowed forms (fail closed on anything else):
@@ -400,30 +409,19 @@ fn authorize_binding_ddl(index: usize, sql: &str) -> Result<()> {
             "statement {index} is not allowed binding DDL ({what})"
         ))
     };
-    let check_name = |name: &str| -> Result<()> {
-        if binding_table_denied(name) {
-            return Err(PluginError::invalid_params(format!(
-                "statement {index} names reserved or qualified object {name}"
-            )));
-        }
-        Ok(())
-    };
     if scan.take_kw("CREATE") {
         let _unique = scan.take_kw("UNIQUE");
         if scan.take_kw("TABLE") {
             let _ = scan.take_kw("IF") && scan.take_kw("NOT") && scan.take_kw("EXISTS");
-            let name = scan.read_ident().ok_or_else(|| deny("table name"))?;
-            return check_name(&name);
+            return check_binding_ddl_name(index, &mut scan, "table name");
         }
         if scan.take_kw("INDEX") {
             let _ = scan.take_kw("IF") && scan.take_kw("NOT") && scan.take_kw("EXISTS");
-            let name = scan.read_ident().ok_or_else(|| deny("index name"))?;
-            check_name(&name)?;
+            check_binding_ddl_name(index, &mut scan, "index name")?;
             if !scan.take_kw("ON") {
                 return Err(deny("CREATE INDEX requires ON <table>"));
             }
-            let table = scan.read_ident().ok_or_else(|| deny("indexed table"))?;
-            return check_name(&table);
+            return check_binding_ddl_name(index, &mut scan, "indexed table");
         }
         return Err(deny("only TABLE and INDEX may be created"));
     }
@@ -431,12 +429,12 @@ fn authorize_binding_ddl(index: usize, sql: &str) -> Result<()> {
         if !scan.take_kw("TABLE") {
             return Err(deny("only ALTER TABLE is allowed"));
         }
-        let name = scan.read_ident().ok_or_else(|| deny("table name"))?;
-        check_name(&name)?;
+        check_binding_ddl_name(index, &mut scan, "table name")?;
         // RENAME TO <new> must also stay unqualified and non-reserved.
         let rest = &sql[scan.i..];
-        if let Some(refs) = rename_target(rest) {
-            check_name(&refs)?;
+        let mut tail = Scan { sql: rest, i: 0 };
+        if tail.take_kw("RENAME") && tail.take_kw("TO") {
+            check_binding_ddl_name(index, &mut tail, "rename target")?;
         }
         return Ok(());
     }
@@ -445,19 +443,27 @@ fn authorize_binding_ddl(index: usize, sql: &str) -> Result<()> {
             return Err(deny("only DROP TABLE / DROP INDEX are allowed"));
         }
         let _ = scan.take_kw("IF") && scan.take_kw("EXISTS");
-        let name = scan.read_ident().ok_or_else(|| deny("object name"))?;
-        return check_name(&name);
+        return check_binding_ddl_name(index, &mut scan, "object name");
     }
     Err(deny("unsupported verb"))
 }
 
-/// The `RENAME TO` target identifier in an `ALTER TABLE` tail, if present.
-fn rename_target(rest: &str) -> Option<String> {
-    let mut scan = Scan { sql: rest, i: 0 };
-    if scan.take_kw("RENAME") && scan.take_kw("TO") {
-        return scan.read_ident();
+/// Reads one DDL object name off `scan`, denying reserved and qualified names.
+///
+/// A trailing `.` after the identifier means a schema-qualified name, which
+/// could escape a pinned PostgreSQL `search_path` — fail closed.
+fn check_binding_ddl_name(index: usize, scan: &mut Scan<'_>, what: &str) -> Result<()> {
+    let name = scan.read_ident().ok_or_else(|| {
+        PluginError::invalid_params(format!(
+            "statement {index} is not allowed binding DDL ({what})"
+        ))
+    })?;
+    if scan.take_byte(b'.') || binding_table_denied(&name) {
+        return Err(PluginError::invalid_params(format!(
+            "statement {index} names reserved or qualified object {name}"
+        )));
     }
-    None
+    Ok(())
 }
 
 /// Classifies guest SQL the same way the host stamps `DbStatement.kind`.
@@ -788,11 +794,17 @@ fn validate_guest_statement_for(
             "statement {index} uses disallowed SQL verb {verb}"
         )));
     }
-    for table in named_tables(&stmt.sql)? {
-        if table_denied(&table) {
-            return Err(PluginError::invalid_params(format!(
-                "statement {index} names unauthorized table {table}"
-            )));
+    if binding_ddl {
+        // The DML/SELECT ref parser does not understand DDL shapes; object
+        // names are authorized by `authorize_binding_ddl` instead.
+        authorize_binding_ddl(index, &stmt.sql)?;
+    } else {
+        for table in named_tables(&stmt.sql)? {
+            if table_denied(&table) {
+                return Err(PluginError::invalid_params(format!(
+                    "statement {index} names unauthorized table {table}"
+                )));
+            }
         }
     }
     let expected = count_placeholders(&stmt.sql);
@@ -1792,6 +1804,115 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.to_string().contains("disallowed"), "{err}");
+    }
+
+    /// Validates + policy-authorizes one statement under `binding_owned`.
+    fn binding_check(sql: &str, selection: DbResultSelection, max_rows: u32) -> Result<()> {
+        let policy = GuestSqlPolicy::binding_owned();
+        let request = req(sql, vec![], selection, max_rows);
+        validate_guest_execute_request_for_policy(&request, &policy)?;
+        authorize_guest_sql_policy(&request, &policy)
+    }
+
+    #[test]
+    fn binding_owned_allows_bounded_ddl_and_any_table_dml() {
+        binding_check(
+            "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
+        binding_check(
+            "CREATE UNIQUE INDEX idx_notes_body ON notes(body)",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
+        binding_check(
+            "ALTER TABLE notes RENAME TO memos",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
+        binding_check("DROP TABLE IF EXISTS memos", DbResultSelection::Discard, 0).unwrap();
+        binding_check(
+            "SELECT body FROM notes WHERE id = 1",
+            DbResultSelection::Rows,
+            1,
+        )
+        .unwrap();
+        binding_check(
+            "DELETE FROM anything_i_own",
+            DbResultSelection::AffectedRows,
+            0,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn binding_owned_denies_reserved_qualified_and_unbounded_ddl() {
+        // Reserved host bookkeeping stays denied for both DML and DDL.
+        for sql in [
+            "SELECT * FROM db_atomic_receipts",
+            "DELETE FROM schema_migrations",
+            "SELECT * FROM plugin_databases",
+            "DROP TABLE db_atomic_receipts",
+            "CREATE TABLE schema_migrations (v INTEGER)",
+            "ALTER TABLE notes RENAME TO db_atomic_receipts",
+            "CREATE INDEX i ON db_atomic_receipts(expires_at)",
+        ] {
+            let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
+            assert!(
+                err.to_string().contains("reserved") || err.to_string().contains("unauthorized"),
+                "{sql}: {err}"
+            );
+        }
+        // Schema-qualified names could escape a pinned Postgres search_path.
+        for sql in [
+            "SELECT * FROM public.books",
+            "CREATE TABLE other_schema.t (id INTEGER)",
+        ] {
+            let err = binding_check(sql, DbResultSelection::Rows, 0).unwrap_err();
+            assert!(
+                err.to_string().contains("reserved")
+                    || err.to_string().contains("qualified")
+                    || err.to_string().contains("unauthorized"),
+                "{sql}: {err}"
+            );
+        }
+        // Only TABLE / INDEX DDL forms; session/admin verbs stay denied.
+        for sql in [
+            "CREATE VIEW v AS SELECT 1",
+            "CREATE TRIGGER trg AFTER INSERT ON notes BEGIN SELECT 1; END",
+            "DROP VIEW v",
+            "ATTACH DATABASE 'x' AS y",
+            "PRAGMA user_version",
+            "VACUUM",
+        ] {
+            assert!(
+                binding_check(sql, DbResultSelection::Discard, 0).is_err(),
+                "{sql} must be denied"
+            );
+        }
+        // Catalog identifiers stay denied.
+        let err =
+            binding_check("SELECT * FROM sqlite_master", DbResultSelection::Rows, 0).unwrap_err();
+        assert!(err.to_string().contains("reserved") || err.to_string().contains("unauthorized"));
+    }
+
+    #[test]
+    fn non_binding_policies_still_deny_ddl() {
+        let policy = GuestSqlPolicy::allow_tables(["books"]);
+        let request = req(
+            "CREATE TABLE t (id INTEGER)",
+            vec![],
+            DbResultSelection::Discard,
+            0,
+        );
+        let err = validate_guest_execute_request_for_policy(&request, &policy).unwrap_err();
+        assert!(err.to_string().contains("disallowed"), "{err}");
+        // The policy-free wrapper keeps the fixed grammar.
+        assert!(validate_guest_execute_request(&request).is_err());
     }
 
     #[test]

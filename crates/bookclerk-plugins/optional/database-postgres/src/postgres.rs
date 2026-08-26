@@ -52,3 +52,88 @@ pub async fn open_binding(
     tracing::debug!(plugin = "postgres", schema, "opened binding database");
     Ok(db)
 }
+
+#[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
+mod tests {
+    use super::*;
+
+    fn postgres_test_url() -> String {
+        let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL").unwrap_or_else(|_| {
+            panic!(
+                "BOOKCLERK_TEST_POSTGRES_URL is required to run postgres binding tests \
+                 (CI sets BOOKCLERK_REQUIRE_POSTGRES_TESTS=1)"
+            )
+        });
+        assert!(
+            !url.trim().is_empty(),
+            "BOOKCLERK_TEST_POSTGRES_URL must not be empty"
+        );
+        url
+    }
+
+    #[test]
+    fn open_binding_rejects_unsafe_schema_names() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        for bad in ["", "Public", "a.b", "a\"b", "a b", "a;b"] {
+            let err = rt
+                .block_on(open_binding("postgres://invalid", bad))
+                .expect_err("unsafe schema name must fail before connecting");
+            assert!(err.to_string().contains("schema name"), "{bad}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+    async fn postgres_binding_schemas_isolate_same_named_tables() {
+        let url = postgres_test_url();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let schema_a = format!("pb_test_a_{suffix}");
+        let schema_b = format!("pb_test_b_{suffix}");
+        let a = open_binding(&url, &schema_a).await.expect("binding A");
+        let b = open_binding(&url, &schema_b).await.expect("binding B");
+        for (db, marker) in [(&a, "alpha"), (&b, "beta")] {
+            db.execute_raw(Statement::from_string(
+                db.get_database_backend(),
+                "CREATE TABLE notes (id BIGSERIAL PRIMARY KEY, body TEXT NOT NULL)".to_string(),
+            ))
+            .await
+            .expect("create per-binding table");
+            db.execute_raw(Statement::from_string(
+                db.get_database_backend(),
+                format!("INSERT INTO notes (body) VALUES ('{marker}')"),
+            ))
+            .await
+            .expect("insert per-binding row");
+        }
+        for (db, marker) in [(&a, "alpha"), (&b, "beta")] {
+            let rows = db
+                .query_all_raw(Statement::from_string(
+                    db.get_database_backend(),
+                    "SELECT body FROM notes ORDER BY id".to_string(),
+                ))
+                .await
+                .expect("select per-binding rows");
+            assert_eq!(rows.len(), 1, "pinned search_path must isolate schemas");
+            let body: String = rows[0].try_get("", "body").expect("body");
+            assert_eq!(body, marker);
+        }
+        // Cleanup so repeated CI runs stay disposable.
+        let admin = Database::connect(url.as_str()).await.expect("admin");
+        for schema in [&schema_a, &schema_b] {
+            admin
+                .execute_raw(Statement::from_string(
+                    admin.get_database_backend(),
+                    format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"),
+                ))
+                .await
+                .expect("drop test schema");
+        }
+    }
+}

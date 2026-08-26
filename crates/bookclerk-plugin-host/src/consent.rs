@@ -1092,6 +1092,45 @@ mod tests {
     }
 
     #[test]
+    fn consent_request_carries_named_database_bindings() {
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 2
+id = "demo"
+kind = "integration"
+runtime = "native"
+command = "./demo"
+[capabilities.network]
+mode = "deny"
+[capabilities.bindings]
+databases = ["DB", "CACHE"]
+"#,
+        )
+        .expect("manifest");
+        let grant = consent_request(&manifest);
+        assert!(grant.bindings.contains("database:DB"));
+        assert!(grant.bindings.contains("database:CACHE"));
+        assert_eq!(granted_database_bindings(&grant), vec!["CACHE", "DB"]);
+        let summary = consent_summary(&grant).join("\n");
+        assert!(summary.contains("Plugin databases"), "{summary}");
+    }
+
+    #[test]
+    fn approved_database_bindings_validate_names_and_keep_case() {
+        let baseline = sample_grant(&[], &[], &[]);
+        let approved = sample_grant(&[], &["database:DB_2", "config"], &[]);
+        let grant = validate_approved_grant(&approved, &baseline).expect("valid binding grant");
+        assert!(grant.bindings.contains("database:DB_2"));
+        assert_eq!(granted_database_bindings(&grant), vec!["DB_2"]);
+
+        let bad = sample_grant(&[], &["database:not-upper"], &[]);
+        let err = validate_approved_grant(&bad, &baseline)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid database binding name"), "{err}");
+    }
+
+    #[test]
     fn spawn_config_omitted_without_config_binding() {
         let grant = sample_grant(&[], &["secrets"], &[]);
         let delivered = spawn_config_for_grant(

@@ -45,7 +45,9 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> HostExecuteEn
     );
     let mut gated = Vec::with_capacity(req.statements.len());
     for mut stmt in req.statements {
-        if is_write(stmt.kind) {
+        // DDL takes no WHERE predicate; replayed DDL is naturally guarded by
+        // IF [NOT] EXISTS (documented for binding authors) or errors closed.
+        if is_write(stmt.kind) && !bookclerk_plugin_abi::statement_is_ddl(&stmt.sql) {
             stmt.sql = apply_write_predicate(
                 &stmt.sql,
                 stmt.kind,
