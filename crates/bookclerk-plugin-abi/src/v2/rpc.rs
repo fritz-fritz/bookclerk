@@ -1993,10 +1993,11 @@ impl database_capnp::Server for DatabaseServer {
         let mut result = results.get().init_result();
         match self.inner.open_session().await {
             Ok(open) => {
-                let host = open.host.map(Arc::from);
+                let (session, host) = open.into_parts();
+                let host = host.map(Arc::from);
                 let client: adapter_database_session_capnp::Client =
                     capnp_rpc::new_client(AdapterDatabaseSessionServer {
-                        inner: Arc::from(open.session),
+                        inner: Arc::from(session),
                         host,
                     });
                 result.set_ok(client);
@@ -3092,12 +3093,11 @@ impl Database for DatabaseClient {
             .get_result()
             .map_err(from_capnp)?;
         match result.which().map_err(from_capnp)? {
-            adapter_session_reply::Ok(sess) => Ok(AdapterSessionOpen {
-                session: Box::new(AdapterDatabaseSessionClient {
+            adapter_session_reply::Ok(sess) => Ok(AdapterSessionOpen::new(Box::new(
+                AdapterDatabaseSessionClient {
                     client: sess.map_err(from_capnp)?,
-                }),
-                host: None,
-            }),
+                },
+            ))),
             adapter_session_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
         }
     }

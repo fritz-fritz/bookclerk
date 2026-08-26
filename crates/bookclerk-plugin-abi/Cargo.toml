@@ -34,5 +34,10 @@ capnpc.workspace = true
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[features]
+default = []
+# Host-only wire surfaces (receipt envelopes, interactive txn Cap'n roles).
+host = []
+
 [lints]
 workspace = true

@@ -1273,9 +1273,9 @@ mod tests {
         let db = Database::connect_proxy(DbBackend::Sqlite, Arc::new(Box::new(proxy)))
             .await
             .unwrap();
-        bookclerk_plugin_sdk::database_adapter::set_connection(db).await;
-        let page = bookclerk_plugin_sdk::database_adapter::session::guest_query_page(
-            bookclerk_plugin_sdk::database_adapter::guest_sql("SELECT id FROM t"),
+        bookclerk_db_guest::set_connection(db).await;
+        let page = bookclerk_db_guest::guest_query_page(
+            bookclerk_db_guest::guest_sql("SELECT id FROM t"),
             "",
             10,
         )
@@ -1753,7 +1753,7 @@ mod tests {
     #[tokio::test]
     async fn executing_mock_row_cap_fails_closed() {
         let (_server, proxy, conn, _interrupt, _drop, _oversize) = executing_proxy().await;
-        let cap = bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows as usize;
+        let cap = bookclerk_plugin_abi::DbConnectResult::d1().max_result_rows as usize;
         {
             let db = conn.lock().expect("sqlite mutex");
             db.execute_batch("CREATE TABLE rowcap (x INTEGER)").unwrap();
@@ -1918,15 +1918,15 @@ mod tests {
         .await
         .expect("host D1 schema");
         bookclerk_library::sql_plan::run_typed_request_vectors(
-            bookclerk_plugin_sdk::DbConnectResult::d1(),
-            bookclerk_plugin_sdk::DbConnectResult::d1().max_result_rows,
+            bookclerk_plugin_abi::DbConnectResult::d1(),
+            bookclerk_plugin_abi::DbConnectResult::d1().max_result_rows,
             |req| {
                 let proxy = proxy.clone();
                 async move {
                     proxy
                         .run_typed_atomic(
                             &req,
-                            bookclerk_plugin_sdk::host_db::GuestReceiptPersist::default(),
+                            bookclerk_plugin_abi::GuestReceiptPersist::default(),
                         )
                         .await
                 }
@@ -1964,10 +1964,7 @@ mod tests {
                 deadline_unix_ms: 0,
             };
             let reply = proxy
-                .run_typed_atomic(
-                    &req,
-                    bookclerk_plugin_sdk::host_db::GuestReceiptPersist::default(),
-                )
+                .run_typed_atomic(&req, bookclerk_plugin_abi::GuestReceiptPersist::default())
                 .await
                 .unwrap_or_else(|e| panic!("{label}: {e}"));
             let got = reply.statements[0].rows[0].values[0].clone();
@@ -2148,7 +2145,7 @@ mod tests {
     impl bookclerk_library::TypedAtomicExec for ProxyTypedExec {
         async fn execute_typed(
             &self,
-            envelope: bookclerk_plugin_sdk::host_db::HostExecuteEnvelope,
+            envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
         ) -> std::result::Result<
             bookclerk_plugin_sdk::ExecuteReply,
             bookclerk_plugin_sdk::PluginError,
@@ -2189,7 +2186,7 @@ mod tests {
         .expect("host schema for guest typed replay");
 
         let store = bookclerk_library::LibraryStore::from_connection(db)
-            .with_connect_result(bookclerk_plugin_sdk::DbConnectResult::d1())
+            .with_connect_result(bookclerk_plugin_abi::DbConnectResult::d1())
             .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
                 proxy: proxy.clone(),
             }));
@@ -2254,7 +2251,7 @@ mod tests {
         .expect("host schema for lost-reply guest typed");
 
         let store = bookclerk_library::LibraryStore::from_connection(db)
-            .with_connect_result(bookclerk_plugin_sdk::DbConnectResult::d1())
+            .with_connect_result(bookclerk_plugin_abi::DbConnectResult::d1())
             .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
                 proxy: proxy.clone(),
             }));

@@ -293,25 +293,7 @@ impl DbCapabilities {
     #[doc(hidden)]
     #[must_use]
     pub fn from_connect(caps: &DbConnectResult) -> Self {
-        Self {
-            sql_contract_version: caps.sql_contract_version,
-            atomic_batch: caps.atomic_batch,
-            returning: caps.returning,
-            affected_rows: true,
-            schema_migrations: caps.schema_migrations,
-            pragma_user_version: caps.pragma_user_version,
-            atomic_schema_batch: caps.atomic_schema_batch,
-            cancellation: true,
-            timing: caps.timing,
-            max_binds: caps.max_binds,
-            max_statements: caps.max_statements,
-            max_result_rows: caps.max_result_rows,
-            max_payload_bytes: caps.max_payload_bytes,
-            max_result_bytes: caps.max_result_bytes,
-            max_cell_bytes: caps.max_cell_bytes,
-            max_request_bytes: caps.max_atomic_request_bytes.max(caps.max_payload_bytes),
-            max_atomic_result_bytes: caps.max_atomic_result_bytes,
-        }
+        capabilities_from_connect_dto(caps)
     }
 
     /// True when this guest meets the host's compiled minimum SQL contract.
@@ -441,19 +423,42 @@ impl DbCapabilities {
     /// First-party SQLite capability advertisement.
     #[must_use]
     pub fn advertised_sqlite() -> Self {
-        Self::from_connect(&DbConnectResult::sqlite())
+        capabilities_from_connect_dto(&DbConnectResult::sqlite())
     }
 
     /// First-party Cloudflare D1 capability advertisement.
     #[must_use]
     pub fn advertised_d1() -> Self {
-        Self::from_connect(&DbConnectResult::d1())
+        capabilities_from_connect_dto(&DbConnectResult::d1())
     }
 
     /// First-party PostgreSQL capability advertisement.
     #[must_use]
     pub fn advertised_postgres() -> Self {
-        Self::from_connect(&DbConnectResult::postgres())
+        capabilities_from_connect_dto(&DbConnectResult::postgres())
+    }
+}
+
+#[allow(clippy::missing_docs_in_private_items)]
+fn capabilities_from_connect_dto(caps: &DbConnectResult) -> DbCapabilities {
+    DbCapabilities {
+        sql_contract_version: caps.sql_contract_version,
+        atomic_batch: caps.atomic_batch,
+        returning: caps.returning,
+        affected_rows: true,
+        schema_migrations: caps.schema_migrations,
+        pragma_user_version: caps.pragma_user_version,
+        atomic_schema_batch: caps.atomic_schema_batch,
+        cancellation: true,
+        timing: caps.timing,
+        max_binds: caps.max_binds,
+        max_statements: caps.max_statements,
+        max_result_rows: caps.max_result_rows,
+        max_payload_bytes: caps.max_payload_bytes,
+        max_result_bytes: caps.max_result_bytes,
+        max_cell_bytes: caps.max_cell_bytes,
+        max_request_bytes: caps.max_atomic_request_bytes.max(caps.max_payload_bytes),
+        max_atomic_result_bytes: caps.max_atomic_result_bytes,
     }
 }
 

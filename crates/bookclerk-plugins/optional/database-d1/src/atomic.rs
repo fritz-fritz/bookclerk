@@ -10,10 +10,11 @@ use bookclerk_db_exec::{
     sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
     DbPlanStatementKind, DbPlanStmtExecResult,
 };
+use bookclerk_plugin_abi::DbConnectResult;
 use bookclerk_plugin_sdk::{
-    encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbConnectResult,
-    DbResultSelection, DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError,
-    StatementResult, TypedDbStatement,
+    encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbResultSelection,
+    DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, StatementResult,
+    TypedDbStatement,
 };
 use sea_orm::DbErr;
 use serde_json::Value as JsonValue;
@@ -109,7 +110,7 @@ impl D1Proxy {
     pub async fn run_typed_atomic(
         &self,
         req: &ExecuteRequest,
-        guest_receipt: bookclerk_plugin_sdk::host_db::GuestReceiptPersist,
+        guest_receipt: bookclerk_plugin_abi::GuestReceiptPersist,
     ) -> std::result::Result<ExecuteReply, DbErr> {
         let started = std::time::Instant::now();
         let deadline = (req.deadline_unix_ms > 0).then_some(req.deadline_unix_ms);

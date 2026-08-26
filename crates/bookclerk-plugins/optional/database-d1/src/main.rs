@@ -3,16 +3,17 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use async_trait::async_trait;
-use bookclerk_plugin_sdk::database_adapter::set_connection;
-use bookclerk_plugin_sdk::host_db::GuestReceiptPersist;
+use bookclerk_db_guest::set_connection;
+use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
+use bookclerk_plugin_abi::v2::AdapterSessionOpen;
+use bookclerk_plugin_abi::v2::{AdapterTransaction, HostAdapterDatabaseSession};
+use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
 use bookclerk_plugin_sdk::v2::{
-    AdapterDatabaseSession, AdapterSessionOpen, Database, DatabaseContext,
-    HostAdapterDatabaseSession, PluginDescribe, PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS,
-    PRODUCT_API_VERSION,
+    AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
+    FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    connect_params_from_context, serve, DbBootstrap, DbCapabilities, DbConnectParams, ExecuteReply,
-    ExecuteRequest, HandshakeResult, PluginError,
+    serve, DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, HandshakeResult, PluginError,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -78,10 +79,10 @@ struct D1Database;
 #[async_trait(?Send)]
 impl Database for D1Database {
     async fn open_session(&self) -> Result<AdapterSessionOpen, PluginError> {
-        Ok(AdapterSessionOpen {
-            session: Box::new(D1Session),
-            host: Some(Box::new(D1HostSession)),
-        })
+        Ok(AdapterSessionOpen::with_host(
+            Box::new(D1Session),
+            Box::new(D1HostSession),
+        ))
     }
 }
 
@@ -89,9 +90,7 @@ struct D1HostSession;
 
 #[async_trait(?Send)]
 impl HostAdapterDatabaseSession for D1HostSession {
-    async fn begin(
-        &self,
-    ) -> Result<Box<dyn bookclerk_plugin_sdk::v2::AdapterTransaction>, PluginError> {
+    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>, PluginError> {
         Err(PluginError::unsupported(
             "D1 does not support interactive transactions",
         ))
@@ -99,7 +98,7 @@ impl HostAdapterDatabaseSession for D1HostSession {
 
     async fn execute_envelope(
         &self,
-        envelope: bookclerk_plugin_sdk::host_db::HostExecuteEnvelope,
+        envelope: HostExecuteEnvelope,
     ) -> Result<ExecuteReply, PluginError> {
         let proxy = bookclerk_plugin_database_d1::shared_proxy()
             .ok_or_else(|| PluginError::internal("d1 guest is not connected"))?;

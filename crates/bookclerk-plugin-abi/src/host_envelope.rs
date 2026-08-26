@@ -20,6 +20,7 @@ pub struct GuestReceiptPersist {
     pub guest_request_hash: String,
 }
 
+#[cfg_attr(not(feature = "host"), allow(dead_code))]
 impl GuestReceiptPersist {
     /// True when the host did not stamp a guest-receipt finalize hint.
     #[must_use]
@@ -37,6 +38,7 @@ pub struct HostExecuteEnvelope {
     pub guest_receipt: GuestReceiptPersist,
 }
 
+#[cfg_attr(not(feature = "host"), allow(dead_code))]
 impl HostExecuteEnvelope {
     /// Builds a host-private envelope for adapter execution.
     #[must_use]

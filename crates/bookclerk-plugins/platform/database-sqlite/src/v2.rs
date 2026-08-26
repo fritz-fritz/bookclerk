@@ -7,17 +7,18 @@
 )]
 
 use async_trait::async_trait;
-use bookclerk_plugin_sdk::database_adapter::{
+use bookclerk_db_guest::{
     guest_bootstrap, guest_capabilities, guest_execute_atomic, host_session, set_connection,
 };
-use bookclerk_plugin_sdk::host_db::{GuestReceiptPersist, HostExecuteEnvelope};
+use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
+use bookclerk_plugin_abi::v2::AdapterSessionOpen;
+use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
 use bookclerk_plugin_sdk::v2::{
-    AdapterDatabaseSession, AdapterSessionOpen, Database, DatabaseContext, PluginDescribe,
-    PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
+    FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    connect_params_from_context, DbBootstrap, DbCapabilities, DbConnectParams, ExecuteReply,
-    ExecuteRequest, PluginError,
+    DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, PluginError,
 };
 
 use crate::ID;
@@ -87,10 +88,10 @@ struct SqliteDatabase;
 #[async_trait(?Send)]
 impl Database for SqliteDatabase {
     async fn open_session(&self) -> Result<AdapterSessionOpen> {
-        Ok(AdapterSessionOpen {
-            session: Box::new(SqliteSession),
-            host: Some(Box::new(host_session())),
-        })
+        Ok(AdapterSessionOpen::with_host(
+            Box::new(SqliteSession),
+            Box::new(host_session()),
+        ))
     }
 }
 

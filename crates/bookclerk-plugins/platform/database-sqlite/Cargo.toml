@@ -53,7 +53,9 @@ anyhow.workspace = true
 async-trait.workspace = true
 bookclerk-db-exec.workspace = true
 bookclerk-library = { workspace = true, optional = true }
-bookclerk-plugin-sdk = { workspace = true, features = ["db", "host-db-session"] }
+bookclerk-db-guest.workspace = true
+bookclerk-plugin-abi = { workspace = true, features = ["host"] }
+bookclerk-plugin-sdk = { workspace = true, features = ["db"] }
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
 sea-orm.workspace = true
@@ -63,6 +65,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+bookclerk-db-guest.workspace = true
+bookclerk-plugin-abi = { workspace = true, features = ["host"] }
 bookclerk-library.workspace = true
 chrono.workspace = true
 tempfile.workspace = true

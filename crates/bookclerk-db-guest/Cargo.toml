@@ -1,6 +1,6 @@
 [package]
 name = "bookclerk-db-guest"
-description = "Deprecated shim — use bookclerk-plugin-sdk::database_adapter"
+description = "First-party database guest session workers (SeaORM proxy, host IR envelopes)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,17 @@ authors.workspace = true
 publish = false
 
 [dependencies]
+async-trait.workspace = true
+base64.workspace = true
+bookclerk-db-exec.workspace = true
+bookclerk-plugin-abi = { workspace = true, features = ["host"] }
 bookclerk-plugin-sdk = { workspace = true, features = ["db"] }
+futures.workspace = true
+sea-orm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 bookclerk-library.workspace = true

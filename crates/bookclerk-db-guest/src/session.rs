@@ -7,21 +7,20 @@
 //! `execute` batches; SQLite and Postgres run named security ops via host IR
 //! envelopes and durable receipts.
 
-#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc, dead_code)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};
 
-use super::plugin_error_from_db_err;
-use super::sql::{
+use crate::sql::{
     guest_statement_to_seaorm, row_to_guest_row, GuestExecResult, GuestQueryResult, GuestRow,
     GuestStatement,
 };
-use crate::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use bookclerk_db_exec::{DbAtomicRequest, DbPlanExecResult};
-use bookclerk_plugin_abi::host_envelope::HostExecuteEnvelope;
-use bookclerk_plugin_abi::DbConnectResult;
+use bookclerk_plugin_abi::HostExecuteEnvelope;
 use bookclerk_plugin_abi::{DbCapabilities, ExecuteReply, ExecuteRequest};
+use bookclerk_plugin_sdk::database_adapter::plugin_error_from_db_err;
+use bookclerk_plugin_sdk::v2::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use futures::TryStreamExt;
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, StreamTrait,
@@ -101,7 +100,8 @@ enum TxnOp {
         /// Typed statements to run on the open transaction.
         request: ExecuteRequest,
         /// Oneshot used to return the typed reply.
-        reply: oneshot::Sender<std::result::Result<ExecuteReply, crate::PluginError>>,
+        reply:
+            oneshot::Sender<std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError>>,
     },
 }
 
@@ -244,12 +244,16 @@ pub async fn guest_rollback(txn_id: String) -> Result<()> {
 /// engine rejects the work.
 pub async fn guest_atomic(
     req: DbAtomicRequest,
-) -> std::result::Result<DbPlanExecResult, crate::PluginError> {
+) -> std::result::Result<DbPlanExecResult, bookclerk_plugin_abi::PluginError> {
     let gate = txn_gate();
     let _gate = gate.lock().await;
-    let conn = connection().await.map_err(crate::PluginError::internal)?;
+    let conn = connection()
+        .await
+        .map_err(bookclerk_plugin_abi::PluginError::internal)?;
     let plan = req.plan.ok_or_else(|| {
-        crate::PluginError::invalid_params("dbAtomic requires a host-authored executePlan")
+        bookclerk_plugin_abi::PluginError::invalid_params(
+            "dbAtomic requires a host-authored executePlan",
+        )
     })?;
     let caps = match conn.get_database_backend() {
         DbBackend::Postgres => bookclerk_plugin_abi::DbConnectResult::postgres(),
@@ -276,13 +280,15 @@ pub async fn guest_atomic(
 /// # Errors
 ///
 /// Returns when no connection has been opened.
-pub async fn guest_capabilities() -> std::result::Result<DbCapabilities, crate::PluginError> {
-    let conn = connection().await.map_err(crate::PluginError::internal)?;
-    let caps = match conn.get_database_backend() {
-        DbBackend::Postgres => DbConnectResult::postgres(),
-        _ => DbConnectResult::sqlite(),
-    };
-    Ok(DbCapabilities::from_connect(&caps))
+pub async fn guest_capabilities(
+) -> std::result::Result<DbCapabilities, bookclerk_plugin_abi::PluginError> {
+    let conn = connection()
+        .await
+        .map_err(bookclerk_plugin_abi::PluginError::internal)?;
+    Ok(match conn.get_database_backend() {
+        DbBackend::Postgres => DbCapabilities::advertised_postgres(),
+        _ => DbCapabilities::advertised_sqlite(),
+    })
 }
 
 /// Bootstrap-only SeaORM proxy metadata for the connected engine.
@@ -291,8 +297,10 @@ pub async fn guest_capabilities() -> std::result::Result<DbCapabilities, crate::
 ///
 /// Returns when no connection has been opened.
 pub async fn guest_bootstrap(
-) -> std::result::Result<bookclerk_plugin_abi::DbBootstrap, crate::PluginError> {
-    let conn = connection().await.map_err(crate::PluginError::internal)?;
+) -> std::result::Result<bookclerk_plugin_abi::DbBootstrap, bookclerk_plugin_abi::PluginError> {
+    let conn = connection()
+        .await
+        .map_err(bookclerk_plugin_abi::PluginError::internal)?;
     Ok(match conn.get_database_backend() {
         DbBackend::Postgres => bookclerk_plugin_abi::DbBootstrap::postgres(),
         _ => bookclerk_plugin_abi::DbBootstrap::sqlite(),
@@ -310,10 +318,12 @@ pub async fn guest_bootstrap(
 /// Returns when no connection is open or the engine rejects the work.
 pub async fn guest_execute_atomic(
     envelope: HostExecuteEnvelope,
-) -> std::result::Result<ExecuteReply, crate::PluginError> {
+) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
     let gate = txn_gate();
     let _gate = gate.lock().await;
-    let conn = connection().await.map_err(crate::PluginError::internal)?;
+    let conn = connection()
+        .await
+        .map_err(bookclerk_plugin_abi::PluginError::internal)?;
     let caps = match conn.get_database_backend() {
         DbBackend::Postgres => bookclerk_plugin_abi::DbConnectResult::postgres(),
         _ => bookclerk_plugin_abi::DbConnectResult::sqlite(),
@@ -346,8 +356,10 @@ pub async fn guest_execute_atomic(
 pub async fn guest_execute_atomic_on_txn(
     txn_id: String,
     request: ExecuteRequest,
-) -> std::result::Result<ExecuteReply, crate::PluginError> {
-    let tx = route(&txn_id).await.map_err(crate::PluginError::internal)?;
+) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
+    let tx = route(&txn_id)
+        .await
+        .map_err(bookclerk_plugin_abi::PluginError::internal)?;
     let (reply, rx) = oneshot::channel();
     tx.send(TxnOp::ExecuteAtomic {
         txn_id,
@@ -355,9 +367,12 @@ pub async fn guest_execute_atomic_on_txn(
         reply,
     })
     .await
-    .map_err(|_| crate::PluginError::internal("transaction worker closed".to_string()))?;
-    rx.await
-        .map_err(|_| crate::PluginError::internal("transaction worker closed".to_string()))?
+    .map_err(|_| {
+        bookclerk_plugin_abi::PluginError::internal("transaction worker closed".to_string())
+    })?;
+    rx.await.map_err(|_| {
+        bookclerk_plugin_abi::PluginError::internal("transaction worker closed".to_string())
+    })?
 }
 
 /// Runs a read-only SQL query through the guest database bridge.
@@ -642,7 +657,7 @@ async fn txn_worker(
                         .await
                         .map_err(|e| plugin_error_from_db_err(&e))
                     }
-                    Err(err) => Err(crate::PluginError::internal(err)),
+                    Err(err) => Err(bookclerk_plugin_abi::PluginError::internal(err)),
                 };
                 let _ = reply.send(result);
             }

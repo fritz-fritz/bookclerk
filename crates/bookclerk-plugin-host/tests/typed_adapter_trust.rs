@@ -4,11 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_library::{compile_named_request, DbAtomicParams, TypedAtomicExec};
-use bookclerk_plugin_sdk::host_db::{GuestReceiptPersist, HostExecuteEnvelope};
-use bookclerk_plugin_sdk::{
+use bookclerk_plugin_abi::{
     DbColumn, DbConnectResult, DbPlanStatementKind, DbResultSelection, DbRow, DbType, DbValue,
-    ExecuteReply, ExecuteRequest, PluginError as AbiPluginError, PluginErrorCode, StatementResult,
-    TypedDbStatement,
+    ExecuteReply, ExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope,
+    PluginError as AbiPluginError, PluginErrorCode, StatementResult, TypedDbStatement,
 };
 
 struct SessionTypedAdapter {

@@ -11,7 +11,7 @@ publish = false
 
 [dependencies]
 base64.workspace = true
-bookclerk-plugin-abi.workspace = true
+bookclerk-plugin-abi = { workspace = true, features = ["host"] }
 chrono.workspace = true
 futures.workspace = true
 sea-orm.workspace = true

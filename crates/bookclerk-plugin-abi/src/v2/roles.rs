@@ -260,11 +260,41 @@ pub trait Database {
 
 /// Public adapter session plus optional host-private interactive transaction view.
 pub struct AdapterSessionOpen {
-    /// Typed `capabilities` / `bootstrap` / `execute` / `close`.
-    pub session: Box<dyn AdapterDatabaseSession>,
-    /// Host-only interactive transaction support (first-party adapters only).
-    #[doc(hidden)]
-    pub host: Option<Box<dyn super::host_roles::HostAdapterDatabaseSession>>,
+    session: Box<dyn AdapterDatabaseSession>,
+    host: Option<Box<dyn super::host_roles::HostAdapterDatabaseSession>>,
+}
+
+impl AdapterSessionOpen {
+    /// Opens a typed adapter session without host-private interactive transactions.
+    #[must_use]
+    pub fn new(session: Box<dyn AdapterDatabaseSession>) -> Self {
+        Self {
+            session,
+            host: None,
+        }
+    }
+
+    /// First-party adapters only; requires `bookclerk-plugin-abi` feature `host`.
+    #[cfg(feature = "host")]
+    #[must_use]
+    pub fn with_host(
+        session: Box<dyn AdapterDatabaseSession>,
+        host: Box<dyn super::host_roles::HostAdapterDatabaseSession>,
+    ) -> Self {
+        Self {
+            session,
+            host: Some(host),
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Box<dyn AdapterDatabaseSession>,
+        Option<Box<dyn super::host_roles::HostAdapterDatabaseSession>>,
+    ) {
+        (self.session, self.host)
+    }
 }
 
 /// Host ↔ database adapter session (`capabilities` + typed `execute`).

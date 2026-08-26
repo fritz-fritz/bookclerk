@@ -2,14 +2,14 @@
 
 #![allow(clippy::missing_docs_in_private_items)]
 
-use bookclerk_plugin_abi::host_envelope::HostExecuteEnvelope;
 use bookclerk_plugin_abi::v2::{AdapterTransaction, HostAdapterDatabaseSession};
+use bookclerk_plugin_abi::HostExecuteEnvelope;
 use bookclerk_plugin_abi::{ExecuteReply, ExecuteRequest, Result};
 
-use super::errors::plugin_error_from_engine;
-use super::session::{
+use crate::session::{
     guest_begin, guest_commit, guest_execute_atomic, guest_execute_atomic_on_txn, guest_rollback,
 };
+use bookclerk_plugin_sdk::database_adapter::plugin_error_from_engine;
 
 /// In-process SeaORM transaction bridge for host `begin` RPC.
 pub struct GuestHostAdapterSession;

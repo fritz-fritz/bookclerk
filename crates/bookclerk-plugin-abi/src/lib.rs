@@ -55,8 +55,7 @@ pub mod db_value;
 pub mod error;
 pub mod events;
 pub mod guest_sql;
-#[doc(hidden)]
-pub mod host_envelope;
+pub(crate) mod host_envelope;
 pub mod kind;
 pub mod methods;
 pub mod types;
@@ -121,6 +120,8 @@ pub use guest_sql::{
     authorize_guest_sql_policy, guest_statement_kind, parse_guest_sql_refs,
     validate_guest_execute_request, GuestSqlPolicy, GuestSqlRefs,
 };
+#[cfg(feature = "host")]
+pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
 pub use types::*;

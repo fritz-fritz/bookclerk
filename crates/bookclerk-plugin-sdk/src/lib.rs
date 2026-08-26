@@ -63,13 +63,6 @@ pub mod tools;
 pub mod v2;
 pub mod workerd;
 
-#[cfg(feature = "db")]
-pub use bookclerk_plugin_abi::db::{
-    connect_params_from_context, database_context_from_params, DbConnectParams,
-};
-#[cfg(feature = "db")]
-#[doc(hidden)]
-pub use bookclerk_plugin_abi::DbConnectResult;
 pub use callback_tunnel::{TunnelGuest, TunnelHost, TunnelStream};
 #[cfg(feature = "db")]
 pub use db::{db_value_from_sea, proxy_rows_from_typed};
@@ -78,9 +71,6 @@ pub use db_binding::{
     DatabaseBinding, DatabaseBindingOptions, PreparedStatement, RetryToken,
 };
 pub use error::{Result, SdkError};
-/// Host-only database replay envelope types (not for third-party plugin authors).
-#[doc(hidden)]
-pub mod host_db;
 pub use fetch_dir::{fetch_work_dir, upload_file_path, FetchWorkDir, UploadFile};
 pub use pass_fd::{fd_proc_path, recv_passed_fd, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
 pub use protocol::{

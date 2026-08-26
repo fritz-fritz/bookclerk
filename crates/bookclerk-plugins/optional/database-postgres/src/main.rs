@@ -3,17 +3,18 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use async_trait::async_trait;
-use bookclerk_plugin_sdk::database_adapter::{
+use bookclerk_db_guest::{
     guest_bootstrap, guest_capabilities, guest_execute_atomic, host_session, set_connection,
 };
-use bookclerk_plugin_sdk::host_db::{GuestReceiptPersist, HostExecuteEnvelope};
+use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
+use bookclerk_plugin_abi::v2::AdapterSessionOpen;
+use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
 use bookclerk_plugin_sdk::v2::{
-    AdapterDatabaseSession, AdapterSessionOpen, Database, DatabaseContext, PluginDescribe,
-    PluginRoot, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
+    FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    connect_params_from_context, serve, DbBootstrap, DbCapabilities, DbConnectParams, ExecuteReply,
-    ExecuteRequest, HandshakeResult, PluginError,
+    serve, DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, HandshakeResult, PluginError,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -76,10 +77,10 @@ struct PostgresDatabase;
 #[async_trait(?Send)]
 impl Database for PostgresDatabase {
     async fn open_session(&self) -> Result<AdapterSessionOpen, PluginError> {
-        Ok(AdapterSessionOpen {
-            session: Box::new(PostgresSession),
-            host: Some(Box::new(host_session())),
-        })
+        Ok(AdapterSessionOpen::with_host(
+            Box::new(PostgresSession),
+            Box::new(host_session()),
+        ))
     }
 }
 

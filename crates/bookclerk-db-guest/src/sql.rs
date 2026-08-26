@@ -1,6 +1,6 @@
 //! In-process SeaORM session SQL types (not public ABI wire DTOs).
 
-#![allow(clippy::missing_docs_in_private_items)]
+#![allow(clippy::missing_docs_in_private_items, dead_code)]
 
 use std::collections::BTreeMap;
 

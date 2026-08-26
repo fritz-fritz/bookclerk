@@ -14,13 +14,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_db_exec::db_value_from_sea;
-use bookclerk_plugin_sdk::host_db::HostExecuteEnvelope;
+use bookclerk_plugin_abi::HostExecuteEnvelope;
+use bookclerk_plugin_abi::{database_context_from_params, DbConnectParams, DbConnectResult};
 use bookclerk_plugin_sdk::v2::GuestDatabase;
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
-    proxy_rows_from_typed, DbConnectParams, DbConnectResult, DbPlanStatementKind,
-    DbResultSelection, ExecuteReply, ExecuteRequest, PluginError as AbiPluginError,
-    TypedDbStatement,
+    proxy_rows_from_typed, DbPlanStatementKind, DbResultSelection, ExecuteReply, ExecuteRequest,
+    PluginError as AbiPluginError, TypedDbStatement,
 };
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
@@ -105,8 +105,8 @@ impl ExternalDatabase {
             &self.plugin_data_dir,
             &self.session,
         )?;
-        let ctx = bookclerk_plugin_sdk::database_context_from_params(&params)
-            .map_err(|err| DbErr::Custom(err.to_string()))?;
+        let ctx =
+            database_context_from_params(&params).map_err(|err| DbErr::Custom(err.to_string()))?;
         self.session.db_open(ctx).await.map_err(map_rpc_err)?;
 
         let caps = self.session.db_capabilities().await.map_err(map_rpc_err)?;
@@ -1398,8 +1398,7 @@ pub fn database_connect_context(
     let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
     let params = connect_params(config, &plugin.manifest.id, &plugin_data_dir, session)
         .map_err(|err| PluginError::message(err.to_string()))?;
-    bookclerk_plugin_sdk::database_context_from_params(&params)
-        .map_err(|err| PluginError::message(err.to_string()))
+    database_context_from_params(&params).map_err(|err| PluginError::message(err.to_string()))
 }
 
 /// Builds guest `db.connect` params from host config.

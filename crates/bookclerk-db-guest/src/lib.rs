@@ -1,21 +1,17 @@
-//! Back-compat shim for `bookclerk_plugin_sdk::database_adapter`.
+//! First-party database guest internals (SeaORM session workers).
 //!
-//! New database guests should depend on `bookclerk-plugin-sdk` with feature
-//! `db` and import [`bookclerk_plugin_sdk::database_adapter`] directly.
+//! Third-party database plugin authors should depend on
+//! [`bookclerk_plugin_sdk::database_adapter`] only. Platform SQLite / Postgres /
+//! D1 guests use this crate for host-mediated session and transaction workers.
 
-pub use bookclerk_plugin_sdk::database_adapter::*;
+mod host_session;
+mod session;
+mod sql;
 
-/// Back-compat submodule path (`bookclerk_db_guest::errors`).
-pub mod errors {
-    pub use bookclerk_plugin_sdk::database_adapter::errors::*;
-}
-
-/// Back-compat submodule path (`bookclerk_db_guest::migrate`).
-pub mod migrate {
-    pub use bookclerk_plugin_sdk::database_adapter::migrate::*;
-}
-
-/// Back-compat submodule path (`bookclerk_db_guest::session`).
-pub mod session {
-    pub use bookclerk_plugin_sdk::database_adapter::session::*;
-}
+pub use host_session::{host_session, GuestHostAdapterSession};
+pub use session::{
+    guest_begin, guest_bootstrap, guest_capabilities, guest_commit, guest_execute,
+    guest_execute_atomic, guest_execute_atomic_on_txn, guest_ping, guest_query, guest_query_page,
+    guest_rollback, row_to_dto, set_connection,
+};
+pub use sql::{guest_sql, GuestStatement};

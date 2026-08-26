@@ -78,7 +78,6 @@ LIBRARY_ISOLATION_PACKAGES = (
 )
 
 FORBIDDEN_PRODUCTION_DEPS = (
-    "bookclerk-db-guest",
     "bookclerk-library",
 )
 
@@ -87,8 +86,7 @@ def check_cargo_metadata() -> list[str]:
     """Refuse forbidden production deps on database guest crates.
 
     Optional (`host-helpers`) and `[dev-dependencies]` are allowed, but the
-    default/release feature graph must not enable `bookclerk-library` or
-    `bookclerk-db-guest`.
+    default/release feature graph must not enable `bookclerk-library`.
     """
     proc = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--no-deps"],
@@ -120,11 +118,6 @@ def check_cargo_metadata() -> list[str]:
             hits.append(
                 f"{pkg['name']}: default/release feature graph depends on bookclerk-library"
             )
-        if "bookclerk-db-guest" in default_enabled:
-            hits.append(
-                f"{pkg['name']}: default/release feature graph depends on bookclerk-db-guest "
-                "(use bookclerk-plugin-sdk::database_adapter)"
-            )
         for dep in pkg.get("dependencies", []):
             dep_name = dep.get("name")
             if dep_name not in FORBIDDEN_PRODUCTION_DEPS:
@@ -134,8 +127,9 @@ def check_cargo_metadata() -> list[str]:
             if kind in (None, "normal") and not optional:
                 hits.append(
                     f"{pkg['name']}: non-optional dependency on {dep_name} "
-                    "(use bookclerk-plugin-sdk::database_adapter, optional host-helpers, "
-                    "or a dev-dependency)"
+                    "(use bookclerk-db-guest for first-party session workers, "
+                    "bookclerk-plugin-sdk::database_adapter for author helpers, "
+                    "optional host-helpers, or a dev-dependency)"
                 )
     return hits
 

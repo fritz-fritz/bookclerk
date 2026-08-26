@@ -16,8 +16,12 @@ mod types;
 /// Generated Cap'n Proto RPC interfaces (`schema/plugin_v2.capnp`).
 pub use crate::plugin_v2_capnp;
 
-/// Host-private Cap'n Proto RPC interfaces (`schema/plugin_v2_host.capnp`).
-pub use crate::plugin_v2_host_capnp;
+pub(crate) use crate::plugin_v2_host_capnp;
+
+#[cfg(feature = "host")]
+pub use host_roles::{AdapterTransaction, HostAdapterDatabaseSession};
+#[cfg(feature = "host")]
+pub use host_rpc::HostAdapterDatabaseSessionClient;
 
 pub use db_rpc::{
     canonical_execute_request_hash, decode_db_value_bytes, decode_execute_request_bytes,
@@ -29,8 +33,6 @@ pub use features::{
     negotiate_rpc_features, RpcFeature, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY,
     FEATURE_STREAMS,
 };
-pub use host_roles::{AdapterTransaction, HostAdapterDatabaseSession};
-pub use host_rpc::HostAdapterDatabaseSessionClient;
 pub use jobs::{read_all, stream_copy_keys, StreamCopyHandler, StreamCopySpec};
 pub use limits::{
     ScalarLimits, ABI_MAJOR, ABI_MINOR, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_SCALAR_BYTES,

@@ -15,13 +15,14 @@ use std::time::Duration;
 use anyhow::anyhow;
 use async_trait::async_trait;
 use bookclerk_config::Config;
+use bookclerk_plugin_abi::v2::HostAdapterDatabaseSession;
 use bookclerk_plugin_sdk::v2::{
     connect_plugin, negotiate_rpc_features, ByteRange as AbiByteRange, Cancellation, CopyResult,
-    Destination, DestinationContext, HostAdapterDatabaseSession, JobInvocation, JobInvocationLease,
-    ListOptions, ObjectMetadata, OidcClientTemplate, PluginClient, PluginDescribe, PutResult,
-    ReadResult, ScalarLimits, Source, StreamCopySpec, WorkerContext, WriteOptions,
-    FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_SCALAR_BYTES,
-    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+    Destination, DestinationContext, JobInvocation, JobInvocationLease, ListOptions,
+    ObjectMetadata, OidcClientTemplate, PluginClient, PluginDescribe, PutResult, ReadResult,
+    ScalarLimits, Source, StreamCopySpec, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS,
+    FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES,
+    PRODUCT_API_VERSION,
 };
 use bookclerk_storage::{
     ByteRange, ListPage, ObjectInfo, ObjectMeta, ObjectProbe, PutStreamResult, StorageBackend,
@@ -160,7 +161,7 @@ enum Work {
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
     DbExecuteEnvelopeRequest {
-        envelope: bookclerk_plugin_sdk::host_db::HostExecuteEnvelope,
+        envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
@@ -748,7 +749,7 @@ impl V2PluginSession {
     /// Returns a plugin error when the guest rejects the call or `cancel` is set.
     pub async fn db_execute_envelope_request(
         &self,
-        envelope: bookclerk_plugin_sdk::host_db::HostExecuteEnvelope,
+        envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
         self.call(|reply| Work::DbExecuteEnvelopeRequest {
@@ -1011,9 +1012,9 @@ fn vat_thread(
                     Box<dyn bookclerk_plugin_sdk::v2::AdapterDatabaseSession>,
                 > = None;
                 let mut db_host_session: Option<
-                    bookclerk_plugin_sdk::v2::HostAdapterDatabaseSessionClient,
+                    bookclerk_plugin_abi::v2::HostAdapterDatabaseSessionClient,
                 > = None;
-                let mut db_txn: Option<Box<dyn bookclerk_plugin_sdk::v2::AdapterTransaction>> =
+                let mut db_txn: Option<Box<dyn bookclerk_plugin_abi::v2::AdapterTransaction>> =
                     None;
                 while let Some(work) = rx.recv().await {
                     match work {
