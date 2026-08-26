@@ -567,15 +567,18 @@ mod tests {
     use bookclerk_plugin_abi::DbCapabilities;
 
     #[test]
-    fn host_migration_plan_is_single_greenfield_baseline() {
+    fn host_migration_plan_starts_with_greenfield_baseline() {
         use crate::migrations::{
             greenfield_baseline_canonical, host_migration_plan, migration_sql,
         };
         let plan = host_migration_plan();
-        assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].version, 1);
         assert_eq!(plan[0].canonical, greenfield_baseline_canonical());
         assert!(plan[0].canonical.contains(migration_sql()[0]));
+        // Versions are contiguous starting at 1.
+        for (i, step) in plan.iter().enumerate() {
+            assert_eq!(step.version, i as i64 + 1);
+        }
     }
 
     #[test]
@@ -655,7 +658,6 @@ mod tests {
             applied.contains(&last),
             "last plan version {last}, applied={applied:?}"
         );
-        assert_eq!(plan.len(), 1, "greenfield baseline is one squashed version");
         let cols = db
             .query_all_raw(Statement::from_string(
                 DbBackend::Sqlite,

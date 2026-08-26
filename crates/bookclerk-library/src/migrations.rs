@@ -937,13 +937,38 @@ pub struct HostMigrationStep {
     pub canonical: &'static str,
 }
 
+/// Canonical DDL for the plugin-database registry (V2).
+///
+/// One row per provisioned `(plugin_id, binding)` unit: `backend_kind` is the
+/// adapter family that provisioned it (`sqlite`, `postgres`, `d1`), and
+/// `unit_ref` the backend-native unit (file path, schema name, or D1
+/// database id).
+const MIGRATION_V2_PLUGIN_DATABASES: &str = r#"
+    CREATE TABLE IF NOT EXISTS plugin_databases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plugin_id TEXT NOT NULL,
+        binding TEXT NOT NULL,
+        backend_kind TEXT NOT NULL,
+        unit_ref TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(plugin_id, binding)
+    );
+    CREATE INDEX IF NOT EXISTS idx_plugin_databases_plugin ON plugin_databases(plugin_id);
+"#;
+
 /// Returns the canonical host migration plan shared by every marker kind.
 #[must_use]
 pub fn host_migration_plan() -> Vec<HostMigrationStep> {
-    vec![HostMigrationStep {
-        version: 1,
-        canonical: greenfield_baseline_canonical(),
-    }]
+    vec![
+        HostMigrationStep {
+            version: 1,
+            canonical: greenfield_baseline_canonical(),
+        },
+        HostMigrationStep {
+            version: 2,
+            canonical: MIGRATION_V2_PLUGIN_DATABASES,
+        },
+    ]
 }
 
 /// Concatenated canonical sqlite-shaped baseline DDL (greenfield squash).
@@ -966,9 +991,10 @@ pub fn host_migration_sql(_backend: sea_orm::DbBackend, step: &HostMigrationStep
 /// edge — there is no hand-authored parallel Postgres schema.
 #[must_use]
 pub fn latest_schema_postgres() -> String {
-    bookclerk_db_exec::split_schema_statements(greenfield_baseline_canonical())
+    host_migration_plan()
         .iter()
-        .map(|stmt| bookclerk_db_exec::lower_canonical_ddl_to_postgres(stmt))
+        .flat_map(|step| bookclerk_db_exec::split_schema_statements(step.canonical))
+        .map(|stmt| bookclerk_db_exec::lower_canonical_ddl_to_postgres(&stmt))
         .collect::<Vec<_>>()
         .join(";\n")
 }
@@ -1242,7 +1268,6 @@ mod tests {
     #[test]
     fn host_migration_plan_is_single_baseline_containing_legacy_steps() {
         let plan = host_migration_plan();
-        assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].version, 1);
         let canonical = plan[0].canonical;
         for step in migration_sql() {
@@ -1251,6 +1276,9 @@ mod tests {
                 "baseline must include legacy step fragment"
             );
         }
+        // V2: plugin-database registry.
+        assert_eq!(plan[1].version, 2);
+        assert!(plan[1].canonical.contains("plugin_databases"));
     }
 
     #[test]

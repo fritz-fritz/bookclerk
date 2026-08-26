@@ -123,6 +123,25 @@ pub fn effective_cpu_cores(value: Option<f64>) -> f64 {
 /// Host binding names operators may grant (widen or narrow).
 pub const KNOWN_HOST_BINDINGS: &[&str] = &["config", "secrets", "plugin_kv", "work_fs", "oauth"];
 
+/// Grant-entry prefix for named plugin database bindings (`database:<NAME>`).
+pub const DATABASE_BINDING_PREFIX: &str = "database:";
+
+/// The binding name when a grant entry is a named database binding.
+#[must_use]
+pub fn database_binding_name(binding: &str) -> Option<&str> {
+    binding.strip_prefix(DATABASE_BINDING_PREFIX)
+}
+
+/// Consented database binding names on a grant, in manifest-set order.
+#[must_use]
+pub fn granted_database_bindings(grant: &PluginGrant) -> Vec<String> {
+    grant
+        .bindings
+        .iter()
+        .filter_map(|b| database_binding_name(b).map(str::to_string))
+        .collect()
+}
+
 /// One approved grant snapshot for a plugin id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -275,6 +294,9 @@ pub fn consent_request(manifest: &PluginManifest) -> PluginGrant {
     if b.oauth {
         bindings.insert("oauth".into());
     }
+    for name in &b.databases {
+        bindings.insert(format!("{DATABASE_BINDING_PREFIX}{name}"));
+    }
     let flags = manifest
         .workerd
         .as_ref()
@@ -375,6 +397,13 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
+        ));
+    }
+    let databases = granted_database_bindings(grant);
+    if !databases.is_empty() {
+        lines.push(format!(
+            "Plugin databases (isolated, plugin-owned): {}",
+            databases.join(", ")
         ));
     }
     if !grant.compatibility_flags.is_empty() {
@@ -572,6 +601,14 @@ pub fn validate_approved_grant(
         )));
     }
     for binding in &approved.bindings {
+        if let Some(name) = database_binding_name(binding) {
+            if !bookclerk_plugin_manifest::is_valid_database_binding_name(name) {
+                return Err(PluginError::message(format!(
+                    "invalid database binding name `{name}` (expected [A-Z][A-Z0-9_]*)"
+                )));
+            }
+            continue;
+        }
         if !KNOWN_HOST_BINDINGS
             .iter()
             .any(|known| binding.eq_ignore_ascii_case(known))
@@ -594,6 +631,10 @@ pub fn validate_approved_grant(
         .bindings
         .iter()
         .map(|b| {
+            if database_binding_name(b).is_some() {
+                // Preserve the case-sensitive binding name after the prefix.
+                return b.clone();
+            }
             KNOWN_HOST_BINDINGS
                 .iter()
                 .find(|known| b.eq_ignore_ascii_case(known))
