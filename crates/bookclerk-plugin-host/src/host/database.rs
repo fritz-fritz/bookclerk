@@ -44,7 +44,7 @@ pub struct ExternalDatabase {
     session: Arc<V2PluginSession>,
     /// Manifest id (`sqlite`, `d1`, `postgres`) used to build connect params.
     plugin_id: String,
-    /// Guest HOME / data directory passed on `db.connect`.
+    /// Guest HOME / data directory passed in the connect params.
     plugin_data_dir: std::path::PathBuf,
 }
 
@@ -559,7 +559,7 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         if let Err(err) = self.session.db_begin().await {
             self.pop_depth();
             bookclerk_library::note_begin_failed(&err);
-            tracing::error!(error = %err, "database plugin dbBegin failed");
+            tracing::error!(error = %err, "database plugin begin failed");
         }
     }
 
@@ -569,7 +569,7 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
                 if let Err(err) = self.session.db_rollback().await {
                     tracing::error!(
                         error = %err,
-                        "database plugin dbRollback after injected commit failure"
+                        "database plugin rollback after injected commit failure"
                     );
                 }
             }
@@ -588,9 +588,9 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         }
         if let Err(err) = self.session.db_commit().await {
             bookclerk_library::note_commit_failed(&err);
-            tracing::error!(error = %err, "database plugin dbCommit failed");
+            tracing::error!(error = %err, "database plugin commit failed");
             if let Err(rb) = self.session.db_rollback().await {
-                tracing::error!(error = %rb, "database plugin dbRollback after commit failure");
+                tracing::error!(error = %rb, "database plugin rollback after commit failure");
             }
         }
     }
@@ -603,7 +603,7 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             return;
         }
         if let Err(err) = self.session.db_rollback().await {
-            tracing::error!(error = %err, "database plugin dbRollback failed");
+            tracing::error!(error = %err, "database plugin rollback failed");
         }
     }
 
@@ -616,18 +616,18 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         }
         let session = self.session.clone();
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            tracing::error!("database plugin dbRollback skipped: no tokio runtime");
+            tracing::error!("database plugin rollback skipped: no tokio runtime");
             return;
         };
         if let Err(err) = tokio::task::block_in_place(|| {
             handle.block_on(async move { session.db_rollback().await.map(|_| ()) })
         }) {
-            tracing::error!(error = %err, "database plugin dbRollback failed");
+            tracing::error!(error = %err, "database plugin rollback failed");
         }
     }
 }
 
-/// Host [`AtomicTxnBackend`] that runs named security ops as one guest `dbAtomic`.
+/// Host [`AtomicTxnBackend`] that runs named security ops as one guest atomic batch.
 struct RpcAtomicBackend {
     /// Cap'n Proto v2 session used for a single `bookclerk.atomic` query per operation.
     session: Arc<V2PluginSession>,
@@ -1394,7 +1394,7 @@ pub fn database_connect_context(
     database_context_from_params(&params).map_err(|err| PluginError::message(err.to_string()))
 }
 
-/// Builds guest `db.connect` params from host config.
+/// Builds guest connect params from host config.
 ///
 /// First-party ids (`sqlite`, `d1`, `postgres`) receive host-injected paths /
 /// secrets. Unknown ids get [`DbConnectParams::Guest`] so third-party adapters
@@ -1490,7 +1490,7 @@ fn apply_bootstrap_metadata(bootstrap: &mut DbBootstrap, plugin_id: &str) {
     }
 }
 
-/// SQLite `db.connect` params for first-party `sqlite` and arbitrary sqlite-family ids.
+/// SQLite connect params for first-party `sqlite` and arbitrary sqlite-family ids.
 fn sqlite_connect_params(config: &Config, plugin_data_dir: &Path) -> DbConnectParams {
     let path = config.database.sqlite_path(&config.paths().files_dir);
     DbConnectParams::Sqlite {

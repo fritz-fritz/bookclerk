@@ -184,7 +184,7 @@ export interface D1Result<T = Record<string, DbValue>> {
  * Cloudflare {@link https://developers.cloudflare.com/d1/worker-api/return-object/ | D1ExecResult}.
  */
 export interface D1ExecResult {
-  /** Number of statements executed (always `1` for Bookclerk `exec`). */
+  /** Number of statements executed (one per non-empty `exec` line). */
   count: number;
   /** Total duration in milliseconds. */
   duration: number;

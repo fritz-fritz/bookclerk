@@ -44,7 +44,7 @@ use crate::wishlist_merge::apply_merged_sources;
 pub struct LibraryStore {
     /// Shared SeaORM connection opened by the database plugin (SQLite / D1 / Postgres).
     db: DatabaseConnection,
-    /// When set, named security methods run as one guest `dbAtomic` command
+    /// When set, named security methods run as one guest atomic batch
     /// instead of a local SeaORM transaction.
     atomic: Option<Arc<dyn AtomicTxnBackend>>,
     /// When set, granted guest SQL runs as one guest `executeAtomic`.
@@ -87,7 +87,7 @@ impl LibraryStore {
         }
     }
 
-    /// Attach a guest `dbAtomic` backend for named security operations.
+    /// Attach a guest atomic backend for named security operations.
     ///
     /// Hosts attach this for every database plugin. Tests that open a local
     /// connection leave it unset and run the same commands through
@@ -1916,7 +1916,7 @@ impl LibraryStore {
     /// * `client` - Optional client metadata stored on the session row.
     /// * `new_password_hash` - Argon2id hash to set when the local user has none.
     /// * `password_fingerprint` - Stable HMAC of the plaintext password for
-    ///   `dbAtomic` idempotency; ignored by the mutation SQL.
+    ///   atomic-execute idempotency; ignored by the mutation SQL.
     ///
     /// # Returns
     ///

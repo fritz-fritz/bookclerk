@@ -541,7 +541,7 @@ const MIGRATION_V10_SSO_WEBAUTHN_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at);
 "#;
 
-/// Durable `dbAtomic` receipts (idempotent replay after a lost response).
+/// Durable atomic receipts (idempotent replay after a lost response).
 const MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE: &str = r#"
     CREATE TABLE IF NOT EXISTS db_atomic_receipts (
         operation_id TEXT PRIMARY KEY NOT NULL,

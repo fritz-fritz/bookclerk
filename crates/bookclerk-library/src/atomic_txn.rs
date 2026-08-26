@@ -4,8 +4,8 @@
 //! `bookclerk.atomic` query. Database guests run that batch as one SQL
 //! transaction (D1 HTTP `batch()`, SQLite/Postgres `BEGIN`) and must not
 //! parse Bookclerk operation names. Receipts live in host-authored SQL
-//! against `db_atomic_receipts`. Generic `dbBegin` / `dbCommit` remain for
-//! unrelated work.
+//! against `db_atomic_receipts`. Host-private interactive transactions
+//! remain for unrelated work.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -20,7 +20,7 @@ use crate::secrets::EncryptedSecretRecord;
 use crate::SessionClientInfo;
 
 /// Backend that runs [`crate::LibraryStore`] named security operations as a
-/// single guest `dbAtomic` command.
+/// single guest atomic batch.
 ///
 /// Implementations must preserve the same fail-closed semantics as the SeaORM
 /// path: last-owner refusals mutate nothing; a failed claim redeem must not
@@ -73,7 +73,7 @@ pub trait AtomicTxnBackend: Send + Sync {
         kind: &str,
     ) -> Result<Option<(Option<i64>, String)>>;
 
-    /// Admit a durable job in one `dbAtomic` transaction.
+    /// Admit a durable job in one atomic transaction.
     async fn enqueue_job(&self, spec: EnqueueJobSpec) -> Result<EnqueueOutcome>;
 
     /// Claim the next ready job; `operation_id` makes a lost response replay-safe.

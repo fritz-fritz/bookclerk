@@ -56,7 +56,7 @@ pub struct D1Result {
 /// Cloudflare [`D1ExecResult`](https://developers.cloudflare.com/d1/worker-api/return-object/).
 #[derive(Debug, Clone, PartialEq)]
 pub struct D1ExecResult {
-    /// Number of statements executed (always `1` for Bookclerk `exec`).
+    /// Number of statements executed (one per non-empty `exec` line).
     pub count: u32,
     /// Total duration in milliseconds.
     pub duration: f64,

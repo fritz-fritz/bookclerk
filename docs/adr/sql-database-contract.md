@@ -9,8 +9,8 @@
 ## Context
 
 Bookclerk ships three first-party database guests (SQLite, PostgreSQL,
-Cloudflare D1). Ordinary CRUD already crosses a generic SeaORM proxy
-(`dbQuery` / `dbExecute`). Atomic work did not: the wire type was a named
+Cloudflare D1). Ordinary CRUD already crosses a generic SeaORM proxy.
+Atomic work did not: the wire type was a named
 domain enum (`deleteUser`, `publishDomainEvent`, `claimNextJob`, …). D1
 recompiled each variant into schema-aware SQL inside the guest; SQLite and
 PostgreSQL ran a separate SeaORM implementation of the same invariants.
@@ -169,7 +169,7 @@ limits is not loaded.
 
 - First-party database plugins shrink to connect, ping, proxy CRUD, and a
   generic batch executor. The host selects and applies schema versions after
-  capability negotiation (generic `dbExecute` / one atomic batch; D1 V27 is
+  capability negotiation (generic execute / one atomic batch; D1 V27 is
   still one host-compiled HTTP batch).
 - An architecture lint forbids plugin and `bookclerk-db-guest` production
   sources from importing Bookclerk migrations, embedding application table

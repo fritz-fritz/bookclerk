@@ -1,4 +1,4 @@
-//! In-process SQLite `dbAtomic` backend for tests (no plugin RPC).
+//! In-process SQLite atomic backend for tests (no plugin RPC).
 
 use async_trait::async_trait;
 use sea_orm::DatabaseConnection;

@@ -4,8 +4,8 @@
 //! Autocommit statements use the documented `{ "sql", "params" }` REST body.
 //! Interactive `BEGIN` is rejected: Time Travel is not a substitute for rollback, and
 //! mid-transaction SeaORM reads cannot be satisfied without committing.
-//! Atomic library operations use [`D1Proxy::run_atomic`] (`dbAtomic`) which
-//! sends `{ "batch": [...] }` (a real SQL transaction) with control flow
+//! Atomic library operations use [`D1Proxy::run_atomic`], which sends
+//! `{ "batch": [...] }` (a real SQL transaction) with control flow
 //! encoded in SQL and a durable `operationId` receipt.
 
 use std::collections::BTreeMap;
@@ -48,12 +48,12 @@ pub async fn open(
 
 /// Operator-facing reason recorded when SeaORM `begin` is rejected on D1 HTTP.
 const D1_INTERACTIVE_TXN_UNSUPPORTED: &str = "D1 does not support interactive transactions; \
-     each HTTP request commits immediately. Use dbAtomic for claim redeem, last-owner guards, and consume-once tokens";
+     each HTTP request commits immediately. Use atomic execute for claim redeem, last-owner guards, and consume-once tokens";
 
-/// Process-wide D1 proxy installed by [`open`] so `dbAtomic` can reuse the same HTTP client.
+/// Process-wide D1 proxy installed by [`open`] so atomic execute can reuse the same HTTP client.
 static SHARED: OnceLock<D1Proxy> = OnceLock::new();
 
-/// Stores the process-wide D1 proxy used by `dbAtomic` after [`open`].
+/// Stores the process-wide D1 proxy used by atomic execute after [`open`].
 pub fn set_shared_proxy(proxy: D1Proxy) {
     let _ = SHARED.set(proxy);
 }
@@ -821,10 +821,10 @@ mod tests {
         assert_eq!(queries.len(), 1);
         let batch = queries[0]["batch"]
             .as_array()
-            .expect("dbAtomic must use the documented { batch: [...] } envelope");
+            .expect("atomic execute must use the documented { batch: [...] } envelope");
         assert!(
             batch.len() > 1,
-            "dbAtomic must send a multi-statement D1 batch, got {}",
+            "atomic execute must send a multi-statement D1 batch, got {}",
             queries[0]
         );
         let sql: String = batch
@@ -878,10 +878,10 @@ mod tests {
         assert_eq!(queries.len(), 1);
         let batch = queries[0]["batch"]
             .as_array()
-            .expect("dbAtomic must use the documented { batch: [...] } envelope");
+            .expect("atomic execute must use the documented { batch: [...] } envelope");
         assert!(
             batch.len() > 1,
-            "dbAtomic must send a multi-statement D1 batch, got {}",
+            "atomic execute must send a multi-statement D1 batch, got {}",
             queries[0]
         );
         let sql: String = batch
@@ -931,7 +931,7 @@ mod tests {
         assert_eq!(queries.len(), 1);
         let batch = queries[0]["batch"]
             .as_array()
-            .expect("dbAtomic must use the documented { batch: [...] } envelope");
+            .expect("atomic execute must use the documented { batch: [...] } envelope");
         let sql: String = batch
             .iter()
             .filter_map(|stmt| stmt["sql"].as_str())

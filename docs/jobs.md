@@ -78,8 +78,8 @@ pending → running → succeeded
                  ↘ cancelled
 ```
 
-- **Admission** is one atomic backend operation (`dbAtomic` in production,
-  a local `BEGIN` in tests). A partial unique index on `dedup_key` for
+- **Admission** is one atomic backend operation (a guest atomic batch in
+  production, a local `BEGIN` in tests). A partial unique index on `dedup_key` for
   `pending`/`running` rows enforces active-key uniqueness.
 - A **worker** claims with a conditional `pending` → `running` update and a
   unique per-attempt `lease_generation`. Lost RPCs retry the same
@@ -144,7 +144,7 @@ exceed `max_pending` under `READ COMMITTED` on every required backend. The requi
 concurrency tests against a disposable multi-connection database
 (`BOOKCLERK_TEST_POSTGRES_URL` + `BOOKCLERK_REQUIRE_POSTGRES_TESTS=1`).
 They are `#[ignore]` in the default workspace suite so a missing Postgres
-cannot false-pass. TOTP enroll/disable `dbAtomic` conformance
+cannot false-pass. TOTP enroll/disable atomic conformance
 (`postgres_totp_*`) is not ignored: the same job provisions Postgres and
 runs those tests automatically (`BOOKCLERK_REQUIRE_POSTGRES_TESTS=1`).
 

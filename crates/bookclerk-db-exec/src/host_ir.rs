@@ -147,7 +147,7 @@ pub struct DbPlanExecResult {
     pub timing: Option<DbAtomicTiming>,
 }
 
-/// Sentinel SQL for legacy JSON `dbAtomic` negotiation (host-internal).
+/// Sentinel SQL for the host-internal atomic proxy transport.
 pub const DB_ATOMIC_SENTINEL: &str = "bookclerk.atomic";
 
 /// Sentinel SQL for capability negotiation (host-internal).

@@ -52,7 +52,7 @@ impl LibraryStore {
 
     /// Claim the next ready job with a conditional `pending` → `running` mutation.
     ///
-    /// `operation_id` is the dbAtomic / local-txn idempotency key: retrying a
+    /// `operation_id` is the atomic / local-txn idempotency key: retrying a
     /// lost response with the same id must not claim a different row.
     ///
     /// # Errors
@@ -957,7 +957,7 @@ pub(crate) async fn lock_job_queue<C: ConnectionTrait>(db: &C) -> Result<()> {
     crate::sql_plan::lock_serialization_slot(db, crate::sql_plan::JOB_QUEUE_SLOT).await
 }
 
-/// Transactional admission used by the local path and `dbAtomic`.
+/// Transactional admission used by the local path and guest atomic execute.
 pub(crate) async fn enqueue_job_on<C: ConnectionTrait>(
     db: &C,
     spec: EnqueueJobSpec,

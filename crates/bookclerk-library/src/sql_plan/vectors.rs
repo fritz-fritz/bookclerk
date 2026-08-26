@@ -41,7 +41,7 @@ pub async fn run_conn_vectors(db: &DatabaseConnection, connect: DbCapabilities, 
     .await;
 }
 
-/// Runs the identical contract suite through a guest `dbAtomic` callback.
+/// Runs the identical contract suite through a guest atomic callback.
 ///
 /// `advertised_cap` is the adapter's `maxResultRows`. The harness does not wrap
 /// SQL or post-reject oversized results.

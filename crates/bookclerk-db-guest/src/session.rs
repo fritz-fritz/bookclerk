@@ -252,7 +252,7 @@ pub async fn guest_atomic(
         .map_err(bookclerk_plugin_abi::PluginError::internal)?;
     let plan = req.plan.ok_or_else(|| {
         bookclerk_plugin_abi::PluginError::invalid_params(
-            "dbAtomic requires a host-authored executePlan",
+            "atomic execute requires a host-authored executePlan",
         )
     })?;
     let caps = match conn.get_database_backend() {
@@ -543,7 +543,7 @@ async fn connection() -> Result<DatabaseConnection> {
         .await
         .conn
         .clone()
-        .ok_or_else(|| "database not connected — call db.connect first".into())
+        .ok_or_else(|| "database not connected — open a session first".into())
 }
 
 /// Owns one SeaORM transaction and serializes nested ops until the root ends.

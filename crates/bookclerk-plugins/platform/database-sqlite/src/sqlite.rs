@@ -220,7 +220,7 @@ impl std::fmt::Debug for SqliteProxy {
 
 /// Opens a SQLite file and returns a SeaORM proxy (no schema application).
 ///
-/// The host applies DDL after `db.connect` + capability negotiation.
+/// The host applies DDL after `openSession` + capability negotiation.
 ///
 /// # Errors
 ///

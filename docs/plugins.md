@@ -143,7 +143,7 @@ is narrow on top of that:
 
 | Host guarantees | Detail |
 | --- | --- |
-| No library DB path (sources / integrations / outputs) | `library.db` is never passed on the wire to those kinds — and not reachable if it were. **Database** sqlite guests open the file at a jail-granted path (`BOOKCLERK_SQLITE_PATH` / `sqlitePath` on `dbConnect`) |
+| No library DB path (sources / integrations / outputs) | `library.db` is never passed on the wire to those kinds — and not reachable if it were. **Database** sqlite guests open the file at a jail-granted path (`BOOKCLERK_SQLITE_PATH` / `sqlitePath` at session open) |
 | No files-dir root | Plugins get `plugin_data_dir` (`…/plugins/<id>/data`) and a per-fetch work directory (descriptor) — not `master.key` or the download cache root |
 | Env scrub | Child spawn uses `env_clear` + a small allowlist (`PATH`, locale, …). `BOOKCLERK_*`, `AWS_*`, tokens, and DB URLs are not inherited; `HOME` and `TMPDIR` are replaced with the guest's own directories |
 | Host-mediated secrets | `login` returns `{ account, credentials }`; host seals into `encrypted_secrets` with `provider = plugin id`. `scan` and `fetchTitle` receive those blobs from the host |
@@ -1117,7 +1117,7 @@ The host owns schema, domain SQL, and Bookclerk invariants
 import Bookclerk entities or embed application table names. The host opens the
 library through the external database loader (guest required — no in-process
 fallback). SQLite opens `library.db` at the jail-granted path
-(`BOOKCLERK_SQLITE_PATH` / `sqlitePath`) at `dbConnect`.
+(`BOOKCLERK_SQLITE_PATH` / `sqlitePath`) when the session opens.
 
 A backend that cannot advertise `atomicBatch`, parameterized statements, and
 bind/statement limits at or above the host minimum is **not loaded** (fail
@@ -1125,13 +1125,21 @@ closed). Non-SQL engines are unsupported.
 
 | Method | Notes |
 | --- | --- |
-| `dbConnect` | Open backend via tagged connect params (`backend`: `sqlite` / `d1` / `postgres`); returns dialect (SQLite: path grant; D1/Postgres: host-injected credentials) |
-| `capabilities` | Typed control-plane call after `openSession` (`abiMinor` ≥ 7). Advertises SQL contract version, execution semantics, schema flags (`pragmaUserVersion` / `schemaMigrations` / `atomicSchemaBatch`), and all limits. `diagnosticEngine` is observability only. Older guests may still answer the `bookclerk.capabilities` query sentinel. The host must not invent these from the plugin id. |
-| `dbPing` | Verify connectivity |
-| `dbQuery` / `dbExecute` | Forward SeaORM statement payloads (optional `txnId` from `dbBegin`). Ordinary-path SQL+binds are preflighted against `min(maxPayloadBytes, MAX_SCALAR_BYTES)`. |
-| `dbBegin` | Start a native engine transaction (or nested savepoint via `parentTxnId`); returns `txnId`. The host records a sticky per-task fault when this RPC fails so later statements cannot fall back to autocommit. D1 rejects interactive transactions and sets `interactiveTxn: false`. |
-| `dbCommit` / `dbRollback` | Finish that transaction. A failed `dbCommit` is surfaced to `LibraryStore` (SeaORM's proxy hook is infallible); the guest is rolled back. |
-| `executeAtomic` | Typed atomic batch (`ExecuteRequest` → `ExecuteReply`). Every request is a non-empty ordered statement list with Cap'n `DbValue` parameters. D1 uses `{ "batch": [...] }` on the REST Query API. SQLite and Postgres run the same plan in a native local transaction. Host compilers emit canonical `?` SQL; adapters lower at execute. Guests do not interpret Bookclerk operation names. Older guests may still accept the `bookclerk.atomic` query sentinel. Nested SeaORM work uses `Transaction.executeAtomic` (`abiMinor` ≥ 9) on the open txn (no second `BEGIN`); a failed nested batch rolls back to a savepoint. `JobHandler.handle` receives a host-granted `DatabaseSession` when a library store is present, scoped to `books`. Unrelated tables are denied. Workerd HTTP grants defer table authorization to that session. |
+| `Database.openSession` | Opens the adapter session. The guest connects its engine from `DatabaseContext.config` (first-party guests receive host-injected connect params; SQLite: path grant; D1/Postgres: host-injected credentials). |
+| `AdapterDatabaseSession.capabilities` | Typed control-plane call after `openSession`. Advertises SQL contract version, execution semantics, schema flags (`pragmaUserVersion` / `schemaMigrations` / `atomicSchemaBatch`), and all limits. The host must not invent these from the plugin id. |
+| `AdapterDatabaseSession.bootstrap` | Bootstrap-only SeaORM proxy metadata (`sqlFamily`, `dialect`); not part of `DbCapabilities` and never read by domain planning. |
+| `AdapterDatabaseSession.execute` | The one typed atomic operation (`ExecuteRequest` → `ExecuteReply`). Every request is a non-empty ordered statement list with Cap'n `DbValue` parameters, run as **one** SQL transaction. D1 uses `{ "batch": [...] }` on the REST Query API. SQLite and Postgres run the same plan in a native local transaction. Host compilers emit canonical `?` SQL; adapters lower at execute. Guests do not interpret Bookclerk operation names. `JobHandler.handle` receives a host-granted `GuestDatabase` when a library store is present, scoped to `books`. Unrelated tables are denied. Workerd HTTP grants defer table authorization to that session. |
+| `AdapterDatabaseSession.close` | Release the session and its engine connection. |
+
+Host-private (never visible to plugin authors; first-party guests built with
+the abi `host` feature only): `HostAdapterDatabaseSession.begin` opens a native
+interactive SeaORM transaction and returns an `AdapterTransaction`
+(`execute` / `commit` / `rollback`); the host records a sticky per-task fault
+when `begin` fails so later statements cannot fall back to autocommit, and a
+failed `commit` is surfaced to `LibraryStore` (SeaORM's proxy hook is
+infallible). `HostAdapterDatabaseSession.executeEnvelope` carries the durable
+receipt-persist envelope. D1 keeps `begin` unsupported and routes
+`executeEnvelope` through its native batch proxy.
 
 Built-in ids: `sqlite`, `d1`, `postgres` (match `[database].plugin`).
 

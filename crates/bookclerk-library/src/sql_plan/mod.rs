@@ -272,7 +272,7 @@ pub fn validate_atomic_request(
         validate_plan(plan, caps)?;
     } else {
         return Err(crate::LibraryError::Other(anyhow::anyhow!(
-            "dbAtomic requires a host-authored executePlan"
+            "atomic execute requires a host-authored executePlan"
         )));
     }
     let cap = atomic_request_cap_bytes(caps);

@@ -71,7 +71,7 @@ enum ConsumeOnceKind {
     WebauthnChallenge,
 }
 
-/// Compiles a named `dbAtomic` request into canonical Bookclerk SQL.
+/// Compiles a named atomic request into canonical Bookclerk SQL.
 ///
 /// Adapters lower placeholders and functions at execute time.
 ///

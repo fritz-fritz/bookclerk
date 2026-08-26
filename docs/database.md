@@ -198,13 +198,15 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   interactive `BEGIN` open across RPCs, and Cloudflare Time Travel is a
   **database-wide restore**, not a per-request rollback (it cannot exclude
   other writers, and a crash before restore leaves partial writes committed).
-- The D1 guest therefore **rejects** `dbBegin` / `dbCommit` / `dbRollback`.
-  Autocommit `dbQuery` / `dbExecute` use the documented REST body
+- The D1 guest therefore keeps the host-private interactive-transaction
+  interface unsupported (`begin` fails; there is no `commit` / `rollback`).
+  Ordinary autocommit statements use the documented REST body
   `{ "sql", "params" }`.   Atomic library operations (claim redeem, last-owner
   demote/disable/delete, password rotation, TOTP enroll/disable, consume-once OIDC RP state and
-  WebAuthn challenges, job admit/claim, event publish/dispatch/claim) use
-  `dbAtomic` on every bundled backend. The **host** compiles a bounded generic
-  SQL plan (statements + binds + outcome selectors + receipt wrapping). The
+  WebAuthn challenges, job admit/claim, event publish/dispatch/claim) use the
+  typed atomic `execute` on every bundled backend. The **host** compiles a
+  bounded generic SQL plan (statements + binds + outcome selectors + receipt
+  wrapping). The
   D1 plugin runs that plan as **one** `{ "batch": [...] }` REST request (a real
   SQL transaction) and returns per-statement `rows` / `rowsAffected`. SQLite
   and PostgreSQL guests run the same plan in a native local transaction and
@@ -256,7 +258,7 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
 
 Core stays database-agnostic: it sees a migrated `DatabaseConnection`, and
 the host always attaches [`AtomicTxnBackend`](../crates/bookclerk-library)
-(`dbAtomic` generic plan on the guest; host `interpret_plan` on the result)
+(generic atomic plan on the guest; host `interpret_plan` on the result)
 for atomic security, job, and event operations. Domain names stay in host
 code.
 Hosts must install/stage the active database guest; missing guests are hard errors.

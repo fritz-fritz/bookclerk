@@ -44,7 +44,7 @@ pub fn encode<T: Serialize>(value: T) -> Result<String, PluginError> {
     Ok(json)
 }
 
-/// Encodes a `dbAtomic` result; an oversized scalar after commit is `unavailable`.
+/// Encodes an atomic result; an oversized scalar after commit is `unavailable`.
 ///
 /// # Errors
 ///

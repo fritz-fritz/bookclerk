@@ -43,10 +43,9 @@ impl D1Proxy {
             bookclerk_db_exec::AtomicInterruptPhase::BeforeBegin,
             req.deadline_unix_ms,
         )?;
-        let plan = req
-            .plan
-            .clone()
-            .ok_or_else(|| DbErr::Custom("dbAtomic requires a host-authored executePlan".into()))?;
+        let plan = req.plan.clone().ok_or_else(|| {
+            DbErr::Custom("atomic execute requires a host-authored executePlan".into())
+        })?;
         reject_unbounded_returning(&plan)?;
         let d1_caps = DbCapabilities::advertised_d1();
         let cap = d1_caps.max_result_rows;

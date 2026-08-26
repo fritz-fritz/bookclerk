@@ -1,4 +1,4 @@
-//! Named `dbAtomic` execution for SQLite and PostgreSQL.
+//! Named atomic execution for SQLite and PostgreSQL.
 //!
 //! Compiles host-owned SQL plans and runs them as one native transaction
 //! with a durable `operationId` receipt. Timing is measured around the
@@ -32,7 +32,7 @@ pub async fn execute_db_atomic(
     };
     let plan = req.plan.as_ref().ok_or_else(|| {
         LibraryError::Other(anyhow::anyhow!(
-            "dbAtomic requires a host-authored executePlan"
+            "atomic execute requires a host-authored executePlan"
         ))
     })?;
     let hash = req.request_hash.as_deref().unwrap_or("");
@@ -61,7 +61,7 @@ async fn run_named(db: &DatabaseConnection, operation: DbAtomicParams) -> Result
     execute_named_atomic(db, &operation_id, &operation).await
 }
 
-/// Deletes a user in one native `dbAtomic` transaction (fails closed on last owner).
+/// Deletes a user in one native atomic transaction (fails closed on last owner).
 pub(crate) async fn delete_user(db: &DatabaseConnection, id: i64) -> Result<()> {
     unit_from_atomic(
         run_named(db, DbAtomicParams::DeleteUser { user_id: id }).await?,
@@ -69,7 +69,7 @@ pub(crate) async fn delete_user(db: &DatabaseConnection, id: i64) -> Result<()> 
     )
 }
 
-/// Sets a user's status (`active`/`disabled`) inside a `dbAtomic` transaction.
+/// Sets a user's status (`active`/`disabled`) inside a atomic transaction.
 pub(crate) async fn set_user_status(
     db: &DatabaseConnection,
     id: i64,
@@ -88,7 +88,7 @@ pub(crate) async fn set_user_status(
     )
 }
 
-/// Replaces or clears a user's Argon2 password hash inside a `dbAtomic` transaction.
+/// Replaces or clears a user's Argon2 password hash inside a atomic transaction.
 pub(crate) async fn set_user_password_hash(
     db: &DatabaseConnection,
     id: i64,
@@ -107,7 +107,7 @@ pub(crate) async fn set_user_password_hash(
     )
 }
 
-/// Changes a user's portal role inside a `dbAtomic` transaction (fails closed on last owner).
+/// Changes a user's portal role inside a atomic transaction (fails closed on last owner).
 pub(crate) async fn set_user_role(
     db: &DatabaseConnection,
     id: i64,
@@ -126,7 +126,7 @@ pub(crate) async fn set_user_role(
     )
 }
 
-/// Consumes a claim ticket and mints a portal session in one `dbAtomic` transaction.
+/// Consumes a claim ticket and mints a portal session in one atomic transaction.
 pub(crate) async fn redeem_claim_ticket_to_session(
     db: &DatabaseConnection,
     token_hash: &str,
@@ -182,7 +182,7 @@ pub(crate) async fn take_oidc_rp_state(
     )))
 }
 
-/// Promotes a sealed TOTP secret to `primary` and sets `totp_enabled` in one `dbAtomic` transaction.
+/// Promotes a sealed TOTP secret to `primary` and sets `totp_enabled` in one atomic transaction.
 pub(crate) async fn confirm_totp_enrollment(
     db: &DatabaseConnection,
     user_id: i64,
@@ -194,7 +194,7 @@ pub(crate) async fn confirm_totp_enrollment(
     )
 }
 
-/// Deletes TOTP secrets and clears `totp_enabled` in one `dbAtomic` transaction.
+/// Deletes TOTP secrets and clears `totp_enabled` in one atomic transaction.
 pub(crate) async fn disable_user_totp(db: &DatabaseConnection, user_id: i64) -> Result<()> {
     unit_from_atomic(
         run_named(db, DbAtomicParams::DisableUserTotp { user_id }).await?,
@@ -226,7 +226,7 @@ pub(crate) async fn take_webauthn_challenge(
     Ok(Some((row.user_id, row.state_json)))
 }
 
-/// Caller-owned idempotency key for a `dbAtomic` attempt.
+/// Caller-owned idempotency key for an atomic attempt.
 ///
 /// Consume-once keys are derived from the operation so an HTTP/RPC retry
 /// resumes the same receipt. Claim redeem includes the session hash; callers
