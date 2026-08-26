@@ -36,6 +36,14 @@ use tokio::sync::{mpsc, oneshot, Notify};
 use crate::discover::DiscoveredPlugin;
 use crate::{PluginError, Result};
 
+/// Send-safe constructor for a per-binding [`bookclerk_plugin_sdk::GuestDatabase`].
+///
+/// `GuestDatabase` trait objects are `?Send`, so named plugin database
+/// bindings cross into the vat task as factories and are constructed on the
+/// vat thread just before `JobHandler.handle`.
+pub type GuestDatabaseFactory =
+    Arc<dyn Fn() -> Arc<dyn bookclerk_plugin_sdk::GuestDatabase> + Send + Sync>;
+
 /// Work item executed on the plugin vat thread.
 enum Work {
     /// `BookclerkPlugin.describe`.
@@ -110,6 +118,8 @@ enum Work {
         cancel: Arc<AtomicBool>,
         /// Durable fenced progress (library row + lease identity).
         progress: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
+        /// Named plugin-owned database bindings (constructed on the vat thread).
+        databases: Vec<(String, GuestDatabaseFactory)>,
         /// Reply channel.
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::JobOutcome>>,
     },
@@ -516,6 +526,27 @@ impl PluginSession {
         cancel: Arc<AtomicBool>,
         progress: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
     ) -> Result<bookclerk_plugin_sdk::JobOutcome> {
+        self.stream_copy_with_databases(lease, from, to, cancel, progress, Vec::new())
+            .await
+    }
+
+    /// [`Self::stream_copy_with_cancel`] with named plugin database bindings.
+    ///
+    /// Each `(name, factory)` pair becomes an isolated `GuestDatabase` on the
+    /// `JobHandler.handle` invocation; factories run on the vat thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the handler fails or the fence is lost.
+    pub async fn stream_copy_with_databases(
+        &self,
+        lease: JobInvocationLease,
+        from: &str,
+        to: &str,
+        cancel: Arc<AtomicBool>,
+        progress: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
+        databases: Vec<(String, GuestDatabaseFactory)>,
+    ) -> Result<bookclerk_plugin_sdk::JobOutcome> {
         self.call(|reply| Work::StreamCopy {
             lease,
             spec: StreamCopySpec {
@@ -524,6 +555,7 @@ impl PluginSession {
             },
             cancel,
             progress,
+            databases,
             reply,
         })
         .await
@@ -1088,6 +1120,7 @@ fn vat_thread(
                             spec,
                             cancel,
                             progress,
+                            databases,
                             reply,
                         } => {
                             let out = tokio::select! {
@@ -1101,6 +1134,10 @@ fn vat_thread(
                                     spec,
                                     cancel,
                                     progress,
+                                    databases
+                                        .into_iter()
+                                        .map(|(name, factory)| (name, factory()))
+                                        .collect(),
                                 ) => out,
                             };
                             let _ = reply.send(out);
@@ -1277,6 +1314,7 @@ async fn run_stream_copy(
     spec: StreamCopySpec,
     cancel: Arc<AtomicBool>,
     progress: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
+    databases: Vec<(String, Arc<dyn bookclerk_plugin_sdk::GuestDatabase>)>,
 ) -> Result<bookclerk_plugin_sdk::JobOutcome> {
     let Some(dest) = dest else {
         return Err(PluginError::message("destination not created"));
@@ -1308,7 +1346,7 @@ async fn run_stream_copy(
     let cancel: Arc<dyn Cancellation> = Arc::new(FlagCancel(cancel));
     client
         .handle_job_with_cancel(
-            handler, invocation, input, output, progress, cancel, database,
+            handler, invocation, input, output, progress, cancel, database, databases,
         )
         .await
         .map_err(map_abi)

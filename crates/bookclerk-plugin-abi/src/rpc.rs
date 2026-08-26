@@ -2205,11 +2205,29 @@ impl job_handler::Server for JobHandlerServer {
             Some(client) => Some(Box::new(GuestDatabaseClient { client })),
             None => None,
         };
+        let mut databases: Vec<(String, Box<dyn GuestDatabase>)> = Vec::new();
+        if p.has_databases() {
+            let list = p
+                .get_databases()
+                .map_err(|err| capnp::Error::failed(err.to_string()))?;
+            for entry in list.iter() {
+                let name = entry
+                    .get_name()
+                    .and_then(|t| t.to_str().map_err(capnp::Error::from))
+                    .map_err(|err| capnp::Error::failed(err.to_string()))?
+                    .to_string();
+                let client = entry
+                    .get_database()
+                    .map_err(|err| capnp::Error::failed(err.to_string()))?;
+                databases.push((name, Box::new(GuestDatabaseClient { client })));
+            }
+        }
         let ctx = JobHandlerContext {
             input: Box::new(SourceClient::new(input, self.window)),
             output: Box::new(DestinationClient::new(output, self.window)),
             progress: Box::new(ProgressArc(progress)),
             database,
+            databases,
             cancel,
         };
         let result = results.get().init_result();
@@ -2461,6 +2479,7 @@ impl PluginClient {
             progress,
             Arc::new(NeverCancel),
             None,
+            Vec::new(),
         )
         .await
     }
@@ -2480,6 +2499,7 @@ impl PluginClient {
         progress: Arc<dyn ProgressSink>,
         cancel: Arc<dyn Cancellation>,
         database: Option<Arc<dyn GuestDatabase>>,
+        databases: Vec<(String, Arc<dyn GuestDatabase>)>,
     ) -> Result<JobOutcome> {
         let mut req = handler.handle_request();
         fill_invocation(req.get().get_invocation().map_err(from_capnp)?, &invocation)
@@ -2498,6 +2518,16 @@ impl PluginClient {
         if let Some(db) = database {
             req.get()
                 .set_database(capnp_rpc::new_client(GuestDatabaseServer { inner: db }));
+        }
+        if !databases.is_empty() {
+            let count = u32::try_from(databases.len())
+                .map_err(|_| PluginError::invalid_params("too many database bindings"))?;
+            let mut list = req.get().init_databases(count);
+            for (i, (name, db)) in databases.into_iter().enumerate() {
+                let mut entry = list.reborrow().get(u32::try_from(i).unwrap_or(u32::MAX));
+                entry.set_name(&name);
+                entry.set_database(capnp_rpc::new_client(GuestDatabaseServer { inner: db }));
+            }
         }
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
@@ -3510,12 +3540,19 @@ mod tests {
         async fn handle(
             &self,
             _invocation: JobInvocation,
-            context: JobHandlerContext,
+            mut context: JobHandlerContext,
         ) -> Result<JobOutcome> {
-            let Some(db) = context.database else {
+            let Some(db) = context.database.take() else {
                 return Err(PluginError::internal("database capability missing"));
             };
             db.close().await?;
+            let Some(named) = context.take_named_database("DB") else {
+                return Err(PluginError::internal("named database binding missing"));
+            };
+            named.close().await?;
+            if context.take_named_database("OTHER").is_some() {
+                return Err(PluginError::internal("unexpected extra binding"));
+            }
             Ok(JobOutcome::Completed {
                 message: "database-injected".into(),
                 bytes_copied: 0,
@@ -3839,6 +3876,10 @@ mod tests {
                         Arc::new(NoopProgress),
                         Arc::new(TestCancel(Arc::new(AtomicBool::new(false)))),
                         Some(Arc::new(GuestDbProbe) as Arc<dyn GuestDatabase>),
+                        vec![(
+                            "DB".to_string(),
+                            Arc::new(GuestDbProbe) as Arc<dyn GuestDatabase>,
+                        )],
                     )
                     .await
                     .expect("handle");
@@ -4011,6 +4052,7 @@ mod tests {
                         Arc::new(NoopProgress),
                         Arc::new(TestCancel(flag)),
                         None,
+                        Vec::new(),
                     ),
                 )
                 .await

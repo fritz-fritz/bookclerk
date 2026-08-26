@@ -109,8 +109,21 @@ pub struct JobHandlerContext {
     /// Host-mediated typed SQL session when the invocation grant includes one.
     /// Host-granted typed SQL binding for one job invocation (`abiMinor` ≥ 11).
     pub database: Option<Box<dyn GuestDatabase>>,
+    /// Named plugin-owned database bindings (`abiMinor` ≥ 18): isolated
+    /// databases from `plugin.toml` `capabilities.bindings.databases`,
+    /// separate from the Bookclerk library and from every other plugin.
+    pub databases: Vec<(String, Box<dyn GuestDatabase>)>,
     /// Cancellation capability (host fence / lease).
     pub cancel: Box<dyn Cancellation>,
+}
+
+impl JobHandlerContext {
+    /// Takes the named plugin database binding `name`, if granted.
+    #[must_use]
+    pub fn take_named_database(&mut self, name: &str) -> Option<Box<dyn GuestDatabase>> {
+        let idx = self.databases.iter().position(|(n, _)| n == name)?;
+        Some(self.databases.swap_remove(idx).1)
+    }
 }
 
 /// Plugin worker that handles one durable job invocation.

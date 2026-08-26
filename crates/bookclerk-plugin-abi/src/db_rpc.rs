@@ -362,6 +362,7 @@ pub(super) fn write_db_capabilities(mut b: db_caps_capnp::Builder<'_>, caps: &Db
     b.set_max_cell_bytes(caps.max_cell_bytes);
     b.set_max_request_bytes(caps.max_request_bytes);
     b.set_max_atomic_result_bytes(caps.max_atomic_result_bytes);
+    b.set_plugin_databases(caps.plugin_databases);
 }
 
 /// Decodes negotiated database capabilities from a Cap'n Proto reader.
@@ -388,6 +389,7 @@ pub(super) fn read_db_capabilities(r: db_caps_capnp::Reader<'_>) -> Result<DbCap
         max_cell_bytes: r.get_max_cell_bytes(),
         max_request_bytes: r.get_max_request_bytes(),
         max_atomic_result_bytes: r.get_max_atomic_result_bytes(),
+        plugin_databases: r.get_plugin_databases(),
     })
 }
 

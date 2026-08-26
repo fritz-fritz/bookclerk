@@ -378,6 +378,10 @@ pub struct DbCapabilities {
     pub max_request_bytes: u32,
     /// Maximum encoded bytes of one [`ExecuteReply`].
     pub max_atomic_result_bytes: u32,
+    /// Adapter can open additional isolated sessions for plugin-owned
+    /// database bindings (per-binding file / schema / database).
+    #[serde(default)]
+    pub plugin_databases: bool,
 }
 
 impl DbCapabilities {
@@ -500,6 +504,7 @@ impl DbCapabilities {
             max_cell_bytes: MAX_SCALAR_BYTES,
             max_request_bytes: MAX_SCALAR_BYTES,
             max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            plugin_databases: true,
         }
     }
 

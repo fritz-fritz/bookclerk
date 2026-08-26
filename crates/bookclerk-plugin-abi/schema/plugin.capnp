@@ -527,8 +527,21 @@ interface JobHandler {
       progress :ProgressSink,
       cancel :Cancellation,
       # Append-only (abiMinor 8). Host-mediated typed SQL session.
-      database :GuestDatabase)
+      database :GuestDatabase,
+      # Append-only (abiMinor 18). Named plugin-owned database bindings
+      # (Workers-style): each entry is an isolated database provisioned by
+      # the active adapter, separate from the Bookclerk library and from
+      # every other plugin. Empty when the manifest declares none.
+      databases :List(NamedDatabase))
       -> (result :HandleReply);
+}
+
+# One named plugin-owned database binding delivered on `JobHandler.handle`.
+struct NamedDatabase {
+  # Binding name from `plugin.toml` `capabilities.bindings.databases`.
+  name @0 :Text;
+  # Isolated typed SQL session for this binding (plugin-owned schema).
+  database @1 :GuestDatabase;
 }
 
 # Storefront content source (not byte Source). JSON params/results are a
@@ -1064,6 +1077,9 @@ struct DbCapabilities {
   maxCellBytes @14 :UInt32;
   maxRequestBytes @15 :UInt32;
   maxAtomicResultBytes @16 :UInt32;
+  # Append-only (abiMinor 18). Adapter can open additional isolated sessions
+  # for plugin-owned database bindings (per-binding file / schema / database).
+  pluginDatabases @17 :Bool;
 }
 
 struct DbBootstrapReply {
