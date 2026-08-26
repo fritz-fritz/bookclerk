@@ -42,10 +42,14 @@ use bookclerk_library::{atomic_status, DbAtomicParams};
 pub struct ExternalDatabase {
     /// Cap'n Proto session (vat holds the database session).
     session: Arc<PluginSession>,
-    /// Manifest id (`sqlite`, `d1`, `postgres`) used to build connect params.
+    /// Manifest id (first-party `sqlite` / `d1` / `postgres`, or a
+    /// third-party adapter id) used to build the factory context.
     plugin_id: String,
-    /// Guest HOME / data directory passed in the connect params.
+    /// Guest HOME / data directory passed in the factory context.
     plugin_data_dir: std::path::PathBuf,
+    /// Granted `[database.<id>]` settings delivered to third-party adapters
+    /// via the public `DatabaseAdapterConfig` payload.
+    settings_json: Value,
 }
 
 impl ExternalDatabase {
@@ -79,7 +83,7 @@ impl ExternalDatabase {
             PluginSession::spawn_for_account_with_env(
                 plugin,
                 config,
-                config_json,
+                config_json.clone(),
                 OPERATOR_ACCOUNT,
                 extra_env.as_slice(),
             )
@@ -89,6 +93,7 @@ impl ExternalDatabase {
             session,
             plugin_id: plugin.manifest.id.clone(),
             plugin_data_dir,
+            settings_json: config_json,
         })
     }
 
@@ -101,14 +106,13 @@ impl ExternalDatabase {
         &self,
         config: &Config,
     ) -> Result<(DatabaseConnection, DbCapabilities), DbErr> {
-        let params = connect_params(
+        let ctx = connect_context(
             config,
             &self.plugin_id,
             &self.plugin_data_dir,
             &self.session,
+            &self.settings_json,
         )?;
-        let ctx =
-            database_context_from_params(&params).map_err(|err| DbErr::Custom(err.to_string()))?;
         self.session.db_open(ctx).await.map_err(map_rpc_err)?;
 
         let caps = self.session.db_capabilities().await.map_err(map_rpc_err)?;
@@ -117,7 +121,17 @@ impl ExternalDatabase {
         }
         let _kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
-        let mut bootstrap = self.session.db_bootstrap().await.unwrap_or_default();
+        // Fail closed: transport/internal/deadline failures must not be
+        // silently replaced with plugin-id-derived metadata. Only a typed
+        // `unsupported` (adapter without a bootstrap surface) may fall back
+        // to the first-party id inference below.
+        let mut bootstrap = match self.session.db_bootstrap().await {
+            Ok(bootstrap) => bootstrap,
+            Err(crate::PluginError::Abi { code, .. }) if code == "unsupported" => {
+                DbBootstrap::default()
+            }
+            Err(err) => return Err(map_rpc_err(err)),
+        };
         apply_bootstrap_metadata(&mut bootstrap, &self.plugin_id);
         if let Some(reason) = bootstrap.backend_failure_reason() {
             return Err(DbErr::Custom(reason));
@@ -1389,50 +1403,76 @@ pub fn database_connect_context(
     session: &PluginSession,
 ) -> PluginResult<bookclerk_plugin_sdk::DatabaseContext> {
     let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
-    let params = connect_params(config, &plugin.manifest.id, &plugin_data_dir, session)
-        .map_err(|err| PluginError::message(err.to_string()))?;
-    database_context_from_params(&params).map_err(|err| PluginError::message(err.to_string()))
+    let table = crate::settings_table(config, plugin);
+    let settings_json = toml_to_json(&toml::Value::Table(table));
+    connect_context(
+        config,
+        &plugin.manifest.id,
+        &plugin_data_dir,
+        session,
+        &settings_json,
+    )
+    .map_err(|err| PluginError::message(err.to_string()))
 }
 
-/// Builds guest connect params from host config.
+/// Builds the `database.openSession` factory context from host config.
 ///
-/// First-party ids (`sqlite`, `d1`, `postgres`) receive host-injected paths /
-/// secrets. Unknown ids get [`DbConnectParams::Guest`] so third-party adapters
-/// can bootstrap from plugin-owned settings without a host registry change.
-fn connect_params(
+/// First-party ids (`sqlite`, `d1`, `postgres`) receive host-private connect
+/// params with host-injected paths / secrets. Any other id is a third-party
+/// adapter and receives the public [`bookclerk_plugin_abi::DatabaseAdapterConfig`]
+/// payload carrying its granted `[database.<id>]` settings, so custom adapters
+/// bootstrap without a host registry change.
+fn connect_context(
     config: &Config,
     plugin_id: &str,
     plugin_data_dir: &Path,
     session: &PluginSession,
-) -> Result<DbConnectParams, DbErr> {
+    settings_json: &Value,
+) -> Result<bookclerk_plugin_sdk::DatabaseContext, DbErr> {
     let data_dir = plugin_data_dir.display().to_string();
-    match DatabasePluginKind::parse(plugin_id) {
-        Some(DatabasePluginKind::Sqlite) => Ok(sqlite_connect_params(config, plugin_data_dir)),
+    let params = match DatabasePluginKind::parse(plugin_id) {
+        Some(DatabasePluginKind::Sqlite) => sqlite_connect_params(config, plugin_data_dir),
         Some(DatabasePluginKind::D1) => {
             session
                 .require_binding("secrets")
                 .map_err(|err| DbErr::Custom(err.to_string()))?;
-            Ok(DbConnectParams::D1 {
+            DbConnectParams::D1 {
                 plugin_data_dir: data_dir,
                 account_id: config.database.d1.account_id.clone(),
                 database_id: config.database.d1.database_id.clone(),
                 api_base: config.database.d1.api_base.clone(),
                 api_token: resolve_d1_api_token().map_err(map_config_err)?,
-            })
+            }
         }
         Some(DatabasePluginKind::Postgres) => {
             session
                 .require_binding("secrets")
                 .map_err(|err| DbErr::Custom(err.to_string()))?;
-            Ok(DbConnectParams::Postgres {
+            DbConnectParams::Postgres {
                 plugin_data_dir: data_dir,
                 url: resolve_postgres_url(config).map_err(map_config_err)?,
-            })
+            }
         }
-        None => Ok(DbConnectParams::Guest {
-            plugin_data_dir: data_dir,
-        }),
-    }
+        None => return adapter_config_context(&data_dir, settings_json),
+    };
+    database_context_from_params(&params).map_err(|err| DbErr::Custom(err.to_string()))
+}
+
+/// Public third-party adapter factory context (granted settings + data dir).
+fn adapter_config_context(
+    data_dir: &str,
+    settings_json: &Value,
+) -> Result<bookclerk_plugin_sdk::DatabaseContext, DbErr> {
+    let adapter_config = bookclerk_plugin_abi::DatabaseAdapterConfig {
+        plugin_data_dir: data_dir.to_string(),
+        config: if settings_json.is_null() {
+            Value::Object(serde_json::Map::new())
+        } else {
+            settings_json.clone()
+        },
+    };
+    bookclerk_plugin_abi::database_context_from_adapter_config(&adapter_config)
+        .map_err(|err| DbErr::Custom(err.to_string()))
 }
 
 /// Maps advertised schema capabilities to a SeaORM [`DbBackend`].
@@ -1598,18 +1638,31 @@ mod tests {
     }
 
     #[test]
-    fn unknown_plugin_id_uses_guest_connect_params() {
+    fn unknown_plugin_id_gets_public_adapter_config_with_granted_settings() {
         assert!(DatabasePluginKind::parse("sql-conformance").is_none());
-        let dir = std::path::Path::new("/tmp/plugins/sql-conformance/data");
-        // Mirrors `connect_params` for unknown ids (no host-injected secrets).
-        let params = DbConnectParams::Guest {
-            plugin_data_dir: dir.display().to_string(),
-        };
-        let v = serde_json::to_value(&params).unwrap();
-        assert_eq!(v["backend"], "guest");
-        assert_eq!(v["pluginDataDir"], dir.display().to_string());
-        let back: DbConnectParams = serde_json::from_value(v).unwrap();
-        assert_eq!(back, params);
+        // Granted `[database.sql-conformance]` settings the operator wrote.
+        let settings = serde_json::json!({ "url": "custom://host/db", "pool_size": 4 });
+        let ctx = adapter_config_context("/tmp/plugins/sql-conformance/data", &settings)
+            .expect("adapter context");
+        // No host-private connect params travel to third-party adapters …
+        bookclerk_plugin_abi::db::connect_params_from_context(&ctx)
+            .expect_err("public adapter config must not decode as host connect params");
+        // … the public payload carries the granted settings, readable without
+        // the abi `host` feature.
+        let cfg = bookclerk_plugin_abi::database_adapter_config_from_context(&ctx)
+            .expect("public decode");
+        assert_eq!(cfg.plugin_data_dir, "/tmp/plugins/sql-conformance/data");
+        assert_eq!(cfg.config["url"], "custom://host/db");
+        assert_eq!(cfg.config["pool_size"], 4);
+    }
+
+    #[test]
+    fn unknown_plugin_id_without_settings_gets_empty_config_object() {
+        let ctx = adapter_config_context("/tmp/plugins/custom/data", &Value::Null)
+            .expect("adapter context");
+        let cfg = bookclerk_plugin_abi::database_adapter_config_from_context(&ctx)
+            .expect("public decode");
+        assert!(cfg.config.is_object(), "{:?}", cfg.config);
     }
 
     #[test]

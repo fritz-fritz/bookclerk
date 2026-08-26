@@ -160,6 +160,23 @@ export interface CliInvokeResult {
 }
 
 /**
+ * Author-facing database adapter configuration carried in `DatabaseContext.config` (mediaType
+ * `application/vnd.bookclerk.db-adapter-config+json`). This is the generic bootstrap
+ * mechanism for third-party adapters: the operator's granted `[database.<id>]` table plus the
+ * scoped writable data dir. First-party host-managed adapters receive host-private connect
+ * params instead.
+ */
+export interface DatabaseAdapterConfig {
+  /** Scoped writable directory for this plugin (`.../plugins/<id>/data`). */
+  pluginDataDir: string;
+  /**
+   * Granted plugin settings (operator `[database.<id>]` table) as a JSON object; `{}` when
+   * the operator configured nothing.
+   */
+  config?: JsonValue;
+}
+
+/**
  * JSON health payload for guests that report identity alongside liveness. Role-level `health`
  * RPCs return the typed `HealthOk` instead.
  */

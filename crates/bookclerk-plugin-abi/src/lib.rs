@@ -114,6 +114,10 @@ mod wire_fixtures;
 
 #[cfg(feature = "host")]
 pub use db::{connect_params_from_context, database_context_from_params, DbConnectParams};
+pub use db::{
+    database_adapter_config_from_context, database_context_from_adapter_config,
+    DATABASE_ADAPTER_CONFIG_MEDIA_TYPE, DATABASE_ADAPTER_CONFIG_SCHEMA_VERSION,
+};
 pub use db_execute::{
     sql_payload_bytes, sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn,
     DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest,
@@ -126,7 +130,7 @@ pub use db_value::{DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
 pub use guest_sql::{
     authorize_guest_sql_policy, guest_statement_kind, parse_guest_sql_refs,
-    validate_guest_execute_request, GuestSqlPolicy, GuestSqlRefs,
+    returning_single_row_proven, validate_guest_execute_request, GuestSqlPolicy, GuestSqlRefs,
 };
 #[cfg(feature = "host")]
 pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};

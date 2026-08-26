@@ -314,6 +314,100 @@ pub fn guest_statement_kind(sql: &str) -> DbPlanStatementKind {
     }
 }
 
+/// Proves from SQL shape alone that a `RETURNING` statement yields at most
+/// one row.
+///
+/// Conservative and fail-closed — a caller-asserted `maxRows` is never
+/// trusted. Only a single-statement `INSERT` (after any leading CTE list)
+/// whose row source is exactly one top-level `VALUES` tuple is proven.
+/// `INSERT … SELECT`, `UPDATE … RETURNING`, `DELETE … RETURNING`, and
+/// multi-tuple `VALUES` are never proven, because the SQL text does not bound
+/// how many rows they touch.
+#[must_use]
+pub fn returning_single_row_proven(sql: &str) -> bool {
+    if has_top_level_semicolon_tail(sql) {
+        return false;
+    }
+    let main = sql_after_leading_ctes(sql);
+    if !matches!(first_top_level_keyword(main).as_deref(), Some("INSERT")) {
+        return false;
+    }
+    // A top-level SELECT row source is unbounded; nested `(SELECT …)` scalar
+    // expressions sit at depth > 0 and do not trip this check.
+    if has_top_level_keyword(main, "SELECT") {
+        return false;
+    }
+    count_top_level_values_tuples(main) == 1
+}
+
+/// Number of top-level `VALUES` tuples (`(1),(2)` → 2). `0` when none parsed.
+fn count_top_level_values_tuples(sql: &str) -> usize {
+    let mut values_at = None;
+    for_each_top_level_keyword(sql, |idx, kw| {
+        if values_at.is_none() && kw.eq_ignore_ascii_case("VALUES") {
+            values_at = Some(idx);
+        }
+    });
+    let Some(idx) = values_at else {
+        return 0;
+    };
+    let bytes = sql.as_bytes();
+    let mut i = idx + "VALUES".len();
+    let mut depth = 0usize;
+    let mut tuples = 0usize;
+    let mut in_squote = false;
+    let mut in_dquote = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_squote {
+            if c == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_squote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_dquote {
+            if c == b'"' {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
+                in_dquote = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => in_squote = true,
+            b'"' => in_dquote = true,
+            b'(' => {
+                if depth == 0 {
+                    tuples = tuples.saturating_add(1);
+                }
+                depth = depth.saturating_add(1);
+            }
+            b')' => depth = depth.saturating_sub(1),
+            _ => {
+                if depth == 0 {
+                    let rest = &sql[i..];
+                    if rest.len() >= 9 && rest[..9].eq_ignore_ascii_case("RETURNING") {
+                        break;
+                    }
+                    if c == b';' {
+                        break;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    tuples
+}
+
 /// Remainder after a leading `WITH [RECURSIVE] cte [, cte …]` list.
 ///
 /// Returns `sql` unchanged when it does not start with `WITH` or the CTE list
@@ -1673,6 +1767,45 @@ mod tests {
             ),
             DbPlanStatementKind::Execute
         );
+    }
+
+    #[test]
+    fn returning_single_row_proof_is_shape_derived_and_fail_closed() {
+        // Proven: exactly one INSERT VALUES tuple.
+        assert!(returning_single_row_proven(
+            "INSERT INTO t (a, b) VALUES (?, ?) RETURNING id"
+        ));
+        assert!(returning_single_row_proven(
+            "INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING RETURNING id"
+        ));
+        // Nested scalar subqueries stay below top level.
+        assert!(returning_single_row_proven(
+            "INSERT INTO t (a) VALUES ((SELECT MAX(x) FROM u)) RETURNING id"
+        ));
+        // Never proven: mutations whose SQL text does not bound row count.
+        assert!(!returning_single_row_proven(
+            "UPDATE t SET a = 1 RETURNING id"
+        ));
+        assert!(!returning_single_row_proven(
+            "UPDATE t SET a = 1 WHERE id = ? RETURNING id"
+        ));
+        assert!(!returning_single_row_proven("DELETE FROM t RETURNING id"));
+        assert!(!returning_single_row_proven(
+            "INSERT INTO t (a) SELECT x FROM u RETURNING id"
+        ));
+        assert!(!returning_single_row_proven(
+            "INSERT INTO t VALUES (1),(2) RETURNING id"
+        ));
+        assert!(!returning_single_row_proven(
+            "WITH seed AS (SELECT 1) INSERT INTO t SELECT * FROM seed RETURNING id"
+        ));
+        assert!(!returning_single_row_proven(
+            "INSERT INTO t VALUES (1) RETURNING id; DELETE FROM t"
+        ));
+        // Leading CTE with a single-tuple VALUES main statement is proven.
+        assert!(returning_single_row_proven(
+            "WITH seed AS (SELECT 1) INSERT INTO t (a) VALUES (?) RETURNING id"
+        ));
     }
 
     #[test]

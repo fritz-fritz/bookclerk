@@ -93,12 +93,13 @@ pub use protocol::{
 
 pub use bookclerk_plugin_abi::{
     byte_source_from_async_read, canonical_execute_request_hash, connect_plugin,
-    decode_db_value_bytes, decode_execute_request_bytes, decode_execute_result_reply_bytes,
-    encoded_db_value_bytes, encoded_execute_reply_bytes, encoded_execute_request_bytes,
-    encoded_execute_result_reply_bytes, encoded_statement_result_bytes, negotiate_rpc_features,
-    pull_byte_source_to_writer, serve_plugin, serve_plugin_stdio, sql_payload_bytes,
-    sql_payload_exceeds, stream_copy_keys, AdapterDatabaseSession, ByteRange, Cancellation,
-    ContentSource, ContentSourceClient, ContentSourceContext, CopyResult, Database, DatabaseClient,
+    database_adapter_config_from_context, decode_db_value_bytes, decode_execute_request_bytes,
+    decode_execute_result_reply_bytes, encoded_db_value_bytes, encoded_execute_reply_bytes,
+    encoded_execute_request_bytes, encoded_execute_result_reply_bytes,
+    encoded_statement_result_bytes, negotiate_rpc_features, pull_byte_source_to_writer,
+    serve_plugin, serve_plugin_stdio, sql_payload_bytes, sql_payload_exceeds, stream_copy_keys,
+    AdapterDatabaseSession, ByteRange, Cancellation, ContentSource, ContentSourceClient,
+    ContentSourceContext, CopyResult, Database, DatabaseAdapterConfig, DatabaseClient,
     DatabaseContext, DbBootstrap, DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection,
     DbRow, DbTiming, DbType, DbValue, Destination, DestinationClient, DestinationContext,
     DestinationServer, DiagnoseResult, DomainEvent, EventResult, ExecuteReply, ExecuteRequest,
@@ -108,9 +109,9 @@ pub use bookclerk_plugin_abi::{
     PluginDescribe, PluginError, PluginErrorCode, PluginRoot, PluginServer, ProgressSink,
     PutResult, QueryPage, ReadResult, ScalarLimits, Source, SourceClient, SourceContext,
     SourceServer, StatementResult, StreamCopyHandler, StreamCopySpec, TypedDbStatement,
-    WorkerContext, WriteOptions, ABI_MAJOR, ABI_MINOR, ENVELOPE_VERSION, FEATURE_SCALAR_LIMITS,
-    FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
-    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION, SQL_CONTRACT_VERSION,
+    WorkerContext, WriteOptions, ABI_MAJOR, ABI_MINOR, DATABASE_ADAPTER_CONFIG_MEDIA_TYPE,
+    ENVELOPE_VERSION, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_LIST_PAGE,
+    MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION, SQL_CONTRACT_VERSION,
 };
 
 /// Serves a [`PluginRoot`] on stdin/stdout (Cap'n Proto RPC).

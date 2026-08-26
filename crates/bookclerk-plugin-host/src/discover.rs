@@ -245,14 +245,24 @@ pub fn settings_table(config: &Config, plugin: &DiscoveredPlugin) -> toml::Table
     }
 }
 
-/// Serializes `[database.sqlite|d1|postgres]` for the matching database plugin id.
+/// Serializes `[database.<id>]` for the matching database plugin id.
+///
+/// First-party ids use their typed config sections; third-party adapters get
+/// the opaque `[database.<id>]` table (delivered as `DatabaseAdapterConfig`).
 fn database_settings_table(config: &Config, plugin: &DiscoveredPlugin) -> toml::Table {
     let id = plugin.manifest.id.to_ascii_lowercase();
     let value = match id.as_str() {
         "sqlite" => toml::Value::try_from(&config.database.sqlite),
         "d1" => toml::Value::try_from(&config.database.d1),
         "postgres" => toml::Value::try_from(&config.database.postgres),
-        _ => return toml::Table::new(),
+        _ => {
+            return config
+                .database
+                .plugin_table(&plugin.manifest.id)
+                .or_else(|| config.database.plugin_table(&id))
+                .cloned()
+                .unwrap_or_default();
+        }
     };
     match value {
         Ok(toml::Value::Table(table)) => table,

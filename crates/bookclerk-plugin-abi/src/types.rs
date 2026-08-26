@@ -182,6 +182,26 @@ pub struct CliInvokeParams {
     pub args: Map<String, Value>,
 }
 
+/// Author-facing database adapter configuration carried in
+/// [`crate::DatabaseContext::config`].
+///
+/// Generic bootstrap mechanism for third-party adapters: the operator's
+/// granted `[database.<id>]` table plus the scoped writable data dir.
+/// First-party host-managed adapters receive host-private connect params
+/// instead. Decode with [`crate::db::database_adapter_config_from_context`].
+///
+/// Wire: `{ "pluginDataDir": "…", "config": { … } }`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseAdapterConfig {
+    /// Scoped writable directory for this plugin (`…/plugins/<id>/data`).
+    pub plugin_data_dir: String,
+    /// Granted plugin settings (operator `[database.<id>]` table) as a JSON
+    /// object; `{}` when the operator configured nothing.
+    #[serde(default)]
+    pub config: Value,
+}
+
 /// Result of [`crate::methods::cli_invoke`].
 ///
 /// Wire: `{ "exitCode": 0, "stdout": "…", "stderr": "…", "json"?: … }`.

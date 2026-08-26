@@ -223,6 +223,22 @@ pub fn authorize_typed_request(
     for stmt in &mut req.statements {
         stmt.kind = host_statement_kind(&stmt.sql);
     }
+    // A nonzero `maxRows` on a RETURNING statement is a boundedness claim
+    // adapters may rely on (D1 commits before it can inspect results). The
+    // claim must be host-proven from the authorized SQL shape — a caller's
+    // number is never trusted.
+    for (i, stmt) in req.statements.iter().enumerate() {
+        if matches!(stmt.kind, DbPlanStatementKind::Returning)
+            && stmt.max_rows != 0
+            && (stmt.max_rows != 1 || !bookclerk_plugin_abi::returning_single_row_proven(&stmt.sql))
+        {
+            return Err(crate::LibraryError::Other(anyhow::anyhow!(
+                "statement {i} RETURNING maxRows={} is not provable from the SQL shape \
+                 (only a single-tuple INSERT … VALUES … RETURNING proves maxRows=1)",
+                stmt.max_rows
+            )));
+        }
+    }
     if req.operation_id.is_empty() {
         req.operation_id = uuid::Uuid::new_v4().to_string();
     }
@@ -494,6 +510,41 @@ mod limits_tests {
         typed.request_hash.clear();
         let err = super::authorize_typed_request(&mut typed, &caps).unwrap_err();
         assert!(err.to_string().contains("maxRequestBytes"), "{err}");
+    }
+
+    #[test]
+    fn authorize_typed_request_rejects_unprovable_returning_max_rows() {
+        use bookclerk_plugin_abi::{DbResultSelection, ExecuteRequest, TypedDbStatement};
+        let caps = DbCapabilities::advertised_sqlite();
+        let stmt = |sql: &str, max_rows: u32| TypedDbStatement {
+            sql: sql.into(),
+            parameters: vec![],
+            kind: DbPlanStatementKind::Execute, // overwritten by authorize
+            max_rows,
+            result_selection: DbResultSelection::Rows,
+        };
+        let req_of = |sql: &str, max_rows: u32| ExecuteRequest {
+            operation_id: "op".into(),
+            request_hash: String::new(),
+            statements: vec![stmt(sql, max_rows)],
+            deadline_unix_ms: 0,
+        };
+        // Guest-asserted bound on an unbounded mutation is rejected.
+        let mut update = req_of("UPDATE books SET title = 'x' RETURNING id", 1);
+        let err = super::authorize_typed_request(&mut update, &caps).unwrap_err();
+        assert!(err.to_string().contains("not provable"), "{err}");
+        // A claim other than 1 is never provable.
+        let mut many = req_of("INSERT INTO books (id) VALUES (?) RETURNING id", 2);
+        let err = super::authorize_typed_request(&mut many, &caps).unwrap_err();
+        assert!(err.to_string().contains("not provable"), "{err}");
+        // Shape-proven single-tuple INSERT VALUES passes.
+        let mut proven = req_of("INSERT INTO books (id) VALUES (?) RETURNING id", 1);
+        super::authorize_typed_request(&mut proven, &caps).unwrap();
+        assert_eq!(proven.statements[0].kind, DbPlanStatementKind::Returning);
+        // No claim (maxRows = 0) stays allowed; bounded adapters reject it
+        // themselves before execution when they need a proof.
+        let mut unclaimed = req_of("UPDATE books SET title = 'x' RETURNING id", 0);
+        super::authorize_typed_request(&mut unclaimed, &caps).unwrap();
     }
 
     #[test]

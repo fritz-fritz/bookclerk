@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 17;
+const abiMinor :UInt32 = 18;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -744,6 +744,20 @@ struct CliInvokeResult {
   stderr @2 :Text;
   # Optional structured payload for machine consumers; omitted when absent.
   json @3 :Text $jsonValue;
+}
+
+# Author-facing database adapter configuration carried in
+# `DatabaseContext.config` (mediaType
+# `application/vnd.bookclerk.db-adapter-config+json`). This is the generic
+# bootstrap mechanism for third-party adapters: the operator's granted
+# `[database.<id>]` table plus the scoped writable data dir. First-party
+# host-managed adapters receive host-private connect params instead.
+struct DatabaseAdapterConfig {
+  # Scoped writable directory for this plugin (`.../plugins/<id>/data`).
+  pluginDataDir @0 :Text $required;
+  # Granted plugin settings (operator `[database.<id>]` table) as a JSON
+  # object; `{}` when the operator configured nothing.
+  config @1 :Text $jsonValue;
 }
 
 # JSON health payload for guests that report identity alongside liveness.
