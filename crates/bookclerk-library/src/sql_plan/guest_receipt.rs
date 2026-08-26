@@ -251,8 +251,8 @@ mod replay_finalize {
             &wrapped.request,
             wrapped.guest_receipt.clone(),
             "sqlite_txn",
-            bookclerk_db_exec::ExecCaps::from_connect(
-                &bookclerk_plugin_abi::DbConnectResult::sqlite(),
+            bookclerk_db_exec::ExecCaps::from_capabilities(
+                &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
             ),
             bookclerk_db_exec::AtomicSession::from_deadline(None),
         )
@@ -279,8 +279,8 @@ mod replay_finalize {
             &replay_wrapped.request,
             replay_wrapped.guest_receipt.clone(),
             "sqlite_txn",
-            bookclerk_db_exec::ExecCaps::from_connect(
-                &bookclerk_plugin_abi::DbConnectResult::sqlite(),
+            bookclerk_db_exec::ExecCaps::from_capabilities(
+                &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
             ),
             bookclerk_db_exec::AtomicSession::from_deadline(None),
         )

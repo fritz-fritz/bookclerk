@@ -54,24 +54,21 @@ execution semantics (`atomicBatch`, `returning`, `affectedRows`,
 (exactly one of `pragmaUserVersion` or `schemaMigrations`;
 `atomicSchemaBatch` requires `schemaMigrations`). Bootstrap metadata
 (`sqlFamily`, SeaORM `dialect`) is **not** on typed `DbCapabilities`
-(`abiMinor` 13 tombstones ordinals @17/@18); it travels on JSON
-`DbConnectResult` / the host connect path after semantic negotiation succeeds.
+(`abiMinor` 13 tombstones ordinals @17/@18); it travels on the separate
+typed `DbBootstrap` / the host connect path after semantic negotiation
+succeeds.
 
-Older guests may still answer the `bookclerk.capabilities` query sentinel
-with a JSON `DbConnectResult`. The host must not invent capabilities from
-the plugin id. Missing required fields, `atomicBatch: false`,
-`returning: false`, unspecified (`0`) limits, limits below the host's
-compiled minimums, `maxPayloadBytes` / `maxAtomicRequestBytes` /
-`maxAtomicResultBytes` above `MAX_SCALAR_BYTES`, or a `dialect` that does
-not match `sqlFamily` are a hard error. Wake page size and `IN (…)`
-chunking are derived from `maxBinds`. `maxPayloadBytes` bounds request SQL
-plus binds per statement and must not exceed the v2 scalar ceiling;
-ordinary `dbQuery` / `dbExecute` use the same preflight.
-`maxRequestBytes` / `maxAtomicResultBytes` bound the whole encoded
-`ExecuteRequest` / `ExecuteReply` (JSON `DbAtomicRequest` /
-`DbPlanExecResult` on older guests). Native guests track encoded result
-bytes incrementally as statement results are built and keep one exact
-pre-commit check.
+The host must not invent capabilities from the plugin id. Missing required
+fields, `atomicBatch: false`, `returning: false`, unspecified (`0`) limits,
+limits below the host's compiled minimums, `maxPayloadBytes` /
+`maxRequestBytes` / `maxAtomicResultBytes` above `MAX_SCALAR_BYTES`, or a
+bootstrap `dialect` that does not match `sqlFamily` are a hard error. Wake
+page size and `IN (…)` chunking are derived from `maxBinds`.
+`maxPayloadBytes` bounds request SQL plus binds per statement and must not
+exceed the scalar ceiling. `maxRequestBytes` / `maxAtomicResultBytes` bound
+the whole encoded `ExecuteRequest` / `ExecuteReply`. Guests track encoded
+result bytes incrementally as statement results are built and keep one
+exact pre-commit check.
 
 First-party values: D1 `maxBinds = 100`; SQLite and PostgreSQL report the
 engine bind cap (host still chunks conservatively).
@@ -94,8 +91,8 @@ only on semantic capabilities, not on plugin id or `sqlFamily`.
 
 ### Bootstrap metadata isolation
 
-`sqlFamily` and SeaORM `dialect` are bootstrap-only (JSON `DbConnectResult` or
-the plugin-host connect path). Typed `DbCapabilities` no longer carry them
+`sqlFamily` and SeaORM `dialect` are bootstrap-only (typed `DbBootstrap` on
+the plugin-host connect path). Typed `DbCapabilities` does not carry them
 (`abiMinor` 13). An architecture lint (`scripts/check-db-plugin-isolation.py`)
 forbids `bookclerk-library` production sources from reading bootstrap fields
 (or defining planner-side `SqlFamily`). SeaORM proxy open maps bootstrap in

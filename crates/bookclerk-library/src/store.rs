@@ -57,8 +57,8 @@ pub struct LibraryStore {
     max_result_rows: u32,
     /// Negotiated guest `maxPayloadBytes`.
     max_payload_bytes: u32,
-    /// Full connect advertisement (SQL family, limits, timing).
-    connect: Arc<bookclerk_plugin_abi::DbConnectResult>,
+    /// Full negotiated capability advertisement (limits, schema flags, timing).
+    caps: Arc<bookclerk_plugin_abi::DbCapabilities>,
 }
 
 impl std::fmt::Debug for LibraryStore {
@@ -83,7 +83,7 @@ impl LibraryStore {
             max_statements: bookclerk_plugin_abi::FIRST_PARTY_MAX_STATEMENTS,
             max_result_rows: 256,
             max_payload_bytes: 256 * 1024,
-            connect: Arc::new(bookclerk_plugin_abi::DbConnectResult::d1()),
+            caps: Arc::new(bookclerk_plugin_abi::DbCapabilities::advertised_d1()),
         }
     }
 
@@ -112,9 +112,9 @@ impl LibraryStore {
     #[must_use]
     pub fn with_max_binds(mut self, max_binds: u32) -> Self {
         self.max_binds = max_binds.max(bookclerk_plugin_abi::HOST_MIN_BINDS);
-        let mut caps = (*self.connect).clone();
+        let mut caps = (*self.caps).clone();
         caps.max_binds = self.max_binds;
-        self.connect = Arc::new(caps);
+        self.caps = Arc::new(caps);
         self
     }
 
@@ -129,31 +129,31 @@ impl LibraryStore {
         self.max_statements = max_statements.max(bookclerk_plugin_abi::HOST_MIN_STATEMENTS);
         self.max_result_rows = max_result_rows.max(1);
         self.max_payload_bytes = max_payload_bytes.max(1024);
-        let mut caps = (*self.connect).clone();
+        let mut caps = (*self.caps).clone();
         caps.max_statements = self.max_statements;
         caps.max_result_rows = self.max_result_rows;
         caps.max_payload_bytes = self.max_payload_bytes;
-        self.connect = Arc::new(caps);
+        self.caps = Arc::new(caps);
         self
     }
 
-    /// Records the full negotiated [`bookclerk_plugin_abi::DbConnectResult`].
+    /// Records the full negotiated [`bookclerk_plugin_abi::DbCapabilities`].
     #[must_use]
-    pub fn with_connect_result(mut self, caps: bookclerk_plugin_abi::DbConnectResult) -> Self {
+    pub fn with_db_capabilities(mut self, caps: bookclerk_plugin_abi::DbCapabilities) -> Self {
         self.max_binds = caps.max_binds.max(bookclerk_plugin_abi::HOST_MIN_BINDS);
         self.max_statements = caps
             .max_statements
             .max(bookclerk_plugin_abi::HOST_MIN_STATEMENTS);
         self.max_result_rows = caps.max_result_rows.max(1);
         self.max_payload_bytes = caps.max_payload_bytes.max(1024);
-        self.connect = Arc::new(caps);
+        self.caps = Arc::new(caps);
         self
     }
 
-    /// Negotiated connect advertisement used for plan validation.
+    /// Negotiated capability advertisement used for plan validation.
     #[must_use]
-    pub fn connect_result(&self) -> &bookclerk_plugin_abi::DbConnectResult {
-        self.connect.as_ref()
+    pub fn db_capabilities(&self) -> &bookclerk_plugin_abi::DbCapabilities {
+        self.caps.as_ref()
     }
 
     /// Runs guest-authored SQL after grammar, table-scope, and cap checks.
@@ -174,14 +174,14 @@ impl LibraryStore {
         policy: &bookclerk_plugin_abi::GuestSqlPolicy,
     ) -> std::result::Result<bookclerk_plugin_abi::ExecuteReply, bookclerk_plugin_abi::PluginError>
     {
-        crate::authorize_guest_typed_request(&mut req, self.connect_result(), policy)
+        crate::authorize_guest_typed_request(&mut req, self.db_capabilities(), policy)
             .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
         let guest_len = req.statements.len();
         let guest_hash = req.request_hash.clone();
         let envelope = crate::sql_plan::wrap_guest_typed_request(req);
         let reply = if let Some(exec) = &self.typed_exec {
             let reply = exec.execute_typed(envelope.clone()).await?;
-            crate::validate_execute_reply(&envelope.request, &reply, self.connect_result())
+            crate::validate_execute_reply(&envelope.request, &reply, self.db_capabilities())
                 .map_err(|err| bookclerk_plugin_abi::PluginError::unavailable(err.to_string()))?;
             reply
         } else {
@@ -196,12 +196,12 @@ impl LibraryStore {
                 &envelope.request,
                 envelope.guest_receipt.clone(),
                 timing,
-                bookclerk_db_exec::ExecCaps::from_connect(self.connect_result()),
+                bookclerk_db_exec::ExecCaps::from_capabilities(self.db_capabilities()),
                 bookclerk_db_exec::AtomicSession::from_deadline(deadline),
             )
             .await
             .map_err(plugin_err_from_db)?;
-            crate::validate_execute_reply(&envelope.request, &reply, self.connect_result())
+            crate::validate_execute_reply(&envelope.request, &reply, self.db_capabilities())
                 .map_err(|err| bookclerk_plugin_abi::PluginError::unavailable(err.to_string()))?;
             reply
         };

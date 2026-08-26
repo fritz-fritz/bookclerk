@@ -256,8 +256,8 @@ pub async fn guest_atomic(
         )
     })?;
     let caps = match conn.get_database_backend() {
-        DbBackend::Postgres => bookclerk_plugin_abi::DbConnectResult::postgres(),
-        _ => bookclerk_plugin_abi::DbConnectResult::sqlite(),
+        DbBackend::Postgres => DbCapabilities::advertised_postgres(),
+        _ => DbCapabilities::advertised_sqlite(),
     };
     let timing_source = match conn.get_database_backend() {
         DbBackend::Postgres => "postgres_txn",
@@ -268,7 +268,7 @@ pub async fn guest_atomic(
         &plan,
         &req.operation_id,
         timing_source,
-        bookclerk_db_exec::ExecCaps::from_connect(&caps),
+        bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
         bookclerk_db_exec::AtomicSession::from_deadline(req.deadline_unix_ms),
     )
     .await
@@ -325,8 +325,8 @@ pub async fn guest_execute_atomic(
         .await
         .map_err(bookclerk_plugin_abi::PluginError::internal)?;
     let caps = match conn.get_database_backend() {
-        DbBackend::Postgres => bookclerk_plugin_abi::DbConnectResult::postgres(),
-        _ => bookclerk_plugin_abi::DbConnectResult::sqlite(),
+        DbBackend::Postgres => DbCapabilities::advertised_postgres(),
+        _ => DbCapabilities::advertised_sqlite(),
     };
     let timing_source = match conn.get_database_backend() {
         DbBackend::Postgres => "postgres_txn",
@@ -339,7 +339,7 @@ pub async fn guest_execute_atomic(
         &envelope.request,
         envelope.guest_receipt,
         timing_source,
-        bookclerk_db_exec::ExecCaps::from_connect(&caps),
+        bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
         bookclerk_db_exec::AtomicSession::from_deadline(deadline),
     )
     .await
@@ -635,10 +635,8 @@ async fn txn_worker(
                 let result = match stack_txn(&stack, &txn_id) {
                     Ok(txn) => {
                         let caps = match ConnectionTrait::get_database_backend(txn) {
-                            DbBackend::Postgres => {
-                                bookclerk_plugin_abi::DbConnectResult::postgres()
-                            }
-                            _ => bookclerk_plugin_abi::DbConnectResult::sqlite(),
+                            DbBackend::Postgres => DbCapabilities::advertised_postgres(),
+                            _ => DbCapabilities::advertised_sqlite(),
                         };
                         let timing_source = match ConnectionTrait::get_database_backend(txn) {
                             DbBackend::Postgres => "postgres_txn",
@@ -650,7 +648,7 @@ async fn txn_worker(
                             txn,
                             &request,
                             timing_source,
-                            bookclerk_db_exec::ExecCaps::from_connect(&caps),
+                            bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
                             bookclerk_db_exec::AtomicSession::from_deadline(deadline),
                             Some(&conn),
                         )

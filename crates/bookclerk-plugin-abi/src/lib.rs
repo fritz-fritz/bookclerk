@@ -44,7 +44,7 @@
 //! | [`methods`] | Wire method name constants (`handshake`, `onEvent`, …) |
 //! | [`types`] | Shared DTOs (handshake, health, CLI, stdio RPC frames) |
 //! | [`kind`] | Kind-specific DTOs (source / integration / output) |
-//! | [`db`] | Database adapter contract constants (+ host-private connect params) |
+//! | [`db`] | Host-private database connect params (feature `host`) |
 //! | [`error`] | [`PluginError`] / [`PluginErrorCode`] |
 //! | [`v2`] | Object-capability ABI (`apiVersion` 2, Cap'n Proto, streams) |
 
@@ -101,19 +101,15 @@ pub mod plugin_v2_host_capnp {
 #[cfg(test)]
 mod wire_fixtures;
 
-#[doc(hidden)]
-pub use db::DbConnectResult;
 #[cfg(feature = "host")]
 pub use db::{connect_params_from_context, database_context_from_params, DbConnectParams};
-pub use db::{
-    D1_MAX_BINDS, FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS,
-    HOST_MIN_CELL_BYTES, HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS,
-    HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
-};
 pub use db_execute::{
     sql_payload_bytes, sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn,
     DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest,
-    StatementResult, TypedDbStatement,
+    StatementResult, TypedDbStatement, D1_MAX_BINDS, FIRST_PARTY_MAX_RESULT_BYTES,
+    FIRST_PARTY_MAX_RESULT_ROWS, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
+    HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS,
+    POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
 };
 pub use db_value::{DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
@@ -152,7 +148,6 @@ pub const PLUGIN_TOML_SCHEMA_JSON: &str = include_str!("../schema/plugin-toml.js
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
-    use crate::db::DbConnectResult;
 
     #[test]
     fn schema_parses_as_json() {
@@ -193,66 +188,6 @@ mod tests {
             schema_names, expected,
             "abi.json methods keys must match methods.rs METHOD_NAMES"
         );
-    }
-
-    #[test]
-    fn connect_caps_fail_closed_without_returning_bounds_or_matching_dialect() {
-        let mut no_returning = DbConnectResult::sqlite();
-        no_returning.returning = false;
-        assert!(!no_returning.meets_host_minimums());
-        assert!(no_returning
-            .capability_failure_reason()
-            .contains("returning"));
-
-        let mut zero_rows = DbConnectResult::sqlite();
-        zero_rows.max_result_rows = 0;
-        assert!(!zero_rows.meets_host_minimums());
-        assert!(zero_rows
-            .capability_failure_reason()
-            .contains("maxResultRows"));
-
-        let mut zero_payload = DbConnectResult::sqlite();
-        zero_payload.max_payload_bytes = 0;
-        assert!(!zero_payload.meets_host_minimums());
-        assert!(zero_payload
-            .capability_failure_reason()
-            .contains("maxPayloadBytes"));
-
-        let mut zero_result = DbConnectResult::sqlite();
-        zero_result.max_result_bytes = 0;
-        assert!(!zero_result.meets_host_minimums());
-        assert!(zero_result
-            .capability_failure_reason()
-            .contains("maxResultBytes"));
-
-        let mut zero_cell = DbConnectResult::sqlite();
-        zero_cell.max_cell_bytes = 0;
-        assert!(!zero_cell.meets_host_minimums());
-        assert!(zero_cell
-            .capability_failure_reason()
-            .contains("maxCellBytes"));
-
-        let mut zero_atomic = DbConnectResult::sqlite();
-        zero_atomic.max_atomic_request_bytes = 0;
-        assert!(!zero_atomic.meets_host_minimums());
-        assert!(zero_atomic
-            .capability_failure_reason()
-            .contains("maxAtomicRequestBytes"));
-
-        let mut over_scalar = DbConnectResult::sqlite();
-        over_scalar.max_atomic_result_bytes = crate::v2::MAX_SCALAR_BYTES + 1;
-        assert!(!over_scalar.meets_host_minimums());
-        assert!(over_scalar
-            .capability_failure_reason()
-            .contains("maxAtomicResultBytes"));
-
-        let mut mismatch = DbConnectResult::sqlite();
-        mismatch.dialect = "postgres".into();
-        assert!(mismatch.meets_host_minimums());
-        let reason = mismatch
-            .bootstrap_backend_failure_reason()
-            .expect("bootstrap mismatch");
-        assert!(reason.contains("does not match"), "{reason}");
     }
 
     #[test]

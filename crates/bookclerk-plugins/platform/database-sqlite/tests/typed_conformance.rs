@@ -1,7 +1,7 @@
 //! Adapter-boundary typed conformance for the platform SQLite guest.
 
 use bookclerk_db_guest::{guest_execute_atomic, set_connection};
-use bookclerk_plugin_abi::DbConnectResult;
+use bookclerk_plugin_abi::DbCapabilities;
 use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
 
 #[tokio::test]
@@ -11,8 +11,8 @@ async fn platform_sqlite_guest_execute_passes_typed_vectors() {
         .expect("mem db");
     set_connection(db).await;
     bookclerk_library::sql_plan::run_typed_request_vectors(
-        DbConnectResult::sqlite(),
-        DbConnectResult::sqlite().max_result_rows,
+        DbCapabilities::advertised_sqlite(),
+        DbCapabilities::advertised_sqlite().max_result_rows,
         |req| async move {
             guest_execute_atomic(HostExecuteEnvelope::new(
                 req,

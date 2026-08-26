@@ -1,8 +1,8 @@
 //! Trust-boundary validation for typed [`ExecuteReply`] envelopes from guests.
 
 use bookclerk_plugin_abi::{
-    encoded_execute_reply_bytes, encoded_statement_result_bytes, DbConnectResult,
-    DbResultSelection, DbValue, ExecuteReply, ExecuteRequest,
+    encoded_execute_reply_bytes, encoded_statement_result_bytes, DbCapabilities, DbResultSelection,
+    DbValue, ExecuteReply, ExecuteRequest,
 };
 
 use crate::error::{LibraryError, Result};
@@ -21,7 +21,7 @@ use crate::error::{LibraryError, Result};
 pub fn validate_execute_reply(
     req: &ExecuteRequest,
     reply: &ExecuteReply,
-    caps: &DbConnectResult,
+    caps: &DbCapabilities,
 ) -> Result<()> {
     reply
         .validate_positional()
@@ -66,7 +66,7 @@ fn validate_statement_result(
     selection: DbResultSelection,
     stmt_max_rows: u32,
     stmt: &bookclerk_plugin_abi::StatementResult,
-    caps: &DbConnectResult,
+    caps: &DbCapabilities,
 ) -> Result<()> {
     match selection {
         DbResultSelection::AffectedRows => {
@@ -150,7 +150,7 @@ fn effective_row_cap(stmt_max_rows: u32, caps_max_result_rows: u32) -> Option<u3
 }
 
 /// Encoded whole-reply byte budget from negotiated caps (`None` = unlimited).
-fn atomic_result_cap_bytes(caps: &DbConnectResult) -> Option<usize> {
+fn atomic_result_cap_bytes(caps: &DbCapabilities) -> Option<usize> {
     if caps.max_atomic_result_bytes == 0 {
         return None;
     }
@@ -181,8 +181,8 @@ mod tests {
 
     use super::*;
 
-    fn tiny_caps() -> DbConnectResult {
-        let mut caps = DbConnectResult::sqlite();
+    fn tiny_caps() -> DbCapabilities {
+        let mut caps = DbCapabilities::advertised_sqlite();
         caps.max_result_rows = 2;
         caps.max_result_bytes = 256;
         caps.max_cell_bytes = 16;
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn validate_execute_reply_uses_min_of_statement_and_adapter_row_caps() {
-        let mut caps = DbConnectResult::sqlite();
+        let mut caps = DbCapabilities::advertised_sqlite();
         caps.max_result_rows = 10;
         let req = rows_request(1);
         let reply = rows_reply("op-1", 2);

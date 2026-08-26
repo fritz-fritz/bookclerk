@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;
 
-use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatementKind};
+use bookclerk_plugin_abi::DbPlanStatementKind;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 
 use crate::error::{LibraryError, Result};
@@ -39,13 +39,14 @@ pub enum HostSchemaKind {
 }
 
 impl HostSchemaKind {
-    /// Selects a schema **apply mechanic** from advertised versioning flags.
+    /// Selects a schema **apply mechanic** from typed
+    /// [`bookclerk_plugin_abi::DbCapabilities`] versioning flags.
     ///
-    /// Plugin identity, `dialect`, `sqlFamily`, and `diagnosticEngine` are not
-    /// consulted. SQL text is chosen from the live connection backend when
-    /// applying (canonical SQLite pack, or the Postgres adapter-edge pack in
-    /// `bookclerk-db-exec`), not from these flags. A conforming adapter may
-    /// use any plugin id as long as it advertises exactly one of:
+    /// Plugin identity, `dialect`, and `sqlFamily` are not consulted. SQL text
+    /// is chosen from the live connection backend when applying (canonical
+    /// SQLite pack, or the Postgres adapter-edge pack in `bookclerk-db-exec`),
+    /// not from these flags. A conforming adapter may use any plugin id as
+    /// long as it advertises exactly one of:
     ///
     /// - `pragmaUserVersion` (`PRAGMA user_version` marker)
     /// - `schemaMigrations` without `atomicSchemaBatch` (row marker)
@@ -54,59 +55,6 @@ impl HostSchemaKind {
     /// # Errors
     ///
     /// Returns [`LibraryError::Other`] when the flags are missing, mixed, or
-    /// contradictory.
-    pub fn from_capabilities(caps: &DbConnectResult) -> Result<Self> {
-        let kind = if caps.pragma_user_version
-            && !caps.schema_migrations
-            && !caps.atomic_schema_batch
-        {
-            Self::PragmaMarker
-        } else if caps.schema_migrations && caps.atomic_schema_batch && !caps.pragma_user_version {
-            Self::AtomicBatchMarker
-        } else if caps.schema_migrations && !caps.atomic_schema_batch && !caps.pragma_user_version {
-            Self::RowMarker
-        } else {
-            return Err(LibraryError::Other(anyhow::anyhow!(
-                "database guest schema flags are not a known versioning contract \
-                 (pragmaUserVersion={}, schemaMigrations={}, atomicSchemaBatch={})",
-                caps.pragma_user_version,
-                caps.schema_migrations,
-                caps.atomic_schema_batch
-            )));
-        };
-        kind.advertised_flags_match(caps)?;
-        Ok(kind)
-    }
-
-    /// Checks that advertised schema flags match this plugin kind.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LibraryError::Other`] when the guest advertised a different
-    /// versioning scheme than this kind requires.
-    pub fn advertised_flags_match(self, caps: &DbConnectResult) -> Result<()> {
-        let ok = match self {
-            Self::PragmaMarker => caps.pragma_user_version && !caps.atomic_schema_batch,
-            Self::AtomicBatchMarker => caps.schema_migrations && caps.atomic_schema_batch,
-            Self::RowMarker => {
-                caps.schema_migrations && !caps.atomic_schema_batch && !caps.pragma_user_version
-            }
-        };
-        if ok {
-            Ok(())
-        } else {
-            Err(LibraryError::Other(anyhow::anyhow!(
-                "database plugin advertised schema flags do not match {:?}",
-                self
-            )))
-        }
-    }
-
-    /// Selects a schema apply mechanic from typed [`bookclerk_plugin_abi::DbCapabilities`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LibraryError::Other`] when capabilities are missing, mixed, or
     /// contradictory.
     pub fn from_db_capabilities(caps: &bookclerk_plugin_abi::DbCapabilities) -> Result<Self> {
         let kind = if caps.pragma_user_version
@@ -132,6 +80,11 @@ impl HostSchemaKind {
     }
 
     /// Checks typed capability flags against this marker kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Other`] when the guest advertised a different
+    /// versioning scheme than this kind requires.
     pub fn advertised_db_capabilities_match(
         self,
         caps: &bookclerk_plugin_abi::DbCapabilities,
@@ -612,7 +565,7 @@ async fn exec_sql(db: &DatabaseConnection, backend: DbBackend, sql: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bookclerk_plugin_abi::DbConnectResult;
+    use bookclerk_plugin_abi::DbCapabilities;
 
     #[test]
     fn host_migration_plan_is_single_greenfield_baseline() {
@@ -627,72 +580,28 @@ mod tests {
     }
 
     #[test]
-    fn from_db_capabilities_selects_kind_from_flags_not_bootstrap() {
-        use bookclerk_plugin_abi::DbCapabilities;
-
-        let mut sqlite = DbConnectResult::sqlite();
-        sqlite.dialect = "not-a-real-engine".into();
-        sqlite.sql_family = "mystery".into();
-        let caps = DbCapabilities::from_connect(&sqlite);
+    fn from_db_capabilities_selects_kind_from_flags_not_identity() {
         assert_eq!(
-            HostSchemaKind::from_db_capabilities(&caps).unwrap(),
+            HostSchemaKind::from_db_capabilities(&DbCapabilities::advertised_sqlite()).unwrap(),
             HostSchemaKind::PragmaMarker
         );
-
-        let mut pg = DbConnectResult::postgres();
-        pg.dialect = "conformance-sql".into();
-        pg.sql_family.clear();
-        let caps = DbCapabilities::from_connect(&pg);
         assert_eq!(
-            HostSchemaKind::from_db_capabilities(&caps).unwrap(),
+            HostSchemaKind::from_db_capabilities(&DbCapabilities::advertised_postgres()).unwrap(),
             HostSchemaKind::RowMarker
         );
-
-        let mut d1 = DbConnectResult::d1();
-        d1.dialect = "arbitrary-adapter".into();
-        d1.sql_family = "postgres".into();
-        let caps = DbCapabilities::from_connect(&d1);
         assert_eq!(
-            HostSchemaKind::from_db_capabilities(&caps).unwrap(),
-            HostSchemaKind::AtomicBatchMarker
-        );
-    }
-
-    #[test]
-    fn from_capabilities_selects_kind_from_flags_not_identity() {
-        let mut sqlite = DbConnectResult::sqlite();
-        sqlite.dialect = "not-a-real-engine".into();
-        sqlite.sql_family = "mystery".into();
-        sqlite.interactive_txn = false;
-        assert_eq!(
-            HostSchemaKind::from_capabilities(&sqlite).unwrap(),
-            HostSchemaKind::PragmaMarker
-        );
-
-        let mut pg = DbConnectResult::postgres();
-        pg.dialect = "conformance-sql".into();
-        assert_eq!(
-            HostSchemaKind::from_capabilities(&pg).unwrap(),
-            HostSchemaKind::RowMarker
-        );
-
-        let mut d1 = DbConnectResult::d1();
-        d1.dialect = "arbitrary-adapter".into();
-        d1.sql_family = "postgres".into();
-        d1.interactive_txn = true;
-        assert_eq!(
-            HostSchemaKind::from_capabilities(&d1).unwrap(),
+            HostSchemaKind::from_db_capabilities(&DbCapabilities::advertised_d1()).unwrap(),
             HostSchemaKind::AtomicBatchMarker
         );
 
-        let mut mixed = DbConnectResult::sqlite();
+        let mut mixed = DbCapabilities::advertised_sqlite();
         mixed.schema_migrations = true;
-        assert!(HostSchemaKind::from_capabilities(&mixed).is_err());
-        let mut none = DbConnectResult::sqlite();
+        assert!(HostSchemaKind::from_db_capabilities(&mixed).is_err());
+        let mut none = DbCapabilities::advertised_sqlite();
         none.pragma_user_version = false;
-        assert!(HostSchemaKind::from_capabilities(&none).is_err());
+        assert!(HostSchemaKind::from_db_capabilities(&none).is_err());
         assert!(HostSchemaKind::PragmaMarker
-            .advertised_flags_match(&none)
+            .advertised_db_capabilities_match(&none)
             .is_err());
     }
 

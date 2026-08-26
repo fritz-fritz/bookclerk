@@ -2,7 +2,7 @@
 
 use super::host_ir::{DbAtomicPlan, DbPlanExecResult, DbPlanStmtExecResult};
 use super::CompiledAtomic;
-use bookclerk_plugin_abi::{DbConnectResult, ExecuteReply};
+use bookclerk_plugin_abi::{DbCapabilities, ExecuteReply};
 use serde_json::Value as JsonValue;
 
 use crate::atomic_ops::{atomic_status, DbAtomicResult};
@@ -66,7 +66,7 @@ pub fn interpret_typed_exec(
 pub fn validate_exec_result(
     plan: &DbAtomicPlan,
     exec: &DbPlanExecResult,
-    caps: &DbConnectResult,
+    caps: &DbCapabilities,
     operation_id: &str,
 ) -> Result<()> {
     if exec.operation_id != operation_id {
@@ -239,7 +239,7 @@ mod tests {
     use super::{validate_exec_result, DbAtomicPlan, DbPlanExecResult, DbPlanStmtExecResult};
     use crate::sql_plan::DbPlanStatement;
     use crate::LibraryError;
-    use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatementKind};
+    use bookclerk_plugin_abi::{DbCapabilities, DbPlanStatementKind};
 
     fn one_stmt_plan() -> DbAtomicPlan {
         DbAtomicPlan {
@@ -275,7 +275,7 @@ mod tests {
                     rows_affected: 0,
                 }],
             ),
-            &DbConnectResult::sqlite(),
+            &DbCapabilities::advertised_sqlite(),
             "wanted",
         )
         .unwrap_err();
@@ -288,7 +288,7 @@ mod tests {
         let err = validate_exec_result(
             &one_stmt_plan(),
             &exec("wanted", vec![]),
-            &DbConnectResult::sqlite(),
+            &DbCapabilities::advertised_sqlite(),
             "wanted",
         )
         .unwrap_err();
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn validate_exec_rejects_over_cap_rows() {
-        let mut caps = DbConnectResult::sqlite();
+        let mut caps = DbCapabilities::advertised_sqlite();
         caps.max_result_rows = 1;
         let err = validate_exec_result(
             &one_stmt_plan(),

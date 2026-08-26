@@ -13,7 +13,7 @@ use super::{
     compile_named_request, execute_plan_on, execute_statements_on_session,
     vectors::CONTRACT_VECTOR_ROW_CAP, AtomicSession,
 };
-use bookclerk_plugin_abi::DbConnectResult;
+use bookclerk_plugin_abi::DbCapabilities;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -57,14 +57,18 @@ fn named(id: &'static str, params: DbAtomicParams) -> NamedOp {
 #[tokio::test]
 async fn shared_vectors_on_sqlite() {
     let db = mem_db().await;
-    super::vectors::run_conn_vectors(&db, DbConnectResult::sqlite(), "sqlite_txn").await;
+    super::vectors::run_conn_vectors(&db, DbCapabilities::advertised_sqlite(), "sqlite_txn").await;
 }
 
 #[tokio::test]
 async fn typed_shared_vectors_on_sqlite() {
     let db = mem_db().await;
-    super::typed_vectors::run_typed_conn_vectors(&db, DbConnectResult::sqlite(), "sqlite_txn")
-        .await;
+    super::typed_vectors::run_typed_conn_vectors(
+        &db,
+        DbCapabilities::advertised_sqlite(),
+        "sqlite_txn",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -74,7 +78,8 @@ async fn postgres_shared_vectors() {
         return;
     }
     let db = postgres_migrated_db().await;
-    super::vectors::run_conn_vectors(&db, DbConnectResult::postgres(), "postgres_txn").await;
+    super::vectors::run_conn_vectors(&db, DbCapabilities::advertised_postgres(), "postgres_txn")
+        .await;
 }
 
 #[tokio::test]
@@ -84,8 +89,12 @@ async fn typed_shared_vectors_on_postgres() {
         return;
     }
     let db = postgres_migrated_db().await;
-    super::typed_vectors::run_typed_conn_vectors(&db, DbConnectResult::postgres(), "postgres_txn")
-        .await;
+    super::typed_vectors::run_typed_conn_vectors(
+        &db,
+        DbCapabilities::advertised_postgres(),
+        "postgres_txn",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1026,7 +1035,7 @@ async fn postgres_plan_commit_inserts_receipt() {
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_plan_exceeds_max_binds_is_rejected() {
-    let mut caps = bookclerk_plugin_abi::DbConnectResult::postgres();
+    let mut caps = bookclerk_plugin_abi::DbCapabilities::advertised_postgres();
     caps.max_binds = 2;
     let plan = crate::sql_plan::DbAtomicPlan {
         statements: vec![crate::sql_plan::DbPlanStatement {
@@ -1356,7 +1365,9 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
         &dup,
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "sqlite_txn",
-        bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite()),
+        bookclerk_db_exec::ExecCaps::from_capabilities(
+            &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
+        ),
         bookclerk_db_exec::AtomicSession::from_deadline(None),
     )
     .await;
@@ -1379,7 +1390,9 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
         &empty,
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "sqlite_txn",
-        bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite()),
+        bookclerk_db_exec::ExecCaps::from_capabilities(
+            &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
+        ),
         bookclerk_db_exec::AtomicSession::from_deadline(None),
     )
     .await
@@ -1394,7 +1407,9 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
         &nulls,
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "sqlite_txn",
-        bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite()),
+        bookclerk_db_exec::ExecCaps::from_capabilities(
+            &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
+        ),
         bookclerk_db_exec::AtomicSession::from_deadline(None),
     )
     .await
@@ -1435,8 +1450,9 @@ async fn typed_sqlite_select_stops_after_cap_plus_one() {
         .unwrap();
     }
     let req = typed_query("cap", "SELECT x FROM typed_rowcap");
-    let mut caps =
-        bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite());
+    let mut caps = bookclerk_db_exec::ExecCaps::from_capabilities(
+        &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
+    );
     caps.max_result_rows = CONTRACT_VECTOR_ROW_CAP;
     let err = bookclerk_db_exec::execute_typed_on_session(
         &db,
@@ -1481,8 +1497,9 @@ async fn typed_sqlite_statement_max_rows_is_a_proven_bound() {
             deadline_unix_ms: 0,
         }
     }
-    let caps =
-        bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite());
+    let caps = bookclerk_db_exec::ExecCaps::from_capabilities(
+        &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
+    );
     let err = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &req("SELECT x FROM typed_probe ORDER BY x"),
@@ -1541,8 +1558,9 @@ async fn typed_sqlite_per_statement_max_result_bytes() {
         ],
         deadline_unix_ms: 0,
     };
-    let mut caps =
-        bookclerk_db_exec::ExecCaps::from_connect(&bookclerk_plugin_abi::DbConnectResult::sqlite());
+    let mut caps = bookclerk_db_exec::ExecCaps::from_capabilities(
+        &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
+    );
     caps.max_result_bytes = 32;
     caps.max_atomic_result_bytes = 1_048_576;
     let err = bookclerk_db_exec::execute_typed_on_session(
@@ -1572,8 +1590,8 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
         &dup,
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "postgres_txn",
-        bookclerk_db_exec::ExecCaps::from_connect(
-            &bookclerk_plugin_abi::DbConnectResult::postgres(),
+        bookclerk_db_exec::ExecCaps::from_capabilities(
+            &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
         bookclerk_db_exec::AtomicSession::from_deadline(None),
     )
@@ -1590,8 +1608,8 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
         &empty,
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "postgres_txn",
-        bookclerk_db_exec::ExecCaps::from_connect(
-            &bookclerk_plugin_abi::DbConnectResult::postgres(),
+        bookclerk_db_exec::ExecCaps::from_capabilities(
+            &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
         bookclerk_db_exec::AtomicSession::from_deadline(None),
     )
@@ -1611,8 +1629,8 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
         &nulls,
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "postgres_txn",
-        bookclerk_db_exec::ExecCaps::from_connect(
-            &bookclerk_plugin_abi::DbConnectResult::postgres(),
+        bookclerk_db_exec::ExecCaps::from_capabilities(
+            &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
         bookclerk_db_exec::AtomicSession::from_deadline(None),
     )
@@ -1651,8 +1669,8 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
         &empty,
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "postgres_txn",
-        bookclerk_db_exec::ExecCaps::from_connect(
-            &bookclerk_plugin_abi::DbConnectResult::postgres(),
+        bookclerk_db_exec::ExecCaps::from_capabilities(
+            &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
         bookclerk_db_exec::AtomicSession::from_deadline(None),
     )
@@ -1667,8 +1685,8 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
         &count,
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "postgres_txn",
-        bookclerk_db_exec::ExecCaps::from_connect(
-            &bookclerk_plugin_abi::DbConnectResult::postgres(),
+        bookclerk_db_exec::ExecCaps::from_capabilities(
+            &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
         bookclerk_db_exec::AtomicSession::from_deadline(None),
     )

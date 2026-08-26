@@ -18,7 +18,7 @@ mod typed_vectors;
 pub mod vectors;
 mod vectors_typed;
 
-use bookclerk_plugin_abi::{encoded_execute_request_bytes, DbConnectResult, ExecuteRequest};
+use bookclerk_plugin_abi::{encoded_execute_request_bytes, DbCapabilities, ExecuteRequest};
 
 pub use bookclerk_plugin_abi::DbPlanStatementKind;
 pub use host_ir::{
@@ -88,7 +88,7 @@ impl CompiledAtomic {
 /// # Errors
 ///
 /// Returns [`crate::LibraryError::Other`] when the plan cannot be sent.
-pub fn validate_plan(plan: &DbAtomicPlan, caps: &DbConnectResult) -> crate::error::Result<()> {
+pub fn validate_plan(plan: &DbAtomicPlan, caps: &DbCapabilities) -> crate::error::Result<()> {
     let n_stmt = u32::try_from(plan.statements.len()).unwrap_or(u32::MAX);
     if caps.max_statements > 0 && n_stmt > caps.max_statements {
         return Err(crate::LibraryError::Other(anyhow::anyhow!(
@@ -141,16 +141,16 @@ pub fn validate_plan(plan: &DbAtomicPlan, caps: &DbConnectResult) -> crate::erro
 
 /// Rejects a typed [`ExecuteRequest`] that exceeds negotiated guest limits.
 ///
-/// `maxAtomicRequestBytes` is measured against the Cap'n-encoded
-/// [`ExecuteRequest`] that will be sent, not the JSON [`DbAtomicRequest`]
-/// envelope used by older-minor sentinels.
+/// `maxRequestBytes` is measured against the Cap'n-encoded [`ExecuteRequest`]
+/// that will be sent, not the JSON [`DbAtomicRequest`] envelope used by the
+/// in-process sentinel path.
 ///
 /// # Errors
 ///
 /// Returns [`crate::LibraryError::Other`] when the request cannot be sent.
 pub fn validate_execute_request(
     req: &ExecuteRequest,
-    caps: &DbConnectResult,
+    caps: &DbCapabilities,
 ) -> crate::error::Result<()> {
     if req.statements.is_empty() {
         return Err(crate::LibraryError::Other(anyhow::anyhow!(
@@ -200,7 +200,7 @@ pub fn validate_execute_request(
         .unwrap_or(usize::MAX);
     if bytes > cap {
         return Err(crate::LibraryError::Other(anyhow::anyhow!(
-            "atomic request is {bytes} bytes; guest maxAtomicRequestBytes is {cap}"
+            "atomic request is {bytes} bytes; guest maxRequestBytes is {cap}"
         )));
     }
     Ok(())
@@ -218,7 +218,7 @@ pub fn validate_execute_request(
 /// retry hash does not match, or the canonical digest cannot be encoded.
 pub fn authorize_typed_request(
     req: &mut ExecuteRequest,
-    caps: &DbConnectResult,
+    caps: &DbCapabilities,
 ) -> crate::error::Result<()> {
     for stmt in &mut req.statements {
         stmt.kind = host_statement_kind(&stmt.sql);
@@ -249,7 +249,7 @@ pub fn authorize_typed_request(
 /// grammar or fails host validation.
 pub fn authorize_guest_typed_request(
     req: &mut ExecuteRequest,
-    caps: &DbConnectResult,
+    caps: &DbCapabilities,
     policy: &bookclerk_plugin_abi::GuestSqlPolicy,
 ) -> crate::error::Result<()> {
     bookclerk_plugin_abi::validate_guest_execute_request(req)
@@ -266,7 +266,7 @@ pub fn authorize_guest_typed_request(
 /// Returns [`crate::LibraryError::Other`] when the request cannot be sent.
 pub fn validate_atomic_request(
     req: &DbAtomicRequest,
-    caps: &DbConnectResult,
+    caps: &DbCapabilities,
 ) -> crate::error::Result<()> {
     if let Some(plan) = &req.plan {
         validate_plan(plan, caps)?;
@@ -284,19 +284,19 @@ pub fn validate_atomic_request(
         .unwrap_or(usize::MAX);
     if bytes > cap {
         return Err(crate::LibraryError::Other(anyhow::anyhow!(
-            "atomic request is {bytes} bytes; guest maxAtomicRequestBytes is {cap}"
+            "atomic request is {bytes} bytes; guest maxRequestBytes is {cap}"
         )));
     }
     Ok(())
 }
 
-/// JSON-byte budget for one encoded [`DbAtomicRequest`] (`0` = skip the check).
-fn atomic_request_cap_bytes(caps: &DbConnectResult) -> usize {
-    if caps.max_atomic_request_bytes == 0 {
+/// Byte budget for one encoded request (`0` = skip the check).
+fn atomic_request_cap_bytes(caps: &DbCapabilities) -> usize {
+    if caps.max_request_bytes == 0 {
         return 0;
     }
     usize::try_from(
-        caps.max_atomic_request_bytes
+        caps.max_request_bytes
             .min(bookclerk_plugin_abi::v2::MAX_SCALAR_BYTES),
     )
     .unwrap_or(usize::MAX)
@@ -378,11 +378,11 @@ pub fn proxy_write_kind(sql: &str) -> bookclerk_plugin_abi::DbPlanStatementKind 
 mod limits_tests {
     use super::{
         validate_atomic_request, validate_execute_request, validate_plan, DbAtomicPlan,
-        DbAtomicRequest, DbConnectResult, DbPlanStatement, DbPlanStatementKind,
+        DbAtomicRequest, DbCapabilities, DbPlanStatement, DbPlanStatementKind,
     };
 
-    fn tiny_caps() -> DbConnectResult {
-        let mut caps = DbConnectResult::sqlite();
+    fn tiny_caps() -> DbCapabilities {
+        let mut caps = DbCapabilities::advertised_sqlite();
         caps.max_statements = 2;
         caps.max_binds = 2;
         caps.max_payload_bytes = 64;
@@ -460,7 +460,7 @@ mod limits_tests {
             "2024-06-01T00:00:00Z",
         )
         .unwrap();
-        let mut caps = DbConnectResult::sqlite();
+        let mut caps = DbCapabilities::advertised_sqlite();
         caps.max_statements = 40;
         let err = validate_plan(&compiled.plan, &caps).unwrap_err();
         assert!(err.to_string().contains("maxStatements"), "{err}");
@@ -479,21 +479,21 @@ mod limits_tests {
             prior_receipt_index: None,
             receipt_select_index: None,
         };
-        let mut caps = DbConnectResult::sqlite();
+        let mut caps = DbCapabilities::advertised_sqlite();
         caps.max_payload_bytes = 1_048_576;
-        caps.max_atomic_request_bytes = 4_096;
+        caps.max_request_bytes = 4_096;
         caps.max_atomic_result_bytes = 4_096;
         caps.max_result_bytes = 4_096;
         let req = DbAtomicRequest::with_plan("op", "abc", plan);
         let err = validate_atomic_request(&req, &caps).unwrap_err();
-        assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
+        assert!(err.to_string().contains("maxRequestBytes"), "{err}");
         let typed = super::host_ir::execute_request_from_atomic(&req).unwrap();
         let err = validate_execute_request(&typed, &caps).unwrap_err();
-        assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
+        assert!(err.to_string().contains("maxRequestBytes"), "{err}");
         let mut typed = typed;
         typed.request_hash.clear();
         let err = super::authorize_typed_request(&mut typed, &caps).unwrap_err();
-        assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
+        assert!(err.to_string().contains("maxRequestBytes"), "{err}");
     }
 
     #[test]
@@ -502,7 +502,7 @@ mod limits_tests {
             canonical_execute_request_hash, DbResultSelection, DbValue, ExecuteRequest,
             TypedDbStatement,
         };
-        let mut caps = DbConnectResult::sqlite();
+        let mut caps = DbCapabilities::advertised_sqlite();
         caps.max_binds = 1;
         let mut req = ExecuteRequest {
             operation_id: "guest-op".into(),
@@ -555,13 +555,13 @@ mod limits_tests {
             stamped_len > empty_len,
             "stamped hash must grow the Cap'n encoding ({stamped_len} vs {empty_len})"
         );
-        let mut caps = DbConnectResult::sqlite();
+        let mut caps = DbCapabilities::advertised_sqlite();
         caps.max_payload_bytes = 1_048_576;
-        caps.max_atomic_request_bytes = u32::try_from(empty_len + 1).unwrap();
+        caps.max_request_bytes = u32::try_from(empty_len + 1).unwrap();
         caps.max_atomic_result_bytes = 1_048_576;
         caps.max_result_bytes = 1_048_576;
         let err = super::authorize_typed_request(&mut req, &caps).unwrap_err();
-        assert!(err.to_string().contains("maxAtomicRequestBytes"), "{err}");
+        assert!(err.to_string().contains("maxRequestBytes"), "{err}");
     }
 
     #[test]
@@ -602,14 +602,14 @@ mod limits_tests {
             prior_receipt_index: None,
             receipt_select_index: None,
         };
-        let err = validate_plan(&plan, &DbConnectResult::sqlite()).unwrap_err();
+        let err = validate_plan(&plan, &DbCapabilities::advertised_sqlite()).unwrap_err();
         assert!(err.to_string().contains("outcomeIndex"), "{err}");
     }
 
     #[test]
     fn authorize_guest_typed_request_rejects_ddl_tables_binds_and_selection() {
         use bookclerk_plugin_abi::{DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement};
-        let caps = DbConnectResult::sqlite();
+        let caps = DbCapabilities::advertised_sqlite();
         let books = bookclerk_plugin_abi::GuestSqlPolicy::allow_tables(["books"]);
         let mut ddl = ExecuteRequest {
             operation_id: "g".into(),

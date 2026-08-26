@@ -3327,7 +3327,7 @@ async fn malformed_dispatch_snapshot_fails_closed() {
 async fn dispatch_twenty_five_subscribers_on_sqlite_caps_are_all_inserted() {
     let store = test_store()
         .await
-        .with_connect_result(bookclerk_plugin_abi::DbConnectResult::sqlite());
+        .with_db_capabilities(bookclerk_plugin_abi::DbCapabilities::advertised_sqlite());
     let created = store
         .publish_domain_event(publish_spec(
             "book_acquired",
@@ -6444,7 +6444,7 @@ async fn execute_guest_atomic_deny_all_does_not_run_sql() {
             .await
             .unwrap(),
     )
-    .with_connect_result(bookclerk_plugin_abi::DbConnectResult::sqlite());
+    .with_db_capabilities(bookclerk_plugin_abi::DbCapabilities::advertised_sqlite());
     let err = store
         .execute_guest_atomic(
             guest_select("SELECT id FROM books"),
@@ -6467,7 +6467,7 @@ async fn execute_guest_atomic_allow_tables_selects_books() {
             .await
             .unwrap(),
     )
-    .with_connect_result(bookclerk_plugin_abi::DbConnectResult::sqlite());
+    .with_db_capabilities(bookclerk_plugin_abi::DbCapabilities::advertised_sqlite());
     store
         .upsert_account("user-1", "us", Some("Main"), true, "audible")
         .await

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bookclerk_library::{compile_named_request, DbAtomicParams, TypedAtomicExec};
 use bookclerk_plugin_abi::{
-    DbColumn, DbConnectResult, DbPlanStatementKind, DbResultSelection, DbRow, DbType, DbValue,
+    DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbType, DbValue,
     ExecuteReply, ExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope,
     PluginError as AbiPluginError, PluginErrorCode, StatementResult, TypedDbStatement,
 };
@@ -26,13 +26,17 @@ impl TypedAtomicExec for SessionTypedAdapter {
             &envelope.request,
             envelope.guest_receipt,
             "sqlite_txn",
-            bookclerk_db_exec::ExecCaps::from_connect(&DbConnectResult::sqlite()),
+            bookclerk_db_exec::ExecCaps::from_capabilities(&DbCapabilities::advertised_sqlite()),
             bookclerk_db_exec::AtomicSession::from_deadline(None),
         )
         .await
         .map_err(|err| AbiPluginError::unavailable(err.to_string()))?;
-        bookclerk_library::validate_execute_reply(&req, &reply, &DbConnectResult::sqlite())
-            .map_err(|err| AbiPluginError::unavailable(err.to_string()))?;
+        bookclerk_library::validate_execute_reply(
+            &req,
+            &reply,
+            &DbCapabilities::advertised_sqlite(),
+        )
+        .map_err(|err| AbiPluginError::unavailable(err.to_string()))?;
         Ok(reply)
     }
 }
@@ -116,7 +120,7 @@ async fn malicious_adapter_wrong_operation_id_rejected_by_host() {
             .await
             .expect("mem db"),
     )
-    .with_connect_result(DbConnectResult::sqlite())
+    .with_db_capabilities(DbCapabilities::advertised_sqlite())
     .with_typed_exec(Arc::new(MaliciousAdapter {
         reply: rows_reply("other-op", 1),
     }));
@@ -155,7 +159,7 @@ async fn malicious_adapter_statement_count_mismatch_rejected_by_host() {
             .await
             .expect("mem db"),
     )
-    .with_connect_result(DbConnectResult::sqlite())
+    .with_db_capabilities(DbCapabilities::advertised_sqlite())
     .with_typed_exec(Arc::new(MaliciousAdapter { reply }));
     let req = ExecuteRequest {
         operation_id: "op-1".into(),

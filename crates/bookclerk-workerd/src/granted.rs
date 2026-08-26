@@ -47,9 +47,9 @@ pub struct GrantedSlot {
     pub allow_database: bool,
     /// Host-issued table/column/function allowlist for guest SQL.
     pub sql_policy: GuestSqlPolicy,
-    /// Negotiated `maxAtomicRequestBytes`. Zero is fail-closed (empty body
+    /// Negotiated `maxRequestBytes`. Zero is fail-closed (empty body
     /// only), never unlimited; grants with a database must store `1..=MAX_SCALAR_BYTES`.
-    pub max_atomic_request_bytes: u32,
+    pub max_request_bytes: u32,
 }
 
 /// Invocation-id → granted stubs.
@@ -308,7 +308,7 @@ fn dispatch_atomic_budget(table: &GrantedTable, invocation: String) -> Result<u3
     if slot.database.is_none() {
         return Err("database not granted".into());
     }
-    Ok(slot.max_atomic_request_bytes)
+    Ok(slot.max_request_bytes)
 }
 
 /// Authorizes a guest typed batch on the granted HTTP path.
@@ -342,7 +342,7 @@ fn authorize_granted_request(
         let n = encoded_execute_request_bytes(req)?.len();
         if n > max_bytes as usize {
             return Err(PluginError::payload_too_large(format!(
-                "atomic request is {n} bytes; guest maxAtomicRequestBytes is {max_bytes}"
+                "atomic request is {n} bytes; guest maxRequestBytes is {max_bytes}"
             )));
         }
     }
@@ -371,7 +371,7 @@ async fn dispatch_execute(
             .database
             .clone()
             .ok_or_else(|| "database not granted".to_string())?;
-        (db, slot.max_atomic_request_bytes, slot.sql_policy.clone())
+        (db, slot.max_request_bytes, slot.sql_policy.clone())
     };
     if let Err(err) = authorize_granted_request(&mut req, cap, &policy) {
         return encoded_execute_result_reply_bytes(Err(err)).map_err(|err| err.to_string());
@@ -971,7 +971,7 @@ mod tests {
                 database: None,
                 allow_database: false,
                 sql_policy: GuestSqlPolicy::deny_all(),
-                max_atomic_request_bytes: 0,
+                max_request_bytes: 0,
             },
         );
         let err = match take_slot_source(&table, "g1") {
@@ -1015,7 +1015,7 @@ mod tests {
                 database: None,
                 allow_database: false,
                 sql_policy: GuestSqlPolicy::deny_all(),
-                max_atomic_request_bytes: 0,
+                max_request_bytes: 0,
             },
         );
         table.borrow_mut().remove("g-live");
@@ -1046,7 +1046,7 @@ mod tests {
                 database: None,
                 allow_database: false,
                 sql_policy: GuestSqlPolicy::deny_all(),
-                max_atomic_request_bytes: 0,
+                max_request_bytes: 0,
             },
         );
         let req = ExecuteRequest {
@@ -1153,7 +1153,7 @@ mod tests {
                 database: Some(session.clone()),
                 allow_database: true,
                 sql_policy: policy,
-                max_atomic_request_bytes: 0,
+                max_request_bytes: 0,
             },
         );
         (table, session)

@@ -640,8 +640,7 @@ struct ExecuteResultReply {
 }
 
 # Semantic SQL-contract advertisement. Bootstrap metadata (`sqlFamily`,
-# `diagnosticEngine`) is not part of the capability plane — see JSON
-# `DbConnectResult` / connect handshake.
+# `dialect`) is not part of the capability plane — see `DbBootstrap`.
 struct DbCapabilities {
   sqlContractVersion @0 :UInt32;
   atomicBatch @1 :Bool;

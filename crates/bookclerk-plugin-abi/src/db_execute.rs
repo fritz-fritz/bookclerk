@@ -1,20 +1,65 @@
 //! Typed Cap'n database data-plane (`ExecuteRequest` / `ExecuteReply`) and
 //! control-plane (`DbCapabilities`) mirrors of `plugin_v2.capnp`.
 //!
-//! First-party hosts call `DatabaseSession.capabilities` and
-//! `DatabaseSession.executeAtomic`. JSON `bookclerk.capabilities` /
-//! `bookclerk.atomic` sentinels remain for older `abiMinor` guests.
+//! Hosts call `DatabaseSession.capabilities` and
+//! `DatabaseSession.executeAtomic`. The `bookclerk.capabilities` /
+//! `bookclerk.atomic` sentinels route these calls through the SeaORM proxy.
 
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::{
-    DbConnectResult, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES, HOST_MIN_PAYLOAD_BYTES,
-    HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS, SQL_CONTRACT_VERSION,
-};
 use crate::db_value::{DbType, DbValue};
 use crate::v2::MAX_SCALAR_BYTES;
+
+/// SQLite family bind cap advertised by the platform sqlite guest.
+pub const SQLITE_MAX_BINDS: u32 = 32_766;
+
+/// PostgreSQL bind cap advertised by the optional postgres guest.
+pub const POSTGRES_MAX_BINDS: u32 = 65_535;
+
+/// Cloudflare D1 bound-parameter limit.
+///
+/// <https://developers.cloudflare.com/d1/platform/limits/>
+pub const D1_MAX_BINDS: u32 = 100;
+
+/// D1 / first-party batch statement cap (D1 HTTP batch is 100 queries).
+pub const FIRST_PARTY_MAX_STATEMENTS: u32 = 100;
+
+/// First-party row cap advertised for one query statement.
+pub const FIRST_PARTY_MAX_RESULT_ROWS: u32 = 1_000;
+
+/// Host refuses guests that cannot bind at least this many parameters.
+pub const HOST_MIN_BINDS: u32 = 32;
+
+/// Host refuses guests that cannot run at least this many statements per batch.
+pub const HOST_MIN_STATEMENTS: u32 = 40;
+
+/// Host refuses guests that do not bound result rows (`0` is unspecified).
+pub const HOST_MIN_RESULT_ROWS: u32 = 1;
+
+/// Host refuses guests that do not bound encoded statement payload bytes.
+pub const HOST_MIN_PAYLOAD_BYTES: u32 = 1024;
+
+/// Host refuses guests that do not bound JSON bytes of one statement's rows.
+pub const HOST_MIN_RESULT_BYTES: u32 = 4_096;
+
+/// Host refuses guests that do not bound one result cell (`0` is unspecified).
+pub const HOST_MIN_CELL_BYTES: u32 = 1_024;
+
+/// First-party JSON-byte budget for one statement's rows and for one atomic
+/// request/result scalar. Must stay at or below [`crate::v2::MAX_SCALAR_BYTES`].
+pub const FIRST_PARTY_MAX_RESULT_BYTES: u32 = MAX_SCALAR_BYTES;
+
+/// Bookclerk SQL contract version advertised by first-party adapters.
+///
+/// Contract versions are **monotonic supersets** (see `docs/sql-contract/v1.md`):
+/// every guarantee in version *N* remains valid in *N+1*. Guests advertise the
+/// highest version they implement; hosts require
+/// `sqlContractVersion >= SQL_CONTRACT_VERSION`. A non-superset change must bump
+/// this constant and document a new major contract — do not weaken `>=` into a
+/// negotiated range until then.
+pub const SQL_CONTRACT_VERSION: u32 = 1;
 
 /// Bootstrap-only SeaORM proxy metadata returned by `AdapterDatabaseSession.bootstrap`.
 ///
@@ -45,6 +90,53 @@ impl DbBootstrap {
             sql_family: "postgres".into(),
             dialect: "postgres".into(),
         }
+    }
+
+    /// SeaORM proxy backend failure from bootstrap metadata (`dialect` / `sqlFamily`).
+    #[must_use]
+    pub fn backend_failure_reason(&self) -> Option<String> {
+        let family = self.sql_family.to_ascii_lowercase();
+        if !family.is_empty() {
+            if family != "sqlite" && family != "postgres" {
+                return Some(format!(
+                    "database guest sqlFamily {:?} is not sqlite or postgres (SQL-like backends only)",
+                    self.sql_family
+                ));
+            }
+            if !self.dialect.is_empty() && !dialect_matches_sql_family(&self.dialect, &family) {
+                return Some(format!(
+                    "database guest dialect {:?} does not match sqlFamily {:?}",
+                    self.dialect, self.sql_family
+                ));
+            }
+            return None;
+        }
+        let dialect = self.dialect.to_ascii_lowercase();
+        if dialect.is_empty() {
+            return Some("database guest dialect is required for SeaORM proxy bootstrap".into());
+        }
+        if dialect == "sqlite"
+            || dialect == "postgres"
+            || dialect == "postgresql"
+            || dialect == "pg"
+        {
+            return None;
+        }
+        Some(format!(
+            "database guest dialect {:?} is not sqlite or postgres (SQL-like backends only)",
+            self.dialect
+        ))
+    }
+}
+
+/// True when SeaORM `dialect` names the same SQL family as `sql_family`.
+fn dialect_matches_sql_family(dialect: &str, sql_family: &str) -> bool {
+    match sql_family {
+        "sqlite" => dialect.eq_ignore_ascii_case("sqlite"),
+        "postgres" => {
+            dialect.eq_ignore_ascii_case("postgres") || dialect.eq_ignore_ascii_case("postgresql")
+        }
+        _ => false,
     }
 }
 
@@ -289,13 +381,6 @@ pub struct DbCapabilities {
 }
 
 impl DbCapabilities {
-    /// Host-internal bridge from legacy connect fixtures and tests.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn from_connect(caps: &DbConnectResult) -> Self {
-        capabilities_from_connect_dto(caps)
-    }
-
     /// True when this guest meets the host's compiled minimum SQL contract.
     #[must_use]
     pub fn meets_host_minimums(&self) -> bool {
@@ -394,71 +479,53 @@ impl DbCapabilities {
         None
     }
 
-    /// Host-internal SeaORM proxy connect snapshot (bootstrap metadata empty).
-    #[doc(hidden)]
+    /// First-party SQLite capability advertisement (`PRAGMA user_version` marker).
     #[must_use]
-    pub fn to_connect(&self) -> DbConnectResult {
-        DbConnectResult {
-            dialect: String::new(),
-            interactive_txn: !self.atomic_schema_batch,
-            sql_family: String::new(),
-            atomic_batch: self.atomic_batch,
-            returning: self.returning,
-            max_binds: self.max_binds,
-            max_statements: self.max_statements,
-            max_result_rows: self.max_result_rows,
-            max_payload_bytes: self.max_payload_bytes,
-            max_result_bytes: self.max_result_bytes,
-            max_cell_bytes: self.max_cell_bytes,
-            max_atomic_request_bytes: self.max_request_bytes.min(MAX_SCALAR_BYTES),
-            max_atomic_result_bytes: self.max_atomic_result_bytes,
-            sql_contract_version: self.sql_contract_version,
-            pragma_user_version: self.pragma_user_version,
-            schema_migrations: self.schema_migrations,
-            atomic_schema_batch: self.atomic_schema_batch,
-            timing: self.timing,
+    pub fn advertised_sqlite() -> Self {
+        Self {
+            sql_contract_version: SQL_CONTRACT_VERSION,
+            atomic_batch: true,
+            returning: true,
+            affected_rows: true,
+            schema_migrations: false,
+            pragma_user_version: true,
+            atomic_schema_batch: false,
+            cancellation: true,
+            timing: true,
+            max_binds: SQLITE_MAX_BINDS,
+            max_statements: FIRST_PARTY_MAX_STATEMENTS,
+            max_result_rows: FIRST_PARTY_MAX_RESULT_ROWS,
+            max_payload_bytes: MAX_SCALAR_BYTES,
+            max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+            max_cell_bytes: MAX_SCALAR_BYTES,
+            max_request_bytes: MAX_SCALAR_BYTES,
+            max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
         }
     }
 
-    /// First-party SQLite capability advertisement.
-    #[must_use]
-    pub fn advertised_sqlite() -> Self {
-        capabilities_from_connect_dto(&DbConnectResult::sqlite())
-    }
-
-    /// First-party Cloudflare D1 capability advertisement.
+    /// First-party Cloudflare D1 capability advertisement
+    /// (`schema_migrations` rows, one atomic HTTP batch per schema version).
     #[must_use]
     pub fn advertised_d1() -> Self {
-        capabilities_from_connect_dto(&DbConnectResult::d1())
+        Self {
+            schema_migrations: true,
+            pragma_user_version: false,
+            atomic_schema_batch: true,
+            max_binds: D1_MAX_BINDS,
+            ..Self::advertised_sqlite()
+        }
     }
 
-    /// First-party PostgreSQL capability advertisement.
+    /// First-party PostgreSQL capability advertisement (`schema_migrations` rows).
     #[must_use]
     pub fn advertised_postgres() -> Self {
-        capabilities_from_connect_dto(&DbConnectResult::postgres())
-    }
-}
-
-#[allow(clippy::missing_docs_in_private_items)]
-fn capabilities_from_connect_dto(caps: &DbConnectResult) -> DbCapabilities {
-    DbCapabilities {
-        sql_contract_version: caps.sql_contract_version,
-        atomic_batch: caps.atomic_batch,
-        returning: caps.returning,
-        affected_rows: true,
-        schema_migrations: caps.schema_migrations,
-        pragma_user_version: caps.pragma_user_version,
-        atomic_schema_batch: caps.atomic_schema_batch,
-        cancellation: true,
-        timing: caps.timing,
-        max_binds: caps.max_binds,
-        max_statements: caps.max_statements,
-        max_result_rows: caps.max_result_rows,
-        max_payload_bytes: caps.max_payload_bytes,
-        max_result_bytes: caps.max_result_bytes,
-        max_cell_bytes: caps.max_cell_bytes,
-        max_request_bytes: caps.max_atomic_request_bytes.max(caps.max_payload_bytes),
-        max_atomic_result_bytes: caps.max_atomic_result_bytes,
+        Self {
+            schema_migrations: true,
+            pragma_user_version: false,
+            atomic_schema_batch: false,
+            max_binds: POSTGRES_MAX_BINDS,
+            ..Self::advertised_sqlite()
+        }
     }
 }
 
@@ -494,7 +561,7 @@ mod tests {
 
     #[test]
     fn capabilities_reject_missing_cancellation() {
-        let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
+        let mut caps = DbCapabilities::advertised_sqlite();
         caps.cancellation = false;
         assert!(!caps.meets_host_minimums());
         assert!(caps.capability_failure_reason().contains("cancellation"));
@@ -502,64 +569,108 @@ mod tests {
 
     #[test]
     fn capabilities_reject_missing_affected_rows() {
-        let mut caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
+        let mut caps = DbCapabilities::advertised_sqlite();
         caps.affected_rows = false;
         assert!(!caps.meets_host_minimums());
         assert!(caps.capability_failure_reason().contains("affectedRows"));
     }
 
     #[test]
-    fn capabilities_roundtrip_schema_flags() {
+    fn advertised_presets_meet_host_minimums() {
         for caps in [
-            DbConnectResult::sqlite(),
-            DbConnectResult::postgres(),
-            DbConnectResult::d1(),
+            DbCapabilities::advertised_sqlite(),
+            DbCapabilities::advertised_postgres(),
+            DbCapabilities::advertised_d1(),
         ] {
-            let typed = DbCapabilities::from_connect(&caps);
-            let back = typed.to_connect();
-            assert_eq!(back.pragma_user_version, caps.pragma_user_version);
-            assert_eq!(back.schema_migrations, caps.schema_migrations);
-            assert_eq!(back.atomic_schema_batch, caps.atomic_schema_batch);
-            assert_eq!(back.interactive_txn, caps.interactive_txn);
-            assert!(back.sql_family.is_empty());
-            assert!(back.dialect.is_empty());
             assert!(
-                back.meets_host_minimums(),
+                caps.meets_host_minimums(),
                 "{}",
-                back.capability_failure_reason()
+                caps.capability_failure_reason()
             );
+            assert_eq!(caps.sql_contract_version, SQL_CONTRACT_VERSION);
+            assert_ne!(caps.pragma_user_version, caps.schema_migrations);
         }
-    }
-
-    #[test]
-    fn capabilities_meet_minimums_without_bootstrap_metadata() {
-        let caps = DbCapabilities::from_connect(&DbConnectResult::sqlite());
-        assert!(
-            caps.meets_host_minimums(),
-            "{}",
-            caps.capability_failure_reason()
+        assert_eq!(
+            DbCapabilities::advertised_sqlite().max_binds,
+            SQLITE_MAX_BINDS
         );
+        assert_eq!(
+            DbCapabilities::advertised_postgres().max_binds,
+            POSTGRES_MAX_BINDS
+        );
+        assert_eq!(DbCapabilities::advertised_d1().max_binds, D1_MAX_BINDS);
+        assert!(DbCapabilities::advertised_d1().atomic_schema_batch);
+        assert!(!DbCapabilities::advertised_postgres().atomic_schema_batch);
     }
 
     #[test]
-    fn to_connect_leaves_bootstrap_empty() {
-        let caps = DbCapabilities::from_connect(&DbConnectResult::d1());
-        let back = caps.to_connect();
-        assert!(back.schema_migrations);
-        assert!(back.atomic_schema_batch);
-        assert!(!back.interactive_txn);
-        assert!(back.sql_family.is_empty());
-        assert!(back.dialect.is_empty());
+    fn capabilities_fail_closed_without_returning_or_bounds() {
+        let mut no_returning = DbCapabilities::advertised_sqlite();
+        no_returning.returning = false;
+        assert!(!no_returning.meets_host_minimums());
+        assert!(no_returning
+            .capability_failure_reason()
+            .contains("returning"));
+
+        let mut zero_rows = DbCapabilities::advertised_sqlite();
+        zero_rows.max_result_rows = 0;
+        assert!(!zero_rows.meets_host_minimums());
+        assert!(zero_rows
+            .capability_failure_reason()
+            .contains("maxResultRows"));
+
+        let mut zero_payload = DbCapabilities::advertised_sqlite();
+        zero_payload.max_payload_bytes = 0;
+        assert!(!zero_payload.meets_host_minimums());
+        assert!(zero_payload
+            .capability_failure_reason()
+            .contains("maxPayloadBytes"));
+
+        let mut zero_result = DbCapabilities::advertised_sqlite();
+        zero_result.max_result_bytes = 0;
+        assert!(!zero_result.meets_host_minimums());
+        assert!(zero_result
+            .capability_failure_reason()
+            .contains("maxResultBytes"));
+
+        let mut zero_cell = DbCapabilities::advertised_sqlite();
+        zero_cell.max_cell_bytes = 0;
+        assert!(!zero_cell.meets_host_minimums());
+        assert!(zero_cell
+            .capability_failure_reason()
+            .contains("maxCellBytes"));
+
+        let mut zero_request = DbCapabilities::advertised_sqlite();
+        zero_request.max_request_bytes = 0;
+        assert!(!zero_request.meets_host_minimums());
+        assert!(zero_request
+            .capability_failure_reason()
+            .contains("maxRequestBytes"));
+
+        let mut over_scalar = DbCapabilities::advertised_sqlite();
+        over_scalar.max_atomic_result_bytes = MAX_SCALAR_BYTES + 1;
+        assert!(!over_scalar.meets_host_minimums());
+        assert!(over_scalar
+            .capability_failure_reason()
+            .contains("maxAtomicResultBytes"));
     }
 
     #[test]
-    fn bootstrap_failure_checked_on_connect_result_not_capabilities() {
-        let mut connect = DbConnectResult::sqlite();
-        connect.sql_family = "mystery".into();
-        let reason = connect.bootstrap_backend_failure_reason().expect("reject");
+    fn bootstrap_backend_failure_reason_rejects_non_sql_families() {
+        let mut bootstrap = DbBootstrap::sqlite();
+        bootstrap.sql_family = "mystery".into();
+        let reason = bootstrap.backend_failure_reason().expect("reject");
         assert!(reason.contains("sqlFamily"), "{reason}");
-        let typed = DbCapabilities::from_connect(&DbConnectResult::sqlite());
-        assert!(typed.meets_host_minimums());
+
+        let mut mismatch = DbBootstrap::sqlite();
+        mismatch.dialect = "postgres".into();
+        let reason = mismatch.backend_failure_reason().expect("reject");
+        assert!(reason.contains("does not match"), "{reason}");
+
+        assert!(DbBootstrap::sqlite().backend_failure_reason().is_none());
+        assert!(DbBootstrap::postgres().backend_failure_reason().is_none());
+        let empty = DbBootstrap::default();
+        assert!(empty.backend_failure_reason().is_some());
     }
 
     #[test]

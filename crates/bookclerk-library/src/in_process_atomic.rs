@@ -151,7 +151,7 @@ impl AtomicTxnBackend for InProcessSqliteAtomic {
         .map_err(LibraryError::Orm)?;
         crate::validate_plan(
             &compiled.plan,
-            &bookclerk_plugin_abi::DbConnectResult::sqlite(),
+            &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
         )?;
         let result =
             execute_db_atomic(&self.db, compiled.into_request(operation_id.to_string())).await?;

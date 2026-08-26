@@ -518,7 +518,7 @@ impl JobHandler for HttpJobHandler {
         invocation: JobInvocation,
         context: JobHandlerContext,
     ) -> AbiResult<JobOutcome> {
-        let (allow_database, max_atomic_request_bytes) =
+        let (allow_database, max_request_bytes) =
             granted_database_budget(context.database.as_deref());
         let grant = format!("{:032x}", rand::random::<u128>());
         self.table.borrow_mut().insert(
@@ -534,7 +534,7 @@ impl JobHandler for HttpJobHandler {
                 database: context.database.map(Rc::from),
                 allow_database,
                 sql_policy: GuestSqlPolicy::host_authoritative(),
-                max_atomic_request_bytes,
+                max_request_bytes,
             },
         );
         let _revoke = RevokeGrant {

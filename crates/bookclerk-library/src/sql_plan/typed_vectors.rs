@@ -6,7 +6,7 @@
 use std::future::Future;
 
 use bookclerk_db_exec::{AtomicSession, ExecCaps};
-use bookclerk_plugin_abi::{DbConnectResult, ExecuteReply, ExecuteRequest};
+use bookclerk_plugin_abi::{DbCapabilities, ExecuteReply, ExecuteRequest};
 use sea_orm::DatabaseConnection;
 
 use super::{validate_execute_reply, vectors};
@@ -20,7 +20,7 @@ use super::{validate_execute_reply, vectors};
 ///
 /// Panics when a vector fails.
 pub async fn run_typed_request_vectors<F, Fut, E>(
-    connect: DbConnectResult,
+    connect: DbCapabilities,
     advertised_cap: u32,
     mut run: F,
 ) where
@@ -42,7 +42,7 @@ pub async fn run_typed_request_vectors<F, Fut, E>(
 /// Panics when a vector fails.
 pub async fn run_typed_conn_vectors(
     db: &DatabaseConnection,
-    connect: DbConnectResult,
+    connect: DbCapabilities,
     timing: &str,
 ) {
     let db = db.clone();
@@ -56,7 +56,7 @@ pub async fn run_typed_conn_vectors(
             let timing = timing.clone();
             let connect = connect_for_run.clone();
             async move {
-                let mut caps = ExecCaps::from_connect(&connect);
+                let mut caps = ExecCaps::from_capabilities(&connect);
                 if cap > 0 {
                     caps.max_result_rows = cap;
                 }
@@ -79,7 +79,7 @@ pub async fn run_typed_conn_vectors(
 }
 
 /// Native typed contract suite (`ExecuteRequest` → `ExecuteReply`).
-async fn run_typed_contract_vectors<F, Fut>(connect: DbConnectResult, row_cap: u32, mut run: F)
+async fn run_typed_contract_vectors<F, Fut>(connect: DbCapabilities, row_cap: u32, mut run: F)
 where
     F: FnMut(ExecuteRequest, u32) -> Fut,
     Fut: Future<Output = Result<ExecuteReply, String>>,
@@ -100,7 +100,7 @@ where
 
 /// Asserts a typed reply echoes the request before host interpretation.
 fn validate_typed_reply(
-    connect: &DbConnectResult,
+    connect: &DbCapabilities,
     req: &ExecuteRequest,
     reply: &ExecuteReply,
 ) -> Result<(), String> {
@@ -135,7 +135,7 @@ mod typed_value_matrix {
     }
 
     fn sqlite_caps() -> ExecCaps {
-        ExecCaps::from_connect(&DbConnectResult::sqlite())
+        ExecCaps::from_capabilities(&DbCapabilities::advertised_sqlite())
     }
 
     fn select_param(op: &str, sql: &str, param: DbValue) -> ExecuteRequest {

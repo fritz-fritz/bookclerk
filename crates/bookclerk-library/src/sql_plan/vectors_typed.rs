@@ -5,14 +5,14 @@
 use std::future::Future;
 
 use super::host_ir::{DbAtomicPlan, DbPlanStatement};
-use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatementKind, ExecuteReply, ExecuteRequest};
+use bookclerk_plugin_abi::{DbCapabilities, DbPlanStatementKind, ExecuteReply, ExecuteRequest};
 use serde_json::Value as JsonValue;
 
 use super::{compile_named_request, interpret_typed_exec, CompiledAtomic};
 use crate::atomic_ops::{atomic_status, DbAtomicParams};
 
 /// Runs the native typed contract suite.
-pub async fn run_typed_contract_vectors<F, Fut>(_connect: DbConnectResult, row_cap: u32, mut run: F)
+pub async fn run_typed_contract_vectors<F, Fut>(_connect: DbCapabilities, row_cap: u32, mut run: F)
 where
     F: FnMut(ExecuteRequest, u32) -> Fut,
     Fut: Future<Output = Result<ExecuteReply, String>>,

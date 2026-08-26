@@ -15,7 +15,9 @@ use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_db_exec::db_value_from_sea;
 use bookclerk_plugin_abi::HostExecuteEnvelope;
-use bookclerk_plugin_abi::{database_context_from_params, DbConnectParams, DbConnectResult};
+use bookclerk_plugin_abi::{
+    database_context_from_params, DbBootstrap, DbCapabilities, DbConnectParams,
+};
 use bookclerk_plugin_sdk::v2::GuestDatabase;
 use bookclerk_plugin_sdk::v2::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
@@ -98,7 +100,7 @@ impl ExternalDatabase {
     pub async fn connect(
         &self,
         config: &Config,
-    ) -> Result<(DatabaseConnection, DbConnectResult), DbErr> {
+    ) -> Result<(DatabaseConnection, DbCapabilities), DbErr> {
         let params = connect_params(
             config,
             &self.plugin_id,
@@ -115,38 +117,29 @@ impl ExternalDatabase {
         }
         let _kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
-        let mut connect_result = caps.to_connect();
-        if let Ok(bootstrap) = self.session.db_bootstrap().await {
-            if !bootstrap.sql_family.is_empty() {
-                connect_result.sql_family = bootstrap.sql_family;
-            }
-            if !bootstrap.dialect.is_empty() {
-                connect_result.dialect = bootstrap.dialect;
-            }
-        } else {
-            apply_bootstrap_metadata(&mut connect_result, &self.plugin_id);
-        }
-        if let Some(reason) = connect_result.bootstrap_backend_failure_reason() {
+        let mut bootstrap = self.session.db_bootstrap().await.unwrap_or_default();
+        apply_bootstrap_metadata(&mut bootstrap, &self.plugin_id);
+        if let Some(reason) = bootstrap.backend_failure_reason() {
             return Err(DbErr::Custom(reason));
         }
-        let backend = seaorm_backend_from_connect(&connect_result)?;
+        let backend = seaorm_backend_from_bootstrap(&bootstrap)?;
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
             session: self.session.clone(),
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
-            caps: connect_result.clone(),
+            caps: caps.clone(),
         }));
         let db = Database::connect_proxy(backend, proxy).await?;
-        self.apply_host_schema(&db, &connect_result).await?;
-        Ok((db, connect_result))
+        self.apply_host_schema(&db, &caps).await?;
+        Ok((db, caps))
     }
 
     /// Reads the guest schema version and applies remaining host-authored DDL.
     async fn apply_host_schema(
         &self,
         db: &DatabaseConnection,
-        caps: &DbConnectResult,
+        caps: &DbCapabilities,
     ) -> Result<(), DbErr> {
-        let kind = bookclerk_library::HostSchemaKind::from_capabilities(caps)
+        let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         let session = self.session.clone();
         let caps = caps.clone();
@@ -261,7 +254,7 @@ pub async fn open_library_store(
         caps: caps.clone(),
     });
     let store = bookclerk_library::LibraryStore::from_connection(db)
-        .with_connect_result(caps)
+        .with_db_capabilities(caps)
         .with_atomic_txn(backend.clone())
         .with_typed_exec(backend);
     store.ensure_users_bridged().await?;
@@ -374,7 +367,7 @@ struct RpcDatabaseProxy {
     /// Per-task nested begin depth (vat holds a single transaction).
     txn_depth: Arc<Mutex<HashMap<TaskKey, usize>>>,
     /// Negotiated guest capabilities (statement/bind/request byte limits).
-    caps: DbConnectResult,
+    caps: DbCapabilities,
 }
 
 impl std::fmt::Debug for RpcDatabaseProxy {
@@ -639,7 +632,7 @@ struct RpcAtomicBackend {
     /// Cap'n Proto v2 session used for a single `bookclerk.atomic` query per operation.
     session: Arc<V2PluginSession>,
     /// Full negotiated capabilities used to reject oversized plans before RPC.
-    caps: DbConnectResult,
+    caps: DbCapabilities,
 }
 
 impl RpcAtomicBackend {
@@ -761,7 +754,7 @@ fn unix_now_ms() -> u64 {
 /// Runs host DDL as one `bookclerk.atomic` batch (D1 V27).
 async fn exec_host_ddl_batch(
     session: &V2PluginSession,
-    caps: &DbConnectResult,
+    caps: &DbCapabilities,
     stmts: Vec<String>,
 ) -> bookclerk_library::Result<()> {
     if stmts.is_empty() {
@@ -1445,7 +1438,7 @@ fn connect_params(
 /// Maps advertised schema capabilities to a SeaORM [`DbBackend`].
 ///
 /// Schema kind is the versioning mechanic, not SQL-family identity. Prefer
-/// [`seaorm_backend_from_connect`] when opening the SeaORM proxy.
+/// [`seaorm_backend_from_bootstrap`] when opening the SeaORM proxy.
 #[cfg(test)]
 fn schema_kind_to_backend(kind: bookclerk_library::HostSchemaKind) -> DbBackend {
     match kind {
@@ -1455,9 +1448,9 @@ fn schema_kind_to_backend(kind: bookclerk_library::HostSchemaKind) -> DbBackend 
     }
 }
 
-/// SeaORM proxy backend from bootstrap metadata on a connect result.
-fn seaorm_backend_from_connect(connect: &DbConnectResult) -> Result<DbBackend, DbErr> {
-    match connect.sql_family.to_ascii_lowercase().as_str() {
+/// SeaORM proxy backend from [`DbBootstrap`] metadata.
+fn seaorm_backend_from_bootstrap(bootstrap: &DbBootstrap) -> Result<DbBackend, DbErr> {
+    match bootstrap.sql_family.to_ascii_lowercase().as_str() {
         "postgres" | "postgresql" | "pg" => return Ok(DbBackend::Postgres),
         "sqlite" => return Ok(DbBackend::Sqlite),
         "" => {}
@@ -1467,7 +1460,7 @@ fn seaorm_backend_from_connect(connect: &DbConnectResult) -> Result<DbBackend, D
             )));
         }
     }
-    match connect.dialect.to_ascii_lowercase().as_str() {
+    match bootstrap.dialect.to_ascii_lowercase().as_str() {
         "postgres" | "postgresql" | "pg" => Ok(DbBackend::Postgres),
         "sqlite" => Ok(DbBackend::Sqlite),
         other => Err(DbErr::Custom(format!(
@@ -1476,12 +1469,12 @@ fn seaorm_backend_from_connect(connect: &DbConnectResult) -> Result<DbBackend, D
     }
 }
 
-/// Fills bootstrap-only SeaORM proxy metadata on a semantic connect result.
+/// Fills missing bootstrap-only SeaORM proxy metadata from the plugin id.
 ///
-/// Typed `DbCapabilities` omit `sqlFamily` / `dialect`; v2 hosts derive bootstrap
-/// from the configured plugin id (JSON `dbConnect` guests may pre-fill these fields).
-fn apply_bootstrap_metadata(connect: &mut DbConnectResult, plugin_id: &str) {
-    if !connect.sql_family.is_empty() && !connect.dialect.is_empty() {
+/// Guest-reported `sqlFamily` / `dialect` always win; the configured
+/// first-party plugin id only fills fields the guest left empty.
+fn apply_bootstrap_metadata(bootstrap: &mut DbBootstrap, plugin_id: &str) {
+    if !bootstrap.sql_family.is_empty() && !bootstrap.dialect.is_empty() {
         return;
     }
     let (sql_family, dialect) = match DatabasePluginKind::parse(plugin_id) {
@@ -1489,11 +1482,11 @@ fn apply_bootstrap_metadata(connect: &mut DbConnectResult, plugin_id: &str) {
         Some(DatabasePluginKind::D1) | Some(DatabasePluginKind::Sqlite) => ("sqlite", "sqlite"),
         None => return,
     };
-    if connect.sql_family.is_empty() {
-        connect.sql_family = sql_family.into();
+    if bootstrap.sql_family.is_empty() {
+        bootstrap.sql_family = sql_family.into();
     }
-    if connect.dialect.is_empty() {
-        connect.dialect = dialect.into();
+    if bootstrap.dialect.is_empty() {
+        bootstrap.dialect = dialect.into();
     }
 }
 
@@ -1548,25 +1541,23 @@ mod tests {
 
     #[test]
     fn apply_bootstrap_metadata_from_plugin_id() {
-        let mut connect = DbCapabilities::from_connect(&DbConnectResult::d1()).to_connect();
-        apply_bootstrap_metadata(&mut connect, "d1");
-        assert_eq!(connect.sql_family, "sqlite");
-        assert_eq!(connect.dialect, "sqlite");
-        assert!(connect.bootstrap_backend_failure_reason().is_none());
+        let mut bootstrap = DbBootstrap::default();
+        apply_bootstrap_metadata(&mut bootstrap, "d1");
+        assert_eq!(bootstrap.sql_family, "sqlite");
+        assert_eq!(bootstrap.dialect, "sqlite");
+        assert!(bootstrap.backend_failure_reason().is_none());
 
-        let mut pg = DbCapabilities::from_connect(&DbConnectResult::postgres()).to_connect();
+        let mut pg = DbBootstrap::default();
         apply_bootstrap_metadata(&mut pg, "postgres");
         assert_eq!(pg.sql_family, "postgres");
         assert_eq!(pg.dialect, "postgres");
 
-        let mut unknown = DbCapabilities::from_connect(&DbConnectResult::sqlite()).to_connect();
-        unknown.sql_family = "sqlite".into();
-        unknown.dialect = "sqlite".into();
+        let mut unknown = DbBootstrap::sqlite();
         apply_bootstrap_metadata(&mut unknown, "sql-conformance");
         assert_eq!(unknown.sql_family, "sqlite");
         assert_eq!(unknown.dialect, "sqlite");
         assert_eq!(
-            seaorm_backend_from_connect(&unknown).unwrap(),
+            seaorm_backend_from_bootstrap(&unknown).unwrap(),
             DbBackend::Sqlite
         );
     }
@@ -1585,19 +1576,23 @@ mod tests {
             schema_kind_to_backend(bookclerk_library::HostSchemaKind::RowMarker),
             DbBackend::Postgres
         );
-        let kind = bookclerk_library::HostSchemaKind::from_capabilities(&DbConnectResult::sqlite())
-            .unwrap();
+        let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(
+            &DbCapabilities::advertised_sqlite(),
+        )
+        .unwrap();
         assert_eq!(kind, bookclerk_library::HostSchemaKind::PragmaMarker);
         assert_eq!(schema_kind_to_backend(kind), DbBackend::Sqlite);
     }
 
     #[test]
-    fn sqlite_row_migrations_family_is_sqlite_kind_is_row_marker() {
-        let caps = DbConnectResult::sqlite_row_migrations();
-        let kind = bookclerk_library::HostSchemaKind::from_capabilities(&caps).unwrap();
+    fn row_migrations_kind_is_independent_of_sqlite_bootstrap() {
+        let mut caps = DbCapabilities::advertised_sqlite();
+        caps.pragma_user_version = false;
+        caps.schema_migrations = true;
+        let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps).unwrap();
         assert_eq!(kind, bookclerk_library::HostSchemaKind::RowMarker);
         assert_eq!(
-            seaorm_backend_from_connect(&caps).unwrap(),
+            seaorm_backend_from_bootstrap(&DbBootstrap::sqlite()).unwrap(),
             DbBackend::Sqlite
         );
     }
@@ -1619,13 +1614,12 @@ mod tests {
 
     #[test]
     fn guest_bootstrap_from_session_overrides_plugin_id_inference() {
-        let bootstrap = bookclerk_plugin_sdk::DbBootstrap::sqlite();
-        let mut connect = DbCapabilities::from_connect(&DbConnectResult::postgres()).to_connect();
-        connect.sql_family = bootstrap.sql_family.clone();
-        connect.dialect = bootstrap.dialect.clone();
-        assert!(connect.bootstrap_backend_failure_reason().is_none());
+        let mut bootstrap = DbBootstrap::sqlite();
+        apply_bootstrap_metadata(&mut bootstrap, "postgres");
+        assert_eq!(bootstrap.sql_family, "sqlite");
+        assert!(bootstrap.backend_failure_reason().is_none());
         assert_eq!(
-            seaorm_backend_from_connect(&connect).unwrap(),
+            seaorm_backend_from_bootstrap(&bootstrap).unwrap(),
             DbBackend::Sqlite
         );
     }
@@ -1685,7 +1679,7 @@ mod tests {
                 .await
                 .unwrap(),
         )
-        .with_connect_result(DbConnectResult::sqlite());
+        .with_db_capabilities(DbCapabilities::advertised_sqlite());
         let session = granted_job_database(store);
         session
             .execute(ExecuteRequest {
@@ -1733,7 +1727,7 @@ mod tests {
                 .await
                 .unwrap(),
         )
-        .with_connect_result(DbConnectResult::sqlite());
+        .with_db_capabilities(DbCapabilities::advertised_sqlite());
         store
             .connection()
             .execute_raw(Statement::from_string(

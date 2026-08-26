@@ -10,7 +10,7 @@ use bookclerk_db_exec::{
     sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
     DbPlanStatementKind, DbPlanStmtExecResult,
 };
-use bookclerk_plugin_abi::DbConnectResult;
+use bookclerk_plugin_abi::DbCapabilities;
 use bookclerk_plugin_sdk::{
     encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbResultSelection,
     DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, StatementResult,
@@ -48,7 +48,7 @@ impl D1Proxy {
             .clone()
             .ok_or_else(|| DbErr::Custom("dbAtomic requires a host-authored executePlan".into()))?;
         reject_unbounded_returning(&plan)?;
-        let d1_caps = DbConnectResult::d1();
+        let d1_caps = DbCapabilities::advertised_d1();
         let cap = d1_caps.max_result_rows;
         let statements: Vec<SqlStmt> = plan
             .statements
@@ -119,7 +119,7 @@ impl D1Proxy {
             deadline,
         )?;
         reject_unbounded_returning_typed(&req.statements)?;
-        let d1_caps = DbConnectResult::d1();
+        let d1_caps = DbCapabilities::advertised_d1();
         let cap = d1_caps.max_result_rows;
         let statements: Vec<SqlStmt> = req
             .statements
@@ -350,7 +350,7 @@ fn ambiguous_d1(msg: impl std::fmt::Display) -> DbErr {
 /// host-IR `maxRows = 1`. Top-level `;` (multi-statement SQL) and multi-tuple
 /// `VALUES` are rejected before HTTP.
 fn reject_unbounded_returning(plan: &DbAtomicPlan) -> std::result::Result<(), DbErr> {
-    let cap = DbConnectResult::d1().max_result_rows;
+    let cap = DbCapabilities::advertised_d1().max_result_rows;
     for (i, stmt) in plan.statements.iter().enumerate() {
         if sql_has_top_level_semicolon(&stmt.sql) {
             return Err(DbErr::Custom(format!(
@@ -387,7 +387,7 @@ fn reject_unbounded_returning(plan: &DbAtomicPlan) -> std::result::Result<(), Db
 fn reject_unbounded_returning_typed(
     statements: &[TypedDbStatement],
 ) -> std::result::Result<(), DbErr> {
-    let cap = DbConnectResult::d1().max_result_rows;
+    let cap = DbCapabilities::advertised_d1().max_result_rows;
     for (i, stmt) in statements.iter().enumerate() {
         if sql_has_top_level_semicolon(&stmt.sql) {
             return Err(DbErr::Custom(format!(
@@ -608,7 +608,7 @@ fn parse_typed_batch(
             arr.len()
         )));
     }
-    let caps = DbConnectResult::d1();
+    let caps = DbCapabilities::advertised_d1();
     let row_cap = usize::try_from(caps.max_result_rows).unwrap_or(1_000);
     let mut statements = Vec::with_capacity(arr.len());
     for (i, entry) in arr.iter().enumerate() {
@@ -949,7 +949,7 @@ fn parse_generic_batch(
             statements.len()
         )));
     }
-    let cap = usize::try_from(DbConnectResult::d1().max_result_rows).unwrap_or(1_000);
+    let cap = usize::try_from(DbCapabilities::advertised_d1().max_result_rows).unwrap_or(1_000);
     for (i, stmt) in statements.iter().enumerate() {
         if stmt.rows.len() > cap {
             return Err(ambiguous_d1(format!(
@@ -968,7 +968,8 @@ fn parse_generic_batch(
             db_timing_source: db_execution_us.map(|_| "d1_sql_duration".into()),
         }),
     };
-    let atomic_cap = usize::try_from(DbConnectResult::d1().max_atomic_result_bytes).unwrap_or(0);
+    let atomic_cap =
+        usize::try_from(DbCapabilities::advertised_d1().max_atomic_result_bytes).unwrap_or(0);
     if atomic_cap > 0 {
         let used = serde_json::to_vec(&result)
             .map(|b| b.len())
@@ -990,7 +991,7 @@ fn parse_batch_results(
     let Some(arr) = value.get("result").and_then(JsonValue::as_array) else {
         return Err(ambiguous_d1("batch response missing result array"));
     };
-    let caps = DbConnectResult::d1();
+    let caps = DbCapabilities::advertised_d1();
     let row_cap = usize::try_from(caps.max_result_rows).unwrap_or(1_000);
     let result_cap = usize::try_from(caps.max_result_bytes).unwrap_or(usize::MAX);
     let cell_cap = usize::try_from(caps.max_cell_bytes).unwrap_or(usize::MAX);

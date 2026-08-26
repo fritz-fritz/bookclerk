@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::host_ir::{DbAtomicPlan, DbAtomicTiming, DbPlanExecResult, DbPlanStmtExecResult};
-use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatementKind};
+use bookclerk_plugin_abi::{DbCapabilities, DbPlanStatementKind};
 use futures::TryStreamExt;
 use sea_orm::{
     from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DbErr, QueryResult,
@@ -88,9 +88,9 @@ impl From<u32> for ExecCaps {
 }
 
 impl ExecCaps {
-    /// Copies advertised connect limits into the executor.
+    /// Copies negotiated capability limits into the executor.
     #[must_use]
-    pub fn from_connect(caps: &DbConnectResult) -> Self {
+    pub fn from_capabilities(caps: &DbCapabilities) -> Self {
         Self {
             max_result_rows: caps.max_result_rows,
             max_result_bytes: caps.max_result_bytes,
@@ -103,8 +103,9 @@ impl ExecCaps {
 /// Executes `plan` as one transaction and returns generic statement results.
 ///
 /// `max_result_rows` of `0` (when passing a bare `u32`) means unlimited rows;
-/// byte caps default to unlimited in that form. Pass [`ExecCaps::from_connect`]
-/// to enforce negotiated result/cell budgets. A statement that yields more
+/// byte caps default to unlimited in that form. Pass
+/// [`ExecCaps::from_capabilities`] to enforce negotiated result/cell budgets.
+/// A statement that yields more
 /// than the cap fails the plan (the transaction is rolled back) rather than
 /// truncating the result.
 ///

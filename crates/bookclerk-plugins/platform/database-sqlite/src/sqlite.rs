@@ -14,7 +14,7 @@ use bookclerk_db_exec::{
 };
 #[cfg(feature = "host-helpers")]
 use bookclerk_library::{apply_host_schema, HostSchemaKind, LibraryStore};
-use bookclerk_plugin_abi::DbConnectResult;
+use bookclerk_plugin_abi::DbCapabilities;
 use bookclerk_plugin_sdk::{DbColumn, DbType};
 use rusqlite::Connection;
 use sea_orm::{
@@ -357,7 +357,7 @@ impl ProxyDatabaseTrait for SqliteProxy {
             let mut rows = stmt
                 .query(rusqlite::params_from_iter(binds.iter()))
                 .map_err(rusqlite_db_err)?;
-            let caps = DbConnectResult::sqlite();
+            let caps = DbCapabilities::advertised_sqlite();
             let cell_cap = usize::try_from(caps.max_cell_bytes).unwrap_or(usize::MAX);
             let mut out = Vec::new();
             let mut result_bytes = 0usize;

@@ -1753,7 +1753,7 @@ mod tests {
     #[tokio::test]
     async fn executing_mock_row_cap_fails_closed() {
         let (_server, proxy, conn, _interrupt, _drop, _oversize) = executing_proxy().await;
-        let cap = bookclerk_plugin_abi::DbConnectResult::d1().max_result_rows as usize;
+        let cap = bookclerk_plugin_abi::DbCapabilities::advertised_d1().max_result_rows as usize;
         {
             let db = conn.lock().expect("sqlite mutex");
             db.execute_batch("CREATE TABLE rowcap (x INTEGER)").unwrap();
@@ -1918,8 +1918,8 @@ mod tests {
         .await
         .expect("host D1 schema");
         bookclerk_library::sql_plan::run_typed_request_vectors(
-            bookclerk_plugin_abi::DbConnectResult::d1(),
-            bookclerk_plugin_abi::DbConnectResult::d1().max_result_rows,
+            bookclerk_plugin_abi::DbCapabilities::advertised_d1(),
+            bookclerk_plugin_abi::DbCapabilities::advertised_d1().max_result_rows,
             |req| {
                 let proxy = proxy.clone();
                 async move {
@@ -2186,7 +2186,7 @@ mod tests {
         .expect("host schema for guest typed replay");
 
         let store = bookclerk_library::LibraryStore::from_connection(db)
-            .with_connect_result(bookclerk_plugin_abi::DbConnectResult::d1())
+            .with_db_capabilities(bookclerk_plugin_abi::DbCapabilities::advertised_d1())
             .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
                 proxy: proxy.clone(),
             }));
@@ -2251,7 +2251,7 @@ mod tests {
         .expect("host schema for lost-reply guest typed");
 
         let store = bookclerk_library::LibraryStore::from_connection(db)
-            .with_connect_result(bookclerk_plugin_abi::DbConnectResult::d1())
+            .with_db_capabilities(bookclerk_plugin_abi::DbCapabilities::advertised_d1())
             .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
                 proxy: proxy.clone(),
             }));

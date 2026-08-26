@@ -4,7 +4,7 @@ use std::future::Future;
 
 use super::host_ir::{DbAtomicPlan, DbAtomicRequest, DbPlanExecResult, DbPlanStatement};
 use bookclerk_db_exec::ExecCaps;
-use bookclerk_plugin_abi::{DbConnectResult, DbPlanStatementKind};
+use bookclerk_plugin_abi::{DbCapabilities, DbPlanStatementKind};
 use sea_orm::DatabaseConnection;
 use serde_json::Value as JsonValue;
 
@@ -19,7 +19,7 @@ pub const CONTRACT_VECTOR_ROW_CAP: u32 = 5;
 /// # Panics
 ///
 /// Panics when a vector fails.
-pub async fn run_conn_vectors(db: &DatabaseConnection, connect: DbConnectResult, timing: &str) {
+pub async fn run_conn_vectors(db: &DatabaseConnection, connect: DbCapabilities, timing: &str) {
     let db = db.clone();
     let timing = timing.to_string();
     let connect_for_run = connect.clone();
@@ -29,7 +29,7 @@ pub async fn run_conn_vectors(db: &DatabaseConnection, connect: DbConnectResult,
         let connect = connect_for_run.clone();
         async move {
             let plan = req.plan.expect("vector plan");
-            let mut caps = ExecCaps::from_connect(&connect);
+            let mut caps = ExecCaps::from_capabilities(&connect);
             if cap > 0 {
                 caps.max_result_rows = cap;
             }
@@ -50,7 +50,7 @@ pub async fn run_conn_vectors(db: &DatabaseConnection, connect: DbConnectResult,
 ///
 /// Panics when a vector fails.
 pub async fn run_request_vectors<F, Fut, E>(
-    connect: DbConnectResult,
+    connect: DbCapabilities,
     advertised_cap: u32,
     mut run: F,
 ) where
@@ -74,7 +74,7 @@ pub async fn run_request_vectors<F, Fut, E>(
 /// # Panics
 ///
 /// Panics when a vector fails.
-pub async fn run_contract_vectors<F, Fut>(_connect: DbConnectResult, row_cap: u32, mut run: F)
+pub async fn run_contract_vectors<F, Fut>(_connect: DbCapabilities, row_cap: u32, mut run: F)
 where
     F: FnMut(DbAtomicRequest, u32) -> Fut,
     Fut: Future<Output = Result<DbPlanExecResult, String>>,

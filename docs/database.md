@@ -217,23 +217,22 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   Structured statuses include `ok`, `empty`, `lastOwner`, `claimInvalid`,
   `passwordRequired`, `notFound`, and `idempotencyConflict`. Consume-once ops
   use `DELETE … RETURNING` so a missing or expired row cannot be observed
-  twice. After `openSession` the host calls typed `DatabaseSession.capabilities`
-  (`abiMinor` ≥ 7; older guests still answer `bookclerk.capabilities`). Schema
-  selection uses `pragmaUserVersion` / `schemaMigrations` /
-  `atomicSchemaBatch`, not `sqlFamily`/`interactiveTxn`. D1 reports
+  twice. After `openSession` the host calls typed
+  `DatabaseSession.capabilities`. Schema selection uses `pragmaUserVersion` /
+  `schemaMigrations` / `atomicSchemaBatch`, not `sqlFamily`. D1 reports
   `atomicSchemaBatch: true` and `maxBinds: 100`. The host stores the
-  full connect advertisement and rejects plans that exceed `maxStatements`,
+  negotiated `DbCapabilities` and rejects plans that exceed `maxStatements`,
   per-statement `maxBinds`, `maxPayloadBytes`, or out-of-range selectors.
   A statement that yields more than `maxResultRows` **fails the plan**
   (no silent truncate). Guests also advertise `maxResultBytes`, `maxCellBytes`,
-  `maxAtomicRequestBytes`, and `maxAtomicResultBytes` (`0` is unspecified and
-  fails closed). Batch request/result caps are at or below the v2 JSON scalar
+  `maxRequestBytes`, and `maxAtomicResultBytes` (`0` is unspecified and
+  fails closed). Batch request/result caps are at or below the scalar
   limit. D1 refuses
   `RETURNING` unless host-IR `maxRows` is `1` (and rejects multi-tuple
   `VALUES` / semicolon-joined SQL) before HTTP; overflow or an oversized body
   after HTTP commit is `unavailable`. Guests that omit `returning`, advertise
-  `0` row/payload/atomic caps, or mismatch `dialect`/`sqlFamily` are not loaded. Time Travel is not
-  used.
+  `0` row/payload/atomic caps, or mismatch bootstrap `dialect`/`sqlFamily`
+  are not loaded. Time Travel is not used.
 - Guest failures are classified from SQLSTATE / `SQLITE_*` codes (not English
   `"unique"` matching). Constraint → `conflict`; busy/serialization →
   `unavailable` (the same `operationId` is retried); timeout →
