@@ -176,6 +176,11 @@ def check_abi_schema_defs() -> list[str]:
 def check_abi_lib_exports() -> list[str]:
     """Fail when removed legacy database DTOs reappear in lib.rs `pub use`."""
     text = ABI_LIB_RS.read_text(encoding="utf-8")
+    # `#[cfg(feature = "host")]`-gated re-exports are host-private surface,
+    # invisible to plugin authors on default features — not public ABI.
+    text = re.sub(
+        r'#\[cfg\(feature = "host"\)\]\s*\npub use [^;]*;', "", text
+    )
     errors: list[str] = []
     for name in FORBIDDEN_ABI_LIB_EXPORTS:
         if re.search(rf"\bpub use\b[^;]*\b{name}\b", text):

@@ -710,28 +710,6 @@ export interface TouchFileParams extends OutputS3Context {
 }
 
 /**
- * Parameters for database `dbConnect`.
- *
- * Discriminated by wire field `backend` (`sqlite` | `d1` | `postgres`). Extra
- * fields depend on the backend (paths, account ids, connection URLs).
- */
-export type DbConnectParams = JsonObject;
-
-/**
- * Result of `dbConnect` (JSON handshake). Typed SQL uses v2 Cap'n Proto
- * `capabilities` / `execute` after connect.
- */
-export interface DbConnectResult {
-  /** SeaORM dialect (`sqlite` or `postgres`). D1 reports `sqlite`. */
-  dialect: string;
-  /**
-   * When false, the host must not open interactive transactions on this guest.
-   * Omitted guests are treated as supporting interactive transactions.
-   */
-  interactiveTxn?: boolean;
-}
-
-/**
  * Known core method names on the Workers RPC wire.
  */
 export const METHOD_NAMES = [

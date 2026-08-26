@@ -10,8 +10,7 @@ mod tests {
     use serde_json::Value;
 
     use crate::{
-        DbConnectParams, FetchTitleParams, LoginParams, LoginResultDto, PutParams, ScanParams,
-        ScanSummaryDto,
+        FetchTitleParams, LoginParams, LoginResultDto, PutParams, ScanParams, ScanSummaryDto,
     };
 
     fn load(name: &str) -> Value {
@@ -148,27 +147,6 @@ mod tests {
         assert_eq!(v["forcePathStyle"], true);
         assert!(v.get("force_path_style").is_none());
         assert!(v["credentials"].get("accessKeyId").is_some());
-    }
-
-    #[test]
-    fn db_connect_sqlite_roundtrip() {
-        roundtrip_fixture::<DbConnectParams>("dbConnect.sqlite.json");
-        let v = load("dbConnect.sqlite.json");
-        assert_eq!(v["backend"], "sqlite");
-        assert!(v.get("pluginDataDir").is_some());
-        assert!(v.get("sqlitePath").is_some());
-        assert!(v.get("plugin_data_dir").is_none());
-        assert!(v.get("sqlite_path").is_none());
-    }
-
-    #[test]
-    fn db_connect_guest_roundtrip() {
-        roundtrip_fixture::<DbConnectParams>("dbConnect.guest.json");
-        let v = load("dbConnect.guest.json");
-        assert_eq!(v["backend"], "guest");
-        assert!(v.get("pluginDataDir").is_some());
-        assert!(v.get("sqlitePath").is_none());
-        assert!(v.get("url").is_none());
     }
 
     #[test]

@@ -1,24 +1,25 @@
-//! Database plugin Workers RPC DTOs (`kind = "database"`).
+//! Database adapter contract constants and host-private connect plumbing.
 //!
 //! Guests such as `sqlite` / `d1` / `postgres` implement the SeaORM proxy
 //! boundary. The host never links SQL engines; it opens the library through
 //! v2 `DatabaseContext` + typed adapter sessions after Cap'n Proto spawn.
 //!
-//! [`DbConnectParams`] / [`DbConnectResult`] remain host-internal serde types
-//! for connect-param building and SeaORM proxy bootstrap — not public JSON RPC.
-//!
-//! Wire fields use camelCase. The `backend` tag on [`DbConnectParams`] is
-//! lowercase (`sqlite`, `d1`, `postgres`).
+//! `DbConnectParams` is a host-private serde type for first-party
+//! connect-param building (feature `host`) — not public JSON RPC. Wire fields
+//! use camelCase; its `backend` tag is lowercase (`sqlite`, `d1`, `postgres`).
 
 use serde::{Deserialize, Serialize};
 
-/// Tagged connect params for [`crate::methods::db_connect`].
+/// Host-private tagged connect params for first-party database guests.
 ///
-/// Discriminant is wire field `backend` with lowercase tags. SQLite guests
-/// open `library.db` at [`Self::Sqlite::sqlite_path`] (also injected as
-/// `BOOKCLERK_SQLITE_PATH`); D1 / Postgres receive host-injected credentials
-/// in the params. Third-party adapters receive [`Self::Guest`] and read
-/// connection settings from plugin-owned config / secrets bindings.
+/// Travels only inside [`crate::v2::DatabaseContext::config`] built by the
+/// host ([`database_context_from_params`]); not part of the public plugin
+/// author ABI. Discriminant is wire field `backend` with lowercase tags.
+/// SQLite guests open `library.db` at [`Self::Sqlite::sqlite_path`] (also
+/// injected as `BOOKCLERK_SQLITE_PATH`); D1 / Postgres receive host-injected
+/// credentials in the params. Third-party adapters read connection settings
+/// from plugin-owned config / secrets bindings instead.
+#[cfg(feature = "host")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum DbConnectParams {
@@ -119,10 +120,7 @@ pub const FIRST_PARTY_MAX_RESULT_BYTES: u32 = crate::v2::MAX_SCALAR_BYTES;
 /// negotiated range until then.
 pub const SQL_CONTRACT_VERSION: u32 = 1;
 
-/// Result of a successful [`crate::methods::db_connect`].
-///
-/// Tells the host which SeaORM dialect to use for the typed execute proxy,
-/// and the negotiated SQL-adapter capabilities.
+/// Host-internal connect snapshot (SeaORM dialect + negotiated capabilities).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbConnectResult {
@@ -456,9 +454,11 @@ fn dialect_matches_sql_family(dialect: &str, sql_family: &str) -> bool {
 }
 
 /// Media type for [`crate::v2::DatabaseContext::config`] connect payloads.
+#[cfg(feature = "host")]
 pub const DATABASE_CONTEXT_MEDIA_TYPE: &str = "application/vnd.bookclerk.db-connect+json";
 
 /// Schema version for [`crate::v2::DatabaseContext::config`] connect payloads.
+#[cfg(feature = "host")]
 pub const DATABASE_CONTEXT_SCHEMA_VERSION: u32 = 1;
 
 /// Builds a v2 [`crate::v2::DatabaseContext`] from host-internal connect params.
@@ -466,6 +466,7 @@ pub const DATABASE_CONTEXT_SCHEMA_VERSION: u32 = 1;
 /// # Errors
 ///
 /// Returns when JSON serialization fails.
+#[cfg(feature = "host")]
 pub fn database_context_from_params(
     params: &DbConnectParams,
 ) -> crate::Result<crate::v2::DatabaseContext> {
@@ -487,6 +488,7 @@ pub fn database_context_from_params(
 /// # Errors
 ///
 /// Returns when the context omits connect params or JSON is invalid.
+#[cfg(feature = "host")]
 pub fn connect_params_from_context(
     ctx: &crate::v2::DatabaseContext,
 ) -> crate::Result<DbConnectParams> {
@@ -503,4 +505,36 @@ pub fn connect_params_from_context(
     serde_json::from_str(&ctx.json).map_err(|err| {
         crate::PluginError::invalid_params(format!("database context decode failed: {err}"))
     })
+}
+
+#[cfg(all(test, feature = "host"))]
+#[allow(clippy::missing_panics_doc)]
+mod host_tests {
+    use super::*;
+
+    #[test]
+    fn connect_params_are_tagged_by_backend_with_camel_case_fields() {
+        let sqlite = DbConnectParams::Sqlite {
+            plugin_data_dir: "/tmp/p".into(),
+            sqlite_path: Some("/tmp/library.db".into()),
+        };
+        let v = serde_json::to_value(&sqlite).unwrap();
+        assert_eq!(v["backend"], "sqlite");
+        assert!(v.get("pluginDataDir").is_some());
+        assert!(v.get("sqlitePath").is_some());
+        assert!(v.get("plugin_data_dir").is_none());
+        let back: DbConnectParams = serde_json::from_value(v).unwrap();
+        assert_eq!(back, sqlite);
+    }
+
+    #[test]
+    fn connect_params_roundtrip_through_database_context() {
+        let params = DbConnectParams::Guest {
+            plugin_data_dir: "/tmp/p".into(),
+        };
+        let ctx = database_context_from_params(&params).unwrap();
+        assert_eq!(ctx.config.media_type, DATABASE_CONTEXT_MEDIA_TYPE);
+        assert_eq!(ctx.config.schema_version, DATABASE_CONTEXT_SCHEMA_VERSION);
+        assert_eq!(connect_params_from_context(&ctx).unwrap(), params);
+    }
 }

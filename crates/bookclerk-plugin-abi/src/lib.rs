@@ -25,8 +25,7 @@
 //! are the Rust projection used by host and guest SDKs. Wire DTO fields
 //! serialize as **camelCase** to match Workers RPC / TypeScript (`abi.json`
 //! `$defs`). Method names on the wire are camelCase strings listed in
-//! [`methods::METHOD_NAMES`] (for example `loginStart`, `fetchTitle`,
-//! `dbConnect`).
+//! [`methods::METHOD_NAMES`] (for example `loginStart`, `fetchTitle`).
 //!
 //! Install manifests validate against [`PLUGIN_TOML_SCHEMA_JSON`]
 //! (`schema/plugin-toml.json`).
@@ -45,7 +44,7 @@
 //! | [`methods`] | Wire method name constants (`handshake`, `onEvent`, …) |
 //! | [`types`] | Shared DTOs (handshake, health, CLI, stdio RPC frames) |
 //! | [`kind`] | Kind-specific DTOs (source / integration / output) |
-//! | [`db`] | Database-guest connect / query / execute DTOs |
+//! | [`db`] | Database adapter contract constants (+ host-private connect params) |
 //! | [`error`] | [`PluginError`] / [`PluginErrorCode`] |
 //! | [`v2`] | Object-capability ABI (`apiVersion` 2, Cap'n Proto, streams) |
 
@@ -104,11 +103,12 @@ mod wire_fixtures;
 
 #[doc(hidden)]
 pub use db::DbConnectResult;
+#[cfg(feature = "host")]
+pub use db::{connect_params_from_context, database_context_from_params, DbConnectParams};
 pub use db::{
-    connect_params_from_context, database_context_from_params, DbConnectParams, D1_MAX_BINDS,
-    FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
-    HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS,
-    POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
+    D1_MAX_BINDS, FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS,
+    HOST_MIN_CELL_BYTES, HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS,
+    HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
 };
 pub use db_execute::{
     sql_payload_bytes, sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn,

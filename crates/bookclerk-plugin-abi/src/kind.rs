@@ -2,7 +2,7 @@
 //!
 //! Field names serialize as **camelCase** on the wire. Tagged enums keep their
 //! discriminant rename policy ([`SourceFetchDto`] variant tags stay
-//! `snake_case`; database connect tags live in [`crate::db::DbConnectParams`]).
+//! `snake_case`).
 //!
 //! | Kind | Typical methods |
 //! | --- | --- |

@@ -112,8 +112,6 @@ export {
   type ConfigOptionValueDto,
   type CopyParams,
   type CredentialsUpdateParams,
-  type DbConnectParams,
-  type DbConnectResult,
   type DiagnoseResult,
   type ExpandCandidatesParams,
   type ExternalUsersPayload,

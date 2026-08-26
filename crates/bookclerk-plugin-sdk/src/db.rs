@@ -121,22 +121,6 @@ pub fn proxy_rows_from_typed(
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
-    use bookclerk_plugin_abi::{DbConnectParams, DbConnectResult};
-
-    #[test]
-    fn connect_params_are_tagged_by_backend() {
-        let sqlite = DbConnectParams::Sqlite {
-            plugin_data_dir: "/tmp/p".into(),
-            sqlite_path: Some("/tmp/library.db".into()),
-        };
-        let v = serde_json::to_value(&sqlite).unwrap();
-        assert_eq!(v["backend"], "sqlite");
-        let back: DbConnectParams = serde_json::from_value(v).unwrap();
-        assert_eq!(back, sqlite);
-
-        let d1 = DbConnectResult::d1();
-        assert!(!d1.interactive_txn);
-    }
 
     #[test]
     fn sea_bridge_coalesces_ints_and_rejects_arrays() {
