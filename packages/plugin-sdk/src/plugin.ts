@@ -356,6 +356,14 @@ export interface JobContext {
   progress: ProgressSink;
   /** Host-mediated typed SQL when the invocation grant includes a database. */
   database?: import("./db-execute.js").DatabaseBinding;
+  /**
+   * Named plugin-owned database bindings (Workers-style) declared in
+   * `plugin.toml` `capabilities.bindings.databases` and approved by the
+   * operator. Each binding is an isolated database — separate from the
+   * Bookclerk library and every other plugin — with full DML plus bounded
+   * DDL (`CREATE`/`ALTER`/`DROP` `TABLE`/`INDEX`).
+   */
+  databases?: Map<string, import("./db-execute.js").DatabaseBinding>;
   signal?: AbortSignal;
 }
 
@@ -892,12 +900,24 @@ function grantedContext(
   env: AdapterEnv,
   grantToken: string,
   controller: AbortController,
+  databaseTokens?: Record<string, string>,
 ): JobContext {
   const granted = env.GRANTED;
   if (!granted || typeof grantToken !== "string" || !grantToken) {
     throw PluginError.fromWire("internal", "granted reverse channel missing");
   }
   const auth = { Authorization: `Bearer ${grantToken}` };
+  const databases = new Map<string, import("./db-execute.js").DatabaseBinding>();
+  for (const [name, token] of Object.entries(databaseTokens ?? {})) {
+    if (typeof token !== "string" || !token) continue;
+    const bindingAuth = { Authorization: `Bearer ${token}` };
+    databases.set(
+      name,
+      createDatabaseBinding(
+        new GrantedDatabaseTransport(granted, bindingAuth, controller.signal),
+      ),
+    );
+  }
   return {
     input: new GrantedSource(granted, auth, controller.signal),
     output: new GrantedDestination(granted, auth, controller.signal),
@@ -905,6 +925,7 @@ function grantedContext(
     database: createDatabaseBinding(
       new GrantedDatabaseTransport(granted, auth, controller.signal),
     ),
+    databases,
     signal: controller.signal,
   };
 }
@@ -1551,17 +1572,19 @@ function createInvocationAdapter() {
      * @param ctx - Worker factory context.
      * @param invocation - Durable command envelope.
      * @param grantToken - Per-invocation grant token.
+     * @param databases - Per-binding grant tokens for named plugin databases.
      * @returns Job outcome from the handler.
      */
     async invokeHandle(
       ctx: WorkerContext,
       invocation: JobInvocation,
       grantToken: string,
+      databases?: Record<string, string>,
     ): Promise<JobOutcome> {
       const handler = await this.#plugin().worker(ctx ?? {});
       const controller = new AbortController();
       try {
-        const context = grantedContext(this.env, grantToken, controller);
+        const context = grantedContext(this.env, grantToken, controller, databases);
         return await handler.handle(invocation, context);
       } finally {
         controller.abort();

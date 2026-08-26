@@ -174,6 +174,12 @@ export interface DatabaseAdapterConfig {
    * the operator configured nothing.
    */
   config?: JsonValue;
+  /**
+   * Named plugin database binding this open serves; omitted for the primary library open.
+   * Adapters advertising `DbCapabilities.pluginDatabases` must serve each binding from its
+   * own isolated database.
+   */
+  binding?: string;
 }
 
 /**

@@ -112,6 +112,18 @@ impl DatabaseBinding {
             .map(|db| Self::from_session(Arc::from(db)))
     }
 
+    /// Takes the named plugin database binding `name` from a job context.
+    ///
+    /// Named bindings come from `plugin.toml` `capabilities.bindings.databases`
+    /// after operator approval: each is an isolated plugin-owned database
+    /// (full DML plus bounded DDL), separate from the Bookclerk library and
+    /// from every other plugin.
+    #[must_use]
+    pub fn take_named_from_job_context(ctx: &mut JobHandlerContext, name: &str) -> Option<Self> {
+        ctx.take_named_database(name)
+            .map(|db| Self::from_session(Arc::from(db)))
+    }
+
     /// Prepare one canonical-SQL statement (`?` placeholders).
     #[must_use]
     pub fn prepare(&self, sql: impl Into<String>) -> PreparedStatement {

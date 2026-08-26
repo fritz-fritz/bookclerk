@@ -314,8 +314,11 @@ async function handleRoleInvoke(request, env, url) {
       const ctx = contextFrom(request, body);
       const grantToken = body.grantToken;
       const invocation = body.invocation ?? {};
+      const databases = body.databases ?? {};
       if (typeof plugin.invokeHandle === "function") {
-        return Response.json(await plugin.invokeHandle(ctx, invocation, grantToken));
+        return Response.json(
+          await plugin.invokeHandle(ctx, invocation, grantToken, databases),
+        );
       }
       const handler = await plugin.worker(ctx);
       try {

@@ -11,7 +11,7 @@ Outside the isolate (authoring / unit tests), lightweight stubs stand in for
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
@@ -267,6 +267,14 @@ class JobContext:
 
     database: "DatabaseBinding | None" = None
     guest_database: GuestDatabase | None = None
+    databases: "dict[str, DatabaseBinding]" = field(default_factory=dict)
+    """Named plugin-owned database bindings (Workers-style).
+
+    Declared in ``plugin.toml`` ``capabilities.bindings.databases`` and
+    approved by the operator. Each binding is an isolated database — separate
+    from the Bookclerk library and every other plugin — with full DML plus
+    bounded DDL (``CREATE``/``ALTER``/``DROP`` ``TABLE``/``INDEX``).
+    """
 
 
 class JobHandler:
@@ -333,12 +341,16 @@ def granted_job_context(
     grant_token: str,
     *,
     signal: Any | None = None,
+    database_tokens: "dict[str, str] | None" = None,
 ) -> JobContext:
     """Build a :class:`JobContext` with host-mediated SQL over ``POST /db/execute``.
 
     The returned :attr:`JobContext.database` is a :class:`DatabaseBinding`
     whose terminal methods (``first``, ``run``, ``all``, ``batch``) are async
-    and route through the granted transport.
+    and route through the granted transport. ``database_tokens`` maps named
+    plugin database bindings to their per-invocation grant tokens; each entry
+    becomes an isolated :class:`DatabaseBinding` on
+    :attr:`JobContext.databases`.
     """
     from bookclerk_plugin_sdk.db_value import (
         ExecuteReply,
@@ -351,9 +363,24 @@ def granted_job_context(
     async def execute(request: ExecuteRequest) -> ExecuteReply:
         return await guest.execute(request)
 
+    databases: dict[str, Any] = {}
+    for name, token in (database_tokens or {}).items():
+        if not isinstance(token, str) or not token:
+            continue
+        binding_guest = _GrantedGuestDatabase(granted, token, signal)
+
+        def _bind(g: _GrantedGuestDatabase) -> Any:
+            async def bound_execute(request: ExecuteRequest) -> ExecuteReply:
+                return await g.execute(request)
+
+            return create_database_binding(bound_execute)
+
+        databases[name] = _bind(binding_guest)
+
     return JobContext(
         database=create_database_binding(execute),
         guest_database=guest,
+        databases=databases,
     )
 
 

@@ -541,12 +541,44 @@ impl JobHandler for HttpJobHandler {
             table: Rc::clone(&self.table),
             grant: grant.clone(),
         };
+        // One database-only grant token per named plugin database binding:
+        // the isolate reaches each isolated database over the same
+        // `/db/execute` broker path with its binding token.
+        let mut binding_tokens = serde_json::Map::new();
+        let mut binding_revokes = Vec::with_capacity(context.databases.len());
+        for (name, database) in context.databases {
+            let token = format!("{:032x}", rand::random::<u128>());
+            self.table.borrow_mut().insert(
+                token.clone(),
+                GrantedSlot {
+                    input: None,
+                    output: None,
+                    progress: None,
+                    expires: std::time::Instant::now() + std::time::Duration::from_secs(3600),
+                    allow_open: false,
+                    allow_put: false,
+                    allow_progress: false,
+                    database: Some(Rc::from(database)),
+                    allow_database: true,
+                    // The host-side binding session enforces binding_owned
+                    // scope; the broker defers to it.
+                    sql_policy: GuestSqlPolicy::host_authoritative(),
+                    max_request_bytes: MAX_SCALAR_BYTES,
+                },
+            );
+            binding_revokes.push(RevokeGrant {
+                table: Rc::clone(&self.table),
+                grant: token.clone(),
+            });
+            binding_tokens.insert(name, serde_json::Value::String(token));
+        }
         let result = self
             .http
             .json_post(
                 "/worker/handle",
                 &serde_json::json!({
                     "grantToken": grant,
+                    "databases": binding_tokens,
                     "invocation": invocation,
                     "jobId": self.ctx.job_id,
                     "json": self.ctx.json,
