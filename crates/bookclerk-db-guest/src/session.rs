@@ -383,7 +383,7 @@ pub async fn guest_execute_atomic_on_txn(
 ///
 /// # Returns
 ///
-/// Query rows projected into [`GuestQueryResult`].
+/// Query rows projected into `GuestQueryResult`.
 ///
 /// # Errors
 ///
@@ -467,7 +467,7 @@ pub async fn guest_query_page(dto: GuestStatement, cursor: &str, limit: u32) -> 
 ///
 /// # Returns
 ///
-/// Last-insert id and rows-affected in an [`GuestExecResult`].
+/// Last-insert id and rows-affected in a `GuestExecResult`.
 ///
 /// # Errors
 ///
@@ -1231,7 +1231,7 @@ async fn execute_on<C: ConnectionTrait>(conn: &C, dto: GuestStatement) -> Result
     })
 }
 
-/// Projects one SeaORM query row into a [`GuestRow`] (integration tests).
+/// Projects one SeaORM query row into a `GuestRow` (integration tests).
 #[must_use]
 pub fn row_to_dto(row: &sea_orm::QueryResult) -> GuestRow {
     row_to_guest_row(row)

@@ -5,11 +5,11 @@ edition = "2021"
 publish = false
 
 # Standalone package (NOT a workspace member): workspace feature unification
-# must not leak the abi `host` feature into this dependency graph. With
-# default features only, every host-private symbol in `cases/` must fail
-# to resolve.
+# must not leak the abi `host` feature into this dependency graph. With the
+# documented author feature set (`db`, the widest third-party surface), every
+# host-private symbol in `cases/` must fail to resolve.
 [workspace]
 
 [dependencies]
-bookclerk-plugin-sdk = { path = "../../../crates/bookclerk-plugin-sdk" }
+bookclerk-plugin-sdk = { path = "../../../crates/bookclerk-plugin-sdk", features = ["db"] }
 bookclerk-plugin-abi = { path = "../../../crates/bookclerk-plugin-abi" }

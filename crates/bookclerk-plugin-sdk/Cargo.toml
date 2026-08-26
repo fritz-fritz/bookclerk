@@ -16,7 +16,6 @@ default = []
 db = [
     "dep:sea-orm",
     "dep:base64",
-    "dep:bookclerk-db-exec",
     "dep:futures",
     "dep:uuid",
 ]
@@ -31,7 +30,6 @@ required-features = ["tools"]
 
 [dependencies]
 async-trait.workspace = true
-bookclerk-db-exec = { workspace = true, optional = true }
 bookclerk-plugin-abi.workspace = true
 bookclerk-plugin-manifest.workspace = true
 bookclerk-workerd = { workspace = true, optional = true }
