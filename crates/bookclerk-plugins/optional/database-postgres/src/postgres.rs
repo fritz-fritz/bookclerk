@@ -132,6 +132,57 @@ pub async fn open_binding(
     Ok(db)
 }
 
+/// Drops an isolated per-binding PostgreSQL database.
+///
+/// Connects to the admin URL (not `database`) so `DROP DATABASE` is legal.
+/// Other backends attached to the target are terminated first. Missing
+/// databases are success (`IF EXISTS`) so the registry row can be removed.
+///
+/// # Errors
+///
+/// Returns when the name is unsafe or `DROP DATABASE` fails.
+pub async fn drop_binding(url: &str, database: &str) -> std::result::Result<(), DbErr> {
+    if !binding_database_name_ok(database) {
+        return Err(DbErr::Custom(format!(
+            "invalid binding database name `{database}`"
+        )));
+    }
+    let admin = Database::connect(url).await?;
+    let backend = admin.get_database_backend();
+    let terminate = format!(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE datname = '{database}' AND pid <> pg_backend_pid()"
+    );
+    let drop = format!("DROP DATABASE IF EXISTS {database}");
+    let mut last_err = None;
+    for attempt in 0..5 {
+        let _ = admin
+            .execute_raw(Statement::from_string(backend, terminate.clone()))
+            .await;
+        match admin
+            .execute_raw(Statement::from_string(backend, drop.clone()))
+            .await
+        {
+            Ok(_) => {
+                tracing::debug!(plugin = "postgres", database, "dropped binding database");
+                return Ok(());
+            }
+            Err(err) if is_database_in_use(&err) && attempt + 1 < 5 => {
+                last_err = Some(err);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| DbErr::Custom(format!("could not drop `{database}`"))))
+}
+
+/// True when `DROP DATABASE` failed because another session is still connected.
+fn is_database_in_use(err: &DbErr) -> bool {
+    let t = err.to_string().to_ascii_lowercase();
+    t.contains("being accessed") || t.contains("55006")
+}
+
 #[cfg(test)]
 #[allow(clippy::missing_panics_doc)]
 mod tests {
@@ -160,6 +211,20 @@ mod tests {
         for bad in ["", "Public", "a.b", "a\"b", "a b", "a;b"] {
             let err = rt
                 .block_on(open_binding("postgres://invalid", bad))
+                .expect_err("unsafe database name must fail before connecting");
+            assert!(err.to_string().contains("database name"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn drop_binding_rejects_unsafe_database_names() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        for bad in ["", "Public", "a.b", "a\"b", "a b", "a;b"] {
+            let err = rt
+                .block_on(drop_binding("postgres://invalid", bad))
                 .expect_err("unsafe database name must fail before connecting");
             assert!(err.to_string().contains("database name"), "{bad}: {err}");
         }
@@ -280,5 +345,38 @@ mod tests {
             ))
             .await
             .expect("drop race database");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+    async fn postgres_drop_binding_reopen_is_empty() {
+        let url = postgres_test_url();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let name = format!("pb_drop_{suffix}");
+        let name = name.chars().take(63).collect::<String>();
+        let db = open_binding(&url, &name).await.expect("open");
+        db.execute_raw(Statement::from_string(
+            db.get_database_backend(),
+            "CREATE TABLE notes (id BIGSERIAL PRIMARY KEY, body TEXT NOT NULL)".to_string(),
+        ))
+        .await
+        .expect("create");
+        drop(db);
+        drop_binding(&url, &name).await.expect("physical drop");
+        let reopened = open_binding(&url, &name).await.expect("reopen after drop");
+        let rows = reopened
+            .query_all_raw(Statement::from_string(
+                reopened.get_database_backend(),
+                "SELECT to_regclass('public.notes') IS NOT NULL AS present".to_string(),
+            ))
+            .await
+            .expect("probe");
+        let present: bool = rows[0].try_get("", "present").unwrap_or(true);
+        assert!(!present, "reopened binding must not keep the dropped table");
+        drop(reopened);
+        drop_binding(&url, &name).await.expect("cleanup");
     }
 }

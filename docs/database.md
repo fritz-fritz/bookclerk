@@ -139,7 +139,9 @@ Cloudflare D1 database by name) and recorded in the host
 retry-token replay, and allow plugin-owned schema (full DML plus idempotent
 `CREATE`/`DROP` `TABLE`/`INDEX` with `IF [NOT] EXISTS`). Jobs never receive
 the host library as guest SQL. Operator lifecycle:
-`bookclerk plugins db list` / `bookclerk plugins db drop <plugin> [binding]`.
+`bookclerk plugins db list` / `bookclerk plugins db drop <plugin> [binding]`
+(physical delete of the SQLite file / `DROP DATABASE` / D1 delete, then the
+registry row; unknown adapters fail closed).
 See [plugins.md — Isolated plugin database bindings](plugins.md#isolated-plugin-database-bindings).
 
 ### Switching backends (opt-in migration)

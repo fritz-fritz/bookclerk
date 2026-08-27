@@ -615,6 +615,65 @@ impl ExternalDatabase {
         };
         database_context_from_params(&params).map_err(|err| PluginError::message(err.to_string()))
     }
+
+    /// Physically deletes a provisioned binding unit. The registry row is the
+    /// caller's to remove **after** this returns success.
+    ///
+    /// SQLite deletes the file and journal sidecars. PostgreSQL issues
+    /// `DROP DATABASE`. D1 deletes the Cloudflare database by name. Unknown
+    /// adapters fail closed so a registry row cannot outlive a unit the host
+    /// cannot prove is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns when credentials are missing, the backend refuses the delete,
+    /// or the adapter family is unknown.
+    pub async fn drop_provisioned_unit(
+        config: &Config,
+        backend_kind: &str,
+        unit_ref: &str,
+    ) -> PluginResult<()> {
+        match backend_kind {
+            "sqlite" => {
+                for suffix in ["", "-wal", "-shm", "-journal"] {
+                    let path = format!("{unit_ref}{suffix}");
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(err) => {
+                            return Err(PluginError::message(format!(
+                                "could not delete {path}: {err}"
+                            )));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            "postgres" => {
+                let url = resolve_postgres_url(config)
+                    .map_err(|err| PluginError::message(err.to_string()))?;
+                bookclerk_plugin_database_postgres::drop_binding(&url, unit_ref)
+                    .await
+                    .map_err(|err| PluginError::message(err.to_string()))
+            }
+            "d1" => {
+                let token =
+                    resolve_d1_api_token().map_err(|err| PluginError::message(err.to_string()))?;
+                bookclerk_plugin_database_d1::delete_database(
+                    &config.database.d1.api_base,
+                    &config.database.d1.account_id,
+                    &token,
+                    unit_ref,
+                )
+                .await
+                .map_err(|err| PluginError::message(err.to_string()))
+            }
+            other => Err(PluginError::message(format!(
+                "cannot drop adapter `{other}` unit `{unit_ref}`: the host cannot prove deletion; \
+                 remove it with the adapter, then retry"
+            ))),
+        }
+    }
 }
 
 /// Open the library for a specific `[database].plugin` id (ignoring the active config value).
@@ -2192,5 +2251,32 @@ mod tests {
         assert_eq!(capped_binding_deadline(100, 50), 50);
         assert_eq!(capped_binding_deadline(100, 0), 100);
         assert_eq!(capped_binding_deadline(0, 0), 0);
+    }
+
+    #[tokio::test]
+    async fn drop_provisioned_sqlite_unit_deletes_file_and_sidecars() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("binding.db");
+        std::fs::write(&path, b"sqlite").expect("db file");
+        let unit = path.display().to_string();
+        std::fs::write(format!("{unit}-wal"), b"wal").expect("wal");
+        std::fs::write(format!("{unit}-shm"), b"shm").expect("shm");
+        std::fs::write(format!("{unit}-journal"), b"j").expect("journal");
+        ExternalDatabase::drop_provisioned_unit(&Config::default(), "sqlite", &unit)
+            .await
+            .expect("drop sqlite unit");
+        assert!(!path.exists(), "binding file must be gone");
+        assert!(!std::path::Path::new(&format!("{unit}-wal")).exists());
+        assert!(!std::path::Path::new(&format!("{unit}-shm")).exists());
+        assert!(!std::path::Path::new(&format!("{unit}-journal")).exists());
+    }
+
+    #[tokio::test]
+    async fn drop_provisioned_unknown_adapter_fails_closed() {
+        let err =
+            ExternalDatabase::drop_provisioned_unit(&Config::default(), "custom-sql", "unit-ref")
+                .await
+                .expect_err("unknown adapter must not unregister");
+        assert!(err.to_string().contains("cannot drop"), "{err}");
     }
 }

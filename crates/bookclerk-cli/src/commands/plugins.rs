@@ -149,9 +149,10 @@ pub enum PluginDbCommand {
     },
     /// Drop provisioned binding units and their registry rows.
     ///
-    /// SQLite binding files are deleted. PostgreSQL databases and Cloudflare D1
-    /// databases are unregistered here; the printed unit reference tells you
-    /// what to drop on the server (`DROP DATABASE <name>` / D1 delete).
+    /// Physically deletes the SQLite file (and journal sidecars), drops the
+    /// PostgreSQL database, or deletes the Cloudflare D1 database, then
+    /// removes the registry row. Physical delete must succeed first; unknown
+    /// adapters fail closed and keep the row.
     Drop {
         /// Plugin id.
         plugin: String,
@@ -848,40 +849,20 @@ async fn run_plugin_db(
                 );
             }
             for row in &rows {
-                match row.backend_kind.as_str() {
-                    "sqlite" => {
-                        // Delete the binding file and its journal sidecars.
-                        for suffix in ["", "-wal", "-shm", "-journal"] {
-                            let path = format!("{}{suffix}", row.unit_ref);
-                            match std::fs::remove_file(&path) {
-                                Ok(()) => {}
-                                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                                Err(err) => {
-                                    anyhow::bail!("could not delete {path}: {err}");
-                                }
-                            }
-                        }
-                        println!("deleted {}", row.unit_ref);
-                    }
-                    "postgres" => println!(
-                        "unregistered {}/{}: drop the database manually with \
-                         `DROP DATABASE \"{}\"`",
-                        row.plugin_id, row.binding, row.unit_ref
-                    ),
-                    "d1" => println!(
-                        "unregistered {}/{}: delete the Cloudflare D1 database `{}` \
-                         via the dashboard or API",
-                        row.plugin_id, row.binding, row.unit_ref
-                    ),
-                    other => println!(
-                        "unregistered {}/{}: adapter `{other}` unit `{}` must be \
-                         removed by the adapter",
-                        row.plugin_id, row.binding, row.unit_ref
-                    ),
-                }
+                bookclerk_plugin_host::ExternalDatabase::drop_provisioned_unit(
+                    config,
+                    &row.backend_kind,
+                    &row.unit_ref,
+                )
+                .await
+                .map_err(|err| anyhow::anyhow!(err.to_string()))?;
                 store
                     .remove_plugin_databases(&row.plugin_id, Some(&row.binding))
                     .await?;
+                println!(
+                    "deleted {}/{} ({} {})",
+                    row.plugin_id, row.binding, row.backend_kind, row.unit_ref
+                );
             }
             Ok(())
         }

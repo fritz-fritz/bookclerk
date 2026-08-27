@@ -1814,6 +1814,8 @@ dependencies = [
  "bookclerk-integrations",
  "bookclerk-library",
  "bookclerk-plugin-abi",
+ "bookclerk-plugin-database-d1",
+ "bookclerk-plugin-database-postgres",
  "bookclerk-plugin-database-sqlite",
  "bookclerk-plugin-integration-audiobookshelf",
  "bookclerk-plugin-manifest",

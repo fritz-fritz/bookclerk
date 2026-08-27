@@ -1163,13 +1163,14 @@ separate from the Bookclerk library and from every other plugin
 - **SQLite** — one file per binding under
   `$BOOKCLERK_FILES_DIR/plugin-databases/<plugin>/<BINDING>.db` (the sqlite
   adapter jail grants that directory).
-- **PostgreSQL** — one database per binding (`pb_<plugin>_<binding>`),
-  created on first use (`CREATEDB` required). This is a separate database,
-  not a schema on the library DB, so plugin SQL cannot see host tables.
+- **PostgreSQL** — one database per binding (`pb_` + 32 hex of the
+  `(plugin, binding)` digest; 35 ≤ 63), created on first use (`CREATEDB`
+  required). This is a separate database, not a schema on the library DB,
+  so plugin SQL cannot see host tables.
 - **Cloudflare D1** — one D1 database per binding
-  (`bookclerk-pb-<plugin>-<binding>`), resolved or created by name through the
-  REST API. Provisioning fails closed with an operator-facing error when the
-  API token cannot create databases.
+  (`bookclerk-pb-` + the same 32 hex), resolved or created by name through
+  the REST API. Provisioning fails closed with an operator-facing error when
+  the API token cannot create databases.
 - **Third-party adapters** — advertise `DbCapabilities.pluginDatabases` and
   receive the binding name on the public `DatabaseAdapterConfig`; adapters
   that do not advertise support fail the job rather than sharing a database.
@@ -1178,7 +1179,10 @@ Consent: each binding appears as a `database:<NAME>` grant entry and requires
 operator approval before enable, like other capabilities. Provisioned units
 are recorded in the host `plugin_databases` registry (an existing row wins so
 re-opens never re-target a binding); inspect and remove them with
-`bookclerk plugins db list` / `bookclerk plugins db drop <plugin> [binding]`.
+`bookclerk plugins db list` / `bookclerk plugins db drop <plugin> [binding]`
+(the drop command deletes the physical SQLite file, PostgreSQL database, or
+Cloudflare D1 database, then removes the registry row; it fails closed if
+physical delete cannot be proven).
 
 Inside a binding the plugin **owns its schema**: full DML plus bounded
 idempotent DDL (`CREATE TABLE/INDEX IF NOT EXISTS`, `DROP TABLE/INDEX IF
