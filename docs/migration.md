@@ -55,7 +55,30 @@ bookclerk import native --from ./bookclerk-backup.tar.gz --force
 ```
 
 Optional export flags: `--include-plugin-manifests`, `--include-cache`,
-`--include-logs`.
+`--include-logs`, `--include-plugin-databases`. Native backup is a **files-dir
+archive** (config, `library.db`, optional extras). It is not a schema walk.
+
+## Host schema snapshots (`bookclerk db`)
+
+Schema versioning, in-place snapshots, and last-reversible downgrade live on
+`bookclerk db`, not `export native` or `config database migrate` (backend
+switch) or `plugins db` (binding list/drop). See
+[ADR: schema versioning](adr/schema-versioning.md).
+
+```bash
+bookclerk db version
+bookclerk db snapshot --path ./schema-snap.tar.gz
+bookclerk db snapshot --include-plugin-databases
+bookclerk db restore --from ./schema-snap.tar.gz
+bookclerk db migrate --to 1
+bookclerk db downgrade
+```
+
+Automatic snapshots land under `$BOOKCLERK_FILES_DIR/snapshots/` (last five
+kept) before host ups on library open. Operator `--path` archives are never
+pruned. Schema 1 is irreversible: if an older binary meets a newer database,
+restore a pre-upgrade snapshot (or run `downgrade` on a binary that still
+knows those steps).
 
 ## Postgres (`copydb`)
 

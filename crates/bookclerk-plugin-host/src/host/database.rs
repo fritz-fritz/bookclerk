@@ -50,6 +50,12 @@ pub struct ExternalDatabase {
     /// Granted `[database.<id>]` settings delivered to third-party adapters
     /// via the public `DatabaseAdapterConfig` payload.
     settings_json: Value,
+    /// Files dir used for in-place schema snapshots before upgrades.
+    files_dir: std::path::PathBuf,
+    /// Library SQLite path when `[database].plugin = sqlite`.
+    sqlite_path: Option<std::path::PathBuf>,
+    /// D1 REST export credentials when `[database].plugin = d1`.
+    d1_snapshot: Option<crate::host::D1SnapshotCreds>,
 }
 
 impl ExternalDatabase {
@@ -94,6 +100,21 @@ impl ExternalDatabase {
             plugin_id: plugin.manifest.id.clone(),
             plugin_data_dir,
             settings_json: config_json,
+            files_dir: config.paths().files_dir.clone(),
+            sqlite_path: match DatabasePluginKind::parse(&plugin.manifest.id) {
+                Some(DatabasePluginKind::Sqlite) => {
+                    Some(config.database.sqlite_path(&config.paths().files_dir))
+                }
+                _ => None,
+            },
+            d1_snapshot: match DatabasePluginKind::parse(&plugin.manifest.id) {
+                Some(DatabasePluginKind::D1) => Some(crate::host::D1SnapshotCreds {
+                    api_base: config.database.d1.api_base.clone(),
+                    account_id: config.database.d1.account_id.clone(),
+                    database_id: config.database.d1.database_id.clone(),
+                }),
+                _ => None,
+            },
         })
     }
 
@@ -103,6 +124,20 @@ impl ExternalDatabase {
     ///
     /// Returns an error when the operation fails.
     pub async fn connect(
+        &self,
+        config: &Config,
+    ) -> Result<(DatabaseConnection, DbCapabilities), DbErr> {
+        let (db, caps) = self.connect_without_migrate(config).await?;
+        self.apply_host_schema(&db, &caps).await?;
+        Ok((db, caps))
+    }
+
+    /// Open the library connection without applying host schema (CLI migrate / version).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the guest cannot open a session.
+    pub async fn connect_without_migrate(
         &self,
         config: &Config,
     ) -> Result<(DatabaseConnection, DbCapabilities), DbErr> {
@@ -121,10 +156,6 @@ impl ExternalDatabase {
         }
         let _kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
-        // Fail closed: transport/internal/deadline failures must not be
-        // silently replaced with plugin-id-derived metadata. Only a typed
-        // `unsupported` (adapter without a bootstrap surface) may fall back
-        // to the first-party id inference below.
         let mut bootstrap = match self.session.db_bootstrap().await {
             Ok(bootstrap) => bootstrap,
             Err(crate::PluginError::Abi { code, .. }) if code == "unsupported" => {
@@ -143,7 +174,6 @@ impl ExternalDatabase {
             caps: caps.clone(),
         }));
         let db = Database::connect_proxy(backend, proxy).await?;
-        self.apply_host_schema(&db, &caps).await?;
         Ok((db, caps))
     }
 
@@ -157,7 +187,37 @@ impl ExternalDatabase {
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         let session = self.session.clone();
         let caps = caps.clone();
-        bookclerk_library::apply_host_schema_with_batch(db, kind, move |stmts| {
+        let current = bookclerk_library::current_schema_version(db, kind)
+            .await
+            .unwrap_or(0);
+        let sql_dump = if current > 0 && current < bookclerk_library::SCHEMA_VERSION {
+            if let Some(creds) = self.d1_snapshot.as_ref() {
+                match bookclerk_config::resolve_d1_api_token() {
+                    Ok(token) => crate::host::export_d1_sql(
+                        &creds.api_base,
+                        &creds.account_id,
+                        &token,
+                        &creds.database_id,
+                    )
+                    .await
+                    .ok(),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let opts = bookclerk_library::SchemaApplyOptions {
+            snapshot: Some(bookclerk_library::SchemaSnapshotOpts {
+                files_dir: self.files_dir.clone(),
+                sqlite_path: self.sqlite_path.clone(),
+                include_plugin_databases: false,
+                sql_dump,
+            }),
+        };
+        bookclerk_library::apply_host_schema_with_batch_opts(db, kind, opts, move |stmts| {
             let session = session.clone();
             let caps = caps.clone();
             async move { exec_host_ddl_batch(&session, &caps, stmts).await }

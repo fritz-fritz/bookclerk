@@ -25,6 +25,8 @@ mod models;
 pub mod operator_token;
 pub mod password;
 pub mod proxy_txn;
+mod schema_snapshot;
+mod schema_walk;
 pub mod scope;
 pub mod secrets;
 mod session_client;
@@ -44,13 +46,22 @@ pub use db_atomic::{
 };
 pub use email::{gravatar_hash, is_valid_user_email, normalize_user_email};
 pub use error::{LibraryError, Result};
-pub use host_schema::{apply_host_schema, apply_host_schema_with_batch, HostSchemaKind};
+pub use host_schema::{
+    apply_host_schema, apply_host_schema_with_batch, apply_host_schema_with_batch_opts,
+    apply_host_schema_with_options, current_schema_version, migrate_host_schema_to, HostSchemaKind,
+    SchemaApplyOptions, SchemaSnapshotOpts,
+};
 pub use in_process_atomic::InProcessSqliteAtomic;
 pub use master_key::{
     configure_master_key, configure_master_key_with, inspect_master_key, master_key_path,
     require_master_key, resolve_master_key, resolve_master_key_with, seal_with_dek,
     unseal_with_dek, wrap_master_key, MasterKey, MasterKeyFormat,
     AUTH_PASSWORD_ENV as MASTER_KEY_AUTH_PASSWORD_ENV, MASTER_KEY_FILE_NAME,
+};
+pub use migrations::{
+    binding_bootstrap_sql, greenfield_baseline_canonical, host_migration_plan, host_migration_sql,
+    latest_schema_postgres, latest_schema_sqlite, HostMigrationStep, MIN_SUPPORTED_SCHEMA_VERSION,
+    SCHEMA_MIGRATIONS_DDL, SCHEMA_V1_INTRODUCED_IN, SCHEMA_VERSION, UNRELEASED_SQL,
 };
 pub use models::{
     catalog_subscribers_for_event, collapse_live_subscriber_nodes, content_kind_from_classic,
@@ -88,6 +99,12 @@ pub use proxy_txn::{
     note_query_row, query_row_cap, query_rows_seen, take_txn_fault, txn_broken_err,
     with_exec_budget, AtomicInterruptKind, AtomicInterruptPhase, ExecBudget,
 };
+pub use schema_snapshot::{
+    archive_snapshot_dir, extract_snapshot_archive, restore_snapshot, snapshot_library,
+    vacuum_sqlite_into, SnapshotKind, SnapshotManifest, SnapshotOutcome, SnapshotRequest,
+    SNAPSHOTS_DIR, SNAPSHOT_RETENTION,
+};
+pub use schema_walk::{plan_downgrade_to_binary, plan_schema_walk, SchemaWalk};
 pub use scope::SourceScope;
 pub use secrets::{
     b64_string_to_bytes, build_sealed_record, bytes_to_b64_string, clear_unseal_cache,

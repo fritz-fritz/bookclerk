@@ -1,31 +1,53 @@
 //! Host-owned schema application after a database guest connects.
 //!
 //! Guests open a connection and ping. The host reads the current version and
-//! applies each remaining step from [`crate::migrations::host_migration_plan`]
-//! as **one** atomic unit (DDL + version marker last). Marker kind (schema
-//! capability flags) selects only the versioning mechanic (`PRAGMA
-//! user_version`, `schema_migrations` row, or one HTTP `{ "batch": [...] }`
-//! per version). Canonical DDL lives in the host plan; the live connection
-//! backend chooses adapter-edge lowering via
-//! [`bookclerk_db_exec::expand_host_schema_batch`] at execution time.
-//!
-//! TODO(#squash): collapse the long migration chain to a single baseline version.
+//! applies remaining [`crate::migrations::host_migration_plan`] steps as **one**
+//! atomic unit (DDL + version marker last). A database newer than
+//! [`crate::migrations::SCHEMA_VERSION`] fails closed. Marker kind selects only
+//! the versioning mechanic (`PRAGMA user_version`, `schema_migrations` row, or
+//! one HTTP `{ "batch": [...] }` per version).
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use bookclerk_plugin_abi::DbPlanStatementKind;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 
 use crate::error::{LibraryError, Result};
-use crate::migrations::{host_migration_plan, HostMigrationStep};
+use crate::migrations::{
+    host_migration_plan, HostMigrationStep, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
+};
+use crate::schema_snapshot::{snapshot_library, SnapshotRequest};
+use crate::schema_walk::{plan_schema_walk, SchemaWalk};
 use crate::sql_plan::{execute_statements_on, DbAtomicPlan, DbPlanStatement};
+
+/// Optional in-place snapshot taken before applying ups or downs.
+#[derive(Debug, Clone, Default)]
+pub struct SchemaSnapshotOpts {
+    /// `$BOOKCLERK_FILES_DIR` root for `snapshots/`.
+    pub files_dir: PathBuf,
+    /// File SQLite path for `VACUUM INTO`; omit for Postgres / D1 SQL dumps.
+    pub sqlite_path: Option<PathBuf>,
+    /// Copy `plugin-databases/` when true (off for automatic connect).
+    pub include_plugin_databases: bool,
+    /// Precomputed SQL dump (Cloudflare D1 REST export). When set, written as
+    /// `library.sql` instead of a SELECT-through-connection dump.
+    pub sql_dump: Option<Vec<u8>>,
+}
+
+/// Options for [`apply_host_schema_with_options`].
+#[derive(Debug, Clone, Default)]
+pub struct SchemaApplyOptions {
+    /// When set, snapshot before applying DDL to a non-empty database.
+    pub snapshot: Option<SchemaSnapshotOpts>,
+}
 
 /// Which versioning mechanic the host should use.
 ///
 /// Flags choose **how** versions are stored and applied, not which SQL pack
-/// to emit. Canonical Bookclerk SQL is [`crate::migrations::migration_sql`].
+/// to emit. Canonical Bookclerk SQL is [`crate::migrations::host_migration_plan`].
 /// Adapters lower canonical DDL for the live connection backend at execution
 /// (see [`bookclerk_db_exec::expand_host_schema_batch`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,16 +133,24 @@ impl HostSchemaKind {
 ///
 /// # Errors
 ///
-/// Returns [`LibraryError`] when a version read or DDL statement fails.
+/// Returns [`LibraryError`] when a version read or DDL statement fails, the
+/// database is newer than this binary, or a frozen checksum does not match.
 pub async fn apply_host_schema(db: &DatabaseConnection, kind: HostSchemaKind) -> Result<()> {
-    match kind {
-        HostSchemaKind::PragmaMarker => apply_sqlite_user_version(db).await,
-        HostSchemaKind::RowMarker | HostSchemaKind::AtomicBatchMarker => {
-            let backend = db.get_database_backend();
-            let timing = schema_migration_timing(backend);
-            apply_schema_migrations_from_plan(db, backend, timing, &host_migration_plan()).await
-        }
-    }
+    apply_host_schema_with_options(db, kind, SchemaApplyOptions::default()).await
+}
+
+/// Applies pending host schema with optional in-place snapshots.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a version read, snapshot, or DDL statement fails.
+pub async fn apply_host_schema_with_options(
+    db: &DatabaseConnection,
+    kind: HostSchemaKind,
+    opts: SchemaApplyOptions,
+) -> Result<()> {
+    let walk = prepare_schema_change(db, kind, SCHEMA_VERSION, &opts).await?;
+    apply_walk_direct(db, kind, &walk).await
 }
 
 /// Applies schema using `run_batch` (typed `executeAtomic`) for each version.
@@ -131,22 +161,50 @@ pub async fn apply_host_schema(db: &DatabaseConnection, kind: HostSchemaKind) ->
 pub async fn apply_host_schema_with_batch<F, Fut>(
     db: &DatabaseConnection,
     kind: HostSchemaKind,
+    run_batch: F,
+) -> Result<()>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    apply_host_schema_with_batch_opts(db, kind, SchemaApplyOptions::default(), run_batch).await
+}
+
+/// Applies schema with snapshots using `run_batch` for each version.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a version read, snapshot, DDL, or batch fails.
+pub async fn apply_host_schema_with_batch_opts<F, Fut>(
+    db: &DatabaseConnection,
+    kind: HostSchemaKind,
+    opts: SchemaApplyOptions,
     mut run_batch: F,
 ) -> Result<()>
 where
     F: FnMut(Vec<String>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    match kind {
-        HostSchemaKind::PragmaMarker => {
-            apply_sqlite_user_version_with_batch(db, &mut run_batch).await
-        }
-        HostSchemaKind::RowMarker | HostSchemaKind::AtomicBatchMarker => {
-            let backend = db.get_database_backend();
-            apply_schema_migrations_with_batch(db, backend, &host_migration_plan(), &mut run_batch)
-                .await
-        }
-    }
+    let walk = prepare_schema_change(db, kind, SCHEMA_VERSION, &opts).await?;
+    apply_walk_batch(db, kind, &walk, &mut run_batch).await
+}
+
+/// Migrates toward `target`, including reversible downs for CLI rollback.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when the walk cannot start, a snapshot fails, or DDL fails.
+/// A blocked downgrade still applies every reversible step and returns the walk
+/// (the caller treats `blocked` / `stopped_at != target` as failure).
+pub async fn migrate_host_schema_to(
+    db: &DatabaseConnection,
+    kind: HostSchemaKind,
+    target: i64,
+    opts: SchemaApplyOptions,
+) -> Result<SchemaWalk> {
+    let walk = prepare_schema_change(db, kind, target, &opts).await?;
+    apply_walk_direct(db, kind, &walk).await?;
+    Ok(walk)
 }
 
 /// Timing label for schema migration transactions on `backend`.
@@ -158,56 +216,242 @@ fn schema_migration_timing(backend: DbBackend) -> &'static str {
     }
 }
 
-/// Applies pending SQLite `PRAGMA user_version` migrations via `run_batch`.
-///
-/// # Errors
-///
-/// Returns when a version read or batch fails.
-async fn apply_sqlite_user_version_with_batch<F, Fut>(
+/// Reads the current schema version, verifies checksums, snapshots, and plans a walk.
+async fn prepare_schema_change(
     db: &DatabaseConnection,
-    run_batch: &mut F,
-) -> Result<()>
-where
-    F: FnMut(Vec<String>) -> Fut,
-    Fut: Future<Output = Result<()>>,
-{
-    let backend = DbBackend::Sqlite;
-    exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
-    let steps = host_migration_plan();
-    for step in &steps {
-        apply_one_sqlite_version_with_batch(db, step.version, step.canonical, run_batch).await?;
+    kind: HostSchemaKind,
+    target: i64,
+    opts: &SchemaApplyOptions,
+) -> Result<SchemaWalk> {
+    let backend = db.get_database_backend();
+    ensure_schema_migrations(db, backend).await?;
+    let current = current_schema_version(db, kind).await?;
+    let plan = host_migration_plan();
+    verify_applied_checksums(db, backend, &plan, current).await?;
+    let walk = plan_schema_walk(&plan, current, target)?;
+    if !walk.is_noop() {
+        if let Some(snap) = opts.snapshot.as_ref() {
+            let req = SnapshotRequest {
+                files_dir: snap.files_dir.clone(),
+                from_version: current,
+                to_version: walk.stopped_at,
+                sqlite_path: snap.sqlite_path.clone(),
+                include_plugin_databases: snap.include_plugin_databases,
+                sql_dump: snap.sql_dump.clone(),
+            };
+            snapshot_library(db, &req).await?;
+        }
     }
-    exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
+    Ok(walk)
+}
+
+/// Applies a prepared walk using in-process atomic DDL.
+async fn apply_walk_direct(
+    db: &DatabaseConnection,
+    kind: HostSchemaKind,
+    walk: &SchemaWalk,
+) -> Result<()> {
+    let backend = db.get_database_backend();
+    let timing = schema_migration_timing(backend);
+    if kind == HostSchemaKind::PragmaMarker {
+        exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
+    }
+    for step in &walk.ups {
+        match kind {
+            HostSchemaKind::PragmaMarker => {
+                apply_one_sqlite_version(db, backend, step).await?;
+            }
+            HostSchemaKind::RowMarker | HostSchemaKind::AtomicBatchMarker => {
+                apply_one_schema_migration(db, backend, timing, step).await?;
+            }
+        }
+    }
+    for step in &walk.downs {
+        apply_one_down(db, backend, kind, timing, step).await?;
+    }
+    if kind == HostSchemaKind::PragmaMarker {
+        exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
+    }
     Ok(())
 }
 
-/// Applies one SQLite schema version as a `run_batch` transaction.
-///
-/// # Errors
-///
-/// Returns when the batch fails.
-async fn apply_one_sqlite_version_with_batch<F, Fut>(
+/// Applies a prepared walk using a guest `run_batch` closure.
+async fn apply_walk_batch<F, Fut>(
     db: &DatabaseConnection,
-    version: i64,
-    schema: &str,
+    kind: HostSchemaKind,
+    walk: &SchemaWalk,
     run_batch: &mut F,
 ) -> Result<()>
 where
     F: FnMut(Vec<String>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
+    let backend = db.get_database_backend();
+    if kind == HostSchemaKind::PragmaMarker {
+        exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
+    }
+    for step in &walk.ups {
+        match kind {
+            HostSchemaKind::PragmaMarker => {
+                apply_one_sqlite_version_with_batch(db, step, run_batch).await?;
+            }
+            HostSchemaKind::RowMarker | HostSchemaKind::AtomicBatchMarker => {
+                apply_one_schema_migration_with_batch(db, backend, step, run_batch).await?;
+            }
+        }
+    }
+    for step in &walk.downs {
+        let stmts = down_statements(kind, step);
+        run_batch(stmts).await?;
+    }
+    if kind == HostSchemaKind::PragmaMarker {
+        exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
+    }
+    Ok(())
+}
+
+/// Reads `PRAGMA user_version` or `max(schema_migrations.version)`.
+///
+/// # Errors
+///
+/// Returns when the version query fails.
+pub async fn current_schema_version(db: &DatabaseConnection, kind: HostSchemaKind) -> Result<i64> {
+    match kind {
+        HostSchemaKind::PragmaMarker => sqlite_user_version(db).await,
+        HostSchemaKind::RowMarker | HostSchemaKind::AtomicBatchMarker => {
+            let applied = schema_versions_applied(db, db.get_database_backend()).await?;
+            Ok(applied.into_iter().max().unwrap_or(0))
+        }
+    }
+}
+
+/// Canonical DDL plus version markers (`PRAGMA` and/or `schema_migrations` insert).
+fn version_marker_statements(kind: HostSchemaKind, step: &HostMigrationStep) -> Vec<String> {
+    let mut stmts = vec![step.canonical.to_string()];
+    if kind == HostSchemaKind::PragmaMarker {
+        stmts.push(format!("PRAGMA user_version = {}", step.version));
+    }
+    stmts.push(schema_migrations_insert(step));
+    stmts
+}
+
+/// Reverse DDL plus deletion of this step's `schema_migrations` row (and pragma).
+fn down_statements(kind: HostSchemaKind, step: &HostMigrationStep) -> Vec<String> {
+    let mut stmts = Vec::new();
+    if let Some(down) = step.down {
+        stmts.push(down.to_string());
+    }
+    stmts.push(format!(
+        "DELETE FROM schema_migrations WHERE version = {}",
+        step.version
+    ));
+    if kind == HostSchemaKind::PragmaMarker {
+        stmts.push(format!(
+            "PRAGMA user_version = {}",
+            step.version.saturating_sub(1)
+        ));
+    }
+    stmts
+}
+
+/// `INSERT` for `schema_migrations` including checksum, app version, and timestamp.
+fn schema_migrations_insert(step: &HostMigrationStep) -> String {
+    let checksum = step.checksum();
+    let app = env!("CARGO_PKG_VERSION").replace('\'', "''");
+    let at = chrono::Utc::now().to_rfc3339().replace('\'', "''");
+    format!(
+        "INSERT INTO schema_migrations (version, checksum, app_version, applied_at) \
+         VALUES ({}, '{checksum}', '{app}', '{at}')",
+        step.version
+    )
+}
+
+/// Refuses when a stored checksum does not match this binary's frozen SQL.
+async fn verify_applied_checksums(
+    db: &DatabaseConnection,
+    backend: DbBackend,
+    plan: &[HostMigrationStep],
+    current: i64,
+) -> Result<()> {
+    if current <= 0 {
+        return Ok(());
+    }
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            backend,
+            "SELECT version, checksum FROM schema_migrations",
+        ))
+        .await;
+    let Ok(rows) = rows else {
+        return Ok(());
+    };
+    for row in rows {
+        let version = row
+            .try_get::<i64>("", "version")
+            .ok()
+            .or_else(|| row.try_get_by_index::<i64>(0).ok())
+            .unwrap_or(0);
+        if version > current {
+            continue;
+        }
+        let Some(step) = plan.iter().find(|s| s.version == version) else {
+            continue;
+        };
+        let found = row
+            .try_get::<String>("", "checksum")
+            .ok()
+            .or_else(|| row.try_get_by_index::<String>(1).ok())
+            .unwrap_or_default();
+        if found.is_empty() {
+            continue;
+        }
+        let expected = step.checksum();
+        if found != expected {
+            return Err(LibraryError::Schema(format!(
+                "schema version {version} checksum mismatch (database {found}, binary {expected}); \
+                 the frozen migration was edited"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Applies one reversible `down` as an atomic DDL batch.
+async fn apply_one_down(
+    db: &DatabaseConnection,
+    backend: DbBackend,
+    kind: HostSchemaKind,
+    timing: &str,
+    step: &HostMigrationStep,
+) -> Result<()> {
+    run_atomic_ddl(
+        db,
+        backend,
+        timing,
+        &format!("migrate-down-{}", step.version),
+        down_statements(kind, step),
+    )
+    .await
+}
+
+/// Applies one SQLite `PRAGMA user_version` step via `run_batch`.
+async fn apply_one_sqlite_version_with_batch<F, Fut>(
+    db: &DatabaseConnection,
+    step: &HostMigrationStep,
+    run_batch: &mut F,
+) -> Result<()>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let version = step.version;
     let mut delay_ms = 20u64;
     let mut last_applied_err = None;
     for attempt in 0..8 {
         if version <= sqlite_user_version(db).await? {
             return Ok(());
         }
-        // Canonical through planning/authorization/routing: adapters lower
-        // and split this pack at execution (see `expand_host_schema_batch`).
-        let stmts = vec![
-            schema.to_string(),
-            format!("PRAGMA user_version = {version}"),
-        ];
+        let stmts = version_marker_statements(HostSchemaKind::PragmaMarker, step);
         match run_batch(stmts).await {
             Ok(()) => return Ok(()),
             Err(err) if is_already_applied_ddl(&err) => {
@@ -228,107 +472,75 @@ where
     Err(last_applied_err.expect("sqlite schema version retry"))
 }
 
-/// Applies pending `schema_migrations` versions via `run_batch`.
-///
-/// # Errors
-///
-/// Returns when a version read or batch fails.
-async fn apply_schema_migrations_with_batch<F, Fut>(
+/// Applies one `schema_migrations` step via `run_batch`.
+async fn apply_one_schema_migration_with_batch<F, Fut>(
     db: &DatabaseConnection,
     backend: DbBackend,
-    steps: &[HostMigrationStep],
+    step: &HostMigrationStep,
     run_batch: &mut F,
 ) -> Result<()>
 where
     F: FnMut(Vec<String>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    ensure_schema_migrations(db, backend).await?;
-    for step in steps {
-        let version = step.version;
-        let schema = step.canonical;
-        let mut delay_ms = 20u64;
-        let mut last_err = None;
-        for attempt in 0..8 {
-            if schema_versions_applied(db, backend)
-                .await?
-                .contains(&version)
-            {
-                break;
-            }
-            // Canonical through planning/authorization/routing: adapters
-            // lower and split this pack at execution.
-            let stmts = vec![
-                schema.to_string(),
-                format!("INSERT INTO schema_migrations (version) VALUES ({version})"),
-            ];
-            match run_batch(stmts).await {
-                Ok(()) => break,
-                Err(err) if is_already_applied_ddl(&err) => {
-                    tokio::time::sleep(Duration::from_millis(15)).await;
-                    last_err = Some(err);
-                }
-                Err(err) if attempt + 1 < 8 && is_schema_lock_err(&err) => {
-                    last_err = Some(err);
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms = delay_ms.saturating_mul(2).min(250);
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        if !schema_versions_applied(db, backend)
+    let version = step.version;
+    let mut delay_ms = 20u64;
+    let mut last_err = None;
+    for attempt in 0..8 {
+        if schema_versions_applied(db, backend)
             .await?
             .contains(&version)
         {
-            if let Some(err) = last_err {
-                return Err(err);
+            return Ok(());
+        }
+        let stmts = version_marker_statements(HostSchemaKind::RowMarker, step);
+        match run_batch(stmts).await {
+            Ok(()) => return Ok(()),
+            Err(err) if is_already_applied_ddl(&err) => {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                last_err = Some(err);
             }
+            Err(err) if attempt + 1 < 8 && is_schema_lock_err(&err) => {
+                last_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = delay_ms.saturating_mul(2).min(250);
+            }
+            Err(err) => return Err(err),
         }
     }
-    Ok(())
-}
-
-/// Applies remaining `PRAGMA user_version` steps (file SQLite).
-async fn apply_sqlite_user_version(db: &DatabaseConnection) -> Result<()> {
-    let backend = DbBackend::Sqlite;
-    exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
-    let steps = host_migration_plan();
-    for step in &steps {
-        apply_one_sqlite_version(db, backend, step.version, step.canonical).await?;
+    if schema_versions_applied(db, backend)
+        .await?
+        .contains(&version)
+    {
+        return Ok(());
     }
-    exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
-    Ok(())
+    Err(last_err.expect("schema_migrations version retry"))
 }
 
 /// Applies one file-SQLite version, recovering when a peer committed DDL first.
 async fn apply_one_sqlite_version(
     db: &DatabaseConnection,
     backend: DbBackend,
-    version: i64,
-    schema: &str,
+    step: &HostMigrationStep,
 ) -> Result<()> {
+    let version = step.version;
     let mut delay_ms = 20u64;
     let mut last_applied_err = None;
     for attempt in 0..8 {
         if version <= sqlite_user_version(db).await? {
             return Ok(());
         }
-        let stmts = vec![
-            schema.to_string(),
-            format!("PRAGMA user_version = {version}"),
-        ];
         match run_atomic_ddl(
             db,
             backend,
             "sqlite_txn",
             &format!("migrate-sqlite-{version}"),
-            stmts,
+            version_marker_statements(HostSchemaKind::PragmaMarker, step),
         )
         .await
         {
             Ok(()) => return Ok(()),
             Err(err) if is_already_applied_ddl(&err) => {
-                // Peer's ALTER is visible before its version marker commits.
                 tokio::time::sleep(Duration::from_millis(15)).await;
                 last_applied_err = Some(err);
             }
@@ -370,29 +582,14 @@ async fn sqlite_user_version(db: &DatabaseConnection) -> Result<i64> {
     Ok(0)
 }
 
-/// Applies pending `schema_migrations` versions from the canonical host plan.
-async fn apply_schema_migrations_from_plan(
-    db: &DatabaseConnection,
-    backend: DbBackend,
-    timing: &str,
-    steps: &[HostMigrationStep],
-) -> Result<()> {
-    ensure_schema_migrations(db, backend).await?;
-    for step in steps {
-        let schema = step.canonical;
-        apply_one_schema_migration(db, backend, timing, step.version, schema).await?;
-    }
-    Ok(())
-}
-
 /// Applies one `schema_migrations` version, recovering from a concurrent peer.
 async fn apply_one_schema_migration(
     db: &DatabaseConnection,
     backend: DbBackend,
     timing: &str,
-    version: i64,
-    schema: &str,
+    step: &HostMigrationStep,
 ) -> Result<()> {
+    let version = step.version;
     let mut delay_ms = 20u64;
     let mut last_err = None;
     for attempt in 0..8 {
@@ -402,16 +599,12 @@ async fn apply_one_schema_migration(
         {
             return Ok(());
         }
-        let stmts = vec![
-            schema.to_string(),
-            format!("INSERT INTO schema_migrations (version) VALUES ({version})"),
-        ];
         match run_atomic_ddl(
             db,
             backend,
             timing,
             &format!("migrate-{timing}-{version}"),
-            stmts,
+            version_marker_statements(HostSchemaKind::RowMarker, step),
         )
         .await
         {
@@ -445,7 +638,7 @@ async fn ensure_schema_migrations(db: &DatabaseConnection, backend: DbBackend) -
         match exec_sql(
             db,
             backend,
-            "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)",
+            &bookclerk_db_exec::schema_sql_for_backend(backend, SCHEMA_MIGRATIONS_DDL),
         )
         .await
         {
@@ -464,7 +657,7 @@ async fn ensure_schema_migrations(db: &DatabaseConnection, backend: DbBackend) -
     match exec_sql(
         db,
         backend,
-        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)",
+        &bookclerk_db_exec::schema_sql_for_backend(backend, SCHEMA_MIGRATIONS_DDL),
     )
     .await
     {
@@ -569,13 +762,13 @@ mod tests {
     #[test]
     fn host_migration_plan_starts_with_greenfield_baseline() {
         use crate::migrations::{
-            greenfield_baseline_canonical, host_migration_plan, migration_sql,
+            greenfield_baseline_canonical, host_migration_plan, SCHEMA_VERSION,
         };
         let plan = host_migration_plan();
-        assert_eq!(plan[0].version, 1);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].version, SCHEMA_VERSION);
         assert_eq!(plan[0].canonical, greenfield_baseline_canonical());
-        assert!(plan[0].canonical.contains(migration_sql()[0]));
-        // Versions are contiguous starting at 1.
+        assert!(plan[0].canonical.contains("plugin_databases"));
         for (i, step) in plan.iter().enumerate() {
             assert_eq!(step.version, i as i64 + 1);
         }
@@ -821,5 +1014,43 @@ mod tests {
         );
         a.expect("first apply");
         b.expect("second apply");
+    }
+
+    #[tokio::test]
+    async fn pragma_marker_fails_closed_when_database_is_ahead() {
+        let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+            .await
+            .expect("unmigrated sqlite");
+        apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+            .await
+            .expect("apply v1");
+        exec_sql(&db, DbBackend::Sqlite, "PRAGMA user_version = 99")
+            .await
+            .expect("bump");
+        let err = apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+            .await
+            .expect_err("schema ahead");
+        assert!(err.to_string().contains("newer than this binary"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn checksum_mismatch_fails_closed() {
+        let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+            .await
+            .expect("unmigrated sqlite");
+        apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+            .await
+            .expect("apply v1");
+        exec_sql(
+            &db,
+            DbBackend::Sqlite,
+            "UPDATE schema_migrations SET checksum = 'deadbeef' WHERE version = 1",
+        )
+        .await
+        .expect("tamper");
+        let err = apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+            .await
+            .expect_err("checksum");
+        assert!(err.to_string().contains("checksum mismatch"), "{err}");
     }
 }

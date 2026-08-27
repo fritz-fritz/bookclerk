@@ -6174,7 +6174,12 @@ async fn postgres_test_store() -> LibraryStore {
     // exactly as a Postgres adapter would at execution.
     db.execute_raw(sea_orm::Statement::from_string(
         backend,
-        "CREATE TABLE IF NOT EXISTS schema_migrations (version BIGINT PRIMARY KEY)".to_string(),
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version BIGINT PRIMARY KEY NOT NULL,
+            checksum TEXT NOT NULL,
+            app_version TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+        )",
     ))
     .await
     .expect("create schema_migrations");
@@ -6182,8 +6187,10 @@ async fn postgres_test_store() -> LibraryStore {
         let batch = vec![
             step.canonical.to_string(),
             format!(
-                "INSERT INTO schema_migrations (version) VALUES ({})",
-                step.version
+                "INSERT INTO schema_migrations (version, checksum, app_version, applied_at) \
+                 VALUES ({}, '{}', '0.1.0', '2026-01-01T00:00:00Z')",
+                step.version,
+                step.checksum()
             ),
         ];
         let stmts =

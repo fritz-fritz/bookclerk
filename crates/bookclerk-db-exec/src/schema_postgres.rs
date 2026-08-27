@@ -27,7 +27,9 @@ pub fn schema_sql_for_backend(backend: DatabaseBackend, canonical: &str) -> Cow<
 #[must_use]
 pub fn is_host_schema_version_marker(sql: &str) -> bool {
     let t = sql.trim();
-    t.starts_with("INSERT INTO schema_migrations") || t.starts_with("PRAGMA user_version =")
+    t.starts_with("INSERT INTO schema_migrations")
+        || t.starts_with("DELETE FROM schema_migrations")
+        || t.starts_with("PRAGMA user_version =")
 }
 
 /// Splits a migration script on `;` and drops empty fragments.

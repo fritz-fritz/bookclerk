@@ -12,9 +12,9 @@ pub enum LibraryError {
     #[error("database error: {0}")]
     Db(#[from] rusqlite::Error),
 
-    /// Schema migration failure from `rusqlite_migration`.
-    #[error("migration error: {0}")]
-    Migrate(#[from] rusqlite_migration::Error),
+    /// Schema migration failure (version ahead, checksum mismatch, or apply error).
+    #[error("{0}")]
+    Schema(String),
 
     /// SeaORM / database-plugin failure (`DbErr`).
     #[error("ORM / database plugin error: {0}")]

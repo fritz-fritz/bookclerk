@@ -111,6 +111,87 @@ pub async fn ensure_database(
         })
 }
 
+/// Exports a D1 database as SQL via the Cloudflare REST export API (polling).
+///
+/// Time Travel is not used. The returned bytes are a SQL dump of the named
+/// database, suitable for writing under `files_dir/snapshots/`.
+///
+/// # Errors
+///
+/// Returns when the token cannot start or poll the export, or the download fails.
+pub async fn export_sql(
+    api_base: &str,
+    account_id: &str,
+    api_token: &str,
+    database_id: &str,
+) -> std::result::Result<Vec<u8>, DbErr> {
+    let base = api_base.trim_end_matches('/');
+    let client = reqwest::Client::builder()
+        .timeout(D1_REQUEST_TIMEOUT)
+        .connect_timeout(D1_CONNECT_TIMEOUT)
+        .build()
+        .map_err(|e| DbErr::Custom(format!("d1 client: {e}")))?;
+    let url = format!("{base}/accounts/{account_id}/d1/database/{database_id}/export");
+    let started: JsonValue = client
+        .post(&url)
+        .bearer_auth(api_token)
+        .json(&json!({ "output_format": "polling" }))
+        .send()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 export start: {e}")))?
+        .json()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 export start: {e}")))?;
+    if started.get("success").and_then(JsonValue::as_bool) == Some(false) {
+        return Err(DbErr::Custom(format!(
+            "d1 export rejected: {}",
+            started.get("errors").cloned().unwrap_or(JsonValue::Null)
+        )));
+    }
+    let mut signed = started
+        .pointer("/result/signed_url")
+        .and_then(JsonValue::as_str)
+        .map(str::to_string);
+    for _ in 0..20 {
+        if signed.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let polled: JsonValue = client
+            .post(&url)
+            .bearer_auth(api_token)
+            .json(&json!({ "output_format": "polling" }))
+            .send()
+            .await
+            .map_err(|e| DbErr::Custom(format!("d1 export poll: {e}")))?
+            .json()
+            .await
+            .map_err(|e| DbErr::Custom(format!("d1 export poll: {e}")))?;
+        signed = polled
+            .pointer("/result/signed_url")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string);
+        let status = polled
+            .pointer("/result/status")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("");
+        if status.eq_ignore_ascii_case("error") || status.eq_ignore_ascii_case("failed") {
+            return Err(DbErr::Custom(format!("d1 export failed: {polled}")));
+        }
+    }
+    let signed =
+        signed.ok_or_else(|| DbErr::Custom("d1 export timed out waiting for signed_url".into()))?;
+    let bytes = client
+        .get(&signed)
+        .send()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 export download: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 export download: {e}")))?;
+    Ok(bytes.to_vec())
+}
+
 /// Extracts the UUID of a D1 database named exactly `name` from a list reply.
 fn d1_database_uuid_by_name(listed: &JsonValue, name: &str) -> Option<String> {
     listed

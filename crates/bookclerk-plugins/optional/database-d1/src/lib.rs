@@ -8,4 +8,4 @@
 pub mod atomic;
 pub mod d1;
 
-pub use d1::{ensure_database, open, set_shared_proxy, shared_proxy, D1Proxy};
+pub use d1::{ensure_database, export_sql, open, set_shared_proxy, shared_proxy, D1Proxy};
