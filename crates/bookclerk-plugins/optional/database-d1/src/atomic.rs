@@ -654,8 +654,11 @@ async fn sleep_before_d1_retry_bounded(
 }
 
 /// True when `err` is a post-commit declared-type / result recovery failure.
+///
+/// SeaORM prefixes [`DbErr::Custom`] with `Custom Error: `, so match anywhere
+/// rather than at the start of `Display`.
 fn is_post_commit_unavailable(err: &DbErr) -> bool {
-    err.to_string().starts_with("unavailable:")
+    err.to_string().contains("unavailable:")
 }
 
 /// True when `err` is a D1 ambiguous-commit marker.
