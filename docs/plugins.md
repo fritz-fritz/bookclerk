@@ -1187,9 +1187,14 @@ physical delete cannot be proven).
 Inside a binding the plugin **owns its schema**: full DML plus bounded
 idempotent DDL (`CREATE TABLE/INDEX IF NOT EXISTS`, `DROP TABLE/INDEX IF
 EXISTS`). `ALTER` and `CREATE TABLE AS` are refused (not retry-safe, and
-`AS SELECT` can copy another catalog). The guest grammar still applies —
+`AS SELECT` can copy another catalog). `REFERENCES` targets are authorized
+with the same reserved-name rules as `CREATE`/`DROP` (no
+`db_atomic_receipts` / `schema_migrations` / `plugin_databases`, no
+schema-qualified names). The guest grammar still applies —
 single statement, no `ATTACH`/`PRAGMA`/session verbs, no schema-qualified
-names, and the binding's own `db_atomic_receipts` bookkeeping table stays
+names — and functions are Bookclerk SQL v1 portable helpers (not a wider
+SQLite dialect; see [`docs/sql-contract/v1.md`](sql-contract/v1.md)). The
+binding's own `db_atomic_receipts` bookkeeping table stays
 host-owned so retry tokens replay inside the binding, never against the
 library.
 

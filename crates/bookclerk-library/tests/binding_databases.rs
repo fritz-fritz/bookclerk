@@ -155,6 +155,29 @@ async fn binding_denies_reserved_tables_and_qualified_names() {
 }
 
 #[tokio::test]
+async fn binding_denies_reserved_foreign_key_references() {
+    let db = binding_db().await;
+    let err = run_binding(
+        &db,
+        req(
+            "fk-receipts",
+            vec![stmt(
+                "CREATE TABLE IF NOT EXISTS t (id INTEGER REFERENCES db_atomic_receipts(operation_id))",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect_err("FK onto host receipts must be denied");
+    assert!(
+        err.to_string().contains("reserved")
+            || err.to_string().contains("qualified")
+            || err.to_string().contains("REFERENCES"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
 async fn binding_retry_token_replays_without_double_apply() {
     let db = binding_db().await;
     run_binding(

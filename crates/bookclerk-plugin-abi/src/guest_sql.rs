@@ -126,12 +126,16 @@ impl GuestSqlPolicy {
     /// `plugin_databases`), catalog identifiers, and schema-qualified names.
     /// `CREATE TABLE AS`, `ALTER`, and unqualified `CREATE`/`DROP` without
     /// `IF [NOT] EXISTS` are refused. Grammar and size checks still run.
+    /// Functions are the Bookclerk SQL v1 portable set (not a wider SQLite
+    /// dialect): contract helpers plus portable scalars. SQLite-only names
+    /// such as `strftime`, `typeof`, `group_concat`, `iif`, `instr`, `quote`,
+    /// `total`, `date`, `datetime`, and `time` are denied.
     #[must_use]
     pub fn binding_owned() -> Self {
         Self {
             tables: std::collections::BTreeSet::new(),
             columns: std::collections::BTreeMap::new(),
-            functions: builtin_functions(),
+            functions: portable_functions(),
             host_authoritative: false,
             binding_owned: true,
         }
@@ -344,6 +348,41 @@ fn builtin_functions() -> std::collections::BTreeSet<String> {
     .collect()
 }
 
+/// Portable Bookclerk SQL v1 functions for plugin-owned bindings.
+///
+/// Contract helpers (`ifnull`, `json_extract`, `json_object`, `json_valid`,
+/// `max`) plus scalars that lower on every admitted adapter. SQLite-only
+/// names in [`builtin_functions`] stay denied here so a binding cannot
+/// depend on an engine dialect the host SQL contract does not guarantee.
+fn portable_functions() -> std::collections::BTreeSet<String> {
+    [
+        "abs",
+        "avg",
+        "cast",
+        "coalesce",
+        "count",
+        "hex",
+        "ifnull",
+        "json_extract",
+        "json_object",
+        "json_valid",
+        "length",
+        "lower",
+        "max",
+        "min",
+        "nullif",
+        "replace",
+        "round",
+        "substr",
+        "sum",
+        "trim",
+        "upper",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 /// Tables, columns, and functions referenced by guest SQL.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuestSqlRefs {
@@ -403,7 +442,10 @@ pub fn statement_is_ddl(sql: &str) -> bool {
 /// `DROP TABLE|INDEX IF EXISTS name`.
 /// `ALTER` is refused (not receipt-idempotent). `CREATE TABLE AS` and
 /// schema-qualified names anywhere in the statement (including
-/// `REFERENCES other.table`) are refused. `IF [NOT] EXISTS` is required so
+/// `REFERENCES other.table`) are refused. Unqualified `REFERENCES` targets
+/// are authorized with the same reserved-name rules as `CREATE`/`DROP`
+/// object names (`db_atomic_receipts`, `schema_migrations`,
+/// `plugin_databases`, catalogs). `IF [NOT] EXISTS` is required so
 /// a retried D1 batch cannot re-execute non-idempotent DDL.
 ///
 /// # Errors
@@ -435,8 +477,10 @@ fn authorize_binding_ddl(index: usize, sql: &str, policy: &GuestSqlPolicy) -> Re
                 .ok_or_else(|| deny("unbalanced CREATE TABLE"))?;
             deny_qualified_names_in(index, inner)?;
             deny_select_in_ddl(index, inner)?;
+            deny_binding_ddl_object_refs(index, inner)?;
             deny_qualified_names_in(index, scan.rest())?;
             deny_select_in_ddl(index, scan.rest())?;
+            deny_binding_ddl_object_refs(index, scan.rest())?;
             return authorize_ddl_function_fragments(index, policy, &[inner, scan.rest()]);
         }
         if scan.take_kw("INDEX") {
@@ -530,9 +574,48 @@ fn deny_select_in_ddl(index: usize, sql: &str) -> Result<()> {
     Ok(())
 }
 
+/// Authorizes every `REFERENCES` target in a binding DDL fragment.
+///
+/// Column-level (`col TYPE REFERENCES t(id)`) and table-level
+/// (`FOREIGN KEY (col) REFERENCES t(id)`) forms both go through
+/// [`check_binding_ddl_name`]. Qualified names are already denied by
+/// [`deny_qualified_names_in`]; this catches reserved host bookkeeping
+/// that would otherwise be skipped by [`ddl_function_names`].
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a `REFERENCES` target is
+/// missing, reserved, or schema-qualified.
+fn deny_binding_ddl_object_refs(index: usize, sql: &str) -> Result<()> {
+    let mut scan = Scan { sql, i: 0 };
+    while scan.i < sql.len() {
+        scan.skip();
+        if scan.i >= sql.len() {
+            break;
+        }
+        let b = scan.sql.as_bytes()[scan.i];
+        if b == b'\'' {
+            skip_quoted_string(&mut scan, b'\'');
+            continue;
+        }
+        if scan.take_kw("REFERENCES") {
+            check_binding_ddl_name(index, &mut scan, "REFERENCES target")?;
+            if scan.take_byte(b'(') {
+                let _ = scan.take_balanced_inner();
+            }
+            continue;
+        }
+        if scan.read_ident().is_some() {
+            continue;
+        }
+        scan.i += 1;
+    }
+    Ok(())
+}
+
 /// Authorizes function calls embedded in binding DDL fragments (DEFAULT /
-/// CHECK / generated columns / index expressions) against the same builtin
-/// allowlist as guest DML.
+/// CHECK / generated columns / index expressions) against the same function
+/// allowlist as guest DML for this policy.
 ///
 /// # Errors
 ///
@@ -599,6 +682,7 @@ fn ddl_constraint_head(name: &str) -> bool {
             | "unique"
             | "primary"
             | "foreign"
+            | "key"
             | "constraint"
             | "generated"
             | "default"
@@ -2142,6 +2226,72 @@ mod tests {
             0,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn binding_owned_denies_reserved_references_targets() {
+        for sql in [
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER REFERENCES db_atomic_receipts(operation_id))",
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER, FOREIGN KEY (id) REFERENCES schema_migrations(v))",
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER REFERENCES plugin_databases(id))",
+        ] {
+            let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
+            assert!(
+                err.to_string().contains("reserved")
+                    || err.to_string().contains("qualified")
+                    || err.to_string().contains("REFERENCES"),
+                "{sql}: {err}"
+            );
+        }
+        binding_check(
+            "CREATE TABLE IF NOT EXISTS keyed (id INTEGER PRIMARY KEY, other_id INTEGER REFERENCES peer(id))",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
+        binding_check(
+            "CREATE TABLE IF NOT EXISTS keyed2 (id INTEGER, other_id INTEGER, FOREIGN KEY (other_id) REFERENCES peer(id))",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn binding_owned_denies_sqlite_only_functions() {
+        for sql in [
+            "SELECT strftime('%Y', body) FROM notes",
+            "SELECT typeof(body) FROM notes",
+            "SELECT group_concat(body) FROM notes",
+            "SELECT iif(id > 0, body, '') FROM notes",
+            "SELECT instr(body, 'x') FROM notes",
+            "SELECT quote(body) FROM notes",
+            "SELECT total(id) FROM notes",
+            "SELECT date('now') FROM notes",
+            "SELECT datetime('now') FROM notes",
+            "SELECT time('now') FROM notes",
+            "SELECT json_array(body) FROM notes",
+        ] {
+            let err = binding_check(sql, DbResultSelection::Rows, 1).unwrap_err();
+            assert!(
+                err.to_string().contains("unauthorized function"),
+                "{sql}: {err}"
+            );
+        }
+        binding_check(
+            "SELECT ifnull(body, ''), json_extract(body, '$.k'), length(body) FROM notes",
+            DbResultSelection::Rows,
+            1,
+        )
+        .unwrap();
+        let library = GuestSqlPolicy::allow_tables(["notes"]);
+        let request = req(
+            "SELECT strftime('%Y', body) FROM notes",
+            vec![],
+            DbResultSelection::Rows,
+            1,
+        );
+        authorize_guest_sql_policy(&request, &library).expect("library guests keep sqlite helpers");
     }
 
     #[test]
