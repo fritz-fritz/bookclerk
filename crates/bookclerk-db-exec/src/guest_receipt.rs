@@ -30,6 +30,16 @@ pub const GUEST_RECEIPT_WRAP_PREFIX: usize = 2;
 /// Same-batch receipt stub INSERT after gated guest statements.
 pub const GUEST_RECEIPT_STUB_SUFFIX: usize = 1;
 
+/// True when `sql` is the guest-receipt claim stub (`INSERT … WHERE NOT EXISTS`).
+///
+/// D1 commits each HTTP batch immediately, so the adapter sends this statement
+/// first and only runs ungated guest DDL after `rows_affected = 1`.
+#[must_use]
+pub fn is_guest_receipt_stub_insert(sql: &str) -> bool {
+    let t = sql.to_ascii_lowercase();
+    t.contains("insert into db_atomic_receipts") && t.contains("where not exists")
+}
+
 /// True when the prior-receipt SELECT returned a row.
 #[must_use]
 pub fn prior_receipt_exists(stmt: &StatementResult) -> bool {
@@ -319,5 +329,21 @@ mod tests {
         ];
         assert!(should_skip_remaining_guest_work(&prior_prefix, 4));
         assert!(!should_skip_remaining_guest_work(&prior_prefix, 2));
+    }
+
+    #[test]
+    fn stub_insert_is_the_gated_receipt_claim() {
+        assert!(is_guest_receipt_stub_insert(
+            "INSERT INTO db_atomic_receipts (\
+                operation_id, operation_kind, request_hash, status, payload, created_at, expires_at\
+             ) SELECT ?, ?, ?, 'ok', '', ?, ? \
+               WHERE NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)"
+        ));
+        assert!(!is_guest_receipt_stub_insert(
+            "UPDATE db_atomic_receipts SET payload = ? WHERE operation_id = ?"
+        ));
+        assert!(!is_guest_receipt_stub_insert(
+            "SELECT operation_id FROM db_atomic_receipts WHERE operation_id = ?"
+        ));
     }
 }

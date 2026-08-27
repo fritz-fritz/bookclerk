@@ -24,6 +24,37 @@ use super::d1::D1Proxy;
 /// One statement in a D1 HTTP batch body.
 pub(crate) type SqlStmt = (String, Vec<JsonValue>);
 
+/// Outcome of the guest-receipt stub INSERT sent as its own D1 HTTP batch.
+enum GuestReceiptClaim {
+    /// `rows_affected = 1`: this host owns the operation and may run guest SQL.
+    Won {
+        /// Claim INSERT result appended onto the wrap so finalize still sees the stub.
+        stub: StatementResult,
+    },
+    /// `rows_affected = 0` or a unique conflict: another host already claimed.
+    Lost,
+}
+
+/// True when the claim INSERT hit a unique/PK conflict (treat as lost claim).
+fn is_claim_constraint(err: &DbErr) -> bool {
+    let t = err.to_string().to_ascii_lowercase();
+    t.contains("sqlite_constraint")
+        || t.contains("unique constraint")
+        || (t.contains("unique") && t.contains("db_atomic_receipts"))
+}
+
+/// True when the guest-receipt wrap contains ungated DDL (CREATE/DROP).
+fn wrap_has_ungated_ddl(statements: &[TypedDbStatement]) -> bool {
+    let end = statements
+        .len()
+        .saturating_sub(bookclerk_db_exec::GUEST_RECEIPT_STUB_SUFFIX);
+    statements
+        .iter()
+        .skip(bookclerk_db_exec::GUEST_RECEIPT_WRAP_PREFIX)
+        .take(end.saturating_sub(bookclerk_db_exec::GUEST_RECEIPT_WRAP_PREFIX))
+        .any(|s| bookclerk_plugin_abi::statement_is_ddl(&s.sql))
+}
+
 /// Maximum D1 HTTP batch attempts, including retries after ambiguous responses.
 const ATOMIC_HTTP_ATTEMPTS: usize = 3;
 
@@ -205,80 +236,85 @@ impl D1Proxy {
                 (sql, binds)
             })
             .collect();
+        // D1 cannot skip later statements in the same HTTP batch based on
+        // earlier results. Claim the receipt stub INSERT first so two hosts
+        // cannot both run ungated guest DDL. Do not send prune as its own
+        // committing HTTP — that would consume lost-reply tests.
+        let needs_claim = !guest_receipt.is_absent()
+            && req.statements.len() > bookclerk_db_exec::GUEST_RECEIPT_WRAP_PREFIX
+            && statements
+                .last()
+                .is_some_and(|(sql, _)| bookclerk_db_exec::is_guest_receipt_stub_insert(sql))
+            && wrap_has_ungated_ddl(&req.statements);
         let mut last_err = None;
+        let mut claim = None;
+        if needs_claim {
+            for attempt in 0..ATOMIC_HTTP_ATTEMPTS {
+                check_d1_session(
+                    bookclerk_db_exec::AtomicInterruptPhase::BeforeBegin,
+                    deadline,
+                )?;
+                let timeout = d1_http_timeout(deadline)?;
+                match self
+                    .claim_guest_receipt_stub(req, &statements, timeout, deadline, started)
+                    .await
+                {
+                    Ok(c) => {
+                        claim = Some(c);
+                        break;
+                    }
+                    Err(err)
+                        if is_ambiguous_d1(&err)
+                            && retry_safe
+                            && attempt + 1 < ATOMIC_HTTP_ATTEMPTS =>
+                    {
+                        sleep_before_d1_retry_bounded(attempt, None, deadline).await?;
+                        last_err = Some(err);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            let Some(c) = claim else {
+                return Err(last_err.unwrap_or_else(|| ambiguous_d1("exhausted claim retries")));
+            };
+            match c {
+                GuestReceiptClaim::Lost => {
+                    let timeout = d1_http_timeout(deadline)?;
+                    return self
+                        .replay_lost_guest_receipt_claim(
+                            req,
+                            &statements,
+                            timeout,
+                            deadline,
+                            started,
+                            wire_len,
+                        )
+                        .await;
+                }
+                GuestReceiptClaim::Won { stub } => {
+                    let timeout = d1_http_timeout(deadline)?;
+                    return self
+                        .run_claimed_guest_ddl(
+                            req,
+                            &statements,
+                            stub,
+                            timeout,
+                            deadline,
+                            started,
+                            wire_len,
+                            &guest_receipt,
+                            cap,
+                        )
+                        .await;
+                }
+            }
+        }
         for attempt in 0..ATOMIC_HTTP_ATTEMPTS {
             check_d1_session(
                 bookclerk_db_exec::AtomicInterruptPhase::BeforeBegin,
                 deadline,
             )?;
             let timeout = d1_http_timeout(deadline)?;
-            // D1 cannot skip later statements in the same HTTP batch. Peek
-            // the prior-receipt SELECT (wrap index 1) first; if a row exists,
-            // skip guest DDL. Do not send the prune DELETE as a separate
-            // commit — that would consume lost-reply tests and split the wrap.
-            let peek_idx = 1;
-            if !guest_receipt.is_absent()
-                && req.statements.len() > bookclerk_db_exec::GUEST_RECEIPT_WRAP_PREFIX
-                && statements.len() > peek_idx
-            {
-                match self
-                    .run_batch_with_timeout(&statements[peek_idx..=peek_idx], timeout)
-                    .await
-                {
-                    Ok(peek_raw) => {
-                        check_d1_session(
-                            bookclerk_db_exec::AtomicInterruptPhase::AroundCommit,
-                            deadline,
-                        )?;
-                        let peek_req = ExecuteRequest {
-                            operation_id: req.operation_id.clone(),
-                            request_hash: req.request_hash.clone(),
-                            statements: vec![req.statements[peek_idx].clone()],
-                            deadline_unix_ms: req.deadline_unix_ms,
-                        };
-                        match parse_typed_batch(&peek_req, &peek_raw, started) {
-                            Ok(peek)
-                                if peek
-                                    .statements
-                                    .first()
-                                    .is_some_and(bookclerk_db_exec::prior_receipt_exists) =>
-                            {
-                                let mut reply = peek;
-                                let mut out = vec![StatementResult::from_affected(0)];
-                                out.extend(std::mem::take(&mut reply.statements));
-                                bookclerk_db_exec::pad_skipped_guest_results(
-                                    &mut out,
-                                    req.statements.len(),
-                                );
-                                reply.statements =
-                                    bookclerk_db_exec::collapse_host_schema_results(wire_len, out);
-                                return Ok(reply);
-                            }
-                            Ok(_) => {}
-                            Err(err)
-                                if is_ambiguous_d1(&err)
-                                    && retry_safe
-                                    && attempt + 1 < ATOMIC_HTTP_ATTEMPTS =>
-                            {
-                                sleep_before_d1_retry_bounded(attempt, None, deadline).await?;
-                                last_err = Some(err);
-                                continue;
-                            }
-                            Err(err) => return Err(err),
-                        }
-                    }
-                    Err(err)
-                        if err.is_retryable()
-                            && retry_safe
-                            && attempt + 1 < ATOMIC_HTTP_ATTEMPTS =>
-                    {
-                        sleep_before_d1_retry_bounded(attempt, err.retry_after(), deadline).await?;
-                        last_err = Some(DbErr::from(err));
-                        continue;
-                    }
-                    Err(err) => return Err(err.into()),
-                }
-            }
             let raw = match self.run_batch_with_timeout(&statements, timeout).await {
                 Ok(value) => {
                     check_d1_session(
@@ -342,6 +378,176 @@ impl D1Proxy {
             }
         }
         Err(last_err.unwrap_or_else(|| ambiguous_d1("exhausted retries")))
+    }
+
+    /// INSERT-only claim of the guest-receipt stub (one committing HTTP).
+    async fn claim_guest_receipt_stub(
+        &self,
+        req: &ExecuteRequest,
+        statements: &[SqlStmt],
+        timeout: Duration,
+        deadline: Option<u64>,
+        started: std::time::Instant,
+    ) -> std::result::Result<GuestReceiptClaim, DbErr> {
+        #[cfg(test)]
+        self.maybe_pause_claim().await;
+        let stub_idx = statements.len().saturating_sub(1);
+        let raw = match self
+            .run_batch_with_timeout(&statements[stub_idx..=stub_idx], timeout)
+            .await
+        {
+            Ok(value) => {
+                check_d1_session(
+                    bookclerk_db_exec::AtomicInterruptPhase::AroundCommit,
+                    deadline,
+                )?;
+                value
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let claim_req = ExecuteRequest {
+            operation_id: req.operation_id.clone(),
+            request_hash: req.request_hash.clone(),
+            statements: vec![req.statements[stub_idx].clone()],
+            deadline_unix_ms: req.deadline_unix_ms,
+        };
+        match parse_typed_batch(&claim_req, &raw, started) {
+            Ok(reply) => {
+                let won = reply
+                    .statements
+                    .first()
+                    .is_some_and(|s| s.rows_affected > 0);
+                if won {
+                    Ok(GuestReceiptClaim::Won {
+                        stub: reply
+                            .statements
+                            .into_iter()
+                            .next()
+                            .unwrap_or_else(|| StatementResult::from_affected(1)),
+                    })
+                } else {
+                    Ok(GuestReceiptClaim::Lost)
+                }
+            }
+            Err(err) if is_claim_constraint(&err) => Ok(GuestReceiptClaim::Lost),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Prior-receipt SELECT after a lost claim; pads skipped guest work.
+    async fn replay_lost_guest_receipt_claim(
+        &self,
+        req: &ExecuteRequest,
+        statements: &[SqlStmt],
+        timeout: Duration,
+        deadline: Option<u64>,
+        started: std::time::Instant,
+        wire_len: usize,
+    ) -> std::result::Result<ExecuteReply, DbErr> {
+        let peek_idx = 1;
+        let raw = match self
+            .run_batch_with_timeout(&statements[peek_idx..=peek_idx], timeout)
+            .await
+        {
+            Ok(value) => {
+                check_d1_session(
+                    bookclerk_db_exec::AtomicInterruptPhase::AroundCommit,
+                    deadline,
+                )?;
+                value
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let peek_req = ExecuteRequest {
+            operation_id: req.operation_id.clone(),
+            request_hash: req.request_hash.clone(),
+            statements: vec![req.statements[peek_idx].clone()],
+            deadline_unix_ms: req.deadline_unix_ms,
+        };
+        let peek = parse_typed_batch(&peek_req, &raw, started)?;
+        let mut reply = peek;
+        let mut out = vec![StatementResult::from_affected(0)];
+        out.extend(std::mem::take(&mut reply.statements));
+        bookclerk_db_exec::pad_skipped_guest_results(&mut out, req.statements.len());
+        reply.statements = bookclerk_db_exec::collapse_host_schema_results(wire_len, out);
+        Ok(reply)
+    }
+
+    /// After a won claim, run prune + guest DDL (not SELECT — that would see
+    /// our empty stub) and reassemble the wrap shape for unwrap/finalize.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_claimed_guest_ddl(
+        &self,
+        req: &ExecuteRequest,
+        statements: &[SqlStmt],
+        stub: StatementResult,
+        timeout: Duration,
+        deadline: Option<u64>,
+        started: std::time::Instant,
+        wire_len: usize,
+        guest_receipt: &bookclerk_plugin_abi::GuestReceiptPersist,
+        cap: u32,
+    ) -> std::result::Result<ExecuteReply, DbErr> {
+        let stub_idx = statements.len().saturating_sub(1);
+        let prefix = bookclerk_db_exec::GUEST_RECEIPT_WRAP_PREFIX;
+        let mut rest_sql: Vec<SqlStmt> = Vec::with_capacity(stub_idx.saturating_sub(1));
+        let mut rest_req_stmts = Vec::with_capacity(stub_idx.saturating_sub(1));
+        rest_sql.push(statements[0].clone());
+        rest_req_stmts.push(req.statements[0].clone());
+        rest_sql.extend(statements[prefix..stub_idx].iter().cloned());
+        rest_req_stmts.extend(req.statements[prefix..stub_idx].iter().cloned());
+        let rest_req = ExecuteRequest {
+            operation_id: req.operation_id.clone(),
+            request_hash: req.request_hash.clone(),
+            statements: rest_req_stmts,
+            deadline_unix_ms: req.deadline_unix_ms,
+        };
+        let raw = self
+            .run_batch_with_timeout(&rest_sql, timeout)
+            .await
+            .map_err(DbErr::from)?;
+        check_d1_session(
+            bookclerk_db_exec::AtomicInterruptPhase::AroundCommit,
+            deadline,
+        )?;
+        let mut reply = parse_typed_batch(&rest_req, &raw, started)?;
+        let mut assembled = Vec::with_capacity(req.statements.len());
+        assembled.push(
+            reply
+                .statements
+                .first()
+                .cloned()
+                .unwrap_or_else(|| StatementResult::from_affected(0)),
+        );
+        assembled.push(StatementResult::from_affected(0));
+        assembled.extend(reply.statements.into_iter().skip(1));
+        assembled.push(stub);
+        reply.statements = assembled;
+        self.normalize_reply_from_declared(req, &mut reply, timeout)
+            .await?;
+        reply.statements =
+            bookclerk_db_exec::collapse_host_schema_results(wire_len, reply.statements);
+        let finalize = bookclerk_db_exec::guest_receipt_finalize_stmts(
+            &reply,
+            usize::try_from(guest_receipt.guest_statement_len).unwrap_or(usize::MAX),
+            &guest_receipt.guest_request_hash,
+        )?;
+        if !finalize.is_empty() {
+            let fin_stmts: Vec<SqlStmt> = finalize
+                .iter()
+                .map(|s| {
+                    let (sql, binds) = d1_typed_statement(&s.sql, &s.parameters);
+                    let sql = if s.kind.wrap_select_limit() {
+                        bookclerk_db_exec::cap_query_sql(&sql, cap)
+                    } else {
+                        sql
+                    };
+                    (sql, binds)
+                })
+                .collect();
+            self.run_batch_with_timeout(&fin_stmts, timeout).await?;
+        }
+        Ok(reply)
     }
 
     /// Declared-type normalization of a typed reply.

@@ -111,6 +111,68 @@ pub async fn ensure_database(
         })
 }
 
+/// Deletes a Cloudflare D1 database by name. Missing databases are success.
+///
+/// Used by `bookclerk plugins db drop` so the physical unit is gone before the
+/// `plugin_databases` registry row is removed. Does not create-if-missing.
+///
+/// # Errors
+///
+/// Returns when lookup or delete fails, or the token lacks D1 edit permission.
+pub async fn delete_database(
+    api_base: &str,
+    account_id: &str,
+    api_token: &str,
+    name: &str,
+) -> std::result::Result<(), DbErr> {
+    let base = api_base.trim_end_matches('/');
+    let client = reqwest::Client::builder()
+        .timeout(D1_REQUEST_TIMEOUT)
+        .connect_timeout(D1_CONNECT_TIMEOUT)
+        .build()
+        .map_err(|e| DbErr::Custom(format!("d1 client: {e}")))?;
+    let list_url = format!("{base}/accounts/{account_id}/d1/database?name={name}");
+    let listed: JsonValue = client
+        .get(&list_url)
+        .bearer_auth(api_token)
+        .send()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?
+        .json()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?;
+    let Some(uuid) = d1_database_uuid_by_name(&listed, name) else {
+        return Ok(());
+    };
+    let delete_url = format!("{base}/accounts/{account_id}/d1/database/{uuid}");
+    let deleted = client
+        .delete(&delete_url)
+        .bearer_auth(api_token)
+        .send()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 database delete `{name}`: {e}")))?;
+    let status = deleted.status();
+    if status.as_u16() == 404 {
+        return Ok(());
+    }
+    let body: JsonValue = deleted
+        .json()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 database delete `{name}`: {e}")))?;
+    if body.get("success").and_then(JsonValue::as_bool) == Some(false) {
+        return Err(DbErr::Custom(format!(
+            "d1 database delete `{name}` rejected (token may lack D1 edit permission): {}",
+            body.get("errors").cloned().unwrap_or(JsonValue::Null)
+        )));
+    }
+    if !status.is_success() {
+        return Err(DbErr::Custom(format!(
+            "d1 database delete `{name}` HTTP {status}"
+        )));
+    }
+    Ok(())
+}
+
 /// Extracts the UUID of a D1 database named exactly `name` from a list reply.
 fn d1_database_uuid_by_name(listed: &JsonValue, name: &str) -> Option<String> {
     listed
@@ -158,6 +220,9 @@ struct D1Inner {
     /// Declared column types per table (`pragma_table_info`), lowercased
     /// keys. Used for universal result normalization; cleared on DDL.
     table_types: std::sync::Mutex<HashMap<String, HashMap<String, DbType>>>,
+    /// Test-only: wait here before sending a guest-receipt claim INSERT.
+    #[cfg(test)]
+    claim_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 /// SeaORM proxy that executes statements against Cloudflare D1's HTTP API.
@@ -292,7 +357,33 @@ impl D1Proxy {
                 client,
                 http: AsyncMutex::new(()),
                 table_types: std::sync::Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                claim_pause: std::sync::Mutex::new(None),
             }),
+        }
+    }
+
+    /// Test helper: both racers wait here before the claim INSERT HTTP.
+    #[cfg(test)]
+    pub fn pause_claims(&self, barrier: Arc<tokio::sync::Barrier>) {
+        *self
+            .inner
+            .claim_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(barrier);
+    }
+
+    /// Waits on [`Self::pause_claims`] when a test armed a barrier.
+    #[cfg(test)]
+    pub(crate) async fn maybe_pause_claim(&self) {
+        let barrier = self
+            .inner
+            .claim_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
         }
     }
 
@@ -872,6 +963,69 @@ mod tests {
         let err = ensure_database(&denied.uri(), "acct", "token", "bookclerk-pb-demo-db")
             .await
             .expect_err("create without permission fails closed");
+        assert!(err.to_string().contains("permission"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn delete_database_removes_by_uuid_and_treats_missing_as_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/accounts/acct/d1/database$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": [
+                    { "name": "bookclerk-pb-demo-db", "uuid": "uuid-to-delete" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/accounts/acct/d1/database/uuid-to-delete$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": { "uuid": "uuid-to-delete" }
+            })))
+            .mount(&server)
+            .await;
+        delete_database(&server.uri(), "acct", "token", "bookclerk-pb-demo-db")
+            .await
+            .expect("delete existing database");
+
+        let missing = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/accounts/acct/d1/database$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "success": true, "result": [] })),
+            )
+            .mount(&missing)
+            .await;
+        delete_database(&missing.uri(), "acct", "token", "bookclerk-pb-demo-db")
+            .await
+            .expect("missing database is already gone");
+    }
+
+    #[tokio::test]
+    async fn delete_database_fails_closed_without_permission() {
+        let denied = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/accounts/acct/d1/database$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": [{ "name": "bookclerk-pb-demo-db", "uuid": "uuid-x" }]
+            })))
+            .mount(&denied)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path_regex(r"^/accounts/acct/d1/database/uuid-x$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": false,
+                "errors": [{ "code": 10000, "message": "Authentication error" }]
+            })))
+            .mount(&denied)
+            .await;
+        let err = delete_database(&denied.uri(), "acct", "token", "bookclerk-pb-demo-db")
+            .await
+            .expect_err("delete without permission fails closed");
         assert!(err.to_string().contains("permission"), "{err}");
     }
 
@@ -1643,6 +1797,15 @@ mod tests {
             })
     }
 
+    /// True when this batch is the guest-receipt claim stub INSERT.
+    fn batch_is_guest_receipt_claim(batch: &[JsonValue]) -> bool {
+        batch.len() == 1
+            && batch.iter().all(|stmt| {
+                let sql = stmt.get("sql").and_then(JsonValue::as_str).unwrap_or("");
+                bookclerk_db_exec::is_guest_receipt_stub_insert(sql)
+            })
+    }
+
     fn sqlite_exec_batch(
         conn: &rusqlite::Connection,
         interrupt_after: &std::sync::atomic::AtomicU32,
@@ -1702,8 +1865,9 @@ mod tests {
             }));
         }
         // Lost-reply injection models a dropped mutating batch, not the
-        // read-only prior-receipt SELECT peek used to skip guest DDL.
+        // read-only prior-receipt SELECT peek or the claim stub INSERT.
         if !batch_is_guest_receipt_peek(batch)
+            && !batch_is_guest_receipt_claim(batch)
             && drop_reply_after_commit.swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             return ResponseTemplate::new(500).set_body_json(json!({
@@ -2645,6 +2809,128 @@ mod tests {
             )
             .expect("count after retry");
         assert_eq!(count, 1, "retry must not insert a second row");
+    }
+
+    /// Two hosts claiming the same operationId with different hashes must not
+    /// both apply ungated guest DDL. The claim stub INSERT is the mutex.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn executing_mock_concurrent_claim_only_one_schema_change() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, PluginErrorCode,
+            TypedDbStatement,
+        };
+
+        let (server, proxy1, conn, _interrupt, _drop, _oversize, _pragma) =
+            executing_proxy_inner().await;
+        let proxy2 = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        proxy1.pause_claims(std::sync::Arc::clone(&barrier));
+        proxy2.pause_claims(barrier);
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy1.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy1.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema for concurrent claim");
+
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
+        let policy = GuestSqlPolicy::binding_owned();
+        let req_alpha = ExecuteRequest {
+            operation_id: "d1-claim-race".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "CREATE TABLE IF NOT EXISTS alpha (id INTEGER PRIMARY KEY)".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let req_beta = ExecuteRequest {
+            operation_id: "d1-claim-race".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "CREATE TABLE IF NOT EXISTS beta (id INTEGER PRIMARY KEY)".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let p1 = proxy1.clone();
+        let p2 = proxy2.clone();
+        let (a, b) = tokio::join!(
+            bookclerk_library::execute_guest_atomic_with(req_alpha, &caps, &policy, |envelope| {
+                let proxy = p1.clone();
+                async move {
+                    proxy
+                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .await
+                        .map_err(crate::atomic::plugin_error_from_d1)
+                }
+            }),
+            bookclerk_library::execute_guest_atomic_with(req_beta, &caps, &policy, |envelope| {
+                let proxy = p2.clone();
+                async move {
+                    proxy
+                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .await
+                        .map_err(crate::atomic::plugin_error_from_d1)
+                }
+            }),
+        );
+        let outcomes = [a, b];
+        let wins = outcomes.iter().filter(|r| r.is_ok()).count();
+        let conflicts = outcomes
+            .iter()
+            .filter(|r| {
+                r.as_ref()
+                    .err()
+                    .is_some_and(|e| e.code == PluginErrorCode::Conflict)
+            })
+            .count();
+        assert_eq!(wins, 1, "exactly one claimer applies DDL: {outcomes:?}");
+        assert_eq!(
+            conflicts, 1,
+            "loser must be conflict (hash mismatch): {outcomes:?}"
+        );
+        let alpha: i64 = conn
+            .lock()
+            .expect("sqlite")
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("alpha");
+        let beta: i64 = conn
+            .lock()
+            .expect("sqlite")
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'beta'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("beta");
+        assert_eq!(
+            alpha + beta,
+            1,
+            "exactly one guest table must exist (alpha={alpha} beta={beta})"
+        );
     }
 
     /// A direct (unwrapped, non-receipt-gated) typed mutation whose reply is
