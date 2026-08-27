@@ -322,6 +322,7 @@ impl GuestDatabase for GuestJobDatabase {
 /// The adapter holds an isolated session (own file / database / D1 database);
 /// guest SQL is authorized with [`bookclerk_library::GuestSqlPolicy::binding_owned`]
 /// and receipt-wrapped against the binding's own `db_atomic_receipts` table.
+/// Execute uses the host-private envelope path so receipts finalize.
 struct BindingGuestDatabase {
     /// Adapter vat session shared with the library connection.
     session: Arc<PluginSession>,
@@ -343,9 +344,9 @@ impl GuestDatabase for BindingGuestDatabase {
             let key = self.key.clone();
             async move {
                 session
-                    .db_execute_binding_request(
+                    .db_execute_binding_envelope_request(
                         &key,
-                        envelope.request,
+                        envelope,
                         Arc::new(AtomicBool::new(false)),
                     )
                     .await
@@ -356,18 +357,43 @@ impl GuestDatabase for BindingGuestDatabase {
     }
 }
 
-/// Sanitizes one identifier segment (`[a-z0-9_]`, `-` and other bytes → `_`).
-fn binding_ident_segment(raw: &str) -> String {
-    raw.chars()
-        .map(|c| {
-            let c = c.to_ascii_lowercase();
-            if c.is_ascii_lowercase() || c.is_ascii_digit() {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+/// Collision-resistant instance id for one `(owner_plugin_id, binding)` pair.
+///
+/// Length-prefixed SHA-256 so `("ab_c", "D")` and `("ab", "C_D")` cannot
+/// collide. Hosts pass this opaque value to third-party adapters and derive
+/// backend-native unit names from a length-bounded prefix of the same digest.
+fn binding_instance_id(owner_plugin_id: &str, binding: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(
+        u64::try_from(owner_plugin_id.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(owner_plugin_id.as_bytes());
+    hasher.update(
+        u64::try_from(binding.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(binding.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Postgres `CREATE DATABASE` identifier (`pb_` + 32 hex = 35 ≤ 63).
+fn postgres_binding_database_name(owner_plugin_id: &str, binding: &str) -> String {
+    format!(
+        "pb_{}",
+        &binding_instance_id(owner_plugin_id, binding)[..32]
+    )
+}
+
+/// Cloudflare D1 database name (`bookclerk-pb-` + 32 hex).
+fn d1_binding_database_name(owner_plugin_id: &str, binding: &str) -> String {
+    format!(
+        "bookclerk-pb-{}",
+        &binding_instance_id(owner_plugin_id, binding)[..32]
+    )
 }
 
 /// Host-authored bootstrap request creating binding-local receipt tables.
@@ -398,9 +424,10 @@ impl ExternalDatabase {
     ///
     /// Backend-native units: SQLite gets a file per binding under
     /// `<files_dir>/plugin-databases/<plugin>/<BINDING>.db`, PostgreSQL a
-    /// dedicated database (`pb_<plugin>_<binding>`), and D1 its own database
-    /// resolved (or created) by name. Third-party adapters advertising
-    /// `pluginDatabases` receive the binding name on the public
+    /// dedicated database (`pb_` + 32 hex of the `(plugin, binding)` digest),
+    /// and D1 its own database (`bookclerk-pb-` + the same 32 hex). Third-party
+    /// adapters advertising `pluginDatabases` receive `binding` plus a
+    /// collision-resistant `instanceId` on the public
     /// [`bookclerk_plugin_abi::DatabaseAdapterConfig`]. Each provisioned unit
     /// is recorded in the `plugin_databases` registry (an existing row wins so
     /// a re-open never re-targets a binding).
@@ -458,7 +485,14 @@ impl ExternalDatabase {
                 &record.unit_ref,
             )?;
             let key = format!("{owner_plugin_id}/{binding}");
-            self.session.db_open_binding(&key, ctx).await?;
+            let binding_caps = self.session.db_open_binding(&key, ctx).await?;
+            if !binding_caps.meets_host_minimums() {
+                return Err(PluginError::message(format!(
+                    "database binding `{owner_plugin_id}/{binding}` failed host capability \
+                     minima: {}",
+                    binding_caps.capability_failure_reason()
+                )));
+            }
             self.session
                 .db_execute_binding_request(
                     &key,
@@ -467,13 +501,12 @@ impl ExternalDatabase {
                 )
                 .await?;
             let session = Arc::clone(&self.session);
-            let caps = caps.clone();
             let factory_key = key.clone();
             let factory: crate::rpc_session::GuestDatabaseFactory = Arc::new(move || {
                 Arc::new(BindingGuestDatabase {
                     session: Arc::clone(&session),
                     key: factory_key.clone(),
-                    caps: caps.clone(),
+                    caps: binding_caps.clone(),
                 })
             });
             out.push((binding.clone(), factory));
@@ -498,18 +531,12 @@ impl ExternalDatabase {
                 .join(format!("{binding}.db"))
                 .display()
                 .to_string(),
-            Some(DatabasePluginKind::Postgres) => format!(
-                "pb_{}_{}",
-                binding_ident_segment(owner_plugin_id),
-                binding_ident_segment(binding)
-            ),
-            Some(DatabasePluginKind::D1) => format!(
-                "bookclerk-pb-{}-{}",
-                binding_ident_segment(owner_plugin_id).replace('_', "-"),
-                binding_ident_segment(binding).replace('_', "-")
-            ),
-            // Third-party adapters define their own units; record the binding name.
-            None => binding.to_string(),
+            Some(DatabasePluginKind::Postgres) => {
+                postgres_binding_database_name(owner_plugin_id, binding)
+            }
+            Some(DatabasePluginKind::D1) => d1_binding_database_name(owner_plugin_id, binding),
+            // Third-party adapters receive the instance id; record it as the unit.
+            None => binding_instance_id(owner_plugin_id, binding),
         }
     }
 
@@ -555,8 +582,8 @@ impl ExternalDatabase {
                         self.settings_json.clone()
                     },
                     binding: Some(binding.to_string()),
+                    instance_id: Some(binding_instance_id(owner_plugin_id, binding)),
                 };
-                let _ = owner_plugin_id;
                 return bookclerk_plugin_abi::database_context_from_adapter_config(&adapter_config)
                     .map_err(|err| PluginError::message(err.to_string()));
             }
@@ -1722,6 +1749,7 @@ fn adapter_config_context(
             settings_json.clone()
         },
         binding: None,
+        instance_id: None,
     };
     bookclerk_plugin_abi::database_context_from_adapter_config(&adapter_config)
         .map_err(|err| DbErr::Custom(err.to_string()))
@@ -1916,6 +1944,36 @@ mod tests {
         let cfg = bookclerk_plugin_abi::database_adapter_config_from_context(&ctx)
             .expect("public decode");
         assert!(cfg.config.is_object(), "{:?}", cfg.config);
+        assert!(cfg.instance_id.is_none());
+    }
+
+    #[test]
+    fn binding_instance_ids_are_distinct_for_the_collision_pair() {
+        let alpha = binding_instance_id("alpha", "DB");
+        let beta = binding_instance_id("beta", "DB");
+        assert_ne!(alpha, beta);
+        assert_eq!(alpha.len(), 64);
+        assert_eq!(
+            binding_instance_id("ab_c", "D"),
+            binding_instance_id("ab_c", "D"),
+            "stable across calls"
+        );
+        let a = postgres_binding_database_name("ab_c", "D");
+        let b = postgres_binding_database_name("ab", "C_D");
+        assert_ne!(a, b, "sanitized concatenation must not collide");
+        assert!(a.starts_with("pb_"), "{a}");
+        assert!(a.len() <= 63, "{a}");
+        assert!(b.len() <= 63, "{b}");
+        let d1_a = d1_binding_database_name("ab_c", "D");
+        let d1_b = d1_binding_database_name("ab", "C_D");
+        assert_ne!(d1_a, d1_b);
+        let long_owner = "p".repeat(256);
+        let long_binding = "b".repeat(256);
+        let pg_long = postgres_binding_database_name(&long_owner, &long_binding);
+        let d1_long = d1_binding_database_name(&long_owner, &long_binding);
+        assert!(pg_long.len() <= 63, "{pg_long}");
+        assert!(d1_long.len() <= 64, "{d1_long}");
+        assert_eq!(binding_instance_id(&long_owner, &long_binding).len(), 64);
     }
 
     #[test]

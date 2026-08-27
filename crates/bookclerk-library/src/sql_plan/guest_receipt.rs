@@ -45,10 +45,10 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> HostExecuteEn
     );
     let mut gated = Vec::with_capacity(req.statements.len());
     for mut stmt in req.statements {
-        // DDL takes no WHERE predicate. Binding DDL is host-proven idempotent
-        // (`IF [NOT] EXISTS` required; `ALTER` / `CREATE TABLE AS` refused),
-        // so a D1 retry of a committed CREATE cannot become a non-idempotent
-        // second apply.
+        // DDL takes no WHERE predicate. Binding DDL is host-proven
+        // idempotent (`IF [NOT] EXISTS`; `ALTER` / `CREATE TABLE AS` refused).
+        // Same-token different-hash retries skip remaining guest work after
+        // the prior-receipt SELECT so a changed CREATE/DROP cannot run.
         if is_write(stmt.kind) && !bookclerk_plugin_abi::statement_is_ddl(&stmt.sql) {
             stmt.sql = apply_write_predicate(
                 &stmt.sql,

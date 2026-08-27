@@ -54,7 +54,8 @@ pub use exec::{
     json_cell_utf8_len, note_encoded_result_bytes, sea_value_to_json, AtomicSession, ExecCaps,
 };
 pub use guest_receipt::{
-    guest_receipt_finalize_stmts, is_guest_receipt_result_lost, GUEST_RECEIPT_RESULT_LOST,
+    guest_receipt_finalize_stmts, is_guest_receipt_result_lost, pad_skipped_guest_results,
+    prior_receipt_exists, should_skip_remaining_guest_work, GUEST_RECEIPT_RESULT_LOST,
     GUEST_RECEIPT_STUB_SUFFIX, GUEST_RECEIPT_WRAP_PREFIX,
 };
 pub use host_ir::{

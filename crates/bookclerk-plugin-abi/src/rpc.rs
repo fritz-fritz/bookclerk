@@ -2115,7 +2115,9 @@ impl host_adapter_database_session_capnp::Server for AdapterDatabaseSessionServe
             results.get().init_result(),
             match &self.host {
                 Some(host) => host.execute_envelope(envelope).await,
-                None => self.inner.execute(envelope.request).await,
+                None => Err(PluginError::unsupported(
+                    "host executeEnvelope not implemented",
+                )),
             },
         );
         Ok(())

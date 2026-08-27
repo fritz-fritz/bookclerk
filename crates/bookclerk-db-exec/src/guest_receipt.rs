@@ -30,6 +30,27 @@ pub const GUEST_RECEIPT_WRAP_PREFIX: usize = 2;
 /// Same-batch receipt stub INSERT after gated guest statements.
 pub const GUEST_RECEIPT_STUB_SUFFIX: usize = 1;
 
+/// True when the prior-receipt SELECT returned a row.
+#[must_use]
+pub fn prior_receipt_exists(stmt: &StatementResult) -> bool {
+    receipt_hash_from(stmt).is_some()
+}
+
+/// True when wrap prefix results show a prior receipt and guest work remains.
+#[must_use]
+pub fn should_skip_remaining_guest_work(results: &[StatementResult], total: usize) -> bool {
+    results.len() == GUEST_RECEIPT_WRAP_PREFIX
+        && total > GUEST_RECEIPT_WRAP_PREFIX
+        && results.get(1).is_some_and(prior_receipt_exists)
+}
+
+/// Pads skipped guest + stub results so the wrap shape stays intact.
+pub fn pad_skipped_guest_results(results: &mut Vec<StatementResult>, total: usize) {
+    while results.len() < total {
+        results.push(StatementResult::from_affected(0));
+    }
+}
+
 /// Builds finalize statements to persist a guest reply before COMMIT.
 ///
 /// Returns an empty list when the prior receipt row already carries payload.
@@ -55,10 +76,9 @@ pub fn guest_receipt_finalize_stmts(
     if let Some(prior) = partial.statements.get(1) {
         if let Some(prior_hash) = receipt_hash_from(prior) {
             if prior_hash != guest_hash {
-                return Err(DbErr::Custom(
-                    "executeAtomic operationId was already committed with a different requestHash"
-                        .into(),
-                ));
+                // Guest statements must already have been skipped; unwrap
+                // reports conflict. Do not emit finalize SQL.
+                return Ok(Vec::new());
             }
             if receipt_payload_text(prior).is_some() {
                 return Ok(Vec::new());
@@ -264,6 +284,14 @@ mod tests {
     }
 
     #[test]
+    fn finalize_skips_sql_on_hash_mismatch() {
+        let mut partial = wrapped_partial(1, 1);
+        partial.statements[1] = prior_receipt_row("{\"operationId\":\"guest-op\"}");
+        let stmts = guest_receipt_finalize_stmts(&partial, 1, &"b".repeat(64)).expect("mismatch");
+        assert!(stmts.is_empty());
+    }
+
+    #[test]
     fn finalize_skips_when_payload_already_present() {
         let mut partial = wrapped_partial(1, 1);
         partial.statements[1] = prior_receipt_row("{\"operationId\":\"guest-op\"}");
@@ -276,5 +304,20 @@ mod tests {
         let partial = wrapped_partial(0, 0);
         let err = guest_receipt_finalize_stmts(&partial, 1, &"a".repeat(64)).unwrap_err();
         assert!(err.to_string().contains("original response lost"), "{err}");
+    }
+
+    #[test]
+    fn skip_remaining_guest_work_only_after_prior_select_row() {
+        let empty_prefix = vec![
+            StatementResult::from_affected(0),
+            StatementResult::from_affected(0),
+        ];
+        assert!(!should_skip_remaining_guest_work(&empty_prefix, 4));
+        let prior_prefix = vec![
+            StatementResult::from_affected(0),
+            prior_receipt_row("{\"operationId\":\"guest-op\"}"),
+        ];
+        assert!(should_skip_remaining_guest_work(&prior_prefix, 4));
+        assert!(!should_skip_remaining_guest_work(&prior_prefix, 2));
     }
 }

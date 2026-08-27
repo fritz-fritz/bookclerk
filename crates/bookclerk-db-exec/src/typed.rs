@@ -824,6 +824,9 @@ where
     }
     let sql_started = Instant::now();
     let mut statements = Vec::with_capacity(req.statements.len());
+    // Guest-typed wrap only: host library plans also SELECT a prior receipt
+    // at index 1, and skipping their remaining selectors would break replay.
+    let skip_guest_on_prior = then.is_some();
     for stmt in &req.statements {
         if let Err(err) = session.check(AtomicInterruptPhase::BetweenStatements) {
             let _ = txn.rollback().await;
@@ -917,6 +920,15 @@ where
             }
         };
         statements.push(stmt_result);
+        if skip_guest_on_prior
+            && crate::guest_receipt::should_skip_remaining_guest_work(
+                &statements,
+                req.statements.len(),
+            )
+        {
+            crate::guest_receipt::pad_skipped_guest_results(&mut statements, req.statements.len());
+            break;
+        }
     }
     let statements = crate::schema_postgres::collapse_host_schema_results(wire_len, statements);
     if let Some(then) = then {

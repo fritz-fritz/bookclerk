@@ -186,13 +186,21 @@ enum Work {
         name: String,
         /// Per-binding factory context (host-private connect params).
         ctx: bookclerk_plugin_sdk::DatabaseContext,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::DbCapabilities>>,
     },
     /// Typed execute on a named plugin database binding session.
     DbExecuteBindingRequest {
         /// Binding name previously opened with [`Work::DbOpenBinding`].
         name: String,
         request: bookclerk_plugin_sdk::ExecuteRequest,
+        cancel: Arc<AtomicBool>,
+        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
+    },
+    /// Host-private envelope execute on a named plugin database binding.
+    DbExecuteBindingEnvelopeRequest {
+        /// Binding name previously opened with [`Work::DbOpenBinding`].
+        name: String,
+        envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
@@ -756,14 +764,18 @@ impl PluginSession {
 
     /// Opens an isolated adapter session for one named plugin database binding.
     ///
+    /// Negotiates [`bookclerk_plugin_sdk::DbCapabilities`] on the binding
+    /// session itself (not the library session).
+    ///
     /// # Errors
     ///
-    /// Returns a plugin error when the guest rejects the open.
+    /// Returns a plugin error when the guest rejects the open or the binding
+    /// session fails host capability minima.
     pub async fn db_open_binding(
         &self,
         name: &str,
         ctx: bookclerk_plugin_sdk::DatabaseContext,
-    ) -> Result<()> {
+    ) -> Result<bookclerk_plugin_sdk::DbCapabilities> {
         let name = name.to_string();
         self.call(|reply| Work::DbOpenBinding { name, ctx, reply })
             .await
@@ -785,6 +797,31 @@ impl PluginSession {
         self.call(|reply| Work::DbExecuteBindingRequest {
             name,
             request,
+            cancel,
+            reply,
+        })
+        .await
+    }
+
+    /// Host-private envelope execute on a named plugin database binding.
+    ///
+    /// Forwards [`bookclerk_plugin_abi::HostExecuteEnvelope`] so the adapter
+    /// persists guest receipt payloads before COMMIT.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the binding is not open, the guest rejects
+    /// the call, or `cancel` is set.
+    pub async fn db_execute_binding_envelope_request(
+        &self,
+        name: &str,
+        envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
+        let name = name.to_string();
+        self.call(|reply| Work::DbExecuteBindingEnvelopeRequest {
+            name,
+            envelope,
             cancel,
             reply,
         })
@@ -1093,10 +1130,12 @@ fn vat_thread(
                     }
                 };
                 let mut dest: Option<bookclerk_plugin_sdk::DestinationClient> = None;
-                let mut db_bindings: std::collections::HashMap<
-                    String,
-                    Box<dyn bookclerk_plugin_sdk::AdapterDatabaseSession>,
-                > = std::collections::HashMap::new();
+                struct BindingOpen {
+                    session: Box<dyn bookclerk_plugin_sdk::AdapterDatabaseSession>,
+                    host: bookclerk_plugin_abi::HostAdapterDatabaseSessionClient,
+                }
+                let mut db_bindings: std::collections::HashMap<String, BindingOpen> =
+                    std::collections::HashMap::new();
                 let mut db_session: Option<Box<dyn bookclerk_plugin_sdk::AdapterDatabaseSession>> =
                     None;
                 let mut db_host_session: Option<
@@ -1360,8 +1399,20 @@ fn vat_thread(
                             let out = async {
                                 let db = client.database(ctx).await.map_err(map_abi)?;
                                 let handle = db.open_session_handle().await.map_err(map_abi)?;
-                                db_bindings.insert(name, handle.session);
-                                Ok(())
+                                let caps = handle.session.capabilities().await.map_err(map_abi)?;
+                                if !caps.meets_host_minimums() {
+                                    return Err(PluginError::message(
+                                        caps.capability_failure_reason(),
+                                    ));
+                                }
+                                db_bindings.insert(
+                                    name,
+                                    BindingOpen {
+                                        session: handle.session,
+                                        host: handle.host,
+                                    },
+                                );
+                                Ok(caps)
                             }
                             .await;
                             let _ = reply.send(out);
@@ -1378,11 +1429,32 @@ fn vat_thread(
                                 }
                                 out = async {
                                     match db_bindings.get_mut(&name) {
-                                        Some(s) => s.execute(request).await.map_err(map_abi),
+                                        Some(s) => s.session.execute(request).await.map_err(map_abi),
                                         None => Err(PluginError::message(format!(
                                             "database binding `{name}` session not open",
                                         ))),
                                     }
+                                } => out,
+                            };
+                            let _ = reply.send(out);
+                        }
+                        Work::DbExecuteBindingEnvelopeRequest {
+                            name,
+                            envelope,
+                            cancel,
+                            reply,
+                        } => {
+                            let out = tokio::select! {
+                                () = wait_flag(Arc::clone(&cancel)) => {
+                                    Err(PluginError::from_abi(Some("cancelled"), "rpc cancelled"))
+                                }
+                                out = async {
+                                    let host = db_bindings.get(&name).ok_or_else(|| {
+                                        PluginError::message(format!(
+                                            "database binding `{name}` session not open",
+                                        ))
+                                    })?;
+                                    host.host.execute_envelope(envelope).await.map_err(map_abi)
                                 } => out,
                             };
                             let _ = reply.send(out);

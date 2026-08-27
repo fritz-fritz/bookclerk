@@ -1,6 +1,7 @@
 //! PostgreSQL engine for the database plugin (SeaORM sqlx-postgres).
 
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Statement};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, RuntimeErr, Statement};
+use std::ops::Deref;
 
 /// Open Postgres with a host-mediated connection URL (ping only; host applies schema).
 ///
@@ -34,6 +35,25 @@ pub fn postgres_url_with_database(url: &str, database: &str) -> String {
             Some(q) => format!("{trimmed}/{database}?{q}"),
             None => format!("{trimmed}/{database}"),
         },
+    }
+}
+
+/// True when `CREATE DATABASE` lost a check-then-create race (`42P04`).
+fn is_duplicate_database(err: &DbErr) -> bool {
+    match err {
+        DbErr::Exec(RuntimeErr::SqlxError(e))
+        | DbErr::Query(RuntimeErr::SqlxError(e))
+        | DbErr::Conn(RuntimeErr::SqlxError(e)) => match e.deref() {
+            sea_orm::sqlx::Error::Database(db_err) => db_err.code().as_deref() == Some("42P04"),
+            _ => {
+                let text = err.to_string();
+                text.contains("42P04") || text.contains("duplicate_database")
+            }
+        },
+        _ => {
+            let text = err.to_string();
+            text.contains("42P04") || text.contains("duplicate_database")
+        }
     }
 }
 
@@ -73,18 +93,22 @@ pub async fn open_binding(
         ))
         .await?;
     if existing.is_empty() {
-        admin
+        match admin
             .execute_raw(Statement::from_string(
                 backend,
                 format!("CREATE DATABASE {database}"),
             ))
             .await
-            .map_err(|err| {
-                DbErr::Custom(format!(
+        {
+            Ok(_) => {}
+            Err(err) if is_duplicate_database(&err) => {}
+            Err(err) => {
+                return Err(DbErr::Custom(format!(
                     "could not create isolated plugin database `{database}` \
                      (the Postgres role needs CREATEDB): {err}"
-                ))
-            })?;
+                )));
+            }
+        }
     }
     drop(admin);
     let db = Database::connect(postgres_url_with_database(url, database)).await?;
@@ -200,5 +224,43 @@ mod tests {
                 .await
                 .expect("drop test database");
         }
+    }
+
+    #[test]
+    fn duplicate_database_sqlstate_is_concurrent_success() {
+        assert!(is_duplicate_database(&DbErr::Custom(
+            "error: 42P04 duplicate_database".into()
+        )));
+        assert!(!is_duplicate_database(&DbErr::Custom(
+            "could not create isolated plugin database".into()
+        )));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+    async fn postgres_concurrent_first_open_treats_42p04_as_success() {
+        let url = postgres_test_url();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let name = format!("pb_race_{suffix}");
+        let name = name.chars().take(63).collect::<String>();
+        let url_a = url.clone();
+        let url_b = url.clone();
+        let name_a = name.clone();
+        let name_b = name.clone();
+        let (a, b) = tokio::join!(open_binding(&url_a, &name_a), open_binding(&url_b, &name_b));
+        a.expect("first concurrent open");
+        b.expect("second concurrent open treats 42P04 as success");
+        let admin = Database::connect(url.as_str()).await.expect("admin");
+        let backend = admin.get_database_backend();
+        admin
+            .execute_raw(Statement::from_string(
+                backend,
+                format!("DROP DATABASE IF EXISTS {name}"),
+            ))
+            .await
+            .expect("drop race database");
     }
 }

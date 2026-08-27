@@ -8,7 +8,9 @@ mod host_session;
 mod session;
 mod sql;
 
-pub use host_session::{host_session, GuestHostAdapterSession};
+pub use host_session::{
+    host_session, host_session_on, BoundGuestHostAdapterSession, GuestHostAdapterSession,
+};
 pub use session::{
     bootstrap_for, capabilities_for, guest_begin, guest_bootstrap, guest_capabilities,
     guest_commit, guest_execute, guest_execute_atomic, guest_execute_atomic_on,

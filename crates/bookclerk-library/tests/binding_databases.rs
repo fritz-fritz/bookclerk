@@ -169,26 +169,17 @@ async fn binding_retry_token_replays_without_double_apply() {
     .expect("setup DDL");
 
     let insert = || {
-        req(
-            "op-once",
-            vec![stmt(
-                "INSERT INTO counters (id, n) VALUES (?, ?)",
-                vec![DbValue::Int64(1), DbValue::Int64(1)],
-            )],
-        )
-    };
-    run_binding(&db, insert()).await.expect("first apply");
-    // Same operation id again: the receipt gate must prevent a second apply.
-    // Without a persisted reply payload the replay surfaces as `unavailable`
-    // (fail closed), never as a double-commit.
-    let replay = run_binding(&db, insert()).await;
-    if let Err(err) = replay {
-        assert!(
-            err.to_string().to_lowercase().contains("unavailable")
-                || err.to_string().contains("retry after finalize"),
-            "{err}"
+        let mut write = stmt(
+            "INSERT INTO counters (id, n) VALUES (?, ?)",
+            vec![DbValue::Int64(1), DbValue::Int64(1)],
         );
-    }
+        write.result_selection = DbResultSelection::AffectedRows;
+        req("op-once", vec![write])
+    };
+    let first = run_binding(&db, insert()).await.expect("first apply");
+    assert_eq!(first.statements[0].rows_affected, 1);
+    let replay = run_binding(&db, insert()).await.expect("same-token retry");
+    assert_eq!(replay.statements[0].rows_affected, 1);
     let rows = db
         .query_all_raw(Statement::from_string(
             db.get_database_backend(),
@@ -198,4 +189,81 @@ async fn binding_retry_token_replays_without_double_apply() {
         .expect("count");
     let count: i64 = rows[0].try_get("", "c").expect("count value");
     assert_eq!(count, 1, "receipt gate must prevent a double apply");
+}
+
+#[tokio::test]
+async fn binding_ddl_hash_mismatch_does_not_change_schema() {
+    let db = binding_db().await;
+    run_binding(
+        &db,
+        req(
+            "ddl-op",
+            vec![stmt(
+                "CREATE TABLE IF NOT EXISTS alpha (id INTEGER PRIMARY KEY)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("first DDL");
+
+    let err = run_binding(
+        &db,
+        req(
+            "ddl-op",
+            vec![stmt(
+                "CREATE TABLE IF NOT EXISTS beta (id INTEGER PRIMARY KEY)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect_err("changed hash must conflict");
+    assert_eq!(err.code, bookclerk_plugin_abi::PluginErrorCode::Conflict);
+
+    let alpha = db
+        .query_all_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'alpha'",
+        ))
+        .await
+        .expect("alpha");
+    assert_eq!(alpha.len(), 1, "original table must remain");
+    let beta = db
+        .query_all_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'beta'",
+        ))
+        .await
+        .expect("beta");
+    assert!(beta.is_empty(), "mismatched DDL must not create beta");
+}
+
+#[tokio::test]
+async fn binding_session_caps_are_enforced_independently_of_library_caps() {
+    let mut binding_caps = DbCapabilities::advertised_sqlite();
+    binding_caps.max_binds = 1;
+    let library_caps = DbCapabilities::advertised_sqlite();
+    assert!(library_caps.max_binds > 1);
+    let policy = GuestSqlPolicy::binding_owned();
+    let request = req(
+        "two-binds",
+        vec![stmt(
+            "INSERT INTO counters (id, n) VALUES (?, ?)",
+            vec![DbValue::Int64(1), DbValue::Int64(1)],
+        )],
+    );
+    let err = bookclerk_library::execute_guest_atomic_with(
+        request,
+        &binding_caps,
+        &policy,
+        |_envelope| async move { unreachable!("must reject before exec") },
+    )
+    .await
+    .expect_err("binding maxBinds=1 must reject two binds");
+    assert!(
+        err.to_string().to_lowercase().contains("bind")
+            || err.to_string().to_lowercase().contains("max"),
+        "{err}"
+    );
 }

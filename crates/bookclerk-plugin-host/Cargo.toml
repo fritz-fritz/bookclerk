@@ -36,6 +36,8 @@ bookclerk-plugin-source-libro = { workspace = true, optional = true }
 bookclerk-plugin-source-chirp = { workspace = true, optional = true }
 bookclerk-plugin-source-graphicaudio = { workspace = true, optional = true }
 bookclerk-plugin-integration-audiobookshelf = { workspace = true, optional = true }
+hex.workspace = true
+sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

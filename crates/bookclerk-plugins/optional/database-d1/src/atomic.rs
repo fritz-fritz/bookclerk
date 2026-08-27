@@ -212,6 +212,70 @@ impl D1Proxy {
                 deadline,
             )?;
             let timeout = d1_http_timeout(deadline)?;
+            let prefix_len = if !guest_receipt.is_absent() {
+                bookclerk_db_exec::GUEST_RECEIPT_WRAP_PREFIX.min(req.statements.len())
+            } else {
+                0
+            };
+            if prefix_len > 0 && prefix_len < statements.len() {
+                match self
+                    .run_batch_with_timeout(&statements[..prefix_len], timeout)
+                    .await
+                {
+                    Ok(prefix_raw) => {
+                        check_d1_session(
+                            bookclerk_db_exec::AtomicInterruptPhase::AroundCommit,
+                            deadline,
+                        )?;
+                        let prefix_req = ExecuteRequest {
+                            operation_id: req.operation_id.clone(),
+                            request_hash: req.request_hash.clone(),
+                            statements: req.statements[..prefix_len].to_vec(),
+                            deadline_unix_ms: req.deadline_unix_ms,
+                        };
+                        match parse_typed_batch(&prefix_req, &prefix_raw, started) {
+                            Ok(prefix_reply)
+                                if prefix_reply
+                                    .statements
+                                    .get(1)
+                                    .is_some_and(bookclerk_db_exec::prior_receipt_exists) =>
+                            {
+                                let mut reply = prefix_reply;
+                                bookclerk_db_exec::pad_skipped_guest_results(
+                                    &mut reply.statements,
+                                    req.statements.len(),
+                                );
+                                reply.statements = bookclerk_db_exec::collapse_host_schema_results(
+                                    wire_len,
+                                    reply.statements,
+                                );
+                                return Ok(reply);
+                            }
+                            Ok(_) => {}
+                            Err(err)
+                                if is_ambiguous_d1(&err)
+                                    && retry_safe
+                                    && attempt + 1 < ATOMIC_HTTP_ATTEMPTS =>
+                            {
+                                sleep_before_d1_retry_bounded(attempt, None, deadline).await?;
+                                last_err = Some(err);
+                                continue;
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    }
+                    Err(err)
+                        if err.is_retryable()
+                            && retry_safe
+                            && attempt + 1 < ATOMIC_HTTP_ATTEMPTS =>
+                    {
+                        sleep_before_d1_retry_bounded(attempt, err.retry_after(), deadline).await?;
+                        last_err = Some(DbErr::from(err));
+                        continue;
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
             let raw = match self.run_batch_with_timeout(&statements, timeout).await {
                 Ok(value) => {
                     check_d1_session(
@@ -589,7 +653,12 @@ async fn sleep_before_d1_retry_bounded(
     Ok(())
 }
 
-/// True when a D1 HTTP/parse failure may have already committed the batch.
+/// True when `err` is a post-commit declared-type / result recovery failure.
+fn is_post_commit_unavailable(err: &DbErr) -> bool {
+    err.to_string().starts_with("unavailable:")
+}
+
+/// True when `err` is a D1 ambiguous-commit marker.
 pub fn is_ambiguous_d1(err: &DbErr) -> bool {
     err.to_string().contains("D1 ambiguous")
 }
@@ -602,6 +671,9 @@ pub fn plugin_error_from_d1(err: DbErr) -> PluginError {
         return PluginError::unavailable(err.to_string());
     }
     if is_ambiguous_d1(&err) {
+        return PluginError::unavailable(err.to_string());
+    }
+    if is_post_commit_unavailable(&err) {
         return PluginError::unavailable(err.to_string());
     }
     if let Some(status) = permanent_http_status(&err) {

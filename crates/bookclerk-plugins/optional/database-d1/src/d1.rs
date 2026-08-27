@@ -1560,6 +1560,8 @@ mod tests {
         drop_reply_after_commit: std::sync::Arc<std::sync::atomic::AtomicBool>,
         /// When non-zero, COMMIT then return this status with a body over the HTTP cap.
         oversized_body_status: std::sync::Arc<std::sync::atomic::AtomicU16>,
+        /// When true, a `pragma_table_info` batch returns HTTP 500 after COMMIT.
+        fail_pragma_table_info: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl wiremock::Respond for ExecutingD1 {
@@ -1572,6 +1574,7 @@ mod tests {
                     &self.interrupt_after,
                     &self.drop_reply_after_commit,
                     &self.oversized_body_status,
+                    &self.fail_pragma_table_info,
                     batch,
                 );
             }
@@ -1630,6 +1633,7 @@ mod tests {
         interrupt_after: &std::sync::atomic::AtomicU32,
         drop_reply_after_commit: &std::sync::atomic::AtomicBool,
         oversized_body_status: &std::sync::atomic::AtomicU16,
+        fail_pragma_table_info: &std::sync::atomic::AtomicBool,
         batch: &[JsonValue],
     ) -> ResponseTemplate {
         if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
@@ -1686,6 +1690,19 @@ mod tests {
             return ResponseTemplate::new(500).set_body_json(json!({
                 "success": false,
                 "errors": [{"message": "commit reply lost"}]
+            }));
+        }
+        if fail_pragma_table_info.load(std::sync::atomic::Ordering::SeqCst)
+            && batch.iter().any(|stmt| {
+                stmt.get("sql")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|sql| sql.to_ascii_lowercase().contains("pragma_table_info"))
+            })
+        {
+            fail_pragma_table_info.store(false, std::sync::atomic::Ordering::SeqCst);
+            return ResponseTemplate::new(500).set_body_json(json!({
+                "success": false,
+                "errors": [{"message": "pragma_table_info failed"}]
             }));
         }
         let oversized = oversized_body_status.load(std::sync::atomic::Ordering::SeqCst);
@@ -1771,19 +1788,21 @@ mod tests {
         }
     }
 
-    async fn executing_proxy() -> (
+    async fn executing_proxy_inner() -> (
         MockServer,
         D1Proxy,
         std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
         std::sync::Arc<std::sync::atomic::AtomicU32>,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
         std::sync::Arc<std::sync::atomic::AtomicU16>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let conn = std::sync::Arc::new(std::sync::Mutex::new(conn));
         let interrupt_after = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
         let drop_reply = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let oversized = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0));
+        let fail_pragma = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r"/query$"))
@@ -1792,16 +1811,51 @@ mod tests {
                 interrupt_after: std::sync::Arc::clone(&interrupt_after),
                 drop_reply_after_commit: std::sync::Arc::clone(&drop_reply),
                 oversized_body_status: std::sync::Arc::clone(&oversized),
+                fail_pragma_table_info: std::sync::Arc::clone(&fail_pragma),
             })
             .mount(&server)
             .await;
         let proxy = D1Proxy::new(server.uri(), "acct".into(), "dbid".into(), "token".into());
-        (server, proxy, conn, interrupt_after, drop_reply, oversized)
+        (
+            server,
+            proxy,
+            conn,
+            interrupt_after,
+            drop_reply,
+            oversized,
+            fail_pragma,
+        )
+    }
+
+    async fn executing_proxy() -> (
+        MockServer,
+        D1Proxy,
+        std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        std::sync::Arc<std::sync::atomic::AtomicU16>,
+    ) {
+        let (server, proxy, conn, interrupt, drop, oversized, _pragma) =
+            executing_proxy_inner().await;
+        (server, proxy, conn, interrupt, drop, oversized)
     }
 
     #[tokio::test]
     async fn plugin_error_from_d1_maps_guest_receipt_result_lost_to_unavailable() {
         let err = DbErr::Custom(bookclerk_db_exec::GUEST_RECEIPT_RESULT_LOST.into());
+        let mapped = crate::atomic::plugin_error_from_d1(err);
+        assert_eq!(
+            mapped.code,
+            bookclerk_plugin_sdk::PluginErrorCode::Unavailable,
+            "{mapped}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_error_from_d1_maps_post_commit_pragma_failure_to_unavailable() {
+        let err = DbErr::Custom(
+            "unavailable: declared types for t could not be loaded: D1 HTTP 500".into(),
+        );
         let mapped = crate::atomic::plugin_error_from_d1(err);
         assert_eq!(
             mapped.code,
@@ -2484,6 +2538,94 @@ mod tests {
             )
             .expect("count slot rows");
         assert_eq!(count, 1, "mutation must commit exactly once");
+    }
+
+    /// After the mutating batch commits, a failed `pragma_table_info` fetch
+    /// is `unavailable` (not Internal). Retry follows receipt semantics.
+    #[tokio::test]
+    async fn executing_mock_post_commit_pragma_failure_is_unavailable() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, PluginErrorCode,
+            TypedDbStatement,
+        };
+
+        let (_server, proxy, conn, _interrupt, _drop, _oversize, fail_pragma) =
+            executing_proxy_inner().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema for pragma-fail guest typed");
+
+        let store = bookclerk_library::LibraryStore::from_connection(db)
+            .with_db_capabilities(bookclerk_plugin_abi::DbCapabilities::advertised_d1())
+            .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
+                proxy: proxy.clone(),
+            }));
+        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"]);
+        fail_pragma.store(true, std::sync::atomic::Ordering::SeqCst);
+        let req = ExecuteRequest {
+            operation_id: "d1-guest-pragma-fail".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql:
+                    "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('pragma-fail', 1)"
+                        .into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let err = store
+            .execute_guest_atomic(req.clone(), &policy)
+            .await
+            .expect_err("post-commit pragma failure must be unavailable");
+        assert_eq!(err.code, PluginErrorCode::Unavailable, "{err}");
+        let count: i64 = conn
+            .lock()
+            .expect("sqlite")
+            .query_row(
+                "SELECT COUNT(*) FROM db_serialization_slots WHERE slot_key = 'pragma-fail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count slot rows");
+        assert_eq!(count, 1, "mutation must commit exactly once");
+        fail_pragma.store(false, std::sync::atomic::Ordering::SeqCst);
+        let retry = store.execute_guest_atomic(req, &policy).await;
+        match retry {
+            Ok(replay) => assert_eq!(replay.statements.len(), 1),
+            Err(err) => assert_eq!(
+                err.code,
+                PluginErrorCode::Unavailable,
+                "receipt-loss retry stays unavailable: {err}"
+            ),
+        }
+        let count: i64 = conn
+            .lock()
+            .expect("sqlite")
+            .query_row(
+                "SELECT COUNT(*) FROM db_serialization_slots WHERE slot_key = 'pragma-fail'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count after retry");
+        assert_eq!(count, 1, "retry must not insert a second row");
     }
 
     /// A direct (unwrapped, non-receipt-gated) typed mutation whose reply is

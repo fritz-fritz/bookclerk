@@ -127,11 +127,35 @@ impl Database for D1Database {
     }
 
     fn host_session(&self) -> Option<Box<dyn HostAdapterDatabaseSession>> {
-        if self.dedicated.is_some() {
-            // Binding sessions are plugin-owned: no host interactive machinery.
-            return None;
+        if let Some(proxy) = &self.dedicated {
+            return Some(Box::new(D1DedicatedHostSession {
+                proxy: proxy.clone(),
+            }));
         }
         Some(Box::new(D1HostSession))
+    }
+}
+
+struct D1DedicatedHostSession {
+    proxy: bookclerk_plugin_database_d1::D1Proxy,
+}
+
+#[async_trait(?Send)]
+impl HostAdapterDatabaseSession for D1DedicatedHostSession {
+    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>, PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not support interactive transactions",
+        ))
+    }
+
+    async fn execute_envelope(
+        &self,
+        envelope: HostExecuteEnvelope,
+    ) -> Result<ExecuteReply, PluginError> {
+        self.proxy
+            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+            .await
+            .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
     }
 }
 
