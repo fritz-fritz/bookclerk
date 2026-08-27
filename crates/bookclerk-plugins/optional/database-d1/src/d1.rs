@@ -48,6 +48,94 @@ pub async fn open(
     Ok(db)
 }
 
+/// True when `url` targets a loopback host (wiremock in unit tests).
+fn host_is_loopback(url: &reqwest::Url) -> bool {
+    match url.host_str() {
+        Some("localhost") | Some("127.0.0.1") | Some("::1") => true,
+        Some(host) => host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback()),
+        None => false,
+    }
+}
+
+/// Parses a D1 management URL and refuses cleartext transports off-loopback.
+///
+/// Production `api_base` is HTTPS (`https://api.cloudflare.com/client/v4`).
+/// Loopback HTTP is allowed only in tests so wiremock can stand in.
+fn d1_management_url(
+    api_base: &str,
+    path_and_query: &str,
+) -> std::result::Result<reqwest::Url, DbErr> {
+    let base = api_base.trim_end_matches('/');
+    let parsed = reqwest::Url::parse(&format!("{base}{path_and_query}"))
+        .map_err(|e| DbErr::Custom(format!("d1 url: {e}")))?;
+    match parsed.scheme() {
+        "https" => Ok(parsed),
+        "http" if cfg!(test) && host_is_loopback(&parsed) => Ok(parsed),
+        scheme => Err(DbErr::Custom(format!(
+            "d1 api_base must be https (got {scheme})"
+        ))),
+    }
+}
+
+/// Sends one D1 management HTTP request. `url` is already HTTPS (or loopback HTTP in tests).
+async fn d1_management_send(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: reqwest::Url,
+    token: &str,
+    body: Option<JsonValue>,
+) -> std::result::Result<reqwest::Response, DbErr> {
+    // Cloudflare account ids are public REST path segments. Off-loopback
+    // transport is HTTPS (`d1_management_url`); the API token is Bearer, not a
+    // URL query. Loopback HTTP is test-only (wiremock).
+    // lgtm[rust/cleartext-transmission]
+    let mut req = client.request(method, url).bearer_auth(token);
+    if let Some(body) = body {
+        req = req.json(&body);
+    }
+    req.send()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 request: {e}")))
+}
+
+/// Sends a D1 management request and parses the JSON body.
+async fn d1_management_json(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: reqwest::Url,
+    token: &str,
+    body: Option<JsonValue>,
+) -> std::result::Result<(reqwest::StatusCode, JsonValue), DbErr> {
+    let response = match url.scheme() {
+        "https" => d1_management_send(client, method, url, token, body).await?,
+        "http" if cfg!(test) && host_is_loopback(&url) => {
+            d1_management_send(client, method, url, token, body).await?
+        }
+        scheme => {
+            return Err(DbErr::Custom(format!(
+                "d1 api_base must be https (got {scheme})"
+            )));
+        }
+    };
+    let status = response.status();
+    let json = response
+        .json()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 request: {e}")))?;
+    Ok((status, json))
+}
+
+/// HTTP client for D1 account-management calls (list/create/delete).
+fn d1_management_client() -> std::result::Result<reqwest::Client, DbErr> {
+    reqwest::Client::builder()
+        .timeout(D1_REQUEST_TIMEOUT)
+        .connect_timeout(D1_CONNECT_TIMEOUT)
+        .build()
+        .map_err(|e| DbErr::Custom(format!("d1 client: {e}")))
+}
+
 /// Resolves (and provisions) a Cloudflare D1 database by name, returning its UUID.
 ///
 /// Used for named plugin database bindings: each binding gets its own D1
@@ -63,36 +151,28 @@ pub async fn ensure_database(
     api_token: &str,
     name: &str,
 ) -> std::result::Result<String, DbErr> {
-    let base = api_base.trim_end_matches('/');
-    let client = reqwest::Client::builder()
-        .timeout(D1_REQUEST_TIMEOUT)
-        .connect_timeout(D1_CONNECT_TIMEOUT)
-        .build()
-        .map_err(|e| DbErr::Custom(format!("d1 client: {e}")))?;
-    let list_url = format!("{base}/accounts/{account_id}/d1/database?name={name}");
-    let listed: JsonValue = client
-        .get(&list_url)
-        .bearer_auth(api_token)
-        .send()
-        .await
-        .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?
-        .json()
-        .await
-        .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?;
+    let client = d1_management_client()?;
+    let list_url = d1_management_url(
+        api_base,
+        &format!("/accounts/{account_id}/d1/database?name={name}"),
+    )?;
+    let (_status, listed) =
+        d1_management_json(&client, reqwest::Method::GET, list_url, api_token, None)
+            .await
+            .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?;
     if let Some(uuid) = d1_database_uuid_by_name(&listed, name) {
         return Ok(uuid);
     }
-    let create_url = format!("{base}/accounts/{account_id}/d1/database");
-    let created: JsonValue = client
-        .post(&create_url)
-        .bearer_auth(api_token)
-        .json(&json!({ "name": name }))
-        .send()
-        .await
-        .map_err(|e| DbErr::Custom(format!("d1 database create `{name}`: {e}")))?
-        .json()
-        .await
-        .map_err(|e| DbErr::Custom(format!("d1 database create `{name}`: {e}")))?;
+    let create_url = d1_management_url(api_base, &format!("/accounts/{account_id}/d1/database"))?;
+    let (_status, created) = d1_management_json(
+        &client,
+        reqwest::Method::POST,
+        create_url,
+        api_token,
+        Some(json!({ "name": name })),
+    )
+    .await
+    .map_err(|e| DbErr::Custom(format!("d1 database create `{name}`: {e}")))?;
     if created.get("success").and_then(JsonValue::as_bool) == Some(false) {
         return Err(DbErr::Custom(format!(
             "d1 database create `{name}` rejected (token may lack D1 edit permission): {}",
@@ -125,32 +205,40 @@ pub async fn delete_database(
     api_token: &str,
     name: &str,
 ) -> std::result::Result<(), DbErr> {
-    let base = api_base.trim_end_matches('/');
-    let client = reqwest::Client::builder()
-        .timeout(D1_REQUEST_TIMEOUT)
-        .connect_timeout(D1_CONNECT_TIMEOUT)
-        .build()
-        .map_err(|e| DbErr::Custom(format!("d1 client: {e}")))?;
-    let list_url = format!("{base}/accounts/{account_id}/d1/database?name={name}");
-    let listed: JsonValue = client
-        .get(&list_url)
-        .bearer_auth(api_token)
-        .send()
-        .await
-        .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?
-        .json()
-        .await
-        .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?;
+    let client = d1_management_client()?;
+    let list_url = d1_management_url(
+        api_base,
+        &format!("/accounts/{account_id}/d1/database?name={name}"),
+    )?;
+    let (_status, listed) =
+        d1_management_json(&client, reqwest::Method::GET, list_url, api_token, None)
+            .await
+            .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?;
     let Some(uuid) = d1_database_uuid_by_name(&listed, name) else {
         return Ok(());
     };
-    let delete_url = format!("{base}/accounts/{account_id}/d1/database/{uuid}");
-    let deleted = client
-        .delete(&delete_url)
-        .bearer_auth(api_token)
-        .send()
-        .await
-        .map_err(|e| DbErr::Custom(format!("d1 database delete `{name}`: {e}")))?;
+    let delete_url = d1_management_url(
+        api_base,
+        &format!("/accounts/{account_id}/d1/database/{uuid}"),
+    )?;
+    match delete_url.scheme() {
+        "https" => {}
+        "http" if cfg!(test) && host_is_loopback(&delete_url) => {}
+        scheme => {
+            return Err(DbErr::Custom(format!(
+                "d1 api_base must be https (got {scheme})"
+            )));
+        }
+    }
+    let deleted = d1_management_send(
+        &client,
+        reqwest::Method::DELETE,
+        delete_url,
+        api_token,
+        None,
+    )
+    .await
+    .map_err(|e| DbErr::Custom(format!("d1 database delete `{name}`: {e}")))?;
     let status = deleted.status();
     if status.as_u16() == 404 {
         return Ok(());
@@ -964,6 +1052,28 @@ mod tests {
             .await
             .expect_err("create without permission fails closed");
         assert!(err.to_string().contains("permission"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn d1_management_refuses_cleartext_remote() {
+        let err = ensure_database(
+            "http://example.com",
+            "acct",
+            "token",
+            "bookclerk-pb-demo-db",
+        )
+        .await
+        .expect_err("remote http must fail closed");
+        assert!(err.to_string().contains("https"), "{err}");
+        let err = delete_database(
+            "http://example.com",
+            "acct",
+            "token",
+            "bookclerk-pb-demo-db",
+        )
+        .await
+        .expect_err("remote http delete must fail closed");
+        assert!(err.to_string().contains("https"), "{err}");
     }
 
     #[tokio::test]
