@@ -40,9 +40,11 @@ use crate::{PluginError, Result};
 ///
 /// `GuestDatabase` trait objects are `?Send`, so named plugin database
 /// bindings cross into the vat task as factories and are constructed on the
-/// vat thread just before `JobHandler.handle`.
+/// vat thread just before `JobHandler.handle`. The factory receives the job
+/// cancel flag and the host lease deadline so binding execute can abort and
+/// cap `deadlineUnixMs`.
 pub type GuestDatabaseFactory =
-    Arc<dyn Fn() -> Arc<dyn bookclerk_plugin_sdk::GuestDatabase> + Send + Sync>;
+    Arc<dyn Fn(Arc<AtomicBool>, u64) -> Arc<dyn bookclerk_plugin_sdk::GuestDatabase> + Send + Sync>;
 
 /// Work item executed on the plugin vat thread.
 enum Work {
@@ -1219,6 +1221,8 @@ fn vat_thread(
                             databases,
                             reply,
                         } => {
+                            let host_deadline = lease.deadline_unix_ms;
+                            let job_cancel = Arc::clone(&cancel);
                             let out = tokio::select! {
                                 () = wait_flag(Arc::clone(&cancel)) => {
                                     Err(PluginError::from_abi(Some("cancelled"), "fence lost"))
@@ -1232,7 +1236,9 @@ fn vat_thread(
                                     progress,
                                     databases
                                         .into_iter()
-                                        .map(|(name, factory)| (name, factory()))
+                                        .map(|(name, factory)| {
+                                            (name, factory(Arc::clone(&job_cancel), host_deadline))
+                                        })
                                         .collect(),
                                 ) => out,
                             };

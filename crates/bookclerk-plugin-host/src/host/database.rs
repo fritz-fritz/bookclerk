@@ -317,12 +317,28 @@ impl GuestDatabase for GuestJobDatabase {
     }
 }
 
+/// Caps a guest `deadlineUnixMs` by the host job lease.
+///
+/// Guest `0` means unlimited and inherits the host deadline. Host `0` means
+/// the guest value is unchanged. Otherwise the earlier of the two wins.
+#[must_use]
+fn capped_binding_deadline(guest_unix_ms: u64, host_unix_ms: u64) -> u64 {
+    if guest_unix_ms == 0 {
+        host_unix_ms
+    } else if host_unix_ms == 0 {
+        guest_unix_ms
+    } else {
+        guest_unix_ms.min(host_unix_ms)
+    }
+}
+
 /// One provisioned named plugin database binding served by the active adapter.
 ///
 /// The adapter holds an isolated session (own file / database / D1 database);
 /// guest SQL is authorized with [`bookclerk_library::GuestSqlPolicy::binding_owned`]
 /// and receipt-wrapped against the binding's own `db_atomic_receipts` table.
-/// Execute uses the host-private envelope path so receipts finalize.
+/// Execute uses the host-private envelope path so receipts finalize, and
+/// forwards the job cancel flag plus a capped host lease deadline.
 struct BindingGuestDatabase {
     /// Adapter vat session shared with the library connection.
     session: Arc<PluginSession>,
@@ -330,25 +346,31 @@ struct BindingGuestDatabase {
     key: String,
     /// Negotiated adapter capabilities.
     caps: DbCapabilities,
+    /// Job fence / cancel flag shared with the destination vat.
+    cancel: Arc<AtomicBool>,
+    /// Host lease deadline (`deadlineUnixMs`); `0` means unlimited.
+    host_deadline_unix_ms: u64,
 }
 
 #[async_trait(?Send)]
 impl GuestDatabase for BindingGuestDatabase {
     async fn execute(
         &self,
-        request: ExecuteRequest,
+        mut request: ExecuteRequest,
     ) -> std::result::Result<ExecuteReply, AbiPluginError> {
+        if self.cancel.load(Ordering::SeqCst) {
+            return Err(AbiPluginError::cancelled("fence lost"));
+        }
+        request.deadline_unix_ms =
+            capped_binding_deadline(request.deadline_unix_ms, self.host_deadline_unix_ms);
         let policy = bookclerk_library::GuestSqlPolicy::binding_owned();
+        let cancel = Arc::clone(&self.cancel);
         bookclerk_library::execute_guest_atomic_with(request, &self.caps, &policy, |envelope| {
             let session = Arc::clone(&self.session);
             let key = self.key.clone();
             async move {
                 session
-                    .db_execute_binding_envelope_request(
-                        &key,
-                        envelope,
-                        Arc::new(AtomicBool::new(false)),
-                    )
+                    .db_execute_binding_envelope_request(&key, envelope, cancel)
                     .await
                     .map_err(host_err_to_abi)
             }
@@ -502,13 +524,16 @@ impl ExternalDatabase {
                 .await?;
             let session = Arc::clone(&self.session);
             let factory_key = key.clone();
-            let factory: crate::rpc_session::GuestDatabaseFactory = Arc::new(move || {
-                Arc::new(BindingGuestDatabase {
-                    session: Arc::clone(&session),
-                    key: factory_key.clone(),
-                    caps: binding_caps.clone(),
-                })
-            });
+            let factory: crate::rpc_session::GuestDatabaseFactory =
+                Arc::new(move |cancel, host_deadline_unix_ms| {
+                    Arc::new(BindingGuestDatabase {
+                        session: Arc::clone(&session),
+                        key: factory_key.clone(),
+                        caps: binding_caps.clone(),
+                        cancel,
+                        host_deadline_unix_ms,
+                    })
+                });
             out.push((binding.clone(), factory));
         }
         Ok(out)
@@ -2155,5 +2180,17 @@ mod tests {
             .map(|(_, v)| v.clone())
             .expect("n column");
         assert_eq!(n, DbValue::Int64(1), "{n:?}");
+    }
+
+    #[test]
+    fn capped_binding_deadline_inherits_host_when_guest_is_unlimited() {
+        assert_eq!(
+            capped_binding_deadline(0, 1_700_000_000_000),
+            1_700_000_000_000
+        );
+        assert_eq!(capped_binding_deadline(50, 100), 50);
+        assert_eq!(capped_binding_deadline(100, 50), 50);
+        assert_eq!(capped_binding_deadline(100, 0), 100);
+        assert_eq!(capped_binding_deadline(0, 0), 0);
     }
 }

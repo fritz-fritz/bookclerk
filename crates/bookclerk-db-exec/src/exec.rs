@@ -39,6 +39,13 @@ impl AtomicSession {
         }
     }
 
+    /// Attaches a host cancel flag (job fence) to this session.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: Option<Arc<AtomicBool>>) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
     /// Checks cancel / deadline / test inject at `phase`.
     ///
     /// # Errors

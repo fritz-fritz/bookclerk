@@ -10,6 +10,8 @@ use bookclerk_plugin_abi::{
     GuestSqlPolicy, PluginError, TypedDbStatement,
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 /// One isolated binding database with its receipt bootstrap applied.
 async fn binding_db() -> DatabaseConnection {
@@ -266,4 +268,133 @@ async fn binding_session_caps_are_enforced_independently_of_library_caps() {
             || err.to_string().to_lowercase().contains("max"),
         "{err}"
     );
+}
+
+#[tokio::test]
+async fn binding_cancel_before_begin_does_not_commit() {
+    let db = binding_db().await;
+    run_binding(
+        &db,
+        req(
+            "ddl-notes",
+            vec![stmt(
+                "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("create notes");
+    let cancel = Arc::new(AtomicBool::new(true));
+    let caps = DbCapabilities::advertised_sqlite();
+    let policy = GuestSqlPolicy::binding_owned();
+    let request = req(
+        "insert-notes",
+        vec![stmt(
+            "INSERT INTO notes (body) VALUES (?)",
+            vec![DbValue::Text("should-not-commit".into())],
+        )],
+    );
+    let err = bookclerk_library::execute_guest_atomic_with(request, &caps, &policy, |envelope| {
+        let cancel = Arc::clone(&cancel);
+        let db = db.clone();
+        async move {
+            let deadline = (envelope.request.deadline_unix_ms > 0)
+                .then_some(envelope.request.deadline_unix_ms);
+            bookclerk_db_exec::execute_typed_on_session(
+                    &db,
+                    &envelope.request,
+                    envelope.guest_receipt,
+                    "sqlite_txn",
+                    bookclerk_db_exec::ExecCaps::from_capabilities(
+                        &DbCapabilities::advertised_sqlite(),
+                    ),
+                    bookclerk_db_exec::AtomicSession::from_deadline(deadline)
+                        .with_cancel(Some(cancel)),
+                )
+                .await
+                .map_err(|err| PluginError::internal(err.to_string()))
+        }
+    })
+    .await
+    .expect_err("cancelled session must not commit");
+    assert!(err.to_string().to_lowercase().contains("cancel"), "{err}");
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT COUNT(*) AS n FROM notes".to_string(),
+        ))
+        .await
+        .expect("count");
+    let n: i64 = rows[0].try_get("", "n").expect("n");
+    assert_eq!(n, 0, "cancelled insert must roll back");
+}
+
+#[tokio::test]
+async fn binding_cancel_around_commit_rolls_back() {
+    let db = binding_db().await;
+    run_binding(
+        &db,
+        req(
+            "ddl-notes-2",
+            vec![stmt(
+                "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("create notes");
+    bookclerk_db_exec::inject_atomic_interrupt(
+        bookclerk_db_exec::AtomicInterruptPhase::AroundCommit,
+        bookclerk_db_exec::AtomicInterruptKind::Cancel,
+    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    let caps = DbCapabilities::advertised_sqlite();
+    let policy = GuestSqlPolicy::binding_owned();
+    let request = req(
+        "insert-notes-2",
+        vec![stmt(
+            "INSERT INTO notes (body) VALUES (?)",
+            vec![DbValue::Text("around-commit".into())],
+        )],
+    );
+    let err = bookclerk_library::execute_guest_atomic_with(request, &caps, &policy, |envelope| {
+        let cancel = Arc::clone(&cancel);
+        let db = db.clone();
+        async move {
+            let deadline = (envelope.request.deadline_unix_ms > 0)
+                .then_some(envelope.request.deadline_unix_ms);
+            bookclerk_db_exec::execute_typed_on_session(
+                    &db,
+                    &envelope.request,
+                    envelope.guest_receipt,
+                    "sqlite_txn",
+                    bookclerk_db_exec::ExecCaps::from_capabilities(
+                        &DbCapabilities::advertised_sqlite(),
+                    ),
+                    bookclerk_db_exec::AtomicSession::from_deadline(deadline)
+                        .with_cancel(Some(cancel)),
+                )
+                .await
+                .map_err(|err| PluginError::internal(err.to_string()))
+        }
+    })
+    .await
+    .expect_err("AroundCommit cancel must not commit");
+    assert!(
+        err.to_string().to_lowercase().contains("commit")
+            || err.to_string().to_lowercase().contains("cancel")
+            || err.to_string().to_lowercase().contains("interrupt"),
+        "{err}"
+    );
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT COUNT(*) AS n FROM notes".to_string(),
+        ))
+        .await
+        .expect("count");
+    let n: i64 = rows[0].try_get("", "n").expect("n");
+    assert_eq!(n, 0, "AroundCommit cancel must roll back");
 }
