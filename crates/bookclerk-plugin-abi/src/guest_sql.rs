@@ -481,6 +481,11 @@ fn authorize_binding_ddl(index: usize, sql: &str) -> Result<()> {
 /// Fails closed when `sql` contains a schema-qualified `ident.ident` (the
 /// class of escape used by `REFERENCES public.books` and CTAS from another
 /// schema). String literals and quoted identifiers are skipped.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `sql` contains a
+/// schema-qualified identifier.
 fn deny_qualified_names_in(index: usize, sql: &str) -> Result<()> {
     let mut scan = Scan { sql, i: 0 };
     while scan.i < sql.len() {
@@ -507,6 +512,11 @@ fn deny_qualified_names_in(index: usize, sql: &str) -> Result<()> {
 }
 
 /// Fails closed when DDL contains a top-level `SELECT` (CTAS / subquery copy).
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a top-level `SELECT` appears
+/// in `sql`.
 fn deny_select_in_ddl(index: usize, sql: &str) -> Result<()> {
     if has_top_level_keyword(sql, "SELECT") {
         return Err(PluginError::invalid_params(format!(
