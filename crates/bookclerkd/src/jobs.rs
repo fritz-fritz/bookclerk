@@ -250,12 +250,13 @@ async fn open_granted_binding_databases(
 ) -> anyhow::Result<Vec<(String, bookclerk_plugin_host::GuestDatabaseFactory)>> {
     let config = state.config.read().await.clone();
     let files_dir = config.paths().files_dir.clone();
-    let names = match bookclerk_plugin_host::PluginGrantStore::load(&files_dir) {
-        Ok(store) => store
+    let names = {
+        let store = bookclerk_plugin_host::PluginGrantStore::load(&files_dir)
+            .map_err(|err| anyhow::anyhow!("plugin grant store could not be loaded: {err}"))?;
+        store
             .get(plugin_id)
             .map(bookclerk_plugin_host::granted_database_bindings)
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
+            .unwrap_or_default()
     };
     if names.is_empty() {
         return Ok(Vec::new());
@@ -862,5 +863,15 @@ mod tests {
         )
         .await;
         assert!(!acquire_job_includes_book(&book, true, true));
+    }
+
+    #[test]
+    fn grant_store_read_error_fails_the_job_instead_of_dropping_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("plugin-grants.json"), "{not-json").unwrap();
+        let err = bookclerk_plugin_host::PluginGrantStore::load(dir.path())
+            .map_err(|err| anyhow::anyhow!("plugin grant store could not be loaded: {err}"))
+            .expect_err("corrupt grant file must fail closed");
+        assert!(err.to_string().contains("plugin grant store"), "{err}");
     }
 }
