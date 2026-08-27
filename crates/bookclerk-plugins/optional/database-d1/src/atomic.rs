@@ -212,43 +212,46 @@ impl D1Proxy {
                 deadline,
             )?;
             let timeout = d1_http_timeout(deadline)?;
-            let prefix_len = if !guest_receipt.is_absent() {
-                bookclerk_db_exec::GUEST_RECEIPT_WRAP_PREFIX.min(req.statements.len())
-            } else {
-                0
-            };
-            if prefix_len > 0 && prefix_len < statements.len() {
+            // D1 cannot skip later statements in the same HTTP batch. Peek
+            // the prior-receipt SELECT (wrap index 1) first; if a row exists,
+            // skip guest DDL. Do not send the prune DELETE as a separate
+            // commit — that would consume lost-reply tests and split the wrap.
+            let peek_idx = 1;
+            if !guest_receipt.is_absent()
+                && req.statements.len() > bookclerk_db_exec::GUEST_RECEIPT_WRAP_PREFIX
+                && statements.len() > peek_idx
+            {
                 match self
-                    .run_batch_with_timeout(&statements[..prefix_len], timeout)
+                    .run_batch_with_timeout(&statements[peek_idx..=peek_idx], timeout)
                     .await
                 {
-                    Ok(prefix_raw) => {
+                    Ok(peek_raw) => {
                         check_d1_session(
                             bookclerk_db_exec::AtomicInterruptPhase::AroundCommit,
                             deadline,
                         )?;
-                        let prefix_req = ExecuteRequest {
+                        let peek_req = ExecuteRequest {
                             operation_id: req.operation_id.clone(),
                             request_hash: req.request_hash.clone(),
-                            statements: req.statements[..prefix_len].to_vec(),
+                            statements: vec![req.statements[peek_idx].clone()],
                             deadline_unix_ms: req.deadline_unix_ms,
                         };
-                        match parse_typed_batch(&prefix_req, &prefix_raw, started) {
-                            Ok(prefix_reply)
-                                if prefix_reply
+                        match parse_typed_batch(&peek_req, &peek_raw, started) {
+                            Ok(peek)
+                                if peek
                                     .statements
-                                    .get(1)
+                                    .first()
                                     .is_some_and(bookclerk_db_exec::prior_receipt_exists) =>
                             {
-                                let mut reply = prefix_reply;
+                                let mut reply = peek;
+                                let mut out = vec![StatementResult::from_affected(0)];
+                                out.extend(std::mem::take(&mut reply.statements));
                                 bookclerk_db_exec::pad_skipped_guest_results(
-                                    &mut reply.statements,
+                                    &mut out,
                                     req.statements.len(),
                                 );
-                                reply.statements = bookclerk_db_exec::collapse_host_schema_results(
-                                    wire_len,
-                                    reply.statements,
-                                );
+                                reply.statements =
+                                    bookclerk_db_exec::collapse_host_schema_results(wire_len, out);
                                 return Ok(reply);
                             }
                             Ok(_) => {}

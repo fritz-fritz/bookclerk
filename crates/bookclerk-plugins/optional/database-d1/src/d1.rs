@@ -1628,6 +1628,21 @@ mod tests {
         }
     }
 
+    /// True when this batch is only a prior-receipt SELECT peek.
+    fn batch_is_guest_receipt_peek(batch: &[JsonValue]) -> bool {
+        !batch.is_empty()
+            && batch.iter().all(|stmt| {
+                let sql = stmt
+                    .get("sql")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                sql.contains("db_atomic_receipts")
+                    && sql.contains("select ")
+                    && !sql.contains("insert ")
+            })
+    }
+
     fn sqlite_exec_batch(
         conn: &rusqlite::Connection,
         interrupt_after: &std::sync::atomic::AtomicU32,
@@ -1686,7 +1701,11 @@ mod tests {
                 "errors": [{"message": "commit failed"}]
             }));
         }
-        if drop_reply_after_commit.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        // Lost-reply injection models a dropped mutating batch, not the
+        // read-only prior-receipt SELECT peek used to skip guest DDL.
+        if !batch_is_guest_receipt_peek(batch)
+            && drop_reply_after_commit.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
             return ResponseTemplate::new(500).set_body_json(json!({
                 "success": false,
                 "errors": [{"message": "commit reply lost"}]
