@@ -259,6 +259,7 @@ mod host_tests {
             plugin_data_dir: "/tmp/p".into(),
             config: serde_json::json!({ "url": "custom://x" }),
             binding: None,
+            instance_id: None,
         };
         let ctx = database_context_from_adapter_config(&cfg).unwrap();
         connect_params_from_context(&ctx)
@@ -277,6 +278,7 @@ mod tests {
             plugin_data_dir: "/tmp/plugins/custom/data".into(),
             config: serde_json::json!({ "url": "custom://host/db", "poolSize": 4 }),
             binding: None,
+            instance_id: None,
         };
         let ctx = database_context_from_adapter_config(&cfg).unwrap();
         assert_eq!(ctx.config.media_type, DATABASE_ADAPTER_CONFIG_MEDIA_TYPE);

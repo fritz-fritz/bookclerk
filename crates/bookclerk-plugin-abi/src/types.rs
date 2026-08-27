@@ -190,7 +190,7 @@ pub struct CliInvokeParams {
 /// First-party host-managed adapters receive host-private connect params
 /// instead. Decode with [`crate::db::database_adapter_config_from_context`].
 ///
-/// Wire: `{ "pluginDataDir": "…", "config": { … } }`.
+/// Wire: `{ "pluginDataDir": "…", "config": { … }, "binding"?: "…", "instanceId"?: "…" }`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseAdapterConfig {
@@ -205,6 +205,13 @@ pub struct DatabaseAdapterConfig {
     /// must serve each binding from its own isolated database.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<String>,
+    /// Host-issued opaque instance id for this `(owner plugin, binding)` pair.
+    /// Collision-resistant and stable across re-opens. Omitted for the primary
+    /// library open. Third-party adapters must key isolated databases on this
+    /// value rather than [`Self::binding`] alone (two plugins may both declare
+    /// `DB`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 
 /// Result of [`crate::methods::cli_invoke`].

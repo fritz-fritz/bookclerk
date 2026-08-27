@@ -367,8 +367,9 @@ pub fn authorize_guest_sql_policy(req: &ExecuteRequest, policy: &GuestSqlPolicy)
     for (i, stmt) in req.statements.iter().enumerate() {
         if policy.is_binding_owned() && binding_ddl_verb(&stmt.sql).is_some() {
             // Bounded DDL inside a plugin-owned binding; the ref parser does
-            // not understand DDL shapes, so target names are checked here.
-            authorize_binding_ddl(i, &stmt.sql)?;
+            // not understand DDL shapes, so target names and function
+            // expressions are checked here.
+            authorize_binding_ddl(i, &stmt.sql, policy)?;
             continue;
         }
         policy.authorize(i, &parse_guest_sql_refs(&stmt.sql)?)?;
@@ -409,7 +410,7 @@ pub fn statement_is_ddl(sql: &str) -> bool {
 ///
 /// Returns [`PluginError::invalid_params`] when the statement is outside the
 /// bounded binding DDL grammar or names a reserved / qualified object.
-fn authorize_binding_ddl(index: usize, sql: &str) -> Result<()> {
+fn authorize_binding_ddl(index: usize, sql: &str, policy: &GuestSqlPolicy) -> Result<()> {
     let mut scan = Scan { sql, i: 0 };
     let deny = |what: &str| {
         PluginError::invalid_params(format!(
@@ -436,7 +437,7 @@ fn authorize_binding_ddl(index: usize, sql: &str) -> Result<()> {
             deny_select_in_ddl(index, inner)?;
             deny_qualified_names_in(index, scan.rest())?;
             deny_select_in_ddl(index, scan.rest())?;
-            return Ok(());
+            return authorize_ddl_function_fragments(index, policy, &[inner, scan.rest()]);
         }
         if scan.take_kw("INDEX") {
             if !(scan.take_kw("IF") && scan.take_kw("NOT") && scan.take_kw("EXISTS")) {
@@ -447,15 +448,18 @@ fn authorize_binding_ddl(index: usize, sql: &str) -> Result<()> {
                 return Err(deny("CREATE INDEX requires ON <table>"));
             }
             check_binding_ddl_name(index, &mut scan, "indexed table")?;
+            let mut fragments: Vec<&str> = Vec::new();
             if scan.take_byte(b'(') {
                 let inner = scan
                     .take_balanced_inner()
                     .ok_or_else(|| deny("unbalanced CREATE INDEX"))?;
                 deny_qualified_names_in(index, inner)?;
+                fragments.push(inner);
             }
             deny_qualified_names_in(index, scan.rest())?;
             deny_select_in_ddl(index, scan.rest())?;
-            return Ok(());
+            fragments.push(scan.rest());
+            return authorize_ddl_function_fragments(index, policy, &fragments);
         }
         return Err(deny("only TABLE and INDEX may be created"));
     }
@@ -473,7 +477,7 @@ fn authorize_binding_ddl(index: usize, sql: &str) -> Result<()> {
         }
         check_binding_ddl_name(index, &mut scan, "object name")?;
         deny_qualified_names_in(index, scan.rest())?;
-        return Ok(());
+        return authorize_ddl_function_fragments(index, policy, &[scan.rest()]);
     }
     Err(deny("unsupported verb"))
 }
@@ -524,6 +528,108 @@ fn deny_select_in_ddl(index: usize, sql: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Authorizes function calls embedded in binding DDL fragments (DEFAULT /
+/// CHECK / generated columns / index expressions) against the same builtin
+/// allowlist as guest DML.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a function is not on the
+/// policy allowlist.
+fn authorize_ddl_function_fragments(
+    index: usize,
+    policy: &GuestSqlPolicy,
+    fragments: &[&str],
+) -> Result<()> {
+    let mut refs = GuestSqlRefs::default();
+    for fragment in fragments {
+        refs.functions.extend(ddl_function_names(fragment));
+    }
+    policy.authorize(index, &refs)
+}
+
+/// Function names in a DDL fragment (`ident(`), skipping type precision,
+/// `REFERENCES` column lists, constraint heads, and quoted strings.
+fn ddl_function_names(sql: &str) -> Vec<String> {
+    let mut scan = Scan { sql, i: 0 };
+    let mut out = Vec::new();
+    while scan.i < sql.len() {
+        scan.skip();
+        if scan.i >= sql.len() {
+            break;
+        }
+        let b = scan.sql.as_bytes()[scan.i];
+        if b == b'\'' {
+            skip_quoted_string(&mut scan, b'\'');
+            continue;
+        }
+        if scan.take_kw("REFERENCES") {
+            let _ = scan.read_ident();
+            if scan.take_byte(b'(') {
+                let _ = scan.take_balanced_inner();
+            }
+            continue;
+        }
+        if let Some(ident) = scan.read_ident() {
+            if scan.take_byte(b'(') {
+                let inner = scan.take_balanced_inner().unwrap_or("");
+                if ddl_type_name(&ident) {
+                    continue;
+                }
+                if !sql_keyword(&ident) && !ddl_constraint_head(&ident) {
+                    out.push(ident);
+                }
+                out.extend(ddl_function_names(inner));
+                continue;
+            }
+            continue;
+        }
+        scan.i += 1;
+    }
+    out
+}
+
+/// Constraint / clause heads that take a parenthesized body, not a call.
+fn ddl_constraint_head(name: &str) -> bool {
+    matches!(
+        name,
+        "check"
+            | "unique"
+            | "primary"
+            | "foreign"
+            | "constraint"
+            | "generated"
+            | "default"
+            | "collate"
+            | "using"
+            | "where"
+            | "on"
+    )
+}
+
+/// SQL type names that take a parenthesized precision/scale list, not a call.
+fn ddl_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "varchar"
+            | "character"
+            | "nchar"
+            | "nvarchar"
+            | "char"
+            | "numeric"
+            | "decimal"
+            | "float"
+            | "double"
+            | "real"
+            | "timestamp"
+            | "time"
+            | "interval"
+            | "bit"
+            | "binary"
+            | "varbinary"
+    )
 }
 
 /// Reads one DDL object name off `scan`, denying reserved and qualified names.
@@ -842,7 +948,7 @@ pub fn validate_guest_execute_request_for_policy(
         ));
     }
     for (i, stmt) in req.statements.iter().enumerate() {
-        validate_guest_statement_for(i, stmt, policy.is_binding_owned())?;
+        validate_guest_statement_for(i, stmt, policy)?;
     }
     Ok(())
 }
@@ -854,7 +960,7 @@ pub fn validate_guest_execute_request_for_policy(
 fn validate_guest_statement_for(
     index: usize,
     stmt: &TypedDbStatement,
-    allow_binding_ddl: bool,
+    policy: &GuestSqlPolicy,
 ) -> Result<()> {
     if stmt.sql.trim().is_empty() {
         return Err(PluginError::invalid_params(format!(
@@ -871,7 +977,7 @@ fn validate_guest_statement_for(
             "statement {index} is not valid Bookclerk SQL"
         )));
     };
-    let binding_ddl = allow_binding_ddl
+    let binding_ddl = policy.is_binding_owned()
         && ["CREATE", "ALTER", "DROP"].contains(&verb.to_ascii_uppercase().as_str());
     if !binding_ddl && DENIED_VERBS.iter().any(|v| verb.eq_ignore_ascii_case(v)) {
         return Err(PluginError::invalid_params(format!(
@@ -881,7 +987,7 @@ fn validate_guest_statement_for(
     if binding_ddl {
         // The DML/SELECT ref parser does not understand DDL shapes; object
         // names are authorized by `authorize_binding_ddl` instead.
-        authorize_binding_ddl(index, &stmt.sql)?;
+        authorize_binding_ddl(index, &stmt.sql, policy)?;
     } else {
         for table in named_tables(&stmt.sql)? {
             if table_denied(&table) {
@@ -1919,6 +2025,24 @@ mod tests {
         .unwrap();
         binding_check("DROP TABLE IF EXISTS memos", DbResultSelection::Discard, 0).unwrap();
         binding_check(
+            "CREATE TABLE IF NOT EXISTS typed (v VARCHAR(255) DEFAULT 'x', n NUMERIC(10, 2))",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
+        binding_check(
+            "CREATE TABLE IF NOT EXISTS keyed (id INTEGER PRIMARY KEY, other_id INTEGER REFERENCES peer(id))",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
+        binding_check(
+            "CREATE TABLE IF NOT EXISTS checked (n INTEGER CHECK (n > 0))",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
+        binding_check(
             "SELECT body FROM notes WHERE id = 1",
             DbResultSelection::Rows,
             1,
@@ -1997,6 +2121,27 @@ mod tests {
                 "{sql}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn binding_owned_denies_forbidden_functions_in_ddl_expressions() {
+        for sql in [
+            "CREATE TABLE IF NOT EXISTS t (v text DEFAULT pg_read_file('/path'))",
+            "CREATE TABLE IF NOT EXISTS t (v text CHECK (pg_read_file('/x') = ''))",
+            "CREATE INDEX IF NOT EXISTS i ON t (v) WHERE pg_read_file('/x') IS NOT NULL",
+        ] {
+            let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
+            assert!(
+                err.to_string().contains("unauthorized function"),
+                "{sql}: {err}"
+            );
+        }
+        binding_check(
+            "CREATE TABLE IF NOT EXISTS t (v text CHECK (length(v) > 0))",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
     }
 
     #[test]

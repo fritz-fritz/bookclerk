@@ -220,11 +220,17 @@ class DatabaseAdapterConfig(TypedDict):
             the primary library open. Adapters advertising
             `DbCapabilities.pluginDatabases` must serve each binding from
             its own isolated database.
+        instanceId: Host-issued opaque instance id for this (owner plugin,
+            binding) pair. Collision-resistant and stable across re-opens.
+            Omitted for the primary library open. Third-party adapters must
+            key isolated databases on this value rather than `binding` alone
+            (two plugins may both declare `DB`).
     """
 
     pluginDataDir: str
     config: NotRequired[JsonValue]
     binding: NotRequired[str]
+    instanceId: NotRequired[str]
 
 
 class HealthResult(TypedDict):

@@ -180,6 +180,13 @@ export interface DatabaseAdapterConfig {
    * own isolated database.
    */
   binding?: string;
+  /**
+   * Host-issued opaque instance id for this (owner plugin, binding) pair. Collision-resistant
+   * and stable across re-opens. Omitted for the primary library open. Third-party adapters
+   * must key isolated databases on this value rather than `binding` alone (two plugins may
+   * both declare `DB`).
+   */
+  instanceId?: string;
 }
 
 /**
