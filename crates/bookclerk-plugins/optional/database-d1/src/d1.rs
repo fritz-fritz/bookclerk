@@ -311,6 +311,9 @@ struct D1Inner {
     /// Test-only: wait here before sending a guest-receipt claim INSERT.
     #[cfg(test)]
     claim_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only: after a won claim INSERT, fail before guest DDL.
+    #[cfg(test)]
+    fail_after_won_claim: std::sync::atomic::AtomicBool,
 }
 
 /// SeaORM proxy that executes statements against Cloudflare D1's HTTP API.
@@ -447,6 +450,8 @@ impl D1Proxy {
                 table_types: std::sync::Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 claim_pause: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                fail_after_won_claim: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
@@ -473,6 +478,22 @@ impl D1Proxy {
         if let Some(barrier) = barrier {
             barrier.wait().await;
         }
+    }
+
+    /// Test helper: next won claim INSERT returns unavailable before guest DDL.
+    #[cfg(test)]
+    pub fn fail_next_won_claim(&self) {
+        self.inner
+            .fail_after_won_claim
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Consumes [`Self::fail_next_won_claim`] when a test armed a post-claim crash.
+    #[cfg(test)]
+    pub(crate) fn consume_fail_after_won_claim(&self) -> bool {
+        self.inner
+            .fail_after_won_claim
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Cached declared column types for a (lowercased) table name.
@@ -3041,6 +3062,102 @@ mod tests {
             1,
             "exactly one guest table must exist (alpha={alpha} beta={beta})"
         );
+    }
+
+    /// A crash after the claim stub INSERT (status=`claimed`) and before ungated
+    /// DDL must resume the same hash on retry instead of treating the empty
+    /// payload as result-lost.
+    #[tokio::test]
+    async fn executing_mock_claimed_ddl_resumes_after_lost_claim() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, PluginErrorCode,
+            TypedDbStatement,
+        };
+
+        let (_server, proxy, conn, _interrupt, _drop, _oversize) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema for claimed resume");
+
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
+        let policy = GuestSqlPolicy::binding_owned();
+        let req = ExecuteRequest {
+            operation_id: "d1-claim-resume".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "CREATE TABLE IF NOT EXISTS resume_notes (id INTEGER PRIMARY KEY)".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        proxy.fail_next_won_claim();
+        let first =
+            bookclerk_library::execute_guest_atomic_with(req.clone(), &caps, &policy, |envelope| {
+                let proxy = proxy.clone();
+                async move {
+                    proxy
+                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .await
+                        .map_err(crate::atomic::plugin_error_from_d1)
+                }
+            })
+            .await;
+        let err = first.expect_err("injected crash after claim");
+        assert_eq!(err.code, PluginErrorCode::Unavailable, "{err}");
+        let tables_after_crash: i64 = conn
+            .lock()
+            .expect("sqlite")
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'resume_notes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count after crash");
+        assert_eq!(
+            tables_after_crash, 0,
+            "DDL must not have run before the crash"
+        );
+
+        let retry = bookclerk_library::execute_guest_atomic_with(req, &caps, &policy, |envelope| {
+            let proxy = proxy.clone();
+            async move {
+                proxy
+                    .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                    .await
+                    .map_err(crate::atomic::plugin_error_from_d1)
+            }
+        })
+        .await
+        .expect("same-hash retry must resume claimed DDL");
+        assert_eq!(retry.statements.len(), 1);
+        let tables_after_retry: i64 = conn
+            .lock()
+            .expect("sqlite")
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'resume_notes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count after retry");
+        assert_eq!(tables_after_retry, 1, "retry must apply the claimed DDL");
     }
 
     /// A direct (unwrapped, non-receipt-gated) typed mutation whose reply is

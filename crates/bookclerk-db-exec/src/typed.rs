@@ -522,6 +522,7 @@ pub async fn execute_typed_on_session(
                 caps,
                 session,
                 None::<fn(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>>,
+                None,
             )
         })
         .await;
@@ -529,18 +530,30 @@ pub async fn execute_typed_on_session(
         return result;
     }
     let hint = guest_receipt;
-    execute_typed_on_session_then(db, req, timing_source, caps, session, move |partial| {
-        crate::guest_receipt::guest_receipt_finalize_stmts(
-            &partial,
-            usize::try_from(hint.guest_statement_len).unwrap_or(usize::MAX),
-            &hint.guest_request_hash,
-        )
-    })
+    let guest_hash = hint.guest_request_hash.clone();
+    execute_typed_on_session_then(
+        db,
+        req,
+        timing_source,
+        caps,
+        session,
+        move |partial| {
+            crate::guest_receipt::guest_receipt_finalize_stmts(
+                &partial,
+                usize::try_from(hint.guest_statement_len).unwrap_or(usize::MAX),
+                &hint.guest_request_hash,
+            )
+        },
+        Some(guest_hash),
+    )
     .await
 }
 
 /// Like [`execute_typed_on_session`], running extra statements in the same transaction
 /// before COMMIT (used to persist guest replay payloads on `db_atomic_receipts`).
+///
+/// `guest_hash` is the guest `requestHash` used to decide whether a claimed
+/// prior receipt should resume remaining guest SQL instead of skipping it.
 ///
 /// # Errors
 ///
@@ -552,6 +565,7 @@ pub async fn execute_typed_on_session_then<F>(
     caps: impl Into<ExecCaps>,
     session: AtomicSession,
     then: F,
+    guest_hash: Option<String>,
 ) -> Result<ExecuteReply, DbErr>
 where
     F: FnOnce(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>,
@@ -561,7 +575,15 @@ where
     let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
     let seen_budget = Arc::clone(&budget);
     let result = with_exec_budget(Arc::clone(&budget), || {
-        execute_typed_body(db, req, timing_source, caps, session, Some(then))
+        execute_typed_body(
+            db,
+            req,
+            timing_source,
+            caps,
+            session,
+            Some(then),
+            guest_hash,
+        )
     })
     .await;
     record_query_rows_seen(seen_budget.rows_seen());
@@ -791,6 +813,7 @@ async fn execute_typed_body<F>(
     caps: ExecCaps,
     session: AtomicSession,
     then: Option<F>,
+    guest_hash: Option<String>,
 ) -> Result<ExecuteReply, DbErr>
 where
     F: FnOnce(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>,
@@ -924,6 +947,7 @@ where
             && crate::guest_receipt::should_skip_remaining_guest_work(
                 &statements,
                 req.statements.len(),
+                guest_hash.as_deref().unwrap_or(""),
             )
         {
             crate::guest_receipt::pad_skipped_guest_results(&mut statements, req.statements.len());

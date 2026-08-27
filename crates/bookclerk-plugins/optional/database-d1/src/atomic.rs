@@ -288,10 +288,18 @@ impl D1Proxy {
                             deadline,
                             started,
                             wire_len,
+                            &guest_receipt,
+                            cap,
                         )
                         .await;
                 }
                 GuestReceiptClaim::Won { stub } => {
+                    #[cfg(test)]
+                    if self.consume_fail_after_won_claim() {
+                        return Err(DbErr::Custom(
+                            "unavailable: guest receipt claimed; DDL not started".into(),
+                        ));
+                    }
                     let timeout = d1_http_timeout(deadline)?;
                     return self
                         .run_claimed_guest_ddl(
@@ -435,6 +443,11 @@ impl D1Proxy {
     }
 
     /// Prior-receipt SELECT after a lost claim; pads skipped guest work.
+    ///
+    /// A [`bookclerk_db_exec::GUEST_RECEIPT_STATUS_CLAIMED`] row with the same
+    /// guest hash is an in-flight claim (crash between stub INSERT and DDL).
+    /// Resume ungated DDL instead of treating the empty payload as result-lost.
+    #[allow(clippy::too_many_arguments)]
     async fn replay_lost_guest_receipt_claim(
         &self,
         req: &ExecuteRequest,
@@ -443,6 +456,8 @@ impl D1Proxy {
         deadline: Option<u64>,
         started: std::time::Instant,
         wire_len: usize,
+        guest_receipt: &bookclerk_plugin_abi::GuestReceiptPersist,
+        cap: u32,
     ) -> std::result::Result<ExecuteReply, DbErr> {
         let peek_idx = 1;
         let raw = match self
@@ -465,6 +480,26 @@ impl D1Proxy {
             deadline_unix_ms: req.deadline_unix_ms,
         };
         let peek = parse_typed_batch(&peek_req, &raw, started)?;
+        if let Some(prior) = peek.statements.first() {
+            if bookclerk_db_exec::prior_receipt_should_resume_guest(
+                prior,
+                &guest_receipt.guest_request_hash,
+            ) {
+                return self
+                    .run_claimed_guest_ddl(
+                        req,
+                        statements,
+                        StatementResult::from_affected(0),
+                        timeout,
+                        deadline,
+                        started,
+                        wire_len,
+                        guest_receipt,
+                        cap,
+                    )
+                    .await;
+            }
+        }
         let mut reply = peek;
         let mut out = vec![StatementResult::from_affected(0)];
         out.extend(std::mem::take(&mut reply.statements));

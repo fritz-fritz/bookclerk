@@ -18,6 +18,12 @@ pub const GUEST_TYPED_REPLAY_PAYLOAD_MAX_BYTES: usize = 65536;
 pub const GUEST_RECEIPT_RESULT_LOST: &str =
     "guest receipt committed without payload; original response lost";
 
+/// In-flight guest-receipt claim (D1 commits the stub INSERT before DDL).
+pub const GUEST_RECEIPT_STATUS_CLAIMED: &str = "claimed";
+
+/// Finalized guest-receipt row; payload is the durable replay body.
+pub const GUEST_RECEIPT_STATUS_OK: &str = "ok";
+
 /// True when `err` is [`GUEST_RECEIPT_RESULT_LOST`].
 #[must_use]
 pub fn is_guest_receipt_result_lost(err: &DbErr) -> bool {
@@ -46,12 +52,53 @@ pub fn prior_receipt_exists(stmt: &StatementResult) -> bool {
     receipt_hash_from(stmt).is_some()
 }
 
-/// True when wrap prefix results show a prior receipt and guest work remains.
+/// True when `stmt` is an in-flight [`GUEST_RECEIPT_STATUS_CLAIMED`] receipt.
 #[must_use]
-pub fn should_skip_remaining_guest_work(results: &[StatementResult], total: usize) -> bool {
-    results.len() == GUEST_RECEIPT_WRAP_PREFIX
-        && total > GUEST_RECEIPT_WRAP_PREFIX
-        && results.get(1).is_some_and(prior_receipt_exists)
+pub fn prior_receipt_is_claimed(stmt: &StatementResult) -> bool {
+    receipt_status_from(stmt).as_deref() == Some(GUEST_RECEIPT_STATUS_CLAIMED)
+}
+
+/// Reads `request_hash` from a prior-receipt select result, if any row exists.
+#[must_use]
+pub fn receipt_hash_from(stmt: &StatementResult) -> Option<String> {
+    let row = stmt.rows.first()?;
+    let idx = stmt
+        .columns
+        .iter()
+        .position(|c| c.name.eq_ignore_ascii_case("request_hash"))
+        .or(Some(1))?;
+    match row.values.get(idx)? {
+        DbValue::Text(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// True when a claimed prior receipt belongs to `guest_hash` (resume ungated DDL).
+#[must_use]
+pub fn prior_receipt_should_resume_guest(stmt: &StatementResult, guest_hash: &str) -> bool {
+    prior_receipt_is_claimed(stmt) && receipt_hash_from(stmt).as_deref() == Some(guest_hash)
+}
+
+/// True when wrap prefix results show a completed prior receipt (skip guest SQL).
+///
+/// An in-flight [`GUEST_RECEIPT_STATUS_CLAIMED`] row with the same hash must
+/// **not** skip remaining work: D1 commits the stub INSERT before ungated
+/// DDL, so a crash between those HTTP batches has to re-run idempotent DDL
+/// and then finalize. A claimed row with a **different** hash still skips
+/// (unwrap reports conflict).
+#[must_use]
+pub fn should_skip_remaining_guest_work(
+    results: &[StatementResult],
+    total: usize,
+    guest_hash: &str,
+) -> bool {
+    if results.len() != GUEST_RECEIPT_WRAP_PREFIX || total <= GUEST_RECEIPT_WRAP_PREFIX {
+        return false;
+    }
+    let Some(prior) = results.get(1) else {
+        return false;
+    };
+    prior_receipt_exists(prior) && !prior_receipt_should_resume_guest(prior, guest_hash)
 }
 
 /// Pads skipped guest + stub results so the wrap shape stays intact.
@@ -96,35 +143,53 @@ pub fn guest_receipt_finalize_stmts(
             if is_gated_guest_replay(partial, prior)? {
                 return Err(DbErr::Custom(GUEST_RECEIPT_RESULT_LOST.into()));
             }
+            if prior_receipt_is_claimed(prior) && stub_rows_affected(partial) == 0 {
+                // In-flight claim with no payload: a DML lost-reply retry
+                // must not stash gated zeros. D1 resumes ungated DDL via
+                // [`prior_receipt_should_resume_guest`] instead.
+                return Ok(Vec::new());
+            }
             let guest_reply = guest_slice_reply(partial, guest_len)?;
             let payload = encode_guest_replay_payload(&guest_reply)?;
-            return Ok(vec![typed_exec(
-                "UPDATE db_atomic_receipts SET payload = ? WHERE operation_id = ? AND status = 'ok'",
-                vec![
-                    DbValue::Text(payload),
-                    DbValue::Text(partial.operation_id.clone()),
-                ],
+            return Ok(vec![finalize_claimed_payload(
+                &payload,
+                &partial.operation_id,
             )]);
         }
     }
     let guest_reply = guest_slice_reply(partial, guest_len)?;
     let payload = encode_guest_replay_payload(&guest_reply)?;
-    Ok(vec![typed_exec(
-        "UPDATE db_atomic_receipts SET payload = ? WHERE operation_id = ? AND status = 'ok'",
-        vec![
-            DbValue::Text(payload),
-            DbValue::Text(partial.operation_id.clone()),
-        ],
+    Ok(vec![finalize_claimed_payload(
+        &payload,
+        &partial.operation_id,
     )])
 }
 
+/// Host UPDATE that promotes a claimed stub to a durable `ok` payload.
+fn finalize_claimed_payload(payload: &str, operation_id: &str) -> TypedDbStatement {
+    typed_exec(
+        "UPDATE db_atomic_receipts SET payload = ?, status = 'ok' \
+         WHERE operation_id = ? AND status = 'claimed'",
+        vec![
+            DbValue::Text(payload.into()),
+            DbValue::Text(operation_id.into()),
+        ],
+    )
+}
+
 /// True when a prior receipt row exists but the stub INSERT was gated off (replay after commit).
+///
+/// An in-flight [`GUEST_RECEIPT_STATUS_CLAIMED`] row is recoverable (resume DDL
+/// then finalize) and must not be reported as result-lost.
 ///
 /// # Errors
 ///
 /// Returns [`DbErr::Custom`] when the wrapped reply is missing the receipt stub suffix.
 fn is_gated_guest_replay(partial: &ExecuteReply, prior: &StatementResult) -> Result<bool, DbErr> {
     if prior.rows.is_empty() {
+        return Ok(false);
+    }
+    if prior_receipt_is_claimed(prior) {
         return Ok(false);
     }
     if receipt_payload_text(prior).is_some() {
@@ -135,6 +200,15 @@ fn is_gated_guest_replay(partial: &ExecuteReply, prior: &StatementResult) -> Res
         .last()
         .ok_or_else(|| DbErr::Custom("guest receipt wrap missing stub suffix".into()))?;
     Ok(stub.rows_affected == 0)
+}
+
+/// `rows_affected` from the wrap's receipt stub INSERT, or 0 when missing.
+fn stub_rows_affected(partial: &ExecuteReply) -> u64 {
+    partial
+        .statements
+        .last()
+        .map(|s| s.rows_affected)
+        .unwrap_or(0)
 }
 
 /// Guest statement results from a wrapped partial reply.
@@ -203,16 +277,16 @@ fn receipt_payload_text(prior: &StatementResult) -> Option<String> {
     }
 }
 
-/// Reads `request_hash` from a prior-receipt select result, if any row exists.
-fn receipt_hash_from(stmt: &StatementResult) -> Option<String> {
-    let row = stmt.rows.first()?;
-    let idx = stmt
+/// Reads `status` from a prior-receipt select row, if present.
+fn receipt_status_from(prior: &StatementResult) -> Option<String> {
+    let row = prior.rows.first()?;
+    let idx = prior
         .columns
         .iter()
-        .position(|c| c.name.eq_ignore_ascii_case("request_hash"))
-        .or(Some(1))?;
+        .position(|c| c.name.eq_ignore_ascii_case("status"))
+        .or(Some(2))?;
     match row.values.get(idx)? {
-        DbValue::Text(s) => Some(s.clone()),
+        DbValue::Text(s) if !s.is_empty() => Some(s.clone()),
         _ => None,
     }
 }
@@ -234,12 +308,16 @@ mod tests {
     use bookclerk_plugin_abi::{DbColumn, DbRow, DbTiming, DbType};
 
     fn prior_receipt_row(payload: &str) -> StatementResult {
+        prior_receipt_row_with_status(GUEST_RECEIPT_STATUS_CLAIMED, payload)
+    }
+
+    fn prior_receipt_row_with_status(status: &str, payload: &str) -> StatementResult {
         StatementResult {
             rows: vec![DbRow {
                 values: vec![
                     DbValue::Text("guest-op".into()),
                     DbValue::Text("a".repeat(64)),
-                    DbValue::Text("ok".into()),
+                    DbValue::Text(status.into()),
                     DbValue::Text(payload.into()),
                     DbValue::Text("2026-01-01T00:00:00Z".into()),
                 ],
@@ -288,9 +366,16 @@ mod tests {
         let partial = wrapped_partial(1, 1);
         let stmts = guest_receipt_finalize_stmts(&partial, 1, &"a".repeat(64)).expect("finalize");
         assert_eq!(stmts.len(), 1);
-        assert!(stmts[0]
-            .sql
-            .contains("UPDATE db_atomic_receipts SET payload"));
+        assert!(
+            stmts[0].sql.contains("SET payload = ?, status = 'ok'"),
+            "{}",
+            stmts[0].sql
+        );
+        assert!(
+            stmts[0].sql.contains("AND status = 'claimed'"),
+            "{}",
+            stmts[0].sql
+        );
     }
 
     #[test]
@@ -311,24 +396,59 @@ mod tests {
 
     #[test]
     fn finalize_rejects_gated_replay_without_payload() {
-        let partial = wrapped_partial(0, 0);
+        let mut partial = wrapped_partial(0, 0);
+        partial.statements[1] = prior_receipt_row_with_status(GUEST_RECEIPT_STATUS_OK, "");
         let err = guest_receipt_finalize_stmts(&partial, 1, &"a".repeat(64)).unwrap_err();
         assert!(err.to_string().contains("original response lost"), "{err}");
     }
 
     #[test]
-    fn skip_remaining_guest_work_only_after_prior_select_row() {
+    fn finalize_persists_claimed_empty_payload() {
+        let partial = wrapped_partial(1, 1);
+        let stmts = guest_receipt_finalize_stmts(&partial, 1, &"a".repeat(64)).expect("claimed");
+        assert_eq!(stmts.len(), 1);
+        assert!(
+            stmts[0].sql.contains("AND status = 'claimed'"),
+            "{}",
+            stmts[0].sql
+        );
+    }
+
+    #[test]
+    fn finalize_does_not_persist_gated_claimed_retry() {
+        let partial = wrapped_partial(0, 0);
+        let stmts = guest_receipt_finalize_stmts(&partial, 1, &"a".repeat(64)).expect("in-flight");
+        assert!(stmts.is_empty());
+    }
+
+    #[test]
+    fn skip_remaining_guest_work_only_after_completed_prior() {
+        let hash = "a".repeat(64);
         let empty_prefix = vec![
             StatementResult::from_affected(0),
             StatementResult::from_affected(0),
         ];
-        assert!(!should_skip_remaining_guest_work(&empty_prefix, 4));
-        let prior_prefix = vec![
+        assert!(!should_skip_remaining_guest_work(&empty_prefix, 4, &hash));
+        let completed = vec![
             StatementResult::from_affected(0),
-            prior_receipt_row("{\"operationId\":\"guest-op\"}"),
+            prior_receipt_row_with_status(
+                GUEST_RECEIPT_STATUS_OK,
+                "{\"operationId\":\"guest-op\"}",
+            ),
         ];
-        assert!(should_skip_remaining_guest_work(&prior_prefix, 4));
-        assert!(!should_skip_remaining_guest_work(&prior_prefix, 2));
+        assert!(should_skip_remaining_guest_work(&completed, 4, &hash));
+        assert!(!should_skip_remaining_guest_work(&completed, 2, &hash));
+        let claimed_same = vec![StatementResult::from_affected(0), prior_receipt_row("")];
+        assert!(
+            !should_skip_remaining_guest_work(&claimed_same, 4, &hash),
+            "claimed + same hash must resume guest DDL"
+        );
+        assert!(prior_receipt_should_resume_guest(&claimed_same[1], &hash));
+        assert!(should_skip_remaining_guest_work(
+            &claimed_same,
+            4,
+            &"b".repeat(64)
+        ));
     }
 
     #[test]
@@ -336,7 +456,7 @@ mod tests {
         assert!(is_guest_receipt_stub_insert(
             "INSERT INTO db_atomic_receipts (\
                 operation_id, operation_kind, request_hash, status, payload, created_at, expires_at\
-             ) SELECT ?, ?, ?, 'ok', '', ?, ? \
+             ) SELECT ?, ?, ?, 'claimed', '', ?, ? \
                WHERE NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)"
         ));
         assert!(!is_guest_receipt_stub_insert(

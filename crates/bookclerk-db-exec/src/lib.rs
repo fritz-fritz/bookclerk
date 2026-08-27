@@ -55,8 +55,10 @@ pub use exec::{
 };
 pub use guest_receipt::{
     guest_receipt_finalize_stmts, is_guest_receipt_result_lost, is_guest_receipt_stub_insert,
-    pad_skipped_guest_results, prior_receipt_exists, should_skip_remaining_guest_work,
-    GUEST_RECEIPT_RESULT_LOST, GUEST_RECEIPT_STUB_SUFFIX, GUEST_RECEIPT_WRAP_PREFIX,
+    pad_skipped_guest_results, prior_receipt_exists, prior_receipt_is_claimed,
+    prior_receipt_should_resume_guest, receipt_hash_from, should_skip_remaining_guest_work,
+    GUEST_RECEIPT_RESULT_LOST, GUEST_RECEIPT_STATUS_CLAIMED, GUEST_RECEIPT_STATUS_OK,
+    GUEST_RECEIPT_STUB_SUFFIX, GUEST_RECEIPT_WRAP_PREFIX,
 };
 pub use host_ir::{
     sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,

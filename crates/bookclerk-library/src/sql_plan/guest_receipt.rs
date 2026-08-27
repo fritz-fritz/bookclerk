@@ -68,7 +68,7 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> HostExecuteEn
     statements.push(typed_exec(
         "INSERT INTO db_atomic_receipts (\
             operation_id, operation_kind, request_hash, status, payload, created_at, expires_at\
-         ) SELECT ?, ?, ?, 'ok', '', ?, ? \
+         ) SELECT ?, ?, ?, 'claimed', '', ?, ? \
            WHERE NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)",
         vec![
             DbValue::Text(operation_id.clone()),
@@ -118,13 +118,14 @@ pub(crate) fn unwrap_guest_typed_reply(
                     "executeAtomic operationId was already committed with a different requestHash",
                 ));
             }
-            if receipt_payload_text(prior).is_none() {
+            if receipt_payload_text(prior).is_some() {
+                if let Some(replayed) = decode_guest_replay_payload(prior)? {
+                    return Ok(replayed);
+                }
+            } else {
                 return Err(PluginError::unavailable(
                     "executeAtomic committed with an empty guest receipt payload; retry after finalize",
                 ));
-            }
-            if let Some(replayed) = decode_guest_replay_payload(prior)? {
-                return Ok(replayed);
             }
         }
     }
@@ -370,6 +371,12 @@ mod tests {
             ddl.sql
         );
         assert!(ddl.sql.contains("IF NOT EXISTS"), "{}", ddl.sql);
+        let stub = wrapped.request.statements.last().expect("stub");
+        assert!(
+            stub.sql.contains("'claimed'"),
+            "D1 preclaim stub must not look committed: {}",
+            stub.sql
+        );
     }
 
     #[test]
@@ -463,5 +470,61 @@ mod tests {
         };
         let err = unwrap_guest_typed_reply(reply, 1, "expected-hash").unwrap_err();
         assert_eq!(err.code, bookclerk_plugin_abi::PluginErrorCode::Conflict);
+    }
+
+    #[test]
+    fn unwrap_unavailable_on_claimed_or_ok_empty_payload() {
+        for status in ["claimed", "ok"] {
+            let prior = bookclerk_plugin_abi::StatementResult {
+                rows: vec![bookclerk_plugin_abi::DbRow {
+                    values: vec![
+                        DbValue::Text("guest-op".into()),
+                        DbValue::Text("a".repeat(64)),
+                        DbValue::Text(status.into()),
+                        DbValue::Text(String::new()),
+                        DbValue::Text("2026-01-01T00:00:00Z".into()),
+                    ],
+                }],
+                columns: vec![
+                    bookclerk_plugin_abi::DbColumn {
+                        name: "operation_id".into(),
+                        db_type: bookclerk_plugin_abi::DbType::Text,
+                    },
+                    bookclerk_plugin_abi::DbColumn {
+                        name: "request_hash".into(),
+                        db_type: bookclerk_plugin_abi::DbType::Text,
+                    },
+                    bookclerk_plugin_abi::DbColumn {
+                        name: "status".into(),
+                        db_type: bookclerk_plugin_abi::DbType::Text,
+                    },
+                    bookclerk_plugin_abi::DbColumn {
+                        name: "payload".into(),
+                        db_type: bookclerk_plugin_abi::DbType::Text,
+                    },
+                    bookclerk_plugin_abi::DbColumn {
+                        name: "created_at".into(),
+                        db_type: bookclerk_plugin_abi::DbType::Text,
+                    },
+                ],
+                rows_affected: 0,
+            };
+            let reply = ExecuteReply {
+                operation_id: "guest-op".into(),
+                statements: vec![
+                    bookclerk_plugin_abi::StatementResult::from_affected(0),
+                    prior,
+                    bookclerk_plugin_abi::StatementResult::from_affected(0),
+                    bookclerk_plugin_abi::StatementResult::from_affected(0),
+                ],
+                timing: bookclerk_plugin_abi::DbTiming::default(),
+            };
+            let err = unwrap_guest_typed_reply(reply, 1, &"a".repeat(64)).unwrap_err();
+            assert_eq!(
+                err.code,
+                bookclerk_plugin_abi::PluginErrorCode::Unavailable,
+                "{status}"
+            );
+        }
     }
 }
