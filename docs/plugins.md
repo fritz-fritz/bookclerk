@@ -1129,7 +1129,7 @@ closed). Non-SQL engines are unsupported.
 | `Database.openSession` | Opens the adapter session. The guest connects its engine from `DatabaseContext.config` (first-party guests receive host-injected connect params; SQLite: path grant; D1/Postgres: host-injected credentials). |
 | `AdapterDatabaseSession.capabilities` | Typed control-plane call after `openSession`. Advertises SQL contract version, execution semantics, schema flags (`pragmaUserVersion` / `schemaMigrations` / `atomicSchemaBatch`), and all limits. The host must not invent these from the plugin id. |
 | `AdapterDatabaseSession.bootstrap` | Bootstrap-only SeaORM proxy metadata (`sqlFamily`, `dialect`); not part of `DbCapabilities` and never read by domain planning. |
-| `AdapterDatabaseSession.execute` | The one typed atomic operation (`ExecuteRequest` → `ExecuteReply`). Every request is a non-empty ordered statement list with Cap'n `DbValue` parameters, run as **one** SQL transaction. D1 uses `{ "batch": [...] }` on the REST Query API. SQLite and Postgres run the same plan in a native local transaction. Host compilers emit canonical `?` SQL; adapters lower at execute. Guests do not interpret Bookclerk operation names. `JobHandler.handle` receives a host-granted `GuestDatabase` when a library store is present, scoped to `books`. Unrelated tables are denied. Workerd HTTP grants defer table authorization to that session. |
+| `AdapterDatabaseSession.execute` | The one typed atomic operation (`ExecuteRequest` → `ExecuteReply`). Every request is a non-empty ordered statement list with Cap'n `DbValue` parameters, run as **one** SQL transaction. D1 uses `{ "batch": [...] }` on the REST Query API. SQLite and Postgres run the same plan in a native local transaction. Host compilers emit canonical `?` SQL; adapters lower at execute. Guests do not interpret Bookclerk operation names. `JobHandler.handle` does **not** receive the host library as `context.database`. Plugins that need durable SQL declare named bindings (`capabilities.bindings.databases`) and receive physically separate units on `context.databases`. |
 | `AdapterDatabaseSession.close` | Release the session and its engine connection. |
 
 Host-private (never visible to plugin authors; first-party guests built with
@@ -1153,16 +1153,19 @@ Plugins may declare Workers-style **named database bindings** in the manifest:
 databases = ["DB", "CACHE"]   # [A-Z][A-Z0-9_]*, unique, max 8
 ```
 
-Each name is an **isolated, plugin-owned database** provisioned by the active
-database adapter — separate from the Bookclerk library and from every other
-plugin (near-equivalent to a Cloudflare Workers D1 binding):
+Named bindings are **plugin-private state**, not a place to put host tables.
+The durable job queue, library catalog, and secrets stay on the host library
+database; `JobHandler.handle` does not get `context.database` pointed at
+`library.db`. Bindings are provisioned by the active adapter — physically
+separate from the Bookclerk library and from every other plugin
+(near-equivalent to a Cloudflare Workers D1 binding):
 
 - **SQLite** — one file per binding under
   `$BOOKCLERK_FILES_DIR/plugin-databases/<plugin>/<BINDING>.db` (the sqlite
   adapter jail grants that directory).
-- **PostgreSQL** — one schema per binding (`pb_<plugin>_<binding>`) with the
-  connection `search_path` pinned to it; schema-qualified names are denied by
-  the binding grammar so a guest cannot escape its schema.
+- **PostgreSQL** — one database per binding (`pb_<plugin>_<binding>`),
+  created on first use (`CREATEDB` required). This is a separate database,
+  not a schema on the library DB, so plugin SQL cannot see host tables.
 - **Cloudflare D1** — one D1 database per binding
   (`bookclerk-pb-<plugin>-<binding>`), resolved or created by name through the
   REST API. Provisioning fails closed with an operator-facing error when the
@@ -1177,12 +1180,14 @@ are recorded in the host `plugin_databases` registry (an existing row wins so
 re-opens never re-target a binding); inspect and remove them with
 `bookclerk plugins db list` / `bookclerk plugins db drop <plugin> [binding]`.
 
-Inside a binding the plugin **owns its schema**: full DML plus bounded DDL
-(`CREATE`/`ALTER`/`DROP` on `TABLE`/`INDEX`, prefer `IF [NOT] EXISTS` so
-retried batches replay cleanly). The guest grammar still applies — single
-statement, no `ATTACH`/`PRAGMA`/session verbs, no schema-qualified names, and
-the binding's own `db_atomic_receipts` bookkeeping table stays host-owned so
-retry tokens replay inside the binding, never against the library.
+Inside a binding the plugin **owns its schema**: full DML plus bounded
+idempotent DDL (`CREATE TABLE/INDEX IF NOT EXISTS`, `DROP TABLE/INDEX IF
+EXISTS`). `ALTER` and `CREATE TABLE AS` are refused (not retry-safe, and
+`AS SELECT` can copy another catalog). The guest grammar still applies —
+single statement, no `ATTACH`/`PRAGMA`/session verbs, no schema-qualified
+names, and the binding's own `db_atomic_receipts` bookkeeping table stays
+host-owned so retry tokens replay inside the binding, never against the
+library.
 
 Delivery: `JobHandler.handle` receives the bindings as the append-only
 `databases :List(NamedDatabase)` argument. Rust guests call

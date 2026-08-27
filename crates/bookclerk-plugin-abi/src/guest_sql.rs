@@ -79,7 +79,8 @@ pub struct GuestSqlPolicy {
     /// When true, table/column/function checks are deferred to the host session.
     host_authoritative: bool,
     /// Plugin-owned isolated database: any non-reserved unqualified table is
-    /// allowed and bounded DDL (`CREATE`/`ALTER`/`DROP` `TABLE`/`INDEX`) passes.
+    /// allowed and bounded idempotent DDL (`CREATE`/`DROP` `TABLE`/`INDEX`
+    /// with `IF [NOT] EXISTS`) passes. `ALTER` is refused.
     binding_owned: bool,
 }
 
@@ -117,12 +118,14 @@ impl GuestSqlPolicy {
 
     /// Plugin-owned isolated database binding (Workers-D1-like ownership).
     ///
-    /// The plugin owns and migrates its own schema: bounded DDL
-    /// (`CREATE`/`ALTER`/`DROP` on `TABLE`/`INDEX`) is allowed and any table
-    /// may be named — except reserved host bookkeeping
-    /// (`db_atomic_receipts`, `schema_migrations`, `plugin_databases`),
-    /// catalog identifiers, and schema-qualified names (which could escape a
-    /// pinned PostgreSQL `search_path`). Grammar and size checks still run.
+    /// The plugin owns and migrates its own schema on a **physically separate**
+    /// database (SQLite file / Postgres database / D1 database). Bounded
+    /// idempotent DDL (`CREATE`/`DROP` `TABLE`/`INDEX` with `IF [NOT] EXISTS`)
+    /// is allowed and any table may be named — except reserved host
+    /// bookkeeping (`db_atomic_receipts`, `schema_migrations`,
+    /// `plugin_databases`), catalog identifiers, and schema-qualified names.
+    /// `CREATE TABLE AS`, `ALTER`, and unqualified `CREATE`/`DROP` without
+    /// `IF [NOT] EXISTS` are refused. Grammar and size checks still run.
     #[must_use]
     pub fn binding_owned() -> Self {
         Self {
@@ -290,8 +293,9 @@ const BINDING_RESERVED_TABLES: &[&str] = &[
 /// True when `name` may not be touched inside a plugin-owned binding.
 ///
 /// Denies catalog identifiers, reserved host bookkeeping, and any
-/// schema-qualified name (a qualified name could escape a pinned PostgreSQL
-/// `search_path`).
+/// schema-qualified name (defense in depth: bindings are physically
+/// separate databases, so a qualified name still must not name another
+/// catalog).
 fn binding_table_denied(name: &str) -> bool {
     if name.contains('.') || table_denied(name) {
         return true;
@@ -393,10 +397,13 @@ pub fn statement_is_ddl(sql: &str) -> bool {
 /// Authorizes one bounded DDL statement inside a plugin-owned binding.
 ///
 /// Allowed forms (fail closed on anything else):
-/// `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table (...)`,
-/// `CREATE TABLE [IF NOT EXISTS] name (...)`,
-/// `ALTER TABLE name ...`, `DROP TABLE|INDEX [IF EXISTS] name`.
-/// Every named object must be unqualified and non-reserved.
+/// `CREATE [UNIQUE] INDEX IF NOT EXISTS name ON table (...)`,
+/// `CREATE TABLE IF NOT EXISTS name (...)`,
+/// `DROP TABLE|INDEX IF EXISTS name`.
+/// `ALTER` is refused (not receipt-idempotent). `CREATE TABLE AS` and
+/// schema-qualified names anywhere in the statement (including
+/// `REFERENCES other.table`) are refused. `IF [NOT] EXISTS` is required so
+/// a retried D1 batch cannot re-execute non-idempotent DDL.
 ///
 /// # Errors
 ///
@@ -412,46 +419,107 @@ fn authorize_binding_ddl(index: usize, sql: &str) -> Result<()> {
     if scan.take_kw("CREATE") {
         let _unique = scan.take_kw("UNIQUE");
         if scan.take_kw("TABLE") {
-            let _ = scan.take_kw("IF") && scan.take_kw("NOT") && scan.take_kw("EXISTS");
-            return check_binding_ddl_name(index, &mut scan, "table name");
+            if !(scan.take_kw("IF") && scan.take_kw("NOT") && scan.take_kw("EXISTS")) {
+                return Err(deny("CREATE TABLE requires IF NOT EXISTS"));
+            }
+            check_binding_ddl_name(index, &mut scan, "table name")?;
+            if scan.peek_kw("AS") {
+                return Err(deny("CREATE TABLE AS is not allowed"));
+            }
+            if !scan.take_byte(b'(') {
+                return Err(deny("CREATE TABLE requires a column list"));
+            }
+            let inner = scan
+                .take_balanced_inner()
+                .ok_or_else(|| deny("unbalanced CREATE TABLE"))?;
+            deny_qualified_names_in(index, inner)?;
+            deny_select_in_ddl(index, inner)?;
+            deny_qualified_names_in(index, scan.rest())?;
+            deny_select_in_ddl(index, scan.rest())?;
+            return Ok(());
         }
         if scan.take_kw("INDEX") {
-            let _ = scan.take_kw("IF") && scan.take_kw("NOT") && scan.take_kw("EXISTS");
+            if !(scan.take_kw("IF") && scan.take_kw("NOT") && scan.take_kw("EXISTS")) {
+                return Err(deny("CREATE INDEX requires IF NOT EXISTS"));
+            }
             check_binding_ddl_name(index, &mut scan, "index name")?;
             if !scan.take_kw("ON") {
                 return Err(deny("CREATE INDEX requires ON <table>"));
             }
-            return check_binding_ddl_name(index, &mut scan, "indexed table");
+            check_binding_ddl_name(index, &mut scan, "indexed table")?;
+            if scan.take_byte(b'(') {
+                let inner = scan
+                    .take_balanced_inner()
+                    .ok_or_else(|| deny("unbalanced CREATE INDEX"))?;
+                deny_qualified_names_in(index, inner)?;
+            }
+            deny_qualified_names_in(index, scan.rest())?;
+            deny_select_in_ddl(index, scan.rest())?;
+            return Ok(());
         }
         return Err(deny("only TABLE and INDEX may be created"));
     }
     if scan.take_kw("ALTER") {
-        if !scan.take_kw("TABLE") {
-            return Err(deny("only ALTER TABLE is allowed"));
-        }
-        check_binding_ddl_name(index, &mut scan, "table name")?;
-        // RENAME TO <new> must also stay unqualified and non-reserved.
-        let rest = &sql[scan.i..];
-        let mut tail = Scan { sql: rest, i: 0 };
-        if tail.take_kw("RENAME") && tail.take_kw("TO") {
-            check_binding_ddl_name(index, &mut tail, "rename target")?;
-        }
-        return Ok(());
+        return Err(deny(
+            "ALTER TABLE is not allowed; binding DDL must be idempotent IF [NOT] EXISTS forms",
+        ));
     }
     if scan.take_kw("DROP") {
         if !scan.take_kw("TABLE") && !scan.take_kw("INDEX") {
             return Err(deny("only DROP TABLE / DROP INDEX are allowed"));
         }
-        let _ = scan.take_kw("IF") && scan.take_kw("EXISTS");
-        return check_binding_ddl_name(index, &mut scan, "object name");
+        if !(scan.take_kw("IF") && scan.take_kw("EXISTS")) {
+            return Err(deny("DROP requires IF EXISTS"));
+        }
+        check_binding_ddl_name(index, &mut scan, "object name")?;
+        deny_qualified_names_in(index, scan.rest())?;
+        return Ok(());
     }
     Err(deny("unsupported verb"))
 }
 
+/// Fails closed when `sql` contains a schema-qualified `ident.ident` (the
+/// class of escape used by `REFERENCES public.books` and CTAS from another
+/// schema). String literals and quoted identifiers are skipped.
+fn deny_qualified_names_in(index: usize, sql: &str) -> Result<()> {
+    let mut scan = Scan { sql, i: 0 };
+    while scan.i < sql.len() {
+        scan.skip();
+        if scan.i >= sql.len() {
+            break;
+        }
+        let b = scan.sql.as_bytes()[scan.i];
+        if b == b'\'' {
+            skip_quoted_string(&mut scan, b'\'');
+            continue;
+        }
+        if scan.read_ident().is_some() {
+            if scan.take_byte(b'.') {
+                return Err(PluginError::invalid_params(format!(
+                    "statement {index} names reserved or qualified object"
+                )));
+            }
+            continue;
+        }
+        scan.i += 1;
+    }
+    Ok(())
+}
+
+/// Fails closed when DDL contains a top-level `SELECT` (CTAS / subquery copy).
+fn deny_select_in_ddl(index: usize, sql: &str) -> Result<()> {
+    if has_top_level_keyword(sql, "SELECT") {
+        return Err(PluginError::invalid_params(format!(
+            "statement {index} is not allowed binding DDL (SELECT in DDL is not allowed)"
+        )));
+    }
+    Ok(())
+}
+
 /// Reads one DDL object name off `scan`, denying reserved and qualified names.
 ///
-/// A trailing `.` after the identifier means a schema-qualified name, which
-/// could escape a pinned PostgreSQL `search_path` — fail closed.
+/// A trailing `.` after the identifier means a schema-qualified name,
+/// which could name another catalog — fail closed.
 ///
 /// # Errors
 ///
@@ -746,7 +814,8 @@ pub fn validate_guest_execute_request(req: &ExecuteRequest) -> Result<()> {
 /// [`validate_guest_execute_request`] with policy-dependent grammar.
 ///
 /// A [`GuestSqlPolicy::binding_owned`] policy admits bounded DDL verbs
-/// (`CREATE` / `ALTER` / `DROP`); shapes and names are then authorized by
+/// (`CREATE` / `DROP`; `ALTER` is still classified then refused);
+/// shapes and names are then authorized by
 /// [`authorize_guest_sql_policy`]. Every other policy uses the fixed
 /// DML/SELECT grammar.
 ///
@@ -1833,13 +1902,7 @@ mod tests {
         )
         .unwrap();
         binding_check(
-            "CREATE UNIQUE INDEX idx_notes_body ON notes(body)",
-            DbResultSelection::Discard,
-            0,
-        )
-        .unwrap();
-        binding_check(
-            "ALTER TABLE notes RENAME TO memos",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_body ON notes(body)",
             DbResultSelection::Discard,
             0,
         )
@@ -1866,10 +1929,9 @@ mod tests {
             "SELECT * FROM db_atomic_receipts",
             "DELETE FROM schema_migrations",
             "SELECT * FROM plugin_databases",
-            "DROP TABLE db_atomic_receipts",
-            "CREATE TABLE schema_migrations (v INTEGER)",
-            "ALTER TABLE notes RENAME TO db_atomic_receipts",
-            "CREATE INDEX i ON db_atomic_receipts(expires_at)",
+            "DROP TABLE IF EXISTS db_atomic_receipts",
+            "CREATE TABLE IF NOT EXISTS schema_migrations (v INTEGER)",
+            "CREATE INDEX IF NOT EXISTS i ON db_atomic_receipts(expires_at)",
         ] {
             let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
             assert!(
@@ -1877,10 +1939,10 @@ mod tests {
                 "{sql}: {err}"
             );
         }
-        // Schema-qualified names could escape a pinned Postgres search_path.
+        // Schema-qualified names could reach another catalog (host library).
         for sql in [
             "SELECT * FROM public.books",
-            "CREATE TABLE other_schema.t (id INTEGER)",
+            "CREATE TABLE IF NOT EXISTS other_schema.t (id INTEGER)",
         ] {
             let err = binding_check(sql, DbResultSelection::Rows, 0).unwrap_err();
             assert!(
@@ -1908,6 +1970,23 @@ mod tests {
         let err =
             binding_check("SELECT * FROM sqlite_master", DbResultSelection::Rows, 0).unwrap_err();
         assert!(err.to_string().contains("reserved") || err.to_string().contains("unauthorized"));
+        // CTAS / FK-to-host / non-idempotent DDL are fail-closed (P1 binding isolation).
+        for sql in [
+            "CREATE TABLE IF NOT EXISTS leak AS SELECT * FROM public.books",
+            "CREATE TABLE leak AS SELECT * FROM public.books",
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER REFERENCES public.books(id))",
+            "CREATE TABLE t (id INTEGER)",
+            "ALTER TABLE notes RENAME TO memos",
+            "DROP TABLE memos",
+        ] {
+            let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
+            assert!(
+                err.to_string().contains("not allowed")
+                    || err.to_string().contains("qualified")
+                    || err.to_string().contains("requires"),
+                "{sql}: {err}"
+            );
+        }
     }
 
     #[test]

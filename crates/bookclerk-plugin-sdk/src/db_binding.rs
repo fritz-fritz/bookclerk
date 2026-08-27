@@ -104,7 +104,10 @@ impl DatabaseBinding {
         Self { session, options }
     }
 
-    /// Takes [`JobHandlerContext::database`] when the invocation grant includes one.
+    /// Takes [`JobHandlerContext::database`] when the invocation includes one.
+    ///
+    /// Production jobs do **not** inject the host library here. Durable plugin
+    /// state uses [`Self::take_named_from_job_context`].
     #[must_use]
     pub fn take_from_job_context(ctx: &mut JobHandlerContext) -> Option<Self> {
         ctx.database
@@ -116,7 +119,8 @@ impl DatabaseBinding {
     ///
     /// Named bindings come from `plugin.toml` `capabilities.bindings.databases`
     /// after operator approval: each is an isolated plugin-owned database
-    /// (full DML plus bounded DDL), separate from the Bookclerk library and
+    /// (full DML plus idempotent `CREATE`/`DROP` `TABLE`/`INDEX` with
+    /// `IF [NOT] EXISTS`), physically separate from the Bookclerk library and
     /// from every other plugin.
     #[must_use]
     pub fn take_named_from_job_context(ctx: &mut JobHandlerContext, name: &str) -> Option<Self> {

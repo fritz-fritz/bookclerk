@@ -80,10 +80,11 @@ pub enum DbConnectParams {
         /// Named plugin database binding this open serves, if any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         binding: Option<String>,
-        /// Dedicated schema for a binding open: the adapter creates it if
-        /// missing and pins the connection `search_path` to it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        schema: Option<String>,
+        /// Isolated PostgreSQL database for a binding open (created if missing).
+        /// Older hosts sent this as `schema` (a schema on the library DB);
+        /// decode still accepts that wire name.
+        #[serde(default, skip_serializing_if = "Option::is_none", alias = "schema")]
+        database: Option<String>,
     },
 }
 
@@ -223,12 +224,33 @@ mod host_tests {
             plugin_data_dir: "/tmp/p".into(),
             url: "postgres://localhost/db".into(),
             binding: None,
-            schema: None,
+            database: None,
         };
         let ctx = database_context_from_params(&params).unwrap();
         assert_eq!(ctx.config.media_type, DATABASE_CONTEXT_MEDIA_TYPE);
         assert_eq!(ctx.config.schema_version, DATABASE_CONTEXT_SCHEMA_VERSION);
         assert_eq!(connect_params_from_context(&ctx).unwrap(), params);
+    }
+
+    #[test]
+    fn postgres_binding_accepts_legacy_schema_wire_name() {
+        let v = serde_json::json!({
+            "backend": "postgres",
+            "pluginDataDir": "/tmp/p",
+            "url": "postgres://localhost/library",
+            "binding": "DB",
+            "schema": "pb_echo_db"
+        });
+        let params: DbConnectParams = serde_json::from_value(v).unwrap();
+        match params {
+            DbConnectParams::Postgres {
+                database, binding, ..
+            } => {
+                assert_eq!(binding.as_deref(), Some("DB"));
+                assert_eq!(database.as_deref(), Some("pb_echo_db"));
+            }
+            other => panic!("expected postgres params, got {other:?}"),
+        }
     }
 
     #[test]

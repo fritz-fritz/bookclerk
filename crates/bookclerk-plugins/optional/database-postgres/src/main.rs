@@ -52,18 +52,18 @@ async fn binding_from_context(
     let Ok(DbConnectParams::Postgres {
         url,
         binding: Some(binding),
-        schema,
+        database,
         ..
     }) = connect_params_from_context(ctx)
     else {
         return Ok(None);
     };
-    let schema = schema.ok_or_else(|| {
+    let database = database.ok_or_else(|| {
         PluginError::invalid_params(format!(
-            "database binding `{binding}` open is missing its schema"
+            "database binding `{binding}` open is missing its database name"
         ))
     })?;
-    let db = bookclerk_plugin_database_postgres::open_binding(&url, &schema)
+    let db = bookclerk_plugin_database_postgres::open_binding(&url, &database)
         .await
         .map_err(|e| PluginError::internal(format!("database binding `{binding}`: {e}")))?;
     Ok(Some(db))
@@ -99,8 +99,8 @@ impl PluginRoot for PostgresRoot {
     }
 }
 
-/// Postgres database factory: shared library pool, or a dedicated schema-
-/// pinned pool for named plugin database bindings.
+/// Postgres database factory: shared library pool, or a dedicated database
+/// connection for named plugin database bindings.
 struct PostgresDatabase {
     dedicated: Option<sea_orm::DatabaseConnection>,
 }

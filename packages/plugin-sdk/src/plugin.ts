@@ -354,14 +354,18 @@ export interface JobContext {
   input: Source;
   output: Destination;
   progress: ProgressSink;
-  /** Host-mediated typed SQL when the invocation grant includes a database. */
+  /**
+   * Unused in production. Jobs never inject the host library as guest SQL;
+   * durable plugin state uses {@link JobContext.databases}.
+   */
   database?: import("./db-execute.js").DatabaseBinding;
   /**
    * Named plugin-owned database bindings (Workers-style) declared in
    * `plugin.toml` `capabilities.bindings.databases` and approved by the
    * operator. Each binding is an isolated database — separate from the
    * Bookclerk library and every other plugin — with full DML plus bounded
-   * DDL (`CREATE`/`ALTER`/`DROP` `TABLE`/`INDEX`).
+   * idempotent DDL (`CREATE`/`DROP` `TABLE`/`INDEX` with `IF [NOT] EXISTS`).
+   * `ALTER` and `CREATE TABLE AS` are refused.
    */
   databases?: Map<string, import("./db-execute.js").DatabaseBinding>;
   signal?: AbortSignal;

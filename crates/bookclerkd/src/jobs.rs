@@ -237,10 +237,12 @@ pub const JOB_SUSPENDED_DETAIL_PREFIX: &str = "suspended until ";
 
 /// Opens the consented named database bindings for one plugin invocation.
 ///
-/// Reads the stored operator grant (`database:<NAME>` entries) and asks the
-/// active database adapter to open (provisioning on first use) one isolated
-/// session per binding. Fails closed: a granted binding that cannot be
-/// provisioned fails the job rather than running without isolation.
+/// These are plugin-owned units, not the host job queue. `jobs` stays on the
+/// library; guests never receive SQL against it. Reads the stored operator
+/// grant (`database:<NAME>` entries) and asks the active database adapter to
+/// open (provisioning on first use) one isolated session per binding. Fails
+/// closed: a granted binding that cannot be provisioned fails the job rather
+/// than running without isolation.
 async fn open_granted_binding_databases(
     state: &AppState,
     plugin_id: &str,

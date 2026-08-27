@@ -149,9 +149,9 @@ pub enum PluginDbCommand {
     },
     /// Drop provisioned binding units and their registry rows.
     ///
-    /// SQLite binding files are deleted. PostgreSQL schemas and Cloudflare D1
+    /// SQLite binding files are deleted. PostgreSQL databases and Cloudflare D1
     /// databases are unregistered here; the printed unit reference tells you
-    /// what to drop on the server (`DROP SCHEMA <name> CASCADE` / D1 delete).
+    /// what to drop on the server (`DROP DATABASE <name>` / D1 delete).
     Drop {
         /// Plugin id.
         plugin: String,
@@ -782,7 +782,7 @@ struct PluginDbListItem {
     binding: String,
     /// Adapter family that provisioned the unit (`sqlite`, `postgres`, `d1`).
     backend_kind: String,
-    /// Backend-native unit: file path, schema name, or D1 database name.
+    /// Backend-native unit: file path, Postgres database name, or D1 database name.
     unit_ref: String,
     /// RFC 3339 provisioning time.
     created_at: String,
@@ -864,8 +864,8 @@ async fn run_plugin_db(
                         println!("deleted {}", row.unit_ref);
                     }
                     "postgres" => println!(
-                        "unregistered {}/{}: drop the schema manually with \
-                         `DROP SCHEMA \"{}\" CASCADE`",
+                        "unregistered {}/{}: drop the database manually with \
+                         `DROP DATABASE \"{}\"`",
                         row.plugin_id, row.binding, row.unit_ref
                     ),
                     "d1" => println!(

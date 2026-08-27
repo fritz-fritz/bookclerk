@@ -45,8 +45,10 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> HostExecuteEn
     );
     let mut gated = Vec::with_capacity(req.statements.len());
     for mut stmt in req.statements {
-        // DDL takes no WHERE predicate; replayed DDL is naturally guarded by
-        // IF [NOT] EXISTS (documented for binding authors) or errors closed.
+        // DDL takes no WHERE predicate. Binding DDL is host-proven idempotent
+        // (`IF [NOT] EXISTS` required; `ALTER` / `CREATE TABLE AS` refused),
+        // so a D1 retry of a committed CREATE cannot become a non-idempotent
+        // second apply.
         if is_write(stmt.kind) && !bookclerk_plugin_abi::statement_is_ddl(&stmt.sql) {
             stmt.sql = apply_write_predicate(
                 &stmt.sql,
@@ -344,6 +346,30 @@ mod tests {
             gated.sql
         );
         assert_eq!(gated.parameters.len(), 3);
+    }
+
+    #[test]
+    fn wrap_does_not_predicate_idempotent_ddl() {
+        let req = ExecuteRequest {
+            operation_id: "guest-ddl".into(),
+            request_hash: "b".repeat(64),
+            statements: vec![TypedDbStatement {
+                sql: "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY)".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::Discard,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let wrapped = wrap_guest_typed_request(req);
+        let ddl = &wrapped.request.statements[2];
+        assert!(
+            !ddl.sql.contains("db_atomic_receipts"),
+            "DDL must not grow a write predicate: {}",
+            ddl.sql
+        );
+        assert!(ddl.sql.contains("IF NOT EXISTS"), "{}", ddl.sql);
     }
 
     #[test]

@@ -3542,10 +3542,11 @@ mod tests {
             _invocation: JobInvocation,
             mut context: JobHandlerContext,
         ) -> Result<JobOutcome> {
-            let Some(db) = context.database.take() else {
-                return Err(PluginError::internal("database capability missing"));
-            };
-            db.close().await?;
+            if context.database.take().is_some() {
+                return Err(PluginError::internal(
+                    "host library database must not be injected",
+                ));
+            }
             let Some(named) = context.take_named_database("DB") else {
                 return Err(PluginError::internal("named database binding missing"));
             };
@@ -3554,7 +3555,7 @@ mod tests {
                 return Err(PluginError::internal("unexpected extra binding"));
             }
             Ok(JobOutcome::Completed {
-                message: "database-injected".into(),
+                message: "named-database-injected".into(),
                 bytes_copied: 0,
             })
         }
@@ -3875,7 +3876,7 @@ mod tests {
                         granted as Arc<dyn Destination>,
                         Arc::new(NoopProgress),
                         Arc::new(TestCancel(Arc::new(AtomicBool::new(false)))),
-                        Some(Arc::new(GuestDbProbe) as Arc<dyn GuestDatabase>),
+                        None,
                         vec![(
                             "DB".to_string(),
                             Arc::new(GuestDbProbe) as Arc<dyn GuestDatabase>,
@@ -3885,7 +3886,7 @@ mod tests {
                     .expect("handle");
                 match outcome {
                     JobOutcome::Completed { message, .. } => {
-                        assert_eq!(message, "database-injected");
+                        assert_eq!(message, "named-database-injected");
                     }
                     other => panic!("expected completed, got {other:?}"),
                 }

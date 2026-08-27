@@ -275,16 +275,12 @@ pub async fn open_library_store(
     Ok(store)
 }
 
-/// Granted `JobHandler.handle` database session for one library store.
+/// Test helper: a `GuestDatabase` over a library store with an explicit policy.
 ///
-/// SQL goes through
-/// [`LibraryStore::execute_guest_atomic`](bookclerk_library::LibraryStore::execute_guest_atomic)
-/// with a host-issued table grant (`books`). Unrelated Bookclerk tables stay
-/// denied. Workerd HTTP grants defer the same check to this session.
+/// Production jobs do not inject the host library; plugins use named bindings.
+#[cfg(test)]
 #[must_use]
-pub(crate) fn granted_job_database(
-    store: bookclerk_library::LibraryStore,
-) -> Arc<dyn GuestDatabase> {
+fn granted_job_database(store: bookclerk_library::LibraryStore) -> Arc<dyn GuestDatabase> {
     granted_job_database_with_policy(
         store,
         bookclerk_library::GuestSqlPolicy::allow_tables(["books"]),
@@ -292,15 +288,17 @@ pub(crate) fn granted_job_database(
 }
 
 /// Like [`granted_job_database`], with an explicit table/column/function policy.
+#[cfg(test)]
 #[must_use]
-pub(crate) fn granted_job_database_with_policy(
+fn granted_job_database_with_policy(
     store: bookclerk_library::LibraryStore,
     policy: bookclerk_library::GuestSqlPolicy,
 ) -> Arc<dyn GuestDatabase> {
     Arc::new(GuestJobDatabase { store, policy })
 }
 
-/// Host-exported [`GuestDatabase`] for one `JobHandler.handle` invocation.
+/// Test-only host-library [`GuestDatabase`] (never injected into production jobs).
+#[cfg(test)]
 struct GuestJobDatabase {
     /// Library used for authorized typed `execute`.
     store: bookclerk_library::LibraryStore,
@@ -308,6 +306,7 @@ struct GuestJobDatabase {
     policy: bookclerk_library::GuestSqlPolicy,
 }
 
+#[cfg(test)]
 #[async_trait(?Send)]
 impl GuestDatabase for GuestJobDatabase {
     async fn execute(
@@ -320,7 +319,7 @@ impl GuestDatabase for GuestJobDatabase {
 
 /// One provisioned named plugin database binding served by the active adapter.
 ///
-/// The adapter holds an isolated session (own file / schema / D1 database);
+/// The adapter holds an isolated session (own file / database / D1 database);
 /// guest SQL is authorized with [`bookclerk_library::GuestSqlPolicy::binding_owned`]
 /// and receipt-wrapped against the binding's own `db_atomic_receipts` table.
 struct BindingGuestDatabase {
@@ -399,7 +398,7 @@ impl ExternalDatabase {
     ///
     /// Backend-native units: SQLite gets a file per binding under
     /// `<files_dir>/plugin-databases/<plugin>/<BINDING>.db`, PostgreSQL a
-    /// dedicated schema with a pinned `search_path`, and D1 its own database
+    /// dedicated database (`pb_<plugin>_<binding>`), and D1 its own database
     /// resolved (or created) by name. Third-party adapters advertising
     /// `pluginDatabases` receive the binding name on the public
     /// [`bookclerk_plugin_abi::DatabaseAdapterConfig`]. Each provisioned unit
@@ -535,7 +534,7 @@ impl ExternalDatabase {
                 url: resolve_postgres_url(config)
                     .map_err(|err| PluginError::message(err.to_string()))?,
                 binding: Some(binding.to_string()),
-                schema: Some(unit_ref.to_string()),
+                database: Some(unit_ref.to_string()),
             },
             Some(DatabasePluginKind::D1) => DbConnectParams::D1 {
                 plugin_data_dir: data_dir,
@@ -1702,7 +1701,7 @@ fn connect_context(
                 plugin_data_dir: data_dir,
                 url: resolve_postgres_url(config).map_err(map_config_err)?,
                 binding: None,
-                schema: None,
+                database: None,
             }
         }
         None => return adapter_config_context(&data_dir, settings_json),
@@ -1979,6 +1978,8 @@ mod tests {
         ));
     }
 
+    /// Defense in depth: even a test-only host-library grant that allows
+    /// `books` cannot reach `jobs`. Production jobs never inject this session.
     #[tokio::test]
     async fn granted_job_database_allows_books_and_denies_jobs() {
         let store = bookclerk_library::LibraryStore::from_connection(

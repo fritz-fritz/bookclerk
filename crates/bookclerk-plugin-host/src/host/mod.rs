@@ -6,7 +6,6 @@ mod destination_local;
 mod integration;
 mod source;
 
-pub(crate) use database::granted_job_database;
 pub use database::{
     database_connect_context, load_external_database, migrate_database_plugin, open_library_store,
     open_library_store_for_plugin, DatabaseRegistry, ExternalDatabase,

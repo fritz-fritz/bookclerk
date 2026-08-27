@@ -232,7 +232,7 @@ impl D1Proxy {
             match parse_typed_batch(req, &raw, started) {
                 Ok(mut reply) => {
                     self.normalize_reply_from_declared(req, &mut reply, timeout)
-                        .await;
+                        .await?;
                     reply.statements =
                         bookclerk_db_exec::collapse_host_schema_results(wire_len, reply.statements);
                     if !guest_receipt.is_absent() {
@@ -277,21 +277,21 @@ impl D1Proxy {
         Err(last_err.unwrap_or_else(|| ambiguous_d1("exhausted retries")))
     }
 
-    /// Best-effort declared-type normalization of a typed reply.
+    /// Declared-type normalization of a typed reply.
     ///
-    /// The universal-value contract requires identical observable `DbValue`
-    /// variants across adapters. D1's JSON channel carries no column
-    /// metadata, so declared types come from `pragma_table_info` on the
-    /// tables each `Rows` statement references (cached per table, cleared on
-    /// DDL). Aliased / computed columns and unparsable SQL keep engine-typed
-    /// cells; metadata fetch failures degrade gracefully rather than failing
-    /// the already-executed batch.
+    /// D1's JSON channel carries no column metadata. Declared types come from
+    /// `pragma_table_info` on tables each `Rows` statement references (cached
+    /// per table, cleared on DDL). Only SELECT items that are proven direct
+    /// column references (`col` / `table.col`, with or without `AS alias`)
+    /// are normalized; aliases that remap a different column keep the engine
+    /// type. A failed metadata fetch is **unavailable**, not a silent
+    /// unnormalized reply.
     async fn normalize_reply_from_declared(
         &self,
         req: &ExecuteRequest,
         reply: &mut ExecuteReply,
         timeout: Duration,
-    ) {
+    ) -> std::result::Result<(), DbErr> {
         use std::collections::{BTreeSet, HashMap, HashSet};
 
         let mut per_stmt: Vec<Option<Vec<String>>> = Vec::with_capacity(req.statements.len());
@@ -312,7 +312,7 @@ impl D1Proxy {
             }
         }
         if wanted.is_empty() {
-            return;
+            return Ok(());
         }
         let missing: Vec<String> = wanted
             .iter()
@@ -329,24 +329,42 @@ impl D1Proxy {
                     )
                 })
                 .collect();
-            if let Ok(raw) = self.run_batch_with_timeout(&stmts, timeout).await {
-                if let Some(arr) = raw.get("result").and_then(JsonValue::as_array) {
-                    for (table, entry) in missing.iter().zip(arr) {
-                        let mut columns = HashMap::new();
-                        if let Some(rows) = entry.get("results").and_then(JsonValue::as_array) {
-                            for row in rows {
-                                let name = row.get("name").and_then(JsonValue::as_str);
-                                let decl = row.get("type").and_then(JsonValue::as_str);
-                                if let (Some(name), Some(decl)) = (name, decl) {
-                                    columns.insert(
-                                        name.to_ascii_lowercase(),
-                                        bookclerk_plugin_abi::db_type_from_declared(decl),
-                                    );
-                                }
-                            }
+            let raw = self
+                .run_batch_with_timeout(&stmts, timeout)
+                .await
+                .map_err(|err| {
+                    DbErr::Custom(format!(
+                        "unavailable: declared types for {} could not be loaded: {}",
+                        missing.join(","),
+                        DbErr::from(err)
+                    ))
+                })?;
+            let Some(arr) = raw.get("result").and_then(JsonValue::as_array) else {
+                return Err(DbErr::Custom(
+                    "unavailable: declared-type pragma reply missing result array".into(),
+                ));
+            };
+            for (table, entry) in missing.iter().zip(arr) {
+                let mut columns = HashMap::new();
+                if let Some(rows) = entry.get("results").and_then(JsonValue::as_array) {
+                    for row in rows {
+                        let name = row.get("name").and_then(JsonValue::as_str);
+                        let decl = row.get("type").and_then(JsonValue::as_str);
+                        if let (Some(name), Some(decl)) = (name, decl) {
+                            columns.insert(
+                                name.to_ascii_lowercase(),
+                                bookclerk_plugin_abi::db_type_from_declared(decl),
+                            );
                         }
-                        self.store_table_types(table.clone(), columns);
                     }
+                }
+                self.store_table_types(table.clone(), columns);
+            }
+            for table in &missing {
+                if self.cached_table_types(table).is_none() {
+                    return Err(DbErr::Custom(format!(
+                        "unavailable: declared types for `{table}` were not cached after pragma"
+                    )));
                 }
             }
         }
@@ -377,23 +395,15 @@ impl D1Proxy {
             if map.is_empty() {
                 continue;
             }
+            let Some(sql) = req.statements.get(i).map(|s| s.sql.as_str()) else {
+                continue;
+            };
             let Some(stmt) = reply.statements.get_mut(i) else {
                 continue;
             };
-            for col_idx in 0..stmt.columns.len() {
-                let key = stmt.columns[col_idx].name.to_ascii_lowercase();
-                let Some(&ty) = map.get(&key) else { continue };
-                if stmt.columns[col_idx].db_type == DbType::Unspecified {
-                    stmt.columns[col_idx].db_type = ty;
-                }
-                for row in &mut stmt.rows {
-                    if let Some(cell) = row.values.get_mut(col_idx) {
-                        *cell =
-                            bookclerk_plugin_abi::normalize_db_value_for_column(cell.clone(), ty);
-                    }
-                }
-            }
+            apply_proven_declared_types(stmt, sql, &map);
         }
+        Ok(())
     }
 }
 
@@ -873,6 +883,85 @@ fn select_item_name(item: &str) -> Option<String> {
         return None;
     }
     Some(token.to_string())
+}
+
+/// Source column of a SELECT item when it is a proven direct reference.
+///
+/// `col`, `table.col`, and `expr AS alias` where `expr` is one of those
+/// forms. Computed expressions (`n + 1`, `NOT flag`) return `None` so the
+/// engine type is kept instead of matching the output alias to a physical
+/// column (the `SELECT n AS flag` boolean collision).
+fn select_item_proven_column(item: &str) -> Option<String> {
+    let item = item.trim();
+    if item.is_empty() || item == "*" || item.ends_with(".*") {
+        return None;
+    }
+    let upper = item.to_ascii_uppercase();
+    let expr = if let Some(idx) = upper.rfind(" AS ") {
+        item[..idx].trim()
+    } else {
+        item
+    };
+    let expr = expr.trim_matches(|c| c == '"' || c == '`' || c == '\'');
+    if expr.is_empty() || expr.contains('(') || expr.contains('+') || expr.contains(' ') {
+        return None;
+    }
+    let col = expr.rsplit('.').next().unwrap_or(expr).trim();
+    let col = col.trim_matches(|c| c == '"' || c == '`' || c == '\'');
+    if col.is_empty() || col == "*" || !col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(col.to_ascii_lowercase())
+}
+
+/// Proven source column per SELECT-list item (same split as [`select_list_column_names`]).
+fn select_list_proven_columns(sql: &str) -> Vec<Option<String>> {
+    let select = match select_list_slice(sql) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let mut cols = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let bytes = select.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                cols.push(select_item_proven_column(&select[start..i]));
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    cols.push(select_item_proven_column(&select[start..]));
+    cols
+}
+
+/// Applies declared types only to SELECT items proven to be direct columns.
+fn apply_proven_declared_types(
+    stmt: &mut StatementResult,
+    sql: &str,
+    map: &std::collections::HashMap<String, DbType>,
+) {
+    let proven = select_list_proven_columns(sql);
+    for col_idx in 0..stmt.columns.len() {
+        let key = proven
+            .get(col_idx)
+            .and_then(|c| c.as_deref())
+            .map(str::to_string);
+        let Some(key) = key else { continue };
+        let Some(&ty) = map.get(&key) else { continue };
+        if stmt.columns[col_idx].db_type == DbType::Unspecified {
+            stmt.columns[col_idx].db_type = ty;
+        }
+        for row in &mut stmt.rows {
+            if let Some(cell) = row.values.get_mut(col_idx) {
+                *cell = bookclerk_plugin_abi::normalize_db_value_for_column(cell.clone(), ty);
+            }
+        }
+    }
 }
 
 /// Parses a D1 HTTP batch body into [`ExecuteReply`] and encodes before return.
@@ -1546,5 +1635,43 @@ mod tests {
             DbValue::Text("b64:not-bytes".into())
         );
         assert_eq!(reply.statements[0].columns[0].db_type, DbType::Text);
+    }
+
+    #[test]
+    fn proven_column_ignores_alias_collision() {
+        assert_eq!(select_item_proven_column("n AS flag").as_deref(), Some("n"));
+        assert_eq!(select_item_proven_column("flag").as_deref(), Some("flag"));
+        assert_eq!(select_item_proven_column("x.flag").as_deref(), Some("flag"));
+        assert_eq!(select_item_proven_column("n + 1 AS flag"), None);
+        assert_eq!(select_item_proven_column("NOT flag"), None);
+        let sql = "SELECT n AS flag, flag FROM x";
+        assert_eq!(
+            select_list_proven_columns(sql),
+            vec![Some("n".into()), Some("flag".into())]
+        );
+        let mut stmt = StatementResult {
+            rows: vec![DbRow {
+                values: vec![DbValue::Int64(1), DbValue::Int64(1)],
+            }],
+            columns: vec![
+                DbColumn {
+                    name: "flag".into(),
+                    db_type: DbType::Unspecified,
+                },
+                DbColumn {
+                    name: "flag".into(),
+                    db_type: DbType::Unspecified,
+                },
+            ],
+            rows_affected: 0,
+        };
+        let mut map = std::collections::HashMap::new();
+        map.insert("flag".into(), DbType::Bool);
+        map.insert("n".into(), DbType::Int64);
+        apply_proven_declared_types(&mut stmt, sql, &map);
+        assert_eq!(stmt.rows[0].values[0], DbValue::Int64(1));
+        assert_eq!(stmt.rows[0].values[1], DbValue::Boolean(true));
+        assert_eq!(stmt.columns[0].db_type, DbType::Int64);
+        assert_eq!(stmt.columns[1].db_type, DbType::Bool);
     }
 }

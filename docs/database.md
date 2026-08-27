@@ -132,12 +132,13 @@ guests with `cargo stage-plugins --optional`.
 
 Plugins that declare `capabilities.bindings.databases = ["DB", ...]` get
 Workers-style **named database bindings**: one isolated database per binding,
-provisioned by the active adapter (SQLite file / PostgreSQL schema with pinned
-`search_path` / Cloudflare D1 database by name) and recorded in the host
+provisioned by the active adapter (SQLite file / PostgreSQL **database** /
+Cloudflare D1 database by name) and recorded in the host
 `plugin_databases` registry. Bindings are consented per name
 (`database:<NAME>` grant entries), carry their own `db_atomic_receipts` for
-retry-token replay, and allow plugin-owned schema (full DML plus bounded
-`CREATE`/`ALTER`/`DROP` `TABLE`/`INDEX`). Operator lifecycle:
+retry-token replay, and allow plugin-owned schema (full DML plus idempotent
+`CREATE`/`DROP` `TABLE`/`INDEX` with `IF [NOT] EXISTS`). Jobs never receive
+the host library as guest SQL. Operator lifecycle:
 `bookclerk plugins db list` / `bookclerk plugins db drop <plugin> [binding]`.
 See [plugins.md — Isolated plugin database bindings](plugins.md#isolated-plugin-database-bindings).
 

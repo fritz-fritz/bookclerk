@@ -1,8 +1,15 @@
 # Durable job queue
 
-`bookclerkd` admits background work as **durable rows** in `library.db` (`jobs`
-+ `job_temp_paths`). HTTP and the interval scheduler are producers; leased
-workers claim jobs. There is no external broker.
+`bookclerkd` admits background work as **durable rows** in the host library
+database (`jobs` + `job_temp_paths` on the same schema as `books` and
+`accounts`). HTTP and the interval scheduler are producers; leased workers
+claim jobs. There is no external broker and **no dedicated jobs database**.
+
+The queue is host-owned. Guests never receive SQL against `jobs` (or any other
+library table). A plugin that needs its own durable store declares a named
+database binding; that unit is physically separate and holds only plugin-owned
+DDL. Job lifecycle (admit, claim, heartbeat, complete) stays host SeaORM /
+typed host plans on the library.
 
 This is not a general pub/sub bus. Domain events such as `book_acquired` /
 plugin `onEvent` stay **off** `JobKind`. They use a durable outbox

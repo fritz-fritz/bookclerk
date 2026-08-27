@@ -106,8 +106,10 @@ pub struct JobHandlerContext {
     pub output: Box<dyn Destination>,
     /// Progress sink (durable job row).
     pub progress: Box<dyn ProgressSink>,
-    /// Host-mediated typed SQL session when the invocation grant includes one.
-    /// Host-granted typed SQL binding for one job invocation (`abiMinor` ≥ 11).
+    /// Unused in production. Jobs never inject the host library as guest SQL;
+    /// durable plugin state uses [`Self::databases`]. Kept so older guests
+    /// that still read this field see `None` instead of a library session
+    /// (`abiMinor` ≥ 11).
     pub database: Option<Box<dyn GuestDatabase>>,
     /// Named plugin-owned database bindings (`abiMinor` ≥ 18): isolated
     /// databases from `plugin.toml` `capabilities.bindings.databases`,

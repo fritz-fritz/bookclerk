@@ -1417,9 +1417,10 @@ async fn run_stream_copy(
     let payload =
         serde_json::to_string(&spec).map_err(|err| PluginError::message(err.to_string()))?;
     let invocation = JobInvocation::stream_copy_from_lease(lease, payload);
-    let database = progress
-        .as_ref()
-        .map(|(store, _)| crate::host::granted_job_database(store.clone()));
+    // Plugins never receive the host library as `context.database`. Durable
+    // plugin state uses consented named bindings (`context.databases`) on
+    // physically separate units.
+    let database = None;
     let input: Arc<dyn Source> = Arc::new(DestAsSource { dest: dest.clone() });
     let output: Arc<dyn Destination> = Arc::new(FencedDestination {
         inner: Arc::new(dest.clone()),

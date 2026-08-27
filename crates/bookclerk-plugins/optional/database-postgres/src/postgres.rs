@@ -1,6 +1,6 @@
 //! PostgreSQL engine for the database plugin (SeaORM sqlx-postgres).
 
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr, Statement};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbErr, Statement};
 
 /// Open Postgres with a host-mediated connection URL (ping only; host applies schema).
 ///
@@ -14,42 +14,82 @@ pub async fn open(url: &str) -> std::result::Result<DatabaseConnection, DbErr> {
     Ok(db)
 }
 
-/// Open a dedicated per-binding connection pinned to its own schema.
+/// Rewrites the database name in a Postgres URL, preserving query options.
+#[must_use]
+pub fn postgres_url_with_database(url: &str, database: &str) -> String {
+    let (base, query) = match url.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (url, None),
+    };
+    let trimmed = base.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(slash) => {
+            let head = &trimmed[..slash];
+            match query {
+                Some(q) => format!("{head}/{database}?{q}"),
+                None => format!("{head}/{database}"),
+            }
+        }
+        None => match query {
+            Some(q) => format!("{trimmed}/{database}?{q}"),
+            None => format!("{trimmed}/{database}"),
+        },
+    }
+}
+
+/// True when `name` is a safe unquoted Postgres identifier (`[a-z0-9_]+`).
+fn binding_database_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Open a dedicated per-binding **database** (not a schema on the library DB).
 ///
-/// Creates the schema when missing and pins the pool `search_path` to it, so
-/// unqualified identifiers resolve only inside the binding's schema. The
-/// host-side binding policy rejects schema-qualified names, which closes the
-/// cross-schema escape.
+/// Creates the database when missing, then connects to it. Plugin SQL cannot
+/// see host library tables in another database, even via `CREATE TABLE AS`
+/// or `REFERENCES public.books`.
 ///
 /// # Errors
 ///
-/// Returns an error when the connection, schema creation, or ping fails.
+/// Returns an error when the name is unsafe, `CREATE DATABASE` fails (the
+/// role needs `CREATEDB`), or the binding connection cannot ping.
 pub async fn open_binding(
     url: &str,
-    schema: &str,
+    database: &str,
 ) -> std::result::Result<DatabaseConnection, DbErr> {
-    if schema.is_empty()
-        || !schema
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-    {
+    if !binding_database_name_ok(database) {
         return Err(DbErr::Custom(format!(
-            "invalid binding schema name `{schema}`"
+            "invalid binding database name `{database}`"
         )));
     }
-    // Provision via a plain connection first (search_path-independent DDL).
     let admin = Database::connect(url).await?;
-    admin
-        .execute_raw(Statement::from_string(
-            admin.get_database_backend(),
-            format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""),
+    let backend = admin.get_database_backend();
+    let existing = admin
+        .query_all_raw(Statement::from_string(
+            backend,
+            format!("SELECT 1 FROM pg_database WHERE datname = '{database}'"),
         ))
         .await?;
-    let mut opt = ConnectOptions::new(url.to_owned());
-    opt.set_schema_search_path(schema.to_owned());
-    let db = Database::connect(opt).await?;
+    if existing.is_empty() {
+        admin
+            .execute_raw(Statement::from_string(
+                backend,
+                format!("CREATE DATABASE {database}"),
+            ))
+            .await
+            .map_err(|err| {
+                DbErr::Custom(format!(
+                    "could not create isolated plugin database `{database}` \
+                     (the Postgres role needs CREATEDB): {err}"
+                ))
+            })?;
+    }
+    drop(admin);
+    let db = Database::connect(postgres_url_with_database(url, database)).await?;
     db.ping().await?;
-    tracing::debug!(plugin = "postgres", schema, "opened binding database");
+    tracing::debug!(plugin = "postgres", database, "opened binding database");
     Ok(db)
 }
 
@@ -73,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn open_binding_rejects_unsafe_schema_names() {
+    fn open_binding_rejects_unsafe_database_names() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -81,23 +121,34 @@ mod tests {
         for bad in ["", "Public", "a.b", "a\"b", "a b", "a;b"] {
             let err = rt
                 .block_on(open_binding("postgres://invalid", bad))
-                .expect_err("unsafe schema name must fail before connecting");
-            assert!(err.to_string().contains("schema name"), "{bad}: {err}");
+                .expect_err("unsafe database name must fail before connecting");
+            assert!(err.to_string().contains("database name"), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn postgres_url_with_database_preserves_query() {
+        assert_eq!(
+            postgres_url_with_database("postgres://h/library?sslmode=require", "pb_echo_db"),
+            "postgres://h/pb_echo_db?sslmode=require"
+        );
     }
 
     #[tokio::test]
     #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
-    async fn postgres_binding_schemas_isolate_same_named_tables() {
+    async fn postgres_binding_databases_are_physically_separate() {
         let url = postgres_test_url();
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let schema_a = format!("pb_test_a_{suffix}");
-        let schema_b = format!("pb_test_b_{suffix}");
-        let a = open_binding(&url, &schema_a).await.expect("binding A");
-        let b = open_binding(&url, &schema_b).await.expect("binding B");
+        let db_a = format!("pb_test_a_{suffix}");
+        let db_b = format!("pb_test_b_{suffix}");
+        // Truncate to Postgres NAMEDATALEN (63) if the nanos suffix is long.
+        let db_a = db_a.chars().take(63).collect::<String>();
+        let db_b = db_b.chars().take(63).collect::<String>();
+        let a = open_binding(&url, &db_a).await.expect("binding A");
+        let b = open_binding(&url, &db_b).await.expect("binding B");
         for (db, marker) in [(&a, "alpha"), (&b, "beta")] {
             db.execute_raw(Statement::from_string(
                 db.get_database_backend(),
@@ -120,20 +171,34 @@ mod tests {
                 ))
                 .await
                 .expect("select per-binding rows");
-            assert_eq!(rows.len(), 1, "pinned search_path must isolate schemas");
+            assert_eq!(rows.len(), 1, "each binding database is isolated");
             let body: String = rows[0].try_get("", "body").expect("body");
             assert_eq!(body, marker);
-        }
-        // Cleanup so repeated CI runs stay disposable.
-        let admin = Database::connect(url.as_str()).await.expect("admin");
-        for schema in [&schema_a, &schema_b] {
-            admin
-                .execute_raw(Statement::from_string(
-                    admin.get_database_backend(),
-                    format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"),
+            let host = db
+                .query_all_raw(Statement::from_string(
+                    db.get_database_backend(),
+                    "SELECT to_regclass('public.books') IS NOT NULL AS present".to_string(),
                 ))
                 .await
-                .expect("drop test schema");
+                .expect("host table probe");
+            let present: bool = host[0].try_get("", "present").unwrap_or(true);
+            assert!(
+                !present,
+                "binding database must not contain the host library catalog"
+            );
+        }
+        drop(a);
+        drop(b);
+        let admin = Database::connect(url.as_str()).await.expect("admin");
+        let backend = admin.get_database_backend();
+        for name in [&db_a, &db_b] {
+            admin
+                .execute_raw(Statement::from_string(
+                    backend,
+                    format!("DROP DATABASE IF EXISTS {name}"),
+                ))
+                .await
+                .expect("drop test database");
         }
     }
 }

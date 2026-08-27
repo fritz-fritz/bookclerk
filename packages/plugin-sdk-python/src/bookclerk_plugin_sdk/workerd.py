@@ -266,6 +266,7 @@ class JobContext:
     """Granted stubs for one :class:`JobHandler.handle` invocation."""
 
     database: "DatabaseBinding | None" = None
+    """Unused in production. Jobs never inject the host library as guest SQL."""
     guest_database: GuestDatabase | None = None
     databases: "dict[str, DatabaseBinding]" = field(default_factory=dict)
     """Named plugin-owned database bindings (Workers-style).
@@ -273,7 +274,9 @@ class JobContext:
     Declared in ``plugin.toml`` ``capabilities.bindings.databases`` and
     approved by the operator. Each binding is an isolated database — separate
     from the Bookclerk library and every other plugin — with full DML plus
-    bounded DDL (``CREATE``/``ALTER``/``DROP`` ``TABLE``/``INDEX``).
+    bounded idempotent DDL (``CREATE``/``DROP`` ``TABLE``/``INDEX``
+    with ``IF [NOT] EXISTS``). ``ALTER`` and ``CREATE TABLE AS`` are
+    refused.
     """
 
 
