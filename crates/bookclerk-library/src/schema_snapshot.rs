@@ -341,7 +341,7 @@ async fn table_columns(
              WHERE table_schema = current_schema() AND table_name = '{table}' \
              ORDER BY ordinal_position"
         ),
-        _ => format!("PRAGMA table_info({table})"),
+        _ => format!("SELECT name FROM pragma_table_info('{table}')"),
     };
     let rows = db
         .query_all_raw(Statement::from_string(backend, sql))

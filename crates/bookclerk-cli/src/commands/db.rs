@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use bookclerk_config::{Config, DatabasePluginKind};
 use bookclerk_library::migrations::{host_migration_plan, SCHEMA_V1_INTRODUCED_IN};
 use bookclerk_library::{
-    archive_snapshot_dir, current_schema_version, extract_snapshot_archive, migrate_host_schema_to,
-    restore_snapshot, snapshot_library, HostSchemaKind, SchemaApplyOptions, SchemaSnapshotOpts,
-    SnapshotRequest, SCHEMA_VERSION,
+    archive_snapshot_dir, current_schema_version, extract_snapshot_archive, restore_snapshot,
+    snapshot_library, HostSchemaKind, SchemaApplyOptions, SchemaSnapshotOpts, SnapshotRequest,
+    SCHEMA_VERSION,
 };
 use clap::Subcommand;
 use sea_orm::DatabaseConnection;
@@ -224,22 +224,20 @@ async fn run_migrate(
     target: i64,
     include_plugin_databases: bool,
 ) -> anyhow::Result<()> {
-    let (db, kind, _) = open_unmigrated(config).await?;
-    let before = current_schema_version(&db, kind).await?;
-    let walk = migrate_host_schema_to(
-        &db,
-        kind,
+    let walk = bookclerk_plugin_host::migrate_library_schema(
+        config,
         target,
         apply_opts(config, include_plugin_databases).await,
     )
     .await?;
+    let (db, kind, _) = open_unmigrated(config).await?;
     let after = current_schema_version(&db, kind).await?;
     let payload = json!({
         "from": walk.from,
         "requested_to": walk.requested_to,
         "stopped_at": walk.stopped_at,
         "blocked": walk.blocked,
-        "before": before,
+        "before": walk.from,
         "after": after,
     });
     if walk.blocked || after != target {

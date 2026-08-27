@@ -207,6 +207,27 @@ pub async fn migrate_host_schema_to(
     Ok(walk)
 }
 
+/// Migrates toward `target` using `run_batch` (typed `executeAtomic`) per version.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when the walk cannot start, a snapshot fails, or a batch fails.
+pub async fn migrate_host_schema_to_with_batch<F, Fut>(
+    db: &DatabaseConnection,
+    kind: HostSchemaKind,
+    target: i64,
+    opts: SchemaApplyOptions,
+    mut run_batch: F,
+) -> Result<SchemaWalk>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let walk = prepare_schema_change(db, kind, target, &opts).await?;
+    apply_walk_batch(db, kind, &walk, &mut run_batch).await?;
+    Ok(walk)
+}
+
 /// Timing label for schema migration transactions on `backend`.
 fn schema_migration_timing(backend: DbBackend) -> &'static str {
     if backend == DbBackend::Postgres {
@@ -558,12 +579,13 @@ async fn apply_one_sqlite_version(
     Err(last_applied_err.expect("sqlite schema version retry"))
 }
 
-/// Reads `PRAGMA user_version`.
+/// Reads SQLite `user_version` as a `SELECT` so the RPC proxy does not run
+/// `PRAGMA` through rusqlite `execute` (which rejects row-producing statements).
 async fn sqlite_user_version(db: &DatabaseConnection) -> Result<i64> {
     let rows = db
         .query_all_raw(Statement::from_string(
             DbBackend::Sqlite,
-            "PRAGMA user_version",
+            "SELECT * FROM pragma_user_version",
         ))
         .await
         .map_err(LibraryError::Orm)?;

@@ -225,6 +225,31 @@ impl ExternalDatabase {
         .await
         .map_err(|err| DbErr::Custom(err.to_string()))
     }
+
+    /// Migrates toward `target` using guest `executeAtomic` batches (CLI migrate / downgrade).
+    ///
+    /// # Errors
+    ///
+    /// Returns when capability flags are unknown or a schema batch fails.
+    pub async fn migrate_to(
+        &self,
+        db: &DatabaseConnection,
+        caps: &DbCapabilities,
+        target: i64,
+        opts: bookclerk_library::SchemaApplyOptions,
+    ) -> Result<bookclerk_library::SchemaWalk, DbErr> {
+        let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(caps)
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
+        let session = self.session.clone();
+        let caps = caps.clone();
+        bookclerk_library::migrate_host_schema_to_with_batch(db, kind, target, opts, move |stmts| {
+            let session = session.clone();
+            let caps = caps.clone();
+            async move { exec_host_ddl_batch(&session, &caps, stmts).await }
+        })
+        .await
+        .map_err(|err| DbErr::Custom(err.to_string()))
+    }
 }
 
 /// Long-lived external database plugin for the active `[database].plugin`.
@@ -303,6 +328,33 @@ pub async fn load_external_database(config: &Config) -> PluginResult<DatabaseReg
         )));
     }
     Ok(registry)
+}
+
+/// Opens the active database guest without auto-apply and migrates to `target`.
+///
+/// Uses guest `executeAtomic` batches (the same path as daemon connect).
+///
+/// # Errors
+///
+/// Returns when the guest cannot start, connect, or apply schema.
+pub async fn migrate_library_schema(
+    config: &Config,
+    target: i64,
+    opts: bookclerk_library::SchemaApplyOptions,
+) -> PluginResult<bookclerk_library::SchemaWalk> {
+    let registry = load_external_database(config).await?;
+    let ext = registry.active().ok_or_else(|| {
+        PluginError::message(
+            "no active database plugin — stage and enable [database].plugin".to_string(),
+        )
+    })?;
+    let (db, caps) = ext
+        .connect_without_migrate(config)
+        .await
+        .map_err(|err| PluginError::message(err.to_string()))?;
+    ext.migrate_to(&db, &caps, target, opts)
+        .await
+        .map_err(|err| PluginError::message(err.to_string()))
 }
 
 /// Open [`bookclerk_library::LibraryStore`] via the external database guest (required).
