@@ -38,23 +38,44 @@ pub fn postgres_url_with_database(url: &str, database: &str) -> String {
     }
 }
 
-/// True when `CREATE DATABASE` lost a check-then-create race (`42P04`).
+/// True when `CREATE DATABASE` lost a check-then-create race.
+///
+/// Postgres may report `42P04 duplicate_database` or a catalog unique
+/// violation (`23505` / `pg_database_datname_index`) depending on version
+/// and timing. Callers still re-check `pg_database` after a miss.
 fn is_duplicate_database(err: &DbErr) -> bool {
     match err {
         DbErr::Exec(RuntimeErr::SqlxError(e))
         | DbErr::Query(RuntimeErr::SqlxError(e))
         | DbErr::Conn(RuntimeErr::SqlxError(e)) => match e.deref() {
-            sea_orm::sqlx::Error::Database(db_err) => db_err.code().as_deref() == Some("42P04"),
-            _ => {
-                let text = err.to_string();
-                text.contains("42P04") || text.contains("duplicate_database")
+            sea_orm::sqlx::Error::Database(db_err) => {
+                matches!(db_err.code().as_deref(), Some("42P04" | "23505"))
             }
+            _ => duplicate_database_text(&err.to_string()),
         },
-        _ => {
-            let text = err.to_string();
-            text.contains("42P04") || text.contains("duplicate_database")
-        }
+        _ => duplicate_database_text(&err.to_string()),
     }
+}
+
+/// True when `text` names a concurrent `CREATE DATABASE` race.
+fn duplicate_database_text(text: &str) -> bool {
+    text.contains("42P04")
+        || text.contains("duplicate_database")
+        || text.contains("pg_database_datname_index")
+}
+
+/// True when `database` already exists in this cluster.
+async fn binding_database_exists(
+    admin: &DatabaseConnection,
+    database: &str,
+) -> std::result::Result<bool, DbErr> {
+    let rows = admin
+        .query_all_raw(Statement::from_string(
+            admin.get_database_backend(),
+            format!("SELECT 1 FROM pg_database WHERE datname = '{database}'"),
+        ))
+        .await?;
+    Ok(!rows.is_empty())
 }
 
 /// True when `name` is a safe unquoted Postgres identifier (`[a-z0-9_]+`).
@@ -85,24 +106,18 @@ pub async fn open_binding(
         )));
     }
     let admin = Database::connect(url).await?;
-    let backend = admin.get_database_backend();
-    let existing = admin
-        .query_all_raw(Statement::from_string(
-            backend,
-            format!("SELECT 1 FROM pg_database WHERE datname = '{database}'"),
-        ))
-        .await?;
-    if existing.is_empty() {
-        match admin
+    if !binding_database_exists(&admin, database).await? {
+        if let Err(err) = admin
             .execute_raw(Statement::from_string(
-                backend,
+                admin.get_database_backend(),
                 format!("CREATE DATABASE {database}"),
             ))
             .await
         {
-            Ok(_) => {}
-            Err(err) if is_duplicate_database(&err) => {}
-            Err(err) => {
+            // 42P04 is the documented race; some clusters surface 23505 on
+            // `pg_database_datname_index` instead. If the name exists now,
+            // the other opener won — connect.
+            if !is_duplicate_database(&err) && !binding_database_exists(&admin, database).await? {
                 return Err(DbErr::Custom(format!(
                     "could not create isolated plugin database `{database}` \
                      (the Postgres role needs CREATEDB): {err}"
@@ -230,6 +245,9 @@ mod tests {
     fn duplicate_database_sqlstate_is_concurrent_success() {
         assert!(is_duplicate_database(&DbErr::Custom(
             "error: 42P04 duplicate_database".into()
+        )));
+        assert!(is_duplicate_database(&DbErr::Custom(
+            "duplicate key value violates unique constraint \"pg_database_datname_index\"".into()
         )));
         assert!(!is_duplicate_database(&DbErr::Custom(
             "could not create isolated plugin database".into()
