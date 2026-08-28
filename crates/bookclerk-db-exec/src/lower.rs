@@ -367,12 +367,13 @@ fn rewrite_julianday_delta(sql: &str) -> String {
 /// - `BOOLEAN` is already a Postgres type and is left unchanged
 ///
 /// Token matching is case-insensitive in **type position** of a
-/// `CREATE TABLE` column list (column names such as `blob` are preserved).
-/// Trivia between `INTEGER PRIMARY KEY AUTOINCREMENT` words is skipped.
+/// `CREATE TABLE` column list and `ALTER TABLE … ADD COLUMN` (column names
+/// such as `blob` are preserved). Trivia between
+/// `INTEGER PRIMARY KEY AUTOINCREMENT` words is skipped.
 /// String literals and comments are copied verbatim.
 pub(crate) fn rewrite_canonical_ddl_types_for_postgres(sql: &str) -> String {
     let Some(open) = create_table_column_list_open(sql) else {
-        return sql.to_string();
+        return rewrite_alter_add_column_types(sql);
     };
     let mut out = String::with_capacity(sql.len() + 16);
     out.push_str(&sql[..=open]);
@@ -449,6 +450,48 @@ pub(crate) fn rewrite_canonical_ddl_types_for_postgres(sql: &str) -> String {
         out.push_str(&sql[i..]);
     }
     out
+}
+
+/// Rewrites `ALTER TABLE … ADD [COLUMN] name TYPE` in type position only.
+fn rewrite_alter_add_column_types(sql: &str) -> String {
+    let mut i = skip_trivia_idx(sql, 0);
+    if !ident_eq_ci(sql, i, "ALTER") {
+        return sql.to_string();
+    }
+    i = skip_trivia_idx(sql, i + "ALTER".len());
+    if !ident_eq_ci(sql, i, "TABLE") {
+        return sql.to_string();
+    }
+    i = skip_trivia_idx(sql, i + "TABLE".len());
+    if ident_eq_ci(sql, i, "IF") {
+        i = skip_trivia_idx(sql, i + "IF".len());
+        if ident_eq_ci(sql, i, "EXISTS") {
+            i = skip_trivia_idx(sql, i + "EXISTS".len());
+        }
+    }
+    let Some((_, name_end)) = ident_span_at(sql, i) else {
+        return sql.to_string();
+    };
+    i = skip_trivia_idx(sql, name_end);
+    if !ident_eq_ci(sql, i, "ADD") {
+        return sql.to_string();
+    }
+    i = skip_trivia_idx(sql, i + "ADD".len());
+    if ident_eq_ci(sql, i, "COLUMN") {
+        i = skip_trivia_idx(sql, i + "COLUMN".len());
+    }
+    let Some((_, col_end)) = ident_span_at(sql, i) else {
+        return sql.to_string();
+    };
+    i = skip_trivia_idx(sql, col_end);
+    if let Some((end, repl)) = ddl_type_rewrite_at(sql, i) {
+        let mut out = String::with_capacity(sql.len() + repl.len());
+        out.push_str(&sql[..i]);
+        out.push_str(repl);
+        out.push_str(&sql[end..]);
+        return out;
+    }
+    sql.to_string()
 }
 
 /// Byte offset of the `CREATE TABLE … (` column-list open paren, if present.
@@ -903,6 +946,20 @@ mod tests {
         );
         assert!(named_blob.contains("BOOLEAN"), "{named_blob}");
         assert!(!named_blob.contains("BYTEA BYTEA"), "{named_blob}");
+
+        let alter = rewrite_canonical_ddl_types_for_postgres(
+            "ALTER TABLE jobs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0",
+        );
+        assert!(
+            alter.contains("lease_generation BIGINT") && !alter.contains("INTEGER"),
+            "{alter}"
+        );
+        let alter_lc =
+            rewrite_canonical_ddl_types_for_postgres("alter table jobs add column payload blob");
+        assert!(
+            alter_lc.contains("payload BYTEA") && !alter_lc.contains("blob"),
+            "{alter_lc}"
+        );
 
         let mixed = rewrite_canonical_ddl_types_for_postgres(
             "Create Table t (id Integer Primary Key Autoincrement, payload Blob, flag Boolean)",
