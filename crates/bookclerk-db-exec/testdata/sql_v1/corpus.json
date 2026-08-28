@@ -46,6 +46,11 @@
       "postgres": "SELECT COALESCE(x, 0), GREATEST(attempt_count, 1)"
     },
     {
+      "id": "ifnull-lowercase",
+      "canonical": "SELECT ifnull(NULL, 5)",
+      "postgres": "SELECT COALESCE(NULL, 5)"
+    },
+    {
       "id": "min-max-scalar",
       "canonical": "SELECT max(1, 2), min(a, b, c)",
       "postgres": "SELECT GREATEST(1, 2), LEAST(a, b, c)"

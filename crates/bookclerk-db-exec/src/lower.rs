@@ -28,7 +28,6 @@ pub fn lower_canonical_sql(backend: DatabaseBackend, sql: &str) -> String {
 #[must_use]
 pub fn lower_canonical_to_postgres(sql: &str) -> String {
     let sql = insert_or_ignore_postgres(sql);
-    let sql = replace_in_code(&sql, "json_object(", "json_build_object(");
     let sql = sqlite_fns_to_postgres(&sql);
     rewrite_placeholders_postgres(&sql)
 }
@@ -79,7 +78,8 @@ fn insert_or_ignore_postgres(sql: &str) -> String {
 
 /// Maps SQLite helpers used in host plans onto PostgreSQL equivalents.
 fn sqlite_fns_to_postgres(sql: &str) -> String {
-    let mut sql = replace_in_code(sql, "IFNULL(", "COALESCE(");
+    let mut sql = rewrite_fn_name(sql, "ifnull", "COALESCE");
+    sql = rewrite_fn_name(&sql, "json_object", "json_build_object");
     sql = rewrite_variadic_min_max(&sql);
     sql = rewrite_json_valid(&sql);
     sql = rewrite_json_extract(&sql);
@@ -104,6 +104,28 @@ fn sqlite_fns_to_postgres(sql: &str) -> String {
         "(resume_pending != 0)",
     );
     rewrite_julianday_delta(&sql)
+}
+
+/// Replaces a function ident (`name(`) with `pg_name(` (case-insensitive).
+fn rewrite_fn_name(sql: &str, name: &str, pg_name: &str) -> String {
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len() + pg_name.len());
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        if ident_call_at(sql, i, name) {
+            out.push_str(pg_name);
+            i += name.len();
+            continue;
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 /// Rewrites 2+-arg `min`/`max` (SQLite scalars) to `LEAST`/`GREATEST`.
@@ -254,15 +276,16 @@ fn split_call_args(s: &str) -> Option<(Vec<String>, &str)> {
 fn rewrite_json_extract(sql: &str) -> String {
     let mut i = 0;
     let mut out = String::with_capacity(sql.len());
-    let needle = "json_extract(";
     while i < sql.len() {
         if let Some(len) = literal_or_comment_len(&sql[i..]) {
             out.push_str(&sql[i..i + len]);
             i += len;
             continue;
         }
-        if sql[i..].starts_with(needle) {
-            let after = &sql[i + needle.len()..];
+        if ident_call_at(sql, i, "json_extract") {
+            let after = &sql[i + "json_extract".len()..];
+            let after = after.trim_start();
+            let after = after.strip_prefix('(').unwrap_or(after);
             if let Some((expr, json_path, rest2)) = parse_json_extract_args(after) {
                 let expr = rewrite_json_extract(expr);
                 let pg_path = json_path.replace('.', ",");
@@ -615,6 +638,18 @@ mod tests {
             bare.contains("CASE WHEN (payload) IS JSON THEN 1 ELSE 0 END"),
             "{bare}"
         );
+    }
+
+    #[test]
+    fn postgres_rewrites_ifnull_and_json_object_case_insensitively() {
+        assert_eq!(
+            lower_canonical_to_postgres("SELECT ifnull(NULL, 5), IFNULL(x, 0)"),
+            "SELECT COALESCE(NULL, 5), COALESCE(x, 0)"
+        );
+        let sql = lower_canonical_to_postgres("SELECT json_object('k', ?), JSON_OBJECT('a', 1)");
+        assert!(sql.contains("json_build_object('k', $1)"), "{sql}");
+        assert!(sql.contains("json_build_object('a', 1)"), "{sql}");
+        assert!(!sql.to_ascii_lowercase().contains("json_object("), "{sql}");
     }
 
     #[test]
