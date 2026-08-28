@@ -1946,3 +1946,92 @@ async fn postgres_binding_portable_functions() {
         )
     );
 }
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_binding_portable_boolean_column() {
+    if !postgres_conformance_enabled() {
+        return;
+    }
+    let db = postgres_binding_db().await;
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ddl-bool",
+            vec![binding_stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_BOOLEAN,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("boolean DDL");
+    let mut insert = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_BOOLEAN_INSERT,
+        bookclerk_db_exec::sql_v1::portable_boolean_insert_binds(),
+    );
+    insert.result_selection = bookclerk_plugin_abi::DbResultSelection::AffectedRows;
+    run_postgres_binding(&db, binding_req("pg-ins-bool", vec![insert]))
+        .await
+        .expect("boolean insert");
+    let mut select = binding_stmt(bookclerk_db_exec::sql_v1::PORTABLE_BOOLEAN_SELECT, vec![]);
+    select.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-sel-bool", vec![select]))
+        .await
+        .expect("boolean select");
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_boolean_mismatch(&reply.statements[0]) {
+        panic!("{err}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_binding_lowercase_ddl_and_insert_or_ignore_returning() {
+    if !postgres_conformance_enabled() {
+        return;
+    }
+    let db = postgres_binding_db().await;
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ddl-lc",
+            vec![binding_stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_LOWERCASE,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("lowercase DDL");
+    let mut insert = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_INSERT_OR_IGNORE_RETURNING_LC,
+        bookclerk_db_exec::sql_v1::portable_lowercase_insert_binds(),
+    );
+    insert.result_selection = bookclerk_plugin_abi::DbResultSelection::Rows;
+    insert.max_rows = 1;
+    let inserted = run_postgres_binding(&db, binding_req("pg-ins-lc", vec![insert]))
+        .await
+        .expect("lowercase insert returning");
+    let bookclerk_plugin_abi::DbValue::Int64(id) = inserted.statements[0].rows[0].values[0] else {
+        panic!(
+            "expected int64 returning id, got {:?}",
+            inserted.statements[0].rows[0].values[0]
+        );
+    };
+    assert!(id >= 1, "returning id {id}");
+    let mut select = binding_stmt(bookclerk_db_exec::sql_v1::PORTABLE_LOWERCASE_SELECT, vec![]);
+    select.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-sel-lc", vec![select]))
+        .await
+        .expect("lowercase select");
+    assert_eq!(
+        reply.statements[0].rows[0].values[0],
+        bookclerk_plugin_abi::DbValue::Bytes(
+            bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB.to_vec()
+        )
+    );
+    assert_eq!(
+        reply.statements[0].rows[0].values[1],
+        bookclerk_plugin_abi::DbValue::Boolean(true)
+    );
+}

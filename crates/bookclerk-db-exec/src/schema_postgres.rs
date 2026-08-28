@@ -341,4 +341,48 @@ mod tests {
             "DML must not take the DDL type pass"
         );
     }
+
+    #[test]
+    fn postgres_adapter_lowers_lowercase_binding_ddl_and_keeps_boolean() {
+        let canonical = "create table if not exists t (\
+             id integer primary key autoincrement, b blob, flag boolean)";
+        let req = ExecuteRequest {
+            operation_id: "binding-ddl-lc".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: canonical.into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let pg = lower_binding_ddl_execute_request(DatabaseBackend::Postgres, &req);
+        assert!(
+            pg.statements[0].sql.contains("BIGSERIAL PRIMARY KEY"),
+            "{}",
+            pg.statements[0].sql
+        );
+        assert!(
+            pg.statements[0].sql.contains("BYTEA"),
+            "{}",
+            pg.statements[0].sql
+        );
+        assert!(
+            pg.statements[0].sql.contains("boolean"),
+            "{}",
+            pg.statements[0].sql
+        );
+        assert!(
+            !pg.statements[0].sql.contains("autoincrement"),
+            "{}",
+            pg.statements[0].sql
+        );
+        assert!(
+            !pg.statements[0].sql.contains("blob"),
+            "{}",
+            pg.statements[0].sql
+        );
+    }
 }

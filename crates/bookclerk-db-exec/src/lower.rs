@@ -58,15 +58,23 @@ fn rewrite_placeholders_postgres(sql: &str) -> String {
 }
 
 /// Renders `INSERT OR IGNORE` as `ON CONFLICT DO NOTHING` (before `RETURNING`).
+///
+/// The `INSERT OR IGNORE INTO` prefix and the `RETURNING` keyword are matched
+/// case-insensitively in code spans. [`find_last_in_code`] stays case-sensitive so
+/// the host write-gate constant is never rewritten by accident.
 fn insert_or_ignore_postgres(sql: &str) -> String {
     let trimmed = skip_trivia(sql);
     let Some(rest) = strip_prefix_ci(trimmed, "INSERT OR IGNORE INTO") else {
         return sql.to_string();
     };
     let prefix_len = sql.len() - trimmed.len();
-    let rebuilt = if let Some(idx) = find_in_code(rest, " RETURNING ") {
-        let (head, returning) = rest.split_at(idx);
-        format!("INSERT INTO{head} ON CONFLICT DO NOTHING{returning}")
+    let rebuilt = if let Some(idx) = find_word_in_code_ci(rest, "RETURNING") {
+        let head = rest[..idx].trim_end();
+        let after = idx + "RETURNING".len();
+        format!(
+            "INSERT INTO{head} ON CONFLICT DO NOTHING RETURNING{}",
+            &rest[after..]
+        )
     } else {
         format!("INSERT INTO{rest} ON CONFLICT DO NOTHING")
     };
@@ -356,18 +364,170 @@ fn rewrite_julianday_delta(sql: &str) -> String {
 /// - `INTEGER` → `BIGINT` (shared SeaORM entities use `i64` everywhere)
 /// - `REAL` → `DOUBLE PRECISION`
 /// - `BLOB` → `BYTEA`
+/// - `BOOLEAN` is already a Postgres type and is left unchanged
 ///
-/// Rewrites are word-boundary and code-span aware; string literals and
-/// comments are copied verbatim.
+/// Token matching is case-insensitive in **type position** of a
+/// `CREATE TABLE` column list (column names such as `blob` are preserved).
+/// Trivia between `INTEGER PRIMARY KEY AUTOINCREMENT` words is skipped.
+/// String literals and comments are copied verbatim.
 pub(crate) fn rewrite_canonical_ddl_types_for_postgres(sql: &str) -> String {
-    let sql = replace_word_in_code(
-        sql,
-        "INTEGER PRIMARY KEY AUTOINCREMENT",
-        "BIGSERIAL PRIMARY KEY",
-    );
-    let sql = replace_word_in_code(&sql, "INTEGER", "BIGINT");
-    let sql = replace_word_in_code(&sql, "REAL", "DOUBLE PRECISION");
-    replace_word_in_code(&sql, "BLOB", "BYTEA")
+    let Some(open) = create_table_column_list_open(sql) else {
+        return sql.to_string();
+    };
+    let mut out = String::with_capacity(sql.len() + 16);
+    out.push_str(&sql[..=open]);
+    let mut i = open + 1;
+    let mut depth = 1i32;
+    let mut at_column_start = true;
+    while i < sql.len() && depth > 0 {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        if ch.is_whitespace() {
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        if ch == '(' {
+            depth += 1;
+            out.push('(');
+            i += 1;
+            continue;
+        }
+        if ch == ')' {
+            depth -= 1;
+            out.push(')');
+            i += 1;
+            at_column_start = false;
+            continue;
+        }
+        if ch == ',' && depth == 1 {
+            out.push(',');
+            i += 1;
+            at_column_start = true;
+            continue;
+        }
+        if depth != 1 || !at_column_start {
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        if ident_eq_ci(sql, i, "CONSTRAINT")
+            || ident_eq_ci(sql, i, "PRIMARY")
+            || ident_eq_ci(sql, i, "UNIQUE")
+            || ident_eq_ci(sql, i, "CHECK")
+            || ident_eq_ci(sql, i, "FOREIGN")
+        {
+            at_column_start = false;
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        let Some((name_start, name_end)) = ident_span_at(sql, i) else {
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        };
+        out.push_str(&sql[name_start..name_end]);
+        i = name_end;
+        let type_at = skip_trivia_idx(sql, i);
+        out.push_str(&sql[i..type_at]);
+        i = type_at;
+        if let Some((end, repl)) = ddl_type_rewrite_at(sql, i) {
+            out.push_str(repl);
+            i = end;
+        } else if let Some((ty_start, ty_end)) = ident_span_at(sql, i) {
+            out.push_str(&sql[ty_start..ty_end]);
+            i = ty_end;
+        }
+        at_column_start = false;
+    }
+    if i < sql.len() {
+        out.push_str(&sql[i..]);
+    }
+    out
+}
+
+/// Byte offset of the `CREATE TABLE … (` column-list open paren, if present.
+fn create_table_column_list_open(sql: &str) -> Option<usize> {
+    let mut i = 0;
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            i += len;
+            continue;
+        }
+        if ident_eq_ci(sql, i, "CREATE") {
+            let mut j = skip_trivia_idx(sql, i + "CREATE".len());
+            if ident_eq_ci(sql, j, "TEMP") {
+                j = skip_trivia_idx(sql, j + "TEMP".len());
+            } else if ident_eq_ci(sql, j, "TEMPORARY") {
+                j = skip_trivia_idx(sql, j + "TEMPORARY".len());
+            }
+            if !ident_eq_ci(sql, j, "TABLE") {
+                return None;
+            }
+            j = skip_trivia_idx(sql, j + "TABLE".len());
+            if ident_eq_ci(sql, j, "IF") {
+                j = skip_trivia_idx(sql, j + "IF".len());
+                if ident_eq_ci(sql, j, "NOT") {
+                    j = skip_trivia_idx(sql, j + "NOT".len());
+                }
+                if ident_eq_ci(sql, j, "EXISTS") {
+                    j = skip_trivia_idx(sql, j + "EXISTS".len());
+                }
+            }
+            let (_, name_end) = ident_span_at(sql, j)?;
+            j = skip_trivia_idx(sql, name_end);
+            return (sql.as_bytes().get(j) == Some(&b'(')).then_some(j);
+        }
+        let ch = sql[i..].chars().next()?;
+        i += ch.len_utf8();
+    }
+    None
+}
+
+/// Quoted or unquoted identifier span starting at `i`.
+fn ident_span_at(sql: &str, i: usize) -> Option<(usize, usize)> {
+    let bytes = sql.as_bytes();
+    let b = *bytes.get(i)?;
+    if b == b'"' {
+        return quoted_len(&sql[i..]).map(|len| (i, i + len));
+    }
+    if b.is_ascii_alphabetic() || b == b'_' {
+        let mut j = i + 1;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+            j += 1;
+        }
+        return Some((i, j));
+    }
+    None
+}
+
+/// Type/identity rewrite starting at `i`, if `i` is a canonical DDL type token.
+fn ddl_type_rewrite_at(sql: &str, i: usize) -> Option<(usize, &'static str)> {
+    if ident_eq_ci(sql, i, "INTEGER") {
+        let mut j = skip_trivia_idx(sql, i + "INTEGER".len());
+        if ident_eq_ci(sql, j, "PRIMARY") {
+            j = skip_trivia_idx(sql, j + "PRIMARY".len());
+            if ident_eq_ci(sql, j, "KEY") {
+                j = skip_trivia_idx(sql, j + "KEY".len());
+                if ident_eq_ci(sql, j, "AUTOINCREMENT") {
+                    return Some((j + "AUTOINCREMENT".len(), "BIGSERIAL PRIMARY KEY"));
+                }
+            }
+        }
+        return Some((i + "INTEGER".len(), "BIGINT"));
+    }
+    if ident_eq_ci(sql, i, "REAL") {
+        return Some((i + "REAL".len(), "DOUBLE PRECISION"));
+    }
+    if ident_eq_ci(sql, i, "BLOB") {
+        return Some((i + "BLOB".len(), "BYTEA"));
+    }
+    None
 }
 
 /// Lowers one canonical Bookclerk **DDL** statement onto PostgreSQL.
@@ -395,32 +555,55 @@ fn word_boundary(sql: &str, idx: Option<usize>) -> bool {
     }
 }
 
-/// Replaces whole-word `from` with `to` in SQL code spans only.
-fn replace_word_in_code(sql: &str, from: &str, to: &str) -> String {
-    if from.is_empty() {
-        return sql.to_string();
-    }
-    let mut i = 0;
-    let mut out = String::with_capacity(sql.len());
+/// True when the ident at `i` equals `word` ignoring ASCII case, with boundaries.
+fn ident_eq_ci(sql: &str, i: usize, word: &str) -> bool {
+    let Some(end) = i.checked_add(word.len()).filter(|e| *e <= sql.len()) else {
+        return false;
+    };
+    sql.get(i..end)
+        .is_some_and(|s| s.eq_ignore_ascii_case(word))
+        && word_boundary(sql, i.checked_sub(1))
+        && word_boundary(sql, Some(end))
+}
+
+/// Byte offset after leading whitespace and comments starting at `i`.
+fn skip_trivia_idx(sql: &str, mut i: usize) -> usize {
     while i < sql.len() {
-        if let Some(len) = literal_or_comment_len(&sql[i..]) {
-            out.push_str(&sql[i..i + len]);
+        let rest = &sql[i..];
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch.is_whitespace() {
+            i += ch.len_utf8();
+            continue;
+        }
+        if let Some(len) = comment_len(rest) {
             i += len;
             continue;
         }
-        if sql[i..].starts_with(from)
-            && word_boundary(sql, i.checked_sub(1))
-            && word_boundary(sql, Some(i + from.len()))
-        {
-            out.push_str(to);
-            i += from.len();
+        break;
+    }
+    i
+}
+
+/// Byte offset of keyword `word` in a code span (ASCII case-insensitive).
+fn find_word_in_code_ci(sql: &str, word: &str) -> Option<usize> {
+    if word.is_empty() {
+        return None;
+    }
+    let mut i = 0;
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            i += len;
             continue;
         }
-        let ch = sql[i..].chars().next().unwrap_or('\0');
-        out.push(ch);
+        if ident_eq_ci(sql, i, word) {
+            return Some(i);
+        }
+        let ch = sql[i..].chars().next()?;
         i += ch.len_utf8();
     }
-    out
+    None
 }
 
 /// Replaces `from` with `to` only in SQL code spans (not strings/comments).
@@ -446,11 +629,6 @@ fn replace_in_code(sql: &str, from: &str, to: &str) -> String {
         i += ch.len_utf8();
     }
     out
-}
-
-/// Byte offset of `needle` in a code span, if present.
-fn find_in_code(sql: &str, needle: &str) -> Option<usize> {
-    find_in_code_from(sql, needle, false)
 }
 
 /// Byte offset of the last `needle` in a code span (literals/comments skipped).
@@ -698,6 +876,52 @@ mod tests {
         assert!(types.contains("BYTEA"), "{types}");
         assert!(!types.contains("AUTOINCREMENT"), "{types}");
         assert!(!types.contains("BLOB"), "{types}");
+    }
+
+    #[test]
+    fn postgres_ddl_and_returning_lowering_is_case_insensitive() {
+        let types = rewrite_canonical_ddl_types_for_postgres(
+            "create table t (id integer /*x*/ primary key autoincrement, b blob, r real, flag boolean)",
+        );
+        assert!(types.contains("BIGSERIAL PRIMARY KEY"), "{types}");
+        assert!(types.contains("BYTEA"), "{types}");
+        assert!(types.contains("DOUBLE PRECISION"), "{types}");
+        assert!(
+            types.contains("boolean") && !types.contains("BOOLEAN"),
+            "BOOLEAN is already Postgres-native and must not be rewritten: {types}"
+        );
+        assert!(!types.contains("autoincrement"), "{types}");
+        assert!(!types.contains("blob"), "{types}");
+        assert!(!types.contains("integer"), "{types}");
+
+        let named_blob = rewrite_canonical_ddl_types_for_postgres(
+            "CREATE TABLE t (blob BLOB, payload blob, flag BOOLEAN)",
+        );
+        assert!(
+            named_blob.contains("blob BYTEA") && named_blob.contains("payload BYTEA"),
+            "column names must be preserved: {named_blob}"
+        );
+        assert!(named_blob.contains("BOOLEAN"), "{named_blob}");
+        assert!(!named_blob.contains("BYTEA BYTEA"), "{named_blob}");
+
+        let mixed = rewrite_canonical_ddl_types_for_postgres(
+            "Create Table t (id Integer Primary Key Autoincrement, payload Blob, flag Boolean)",
+        );
+        assert!(mixed.contains("BIGSERIAL PRIMARY KEY"), "{mixed}");
+        assert!(mixed.contains("BYTEA"), "{mixed}");
+        assert!(mixed.contains("Boolean"), "{mixed}");
+
+        let sql = insert_or_ignore_postgres("insert or ignore into t (id) values (?) returning id");
+        assert!(
+            sql.contains("ON CONFLICT DO NOTHING RETURNING"),
+            "conflict clause must precede RETURNING: {sql}"
+        );
+        assert!(!sql.contains("ON CONFLICT DO NOTHING returning"), "{sql}");
+        let after_conflict = sql.split("ON CONFLICT DO NOTHING").nth(1).unwrap_or("");
+        assert!(
+            after_conflict.to_ascii_uppercase().contains("RETURNING"),
+            "{sql}"
+        );
     }
 
     #[test]

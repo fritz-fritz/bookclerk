@@ -1289,7 +1289,10 @@ fn select_list_proven_columns(sql: &str) -> Vec<Option<String>> {
     cols
 }
 
-/// Applies declared types only to SELECT items proven to be direct columns.
+/// Applies declared types to SELECT items proven to be direct columns.
+///
+/// Declared metadata wins over JSON-inferred types (D1 stores booleans as
+/// integers, so a `BOOLEAN` column would otherwise stay `Int64`).
 fn apply_proven_declared_types(
     stmt: &mut StatementResult,
     sql: &str,
@@ -1303,9 +1306,7 @@ fn apply_proven_declared_types(
             .map(str::to_string);
         let Some(key) = key else { continue };
         let Some(&ty) = map.get(&key) else { continue };
-        if stmt.columns[col_idx].db_type == DbType::Unspecified {
-            stmt.columns[col_idx].db_type = ty;
-        }
+        stmt.columns[col_idx].db_type = ty;
         for row in &mut stmt.rows {
             if let Some(cell) = row.values.get_mut(col_idx) {
                 *cell = bookclerk_plugin_abi::normalize_db_value_for_column(cell.clone(), ty);

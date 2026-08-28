@@ -523,6 +523,7 @@ fn authorize_binding_ddl(index: usize, sql: &str, policy: &GuestSqlPolicy) -> Re
             return Err(deny("DROP requires IF EXISTS"));
         }
         check_binding_ddl_name(index, &mut scan, "object name")?;
+        deny_v1_ddl_tail(index, scan.rest(), false)?;
         deny_qualified_names_in(index, scan.rest())?;
         return authorize_ddl_function_fragments(index, policy, &[scan.rest()]);
     }
@@ -533,7 +534,8 @@ fn authorize_binding_ddl(index: usize, sql: &str, policy: &GuestSqlPolicy) -> Re
 ///
 /// Bindings use the portable subset: `INSERT` / `INSERT OR IGNORE` (not
 /// `REPLACE`), no `GLOB` / `COLLATE` / `MATCH` / `REGEXP`, and CREATE TABLE
-/// types `INTEGER` / `REAL` / `TEXT` / `BLOB` only. Library guests still reject
+/// types `INTEGER` / `REAL` / `TEXT` / `BLOB` / `BOOLEAN` only. Every guest
+/// rejects non-v1 bind spellings (`$n`, `?NNN`). Library guests still reject
 /// `REPLACE` as a statement form.
 ///
 /// # Errors
@@ -547,6 +549,7 @@ pub fn validate_sql_v1_grammar(sql: &str, binding_owned: bool) -> Result<()> {
 ///
 /// Returns [`PluginError::invalid_params`] when `sql` is outside SQL v1.
 fn validate_sql_v1_grammar_at(index: usize, sql: &str, binding_owned: bool) -> Result<()> {
+    deny_non_v1_placeholders(index, sql)?;
     deny_non_v1_insert(index, sql)?;
     if binding_owned {
         deny_binding_v1_operators(index, sql)?;
@@ -583,6 +586,46 @@ fn deny_non_v1_insert(index: usize, sql: &str) -> Result<()> {
         index,
         &format!("INSERT OR {conflict} is not portable; use INSERT OR IGNORE"),
     ))
+}
+
+/// SQL v1 binds are bare `?` only (`$n` and `?NNN` are engine-specific).
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a code span contains `$n` or
+/// `?NNN`.
+fn deny_non_v1_placeholders(index: usize, sql: &str) -> Result<()> {
+    let mut err = None;
+    for_each_unquoted(sql, |slice, i| {
+        if err.is_some() {
+            return 1;
+        }
+        let bytes = slice.as_bytes();
+        let c = bytes[i];
+        if c == b'?' {
+            if bytes.get(i + 1) == Some(&b'?') {
+                return 2;
+            }
+            if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+                err = Some(v1_grammar_err(
+                    index,
+                    "?NNN bind placeholders are not SQL v1; use bare ?",
+                ));
+            }
+            return 1;
+        }
+        if c == b'$' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
+            err = Some(v1_grammar_err(
+                index,
+                "$n bind placeholders are not SQL v1; use bare ?",
+            ));
+        }
+        1
+    });
+    match err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// SQLite-only operators that the expression scanner would otherwise treat as columns.
@@ -623,7 +666,7 @@ fn deny_binding_v1_operators(index: usize, sql: &str) -> Result<()> {
     Ok(())
 }
 
-const V1_COLUMN_TYPES: &[&str] = &["integer", "real", "text", "blob"];
+const V1_COLUMN_TYPES: &[&str] = &["integer", "real", "text", "blob", "boolean"];
 
 /// # Errors
 ///
@@ -733,7 +776,7 @@ fn parse_column_def(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if !V1_COLUMN_TYPES.contains(&ty.as_str()) {
         return Err(v1_grammar_err(
             index,
-            &format!("column type {ty} is not portable; use INTEGER, REAL, TEXT, or BLOB"),
+            &format!("column type {ty} is not portable; use INTEGER, REAL, TEXT, BLOB, or BOOLEAN"),
         ));
     }
     if scan.peek_byte(b'(') {
@@ -2212,10 +2255,12 @@ fn sql_keyword(ident: &str) -> bool {
     )
 }
 
-/// Positional `?` count (or unique `$n` when the SQL has no `?`).
+/// Positional bare-`?` count (`??` is an escaped literal, not two binds).
+///
+/// SQL v1 admits only bare `?`. [`deny_non_v1_placeholders`] rejects `$n` and
+/// `?NNN` before this runs.
 fn count_placeholders(sql: &str) -> usize {
     let mut n_q = 0usize;
-    let mut dollars = Vec::new();
     for_each_unquoted(sql, |slice, i| {
         let c = slice.as_bytes()[i];
         if c == b'?' {
@@ -2223,33 +2268,10 @@ fn count_placeholders(sql: &str) -> usize {
                 return 2;
             }
             n_q += 1;
-            let mut j = i + 1;
-            while slice.as_bytes().get(j).is_some_and(u8::is_ascii_digit) {
-                j += 1;
-            }
-            return j - i;
-        }
-        if c == b'$' {
-            let mut j = i + 1;
-            while slice.as_bytes().get(j).is_some_and(u8::is_ascii_digit) {
-                j += 1;
-            }
-            if j > i + 1 {
-                if let Ok(idx) = slice[i + 1..j].parse::<u32>() {
-                    if !dollars.contains(&idx) {
-                        dollars.push(idx);
-                    }
-                }
-                return j - i;
-            }
         }
         1
     });
-    if n_q > 0 {
-        n_q
-    } else {
-        dollars.len()
-    }
+    n_q
 }
 
 fn ident_start(c: u8) -> bool {
@@ -2455,6 +2477,35 @@ mod tests {
     }
 
     #[test]
+    fn sql_v1_grammar_rejects_noncanonical_placeholders_for_every_guest() {
+        for sql in [
+            "SELECT id FROM books WHERE id = $1",
+            "SELECT id FROM books WHERE id = ?1",
+            "INSERT INTO books (id) VALUES ($1)",
+            "INSERT INTO books (id) VALUES (?2)",
+        ] {
+            let err = validate_guest_execute_request(&req(
+                sql,
+                vec![DbValue::Int64(1)],
+                DbResultSelection::Rows,
+                1,
+            ))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("SQL v1") || err.to_string().contains("placeholder"),
+                "{sql}: {err}"
+            );
+        }
+        validate_guest_execute_request(&req(
+            "SELECT id FROM books WHERE id = '?' OR id = '$1' -- ?1\nAND body = ?",
+            vec![DbValue::Int64(1)],
+            DbResultSelection::Rows,
+            1,
+        ))
+        .unwrap();
+    }
+
+    #[test]
     fn allows_select_and_insert() {
         validate_guest_execute_request(&req(
             "SELECT id FROM books WHERE id = ?",
@@ -2508,7 +2559,7 @@ mod tests {
     #[test]
     fn binding_owned_allows_bounded_ddl_and_any_table_dml() {
         binding_check(
-            "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT)",
+            "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT, flag BOOLEAN)",
             DbResultSelection::Discard,
             0,
         )
@@ -2575,6 +2626,12 @@ mod tests {
             "CREATE INDEX IF NOT EXISTS i ON notes (body COLLATE NOCASE)",
             "CREATE INDEX IF NOT EXISTS i ON notes (body) INCLUDE (id)",
             "CREATE INDEX IF NOT EXISTS i ON notes USING btree (body)",
+            "CREATE TABLE IF NOT EXISTS t (flag BOOL)",
+            "DROP TABLE IF EXISTS notes CASCADE",
+            "DROP TABLE IF EXISTS notes RESTRICT",
+            "DROP INDEX IF EXISTS idx_notes_body CASCADE",
+            "SELECT body FROM notes WHERE id = $1",
+            "SELECT body FROM notes WHERE id = ?1",
         ] {
             let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
             assert!(

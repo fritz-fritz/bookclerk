@@ -3458,6 +3458,209 @@ mod tests {
         assert_eq!(blob, bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB);
     }
 
+    /// Canonical BOOLEAN columns round-trip as [`DbValue::Boolean`] / typed-null.
+    #[tokio::test]
+    async fn executing_mock_portable_boolean_column() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+        };
+
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema for boolean");
+
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
+        let policy = GuestSqlPolicy::binding_owned();
+        let run = |req: ExecuteRequest| {
+            let proxy = proxy.clone();
+            let caps = caps.clone();
+            let policy = policy.clone();
+            async move {
+                bookclerk_library::execute_guest_atomic_with(req, &caps, &policy, |envelope| {
+                    let proxy = proxy.clone();
+                    async move {
+                        proxy
+                            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                            .await
+                            .map_err(crate::atomic::plugin_error_from_d1)
+                    }
+                })
+                .await
+            }
+        };
+        run(ExecuteRequest {
+            operation_id: "d1-ddl-bool".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: bookclerk_db_exec::sql_v1::BINDING_DDL_BOOLEAN.into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::Discard,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("boolean DDL");
+        run(ExecuteRequest {
+            operation_id: "d1-ins-bool".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: bookclerk_db_exec::sql_v1::PORTABLE_BOOLEAN_INSERT.into(),
+                parameters: bookclerk_db_exec::sql_v1::portable_boolean_insert_binds(),
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("boolean insert");
+        let reply = run(ExecuteRequest {
+            operation_id: "d1-sel-bool".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: bookclerk_db_exec::sql_v1::PORTABLE_BOOLEAN_SELECT.into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 8,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("boolean select");
+        if let Some(err) =
+            bookclerk_db_exec::sql_v1::portable_boolean_mismatch(&reply.statements[0])
+        {
+            panic!("{err}");
+        }
+    }
+
+    /// Lowercase DDL types and `insert or ignore … returning` execute on D1.
+    #[tokio::test]
+    async fn executing_mock_lowercase_ddl_and_insert_or_ignore_returning() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+        };
+
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema for lowercase");
+
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
+        let policy = GuestSqlPolicy::binding_owned();
+        let run = |req: ExecuteRequest| {
+            let proxy = proxy.clone();
+            let caps = caps.clone();
+            let policy = policy.clone();
+            async move {
+                bookclerk_library::execute_guest_atomic_with(req, &caps, &policy, |envelope| {
+                    let proxy = proxy.clone();
+                    async move {
+                        proxy
+                            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                            .await
+                            .map_err(crate::atomic::plugin_error_from_d1)
+                    }
+                })
+                .await
+            }
+        };
+        run(ExecuteRequest {
+            operation_id: "d1-ddl-lc".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: bookclerk_db_exec::sql_v1::BINDING_DDL_LOWERCASE.into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::Discard,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("lowercase DDL");
+        let inserted = run(ExecuteRequest {
+            operation_id: "d1-ins-lc".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: bookclerk_db_exec::sql_v1::PORTABLE_INSERT_OR_IGNORE_RETURNING_LC.into(),
+                parameters: bookclerk_db_exec::sql_v1::portable_lowercase_insert_binds(),
+                kind: DbPlanStatementKind::Returning,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("lowercase insert returning");
+        let bookclerk_plugin_abi::DbValue::Int64(id) = inserted.statements[0].rows[0].values[0]
+        else {
+            panic!(
+                "expected int64 returning id, got {:?}",
+                inserted.statements[0].rows[0].values[0]
+            );
+        };
+        assert!(id >= 1, "returning id {id}");
+        let reply = run(ExecuteRequest {
+            operation_id: "d1-sel-lc".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: bookclerk_db_exec::sql_v1::PORTABLE_LOWERCASE_SELECT.into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 8,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("lowercase select");
+        assert_eq!(
+            reply.statements[0].rows[0].values[0],
+            bookclerk_plugin_abi::DbValue::Bytes(
+                bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB.to_vec()
+            )
+        );
+        assert_eq!(
+            reply.statements[0].rows[0].values[1],
+            bookclerk_plugin_abi::DbValue::Boolean(true)
+        );
+    }
+
     /// A direct (unwrapped, non-receipt-gated) typed mutation whose reply is
     /// lost after commit must NOT be resubmitted: state changes exactly once,
     /// only one HTTP batch carries the mutation, and the caller receives the

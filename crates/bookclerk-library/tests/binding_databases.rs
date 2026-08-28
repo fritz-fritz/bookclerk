@@ -538,3 +538,79 @@ async fn binding_portable_functions_and_ddl_types() {
         DbValue::Bytes(bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB.to_vec())
     );
 }
+
+#[tokio::test]
+async fn binding_portable_boolean_column() {
+    let db = binding_db().await;
+    run_binding(
+        &db,
+        req(
+            "ddl-bool",
+            vec![stmt(bookclerk_db_exec::sql_v1::BINDING_DDL_BOOLEAN, vec![])],
+        ),
+    )
+    .await
+    .expect("boolean DDL");
+    let mut insert = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_BOOLEAN_INSERT,
+        bookclerk_db_exec::sql_v1::portable_boolean_insert_binds(),
+    );
+    insert.result_selection = DbResultSelection::AffectedRows;
+    run_binding(&db, req("ins-bool", vec![insert]))
+        .await
+        .expect("boolean insert");
+    let mut select = stmt(bookclerk_db_exec::sql_v1::PORTABLE_BOOLEAN_SELECT, vec![]);
+    select.max_rows = 8;
+    let reply = run_binding(&db, req("sel-bool", vec![select]))
+        .await
+        .expect("boolean select");
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_boolean_mismatch(&reply.statements[0]) {
+        panic!("{err}");
+    }
+}
+
+#[tokio::test]
+async fn binding_lowercase_ddl_and_insert_or_ignore_returning() {
+    let db = binding_db().await;
+    run_binding(
+        &db,
+        req(
+            "ddl-lc",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_LOWERCASE,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("lowercase DDL");
+    let mut insert = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_INSERT_OR_IGNORE_RETURNING_LC,
+        bookclerk_db_exec::sql_v1::portable_lowercase_insert_binds(),
+    );
+    insert.result_selection = DbResultSelection::Rows;
+    insert.max_rows = 1;
+    let inserted = run_binding(&db, req("ins-lc", vec![insert]))
+        .await
+        .expect("lowercase insert returning");
+    let DbValue::Int64(id) = inserted.statements[0].rows[0].values[0] else {
+        panic!(
+            "expected int64 returning id, got {:?}",
+            inserted.statements[0].rows[0].values[0]
+        );
+    };
+    assert!(id >= 1, "returning id {id}");
+    let mut select = stmt(bookclerk_db_exec::sql_v1::PORTABLE_LOWERCASE_SELECT, vec![]);
+    select.max_rows = 8;
+    let reply = run_binding(&db, req("sel-lc", vec![select]))
+        .await
+        .expect("lowercase select");
+    assert_eq!(
+        reply.statements[0].rows[0].values[0],
+        DbValue::Bytes(bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB.to_vec())
+    );
+    assert_eq!(
+        reply.statements[0].rows[0].values[1],
+        DbValue::Boolean(true)
+    );
+}

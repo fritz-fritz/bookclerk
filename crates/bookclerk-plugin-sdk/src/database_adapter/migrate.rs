@@ -49,6 +49,9 @@ pub fn typed_null(decl_type: Option<&str>, column: &str) -> Value {
         if d.contains("INT") {
             return Value::BigInt(None);
         }
+        if d.contains("BOOL") {
+            return Value::Bool(None);
+        }
         if d.contains("REAL") || d.contains("FLOA") || d.contains("DOUB") {
             return Value::Double(None);
         }

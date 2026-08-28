@@ -12,6 +12,31 @@ pub const BINDING_DDL_AUTOINCREMENT_BLOB: &str = "CREATE TABLE IF NOT EXISTS typ
      id INTEGER PRIMARY KEY AUTOINCREMENT, \
      n INTEGER, body TEXT, payload TEXT, blob BLOB, r REAL)";
 
+/// Binding `CREATE TABLE` covering canonical `BOOLEAN` (not INTEGER-as-bool).
+pub const BINDING_DDL_BOOLEAN: &str = "CREATE TABLE IF NOT EXISTS flags (\
+     id INTEGER PRIMARY KEY AUTOINCREMENT, \
+     flag BOOLEAN, \
+     missing BOOLEAN)";
+
+/// INSERT [`DbValue::Boolean`] + typed-null into [`BINDING_DDL_BOOLEAN`].
+pub const PORTABLE_BOOLEAN_INSERT: &str = "INSERT INTO flags (flag, missing) VALUES (?, ?)";
+
+/// SELECT declared boolean columns from [`BINDING_DDL_BOOLEAN`].
+pub const PORTABLE_BOOLEAN_SELECT: &str = "SELECT flag, missing FROM flags";
+
+/// Lowercase / mixed-case DDL admitted by SQL v1 (idents fold) and lowered
+/// case-insensitively on Postgres.
+pub const BINDING_DDL_LOWERCASE: &str = "create table if not exists typed_lc (\
+     id integer primary key autoincrement, \
+     blob blob, flag boolean)";
+
+/// Lowercase `INSERT OR IGNORE … RETURNING` against [`BINDING_DDL_LOWERCASE`].
+pub const PORTABLE_INSERT_OR_IGNORE_RETURNING_LC: &str =
+    "insert or ignore into typed_lc (blob, flag) values (?, ?) returning id";
+
+/// SELECT stored blob + boolean from [`BINDING_DDL_LOWERCASE`].
+pub const PORTABLE_LOWERCASE_SELECT: &str = "SELECT blob, flag FROM typed_lc";
+
 /// Seed row for [`PORTABLE_SELECT`]. Bind [`PORTABLE_INSERT_BLOB`] at `?`.
 pub const PORTABLE_INSERT: &str =
     "INSERT INTO typed (n, body, payload, blob, r) VALUES (2, 'Ab', '{\"k\":\"v\"}', ?, 1.5)";
@@ -67,6 +92,10 @@ pub enum PortableExpect {
     Text(&'static str),
     /// Exact [`DbValue::Float64`] (tolerance only vs another float).
     Float(f64),
+    /// Exact [`DbValue::Boolean`].
+    Bool(bool),
+    /// Exact [`DbValue::Null`] with [`DbType::Bool`].
+    NullBool,
 }
 
 /// Expected [`PORTABLE_SELECT`] cells in column order.
@@ -94,6 +123,27 @@ pub fn portable_select_expects() -> &'static [PortableExpect] {
     ]
 }
 
+/// Expected [`PORTABLE_BOOLEAN_SELECT`] cells in column order.
+#[must_use]
+pub fn portable_boolean_expects() -> &'static [PortableExpect] {
+    &[PortableExpect::Bool(true), PortableExpect::NullBool]
+}
+
+/// Binds for [`PORTABLE_BOOLEAN_INSERT`].
+#[must_use]
+pub fn portable_boolean_insert_binds() -> Vec<DbValue> {
+    vec![DbValue::Boolean(true), DbValue::Null(DbType::Bool)]
+}
+
+/// Binds for [`PORTABLE_INSERT_OR_IGNORE_RETURNING_LC`].
+#[must_use]
+pub fn portable_lowercase_insert_binds() -> Vec<DbValue> {
+    vec![
+        DbValue::Bytes(PORTABLE_INSERT_BLOB.to_vec()),
+        DbValue::Boolean(true),
+    ]
+}
+
 /// Expected [`PORTABLE_AGGREGATE_SELECT`] cells in column order.
 #[must_use]
 pub fn portable_aggregate_expects() -> &'static [PortableExpect] {
@@ -113,6 +163,8 @@ pub fn portable_value_matches(got: &DbValue, want: PortableExpect) -> bool {
         (DbValue::Int64(n), PortableExpect::Int(w)) => *n == w,
         (DbValue::Text(s), PortableExpect::Text(w)) => s == w,
         (DbValue::Float64(n), PortableExpect::Float(w)) => (*n - w).abs() < 1e-9,
+        (DbValue::Boolean(b), PortableExpect::Bool(w)) => *b == w,
+        (DbValue::Null(DbType::Bool), PortableExpect::NullBool) => true,
         _ => false,
     }
 }
@@ -126,6 +178,7 @@ fn portable_column_type_ok(col: Option<&DbColumn>, want: PortableExpect) -> bool
         PortableExpect::Int(_) => matches!(col.db_type, DbType::Int64 | DbType::Unspecified),
         PortableExpect::Text(_) => matches!(col.db_type, DbType::Text | DbType::Unspecified),
         PortableExpect::Float(_) => matches!(col.db_type, DbType::Float64 | DbType::Unspecified),
+        PortableExpect::Bool(_) | PortableExpect::NullBool => matches!(col.db_type, DbType::Bool),
     }
 }
 
@@ -133,6 +186,12 @@ fn portable_column_type_ok(col: Option<&DbColumn>, want: PortableExpect) -> bool
 #[must_use]
 pub fn portable_select_mismatch(stmt: &StatementResult) -> Option<String> {
     portable_statement_mismatch(stmt, portable_select_expects(), "portable SELECT")
+}
+
+/// Formats a mismatch for [`PORTABLE_BOOLEAN_SELECT`].
+#[must_use]
+pub fn portable_boolean_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_statement_mismatch(stmt, portable_boolean_expects(), "portable BOOLEAN SELECT")
 }
 
 /// Formats a mismatch for [`PORTABLE_AGGREGATE_SELECT`].
@@ -179,7 +238,7 @@ fn portable_row_mismatch(
         }
         if !portable_column_type_ok(columns.get(i), *want) {
             return Some(format!(
-                "{label} column {i} db_type {:?}, expected Int64/Text/Float64 or Unspecified for {want:?}",
+                "{label} column {i} db_type {:?}, expected matching DbType (Bool required for boolean cells; Int64/Text/Float64 or Unspecified otherwise) for {want:?}",
                 columns[i].db_type
             ));
         }
@@ -225,6 +284,22 @@ mod tests {
         assert!(portable_value_matches(
             &DbValue::Text("ab".into()),
             PortableExpect::Text("ab")
+        ));
+        assert!(portable_value_matches(
+            &DbValue::Boolean(true),
+            PortableExpect::Bool(true)
+        ));
+        assert!(!portable_value_matches(
+            &DbValue::Int64(1),
+            PortableExpect::Bool(true)
+        ));
+        assert!(portable_value_matches(
+            &DbValue::Null(DbType::Bool),
+            PortableExpect::NullBool
+        ));
+        assert!(!portable_value_matches(
+            &DbValue::Null(DbType::Int64),
+            PortableExpect::NullBool
         ));
     }
 }

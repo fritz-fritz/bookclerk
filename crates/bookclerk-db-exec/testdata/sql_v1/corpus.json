@@ -36,6 +36,11 @@
       "postgres": "INSERT INTO t (id) SELECT $1 ON CONFLICT DO NOTHING RETURNING id"
     },
     {
+      "id": "insert-or-ignore-returning-lowercase",
+      "canonical": "insert or ignore into t (id) select ? returning id",
+      "postgres": "INSERT INTO t (id) select $1 ON CONFLICT DO NOTHING RETURNING id"
+    },
+    {
       "id": "json-object",
       "canonical": "SELECT json_object('k', ?) AS o",
       "postgres": "SELECT json_build_object('k', $1) AS o"
