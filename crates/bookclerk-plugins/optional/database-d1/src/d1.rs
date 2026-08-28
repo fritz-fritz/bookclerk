@@ -3328,19 +3328,32 @@ mod tests {
         let reply = run(ExecuteRequest {
             operation_id: "d1-sel-typed".into(),
             request_hash: String::new(),
-            statements: vec![TypedDbStatement {
-                sql: bookclerk_db_exec::sql_v1::PORTABLE_SELECT.into(),
-                parameters: vec![],
-                kind: DbPlanStatementKind::Select,
-                max_rows: 8,
-                result_selection: DbResultSelection::Rows,
-            }],
+            statements: vec![
+                TypedDbStatement {
+                    sql: bookclerk_db_exec::sql_v1::PORTABLE_SELECT.into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Select,
+                    max_rows: 8,
+                    result_selection: DbResultSelection::Rows,
+                },
+                TypedDbStatement {
+                    sql: bookclerk_db_exec::sql_v1::PORTABLE_AGGREGATE_SELECT.into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Select,
+                    max_rows: 8,
+                    result_selection: DbResultSelection::Rows,
+                },
+            ],
             deadline_unix_ms: 0,
         })
         .await
         .expect("portable select");
         let values = &reply.statements[0].rows[0].values;
         if let Some(err) = bookclerk_db_exec::sql_v1::portable_select_mismatch(values) {
+            panic!("{err}");
+        }
+        let agg = &reply.statements[1].rows[0].values;
+        if let Some(err) = bookclerk_db_exec::sql_v1::portable_aggregate_mismatch(agg) {
             panic!("{err}");
         }
         let blob: Vec<u8> = conn

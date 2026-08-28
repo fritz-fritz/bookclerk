@@ -653,6 +653,19 @@ mod tests {
     }
 
     #[test]
+    fn portable_select_lowers_helpers_for_postgres() {
+        let sql = lower_canonical_to_postgres(crate::sql_v1::PORTABLE_SELECT);
+        assert!(!sql.to_ascii_lowercase().contains("ifnull("), "{sql}");
+        assert!(!sql.to_ascii_lowercase().contains("json_object("), "{sql}");
+        assert!(sql.contains("COALESCE(NULL, 5)"), "{sql}");
+        assert!(sql.contains("LEAST(1, 2)"), "{sql}");
+        assert!(sql.contains("GREATEST(3, 1)"), "{sql}");
+        assert!(sql.contains("json_build_object"), "{sql}");
+        assert!(!sql.contains("json_extract("), "{sql}");
+        assert!(!sql.contains("json_valid("), "{sql}");
+    }
+
+    #[test]
     fn postgres_dml_lowering_does_not_rewrite_ddl_types() {
         let canonical =
             "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY AUTOINCREMENT, b BLOB)";

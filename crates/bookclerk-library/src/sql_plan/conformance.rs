@@ -1878,11 +1878,17 @@ async fn postgres_binding_portable_functions() {
         .expect("typed insert");
     let mut select = binding_stmt(bookclerk_db_exec::sql_v1::PORTABLE_SELECT, vec![]);
     select.max_rows = 8;
-    let reply = run_postgres_binding(&db, binding_req("pg-sel-typed", vec![select]))
+    let mut aggregates = binding_stmt(bookclerk_db_exec::sql_v1::PORTABLE_AGGREGATE_SELECT, vec![]);
+    aggregates.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-sel-typed", vec![select, aggregates]))
         .await
         .expect("portable select");
     let values = &reply.statements[0].rows[0].values;
     if let Some(err) = bookclerk_db_exec::sql_v1::portable_select_mismatch(values) {
+        panic!("{err}");
+    }
+    let agg = &reply.statements[1].rows[0].values;
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_aggregate_mismatch(agg) {
         panic!("{err}");
     }
     let mut blob = binding_stmt("SELECT blob FROM typed", vec![]);

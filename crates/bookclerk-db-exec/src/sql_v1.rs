@@ -19,10 +19,15 @@ pub const PORTABLE_INSERT: &str =
 /// Blob payload for [`PORTABLE_INSERT`].
 pub const PORTABLE_INSERT_BLOB: &[u8] = &[1, 2, 3];
 
-/// One SELECT that exercises every remaining portable helper.
+/// Scalar portable helpers (no aggregates).
 ///
 /// Column order matches [`portable_select_expects`]. `json_object` is wrapped
 /// in `json_extract` so Postgres `json_build_object` still yields text.
+/// Aggregates live in [`PORTABLE_AGGREGATE_SELECT`]: a mixed aggregate +
+/// non-aggregate SELECT list is SQLite-shaped, not Bookclerk SQL v1
+/// (PostgreSQL requires `GROUP BY`). `round`/`sum`/`avg` are `CAST` to
+/// `INTEGER` so cells stay in the universal `DbValue` domain (Postgres
+/// `NUMERIC` is not a wire type).
 pub const PORTABLE_SELECT: &str = "SELECT \
      abs(-3) AS c0, \
      coalesce(NULL, 4) AS c1, \
@@ -32,7 +37,7 @@ pub const PORTABLE_SELECT: &str = "SELECT \
      upper(body) AS c5, \
      trim(' x ') AS c6, \
      substr(body, 1, 1) AS c7, \
-     round(1.4) AS c8, \
+     CAST(round(1.4) AS INTEGER) AS c8, \
      nullif(n, 9) AS c9, \
      min(1, 2) AS c10, \
      max(3, 1) AS c11, \
@@ -41,18 +46,22 @@ pub const PORTABLE_SELECT: &str = "SELECT \
      json_valid(payload) AS c14, \
      json_valid(body) AS c15, \
      replace(body, 'A', 'Z') AS c16, \
-     CAST(n AS INTEGER) AS c17, \
-     count(*) AS c18, \
-     sum(n) AS c19, \
-     min(n) AS c20, \
-     max(n) AS c21, \
-     avg(n) AS c22 \
+     CAST(n AS INTEGER) AS c17 \
+     FROM typed";
+
+/// Aggregate-only companion to [`PORTABLE_SELECT`].
+pub const PORTABLE_AGGREGATE_SELECT: &str = "SELECT \
+     count(*) AS a0, \
+     CAST(sum(n) AS INTEGER) AS a1, \
+     min(n) AS a2, \
+     max(n) AS a3, \
+     CAST(avg(n) AS INTEGER) AS a4 \
      FROM typed";
 
 /// Expected cells for [`PORTABLE_SELECT`] (adapter-neutral).
 #[derive(Clone, Copy, Debug)]
 pub enum PortableExpect {
-    /// Integer (or integer-valued float from `round`/`avg`/`json_valid`).
+    /// Integer (or integer-valued float from `json_valid` / CAST).
     Int(i64),
     /// UTF-8 text.
     Text(&'static str),
@@ -80,6 +89,13 @@ pub fn portable_select_expects() -> &'static [PortableExpect] {
         PortableExpect::Int(0),
         PortableExpect::Text("Zb"),
         PortableExpect::Int(2),
+    ]
+}
+
+/// Expected [`PORTABLE_AGGREGATE_SELECT`] cells in column order.
+#[must_use]
+pub fn portable_aggregate_expects() -> &'static [PortableExpect] {
+    &[
         PortableExpect::Int(1),
         PortableExpect::Int(2),
         PortableExpect::Int(2),
@@ -106,10 +122,28 @@ pub fn portable_value_matches(got: &DbValue, want: PortableExpect) -> bool {
 /// Formats a mismatch for adapter execution tests.
 #[must_use]
 pub fn portable_select_mismatch(values: &[DbValue]) -> Option<String> {
-    let expect = portable_select_expects();
+    portable_row_mismatch(values, portable_select_expects(), "portable SELECT")
+}
+
+/// Formats a mismatch for [`PORTABLE_AGGREGATE_SELECT`].
+#[must_use]
+pub fn portable_aggregate_mismatch(values: &[DbValue]) -> Option<String> {
+    portable_row_mismatch(
+        values,
+        portable_aggregate_expects(),
+        "portable aggregate SELECT",
+    )
+}
+
+/// Compares `values` to `expect` and describes the first mismatch.
+fn portable_row_mismatch(
+    values: &[DbValue],
+    expect: &[PortableExpect],
+    label: &str,
+) -> Option<String> {
     if values.len() != expect.len() {
         return Some(format!(
-            "portable SELECT returned {} cells; expected {}",
+            "{label} returned {} cells; expected {}",
             values.len(),
             expect.len()
         ));
@@ -117,7 +151,7 @@ pub fn portable_select_mismatch(values: &[DbValue]) -> Option<String> {
     for (i, (got, want)) in values.iter().zip(expect.iter()).enumerate() {
         if !portable_value_matches(got, *want) {
             return Some(format!(
-                "portable SELECT column {i}: got {got:?}, expected {want:?}"
+                "{label} column {i}: got {got:?}, expected {want:?}"
             ));
         }
     }

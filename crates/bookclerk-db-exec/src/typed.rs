@@ -357,7 +357,12 @@ fn db_values_from_query_result(
     }
     let mut values = Vec::with_capacity(columns.len());
     for (i, col) in columns.iter().enumerate() {
-        let sea = sea_value_from_index(row, i, col.db_type)?;
+        let sea = sea_value_from_index(row, i, col.db_type).map_err(|err| {
+            DbErr::Custom(format!(
+                "{err}; column `{}` declared {:?}",
+                col.name, col.db_type
+            ))
+        })?;
         values.push(db_value_for_column(&sea, col)?);
     }
     Ok(values)

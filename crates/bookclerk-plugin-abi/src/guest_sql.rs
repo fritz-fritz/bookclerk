@@ -2286,6 +2286,12 @@ mod tests {
             1,
         )
         .unwrap();
+        binding_check(
+            "SELECT count(*), sum(id), min(id), max(id), avg(id) FROM notes",
+            DbResultSelection::Rows,
+            1,
+        )
+        .unwrap();
         let err =
             binding_check("SELECT hex(body) FROM notes", DbResultSelection::Rows, 1).unwrap_err();
         assert!(
