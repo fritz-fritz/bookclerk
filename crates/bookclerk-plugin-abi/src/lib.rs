@@ -131,7 +131,8 @@ pub use error::{PluginError, PluginErrorCode, Result};
 pub use guest_sql::{
     authorize_guest_sql_policy, guest_statement_kind, parse_guest_sql_refs,
     returning_single_row_proven, statement_is_ddl, validate_guest_execute_request,
-    validate_guest_execute_request_for_policy, GuestSqlPolicy, GuestSqlRefs,
+    validate_guest_execute_request_for_policy, validate_sql_v1_grammar, GuestSqlPolicy,
+    GuestSqlRefs,
 };
 #[cfg(feature = "host")]
 pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};

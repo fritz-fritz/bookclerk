@@ -3249,6 +3249,99 @@ mod tests {
         assert_eq!(count, 1, "D1 mixed batch must not double-insert");
     }
 
+    /// Mixed DDL+DML whose INSERT stores the host write-gate text in a string
+    /// and a comment must keep that payload intact after claimed-owner ungating.
+    #[tokio::test]
+    async fn executing_mock_mixed_ddl_dml_preserves_gate_text_in_literal_and_comment() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+        };
+
+        let (_server, proxy, conn, _interrupt, _drop, _oversize) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema for mixed gate batch");
+
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
+        let policy = GuestSqlPolicy::binding_owned();
+        let mixed = || ExecuteRequest {
+            operation_id: "d1-mixed-gate-lit".into(),
+            request_hash: String::new(),
+            statements: vec![
+                TypedDbStatement {
+                    sql: bookclerk_db_exec::sql_v1::MIXED_GATE_LITERAL_DDL.into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::Discard,
+                },
+                TypedDbStatement {
+                    sql: bookclerk_db_exec::sql_v1::mixed_gate_literal_insert(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                },
+            ],
+            deadline_unix_ms: 0,
+        };
+        let first =
+            bookclerk_library::execute_guest_atomic_with(mixed(), &caps, &policy, |envelope| {
+                let proxy = proxy.clone();
+                async move {
+                    proxy
+                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .await
+                        .map_err(crate::atomic::plugin_error_from_d1)
+                }
+            })
+            .await
+            .expect("first mixed gate");
+        assert_eq!(first.statements[1].rows_affected, 1);
+        let replay =
+            bookclerk_library::execute_guest_atomic_with(mixed(), &caps, &policy, |envelope| {
+                let proxy = proxy.clone();
+                async move {
+                    proxy
+                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .await
+                        .map_err(crate::atomic::plugin_error_from_d1)
+                }
+            })
+            .await
+            .expect("replay mixed gate");
+        assert_eq!(replay.statements[1].rows_affected, 1);
+        let body: String = conn
+            .lock()
+            .expect("sqlite")
+            .query_row("SELECT body FROM gated_notes WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("body");
+        assert_eq!(body, bookclerk_db_exec::GUEST_RECEIPT_WRITE_GATE);
+        let count: i64 = conn
+            .lock()
+            .expect("sqlite")
+            .query_row("SELECT COUNT(*) FROM gated_notes", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(count, 1, "D1 mixed gate batch must not double-insert");
+    }
+
     /// Portable SQL v1 helpers and AUTOINCREMENT/BLOB DDL execute on D1.
     #[tokio::test]
     async fn executing_mock_portable_functions_and_binding_ddl() {
@@ -3348,12 +3441,13 @@ mod tests {
         })
         .await
         .expect("portable select");
-        let values = &reply.statements[0].rows[0].values;
-        if let Some(err) = bookclerk_db_exec::sql_v1::portable_select_mismatch(values) {
+        if let Some(err) = bookclerk_db_exec::sql_v1::portable_select_mismatch(&reply.statements[0])
+        {
             panic!("{err}");
         }
-        let agg = &reply.statements[1].rows[0].values;
-        if let Some(err) = bookclerk_db_exec::sql_v1::portable_aggregate_mismatch(agg) {
+        if let Some(err) =
+            bookclerk_db_exec::sql_v1::portable_aggregate_mismatch(&reply.statements[1])
+        {
             panic!("{err}");
         }
         let blob: Vec<u8> = conn

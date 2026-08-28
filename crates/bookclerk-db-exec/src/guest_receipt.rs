@@ -60,13 +60,15 @@ pub fn is_guest_receipt_stub_insert(sql: &str) -> bool {
     t.contains("insert into db_atomic_receipts") && t.contains("where not exists")
 }
 
-/// Removes [`GUEST_RECEIPT_WRITE_GATE`] and the `WHERE`/`AND` that introduced it.
+/// Removes the **host-appended** [`GUEST_RECEIPT_WRITE_GATE`] predicate.
 ///
-/// Returns `sql` unchanged when the gate is absent. The caller must drop the
-/// trailing `operation_id` bind that the wrap appended for the gate.
+/// The wrap splices the gate into a code span (before `RETURNING`). A plugin
+/// string or comment may contain the same text; only the last code-span match
+/// is removed. Returns `sql` unchanged when that gate is absent. The caller
+/// must drop the trailing `operation_id` bind the wrap appended for the gate.
 #[must_use]
 pub fn strip_guest_receipt_write_gate(sql: &str) -> String {
-    let Some(idx) = sql.find(GUEST_RECEIPT_WRITE_GATE) else {
+    let Some(idx) = crate::lower::find_last_in_code(sql, GUEST_RECEIPT_WRITE_GATE) else {
         return sql.to_string();
     };
     let before = sql[..idx].trim_end();
@@ -565,6 +567,26 @@ mod tests {
         assert_eq!(
             strip_guest_receipt_write_gate("INSERT INTO t (id) SELECT 1"),
             "INSERT INTO t (id) SELECT 1"
+        );
+        let gate = GUEST_RECEIPT_WRITE_GATE;
+        let literal_then_gate =
+            format!("INSERT INTO gated_notes (id, body) SELECT 1, '{gate}' WHERE {gate}");
+        assert_eq!(
+            strip_guest_receipt_write_gate(&literal_then_gate),
+            format!("INSERT INTO gated_notes (id, body) SELECT 1, '{gate}'")
+        );
+        let comment_then_gate =
+            format!("INSERT INTO gated_notes (id, body) -- {gate}\nSELECT 1, 'x' WHERE {gate}");
+        assert_eq!(
+            strip_guest_receipt_write_gate(&comment_then_gate),
+            format!("INSERT INTO gated_notes (id, body) -- {gate}\nSELECT 1, 'x'")
+        );
+        let both = format!(
+            "INSERT INTO gated_notes (id, body)\n-- {gate}\nSELECT 1, '{gate}' WHERE {gate}"
+        );
+        assert_eq!(
+            strip_guest_receipt_write_gate(&both),
+            format!("INSERT INTO gated_notes (id, body)\n-- {gate}\nSELECT 1, '{gate}'")
         );
     }
 

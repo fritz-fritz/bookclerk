@@ -1849,6 +1849,50 @@ async fn postgres_binding_mixed_ddl_dml() {
 
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_binding_mixed_ddl_dml_preserves_gate_text_in_literal_and_comment() {
+    if !postgres_conformance_enabled() {
+        return;
+    }
+    let db = postgres_binding_db().await;
+    let mixed = || {
+        let ddl = binding_stmt(bookclerk_db_exec::sql_v1::MIXED_GATE_LITERAL_DDL, vec![]);
+        let mut insert = binding_stmt(
+            &bookclerk_db_exec::sql_v1::mixed_gate_literal_insert(),
+            vec![],
+        );
+        insert.result_selection = bookclerk_plugin_abi::DbResultSelection::AffectedRows;
+        binding_req("pg-mixed-gate-lit", vec![ddl, insert])
+    };
+    let first = run_postgres_binding(&db, mixed())
+        .await
+        .expect("first mixed gate");
+    assert_eq!(first.statements[1].rows_affected, 1);
+    let replay = run_postgres_binding(&db, mixed())
+        .await
+        .expect("replay mixed gate");
+    assert_eq!(replay.statements[1].rows_affected, 1);
+    let mut select = binding_stmt(bookclerk_db_exec::sql_v1::MIXED_GATE_LITERAL_SELECT, vec![]);
+    select.max_rows = 8;
+    let mut count = binding_stmt(bookclerk_db_exec::sql_v1::MIXED_GATE_LITERAL_COUNT, vec![]);
+    count.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-mixed-gate-sel", vec![select, count]))
+        .await
+        .expect("select mixed gate");
+    assert_eq!(
+        reply.statements[0].rows[0].values[0],
+        bookclerk_plugin_abi::DbValue::Text(bookclerk_db_exec::GUEST_RECEIPT_WRITE_GATE.into())
+    );
+    let bookclerk_plugin_abi::DbValue::Int64(n) = reply.statements[1].rows[0].values[0] else {
+        panic!(
+            "expected int64 count, got {:?}",
+            reply.statements[1].rows[0].values[0]
+        );
+    };
+    assert_eq!(n, 1, "postgres mixed gate batch must not double-insert");
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_binding_portable_functions() {
     if !postgres_conformance_enabled() {
         return;
@@ -1883,12 +1927,11 @@ async fn postgres_binding_portable_functions() {
     let reply = run_postgres_binding(&db, binding_req("pg-sel-typed", vec![select, aggregates]))
         .await
         .expect("portable select");
-    let values = &reply.statements[0].rows[0].values;
-    if let Some(err) = bookclerk_db_exec::sql_v1::portable_select_mismatch(values) {
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_select_mismatch(&reply.statements[0]) {
         panic!("{err}");
     }
-    let agg = &reply.statements[1].rows[0].values;
-    if let Some(err) = bookclerk_db_exec::sql_v1::portable_aggregate_mismatch(agg) {
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_aggregate_mismatch(&reply.statements[1])
+    {
         panic!("{err}");
     }
     let mut blob = binding_stmt("SELECT blob FROM typed", vec![]);

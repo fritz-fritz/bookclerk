@@ -295,8 +295,12 @@ where
     unwrap_guest_typed_reply(reply, guest_len, &guest_hash)
 }
 
-/// Authorizes a **guest-authored** typed batch: grammar and table scope,
-/// bind counts, result selection, then [`authorize_typed_request`].
+/// Authorizes a **guest-authored** typed batch.
+///
+/// Pipeline: plugin SQL → SQL-v1 grammar validation → binding
+/// scope/security authorization → capability/limit validation → canonical
+/// [`bookclerk_plugin_abi::ExecuteRequest`]. Adapter-edge lowering happens
+/// later, at execute, against the isolated physical DB.
 ///
 /// Host schema DDL must use [`authorize_typed_request`] directly.
 ///

@@ -450,19 +450,37 @@ fn replace_in_code(sql: &str, from: &str, to: &str) -> String {
 
 /// Byte offset of `needle` in a code span, if present.
 fn find_in_code(sql: &str, needle: &str) -> Option<usize> {
+    find_in_code_from(sql, needle, false)
+}
+
+/// Byte offset of the last `needle` in a code span (literals/comments skipped).
+pub(crate) fn find_last_in_code(sql: &str, needle: &str) -> Option<usize> {
+    find_in_code_from(sql, needle, true)
+}
+
+fn find_in_code_from(sql: &str, needle: &str, last: bool) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
     let mut i = 0;
+    let mut found = None;
     while i < sql.len() {
         if let Some(len) = literal_or_comment_len(&sql[i..]) {
             i += len;
             continue;
         }
         if sql[i..].starts_with(needle) {
-            return Some(i);
+            if !last {
+                return Some(i);
+            }
+            found = Some(i);
+            i += needle.len();
+            continue;
         }
         let ch = sql[i..].chars().next()?;
         i += ch.len_utf8();
     }
-    None
+    found
 }
 
 /// Leading comments and whitespace.

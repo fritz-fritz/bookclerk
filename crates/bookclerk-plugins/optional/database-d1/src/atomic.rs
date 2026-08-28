@@ -57,13 +57,11 @@ fn wrap_has_ungated_ddl(statements: &[TypedDbStatement]) -> bool {
 
 /// Strips the host wrap's DML receipt gate after D1 has claimed the operation.
 fn ungate_claimed_guest_write(sql_stmt: &mut SqlStmt, typed: &mut TypedDbStatement) {
-    if !sql_stmt
-        .0
-        .contains(bookclerk_db_exec::GUEST_RECEIPT_WRITE_GATE)
-    {
+    let stripped = bookclerk_db_exec::strip_guest_receipt_write_gate(&sql_stmt.0);
+    if stripped == sql_stmt.0 {
         return;
     }
-    sql_stmt.0 = bookclerk_db_exec::strip_guest_receipt_write_gate(&sql_stmt.0);
+    sql_stmt.0 = stripped;
     let _ = sql_stmt.1.pop();
     typed.sql = sql_stmt.0.clone();
     let _ = typed.parameters.pop();

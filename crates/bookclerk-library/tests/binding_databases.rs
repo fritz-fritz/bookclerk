@@ -454,6 +454,42 @@ async fn binding_mixed_ddl_dml_applies_once_and_replays() {
 }
 
 #[tokio::test]
+async fn binding_mixed_ddl_dml_preserves_gate_text_in_literal_and_comment() {
+    let db = binding_db().await;
+    let mixed = || {
+        let ddl = stmt(bookclerk_db_exec::sql_v1::MIXED_GATE_LITERAL_DDL, vec![]);
+        let mut insert = stmt(
+            &bookclerk_db_exec::sql_v1::mixed_gate_literal_insert(),
+            vec![],
+        );
+        insert.result_selection = DbResultSelection::AffectedRows;
+        req("mixed-gate-lit", vec![ddl, insert])
+    };
+    let first = run_binding(&db, mixed()).await.expect("first mixed gate");
+    assert_eq!(first.statements[1].rows_affected, 1);
+    let replay = run_binding(&db, mixed()).await.expect("replay mixed gate");
+    assert_eq!(replay.statements[1].rows_affected, 1);
+    let mut select = stmt(bookclerk_db_exec::sql_v1::MIXED_GATE_LITERAL_SELECT, vec![]);
+    select.max_rows = 8;
+    let mut count = stmt(bookclerk_db_exec::sql_v1::MIXED_GATE_LITERAL_COUNT, vec![]);
+    count.max_rows = 8;
+    let reply = run_binding(&db, req("mixed-gate-sel", vec![select, count]))
+        .await
+        .expect("select mixed gate");
+    assert_eq!(
+        reply.statements[0].rows[0].values[0],
+        DbValue::Text(bookclerk_db_exec::GUEST_RECEIPT_WRITE_GATE.into())
+    );
+    let DbValue::Int64(n) = reply.statements[1].rows[0].values[0] else {
+        panic!(
+            "expected int64 count, got {:?}",
+            reply.statements[1].rows[0].values[0]
+        );
+    };
+    assert_eq!(n, 1, "mixed gate batch must not double-insert");
+}
+
+#[tokio::test]
 async fn binding_portable_functions_and_ddl_types() {
     let db = binding_db().await;
     run_binding(
@@ -485,12 +521,11 @@ async fn binding_portable_functions_and_ddl_types() {
     let reply = run_binding(&db, req("sel-typed", vec![select, aggregates]))
         .await
         .expect("portable select");
-    let values = &reply.statements[0].rows[0].values;
-    if let Some(err) = bookclerk_db_exec::sql_v1::portable_select_mismatch(values) {
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_select_mismatch(&reply.statements[0]) {
         panic!("{err}");
     }
-    let agg = &reply.statements[1].rows[0].values;
-    if let Some(err) = bookclerk_db_exec::sql_v1::portable_aggregate_mismatch(agg) {
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_aggregate_mismatch(&reply.statements[1])
+    {
         panic!("{err}");
     }
     let mut blob = stmt("SELECT blob FROM typed", vec![]);

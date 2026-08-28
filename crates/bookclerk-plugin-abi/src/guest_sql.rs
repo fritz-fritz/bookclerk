@@ -54,6 +54,7 @@ const DENIED_VERBS: &[&str] = &[
     "PREPARE",
     "REINDEX",
     "RELEASE",
+    "REPLACE",
     "REVOKE",
     "ROLLBACK",
     "SAVEPOINT",
@@ -480,6 +481,7 @@ fn authorize_binding_ddl(index: usize, sql: &str, policy: &GuestSqlPolicy) -> Re
             deny_qualified_names_in(index, inner)?;
             deny_select_in_ddl(index, inner)?;
             deny_binding_ddl_object_refs(index, inner)?;
+            validate_binding_create_table_v1(index, inner, scan.rest())?;
             deny_qualified_names_in(index, scan.rest())?;
             deny_select_in_ddl(index, scan.rest())?;
             deny_binding_ddl_object_refs(index, scan.rest())?;
@@ -494,18 +496,17 @@ fn authorize_binding_ddl(index: usize, sql: &str, policy: &GuestSqlPolicy) -> Re
                 return Err(deny("CREATE INDEX requires ON <table>"));
             }
             check_binding_ddl_name(index, &mut scan, "indexed table")?;
-            let mut fragments: Vec<&str> = Vec::new();
-            if scan.take_byte(b'(') {
-                let inner = scan
-                    .take_balanced_inner()
-                    .ok_or_else(|| deny("unbalanced CREATE INDEX"))?;
-                deny_qualified_names_in(index, inner)?;
-                fragments.push(inner);
+            if !scan.take_byte(b'(') {
+                return Err(deny("CREATE INDEX requires a column list"));
             }
+            let inner = scan
+                .take_balanced_inner()
+                .ok_or_else(|| deny("unbalanced CREATE INDEX"))?;
+            deny_qualified_names_in(index, inner)?;
+            validate_binding_create_index_v1(index, inner, scan.rest())?;
             deny_qualified_names_in(index, scan.rest())?;
             deny_select_in_ddl(index, scan.rest())?;
-            fragments.push(scan.rest());
-            return authorize_ddl_function_fragments(index, policy, &fragments);
+            return authorize_ddl_function_fragments(index, policy, &[inner, scan.rest()]);
         }
         return Err(deny("only TABLE and INDEX may be created"));
     }
@@ -526,6 +527,360 @@ fn authorize_binding_ddl(index: usize, sql: &str, policy: &GuestSqlPolicy) -> Re
         return authorize_ddl_function_fragments(index, policy, &[scan.rest()]);
     }
     Err(deny("unsupported verb"))
+}
+
+/// Bookclerk SQL v1 grammar (plugin SQL), before scope/security authorization.
+///
+/// Bindings use the portable subset: `INSERT` / `INSERT OR IGNORE` (not
+/// `REPLACE`), no `GLOB` / `COLLATE` / `MATCH` / `REGEXP`, and CREATE TABLE
+/// types `INTEGER` / `REAL` / `TEXT` / `BLOB` only. Library guests still reject
+/// `REPLACE` as a statement form.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `sql` is outside SQL v1.
+pub fn validate_sql_v1_grammar(sql: &str, binding_owned: bool) -> Result<()> {
+    validate_sql_v1_grammar_at(0, sql, binding_owned)
+}
+
+fn validate_sql_v1_grammar_at(index: usize, sql: &str, binding_owned: bool) -> Result<()> {
+    deny_non_v1_insert(index, sql)?;
+    if binding_owned {
+        deny_binding_v1_operators(index, sql)?;
+    }
+    Ok(())
+}
+
+fn v1_grammar_err(index: usize, what: &str) -> PluginError {
+    PluginError::invalid_params(format!(
+        "statement {index} is not Bookclerk SQL v1 ({what})"
+    ))
+}
+
+/// `INSERT OR IGNORE` is canonical; `INSERT OR REPLACE` / `OR ABORT` are not.
+fn deny_non_v1_insert(index: usize, sql: &str) -> Result<()> {
+    let main = sql_after_leading_ctes(sql);
+    let mut scan = Scan { sql: main, i: 0 };
+    if !scan.take_kw("INSERT") {
+        return Ok(());
+    }
+    if !scan.take_kw("OR") {
+        return Ok(());
+    }
+    if scan.take_kw("IGNORE") {
+        return Ok(());
+    }
+    let conflict = scan.read_ident().unwrap_or_else(|| "unknown".to_string());
+    Err(v1_grammar_err(
+        index,
+        &format!("INSERT OR {conflict} is not portable; use INSERT OR IGNORE"),
+    ))
+}
+
+/// SQLite-only operators that the expression scanner would otherwise treat as columns.
+fn deny_binding_v1_operators(index: usize, sql: &str) -> Result<()> {
+    let mut scan = Scan { sql, i: 0 };
+    while scan.i < sql.len() {
+        scan.skip();
+        if scan.i >= sql.len() {
+            break;
+        }
+        let b = scan.sql.as_bytes()[scan.i];
+        if b == b'\'' {
+            skip_quoted_string(&mut scan, b'\'');
+            continue;
+        }
+        if b == b'"' || b == b'`' || b == b'[' {
+            let _ = scan.read_ident();
+            continue;
+        }
+        for kw in ["GLOB", "COLLATE", "MATCH", "REGEXP"] {
+            if scan.peek_kw(kw) {
+                return Err(v1_grammar_err(
+                    index,
+                    &format!("{kw} is not a Bookclerk SQL v1 operator"),
+                ));
+            }
+        }
+        if scan.read_ident().is_some() {
+            continue;
+        }
+        scan.i += 1;
+    }
+    Ok(())
+}
+
+const V1_COLUMN_TYPES: &[&str] = &["integer", "real", "text", "blob"];
+
+fn validate_binding_create_table_v1(index: usize, inner: &str, tail: &str) -> Result<()> {
+    deny_v1_ddl_tail(index, tail, false)?;
+    let mut scan = Scan { sql: inner, i: 0 };
+    let mut saw_column = false;
+    loop {
+        scan.skip();
+        if scan.i >= inner.len() {
+            break;
+        }
+        if scan.peek_kw("CONSTRAINT")
+            || scan.peek_kw("PRIMARY")
+            || scan.peek_kw("UNIQUE")
+            || scan.peek_kw("CHECK")
+            || scan.peek_kw("FOREIGN")
+        {
+            parse_table_constraint(index, &mut scan)?;
+        } else {
+            parse_column_def(index, &mut scan)?;
+            saw_column = true;
+        }
+        scan.skip();
+        if scan.take_byte(b',') {
+            continue;
+        }
+        scan.skip();
+        if scan.i < inner.len() {
+            return Err(v1_grammar_err(
+                index,
+                "CREATE TABLE column list has trailing tokens",
+            ));
+        }
+        break;
+    }
+    if !saw_column {
+        return Err(v1_grammar_err(
+            index,
+            "CREATE TABLE requires at least one column",
+        ));
+    }
+    Ok(())
+}
+
+fn deny_v1_ddl_tail(index: usize, tail: &str, allow_where: bool) -> Result<()> {
+    let mut scan = Scan { sql: tail, i: 0 };
+    scan.skip();
+    if scan.i >= tail.len() {
+        return Ok(());
+    }
+    if allow_where && scan.peek_kw("WHERE") {
+        return Ok(());
+    }
+    Err(v1_grammar_err(
+        index,
+        "SQLite-only or engine-specific table/index tail is not portable",
+    ))
+}
+
+fn validate_binding_create_index_v1(index: usize, inner: &str, tail: &str) -> Result<()> {
+    deny_v1_ddl_tail(index, tail, true)?;
+    deny_binding_v1_operators(index, inner)?;
+    let mut scan = Scan { sql: inner, i: 0 };
+    loop {
+        if scan.read_ident().is_none() {
+            return Err(v1_grammar_err(index, "CREATE INDEX requires a column list"));
+        }
+        let _ = scan.take_kw("ASC");
+        let _ = scan.take_kw("DESC");
+        if scan.take_byte(b',') {
+            continue;
+        }
+        scan.skip();
+        if scan.i < inner.len() {
+            return Err(v1_grammar_err(
+                index,
+                "CREATE INDEX column list has trailing tokens",
+            ));
+        }
+        break;
+    }
+    Ok(())
+}
+
+fn parse_column_def(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if scan.read_ident().is_none() {
+        return Err(v1_grammar_err(index, "column name required"));
+    }
+    let ty = scan
+        .read_ident()
+        .ok_or_else(|| v1_grammar_err(index, "column type required"))?;
+    if !V1_COLUMN_TYPES.contains(&ty.as_str()) {
+        return Err(v1_grammar_err(
+            index,
+            &format!("column type {ty} is not portable; use INTEGER, REAL, TEXT, or BLOB"),
+        ));
+    }
+    if scan.peek_byte(b'(') {
+        return Err(v1_grammar_err(
+            index,
+            "column type parameters (VARCHAR(n), NUMERIC(p,s)) are not portable",
+        ));
+    }
+    parse_column_constraints(index, scan)
+}
+
+fn parse_column_constraints(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    loop {
+        scan.skip();
+        if scan.i >= scan.sql.len() || scan.peek_byte(b',') {
+            return Ok(());
+        }
+        if scan.peek_kw("FOREIGN") {
+            return Ok(());
+        }
+        if scan.take_kw("CONSTRAINT") {
+            if scan.read_ident().is_none() {
+                return Err(v1_grammar_err(index, "CONSTRAINT requires a name"));
+            }
+            continue;
+        }
+        if scan.take_kw("PRIMARY") {
+            if !scan.take_kw("KEY") {
+                return Err(v1_grammar_err(index, "PRIMARY KEY required"));
+            }
+            let _ = scan.take_kw("AUTOINCREMENT");
+            continue;
+        }
+        if scan.take_kw("AUTOINCREMENT") {
+            continue;
+        }
+        if scan.take_kw("NOT") {
+            if !scan.take_kw("NULL") {
+                return Err(v1_grammar_err(index, "NOT NULL required"));
+            }
+            continue;
+        }
+        if scan.take_kw("NULL") {
+            continue;
+        }
+        if scan.take_kw("UNIQUE") {
+            continue;
+        }
+        if scan.take_kw("CHECK") {
+            skip_paren_group(index, scan)?;
+            continue;
+        }
+        if scan.take_kw("DEFAULT") {
+            parse_default_value(index, scan)?;
+            continue;
+        }
+        if scan.take_kw("REFERENCES") {
+            parse_references(index, scan)?;
+            continue;
+        }
+        let unknown = scan.read_ident().unwrap_or_else(|| "token".to_string());
+        return Err(v1_grammar_err(
+            index,
+            &format!("constraint {unknown} is not portable"),
+        ));
+    }
+}
+
+fn parse_table_constraint(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if scan.take_kw("CONSTRAINT") && scan.read_ident().is_none() {
+        return Err(v1_grammar_err(index, "CONSTRAINT requires a name"));
+    }
+    if scan.take_kw("PRIMARY") {
+        if !scan.take_kw("KEY") {
+            return Err(v1_grammar_err(index, "PRIMARY KEY required"));
+        }
+        return skip_paren_group(index, scan);
+    }
+    if scan.take_kw("UNIQUE") {
+        return skip_paren_group(index, scan);
+    }
+    if scan.take_kw("CHECK") {
+        return skip_paren_group(index, scan);
+    }
+    if scan.take_kw("FOREIGN") {
+        if !scan.take_kw("KEY") {
+            return Err(v1_grammar_err(index, "FOREIGN KEY required"));
+        }
+        skip_paren_group(index, scan)?;
+        if !scan.take_kw("REFERENCES") {
+            return Err(v1_grammar_err(index, "FOREIGN KEY requires REFERENCES"));
+        }
+        return parse_references(index, scan);
+    }
+    Err(v1_grammar_err(index, "unsupported table constraint"))
+}
+
+fn skip_paren_group(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if !scan.take_byte(b'(') {
+        return Err(v1_grammar_err(index, "expected '('"));
+    }
+    if scan.take_balanced_inner().is_none() {
+        return Err(v1_grammar_err(index, "unbalanced parentheses"));
+    }
+    Ok(())
+}
+
+fn parse_default_value(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    scan.skip();
+    if scan.i >= scan.sql.len() {
+        return Err(v1_grammar_err(index, "DEFAULT requires a value"));
+    }
+    let b = scan.sql.as_bytes()[scan.i];
+    if b == b'\'' {
+        skip_quoted_string(scan, b'\'');
+        return Ok(());
+    }
+    if scan.take_byte(b'(') {
+        if scan.take_balanced_inner().is_none() {
+            return Err(v1_grammar_err(index, "unbalanced DEFAULT"));
+        }
+        return Ok(());
+    }
+    if scan.take_kw("NULL") || scan.take_kw("TRUE") || scan.take_kw("FALSE") {
+        return Ok(());
+    }
+    if b == b'+' || b == b'-' || b.is_ascii_digit() {
+        scan.i += 1;
+        while scan
+            .sql
+            .as_bytes()
+            .get(scan.i)
+            .is_some_and(|c| c.is_ascii_digit() || *c == b'.')
+        {
+            scan.i += 1;
+        }
+        return Ok(());
+    }
+    if scan.read_ident().is_some() {
+        if scan.peek_byte(b'(') {
+            skip_paren_group(index, scan)?;
+        }
+        return Ok(());
+    }
+    Err(v1_grammar_err(index, "DEFAULT value is not portable"))
+}
+
+fn parse_references(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if scan.read_ident().is_none() {
+        return Err(v1_grammar_err(index, "REFERENCES requires a table"));
+    }
+    if scan.peek_byte(b'(') {
+        skip_paren_group(index, scan)?;
+    }
+    while scan.take_kw("ON") {
+        if !scan.take_kw("DELETE") && !scan.take_kw("UPDATE") {
+            return Err(v1_grammar_err(index, "ON DELETE/UPDATE required"));
+        }
+        if scan.take_kw("NO") {
+            if !scan.take_kw("ACTION") {
+                return Err(v1_grammar_err(index, "NO ACTION required"));
+            }
+            continue;
+        }
+        if scan.take_kw("SET") {
+            if !scan.take_kw("NULL") && !scan.take_kw("DEFAULT") {
+                return Err(v1_grammar_err(index, "SET NULL/DEFAULT required"));
+            }
+            continue;
+        }
+        if scan.take_kw("CASCADE") || scan.take_kw("RESTRICT") {
+            continue;
+        }
+        return Err(v1_grammar_err(index, "unsupported REFERENCES action"));
+    }
+    Ok(())
 }
 
 /// Fails closed when `sql` contains a schema-qualified `ident.ident` (the
@@ -1015,6 +1370,11 @@ pub fn validate_guest_execute_request(req: &ExecuteRequest) -> Result<()> {
 
 /// [`validate_guest_execute_request`] with policy-dependent grammar.
 ///
+/// Pipeline: plugin SQL → SQL-v1 grammar validation → binding
+/// scope/security authorization → capability/limit validation → canonical
+/// [`ExecuteRequest`]. Adapter-edge lowering happens later, at execute,
+/// against the isolated physical DB.
+///
 /// A [`GuestSqlPolicy::binding_owned`] policy admits bounded DDL verbs
 /// (`CREATE` / `DROP`; `ALTER` is still classified then refused);
 /// shapes and names are then authorized by
@@ -1063,6 +1423,7 @@ fn validate_guest_statement_for(
             "statement {index} is not valid Bookclerk SQL"
         )));
     };
+    validate_sql_v1_grammar_at(index, &stmt.sql, policy.is_binding_owned())?;
     let binding_ddl = policy.is_binding_owned()
         && ["CREATE", "ALTER", "DROP"].contains(&verb.to_ascii_uppercase().as_str());
     if !binding_ddl && DENIED_VERBS.iter().any(|v| verb.eq_ignore_ascii_case(v)) {
@@ -1293,10 +1654,10 @@ impl<'a> Scan<'a> {
 /// resolved for authorization.
 fn parse_statement_into(sql: &str, refs: &mut GuestSqlRefs, ctes: &[String]) -> Result<()> {
     let mut scan = Scan { sql, i: 0 };
-    if scan.take_kw("INSERT") || scan.take_kw("REPLACE") {
-        let _ = scan.take_kw("OR");
-        let _ = scan.take_kw("IGNORE");
-        let _ = scan.take_kw("REPLACE");
+    if scan.take_kw("INSERT") {
+        if scan.take_kw("OR") && !scan.take_kw("IGNORE") {
+            return Err(unresolved("INSERT OR IGNORE"));
+        }
         if !scan.take_kw("INTO") {
             return Err(unresolved("INSERT INTO"));
         }
@@ -2111,7 +2472,7 @@ mod tests {
         .unwrap();
         binding_check("DROP TABLE IF EXISTS memos", DbResultSelection::Discard, 0).unwrap();
         binding_check(
-            "CREATE TABLE IF NOT EXISTS typed (v VARCHAR(255) DEFAULT 'x', n NUMERIC(10, 2))",
+            "CREATE TABLE IF NOT EXISTS typed (v TEXT DEFAULT 'x', n REAL)",
             DbResultSelection::Discard,
             0,
         )
@@ -2140,6 +2501,42 @@ mod tests {
             0,
         )
         .unwrap();
+        binding_check(
+            "SELECT replace(body, 'A', 'Z') FROM notes",
+            DbResultSelection::Rows,
+            1,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn binding_owned_sql_v1_grammar_rejects_nonportable_forms() {
+        for sql in [
+            "REPLACE INTO notes (id) VALUES (1)",
+            "INSERT OR REPLACE INTO notes (id) VALUES (1)",
+            "INSERT OR ABORT INTO notes (id) VALUES (1)",
+            "SELECT body FROM notes WHERE body GLOB 'A*'",
+            "SELECT body FROM notes WHERE body COLLATE NOCASE = 'x'",
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY) STRICT",
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY) WITHOUT ROWID",
+            "CREATE TABLE IF NOT EXISTS t (doc JSONB)",
+            "CREATE TABLE IF NOT EXISTS t (n NUMERIC(10, 2))",
+            "CREATE TABLE IF NOT EXISTS t (v VARCHAR(255))",
+            "CREATE TABLE IF NOT EXISTS t (body TEXT COLLATE NOCASE)",
+            "CREATE INDEX IF NOT EXISTS i ON notes (body COLLATE NOCASE)",
+            "CREATE INDEX IF NOT EXISTS i ON notes (body) INCLUDE (id)",
+            "CREATE INDEX IF NOT EXISTS i ON notes USING btree (body)",
+        ] {
+            let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
+            assert!(
+                err.to_string().contains("SQL v1")
+                    || err.to_string().contains("not portable")
+                    || err.to_string().contains("disallowed")
+                    || err.to_string().contains("not allowed")
+                    || err.to_string().contains("column list"),
+                "{sql}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -2386,14 +2783,26 @@ mod tests {
     }
 
     #[test]
-    fn allows_replace_upsert() {
-        validate_guest_execute_request(&req(
+    fn rejects_replace_upsert() {
+        let err = validate_guest_execute_request(&req(
             "REPLACE INTO books (id) VALUES (?)",
             vec![DbValue::Int64(1)],
             DbResultSelection::AffectedRows,
             0,
         ))
-        .unwrap();
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("disallowed") || err.to_string().contains("SQL v1"),
+            "{err}"
+        );
+        let err = validate_guest_execute_request(&req(
+            "INSERT OR REPLACE INTO books (id) VALUES (?)",
+            vec![DbValue::Int64(1)],
+            DbResultSelection::AffectedRows,
+            0,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("SQL v1"), "{err}");
     }
 
     #[test]
