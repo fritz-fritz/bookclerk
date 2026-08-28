@@ -2799,6 +2799,15 @@ fn publish_spec_account(
     }
 }
 
+fn expect_created(outcome: PublishDomainEventOutcome) -> String {
+    match outcome {
+        PublishDomainEventOutcome::Created { id } => id,
+        PublishDomainEventOutcome::Duplicate { .. } => {
+            panic!("expected PublishDomainEventOutcome::Created, got Duplicate")
+        }
+    }
+}
+
 async fn claim_delivery(store: &LibraryStore, owner: &str) -> crate::EventDeliveryRecord {
     claim_delivery_for(store, owner, &["echo".into()]).await
 }
@@ -2853,9 +2862,7 @@ async fn publish_domain_event_dedupes_and_rejects_oversized_payload() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = first else {
-        panic!("expected created: {first:?}");
-    };
+    let id = expect_created(first);
     let again = store
         .publish_domain_event(publish_spec(
             "book_acquired",
@@ -2898,9 +2905,7 @@ async fn publish_domain_event_namespaces_dedup_by_account_and_source() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: id_a } = a else {
-        panic!("{a:?}");
-    };
+    let id_a = expect_created(a);
     let b = store
         .publish_domain_event(publish_spec_account(
             "book_acquired",
@@ -2913,14 +2918,14 @@ async fn publish_domain_event_namespaces_dedup_by_account_and_source() {
         .unwrap();
     assert!(
         matches!(b, PublishDomainEventOutcome::Created { .. }),
-        "{b:?}"
+        "expected PublishDomainEventOutcome::Created"
     );
     let mut sourced = publish_spec_account("book_acquired", "book_acquired:ns", "{}", "", "acct-a");
     sourced.source = "audible".into();
     let c = store.publish_domain_event(sourced).await.unwrap();
     assert!(
         matches!(c, PublishDomainEventOutcome::Created { .. }),
-        "{c:?}"
+        "expected PublishDomainEventOutcome::Created"
     );
     let dup = store
         .publish_domain_event(publish_spec_account(
@@ -2949,9 +2954,7 @@ async fn dispatch_is_idempotent_and_isolates_subscribers() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected created: {created:?}");
-    };
+    let id = expect_created(created);
     let subs = vec![
         EventSubscriber::plugin("echo"),
         EventSubscriber::plugin("audiobookshelf"),
@@ -3002,9 +3005,7 @@ async fn concurrent_host_cas_claims_do_not_skip_keyset_pages() {
             ))
             .await
             .unwrap();
-        let PublishDomainEventOutcome::Created { id } = created else {
-            panic!("expected PublishDomainEventOutcome::Created");
-        };
+        let id = expect_created(created);
         store
             .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], &format!("d-{id}"))
             .await
@@ -3058,9 +3059,7 @@ async fn dispatch_page_fault_leaves_parent_pending_and_retries() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let db = store.db().clone();
     let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
     let subs = [
@@ -3112,9 +3111,7 @@ async fn dispatch_retry_keeps_frozen_snapshot_when_catalog_changes() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let db = store.db().clone();
     let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
     let original = [
@@ -3184,9 +3181,7 @@ async fn dispatch_snapshot_cas_two_stores_agree() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let store1 = store1.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db: db1 }));
     let store2 = LibraryStore::from_connection(db2.clone())
         .with_atomic_txn(Arc::new(InProcessSqliteAtomic { db: db2 }));
@@ -3265,9 +3260,7 @@ async fn unrelated_dispatch_does_not_wait_on_snapshot_cas_barrier() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let db = store.db().clone();
     let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
     super::event_outbox::set_snapshot_claim_barrier(Some(std::sync::Arc::new(
@@ -3295,9 +3288,7 @@ async fn malformed_dispatch_snapshot_fails_closed() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .db()
         .execute_raw(sea_orm::Statement::from_sql_and_values(
@@ -3336,9 +3327,7 @@ async fn dispatch_twenty_five_subscribers_on_sqlite_caps_are_all_inserted() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let db = store.db().clone();
     let store = store.with_atomic_txn(Arc::new(InProcessSqliteAtomic { db }));
     assert!(
@@ -3374,9 +3363,7 @@ async fn oversized_dispatch_page_is_rejected_and_parent_stays_pending() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let backend = InProcessSqliteAtomic {
         db: store.db().clone(),
     };
@@ -3407,9 +3394,7 @@ async fn crash_between_publish_and_dispatch_leaves_pending_outbox() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected created: {created:?}");
-    };
+    let id = expect_created(created);
     assert_eq!(
         store.list_event_deliveries(None, 10).await.unwrap().len(),
         0
@@ -3434,9 +3419,7 @@ async fn reclaim_expired_event_delivery_and_stale_fence_ignored() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected created: {created:?}");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op")
         .await
@@ -3488,9 +3471,7 @@ async fn reclaim_expired_resume_restores(store: &LibraryStore) {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected created: {created:?}");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op")
         .await
@@ -3551,9 +3532,7 @@ async fn suspend_resume_does_not_increment_attempt_count() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected created: {created:?}");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op")
         .await
@@ -3604,12 +3583,8 @@ async fn fifo_skips_later_delivery_with_same_ordering_key() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: id_a } = a else {
-        panic!("{a:?}");
-    };
-    let PublishDomainEventOutcome::Created { id: id_b } = b else {
-        panic!("{b:?}");
-    };
+    let id_a = expect_created(a);
+    let id_b = expect_created(b);
     let sub = [EventSubscriber::plugin("echo")];
     store
         .dispatch_event_deliveries(&id_a, &sub, "a")
@@ -3653,9 +3628,7 @@ async fn fifo_blocked_window_does_not_starve_other_ordering_keys() {
             ))
             .await
             .unwrap();
-        let PublishDomainEventOutcome::Created { id } = created else {
-            panic!("expected PublishDomainEventOutcome::Created");
-        };
+        let id = expect_created(created);
         store
             .dispatch_event_deliveries(&id, &sub, &format!("block-{i}"))
             .await
@@ -3674,9 +3647,7 @@ async fn fifo_blocked_window_does_not_starve_other_ordering_keys() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: other_id } = other else {
-        panic!("{other:?}");
-    };
+    let other_id = expect_created(other);
     store
         .dispatch_event_deliveries(&other_id, &sub, "other")
         .await
@@ -3696,9 +3667,7 @@ async fn operator_retry_and_ack_dead_letter() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op")
         .await
@@ -3764,9 +3733,7 @@ async fn retry_at_max_attempts_dead_letters() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op")
         .await
@@ -3817,9 +3784,7 @@ async fn postgres_event_outbox_publish_dispatch_claim() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "pg-op")
         .await
@@ -3837,9 +3802,7 @@ async fn postgres_event_catalog_reconcile_missing_pairs() {
         .publish_domain_event(publish_spec("book_acquired", "book_acquired:pg-late", "{}"))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[], "pg-empty")
         .await
@@ -3886,9 +3849,7 @@ async fn postgres_event_fence_suspend_and_wake() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "pg-s")
         .await
@@ -3922,9 +3883,7 @@ async fn postgres_event_fence_suspend_and_wake() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: wake_id } = trigger else {
-        panic!("{trigger:?}");
-    };
+    let wake_id = expect_created(trigger);
     store
         .dispatch_event_deliveries(&wake_id, &[], "pg-wake-d")
         .await
@@ -3946,9 +3905,7 @@ async fn postgres_event_retention_cutoff_and_in_flight_cap() {
         .publish_domain_event(publish_spec("book_acquired", "book_acquired:pg-old", "{}"))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: old_id } = old else {
-        panic!("{old:?}");
-    };
+    let old_id = expect_created(old);
     store
         .dispatch_event_deliveries(&old_id, &[], "pg-old-d")
         .await
@@ -3994,12 +3951,8 @@ async fn postgres_event_retention_cutoff_and_in_flight_cap() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: id_a } = a else {
-        panic!("{a:?}");
-    };
-    let PublishDomainEventOutcome::Created { id: id_b } = b else {
-        panic!("{b:?}");
-    };
+    let id_a = expect_created(a);
+    let id_b = expect_created(b);
     let sub = [EventSubscriber::plugin("echo")];
     store
         .dispatch_event_deliveries(&id_a, &sub, "pg-ca")
@@ -4056,9 +4009,7 @@ async fn postgres_duplicate_publish_replays_skipped_wake() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: id2 } = second else {
-        panic!("{second:?}");
-    };
+    let id2 = expect_created(second);
     assert!(
         store
             .get_domain_event(&id2)
@@ -4117,9 +4068,7 @@ async fn postgres_process_pending_wakes_repairs_dispatched_gap() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = trigger else {
-        panic!("{trigger:?}");
-    };
+    let id = expect_created(trigger);
     store
         .dispatch_event_deliveries(&id, &[], "pg-gap-d")
         .await
@@ -4199,9 +4148,7 @@ async fn postgres_concurrent_event_claims_respect_in_flight_cap() {
             ))
             .await
             .unwrap();
-        let PublishDomainEventOutcome::Created { id } = created else {
-            panic!("expected PublishDomainEventOutcome::Created");
-        };
+        let id = expect_created(created);
         store
             .dispatch_event_deliveries(&id, &sub, &format!("d-{id}"))
             .await
@@ -4304,12 +4251,8 @@ async fn fifo_uses_persisted_ordering_key_without_title_id() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: id_a } = a else {
-        panic!("{a:?}");
-    };
-    let PublishDomainEventOutcome::Created { id: id_b } = b else {
-        panic!("{b:?}");
-    };
+    let id_a = expect_created(a);
+    let id_b = expect_created(b);
     store
         .dispatch_event_deliveries(&id_a, &sub, "a")
         .await
@@ -4345,9 +4288,7 @@ async fn claim_filters_to_loaded_plugin_ids() {
         .publish_domain_event(publish_spec("book_acquired", "book_acquired:plug", "{}"))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(
             &id,
@@ -4426,9 +4367,7 @@ async fn catalog_dispatch_creates_rows_claim_filters_loaded_plugins() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let event = store.get_domain_event(&id).await.unwrap().unwrap();
     assert_eq!(
         store
@@ -4486,12 +4425,8 @@ async fn catalog_filter_match_and_miss() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: hit_id } = hit else {
-        panic!("{hit:?}");
-    };
-    let PublishDomainEventOutcome::Created { id: miss_id } = miss else {
-        panic!("{miss:?}");
-    };
+    let hit_id = expect_created(hit);
+    let miss_id = expect_created(miss);
     let hit_event = store.get_domain_event(&hit_id).await.unwrap().unwrap();
     let miss_event = store.get_domain_event(&miss_id).await.unwrap().unwrap();
     assert_eq!(
@@ -4524,9 +4459,7 @@ async fn cancel_pending_and_running_delivery() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op")
         .await
@@ -4551,9 +4484,7 @@ async fn cancel_pending_and_running_delivery() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op")
         .await
@@ -4583,9 +4514,7 @@ async fn resume_suspended_delivery_sets_run_after_now() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op")
         .await
@@ -4624,9 +4553,7 @@ async fn prune_event_retention_independent_of_dead_letters() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: ack_id } = acked else {
-        panic!("{acked:?}");
-    };
+    let ack_id = expect_created(acked);
     store
         .dispatch_event_deliveries(&ack_id, &[EventSubscriber::plugin("echo")], "op")
         .await
@@ -4642,9 +4569,7 @@ async fn prune_event_retention_independent_of_dead_letters() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: dl_id } = dead else {
-        panic!("{dead:?}");
-    };
+    let dl_id = expect_created(dead);
     store
         .dispatch_event_deliveries(&dl_id, &[EventSubscriber::plugin("echo")], "op")
         .await
@@ -4692,9 +4617,7 @@ async fn event_delivery_metrics_split_pending_and_suspended() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(
             &id,
@@ -4745,9 +4668,7 @@ async fn catalog_union_enabled_wins_and_expired_nodes_drop_out() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let event = store.get_domain_event(&id).await.unwrap().unwrap();
     assert_eq!(
         store
@@ -4774,9 +4695,7 @@ async fn catalog_union_enabled_wins_and_expired_nodes_drop_out() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let event = store.get_domain_event(&id).await.unwrap().unwrap();
     assert_eq!(
         store
@@ -4809,9 +4728,7 @@ async fn late_join_reconciles_more_than_two_hundred_dispatched_events() {
             ))
             .await
             .unwrap();
-        let PublishDomainEventOutcome::Created { id } = created else {
-            panic!("expected PublishDomainEventOutcome::Created");
-        };
+        let id = expect_created(created);
         store
             .dispatch_event_deliveries(&id, &[], &format!("empty-{i}"))
             .await
@@ -4864,9 +4781,7 @@ async fn unchanged_catalog_reconcile_does_zero_dispatch_writes() {
             ))
             .await
             .unwrap();
-        let PublishDomainEventOutcome::Created { id } = created else {
-            panic!("expected PublishDomainEventOutcome::Created");
-        };
+        let id = expect_created(created);
         store
             .dispatch_event_deliveries(
                 &id,
@@ -4929,9 +4844,7 @@ async fn wake_on_matching_event_makes_delivery_claimable() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: id1 } = first else {
-        panic!("{first:?}");
-    };
+    let id1 = expect_created(first);
     store
         .dispatch_event_deliveries(&id1, &[EventSubscriber::plugin("echo")], "d1")
         .await
@@ -4978,9 +4891,7 @@ async fn wake_on_matching_event_makes_delivery_claimable() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: id2 } = second else {
-        panic!("{second:?}");
-    };
+    let id2 = expect_created(second);
     store
         .dispatch_event_deliveries(&id2, &[EventSubscriber::plugin("echo")], "d2")
         .await
@@ -5008,9 +4919,7 @@ async fn park_echo_wake(
         .publish_domain_event(publish_spec("book_acquired", dedup, payload))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], &format!("d-{id}"))
         .await
@@ -5055,9 +4964,7 @@ async fn duplicate_publish_replays_skipped_wake() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: id2 } = second else {
-        panic!("{second:?}");
-    };
+    let id2 = expect_created(second);
     let pending = store.get_domain_event(&id2).await.unwrap().unwrap();
     assert!(pending.wake_pending);
     let still = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
@@ -5104,9 +5011,7 @@ async fn process_pending_wakes_repairs_dispatched_gap() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = trigger else {
-        panic!("{trigger:?}");
-    };
+    let id = expect_created(trigger);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "gap-d")
         .await
@@ -5146,9 +5051,7 @@ async fn wake_stays_inside_account_boundary() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: other_id } = other else {
-        panic!("{other:?}");
-    };
+    let other_id = expect_created(other);
     drain_pending_wakes(&store).await;
     let still = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
     assert!(still.run_after > chrono::Utc::now() + chrono::Duration::days(1));
@@ -5160,9 +5063,7 @@ async fn wake_stays_inside_account_boundary() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: same_id } = same else {
-        panic!("{same:?}");
-    };
+    let same_id = expect_created(same);
     drain_pending_wakes(&store).await;
     let woken = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
     assert!(woken.run_after <= chrono::Utc::now() + chrono::Duration::seconds(2));
@@ -5180,9 +5081,7 @@ async fn wake_pages_more_than_page_size_same_account() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: parent_id } = parent else {
-        panic!("{parent:?}");
-    };
+    let parent_id = expect_created(parent);
     let now = chrono::Utc::now().to_rfc3339();
     let future = "9999-12-31T23:59:59+00:00";
     let n = usize::try_from(store.wake_page()).unwrap() + 1;
@@ -5256,9 +5155,7 @@ async fn per_plugin_in_flight_cap_blocks_second_claim() {
             ))
             .await
             .unwrap();
-        let PublishDomainEventOutcome::Created { id } = created else {
-            panic!("expected PublishDomainEventOutcome::Created");
-        };
+        let id = expect_created(created);
         store
             .dispatch_event_deliveries(&id, &sub, &format!("d-{id}"))
             .await
@@ -5313,9 +5210,7 @@ async fn publish_rejects_invalid_source_and_accepts_empty() {
     let mut ok = publish_spec("book_acquired", "book_acquired:ok-src", "{}");
     ok.source = "audible".into();
     let created = store.publish_domain_event(ok).await.unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let event = store.get_domain_event(&id).await.unwrap().unwrap();
     assert_eq!(event.source, "audible");
 }
@@ -5331,9 +5226,7 @@ async fn zero_delivery_event_survives_until_retention_deadline() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[], "empty")
         .await
@@ -5366,9 +5259,7 @@ async fn unknown_event_resource_class_is_rejected_and_does_not_block_claim() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "op")
         .await
@@ -5510,9 +5401,7 @@ async fn process_pending_wakes_is_bounded_and_leases_prevent_shared_slice() {
             ))
             .await
             .unwrap();
-        let PublishDomainEventOutcome::Created { id } = created else {
-            panic!("expected PublishDomainEventOutcome::Created");
-        };
+        let id = expect_created(created);
         ids.push(id);
     }
     let first = store.process_pending_wakes(1, "owner-a", 60).await.unwrap();
@@ -5577,9 +5466,7 @@ async fn stale_wake_fence_does_not_clobber(store: &LibraryStore) {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
     let mut am: crate::entities::domain_events::ActiveModel =
         crate::entities::domain_events::Entity::find_by_id(&id)
@@ -5649,9 +5536,7 @@ async fn stale_wake_delivery_update_does_not_clear(store: &LibraryStore) {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: trigger_id } = trigger else {
-        panic!("{trigger:?}");
-    };
+    let trigger_id = expect_created(trigger);
     let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
     let mut am: crate::entities::domain_events::ActiveModel =
         crate::entities::domain_events::Entity::find_by_id(&trigger_id)
@@ -5740,9 +5625,7 @@ async fn wake_consumes_registration_so_retry_is_not_rewoken() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: trigger_id } = trigger else {
-        panic!("{trigger:?}");
-    };
+    let trigger_id = expect_created(trigger);
     drain_pending_wakes(&store).await;
     let woken = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
     assert!(woken.resume_pending);
@@ -5768,9 +5651,7 @@ async fn wake_consumes_registration_so_retry_is_not_rewoken() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: again_id } = again else {
-        panic!("{again:?}");
-    };
+    let again_id = expect_created(again);
     drain_pending_wakes(&store).await;
     let still = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
     assert_eq!(still.run_after, held_run_after);
@@ -5808,9 +5689,7 @@ async fn wake_consumes_registration_so_retry_is_not_rewoken() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: fourth_id } = fourth else {
-        panic!("{fourth:?}");
-    };
+    let fourth_id = expect_created(fourth);
     drain_pending_wakes(&store).await;
     let rewoken = store.get_event_delivery(&parked.id).await.unwrap().unwrap();
     assert!(rewoken.resume_pending);
@@ -5842,9 +5721,7 @@ async fn claim_requires_this_nodes_schema_version() {
     let mut spec = publish_spec("book_acquired", "book_acquired:schema-v2", "{}");
     spec.schema_version = 2;
     let created = store.publish_domain_event(spec).await.unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     let event = store.get_domain_event(&id).await.unwrap().unwrap();
     let catalog = store.list_live_event_subscribers().await.unwrap();
     let subs = crate::catalog_subscribers_for_event(&catalog, &event);
@@ -5905,9 +5782,7 @@ async fn incompatible_d1_style_claim_is_released_without_attempt_burn() {
     let mut spec = publish_spec("book_acquired", "book_acquired:d1-incompat", "{}");
     spec.schema_version = 2;
     let created = store.publish_domain_event(spec).await.unwrap();
-    let PublishDomainEventOutcome::Created { id } = created else {
-        panic!("expected PublishDomainEventOutcome::Created");
-    };
+    let id = expect_created(created);
     store
         .dispatch_event_deliveries(&id, &[EventSubscriber::plugin("echo")], "d1-incompat")
         .await
@@ -5954,9 +5829,7 @@ async fn atomic_claim_skips_incompatible_oldest_and_claims_later_compatible() {
     let mut spec_v2 = publish_spec("book_acquired", "book_acquired:atomic-skip-v2", "{}");
     spec_v2.schema_version = 2;
     let created_v2 = store.publish_domain_event(spec_v2).await.unwrap();
-    let PublishDomainEventOutcome::Created { id: id_v2 } = created_v2 else {
-        panic!("{created_v2:?}");
-    };
+    let id_v2 = expect_created(created_v2);
     store
         .dispatch_event_deliveries(&id_v2, &[EventSubscriber::plugin("echo")], "atomic-skip-v2")
         .await
@@ -5969,9 +5842,7 @@ async fn atomic_claim_skips_incompatible_oldest_and_claims_later_compatible() {
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: id_v1 } = created_v1 else {
-        panic!("{created_v1:?}");
-    };
+    let id_v1 = expect_created(created_v1);
     store
         .dispatch_event_deliveries(&id_v1, &[EventSubscriber::plugin("echo")], "atomic-skip-v1")
         .await
@@ -6017,9 +5888,7 @@ async fn postgres_publish_domain_event_namespaces_dedup_by_account_and_source() 
         ))
         .await
         .unwrap();
-    let PublishDomainEventOutcome::Created { id: id_a } = a else {
-        panic!("{a:?}");
-    };
+    let id_a = expect_created(a);
     let b = store
         .publish_domain_event(publish_spec_account(
             "book_acquired",
@@ -6032,7 +5901,7 @@ async fn postgres_publish_domain_event_namespaces_dedup_by_account_and_source() 
         .unwrap();
     assert!(
         matches!(b, PublishDomainEventOutcome::Created { .. }),
-        "{b:?}"
+        "expected PublishDomainEventOutcome::Created"
     );
     let mut sourced =
         publish_spec_account("book_acquired", "book_acquired:pg-ns", "{}", "", "acct-a");
@@ -6040,7 +5909,7 @@ async fn postgres_publish_domain_event_namespaces_dedup_by_account_and_source() 
     let c = store.publish_domain_event(sourced).await.unwrap();
     assert!(
         matches!(c, PublishDomainEventOutcome::Created { .. }),
-        "{c:?}"
+        "expected PublishDomainEventOutcome::Created"
     );
     let dup = store
         .publish_domain_event(publish_spec_account(
