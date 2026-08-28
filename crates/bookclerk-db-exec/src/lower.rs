@@ -458,6 +458,7 @@ pub(crate) fn find_last_in_code(sql: &str, needle: &str) -> Option<usize> {
     find_in_code_from(sql, needle, true)
 }
 
+/// Byte offset of `needle` in a code span; `last` keeps scanning for the final match.
 fn find_in_code_from(sql: &str, needle: &str, last: bool) -> Option<usize> {
     if needle.is_empty() {
         return None;
