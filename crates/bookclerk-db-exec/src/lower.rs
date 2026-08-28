@@ -8,14 +8,20 @@
 
 use sea_orm::DatabaseBackend;
 
-/// Lowers canonical Bookclerk SQL for `backend` (identity for SQLite/D1).
+/// Lowers canonical Bookclerk **DML/query** SQL for `backend` (identity for SQLite/D1).
+///
+/// Postgres adapters rewrite helpers (`IFNULL`, `json_extract`, `INSERT OR IGNORE`,
+/// 2+-arg `min`/`max`, `json_valid`) and `?` placeholders. Binding and host
+/// **DDL** type/identity rewrites (`AUTOINCREMENT`, `BLOB`, `INTEGER`) stay on
+/// the adapter execution edge ([`crate::schema_sql_for_backend`],
+/// [`crate::lower_binding_ddl_execute_request`]) so this function does not
+/// classify statements.
 #[must_use]
 pub fn lower_canonical_sql(backend: DatabaseBackend, sql: &str) -> String {
-    if backend == DatabaseBackend::Postgres {
-        lower_canonical_to_postgres(sql)
-    } else {
-        sql.to_string()
+    if backend != DatabaseBackend::Postgres {
+        return sql.to_string();
     }
+    lower_canonical_to_postgres(sql)
 }
 
 /// Lowers canonical SQLite-shaped SQL onto PostgreSQL.
@@ -74,9 +80,8 @@ fn insert_or_ignore_postgres(sql: &str) -> String {
 /// Maps SQLite helpers used in host plans onto PostgreSQL equivalents.
 fn sqlite_fns_to_postgres(sql: &str) -> String {
     let mut sql = replace_in_code(sql, "IFNULL(", "COALESCE(");
-    sql = replace_in_code(&sql, "MAX(attempt_count, 1)", "GREATEST(attempt_count, 1)");
-    sql = replace_in_code(&sql, "json_valid(payload) = 0", "(payload IS NOT JSON)");
-    sql = replace_in_code(&sql, "json_valid(payload) = 1", "(payload IS JSON)");
+    sql = rewrite_variadic_min_max(&sql);
+    sql = rewrite_json_valid(&sql);
     sql = rewrite_json_extract(&sql);
     sql = replace_in_code(
         &sql,
@@ -99,6 +104,150 @@ fn sqlite_fns_to_postgres(sql: &str) -> String {
         "(resume_pending != 0)",
     );
     rewrite_julianday_delta(&sql)
+}
+
+/// Rewrites 2+-arg `min`/`max` (SQLite scalars) to `LEAST`/`GREATEST`.
+///
+/// One-argument `MIN`/`MAX` stay aggregates. Nested calls are rewritten
+/// inside-out.
+fn rewrite_variadic_min_max(sql: &str) -> String {
+    let sql = rewrite_variadic_fn(sql, "min", "LEAST");
+    rewrite_variadic_fn(&sql, "max", "GREATEST")
+}
+
+/// Rewrites `name(...)` with two or more arguments to `pg_name(...)`.
+fn rewrite_variadic_fn(sql: &str, name: &str, pg_name: &str) -> String {
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len());
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        if ident_call_at(sql, i, name) {
+            let open = sql[i + name.len()..]
+                .char_indices()
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(off, _)| i + name.len() + off)
+                .unwrap_or(i + name.len());
+            if let Some((args, rest)) = split_call_args(&sql[open + 1..]) {
+                let rewritten: Vec<String> = args
+                    .iter()
+                    .map(|a| rewrite_variadic_fn(a, name, pg_name))
+                    .collect();
+                if rewritten.len() >= 2 {
+                    out.push_str(pg_name);
+                    out.push('(');
+                    out.push_str(&rewritten.join(", "));
+                    out.push(')');
+                } else {
+                    out.push_str(&sql[i..=open]);
+                    out.push_str(&rewritten.join(", "));
+                    out.push(')');
+                }
+                i = sql.len() - rest.len();
+                continue;
+            }
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Rewrites `json_valid(expr) = 0/1` and bare `json_valid(expr)` to `IS [NOT] JSON`.
+fn rewrite_json_valid(sql: &str) -> String {
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len());
+    let name = "json_valid";
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        if ident_call_at(sql, i, name) {
+            let open = sql[i + name.len()..]
+                .char_indices()
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(off, _)| i + name.len() + off)
+                .unwrap_or(i + name.len());
+            if let Some((args, rest)) = split_call_args(&sql[open + 1..]) {
+                if args.len() == 1 {
+                    let expr = rewrite_json_valid(&args[0]);
+                    let rest_trim = rest.trim_start();
+                    if let Some(rest2) = rest_trim.strip_prefix('=') {
+                        let rest2 = rest2.trim_start();
+                        if let Some(rest2) = strip_json_valid_flag(rest2, '0') {
+                            out.push_str(&format!("({expr} IS NOT JSON)"));
+                            i = sql.len() - rest2.len();
+                            continue;
+                        }
+                        if let Some(rest2) = strip_json_valid_flag(rest2, '1') {
+                            out.push_str(&format!("({expr} IS JSON)"));
+                            i = sql.len() - rest2.len();
+                            continue;
+                        }
+                    }
+                    out.push_str(&format!("(CASE WHEN ({expr}) IS JSON THEN 1 ELSE 0 END)"));
+                    i = sql.len() - rest.len();
+                    continue;
+                }
+            }
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// True when `sql[i..]` is a call to `name(` (case-insensitive, word-bounded).
+fn ident_call_at(sql: &str, i: usize, name: &str) -> bool {
+    let rest = &sql[i..];
+    if rest.len() < name.len() || !rest[..name.len()].eq_ignore_ascii_case(name) {
+        return false;
+    }
+    if !word_boundary(sql, i.checked_sub(1)) {
+        return false;
+    }
+    rest[name.len()..].chars().find(|c| !c.is_whitespace()) == Some('(')
+}
+
+/// Splits the argument list of a call whose `s` starts just after `(`.
+///
+/// Returns `(args, rest_after_closing_paren)`.
+fn split_call_args(s: &str) -> Option<(Vec<String>, &str)> {
+    let mut args = Vec::new();
+    let mut start = 0;
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < s.len() {
+        if let Some(len) = literal_or_comment_len(&s[i..]) {
+            i += len;
+            continue;
+        }
+        match s[i..].chars().next()? {
+            '(' => depth += 1,
+            ')' if depth == 0 => {
+                let last = s[start..i].trim();
+                if !last.is_empty() || !args.is_empty() {
+                    args.push(last.to_string());
+                }
+                return Some((args, &s[i + 1..]));
+            }
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                args.push(s[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += s[i..].chars().next()?.len_utf8();
+    }
+    None
 }
 
 /// Rewrites `json_extract(expr, '$.a.b')` to a guarded `jsonb #>>` extract.
@@ -174,10 +323,11 @@ fn rewrite_julianday_delta(sql: &str) -> String {
     replace_in_code(sql, NEEDLE, REPL)
 }
 
-/// Lowers one canonical Bookclerk **DDL** statement onto PostgreSQL.
+/// Mechanical SQLite→Postgres type/identity rewrites for one DDL statement.
 ///
-/// Mechanical type/identity rewrites for the host schema pack, applied at
-/// the adapter execution edge before [`lower_canonical_to_postgres`]:
+/// Applied at the adapter execution edge ([`crate::schema_sql_for_backend`],
+/// [`crate::lower_binding_ddl_execute_request`]), not by
+/// [`lower_canonical_sql`]:
 ///
 /// - `INTEGER PRIMARY KEY AUTOINCREMENT` → `BIGSERIAL PRIMARY KEY`
 /// - `INTEGER` → `BIGINT` (shared SeaORM entities use `i64` everywhere)
@@ -186,8 +336,7 @@ fn rewrite_julianday_delta(sql: &str) -> String {
 ///
 /// Rewrites are word-boundary and code-span aware; string literals and
 /// comments are copied verbatim.
-#[must_use]
-pub fn lower_canonical_ddl_to_postgres(sql: &str) -> String {
+pub(crate) fn rewrite_canonical_ddl_types_for_postgres(sql: &str) -> String {
     let sql = replace_word_in_code(
         sql,
         "INTEGER PRIMARY KEY AUTOINCREMENT",
@@ -195,8 +344,24 @@ pub fn lower_canonical_ddl_to_postgres(sql: &str) -> String {
     );
     let sql = replace_word_in_code(&sql, "INTEGER", "BIGINT");
     let sql = replace_word_in_code(&sql, "REAL", "DOUBLE PRECISION");
-    let sql = replace_word_in_code(&sql, "BLOB", "BYTEA");
-    lower_canonical_to_postgres(&sql)
+    replace_word_in_code(&sql, "BLOB", "BYTEA")
+}
+
+/// Lowers one canonical Bookclerk **DDL** statement onto PostgreSQL.
+///
+/// Type/identity rewrites plus [`lower_canonical_to_postgres`] (placeholders,
+/// `INSERT OR IGNORE`). Host schema packs use this through
+/// [`crate::schema_sql_for_backend`]; binding DDL uses the type rewrite at
+/// the adapter edge and then the DML helper pass.
+#[must_use]
+pub fn lower_canonical_ddl_to_postgres(sql: &str) -> String {
+    lower_canonical_to_postgres(&rewrite_canonical_ddl_types_for_postgres(sql))
+}
+
+/// True when `s` starts with JSON-valid flag `flag` (`0` or `1`) at a word boundary.
+fn strip_json_valid_flag(s: &str, flag: char) -> Option<&str> {
+    let rest = s.strip_prefix(flag)?;
+    word_boundary(s, Some(flag.len_utf8())).then_some(rest)
 }
 
 /// True when the byte at `idx` (or the string edge) is not an identifier char.
@@ -429,6 +594,53 @@ mod tests {
         assert!(!sql.contains("json_extract("), "{sql}");
         assert!(sql.contains("#>> '{a}'"), "{sql}");
         assert!(sql.contains("#>> '{b}'"), "{sql}");
+    }
+
+    #[test]
+    fn postgres_rewrites_variadic_min_max_and_json_valid() {
+        assert_eq!(
+            lower_canonical_to_postgres("SELECT MAX(attempt_count, 1), min(a, b)"),
+            "SELECT GREATEST(attempt_count, 1), LEAST(a, b)"
+        );
+        assert_eq!(
+            lower_canonical_to_postgres("SELECT max(x)"),
+            "SELECT max(x)"
+        );
+        let sql = lower_canonical_to_postgres("WHERE json_valid(doc) = 1 AND json_valid(body) = 0");
+        assert!(sql.contains("(doc IS JSON)"), "{sql}");
+        assert!(sql.contains("(body IS NOT JSON)"), "{sql}");
+        assert!(!sql.contains("json_valid"), "{sql}");
+        let bare = lower_canonical_to_postgres("SELECT json_valid(payload) FROM t");
+        assert!(
+            bare.contains("CASE WHEN (payload) IS JSON THEN 1 ELSE 0 END"),
+            "{bare}"
+        );
+    }
+
+    #[test]
+    fn postgres_dml_lowering_does_not_rewrite_ddl_types() {
+        let canonical =
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY AUTOINCREMENT, b BLOB)";
+        let sql = lower_canonical_sql(DatabaseBackend::Postgres, canonical);
+        assert!(
+            sql.contains("AUTOINCREMENT") && sql.contains("BLOB"),
+            "DDL type/identity lowering is adapter-owned, not generic DML lowering: {sql}"
+        );
+        let types = rewrite_canonical_ddl_types_for_postgres(canonical);
+        assert!(types.contains("BIGSERIAL PRIMARY KEY"), "{types}");
+        assert!(types.contains("BYTEA"), "{types}");
+        assert!(!types.contains("AUTOINCREMENT"), "{types}");
+        assert!(!types.contains("BLOB"), "{types}");
+    }
+
+    #[test]
+    fn json_valid_flag_does_not_match_multi_digit() {
+        let sql = lower_canonical_to_postgres("WHERE json_valid(doc) = 10");
+        assert!(
+            sql.contains("CASE WHEN (doc) IS JSON THEN 1 ELSE 0 END") && sql.contains("= 10"),
+            "{sql}"
+        );
+        assert!(!sql.contains("doc IS JSON)"), "{sql}");
     }
 
     #[test]

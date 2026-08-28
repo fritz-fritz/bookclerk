@@ -732,7 +732,8 @@ async fn execute_typed_join_body(
         } else {
             stmt.sql.clone()
         };
-        let sql = lower_canonical_sql(backend, &sql);
+        let sql = crate::schema_postgres::lower_binding_sql_for_backend(backend, &sql);
+        let sql = lower_canonical_sql(backend, sql.as_ref());
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = match stmt.result_selection {
             DbResultSelection::Rows => {
@@ -836,6 +837,9 @@ where
     // request shape below.
     let wire_len = req.statements.len();
     let req = expand_host_schema_execute_request(backend, req);
+    // Binding CREATE/DROP stays canonical on the wire; Postgres adapters
+    // lower types/`AUTOINCREMENT` here (not in `lower_canonical_sql`).
+    let req = crate::schema_postgres::lower_binding_ddl_execute_request(backend, &req);
     if backend == sea_orm::DatabaseBackend::Postgres {
         if let Some(ms) = remaining_deadline_ms(session.deadline_unix_ms) {
             let sql = format!("SET LOCAL statement_timeout = '{ms}ms'");

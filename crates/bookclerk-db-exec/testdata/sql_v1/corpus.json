@@ -44,6 +44,17 @@
       "id": "ifnull-greatest",
       "canonical": "SELECT IFNULL(x, 0), MAX(attempt_count, 1)",
       "postgres": "SELECT COALESCE(x, 0), GREATEST(attempt_count, 1)"
+    },
+    {
+      "id": "min-max-scalar",
+      "canonical": "SELECT max(1, 2), min(a, b, c)",
+      "postgres": "SELECT GREATEST(1, 2), LEAST(a, b, c)"
+    },
+    {
+      "id": "json-valid-any-expr",
+      "canonical": "WHERE json_valid(doc) = 1 OR json_valid(body) = 0",
+      "postgresContains": ["(doc IS JSON)", "(body IS NOT JSON)"],
+      "postgresNotContains": ["json_valid"]
     }
   ],
   "sqliteIdentity": [

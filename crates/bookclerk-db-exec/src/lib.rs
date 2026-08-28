@@ -3,8 +3,10 @@
 //! Hosts compile domain work into a generic [`host_ir::DbAtomicPlan`].
 //! This crate runs those statements as one native transaction and records
 //! fail-closed begin/commit faults. It must not import Bookclerk entities or
-//! host domain planners. Engine-specific schema DDL lowering for Postgres lives
-//! in [`schema_sql_for_backend`] and related helpers.
+//! host domain planners. Postgres adapters lower host-schema packs and binding
+//! DDL types at execute ([`schema_sql_for_backend`],
+//! [`lower_binding_ddl_execute_request`]); [`lower_canonical_sql`] stays
+//! DML/query helpers.
 
 use std::cell::RefCell;
 
@@ -18,6 +20,7 @@ mod json_bridge;
 mod lower;
 pub mod proxy_txn;
 mod schema_postgres;
+pub mod sql_v1;
 mod typed;
 
 thread_local! {
@@ -54,11 +57,12 @@ pub use exec::{
     json_cell_utf8_len, note_encoded_result_bytes, sea_value_to_json, AtomicSession, ExecCaps,
 };
 pub use guest_receipt::{
-    guest_receipt_finalize_stmts, is_guest_receipt_result_lost, is_guest_receipt_stub_insert,
-    pad_skipped_guest_results, prior_receipt_exists, prior_receipt_is_claimed,
-    prior_receipt_should_resume_guest, receipt_hash_from, should_skip_remaining_guest_work,
-    GUEST_RECEIPT_RESULT_LOST, GUEST_RECEIPT_STATUS_CLAIMED, GUEST_RECEIPT_STATUS_OK,
-    GUEST_RECEIPT_STUB_SUFFIX, GUEST_RECEIPT_WRAP_PREFIX,
+    guest_receipt_applied_stmt, guest_receipt_finalize_stmts, is_guest_receipt_result_lost,
+    is_guest_receipt_stub_insert, pad_skipped_guest_results, prior_receipt_exists,
+    prior_receipt_is_claimed, prior_receipt_should_resume_guest, receipt_hash_from,
+    should_skip_remaining_guest_work, strip_guest_receipt_write_gate, GUEST_RECEIPT_RESULT_LOST,
+    GUEST_RECEIPT_STATUS_APPLIED, GUEST_RECEIPT_STATUS_CLAIMED, GUEST_RECEIPT_STATUS_OK,
+    GUEST_RECEIPT_STUB_SUFFIX, GUEST_RECEIPT_WRAP_PREFIX, GUEST_RECEIPT_WRITE_GATE,
 };
 pub use host_ir::{
     sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
@@ -80,7 +84,8 @@ pub use proxy_txn::{
 };
 pub use schema_postgres::{
     collapse_host_schema_results, expand_host_schema_batch, expand_host_schema_execute_request,
-    is_host_schema_version_marker, schema_sql_for_backend, split_schema_statements,
+    is_host_schema_version_marker, lower_binding_ddl_execute_request,
+    lower_binding_sql_for_backend, schema_sql_for_backend, split_schema_statements,
 };
 pub use typed::{
     db_value_from_sea, db_value_to_sea, execute_typed_on_session, execute_typed_on_session_then,

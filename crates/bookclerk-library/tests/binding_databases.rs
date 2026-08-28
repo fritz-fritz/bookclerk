@@ -421,3 +421,79 @@ async fn binding_cancel_around_commit_rolls_back() {
     let n: i64 = rows[0].try_get("", "n").expect("n");
     assert_eq!(n, 0, "AroundCommit cancel must roll back");
 }
+
+#[tokio::test]
+async fn binding_mixed_ddl_dml_applies_once_and_replays() {
+    let db = binding_db().await;
+    let mixed = || {
+        let ddl = stmt(
+            "CREATE TABLE IF NOT EXISTS counters (id INTEGER PRIMARY KEY, n INTEGER)",
+            vec![],
+        );
+        let mut insert = stmt(
+            "INSERT INTO counters (id, n) VALUES (?, ?)",
+            vec![DbValue::Int64(1), DbValue::Int64(1)],
+        );
+        insert.result_selection = DbResultSelection::AffectedRows;
+        req("mixed-once", vec![ddl, insert])
+    };
+    let first = run_binding(&db, mixed()).await.expect("first mixed");
+    assert_eq!(first.statements.len(), 2);
+    assert_eq!(first.statements[1].rows_affected, 1);
+    let replay = run_binding(&db, mixed()).await.expect("replay mixed");
+    assert_eq!(replay.statements[1].rows_affected, 1);
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT COUNT(*) AS c FROM counters",
+        ))
+        .await
+        .expect("count");
+    let count: i64 = rows[0].try_get("", "c").expect("count value");
+    assert_eq!(count, 1, "mixed batch must not double-insert on replay");
+}
+
+#[tokio::test]
+async fn binding_portable_functions_and_ddl_types() {
+    let db = binding_db().await;
+    run_binding(
+        &db,
+        req(
+            "ddl-typed",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_AUTOINCREMENT_BLOB,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("typed DDL");
+    let mut insert = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_INSERT,
+        vec![DbValue::Bytes(
+            bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB.to_vec(),
+        )],
+    );
+    insert.result_selection = DbResultSelection::AffectedRows;
+    run_binding(&db, req("ins-typed", vec![insert]))
+        .await
+        .expect("typed insert");
+    let mut select = stmt(bookclerk_db_exec::sql_v1::PORTABLE_SELECT, vec![]);
+    select.max_rows = 8;
+    let reply = run_binding(&db, req("sel-typed", vec![select]))
+        .await
+        .expect("portable select");
+    let values = &reply.statements[0].rows[0].values;
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_select_mismatch(values) {
+        panic!("{err}");
+    }
+    let mut blob = stmt("SELECT blob FROM typed", vec![]);
+    blob.max_rows = 8;
+    let blob_reply = run_binding(&db, req("sel-blob", vec![blob]))
+        .await
+        .expect("blob select");
+    assert_eq!(
+        blob_reply.statements[0].rows[0].values[0],
+        DbValue::Bytes(bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB.to_vec())
+    );
+}

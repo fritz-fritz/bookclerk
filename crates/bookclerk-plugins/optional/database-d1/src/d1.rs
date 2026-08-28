@@ -3160,6 +3160,197 @@ mod tests {
         assert_eq!(tables_after_retry, 1, "retry must apply the claimed DDL");
     }
 
+    /// Mixed DDL+DML on executing D1 must apply the INSERT on first execution
+    /// (claimed-owner ungates DML) and must not double-insert on same-token replay.
+    #[tokio::test]
+    async fn executing_mock_mixed_ddl_dml_applies_insert_once() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+        };
+
+        let (_server, proxy, conn, _interrupt, _drop, _oversize) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema for mixed batch");
+
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
+        let policy = GuestSqlPolicy::binding_owned();
+        let mixed = || ExecuteRequest {
+            operation_id: "d1-mixed-once".into(),
+            request_hash: String::new(),
+            statements: vec![
+                TypedDbStatement {
+                    sql: "CREATE TABLE IF NOT EXISTS counters (id INTEGER PRIMARY KEY, n INTEGER)"
+                        .into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::Discard,
+                },
+                TypedDbStatement {
+                    sql: "INSERT INTO counters (id, n) VALUES (?, ?)".into(),
+                    parameters: vec![
+                        bookclerk_plugin_abi::DbValue::Int64(1),
+                        bookclerk_plugin_abi::DbValue::Int64(1),
+                    ],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                },
+            ],
+            deadline_unix_ms: 0,
+        };
+        let first =
+            bookclerk_library::execute_guest_atomic_with(mixed(), &caps, &policy, |envelope| {
+                let proxy = proxy.clone();
+                async move {
+                    proxy
+                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .await
+                        .map_err(crate::atomic::plugin_error_from_d1)
+                }
+            })
+            .await
+            .expect("first mixed");
+        assert_eq!(first.statements[1].rows_affected, 1);
+        let replay =
+            bookclerk_library::execute_guest_atomic_with(mixed(), &caps, &policy, |envelope| {
+                let proxy = proxy.clone();
+                async move {
+                    proxy
+                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .await
+                        .map_err(crate::atomic::plugin_error_from_d1)
+                }
+            })
+            .await
+            .expect("replay mixed");
+        assert_eq!(replay.statements[1].rows_affected, 1);
+        let count: i64 = conn
+            .lock()
+            .expect("sqlite")
+            .query_row("SELECT COUNT(*) FROM counters", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(count, 1, "D1 mixed batch must not double-insert");
+    }
+
+    /// Portable SQL v1 helpers and AUTOINCREMENT/BLOB DDL execute on D1.
+    #[tokio::test]
+    async fn executing_mock_portable_functions_and_binding_ddl() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+        };
+
+        let (_server, proxy, conn, _interrupt, _drop, _oversize) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema for portable fns");
+
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
+        let policy = GuestSqlPolicy::binding_owned();
+        let run = |req: ExecuteRequest| {
+            let proxy = proxy.clone();
+            let caps = caps.clone();
+            let policy = policy.clone();
+            async move {
+                bookclerk_library::execute_guest_atomic_with(req, &caps, &policy, |envelope| {
+                    let proxy = proxy.clone();
+                    async move {
+                        proxy
+                            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                            .await
+                            .map_err(crate::atomic::plugin_error_from_d1)
+                    }
+                })
+                .await
+            }
+        };
+        run(ExecuteRequest {
+            operation_id: "d1-ddl-typed".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: bookclerk_db_exec::sql_v1::BINDING_DDL_AUTOINCREMENT_BLOB.into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::Discard,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("typed DDL");
+        run(ExecuteRequest {
+            operation_id: "d1-ins-typed".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: bookclerk_db_exec::sql_v1::PORTABLE_INSERT.into(),
+                parameters: vec![bookclerk_plugin_abi::DbValue::Bytes(
+                    bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB.to_vec(),
+                )],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("typed insert");
+        let reply = run(ExecuteRequest {
+            operation_id: "d1-sel-typed".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: bookclerk_db_exec::sql_v1::PORTABLE_SELECT.into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 8,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("portable select");
+        let values = &reply.statements[0].rows[0].values;
+        if let Some(err) = bookclerk_db_exec::sql_v1::portable_select_mismatch(values) {
+            panic!("{err}");
+        }
+        let blob: Vec<u8> = conn
+            .lock()
+            .expect("sqlite")
+            .query_row("SELECT blob FROM typed", [], |row| row.get(0))
+            .expect("blob");
+        assert_eq!(blob, bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB);
+    }
+
     /// A direct (unwrapped, non-receipt-gated) typed mutation whose reply is
     /// lost after commit must NOT be resubmitted: state changes exactly once,
     /// only one HTTP batch carries the mutation, and the caller receives the

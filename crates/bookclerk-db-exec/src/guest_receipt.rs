@@ -24,6 +24,20 @@ pub const GUEST_RECEIPT_STATUS_CLAIMED: &str = "claimed";
 /// Finalized guest-receipt row; payload is the durable replay body.
 pub const GUEST_RECEIPT_STATUS_OK: &str = "ok";
 
+/// Claimed-owner guest SQL finished on D1 (prune + ungated guest in one HTTP).
+///
+/// Resume remaining guest work only for [`GUEST_RECEIPT_STATUS_CLAIMED`]. An
+/// `applied` row means DML already ran; skip guest SQL and finalize (or
+/// surface result-lost when payload is still empty).
+pub const GUEST_RECEIPT_STATUS_APPLIED: &str = "applied";
+
+/// Write-predicate spliced onto guest DML by the host receipt wrap.
+///
+/// D1 claimed-owner batches strip this after the stub INSERT commits, because
+/// the claim row would otherwise make the predicate false on first execution.
+pub const GUEST_RECEIPT_WRITE_GATE: &str =
+    "NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)";
+
 /// True when `err` is [`GUEST_RECEIPT_RESULT_LOST`].
 #[must_use]
 pub fn is_guest_receipt_result_lost(err: &DbErr) -> bool {
@@ -44,6 +58,53 @@ pub const GUEST_RECEIPT_STUB_SUFFIX: usize = 1;
 pub fn is_guest_receipt_stub_insert(sql: &str) -> bool {
     let t = sql.to_ascii_lowercase();
     t.contains("insert into db_atomic_receipts") && t.contains("where not exists")
+}
+
+/// Removes [`GUEST_RECEIPT_WRITE_GATE`] and the `WHERE`/`AND` that introduced it.
+///
+/// Returns `sql` unchanged when the gate is absent. The caller must drop the
+/// trailing `operation_id` bind that the wrap appended for the gate.
+#[must_use]
+pub fn strip_guest_receipt_write_gate(sql: &str) -> String {
+    let Some(idx) = sql.find(GUEST_RECEIPT_WRITE_GATE) else {
+        return sql.to_string();
+    };
+    let before = sql[..idx].trim_end();
+    let after = sql[idx + GUEST_RECEIPT_WRITE_GATE.len()..].trim_start();
+    let before = strip_trailing_where_or_and(before);
+    if after.is_empty() {
+        before.to_string()
+    } else {
+        format!("{before} {after}")
+    }
+}
+
+/// Drops a trailing top-level `WHERE` or `AND` that preceded the write gate.
+fn strip_trailing_where_or_and(sql: &str) -> &str {
+    let trimmed = sql.trim_end();
+    for kw in ["WHERE", "AND"] {
+        if trimmed.len() >= kw.len() {
+            let start = trimmed.len() - kw.len();
+            if trimmed[start..].eq_ignore_ascii_case(kw)
+                && (start == 0
+                    || (!trimmed.as_bytes()[start - 1].is_ascii_alphanumeric()
+                        && trimmed.as_bytes()[start - 1] != b'_'))
+            {
+                return trimmed[..start].trim_end();
+            }
+        }
+    }
+    trimmed
+}
+
+/// Host UPDATE that marks a claimed stub as applied after ungated guest SQL.
+#[must_use]
+pub fn guest_receipt_applied_stmt(operation_id: &str) -> TypedDbStatement {
+    typed_exec(
+        "UPDATE db_atomic_receipts SET status = 'applied' \
+         WHERE operation_id = ? AND status = 'claimed'",
+        vec![DbValue::Text(operation_id.into())],
+    )
 }
 
 /// True when the prior-receipt SELECT returned a row.
@@ -169,7 +230,7 @@ pub fn guest_receipt_finalize_stmts(
 fn finalize_claimed_payload(payload: &str, operation_id: &str) -> TypedDbStatement {
     typed_exec(
         "UPDATE db_atomic_receipts SET payload = ?, status = 'ok' \
-         WHERE operation_id = ? AND status = 'claimed'",
+         WHERE operation_id = ? AND status IN ('claimed', 'applied')",
         vec![
             DbValue::Text(payload.into()),
             DbValue::Text(operation_id.into()),
@@ -372,7 +433,9 @@ mod tests {
             stmts[0].sql
         );
         assert!(
-            stmts[0].sql.contains("AND status = 'claimed'"),
+            stmts[0]
+                .sql
+                .contains("AND status IN ('claimed', 'applied')"),
             "{}",
             stmts[0].sql
         );
@@ -408,7 +471,9 @@ mod tests {
         let stmts = guest_receipt_finalize_stmts(&partial, 1, &"a".repeat(64)).expect("claimed");
         assert_eq!(stmts.len(), 1);
         assert!(
-            stmts[0].sql.contains("AND status = 'claimed'"),
+            stmts[0]
+                .sql
+                .contains("AND status IN ('claimed', 'applied')"),
             "{}",
             stmts[0].sql
         );
@@ -444,6 +509,15 @@ mod tests {
             "claimed + same hash must resume guest DDL"
         );
         assert!(prior_receipt_should_resume_guest(&claimed_same[1], &hash));
+        let applied_same = vec![
+            StatementResult::from_affected(0),
+            prior_receipt_row_with_status(GUEST_RECEIPT_STATUS_APPLIED, ""),
+        ];
+        assert!(
+            should_skip_remaining_guest_work(&applied_same, 4, &hash),
+            "applied must not resume guest DML"
+        );
+        assert!(!prior_receipt_should_resume_guest(&applied_same[1], &hash));
         assert!(should_skip_remaining_guest_work(
             &claimed_same,
             4,
@@ -465,5 +539,40 @@ mod tests {
         assert!(!is_guest_receipt_stub_insert(
             "SELECT operation_id FROM db_atomic_receipts WHERE operation_id = ?"
         ));
+    }
+
+    #[test]
+    fn strip_write_gate_restores_insert_select_and_keeps_returning() {
+        let gated =
+            format!("INSERT INTO counters (id, n) SELECT ?, ? WHERE {GUEST_RECEIPT_WRITE_GATE}");
+        assert_eq!(
+            strip_guest_receipt_write_gate(&gated),
+            "INSERT INTO counters (id, n) SELECT ?, ?"
+        );
+        let returning = format!(
+            "INSERT INTO counters (id, n) SELECT ?, ? WHERE {GUEST_RECEIPT_WRITE_GATE} RETURNING id"
+        );
+        assert_eq!(
+            strip_guest_receipt_write_gate(&returning),
+            "INSERT INTO counters (id, n) SELECT ?, ? RETURNING id"
+        );
+        let update =
+            format!("UPDATE counters SET n = n + 1 WHERE id = ? AND {GUEST_RECEIPT_WRITE_GATE}");
+        assert_eq!(
+            strip_guest_receipt_write_gate(&update),
+            "UPDATE counters SET n = n + 1 WHERE id = ?"
+        );
+        assert_eq!(
+            strip_guest_receipt_write_gate("INSERT INTO t (id) SELECT 1"),
+            "INSERT INTO t (id) SELECT 1"
+        );
+    }
+
+    #[test]
+    fn finalize_rejects_applied_empty_payload_as_result_lost() {
+        let mut partial = wrapped_partial(0, 0);
+        partial.statements[1] = prior_receipt_row_with_status(GUEST_RECEIPT_STATUS_APPLIED, "");
+        let err = guest_receipt_finalize_stmts(&partial, 1, &"a".repeat(64)).unwrap_err();
+        assert!(err.to_string().contains("original response lost"), "{err}");
     }
 }

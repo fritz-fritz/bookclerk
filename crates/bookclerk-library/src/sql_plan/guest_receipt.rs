@@ -4,7 +4,9 @@
 //! `executeAtomic` must use the same envelope so a D1 (or any) adapter cannot
 //! apply guest mutations twice after an ambiguous commit.
 
-use bookclerk_db_exec::{GuestReceiptPersist, HostExecuteEnvelope, GUEST_RECEIPT_WRAP_PREFIX};
+use bookclerk_db_exec::{
+    GuestReceiptPersist, HostExecuteEnvelope, GUEST_RECEIPT_WRAP_PREFIX, GUEST_RECEIPT_WRITE_GATE,
+};
 use bookclerk_plugin_abi::{
     DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, ExecuteRequest, PluginError,
     TypedDbStatement,
@@ -50,11 +52,7 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> HostExecuteEn
         // Same-token different-hash retries skip remaining guest work after
         // the prior-receipt SELECT so a changed CREATE/DROP cannot run.
         if is_write(stmt.kind) && !bookclerk_plugin_abi::statement_is_ddl(&stmt.sql) {
-            stmt.sql = apply_write_predicate(
-                &stmt.sql,
-                stmt.kind,
-                "NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)",
-            );
+            stmt.sql = apply_write_predicate(&stmt.sql, stmt.kind, GUEST_RECEIPT_WRITE_GATE);
             stmt.parameters.push(DbValue::Text(operation_id.clone()));
         }
         gated.push(stmt);
@@ -340,9 +338,7 @@ mod tests {
             gated.sql
         );
         assert!(
-            gated
-                .sql
-                .contains("NOT EXISTS (SELECT 1 FROM db_atomic_receipts"),
+            gated.sql.contains(GUEST_RECEIPT_WRITE_GATE),
             "{}",
             gated.sql
         );
@@ -377,6 +373,46 @@ mod tests {
             "D1 preclaim stub must not look committed: {}",
             stub.sql
         );
+    }
+
+    #[test]
+    fn wrap_mixed_ddl_dml_still_gates_writes() {
+        let req = ExecuteRequest {
+            operation_id: "guest-mixed".into(),
+            request_hash: "c".repeat(64),
+            statements: vec![
+                TypedDbStatement {
+                    sql: "CREATE TABLE IF NOT EXISTS counters (id INTEGER PRIMARY KEY, n INTEGER)"
+                        .into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::Discard,
+                },
+                TypedDbStatement {
+                    sql: "INSERT INTO counters (id, n) VALUES (?, ?)".into(),
+                    parameters: vec![DbValue::Int64(1), DbValue::Int64(1)],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                },
+            ],
+            deadline_unix_ms: 0,
+        };
+        let wrapped = wrap_guest_typed_request(req);
+        let ddl = &wrapped.request.statements[2];
+        let dml = &wrapped.request.statements[3];
+        assert!(
+            !ddl.sql.contains(GUEST_RECEIPT_WRITE_GATE),
+            "DDL must stay ungated: {}",
+            ddl.sql
+        );
+        assert!(
+            dml.sql.contains(GUEST_RECEIPT_WRITE_GATE),
+            "DML-only and mixed wrap still gate writes; D1 claimed-owner strips: {}",
+            dml.sql
+        );
+        assert_eq!(dml.parameters.len(), 3);
     }
 
     #[test]

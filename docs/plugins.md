@@ -1193,7 +1193,11 @@ with the same reserved-name rules as `CREATE`/`DROP` (no
 schema-qualified names). The guest grammar still applies —
 single statement, no `ATTACH`/`PRAGMA`/session verbs, no schema-qualified
 names — and functions are Bookclerk SQL v1 portable helpers (not a wider
-SQLite dialect; see [`docs/sql-contract/v1.md`](sql-contract/v1.md)). The
+SQLite dialect; `hex` is denied; see [`docs/sql-contract/v1.md`](sql-contract/v1.md)).
+A mixed `CREATE` + `INSERT` batch is one atomic receipt: first execution
+applies both statements on SQLite, PostgreSQL, and D1 (D1 claims the receipt
+before ungated DDL, then ungates DML for the claim owner). Same-token replay
+must not double-insert. The
 binding's own `db_atomic_receipts` bookkeeping table stays
 host-owned so retry tokens replay inside the binding, never against the
 library.

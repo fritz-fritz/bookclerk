@@ -1703,3 +1703,197 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
         "zero-row SELECT must execute at most once (counter={n}); describe must not re-run it"
     );
 }
+
+/// Disposable Postgres **binding** database (receipt bootstrap only, not the host catalog).
+async fn postgres_binding_db() -> sea_orm::DatabaseConnection {
+    let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL").expect("postgres url");
+    let db_name = format!("bind_{}", uuid::Uuid::new_v4().as_simple());
+    let admin = sea_orm::Database::connect(url.as_str())
+        .await
+        .expect("connect to BOOKCLERK_TEST_POSTGRES_URL");
+    let backend = sea_orm::ConnectionTrait::get_database_backend(&admin);
+    sea_orm::ConnectionTrait::execute_raw(
+        &admin,
+        sea_orm::Statement::from_string(backend, format!("CREATE DATABASE {db_name}")),
+    )
+    .await
+    .expect("create disposable postgres binding database");
+    let (base, query) = match url.split_once('?') {
+        Some((base, q)) => (base, Some(q)),
+        None => (url.as_str(), None),
+    };
+    let trimmed = base.trim_end_matches('/');
+    let slash = trimmed
+        .rfind('/')
+        .expect("BOOKCLERK_TEST_POSTGRES_URL must include a database path");
+    let db_url = match query {
+        Some(q) => format!("{}/{db_name}?{q}", &trimmed[..slash]),
+        None => format!("{}/{db_name}", &trimmed[..slash]),
+    };
+    let db = sea_orm::Database::connect(&db_url)
+        .await
+        .expect("connect to disposable postgres binding database");
+    let backend = sea_orm::ConnectionTrait::get_database_backend(&db);
+    for sql in
+        bookclerk_db_exec::split_schema_statements(crate::migrations::binding_bootstrap_sql())
+    {
+        let sql = bookclerk_db_exec::schema_sql_for_backend(backend, &sql);
+        sea_orm::ConnectionTrait::execute_raw(
+            &db,
+            sea_orm::Statement::from_string(backend, sql.into_owned()),
+        )
+        .await
+        .expect("binding bootstrap DDL");
+    }
+    db
+}
+
+async fn run_postgres_binding(
+    db: &sea_orm::DatabaseConnection,
+    request: bookclerk_plugin_abi::ExecuteRequest,
+) -> Result<bookclerk_plugin_abi::ExecuteReply, bookclerk_plugin_abi::PluginError> {
+    let caps = DbCapabilities::advertised_postgres();
+    let policy = bookclerk_plugin_abi::GuestSqlPolicy::binding_owned();
+    let exec_caps = caps.clone();
+    super::execute_guest_atomic_with(request, &caps, &policy, |envelope| async move {
+        let deadline =
+            (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
+        bookclerk_db_exec::execute_typed_on_session(
+            db,
+            &envelope.request,
+            envelope.guest_receipt,
+            "postgres_txn",
+            bookclerk_db_exec::ExecCaps::from_capabilities(&exec_caps),
+            bookclerk_db_exec::AtomicSession::from_deadline(deadline),
+        )
+        .await
+        .map_err(|err| bookclerk_plugin_abi::PluginError::internal(err.to_string()))
+    })
+    .await
+}
+
+fn binding_stmt(
+    sql: &str,
+    parameters: Vec<bookclerk_plugin_abi::DbValue>,
+) -> bookclerk_plugin_abi::TypedDbStatement {
+    let kind = bookclerk_plugin_abi::guest_statement_kind(sql);
+    let result_selection = if kind == bookclerk_plugin_abi::DbPlanStatementKind::Select {
+        bookclerk_plugin_abi::DbResultSelection::Rows
+    } else {
+        bookclerk_plugin_abi::DbResultSelection::Discard
+    };
+    bookclerk_plugin_abi::TypedDbStatement {
+        sql: sql.into(),
+        parameters,
+        kind,
+        max_rows: 0,
+        result_selection,
+    }
+}
+
+fn binding_req(
+    operation_id: &str,
+    statements: Vec<bookclerk_plugin_abi::TypedDbStatement>,
+) -> bookclerk_plugin_abi::ExecuteRequest {
+    bookclerk_plugin_abi::ExecuteRequest {
+        operation_id: operation_id.into(),
+        request_hash: String::new(),
+        statements,
+        deadline_unix_ms: 0,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_binding_mixed_ddl_dml() {
+    if !postgres_conformance_enabled() {
+        return;
+    }
+    let db = postgres_binding_db().await;
+    let mixed = || {
+        let ddl = binding_stmt(
+            "CREATE TABLE IF NOT EXISTS counters (id INTEGER PRIMARY KEY, n INTEGER)",
+            vec![],
+        );
+        let mut insert = binding_stmt(
+            "INSERT INTO counters (id, n) VALUES (?, ?)",
+            vec![
+                bookclerk_plugin_abi::DbValue::Int64(1),
+                bookclerk_plugin_abi::DbValue::Int64(1),
+            ],
+        );
+        insert.result_selection = bookclerk_plugin_abi::DbResultSelection::AffectedRows;
+        binding_req("pg-mixed-once", vec![ddl, insert])
+    };
+    let first = run_postgres_binding(&db, mixed())
+        .await
+        .expect("first mixed");
+    assert_eq!(first.statements[1].rows_affected, 1);
+    let replay = run_postgres_binding(&db, mixed())
+        .await
+        .expect("replay mixed");
+    assert_eq!(replay.statements[1].rows_affected, 1);
+    let mut count = binding_stmt("SELECT count(*) FROM counters", vec![]);
+    count.max_rows = 8;
+    let counted = run_postgres_binding(&db, binding_req("pg-mixed-count", vec![count]))
+        .await
+        .expect("count");
+    let bookclerk_plugin_abi::DbValue::Int64(n) = counted.statements[0].rows[0].values[0] else {
+        panic!(
+            "expected int64 count, got {:?}",
+            counted.statements[0].rows[0].values[0]
+        );
+    };
+    assert_eq!(n, 1, "postgres mixed batch must not double-insert");
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_binding_portable_functions() {
+    if !postgres_conformance_enabled() {
+        return;
+    }
+    let db = postgres_binding_db().await;
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ddl-typed",
+            vec![binding_stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_AUTOINCREMENT_BLOB,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("typed DDL");
+    let mut insert = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_INSERT,
+        vec![bookclerk_plugin_abi::DbValue::Bytes(
+            bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB.to_vec(),
+        )],
+    );
+    insert.result_selection = bookclerk_plugin_abi::DbResultSelection::AffectedRows;
+    run_postgres_binding(&db, binding_req("pg-ins-typed", vec![insert]))
+        .await
+        .expect("typed insert");
+    let mut select = binding_stmt(bookclerk_db_exec::sql_v1::PORTABLE_SELECT, vec![]);
+    select.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-sel-typed", vec![select]))
+        .await
+        .expect("portable select");
+    let values = &reply.statements[0].rows[0].values;
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_select_mismatch(values) {
+        panic!("{err}");
+    }
+    let mut blob = binding_stmt("SELECT blob FROM typed", vec![]);
+    blob.max_rows = 8;
+    let blob_reply = run_postgres_binding(&db, binding_req("pg-sel-blob", vec![blob]))
+        .await
+        .expect("blob select");
+    assert_eq!(
+        blob_reply.statements[0].rows[0].values[0],
+        bookclerk_plugin_abi::DbValue::Bytes(
+            bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB.to_vec()
+        )
+    );
+}

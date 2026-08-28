@@ -1,10 +1,10 @@
-//! Host-schema pack expansion at the adapter execution edge.
+//! Adapter execution-edge SQL lowering (host schema packs and binding DDL).
 //!
-//! `bookclerk-library` owns the canonical SQLite-shaped migration plan and
-//! never lowers it. Adapters expand the pack here at execution: the SQLite
-//! family applies canonical DDL verbatim; PostgreSQL lowers it mechanically
-//! via [`crate::lower_canonical_ddl_to_postgres`] (types, `AUTOINCREMENT`,
-//! `INSERT OR IGNORE`). There is no hand-authored parallel Postgres schema.
+//! `bookclerk-library` owns canonical SQLite-shaped SQL and never lowers it.
+//! SeaORM adapters invoke these helpers at execute: the SQLite family applies
+//! canonical DDL verbatim; PostgreSQL lowers types/`AUTOINCREMENT` here (not
+//! inside [`crate::lower_canonical_sql`], which stays DML/query helpers).
+//! There is no hand-authored parallel Postgres schema.
 
 use std::borrow::Cow;
 
@@ -20,6 +20,47 @@ pub fn schema_sql_for_backend(backend: DatabaseBackend, canonical: &str) -> Cow<
     match backend {
         DatabaseBackend::Postgres => Cow::Owned(crate::lower_canonical_ddl_to_postgres(canonical)),
         _ => Cow::Borrowed(canonical),
+    }
+}
+
+/// Mechanical type/identity lowering for one **binding** statement.
+///
+/// Hosts emit canonical SQLite-shaped `CREATE`/`DROP`. Postgres adapters
+/// rewrite `AUTOINCREMENT`/`BLOB`/`INTEGER`/`REAL` here; SQLite/D1 leave the
+/// statement unchanged. DML stays for [`crate::lower_canonical_sql`].
+#[must_use]
+pub fn lower_binding_sql_for_backend(backend: DatabaseBackend, sql: &str) -> Cow<'_, str> {
+    if backend == DatabaseBackend::Postgres && bookclerk_plugin_abi::statement_is_ddl(sql) {
+        Cow::Owned(crate::lower::rewrite_canonical_ddl_types_for_postgres(sql))
+    } else {
+        Cow::Borrowed(sql)
+    }
+}
+
+/// Applies [`lower_binding_sql_for_backend`] to every statement in `req`.
+///
+/// Identity when no statement changes (SQLite/D1, or Postgres DML-only).
+#[must_use]
+pub fn lower_binding_ddl_execute_request(
+    backend: DatabaseBackend,
+    req: &ExecuteRequest,
+) -> ExecuteRequest {
+    if backend != DatabaseBackend::Postgres {
+        return req.clone();
+    }
+    let mut out = req.clone();
+    let mut changed = false;
+    for stmt in &mut out.statements {
+        let lowered = lower_binding_sql_for_backend(backend, &stmt.sql);
+        if lowered.as_ref() != stmt.sql.as_str() {
+            stmt.sql = lowered.into_owned();
+            changed = true;
+        }
+    }
+    if changed {
+        out
+    } else {
+        req.clone()
     }
 }
 
@@ -234,6 +275,70 @@ mod tests {
         assert_eq!(
             expanded.statements.last().map(|s| s.sql.as_str()),
             Some("INSERT INTO schema_migrations (version) VALUES (1)")
+        );
+    }
+
+    #[test]
+    fn postgres_adapter_lowers_binding_ddl_types() {
+        let canonical =
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY AUTOINCREMENT, b BLOB, n INTEGER, r REAL)";
+        let req = ExecuteRequest {
+            operation_id: "binding-ddl".into(),
+            request_hash: String::new(),
+            statements: vec![
+                TypedDbStatement {
+                    sql: canonical.into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                },
+                TypedDbStatement {
+                    sql: "INSERT INTO t (n) VALUES (?)".into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                },
+            ],
+            deadline_unix_ms: 0,
+        };
+        let sqlite = lower_binding_ddl_execute_request(DatabaseBackend::Sqlite, &req);
+        assert_eq!(sqlite.statements[0].sql, canonical);
+        let pg = lower_binding_ddl_execute_request(DatabaseBackend::Postgres, &req);
+        assert!(
+            pg.statements[0].sql.contains("BIGSERIAL PRIMARY KEY"),
+            "{}",
+            pg.statements[0].sql
+        );
+        assert!(
+            pg.statements[0].sql.contains("BYTEA"),
+            "{}",
+            pg.statements[0].sql
+        );
+        assert!(
+            pg.statements[0].sql.contains("BIGINT"),
+            "{}",
+            pg.statements[0].sql
+        );
+        assert!(
+            pg.statements[0].sql.contains("DOUBLE PRECISION"),
+            "{}",
+            pg.statements[0].sql
+        );
+        assert!(
+            !pg.statements[0].sql.contains("AUTOINCREMENT"),
+            "{}",
+            pg.statements[0].sql
+        );
+        assert!(
+            !pg.statements[0].sql.contains("BLOB"),
+            "{}",
+            pg.statements[0].sql
+        );
+        assert_eq!(
+            pg.statements[1].sql, req.statements[1].sql,
+            "DML must not take the DDL type pass"
         );
     }
 }

@@ -55,6 +55,20 @@ fn wrap_has_ungated_ddl(statements: &[TypedDbStatement]) -> bool {
         .any(|s| bookclerk_plugin_abi::statement_is_ddl(&s.sql))
 }
 
+/// Strips the host wrap's DML receipt gate after D1 has claimed the operation.
+fn ungate_claimed_guest_write(sql_stmt: &mut SqlStmt, typed: &mut TypedDbStatement) {
+    if !sql_stmt
+        .0
+        .contains(bookclerk_db_exec::GUEST_RECEIPT_WRITE_GATE)
+    {
+        return;
+    }
+    sql_stmt.0 = bookclerk_db_exec::strip_guest_receipt_write_gate(&sql_stmt.0);
+    let _ = sql_stmt.1.pop();
+    typed.sql = sql_stmt.0.clone();
+    let _ = typed.parameters.pop();
+}
+
 /// Maximum D1 HTTP batch attempts, including retries after ambiguous responses.
 const ATOMIC_HTTP_ATTEMPTS: usize = 3;
 
@@ -508,8 +522,14 @@ impl D1Proxy {
         Ok(reply)
     }
 
-    /// After a won claim, run prune + guest DDL (not SELECT — that would see
-    /// our empty stub) and reassemble the wrap shape for unwrap/finalize.
+    /// After a won claim, run prune + ungated guest SQL (DDL and DML) and mark
+    /// the receipt `applied` in the same HTTP, then reassemble the wrap shape
+    /// for unwrap/finalize.
+    ///
+    /// The host wrap still gates DML with [`bookclerk_db_exec::GUEST_RECEIPT_WRITE_GATE`].
+    /// After the claim stub commits, that predicate would be false on first
+    /// execution, so this path strips it. Resume only for `claimed` rows;
+    /// `applied` means guest DML already ran.
     #[allow(clippy::too_many_arguments)]
     async fn run_claimed_guest_ddl(
         &self,
@@ -529,8 +549,19 @@ impl D1Proxy {
         let mut rest_req_stmts = Vec::with_capacity(stub_idx.saturating_sub(1));
         rest_sql.push(statements[0].clone());
         rest_req_stmts.push(req.statements[0].clone());
-        rest_sql.extend(statements[prefix..stub_idx].iter().cloned());
-        rest_req_stmts.extend(req.statements[prefix..stub_idx].iter().cloned());
+        for (mut sql_stmt, mut typed) in statements[prefix..stub_idx]
+            .iter()
+            .cloned()
+            .zip(req.statements[prefix..stub_idx].iter().cloned())
+        {
+            ungate_claimed_guest_write(&mut sql_stmt, &mut typed);
+            rest_sql.push(sql_stmt);
+            rest_req_stmts.push(typed);
+        }
+        let applied = bookclerk_db_exec::guest_receipt_applied_stmt(&req.operation_id);
+        let (applied_sql, applied_binds) = d1_typed_statement(&applied.sql, &applied.parameters);
+        rest_sql.push((applied_sql, applied_binds));
+        rest_req_stmts.push(applied);
         let rest_req = ExecuteRequest {
             operation_id: req.operation_id.clone(),
             request_hash: req.request_hash.clone(),
@@ -546,6 +577,8 @@ impl D1Proxy {
             deadline,
         )?;
         let mut reply = parse_typed_batch(&rest_req, &raw, started)?;
+        // Applied-mark is adapter-private; unwrap still sees prune + guest + stub.
+        let _applied = reply.statements.pop();
         let mut assembled = Vec::with_capacity(req.statements.len());
         assembled.push(
             reply

@@ -351,9 +351,12 @@ fn builtin_functions() -> std::collections::BTreeSet<String> {
 /// Portable Bookclerk SQL v1 functions for plugin-owned bindings.
 ///
 /// Contract helpers (`ifnull`, `json_extract`, `json_object`, `json_valid`,
-/// `max`) plus scalars that lower on every admitted adapter. SQLite-only
-/// names in [`builtin_functions`] stay denied here so a binding cannot
-/// depend on an engine dialect the host SQL contract does not guarantee.
+/// 2+-arg `min`/`max`) plus scalars that execute on every admitted adapter
+/// after adapter-owned lowering. `hex` is SQLite-only (Postgres has no
+/// `hex()`); it stays in [`builtin_functions`] for library guests. Other
+/// SQLite-only names in [`builtin_functions`] stay denied here so a binding
+/// cannot depend on an engine dialect the host SQL contract does not
+/// guarantee.
 fn portable_functions() -> std::collections::BTreeSet<String> {
     [
         "abs",
@@ -361,7 +364,6 @@ fn portable_functions() -> std::collections::BTreeSet<String> {
         "cast",
         "coalesce",
         "count",
-        "hex",
         "ifnull",
         "json_extract",
         "json_object",
@@ -2284,6 +2286,12 @@ mod tests {
             1,
         )
         .unwrap();
+        let err =
+            binding_check("SELECT hex(body) FROM notes", DbResultSelection::Rows, 1).unwrap_err();
+        assert!(
+            err.to_string().contains("unauthorized function"),
+            "hex is not portable: {err}"
+        );
         let library = GuestSqlPolicy::allow_tables(["notes"]);
         let request = req(
             "SELECT strftime('%Y', body) FROM notes",
