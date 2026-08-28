@@ -543,6 +543,9 @@ pub fn validate_sql_v1_grammar(sql: &str, binding_owned: bool) -> Result<()> {
     validate_sql_v1_grammar_at(0, sql, binding_owned)
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `sql` is outside SQL v1.
 fn validate_sql_v1_grammar_at(index: usize, sql: &str, binding_owned: bool) -> Result<()> {
     deny_non_v1_insert(index, sql)?;
     if binding_owned {
@@ -558,6 +561,11 @@ fn v1_grammar_err(index: usize, what: &str) -> PluginError {
 }
 
 /// `INSERT OR IGNORE` is canonical; `INSERT OR REPLACE` / `OR ABORT` are not.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `sql` uses a non-portable
+/// `INSERT OR` conflict verb.
 fn deny_non_v1_insert(index: usize, sql: &str) -> Result<()> {
     let main = sql_after_leading_ctes(sql);
     let mut scan = Scan { sql: main, i: 0 };
@@ -578,6 +586,11 @@ fn deny_non_v1_insert(index: usize, sql: &str) -> Result<()> {
 }
 
 /// SQLite-only operators that the expression scanner would otherwise treat as columns.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `GLOB`, `COLLATE`, `MATCH`, or
+/// `REGEXP` appears in a code span.
 fn deny_binding_v1_operators(index: usize, sql: &str) -> Result<()> {
     let mut scan = Scan { sql, i: 0 };
     while scan.i < sql.len() {
@@ -612,6 +625,10 @@ fn deny_binding_v1_operators(index: usize, sql: &str) -> Result<()> {
 
 const V1_COLUMN_TYPES: &[&str] = &["integer", "real", "text", "blob"];
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the column list or table tail
+/// is not portable SQL v1.
 fn validate_binding_create_table_v1(index: usize, inner: &str, tail: &str) -> Result<()> {
     deny_v1_ddl_tail(index, tail, false)?;
     let mut scan = Scan { sql: inner, i: 0 };
@@ -654,6 +671,10 @@ fn validate_binding_create_table_v1(index: usize, inner: &str, tail: &str) -> Re
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `tail` is a non-portable
+/// `STRICT` / `WITHOUT ROWID` / `USING` / `INCLUDE` clause.
 fn deny_v1_ddl_tail(index: usize, tail: &str, allow_where: bool) -> Result<()> {
     let mut scan = Scan { sql: tail, i: 0 };
     scan.skip();
@@ -669,6 +690,10 @@ fn deny_v1_ddl_tail(index: usize, tail: &str, allow_where: bool) -> Result<()> {
     ))
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the index column list or tail
+/// is not portable SQL v1.
 fn validate_binding_create_index_v1(index: usize, inner: &str, tail: &str) -> Result<()> {
     deny_v1_ddl_tail(index, tail, true)?;
     deny_binding_v1_operators(index, inner)?;
@@ -694,6 +719,10 @@ fn validate_binding_create_index_v1(index: usize, inner: &str, tail: &str) -> Re
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the column name, type, or
+/// constraints are not portable SQL v1.
 fn parse_column_def(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if scan.read_ident().is_none() {
         return Err(v1_grammar_err(index, "column name required"));
@@ -716,6 +745,10 @@ fn parse_column_def(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_column_constraints(index, scan)
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a column constraint is not
+/// portable SQL v1.
 fn parse_column_constraints(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     loop {
         scan.skip();
@@ -773,6 +806,10 @@ fn parse_column_constraints(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     }
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a table constraint is not
+/// portable SQL v1.
 fn parse_table_constraint(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if scan.take_kw("CONSTRAINT") && scan.read_ident().is_none() {
         return Err(v1_grammar_err(index, "CONSTRAINT requires a name"));
@@ -802,6 +839,10 @@ fn parse_table_constraint(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Err(v1_grammar_err(index, "unsupported table constraint"))
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when parentheses are missing or
+/// unbalanced.
 fn skip_paren_group(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if !scan.take_byte(b'(') {
         return Err(v1_grammar_err(index, "expected '('"));
@@ -812,6 +853,10 @@ fn skip_paren_group(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the `DEFAULT` value is not a
+/// portable literal or function call.
 fn parse_default_value(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     scan.skip();
     if scan.i >= scan.sql.len() {
@@ -852,6 +897,10 @@ fn parse_default_value(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Err(v1_grammar_err(index, "DEFAULT value is not portable"))
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `REFERENCES` is missing a
+/// table or uses a non-portable action.
 fn parse_references(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if scan.read_ident().is_none() {
         return Err(v1_grammar_err(index, "REFERENCES requires a table"));
