@@ -577,6 +577,10 @@ fn v1_grammar_err(index: usize, what: &str) -> PluginError {
 }
 
 /// Rejects `"…"`, `` `…` ``, and `[…]` object names.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn deny_quoted_ident(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     scan.skip();
     match scan.sql.as_bytes().get(scan.i) {
@@ -589,6 +593,10 @@ fn deny_quoted_ident(index: usize, scan: &mut Scan<'_>) -> Result<()> {
 }
 
 /// Fail-closed SELECT/DML/expression productions for SQL v1.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_positive_sql_v1(index: usize, sql: &str) -> Result<()> {
     let mut scan = Scan { sql, i: 0 };
     parse_v1_statement(index, &mut scan)?;
@@ -599,6 +607,9 @@ fn parse_positive_sql_v1(index: usize, sql: &str) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_statement(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if scan.take_kw("WITH") {
         parse_v1_cte_list(index, scan)?;
@@ -618,6 +629,9 @@ fn parse_v1_statement(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Err(v1_grammar_err(index, "unsupported statement form"))
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_cte_list(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     let _ = scan.take_kw("RECURSIVE");
     loop {
@@ -659,6 +673,9 @@ fn parse_v1_cte_list(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     }
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_select(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if scan.take_kw("VALUES") {
         parse_v1_values_tuples(index, scan)?;
@@ -680,6 +697,9 @@ fn parse_v1_select(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_select_core(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if !scan.take_kw("SELECT") {
         return Err(v1_grammar_err(index, "SELECT required"));
@@ -721,6 +741,9 @@ fn parse_v1_select_core(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_select_list(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     loop {
         if scan.take_byte(b'*') {
@@ -770,6 +793,9 @@ fn parse_v1_optional_alias(scan: &mut Scan<'_>) -> bool {
     scan.read_ident().is_some()
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_from_item(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if scan.take_byte(b'(') {
         let inner = scan
@@ -797,6 +823,9 @@ fn parse_v1_from_item(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_joins(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     loop {
         let _ = scan.take_kw("INNER");
@@ -834,6 +863,9 @@ fn parse_v1_joins(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     }
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_order_limit(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if scan.take_kw("ORDER") {
         if !scan.take_kw("BY") {
@@ -860,6 +892,9 @@ fn parse_v1_order_limit(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_insert(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if !scan.take_kw("INSERT") {
         return Err(v1_grammar_err(index, "INSERT"));
@@ -895,6 +930,9 @@ fn parse_v1_insert(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_v1_returning(index, scan)
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_values_tuples(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     loop {
         if !scan.take_byte(b'(') {
@@ -915,6 +953,9 @@ fn parse_v1_values_tuples(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     }
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_update(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if !scan.take_kw("UPDATE") {
         return Err(v1_grammar_err(index, "UPDATE"));
@@ -939,6 +980,9 @@ fn parse_v1_update(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_v1_returning(index, scan)
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_delete(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if !scan.take_kw("DELETE") || !scan.take_kw("FROM") {
         return Err(v1_grammar_err(index, "DELETE FROM"));
@@ -950,6 +994,9 @@ fn parse_v1_delete(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_v1_returning(index, scan)
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_returning(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if !scan.take_kw("RETURNING") {
         return Ok(());
@@ -968,12 +1015,18 @@ fn parse_v1_returning(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     }
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_ident(index: usize, scan: &mut Scan<'_>) -> Result<String> {
     deny_quoted_ident(index, scan)?;
     scan.read_ident()
         .ok_or_else(|| v1_grammar_err(index, "identifier required"))
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_table_name(index: usize, scan: &mut Scan<'_>) -> Result<String> {
     let name = parse_v1_ident(index, scan)?;
     if scan.peek_byte(b'.') {
@@ -985,11 +1038,17 @@ fn parse_v1_table_name(index: usize, scan: &mut Scan<'_>) -> Result<String> {
     Ok(name)
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_expr(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     deny_double_colon(index, scan)?;
     parse_v1_or(index, scan)
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn deny_double_colon(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     scan.skip();
     if scan.sql[scan.i..].starts_with("::") {
@@ -1001,6 +1060,9 @@ fn deny_double_colon(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_or(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_v1_and(index, scan)?;
     while scan.take_kw("OR") {
@@ -1009,6 +1071,9 @@ fn parse_v1_or(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_and(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_v1_not(index, scan)?;
     while scan.take_kw("AND") {
@@ -1017,6 +1082,9 @@ fn parse_v1_and(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_not(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if scan.take_kw("NOT") {
         return parse_v1_not(index, scan);
@@ -1024,6 +1092,9 @@ fn parse_v1_not(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_v1_cmp(index, scan)
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_cmp(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_v1_concat(index, scan)?;
     deny_double_colon(index, scan)?;
@@ -1101,6 +1172,9 @@ fn take_cmp_op(scan: &mut Scan<'_>) -> bool {
     false
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_in_list(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if !scan.take_byte(b'(') {
         return Err(v1_grammar_err(index, "IN ("));
@@ -1126,6 +1200,9 @@ fn parse_v1_in_list(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_concat(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_v1_add(index, scan)?;
     loop {
@@ -1140,6 +1217,9 @@ fn parse_v1_concat(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_add(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_v1_mul(index, scan)?;
     loop {
@@ -1153,6 +1233,9 @@ fn parse_v1_add(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_mul(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_v1_prefix(index, scan)?;
     loop {
@@ -1166,6 +1249,9 @@ fn parse_v1_mul(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_prefix(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     scan.skip();
     deny_double_colon(index, scan)?;
@@ -1175,6 +1261,9 @@ fn parse_v1_prefix(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     parse_v1_atom(index, scan)
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_atom(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     deny_double_colon(index, scan)?;
     if scan.take_kw("NULL") || scan.take_kw("TRUE") || scan.take_kw("FALSE") {
@@ -1261,6 +1350,9 @@ fn parse_v1_atom(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_call_args(index: usize, scan: &mut Scan<'_>, name: &str) -> Result<()> {
     if scan.peek_byte(b')') {
         scan.take_byte(b')');
@@ -1286,6 +1378,9 @@ fn parse_v1_call_args(index: usize, scan: &mut Scan<'_>, name: &str) -> Result<(
     check_v1_arity(index, name, n)
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn check_v1_arity(index: usize, name: &str, n: usize) -> Result<()> {
     let (min, max) = match name {
         "round" => (1, 2),
@@ -1309,6 +1404,9 @@ fn check_v1_arity(index: usize, name: &str, n: usize) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_case(index: usize, scan: &mut Scan<'_>) -> Result<()> {
     if !scan.peek_kw("WHEN") {
         parse_v1_expr(index, scan)?;
