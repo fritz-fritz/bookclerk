@@ -1886,6 +1886,10 @@ fn parse_default_value(index: usize, scan: &mut Scan<'_>, ty: &str) -> Result<()
     Ok(())
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the `DEFAULT` token is not a
+/// portable SQL v1 literal.
 fn parse_default_literal(index: usize, scan: &mut Scan<'_>) -> Result<SqlType> {
     scan.skip();
     if scan.take_kw("NULL") {

@@ -4,7 +4,7 @@
 //! [`SQL_CATALOG_TABLE`]. This module only interprets canonical SQL; adapters
 //! persist catalog rows at execute.
 
-#![allow(clippy::missing_docs_in_private_items)]
+#![allow(clippy::missing_docs_in_private_items, clippy::missing_errors_doc)]
 
 use crate::{DbType, DbValue, ExecuteRequest, PluginError, Result, TypedDbStatement};
 use std::collections::BTreeMap;
@@ -1439,7 +1439,9 @@ impl<'a> TScan<'a> {
                 self.i += rest.find("*/").map(|p| p + 2).unwrap_or(rest.len());
                 continue;
             }
-            let ch = rest.chars().next().unwrap();
+            let Some(ch) = rest.chars().next() else {
+                break;
+            };
             if ch.is_whitespace() {
                 self.i += ch.len_utf8();
                 continue;
@@ -1610,6 +1612,7 @@ impl<'a> TScan<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
     use crate::{DbPlanStatementKind, DbResultSelection};
