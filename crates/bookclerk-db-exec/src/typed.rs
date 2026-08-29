@@ -13,9 +13,9 @@ use bookclerk_plugin_abi::{
     apply_schema_sql_to_env, encoded_execute_reply_bytes, encoded_statement_result_bytes,
 };
 use bookclerk_plugin_abi::{
-    sql_catalog_create_table_sql, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow,
-    DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, SqlType, SqlTypeEnv, StatementResult,
-    TypedDbStatement, SQL_CATALOG_TABLE,
+    DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
+    ExecuteReply, ExecuteRequest, SqlType, SqlTypeEnv, StatementResult, TypedDbStatement,
+    SQL_CATALOG_TABLE,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, Statement,
@@ -68,27 +68,68 @@ async fn apply_binding_companions(
     Ok(())
 }
 
-/// Reconstructs [`SqlTypeEnv`] from the durable binding catalog.
+/// Reconstructs [`SqlTypeEnv`] from the durable binding catalog, if present.
 ///
-/// Ensures [`SQL_CATALOG_TABLE`] exists first. A missing-table `SELECT` on
-/// PostgreSQL aborts the current transaction (`25P02`); creating the empty
-/// catalog keeps load fail-open for host library DBs that have not yet run
-/// binding DDL.
+/// A missing catalog table yields an empty environment. On PostgreSQL the
+/// probe runs under a savepoint so a missing-table `SELECT` cannot abort the
+/// current transaction (`25P02`).
 ///
 /// # Errors
 ///
-/// Returns [`DbErr`] when catalog DDL or the catalog query fails.
+/// Returns [`DbErr`] when the catalog query fails for a reason other than a
+/// missing table.
 pub async fn load_sql_type_env(conn: &impl ConnectionTrait) -> Result<SqlTypeEnv, DbErr> {
     let backend = conn.get_database_backend();
-    conn.execute_raw(Statement::from_string(
-        backend,
-        sql_catalog_create_table_sql(),
-    ))
-    .await?;
+    let savepoint = backend == sea_orm::DatabaseBackend::Postgres
+        && conn
+            .execute_raw(Statement::from_string(
+                backend,
+                "SAVEPOINT bookclerk_sql_catalog_load",
+            ))
+            .await
+            .is_ok();
     let sql = format!("SELECT table_name, column_name, sql_type FROM {SQL_CATALOG_TABLE}");
-    let rows = conn
+    let rows = match conn
         .query_all_raw(Statement::from_string(backend, sql))
-        .await?;
+        .await
+    {
+        Ok(rows) => {
+            if savepoint {
+                let _ = conn
+                    .execute_raw(Statement::from_string(
+                        backend,
+                        "RELEASE SAVEPOINT bookclerk_sql_catalog_load",
+                    ))
+                    .await;
+            }
+            rows
+        }
+        Err(err) => {
+            if savepoint {
+                let _ = conn
+                    .execute_raw(Statement::from_string(
+                        backend,
+                        "ROLLBACK TO SAVEPOINT bookclerk_sql_catalog_load",
+                    ))
+                    .await;
+                let _ = conn
+                    .execute_raw(Statement::from_string(
+                        backend,
+                        "RELEASE SAVEPOINT bookclerk_sql_catalog_load",
+                    ))
+                    .await;
+            }
+            let msg = err.to_string().to_ascii_lowercase();
+            if msg.contains("no such table")
+                || msg.contains("does not exist")
+                || msg.contains("undefined table")
+                || msg.contains("unknown table")
+            {
+                return Ok(SqlTypeEnv::new());
+            }
+            return Err(err);
+        }
+    };
     let mut env = SqlTypeEnv::new();
     for row in rows {
         let table = query_result_text(&row, "table_name");
