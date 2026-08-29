@@ -8,6 +8,10 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use crate::{
+    sql_types::{
+        typecheck_execute_request, SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS,
+        SQL_CATALOG_TABLE, SQL_IDENTITY_TABLE,
+    },
     DbPlanStatementKind, DbResultSelection, ExecuteRequest, PluginError, Result, TypedDbStatement,
 };
 
@@ -20,6 +24,9 @@ const DENIED_TABLES: &[&str] = &[
     "sqlite_temp_schema",
     "sqlite_sequence",
     "information_schema",
+    SQL_CATALOG_TABLE,
+    SQL_IDENTITY_TABLE,
+    INSERT_SELECT_WRAP_ALIAS,
 ];
 
 /// Leading verbs that are never valid guest SQL (DDL, session, admin).
@@ -83,6 +90,8 @@ pub struct GuestSqlPolicy {
     /// allowed and bounded idempotent DDL (`CREATE`/`DROP` `TABLE`/`INDEX`
     /// with `IF [NOT] EXISTS`) passes. `ALTER` is refused.
     binding_owned: bool,
+    /// Durable/loaded column types for fail-closed expression checking.
+    sql_types: SqlTypeEnv,
 }
 
 impl Default for GuestSqlPolicy {
@@ -101,6 +110,7 @@ impl GuestSqlPolicy {
             functions: std::collections::BTreeSet::new(),
             host_authoritative: false,
             binding_owned: false,
+            sql_types: SqlTypeEnv::new(),
         }
     }
 
@@ -114,6 +124,7 @@ impl GuestSqlPolicy {
             functions: std::collections::BTreeSet::new(),
             host_authoritative: true,
             binding_owned: false,
+            sql_types: SqlTypeEnv::new(),
         }
     }
 
@@ -139,6 +150,7 @@ impl GuestSqlPolicy {
             functions: portable_functions(),
             host_authoritative: false,
             binding_owned: true,
+            sql_types: SqlTypeEnv::new(),
         }
     }
 
@@ -161,10 +173,23 @@ impl GuestSqlPolicy {
             functions: builtin_functions(),
             host_authoritative: false,
             binding_owned: false,
+            sql_types: SqlTypeEnv::new(),
         }
     }
 
-    /// Restricts `table` to `cols` (must already be an allowed table).
+    /// Attaches a loaded [`SqlTypeEnv`] (durable catalog snapshot).
+    #[must_use]
+    pub fn with_sql_types(mut self, env: SqlTypeEnv) -> Self {
+        self.sql_types = env;
+        self
+    }
+
+    /// Column types used by fail-closed expression checking.
+    #[must_use]
+    pub fn sql_types(&self) -> &SqlTypeEnv {
+        &self.sql_types
+    }
+    /// Restricts `table` to `cols` (empty set denies every column on that table).
     #[must_use]
     pub fn restrict_columns(
         mut self,
@@ -293,6 +318,9 @@ const BINDING_RESERVED_TABLES: &[&str] = &[
     "db_atomic_receipts",
     "schema_migrations",
     "plugin_databases",
+    SQL_CATALOG_TABLE,
+    SQL_IDENTITY_TABLE,
+    INSERT_SELECT_WRAP_ALIAS,
 ];
 
 /// True when `name` may not be touched inside a plugin-owned binding.
@@ -922,6 +950,10 @@ fn parse_v1_insert(index: usize, scan: &mut Scan<'_>) -> Result<()> {
             scan.take_kw("VALUES");
             parse_v1_values_tuples(index, scan)?;
         } else {
+            if scan.peek_kw("WITH") {
+                scan.take_kw("WITH");
+                parse_v1_cte_list(index, scan)?;
+            }
             parse_v1_select(index, scan)?;
         }
     } else {
@@ -1322,6 +1354,9 @@ fn parse_v1_atom(index: usize, scan: &mut Scan<'_>) -> Result<()> {
         }
         return Ok(());
     }
+    if take_v1_blob_hex(scan) {
+        return Ok(());
+    }
     if take_v1_number(scan) || take_v1_string(scan) {
         return Ok(());
     }
@@ -1568,7 +1603,8 @@ fn deny_binding_v1_operators(index: usize, sql: &str) -> Result<()> {
         if scan.read_ident().is_some() {
             continue;
         }
-        scan.i += 1;
+        let ch = scan.sql[scan.i..].chars().next().unwrap_or('\0');
+        scan.i += ch.len_utf8().max(1);
     }
     Ok(())
 }
@@ -1758,7 +1794,7 @@ fn parse_column_constraints(index: usize, scan: &mut Scan<'_>, ty: &str) -> Resu
             continue;
         }
         if scan.take_kw("DEFAULT") {
-            parse_default_value(index, scan)?;
+            parse_default_value(index, scan, ty)?;
             continue;
         }
         if scan.take_kw("REFERENCES") {
@@ -1823,45 +1859,117 @@ fn skip_paren_group(index: usize, scan: &mut Scan<'_>) -> Result<()> {
 /// # Errors
 ///
 /// Returns [`PluginError::invalid_params`] when the `DEFAULT` value is not a
-/// portable literal or function call.
-fn parse_default_value(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+/// portable literal matching `ty`.
+fn parse_default_value(index: usize, scan: &mut Scan<'_>, ty: &str) -> Result<()> {
     scan.skip();
     if scan.i >= scan.sql.len() {
         return Err(v1_grammar_err(index, "DEFAULT requires a value"));
     }
-    let b = scan.sql.as_bytes()[scan.i];
-    if b == b'\'' {
-        skip_quoted_string(scan, b'\'');
-        return Ok(());
+    let want = SqlType::from_column_ident(ty)
+        .ok_or_else(|| v1_grammar_err(index, "DEFAULT column type"))?;
+    let got = parse_default_literal(index, scan)?;
+    crate::sql_types::unify_types(index, want, got)?;
+    if got != crate::sql_types::SqlType::Null && got != want {
+        if !crate::sql_types::cast_is_legal(got, want) {
+            return Err(v1_grammar_err(
+                index,
+                &format!("DEFAULT type {} does not match column {ty}", got.as_str()),
+            ));
+        }
+        if got != want {
+            return Err(v1_grammar_err(
+                index,
+                &format!("DEFAULT type {} does not match column {ty}", got.as_str()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_default_literal(index: usize, scan: &mut Scan<'_>) -> Result<SqlType> {
+    scan.skip();
+    if scan.take_kw("NULL") {
+        return Ok(SqlType::Null);
+    }
+    if scan.take_kw("TRUE") || scan.take_kw("FALSE") {
+        return Ok(SqlType::Boolean);
+    }
+    if take_v1_blob_hex(scan) {
+        return Ok(SqlType::Blob);
+    }
+    if take_v1_string(scan) {
+        return Ok(SqlType::Text);
+    }
+    let num_start = {
+        scan.skip();
+        scan.i
+    };
+    if take_v1_number(scan) {
+        let lit = &scan.sql[num_start..scan.i];
+        return Ok(if lit.contains('.') {
+            SqlType::Real
+        } else {
+            SqlType::Integer
+        });
+    }
+    if scan.take_kw("CAST") {
+        if !scan.take_byte(b'(') {
+            return Err(v1_grammar_err(index, "DEFAULT CAST ("));
+        }
+        let from = parse_default_literal(index, scan)?;
+        if !scan.take_kw("AS") {
+            return Err(v1_grammar_err(index, "DEFAULT CAST AS"));
+        }
+        let ty = parse_v1_ident(index, scan)?;
+        if !scan.take_byte(b')') {
+            return Err(v1_grammar_err(index, "DEFAULT CAST )"));
+        }
+        let to = SqlType::from_column_ident(&ty)
+            .ok_or_else(|| v1_grammar_err(index, "DEFAULT CAST type"))?;
+        if !crate::sql_types::cast_is_legal(from, to) {
+            return Err(v1_grammar_err(
+                index,
+                &format!(
+                    "DEFAULT CAST from {} to {} is not SQL v1",
+                    from.as_str(),
+                    to.as_str()
+                ),
+            ));
+        }
+        return Ok(to);
     }
     if scan.take_byte(b'(') {
-        if scan.take_balanced_inner().is_none() {
-            return Err(v1_grammar_err(index, "unbalanced DEFAULT"));
-        }
-        return Ok(());
-    }
-    if scan.take_kw("NULL") || scan.take_kw("TRUE") || scan.take_kw("FALSE") {
-        return Ok(());
-    }
-    if b == b'+' || b == b'-' || b.is_ascii_digit() {
-        scan.i += 1;
-        while scan
-            .sql
-            .as_bytes()
-            .get(scan.i)
-            .is_some_and(|c| c.is_ascii_digit() || *c == b'.')
-        {
-            scan.i += 1;
-        }
-        return Ok(());
-    }
-    if scan.read_ident().is_some() {
-        if scan.peek_byte(b'(') {
-            skip_paren_group(index, scan)?;
-        }
-        return Ok(());
+        return Err(v1_grammar_err(
+            index,
+            "parenthesized DEFAULT is not SQL v1 unless CAST",
+        ));
     }
     Err(v1_grammar_err(index, "DEFAULT value is not portable"))
+}
+
+fn take_v1_blob_hex(scan: &mut Scan<'_>) -> bool {
+    scan.skip();
+    let rest = scan.rest();
+    if rest.len() < 3 {
+        return false;
+    }
+    let b = rest.as_bytes();
+    if !b[0].eq_ignore_ascii_case(&b'x') || b[1] != b'\'' {
+        return false;
+    }
+    let mut i = scan.i + 2;
+    while i < scan.sql.len() {
+        let c = scan.sql.as_bytes()[i];
+        if c == b'\'' {
+            scan.i = i + 1;
+            return true;
+        }
+        if !c.is_ascii_hexdigit() {
+            return false;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// # Errors
@@ -2306,16 +2414,22 @@ fn skip_ws_comments(sql: &str, mut i: usize) -> usize {
 }
 
 fn keyword_at(sql: &str, i: usize, kw: &str) -> bool {
-    let bytes = sql.as_bytes();
+    if !sql.is_char_boundary(i) {
+        return false;
+    }
     let n = kw.len();
-    if i.saturating_add(n) > bytes.len() {
+    let Some(end) = i.checked_add(n) else {
+        return false;
+    };
+    if end > sql.len() || !sql.is_char_boundary(end) {
         return false;
     }
-    if !sql[i..i + n].eq_ignore_ascii_case(kw) {
+    if !sql[i..end].eq_ignore_ascii_case(kw) {
         return false;
     }
+    let bytes = sql.as_bytes();
     let before_ok = i == 0 || !ident_cont(bytes[i - 1]);
-    let after = bytes.get(i + n).copied().unwrap_or(b' ');
+    let after = bytes.get(end).copied().unwrap_or(b' ');
     before_ok && !ident_cont(after)
 }
 
@@ -2413,6 +2527,9 @@ pub fn validate_guest_execute_request_for_policy(
     }
     for (i, stmt) in req.statements.iter().enumerate() {
         validate_guest_statement_for(i, stmt, policy)?;
+    }
+    if policy.is_binding_owned() || !policy.sql_types().is_empty() {
+        typecheck_execute_request(req, policy.sql_types(), policy.host_authoritative)?;
     }
     Ok(())
 }
@@ -3551,6 +3668,24 @@ mod tests {
         )
         .unwrap();
         binding_check(
+            "CREATE TABLE IF NOT EXISTS blobdef (payload BLOB DEFAULT X'deadbeef')",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
+        binding_check(
+            "CREATE TABLE IF NOT EXISTS casted (n INTEGER DEFAULT CAST(1 AS INTEGER))",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
+        binding_check(
+            "INSERT OR IGNORE INTO ign_sel (id) WITH s AS (SELECT 1) SELECT * FROM s RETURNING id",
+            DbResultSelection::Rows,
+            0,
+        )
+        .unwrap();
+        binding_check(
             "CREATE TABLE IF NOT EXISTS keyed (id INTEGER PRIMARY KEY, other_id INTEGER REFERENCES peer(id))",
             DbResultSelection::Discard,
             0,
@@ -3614,6 +3749,11 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS t (id REAL AUTOINCREMENT)",
             "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, n INTEGER AUTOINCREMENT)",
             "SELECT round(n, 2, 3) FROM notes",
+            "CREATE TABLE IF NOT EXISTS t (n INTEGER DEFAULT 'x')",
+            "CREATE TABLE IF NOT EXISTS t (flag BOOLEAN DEFAULT 1)",
+            "CREATE TABLE IF NOT EXISTS t (n INTEGER DEFAULT (1))",
+            "CREATE TABLE IF NOT EXISTS t (n INTEGER DEFAULT CAST('x' AS INTEGER))",
+            "CREATE TABLE IF NOT EXISTS _bc_src (id INTEGER PRIMARY KEY)",
         ] {
             let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
             assert!(
@@ -3621,7 +3761,8 @@ mod tests {
                     || err.to_string().contains("not portable")
                     || err.to_string().contains("disallowed")
                     || err.to_string().contains("not allowed")
-                    || err.to_string().contains("column list"),
+                    || err.to_string().contains("column list")
+                    || err.to_string().contains("reserved"),
                 "{sql}: {err}"
             );
         }
@@ -3703,7 +3844,8 @@ mod tests {
         ] {
             let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
             assert!(
-                err.to_string().contains("unauthorized function"),
+                err.to_string().contains("unauthorized function")
+                    || err.to_string().contains("not portable"),
                 "{sql}: {err}"
             );
         }
@@ -3777,6 +3919,17 @@ mod tests {
             1,
         )
         .unwrap();
+        let err =
+            binding_check("SELECT CAST('1' AS INTEGER)", DbResultSelection::Rows, 1).unwrap_err();
+        assert!(
+            err.to_string().contains("CAST") || err.to_string().contains("invalid"),
+            "{err}"
+        );
+        let err = binding_check("SELECT IFNULL('x', 0)", DbResultSelection::Rows, 1).unwrap_err();
+        assert!(
+            err.to_string().contains("incompatible") || err.to_string().contains("invalid"),
+            "{err}"
+        );
         let err =
             binding_check("SELECT hex(body) FROM notes", DbResultSelection::Rows, 1).unwrap_err();
         assert!(

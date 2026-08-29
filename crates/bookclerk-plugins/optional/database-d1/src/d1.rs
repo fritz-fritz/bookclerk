@@ -3875,6 +3875,46 @@ mod tests {
         exec("d1-ddl-id", bookclerk_db_exec::sql_v1::BINDING_DDL_IDENTITY)
             .await
             .expect("identity DDL");
+        let err = run(ExecuteRequest {
+            operation_id: "d1-ident-rollback".into(),
+            request_hash: String::new(),
+            statements: vec![
+                TypedDbStatement {
+                    sql: bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_EXPLICIT.into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                },
+                TypedDbStatement {
+                    sql: bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_EXPLICIT.into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                },
+            ],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect_err("unique conflict must abort");
+        assert!(!err.to_string().is_empty(), "{err}");
+        exec(
+            "d1-ident-omit-rb",
+            bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_OMIT,
+        )
+        .await
+        .expect("omit after rollback");
+        let max_rb = sel(
+            "d1-sel-max-rb",
+            bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_SELECT_MAX,
+        )
+        .await
+        .expect("max after rollback");
+        assert_eq!(
+            max_rb.statements[0].rows[0].values[0],
+            bookclerk_plugin_abi::DbValue::Int64(1)
+        );
         exec(
             "d1-ins-ex",
             bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_EXPLICIT,
@@ -3918,6 +3958,198 @@ mod tests {
         assert_eq!(
             max2.statements[0].rows[0].values[0],
             bookclerk_plugin_abi::DbValue::Int64(102)
+        );
+
+        exec(
+            "d1-ddl-ign",
+            bookclerk_db_exec::sql_v1::BINDING_DDL_IGNORE_SELECT,
+        )
+        .await
+        .expect("ign ddl");
+        // D1 HTTP cannot prove `INSERT … SELECT … RETURNING` is `maxRows=1`.
+        // The wrap still runs; results are not collected.
+        for (op, sql, binds) in [
+            (
+                "d1-ign-sel",
+                bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT,
+                vec![bookclerk_plugin_abi::DbValue::Int64(1)],
+            ),
+            (
+                "d1-ign-with",
+                bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT_WITH,
+                vec![bookclerk_plugin_abi::DbValue::Int64(2)],
+            ),
+            (
+                "d1-ign-union",
+                bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT_UNION,
+                vec![
+                    bookclerk_plugin_abi::DbValue::Int64(3),
+                    bookclerk_plugin_abi::DbValue::Int64(4),
+                ],
+            ),
+            (
+                "d1-ign-ord",
+                bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT_ORDER_LIMIT,
+                vec![bookclerk_plugin_abi::DbValue::Int64(5)],
+            ),
+        ] {
+            run(ExecuteRequest {
+                operation_id: op.into(),
+                request_hash: String::new(),
+                statements: vec![TypedDbStatement {
+                    sql: sql.replace(" RETURNING id", ""),
+                    parameters: binds,
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                }],
+                deadline_unix_ms: 0,
+            })
+            .await
+            .expect(op);
+        }
+
+        exec("d1-ddl-like", bookclerk_db_exec::sql_v1::BINDING_DDL_LIKE)
+            .await
+            .expect("like ddl");
+        exec(
+            "d1-ins-like",
+            bookclerk_db_exec::sql_v1::PORTABLE_LIKE_INSERT,
+        )
+        .await
+        .expect("like ins");
+        let liked = run(ExecuteRequest {
+            operation_id: "d1-sel-like".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: bookclerk_db_exec::sql_v1::PORTABLE_LIKE_SELECT.into(),
+                parameters: vec![bookclerk_plugin_abi::DbValue::Text("A".into())],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 8,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("like sel");
+        if let Some(err) = bookclerk_db_exec::sql_v1::portable_statement_mismatch(
+            &liked.statements[0],
+            bookclerk_db_exec::sql_v1::portable_like_expects(),
+            "like",
+        ) {
+            panic!("{err}");
+        }
+        let na = sel(
+            "d1-sel-like-na",
+            bookclerk_db_exec::sql_v1::PORTABLE_LIKE_NON_ASCII,
+        )
+        .await
+        .expect("like na");
+        assert_eq!(
+            na.statements[0].rows[0].values[0],
+            bookclerk_plugin_abi::DbValue::Int64(0)
+        );
+
+        exec(
+            "d1-ddl-blobdef",
+            bookclerk_db_exec::sql_v1::BINDING_DDL_BLOB_DEFAULT,
+        )
+        .await
+        .expect("blobdef ddl");
+        exec(
+            "d1-ins-blobdef",
+            bookclerk_db_exec::sql_v1::PORTABLE_BLOB_DEFAULT_INSERT,
+        )
+        .await
+        .expect("blobdef ins");
+        let blobdef = sel(
+            "d1-sel-blobdef",
+            bookclerk_db_exec::sql_v1::PORTABLE_BLOB_DEFAULT_SELECT,
+        )
+        .await
+        .expect("blobdef sel");
+        assert_eq!(
+            blobdef.statements[0].rows[0].values[0],
+            bookclerk_plugin_abi::DbValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef])
+        );
+
+        exec(
+            "d1-ddl-textord",
+            bookclerk_db_exec::sql_v1::BINDING_DDL_TEXT_ORDER,
+        )
+        .await
+        .expect("textord ddl");
+        for (op, sql) in [
+            (
+                "d1-to-b",
+                bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_B,
+            ),
+            (
+                "d1-to-a",
+                bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_A,
+            ),
+            (
+                "d1-to-eac",
+                bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_EACUTE,
+            ),
+            (
+                "d1-to-e",
+                bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_E,
+            ),
+        ] {
+            exec(op, sql).await.expect(op);
+        }
+        let ordered = sel(
+            "d1-text-ord",
+            bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_SELECT,
+        )
+        .await
+        .expect("text ord");
+        if let Some(err) = bookclerk_db_exec::sql_v1::portable_rows_mismatch(
+            &ordered.statements[0],
+            bookclerk_db_exec::sql_v1::portable_text_order_expects(),
+            "text order",
+        ) {
+            panic!("{err}");
+        }
+        let tops = sel("d1-text-ops", bookclerk_db_exec::sql_v1::PORTABLE_TEXT_OPS)
+            .await
+            .expect("text ops");
+        if let Some(err) = bookclerk_db_exec::sql_v1::portable_statement_mismatch(
+            &tops.statements[0],
+            bookclerk_db_exec::sql_v1::portable_text_ops_expects(),
+            "text ops",
+        ) {
+            panic!("{err}");
+        }
+
+        exec(
+            "d1-ident-drop",
+            bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_DROP,
+        )
+        .await
+        .expect("drop ident");
+        exec(
+            "d1-ident-recreate",
+            bookclerk_db_exec::sql_v1::BINDING_DDL_IDENTITY,
+        )
+        .await
+        .expect("recreate ident");
+        exec(
+            "d1-ident-omit-re",
+            bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_OMIT,
+        )
+        .await
+        .expect("omit after recreate");
+        let max_re = sel(
+            "d1-sel-max-re",
+            bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_SELECT_MAX,
+        )
+        .await
+        .expect("max after recreate");
+        assert_eq!(
+            max_re.statements[0].rows[0].values[0],
+            bookclerk_plugin_abi::DbValue::Int64(1)
         );
 
         exec(

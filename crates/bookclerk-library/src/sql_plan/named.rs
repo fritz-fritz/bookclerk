@@ -561,22 +561,37 @@ fn for_each_top_level_keyword(sql: &str, mut on_keyword: impl FnMut(usize, &str)
     }
 }
 
-/// Inserts a write gate before top-level `RETURNING`, or as `WHERE`/`AND` on DML.
+/// Inserts a write gate before top-level `ORDER BY` / `LIMIT` / `RETURNING`.
 ///
 /// `INSERT … VALUES` is rewritten to `INSERT … SELECT` first so a trailing
-/// `WHERE` is valid SQL.
+/// `WHERE` is valid SQL. Splicing before `ORDER BY`/`LIMIT` keeps
+/// `INSERT … SELECT … ORDER BY … LIMIT … RETURNING` valid after the gate.
 pub(super) fn apply_write_predicate(sql: &str, kind: DbPlanStatementKind, pred: &str) -> String {
     let sql = rewrite_insert_values_to_select(sql);
-    let splice_at = match kind {
+    let returning_at = match kind {
         DbPlanStatementKind::Returning => find_returning_clause(&sql),
         _ => None,
     };
-    if let Some(idx) = splice_at {
-        let prefix = sql[..idx].trim_end();
-        let returning = sql[idx..].trim_start();
-        return format!("{} {} {pred} {returning}", prefix, where_or_and(prefix));
+    let (body, returning) = if let Some(idx) = returning_at {
+        (sql[..idx].trim_end(), Some(sql[idx..].trim_start()))
+    } else {
+        (sql.as_str(), None)
+    };
+    let cut = find_first_top_level_keyword(body, "ORDER")
+        .or_else(|| find_first_top_level_keyword(body, "LIMIT"))
+        .unwrap_or(body.len());
+    let head = body[..cut].trim_end();
+    let tail = body[cut..].trim_start();
+    let mut out = format!("{head} {} {pred}", where_or_and(head));
+    if !tail.is_empty() {
+        out.push(' ');
+        out.push_str(tail);
     }
-    format!("{sql} {} {pred}", where_or_and(&sql))
+    if let Some(ret) = returning {
+        out.push(' ');
+        out.push_str(ret);
+    }
+    out
 }
 
 /// Rewrites a top-level `INSERT … VALUES (…)` tuple into `INSERT … SELECT …`.
@@ -2992,6 +3007,24 @@ mod tests {
             authored_kind(&gated),
             DbPlanStatementKind::Returning,
             "{gated}"
+        );
+    }
+
+    #[test]
+    fn write_gate_lands_before_order_by_limit() {
+        let sql = "INSERT INTO t (id) SELECT ? AS id ORDER BY id LIMIT 1 RETURNING id";
+        let gated = apply_write_predicate(
+            sql,
+            DbPlanStatementKind::Returning,
+            "NOT EXISTS (SELECT 1 FROM db_atomic_receipts WHERE operation_id = ?)",
+        );
+        let order = gated.to_ascii_uppercase().find("ORDER BY").unwrap();
+        let gate = gated
+            .find("NOT EXISTS (SELECT 1 FROM db_atomic_receipts")
+            .unwrap();
+        assert!(
+            gate < order,
+            "receipt gate must precede ORDER BY/LIMIT: {gated}"
         );
     }
 

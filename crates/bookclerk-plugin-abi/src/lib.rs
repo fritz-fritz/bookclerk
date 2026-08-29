@@ -70,6 +70,7 @@ mod roles;
 mod rpc;
 mod rpc_types;
 mod sdk_wire;
+pub mod sql_types;
 pub mod types;
 
 /// Generated Cap'n Proto RPC interfaces (`schema/plugin.capnp`).
@@ -138,6 +139,11 @@ pub use guest_sql::{
 pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
+pub use sql_types::{
+    apply_schema_sql_to_env, catalog_companions, parse_create_table_schema, parse_drop_table_name,
+    sql_type_env_from_canonical_ddl, typecheck_execute_request, CreateTableSchema, SqlType,
+    SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS, SQL_CATALOG_TABLE, SQL_IDENTITY_TABLE,
+};
 pub use types::*;
 
 #[cfg(feature = "host")]

@@ -9,10 +9,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bookclerk_plugin_abi::GuestReceiptPersist;
-use bookclerk_plugin_abi::{encoded_execute_reply_bytes, encoded_statement_result_bytes};
+use bookclerk_plugin_abi::{
+    apply_schema_sql_to_env, encoded_execute_reply_bytes, encoded_statement_result_bytes,
+};
 use bookclerk_plugin_abi::{
     DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
-    ExecuteReply, ExecuteRequest, StatementResult, TypedDbStatement,
+    ExecuteReply, ExecuteRequest, SqlType, SqlTypeEnv, StatementResult, TypedDbStatement,
+    SQL_CATALOG_TABLE,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, Statement,
@@ -23,7 +26,7 @@ use crate::exec::{
     collect_capped_query_results, exceeds_result_row_cap, remaining_deadline_ms,
     rows_affected_for_kind, AtomicSession, ExecCaps,
 };
-use crate::lower_canonical_sql;
+use crate::lower_canonical_sql_typed;
 use crate::proxy_txn::{
     consume_commit_injection, consume_savepoint_release_injection,
     consume_savepoint_rollback_injection, is_txn_broken, note_commit_failed, take_txn_fault,
@@ -45,24 +48,83 @@ fn effective_row_cap(stmt_max: u32, caps_max: u32) -> u32 {
     }
 }
 
-/// Runs adapter-private serial-sync DDL after a Postgres CREATE TABLE.
+/// Runs adapter-private catalog + identity companions after a binding DDL statement.
+///
+/// Companions are generated from **canonical** SQL and executed internally
+/// (not extra Cap'n statements).
 ///
 /// # Errors
 ///
 /// Returns [`DbErr`] when a companion statement fails to execute.
-async fn apply_postgres_identity_companions(
+async fn apply_binding_companions(
     txn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
-    sql: &str,
+    canonical: &str,
 ) -> Result<(), DbErr> {
-    if backend != sea_orm::DatabaseBackend::Postgres {
-        return Ok(());
-    }
-    for companion in crate::schema_postgres::postgres_identity_companions(sql) {
+    for companion in crate::schema_postgres::binding_companions(backend, canonical) {
         txn.execute_raw(Statement::from_string(backend, companion))
             .await?;
     }
     Ok(())
+}
+
+/// Reconstructs [`SqlTypeEnv`] from the durable binding catalog, if present.
+///
+/// A missing catalog table yields an empty environment (host library DBs
+/// without the reserved table).
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the catalog query fails for a reason other than a
+/// missing table.
+pub async fn load_sql_type_env(conn: &impl ConnectionTrait) -> Result<SqlTypeEnv, DbErr> {
+    let backend = conn.get_database_backend();
+    let sql = format!("SELECT table_name, column_name, sql_type FROM {SQL_CATALOG_TABLE}");
+    let rows = match conn
+        .query_all_raw(Statement::from_string(backend, sql))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            let msg = err.to_string().to_ascii_lowercase();
+            if msg.contains("no such table")
+                || msg.contains("does not exist")
+                || msg.contains("undefined table")
+                || msg.contains("unknown table")
+            {
+                return Ok(SqlTypeEnv::new());
+            }
+            return Err(err);
+        }
+    };
+    let mut env = SqlTypeEnv::new();
+    for row in rows {
+        let table = query_result_text(&row, "table_name");
+        let column = query_result_text(&row, "column_name");
+        let ty = query_result_text(&row, "sql_type");
+        if table.is_empty() || column.is_empty() {
+            continue;
+        }
+        if let Some(sql_ty) = SqlType::from_column_ident(ty.to_ascii_lowercase().as_str()) {
+            env.insert_column(&table, &column, sql_ty);
+        }
+    }
+    Ok(env)
+}
+
+/// Reads a TEXT catalog cell by column name (ProxyRow maps are not SELECT-ordered).
+fn query_result_text(row: &QueryResult, column: &str) -> String {
+    row.try_get::<String>("", column)
+        .or_else(|_| {
+            row.try_get::<Option<String>>("", column)
+                .map(|s| s.unwrap_or_default())
+        })
+        .or_else(|_| row.try_get::<String>(SQL_CATALOG_TABLE, column))
+        .or_else(|_| {
+            row.try_get::<Option<String>>(SQL_CATALOG_TABLE, column)
+                .map(|s| s.unwrap_or_default())
+        })
+        .unwrap_or_default()
 }
 
 /// Convert a typed bind into a SeaORM value without JSON / `b64:` decoding.
@@ -747,18 +809,26 @@ async fn execute_typed_join_body(
     let started = Instant::now();
     let backend = ConnectionTrait::get_database_backend(txn);
     let sql_started = Instant::now();
+    let mut env = load_sql_type_env(txn)
+        .await
+        .unwrap_or_else(|_| SqlTypeEnv::new());
     let mut statements = Vec::with_capacity(req.statements.len());
     for stmt in &req.statements {
         session.check(AtomicInterruptPhase::BetweenStatements)?;
         let values: Vec<SeaValue> = stmt.parameters.iter().map(db_value_to_sea).collect();
         let row_cap = effective_row_cap(stmt.max_rows, caps.max_result_rows);
+        let canonical = stmt.sql.clone();
         let sql = if stmt.kind.wrap_select_limit() {
-            cap_query_sql(&stmt.sql, row_cap)
+            cap_query_sql(&canonical, row_cap)
         } else {
-            stmt.sql.clone()
+            canonical.clone()
         };
         let sql = crate::schema_postgres::lower_binding_sql_for_backend(backend, &sql);
-        let sql = lower_canonical_sql(backend, sql.as_ref());
+        let sql = if bookclerk_plugin_abi::statement_is_ddl(&canonical) {
+            sql.into_owned()
+        } else {
+            lower_canonical_sql_typed(backend, sql.as_ref(), &env)
+        };
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = match stmt.result_selection {
             DbResultSelection::Rows => {
@@ -791,7 +861,8 @@ async fn execute_typed_join_body(
                 }
             }
         };
-        apply_postgres_identity_companions(txn, backend, &sql).await?;
+        apply_binding_companions(txn, backend, &canonical).await?;
+        apply_schema_sql_to_env(&mut env, &canonical);
         statements.push(stmt_result);
     }
     session.check(AtomicInterruptPhase::AroundCommit)?;
@@ -863,6 +934,7 @@ where
     // request shape below.
     let wire_len = req.statements.len();
     let req = expand_host_schema_execute_request(backend, req);
+    let canonical_sqls: Vec<String> = req.statements.iter().map(|s| s.sql.clone()).collect();
     // Binding CREATE/DROP stays canonical on the wire; Postgres adapters
     // lower types/`AUTOINCREMENT` here (not in `lower_canonical_sql`).
     let req = crate::schema_postgres::lower_binding_ddl_execute_request(backend, &req);
@@ -876,11 +948,14 @@ where
         }
     }
     let sql_started = Instant::now();
+    let mut env = load_sql_type_env(&txn)
+        .await
+        .unwrap_or_else(|_| SqlTypeEnv::new());
     let mut statements = Vec::with_capacity(req.statements.len());
     // Guest-typed wrap only: host library plans also SELECT a prior receipt
     // at index 1, and skipping their remaining selectors would break replay.
     let skip_guest_on_prior = then.is_some();
-    for stmt in &req.statements {
+    for (idx, stmt) in req.statements.iter().enumerate() {
         if let Err(err) = session.check(AtomicInterruptPhase::BetweenStatements) {
             let _ = txn.rollback().await;
             let _ = take_txn_fault();
@@ -888,12 +963,20 @@ where
         }
         let values: Vec<SeaValue> = stmt.parameters.iter().map(db_value_to_sea).collect();
         let row_cap = effective_row_cap(stmt.max_rows, caps.max_result_rows);
+        let canonical = canonical_sqls
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(|| stmt.sql.clone());
         let sql = if stmt.kind.wrap_select_limit() {
             cap_query_sql(&stmt.sql, row_cap)
         } else {
             stmt.sql.clone()
         };
-        let sql = lower_canonical_sql(backend, &sql);
+        let sql = if bookclerk_plugin_abi::statement_is_ddl(&canonical) {
+            sql
+        } else {
+            lower_canonical_sql_typed(backend, &sql, &env)
+        };
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = match stmt.result_selection {
             DbResultSelection::Rows => {
@@ -972,11 +1055,12 @@ where
                 }
             }
         };
-        if let Err(err) = apply_postgres_identity_companions(&txn, backend, &sql).await {
+        if let Err(err) = apply_binding_companions(&txn, backend, &canonical).await {
             let _ = txn.rollback().await;
             let _ = take_txn_fault();
             return Err(err);
         }
+        apply_schema_sql_to_env(&mut env, &canonical);
         statements.push(stmt_result);
         if skip_guest_on_prior
             && crate::guest_receipt::should_skip_remaining_guest_work(
@@ -1009,7 +1093,11 @@ where
                 return Err(err);
             }
             let values: Vec<SeaValue> = stmt.parameters.iter().map(db_value_to_sea).collect();
-            let sql = lower_canonical_sql(backend, &stmt.sql);
+            let sql = if bookclerk_plugin_abi::statement_is_ddl(&stmt.sql) {
+                stmt.sql.clone()
+            } else {
+                lower_canonical_sql_typed(backend, &stmt.sql, &env)
+            };
             let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
             match txn.execute_raw(sea_stmt).await {
                 Ok(_) => {}

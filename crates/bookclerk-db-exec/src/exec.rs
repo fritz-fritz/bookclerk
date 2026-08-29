@@ -13,12 +13,13 @@ use sea_orm::{
 };
 use serde_json::Value as JsonValue;
 
-use crate::lower_canonical_sql;
+use crate::lower_canonical_sql_typed;
 use crate::proxy_txn::{
     consume_atomic_interrupt, consume_commit_injection, is_txn_broken, note_query_row,
     record_query_rows_seen, take_txn_fault, with_exec_budget, AtomicInterruptKind,
     AtomicInterruptPhase, ExecBudget,
 };
+use crate::typed::load_sql_type_env;
 
 /// Session-level cancel / deadline for one atomic attempt (not hashed).
 #[derive(Clone, Default)]
@@ -70,7 +71,7 @@ impl AtomicSession {
     }
 }
 
-/// Runs adapter-private serial-sync DDL after a Postgres CREATE TABLE.
+/// Runs adapter-private catalog + identity companions after a statement.
 ///
 /// # Errors
 ///
@@ -78,12 +79,9 @@ impl AtomicSession {
 async fn apply_exec_identity_companions(
     txn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
-    sql: &str,
+    canonical: &str,
 ) -> Result<(), DbErr> {
-    if backend != sea_orm::DatabaseBackend::Postgres {
-        return Ok(());
-    }
-    for companion in crate::schema_postgres::postgres_identity_companions(sql) {
+    for companion in crate::schema_postgres::binding_companions(backend, canonical) {
         txn.execute_raw(Statement::from_string(backend, companion))
             .await?;
     }
@@ -213,6 +211,9 @@ async fn execute_statements_body(
         }
     }
     let sql_started = Instant::now();
+    let mut env = load_sql_type_env(&txn)
+        .await
+        .unwrap_or_else(|_| bookclerk_plugin_abi::SqlTypeEnv::new());
     let mut statements = Vec::with_capacity(plan.statements.len());
     let mut used_atomic = atomic_result_envelope_len(operation_id);
     for stmt in &plan.statements {
@@ -222,12 +223,17 @@ async fn execute_statements_body(
             return Err(err);
         }
         let values: Vec<Value> = stmt.binds.iter().map(json_to_sea).collect();
+        let canonical = stmt.sql.clone();
         let sql = if stmt.kind.wrap_select_limit() {
-            cap_query_sql(&stmt.sql, caps.max_result_rows)
+            cap_query_sql(&canonical, caps.max_result_rows)
         } else {
-            stmt.sql.clone()
+            canonical.clone()
         };
-        let sql = lower_canonical_sql(backend, &sql);
+        let sql = if bookclerk_plugin_abi::statement_is_ddl(&canonical) {
+            sql
+        } else {
+            lower_canonical_sql_typed(backend, &sql, &env)
+        };
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = if stmt.kind.collects_rows() {
             let json_rows = match collect_capped_query_rows(&txn, sea_stmt, caps).await {
@@ -257,11 +263,12 @@ async fn execute_statements_body(
                 rows_affected: exec.rows_affected(),
             }
         };
-        if let Err(err) = apply_exec_identity_companions(&txn, backend, &sql).await {
+        if let Err(err) = apply_exec_identity_companions(&txn, backend, &canonical).await {
             let _ = txn.rollback().await;
             let _ = take_txn_fault();
             return Err(err);
         }
+        bookclerk_plugin_abi::apply_schema_sql_to_env(&mut env, &canonical);
         if let Err(err) = note_atomic_stmt_bytes(
             &mut used_atomic,
             statements.len(),

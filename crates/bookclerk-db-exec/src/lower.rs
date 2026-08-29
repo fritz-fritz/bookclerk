@@ -6,6 +6,7 @@
 //! and block comments, and PostgreSQL dollar quotes are copied verbatim.
 //! Do not call this from host domain compilers.
 
+use bookclerk_plugin_abi::{SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS};
 use sea_orm::DatabaseBackend;
 
 /// Lowers canonical Bookclerk **DML/query** SQL for `backend`.
@@ -20,11 +21,18 @@ use sea_orm::DatabaseBackend;
 /// so this function does not classify statements.
 #[must_use]
 pub fn lower_canonical_sql(backend: DatabaseBackend, sql: &str) -> String {
+    lower_canonical_sql_typed(backend, sql, &SqlTypeEnv::new())
+}
+
+/// [`lower_canonical_sql`] plus type-directed Postgres `COLLATE "C"` on TEXT.
+#[must_use]
+pub fn lower_canonical_sql_typed(backend: DatabaseBackend, sql: &str, env: &SqlTypeEnv) -> String {
     let sql = rewrite_insert_or_ignore_unique_conflict(sql);
     if backend != DatabaseBackend::Postgres {
-        return sql;
+        return rewrite_like_to_glob(&sql);
     }
-    lower_canonical_to_postgres_helpers(&sql)
+    let sql = lower_canonical_to_postgres_helpers(&sql);
+    rewrite_postgres_text_collate(&sql, env)
 }
 
 /// Lowers canonical SQLite-shaped SQL onto PostgreSQL.
@@ -80,19 +88,260 @@ fn rewrite_insert_or_ignore_unique_conflict(sql: &str) -> String {
     };
     let prefix_len = sql.len() - trimmed.len();
     let rebuilt = if let Some(idx) = find_word_in_code_ci(rest, "RETURNING") {
-        let head = rest[..idx].trim_end();
+        let head = wrap_insert_select_head(rest[..idx].trim_end());
         let after = idx + "RETURNING".len();
         format!(
             "INSERT INTO{head} ON CONFLICT DO NOTHING RETURNING{}",
             &rest[after..]
         )
     } else {
-        format!("INSERT INTO{rest} ON CONFLICT DO NOTHING")
+        format!(
+            "INSERT INTO{} ON CONFLICT DO NOTHING",
+            wrap_insert_select_head(rest)
+        )
     };
     let mut out = String::with_capacity(prefix_len + rebuilt.len());
     out.push_str(&sql[..prefix_len]);
     out.push_str(&rebuilt);
     out
+}
+
+/// Wraps a `SELECT`/`WITH` insert source so `ON CONFLICT` is unambiguous.
+///
+/// `VALUES` stays unwrapped. Compound queries, `ORDER BY`, and `LIMIT` stay
+/// inside the subquery. Guests cannot name [`INSERT_SELECT_WRAP_ALIAS`].
+fn wrap_insert_select_head(head: &str) -> String {
+    let Some(src_off) = insert_row_source_offset(head) else {
+        return head.to_string();
+    };
+    let source = head[src_off..].trim();
+    if ident_eq_ci(source, 0, "SELECT") || ident_eq_ci(source, 0, "WITH") {
+        let prefix = &head[..src_off];
+        format!("{prefix}SELECT * FROM ({source}) AS {INSERT_SELECT_WRAP_ALIAS} WHERE true ")
+    } else {
+        head.to_string()
+    }
+}
+
+/// Byte offset of `VALUES` / `SELECT` / `WITH` after `INSERT INTO table [(cols)]`.
+fn insert_row_source_offset(head: &str) -> Option<usize> {
+    let mut i = skip_trivia_idx(head, 0);
+    let (_, end) = ident_span_at(head, i)?;
+    i = skip_trivia_idx(head, end);
+    if head.as_bytes().get(i) == Some(&b'(') {
+        i = skip_balanced(head, i);
+        i = skip_trivia_idx(head, i);
+    }
+    Some(i)
+}
+
+/// SQLite/D1: case-sensitive `LIKE`/`NOT LIKE` via `GLOB` and bind-safe `replace`.
+///
+/// Escapes GLOB metacharacters `[` `*` `?` first, then maps `%`→`*` and `_`→`?`.
+fn rewrite_like_to_glob(sql: &str) -> String {
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len() + 64);
+    while i < sql.len() {
+        let Some(rest) = sql.get(i..) else {
+            break;
+        };
+        if let Some(len) = literal_or_comment_len(rest) {
+            out.push_str(&rest[..len]);
+            i += len;
+            continue;
+        }
+        if ident_eq_ci(sql, i, "NOT") {
+            let after_not = skip_trivia_idx(sql, i + 3);
+            if ident_eq_ci(sql, after_not, "LIKE") {
+                out.push_str("NOT GLOB ");
+                i = skip_trivia_idx(sql, after_not + 4);
+                let end = like_pattern_end(sql, i);
+                out.push_str(&glob_pattern_sql(sql.get(i..end).unwrap_or("")));
+                i = end;
+                continue;
+            }
+        }
+        if ident_eq_ci(sql, i, "LIKE") {
+            out.push_str("GLOB ");
+            i = skip_trivia_idx(sql, i + 4);
+            let end = like_pattern_end(sql, i);
+            out.push_str(&glob_pattern_sql(sql.get(i..end).unwrap_or("")));
+            i = end;
+            continue;
+        }
+        let ch = rest.chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Bind-safe GLOB conversion of a SQL v1 `LIKE` pattern expression.
+fn glob_pattern_sql(pat: &str) -> String {
+    format!(
+        "replace(replace(replace(replace(replace(({pat}), '[', '[[]'), '*', '[*]'), '?', '[?]'), '%', '*'), '_', '?')"
+    )
+}
+
+/// End offset of the `LIKE` pattern expression starting at `start`.
+fn like_pattern_end(sql: &str, start: usize) -> usize {
+    let mut i = skip_sql_atom(sql, start);
+    loop {
+        let j = skip_trivia_idx(sql, i);
+        if sql.get(j..).is_some_and(|s| s.starts_with("||")) {
+            i = skip_sql_atom(sql, j + 2);
+            continue;
+        }
+        break;
+    }
+    i
+}
+
+/// Skips one SQL atom (paren group, literal, bind, ident/call).
+fn skip_sql_atom(sql: &str, start: usize) -> usize {
+    let mut i = skip_trivia_idx(sql, start);
+    if sql.as_bytes().get(i) == Some(&b'(') {
+        return skip_balanced(sql, i);
+    }
+    if let Some(len) = sql.get(i..).and_then(literal_or_comment_len) {
+        return i + len;
+    }
+    if sql.as_bytes().get(i) == Some(&b'?') {
+        return i + 1;
+    }
+    if ident_eq_ci(sql, i, "NULL") {
+        return i + 4;
+    }
+    if let Some((_, end)) = ident_span_at(sql, i) {
+        let j = skip_trivia_idx(sql, end);
+        if sql.as_bytes().get(j) == Some(&b'(') {
+            return skip_balanced(sql, j);
+        }
+        if sql.as_bytes().get(j) == Some(&b'.') {
+            let k = skip_trivia_idx(sql, j + 1);
+            if let Some((_, e2)) = ident_span_at(sql, k) {
+                let m = skip_trivia_idx(sql, e2);
+                if sql.as_bytes().get(m) == Some(&b'(') {
+                    return skip_balanced(sql, m);
+                }
+                return e2;
+            }
+        }
+        return end;
+    }
+    if sql
+        .as_bytes()
+        .get(i)
+        .is_some_and(|b| b.is_ascii_digit() || *b == b'-' || *b == b'+')
+    {
+        let start = i;
+        if sql.as_bytes().get(i) == Some(&b'-') || sql.as_bytes().get(i) == Some(&b'+') {
+            i += 1;
+        }
+        while i < sql.len() && sql.as_bytes()[i].is_ascii_digit() {
+            i += 1;
+        }
+        if sql.as_bytes().get(i) == Some(&b'.') {
+            i += 1;
+            while i < sql.len() && sql.as_bytes()[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        return if i > start { i } else { start };
+    }
+    i
+}
+
+/// Index after a balanced `(…)` group starting at `open` (`(`).
+fn skip_balanced(sql: &str, open: usize) -> usize {
+    let mut depth = 0i32;
+    let mut i = open;
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            i += len;
+            continue;
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        if ch == '(' {
+            depth += 1;
+        } else if ch == ')' {
+            depth -= 1;
+            if depth == 0 {
+                return i + 1;
+            }
+        }
+        i += ch.len_utf8();
+    }
+    sql.len()
+}
+
+/// Postgres binary TEXT: `COLLATE "C"` on typed TEXT columns and string literals.
+fn rewrite_postgres_text_collate(sql: &str, env: &SqlTypeEnv) -> String {
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len() + 32);
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            let lit = &sql[i..i + len];
+            let after = skip_trivia_idx(sql, i + len);
+            if lit.starts_with('\'')
+                && should_collate_string_lit(lit)
+                && !ident_eq_ci(sql, after, "COLLATE")
+            {
+                out.push('(');
+                out.push_str(lit);
+                out.push_str(" COLLATE \"C\")");
+            } else {
+                out.push_str(lit);
+            }
+            i += len;
+            continue;
+        }
+        if let Some((s, e)) = ident_span_at(sql, i) {
+            let name = &sql[s..e];
+            let after = skip_trivia_idx(sql, e);
+            if sql.as_bytes().get(after) == Some(&b'(') || ident_eq_ci(sql, after, "COLLATE") {
+                out.push_str(name);
+                i = e;
+                continue;
+            }
+            if sql.as_bytes().get(after) == Some(&b'.') {
+                let col_at = skip_trivia_idx(sql, after + 1);
+                if let Some((cs, ce)) = ident_span_at(sql, col_at) {
+                    let col = &sql[cs..ce];
+                    let after_col = skip_trivia_idx(sql, ce);
+                    if sql.as_bytes().get(after_col) != Some(&b'(')
+                        && !ident_eq_ci(sql, after_col, "COLLATE")
+                        && env.column_type(name, col) == Some(SqlType::Text)
+                    {
+                        out.push_str(&format!("({name}.{col} COLLATE \"C\")"));
+                        i = ce;
+                        continue;
+                    }
+                    out.push_str(&sql[s..ce]);
+                    i = ce;
+                    continue;
+                }
+            }
+            if env.ident_is_text(name) {
+                out.push_str(&format!("({name} COLLATE \"C\")"));
+                i = e;
+                continue;
+            }
+            out.push_str(name);
+            i = e;
+            continue;
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// True when a SQL string literal should receive Postgres `COLLATE "C"`.
+fn should_collate_string_lit(lit: &str) -> bool {
+    let inner = lit.trim_start_matches('\'').trim_end_matches('\'');
+    !(inner.starts_with('$') || inner.starts_with('{'))
 }
 
 /// Maps SQLite helpers used in host plans onto PostgreSQL equivalents.
@@ -604,7 +853,8 @@ fn rewrite_julianday_delta(sql: &str) -> String {
 /// [`crate::lower_binding_ddl_execute_request`]), not by
 /// [`lower_canonical_sql`]:
 ///
-/// - `INTEGER PRIMARY KEY AUTOINCREMENT` → `BIGSERIAL PRIMARY KEY`
+/// - `INTEGER PRIMARY KEY AUTOINCREMENT` → `BIGINT PRIMARY KEY` plus an
+///   adapter-private transactional identity trigger (not `BIGSERIAL`)
 /// - `INTEGER` → `BIGINT` (shared SeaORM entities use `i64` everywhere)
 /// - `REAL` → `DOUBLE PRECISION`
 /// - `BLOB` → `BYTEA`
@@ -617,7 +867,7 @@ fn rewrite_julianday_delta(sql: &str) -> String {
 /// String literals and comments are copied verbatim.
 pub(crate) fn rewrite_canonical_ddl_types_for_postgres(sql: &str) -> String {
     let Some(open) = create_table_column_list_open(sql) else {
-        return rewrite_alter_add_column_types(sql);
+        return rewrite_postgres_blob_hex_defaults(&rewrite_alter_add_column_types(sql));
     };
     let mut out = String::with_capacity(sql.len() + 16);
     out.push_str(&sql[..=open]);
@@ -693,7 +943,7 @@ pub(crate) fn rewrite_canonical_ddl_types_for_postgres(sql: &str) -> String {
     if i < sql.len() {
         out.push_str(&sql[i..]);
     }
-    out
+    rewrite_postgres_blob_hex_defaults(&out)
 }
 
 /// Rewrites `ALTER TABLE … ADD [COLUMN] name TYPE` in type position only.
@@ -793,6 +1043,62 @@ fn ident_span_at(sql: &str, i: usize) -> Option<(usize, usize)> {
     None
 }
 
+/// Canonical `DEFAULT X'hex'` → Postgres `DEFAULT decode('hex', 'hex')` after BYTEA.
+fn rewrite_postgres_blob_hex_defaults(sql: &str) -> String {
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len() + 16);
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        if ident_eq_ci(sql, i, "DEFAULT") {
+            out.push_str(&sql[i..i + 7]);
+            i += 7;
+            let j = skip_trivia_idx(sql, i);
+            out.push_str(&sql[i..j]);
+            i = j;
+            if let Some((hex, end)) = take_blob_hex_at(sql, i) {
+                out.push_str("decode('");
+                out.push_str(&hex);
+                out.push_str("', 'hex')");
+                i = end;
+                continue;
+            }
+            continue;
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Canonical `X'hex'` / `x'hex'` starting at `i`.
+fn take_blob_hex_at(sql: &str, i: usize) -> Option<(String, usize)> {
+    let rest = sql.get(i..)?;
+    if rest.len() < 3 {
+        return None;
+    }
+    let b = rest.as_bytes();
+    if !b[0].eq_ignore_ascii_case(&b'x') || b[1] != b'\'' {
+        return None;
+    }
+    let mut j = i + 2;
+    while j < sql.len() {
+        let c = sql.as_bytes()[j];
+        if c == b'\'' {
+            return Some((sql[i + 2..j].to_ascii_lowercase(), j + 1));
+        }
+        if !c.is_ascii_hexdigit() {
+            return None;
+        }
+        j += 1;
+    }
+    None
+}
+
 /// Type/identity rewrite starting at `i`, if `i` is a canonical DDL type token.
 fn ddl_type_rewrite_at(sql: &str, i: usize) -> Option<(usize, &'static str)> {
     if ident_eq_ci(sql, i, "INTEGER") {
@@ -802,7 +1108,7 @@ fn ddl_type_rewrite_at(sql: &str, i: usize) -> Option<(usize, &'static str)> {
             if ident_eq_ci(sql, j, "KEY") {
                 j = skip_trivia_idx(sql, j + "KEY".len());
                 if ident_eq_ci(sql, j, "AUTOINCREMENT") {
-                    return Some((j + "AUTOINCREMENT".len(), "BIGSERIAL PRIMARY KEY"));
+                    return Some((j + "AUTOINCREMENT".len(), "BIGINT PRIMARY KEY"));
                 }
             }
         }
@@ -855,8 +1161,16 @@ fn ident_eq_ci(sql: &str, i: usize, word: &str) -> bool {
 
 /// Byte offset after leading whitespace and comments starting at `i`.
 fn skip_trivia_idx(sql: &str, mut i: usize) -> usize {
+    if i > sql.len() {
+        return sql.len();
+    }
+    while i < sql.len() && !sql.is_char_boundary(i) {
+        i += 1;
+    }
     while i < sql.len() {
-        let rest = &sql[i..];
+        let Some(rest) = sql.get(i..) else {
+            break;
+        };
         let Some(ch) = rest.chars().next() else {
             break;
         };
@@ -1170,7 +1484,7 @@ mod tests {
             "DDL type/identity lowering is adapter-owned, not generic DML lowering: {sql}"
         );
         let types = rewrite_canonical_ddl_types_for_postgres(canonical);
-        assert!(types.contains("BIGSERIAL PRIMARY KEY"), "{types}");
+        assert!(types.contains("BIGINT PRIMARY KEY"), "{types}");
         assert!(types.contains("BYTEA"), "{types}");
         assert!(!types.contains("AUTOINCREMENT"), "{types}");
         assert!(!types.contains("BLOB"), "{types}");
@@ -1181,7 +1495,7 @@ mod tests {
         let types = rewrite_canonical_ddl_types_for_postgres(
             "create table t (id integer /*x*/ primary key autoincrement, b blob, r real, flag boolean)",
         );
-        assert!(types.contains("BIGSERIAL PRIMARY KEY"), "{types}");
+        assert!(types.contains("BIGINT PRIMARY KEY"), "{types}");
         assert!(types.contains("BYTEA"), "{types}");
         assert!(types.contains("DOUBLE PRECISION"), "{types}");
         assert!(
@@ -1219,7 +1533,7 @@ mod tests {
         let mixed = rewrite_canonical_ddl_types_for_postgres(
             "Create Table t (id Integer Primary Key Autoincrement, payload Blob, flag Boolean)",
         );
-        assert!(mixed.contains("BIGSERIAL PRIMARY KEY"), "{mixed}");
+        assert!(mixed.contains("BIGINT PRIMARY KEY"), "{mixed}");
         assert!(mixed.contains("BYTEA"), "{mixed}");
         assert!(mixed.contains("Boolean"), "{mixed}");
 
@@ -1313,5 +1627,43 @@ mod tests {
         );
         assert!(sql.contains("CAST(sum(n) AS BIGINT)"), "{sql}");
         assert!(sql.contains("CAST(avg(n) AS DOUBLE PRECISION)"), "{sql}");
+    }
+
+    #[test]
+    fn insert_or_ignore_select_wraps_source() {
+        let sql = rewrite_insert_or_ignore_unique_conflict(
+            "INSERT OR IGNORE INTO t (id) SELECT ? RETURNING id",
+        );
+        assert!(
+            sql.contains("SELECT * FROM (SELECT ?) AS _bc_src WHERE true"),
+            "{sql}"
+        );
+        assert!(sql.contains("ON CONFLICT DO NOTHING RETURNING"), "{sql}");
+        let values = rewrite_insert_or_ignore_unique_conflict(
+            "INSERT OR IGNORE INTO t (id) VALUES (?) RETURNING id",
+        );
+        assert!(
+            !values.contains("_bc_src"),
+            "VALUES must stay unwrapped: {values}"
+        );
+        let glob = lower_canonical_sql(
+            DatabaseBackend::Sqlite,
+            "SELECT 1 WHERE 'A' LIKE 'a' AND body LIKE ?",
+        );
+        assert!(glob.contains("GLOB "), "{glob}");
+        assert!(glob.contains("replace("), "{glob}");
+        assert!(!glob.contains(" LIKE "), "{glob}");
+        let glob_na = lower_canonical_sql(
+            DatabaseBackend::Sqlite,
+            "SELECT CASE WHEN 'İ' LIKE 'i' THEN 1 ELSE 0 END",
+        );
+        assert!(glob_na.contains("GLOB "), "{glob_na}");
+        assert!(!glob_na.contains(" LIKE "), "{glob_na}");
+        let hex = rewrite_canonical_ddl_types_for_postgres(
+            "CREATE TABLE t (payload BLOB DEFAULT X'deadbeef')",
+        );
+        assert!(hex.contains("DEFAULT decode('deadbeef', 'hex')"), "{hex}");
+        assert!(hex.contains("BYTEA"), "{hex}");
+        assert!(!hex.contains("X'"), "{hex}");
     }
 }

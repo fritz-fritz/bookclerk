@@ -1196,8 +1196,13 @@ names — and functions are Bookclerk SQL v1 portable helpers (not a wider
 SQLite dialect; `hex` is denied; column types are `INTEGER` / `REAL` /
 `TEXT` / `BLOB` / `BOOLEAN`; `INSERT OR IGNORE` is unique/PK-conflict only and
 is lowered to `ON CONFLICT DO NOTHING` on every backend, including SQLite and
-D1; helper arity and wire types are enforced so callers need not `CAST` for
-`round` / `sum` / `avg` / `count`; see
+D1 (`SELECT`/`WITH` sources are wrapped as `SELECT * FROM (<source>) AS
+_bc_src WHERE true`); helper arity and wire types are enforced so callers need
+not `CAST` for `round` / `sum` / `avg` / `count`. Canonical `LIKE` is
+case-sensitive (SQLite/D1 `GLOB` lowering; Postgres `COLLATE "C"`). Schema
+metadata is durable in adapter-private `bookclerk_sql_catalog` (Postgres
+identity in `bookclerk_identity`); both are guest-denied. Opening a binding
+reloads types from that catalog. See
 [`docs/sql-contract/v1.md`](sql-contract/v1.md)).
 A mixed `CREATE` + `INSERT` batch is one atomic receipt: first execution
 applies both statements on SQLite, PostgreSQL, and D1 (D1 claims the receipt

@@ -34,7 +34,10 @@ async fn run_binding(
     request: ExecuteRequest,
 ) -> Result<ExecuteReply, PluginError> {
     let caps = DbCapabilities::advertised_sqlite();
-    let policy = GuestSqlPolicy::binding_owned();
+    let env = bookclerk_db_exec::load_sql_type_env(db)
+        .await
+        .unwrap_or_else(|_| bookclerk_plugin_abi::SqlTypeEnv::new());
+    let policy = GuestSqlPolicy::binding_owned().with_sql_types(env);
     bookclerk_library::execute_guest_atomic_with(request, &caps, &policy, |envelope| async move {
         let deadline =
             (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
@@ -273,7 +276,15 @@ async fn binding_session_caps_are_enforced_independently_of_library_caps() {
     binding_caps.max_binds = 1;
     let library_caps = DbCapabilities::advertised_sqlite();
     assert!(library_caps.max_binds > 1);
-    let policy = GuestSqlPolicy::binding_owned();
+    let mut env = bookclerk_plugin_abi::SqlTypeEnv::new();
+    env.insert_table(
+        "counters",
+        [
+            ("id".into(), bookclerk_plugin_abi::SqlType::Integer),
+            ("n".into(), bookclerk_plugin_abi::SqlType::Integer),
+        ],
+    );
+    let policy = GuestSqlPolicy::binding_owned().with_sql_types(env);
     let request = req(
         "two-binds",
         vec![stmt(
@@ -313,7 +324,10 @@ async fn binding_cancel_before_begin_does_not_commit() {
     .expect("create notes");
     let cancel = Arc::new(AtomicBool::new(true));
     let caps = DbCapabilities::advertised_sqlite();
-    let policy = GuestSqlPolicy::binding_owned();
+    let env = bookclerk_db_exec::load_sql_type_env(&db)
+        .await
+        .unwrap_or_else(|_| bookclerk_plugin_abi::SqlTypeEnv::new());
+    let policy = GuestSqlPolicy::binding_owned().with_sql_types(env);
     let request = req(
         "insert-notes",
         vec![stmt(
@@ -377,7 +391,10 @@ async fn binding_cancel_around_commit_rolls_back() {
     );
     let cancel = Arc::new(AtomicBool::new(false));
     let caps = DbCapabilities::advertised_sqlite();
-    let policy = GuestSqlPolicy::binding_owned();
+    let env = bookclerk_db_exec::load_sql_type_env(&db)
+        .await
+        .unwrap_or_else(|_| bookclerk_plugin_abi::SqlTypeEnv::new());
+    let policy = GuestSqlPolicy::binding_owned().with_sql_types(env);
     let request = req(
         "insert-notes-2",
         vec![stmt(
@@ -845,4 +862,324 @@ async fn binding_order_by_nulls_and_identity_and_unquoted_fold() {
         .await
         .expect("fold select");
     assert_eq!(folded.statements[0].rows[0].values[0], DbValue::Int64(7));
+}
+
+#[tokio::test]
+async fn binding_sql_v1_p1_vectors() {
+    let db = binding_db().await;
+    run_binding(
+        &db,
+        req(
+            "ddl-ign",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_IGNORE_SELECT,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("ign ddl");
+    for (op, sql, binds) in [
+        (
+            "ign-sel",
+            bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT,
+            vec![DbValue::Int64(1)],
+        ),
+        (
+            "ign-with",
+            bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT_WITH,
+            vec![DbValue::Int64(2)],
+        ),
+        (
+            "ign-union",
+            bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT_UNION,
+            vec![DbValue::Int64(3), DbValue::Int64(4)],
+        ),
+        (
+            "ign-ord",
+            bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT_ORDER_LIMIT,
+            vec![DbValue::Int64(5)],
+        ),
+    ] {
+        let mut ins = stmt(sql, binds);
+        ins.result_selection = DbResultSelection::Rows;
+        ins.max_rows = 0;
+        run_binding(&db, req(op, vec![ins])).await.expect(op);
+    }
+
+    run_binding(
+        &db,
+        req(
+            "ddl-like",
+            vec![stmt(bookclerk_db_exec::sql_v1::BINDING_DDL_LIKE, vec![])],
+        ),
+    )
+    .await
+    .expect("like ddl");
+    let mut like_ins = stmt(bookclerk_db_exec::sql_v1::PORTABLE_LIKE_INSERT, vec![]);
+    like_ins.result_selection = DbResultSelection::AffectedRows;
+    run_binding(&db, req("like-ins", vec![like_ins]))
+        .await
+        .expect("like ins");
+    let mut like_sel = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_LIKE_SELECT,
+        vec![DbValue::Text("A".into())],
+    );
+    like_sel.max_rows = 8;
+    let liked = run_binding(&db, req("like-sel", vec![like_sel]))
+        .await
+        .expect("like sel");
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_statement_mismatch(
+        &liked.statements[0],
+        bookclerk_db_exec::sql_v1::portable_like_expects(),
+        "like",
+    ) {
+        panic!("{err}");
+    }
+    let mut like_na = stmt(bookclerk_db_exec::sql_v1::PORTABLE_LIKE_NON_ASCII, vec![]);
+    like_na.max_rows = 8;
+    let na = run_binding(&db, req("like-na", vec![like_na]))
+        .await
+        .expect("like na");
+    assert_eq!(na.statements[0].rows[0].values[0], DbValue::Int64(0));
+
+    run_binding(
+        &db,
+        req(
+            "ddl-blobdef",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_BLOB_DEFAULT,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("blobdef ddl");
+    let mut bdi = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_BLOB_DEFAULT_INSERT,
+        vec![],
+    );
+    bdi.result_selection = DbResultSelection::AffectedRows;
+    run_binding(&db, req("blobdef-ins", vec![bdi]))
+        .await
+        .expect("blobdef ins");
+    let mut bds = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_BLOB_DEFAULT_SELECT,
+        vec![],
+    );
+    bds.max_rows = 8;
+    let blob = run_binding(&db, req("blobdef-sel", vec![bds]))
+        .await
+        .expect("blobdef sel");
+    assert_eq!(
+        blob.statements[0].rows[0].values[0],
+        DbValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef])
+    );
+
+    run_binding(
+        &db,
+        req(
+            "ddl-textord",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_TEXT_ORDER,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("textord ddl");
+    for (op, sql) in [
+        (
+            "to-b",
+            bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_B,
+        ),
+        (
+            "to-a",
+            bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_A,
+        ),
+        (
+            "to-eac",
+            bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_EACUTE,
+        ),
+        (
+            "to-e",
+            bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_E,
+        ),
+    ] {
+        let mut ins = stmt(sql, vec![]);
+        ins.result_selection = DbResultSelection::AffectedRows;
+        run_binding(&db, req(op, vec![ins])).await.expect(op);
+    }
+    let mut tos = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_SELECT,
+        vec![],
+    );
+    tos.max_rows = 8;
+    let ordered = run_binding(&db, req("text-ord", vec![tos]))
+        .await
+        .expect("text ord");
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_rows_mismatch(
+        &ordered.statements[0],
+        bookclerk_db_exec::sql_v1::portable_text_order_expects(),
+        "text order",
+    ) {
+        panic!("{err}");
+    }
+    let mut ops = stmt(bookclerk_db_exec::sql_v1::PORTABLE_TEXT_OPS, vec![]);
+    ops.max_rows = 8;
+    let tops = run_binding(&db, req("text-ops", vec![ops]))
+        .await
+        .expect("text ops");
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_statement_mismatch(
+        &tops.statements[0],
+        bookclerk_db_exec::sql_v1::portable_text_ops_expects(),
+        "text ops",
+    ) {
+        panic!("{err}");
+    }
+
+    // Identity rollback: explicit 100 + unique conflict rolls back; omit-id is 1.
+    run_binding(
+        &db,
+        req(
+            "ddl-ident",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_IDENTITY,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("ident ddl");
+    let mut ok = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_EXPLICIT,
+        vec![],
+    );
+    ok.result_selection = DbResultSelection::AffectedRows;
+    let mut dup = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_EXPLICIT,
+        vec![],
+    );
+    dup.result_selection = DbResultSelection::AffectedRows;
+    let err = run_binding(&db, req("ident-rollback", vec![ok, dup]))
+        .await
+        .expect_err("unique conflict must abort the batch");
+    assert!(!err.to_string().is_empty(), "{err}");
+    let mut omit = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_OMIT,
+        vec![],
+    );
+    omit.result_selection = DbResultSelection::AffectedRows;
+    run_binding(&db, req("ident-omit-after-rollback", vec![omit]))
+        .await
+        .expect("omit after rollback");
+    let mut mx = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_SELECT_MAX,
+        vec![],
+    );
+    mx.max_rows = 8;
+    let maxed = run_binding(&db, req("ident-max-rb", vec![mx]))
+        .await
+        .expect("max after rollback");
+    assert_eq!(maxed.statements[0].rows[0].values[0], DbValue::Int64(1));
+
+    run_binding(
+        &db,
+        req(
+            "ident-drop",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_DROP,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("drop ident");
+    run_binding(
+        &db,
+        req(
+            "ident-recreate",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_IDENTITY,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("recreate ident");
+    let mut omit2 = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_OMIT,
+        vec![],
+    );
+    omit2.result_selection = DbResultSelection::AffectedRows;
+    run_binding(&db, req("ident-omit-recreate", vec![omit2]))
+        .await
+        .expect("omit after recreate");
+    let mut mx2 = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_SELECT_MAX,
+        vec![],
+    );
+    mx2.max_rows = 8;
+    let maxed2 = run_binding(&db, req("ident-max-re", vec![mx2]))
+        .await
+        .expect("max after recreate");
+    assert_eq!(maxed2.statements[0].rows[0].values[0], DbValue::Int64(1));
+
+    // Reopen: catalog rows survive a fresh policy load (no in-request CREATE).
+    run_binding(
+        &db,
+        req(
+            "ddl-reopen",
+            vec![stmt(
+                "CREATE TABLE IF NOT EXISTS typed_reopen (n INTEGER, body TEXT)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("reopen ddl");
+    let env = bookclerk_db_exec::load_sql_type_env(&db)
+        .await
+        .expect("load catalog");
+    assert_eq!(
+        env.column_type("typed_reopen", "body"),
+        Some(bookclerk_plugin_abi::SqlType::Text)
+    );
+    assert_eq!(
+        env.column_type("typed_reopen", "n"),
+        Some(bookclerk_plugin_abi::SqlType::Integer)
+    );
+    let policy = GuestSqlPolicy::binding_owned().with_sql_types(env);
+    let missing = req(
+        "reopen-missing",
+        vec![stmt("SELECT missing FROM typed_reopen", vec![])],
+    );
+    bookclerk_plugin_abi::validate_guest_execute_request_for_policy(&missing, &policy)
+        .expect_err("unknown column after catalog reload");
+    let mixed = req(
+        "reopen-mixed",
+        vec![stmt("SELECT IFNULL(body, n) FROM typed_reopen", vec![])],
+    );
+    bookclerk_plugin_abi::validate_guest_execute_request_for_policy(&mixed, &policy)
+        .expect_err("IFNULL mixed columns after catalog reload");
+    let ok_sel = req(
+        "reopen-ok",
+        vec![stmt("SELECT body FROM typed_reopen", vec![])],
+    );
+    bookclerk_plugin_abi::validate_guest_execute_request_for_policy(&ok_sel, &policy)
+        .expect("catalog types admit TEXT select");
+
+    // Expression-only typecheck (empty env): mixed literals still fail closed.
+    let err = bookclerk_library::execute_guest_atomic_with(
+        req("ifnull-mixed", vec![stmt("SELECT IFNULL('x', 0)", vec![])]),
+        &DbCapabilities::advertised_sqlite(),
+        &GuestSqlPolicy::binding_owned(),
+        |_| async { unreachable!("typecheck must reject") },
+    )
+    .await
+    .expect_err("IFNULL mixed types");
+    assert!(
+        err.to_string().contains("incompatible") || err.to_string().contains("invalid"),
+        "{err}"
+    );
 }

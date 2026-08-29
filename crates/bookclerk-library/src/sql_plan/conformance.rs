@@ -1753,7 +1753,10 @@ async fn run_postgres_binding(
     request: bookclerk_plugin_abi::ExecuteRequest,
 ) -> Result<bookclerk_plugin_abi::ExecuteReply, bookclerk_plugin_abi::PluginError> {
     let caps = DbCapabilities::advertised_postgres();
-    let policy = bookclerk_plugin_abi::GuestSqlPolicy::binding_owned();
+    let env = bookclerk_db_exec::load_sql_type_env(db)
+        .await
+        .unwrap_or_else(|_| bookclerk_plugin_abi::SqlTypeEnv::new());
+    let policy = bookclerk_plugin_abi::GuestSqlPolicy::binding_owned().with_sql_types(env);
     let exec_caps = caps.clone();
     super::execute_guest_atomic_with(request, &caps, &policy, |envelope| async move {
         let deadline =
@@ -2277,5 +2280,295 @@ async fn postgres_binding_semantic_helpers_order_identity_fold() {
     assert_eq!(
         folded.statements[0].rows[0].values[0],
         bookclerk_plugin_abi::DbValue::Int64(7)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_binding_sql_v1_p1_vectors() {
+    if !postgres_conformance_enabled() {
+        return;
+    }
+    let db = postgres_binding_db().await;
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ddl-ign",
+            vec![binding_stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_IGNORE_SELECT,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("ign ddl");
+    let mut ign = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT,
+        vec![bookclerk_plugin_abi::DbValue::Int64(1)],
+    );
+    ign.result_selection = bookclerk_plugin_abi::DbResultSelection::Rows;
+    ign.max_rows = 0;
+    run_postgres_binding(&db, binding_req("pg-ign-sel", vec![ign]))
+        .await
+        .expect("ign select");
+    let mut withs = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT_WITH,
+        vec![bookclerk_plugin_abi::DbValue::Int64(2)],
+    );
+    withs.result_selection = bookclerk_plugin_abi::DbResultSelection::Rows;
+    withs.max_rows = 0;
+    run_postgres_binding(&db, binding_req("pg-ign-with", vec![withs]))
+        .await
+        .expect("ign with");
+    let mut uni = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT_UNION,
+        vec![
+            bookclerk_plugin_abi::DbValue::Int64(3),
+            bookclerk_plugin_abi::DbValue::Int64(4),
+        ],
+    );
+    uni.result_selection = bookclerk_plugin_abi::DbResultSelection::Rows;
+    uni.max_rows = 0;
+    run_postgres_binding(&db, binding_req("pg-ign-union", vec![uni]))
+        .await
+        .expect("ign union");
+    let mut ord = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IGNORE_SELECT_ORDER_LIMIT,
+        vec![bookclerk_plugin_abi::DbValue::Int64(5)],
+    );
+    ord.result_selection = bookclerk_plugin_abi::DbResultSelection::Rows;
+    ord.max_rows = 0;
+    run_postgres_binding(&db, binding_req("pg-ign-ord", vec![ord]))
+        .await
+        .expect("ign order limit");
+
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ddl-like",
+            vec![binding_stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_LIKE,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("like ddl");
+    let mut like_ins = binding_stmt(bookclerk_db_exec::sql_v1::PORTABLE_LIKE_INSERT, vec![]);
+    like_ins.result_selection = bookclerk_plugin_abi::DbResultSelection::AffectedRows;
+    run_postgres_binding(&db, binding_req("pg-like-ins", vec![like_ins]))
+        .await
+        .expect("like ins");
+    let mut like_sel = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_LIKE_SELECT,
+        vec![bookclerk_plugin_abi::DbValue::Text("A".into())],
+    );
+    like_sel.max_rows = 8;
+    let liked = run_postgres_binding(&db, binding_req("pg-like-sel", vec![like_sel]))
+        .await
+        .expect("like sel");
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_statement_mismatch(
+        &liked.statements[0],
+        bookclerk_db_exec::sql_v1::portable_like_expects(),
+        "like",
+    ) {
+        panic!("{err}");
+    }
+    let mut like_na = binding_stmt(bookclerk_db_exec::sql_v1::PORTABLE_LIKE_NON_ASCII, vec![]);
+    like_na.max_rows = 8;
+    let na = run_postgres_binding(&db, binding_req("pg-like-na", vec![like_na]))
+        .await
+        .expect("like na");
+    assert_eq!(
+        na.statements[0].rows[0].values[0],
+        bookclerk_plugin_abi::DbValue::Int64(0)
+    );
+
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ddl-blobdef",
+            vec![binding_stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_BLOB_DEFAULT,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("blobdef ddl");
+    let mut bdi = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_BLOB_DEFAULT_INSERT,
+        vec![],
+    );
+    bdi.result_selection = bookclerk_plugin_abi::DbResultSelection::AffectedRows;
+    run_postgres_binding(&db, binding_req("pg-blobdef-ins", vec![bdi]))
+        .await
+        .expect("blobdef ins");
+    let mut bds = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_BLOB_DEFAULT_SELECT,
+        vec![],
+    );
+    bds.max_rows = 8;
+    let blob = run_postgres_binding(&db, binding_req("pg-blobdef-sel", vec![bds]))
+        .await
+        .expect("blobdef sel");
+    assert_eq!(
+        blob.statements[0].rows[0].values[0],
+        bookclerk_plugin_abi::DbValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef])
+    );
+
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ddl-textord",
+            vec![binding_stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_TEXT_ORDER,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("textord ddl");
+    for (op, sql) in [
+        (
+            "pg-to-b",
+            bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_B,
+        ),
+        (
+            "pg-to-a",
+            bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_A,
+        ),
+        (
+            "pg-to-eac",
+            bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_EACUTE,
+        ),
+        (
+            "pg-to-e",
+            bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_INSERT_E,
+        ),
+    ] {
+        let mut ins = binding_stmt(sql, vec![]);
+        ins.result_selection = bookclerk_plugin_abi::DbResultSelection::AffectedRows;
+        run_postgres_binding(&db, binding_req(op, vec![ins]))
+            .await
+            .expect(op);
+    }
+    let mut tos = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_TEXT_ORDER_SELECT,
+        vec![],
+    );
+    tos.max_rows = 8;
+    let ordered = run_postgres_binding(&db, binding_req("pg-text-ord", vec![tos]))
+        .await
+        .expect("text ord");
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_rows_mismatch(
+        &ordered.statements[0],
+        bookclerk_db_exec::sql_v1::portable_text_order_expects(),
+        "text order",
+    ) {
+        panic!("{err}");
+    }
+    let mut ops = binding_stmt(bookclerk_db_exec::sql_v1::PORTABLE_TEXT_OPS, vec![]);
+    ops.max_rows = 8;
+    let tops = run_postgres_binding(&db, binding_req("pg-text-ops", vec![ops]))
+        .await
+        .expect("text ops");
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_statement_mismatch(
+        &tops.statements[0],
+        bookclerk_db_exec::sql_v1::portable_text_ops_expects(),
+        "text ops",
+    ) {
+        panic!("{err}");
+    }
+
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ddl-ident-p1",
+            vec![binding_stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_IDENTITY,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("ident ddl");
+    let mut ok = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_EXPLICIT,
+        vec![],
+    );
+    ok.result_selection = bookclerk_plugin_abi::DbResultSelection::AffectedRows;
+    let mut dup = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_EXPLICIT,
+        vec![],
+    );
+    dup.result_selection = bookclerk_plugin_abi::DbResultSelection::AffectedRows;
+    run_postgres_binding(&db, binding_req("pg-ident-rollback", vec![ok, dup]))
+        .await
+        .expect_err("unique conflict must abort");
+    let mut omit = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_OMIT,
+        vec![],
+    );
+    omit.result_selection = bookclerk_plugin_abi::DbResultSelection::AffectedRows;
+    run_postgres_binding(&db, binding_req("pg-ident-omit-rb", vec![omit]))
+        .await
+        .expect("omit after rollback");
+    let mut mx = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_SELECT_MAX,
+        vec![],
+    );
+    mx.max_rows = 8;
+    let maxed = run_postgres_binding(&db, binding_req("pg-ident-max-rb", vec![mx]))
+        .await
+        .expect("max after rollback");
+    assert_eq!(
+        maxed.statements[0].rows[0].values[0],
+        bookclerk_plugin_abi::DbValue::Int64(1)
+    );
+
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ident-drop",
+            vec![binding_stmt(
+                bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_DROP,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("drop ident");
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ident-recreate",
+            vec![binding_stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_IDENTITY,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("recreate ident");
+    let mut omit2 = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_OMIT,
+        vec![],
+    );
+    omit2.result_selection = bookclerk_plugin_abi::DbResultSelection::AffectedRows;
+    run_postgres_binding(&db, binding_req("pg-ident-omit-re", vec![omit2]))
+        .await
+        .expect("omit after recreate");
+    let mut mx2 = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_SELECT_MAX,
+        vec![],
+    );
+    mx2.max_rows = 8;
+    let maxed2 = run_postgres_binding(&db, binding_req("pg-ident-max-re", vec![mx2]))
+        .await
+        .expect("max after recreate");
+    assert_eq!(
+        maxed2.statements[0].rows[0].values[0],
+        bookclerk_plugin_abi::DbValue::Int64(1)
     );
 }

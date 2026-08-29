@@ -10,6 +10,18 @@ use bookclerk_db_exec::{
     sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
     DbPlanStatementKind, DbPlanStmtExecResult,
 };
+
+/// Collapses adapter-private companions then host-schema pack extras.
+fn collapse_d1_wire(
+    wire_len: usize,
+    groups: &[usize],
+    statements: Vec<bookclerk_plugin_abi::StatementResult>,
+) -> Vec<bookclerk_plugin_abi::StatementResult> {
+    bookclerk_db_exec::collapse_host_schema_results(
+        wire_len,
+        bookclerk_db_exec::collapse_companion_groups(groups, statements),
+    )
+}
 use bookclerk_plugin_abi::DbCapabilities;
 use bookclerk_plugin_sdk::{
     encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbResultSelection,
@@ -225,6 +237,19 @@ impl D1Proxy {
             sea_orm::DatabaseBackend::Sqlite,
             req,
         );
+        let host_schema = expanded
+            .statements
+            .last()
+            .is_some_and(|s| bookclerk_db_exec::is_host_schema_version_marker(&s.sql));
+        let (expanded, companion_groups) = if host_schema {
+            let n = expanded.statements.len();
+            (expanded, vec![1usize; n])
+        } else {
+            bookclerk_db_exec::expand_binding_execute_request(
+                sea_orm::DatabaseBackend::Sqlite,
+                &expanded,
+            )
+        };
         let req = &expanded;
         if req.statements.iter().any(|s| sql_is_ddl(&s.sql)) {
             self.clear_table_types();
@@ -302,6 +327,7 @@ impl D1Proxy {
                             deadline,
                             started,
                             wire_len,
+                            &companion_groups,
                             &guest_receipt,
                             cap,
                         )
@@ -324,6 +350,7 @@ impl D1Proxy {
                             deadline,
                             started,
                             wire_len,
+                            &companion_groups,
                             &guest_receipt,
                             cap,
                         )
@@ -359,7 +386,7 @@ impl D1Proxy {
                     self.normalize_reply_from_declared(req, &mut reply, timeout)
                         .await?;
                     reply.statements =
-                        bookclerk_db_exec::collapse_host_schema_results(wire_len, reply.statements);
+                        collapse_d1_wire(wire_len, &companion_groups, reply.statements);
                     if !guest_receipt.is_absent() {
                         // Guest-receipt finalize needs statement results, so D1 runs a
                         // follow-up HTTP batch after the main batch commits. Same-batch
@@ -470,6 +497,7 @@ impl D1Proxy {
         deadline: Option<u64>,
         started: std::time::Instant,
         wire_len: usize,
+        companion_groups: &[usize],
         guest_receipt: &bookclerk_plugin_abi::GuestReceiptPersist,
         cap: u32,
     ) -> std::result::Result<ExecuteReply, DbErr> {
@@ -508,6 +536,7 @@ impl D1Proxy {
                         deadline,
                         started,
                         wire_len,
+                        companion_groups,
                         guest_receipt,
                         cap,
                     )
@@ -518,7 +547,7 @@ impl D1Proxy {
         let mut out = vec![StatementResult::from_affected(0)];
         out.extend(std::mem::take(&mut reply.statements));
         bookclerk_db_exec::pad_skipped_guest_results(&mut out, req.statements.len());
-        reply.statements = bookclerk_db_exec::collapse_host_schema_results(wire_len, out);
+        reply.statements = collapse_d1_wire(wire_len, companion_groups, out);
         Ok(reply)
     }
 
@@ -540,6 +569,7 @@ impl D1Proxy {
         deadline: Option<u64>,
         started: std::time::Instant,
         wire_len: usize,
+        companion_groups: &[usize],
         guest_receipt: &bookclerk_plugin_abi::GuestReceiptPersist,
         cap: u32,
     ) -> std::result::Result<ExecuteReply, DbErr> {
@@ -593,8 +623,7 @@ impl D1Proxy {
         reply.statements = assembled;
         self.normalize_reply_from_declared(req, &mut reply, timeout)
             .await?;
-        reply.statements =
-            bookclerk_db_exec::collapse_host_schema_results(wire_len, reply.statements);
+        reply.statements = collapse_d1_wire(wire_len, companion_groups, reply.statements);
         let finalize = bookclerk_db_exec::guest_receipt_finalize_stmts(
             &reply,
             usize::try_from(guest_receipt.guest_statement_len).unwrap_or(usize::MAX),

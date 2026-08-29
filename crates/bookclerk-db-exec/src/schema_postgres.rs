@@ -102,7 +102,7 @@ pub fn expand_host_schema_batch(backend: DatabaseBackend, batch: &[String]) -> O
     for stmt in split_schema_statements(canonical) {
         let lowered = schema_sql_for_backend(backend, &stmt).into_owned();
         let companions = if backend == DatabaseBackend::Postgres {
-            postgres_identity_companions(&lowered)
+            postgres_identity_companions(&stmt)
         } else {
             Vec::new()
         };
@@ -113,140 +113,159 @@ pub fn expand_host_schema_batch(backend: DatabaseBackend, batch: &[String]) -> O
     Some(stmts)
 }
 
-/// Postgres-only companion DDL that keeps `BIGSERIAL` in sync with explicit ids.
+/// Postgres-only companion DDL: transactional identity counter + BEFORE INSERT trigger.
 ///
-/// SQLite `AUTOINCREMENT` records the largest value ever inserted. PostgreSQL
-/// serial sequences do not. After a binding/host `CREATE TABLE` that lowered to
-/// `BIGSERIAL`, the adapter runs this function + per-table trigger internally
-/// (not as extra Cap'n statements). Empty when `sql` is not a CREATE TABLE
-/// with an identity column.
+/// SQLite `AUTOINCREMENT` records the largest committed value. A PostgreSQL
+/// `setval` sequence does not roll back with the `ExecuteRequest`. The adapter
+/// keeps a `BIGINT` high-water row in [`bookclerk_plugin_abi::SQL_IDENTITY_TABLE`]
+/// and assigns omit-ids from that row under `SELECT … FOR UPDATE`. Companions
+/// are generated from **canonical** SQL (parsed identity column, not assumed
+/// `id`) and executed internally (not extra Cap'n statements). Empty when `sql`
+/// is not `CREATE TABLE` with `INTEGER PRIMARY KEY AUTOINCREMENT`.
 #[must_use]
 pub fn postgres_identity_companions(sql: &str) -> Vec<String> {
-    if !create_table_has_identity(sql) {
-        return Vec::new();
-    }
-    let Some(table) = create_table_ident(sql) else {
-        return Vec::new();
-    };
-    vec![
-        BOOKCLERK_SYNC_IDENTITY_FN.to_string(),
-        format!("DROP TRIGGER IF EXISTS bookclerk_sync_identity ON {table}"),
-        format!(
-            "CREATE TRIGGER bookclerk_sync_identity AFTER INSERT ON {table} \
-             FOR EACH ROW EXECUTE FUNCTION bookclerk_sync_identity()"
-        ),
-    ]
-}
-
-/// Shared trigger function: `setval` serial columns to `GREATEST(last, NEW.col)`.
-const BOOKCLERK_SYNC_IDENTITY_FN: &str = "\
-CREATE OR REPLACE FUNCTION bookclerk_sync_identity() RETURNS trigger \
-LANGUAGE plpgsql AS $bookclerk_sync$ \
-DECLARE seq text; col name; val bigint; last bigint; \
-BEGIN \
-  FOR col IN \
-    SELECT a.attname FROM pg_attribute a \
-    WHERE a.attrelid = TG_RELID AND a.attnum > 0 AND NOT a.attisdropped \
-      AND pg_get_serial_sequence(format('%I.%I', TG_TABLE_SCHEMA, TG_TABLE_NAME), a.attname) IS NOT NULL \
-  LOOP \
-    seq := pg_get_serial_sequence(format('%I.%I', TG_TABLE_SCHEMA, TG_TABLE_NAME), col); \
-    EXECUTE format('SELECT ($1).%I', col) INTO val USING NEW; \
-    IF val IS NOT NULL THEN \
-      EXECUTE format('SELECT last_value FROM %s', seq) INTO last; \
-      PERFORM setval(seq::regclass, GREATEST(last, val), true); \
-    END IF; \
-  END LOOP; \
-  RETURN NEW; \
-END; \
-$bookclerk_sync$";
-
-/// True when `sql` is `CREATE TABLE` with `AUTOINCREMENT` or `BIGSERIAL`.
-fn create_table_has_identity(sql: &str) -> bool {
-    let t = skip_create_table_head(sql);
-    if t.is_none() {
-        return false;
-    }
-    let upper = sql.to_ascii_uppercase();
-    upper.contains("AUTOINCREMENT") || upper.contains("BIGSERIAL")
-}
-
-/// Accepts a `CREATE [TEMP[ORARY]] TABLE` statement head.
-fn skip_create_table_head(sql: &str) -> Option<()> {
-    let mut scan = sql.trim_start();
-    if !starts_kw(scan, "CREATE") {
-        return None;
-    }
-    scan = skip_kw(scan, "CREATE")?;
-    if starts_kw(scan, "TEMP") {
-        scan = skip_kw(scan, "TEMP")?;
-    } else if starts_kw(scan, "TEMPORARY") {
-        scan = skip_kw(scan, "TEMPORARY")?;
-    }
-    if !starts_kw(scan, "TABLE") {
-        return None;
-    }
-    let _ = scan;
-    Some(())
-}
-
-/// Unquoted table ident from a `CREATE TABLE` statement.
-fn create_table_ident(sql: &str) -> Option<String> {
-    let mut s = sql.trim_start();
-    s = skip_kw(s, "CREATE")?;
-    if starts_kw(s, "TEMP") {
-        s = skip_kw(s, "TEMP")?;
-    } else if starts_kw(s, "TEMPORARY") {
-        s = skip_kw(s, "TEMPORARY")?;
-    }
-    s = skip_kw(s, "TABLE")?;
-    if starts_kw(s, "IF") {
-        s = skip_kw(s, "IF")?;
-        if starts_kw(s, "NOT") {
-            s = skip_kw(s, "NOT")?;
+    if let Some(schema) = bookclerk_plugin_abi::parse_create_table_schema(sql) {
+        let Some(col) = schema.identity_column.as_deref() else {
+            return Vec::new();
+        };
+        let table = schema.table.as_str();
+        if !is_safe_ident(table) || !is_safe_ident(col) {
+            return Vec::new();
         }
-        if starts_kw(s, "EXISTS") {
-            s = skip_kw(s, "EXISTS")?;
+        let fn_name = format!("bookclerk_ident_{table}");
+        return vec![
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} (\
+             table_name TEXT PRIMARY KEY, last BIGINT NOT NULL)",
+                bookclerk_plugin_abi::SQL_IDENTITY_TABLE
+            ),
+            format!(
+                "CREATE OR REPLACE FUNCTION {fn_name}() RETURNS trigger \
+             LANGUAGE plpgsql AS $bookclerk_ident$ \
+             DECLARE nxt bigint; \
+             BEGIN \
+               INSERT INTO {} (table_name, last) VALUES (TG_TABLE_NAME, 0) \
+                 ON CONFLICT (table_name) DO NOTHING; \
+               PERFORM 1 FROM {} WHERE table_name = TG_TABLE_NAME FOR UPDATE; \
+               IF NEW.{col} IS NULL THEN \
+                 UPDATE {} SET last = last + 1 WHERE table_name = TG_TABLE_NAME \
+                   RETURNING last INTO nxt; \
+                 NEW.{col} := nxt; \
+               ELSE \
+                 UPDATE {} SET last = GREATEST(last, NEW.{col}) \
+                   WHERE table_name = TG_TABLE_NAME; \
+               END IF; \
+               RETURN NEW; \
+             END; \
+             $bookclerk_ident$",
+                bookclerk_plugin_abi::SQL_IDENTITY_TABLE,
+                bookclerk_plugin_abi::SQL_IDENTITY_TABLE,
+                bookclerk_plugin_abi::SQL_IDENTITY_TABLE,
+                bookclerk_plugin_abi::SQL_IDENTITY_TABLE
+            ),
+            format!("DROP TRIGGER IF EXISTS {fn_name} ON {table}"),
+            format!(
+                "CREATE TRIGGER {fn_name} BEFORE INSERT ON {table} \
+             FOR EACH ROW EXECUTE FUNCTION {fn_name}()"
+            ),
+        ];
+    }
+    if let Some(table) = bookclerk_plugin_abi::parse_drop_table_name(sql) {
+        if !is_safe_ident(&table) {
+            return Vec::new();
+        }
+        let fn_name = format!("bookclerk_ident_{table}");
+        return vec![
+            format!(
+                "CREATE TABLE IF NOT EXISTS {} (\
+                 table_name TEXT PRIMARY KEY, last BIGINT NOT NULL)",
+                bookclerk_plugin_abi::SQL_IDENTITY_TABLE
+            ),
+            format!(
+                "DELETE FROM {} WHERE table_name = '{table}'",
+                bookclerk_plugin_abi::SQL_IDENTITY_TABLE
+            ),
+            format!("DROP TRIGGER IF EXISTS {fn_name} ON {table}"),
+            format!("DROP FUNCTION IF EXISTS {fn_name}()"),
+        ];
+    }
+    Vec::new()
+}
+
+/// Catalog + Postgres identity companions for one canonical binding statement.
+#[must_use]
+pub fn binding_companions(backend: DatabaseBackend, canonical: &str) -> Vec<String> {
+    let mut out = bookclerk_plugin_abi::catalog_companions(canonical);
+    if backend == DatabaseBackend::Postgres {
+        out.extend(postgres_identity_companions(canonical));
+    }
+    out
+}
+
+/// Expands a binding request with adapter-private catalog/identity companions.
+///
+/// Returns the expanded request and per-original-statement group sizes so
+/// callers can collapse results back to the wire statement count.
+#[must_use]
+pub fn expand_binding_execute_request(
+    backend: DatabaseBackend,
+    req: &ExecuteRequest,
+) -> (ExecuteRequest, Vec<usize>) {
+    let mut statements = Vec::new();
+    let mut groups = Vec::with_capacity(req.statements.len());
+    for stmt in &req.statements {
+        let companions = binding_companions(backend, &stmt.sql);
+        groups.push(1 + companions.len());
+        statements.push(stmt.clone());
+        for sql in companions {
+            let mut extra = stmt.clone();
+            extra.sql = sql;
+            extra.parameters.clear();
+            extra.kind = bookclerk_plugin_abi::DbPlanStatementKind::Execute;
+            extra.max_rows = 0;
+            extra.result_selection = bookclerk_plugin_abi::DbResultSelection::Discard;
+            statements.push(extra);
         }
     }
-    read_unquoted_ident(s)
+    (
+        ExecuteRequest {
+            statements,
+            ..req.clone()
+        },
+        groups,
+    )
 }
 
-/// Case-insensitive keyword at the start of `s`.
-fn starts_kw(s: &str, kw: &str) -> bool {
-    let s = s.trim_start();
-    s.len() >= kw.len()
-        && s[..kw.len()].eq_ignore_ascii_case(kw)
-        && s.as_bytes()
-            .get(kw.len())
-            .is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'_')
-}
-
-/// Consumes `kw` from the start of `s`.
-fn skip_kw<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
-    let s = s.trim_start();
-    if !starts_kw(s, kw) {
-        return None;
+/// Collapses interleaved companion results back to one result per original statement.
+#[must_use]
+pub fn collapse_companion_groups(
+    groups: &[usize],
+    results: Vec<bookclerk_plugin_abi::StatementResult>,
+) -> Vec<bookclerk_plugin_abi::StatementResult> {
+    let expected: usize = groups.iter().copied().sum();
+    if expected == 0 || expected != results.len() || groups.iter().all(|g| *g == 1) {
+        return results;
     }
-    Some(s[kw.len()..].trim_start())
-}
-
-/// Next unquoted ident at the start of `s`.
-fn read_unquoted_ident(s: &str) -> Option<String> {
-    let s = s.trim_start();
-    let mut chars = s.chars();
-    let first = chars.next()?;
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return None;
-    }
-    let mut n = first.len_utf8();
-    for c in chars {
-        if c.is_ascii_alphanumeric() || c == '_' {
-            n += c.len_utf8();
-        } else {
+    let mut out = Vec::with_capacity(groups.len());
+    let mut i = 0;
+    for &g in groups {
+        if i >= results.len() {
             break;
         }
+        out.push(results[i].clone());
+        i = i.saturating_add(g);
     }
-    Some(s[..n].to_string())
+    out
+}
+
+/// Unquoted SQL v1 ident safe to interpolate into adapter-private DDL.
+fn is_safe_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Expands a typed host schema batch at the adapter execution edge.
@@ -361,14 +380,12 @@ mod tests {
         let expanded =
             expand_host_schema_batch(DatabaseBackend::Postgres, &batch).expect("host schema batch");
         assert!(
-            expanded.iter().any(|s| s.contains("BIGSERIAL")),
+            expanded.iter().any(|s| s.contains("BIGINT PRIMARY KEY")),
             "adapter must lower canonical sqlite DDL for postgres: {expanded:?}"
         );
         assert!(
-            expanded
-                .iter()
-                .any(|s| s.contains("bookclerk_sync_identity")),
-            "identity CREATE TABLE must install serial-sync companions: {expanded:?}"
+            expanded.iter().any(|s| s.contains("bookclerk_ident_users")),
+            "identity CREATE TABLE must install transactional identity companions: {expanded:?}"
         );
         assert!(
             !expanded[0].contains("AUTOINCREMENT"),
@@ -414,14 +431,14 @@ mod tests {
             expanded
                 .statements
                 .iter()
-                .any(|s| s.sql.contains("BIGSERIAL")),
+                .any(|s| s.sql.contains("BIGINT PRIMARY KEY")),
             "typed execute must lower canonical DDL at adapter edge"
         );
         assert!(
             expanded
                 .statements
                 .iter()
-                .any(|s| s.sql.contains("bookclerk_sync_identity")),
+                .any(|s| s.sql.contains("bookclerk_ident_users")),
             "typed execute must attach identity companions"
         );
         assert!(
@@ -466,7 +483,7 @@ mod tests {
         assert_eq!(sqlite.statements[0].sql, canonical);
         let pg = lower_binding_ddl_execute_request(DatabaseBackend::Postgres, &req);
         assert!(
-            pg.statements[0].sql.contains("BIGSERIAL PRIMARY KEY"),
+            pg.statements[0].sql.contains("BIGINT PRIMARY KEY"),
             "{}",
             pg.statements[0].sql
         );
@@ -519,7 +536,7 @@ mod tests {
         };
         let pg = lower_binding_ddl_execute_request(DatabaseBackend::Postgres, &req);
         assert!(
-            pg.statements[0].sql.contains("BIGSERIAL PRIMARY KEY"),
+            pg.statements[0].sql.contains("BIGINT PRIMARY KEY"),
             "{}",
             pg.statements[0].sql
         );
@@ -550,22 +567,47 @@ mod tests {
         let sql =
             "CREATE TABLE IF NOT EXISTS ident (id INTEGER PRIMARY KEY AUTOINCREMENT, n INTEGER)";
         let companions = postgres_identity_companions(sql);
-        assert_eq!(companions.len(), 3, "{companions:?}");
+        assert_eq!(companions.len(), 4, "{companions:?}");
         assert!(
-            companions[0].contains("CREATE OR REPLACE FUNCTION bookclerk_sync_identity"),
+            companions[0].contains("bookclerk_identity"),
             "{}",
             companions[0]
         );
         assert!(
-            companions[1].contains("DROP TRIGGER IF EXISTS bookclerk_sync_identity ON ident"),
+            companions[1].contains("CREATE OR REPLACE FUNCTION bookclerk_ident_ident"),
             "{}",
             companions[1]
         );
         assert!(
-            companions[2].contains("EXECUTE FUNCTION bookclerk_sync_identity()"),
+            companions[1].contains("NEW.id"),
+            "trigger must use the parsed identity column: {}",
+            companions[1]
+        );
+        assert!(
+            companions[2].contains("DROP TRIGGER IF EXISTS bookclerk_ident_ident ON ident"),
             "{}",
             companions[2]
         );
+        assert!(
+            companions[3].contains("BEFORE INSERT ON ident"),
+            "{}",
+            companions[3]
+        );
         assert!(postgres_identity_companions("CREATE TABLE t (n INTEGER)").is_empty());
+        let named = postgres_identity_companions(
+            "CREATE TABLE IF NOT EXISTS t (pk INTEGER PRIMARY KEY AUTOINCREMENT, n INTEGER)",
+        );
+        assert!(named.iter().any(|s| s.contains("NEW.pk")), "{named:?}");
+        let drop = postgres_identity_companions("DROP TABLE IF EXISTS ident");
+        assert!(
+            drop.iter()
+                .any(|s| s.contains("DELETE FROM") && s.contains("bookclerk_identity")),
+            "{drop:?}"
+        );
+        assert!(
+            drop.iter()
+                .any(|s| s.contains("DROP TRIGGER IF EXISTS bookclerk_ident_ident")),
+            "{drop:?}"
+        );
     }
 }

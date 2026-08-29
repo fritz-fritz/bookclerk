@@ -210,7 +210,8 @@ pub fn portable_aggregate_mismatch(stmt: &StatementResult) -> Option<String> {
 }
 
 /// Compares `stmt` to `expect` and describes the first mismatch.
-fn portable_statement_mismatch(
+#[must_use]
+pub fn portable_statement_mismatch(
     stmt: &StatementResult,
     expect: &[PortableExpect],
     label: &str,
@@ -436,7 +437,8 @@ pub fn portable_uncast_sum_avg_mismatch(stmt: &StatementResult) -> Option<String
 }
 
 /// Compares every row in `stmt` to `expect`.
-fn portable_rows_mismatch(
+#[must_use]
+pub fn portable_rows_mismatch(
     stmt: &StatementResult,
     expect: &[&[PortableExpect]],
     label: &str,
@@ -454,6 +456,127 @@ fn portable_rows_mismatch(
         }
     }
     None
+}
+
+/// `INSERT OR IGNORE … SELECT` (plain bind source).
+pub const BINDING_DDL_IGNORE_SELECT: &str =
+    "CREATE TABLE IF NOT EXISTS ign_sel (id INTEGER PRIMARY KEY)";
+
+/// Plain `INSERT OR IGNORE … SELECT ? RETURNING id`.
+pub const PORTABLE_IGNORE_SELECT: &str = "INSERT OR IGNORE INTO ign_sel (id) SELECT ? RETURNING id";
+
+/// `WITH` source for `INSERT OR IGNORE`.
+pub const PORTABLE_IGNORE_SELECT_WITH: &str =
+    "INSERT OR IGNORE INTO ign_sel (id) WITH s AS (SELECT ?) SELECT * FROM s RETURNING id";
+
+/// Compound `UNION ALL` source.
+pub const PORTABLE_IGNORE_SELECT_UNION: &str =
+    "INSERT OR IGNORE INTO ign_sel (id) SELECT ? UNION ALL SELECT ? RETURNING id";
+
+/// `ORDER BY` + `LIMIT` source.
+pub const PORTABLE_IGNORE_SELECT_ORDER_LIMIT: &str =
+    "INSERT OR IGNORE INTO ign_sel (id) SELECT ? AS id ORDER BY id LIMIT 1 RETURNING id";
+
+/// Case-sensitive `LIKE` table.
+pub const BINDING_DDL_LIKE: &str = "CREATE TABLE IF NOT EXISTS liked (body TEXT)";
+
+/// Seed `'A'` for LIKE vectors.
+pub const PORTABLE_LIKE_INSERT: &str = "INSERT INTO liked (body) VALUES ('A')";
+
+/// Case-sensitive LIKE probes (A/a, prefix, GLOB metacharacters, NULL).
+pub const PORTABLE_LIKE_SELECT: &str = "SELECT \
+     CASE WHEN 'A' LIKE 'a' THEN 1 ELSE 0 END AS c0, \
+     CASE WHEN 'A' LIKE 'A' THEN 1 ELSE 0 END AS c1, \
+     CASE WHEN 'A' LIKE 'A%' THEN 1 ELSE 0 END AS c2, \
+     CASE WHEN 'A' LIKE 'A*' THEN 1 ELSE 0 END AS c3, \
+     CASE WHEN 'A' LIKE 'A?' THEN 1 ELSE 0 END AS c4, \
+     CASE WHEN 'A' LIKE 'A[' THEN 1 ELSE 0 END AS c5, \
+     CASE WHEN 'ab' LIKE 'a_b' THEN 1 ELSE 0 END AS c6, \
+     CASE WHEN 'A' LIKE NULL THEN 1 ELSE 0 END AS c7, \
+     CASE WHEN body LIKE ? THEN 1 ELSE 0 END AS c8 \
+     FROM liked";
+
+/// Non-ASCII that must not Unicode-fold under LIKE.
+pub const PORTABLE_LIKE_NON_ASCII: &str = "SELECT CASE WHEN 'İ' LIKE 'i' THEN 1 ELSE 0 END AS c0";
+
+/// Typed BLOB default hex.
+pub const BINDING_DDL_BLOB_DEFAULT: &str =
+    "CREATE TABLE IF NOT EXISTS blobdef (id INTEGER PRIMARY KEY, payload BLOB DEFAULT X'deadbeef')";
+
+/// INSERT using the BLOB default.
+pub const PORTABLE_BLOB_DEFAULT_INSERT: &str = "INSERT INTO blobdef (id) VALUES (1)";
+
+/// Read the default blob.
+pub const PORTABLE_BLOB_DEFAULT_SELECT: &str = "SELECT payload FROM blobdef WHERE id = 1";
+
+/// TEXT collation / order table.
+pub const BINDING_DDL_TEXT_ORDER: &str = "CREATE TABLE IF NOT EXISTS textord (body TEXT)";
+
+/// Seed ASCII + non-ASCII rows.
+pub const PORTABLE_TEXT_ORDER_INSERT_B: &str = "INSERT INTO textord (body) VALUES ('B')";
+/// Lowercase a.
+pub const PORTABLE_TEXT_ORDER_INSERT_A: &str = "INSERT INTO textord (body) VALUES ('a')";
+/// Non-ASCII é (U+00E9).
+pub const PORTABLE_TEXT_ORDER_INSERT_EACUTE: &str = "INSERT INTO textord (body) VALUES ('é')";
+/// ASCII e.
+pub const PORTABLE_TEXT_ORDER_INSERT_E: &str = "INSERT INTO textord (body) VALUES ('e')";
+
+/// Binary TEXT order (byte/code-point, not locale).
+pub const PORTABLE_TEXT_ORDER_SELECT: &str = "SELECT body FROM textord ORDER BY body";
+
+/// TEXT comparison + scalar min/max + lower/upper.
+pub const PORTABLE_TEXT_OPS: &str = "SELECT \
+     CASE WHEN 'A' < 'a' THEN 1 ELSE 0 END AS c0, \
+     CASE WHEN 'A' > 'a' THEN 1 ELSE 0 END AS c1, \
+     min('A', 'a') AS c2, \
+     max('A', 'a') AS c3, \
+     lower('Ab') AS c4, \
+     upper('Ab') AS c5";
+
+/// Identity omit after rollback of an explicit id (same atomic request fails).
+pub const PORTABLE_IDENTITY_INSERT_BAD_TYPE: &str = "INSERT INTO ident (id, n) VALUES (100, 'x')";
+
+/// DROP identity table.
+pub const PORTABLE_IDENTITY_DROP: &str = "DROP TABLE IF EXISTS ident";
+
+/// Expected [`PORTABLE_LIKE_SELECT`] cells (`c8` bind is `'A'`).
+#[must_use]
+pub fn portable_like_expects() -> &'static [PortableExpect] {
+    &[
+        PortableExpect::Int(0),
+        PortableExpect::Int(1),
+        PortableExpect::Int(1),
+        PortableExpect::Int(0),
+        PortableExpect::Int(0),
+        PortableExpect::Int(0),
+        PortableExpect::Int(0),
+        PortableExpect::Int(0),
+        PortableExpect::Int(1),
+    ]
+}
+
+/// Expected [`PORTABLE_TEXT_ORDER_SELECT`] rows.
+#[must_use]
+pub fn portable_text_order_expects() -> &'static [&'static [PortableExpect]] {
+    &[
+        &[PortableExpect::Text("B")],
+        &[PortableExpect::Text("a")],
+        &[PortableExpect::Text("e")],
+        &[PortableExpect::Text("é")],
+    ]
+}
+
+/// Expected [`PORTABLE_TEXT_OPS`] cells.
+#[must_use]
+pub fn portable_text_ops_expects() -> &'static [PortableExpect] {
+    &[
+        PortableExpect::Int(1),
+        PortableExpect::Int(0),
+        PortableExpect::Text("A"),
+        PortableExpect::Text("a"),
+        PortableExpect::Text("ab"),
+        PortableExpect::Text("AB"),
+    ]
 }
 
 #[cfg(test)]

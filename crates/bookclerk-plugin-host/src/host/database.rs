@@ -16,7 +16,8 @@ use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, Datab
 use bookclerk_db_exec::db_value_from_sea;
 use bookclerk_plugin_abi::HostExecuteEnvelope;
 use bookclerk_plugin_abi::{
-    database_context_from_params, DbBootstrap, DbCapabilities, DbConnectParams,
+    database_context_from_params, DbBootstrap, DbCapabilities, DbConnectParams, DbValue, SqlType,
+    SqlTypeEnv, SQL_CATALOG_TABLE,
 };
 use bookclerk_plugin_sdk::GuestDatabase;
 use bookclerk_plugin_sdk::PRODUCT_API_VERSION;
@@ -363,7 +364,8 @@ impl GuestDatabase for BindingGuestDatabase {
         }
         request.deadline_unix_ms =
             capped_binding_deadline(request.deadline_unix_ms, self.host_deadline_unix_ms);
-        let policy = bookclerk_library::GuestSqlPolicy::binding_owned();
+        let env = load_binding_sql_type_env(&self.session, &self.key).await;
+        let policy = bookclerk_library::GuestSqlPolicy::binding_owned().with_sql_types(env);
         let cancel = Arc::clone(&self.cancel);
         bookclerk_library::execute_guest_atomic_with(request, &self.caps, &policy, |envelope| {
             let session = Arc::clone(&self.session);
@@ -416,6 +418,57 @@ fn d1_binding_database_name(owner_plugin_id: &str, binding: &str) -> String {
         "bookclerk-pb-{}",
         &binding_instance_id(owner_plugin_id, binding)[..32]
     )
+}
+
+/// Reads the durable binding catalog through the host (guest-denied) path.
+async fn load_binding_sql_type_env(session: &PluginSession, key: &str) -> SqlTypeEnv {
+    let req = ExecuteRequest {
+        operation_id: format!("binding-catalog-{key}"),
+        request_hash: String::new(),
+        deadline_unix_ms: 0,
+        statements: vec![TypedDbStatement {
+            sql: format!("SELECT table_name, column_name, sql_type FROM {SQL_CATALOG_TABLE}"),
+            parameters: Vec::new(),
+            kind: DbPlanStatementKind::Select,
+            max_rows: 10_000,
+            result_selection: DbResultSelection::Rows,
+        }],
+    };
+    let Ok(reply) = session
+        .db_execute_binding_request(key, req, Arc::new(AtomicBool::new(false)))
+        .await
+    else {
+        return SqlTypeEnv::new();
+    };
+    sql_type_env_from_catalog_reply(&reply)
+}
+
+/// Rebuilds [`SqlTypeEnv`] from a catalog `SELECT` reply (SELECT-list order).
+fn sql_type_env_from_catalog_reply(reply: &ExecuteReply) -> SqlTypeEnv {
+    let mut env = SqlTypeEnv::new();
+    let Some(stmt) = reply.statements.first() else {
+        return env;
+    };
+    for row in &stmt.rows {
+        let table = catalog_cell_text(row.values.first());
+        let column = catalog_cell_text(row.values.get(1));
+        let ty = catalog_cell_text(row.values.get(2));
+        if table.is_empty() || column.is_empty() {
+            continue;
+        }
+        if let Some(sql_ty) = SqlType::from_column_ident(ty.to_ascii_lowercase().as_str()) {
+            env.insert_column(&table, &column, sql_ty);
+        }
+    }
+    env
+}
+
+/// TEXT cell from a catalog row, or empty when missing/non-text.
+fn catalog_cell_text(v: Option<&DbValue>) -> String {
+    match v {
+        Some(DbValue::Text(s)) => s.clone(),
+        _ => String::new(),
+    }
 }
 
 /// Host-authored bootstrap request creating binding-local receipt tables.

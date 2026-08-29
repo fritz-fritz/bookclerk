@@ -556,6 +556,23 @@ const MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_db_atomic_receipts_expires ON db_atomic_receipts(expires_at);
 "#;
 
+/// Reserved adapter-private catalog + identity tables (canonical SQLite-shaped).
+///
+/// Postgres adapters rewrite `last INTEGER` to `BIGINT`. Guests cannot name
+/// these tables.
+const BINDING_SQL_CATALOG_SQLITE: &str = r#"
+    CREATE TABLE IF NOT EXISTS bookclerk_sql_catalog (
+        table_name TEXT NOT NULL,
+        column_name TEXT NOT NULL,
+        sql_type TEXT NOT NULL,
+        PRIMARY KEY (table_name, column_name)
+    );
+    CREATE TABLE IF NOT EXISTS bookclerk_identity (
+        table_name TEXT PRIMARY KEY NOT NULL,
+        last INTEGER NOT NULL
+    );
+"#;
+
 /// Durable daemon job queue and associated scratch-path ledger (SQLite).
 const MIGRATION_V12_JOBS_SQLITE: &str = r#"
     CREATE TABLE IF NOT EXISTS jobs (
@@ -964,7 +981,16 @@ const MIGRATION_V2_PLUGIN_DATABASES: &str = r#"
 /// SQLite-shaped; adapters lower it mechanically like the host schema.
 #[must_use]
 pub fn binding_bootstrap_sql() -> &'static str {
-    MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE
+    static SQL: OnceLock<&'static str> = OnceLock::new();
+    SQL.get_or_init(|| {
+        format!("{MIGRATION_V11_ATOMIC_RECEIPTS_SQLITE}\n{BINDING_SQL_CATALOG_SQLITE}").leak()
+    })
+}
+
+/// Column types implied by canonical host library DDL.
+#[must_use]
+pub fn host_sql_type_env() -> bookclerk_plugin_abi::SqlTypeEnv {
+    bookclerk_plugin_abi::sql_type_env_from_canonical_ddl(greenfield_baseline_canonical())
 }
 
 /// Returns the canonical host migration plan shared by every marker kind.
@@ -1309,7 +1335,7 @@ mod tests {
                 "sqlite-ism `{token}` survived postgres lowering"
             );
         }
-        assert!(lowered.contains("BIGSERIAL PRIMARY KEY"), "serial ids");
+        assert!(lowered.contains("BIGINT PRIMARY KEY"), "identity ids");
         assert!(
             lowered.contains("ON CONFLICT DO NOTHING"),
             "insert-or-ignore"
@@ -1347,5 +1373,19 @@ mod tests {
             Some("INSERT INTO schema_migrations (version) VALUES (28)")
         );
         assert_eq!(migration_v27_schema_version(), 28);
+    }
+
+    #[test]
+    fn host_sql_type_env_seeds_library_tables() {
+        let env = host_sql_type_env();
+        assert!(
+            env.has_table("accounts"),
+            "expected accounts in {:?}",
+            env.iter().map(|(t, _, _)| t).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            env.column_type("accounts", "account_id"),
+            Some(bookclerk_plugin_abi::SqlType::Text)
+        );
     }
 }
