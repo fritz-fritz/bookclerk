@@ -141,8 +141,9 @@ pub use kind::*;
 pub use methods::METHOD_NAMES;
 pub use sql_types::{
     apply_schema_sql_to_env, catalog_companions, parse_create_table_schema, parse_drop_table_name,
-    sql_type_env_from_canonical_ddl, typecheck_execute_request, CreateTableSchema, SqlType,
-    SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS, SQL_CATALOG_TABLE, SQL_IDENTITY_TABLE,
+    sql_catalog_create_table_sql, sql_type_env_from_canonical_ddl, typecheck_execute_request,
+    CreateTableSchema, SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS, SQL_CATALOG_TABLE,
+    SQL_IDENTITY_TABLE,
 };
 pub use types::*;
 

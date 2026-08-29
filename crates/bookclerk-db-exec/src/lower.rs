@@ -921,14 +921,21 @@ fn rewrite_json_valid(sql: &str) -> String {
 
 /// True when `sql[i..]` is a call to `name(` (case-insensitive, word-bounded).
 fn ident_call_at(sql: &str, i: usize, name: &str) -> bool {
-    let rest = &sql[i..];
-    if rest.len() < name.len() || !rest[..name.len()].eq_ignore_ascii_case(name) {
+    let Some(end) = i.checked_add(name.len()).filter(|e| *e <= sql.len()) else {
+        return false;
+    };
+    let Some(prefix) = sql.get(i..end) else {
+        return false;
+    };
+    if !prefix.eq_ignore_ascii_case(name) {
         return false;
     }
     if !word_boundary(sql, i.checked_sub(1)) {
         return false;
     }
-    rest[name.len()..].chars().find(|c| !c.is_whitespace()) == Some('(')
+    sql.get(end..)
+        .and_then(|rest| rest.chars().find(|c| !c.is_whitespace()))
+        == Some('(')
 }
 
 /// Splits the argument list of a call whose `s` starts just after `(`.
@@ -1929,5 +1936,19 @@ mod tests {
         assert!(!update.contains("SET (body COLLATE"), "{update}");
         assert!(update.contains("WHERE (body COLLATE \"C\")"), "{update}");
         assert!(update.contains("('A' COLLATE \"C\")"), "{update}");
+    }
+
+    #[test]
+    fn postgres_like_non_ascii_does_not_panic_on_fn_scan() {
+        let sql =
+            lower_canonical_to_postgres("SELECT CASE WHEN 'İ' LIKE 'i' THEN 1 ELSE 0 END AS c0");
+        assert!(sql.contains("LIKE"), "{sql}");
+        assert!(sql.contains('İ'), "{sql}");
+        let typed = lower_canonical_sql_typed(
+            DatabaseBackend::Postgres,
+            "SELECT CASE WHEN 'İ' LIKE 'i' THEN 1 ELSE 0 END AS c0",
+            &SqlTypeEnv::new(),
+        );
+        assert!(typed.contains("LIKE"), "{typed}");
     }
 }

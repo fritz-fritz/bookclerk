@@ -13,9 +13,9 @@ use bookclerk_plugin_abi::{
     apply_schema_sql_to_env, encoded_execute_reply_bytes, encoded_statement_result_bytes,
 };
 use bookclerk_plugin_abi::{
-    DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
-    ExecuteReply, ExecuteRequest, SqlType, SqlTypeEnv, StatementResult, TypedDbStatement,
-    SQL_CATALOG_TABLE,
+    sql_catalog_create_table_sql, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow,
+    DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, SqlType, SqlTypeEnv, StatementResult,
+    TypedDbStatement, SQL_CATALOG_TABLE,
 };
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, Statement,
@@ -68,35 +68,27 @@ async fn apply_binding_companions(
     Ok(())
 }
 
-/// Reconstructs [`SqlTypeEnv`] from the durable binding catalog, if present.
+/// Reconstructs [`SqlTypeEnv`] from the durable binding catalog.
 ///
-/// A missing catalog table yields an empty environment (host library DBs
-/// without the reserved table).
+/// Ensures [`SQL_CATALOG_TABLE`] exists first. A missing-table `SELECT` on
+/// PostgreSQL aborts the current transaction (`25P02`); creating the empty
+/// catalog keeps load fail-open for host library DBs that have not yet run
+/// binding DDL.
 ///
 /// # Errors
 ///
-/// Returns [`DbErr`] when the catalog query fails for a reason other than a
-/// missing table.
+/// Returns [`DbErr`] when catalog DDL or the catalog query fails.
 pub async fn load_sql_type_env(conn: &impl ConnectionTrait) -> Result<SqlTypeEnv, DbErr> {
     let backend = conn.get_database_backend();
+    conn.execute_raw(Statement::from_string(
+        backend,
+        sql_catalog_create_table_sql(),
+    ))
+    .await?;
     let sql = format!("SELECT table_name, column_name, sql_type FROM {SQL_CATALOG_TABLE}");
-    let rows = match conn
+    let rows = conn
         .query_all_raw(Statement::from_string(backend, sql))
-        .await
-    {
-        Ok(rows) => rows,
-        Err(err) => {
-            let msg = err.to_string().to_ascii_lowercase();
-            if msg.contains("no such table")
-                || msg.contains("does not exist")
-                || msg.contains("undefined table")
-                || msg.contains("unknown table")
-            {
-                return Ok(SqlTypeEnv::new());
-            }
-            return Err(err);
-        }
-    };
+        .await?;
     let mut env = SqlTypeEnv::new();
     for row in rows {
         let table = query_result_text(&row, "table_name");

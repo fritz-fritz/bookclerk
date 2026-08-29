@@ -263,6 +263,16 @@ pub fn parse_drop_table_name(sql: &str) -> Option<String> {
     Some(name)
 }
 
+/// `CREATE TABLE IF NOT EXISTS` for the reserved SQL v1 catalog.
+#[must_use]
+pub fn sql_catalog_create_table_sql() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {SQL_CATALOG_TABLE} (\
+         table_name TEXT NOT NULL, column_name TEXT NOT NULL, sql_type TEXT NOT NULL, \
+         PRIMARY KEY (table_name, column_name))"
+    )
+}
+
 /// Catalog DML companions for one canonical DDL statement (all backends).
 #[must_use]
 pub fn catalog_companions(sql: &str) -> Vec<String> {
@@ -284,11 +294,7 @@ pub fn catalog_companions(sql: &str) -> Vec<String> {
             .collect::<Vec<_>>()
             .join(", ");
         return vec![
-            format!(
-                "CREATE TABLE IF NOT EXISTS {SQL_CATALOG_TABLE} (\
-                 table_name TEXT NOT NULL, column_name TEXT NOT NULL, sql_type TEXT NOT NULL, \
-                 PRIMARY KEY (table_name, column_name))"
-            ),
+            sql_catalog_create_table_sql(),
             format!(
             "INSERT INTO {SQL_CATALOG_TABLE} (table_name, column_name, sql_type) \
              VALUES {values} ON CONFLICT (table_name, column_name) DO UPDATE SET sql_type = excluded.sql_type"
@@ -297,11 +303,7 @@ pub fn catalog_companions(sql: &str) -> Vec<String> {
     }
     if let Some(table) = parse_drop_table_name(sql) {
         return vec![
-            format!(
-                "CREATE TABLE IF NOT EXISTS {SQL_CATALOG_TABLE} (\
-                 table_name TEXT NOT NULL, column_name TEXT NOT NULL, sql_type TEXT NOT NULL, \
-                 PRIMARY KEY (table_name, column_name))"
-            ),
+            sql_catalog_create_table_sql(),
             format!(
                 "DELETE FROM {SQL_CATALOG_TABLE} WHERE table_name = '{}'",
                 escape_sql_str(&table)
