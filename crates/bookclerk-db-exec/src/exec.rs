@@ -70,6 +70,22 @@ impl AtomicSession {
     }
 }
 
+/// Runs adapter-private serial-sync DDL after a Postgres CREATE TABLE.
+async fn apply_exec_identity_companions(
+    txn: &impl ConnectionTrait,
+    backend: sea_orm::DatabaseBackend,
+    sql: &str,
+) -> Result<(), DbErr> {
+    if backend != sea_orm::DatabaseBackend::Postgres {
+        return Ok(());
+    }
+    for companion in crate::schema_postgres::postgres_identity_companions(sql) {
+        txn.execute_raw(Statement::from_string(backend, companion))
+            .await?;
+    }
+    Ok(())
+}
+
 /// Per-statement result bounds. Row/byte `0` means unlimited at execute time.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ExecCaps {
@@ -237,6 +253,11 @@ async fn execute_statements_body(
                 rows_affected: exec.rows_affected(),
             }
         };
+        if let Err(err) = apply_exec_identity_companions(&txn, backend, &sql).await {
+            let _ = txn.rollback().await;
+            let _ = take_txn_fault();
+            return Err(err);
+        }
         if let Err(err) = note_atomic_stmt_bytes(
             &mut used_atomic,
             statements.len(),

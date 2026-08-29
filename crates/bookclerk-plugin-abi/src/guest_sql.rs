@@ -554,13 +554,822 @@ fn validate_sql_v1_grammar_at(index: usize, sql: &str, binding_owned: bool) -> R
     if binding_owned {
         deny_binding_v1_operators(index, sql)?;
     }
-    Ok(())
+    let verb = first_top_level_keyword(sql).unwrap_or_default();
+    if ["CREATE", "ALTER", "DROP"]
+        .iter()
+        .any(|v| verb.eq_ignore_ascii_case(v))
+    {
+        return Ok(());
+    }
+    if DENIED_VERBS.iter().any(|v| verb.eq_ignore_ascii_case(v)) {
+        return Err(v1_grammar_err(
+            index,
+            &format!("disallowed SQL verb {verb}"),
+        ));
+    }
+    parse_positive_sql_v1(index, sql)
 }
 
 fn v1_grammar_err(index: usize, what: &str) -> PluginError {
     PluginError::invalid_params(format!(
         "statement {index} is not Bookclerk SQL v1 ({what})"
     ))
+}
+
+/// Rejects `"…"`, `` `…` ``, and `[…]` object names.
+fn deny_quoted_ident(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    scan.skip();
+    match scan.sql.as_bytes().get(scan.i) {
+        Some(b'"' | b'`' | b'[') => Err(v1_grammar_err(
+            index,
+            "quoted identifiers are not SQL v1; use unquoted names",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Fail-closed SELECT/DML/expression productions for SQL v1.
+fn parse_positive_sql_v1(index: usize, sql: &str) -> Result<()> {
+    let mut scan = Scan { sql, i: 0 };
+    parse_v1_statement(index, &mut scan)?;
+    scan.skip();
+    if scan.i < sql.len() {
+        return Err(v1_grammar_err(index, "trailing tokens are not SQL v1"));
+    }
+    Ok(())
+}
+
+fn parse_v1_statement(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if scan.take_kw("WITH") {
+        parse_v1_cte_list(index, scan)?;
+    }
+    if scan.peek_kw("SELECT") || scan.peek_kw("VALUES") {
+        return parse_v1_select(index, scan);
+    }
+    if scan.peek_kw("INSERT") {
+        return parse_v1_insert(index, scan);
+    }
+    if scan.peek_kw("UPDATE") {
+        return parse_v1_update(index, scan);
+    }
+    if scan.peek_kw("DELETE") {
+        return parse_v1_delete(index, scan);
+    }
+    Err(v1_grammar_err(index, "unsupported statement form"))
+}
+
+fn parse_v1_cte_list(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    let _ = scan.take_kw("RECURSIVE");
+    loop {
+        parse_v1_ident(index, scan)?;
+        if scan.take_byte(b'(') {
+            loop {
+                parse_v1_ident(index, scan)?;
+                if !scan.take_byte(b',') {
+                    break;
+                }
+            }
+            if !scan.take_byte(b')') {
+                return Err(v1_grammar_err(index, "CTE column list"));
+            }
+        }
+        if !scan.take_kw("AS") {
+            return Err(v1_grammar_err(index, "CTE AS"));
+        }
+        let _ = scan.take_kw("NOT");
+        let _ = scan.take_kw("MATERIALIZED");
+        if !scan.take_byte(b'(') {
+            return Err(v1_grammar_err(index, "CTE body"));
+        }
+        let inner = scan
+            .take_balanced_inner()
+            .ok_or_else(|| v1_grammar_err(index, "CTE body"))?;
+        let mut body = Scan { sql: inner, i: 0 };
+        if body.peek_kw("INSERT") || body.peek_kw("UPDATE") || body.peek_kw("DELETE") {
+            return Err(v1_grammar_err(index, "nested DML in WITH is not SQL v1"));
+        }
+        parse_v1_select(index, &mut body)?;
+        body.skip();
+        if body.i < inner.len() {
+            return Err(v1_grammar_err(index, "CTE body trailing tokens"));
+        }
+        if !scan.take_byte(b',') {
+            return Ok(());
+        }
+    }
+}
+
+fn parse_v1_select(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if scan.take_kw("VALUES") {
+        parse_v1_values_tuples(index, scan)?;
+        parse_v1_order_limit(index, scan)?;
+        return Ok(());
+    }
+    loop {
+        parse_v1_select_core(index, scan)?;
+        if scan.take_kw("UNION") {
+            let _ = scan.take_kw("ALL");
+            continue;
+        }
+        if scan.peek_kw("EXCEPT") || scan.peek_kw("INTERSECT") {
+            return Err(v1_grammar_err(index, "EXCEPT/INTERSECT are not SQL v1"));
+        }
+        break;
+    }
+    parse_v1_order_limit(index, scan)?;
+    Ok(())
+}
+
+fn parse_v1_select_core(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if !scan.take_kw("SELECT") {
+        return Err(v1_grammar_err(index, "SELECT required"));
+    }
+    if scan.take_kw("DISTINCT") {
+        if scan.peek_kw("ON") {
+            return Err(v1_grammar_err(index, "DISTINCT ON is not SQL v1"));
+        }
+    } else {
+        let _ = scan.take_kw("ALL");
+    }
+    parse_v1_select_list(index, scan)?;
+    if scan.take_kw("FROM") {
+        loop {
+            parse_v1_from_item(index, scan)?;
+            parse_v1_joins(index, scan)?;
+            if !scan.take_byte(b',') {
+                break;
+            }
+        }
+    }
+    if scan.take_kw("WHERE") {
+        parse_v1_expr(index, scan)?;
+    }
+    if scan.take_kw("GROUP") {
+        if !scan.take_kw("BY") {
+            return Err(v1_grammar_err(index, "GROUP BY"));
+        }
+        loop {
+            parse_v1_expr(index, scan)?;
+            if !scan.take_byte(b',') {
+                break;
+            }
+        }
+    }
+    if scan.take_kw("HAVING") {
+        parse_v1_expr(index, scan)?;
+    }
+    Ok(())
+}
+
+fn parse_v1_select_list(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    loop {
+        if scan.take_byte(b'*') {
+            // whole-row *
+        } else {
+            parse_v1_expr(index, scan)?;
+            if scan.take_kw("AS") {
+                parse_v1_ident(index, scan)?;
+            } else {
+                let _ = parse_v1_optional_alias(scan);
+            }
+        }
+        if !scan.take_byte(b',') {
+            return Ok(());
+        }
+    }
+}
+
+fn parse_v1_optional_alias(scan: &mut Scan<'_>) -> bool {
+    if scan.peek_kw("FROM")
+        || scan.peek_kw("WHERE")
+        || scan.peek_kw("GROUP")
+        || scan.peek_kw("HAVING")
+        || scan.peek_kw("ORDER")
+        || scan.peek_kw("LIMIT")
+        || scan.peek_kw("OFFSET")
+        || scan.peek_kw("UNION")
+        || scan.peek_kw("EXCEPT")
+        || scan.peek_kw("INTERSECT")
+        || scan.peek_kw("RETURNING")
+        || scan.peek_kw("JOIN")
+        || scan.peek_kw("INNER")
+        || scan.peek_kw("LEFT")
+        || scan.peek_kw("CROSS")
+        || scan.peek_kw("RIGHT")
+        || scan.peek_kw("FULL")
+        || scan.peek_kw("ON")
+        || scan.peek_kw("USING")
+        || scan.peek_kw("AS")
+    {
+        return false;
+    }
+    scan.skip();
+    if matches!(scan.sql.as_bytes().get(scan.i), Some(b'"' | b'`' | b'[')) {
+        return false;
+    }
+    scan.read_ident().is_some()
+}
+
+fn parse_v1_from_item(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if scan.take_byte(b'(') {
+        let inner = scan
+            .take_balanced_inner()
+            .ok_or_else(|| v1_grammar_err(index, "subquery"))?;
+        let mut body = Scan { sql: inner, i: 0 };
+        parse_v1_select(index, &mut body)?;
+        body.skip();
+        if body.i < inner.len() {
+            return Err(v1_grammar_err(index, "subquery trailing tokens"));
+        }
+        let _ = scan.take_kw("AS");
+        let _ = parse_v1_optional_alias(scan);
+        return Ok(());
+    }
+    parse_v1_table_name(index, scan)?;
+    if scan.take_byte(b'(') {
+        return Err(v1_grammar_err(index, "table functions are not SQL v1"));
+    }
+    if scan.take_kw("AS") {
+        parse_v1_ident(index, scan)?;
+    } else {
+        let _ = parse_v1_optional_alias(scan);
+    }
+    Ok(())
+}
+
+fn parse_v1_joins(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    loop {
+        let _ = scan.take_kw("INNER");
+        if scan.take_kw("LEFT") {
+            let _ = scan.take_kw("OUTER");
+            if !scan.take_kw("JOIN") {
+                return Err(v1_grammar_err(index, "LEFT JOIN"));
+            }
+        } else if scan.take_kw("CROSS") {
+            if !scan.take_kw("JOIN") {
+                return Err(v1_grammar_err(index, "CROSS JOIN"));
+            }
+        } else if scan.take_kw("RIGHT") || scan.take_kw("FULL") {
+            return Err(v1_grammar_err(index, "RIGHT/FULL JOIN is not SQL v1"));
+        } else if !scan.take_kw("JOIN") {
+            return Ok(());
+        }
+        parse_v1_from_item(index, scan)?;
+        if scan.take_kw("ON") {
+            parse_v1_expr(index, scan)?;
+        } else if scan.take_kw("USING") {
+            if !scan.take_byte(b'(') {
+                return Err(v1_grammar_err(index, "USING ("));
+            }
+            loop {
+                parse_v1_ident(index, scan)?;
+                if !scan.take_byte(b',') {
+                    break;
+                }
+            }
+            if !scan.take_byte(b')') {
+                return Err(v1_grammar_err(index, "USING )"));
+            }
+        }
+    }
+}
+
+fn parse_v1_order_limit(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if scan.take_kw("ORDER") {
+        if !scan.take_kw("BY") {
+            return Err(v1_grammar_err(index, "ORDER BY"));
+        }
+        loop {
+            parse_v1_expr(index, scan)?;
+            let _ = scan.take_kw("ASC");
+            let _ = scan.take_kw("DESC");
+            if scan.take_kw("NULLS") && !scan.take_kw("FIRST") && !scan.take_kw("LAST") {
+                return Err(v1_grammar_err(index, "NULLS FIRST|LAST"));
+            }
+            if !scan.take_byte(b',') {
+                break;
+            }
+        }
+    }
+    if scan.take_kw("LIMIT") {
+        parse_v1_expr(index, scan)?;
+    }
+    if scan.take_kw("OFFSET") {
+        parse_v1_expr(index, scan)?;
+    }
+    Ok(())
+}
+
+fn parse_v1_insert(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if !scan.take_kw("INSERT") {
+        return Err(v1_grammar_err(index, "INSERT"));
+    }
+    if scan.take_kw("OR") && !scan.take_kw("IGNORE") {
+        return Err(v1_grammar_err(index, "INSERT OR IGNORE"));
+    }
+    if !scan.take_kw("INTO") {
+        return Err(v1_grammar_err(index, "INSERT INTO"));
+    }
+    parse_v1_table_name(index, scan)?;
+    if scan.take_byte(b'(') {
+        loop {
+            parse_v1_ident(index, scan)?;
+            if !scan.take_byte(b',') {
+                break;
+            }
+        }
+        if !scan.take_byte(b')') {
+            return Err(v1_grammar_err(index, "INSERT column list"));
+        }
+    }
+    if scan.peek_kw("SELECT") || scan.peek_kw("WITH") || scan.peek_kw("VALUES") {
+        if scan.peek_kw("VALUES") {
+            scan.take_kw("VALUES");
+            parse_v1_values_tuples(index, scan)?;
+        } else {
+            parse_v1_select(index, scan)?;
+        }
+    } else {
+        return Err(v1_grammar_err(index, "INSERT VALUES or SELECT"));
+    }
+    parse_v1_returning(index, scan)
+}
+
+fn parse_v1_values_tuples(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    loop {
+        if !scan.take_byte(b'(') {
+            return Err(v1_grammar_err(index, "VALUES tuple"));
+        }
+        loop {
+            parse_v1_expr(index, scan)?;
+            if !scan.take_byte(b',') {
+                break;
+            }
+        }
+        if !scan.take_byte(b')') {
+            return Err(v1_grammar_err(index, "VALUES tuple close"));
+        }
+        if !scan.take_byte(b',') {
+            return Ok(());
+        }
+    }
+}
+
+fn parse_v1_update(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if !scan.take_kw("UPDATE") {
+        return Err(v1_grammar_err(index, "UPDATE"));
+    }
+    parse_v1_table_name(index, scan)?;
+    if !scan.take_kw("SET") {
+        return Err(v1_grammar_err(index, "UPDATE SET"));
+    }
+    loop {
+        parse_v1_ident(index, scan)?;
+        if !scan.take_byte(b'=') {
+            return Err(v1_grammar_err(index, "SET ="));
+        }
+        parse_v1_expr(index, scan)?;
+        if !scan.take_byte(b',') {
+            break;
+        }
+    }
+    if scan.take_kw("WHERE") {
+        parse_v1_expr(index, scan)?;
+    }
+    parse_v1_returning(index, scan)
+}
+
+fn parse_v1_delete(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if !scan.take_kw("DELETE") || !scan.take_kw("FROM") {
+        return Err(v1_grammar_err(index, "DELETE FROM"));
+    }
+    parse_v1_table_name(index, scan)?;
+    if scan.take_kw("WHERE") {
+        parse_v1_expr(index, scan)?;
+    }
+    parse_v1_returning(index, scan)
+}
+
+fn parse_v1_returning(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if !scan.take_kw("RETURNING") {
+        return Ok(());
+    }
+    if scan.take_byte(b'*') {
+        return Ok(());
+    }
+    loop {
+        parse_v1_expr(index, scan)?;
+        if scan.take_kw("AS") {
+            parse_v1_ident(index, scan)?;
+        }
+        if !scan.take_byte(b',') {
+            return Ok(());
+        }
+    }
+}
+
+fn parse_v1_ident(index: usize, scan: &mut Scan<'_>) -> Result<String> {
+    deny_quoted_ident(index, scan)?;
+    scan.read_ident()
+        .ok_or_else(|| v1_grammar_err(index, "identifier required"))
+}
+
+fn parse_v1_table_name(index: usize, scan: &mut Scan<'_>) -> Result<String> {
+    let name = parse_v1_ident(index, scan)?;
+    if scan.peek_byte(b'.') {
+        return Err(v1_grammar_err(
+            index,
+            "schema-qualified names are not SQL v1",
+        ));
+    }
+    Ok(name)
+}
+
+fn parse_v1_expr(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    deny_double_colon(index, scan)?;
+    parse_v1_or(index, scan)
+}
+
+fn deny_double_colon(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    scan.skip();
+    if scan.sql[scan.i..].starts_with("::") {
+        return Err(v1_grammar_err(
+            index,
+            ":: casts are not SQL v1; use CAST(x AS TYPE)",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_v1_or(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    parse_v1_and(index, scan)?;
+    while scan.take_kw("OR") {
+        parse_v1_and(index, scan)?;
+    }
+    Ok(())
+}
+
+fn parse_v1_and(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    parse_v1_not(index, scan)?;
+    while scan.take_kw("AND") {
+        parse_v1_not(index, scan)?;
+    }
+    Ok(())
+}
+
+fn parse_v1_not(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if scan.take_kw("NOT") {
+        return parse_v1_not(index, scan);
+    }
+    parse_v1_cmp(index, scan)
+}
+
+fn parse_v1_cmp(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    parse_v1_concat(index, scan)?;
+    deny_double_colon(index, scan)?;
+    if scan.take_kw("IS") {
+        let _ = scan.take_kw("NOT");
+        if !scan.take_kw("NULL") {
+            return Err(v1_grammar_err(index, "IS [NOT] NULL"));
+        }
+        return Ok(());
+    }
+    if scan.take_kw("NOT") {
+        if scan.take_kw("LIKE") {
+            if scan.peek_kw("ILIKE") {
+                return Err(v1_grammar_err(index, "ILIKE is not SQL v1"));
+            }
+            parse_v1_concat(index, scan)?;
+            return Ok(());
+        }
+        if scan.take_kw("IN") {
+            return parse_v1_in_list(index, scan);
+        }
+        if scan.take_kw("BETWEEN") {
+            parse_v1_concat(index, scan)?;
+            if !scan.take_kw("AND") {
+                return Err(v1_grammar_err(index, "BETWEEN AND"));
+            }
+            parse_v1_concat(index, scan)?;
+            return Ok(());
+        }
+        return Err(v1_grammar_err(index, "NOT LIKE/IN/BETWEEN"));
+    }
+    if scan.peek_kw("ILIKE") || scan.take_kw("ILIKE") {
+        return Err(v1_grammar_err(index, "ILIKE is not SQL v1"));
+    }
+    if scan.take_kw("LIKE") {
+        parse_v1_concat(index, scan)?;
+        return Ok(());
+    }
+    if scan.take_kw("IN") {
+        return parse_v1_in_list(index, scan);
+    }
+    if scan.take_kw("BETWEEN") {
+        parse_v1_concat(index, scan)?;
+        if !scan.take_kw("AND") {
+            return Err(v1_grammar_err(index, "BETWEEN AND"));
+        }
+        parse_v1_concat(index, scan)?;
+        return Ok(());
+    }
+    if scan.take_kw("GLOB")
+        || scan.take_kw("MATCH")
+        || scan.take_kw("REGEXP")
+        || scan.take_kw("COLLATE")
+    {
+        return Err(v1_grammar_err(
+            index,
+            "GLOB/MATCH/REGEXP/COLLATE are not SQL v1 operators",
+        ));
+    }
+    if take_cmp_op(scan) {
+        parse_v1_concat(index, scan)?;
+    }
+    Ok(())
+}
+
+fn take_cmp_op(scan: &mut Scan<'_>) -> bool {
+    scan.skip();
+    let rest = &scan.sql[scan.i..];
+    for op in ["<=", ">=", "<>", "!=", "=", "<", ">"] {
+        if rest.starts_with(op) {
+            scan.i += op.len();
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_v1_in_list(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if !scan.take_byte(b'(') {
+        return Err(v1_grammar_err(index, "IN ("));
+    }
+    let inner = scan
+        .take_balanced_inner()
+        .ok_or_else(|| v1_grammar_err(index, "IN list"))?;
+    let mut body = Scan { sql: inner, i: 0 };
+    if body.peek_kw("SELECT") || body.peek_kw("WITH") || body.peek_kw("VALUES") {
+        parse_v1_select(index, &mut body)?;
+    } else {
+        loop {
+            parse_v1_expr(index, &mut body)?;
+            if !body.take_byte(b',') {
+                break;
+            }
+        }
+    }
+    body.skip();
+    if body.i < inner.len() {
+        return Err(v1_grammar_err(index, "IN list trailing tokens"));
+    }
+    Ok(())
+}
+
+fn parse_v1_concat(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    parse_v1_add(index, scan)?;
+    loop {
+        scan.skip();
+        if scan.sql[scan.i..].starts_with("||") {
+            scan.i += 2;
+            parse_v1_add(index, scan)?;
+            continue;
+        }
+        break;
+    }
+    Ok(())
+}
+
+fn parse_v1_add(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    parse_v1_mul(index, scan)?;
+    loop {
+        scan.skip();
+        if scan.take_byte(b'+') || scan.take_byte(b'-') {
+            parse_v1_mul(index, scan)?;
+            continue;
+        }
+        break;
+    }
+    Ok(())
+}
+
+fn parse_v1_mul(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    parse_v1_prefix(index, scan)?;
+    loop {
+        scan.skip();
+        if scan.take_byte(b'*') || scan.take_byte(b'/') || scan.take_byte(b'%') {
+            parse_v1_prefix(index, scan)?;
+            continue;
+        }
+        break;
+    }
+    Ok(())
+}
+
+fn parse_v1_prefix(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    scan.skip();
+    deny_double_colon(index, scan)?;
+    if scan.take_byte(b'+') || scan.take_byte(b'-') {
+        return parse_v1_prefix(index, scan);
+    }
+    parse_v1_atom(index, scan)
+}
+
+fn parse_v1_atom(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    deny_double_colon(index, scan)?;
+    if scan.take_kw("NULL") || scan.take_kw("TRUE") || scan.take_kw("FALSE") {
+        return Ok(());
+    }
+    if scan.take_kw("EXISTS") {
+        if !scan.take_byte(b'(') {
+            return Err(v1_grammar_err(index, "EXISTS ("));
+        }
+        let inner = scan
+            .take_balanced_inner()
+            .ok_or_else(|| v1_grammar_err(index, "EXISTS subquery"))?;
+        let mut body = Scan { sql: inner, i: 0 };
+        parse_v1_select(index, &mut body)?;
+        return Ok(());
+    }
+    if scan.take_kw("CASE") {
+        return parse_v1_case(index, scan);
+    }
+    if scan.take_kw("CAST") {
+        if !scan.take_byte(b'(') {
+            return Err(v1_grammar_err(index, "CAST ("));
+        }
+        parse_v1_expr(index, scan)?;
+        if !scan.take_kw("AS") {
+            return Err(v1_grammar_err(index, "CAST AS"));
+        }
+        let ty = parse_v1_ident(index, scan)?;
+        if !["integer", "real", "text", "blob", "boolean"].contains(&ty.as_str()) {
+            return Err(v1_grammar_err(
+                index,
+                "CAST type must be INTEGER, REAL, TEXT, BLOB, or BOOLEAN",
+            ));
+        }
+        if !scan.take_byte(b')') {
+            return Err(v1_grammar_err(index, "CAST )"));
+        }
+        return Ok(());
+    }
+    if scan.take_byte(b'?') {
+        return Ok(());
+    }
+    if scan.take_byte(b'(') {
+        let inner = scan
+            .take_balanced_inner()
+            .ok_or_else(|| v1_grammar_err(index, "parenthesized expr"))?;
+        let mut body = Scan { sql: inner, i: 0 };
+        if body.peek_kw("SELECT") || body.peek_kw("WITH") || body.peek_kw("VALUES") {
+            parse_v1_select(index, &mut body)?;
+        } else {
+            parse_v1_expr(index, &mut body)?;
+        }
+        body.skip();
+        if body.i < inner.len() {
+            return Err(v1_grammar_err(index, "parenthesized trailing tokens"));
+        }
+        return Ok(());
+    }
+    if take_v1_number(scan) || take_v1_string(scan) {
+        return Ok(());
+    }
+    deny_quoted_ident(index, scan)?;
+    let Some(name) = scan.read_ident() else {
+        return Err(v1_grammar_err(index, "expression atom"));
+    };
+    if scan.take_byte(b'.') {
+        if scan.take_byte(b'*') {
+            return Ok(());
+        }
+        deny_quoted_ident(index, scan)?;
+        if scan.read_ident().is_none() {
+            return Err(v1_grammar_err(index, "qualified identifier"));
+        }
+    }
+    if scan.take_byte(b'(') {
+        parse_v1_call_args(index, scan, &name)?;
+        if scan.peek_kw("OVER") || scan.peek_kw("FILTER") {
+            return Err(v1_grammar_err(index, "OVER/FILTER are not SQL v1"));
+        }
+        if scan.peek_kw("SIMILAR") {
+            return Err(v1_grammar_err(index, "SIMILAR is not SQL v1"));
+        }
+    }
+    Ok(())
+}
+
+fn parse_v1_call_args(index: usize, scan: &mut Scan<'_>, name: &str) -> Result<()> {
+    if scan.peek_byte(b')') {
+        scan.take_byte(b')');
+        return check_v1_arity(index, name, 0);
+    }
+    if scan.take_byte(b'*') {
+        if !scan.take_byte(b')') {
+            return Err(v1_grammar_err(index, "count(*)"));
+        }
+        return check_v1_arity(index, name, 1);
+    }
+    let mut n = 0usize;
+    loop {
+        parse_v1_expr(index, scan)?;
+        n += 1;
+        if !scan.take_byte(b',') {
+            break;
+        }
+    }
+    if !scan.take_byte(b')') {
+        return Err(v1_grammar_err(index, "call )"));
+    }
+    check_v1_arity(index, name, n)
+}
+
+fn check_v1_arity(index: usize, name: &str, n: usize) -> Result<()> {
+    let (min, max) = match name {
+        "round" => (1, 2),
+        "avg" | "sum" | "abs" | "length" | "lower" | "upper" | "json_valid" | "count" => (1, 1),
+        "ifnull" | "nullif" => (2, 2),
+        "coalesce" => (2, 32),
+        "min" | "max" => (1, 32),
+        "json_extract" => (2, 2),
+        "json_object" => (2, 32),
+        "replace" => (3, 3),
+        "substr" => (2, 3),
+        "trim" => (1, 2),
+        _ => return Ok(()),
+    };
+    if n < min || n > max {
+        return Err(v1_grammar_err(
+            index,
+            &format!("function {name} has arity {n}; expected {min}..={max}"),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_v1_case(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    if !scan.peek_kw("WHEN") {
+        parse_v1_expr(index, scan)?;
+    }
+    let mut saw_when = false;
+    while scan.take_kw("WHEN") {
+        saw_when = true;
+        parse_v1_expr(index, scan)?;
+        if !scan.take_kw("THEN") {
+            return Err(v1_grammar_err(index, "CASE WHEN THEN"));
+        }
+        parse_v1_expr(index, scan)?;
+    }
+    if !saw_when {
+        return Err(v1_grammar_err(index, "CASE WHEN"));
+    }
+    if scan.take_kw("ELSE") {
+        parse_v1_expr(index, scan)?;
+    }
+    if !scan.take_kw("END") {
+        return Err(v1_grammar_err(index, "CASE END"));
+    }
+    Ok(())
+}
+
+fn take_v1_number(scan: &mut Scan<'_>) -> bool {
+    scan.skip();
+    let bytes = scan.sql.as_bytes();
+    let mut i = scan.i;
+    if i >= bytes.len() {
+        return false;
+    }
+    let mut saw = false;
+    if bytes[i] == b'.' {
+        i += 1;
+    }
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        saw = true;
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'.' && bytes.get(i + 1).is_some_and(|b| b.is_ascii_digit()) {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        saw = true;
+    }
+    if !saw {
+        return false;
+    }
+    scan.i = i;
+    true
+}
+
+fn take_v1_string(scan: &mut Scan<'_>) -> bool {
+    scan.skip();
+    if scan.sql.as_bytes().get(scan.i) != Some(&b'\'') {
+        return false;
+    }
+    skip_quoted_string(scan, b'\'');
+    true
 }
 
 /// `INSERT OR IGNORE` is canonical; `INSERT OR REPLACE` / `OR ABORT` are not.
@@ -742,6 +1551,7 @@ fn validate_binding_create_index_v1(index: usize, inner: &str, tail: &str) -> Re
     deny_binding_v1_operators(index, inner)?;
     let mut scan = Scan { sql: inner, i: 0 };
     loop {
+        deny_quoted_ident(index, &mut scan)?;
         if scan.read_ident().is_none() {
             return Err(v1_grammar_err(index, "CREATE INDEX requires a column list"));
         }
@@ -767,6 +1577,7 @@ fn validate_binding_create_index_v1(index: usize, inner: &str, tail: &str) -> Re
 /// Returns [`PluginError::invalid_params`] when the column name, type, or
 /// constraints are not portable SQL v1.
 fn parse_column_def(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+    deny_quoted_ident(index, scan)?;
     if scan.read_ident().is_none() {
         return Err(v1_grammar_err(index, "column name required"));
     }
@@ -785,14 +1596,15 @@ fn parse_column_def(index: usize, scan: &mut Scan<'_>) -> Result<()> {
             "column type parameters (VARCHAR(n), NUMERIC(p,s)) are not portable",
         ));
     }
-    parse_column_constraints(index, scan)
+    parse_column_constraints(index, scan, &ty)
 }
 
 /// # Errors
 ///
 /// Returns [`PluginError::invalid_params`] when a column constraint is not
 /// portable SQL v1.
-fn parse_column_constraints(index: usize, scan: &mut Scan<'_>) -> Result<()> {
+fn parse_column_constraints(index: usize, scan: &mut Scan<'_>, ty: &str) -> Result<()> {
+    let mut saw_autoincrement = false;
     loop {
         scan.skip();
         if scan.i >= scan.sql.len() || scan.peek_byte(b',') {
@@ -811,11 +1623,25 @@ fn parse_column_constraints(index: usize, scan: &mut Scan<'_>) -> Result<()> {
             if !scan.take_kw("KEY") {
                 return Err(v1_grammar_err(index, "PRIMARY KEY required"));
             }
-            let _ = scan.take_kw("AUTOINCREMENT");
+            if scan.take_kw("AUTOINCREMENT") {
+                if ty != "integer" {
+                    return Err(v1_grammar_err(
+                        index,
+                        "AUTOINCREMENT is only valid as INTEGER PRIMARY KEY AUTOINCREMENT",
+                    ));
+                }
+                if saw_autoincrement {
+                    return Err(v1_grammar_err(index, "AUTOINCREMENT may appear only once"));
+                }
+                saw_autoincrement = true;
+            }
             continue;
         }
         if scan.take_kw("AUTOINCREMENT") {
-            continue;
+            return Err(v1_grammar_err(
+                index,
+                "AUTOINCREMENT is only valid immediately after INTEGER PRIMARY KEY",
+            ));
         }
         if scan.take_kw("NOT") {
             if !scan.take_kw("NULL") {
@@ -1175,6 +2001,8 @@ fn ddl_type_name(name: &str) -> bool {
 /// Returns [`PluginError::invalid_params`] when the next token is missing, a
 /// reserved host bookkeeping name, or schema-qualified.
 fn check_binding_ddl_name(index: usize, scan: &mut Scan<'_>, what: &str) -> Result<()> {
+    scan.skip();
+    deny_quoted_ident(index, scan)?;
     let name = scan.read_ident().ok_or_else(|| {
         PluginError::invalid_params(format!(
             "statement {index} is not allowed binding DDL ({what})"
@@ -2506,6 +3334,53 @@ mod tests {
     }
 
     #[test]
+    fn sql_v1_positive_grammar_rejects_extension_tokens() {
+        for sql in [
+            "SELECT body FROM books WHERE body ILIKE 'a%'",
+            "SELECT DISTINCT ON (id) id FROM books",
+            "SELECT id::text FROM books",
+            "SELECT CAST(id AS BYTEA) FROM books",
+            "SELECT round(id, 2, 3) FROM books",
+            r#"SELECT "hex"(id) FROM books"#,
+        ] {
+            let err = validate_guest_execute_request(&req(sql, vec![], DbResultSelection::Rows, 1))
+                .unwrap_err();
+            assert!(err.to_string().contains("SQL v1"), "{sql}: {err}");
+        }
+        validate_guest_execute_request(&req(
+            "SELECT body FROM books WHERE body LIKE 'a%' ORDER BY id ASC NULLS FIRST",
+            vec![],
+            DbResultSelection::Rows,
+            1,
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn binding_owned_sql_v1_rejects_quoted_idents_and_malformed_autoincrement() {
+        for sql in [
+            r#"CREATE TABLE IF NOT EXISTS "Foo" (id INTEGER PRIMARY KEY)"#,
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER AUTOINCREMENT)",
+            "CREATE TABLE IF NOT EXISTS t (id REAL PRIMARY KEY AUTOINCREMENT)",
+            "CREATE TABLE IF NOT EXISTS t (n INTEGER AUTOINCREMENT)",
+        ] {
+            let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
+            assert!(
+                err.to_string().contains("SQL v1")
+                    || err.to_string().contains("quoted")
+                    || err.to_string().contains("AUTOINCREMENT"),
+                "{sql}: {err}"
+            );
+        }
+        binding_check(
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY AUTOINCREMENT, n INTEGER)",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn allows_select_and_insert() {
         validate_guest_execute_request(&req(
             "SELECT id FROM books WHERE id = ?",
@@ -2632,6 +3507,15 @@ mod tests {
             "DROP INDEX IF EXISTS idx_notes_body CASCADE",
             "SELECT body FROM notes WHERE id = $1",
             "SELECT body FROM notes WHERE id = ?1",
+            "SELECT body FROM notes WHERE body ILIKE 'a%'",
+            "SELECT DISTINCT ON (id) id FROM notes",
+            "SELECT body::text FROM notes",
+            "SELECT CAST(body AS BYTEA) FROM notes",
+            r#"CREATE TABLE IF NOT EXISTS "Foo" (id INTEGER PRIMARY KEY)"#,
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER AUTOINCREMENT)",
+            "CREATE TABLE IF NOT EXISTS t (id REAL AUTOINCREMENT)",
+            "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, n INTEGER AUTOINCREMENT)",
+            "SELECT round(n, 2, 3) FROM notes",
         ] {
             let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
             assert!(
@@ -2851,7 +3735,10 @@ mod tests {
             0,
         ))
         .unwrap_err();
-        assert!(err.to_string().contains("unauthorized"), "{err}");
+        assert!(
+            err.to_string().contains("unauthorized") || err.to_string().contains("SQL v1"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -2920,7 +3807,12 @@ mod tests {
             0,
         ))
         .unwrap_err();
-        assert!(err.to_string().contains("unauthorized"), "{err}");
+        assert!(
+            err.to_string().contains("unauthorized")
+                || err.to_string().contains("qualified")
+                || err.to_string().contains("SQL v1"),
+            "{err}"
+        );
         let err = validate_guest_execute_request(&req(
             "SELECT * FROM (SELECT * FROM encrypted_secrets)",
             vec![],

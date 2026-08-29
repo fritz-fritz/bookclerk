@@ -2404,8 +2404,15 @@ mod tests {
         // family before the HTTP batch (mirrors `run_typed_atomic`).
         let stmts = bookclerk_db_exec::expand_host_schema_batch(DatabaseBackend::Sqlite, &stmts)
             .unwrap_or(stmts);
-        let batch: Vec<(String, Vec<JsonValue>)> =
-            stmts.into_iter().map(|sql| (sql, Vec::new())).collect();
+        let batch: Vec<(String, Vec<JsonValue>)> = stmts
+            .into_iter()
+            .map(|sql| {
+                (
+                    bookclerk_db_exec::lower_canonical_sql(DatabaseBackend::Sqlite, &sql),
+                    Vec::new(),
+                )
+            })
+            .collect();
         let raw = proxy
             .run_batch(&batch)
             .await
@@ -3658,6 +3665,282 @@ mod tests {
         assert_eq!(
             reply.statements[0].rows[0].values[1],
             bookclerk_plugin_abi::DbValue::Boolean(true)
+        );
+    }
+
+    /// Unique-only `INSERT OR IGNORE`, NULL-poison min/max, ORDER BY NULLs,
+    /// AUTOINCREMENT identity, unquoted fold, and uncast helper wire types.
+    #[tokio::test]
+    async fn executing_mock_sql_v1_semantic_vectors() {
+        use bookclerk_library::GuestSqlPolicy;
+        use bookclerk_plugin_sdk::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+        };
+
+        let (_server, proxy, _conn, _interrupt, _drop, _oversize) = executing_proxy().await;
+        let db = sea_orm::Database::connect_proxy(
+            DatabaseBackend::Sqlite,
+            std::sync::Arc::new(Box::new(proxy.clone())),
+        )
+        .await
+        .unwrap();
+        let proxy_for_batch = proxy.clone();
+        bookclerk_library::apply_host_schema_with_batch(
+            &db,
+            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            move |stmts| {
+                let proxy = proxy_for_batch.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },
+        )
+        .await
+        .expect("host schema for semantic vectors");
+
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
+        let policy = GuestSqlPolicy::binding_owned();
+        let run = |req: ExecuteRequest| {
+            let proxy = proxy.clone();
+            let caps = caps.clone();
+            let policy = policy.clone();
+            async move {
+                bookclerk_library::execute_guest_atomic_with(req, &caps, &policy, |envelope| {
+                    let proxy = proxy.clone();
+                    async move {
+                        proxy
+                            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                            .await
+                            .map_err(crate::atomic::plugin_error_from_d1)
+                    }
+                })
+                .await
+            }
+        };
+        let exec = |op: &str, sql: &str| {
+            run(ExecuteRequest {
+                operation_id: op.into(),
+                request_hash: String::new(),
+                statements: vec![TypedDbStatement {
+                    sql: sql.into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                }],
+                deadline_unix_ms: 0,
+            })
+        };
+        let sel = |op: &str, sql: &str| {
+            run(ExecuteRequest {
+                operation_id: op.into(),
+                request_hash: String::new(),
+                statements: vec![TypedDbStatement {
+                    sql: sql.into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Select,
+                    max_rows: 8,
+                    result_selection: DbResultSelection::Rows,
+                }],
+                deadline_unix_ms: 0,
+            })
+        };
+
+        exec("d1-ddl-c", bookclerk_db_exec::sql_v1::BINDING_DDL_CONFLICT)
+            .await
+            .expect("conflict DDL");
+        let first = exec(
+            "d1-ins-u1",
+            bookclerk_db_exec::sql_v1::PORTABLE_INSERT_OR_IGNORE_UNIQUE,
+        )
+        .await
+        .expect("first unique insert");
+        assert_eq!(first.statements[0].rows_affected, 1);
+        let ignored = exec(
+            "d1-ins-u2",
+            bookclerk_db_exec::sql_v1::PORTABLE_INSERT_OR_IGNORE_UNIQUE,
+        )
+        .await
+        .expect("duplicate unique ignore");
+        assert_eq!(ignored.statements[0].rows_affected, 0);
+        let err = exec(
+            "d1-ins-nn",
+            bookclerk_db_exec::sql_v1::PORTABLE_INSERT_OR_IGNORE_NOT_NULL,
+        )
+        .await
+        .expect_err("NOT NULL must still abort");
+        let t = err.to_string().to_ascii_lowercase();
+        assert!(
+            t.contains("null")
+                || t.contains("constraint")
+                || t.contains("not null")
+                || t.contains("ambiguous")
+                || t.contains("unavailable"),
+            "{err}"
+        );
+
+        exec(
+            "d1-ddl-typed",
+            bookclerk_db_exec::sql_v1::BINDING_DDL_AUTOINCREMENT_BLOB,
+        )
+        .await
+        .expect("typed DDL");
+        run(ExecuteRequest {
+            operation_id: "d1-ins-typed".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: bookclerk_db_exec::sql_v1::PORTABLE_INSERT.into(),
+                parameters: vec![bookclerk_plugin_abi::DbValue::Bytes(
+                    bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB.to_vec(),
+                )],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("typed insert");
+        let mm = sel("d1-mm", bookclerk_db_exec::sql_v1::PORTABLE_MIN_MAX_NULL)
+            .await
+            .expect("min/max");
+        if let Some(err) =
+            bookclerk_db_exec::sql_v1::portable_min_max_null_mismatch(&mm.statements[0])
+        {
+            panic!("{err}");
+        }
+        let round = sel("d1-round", bookclerk_db_exec::sql_v1::PORTABLE_UNCAST_ROUND)
+            .await
+            .expect("round");
+        if let Some(err) =
+            bookclerk_db_exec::sql_v1::portable_uncast_round_mismatch(&round.statements[0])
+        {
+            panic!("{err}");
+        }
+        let sum_avg = sel(
+            "d1-sum-avg",
+            bookclerk_db_exec::sql_v1::PORTABLE_UNCAST_SUM_AVG,
+        )
+        .await
+        .expect("sum/avg");
+        if let Some(err) =
+            bookclerk_db_exec::sql_v1::portable_uncast_sum_avg_mismatch(&sum_avg.statements[0])
+        {
+            panic!("{err}");
+        }
+
+        exec(
+            "d1-ddl-ord",
+            bookclerk_db_exec::sql_v1::BINDING_DDL_ORDER_NULLS,
+        )
+        .await
+        .expect("order DDL");
+        for (op, sql) in [
+            (
+                "d1-i1",
+                bookclerk_db_exec::sql_v1::PORTABLE_ORDER_NULLS_INSERT_1,
+            ),
+            (
+                "d1-inull",
+                bookclerk_db_exec::sql_v1::PORTABLE_ORDER_NULLS_INSERT_NULL,
+            ),
+            (
+                "d1-i2",
+                bookclerk_db_exec::sql_v1::PORTABLE_ORDER_NULLS_INSERT_2,
+            ),
+        ] {
+            exec(op, sql).await.expect(op);
+        }
+        let asc = sel(
+            "d1-asc",
+            bookclerk_db_exec::sql_v1::PORTABLE_ORDER_NULLS_ASC,
+        )
+        .await
+        .expect("asc");
+        if let Some(err) =
+            bookclerk_db_exec::sql_v1::portable_order_nulls_asc_mismatch(&asc.statements[0])
+        {
+            panic!("{err}");
+        }
+        let desc = sel(
+            "d1-desc",
+            bookclerk_db_exec::sql_v1::PORTABLE_ORDER_NULLS_DESC,
+        )
+        .await
+        .expect("desc");
+        if let Some(err) =
+            bookclerk_db_exec::sql_v1::portable_order_nulls_desc_mismatch(&desc.statements[0])
+        {
+            panic!("{err}");
+        }
+
+        exec("d1-ddl-id", bookclerk_db_exec::sql_v1::BINDING_DDL_IDENTITY)
+            .await
+            .expect("identity DDL");
+        exec(
+            "d1-ins-ex",
+            bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_EXPLICIT,
+        )
+        .await
+        .expect("explicit id");
+        exec(
+            "d1-ins-om",
+            bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_OMIT,
+        )
+        .await
+        .expect("omit id");
+        let max1 = sel(
+            "d1-sel-max1",
+            bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_SELECT_MAX,
+        )
+        .await
+        .expect("max after omit");
+        assert_eq!(
+            max1.statements[0].rows[0].values[0],
+            bookclerk_plugin_abi::DbValue::Int64(101)
+        );
+        exec(
+            "d1-del-max",
+            bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_DELETE_MAX,
+        )
+        .await
+        .expect("delete max");
+        exec(
+            "d1-ins-om2",
+            bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_OMIT,
+        )
+        .await
+        .expect("omit after delete");
+        let max2 = sel(
+            "d1-sel-max2",
+            bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_SELECT_MAX,
+        )
+        .await
+        .expect("max after reinsert");
+        assert_eq!(
+            max2.statements[0].rows[0].values[0],
+            bookclerk_plugin_abi::DbValue::Int64(102)
+        );
+
+        exec(
+            "d1-ddl-fold",
+            bookclerk_db_exec::sql_v1::BINDING_DDL_UNQUOTED_FOLD,
+        )
+        .await
+        .expect("fold DDL");
+        exec(
+            "d1-ins-fold",
+            bookclerk_db_exec::sql_v1::PORTABLE_UNQUOTED_FOLD_INSERT,
+        )
+        .await
+        .expect("fold insert");
+        let folded = sel(
+            "d1-sel-fold",
+            bookclerk_db_exec::sql_v1::PORTABLE_UNQUOTED_FOLD_SELECT,
+        )
+        .await
+        .expect("fold select");
+        assert_eq!(
+            folded.statements[0].rows[0].values[0],
+            bookclerk_plugin_abi::DbValue::Int64(7)
         );
     }
 

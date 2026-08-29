@@ -1194,7 +1194,11 @@ schema-qualified names). The guest grammar still applies —
 single statement, no `ATTACH`/`PRAGMA`/session verbs, no schema-qualified
 names — and functions are Bookclerk SQL v1 portable helpers (not a wider
 SQLite dialect; `hex` is denied; column types are `INTEGER` / `REAL` /
-`TEXT` / `BLOB` / `BOOLEAN`; see [`docs/sql-contract/v1.md`](sql-contract/v1.md)).
+`TEXT` / `BLOB` / `BOOLEAN`; `INSERT OR IGNORE` is unique/PK-conflict only and
+is lowered to `ON CONFLICT DO NOTHING` on every backend, including SQLite and
+D1; helper arity and wire types are enforced so callers need not `CAST` for
+`round` / `sum` / `avg` / `count`; see
+[`docs/sql-contract/v1.md`](sql-contract/v1.md)).
 A mixed `CREATE` + `INSERT` batch is one atomic receipt: first execution
 applies both statements on SQLite, PostgreSQL, and D1 (D1 claims the receipt
 before ungated DDL, then ungates DML for the claim owner). Same-token replay

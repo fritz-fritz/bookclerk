@@ -143,6 +143,8 @@ impl D1Proxy {
                 } else {
                     s.sql.clone()
                 };
+                let sql =
+                    bookclerk_db_exec::lower_canonical_sql(sea_orm::DatabaseBackend::Sqlite, &sql);
                 (sql, d1_wire_binds(&s.binds))
             })
             .collect();
@@ -799,7 +801,8 @@ fn d1_unix_now_ms() -> u64 {
 /// BLOBs (JSON has no binary scalar). All other values map directly; text is
 /// never re-encoded, so a `Text` cell can never masquerade as bytes.
 pub(crate) fn d1_typed_statement(sql: &str, params: &[DbValue]) -> SqlStmt {
-    let sql = wrap_bytes_placeholders(sql, params);
+    let sql = bookclerk_db_exec::lower_canonical_sql(sea_orm::DatabaseBackend::Sqlite, sql);
+    let sql = wrap_bytes_placeholders(&sql, params);
     let binds = params
         .iter()
         .map(|v| match v {

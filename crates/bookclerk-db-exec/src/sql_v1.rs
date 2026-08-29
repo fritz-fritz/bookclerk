@@ -1,8 +1,9 @@
 //! Shared Bookclerk SQL v1 execution vectors (binding DDL + portable helpers).
 //!
-//! Hosts emit these canonical statements. Adapters lower at execute: SQLite/D1
-//! run them verbatim; Postgres applies binding DDL type rewrites and helper
-//! lowering. Every name in `GuestSqlPolicy::binding_owned` portable functions
+//! Hosts emit these canonical statements. Adapters lower at execute: every
+//! backend rewrites `INSERT OR IGNORE` to unique/PK `ON CONFLICT DO NOTHING`;
+//! Postgres also applies binding DDL type rewrites and helper lowering.
+//! Every name in `GuestSqlPolicy::binding_owned` portable functions
 //! (except denied `hex`) appears here.
 
 use bookclerk_plugin_abi::{DbColumn, DbType, DbValue, StatementResult};
@@ -96,6 +97,8 @@ pub enum PortableExpect {
     Bool(bool),
     /// Exact [`DbValue::Null`] with [`DbType::Bool`].
     NullBool,
+    /// Exact [`DbValue::Null`] (any declared type).
+    Null,
 }
 
 /// Expected [`PORTABLE_SELECT`] cells in column order.
@@ -165,6 +168,7 @@ pub fn portable_value_matches(got: &DbValue, want: PortableExpect) -> bool {
         (DbValue::Float64(n), PortableExpect::Float(w)) => (*n - w).abs() < 1e-9,
         (DbValue::Boolean(b), PortableExpect::Bool(w)) => *b == w,
         (DbValue::Null(DbType::Bool), PortableExpect::NullBool) => true,
+        (DbValue::Null(_), PortableExpect::Null) => true,
         _ => false,
     }
 }
@@ -179,6 +183,7 @@ fn portable_column_type_ok(col: Option<&DbColumn>, want: PortableExpect) -> bool
         PortableExpect::Text(_) => matches!(col.db_type, DbType::Text | DbType::Unspecified),
         PortableExpect::Float(_) => matches!(col.db_type, DbType::Float64 | DbType::Unspecified),
         PortableExpect::Bool(_) | PortableExpect::NullBool => matches!(col.db_type, DbType::Bool),
+        PortableExpect::Null => true,
     }
 }
 
@@ -262,6 +267,194 @@ pub const MIXED_GATE_LITERAL_SELECT: &str = "SELECT body FROM gated_notes WHERE 
 
 /// COUNT helper for mixed-gate replay assertions.
 pub const MIXED_GATE_LITERAL_COUNT: &str = "SELECT count(*) FROM gated_notes";
+
+/// Unique + NOT NULL table for `INSERT OR IGNORE` conflict-domain vectors.
+pub const BINDING_DDL_CONFLICT: &str = "CREATE TABLE IF NOT EXISTS conflicted (\
+     id INTEGER PRIMARY KEY, \
+     k TEXT NOT NULL UNIQUE, \
+     v TEXT NOT NULL)";
+
+/// Unique-conflict ignore (second insert is a no-op).
+pub const PORTABLE_INSERT_OR_IGNORE_UNIQUE: &str =
+    "INSERT OR IGNORE INTO conflicted (id, k, v) VALUES (1, 'a', 'x')";
+
+/// NOT NULL ignore must still error (not swallowed).
+pub const PORTABLE_INSERT_OR_IGNORE_NOT_NULL: &str =
+    "INSERT OR IGNORE INTO conflicted (id, k, v) VALUES (2, 'b', NULL)";
+
+/// Scalar min/max NULL-poison (any NULL argument → NULL).
+pub const PORTABLE_MIN_MAX_NULL: &str =
+    "SELECT max(NULL, 3) AS c0, min(NULL, 3) AS c1, max(1, 3) AS c2";
+
+/// Nullable column for ORDER BY NULL ordering.
+pub const BINDING_DDL_ORDER_NULLS: &str = "CREATE TABLE IF NOT EXISTS ordered_n (n INTEGER)";
+
+/// Seed three rows: 1, NULL, 2.
+pub const PORTABLE_ORDER_NULLS_INSERT_1: &str = "INSERT INTO ordered_n (n) VALUES (1)";
+/// NULL seed.
+pub const PORTABLE_ORDER_NULLS_INSERT_NULL: &str = "INSERT INTO ordered_n (n) VALUES (NULL)";
+/// 2 seed.
+pub const PORTABLE_ORDER_NULLS_INSERT_2: &str = "INSERT INTO ordered_n (n) VALUES (2)";
+
+/// ASC: NULL sorts as smallest.
+pub const PORTABLE_ORDER_NULLS_ASC: &str = "SELECT n FROM ordered_n ORDER BY n ASC";
+
+/// DESC: NULL sorts as smallest (last).
+pub const PORTABLE_ORDER_NULLS_DESC: &str = "SELECT n FROM ordered_n ORDER BY n DESC";
+
+/// Identity table (explicit id then omit-id).
+pub const BINDING_DDL_IDENTITY: &str =
+    "CREATE TABLE IF NOT EXISTS ident (id INTEGER PRIMARY KEY AUTOINCREMENT, n INTEGER)";
+
+/// Explicit id 100.
+pub const PORTABLE_IDENTITY_INSERT_EXPLICIT: &str = "INSERT INTO ident (id, n) VALUES (100, 1)";
+
+/// Omit id (must yield 101 after explicit 100).
+pub const PORTABLE_IDENTITY_INSERT_OMIT: &str = "INSERT INTO ident (n) VALUES (2)";
+
+/// Largest id.
+pub const PORTABLE_IDENTITY_SELECT_MAX: &str = "SELECT max(id) FROM ident";
+
+/// Delete the max identity row (SQLite AUTOINCREMENT must not reuse it).
+pub const PORTABLE_IDENTITY_DELETE_MAX: &str =
+    "DELETE FROM ident WHERE id = (SELECT max(id) FROM ident)";
+
+/// Unquoted mixed-case table that folds to lowercase.
+pub const BINDING_DDL_UNQUOTED_FOLD: &str =
+    "CREATE TABLE IF NOT EXISTS FoldMe (id INTEGER PRIMARY KEY, n INTEGER)";
+
+/// SELECT via folded lowercase name.
+pub const PORTABLE_UNQUOTED_FOLD_INSERT: &str = "INSERT INTO FoldMe (id, n) VALUES (1, 7)";
+
+/// SELECT from folded name.
+pub const PORTABLE_UNQUOTED_FOLD_SELECT: &str = "SELECT n FROM foldme";
+
+/// Uncast `round` (per-row; not mixed with aggregates).
+pub const PORTABLE_UNCAST_ROUND: &str = "SELECT round(r, 2) AS r0 FROM typed";
+
+/// Uncast integer `sum` / `avg` (aggregate-only companion).
+pub const PORTABLE_UNCAST_SUM_AVG: &str = "SELECT sum(n) AS s, avg(n) AS a FROM typed";
+
+/// Expected [`PORTABLE_MIN_MAX_NULL`] cells.
+#[must_use]
+pub fn portable_min_max_null_expects() -> &'static [PortableExpect] {
+    &[
+        PortableExpect::Null,
+        PortableExpect::Null,
+        PortableExpect::Int(3),
+    ]
+}
+
+/// Expected [`PORTABLE_ORDER_NULLS_ASC`] cells.
+#[must_use]
+pub fn portable_order_nulls_asc_expects() -> &'static [PortableExpect] {
+    &[
+        PortableExpect::Null,
+        PortableExpect::Int(1),
+        PortableExpect::Int(2),
+    ]
+}
+
+/// Expected [`PORTABLE_ORDER_NULLS_DESC`] cells.
+#[must_use]
+pub fn portable_order_nulls_desc_expects() -> &'static [PortableExpect] {
+    &[
+        PortableExpect::Int(2),
+        PortableExpect::Int(1),
+        PortableExpect::Null,
+    ]
+}
+
+/// Expected [`PORTABLE_UNCAST_ROUND`] cells (r=1.5).
+#[must_use]
+pub fn portable_uncast_round_expects() -> &'static [PortableExpect] {
+    &[PortableExpect::Float(1.5)]
+}
+
+/// Expected [`PORTABLE_UNCAST_SUM_AVG`] cells (n=2).
+#[must_use]
+pub fn portable_uncast_sum_avg_expects() -> &'static [PortableExpect] {
+    &[PortableExpect::Int(2), PortableExpect::Float(2.0)]
+}
+
+/// Formats a mismatch for [`PORTABLE_MIN_MAX_NULL`].
+#[must_use]
+pub fn portable_min_max_null_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_statement_mismatch(
+        stmt,
+        portable_min_max_null_expects(),
+        "portable min/max NULL",
+    )
+}
+
+/// Formats a mismatch for ASC NULL ordering.
+#[must_use]
+pub fn portable_order_nulls_asc_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_rows_mismatch(
+        stmt,
+        &[
+            &[PortableExpect::Null],
+            &[PortableExpect::Int(1)],
+            &[PortableExpect::Int(2)],
+        ],
+        "portable ORDER BY ASC NULLS",
+    )
+}
+
+/// Formats a mismatch for DESC NULL ordering.
+#[must_use]
+pub fn portable_order_nulls_desc_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_rows_mismatch(
+        stmt,
+        &[
+            &[PortableExpect::Int(2)],
+            &[PortableExpect::Int(1)],
+            &[PortableExpect::Null],
+        ],
+        "portable ORDER BY DESC NULLS",
+    )
+}
+
+/// Formats a mismatch for [`PORTABLE_UNCAST_ROUND`].
+#[must_use]
+pub fn portable_uncast_round_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_statement_mismatch(
+        stmt,
+        portable_uncast_round_expects(),
+        "portable uncast round",
+    )
+}
+
+/// Formats a mismatch for [`PORTABLE_UNCAST_SUM_AVG`].
+#[must_use]
+pub fn portable_uncast_sum_avg_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_statement_mismatch(
+        stmt,
+        portable_uncast_sum_avg_expects(),
+        "portable uncast sum/avg",
+    )
+}
+
+/// Compares every row in `stmt` to `expect`.
+fn portable_rows_mismatch(
+    stmt: &StatementResult,
+    expect: &[&[PortableExpect]],
+    label: &str,
+) -> Option<String> {
+    if stmt.rows.len() != expect.len() {
+        return Some(format!(
+            "{label} returned {} rows; expected {}",
+            stmt.rows.len(),
+            expect.len()
+        ));
+    }
+    for (i, (row, want)) in stmt.rows.iter().zip(expect.iter()).enumerate() {
+        if let Some(err) = portable_row_mismatch(&stmt.columns, &row.values, want, label) {
+            return Some(format!("row {i}: {err}"));
+        }
+    }
+    None
+}
 
 #[cfg(test)]
 mod tests {

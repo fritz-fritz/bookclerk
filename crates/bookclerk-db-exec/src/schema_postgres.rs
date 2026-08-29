@@ -98,12 +98,155 @@ pub fn expand_host_schema_batch(backend: DatabaseBackend, batch: &[String]) -> O
     // Split first, lower per statement: statement-shaped rewrites such as
     // `INSERT OR IGNORE` → `ON CONFLICT DO NOTHING` anchor on the statement
     // head.
-    let mut stmts: Vec<String> = split_schema_statements(canonical)
-        .iter()
-        .map(|stmt| schema_sql_for_backend(backend, stmt).into_owned())
-        .collect();
+    let mut stmts: Vec<String> = Vec::new();
+    for stmt in split_schema_statements(canonical) {
+        let lowered = schema_sql_for_backend(backend, &stmt).into_owned();
+        let companions = if backend == DatabaseBackend::Postgres {
+            postgres_identity_companions(&lowered)
+        } else {
+            Vec::new()
+        };
+        stmts.push(lowered);
+        stmts.extend(companions);
+    }
     stmts.extend(batch.iter().skip(1).cloned());
     Some(stmts)
+}
+
+/// Postgres-only companion DDL that keeps `BIGSERIAL` in sync with explicit ids.
+///
+/// SQLite `AUTOINCREMENT` records the largest value ever inserted. PostgreSQL
+/// serial sequences do not. After a binding/host `CREATE TABLE` that lowered to
+/// `BIGSERIAL`, the adapter runs this function + per-table trigger internally
+/// (not as extra Cap'n statements). Empty when `sql` is not a CREATE TABLE
+/// with an identity column.
+#[must_use]
+pub fn postgres_identity_companions(sql: &str) -> Vec<String> {
+    if !create_table_has_identity(sql) {
+        return Vec::new();
+    }
+    let Some(table) = create_table_ident(sql) else {
+        return Vec::new();
+    };
+    vec![
+        BOOKCLERK_SYNC_IDENTITY_FN.to_string(),
+        format!("DROP TRIGGER IF EXISTS bookclerk_sync_identity ON {table}"),
+        format!(
+            "CREATE TRIGGER bookclerk_sync_identity AFTER INSERT ON {table} \
+             FOR EACH ROW EXECUTE FUNCTION bookclerk_sync_identity()"
+        ),
+    ]
+}
+
+/// Shared trigger function: `setval` serial columns to `GREATEST(last, NEW.col)`.
+const BOOKCLERK_SYNC_IDENTITY_FN: &str = "\
+CREATE OR REPLACE FUNCTION bookclerk_sync_identity() RETURNS trigger \
+LANGUAGE plpgsql AS $bookclerk_sync$ \
+DECLARE seq text; col name; val bigint; last bigint; \
+BEGIN \
+  FOR col IN \
+    SELECT a.attname FROM pg_attribute a \
+    WHERE a.attrelid = TG_RELID AND a.attnum > 0 AND NOT a.attisdropped \
+      AND pg_get_serial_sequence(format('%I.%I', TG_TABLE_SCHEMA, TG_TABLE_NAME), a.attname) IS NOT NULL \
+  LOOP \
+    seq := pg_get_serial_sequence(format('%I.%I', TG_TABLE_SCHEMA, TG_TABLE_NAME), col); \
+    EXECUTE format('SELECT ($1).%I', col) INTO val USING NEW; \
+    IF val IS NOT NULL THEN \
+      EXECUTE format('SELECT last_value FROM %s', seq) INTO last; \
+      PERFORM setval(seq::regclass, GREATEST(last, val), true); \
+    END IF; \
+  END LOOP; \
+  RETURN NEW; \
+END; \
+$bookclerk_sync$";
+
+/// True when `sql` is `CREATE TABLE` with `AUTOINCREMENT` or `BIGSERIAL`.
+fn create_table_has_identity(sql: &str) -> bool {
+    let t = skip_create_table_head(sql);
+    if t.is_none() {
+        return false;
+    }
+    let upper = sql.to_ascii_uppercase();
+    upper.contains("AUTOINCREMENT") || upper.contains("BIGSERIAL")
+}
+
+/// Accepts a `CREATE [TEMP[ORARY]] TABLE` statement head.
+fn skip_create_table_head(sql: &str) -> Option<()> {
+    let mut scan = sql.trim_start();
+    if !starts_kw(scan, "CREATE") {
+        return None;
+    }
+    scan = skip_kw(scan, "CREATE")?;
+    if starts_kw(scan, "TEMP") {
+        scan = skip_kw(scan, "TEMP")?;
+    } else if starts_kw(scan, "TEMPORARY") {
+        scan = skip_kw(scan, "TEMPORARY")?;
+    }
+    if !starts_kw(scan, "TABLE") {
+        return None;
+    }
+    let _ = scan;
+    Some(())
+}
+
+/// Unquoted table ident from a `CREATE TABLE` statement.
+fn create_table_ident(sql: &str) -> Option<String> {
+    let mut s = sql.trim_start();
+    s = skip_kw(s, "CREATE")?;
+    if starts_kw(s, "TEMP") {
+        s = skip_kw(s, "TEMP")?;
+    } else if starts_kw(s, "TEMPORARY") {
+        s = skip_kw(s, "TEMPORARY")?;
+    }
+    s = skip_kw(s, "TABLE")?;
+    if starts_kw(s, "IF") {
+        s = skip_kw(s, "IF")?;
+        if starts_kw(s, "NOT") {
+            s = skip_kw(s, "NOT")?;
+        }
+        if starts_kw(s, "EXISTS") {
+            s = skip_kw(s, "EXISTS")?;
+        }
+    }
+    read_unquoted_ident(s)
+}
+
+/// Case-insensitive keyword at the start of `s`.
+fn starts_kw(s: &str, kw: &str) -> bool {
+    let s = s.trim_start();
+    s.len() >= kw.len()
+        && s[..kw.len()].eq_ignore_ascii_case(kw)
+        && s.as_bytes()
+            .get(kw.len())
+            .is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+}
+
+/// Consumes `kw` from the start of `s`.
+fn skip_kw<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
+    let s = s.trim_start();
+    if !starts_kw(s, kw) {
+        return None;
+    }
+    Some(s[kw.len()..].trim_start())
+}
+
+/// Next unquoted ident at the start of `s`.
+fn read_unquoted_ident(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    let mut chars = s.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return None;
+    }
+    let mut n = first.len_utf8();
+    for c in chars {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            n += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    Some(s[..n].to_string())
 }
 
 /// Expands a typed host schema batch at the adapter execution edge.
@@ -222,6 +365,12 @@ mod tests {
             "adapter must lower canonical sqlite DDL for postgres: {expanded:?}"
         );
         assert!(
+            expanded
+                .iter()
+                .any(|s| s.contains("bookclerk_sync_identity")),
+            "identity CREATE TABLE must install serial-sync companions: {expanded:?}"
+        );
+        assert!(
             !expanded[0].contains("AUTOINCREMENT"),
             "host canonical must not be pre-lowered: {}",
             expanded[0]
@@ -257,13 +406,23 @@ mod tests {
             deadline_unix_ms: 0,
         };
         let expanded = expand_host_schema_execute_request(DatabaseBackend::Postgres, &req);
-        assert_eq!(expanded.statements.len(), req.statements.len());
+        assert!(
+            expanded.statements.len() > req.statements.len(),
+            "identity CREATE TABLE must expand with serial-sync companions"
+        );
         assert!(
             expanded
                 .statements
                 .iter()
                 .any(|s| s.sql.contains("BIGSERIAL")),
             "typed execute must lower canonical DDL at adapter edge"
+        );
+        assert!(
+            expanded
+                .statements
+                .iter()
+                .any(|s| s.sql.contains("bookclerk_sync_identity")),
+            "typed execute must attach identity companions"
         );
         assert!(
             expanded
@@ -384,5 +543,29 @@ mod tests {
             "{}",
             pg.statements[0].sql
         );
+    }
+
+    #[test]
+    fn postgres_identity_companions_follow_autoincrement_create() {
+        let sql =
+            "CREATE TABLE IF NOT EXISTS ident (id INTEGER PRIMARY KEY AUTOINCREMENT, n INTEGER)";
+        let companions = postgres_identity_companions(sql);
+        assert_eq!(companions.len(), 3, "{companions:?}");
+        assert!(
+            companions[0].contains("CREATE OR REPLACE FUNCTION bookclerk_sync_identity"),
+            "{}",
+            companions[0]
+        );
+        assert!(
+            companions[1].contains("DROP TRIGGER IF EXISTS bookclerk_sync_identity ON ident"),
+            "{}",
+            companions[1]
+        );
+        assert!(
+            companions[2].contains("EXECUTE FUNCTION bookclerk_sync_identity()"),
+            "{}",
+            companions[2]
+        );
+        assert!(postgres_identity_companions("CREATE TABLE t (n INTEGER)").is_empty());
     }
 }

@@ -2800,6 +2800,7 @@ fn publish_spec_account(
 }
 
 fn expect_created(outcome: PublishDomainEventOutcome) -> String {
+    // Do not Debug-format the outcome: `account_id` is sensitive to CodeQL.
     match outcome {
         PublishDomainEventOutcome::Created { id } => id,
         PublishDomainEventOutcome::Duplicate { .. } => {

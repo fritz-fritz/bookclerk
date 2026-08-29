@@ -8,27 +8,36 @@
 
 use sea_orm::DatabaseBackend;
 
-/// Lowers canonical Bookclerk **DML/query** SQL for `backend` (identity for SQLite/D1).
+/// Lowers canonical Bookclerk **DML/query** SQL for `backend`.
 ///
-/// Postgres adapters rewrite helpers (`IFNULL`, `json_extract`, `INSERT OR IGNORE`,
-/// 2+-arg `min`/`max`, `json_valid`) and `?` placeholders. Binding and host
-/// **DDL** type/identity rewrites (`AUTOINCREMENT`, `BLOB`, `INTEGER`) stay on
-/// the adapter execution edge ([`crate::schema_sql_for_backend`],
-/// [`crate::lower_binding_ddl_execute_request`]) so this function does not
-/// classify statements.
+/// Every backend rewrites `INSERT OR IGNORE` to unique/PK `ON CONFLICT DO
+/// NOTHING` (SQLite `OR IGNORE` would otherwise swallow `NOT NULL`). Postgres
+/// adapters then rewrite helpers (`IFNULL`, `json_extract`, 2+-arg `min`/`max`,
+/// `json_valid`, `round`/`sum`/`avg`), `ORDER BY` NULL ordering, and `?`
+/// placeholders. Binding and host **DDL** type/identity rewrites
+/// (`AUTOINCREMENT`, `BLOB`, `INTEGER`) stay on the adapter execution edge
+/// ([`crate::schema_sql_for_backend`], [`crate::lower_binding_ddl_execute_request`])
+/// so this function does not classify statements.
 #[must_use]
 pub fn lower_canonical_sql(backend: DatabaseBackend, sql: &str) -> String {
+    let sql = rewrite_insert_or_ignore_unique_conflict(sql);
     if backend != DatabaseBackend::Postgres {
-        return sql.to_string();
+        return sql;
     }
-    lower_canonical_to_postgres(sql)
+    lower_canonical_to_postgres_helpers(&sql)
 }
 
 /// Lowers canonical SQLite-shaped SQL onto PostgreSQL.
 #[must_use]
 pub fn lower_canonical_to_postgres(sql: &str) -> String {
-    let sql = insert_or_ignore_postgres(sql);
-    let sql = sqlite_fns_to_postgres(&sql);
+    let sql = rewrite_insert_or_ignore_unique_conflict(sql);
+    lower_canonical_to_postgres_helpers(&sql)
+}
+
+/// Postgres helper / NULLS / placeholder rewrites (after unique-conflict INSERT).
+fn lower_canonical_to_postgres_helpers(sql: &str) -> String {
+    let sql = sqlite_fns_to_postgres(sql);
+    let sql = rewrite_order_by_nulls_postgres(&sql);
     rewrite_placeholders_postgres(&sql)
 }
 
@@ -57,12 +66,14 @@ fn rewrite_placeholders_postgres(sql: &str) -> String {
     out
 }
 
-/// Renders `INSERT OR IGNORE` as `ON CONFLICT DO NOTHING` (before `RETURNING`).
+/// Renders `INSERT OR IGNORE` as unique/PK `ON CONFLICT DO NOTHING` (before `RETURNING`).
 ///
-/// The `INSERT OR IGNORE INTO` prefix and the `RETURNING` keyword are matched
+/// Canonical v1 conflict domain is uniqueness only: `NOT NULL` / `CHECK` still
+/// abort. SQLite `OR IGNORE` would otherwise swallow those. The
+/// `INSERT OR IGNORE INTO` prefix and the `RETURNING` keyword are matched
 /// case-insensitively in code spans. [`find_last_in_code`] stays case-sensitive so
 /// the host write-gate constant is never rewritten by accident.
-fn insert_or_ignore_postgres(sql: &str) -> String {
+fn rewrite_insert_or_ignore_unique_conflict(sql: &str) -> String {
     let trimmed = skip_trivia(sql);
     let Some(rest) = strip_prefix_ci(trimmed, "INSERT OR IGNORE INTO") else {
         return sql.to_string();
@@ -89,6 +100,7 @@ fn sqlite_fns_to_postgres(sql: &str) -> String {
     let mut sql = rewrite_fn_name(sql, "ifnull", "COALESCE");
     sql = rewrite_fn_name(&sql, "json_object", "json_build_object");
     sql = rewrite_variadic_min_max(&sql);
+    sql = rewrite_round_sum_avg(&sql);
     sql = rewrite_json_valid(&sql);
     sql = rewrite_json_extract(&sql);
     sql = replace_in_code(
@@ -167,10 +179,20 @@ fn rewrite_variadic_fn(sql: &str, name: &str, pg_name: &str) -> String {
                     .map(|a| rewrite_variadic_fn(a, name, pg_name))
                     .collect();
                 if rewritten.len() >= 2 {
+                    // SQLite scalar min/max: any NULL argument yields NULL.
+                    // PostgreSQL LEAST/GREATEST skip NULLs; poison explicitly.
+                    let nulls = rewritten
+                        .iter()
+                        .map(|a| format!("({a}) IS NULL"))
+                        .collect::<Vec<_>>()
+                        .join(" OR ");
+                    out.push_str("CASE WHEN ");
+                    out.push_str(&nulls);
+                    out.push_str(" THEN NULL ELSE ");
                     out.push_str(pg_name);
                     out.push('(');
                     out.push_str(&rewritten.join(", "));
-                    out.push(')');
+                    out.push_str(") END");
                 } else {
                     out.push_str(&sql[i..=open]);
                     out.push_str(&rewritten.join(", "));
@@ -185,6 +207,228 @@ fn rewrite_variadic_fn(sql: &str, name: &str, pg_name: &str) -> String {
         i += ch.len_utf8();
     }
     out
+}
+
+/// Rewrites `round` / `sum` / `avg` onto Postgres wire types (`Float64` / `Int64`).
+fn rewrite_round_sum_avg(sql: &str) -> String {
+    let sql = rewrite_round(sql);
+    let sql = rewrite_sum_or_avg(&sql, "sum", "BIGINT");
+    rewrite_sum_or_avg(&sql, "avg", "DOUBLE PRECISION")
+}
+
+/// Rewrites `round(x)` / `round(x, n)` onto `DOUBLE PRECISION`.
+fn rewrite_round(sql: &str) -> String {
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len() + 32);
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        if ident_call_at(sql, i, "round") {
+            let open = sql[i + "round".len()..]
+                .char_indices()
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(off, _)| i + "round".len() + off)
+                .unwrap_or(i + "round".len());
+            if let Some((args, rest)) = split_call_args(&sql[open + 1..]) {
+                let rewritten: Vec<String> = args.iter().map(|a| rewrite_round(a)).collect();
+                if rewritten.len() == 1 {
+                    out.push_str(&format!(
+                        "CAST(round(CAST(({}) AS NUMERIC)) AS DOUBLE PRECISION)",
+                        rewritten[0]
+                    ));
+                    i = sql.len() - rest.len();
+                    continue;
+                }
+                if rewritten.len() == 2 {
+                    out.push_str(&format!(
+                        "CAST(round(CAST(({}) AS NUMERIC), {}) AS DOUBLE PRECISION)",
+                        rewritten[0], rewritten[1]
+                    ));
+                    i = sql.len() - rest.len();
+                    continue;
+                }
+            }
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Rewrites `sum`/`avg` onto `BIGINT` / `DOUBLE PRECISION`.
+fn rewrite_sum_or_avg(sql: &str, name: &str, pg_type: &str) -> String {
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len() + 24);
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        if ident_call_at(sql, i, name) {
+            let open = sql[i + name.len()..]
+                .char_indices()
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(off, _)| i + name.len() + off)
+                .unwrap_or(i + name.len());
+            if let Some((args, rest)) = split_call_args(&sql[open + 1..]) {
+                let rewritten: Vec<String> = args
+                    .iter()
+                    .map(|a| rewrite_sum_or_avg(a, name, pg_type))
+                    .collect();
+                if rewritten.len() == 1 {
+                    out.push_str(&format!("CAST({name}({}) AS {pg_type})", rewritten[0]));
+                    i = sql.len() - rest.len();
+                    continue;
+                }
+            }
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Appends SQLite-equivalent NULL ordering (`ASC NULLS FIRST`, `DESC NULLS LAST`).
+fn rewrite_order_by_nulls_postgres(sql: &str) -> String {
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len() + 32);
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        if ident_eq_ci(sql, i, "ORDER") {
+            let after_order = skip_trivia_idx(sql, i + "ORDER".len());
+            if ident_eq_ci(sql, after_order, "BY") {
+                let by_end = after_order + "BY".len();
+                out.push_str(&sql[i..by_end]);
+                i = rewrite_order_by_items(sql, by_end, &mut out);
+                continue;
+            }
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Copies one `ORDER BY` item list, inserting NULLS FIRST/LAST when omitted.
+fn rewrite_order_by_items(sql: &str, mut i: usize, out: &mut String) -> usize {
+    loop {
+        let start = i;
+        i = skip_trivia_idx(sql, i);
+        out.push_str(&sql[start..i]);
+        if i >= sql.len() {
+            return i;
+        }
+        let expr_end = skip_order_by_expr(sql, i);
+        out.push_str(&sql[i..expr_end]);
+        i = skip_trivia_idx(sql, expr_end);
+        let mut desc = false;
+        if ident_eq_ci(sql, i, "ASC") {
+            out.push(' ');
+            out.push_str(&sql[i..i + "ASC".len()]);
+            i = skip_trivia_idx(sql, i + "ASC".len());
+        } else if ident_eq_ci(sql, i, "DESC") {
+            out.push(' ');
+            out.push_str(&sql[i..i + "DESC".len()]);
+            i = skip_trivia_idx(sql, i + "DESC".len());
+            desc = true;
+        }
+        if ident_eq_ci(sql, i, "NULLS") {
+            let after_nulls = skip_trivia_idx(sql, i + "NULLS".len());
+            if ident_eq_ci(sql, after_nulls, "FIRST") || ident_eq_ci(sql, after_nulls, "LAST") {
+                let kw_len = if ident_eq_ci(sql, after_nulls, "FIRST") {
+                    "FIRST".len()
+                } else {
+                    "LAST".len()
+                };
+                out.push(' ');
+                out.push_str(&sql[i..after_nulls + kw_len]);
+                i = skip_trivia_idx(sql, after_nulls + kw_len);
+            }
+        } else if desc {
+            out.push_str(" NULLS LAST");
+        } else {
+            out.push_str(" NULLS FIRST");
+        }
+        if let Some(next) = sql[i..].chars().next() {
+            if !next.is_whitespace() && next != ',' && next != ';' && next != ')' {
+                out.push(' ');
+            }
+        }
+        if sql.as_bytes().get(i) == Some(&b',') {
+            out.push(',');
+            i += 1;
+            continue;
+        }
+        return i;
+    }
+}
+
+/// Byte offset after one `ORDER BY` expression (balanced parens, literals skipped).
+fn skip_order_by_expr(sql: &str, mut i: usize) -> usize {
+    let mut depth = 0i32;
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            i += len;
+            continue;
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        if ch == '(' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if ch == ')' {
+            if depth == 0 {
+                return i;
+            }
+            depth -= 1;
+            i += 1;
+            continue;
+        }
+        if depth == 0 {
+            if ch == ',' || ch == ';' {
+                return i;
+            }
+            if ch.is_whitespace() {
+                let next = skip_trivia_idx(sql, i);
+                if order_by_item_terminator(sql, next) {
+                    return i;
+                }
+            }
+            if order_by_item_terminator(sql, i) {
+                return i;
+            }
+        }
+        i += ch.len_utf8();
+    }
+    i
+}
+
+/// True when `ORDER BY` item parsing should stop (`ASC`/`LIMIT`/…).
+fn order_by_item_terminator(sql: &str, i: usize) -> bool {
+    ident_eq_ci(sql, i, "ASC")
+        || ident_eq_ci(sql, i, "DESC")
+        || ident_eq_ci(sql, i, "NULLS")
+        || ident_eq_ci(sql, i, "LIMIT")
+        || ident_eq_ci(sql, i, "OFFSET")
+        || ident_eq_ci(sql, i, "RETURNING")
+        || ident_eq_ci(sql, i, "UNION")
+        || ident_eq_ci(sql, i, "EXCEPT")
+        || ident_eq_ci(sql, i, "INTERSECT")
+        || ident_eq_ci(sql, i, "FETCH")
+        || ident_eq_ci(sql, i, "FOR")
+        || ident_eq_ci(sql, i, "WINDOW")
 }
 
 /// Rewrites `json_valid(expr) = 0/1` and bare `json_valid(expr)` to `IS [NOT] JSON`.
@@ -814,10 +1058,17 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_backend_is_identity() {
+    fn sqlite_backend_is_identity_except_insert_or_ignore() {
         assert_eq!(
             lower_canonical_sql(DatabaseBackend::Sqlite, "a = ? AND b = ?"),
             "a = ? AND b = ?"
+        );
+        assert_eq!(
+            lower_canonical_sql(
+                DatabaseBackend::Sqlite,
+                "INSERT OR IGNORE INTO t (id) VALUES (?)"
+            ),
+            "INSERT INTO t (id) VALUES (?) ON CONFLICT DO NOTHING"
         );
     }
 
@@ -863,7 +1114,7 @@ mod tests {
     fn postgres_rewrites_variadic_min_max_and_json_valid() {
         assert_eq!(
             lower_canonical_to_postgres("SELECT MAX(attempt_count, 1), min(a, b)"),
-            "SELECT GREATEST(attempt_count, 1), LEAST(a, b)"
+            "SELECT CASE WHEN (attempt_count) IS NULL OR (1) IS NULL THEN NULL ELSE GREATEST(attempt_count, 1) END, CASE WHEN (a) IS NULL OR (b) IS NULL THEN NULL ELSE LEAST(a, b) END"
         );
         assert_eq!(
             lower_canonical_to_postgres("SELECT max(x)"),
@@ -900,6 +1151,10 @@ mod tests {
         assert!(sql.contains("COALESCE(NULL, 5)"), "{sql}");
         assert!(sql.contains("LEAST(1, 2)"), "{sql}");
         assert!(sql.contains("GREATEST(3, 1)"), "{sql}");
+        assert!(
+            sql.contains("CASE WHEN (1) IS NULL OR (2) IS NULL"),
+            "{sql}"
+        );
         assert!(sql.contains("json_build_object"), "{sql}");
         assert!(!sql.contains("json_extract("), "{sql}");
         assert!(!sql.contains("json_valid("), "{sql}");
@@ -968,7 +1223,9 @@ mod tests {
         assert!(mixed.contains("BYTEA"), "{mixed}");
         assert!(mixed.contains("Boolean"), "{mixed}");
 
-        let sql = insert_or_ignore_postgres("insert or ignore into t (id) values (?) returning id");
+        let sql = rewrite_insert_or_ignore_unique_conflict(
+            "insert or ignore into t (id) values (?) returning id",
+        );
         assert!(
             sql.contains("ON CONFLICT DO NOTHING RETURNING"),
             "conflict clause must precede RETURNING: {sql}"
@@ -1025,5 +1282,36 @@ mod tests {
                 "corpus {id}"
             );
         }
+    }
+
+    #[test]
+    fn postgres_order_by_appends_sqlite_null_ordering() {
+        assert_eq!(
+            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a"),
+            "SELECT a FROM t ORDER BY a NULLS FIRST"
+        );
+        assert_eq!(
+            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a DESC"),
+            "SELECT a FROM t ORDER BY a DESC NULLS LAST"
+        );
+        assert_eq!(
+            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a ASC NULLS LAST"),
+            "SELECT a FROM t ORDER BY a ASC NULLS LAST"
+        );
+        assert_eq!(
+            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a LIMIT 1"),
+            "SELECT a FROM t ORDER BY a NULLS FIRST LIMIT 1"
+        );
+    }
+
+    #[test]
+    fn postgres_round_sum_avg_cast_to_wire_types() {
+        let sql = lower_canonical_to_postgres("SELECT round(r, 2), sum(n), avg(n) FROM typed");
+        assert!(
+            sql.contains("CAST(round(CAST((r) AS NUMERIC), 2) AS DOUBLE PRECISION)"),
+            "{sql}"
+        );
+        assert!(sql.contains("CAST(sum(n) AS BIGINT)"), "{sql}");
+        assert!(sql.contains("CAST(avg(n) AS DOUBLE PRECISION)"), "{sql}");
     }
 }

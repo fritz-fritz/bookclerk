@@ -149,7 +149,10 @@ async fn binding_denies_reserved_tables_and_qualified_names() {
     .await
     .expect_err("qualified names must be denied");
     assert!(
-        err.to_string().contains("reserved") || err.to_string().contains("unauthorized"),
+        err.to_string().contains("reserved")
+            || err.to_string().contains("unauthorized")
+            || err.to_string().contains("qualified")
+            || err.to_string().contains("SQL v1"),
         "{err}"
     );
 }
@@ -613,4 +616,233 @@ async fn binding_lowercase_ddl_and_insert_or_ignore_returning() {
         reply.statements[0].rows[0].values[1],
         DbValue::Boolean(true)
     );
+}
+
+#[tokio::test]
+async fn binding_insert_or_ignore_unique_not_null_domain() {
+    let db = binding_db().await;
+    run_binding(
+        &db,
+        req(
+            "ddl-conflict",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_CONFLICT,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("conflict DDL");
+    let mut first = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_INSERT_OR_IGNORE_UNIQUE,
+        vec![],
+    );
+    first.result_selection = DbResultSelection::AffectedRows;
+    let inserted = run_binding(&db, req("ins-u1", vec![first.clone()]))
+        .await
+        .expect("first unique insert");
+    assert_eq!(inserted.statements[0].rows_affected, 1);
+    let ignored = run_binding(&db, req("ins-u2", vec![first]))
+        .await
+        .expect("duplicate unique ignore");
+    assert_eq!(ignored.statements[0].rows_affected, 0);
+    let mut null_ins = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_INSERT_OR_IGNORE_NOT_NULL,
+        vec![],
+    );
+    null_ins.result_selection = DbResultSelection::AffectedRows;
+    let err = run_binding(&db, req("ins-nn", vec![null_ins]))
+        .await
+        .expect_err("NOT NULL must still abort");
+    let t = err.to_string().to_ascii_lowercase();
+    assert!(
+        t.contains("null") || t.contains("constraint") || t.contains("not null"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn binding_min_max_null_poison_and_uncast_helpers() {
+    let db = binding_db().await;
+    run_binding(
+        &db,
+        req(
+            "ddl-typed",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_AUTOINCREMENT_BLOB,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("typed DDL");
+    let mut insert = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_INSERT,
+        vec![DbValue::Bytes(
+            bookclerk_db_exec::sql_v1::PORTABLE_INSERT_BLOB.to_vec(),
+        )],
+    );
+    insert.result_selection = DbResultSelection::AffectedRows;
+    run_binding(&db, req("ins-typed", vec![insert]))
+        .await
+        .expect("typed insert");
+    let mut mm = stmt(bookclerk_db_exec::sql_v1::PORTABLE_MIN_MAX_NULL, vec![]);
+    mm.max_rows = 8;
+    let mut round = stmt(bookclerk_db_exec::sql_v1::PORTABLE_UNCAST_ROUND, vec![]);
+    round.max_rows = 8;
+    let mut sum_avg = stmt(bookclerk_db_exec::sql_v1::PORTABLE_UNCAST_SUM_AVG, vec![]);
+    sum_avg.max_rows = 8;
+    let reply = run_binding(&db, req("sel-sem", vec![mm, round, sum_avg]))
+        .await
+        .expect("semantic select");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_min_max_null_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_uncast_round_mismatch(&reply.statements[1])
+    {
+        panic!("{err}");
+    }
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_uncast_sum_avg_mismatch(&reply.statements[2])
+    {
+        panic!("{err}");
+    }
+}
+
+#[tokio::test]
+async fn binding_order_by_nulls_and_identity_and_unquoted_fold() {
+    let db = binding_db().await;
+    run_binding(
+        &db,
+        req(
+            "ddl-ord",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_ORDER_NULLS,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("order DDL");
+    for (op, sql) in [
+        (
+            "i1",
+            bookclerk_db_exec::sql_v1::PORTABLE_ORDER_NULLS_INSERT_1,
+        ),
+        (
+            "inull",
+            bookclerk_db_exec::sql_v1::PORTABLE_ORDER_NULLS_INSERT_NULL,
+        ),
+        (
+            "i2",
+            bookclerk_db_exec::sql_v1::PORTABLE_ORDER_NULLS_INSERT_2,
+        ),
+    ] {
+        let mut ins = stmt(sql, vec![]);
+        ins.result_selection = DbResultSelection::AffectedRows;
+        run_binding(&db, req(op, vec![ins])).await.expect(op);
+    }
+    let mut asc = stmt(bookclerk_db_exec::sql_v1::PORTABLE_ORDER_NULLS_ASC, vec![]);
+    asc.max_rows = 8;
+    let mut desc = stmt(bookclerk_db_exec::sql_v1::PORTABLE_ORDER_NULLS_DESC, vec![]);
+    desc.max_rows = 8;
+    let ordered = run_binding(&db, req("sel-ord", vec![asc, desc]))
+        .await
+        .expect("order select");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_order_nulls_asc_mismatch(&ordered.statements[0])
+    {
+        panic!("{err}");
+    }
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_order_nulls_desc_mismatch(&ordered.statements[1])
+    {
+        panic!("{err}");
+    }
+
+    run_binding(
+        &db,
+        req(
+            "ddl-id",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_IDENTITY,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("identity DDL");
+    let mut expl = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_EXPLICIT,
+        vec![],
+    );
+    expl.result_selection = DbResultSelection::AffectedRows;
+    run_binding(&db, req("ins-ex", vec![expl]))
+        .await
+        .expect("explicit id");
+    let mut omit = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_INSERT_OMIT,
+        vec![],
+    );
+    omit.result_selection = DbResultSelection::AffectedRows;
+    run_binding(&db, req("ins-om", vec![omit.clone()]))
+        .await
+        .expect("omit id");
+    let mut mx = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_SELECT_MAX,
+        vec![],
+    );
+    mx.max_rows = 8;
+    let max1 = run_binding(&db, req("sel-max1", vec![mx.clone()]))
+        .await
+        .expect("max after omit");
+    assert_eq!(max1.statements[0].rows[0].values[0], DbValue::Int64(101));
+    let mut del = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_IDENTITY_DELETE_MAX,
+        vec![],
+    );
+    del.result_selection = DbResultSelection::AffectedRows;
+    run_binding(&db, req("del-max", vec![del]))
+        .await
+        .expect("delete max");
+    run_binding(&db, req("ins-om2", vec![omit]))
+        .await
+        .expect("omit after delete");
+    let max2 = run_binding(&db, req("sel-max2", vec![mx]))
+        .await
+        .expect("max after reinsert");
+    assert_eq!(max2.statements[0].rows[0].values[0], DbValue::Int64(102));
+
+    run_binding(
+        &db,
+        req(
+            "ddl-fold",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_UNQUOTED_FOLD,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("fold DDL");
+    let mut fins = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_UNQUOTED_FOLD_INSERT,
+        vec![],
+    );
+    fins.result_selection = DbResultSelection::AffectedRows;
+    run_binding(&db, req("ins-fold", vec![fins]))
+        .await
+        .expect("fold insert");
+    let mut fsel = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_UNQUOTED_FOLD_SELECT,
+        vec![],
+    );
+    fsel.max_rows = 8;
+    let folded = run_binding(&db, req("sel-fold", vec![fsel]))
+        .await
+        .expect("fold select");
+    assert_eq!(folded.statements[0].rows[0].values[0], DbValue::Int64(7));
 }

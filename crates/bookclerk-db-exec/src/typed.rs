@@ -45,6 +45,22 @@ fn effective_row_cap(stmt_max: u32, caps_max: u32) -> u32 {
     }
 }
 
+/// Runs adapter-private serial-sync DDL after a Postgres CREATE TABLE.
+async fn apply_postgres_identity_companions(
+    txn: &impl ConnectionTrait,
+    backend: sea_orm::DatabaseBackend,
+    sql: &str,
+) -> Result<(), DbErr> {
+    if backend != sea_orm::DatabaseBackend::Postgres {
+        return Ok(());
+    }
+    for companion in crate::schema_postgres::postgres_identity_companions(sql) {
+        txn.execute_raw(Statement::from_string(backend, companion))
+            .await?;
+    }
+    Ok(())
+}
+
 /// Convert a typed bind into a SeaORM value without JSON / `b64:` decoding.
 #[must_use]
 pub fn db_value_to_sea(value: &DbValue) -> SeaValue {
@@ -771,6 +787,7 @@ async fn execute_typed_join_body(
                 }
             }
         };
+        apply_postgres_identity_companions(txn, backend, &sql).await?;
         statements.push(stmt_result);
     }
     session.check(AtomicInterruptPhase::AroundCommit)?;
@@ -951,6 +968,11 @@ where
                 }
             }
         };
+        if let Err(err) = apply_postgres_identity_companions(&txn, backend, &sql).await {
+            let _ = txn.rollback().await;
+            let _ = take_txn_fault();
+            return Err(err);
+        }
         statements.push(stmt_result);
         if skip_guest_on_prior
             && crate::guest_receipt::should_skip_remaining_guest_work(
