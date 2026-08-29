@@ -71,6 +71,10 @@ impl AtomicSession {
 }
 
 /// Runs adapter-private serial-sync DDL after a Postgres CREATE TABLE.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a companion statement fails to execute.
 async fn apply_exec_identity_companions(
     txn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,

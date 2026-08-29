@@ -46,6 +46,10 @@ fn effective_row_cap(stmt_max: u32, caps_max: u32) -> u32 {
 }
 
 /// Runs adapter-private serial-sync DDL after a Postgres CREATE TABLE.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a companion statement fails to execute.
 async fn apply_postgres_identity_companions(
     txn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
