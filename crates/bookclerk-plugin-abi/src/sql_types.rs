@@ -39,12 +39,12 @@ impl SqlType {
     /// Parses a canonical column type ident (already lowercased).
     #[must_use]
     pub fn from_column_ident(ty: &str) -> Option<Self> {
-        match ty {
-            "integer" => Some(Self::Integer),
-            "real" => Some(Self::Real),
-            "text" => Some(Self::Text),
-            "blob" => Some(Self::Blob),
-            "boolean" => Some(Self::Boolean),
+        match ty.to_ascii_lowercase().as_str() {
+            "integer" | "bigint" | "int" | "int4" | "int8" | "smallint" => Some(Self::Integer),
+            "real" | "float" | "double" => Some(Self::Real),
+            "text" | "varchar" => Some(Self::Text),
+            "blob" | "bytea" => Some(Self::Blob),
+            "boolean" | "bool" => Some(Self::Boolean),
             _ => None,
         }
     }
@@ -1645,6 +1645,19 @@ mod tests {
         )
         .expect("schema");
         assert_eq!(schema.identity_column.as_deref(), Some("pk"));
+        let lowered = parse_create_table_schema(
+            "CREATE TABLE IF NOT EXISTS t (id BIGINT PRIMARY KEY, body TEXT, blob BYTEA, r DOUBLE PRECISION)",
+        )
+        .expect("postgres-lowered schema");
+        assert_eq!(
+            lowered.columns,
+            vec![
+                ("id".into(), SqlType::Integer),
+                ("body".into(), SqlType::Text),
+                ("blob".into(), SqlType::Blob),
+                ("r".into(), SqlType::Real),
+            ]
+        );
     }
 
     #[test]
