@@ -263,6 +263,10 @@ pub async fn load_physical_sql_type_env(conn: &impl ConnectionTrait) -> Result<S
 /// Host sessions merge live physical tables, then the canonical host schema,
 /// so ad-hoc host test tables typecheck without adopting plugin orphans.
 ///
+/// New atomic batches snapshot this in autocommit **before** `BEGIN` so SQLite
+/// does not hold a reserved lock across paged catalog/physical loads. Nested
+/// execute on an open transaction still snapshots inside that transaction.
+///
 /// # Errors
 ///
 /// Returns [`DbErr`] when the catalog or physical snapshot cannot be loaded.
@@ -1509,13 +1513,7 @@ where
         ));
     }
     let started = Instant::now();
-    let txn = db.begin().await?;
-    if is_txn_broken() {
-        let _ = txn.rollback().await;
-        let fault = take_txn_fault().unwrap_or_else(|| "database begin failed".into());
-        return Err(DbErr::Custom(fault));
-    }
-    let backend = ConnectionTrait::get_database_backend(&txn);
+    let backend = ConnectionTrait::get_database_backend(db);
     // Host schema batches travel canonical; this adapter edge lowers/splits
     // them for the live backend and collapses the results back to the wire
     // request shape below.
@@ -1525,6 +1523,19 @@ where
     // Binding CREATE/DROP stays canonical on the wire; Postgres adapters
     // lower types/`AUTOINCREMENT` here (not in `lower_canonical_sql`).
     let req = crate::schema_postgres::lower_binding_ddl_execute_request(backend, &req);
+    let sql_started = Instant::now();
+    let mut env = catalog_env_for_typed(db, &session).await?;
+    let mut type_req = req.clone();
+    for (stmt, canon) in type_req.statements.iter_mut().zip(canonical_sqls.iter()) {
+        stmt.sql = canon.clone();
+    }
+    let proofs = proofs_for_request(&env, &type_req, stamped)?;
+    let txn = db.begin().await?;
+    if is_txn_broken() {
+        let _ = txn.rollback().await;
+        let fault = take_txn_fault().unwrap_or_else(|| "database begin failed".into());
+        return Err(DbErr::Custom(fault));
+    }
     if backend == sea_orm::DatabaseBackend::Postgres {
         if let Some(ms) = remaining_deadline_ms(session.deadline_unix_ms) {
             let sql = format!("SET LOCAL statement_timeout = '{ms}ms'");
@@ -1534,25 +1545,6 @@ where
             }
         }
     }
-    let sql_started = Instant::now();
-    let mut env = match catalog_env_for_typed(&txn, &session).await {
-        Ok(env) => env,
-        Err(err) => {
-            let _ = txn.rollback().await;
-            return Err(err);
-        }
-    };
-    let mut type_req = req.clone();
-    for (stmt, canon) in type_req.statements.iter_mut().zip(canonical_sqls.iter()) {
-        stmt.sql = canon.clone();
-    }
-    let proofs = match proofs_for_request(&env, &type_req, stamped) {
-        Ok(proofs) => proofs,
-        Err(err) => {
-            let _ = txn.rollback().await;
-            return Err(err);
-        }
-    };
     let reconcile = guest_hash.is_some();
     let mut statements = Vec::with_capacity(req.statements.len());
     // Guest-typed wrap only: host library plans also SELECT a prior receipt

@@ -131,7 +131,11 @@ impl SqliteProxy {
     /// Call after the host applies schema (see [`open`] / [`open_memory`]).
     #[must_use]
     pub fn new(conn: Connection) -> Self {
-        let _ = conn.busy_timeout(std::time::Duration::from_millis(250));
+        // TRUNCATE journal serializes writers. Two LibraryStores (or CLI +
+        // daemon) on one file wait here through BEGIN IMMEDIATE. 250ms was
+        // shorter than catalog paging under CI `spawn_blocking`, which turned
+        // snapshot CAS into SQLITE_BUSY instead of a lost update.
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         let budget = Arc::new(Mutex::new(ExecBudget::unlimited()));
         let handler_budget = Arc::clone(&budget);
         conn.progress_handler(

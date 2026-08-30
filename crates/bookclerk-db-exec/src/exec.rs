@@ -292,13 +292,25 @@ async fn execute_statements_body(
     session: AtomicSession,
 ) -> Result<DbPlanExecResult, DbErr> {
     let started = Instant::now();
+    let backend = ConnectionTrait::get_database_backend(db);
+    let sql_started = Instant::now();
+    // Snapshot in autocommit so SQLite BEGIN IMMEDIATE does not hold a reserved
+    // lock across paged catalog/physical loads (concurrent writers wait on
+    // busy_timeout). Physical tables first so ad-hoc host test tables (created
+    // via raw SQL) are visible. Canonical host schema and the plugin catalog
+    // overwrite overlapping names; plugin typed execute never calls this loader.
+    let mut env = load_physical_sql_type_env(db).await?;
+    env.merge(&load_sql_type_env(db).await?);
+    env.merge(&sql_host_bookkeeping_type_env());
+    env.merge(&session.type_env);
+    let type_req = plan_as_typed_request(plan, operation_id);
+    let proofs = proofs_for_host_plan(&type_req, &env)?;
     let txn = db.begin().await?;
     if is_txn_broken() {
         let _ = txn.rollback().await;
         let fault = take_txn_fault().unwrap_or_else(|| "database begin failed".into());
         return Err(DbErr::Custom(fault));
     }
-    let backend = ConnectionTrait::get_database_backend(&txn);
     if backend == sea_orm::DatabaseBackend::Postgres {
         if let Some(ms) = remaining_deadline_ms(session.deadline_unix_ms) {
             let sql = format!("SET LOCAL statement_timeout = '{ms}ms'");
@@ -308,37 +320,6 @@ async fn execute_statements_body(
             }
         }
     }
-    let sql_started = Instant::now();
-    // Physical tables first so ad-hoc host test tables (created via raw SQL)
-    // are visible. Canonical host schema and the plugin catalog overwrite
-    // overlapping names; plugin typed execute never calls this loader.
-    let mut env = match load_physical_sql_type_env(&txn).await {
-        Ok(env) => env,
-        Err(err) => {
-            let _ = txn.rollback().await;
-            let _ = take_txn_fault();
-            return Err(err);
-        }
-    };
-    match load_sql_type_env(&txn).await {
-        Ok(catalog) => env.merge(&catalog),
-        Err(err) => {
-            let _ = txn.rollback().await;
-            let _ = take_txn_fault();
-            return Err(err);
-        }
-    }
-    env.merge(&sql_host_bookkeeping_type_env());
-    env.merge(&session.type_env);
-    let type_req = plan_as_typed_request(plan, operation_id);
-    let proofs = match proofs_for_host_plan(&type_req, &env) {
-        Ok(proofs) => proofs,
-        Err(err) => {
-            let _ = txn.rollback().await;
-            let _ = take_txn_fault();
-            return Err(err);
-        }
-    };
     let mut statements = Vec::with_capacity(plan.statements.len());
     let mut used_atomic = atomic_result_envelope_len(operation_id);
     for (stmt, proof) in plan.statements.iter().zip(proofs.iter()) {
