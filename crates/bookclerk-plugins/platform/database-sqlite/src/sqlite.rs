@@ -155,7 +155,12 @@ impl SqliteProxy {
         }
     }
 
-    /// Copies the current request budget onto this connection after the lease is held.
+    /// Copies the current request budget onto this connection.
+    ///
+    /// Called on `BEGIN` and on autocommit statements so catalog snapshots
+    /// taken before `BEGIN IMMEDIATE` use this attempt's cap (and
+    /// `suspend_execute_row_cap`), not a leftover from a prior atomic on the
+    /// same proxy.
     fn install_request_budget(&self) {
         if let Some(budget) = current_exec_budget() {
             *self.budget.lock().unwrap_or_else(|e| e.into_inner()) = budget;
@@ -322,6 +327,7 @@ impl ProxyDatabaseTrait for SqliteProxy {
             return Err(txn_broken_err());
         }
         let _permit = self.acquire_for_statement().await;
+        self.install_request_budget();
         let conn = self.conn.clone();
         let budget = self.connection_budget();
         budget.reset_rows_seen();
