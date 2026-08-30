@@ -3002,7 +3002,7 @@ mod tests {
         let mut env = SqlTypeEnv::new();
         env.insert_column("jobs", "payload", SqlType::Text);
         typecheck_execute_request(
-            &req("SELECT 1 FROM jobs WHERE IFNULL(json_extract(payload, '$.v'), '') = '1'"),
+            &req("SELECT 1 FROM jobs WHERE IFNULL(json_extract(payload, '$.v') || '', '') = '1'"),
             &env,
         )
         .unwrap();

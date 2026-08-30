@@ -1826,6 +1826,9 @@ fn plan_lock_slot(slot_key: &str) -> Vec<SqlStmt> {
 ///
 /// `json(payload)` aborts a D1 batch. Rewriting the envelope in the same
 /// transaction keeps a malformed highest-priority row from poisoning claim.
+/// Version is compared as TEXT (`json_extract || ''`) because SQLite
+/// `json_extract` of a JSON number is INTEGER (`1 = '1'` is false) while
+/// Postgres `#>>` is TEXT, and SQL v1 forbids CAST TEXT↔INTEGER.
 fn plan_mark_unreadable_pending_jobs(now: &str) -> SqlStmt {
     sql(
         "UPDATE jobs SET \
@@ -1836,7 +1839,7 @@ fn plan_mark_unreadable_pending_jobs(now: &str) -> SqlStmt {
             error_kind = 'invalid_job', \
             error_message = CASE \
                 WHEN json_valid(payload) = 0 THEN 'malformed job payload JSON' \
-                WHEN IFNULL(json_extract(payload, '$.v'), '') != '1' \
+                WHEN IFNULL(json_extract(payload, '$.v') || '', '') != '1' \
                     THEN 'unsupported job payload version' \
                 WHEN resource_class NOT IN ('network', 'media', 'transcription', 'indexing') \
                     THEN 'unknown job resource class' \
@@ -1848,7 +1851,7 @@ fn plan_mark_unreadable_pending_jobs(now: &str) -> SqlStmt {
             lease_expires_at = NULL \
          WHERE state = 'pending' AND ( \
             json_valid(payload) = 0 \
-            OR IFNULL(json_extract(payload, '$.v'), '') != '1' \
+            OR IFNULL(json_extract(payload, '$.v') || '', '') != '1' \
             OR kind NOT IN ('scan', 'acquire', 'listen_sync', 'integration_scan') \
             OR resource_class NOT IN ('network', 'media', 'transcription', 'indexing') \
          )",
@@ -1963,7 +1966,7 @@ fn plan_claim_next_job(
                      WHERE resource_class = ? AND state = 'pending' AND run_after <= ? \
                        AND cancel_requested = 0 \
                        AND json_valid(payload) = 1 \
-                       AND IFNULL(json_extract(payload, '$.v'), '') = '1' \
+                       AND IFNULL(json_extract(payload, '$.v') || '', '') = '1' \
                        AND kind IN ('scan', 'acquire', 'listen_sync', 'integration_scan') \
                        AND resource_class IN ('network', 'media', 'transcription', 'indexing') \
                      ORDER BY priority DESC, created_at ASC LIMIT 1\
