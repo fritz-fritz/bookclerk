@@ -2998,6 +2998,31 @@ mod tests {
     }
 
     #[test]
+    fn json_extract_version_compare_stays_text() {
+        let mut env = SqlTypeEnv::new();
+        env.insert_column("jobs", "payload", SqlType::Text);
+        typecheck_execute_request(
+            &req("SELECT 1 FROM jobs WHERE IFNULL(json_extract(payload, '$.v'), '') = '1'"),
+            &env,
+        )
+        .unwrap();
+        let err = typecheck_execute_request(
+            &req(
+                "SELECT 1 FROM jobs WHERE IFNULL(CAST(json_extract(payload, '$.v') AS INTEGER), -1) = 1",
+            ),
+            &env,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("CAST"), "{err}");
+        let err = typecheck_execute_request(&req("SELECT typed_bump() AS n"), &SqlTypeEnv::new())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown helper typed_bump"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn ifnull_mixed_literals_fail_closed() {
         let err = typecheck_execute_request(&req("SELECT IFNULL('x', 0)"), &SqlTypeEnv::new())
             .unwrap_err();

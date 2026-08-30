@@ -1075,6 +1075,9 @@ fn parse_v1_ident(index: usize, scan: &mut Scan<'_>) -> Result<String> {
     Ok(ident)
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn reject_oversize_ident(index: usize, ident: &str) -> Result<()> {
     if crate::sql_types::sql_v1_ident_in_bounds(ident) {
         Ok(())

@@ -1659,12 +1659,22 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
         "CREATE TABLE typed_counter (n INTEGER NOT NULL)",
         "INSERT INTO typed_counter (n) VALUES (0)",
         "CREATE FUNCTION typed_bump() RETURNS integer LANGUAGE plpgsql AS $$ BEGIN UPDATE typed_counter SET n = n + 1; RETURN 1; END; $$",
+        "CREATE VIEW typed_bump_view AS SELECT typed_bump() AS n",
     ] {
         sea_orm::ConnectionTrait::execute_raw(&db, sea_orm::Statement::from_string(backend, sql))
             .await
             .unwrap();
     }
-    let empty = typed_query("bump", "SELECT typed_bump() AS n LIMIT 0");
+    // `typed_bump()` is not a SQL v1 helper. SELECT the volatile function
+    // through a view so the typed statement stays fail-closed on unknown
+    // helpers while still detecting a describe-time re-execute.
+    let mut type_env = crate::migrations::host_sql_type_env();
+    type_env.insert_column(
+        "typed_bump_view",
+        "n",
+        bookclerk_plugin_abi::SqlType::Integer,
+    );
+    let empty = typed_query("bump", "SELECT n FROM typed_bump_view LIMIT 0");
     let reply = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &empty,
@@ -1673,8 +1683,7 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(type_env.clone()),
     )
     .await
     .unwrap();

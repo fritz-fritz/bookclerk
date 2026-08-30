@@ -1836,7 +1836,7 @@ fn plan_mark_unreadable_pending_jobs(now: &str) -> SqlStmt {
             error_kind = 'invalid_job', \
             error_message = CASE \
                 WHEN json_valid(payload) = 0 THEN 'malformed job payload JSON' \
-                WHEN IFNULL(CAST(json_extract(payload, '$.v') AS INTEGER), -1) != 1 \
+                WHEN IFNULL(json_extract(payload, '$.v'), '') != '1' \
                     THEN 'unsupported job payload version' \
                 WHEN resource_class NOT IN ('network', 'media', 'transcription', 'indexing') \
                     THEN 'unknown job resource class' \
@@ -1848,7 +1848,7 @@ fn plan_mark_unreadable_pending_jobs(now: &str) -> SqlStmt {
             lease_expires_at = NULL \
          WHERE state = 'pending' AND ( \
             json_valid(payload) = 0 \
-            OR IFNULL(CAST(json_extract(payload, '$.v') AS INTEGER), -1) != 1 \
+            OR IFNULL(json_extract(payload, '$.v'), '') != '1' \
             OR kind NOT IN ('scan', 'acquire', 'listen_sync', 'integration_scan') \
             OR resource_class NOT IN ('network', 'media', 'transcription', 'indexing') \
          )",
@@ -1963,7 +1963,7 @@ fn plan_claim_next_job(
                      WHERE resource_class = ? AND state = 'pending' AND run_after <= ? \
                        AND cancel_requested = 0 \
                        AND json_valid(payload) = 1 \
-                       AND IFNULL(CAST(json_extract(payload, '$.v') AS INTEGER), -1) = 1 \
+                       AND IFNULL(json_extract(payload, '$.v'), '') = '1' \
                        AND kind IN ('scan', 'acquire', 'listen_sync', 'integration_scan') \
                        AND resource_class IN ('network', 'media', 'transcription', 'indexing') \
                      ORDER BY priority DESC, created_at ASC LIMIT 1\
@@ -3005,6 +3005,21 @@ mod tests {
             "receipt must use the pre-write snapshot: {}",
             compiled.plan.statements[insert_idx].sql
         );
+        assert_host_plan_typechecks(&compiled.plan);
+    }
+
+    #[test]
+    fn claim_plan_typechecks_against_host_schema() {
+        let compiled = super::compile_named_request(
+            "claim-op",
+            &DbAtomicParams::ClaimNextJob {
+                resource_class: "network".into(),
+                owner: "worker-1".into(),
+                lease_secs: 60,
+            },
+            "2024-06-01T00:00:00Z",
+        )
+        .unwrap();
         assert_host_plan_typechecks(&compiled.plan);
     }
 

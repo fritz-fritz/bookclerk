@@ -99,6 +99,7 @@ impl ResolvedStatement {
     }
 
     /// True when `sql` is the exact statement this proof was built from.
+    #[cfg(feature = "host")]
     #[must_use]
     pub fn proves(&self, sql: &str) -> bool {
         self.statement_hash == statement_sql_hash(sql)
@@ -110,6 +111,7 @@ impl ResolvedStatement {
 /// # Errors
 ///
 /// Returns when the hashes differ (transformed or reindexed SQL).
+#[cfg(feature = "host")]
 pub fn assert_proof_matches_sql(proof: &ResolvedStatement, sql: &str) -> crate::Result<()> {
     if proof.proves(sql) {
         Ok(())
