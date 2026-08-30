@@ -288,7 +288,7 @@ where
         .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
     let guest_len = req.statements.len();
     let guest_hash = req.request_hash.clone();
-    let envelope = wrap_guest_typed_request(req);
+    let envelope = wrap_guest_typed_request(req, policy.sql_types());
     let reply = exec(envelope.clone()).await?;
     crate::validate_execute_reply(&envelope.request, &reply, caps)
         .map_err(|err| bookclerk_plugin_abi::PluginError::unavailable(err.to_string()))?;

@@ -90,6 +90,6 @@ pub use schema_postgres::{
     lower_binding_sql_for_backend, schema_sql_for_backend, split_schema_statements,
 };
 pub use typed::{
-    db_value_from_sea, db_value_to_sea, execute_typed_on_session, execute_typed_on_session_then,
-    execute_typed_on_txn, load_sql_type_env,
+    db_value_from_sea, db_value_to_sea, execute_typed_envelope, execute_typed_on_session,
+    execute_typed_on_session_then, execute_typed_on_txn, load_sql_type_env,
 };

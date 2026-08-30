@@ -17,7 +17,7 @@ use bookclerk_db_exec::db_value_from_sea;
 use bookclerk_plugin_abi::HostExecuteEnvelope;
 use bookclerk_plugin_abi::{
     database_context_from_params, DbBootstrap, DbCapabilities, DbConnectParams, DbValue, SqlType,
-    SqlTypeEnv, SQL_CATALOG_TABLE,
+    SqlTypeEnv, FIRST_PARTY_MAX_RESULT_ROWS, SQL_CATALOG_TABLE,
 };
 use bookclerk_plugin_sdk::GuestDatabase;
 use bookclerk_plugin_sdk::PRODUCT_API_VERSION;
@@ -364,7 +364,13 @@ impl GuestDatabase for BindingGuestDatabase {
         }
         request.deadline_unix_ms =
             capped_binding_deadline(request.deadline_unix_ms, self.host_deadline_unix_ms);
-        let env = load_binding_sql_type_env(&self.session, &self.key).await;
+        let env = load_binding_sql_type_env(
+            &self.session,
+            &self.key,
+            &self.cancel,
+            request.deadline_unix_ms,
+        )
+        .await?;
         let policy = bookclerk_library::GuestSqlPolicy::binding_owned().with_sql_types(env);
         let cancel = Arc::clone(&self.cancel);
         bookclerk_library::execute_guest_atomic_with(request, &self.caps, &policy, |envelope| {
@@ -421,53 +427,191 @@ fn d1_binding_database_name(owner_plugin_id: &str, binding: &str) -> String {
 }
 
 /// Reads the durable binding catalog through the host (guest-denied) path.
-async fn load_binding_sql_type_env(session: &PluginSession, key: &str) -> SqlTypeEnv {
-    let req = ExecuteRequest {
-        operation_id: format!("binding-catalog-{key}"),
-        request_hash: String::new(),
-        deadline_unix_ms: 0,
-        statements: vec![TypedDbStatement {
-            sql: format!("SELECT table_name, column_name, sql_type FROM {SQL_CATALOG_TABLE}"),
-            parameters: Vec::new(),
-            kind: DbPlanStatementKind::Select,
-            max_rows: 10_000,
-            result_selection: DbResultSelection::Rows,
-        }],
-    };
-    let Ok(reply) = session
-        .db_execute_binding_request(key, req, Arc::new(AtomicBool::new(false)))
-        .await
-    else {
-        return SqlTypeEnv::new();
-    };
-    sql_type_env_from_catalog_reply(&reply)
-}
-
-/// Rebuilds [`SqlTypeEnv`] from a catalog `SELECT` reply (SELECT-list order).
-fn sql_type_env_from_catalog_reply(reply: &ExecuteReply) -> SqlTypeEnv {
+async fn load_binding_sql_type_env(
+    session: &PluginSession,
+    key: &str,
+    cancel: &Arc<AtomicBool>,
+    deadline_unix_ms: u64,
+) -> std::result::Result<SqlTypeEnv, AbiPluginError> {
+    let page = FIRST_PARTY_MAX_RESULT_ROWS.max(1);
     let mut env = SqlTypeEnv::new();
-    let Some(stmt) = reply.statements.first() else {
-        return env;
-    };
-    for row in &stmt.rows {
-        let table = catalog_cell_text(row.values.first());
-        let column = catalog_cell_text(row.values.get(1));
-        let ty = catalog_cell_text(row.values.get(2));
-        if table.is_empty() || column.is_empty() {
-            continue;
+    let mut cursor_table = String::new();
+    let mut cursor_ord: i64 = -1;
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(AbiPluginError::cancelled("fence lost"));
         }
-        if let Some(sql_ty) = SqlType::from_column_ident(ty.to_ascii_lowercase().as_str()) {
+        let req = ExecuteRequest {
+            operation_id: format!("binding-catalog-{key}"),
+            request_hash: String::new(),
+            deadline_unix_ms,
+            statements: vec![TypedDbStatement {
+                sql: format!(
+                    "SELECT table_name, column_name, sql_type, ordinal, is_identity, default_sql \
+                     FROM {SQL_CATALOG_TABLE} \
+                     WHERE table_name > {ct} OR (table_name = {ct} AND ordinal > {co}) \
+                     ORDER BY table_name, ordinal LIMIT {page}",
+                    ct = format!("'{}'", cursor_table.replace('\'', "''")),
+                    co = cursor_ord,
+                ),
+                parameters: Vec::new(),
+                kind: DbPlanStatementKind::Select,
+                max_rows: page,
+                result_selection: DbResultSelection::Rows,
+            }],
+        };
+        let reply = match session
+            .db_execute_binding_request(key, req, Arc::clone(cancel))
+            .await
+        {
+            Ok(reply) => reply,
+            Err(err) => {
+                let msg = err.to_string().to_ascii_lowercase();
+                if msg.contains("no such table")
+                    || msg.contains("does not exist")
+                    || msg.contains("undefined table")
+                    || msg.contains("unknown table")
+                {
+                    return Ok(SqlTypeEnv::new());
+                }
+                return Err(host_err_to_abi(err));
+            }
+        };
+        let Some(stmt) = reply.statements.first() else {
+            break;
+        };
+        if stmt.rows.is_empty() {
+            break;
+        }
+        let n = stmt.rows.len();
+        for row in &stmt.rows {
+            let table = catalog_cell_text(row.values.first());
+            let column = catalog_cell_text(row.values.get(1));
+            let ty = catalog_cell_text(row.values.get(2));
+            if table.is_empty() || column.is_empty() {
+                return Err(AbiPluginError::internal(
+                    "bookclerk_sql_catalog row is missing table_name or column_name",
+                ));
+            }
+            let Some(sql_ty) = SqlType::from_column_ident(ty.to_ascii_lowercase().as_str()) else {
+                return Err(AbiPluginError::internal(format!(
+                    "bookclerk_sql_catalog has unknown sql_type {ty}"
+                )));
+            };
+            let ordinal = catalog_cell_i64(row.values.get(3)).ok_or_else(|| {
+                AbiPluginError::internal("bookclerk_sql_catalog row is missing ordinal")
+            })?;
             env.insert_column(&table, &column, sql_ty);
+            cursor_table = table;
+            cursor_ord = ordinal;
+        }
+        if n < usize::try_from(page).unwrap_or(usize::MAX) {
+            break;
         }
     }
-    env
+    load_binding_sql_schema_env(session, key, cancel, deadline_unix_ms, page, &mut env).await?;
+    Ok(env)
 }
 
-/// TEXT cell from a catalog row, or empty when missing/non-text.
+/// Pages `bookclerk_sql_schema` into `env` (fail closed on malformed rows).
+async fn load_binding_sql_schema_env(
+    session: &PluginSession,
+    key: &str,
+    cancel: &Arc<AtomicBool>,
+    deadline_unix_ms: u64,
+    page: u32,
+    env: &mut SqlTypeEnv,
+) -> std::result::Result<(), AbiPluginError> {
+    let mut cursor = String::new();
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(AbiPluginError::cancelled("fence lost"));
+        }
+        let ct = format!("'{}'", cursor.replace('\'', "''"));
+        let req = ExecuteRequest {
+            operation_id: format!("binding-schema-{key}"),
+            request_hash: String::new(),
+            deadline_unix_ms,
+            statements: vec![TypedDbStatement {
+                sql: format!(
+                    "SELECT table_name, fingerprint, identity_column \
+                     FROM {} \
+                     WHERE table_name > {ct} \
+                     ORDER BY table_name LIMIT {page}",
+                    bookclerk_plugin_abi::SQL_SCHEMA_TABLE,
+                ),
+                parameters: Vec::new(),
+                kind: DbPlanStatementKind::Select,
+                max_rows: page,
+                result_selection: DbResultSelection::Rows,
+            }],
+        };
+        let reply = match session
+            .db_execute_binding_request(key, req, Arc::clone(cancel))
+            .await
+        {
+            Ok(reply) => reply,
+            Err(err) => {
+                let msg = err.to_string().to_ascii_lowercase();
+                if msg.contains("no such table")
+                    || msg.contains("does not exist")
+                    || msg.contains("undefined table")
+                    || msg.contains("unknown table")
+                {
+                    return Ok(());
+                }
+                return Err(host_err_to_abi(err));
+            }
+        };
+        let Some(stmt) = reply.statements.first() else {
+            break;
+        };
+        if stmt.rows.is_empty() {
+            break;
+        }
+        let n = stmt.rows.len();
+        for row in &stmt.rows {
+            let table = catalog_cell_text(row.values.first());
+            let fingerprint = catalog_cell_text(row.values.get(1));
+            let identity = catalog_cell_text(row.values.get(2));
+            if table.is_empty() || fingerprint.is_empty() {
+                return Err(AbiPluginError::internal(
+                    "bookclerk_sql_schema row is missing table_name or fingerprint",
+                ));
+            }
+            let cols = env.table_columns(&table).unwrap_or(&[]).to_vec();
+            env.insert_table_schema(
+                table.clone(),
+                cols,
+                if identity.is_empty() {
+                    None
+                } else {
+                    Some(identity)
+                },
+                fingerprint,
+            );
+            cursor = table;
+        }
+        if n < usize::try_from(page).unwrap_or(usize::MAX) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// TEXT cell from a catalog row, or empty when the value is missing/non-text.
 fn catalog_cell_text(v: Option<&DbValue>) -> String {
     match v {
         Some(DbValue::Text(s)) => s.clone(),
         _ => String::new(),
+    }
+}
+
+/// INTEGER cell from a catalog row.
+fn catalog_cell_i64(v: Option<&DbValue>) -> Option<i64> {
+    match v {
+        Some(DbValue::Int64(n)) => Some(*n),
+        _ => None,
     }
 }
 
@@ -1261,6 +1405,7 @@ impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
         envelope: HostExecuteEnvelope,
     ) -> std::result::Result<ExecuteReply, AbiPluginError> {
         let mut request = envelope.request.clone();
+        let proofs = envelope.proofs.clone();
         bookclerk_library::authorize_typed_request(&mut request, &self.caps)
             .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
         let validate_req = request.clone();
@@ -1273,7 +1418,7 @@ impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
         } else {
             self.session
                 .db_execute_envelope_request(
-                    HostExecuteEnvelope::new(request, envelope.guest_receipt),
+                    HostExecuteEnvelope::new(request, envelope.guest_receipt).with_proofs(proofs),
                     cancel,
                 )
                 .await

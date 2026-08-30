@@ -178,7 +178,7 @@ impl LibraryStore {
             .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
         let guest_len = req.statements.len();
         let guest_hash = req.request_hash.clone();
-        let envelope = crate::sql_plan::wrap_guest_typed_request(req);
+        let envelope = crate::sql_plan::wrap_guest_typed_request(req, policy.sql_types());
         let reply = if let Some(exec) = &self.typed_exec {
             let reply = exec.execute_typed(envelope.clone()).await?;
             crate::validate_execute_reply(&envelope.request, &reply, self.db_capabilities())
@@ -191,10 +191,9 @@ impl LibraryStore {
             };
             let deadline = (envelope.request.deadline_unix_ms > 0)
                 .then_some(envelope.request.deadline_unix_ms);
-            let reply = bookclerk_db_exec::execute_typed_on_session(
+            let reply = bookclerk_db_exec::execute_typed_envelope(
                 &self.db,
-                &envelope.request,
-                envelope.guest_receipt.clone(),
+                &envelope,
                 timing,
                 bookclerk_db_exec::ExecCaps::from_capabilities(self.db_capabilities()),
                 bookclerk_db_exec::AtomicSession::from_deadline(deadline),

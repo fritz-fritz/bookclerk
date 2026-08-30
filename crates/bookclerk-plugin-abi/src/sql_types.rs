@@ -6,8 +6,11 @@
 
 #![allow(clippy::missing_docs_in_private_items, clippy::missing_errors_doc)]
 
+use crate::sql_proof::{
+    PhysicalAccess, ResolvedAssignment, ResolvedStatement, SchemaAction, SqlSpan, TextCollateSite,
+};
 use crate::{DbType, DbValue, ExecuteRequest, PluginError, Result, TypedDbStatement};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Reserved catalog of `(table, column, sql_type)` for isolated bindings.
 pub const SQL_CATALOG_TABLE: &str = "bookclerk_sql_catalog";
@@ -17,6 +20,63 @@ pub const SQL_IDENTITY_TABLE: &str = "bookclerk_identity";
 
 /// Internal alias used when wrapping `INSERT OR IGNORE … SELECT`.
 pub const INSERT_SELECT_WRAP_ALIAS: &str = "_bc_src";
+
+/// Portable bound for every canonical SQL v1 identifier after case fold.
+///
+/// PostgreSQL `NAMEDATALEN` is 64 including the NUL terminator, so 63 bytes
+/// is the portable maximum for tables, columns, indexes, aliases, and CTEs.
+pub const SQL_V1_MAX_IDENT_BYTES: usize = 63;
+
+/// Table-level durable schema fingerprint (identity + constraints).
+pub const SQL_SCHEMA_TABLE: &str = "bookclerk_sql_schema";
+
+/// Postgres adapter-private identity function prefix (`bc_if_<digest>`).
+pub const POSTGRES_IDENT_FN_PREFIX: &str = "bc_if_";
+
+/// Postgres adapter-private identity trigger prefix (`bc_it_<digest>`).
+pub const POSTGRES_IDENT_TRIGGER_PREFIX: &str = "bc_it_";
+
+/// SHA-256 hex digits used in adapter-private identity object names (64 bits).
+const POSTGRES_IDENT_DIGEST_HEX: usize = 16;
+
+/// True when `ident` (already case-folded) is a portable SQL v1 identifier.
+#[must_use]
+pub fn sql_v1_ident_in_bounds(ident: &str) -> bool {
+    ident.len() <= SQL_V1_MAX_IDENT_BYTES
+}
+
+/// SHA-256 digest prefix of a folded table name for adapter-private objects.
+#[must_use]
+pub fn postgres_identity_object_digest(table: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(table.to_ascii_lowercase().as_bytes());
+    hex::encode(&digest[..POSTGRES_IDENT_DIGEST_HEX / 2])
+}
+
+/// Postgres identity trigger function name for `table` (`bc_if_<digest>`).
+#[must_use]
+pub fn postgres_identity_function_name(table: &str) -> String {
+    format!(
+        "{POSTGRES_IDENT_FN_PREFIX}{}",
+        postgres_identity_object_digest(table)
+    )
+}
+
+/// Postgres identity trigger name for `table` (`bc_it_<digest>`).
+#[must_use]
+pub fn postgres_identity_trigger_name(table: &str) -> String {
+    format!(
+        "{POSTGRES_IDENT_TRIGGER_PREFIX}{}",
+        postgres_identity_object_digest(table)
+    )
+}
+
+/// SHA-256 hex of the exact canonical SQL string a [`ResolvedStatement`] proves.
+#[must_use]
+pub fn statement_sql_hash(sql: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(sql.as_bytes()))
+}
 
 /// Canonical SQL v1 column / expression type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -88,10 +148,14 @@ impl From<DbType> for SqlType {
     }
 }
 
-/// `(table → column → type)` environment used at admission and typed lowering.
+/// `(table → ordered columns)` environment used to *build* a proof.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SqlTypeEnv {
-    tables: BTreeMap<String, BTreeMap<String, SqlType>>,
+    tables: BTreeMap<String, Vec<(String, SqlType)>>,
+    /// Structured fingerprints keyed by folded table name.
+    fingerprints: BTreeMap<String, String>,
+    /// Identity column per table, if any.
+    identities: BTreeMap<String, String>,
 }
 
 impl SqlTypeEnv {
@@ -116,25 +180,36 @@ impl SqlTypeEnv {
     /// Declared type of `table.column`, if present.
     #[must_use]
     pub fn column_type(&self, table: &str, column: &str) -> Option<SqlType> {
+        let col = column.to_ascii_lowercase();
         self.tables
-            .get(&table.to_ascii_lowercase())
-            .and_then(|cols| cols.get(&column.to_ascii_lowercase()).copied())
+            .get(&table.to_ascii_lowercase())?
+            .iter()
+            .find(|(n, _)| *n == col)
+            .map(|(_, t)| *t)
     }
 
-    /// True when `column` is TEXT in every table that declares it, and at least one does.
+    /// Columns of `table` in declaration order.
     #[must_use]
-    pub fn ident_is_text(&self, column: &str) -> bool {
-        let col = column.to_ascii_lowercase();
-        let mut saw = false;
-        for cols in self.tables.values() {
-            if let Some(ty) = cols.get(&col) {
-                saw = true;
-                if *ty != SqlType::Text {
-                    return false;
-                }
-            }
-        }
-        saw
+    pub fn table_columns(&self, table: &str) -> Option<&[(String, SqlType)]> {
+        self.tables
+            .get(&table.to_ascii_lowercase())
+            .map(Vec::as_slice)
+    }
+
+    /// Stored structured fingerprint for `table`.
+    #[must_use]
+    pub fn fingerprint(&self, table: &str) -> Option<&str> {
+        self.fingerprints
+            .get(&table.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    /// Identity column for `table`.
+    #[must_use]
+    pub fn identity_column(&self, table: &str) -> Option<&str> {
+        self.identities
+            .get(&table.to_ascii_lowercase())
+            .map(String::as_str)
     }
 
     /// Inserts or replaces columns for `table`.
@@ -143,38 +218,81 @@ impl SqlTypeEnv {
         table: impl Into<String>,
         columns: impl IntoIterator<Item = (String, SqlType)>,
     ) {
+        self.insert_table_schema(table, columns, None, String::new());
+    }
+
+    /// Inserts table columns plus fingerprint / identity metadata.
+    pub fn insert_table_schema(
+        &mut self,
+        table: impl Into<String>,
+        columns: impl IntoIterator<Item = (String, SqlType)>,
+        identity: Option<String>,
+        fingerprint: String,
+    ) {
         let table = table.into().to_ascii_lowercase();
-        let cols = columns
+        let cols: Vec<(String, SqlType)> = columns
             .into_iter()
             .map(|(n, t)| (n.to_ascii_lowercase(), t))
             .collect();
-        self.tables.insert(table, cols);
+        self.tables.insert(table.clone(), cols);
+        if let Some(id) = identity {
+            self.identities
+                .insert(table.clone(), id.to_ascii_lowercase());
+        } else {
+            self.identities.remove(&table);
+        }
+        if fingerprint.is_empty() {
+            self.fingerprints.remove(&table);
+        } else {
+            self.fingerprints.insert(table, fingerprint);
+        }
     }
 
     /// Drops `table` from the environment.
     pub fn drop_table(&mut self, table: &str) {
-        self.tables.remove(&table.to_ascii_lowercase());
+        let table = table.to_ascii_lowercase();
+        self.tables.remove(&table);
+        self.fingerprints.remove(&table);
+        self.identities.remove(&table);
     }
 
-    /// Merges `other` (later entries win per column).
-    pub fn merge(&mut self, other: &Self) {
-        for (table, cols) in &other.tables {
-            self.tables
-                .entry(table.clone())
-                .or_default()
-                .extend(cols.clone());
+    /// Renames a table (used for rebuild `ALTER TABLE … RENAME TO`).
+    pub fn rename_table(&mut self, from: &str, to: &str) {
+        let from = from.to_ascii_lowercase();
+        let to = to.to_ascii_lowercase();
+        if let Some(cols) = self.tables.remove(&from) {
+            self.tables.insert(to.clone(), cols);
+        }
+        if let Some(fp) = self.fingerprints.remove(&from) {
+            self.fingerprints.insert(to.clone(), fp);
+        }
+        if let Some(id) = self.identities.remove(&from) {
+            self.identities.insert(to, id);
         }
     }
 
-    /// Records one catalog row.
-    pub fn insert_column(&mut self, table: &str, column: &str, ty: SqlType) {
-        self.tables
-            .entry(table.to_ascii_lowercase())
-            .or_default()
-            .insert(column.to_ascii_lowercase(), ty);
+    /// Merges `other` (later entries win per table).
+    pub fn merge(&mut self, other: &Self) {
+        for (table, cols) in &other.tables {
+            self.tables.insert(table.clone(), cols.clone());
+        }
+        self.fingerprints.extend(other.fingerprints.clone());
+        self.identities.extend(other.identities.clone());
     }
 
-    /// Iterates `(table, column, type)` in sorted order.
+    /// Records one catalog row, appending when the column is new.
+    pub fn insert_column(&mut self, table: &str, column: &str, ty: SqlType) {
+        let table = table.to_ascii_lowercase();
+        let column = column.to_ascii_lowercase();
+        let cols = self.tables.entry(table).or_default();
+        if let Some(existing) = cols.iter_mut().find(|(n, _)| *n == column) {
+            existing.1 = ty;
+        } else {
+            cols.push((column, ty));
+        }
+    }
+
+    /// Iterates `(table, column, type)` in table order then declaration order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str, SqlType)> {
         self.tables.iter().flat_map(|(t, cols)| {
             cols.iter()
@@ -192,6 +310,125 @@ pub struct CreateTableSchema {
     pub columns: Vec<(String, SqlType)>,
     /// `INTEGER PRIMARY KEY AUTOINCREMENT` column, if any.
     pub identity_column: Option<String>,
+    /// Per-column NOT NULL flags (same order as `columns`).
+    pub column_not_null: Vec<bool>,
+    /// Per-column UNIQUE flags.
+    pub column_unique: Vec<bool>,
+    /// Per-column PRIMARY KEY flags (inline).
+    pub column_primary_key: Vec<bool>,
+    /// Per-column DEFAULT SQL (empty if none).
+    pub column_defaults: Vec<String>,
+    /// Per-column CHECK SQL (empty if none).
+    pub column_checks: Vec<String>,
+    /// Table-level constraints in declaration order.
+    pub table_constraints: Vec<TableConstraint>,
+}
+
+/// Table-level constraint captured in the structured schema IR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableConstraint {
+    /// `PRIMARY KEY (cols…)`.
+    PrimaryKey(Vec<String>),
+    /// `UNIQUE (cols…)`.
+    Unique(Vec<String>),
+    /// `CHECK (expr)`.
+    Check(String),
+    /// `FOREIGN KEY (cols) REFERENCES table (refcols)`.
+    ForeignKey {
+        /// Local columns.
+        columns: Vec<String>,
+        /// Referenced table.
+        ref_table: String,
+        /// Referenced columns (empty if omitted).
+        ref_columns: Vec<String>,
+    },
+}
+
+impl CreateTableSchema {
+    /// Structured fingerprint (SHA-256 hex) of this schema IR.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"sql-v1-schema\0");
+        h.update(self.table.as_bytes());
+        h.update(b"\0");
+        for (i, (name, ty)) in self.columns.iter().enumerate() {
+            h.update(name.as_bytes());
+            h.update(b"\0");
+            h.update(ty.as_str().as_bytes());
+            h.update(b"\0");
+            h.update([u8::from(
+                self.column_not_null.get(i).copied().unwrap_or(false),
+            )]);
+            h.update([u8::from(
+                self.column_unique.get(i).copied().unwrap_or(false),
+            )]);
+            h.update([u8::from(
+                self.column_primary_key.get(i).copied().unwrap_or(false),
+            )]);
+            h.update([u8::from(
+                self.identity_column.as_deref() == Some(name.as_str()),
+            )]);
+            h.update(
+                self.column_defaults
+                    .get(i)
+                    .map(String::as_str)
+                    .unwrap_or("")
+                    .as_bytes(),
+            );
+            h.update(b"\0");
+            h.update(
+                self.column_checks
+                    .get(i)
+                    .map(String::as_str)
+                    .unwrap_or("")
+                    .as_bytes(),
+            );
+            h.update(b"\0");
+        }
+        for c in &self.table_constraints {
+            match c {
+                TableConstraint::PrimaryKey(cols) => {
+                    h.update(b"pk\0");
+                    for col in cols {
+                        h.update(col.as_bytes());
+                        h.update(b"\0");
+                    }
+                }
+                TableConstraint::Unique(cols) => {
+                    h.update(b"uq\0");
+                    for col in cols {
+                        h.update(col.as_bytes());
+                        h.update(b"\0");
+                    }
+                }
+                TableConstraint::Check(expr) => {
+                    h.update(b"ck\0");
+                    h.update(expr.as_bytes());
+                    h.update(b"\0");
+                }
+                TableConstraint::ForeignKey {
+                    columns,
+                    ref_table,
+                    ref_columns,
+                } => {
+                    h.update(b"fk\0");
+                    for col in columns {
+                        h.update(col.as_bytes());
+                        h.update(b"\0");
+                    }
+                    h.update(ref_table.as_bytes());
+                    h.update(b"\0");
+                    for col in ref_columns {
+                        h.update(col.as_bytes());
+                        h.update(b"\0");
+                    }
+                }
+            }
+        }
+        hex::encode(h.finalize())
+    }
 }
 
 /// Parses a canonical `CREATE TABLE` into columns / identity, if the head matches.
@@ -220,24 +457,40 @@ pub fn parse_create_table_schema(sql: &str) -> Option<CreateTableSchema> {
     let inner = balanced_inner(rest)?;
     let mut columns = Vec::new();
     let mut identity_column = None;
+    let mut column_not_null = Vec::new();
+    let mut column_unique = Vec::new();
+    let mut column_primary_key = Vec::new();
+    let mut column_defaults = Vec::new();
+    let mut column_checks = Vec::new();
+    let mut table_constraints = Vec::new();
     for def in split_top_level_commas(inner) {
         let def = skip_ws(def);
-        if starts_kw(def, "PRIMARY")
-            || starts_kw(def, "UNIQUE")
-            || starts_kw(def, "CHECK")
-            || starts_kw(def, "FOREIGN")
-            || starts_kw(def, "CONSTRAINT")
-        {
+        let constraint_head = if starts_kw(def, "CONSTRAINT") {
+            let Some((_, rest)) = read_ident(skip_ws(skip_kw(def, "CONSTRAINT")?)) else {
+                continue;
+            };
+            skip_ws(rest)
+        } else {
+            def
+        };
+        if let Some(c) = parse_table_constraint_def(constraint_head) {
+            table_constraints.push(c);
             continue;
         }
         let (name, rest) = read_ident(def)?;
         let rest = skip_ws(rest);
         let (ty_ident, rest) = read_ident(rest)?;
         let ty = SqlType::from_column_ident(&ty_ident)?;
-        if identity_column.is_none() && column_is_autoincrement(rest) && ty == SqlType::Integer {
+        let flags = parse_column_constraint_flags(rest);
+        if identity_column.is_none() && flags.identity && ty == SqlType::Integer {
             identity_column = Some(name.clone());
         }
         columns.push((name, ty));
+        column_not_null.push(flags.not_null);
+        column_unique.push(flags.unique);
+        column_primary_key.push(flags.primary_key);
+        column_defaults.push(flags.default_sql);
+        column_checks.push(flags.check_sql);
     }
     if columns.is_empty() {
         return None;
@@ -246,7 +499,142 @@ pub fn parse_create_table_schema(sql: &str) -> Option<CreateTableSchema> {
         table,
         columns,
         identity_column,
+        column_not_null,
+        column_unique,
+        column_primary_key,
+        column_defaults,
+        column_checks,
+        table_constraints,
     })
+}
+
+struct ColumnFlags {
+    not_null: bool,
+    unique: bool,
+    primary_key: bool,
+    identity: bool,
+    default_sql: String,
+    check_sql: String,
+}
+
+fn parse_column_constraint_flags(rest: &str) -> ColumnFlags {
+    let u = rest.to_ascii_uppercase();
+    let identity = u.contains("PRIMARY") && u.contains("KEY") && u.contains("AUTOINCREMENT");
+    let primary_key = u.contains("PRIMARY") && u.contains("KEY");
+    let not_null = u.contains("NOT NULL") || primary_key;
+    let unique = u.contains("UNIQUE");
+    let default_sql = extract_keyword_arg(rest, "DEFAULT").unwrap_or_default();
+    let check_sql = extract_paren_after_kw(rest, "CHECK").unwrap_or_default();
+    ColumnFlags {
+        not_null,
+        unique,
+        primary_key,
+        identity,
+        default_sql,
+        check_sql,
+    }
+}
+
+fn extract_keyword_arg(s: &str, kw: &str) -> Option<String> {
+    let mut scan = s;
+    loop {
+        scan = skip_ws(scan);
+        if scan.is_empty() {
+            return None;
+        }
+        if starts_kw(scan, kw) {
+            scan = skip_kw(scan, kw)?;
+            scan = skip_ws(scan);
+            if scan.starts_with('(') {
+                return balanced_inner(scan).map(str::trim).map(str::to_string);
+            }
+            let end = scan
+                .find(|c: char| c.is_whitespace() || c == ',')
+                .unwrap_or(scan.len());
+            return Some(scan[..end].trim().to_ascii_lowercase());
+        }
+        let Some((_, rest)) = read_ident(scan) else {
+            if scan.starts_with('(') {
+                scan = &scan[balanced_inner(scan).map(|i| i.len() + 2).unwrap_or(1)..];
+                continue;
+            }
+            scan = scan.get(1..).unwrap_or("");
+            continue;
+        };
+        scan = rest;
+    }
+}
+
+fn extract_paren_after_kw(s: &str, kw: &str) -> Option<String> {
+    let mut scan = s;
+    loop {
+        scan = skip_ws(scan);
+        if scan.is_empty() {
+            return None;
+        }
+        if starts_kw(scan, kw) {
+            scan = skip_kw(scan, kw)?;
+            scan = skip_ws(scan);
+            return balanced_inner(scan).map(str::trim).map(str::to_string);
+        }
+        let Some((_, rest)) = read_ident(scan) else {
+            if scan.starts_with('(') {
+                let inner_len = balanced_inner(scan)?.len();
+                scan = scan.get(inner_len + 2..).unwrap_or("");
+                continue;
+            }
+            scan = scan.get(1..).unwrap_or("");
+            continue;
+        };
+        scan = rest;
+    }
+}
+
+fn parse_table_constraint_def(def: &str) -> Option<TableConstraint> {
+    let def = skip_ws(def);
+    if starts_kw(def, "PRIMARY") {
+        let rest = skip_kw(def, "PRIMARY")?;
+        let rest = skip_kw(rest, "KEY")?;
+        let inner = balanced_inner(skip_ws(rest))?;
+        return Some(TableConstraint::PrimaryKey(ident_list(inner)));
+    }
+    if starts_kw(def, "UNIQUE") {
+        let rest = skip_kw(def, "UNIQUE")?;
+        let inner = balanced_inner(skip_ws(rest))?;
+        return Some(TableConstraint::Unique(ident_list(inner)));
+    }
+    if starts_kw(def, "CHECK") {
+        let rest = skip_kw(def, "CHECK")?;
+        let inner = balanced_inner(skip_ws(rest))?;
+        return Some(TableConstraint::Check(inner.trim().to_string()));
+    }
+    if starts_kw(def, "FOREIGN") {
+        let rest = skip_kw(def, "FOREIGN")?;
+        let rest = skip_kw(rest, "KEY")?;
+        let inner = balanced_inner(skip_ws(rest))?;
+        let columns = ident_list(inner);
+        let after = skip_ws(&skip_ws(rest)[inner.len() + 2..]);
+        let after = skip_kw(after, "REFERENCES")?;
+        let (ref_table, after) = read_ident(after)?;
+        let ref_columns = if skip_ws(after).starts_with('(') {
+            ident_list(balanced_inner(skip_ws(after))?)
+        } else {
+            Vec::new()
+        };
+        return Some(TableConstraint::ForeignKey {
+            columns,
+            ref_table,
+            ref_columns,
+        });
+    }
+    None
+}
+
+fn ident_list(s: &str) -> Vec<String> {
+    split_top_level_commas(s)
+        .into_iter()
+        .filter_map(|p| read_ident(p).map(|(n, _)| n))
+        .collect()
 }
 
 /// Parses `DROP TABLE [IF EXISTS] name`.
@@ -269,43 +657,94 @@ pub fn sql_catalog_create_table_sql() -> String {
     format!(
         "CREATE TABLE IF NOT EXISTS {SQL_CATALOG_TABLE} (\
          table_name TEXT NOT NULL, column_name TEXT NOT NULL, sql_type TEXT NOT NULL, \
+         ordinal INTEGER NOT NULL, is_identity INTEGER NOT NULL, default_sql TEXT NOT NULL, \
          PRIMARY KEY (table_name, column_name))"
     )
 }
 
+/// Table-level fingerprint companion table.
+#[must_use]
+pub fn sql_schema_create_table_sql() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {SQL_SCHEMA_TABLE} (\
+         table_name TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, identity_column TEXT NOT NULL)"
+    )
+}
+
 /// Catalog DML companions for one canonical DDL statement (all backends).
+///
+/// Callers must skip this when [`SchemaAction::Create`] is a fingerprint no-op.
 #[must_use]
 pub fn catalog_companions(sql: &str) -> Vec<String> {
+    catalog_companions_for_action(sql, None)
+}
+
+/// Catalog companions gated by a resolved schema action.
+#[must_use]
+pub fn catalog_companions_for_action(sql: &str, action: Option<&SchemaAction>) -> Vec<String> {
+    if let Some(SchemaAction::Create { noop: true, .. }) = action {
+        return Vec::new();
+    }
+    if matches!(action, Some(SchemaAction::None)) {
+        return Vec::new();
+    }
     if let Some(schema) = parse_create_table_schema(sql) {
         if schema.columns.is_empty() {
+            return Vec::new();
+        }
+        if matches!(action, Some(SchemaAction::Create { noop: true, .. })) {
             return Vec::new();
         }
         let values = schema
             .columns
             .iter()
-            .map(|(col, ty)| {
+            .enumerate()
+            .map(|(i, (col, ty))| {
+                let ident = i32::from(schema.identity_column.as_deref() == Some(col.as_str()));
+                let default_sql = schema
+                    .column_defaults
+                    .get(i)
+                    .map(String::as_str)
+                    .unwrap_or("");
                 format!(
-                    "('{}', '{}', '{}')",
+                    "('{}', '{}', '{}', {}, {ident}, '{}')",
                     escape_sql_str(&schema.table),
                     escape_sql_str(col),
-                    ty.as_str()
+                    ty.as_str(),
+                    i,
+                    escape_sql_str(default_sql)
                 )
             })
             .collect::<Vec<_>>()
             .join(", ");
+        let ident = schema.identity_column.clone().unwrap_or_default();
         return vec![
             sql_catalog_create_table_sql(),
+            sql_schema_create_table_sql(),
             format!(
-            "INSERT INTO {SQL_CATALOG_TABLE} (table_name, column_name, sql_type) \
-             VALUES {values} ON CONFLICT (table_name, column_name) DO UPDATE SET sql_type = excluded.sql_type"
+                "INSERT INTO {SQL_CATALOG_TABLE} \
+                 (table_name, column_name, sql_type, ordinal, is_identity, default_sql) \
+                 VALUES {values}"
+            ),
+            format!(
+                "INSERT INTO {SQL_SCHEMA_TABLE} (table_name, fingerprint, identity_column) \
+                 VALUES ('{}', '{}', '{}')",
+                escape_sql_str(&schema.table),
+                escape_sql_str(&schema.fingerprint()),
+                escape_sql_str(&ident)
             ),
         ];
     }
     if let Some(table) = parse_drop_table_name(sql) {
         return vec![
             sql_catalog_create_table_sql(),
+            sql_schema_create_table_sql(),
             format!(
                 "DELETE FROM {SQL_CATALOG_TABLE} WHERE table_name = '{}'",
+                escape_sql_str(&table)
+            ),
+            format!(
+                "DELETE FROM {SQL_SCHEMA_TABLE} WHERE table_name = '{}'",
                 escape_sql_str(&table)
             ),
         ];
@@ -316,10 +755,72 @@ pub fn catalog_companions(sql: &str) -> Vec<String> {
 /// Applies one statement's `CREATE`/`DROP TABLE` effects to `env`.
 pub fn apply_schema_sql_to_env(env: &mut SqlTypeEnv, sql: &str) {
     if let Some(schema) = parse_create_table_schema(sql) {
-        env.insert_table(schema.table, schema.columns);
+        if env.has_table(&schema.table) {
+            return;
+        }
+        env.insert_table_schema(
+            schema.table.clone(),
+            schema.columns.iter().cloned(),
+            schema.identity_column.clone(),
+            schema.fingerprint(),
+        );
     } else if let Some(table) = parse_drop_table_name(sql) {
         env.drop_table(&table);
+    } else if let Some((from, to)) = parse_alter_rename_table(sql) {
+        env.rename_table(&from, &to);
+    } else {
+        apply_alter_add_column(env, sql);
     }
+}
+
+fn apply_alter_add_column(env: &mut SqlTypeEnv, sql: &str) {
+    let Some((table, column, ty)) = parse_alter_add_column(sql) else {
+        return;
+    };
+    if !env.has_table(&table) {
+        return;
+    }
+    env.insert_column(&table, &column, ty);
+}
+
+fn parse_alter_add_column(sql: &str) -> Option<(String, String, SqlType)> {
+    let mut s = skip_ws(sql);
+    s = skip_kw(s, "ALTER")?;
+    s = skip_kw(s, "TABLE")?;
+    let (table, rest) = read_ident(s)?;
+    s = skip_kw(rest, "ADD")?;
+    if starts_kw(s, "COLUMN") {
+        s = skip_kw(s, "COLUMN")?;
+    }
+    let (column, rest) = read_ident(s)?;
+    let (ty_ident, _) = read_ident(rest)?;
+    let ty = SqlType::from_column_ident(&ty_ident)?;
+    Some((table, column, ty))
+}
+
+fn parse_alter_rename_table(sql: &str) -> Option<(String, String)> {
+    let mut s = skip_ws(sql);
+    s = skip_kw(s, "ALTER")?;
+    s = skip_kw(s, "TABLE")?;
+    let (from, rest) = read_ident(s)?;
+    s = skip_kw(rest, "RENAME")?;
+    s = skip_kw(s, "TO")?;
+    let (to, _) = read_ident(s)?;
+    Some((from, to))
+}
+
+/// Host-private proofs for one execute request (not a guest SDK surface).
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when an expression is not in the
+/// v1 type contract.
+#[cfg(feature = "host")]
+pub fn typecheck_execute_request_proofs(
+    req: &ExecuteRequest,
+    env: &SqlTypeEnv,
+) -> Result<Vec<ResolvedStatement>> {
+    typecheck_execute_request_resolved(req, env)
 }
 
 /// Reconstructs a type environment from canonical `CREATE TABLE` statements.
@@ -330,6 +831,19 @@ pub fn sql_type_env_from_canonical_ddl(sql: &str) -> SqlTypeEnv {
         apply_schema_sql_to_env(&mut env, stmt);
     }
     env
+}
+
+/// Host bookkeeping tables present on every binding/library database.
+///
+/// Receipt wrap SQL is typed against this plus the plugin catalog. Adapters
+/// merge it when rebuilding proofs after Cap'n drops host-private proofs.
+#[must_use]
+pub fn sql_host_bookkeeping_type_env() -> SqlTypeEnv {
+    sql_type_env_from_canonical_ddl(
+        "CREATE TABLE db_atomic_receipts (\
+         operation_id TEXT NOT NULL, operation_kind TEXT NOT NULL, request_hash TEXT NOT NULL, \
+         status TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL)",
+    )
 }
 
 /// Proven v1 CAST matrix: same type, INTEGER↔REAL, or NULL to any admitted type.
@@ -364,36 +878,56 @@ pub fn unify_types(index: usize, a: SqlType, b: SqlType) -> Result<SqlType> {
 
 /// Type-checks every statement in `req` against `env` plus in-request `CREATE`.
 ///
-/// `host_authoritative` skips this layer. Unknown column types fail closed.
+/// Host-authoritative SQL is still typed (authorization may be skipped
+/// elsewhere). Unknown columns fail closed, including when the catalog is empty.
 ///
 /// # Errors
 ///
 /// Returns [`PluginError::invalid_params`] when an expression is not in the
 /// v1 type contract.
-pub fn typecheck_execute_request(
-    req: &ExecuteRequest,
-    env: &SqlTypeEnv,
-    host_authoritative: bool,
-) -> Result<()> {
-    if host_authoritative {
-        return Ok(());
-    }
-    let mut working = env.clone();
-    for (index, stmt) in req.statements.iter().enumerate() {
-        typecheck_statement(index, stmt, &mut working)?;
-    }
+pub fn typecheck_execute_request(req: &ExecuteRequest, env: &SqlTypeEnv) -> Result<()> {
+    let _proofs = typecheck_execute_request_resolved(req, env)?;
     Ok(())
 }
 
-/// Applies one statement's schema effects and expression types to `env`.
-fn typecheck_statement(index: usize, stmt: &TypedDbStatement, env: &mut SqlTypeEnv) -> Result<()> {
-    if let Some(schema) = parse_create_table_schema(&stmt.sql) {
-        env.insert_table(schema.table.clone(), schema.columns.iter().cloned());
-        return Ok(());
+/// [`typecheck_execute_request`] plus the host-private resolved proofs.
+pub(crate) fn typecheck_execute_request_resolved(
+    req: &ExecuteRequest,
+    env: &SqlTypeEnv,
+) -> Result<Vec<ResolvedStatement>> {
+    let mut working = env.clone();
+    let mut proofs = Vec::with_capacity(req.statements.len());
+    for (index, stmt) in req.statements.iter().enumerate() {
+        proofs.push(typecheck_statement(index, stmt, &mut working)?);
     }
-    if let Some(table) = parse_drop_table_name(&stmt.sql) {
+    Ok(proofs)
+}
+
+fn typecheck_statement(
+    index: usize,
+    stmt: &TypedDbStatement,
+    env: &mut SqlTypeEnv,
+) -> Result<ResolvedStatement> {
+    let sql = stmt.sql.trim();
+    if let Some(schema) = parse_create_table_schema(sql) {
+        return typecheck_create(index, sql, schema, env);
+    }
+    if let Some(table) = parse_drop_table_name(sql) {
         env.drop_table(&table);
-        return Ok(());
+        return Ok(ResolvedStatement {
+            statement_hash: statement_sql_hash(sql),
+            output_columns: Vec::new(),
+            physical_accesses: vec![PhysicalAccess {
+                table: table.clone(),
+                column: None,
+            }],
+            assignments: Vec::new(),
+            text_collate_sites: Vec::new(),
+            schema_action: SchemaAction::Drop { table },
+        });
+    }
+    if looks_like_index_ddl(sql) {
+        return typecheck_index_ddl(index, sql, env);
     }
     let binds: Vec<SqlType> = stmt.parameters.iter().map(sql_type_of_value).collect();
     let mut cx = TypeCx {
@@ -401,10 +935,189 @@ fn typecheck_statement(index: usize, stmt: &TypedDbStatement, env: &mut SqlTypeE
         env,
         binds: &binds,
         bind_i: 0,
-        from: Vec::new(),
+        from: BTreeMap::new(),
+        outer_from: Vec::new(),
         ctes: BTreeMap::new(),
+        physical: BTreeSet::new(),
+        assignments: Vec::new(),
+        text_spans: Vec::new(),
+        output_columns: Vec::new(),
+        require_named_derived: false,
     };
-    typecheck_sql(stmt.sql.trim(), &mut cx)
+    typecheck_sql(sql, &mut cx)?;
+    Ok(cx.into_proof(sql))
+}
+
+fn typecheck_create(
+    index: usize,
+    sql: &str,
+    schema: CreateTableSchema,
+    env: &mut SqlTypeEnv,
+) -> Result<ResolvedStatement> {
+    typecheck_create_checks(index, &schema, env)?;
+    let fingerprint = schema.fingerprint();
+    let noop = if let Some(existing) = env.fingerprint(&schema.table) {
+        if existing != fingerprint {
+            return Err(PluginError::invalid_params(format!(
+                "statement {index} CREATE TABLE IF NOT EXISTS {} does not match the catalog schema",
+                schema.table
+            )));
+        }
+        true
+    } else if env.has_table(&schema.table) {
+        return Err(PluginError::invalid_params(format!(
+            "statement {index} CREATE TABLE IF NOT EXISTS {} conflicts with catalog metadata",
+            schema.table
+        )));
+    } else {
+        false
+    };
+    if !noop {
+        env.insert_table_schema(
+            schema.table.clone(),
+            schema.columns.iter().cloned(),
+            schema.identity_column.clone(),
+            fingerprint.clone(),
+        );
+    }
+    Ok(ResolvedStatement {
+        statement_hash: statement_sql_hash(sql),
+        output_columns: Vec::new(),
+        physical_accesses: vec![PhysicalAccess {
+            table: schema.table.clone(),
+            column: None,
+        }],
+        assignments: Vec::new(),
+        text_collate_sites: Vec::new(),
+        schema_action: SchemaAction::Create {
+            table: schema.table,
+            fingerprint,
+            identity_column: schema.identity_column,
+            noop,
+        },
+    })
+}
+
+fn looks_like_index_ddl(sql: &str) -> bool {
+    let mut scan = TScan {
+        sql,
+        i: 0,
+        took_real: false,
+        base: 0,
+    };
+    if scan.take_kw("DROP") {
+        return scan.take_kw("INDEX");
+    }
+    if !scan.take_kw("CREATE") {
+        return false;
+    }
+    let _ = scan.take_kw("UNIQUE");
+    scan.take_kw("INDEX")
+}
+
+fn typecheck_index_ddl(index: usize, sql: &str, env: &SqlTypeEnv) -> Result<ResolvedStatement> {
+    let mut scan = TScan {
+        sql,
+        i: 0,
+        took_real: false,
+        base: 0,
+    };
+    if scan.take_kw("DROP") {
+        if !scan.take_kw("INDEX") {
+            return Err(ty_err(index, "DROP INDEX"));
+        }
+        let _ = scan.take_kw("IF");
+        let _ = scan.take_kw("EXISTS");
+        let _ = scan.read_ident();
+        return Ok(ResolvedStatement::bound_empty(sql));
+    }
+    if !scan.take_kw("CREATE") {
+        return Err(ty_err(index, "CREATE INDEX"));
+    }
+    let _ = scan.take_kw("UNIQUE");
+    if !scan.take_kw("INDEX") {
+        return Err(ty_err(index, "CREATE INDEX"));
+    }
+    let _ = scan.take_kw("IF");
+    let _ = scan.take_kw("NOT");
+    let _ = scan.take_kw("EXISTS");
+    let _ = scan
+        .read_ident()
+        .ok_or_else(|| ty_err(index, "CREATE INDEX name"))?;
+    if !scan.take_kw("ON") {
+        return Err(ty_err(index, "CREATE INDEX ON"));
+    }
+    let table = scan
+        .read_ident()
+        .ok_or_else(|| ty_err(index, "CREATE INDEX table"))?;
+    require_table_in_env(index, env, &table)?;
+    Ok(ResolvedStatement {
+        statement_hash: statement_sql_hash(sql),
+        output_columns: Vec::new(),
+        physical_accesses: vec![PhysicalAccess {
+            table,
+            column: None,
+        }],
+        assignments: Vec::new(),
+        text_collate_sites: Vec::new(),
+        schema_action: SchemaAction::None,
+    })
+}
+
+fn require_table_in_env(index: usize, env: &SqlTypeEnv, table: &str) -> Result<()> {
+    if env.has_table(table) {
+        Ok(())
+    } else {
+        Err(ty_err(index, &format!("unknown table {table}")))
+    }
+}
+
+fn typecheck_create_checks(
+    index: usize,
+    schema: &CreateTableSchema,
+    env: &SqlTypeEnv,
+) -> Result<()> {
+    let mut tmp = env.clone();
+    tmp.insert_table(schema.table.clone(), schema.columns.iter().cloned());
+    let binds: Vec<SqlType> = Vec::new();
+    let mut cx = TypeCx {
+        index,
+        env: &tmp,
+        binds: &binds,
+        bind_i: 0,
+        from: BTreeMap::from([(
+            schema.table.clone(),
+            FromSrc::Physical(schema.table.clone()),
+        )]),
+        outer_from: Vec::new(),
+        ctes: BTreeMap::new(),
+        physical: BTreeSet::new(),
+        assignments: Vec::new(),
+        text_spans: Vec::new(),
+        output_columns: Vec::new(),
+        require_named_derived: false,
+    };
+    for check in schema
+        .column_checks
+        .iter()
+        .chain(schema.table_constraints.iter().filter_map(|c| match c {
+            TableConstraint::Check(s) => Some(s),
+            _ => None,
+        }))
+    {
+        if check.is_empty() {
+            continue;
+        }
+        let mut scan = TScan {
+            sql: check,
+            i: 0,
+            took_real: false,
+            base: 0,
+        };
+        let ty = infer_expr(&mut scan, &mut cx)?;
+        require_booleanish(index, ty, "CHECK")?;
+    }
+    Ok(())
 }
 
 fn sql_type_of_value(v: &DbValue) -> SqlType {
@@ -418,26 +1131,85 @@ fn sql_type_of_value(v: &DbValue) -> SqlType {
     }
 }
 
+#[derive(Clone)]
+enum FromSrc {
+    Physical(String),
+    Cte(String),
+}
+
 struct TypeCx<'a> {
     index: usize,
     env: &'a SqlTypeEnv,
     binds: &'a [SqlType],
     bind_i: usize,
-    from: Vec<String>,
+    from: BTreeMap<String, FromSrc>,
+    /// Outer SELECT/UPDATE/DELETE FROM maps for correlated subquery lookup.
+    outer_from: Vec<BTreeMap<String, FromSrc>>,
     ctes: BTreeMap<String, Vec<(String, SqlType)>>,
+    physical: BTreeSet<(String, Option<String>)>,
+    assignments: Vec<ResolvedAssignment>,
+    text_spans: Vec<SqlSpan>,
+    output_columns: Vec<(String, SqlType)>,
+    require_named_derived: bool,
+}
+
+impl TypeCx<'_> {
+    fn note_text(&mut self, start: usize, end: usize) {
+        if start < end {
+            self.text_spans.push(SqlSpan { start, end });
+        }
+    }
+
+    fn note_physical(&mut self, table: &str, column: Option<&str>) {
+        self.physical
+            .insert((table.to_string(), column.map(str::to_string)));
+    }
+
+    fn into_proof(self, sql: &str) -> ResolvedStatement {
+        let mut accesses: Vec<PhysicalAccess> = self
+            .physical
+            .into_iter()
+            .map(|(table, column)| PhysicalAccess { table, column })
+            .collect();
+        accesses.sort();
+        ResolvedStatement {
+            statement_hash: statement_sql_hash(sql),
+            output_columns: self.output_columns,
+            physical_accesses: accesses,
+            assignments: self.assignments,
+            text_collate_sites: self
+                .text_spans
+                .into_iter()
+                .map(|span| TextCollateSite { span })
+                .collect(),
+            schema_action: SchemaAction::None,
+        }
+    }
 }
 
 fn parse_optional_with(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<()> {
     if !scan.take_kw("WITH") {
         return Ok(());
     }
-    let _ = scan.take_kw("RECURSIVE");
+    let recursive = scan.take_kw("RECURSIVE");
     loop {
         let name = scan
             .read_ident()
             .ok_or_else(|| ty_err(cx.index, "CTE name"))?;
+        let mut explicit_names = Vec::new();
         if scan.take_byte(b'(') {
-            let _ = scan.take_balanced_inner();
+            loop {
+                let col = scan
+                    .read_ident()
+                    .ok_or_else(|| ty_err(cx.index, "CTE column"))?;
+                explicit_names.push(col);
+                if !scan.take_byte(b',') {
+                    break;
+                }
+            }
+            if !scan.take_byte(b')') {
+                return Err(ty_err(cx.index, "CTE columns"));
+            }
         }
         if !scan.take_kw("AS") || !scan.take_byte(b'(') {
             return Err(ty_err(cx.index, "CTE AS ("));
@@ -445,7 +1217,16 @@ fn parse_optional_with(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<()> 
         let inner = scan
             .take_balanced_inner()
             .ok_or_else(|| ty_err(cx.index, "CTE body"))?;
-        let cols = typecheck_select_list_only(inner, cx)?;
+        let cols = if recursive {
+            typecheck_recursive_cte(inner, cx, &name, &explicit_names)?
+        } else {
+            let saved = cx.require_named_derived;
+            cx.require_named_derived = explicit_names.is_empty();
+            let cols = typecheck_select_list_only(inner, scan.base_of(inner), cx)?;
+            cx.require_named_derived = saved;
+            apply_explicit_cte_names(cx.index, cols, &explicit_names)?
+        };
+        reject_duplicate_names(cx.index, &cols)?;
         cx.ctes.insert(name, cols);
         if !scan.take_byte(b',') {
             break;
@@ -454,15 +1235,96 @@ fn parse_optional_with(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<()> 
     Ok(())
 }
 
+fn apply_explicit_cte_names(
+    index: usize,
+    mut cols: Vec<(String, SqlType)>,
+    explicit: &[String],
+) -> Result<Vec<(String, SqlType)>> {
+    if explicit.is_empty() {
+        return Ok(cols);
+    }
+    if explicit.len() != cols.len() {
+        return Err(ty_err(index, "CTE column list arity"));
+    }
+    for (i, name) in explicit.iter().enumerate() {
+        cols[i].0 = name.clone();
+    }
+    Ok(cols)
+}
+
+fn reject_duplicate_names(index: usize, cols: &[(String, SqlType)]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for (n, _) in cols {
+        if !seen.insert(n) {
+            return Err(ty_err(index, "duplicate derived column name"));
+        }
+    }
+    Ok(())
+}
+
+fn typecheck_recursive_cte(
+    sql: &str,
+    cx: &mut TypeCx<'_>,
+    name: &str,
+    explicit: &[String],
+) -> Result<Vec<(String, SqlType)>> {
+    let mut scan = TScan {
+        sql,
+        i: 0,
+        took_real: false,
+        base: 0,
+    };
+    let saved = cx.require_named_derived;
+    cx.require_named_derived = explicit.is_empty();
+    let mut cols = infer_select_core(&mut scan, cx)?;
+    cx.require_named_derived = saved;
+    cols = apply_explicit_cte_names(cx.index, cols, explicit)?;
+    reject_duplicate_names(cx.index, &cols)?;
+    for (n, ty) in &cols {
+        if *ty == SqlType::Null {
+            return Err(ty_err(
+                cx.index,
+                "recursive CTE anchor must establish concrete column types",
+            ));
+        }
+        if n.starts_with('c') && n[1..].chars().all(|c| c.is_ascii_digit()) && explicit.is_empty() {
+            return Err(ty_err(
+                cx.index,
+                "derived columns require explicit aliases or inherited names",
+            ));
+        }
+    }
+    cx.ctes.insert(name.to_string(), cols.clone());
+    while scan.take_kw("UNION") {
+        let _ = scan.take_kw("ALL");
+        let other = infer_select_core(&mut scan, cx)?;
+        if cols.len() != other.len() {
+            return Err(ty_err(cx.index, "UNION column counts differ"));
+        }
+        for ((_, a), (_, b)) in cols.iter().zip(other.iter()) {
+            let u = unify_types(cx.index, *a, *b)?;
+            if u != *a {
+                return Err(ty_err(
+                    cx.index,
+                    "recursive CTE arm is not compatible with the anchor types",
+                ));
+            }
+        }
+    }
+    Ok(cols)
+}
+
 fn typecheck_sql(sql: &str, cx: &mut TypeCx<'_>) -> Result<()> {
     let mut scan = TScan {
         sql,
         i: 0,
         took_real: false,
+        base: 0,
     };
     parse_optional_with(&mut scan, cx)?;
     if scan.peek_kw("SELECT") || scan.peek_kw("VALUES") {
-        let _ = infer_select(&mut scan, cx)?;
+        let cols = infer_select(&mut scan, cx)?;
+        cx.output_columns = cols;
         return Ok(());
     }
     if scan.take_kw("INSERT") {
@@ -475,20 +1337,18 @@ fn typecheck_sql(sql: &str, cx: &mut TypeCx<'_>) -> Result<()> {
         let table = scan
             .read_ident()
             .ok_or_else(|| ty_err(cx.index, "INSERT table"))?;
-        if !cx.env.is_empty() && !cx.env.has_table(&table) {
-            return Err(PluginError::invalid_params(format!(
-                "statement {} names unknown table {table}",
-                cx.index
-            )));
-        }
-        cx.from = vec![table.clone()];
-        let mut col_types = Vec::new();
+        require_physical_table(cx, &table)?;
+        cx.from
+            .insert(table.clone(), FromSrc::Physical(table.clone()));
+        cx.note_physical(&table, None);
+        let mut dests: Vec<(String, SqlType)> = Vec::new();
         if scan.take_byte(b'(') {
             loop {
                 let col = scan
                     .read_ident()
                     .ok_or_else(|| ty_err(cx.index, "INSERT column"))?;
-                col_types.push(lookup_column(cx, Some(&table), &col)?);
+                let ty = lookup_column(cx, Some(&table), &col)?;
+                dests.push((col, ty));
                 if !scan.take_byte(b',') {
                     break;
                 }
@@ -496,6 +1356,8 @@ fn typecheck_sql(sql: &str, cx: &mut TypeCx<'_>) -> Result<()> {
             if !scan.take_byte(b')') {
                 return Err(ty_err(cx.index, "INSERT columns"));
             }
+        } else if let Some(cols) = cx.env.table_columns(&table) {
+            dests = cols.to_vec();
         }
         if scan.peek_kw("VALUES") {
             scan.take_kw("VALUES");
@@ -506,13 +1368,14 @@ fn typecheck_sql(sql: &str, cx: &mut TypeCx<'_>) -> Result<()> {
                 let mut i = 0usize;
                 loop {
                     let ty = infer_expr(&mut scan, cx)?;
-                    if let Some(want) = col_types.get(i) {
-                        let _ = unify_types(cx.index, ty, *want)?;
-                    }
+                    unify_insert_dest(cx, &table, &dests, i, ty)?;
                     i += 1;
                     if !scan.take_byte(b',') {
                         break;
                     }
+                }
+                if i != dests.len() && !dests.is_empty() {
+                    return Err(ty_err(cx.index, "INSERT VALUES arity"));
                 }
                 if !scan.take_byte(b')') {
                     return Err(ty_err(cx.index, "VALUES close"));
@@ -522,21 +1385,34 @@ fn typecheck_sql(sql: &str, cx: &mut TypeCx<'_>) -> Result<()> {
                 }
             }
         } else {
+            let dest_from = cx.from.clone();
             parse_optional_with(&mut scan, cx)?;
-            let _ = infer_select(&mut scan, cx)?;
+            let cols = infer_select(&mut scan, cx)?;
+            if !dests.is_empty() && cols.len() != dests.len() {
+                return Err(ty_err(cx.index, "INSERT SELECT arity"));
+            }
+            for (i, (_, ty)) in cols.iter().enumerate() {
+                unify_insert_dest(cx, &table, &dests, i, *ty)?;
+            }
+            cx.from = dest_from;
         }
         if scan.take_kw("RETURNING") {
+            let mut out = Vec::new();
             loop {
                 if scan.take_byte(b'*') {
+                    out.extend(star_columns(cx)?);
                     break;
                 }
-                let _ = infer_expr(&mut scan, cx)?;
-                let _ = scan.take_kw("AS");
-                let _ = scan.read_ident();
+                let start = scan.i;
+                let ty = infer_expr(&mut scan, cx)?;
+                let expr_sql = scan.sql.get(start..scan.i).unwrap_or("");
+                let name = select_item_name(&mut scan, cx, out.len(), expr_sql)?;
+                out.push((name, ty));
                 if !scan.take_byte(b',') {
                     break;
                 }
             }
+            cx.output_columns = out;
         }
         return Ok(());
     }
@@ -544,39 +1420,54 @@ fn typecheck_sql(sql: &str, cx: &mut TypeCx<'_>) -> Result<()> {
         let table = scan
             .read_ident()
             .ok_or_else(|| ty_err(cx.index, "UPDATE table"))?;
-        if !cx.env.is_empty() && !cx.env.has_table(&table) {
-            return Err(PluginError::invalid_params(format!(
-                "statement {} names unknown table {table}",
-                cx.index
-            )));
-        }
-        cx.from = vec![table];
+        require_physical_table(cx, &table)?;
+        cx.from
+            .insert(table.clone(), FromSrc::Physical(table.clone()));
+        cx.note_physical(&table, None);
         if !scan.take_kw("SET") {
             return Err(ty_err(cx.index, "UPDATE SET"));
         }
         loop {
-            let _ = scan.read_ident();
+            let col = scan
+                .read_ident()
+                .ok_or_else(|| ty_err(cx.index, "UPDATE column"))?;
             if !scan.take_byte(b'=') {
                 return Err(ty_err(cx.index, "UPDATE ="));
             }
-            let _ = infer_expr(&mut scan, cx)?;
+            let dest = lookup_column(cx, Some(&table), &col)?;
+            let src = infer_expr(&mut scan, cx)?;
+            let unified = unify_types(cx.index, dest, src)?;
+            cx.assignments.push(ResolvedAssignment {
+                table: table.clone(),
+                column: col,
+                dest,
+                source: unified,
+            });
             if !scan.take_byte(b',') {
                 break;
             }
         }
         if scan.take_kw("WHERE") {
-            let _ = infer_expr(&mut scan, cx)?;
+            let ty = infer_expr(&mut scan, cx)?;
+            require_booleanish(cx.index, ty, "WHERE")?;
         }
         if scan.take_kw("RETURNING") {
+            let mut out = Vec::new();
             loop {
                 if scan.take_byte(b'*') {
+                    out.extend(star_columns(cx)?);
                     break;
                 }
-                let _ = infer_expr(&mut scan, cx)?;
+                let start = scan.i;
+                let ty = infer_expr(&mut scan, cx)?;
+                let expr_sql = scan.sql.get(start..scan.i).unwrap_or("");
+                let name = select_item_name(&mut scan, cx, out.len(), expr_sql)?;
+                out.push((name, ty));
                 if !scan.take_byte(b',') {
                     break;
                 }
             }
+            cx.output_columns = out;
         }
         return Ok(());
     }
@@ -585,15 +1476,13 @@ fn typecheck_sql(sql: &str, cx: &mut TypeCx<'_>) -> Result<()> {
         let table = scan
             .read_ident()
             .ok_or_else(|| ty_err(cx.index, "DELETE table"))?;
-        if !cx.env.is_empty() && !cx.env.has_table(&table) {
-            return Err(PluginError::invalid_params(format!(
-                "statement {} names unknown table {table}",
-                cx.index
-            )));
-        }
-        cx.from = vec![table];
+        require_physical_table(cx, &table)?;
+        cx.from
+            .insert(table.clone(), FromSrc::Physical(table.clone()));
+        cx.note_physical(&table, None);
         if scan.take_kw("WHERE") {
-            let _ = infer_expr(&mut scan, cx)?;
+            let ty = infer_expr(&mut scan, cx)?;
+            require_booleanish(cx.index, ty, "WHERE")?;
         }
         return Ok(());
     }
@@ -603,30 +1492,81 @@ fn typecheck_sql(sql: &str, cx: &mut TypeCx<'_>) -> Result<()> {
     Ok(())
 }
 
-fn typecheck_select_list_only(sql: &str, cx: &mut TypeCx<'_>) -> Result<Vec<(String, SqlType)>> {
+fn unify_insert_dest(
+    cx: &mut TypeCx<'_>,
+    table: &str,
+    dests: &[(String, SqlType)],
+    i: usize,
+    ty: SqlType,
+) -> Result<()> {
+    let Some((col, want)) = dests.get(i) else {
+        return Ok(());
+    };
+    let unified = unify_types(cx.index, ty, *want)?;
+    cx.assignments.push(ResolvedAssignment {
+        table: table.to_string(),
+        column: col.clone(),
+        dest: *want,
+        source: unified,
+    });
+    Ok(())
+}
+
+fn require_physical_table(cx: &TypeCx<'_>, table: &str) -> Result<()> {
+    if cx.env.has_table(table) {
+        return Ok(());
+    }
+    Err(PluginError::invalid_params(format!(
+        "statement {} names unknown table {table}",
+        cx.index
+    )))
+}
+
+fn require_booleanish(index: usize, ty: SqlType, ctx: &str) -> Result<()> {
+    if ty == SqlType::Boolean || ty == SqlType::Null {
+        Ok(())
+    } else {
+        Err(PluginError::invalid_params(format!(
+            "statement {index} {ctx} requires BOOLEAN or NULL, found {}",
+            ty.as_str()
+        )))
+    }
+}
+
+fn typecheck_select_list_only(
+    sql: &str,
+    base: usize,
+    cx: &mut TypeCx<'_>,
+) -> Result<Vec<(String, SqlType)>> {
     let mut scan = TScan {
         sql,
         i: 0,
         took_real: false,
+        base,
     };
     infer_select(&mut scan, cx)
 }
 
 fn infer_select(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<Vec<(String, SqlType)>> {
-    let mut cols = infer_select_core(scan, cx)?;
-    while scan.take_kw("UNION") {
-        let _ = scan.take_kw("ALL");
-        let other = infer_select_core(scan, cx)?;
-        if cols.len() != other.len() {
-            return Err(ty_err(cx.index, "UNION column counts differ"));
+    cx.outer_from.push(std::mem::take(&mut cx.from));
+    let saved_ctes = cx.ctes.clone();
+    let result = (|| {
+        let mut cols = infer_select_core(scan, cx)?;
+        while scan.take_kw("UNION") {
+            let _ = scan.take_kw("ALL");
+            let other = infer_select_core(scan, cx)?;
+            if cols.len() != other.len() {
+                return Err(ty_err(cx.index, "UNION column counts differ"));
+            }
+            for ((_, a), (_, b)) in cols.iter_mut().zip(other.iter()) {
+                *a = unify_types(cx.index, *a, *b)?;
+            }
         }
-        for (i, ((n, a), (_, b))) in cols.iter_mut().zip(other.iter()).enumerate() {
-            let u = unify_types(cx.index, *a, *b)?;
-            *n = format!("c{i}");
-            *a = u;
-        }
-    }
-    Ok(cols)
+        Ok(cols)
+    })();
+    cx.ctes = saved_ctes;
+    cx.from = cx.outer_from.pop().unwrap_or_default();
+    result
 }
 
 fn infer_select_core(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<Vec<(String, SqlType)>> {
@@ -659,8 +1599,10 @@ fn infer_select_core(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<Vec<(S
         if scan.take_byte(b'*') {
             cols.extend(star_columns(cx)?);
         } else {
+            let start = scan.i;
             let ty = infer_expr(scan, cx)?;
-            let name = select_item_alias(scan, cols.len());
+            let expr_sql = scan.sql.get(start..scan.i).unwrap_or("");
+            let name = select_item_name(scan, cx, cols.len(), expr_sql)?;
             cols.push((name, ty));
         }
         if !scan.take_byte(b',') {
@@ -668,9 +1610,9 @@ fn infer_select_core(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<Vec<(S
         }
     }
     if scan.take_kw("FROM") {
-        cx.from = Vec::new();
+        cx.from.clear();
+        take_from_item(scan, cx)?;
         loop {
-            take_from_item(scan, cx)?;
             if scan.take_kw("JOIN")
                 || scan.take_kw("INNER")
                 || scan.take_kw("LEFT")
@@ -680,15 +1622,21 @@ fn infer_select_core(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<Vec<(S
                 let _ = scan.take_kw("JOIN");
                 take_from_item(scan, cx)?;
                 if scan.take_kw("ON") {
-                    let _ = infer_expr(scan, cx)?;
+                    let ty = infer_expr(scan, cx)?;
+                    require_booleanish(cx.index, ty, "JOIN ON")?;
                 }
+                continue;
+            }
+            if scan.take_byte(b',') {
+                take_from_item(scan, cx)?;
                 continue;
             }
             break;
         }
     }
     if scan.take_kw("WHERE") {
-        let _ = infer_expr(scan, cx)?;
+        let ty = infer_expr(scan, cx)?;
+        require_booleanish(cx.index, ty, "WHERE")?;
     }
     if scan.take_kw("GROUP") {
         let _ = scan.take_kw("BY");
@@ -700,12 +1648,13 @@ fn infer_select_core(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<Vec<(S
         }
     }
     if scan.take_kw("HAVING") {
-        let _ = infer_expr(scan, cx)?;
+        let ty = infer_expr(scan, cx)?;
+        require_booleanish(cx.index, ty, "HAVING")?;
     }
     if scan.take_kw("ORDER") {
         let _ = scan.take_kw("BY");
         loop {
-            let _ = infer_expr(scan, cx)?;
+            take_order_key(scan, cx, &cols)?;
             let _ = scan.take_kw("ASC");
             let _ = scan.take_kw("DESC");
             if scan.take_kw("NULLS") {
@@ -726,14 +1675,75 @@ fn infer_select_core(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<Vec<(S
     Ok(cols)
 }
 
-fn select_item_alias(scan: &mut TScan<'_>, i: usize) -> String {
+fn take_order_key(
+    scan: &mut TScan<'_>,
+    cx: &mut TypeCx<'_>,
+    cols: &[(String, SqlType)],
+) -> Result<SqlType> {
+    scan.skip();
+    let start = scan.i;
+    if let Some(ident) = scan.read_ident() {
+        scan.skip();
+        let terminal = scan.i >= scan.sql.len()
+            || scan.peek_byte(b',')
+            || scan.peek_byte(b')')
+            || scan.peek_kw("ASC")
+            || scan.peek_kw("DESC")
+            || scan.peek_kw("NULLS")
+            || scan.peek_kw("LIMIT")
+            || scan.peek_kw("OFFSET")
+            || scan.peek_kw("UNION")
+            || scan.peek_kw("INTERSECT")
+            || scan.peek_kw("EXCEPT");
+        if terminal {
+            if let Some((_, ty)) = cols.iter().find(|(n, _)| *n == ident) {
+                return Ok(*ty);
+            }
+        }
+        scan.i = start;
+    }
+    infer_expr(scan, cx)
+}
+
+fn select_item_name(
+    scan: &mut TScan<'_>,
+    cx: &TypeCx<'_>,
+    i: usize,
+    expr_sql: &str,
+) -> Result<String> {
     if scan.take_kw("AS") {
-        return scan.read_ident().unwrap_or_else(|| format!("c{i}"));
+        return scan
+            .read_ident()
+            .ok_or_else(|| ty_err(cx.index, "select alias"));
     }
-    if scan.peek_select_clause_kw() {
-        return format!("c{i}");
+    if let Some(name) = inherited_column_name(expr_sql) {
+        return Ok(name);
     }
-    scan.read_ident().unwrap_or_else(|| format!("c{i}"))
+    if cx.require_named_derived {
+        return Err(ty_err(
+            cx.index,
+            "derived columns require explicit aliases or inherited names",
+        ));
+    }
+    Ok(format!("c{i}"))
+}
+
+fn inherited_column_name(expr: &str) -> Option<String> {
+    let mut s = skip_ws(expr);
+    let (first, rest) = read_ident(s)?;
+    s = skip_ws(rest);
+    let name = if s.starts_with('.') {
+        let (col, rest) = read_ident(skip_ws(&s[1..]))?;
+        s = skip_ws(rest);
+        col
+    } else {
+        first
+    };
+    if s.is_empty() {
+        Some(name)
+    } else {
+        None
+    }
 }
 
 fn lookahead_from(scan: &TScan<'_>, cx: &mut TypeCx<'_>) {
@@ -741,6 +1751,7 @@ fn lookahead_from(scan: &TScan<'_>, cx: &mut TypeCx<'_>) {
         sql: scan.sql,
         i: scan.i,
         took_real: false,
+        base: scan.base,
     };
     let mut depth = 0i32;
     while ahead.i < ahead.sql.len() {
@@ -765,65 +1776,151 @@ fn lookahead_from(scan: &TScan<'_>, cx: &mut TypeCx<'_>) {
                 sql: ahead.sql,
                 i: ahead.i,
                 took_real: false,
+                base: ahead.base,
             };
             let saved_from = cx.from.clone();
             cx.from.clear();
             loop {
                 if tmp.take_byte(b'(') {
-                    let _ = tmp.take_balanced_inner();
+                    let inner = tmp.take_balanced_inner().unwrap_or("");
+                    let saved_named = cx.require_named_derived;
+                    let saved_bind = cx.bind_i;
+                    let saved_spans = cx.text_spans.len();
+                    let saved_physical = cx.physical.clone();
+                    let saved_assign = cx.assignments.len();
+                    cx.require_named_derived = true;
+                    let cols = typecheck_select_list_only(inner, tmp.base_of(inner), cx).ok();
+                    cx.require_named_derived = saved_named;
+                    cx.bind_i = saved_bind;
+                    cx.text_spans.truncate(saved_spans);
+                    cx.physical = saved_physical;
+                    cx.assignments.truncate(saved_assign);
                     let _ = tmp.take_kw("AS");
-                    let alias = tmp.read_ident();
-                    if let Some(alias) = alias {
-                        cx.from.push(alias);
+                    if let Some(alias) = tmp.read_ident() {
+                        if let Some(cols) = cols {
+                            let _ = reject_duplicate_names(cx.index, &cols);
+                            cx.ctes.insert(alias.clone(), cols);
+                        }
+                        cx.from.insert(alias.clone(), FromSrc::Cte(alias));
                     }
                 } else if let Some(name) = tmp.read_ident() {
-                    cx.from.push(name);
+                    let mut visible = name.clone();
                     if tmp.take_kw("AS") {
-                        let _ = tmp.read_ident();
+                        if let Some(alias) = tmp.read_ident() {
+                            visible = alias;
+                        }
+                    } else if !tmp.peek_kw("JOIN")
+                        && !tmp.peek_kw("INNER")
+                        && !tmp.peek_kw("LEFT")
+                        && !tmp.peek_kw("CROSS")
+                        && !tmp.peek_kw("ON")
+                        && !tmp.peek_kw("WHERE")
+                        && !tmp.peek_byte(b',')
+                    {
+                        if let Some(alias) = tmp.read_ident_if_not_clause() {
+                            visible = alias;
+                        }
                     }
+                    let src = if cx.ctes.contains_key(&name) {
+                        FromSrc::Cte(name)
+                    } else {
+                        FromSrc::Physical(name)
+                    };
+                    cx.from.insert(visible, src);
                 } else {
                     break;
                 }
-                if tmp.take_kw("JOIN")
-                    || tmp.take_kw("INNER")
-                    || tmp.take_kw("LEFT")
-                    || tmp.take_kw("CROSS")
-                {
-                    let _ = tmp.take_kw("OUTER");
-                    let _ = tmp.take_kw("JOIN");
-                    continue;
+                loop {
+                    if tmp.take_kw("ON") {
+                        skip_join_on_predicate(&mut tmp);
+                        continue;
+                    }
+                    if tmp.take_kw("JOIN")
+                        || tmp.take_kw("INNER")
+                        || tmp.take_kw("LEFT")
+                        || tmp.take_kw("CROSS")
+                    {
+                        let _ = tmp.take_kw("OUTER");
+                        let _ = tmp.take_kw("JOIN");
+                        break;
+                    }
+                    if tmp.take_byte(b',') {
+                        break;
+                    }
+                    if cx.from.is_empty() {
+                        cx.from = saved_from;
+                    }
+                    return;
                 }
-                if tmp.take_byte(b',') {
-                    continue;
-                }
-                break;
             }
-            if cx.from.is_empty() {
-                cx.from = saved_from;
-            }
-            return;
         }
         let ch = ahead.sql[ahead.i..].chars().next().unwrap_or('\0');
         ahead.i += ch.len_utf8();
     }
 }
 
+fn skip_join_on_predicate(scan: &mut TScan<'_>) {
+    let mut depth = 0i32;
+    while scan.i < scan.sql.len() {
+        scan.skip();
+        if scan.i >= scan.sql.len() {
+            break;
+        }
+        if scan.sql.as_bytes()[scan.i] == b'\'' {
+            let _ = scan.take_string();
+            continue;
+        }
+        if scan.take_byte(b'(') {
+            depth += 1;
+            continue;
+        }
+        if scan.take_byte(b')') {
+            depth -= 1;
+            continue;
+        }
+        if depth > 0 {
+            let ch = scan.sql[scan.i..].chars().next().unwrap_or('\0');
+            scan.i += ch.len_utf8();
+            continue;
+        }
+        if scan.peek_kw("JOIN")
+            || scan.peek_kw("INNER")
+            || scan.peek_kw("LEFT")
+            || scan.peek_kw("CROSS")
+            || scan.peek_kw("WHERE")
+            || scan.peek_kw("GROUP")
+            || scan.peek_kw("HAVING")
+            || scan.peek_kw("ORDER")
+            || scan.peek_kw("LIMIT")
+            || scan.peek_kw("UNION")
+            || scan.peek_byte(b',')
+        {
+            break;
+        }
+        let ch = scan.sql[scan.i..].chars().next().unwrap_or('\0');
+        scan.i += ch.len_utf8();
+    }
+}
+
 fn star_columns(cx: &TypeCx<'_>) -> Result<Vec<(String, SqlType)>> {
     let mut out = Vec::new();
-    for table in &cx.from {
-        if let Some(cols) = cx.ctes.get(table) {
-            out.extend(cols.clone());
-            continue;
-        }
-        if let Some(cols) = cx.env.tables.get(table) {
-            out.extend(cols.iter().map(|(n, t)| (n.clone(), *t)));
-            continue;
-        }
-        if cx.env.is_empty() {
-            return Ok(Vec::new());
+    for src in cx.from.values() {
+        match src {
+            FromSrc::Cte(name) => {
+                if let Some(cols) = cx.ctes.get(name) {
+                    out.extend(cols.clone());
+                    continue;
+                }
+            }
+            FromSrc::Physical(table) => {
+                if let Some(cols) = cx.env.table_columns(table) {
+                    out.extend(cols.iter().cloned());
+                    continue;
+                }
+            }
         }
         return Err(PluginError::invalid_params(format!(
-            "statement {} names unknown table {table}",
+            "statement {} SELECT * names unknown source",
             cx.index
         )));
     }
@@ -835,19 +1932,23 @@ fn take_from_item(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<()> {
         let inner = scan
             .take_balanced_inner()
             .ok_or_else(|| ty_err(cx.index, "FROM subquery"))?;
-        let cols = typecheck_select_list_only(inner, cx)?;
+        let saved = cx.require_named_derived;
+        cx.require_named_derived = true;
+        let cols = typecheck_select_list_only(inner, scan.base_of(inner), cx)?;
+        cx.require_named_derived = saved;
+        reject_duplicate_names(cx.index, &cols)?;
         let _ = scan.take_kw("AS");
         let alias = scan
             .read_ident()
-            .unwrap_or_else(|| format!("_sub{}", cx.from.len()));
+            .ok_or_else(|| ty_err(cx.index, "subquery alias required"))?;
         cx.ctes.insert(alias.clone(), cols);
-        cx.from.push(alias);
+        cx.from.insert(alias.clone(), FromSrc::Cte(alias));
         return Ok(());
     }
     let name = scan
         .read_ident()
         .ok_or_else(|| ty_err(cx.index, "FROM table"))?;
-    cx.from.push(name);
+    let mut visible = name.clone();
     if scan.take_kw("AS")
         || !(scan.peek_kw("JOIN")
             || scan.peek_kw("INNER")
@@ -862,7 +1963,16 @@ fn take_from_item(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<()> {
             || scan.peek_kw("UNION")
             || scan.peek_byte(b','))
     {
-        let _ = scan.read_ident();
+        if let Some(alias) = scan.read_ident() {
+            visible = alias;
+        }
+    }
+    if cx.ctes.contains_key(&name) {
+        cx.from.insert(visible, FromSrc::Cte(name));
+    } else {
+        require_physical_table(cx, &name)?;
+        cx.note_physical(&name, None);
+        cx.from.insert(visible, FromSrc::Physical(name));
     }
     Ok(())
 }
@@ -874,8 +1984,9 @@ fn infer_expr(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
 fn infer_or(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
     let mut t = infer_and(scan, cx)?;
     while scan.take_kw("OR") {
+        require_booleanish(cx.index, t, "OR")?;
         let r = infer_and(scan, cx)?;
-        let _ = unify_types(cx.index, t, r)?;
+        require_booleanish(cx.index, r, "OR")?;
         t = SqlType::Boolean;
     }
     Ok(t)
@@ -884,8 +1995,9 @@ fn infer_or(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
 fn infer_and(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
     let mut t = infer_not(scan, cx)?;
     while scan.take_kw("AND") {
+        require_booleanish(cx.index, t, "AND")?;
         let r = infer_not(scan, cx)?;
-        let _ = unify_types(cx.index, t, r)?;
+        require_booleanish(cx.index, r, "AND")?;
         t = SqlType::Boolean;
     }
     Ok(t)
@@ -893,7 +2005,8 @@ fn infer_and(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
 
 fn infer_not(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
     if scan.take_kw("NOT") {
-        let _ = infer_not(scan, cx)?;
+        let t = infer_not(scan, cx)?;
+        require_booleanish(cx.index, t, "NOT")?;
         return Ok(SqlType::Boolean);
     }
     infer_cmp(scan, cx)
@@ -965,28 +2078,31 @@ fn infer_in_list(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>, left: SqlType) -> Re
     if !scan.take_byte(b'(') {
         return Err(ty_err(cx.index, "IN ("));
     }
-    if scan.peek_kw("SELECT") || scan.peek_kw("WITH") {
-        let inner = scan.take_balanced_inner().unwrap_or("");
-        let mut body = TScan {
-            sql: inner,
-            i: 0,
-            took_real: false,
-        };
+    let inner = scan
+        .take_balanced_inner()
+        .ok_or_else(|| ty_err(cx.index, "IN ("))?;
+    let mut body = TScan {
+        sql: inner,
+        i: 0,
+        took_real: false,
+        base: scan.base_of(inner),
+    };
+    if body.peek_kw("SELECT") || body.peek_kw("WITH") {
+        let saved_named = cx.require_named_derived;
+        cx.require_named_derived = false;
         let cols = infer_select(&mut body, cx)?;
+        cx.require_named_derived = saved_named;
         if let Some((_, ty)) = cols.first() {
             let _ = unify_types(cx.index, left, *ty)?;
         }
         return Ok(());
     }
     loop {
-        let t = infer_expr(scan, cx)?;
+        let t = infer_expr(&mut body, cx)?;
         let _ = unify_types(cx.index, left, t)?;
-        if !scan.take_byte(b',') {
+        if !body.take_byte(b',') {
             break;
         }
-    }
-    if !scan.take_byte(b')') {
-        return Err(ty_err(cx.index, "IN )"));
     }
     Ok(())
 }
@@ -1018,7 +2134,10 @@ fn infer_add(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
 fn infer_mul(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
     let mut t = infer_prefix(scan, cx)?;
     loop {
-        if scan.take_op("*") || scan.take_op("/") || scan.take_op("%") {
+        if scan.take_op("%") {
+            let r = infer_prefix(scan, cx)?;
+            t = unify_integer_mod(cx.index, t, r)?;
+        } else if scan.take_op("*") || scan.take_op("/") {
             let r = infer_prefix(scan, cx)?;
             t = unify_numeric(cx.index, t, r)?;
         } else {
@@ -1026,6 +2145,16 @@ fn infer_mul(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
         }
     }
     Ok(t)
+}
+
+fn unify_integer_mod(index: usize, a: SqlType, b: SqlType) -> Result<SqlType> {
+    let t = unify_types(index, a, b)?;
+    if t != SqlType::Null && t != SqlType::Integer {
+        return Err(PluginError::invalid_params(format!(
+            "statement {index} % requires INTEGER (REAL modulo is not SQL v1)"
+        )));
+    }
+    Ok(SqlType::Integer)
 }
 
 fn infer_prefix(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
@@ -1075,6 +2204,19 @@ fn infer_atom(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
     if scan.take_kw("CASE") {
         return infer_case(scan, cx);
     }
+    if scan.take_kw("EXISTS") {
+        if !scan.take_byte(b'(') {
+            return Err(ty_err(cx.index, "EXISTS ("));
+        }
+        let inner = scan
+            .take_balanced_inner()
+            .ok_or_else(|| ty_err(cx.index, "EXISTS subquery"))?;
+        let saved = cx.require_named_derived;
+        cx.require_named_derived = false;
+        let _ = typecheck_select_list_only(inner, scan.base_of(inner), cx)?;
+        cx.require_named_derived = saved;
+        return Ok(SqlType::Boolean);
+    }
     if scan.take_byte(b'?') {
         let ty = cx.binds.get(cx.bind_i).copied().unwrap_or(SqlType::Null);
         cx.bind_i += 1;
@@ -1084,6 +2226,9 @@ fn infer_atom(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
         return Ok(SqlType::Blob);
     }
     if scan.take_string() {
+        let end = scan.i;
+        let start = string_lit_start(scan, end);
+        cx.note_text(scan.abs(start), scan.abs(end));
         return Ok(SqlType::Text);
     }
     if scan.take_number() {
@@ -1101,13 +2246,21 @@ fn infer_atom(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
             sql: inner,
             i: 0,
             took_real: false,
+            base: scan.base_of(inner),
         };
         if body.peek_kw("SELECT") || body.peek_kw("WITH") || body.peek_kw("VALUES") {
+            let saved_named = cx.require_named_derived;
+            cx.require_named_derived = false;
             let cols = infer_select(&mut body, cx)?;
+            cx.require_named_derived = saved_named;
             return Ok(cols.first().map(|(_, t)| *t).unwrap_or(SqlType::Null));
         }
         return infer_expr(&mut body, cx);
     }
+    let ident_start = {
+        scan.skip();
+        scan.i
+    };
     let Some(name) = scan.read_ident() else {
         return Err(ty_err(cx.index, "expression atom"));
     };
@@ -1115,12 +2268,44 @@ fn infer_atom(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
         return infer_call(scan, cx, &name);
     }
     if scan.take_byte(b'.') {
+        let col_start = scan.i;
         let col = scan
             .read_ident()
             .ok_or_else(|| ty_err(cx.index, "qualified column"))?;
-        return lookup_column(cx, Some(&name), &col);
+        let ty = lookup_column(cx, Some(&name), &col)?;
+        if ty.is_text() {
+            cx.note_text(scan.abs(ident_start), scan.abs(scan.i));
+        }
+        let _ = col_start;
+        return Ok(ty);
     }
-    lookup_column(cx, None, &name)
+    let ty = lookup_column(cx, None, &name)?;
+    if ty.is_text() {
+        cx.note_text(scan.abs(ident_start), scan.abs(scan.i));
+    }
+    Ok(ty)
+}
+
+fn string_lit_start(scan: &TScan<'_>, end: usize) -> usize {
+    let bytes = scan.sql.as_bytes();
+    if end == 0 {
+        return 0;
+    }
+    let mut i = end.saturating_sub(1);
+    if bytes.get(i) == Some(&b'\'') {
+        i = i.saturating_sub(1);
+    }
+    while i > 0 {
+        if bytes[i] == b'\'' {
+            if bytes.get(i.saturating_sub(1)) == Some(&b'\'') {
+                i = i.saturating_sub(2);
+                continue;
+            }
+            return i;
+        }
+        i -= 1;
+    }
+    0
 }
 
 fn infer_call(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>, name: &str) -> Result<SqlType> {
@@ -1166,25 +2351,72 @@ fn infer_call(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>, name: &str) -> Result<S
             }
             Ok(SqlType::Integer)
         }
-        "avg" | "round" | "abs" => {
+        "avg" => {
             let t = args.first().copied().unwrap_or(SqlType::Null);
             if t != SqlType::Null && !t.is_numeric() {
-                return Err(ty_err(cx.index, "numeric helper requires INTEGER or REAL"));
+                return Err(ty_err(cx.index, "avg() requires INTEGER or REAL"));
             }
-            if name == "round" || name == "avg" {
-                Ok(SqlType::Real)
+            Ok(SqlType::Real)
+        }
+        "abs" => {
+            let t = args.first().copied().unwrap_or(SqlType::Null);
+            if t != SqlType::Null && !t.is_numeric() {
+                return Err(ty_err(cx.index, "abs() requires INTEGER or REAL"));
+            }
+            Ok(if t == SqlType::Null {
+                SqlType::Integer
             } else {
-                Ok(if t == SqlType::Null {
-                    SqlType::Integer
-                } else {
-                    t
-                })
+                t
+            })
+        }
+        "round" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(ty_err(cx.index, "round() requires 1 or 2 arguments"));
             }
+            let t = args.first().copied().unwrap_or(SqlType::Null);
+            if t != SqlType::Null && !t.is_numeric() {
+                return Err(ty_err(cx.index, "round() requires INTEGER or REAL"));
+            }
+            if let Some(prec) = args.get(1) {
+                if *prec != SqlType::Null && *prec != SqlType::Integer {
+                    return Err(ty_err(cx.index, "round() precision must be INTEGER"));
+                }
+            }
+            Ok(SqlType::Real)
         }
         "count" => Ok(SqlType::Integer),
-        "lower" | "upper" | "trim" | "replace" | "substr" => {
-            for a in args.iter().take(1) {
+        "lower" | "upper" => {
+            require_textish(cx.index, args.first().copied().unwrap_or(SqlType::Null))?;
+            Ok(SqlType::Text)
+        }
+        "trim" => {
+            for a in &args {
                 require_textish(cx.index, *a)?;
+            }
+            Ok(SqlType::Text)
+        }
+        "replace" => {
+            if args.len() != 3 {
+                return Err(ty_err(cx.index, "replace() requires 3 TEXT arguments"));
+            }
+            for a in &args {
+                require_textish(cx.index, *a)?;
+            }
+            Ok(SqlType::Text)
+        }
+        "substr" => {
+            if args.len() != 2 && args.len() != 3 {
+                return Err(ty_err(cx.index, "substr() requires 2 or 3 arguments"));
+            }
+            require_textish(cx.index, args.first().copied().unwrap_or(SqlType::Null))?;
+            let idx = args.get(1).copied().unwrap_or(SqlType::Null);
+            if idx != SqlType::Null && idx != SqlType::Integer {
+                return Err(ty_err(cx.index, "substr() index must be INTEGER"));
+            }
+            if let Some(len) = args.get(2) {
+                if *len != SqlType::Null && *len != SqlType::Integer {
+                    return Err(ty_err(cx.index, "substr() length must be INTEGER"));
+                }
             }
             Ok(SqlType::Text)
         }
@@ -1195,19 +2427,45 @@ fn infer_call(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>, name: &str) -> Result<S
             }
             Ok(SqlType::Integer)
         }
-        "json_extract" | "json_object" => Ok(SqlType::Text),
+        "json_extract" => {
+            if args.len() != 2 {
+                return Err(ty_err(cx.index, "json_extract() requires 2 arguments"));
+            }
+            require_textish(cx.index, args.get(1).copied().unwrap_or(SqlType::Null))?;
+            Ok(SqlType::Text)
+        }
+        "json_object" => Ok(SqlType::Text),
         "json_valid" => Ok(SqlType::Integer),
-        _ => Ok(SqlType::Null),
+        "json" => {
+            if args.len() != 1 {
+                return Err(ty_err(cx.index, "json() requires 1 argument"));
+            }
+            Ok(SqlType::Text)
+        }
+        "julianday" => {
+            if args.len() != 1 {
+                return Err(ty_err(cx.index, "julianday() requires 1 argument"));
+            }
+            Ok(SqlType::Real)
+        }
+        _ => Err(ty_err(cx.index, &format!("unknown helper {name}"))),
     }
 }
 
 fn infer_case(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
-    if !scan.peek_kw("WHEN") {
-        let _ = infer_expr(scan, cx)?;
-    }
+    let simple = if !scan.peek_kw("WHEN") {
+        Some(infer_expr(scan, cx)?)
+    } else {
+        None
+    };
     let mut result = SqlType::Null;
     while scan.take_kw("WHEN") {
-        let _ = infer_expr(scan, cx)?;
+        let w = infer_expr(scan, cx)?;
+        if let Some(scrutinee) = simple {
+            let _ = unify_types(cx.index, scrutinee, w)?;
+        } else {
+            require_booleanish(cx.index, w, "CASE WHEN")?;
+        }
         if !scan.take_kw("THEN") {
             return Err(ty_err(cx.index, "CASE THEN"));
         }
@@ -1224,29 +2482,25 @@ fn infer_case(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
     Ok(result)
 }
 
-fn lookup_column(cx: &TypeCx<'_>, table: Option<&str>, column: &str) -> Result<SqlType> {
+fn lookup_column(cx: &mut TypeCx<'_>, table: Option<&str>, column: &str) -> Result<SqlType> {
     if let Some(table) = table {
+        if let Some(src) = lookup_visible_src(cx, table) {
+            return lookup_from_src(cx, &src, column);
+        }
         if let Some(cols) = cx.ctes.get(table) {
             if let Some((_, ty)) = cols.iter().find(|(n, _)| n == column) {
                 return Ok(*ty);
             }
         }
         if let Some(ty) = cx.env.column_type(table, column) {
+            cx.note_physical(table, Some(column));
             return Ok(ty);
         }
         return unknown_column(cx, Some(table), column);
     }
-    for cte in cx.ctes.values() {
-        if let Some((_, ty)) = cte.iter().find(|(n, _)| n == column) {
-            return Ok(*ty);
-        }
-    }
-    if cx.from.len() == 1 {
-        return lookup_column(cx, Some(&cx.from[0]), column);
-    }
     let mut found = None;
-    for table in &cx.from {
-        if let Some(ty) = cx.env.column_type(table, column) {
+    for src in cx.from.values().cloned().collect::<Vec<_>>() {
+        if let Ok(ty) = lookup_from_src(cx, &src, column) {
             if found.is_some() {
                 return Err(PluginError::invalid_params(format!(
                     "statement {} unqualified column {column} is ambiguous",
@@ -1259,13 +2513,65 @@ fn lookup_column(cx: &TypeCx<'_>, table: Option<&str>, column: &str) -> Result<S
     if let Some(ty) = found {
         return Ok(ty);
     }
+    let outer_sources: Vec<Vec<FromSrc>> = cx
+        .outer_from
+        .iter()
+        .rev()
+        .map(|outer| outer.values().cloned().collect())
+        .collect();
+    for sources in outer_sources {
+        let mut outer_found = None;
+        for src in sources {
+            if let Ok(ty) = lookup_from_src(cx, &src, column) {
+                if outer_found.is_some() {
+                    return Err(PluginError::invalid_params(format!(
+                        "statement {} unqualified column {column} is ambiguous",
+                        cx.index
+                    )));
+                }
+                outer_found = Some(ty);
+            }
+        }
+        if let Some(ty) = outer_found {
+            return Ok(ty);
+        }
+    }
     unknown_column(cx, None, column)
 }
 
-fn unknown_column(cx: &TypeCx<'_>, table: Option<&str>, column: &str) -> Result<SqlType> {
-    if cx.env.is_empty() {
-        return Ok(SqlType::Null);
+fn lookup_visible_src(cx: &TypeCx<'_>, table: &str) -> Option<FromSrc> {
+    if let Some(src) = cx.from.get(table) {
+        return Some(src.clone());
     }
+    for outer in cx.outer_from.iter().rev() {
+        if let Some(src) = outer.get(table) {
+            return Some(src.clone());
+        }
+    }
+    None
+}
+
+fn lookup_from_src(cx: &mut TypeCx<'_>, src: &FromSrc, column: &str) -> Result<SqlType> {
+    match src {
+        FromSrc::Cte(name) => {
+            if let Some(cols) = cx.ctes.get(name) {
+                if let Some((_, ty)) = cols.iter().find(|(n, _)| n == column) {
+                    return Ok(*ty);
+                }
+            }
+            unknown_column(cx, Some(name), column)
+        }
+        FromSrc::Physical(table) => {
+            if let Some(ty) = cx.env.column_type(table, column) {
+                cx.note_physical(table, Some(column));
+                return Ok(ty);
+            }
+            unknown_column(cx, Some(table), column)
+        }
+    }
+}
+
+fn unknown_column(cx: &TypeCx<'_>, table: Option<&str>, column: &str) -> Result<SqlType> {
     let msg = match table {
         Some(table) => format!(
             "statement {} names unknown column {table}.{column}",
@@ -1299,11 +2605,6 @@ fn unify_numeric(index: usize, a: SqlType, b: SqlType) -> Result<SqlType> {
 
 fn ty_err(index: usize, msg: &str) -> PluginError {
     PluginError::invalid_params(format!("statement {index} {msg}"))
-}
-
-fn column_is_autoincrement(rest: &str) -> bool {
-    let u = rest.to_ascii_uppercase();
-    u.contains("PRIMARY") && u.contains("KEY") && u.contains("AUTOINCREMENT")
 }
 
 fn escape_sql_str(s: &str) -> String {
@@ -1423,13 +2724,46 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     out
 }
 
+fn subslice_offset(outer: &str, inner: &str) -> Option<usize> {
+    let outer_addr = outer.as_ptr() as usize;
+    let inner_addr = inner.as_ptr() as usize;
+    if inner_addr >= outer_addr && inner_addr + inner.len() <= outer_addr + outer.len() {
+        Some(inner_addr - outer_addr)
+    } else {
+        None
+    }
+}
+
 struct TScan<'a> {
     sql: &'a str,
     i: usize,
     took_real: bool,
+    base: usize,
 }
 
 impl<'a> TScan<'a> {
+    fn abs(&self, local: usize) -> usize {
+        self.base.saturating_add(local)
+    }
+
+    fn base_of(&self, inner: &str) -> usize {
+        subslice_offset(self.sql, inner)
+            .map(|off| self.base.saturating_add(off))
+            .unwrap_or(self.base)
+    }
+
+    fn read_ident_if_not_clause(&mut self) -> Option<String> {
+        if self.peek_select_clause_kw()
+            || self.peek_kw("JOIN")
+            || self.peek_kw("INNER")
+            || self.peek_kw("LEFT")
+            || self.peek_kw("CROSS")
+            || self.peek_kw("ON")
+        {
+            return None;
+        }
+        self.read_ident()
+    }
     fn skip(&mut self) {
         while self.i < self.sql.len() {
             let rest = &self.sql[self.i..];
@@ -1520,12 +2854,8 @@ impl<'a> TScan<'a> {
     }
 
     fn take_balanced_inner(&mut self) -> Option<&'a str> {
-        self.skip();
-        let start = self.i.saturating_sub(1);
-        if start >= self.sql.len() || self.sql.as_bytes().get(start) != Some(&b'(') {
-            let s = skip_ws(&self.sql[self.i.saturating_sub(1).min(self.sql.len())..]);
-            let _ = s;
-        }
+        // Caller consumed the opening `(`. Do not skip whitespace first or
+        // `i - 1` would no longer be that paren (`(\n SELECT …)`).
         let from = if self.i > 0 && self.sql.as_bytes()[self.i - 1] == b'(' {
             self.i - 1
         } else {
@@ -1669,20 +2999,16 @@ mod tests {
 
     #[test]
     fn ifnull_mixed_literals_fail_closed() {
-        let err =
-            typecheck_execute_request(&req("SELECT IFNULL('x', 0)"), &SqlTypeEnv::new(), false)
-                .unwrap_err();
+        let err = typecheck_execute_request(&req("SELECT IFNULL('x', 0)"), &SqlTypeEnv::new())
+            .unwrap_err();
         assert!(err.to_string().contains("incompatible"), "{err}");
     }
 
     #[test]
     fn union_mixed_types_fail_closed() {
-        let err = typecheck_execute_request(
-            &req("SELECT 1 UNION ALL SELECT 'x'"),
-            &SqlTypeEnv::new(),
-            false,
-        )
-        .unwrap_err();
+        let err =
+            typecheck_execute_request(&req("SELECT 1 UNION ALL SELECT 'x'"), &SqlTypeEnv::new())
+                .unwrap_err();
         assert!(err.to_string().contains("incompatible"), "{err}");
     }
 
@@ -1694,8 +3020,7 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS typed (n INTEGER, body TEXT)",
         );
         assert_eq!(env.column_type("typed", "body"), Some(SqlType::Text));
-        let err =
-            typecheck_execute_request(&req("SELECT missing FROM typed"), &env, false).unwrap_err();
+        let err = typecheck_execute_request(&req("SELECT missing FROM typed"), &env).unwrap_err();
         assert!(err.to_string().contains("unknown column"), "{err}");
         let from_ddl = sql_type_env_from_canonical_ddl(
             "CREATE TABLE a (id INTEGER PRIMARY KEY); CREATE TABLE b (body TEXT);",
@@ -1706,10 +3031,11 @@ mod tests {
 
     #[test]
     fn insert_with_source_typechecks() {
+        let mut env = SqlTypeEnv::new();
+        apply_schema_sql_to_env(&mut env, "CREATE TABLE IF NOT EXISTS ign_sel (id INTEGER)");
         typecheck_execute_request(
-            &req("INSERT OR IGNORE INTO ign_sel (id) WITH s AS (SELECT 1) SELECT * FROM s"),
-            &SqlTypeEnv::new(),
-            false,
+            &req("INSERT OR IGNORE INTO ign_sel (id) WITH s(id) AS (SELECT 1) SELECT * FROM s"),
+            &env,
         )
         .expect("INSERT … WITH");
     }
@@ -1718,8 +3044,233 @@ mod tests {
     fn sum_real_without_cast_fails_closed() {
         let mut env = SqlTypeEnv::new();
         apply_schema_sql_to_env(&mut env, "CREATE TABLE IF NOT EXISTS typed (r REAL)");
-        let err =
-            typecheck_execute_request(&req("SELECT sum(r) FROM typed"), &env, false).unwrap_err();
+        let err = typecheck_execute_request(&req("SELECT sum(r) FROM typed"), &env).unwrap_err();
         assert!(err.to_string().contains("sum()"), "{err}");
+    }
+
+    #[test]
+    fn insert_select_and_update_unify_destinations() {
+        let mut env = SqlTypeEnv::new();
+        apply_schema_sql_to_env(&mut env, "CREATE TABLE IF NOT EXISTS t (n INTEGER)");
+        let err = typecheck_execute_request(&req("INSERT INTO t(n) SELECT 'x'"), &env).unwrap_err();
+        assert!(err.to_string().contains("incompatible"), "{err}");
+        let err = typecheck_execute_request(&req("UPDATE t SET n = 'x'"), &env).unwrap_err();
+        assert!(err.to_string().contains("incompatible"), "{err}");
+    }
+
+    #[test]
+    fn boolean_contexts_reject_integers() {
+        let err =
+            typecheck_execute_request(&req("SELECT 1 WHERE 1"), &SqlTypeEnv::new()).unwrap_err();
+        assert!(err.to_string().contains("BOOLEAN"), "{err}");
+        let err = typecheck_execute_request(&req("SELECT NOT 1"), &SqlTypeEnv::new()).unwrap_err();
+        assert!(err.to_string().contains("BOOLEAN"), "{err}");
+        let err = typecheck_execute_request(
+            &req("SELECT CASE WHEN 1 THEN 1 ELSE 0 END"),
+            &SqlTypeEnv::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("BOOLEAN"), "{err}");
+        let mut env = SqlTypeEnv::new();
+        apply_schema_sql_to_env(
+            &mut env,
+            "CREATE TABLE IF NOT EXISTS checked (n INTEGER CHECK (n))",
+        );
+        let err = typecheck_execute_request(
+            &req("CREATE TABLE IF NOT EXISTS checked (n INTEGER CHECK (n))"),
+            &env,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("BOOLEAN") || err.to_string().contains("does not match"),
+            "{err}"
+        );
+        let fresh = SqlTypeEnv::new();
+        let err = typecheck_execute_request(
+            &req("CREATE TABLE IF NOT EXISTS checked (n INTEGER CHECK (n))"),
+            &fresh,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("BOOLEAN"), "{err}");
+    }
+
+    #[test]
+    fn modulo_real_and_helper_signatures_fail_closed() {
+        let err =
+            typecheck_execute_request(&req("SELECT 1.5 % 2"), &SqlTypeEnv::new()).unwrap_err();
+        assert!(err.to_string().contains("%"), "{err}");
+        let err =
+            typecheck_execute_request(&req("SELECT replace(1, 'a', 'b')"), &SqlTypeEnv::new())
+                .unwrap_err();
+        assert!(err.to_string().contains("TEXT"), "{err}");
+        let err =
+            typecheck_execute_request(&req("SELECT substr('x')"), &SqlTypeEnv::new()).unwrap_err();
+        assert!(err.to_string().contains("substr()"), "{err}");
+        let err = typecheck_execute_request(&req("SELECT round(1, 'x')"), &SqlTypeEnv::new())
+            .unwrap_err();
+        assert!(err.to_string().contains("round()"), "{err}");
+    }
+
+    #[test]
+    fn alias_cte_and_recursive_anchor_first() {
+        let mut env = SqlTypeEnv::new();
+        apply_schema_sql_to_env(
+            &mut env,
+            "CREATE TABLE IF NOT EXISTS books (id INTEGER, title TEXT)",
+        );
+        typecheck_execute_request(&req("SELECT b.id FROM books AS b"), &env).unwrap();
+        typecheck_execute_request(
+            &req("WITH c(x) AS (SELECT id FROM books) SELECT x FROM c"),
+            &env,
+        )
+        .unwrap();
+        typecheck_execute_request(
+            &req(
+                "WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SELECT n FROM t",
+            ),
+            &SqlTypeEnv::new(),
+        )
+        .unwrap();
+        let err = typecheck_execute_request(
+            &req("WITH c AS (SELECT 1) SELECT * FROM c"),
+            &SqlTypeEnv::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("derived columns"), "{err}");
+        let err = typecheck_execute_request(
+            &req("WITH c(a, a) AS (SELECT 1, 2) SELECT a FROM c"),
+            &SqlTypeEnv::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
+        typecheck_execute_request(
+            &req("SELECT operation_id FROM db_atomic_receipts"),
+            &sql_host_bookkeeping_type_env(),
+        )
+        .unwrap();
+        typecheck_execute_request(
+            &req("UPDATE books SET id = (\
+                    SELECT CASE o.status WHEN 'ok' THEN 1 ELSE 0 END FROM (\
+                        SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM books WHERE id = 1) \
+                          THEN 'missing' ELSE 'ok' END AS status\
+                    ) o\
+                 )"),
+            &env,
+        )
+        .unwrap();
+        apply_schema_sql_to_env(
+            &mut env,
+            "CREATE TABLE IF NOT EXISTS identities (id INTEGER, user_id INTEGER)",
+        );
+        apply_schema_sql_to_env(
+            &mut env,
+            "CREATE TABLE IF NOT EXISTS users (id INTEGER, role TEXT, status TEXT)",
+        );
+        typecheck_execute_request(
+            &req(
+                "SELECT CASE \
+                   WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = ?) THEN 'notFound' \
+                   WHEN ((SELECT role FROM users WHERE id = ?) = 'owner' \
+                     AND (SELECT status FROM users WHERE id = ?) = 'active' \
+                     AND (SELECT COUNT(*) FROM users WHERE role = 'owner' AND status = 'active') <= 1) \
+                   THEN 'lastOwner' ELSE 'ok' END AS status",
+            ),
+            &env,
+        )
+        .unwrap();
+        typecheck_execute_request(
+            &req(
+                "UPDATE books SET id = (\
+                    SELECT CASE o.status WHEN 'ok' THEN 1 ELSE 0 END FROM (\
+                        SELECT CASE \
+                          WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = ?) THEN 'notFound' \
+                          WHEN ((SELECT role FROM users WHERE id = ?) = 'owner' \
+                            AND (SELECT status FROM users WHERE id = ?) = 'active' \
+                            AND (SELECT COUNT(*) FROM users WHERE role = 'owner' AND status = 'active') <= 1) \
+                          THEN 'lastOwner' ELSE 'ok' END AS status\
+                    ) o\
+                 )",
+            ),
+            &env,
+        )
+        .unwrap();
+        typecheck_execute_request(
+            &req("SELECT i.user_id FROM books t \
+                 JOIN identities i ON i.id = t.id"),
+            &env,
+        )
+        .unwrap();
+        typecheck_execute_request(
+            &req("UPDATE identities SET user_id = 1 WHERE NOT EXISTS (\
+                    SELECT 1 FROM identities i \
+                    WHERE i.id = identities.id \
+                      AND i.user_id IS NOT NULL \
+                      AND NOT EXISTS (SELECT 1 FROM users WHERE id = i.user_id)\
+                 )"),
+            &env,
+        )
+        .expect("correlated nested EXISTS alias");
+        typecheck_execute_request(
+            &req(
+                "DELETE FROM books WHERE id IN ( SELECT i.user_id FROM identities i JOIN users u ON u.id = i.user_id WHERE i.user_id IS NOT NULL )",
+            ),
+            &env,
+        )
+        .expect("IN subquery after space");
+    }
+
+    #[test]
+    fn create_if_not_exists_fingerprint_noop_or_reject() {
+        let mut env = SqlTypeEnv::new();
+        let sql = "CREATE TABLE IF NOT EXISTS t (n INTEGER, body TEXT)";
+        let proofs = typecheck_execute_request_resolved(&req(sql), &env).unwrap();
+        assert!(matches!(
+            proofs[0].schema_action,
+            SchemaAction::Create { noop: false, .. }
+        ));
+        apply_schema_sql_to_env(&mut env, sql);
+        let proofs = typecheck_execute_request_resolved(&req(sql), &env).unwrap();
+        assert!(matches!(
+            proofs[0].schema_action,
+            SchemaAction::Create { noop: true, .. }
+        ));
+        let err = typecheck_execute_request(&req("CREATE TABLE IF NOT EXISTS t (n TEXT)"), &env)
+            .unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+    }
+
+    #[test]
+    fn order_by_select_list_alias_without_from() {
+        let mut env = SqlTypeEnv::new();
+        apply_schema_sql_to_env(&mut env, "CREATE TABLE IF NOT EXISTS ign_sel (id INTEGER)");
+        typecheck_execute_request(
+            &req("INSERT OR IGNORE INTO ign_sel (id) SELECT 1 AS id ORDER BY id LIMIT 1 RETURNING id"),
+            &env,
+        )
+        .expect("ORDER BY select-list alias");
+        typecheck_execute_request(
+            &req("CREATE INDEX IF NOT EXISTS idx_ign_sel_id ON ign_sel (id)"),
+            &env,
+        )
+        .expect("CREATE INDEX");
+        typecheck_execute_request(
+            &req(
+                "SELECT CAST((julianday('2020-01-02') - julianday('2020-01-01')) * 86400000 AS INTEGER)",
+            ),
+            &SqlTypeEnv::new(),
+        )
+        .expect("host julianday helper");
+    }
+
+    #[test]
+    fn identifier_helpers_stay_under_63_bytes() {
+        let table = "t";
+        let fn_name = postgres_identity_function_name(table);
+        let trig = postgres_identity_trigger_name(table);
+        assert!(fn_name.len() <= SQL_V1_MAX_IDENT_BYTES);
+        assert!(trig.len() <= SQL_V1_MAX_IDENT_BYTES);
+        assert!(fn_name.starts_with(POSTGRES_IDENT_FN_PREFIX));
+        assert!(trig.starts_with(POSTGRES_IDENT_TRIGGER_PREFIX));
+        assert_ne!(fn_name, trig);
     }
 }

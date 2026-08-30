@@ -79,6 +79,11 @@
         "CAST(sum(n) AS BIGINT)",
         "CAST(avg(n) AS DOUBLE PRECISION)"
       ]
+    },
+    {
+      "id": "div-mod-null-on-zero",
+      "canonical": "SELECT 1 / 0, 4 % 0, a / b",
+      "postgresContains": ["NULLIF(0, 0)", "NULLIF(b, 0)"]
     }
   ],
   "sqliteIdentity": [

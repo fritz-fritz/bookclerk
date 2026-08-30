@@ -347,10 +347,9 @@ pub async fn guest_execute_atomic_on(
     };
     let deadline =
         (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
-    bookclerk_db_exec::execute_typed_on_session(
+    bookclerk_db_exec::execute_typed_envelope(
         conn,
-        &envelope.request,
-        envelope.guest_receipt,
+        &envelope,
         timing_source,
         bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
         bookclerk_db_exec::AtomicSession::from_deadline(deadline),

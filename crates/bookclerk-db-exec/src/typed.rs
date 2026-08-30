@@ -4,19 +4,24 @@
 //! [`DbValue::Bytes`] maps to SeaORM bytes. Typed nulls use the matching
 //! SeaORM `Value::…(None)` variant so column types survive the round trip.
 
+#![allow(clippy::missing_docs_in_private_items)]
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bookclerk_plugin_abi::GuestReceiptPersist;
 use bookclerk_plugin_abi::{
-    apply_schema_sql_to_env, encoded_execute_reply_bytes, encoded_statement_result_bytes,
+    apply_schema_sql_to_env, assert_proof_matches_sql, catalog_companions_for_action,
+    encoded_execute_reply_bytes, encoded_statement_result_bytes, parse_create_table_schema,
+    sql_host_bookkeeping_type_env, typecheck_execute_request_proofs, ResolvedStatement,
+    SchemaAction,
 };
 use bookclerk_plugin_abi::{
     DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue,
     ExecuteReply, ExecuteRequest, SqlType, SqlTypeEnv, StatementResult, TypedDbStatement,
-    SQL_CATALOG_TABLE,
+    FIRST_PARTY_MAX_RESULT_ROWS, SQL_CATALOG_TABLE, SQL_SCHEMA_TABLE,
 };
+use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, Statement,
     TransactionTrait, Value as SeaValue,
@@ -29,8 +34,8 @@ use crate::exec::{
 use crate::lower_canonical_sql_typed;
 use crate::proxy_txn::{
     consume_commit_injection, consume_savepoint_release_injection,
-    consume_savepoint_rollback_injection, is_txn_broken, note_commit_failed, take_txn_fault,
-    with_exec_budget, AtomicInterruptPhase, ExecBudget,
+    consume_savepoint_rollback_injection, is_txn_broken, note_commit_failed,
+    suspend_execute_row_cap, take_txn_fault, with_exec_budget, AtomicInterruptPhase, ExecBudget,
 };
 use crate::schema_postgres::expand_host_schema_execute_request;
 use crate::{
@@ -60,8 +65,19 @@ async fn apply_binding_companions(
     txn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
     canonical: &str,
+    action: &SchemaAction,
 ) -> Result<(), DbErr> {
-    for companion in crate::schema_postgres::binding_companions(backend, canonical) {
+    let mut companions = catalog_companions_for_action(canonical, Some(action));
+    if backend == sea_orm::DatabaseBackend::Postgres {
+        match action {
+            SchemaAction::Create { noop: true, .. } => {}
+            SchemaAction::None => {}
+            _ => companions.extend(crate::schema_postgres::postgres_identity_companions(
+                canonical,
+            )),
+        }
+    }
+    for companion in companions {
         txn.execute_raw(Statement::from_string(backend, companion))
             .await?;
     }
@@ -70,15 +86,16 @@ async fn apply_binding_companions(
 
 /// Reconstructs [`SqlTypeEnv`] from the durable binding catalog, if present.
 ///
-/// A missing catalog table yields an empty environment. On PostgreSQL the
-/// probe runs under a savepoint so a missing-table `SELECT` cannot abort the
-/// current transaction (`25P02`).
+/// A missing catalog table yields an empty environment. RPC/adapter/shape/type
+/// errors fail closed. On PostgreSQL the probe runs under a savepoint so a
+/// missing-table `SELECT` cannot abort the current transaction (`25P02`).
 ///
 /// # Errors
 ///
 /// Returns [`DbErr`] when the catalog query fails for a reason other than a
-/// missing table.
+/// missing table, or when a catalog cell is malformed.
 pub async fn load_sql_type_env(conn: &impl ConnectionTrait) -> Result<SqlTypeEnv, DbErr> {
+    let _guard = suspend_execute_row_cap();
     let backend = conn.get_database_backend();
     let savepoint = backend == sea_orm::DatabaseBackend::Postgres
         && conn
@@ -88,12 +105,9 @@ pub async fn load_sql_type_env(conn: &impl ConnectionTrait) -> Result<SqlTypeEnv
             ))
             .await
             .is_ok();
-    let sql = format!("SELECT table_name, column_name, sql_type FROM {SQL_CATALOG_TABLE}");
-    let rows = match conn
-        .query_all_raw(Statement::from_string(backend, sql))
-        .await
-    {
-        Ok(rows) => {
+    let loaded = load_sql_type_env_paged(conn, backend).await;
+    match loaded {
+        Ok(env) => {
             if savepoint {
                 let _ = conn
                     .execute_raw(Statement::from_string(
@@ -102,7 +116,7 @@ pub async fn load_sql_type_env(conn: &impl ConnectionTrait) -> Result<SqlTypeEnv
                     ))
                     .await;
             }
-            rows
+            Ok(env)
         }
         Err(err) => {
             if savepoint {
@@ -119,30 +133,442 @@ pub async fn load_sql_type_env(conn: &impl ConnectionTrait) -> Result<SqlTypeEnv
                     ))
                     .await;
             }
-            let msg = err.to_string().to_ascii_lowercase();
-            if msg.contains("no such table")
-                || msg.contains("does not exist")
-                || msg.contains("undefined table")
-                || msg.contains("unknown table")
-            {
+            if catalog_missing_table(&err) {
                 return Ok(SqlTypeEnv::new());
             }
-            return Err(err);
+            Err(err)
         }
-    };
+    }
+}
+
+fn catalog_missing_table(err: &DbErr) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("no such table")
+        || msg.contains("does not exist")
+        || msg.contains("undefined table")
+        || msg.contains("unknown table")
+}
+
+async fn load_sql_type_env_paged(
+    conn: &impl ConnectionTrait,
+    backend: sea_orm::DatabaseBackend,
+) -> Result<SqlTypeEnv, DbErr> {
+    let page = FIRST_PARTY_MAX_RESULT_ROWS.max(1);
+    let mut env = SqlTypeEnv::new();
+    let mut cursor_table = String::new();
+    let mut cursor_ord: i64 = -1;
+    loop {
+        let sql = format!(
+            "SELECT table_name, column_name, sql_type, ordinal, is_identity, default_sql \
+             FROM {SQL_CATALOG_TABLE} \
+             WHERE table_name > {ct} OR (table_name = {ct} AND ordinal > {co}) \
+             ORDER BY table_name, ordinal LIMIT {page}",
+            ct = sql_string_literal(&cursor_table),
+            co = cursor_ord,
+        );
+        let rows = conn
+            .query_all_raw(Statement::from_string(backend, sql))
+            .await?;
+        if rows.is_empty() {
+            break;
+        }
+        let n = rows.len();
+        for row in rows {
+            let table = query_result_text(&row, "table_name");
+            let column = query_result_text(&row, "column_name");
+            let ty = query_result_text(&row, "sql_type");
+            if table.is_empty() || column.is_empty() {
+                return Err(DbErr::Custom(
+                    "bookclerk_sql_catalog row is missing table_name or column_name".into(),
+                ));
+            }
+            let Some(sql_ty) = SqlType::from_column_ident(ty.to_ascii_lowercase().as_str()) else {
+                return Err(DbErr::Custom(format!(
+                    "bookclerk_sql_catalog has unknown sql_type {ty}"
+                )));
+            };
+            let ordinal = query_result_i64(&row, "ordinal").ok_or_else(|| {
+                DbErr::Custom("bookclerk_sql_catalog row is missing ordinal".into())
+            })?;
+            env.insert_column(&table, &column, sql_ty);
+            cursor_table = table;
+            cursor_ord = ordinal;
+            let _ = column;
+        }
+        if n < usize::try_from(page).unwrap_or(usize::MAX) {
+            break;
+        }
+    }
+    let schema_sql =
+        format!("SELECT table_name, fingerprint, identity_column FROM {SQL_SCHEMA_TABLE}");
+    match conn
+        .query_all_raw(Statement::from_string(backend, schema_sql))
+        .await
+    {
+        Ok(rows) => {
+            for row in rows {
+                let table = query_result_text(&row, "table_name");
+                let fingerprint = query_result_text(&row, "fingerprint");
+                let identity = query_result_text(&row, "identity_column");
+                if table.is_empty() || fingerprint.is_empty() {
+                    return Err(DbErr::Custom(
+                        "bookclerk_sql_schema row is missing table_name or fingerprint".into(),
+                    ));
+                }
+                let cols = env.table_columns(&table).unwrap_or(&[]).to_vec();
+                env.insert_table_schema(
+                    table,
+                    cols,
+                    if identity.is_empty() {
+                        None
+                    } else {
+                        Some(identity)
+                    },
+                    fingerprint,
+                );
+            }
+        }
+        Err(err) if catalog_missing_table(&err) => {}
+        Err(err) => return Err(err),
+    }
+    Ok(env)
+}
+
+/// Live physical tables on this connection (host execute only).
+///
+/// Plugin bindings type against [`SQL_CATALOG_TABLE`], not sqlite_master.
+/// Host plans may query tables created outside the canonical host snapshot
+/// (tests, `PRAGMA`/raw DDL); those columns are merged here so typing still
+/// runs.
+pub async fn load_physical_sql_type_env(conn: &impl ConnectionTrait) -> Result<SqlTypeEnv, DbErr> {
+    let _guard = suspend_execute_row_cap();
+    let backend = conn.get_database_backend();
+    if backend == sea_orm::DatabaseBackend::Postgres {
+        load_physical_postgres(conn, backend).await
+    } else {
+        load_physical_sqlite(conn, backend).await
+    }
+}
+
+/// Catalog snapshot for typed execute.
+///
+/// Plugin bindings (`session.type_env` empty) see only [`SQL_CATALOG_TABLE`].
+/// Host sessions merge live physical tables, then the canonical host schema,
+/// so ad-hoc host test tables typecheck without adopting plugin orphans.
+async fn catalog_env_for_typed(
+    conn: &impl ConnectionTrait,
+    session: &AtomicSession,
+) -> Result<SqlTypeEnv, DbErr> {
+    let catalog = load_sql_type_env(conn).await?;
+    if session.type_env.is_empty() {
+        return Ok(catalog);
+    }
+    let mut env = load_physical_sql_type_env(conn).await?;
+    env.merge(&catalog);
+    env.merge(&session.type_env);
+    Ok(env)
+}
+
+async fn load_physical_sqlite(
+    conn: &impl ConnectionTrait,
+    backend: sea_orm::DatabaseBackend,
+) -> Result<SqlTypeEnv, DbErr> {
+    let rows = conn
+        .query_all_raw(Statement::from_string(
+            backend,
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' \
+             AND name NOT LIKE 'sqlite_%'"
+                .to_string(),
+        ))
+        .await?;
+    let mut env = SqlTypeEnv::new();
+    for row in rows {
+        let name = query_result_text(&row, "name");
+        let ddl = query_result_text(&row, "sql");
+        if name.is_empty() || !portable_physical_ident(&name) {
+            continue;
+        }
+        if let Some(schema) = parse_create_table_schema(&ddl) {
+            env.insert_table(schema.table, schema.columns);
+            continue;
+        }
+        match sqlite_pragma_columns(conn, backend, &name).await {
+            Ok(cols) if !cols.is_empty() => env.insert_table(name, cols),
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+    Ok(env)
+}
+
+async fn sqlite_pragma_columns(
+    conn: &impl ConnectionTrait,
+    backend: sea_orm::DatabaseBackend,
+    table: &str,
+) -> Result<Vec<(String, SqlType)>, DbErr> {
+    let sql = format!(
+        "SELECT name, type FROM pragma_table_info({})",
+        sql_string_literal(table)
+    );
+    let rows = conn
+        .query_all_raw(Statement::from_string(backend, sql))
+        .await?;
+    let mut cols = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name = query_result_text(&row, "name");
+        let ty_name = query_result_text(&row, "type");
+        if name.is_empty() {
+            continue;
+        }
+        let Some(ty) = declared_sql_type(&ty_name) else {
+            continue;
+        };
+        cols.push((name, ty));
+    }
+    Ok(cols)
+}
+
+fn portable_physical_ident(name: &str) -> bool {
+    let b = name.as_bytes();
+    !b.is_empty()
+        && b.len() <= bookclerk_plugin_abi::SQL_V1_MAX_IDENT_BYTES
+        && matches!(b[0], b'A'..=b'Z' | b'a'..=b'z' | b'_')
+        && b[1..]
+            .iter()
+            .all(|c| matches!(c, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'))
+}
+
+fn declared_sql_type(ty: &str) -> Option<SqlType> {
+    let t = ty.trim().to_ascii_lowercase();
+    if let Some(parsed) = SqlType::from_column_ident(&t) {
+        return Some(parsed);
+    }
+    let head = t.split(|c: char| c == '(' || c.is_whitespace()).next()?;
+    SqlType::from_column_ident(head)
+}
+
+async fn load_physical_postgres(
+    conn: &impl ConnectionTrait,
+    backend: sea_orm::DatabaseBackend,
+) -> Result<SqlTypeEnv, DbErr> {
+    let sql = "SELECT c.relname::text AS table_name, a.attname::text AS column_name, \
+               t.typname::text AS data_type \
+               FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+               JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid \
+               JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
+               WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') \
+               AND a.attnum > 0 AND NOT a.attisdropped \
+               ORDER BY c.relname, a.attnum";
+    let rows = conn
+        .query_all_raw(Statement::from_string(backend, sql.to_string()))
+        .await?;
     let mut env = SqlTypeEnv::new();
     for row in rows {
         let table = query_result_text(&row, "table_name");
         let column = query_result_text(&row, "column_name");
-        let ty = query_result_text(&row, "sql_type");
-        if table.is_empty() || column.is_empty() {
+        let ty_name = query_result_text(&row, "data_type");
+        if table.is_empty()
+            || column.is_empty()
+            || !portable_physical_ident(&table)
+            || !portable_physical_ident(&column)
+        {
             continue;
         }
-        if let Some(sql_ty) = SqlType::from_column_ident(ty.to_ascii_lowercase().as_str()) {
-            env.insert_column(&table, &column, sql_ty);
-        }
+        let Some(ty) = postgres_typname_to_sql_type(&ty_name) else {
+            continue;
+        };
+        env.insert_column(&table, &column, ty);
     }
     Ok(env)
+}
+
+fn sql_string_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+fn proofs_for_request(
+    catalog: &SqlTypeEnv,
+    req: &ExecuteRequest,
+    stamped: &[ResolvedStatement],
+) -> Result<Vec<ResolvedStatement>, DbErr> {
+    if stamped.len() == req.statements.len() && !stamped.is_empty() {
+        for (stmt, proof) in req.statements.iter().zip(stamped.iter()) {
+            assert_proof_matches_sql(proof, stmt.sql.trim())
+                .map_err(|err| DbErr::Custom(err.to_string()))?;
+        }
+        return Ok(stamped.to_vec());
+    }
+    let env = type_env_with_bookkeeping(catalog);
+    typecheck_execute_request_proofs(req, &env).map_err(|err| DbErr::Custom(err.to_string()))
+}
+
+fn type_env_with_bookkeeping(catalog: &SqlTypeEnv) -> SqlTypeEnv {
+    let mut env = sql_host_bookkeeping_type_env();
+    env.merge(catalog);
+    env
+}
+
+async fn reconcile_physical(
+    txn: &impl ConnectionTrait,
+    backend: sea_orm::DatabaseBackend,
+    action: &SchemaAction,
+    env: &SqlTypeEnv,
+) -> Result<(), DbErr> {
+    match action {
+        SchemaAction::Create {
+            table,
+            fingerprint,
+            noop,
+            ..
+        } => {
+            let exists = physical_table_exists(txn, backend, table).await?;
+            if *noop {
+                if !exists {
+                    return Err(DbErr::Custom(format!(
+                        "binding catalog lists table {table} but the physical table is missing"
+                    )));
+                }
+            } else if exists {
+                return Err(DbErr::Custom(format!(
+                    "physical table {table} exists without catalog metadata; refusing to adopt it"
+                )));
+            }
+            if exists {
+                if let Some(physical) = physical_table_fingerprint(txn, backend, table).await? {
+                    if physical != *fingerprint {
+                        return Err(DbErr::Custom(format!(
+                            "catalog fingerprint for {table} does not match the physical schema"
+                        )));
+                    }
+                } else if let Some(physical_cols) =
+                    physical_table_columns(txn, backend, table).await?
+                {
+                    let Some(catalog_cols) = env.table_columns(table) else {
+                        return Err(DbErr::Custom(format!(
+                            "catalog fingerprint for {table} cannot be compared to the physical schema"
+                        )));
+                    };
+                    if !physical_columns_match(catalog_cols, &physical_cols) {
+                        return Err(DbErr::Custom(format!(
+                            "catalog fingerprint for {table} does not match the physical schema"
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        }
+        SchemaAction::Drop { table } => {
+            let _ = table;
+            Ok(())
+        }
+        SchemaAction::None => Ok(()),
+    }
+}
+
+fn physical_columns_match(catalog: &[(String, SqlType)], physical: &[(String, SqlType)]) -> bool {
+    catalog.len() == physical.len()
+        && catalog
+            .iter()
+            .zip(physical.iter())
+            .all(|((a, ta), (b, tb))| a == b && ta == tb)
+}
+
+async fn physical_table_exists(
+    txn: &impl ConnectionTrait,
+    backend: sea_orm::DatabaseBackend,
+    table: &str,
+) -> Result<bool, DbErr> {
+    let sql = if backend == sea_orm::DatabaseBackend::Postgres {
+        format!(
+            "SELECT 1 FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') \
+             AND c.relname = {}",
+            sql_string_literal(&table.to_ascii_lowercase())
+        )
+    } else {
+        format!(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = {}",
+            sql_string_literal(table)
+        )
+    };
+    let rows = txn
+        .query_all_raw(Statement::from_string(backend, sql))
+        .await?;
+    Ok(!rows.is_empty())
+}
+
+async fn physical_table_fingerprint(
+    txn: &impl ConnectionTrait,
+    backend: sea_orm::DatabaseBackend,
+    table: &str,
+) -> Result<Option<String>, DbErr> {
+    if backend == sea_orm::DatabaseBackend::Postgres {
+        return Ok(None);
+    }
+    let sql = format!(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = {}",
+        sql_string_literal(table)
+    );
+    let rows = txn
+        .query_all_raw(Statement::from_string(backend, sql))
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let ddl = query_result_text(row, "sql");
+    Ok(parse_create_table_schema(&ddl).map(|s| s.fingerprint()))
+}
+
+async fn physical_table_columns(
+    txn: &impl ConnectionTrait,
+    backend: sea_orm::DatabaseBackend,
+    table: &str,
+) -> Result<Option<Vec<(String, SqlType)>>, DbErr> {
+    if backend != sea_orm::DatabaseBackend::Postgres {
+        return Ok(None);
+    }
+    let sql = format!(
+        "SELECT a.attname::text AS column_name, t.typname::text AS data_type \
+         FROM pg_catalog.pg_attribute a \
+         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
+         WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') \
+         AND c.relname = {} AND a.attnum > 0 AND NOT a.attisdropped \
+         ORDER BY a.attnum",
+        sql_string_literal(&table.to_ascii_lowercase())
+    );
+    let rows = txn
+        .query_all_raw(Statement::from_string(backend, sql))
+        .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut cols = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name = query_result_text(&row, "column_name").to_ascii_lowercase();
+        let ty_name = query_result_text(&row, "data_type");
+        let Some(ty) = postgres_typname_to_sql_type(&ty_name) else {
+            return Err(DbErr::Custom(format!(
+                "physical column {table}.{name} has non-v1 type {ty_name}"
+            )));
+        };
+        cols.push((name, ty));
+    }
+    Ok(Some(cols))
+}
+
+fn postgres_typname_to_sql_type(ty: &str) -> Option<SqlType> {
+    match ty.to_ascii_lowercase().as_str() {
+        "int2" | "int4" | "int8" | "integer" | "bigint" | "smallint" => Some(SqlType::Integer),
+        "float4" | "float8" | "real" | "double precision" => Some(SqlType::Real),
+        "text" | "varchar" | "bpchar" | "name" => Some(SqlType::Text),
+        "bytea" => Some(SqlType::Blob),
+        "bool" | "boolean" => Some(SqlType::Boolean),
+        _ => SqlType::from_column_ident(ty),
+    }
 }
 
 /// Reads a TEXT catalog cell by column name (ProxyRow maps are not SELECT-ordered).
@@ -158,6 +584,19 @@ fn query_result_text(row: &QueryResult, column: &str) -> String {
                 .map(|s| s.unwrap_or_default())
         })
         .unwrap_or_default()
+}
+
+fn query_result_i64(row: &QueryResult, column: &str) -> Option<i64> {
+    row.try_get::<i64>("", column)
+        .ok()
+        .or_else(|| row.try_get::<i32>("", column).ok().map(i64::from))
+        .or_else(|| row.try_get::<Option<i64>>("", column).ok().flatten())
+        .or_else(|| {
+            row.try_get::<Option<i32>>("", column)
+                .ok()
+                .flatten()
+                .map(i64::from)
+        })
 }
 
 /// Convert a typed bind into a SeaORM value without JSON / `b64:` decoding.
@@ -629,6 +1068,46 @@ pub async fn execute_typed_on_session(
     caps: impl Into<ExecCaps>,
     session: AtomicSession,
 ) -> Result<ExecuteReply, DbErr> {
+    execute_typed_on_session_proofs(db, req, guest_receipt, &[], timing_source, caps, session).await
+}
+
+/// [`execute_typed_on_session`] using host-private proofs already stamped on `envelope`.
+///
+/// Cap'n RPC drops proofs; adapters rebuild them from the durable catalog.
+/// In-process callers should pass the envelope so TEXT collation is not skipped.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails, the encoded reply exceeds
+/// `max_atomic_result_bytes`, or the session is interrupted.
+pub async fn execute_typed_envelope(
+    db: &DatabaseConnection,
+    envelope: &HostExecuteEnvelope,
+    timing_source: &str,
+    caps: impl Into<ExecCaps>,
+    session: AtomicSession,
+) -> Result<ExecuteReply, DbErr> {
+    execute_typed_on_session_proofs(
+        db,
+        &envelope.request,
+        envelope.guest_receipt.clone(),
+        &envelope.proofs,
+        timing_source,
+        caps,
+        session,
+    )
+    .await
+}
+
+async fn execute_typed_on_session_proofs(
+    db: &DatabaseConnection,
+    req: &ExecuteRequest,
+    guest_receipt: GuestReceiptPersist,
+    stamped: &[ResolvedStatement],
+    timing_source: &str,
+    caps: impl Into<ExecCaps>,
+    session: AtomicSession,
+) -> Result<ExecuteReply, DbErr> {
     if guest_receipt.is_absent() {
         let caps = caps.into();
         session.check(AtomicInterruptPhase::BeforeBegin)?;
@@ -643,6 +1122,7 @@ pub async fn execute_typed_on_session(
                 session,
                 None::<fn(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>>,
                 None,
+                stamped,
             )
         })
         .await;
@@ -651,7 +1131,7 @@ pub async fn execute_typed_on_session(
     }
     let hint = guest_receipt;
     let guest_hash = hint.guest_request_hash.clone();
-    execute_typed_on_session_then(
+    execute_typed_on_session_then_proofs(
         db,
         req,
         timing_source,
@@ -665,6 +1145,7 @@ pub async fn execute_typed_on_session(
             )
         },
         Some(guest_hash),
+        stamped,
     )
     .await
 }
@@ -690,6 +1171,33 @@ pub async fn execute_typed_on_session_then<F>(
 where
     F: FnOnce(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>,
 {
+    execute_typed_on_session_then_proofs(
+        db,
+        req,
+        timing_source,
+        caps,
+        session,
+        then,
+        guest_hash,
+        &[],
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_typed_on_session_then_proofs<F>(
+    db: &DatabaseConnection,
+    req: &ExecuteRequest,
+    timing_source: &str,
+    caps: impl Into<ExecCaps>,
+    session: AtomicSession,
+    then: F,
+    guest_hash: Option<String>,
+    stamped: &[ResolvedStatement],
+) -> Result<ExecuteReply, DbErr>
+where
+    F: FnOnce(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>,
+{
     let caps = caps.into();
     session.check(AtomicInterruptPhase::BeforeBegin)?;
     let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
@@ -703,6 +1211,7 @@ where
             session,
             Some(then),
             guest_hash,
+            stamped,
         )
     })
     .await;
@@ -842,25 +1351,24 @@ async fn execute_typed_join_body(
     let started = Instant::now();
     let backend = ConnectionTrait::get_database_backend(txn);
     let sql_started = Instant::now();
-    let mut env = load_sql_type_env(txn)
-        .await
-        .unwrap_or_else(|_| SqlTypeEnv::new());
+    let mut env = catalog_env_for_typed(txn, &session).await?;
+    let proofs = proofs_for_request(&env, req, &[])?;
     let mut statements = Vec::with_capacity(req.statements.len());
-    for stmt in &req.statements {
+    for (stmt, proof) in req.statements.iter().zip(proofs.iter()) {
         session.check(AtomicInterruptPhase::BetweenStatements)?;
         let values: Vec<SeaValue> = stmt.parameters.iter().map(db_value_to_sea).collect();
         let row_cap = effective_row_cap(stmt.max_rows, caps.max_result_rows);
         let canonical = stmt.sql.clone();
-        let sql = if stmt.kind.wrap_select_limit() {
-            cap_query_sql(&canonical, row_cap)
-        } else {
-            canonical.clone()
-        };
-        let sql = crate::schema_postgres::lower_binding_sql_for_backend(backend, &sql);
+        reconcile_physical(txn, backend, &proof.schema_action, &env).await?;
         let sql = if bookclerk_plugin_abi::statement_is_ddl(&canonical) {
-            sql.into_owned()
+            crate::schema_postgres::lower_binding_sql_for_backend(backend, &canonical).into_owned()
         } else {
-            lower_canonical_sql_typed(backend, sql.as_ref(), &env)
+            let lowered = lower_canonical_sql_typed(backend, canonical.trim(), Some(proof));
+            if stmt.kind.wrap_select_limit() {
+                cap_query_sql(&lowered, row_cap)
+            } else {
+                lowered
+            }
         };
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = match stmt.result_selection {
@@ -894,7 +1402,7 @@ async fn execute_typed_join_body(
                 }
             }
         };
-        apply_binding_companions(txn, backend, &canonical).await?;
+        apply_binding_companions(txn, backend, &canonical, &proof.schema_action).await?;
         apply_schema_sql_to_env(&mut env, &canonical);
         statements.push(stmt_result);
     }
@@ -937,6 +1445,7 @@ async fn execute_typed_join_body(
 /// # Errors
 ///
 /// Returns [`DbErr`] when a statement fails, encoding fails, or COMMIT fails.
+#[allow(clippy::too_many_arguments)]
 async fn execute_typed_body<F>(
     db: &DatabaseConnection,
     req: &ExecuteRequest,
@@ -945,6 +1454,7 @@ async fn execute_typed_body<F>(
     session: AtomicSession,
     then: Option<F>,
     guest_hash: Option<String>,
+    stamped: &[ResolvedStatement],
 ) -> Result<ExecuteReply, DbErr>
 where
     F: FnOnce(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>,
@@ -981,9 +1491,25 @@ where
         }
     }
     let sql_started = Instant::now();
-    let mut env = load_sql_type_env(&txn)
-        .await
-        .unwrap_or_else(|_| SqlTypeEnv::new());
+    let mut env = match catalog_env_for_typed(&txn, &session).await {
+        Ok(env) => env,
+        Err(err) => {
+            let _ = txn.rollback().await;
+            return Err(err);
+        }
+    };
+    let mut type_req = req.clone();
+    for (stmt, canon) in type_req.statements.iter_mut().zip(canonical_sqls.iter()) {
+        stmt.sql = canon.clone();
+    }
+    let proofs = match proofs_for_request(&env, &type_req, stamped) {
+        Ok(proofs) => proofs,
+        Err(err) => {
+            let _ = txn.rollback().await;
+            return Err(err);
+        }
+    };
+    let reconcile = guest_hash.is_some();
     let mut statements = Vec::with_capacity(req.statements.len());
     // Guest-typed wrap only: host library plans also SELECT a prior receipt
     // at index 1, and skipping their remaining selectors would break replay.
@@ -1000,15 +1526,27 @@ where
             .get(idx)
             .cloned()
             .unwrap_or_else(|| stmt.sql.clone());
-        let sql = if stmt.kind.wrap_select_limit() {
-            cap_query_sql(&stmt.sql, row_cap)
-        } else {
-            stmt.sql.clone()
-        };
+        let proof = proofs.get(idx);
+        if reconcile {
+            if let Some(proof) = proof {
+                if let Err(err) =
+                    reconcile_physical(&txn, backend, &proof.schema_action, &env).await
+                {
+                    let _ = txn.rollback().await;
+                    let _ = take_txn_fault();
+                    return Err(err);
+                }
+            }
+        }
         let sql = if bookclerk_plugin_abi::statement_is_ddl(&canonical) {
-            sql
+            stmt.sql.clone()
         } else {
-            lower_canonical_sql_typed(backend, &sql, &env)
+            let lowered = lower_canonical_sql_typed(backend, canonical.trim(), proof);
+            if stmt.kind.wrap_select_limit() {
+                cap_query_sql(&lowered, row_cap)
+            } else {
+                lowered
+            }
         };
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = match stmt.result_selection {
@@ -1088,7 +1626,16 @@ where
                 }
             }
         };
-        if let Err(err) = apply_binding_companions(&txn, backend, &canonical).await {
+        if let Err(err) = apply_binding_companions(
+            &txn,
+            backend,
+            &canonical,
+            proof
+                .map(|p| &p.schema_action)
+                .unwrap_or(&SchemaAction::None),
+        )
+        .await
+        {
             let _ = txn.rollback().await;
             let _ = take_txn_fault();
             return Err(err);
@@ -1129,7 +1676,7 @@ where
             let sql = if bookclerk_plugin_abi::statement_is_ddl(&stmt.sql) {
                 stmt.sql.clone()
             } else {
-                lower_canonical_sql_typed(backend, &stmt.sql, &env)
+                lower_canonical_sql_typed(backend, &stmt.sql, None)
             };
             let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
             match txn.execute_raw(sea_stmt).await {

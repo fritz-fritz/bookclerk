@@ -17,7 +17,7 @@ chrono.workspace = true
 email_address.workspace = true
 bookclerk-config.workspace = true
 bookclerk-db-exec.workspace = true
-bookclerk-plugin-abi.workspace = true
+bookclerk-plugin-abi = { workspace = true, features = ["host"] }
 html-escape.workspace = true
 rand.workspace = true
 zeroize.workspace = true

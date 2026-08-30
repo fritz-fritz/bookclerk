@@ -66,7 +66,8 @@ pub async fn run_typed_conn_vectors(
                     bookclerk_db_exec::GuestReceiptPersist::default(),
                     &timing,
                     caps,
-                    AtomicSession::from_deadline(None),
+                    AtomicSession::from_deadline(None)
+                        .with_type_env(crate::migrations::host_sql_type_env()),
                 )
                 .await
                 .map_err(|err| err.to_string())?;
@@ -160,7 +161,8 @@ mod typed_value_matrix {
             bookclerk_db_exec::GuestReceiptPersist::default(),
             "sqlite_txn",
             sqlite_caps(),
-            AtomicSession::from_deadline(None),
+            AtomicSession::from_deadline(None)
+                .with_type_env(crate::migrations::host_sql_type_env()),
         )
         .await
         .expect("typed execute");
@@ -239,7 +241,8 @@ mod typed_value_matrix {
             bookclerk_db_exec::GuestReceiptPersist::default(),
             "sqlite_txn",
             sqlite_caps(),
-            AtomicSession::from_deadline(None),
+            AtomicSession::from_deadline(None)
+                .with_type_env(crate::migrations::host_sql_type_env()),
         )
         .await
         .expect("typed execute");
@@ -312,7 +315,8 @@ mod typed_value_matrix {
             bookclerk_db_exec::GuestReceiptPersist::default(),
             "sqlite_txn",
             sqlite_caps(),
-            AtomicSession::from_deadline(None),
+            AtomicSession::from_deadline(None)
+                .with_type_env(crate::migrations::host_sql_type_env()),
         )
         .await
         .expect_err("duplicate key must fail");
@@ -341,7 +345,8 @@ mod typed_value_matrix {
             bookclerk_db_exec::GuestReceiptPersist::default(),
             "sqlite_txn",
             sqlite_caps(),
-            AtomicSession::from_deadline(None),
+            AtomicSession::from_deadline(None)
+                .with_type_env(crate::migrations::host_sql_type_env()),
         )
         .await
         .expect("rollback check");

@@ -122,6 +122,17 @@ impl ExecBudget {
         (n > 0).then_some(n)
     }
 
+    /// Sets the query row cap (`0` = unlimited).
+    pub fn set_query_row_cap(&self, cap: usize) {
+        self.query_row_cap.store(cap, Ordering::SeqCst);
+    }
+
+    /// Raw cap including `0` for unlimited.
+    #[must_use]
+    pub fn raw_query_row_cap(&self) -> usize {
+        self.query_row_cap.load(Ordering::SeqCst)
+    }
+
     /// Clears the per-query row counter.
     pub fn reset_rows_seen(&self) {
         self.query_rows_seen.store(0, Ordering::SeqCst);
@@ -386,6 +397,32 @@ where
 #[must_use]
 pub fn current_exec_budget() -> Option<Arc<ExecBudget>> {
     TASK_EXEC_BUDGET.try_with(Arc::clone).ok()
+}
+
+/// Suspends the execute-request row cap until the guard is dropped.
+///
+/// Catalog / `sqlite_master` loads are not guest result rows; they must not
+/// fail a tight `maxResultRows` on the surrounding execute.
+#[must_use]
+pub fn suspend_execute_row_cap() -> Option<ExecuteRowCapGuard> {
+    let budget = current_exec_budget()?;
+    let prev = budget.raw_query_row_cap();
+    budget.set_query_row_cap(0);
+    Some(ExecuteRowCapGuard { budget, prev })
+}
+
+/// Restores [`ExecBudget::raw_query_row_cap`] when dropped.
+pub struct ExecuteRowCapGuard {
+    /// Budget whose row cap is restored on drop.
+    budget: Arc<ExecBudget>,
+    /// Cap to restore (`0` = unlimited).
+    prev: usize,
+}
+
+impl Drop for ExecuteRowCapGuard {
+    fn drop(&mut self) {
+        self.budget.set_query_row_cap(self.prev);
+    }
 }
 
 /// Records `seen` for [`query_rows_seen`] after an atomic attempt completes.

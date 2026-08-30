@@ -6,7 +6,7 @@
 //! and block comments, and PostgreSQL dollar quotes are copied verbatim.
 //! Do not call this from host domain compilers.
 
-use bookclerk_plugin_abi::{SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS};
+use bookclerk_plugin_abi::{assert_proof_matches_sql, ResolvedStatement, INSERT_SELECT_WRAP_ALIAS};
 use sea_orm::DatabaseBackend;
 
 /// Lowers canonical Bookclerk **DML/query** SQL for `backend`.
@@ -21,24 +21,45 @@ use sea_orm::DatabaseBackend;
 /// so this function does not classify statements.
 #[must_use]
 pub fn lower_canonical_sql(backend: DatabaseBackend, sql: &str) -> String {
-    lower_canonical_sql_typed(backend, sql, &SqlTypeEnv::new())
+    lower_canonical_sql_typed(backend, sql, None)
 }
 
-/// [`lower_canonical_sql`] plus type-directed Postgres `COLLATE "C"` on TEXT.
+/// [`lower_canonical_sql`] plus proof-directed Postgres `COLLATE "C"` on TEXT.
+///
+/// `proof` must be bound to `sql` (the canonical string before mechanical
+/// lowering). When absent, TEXT collation is not applied.
 #[must_use]
-pub fn lower_canonical_sql_typed(backend: DatabaseBackend, sql: &str, env: &SqlTypeEnv) -> String {
-    let sql = rewrite_insert_or_ignore_unique_conflict(sql);
+pub fn lower_canonical_sql_typed(
+    backend: DatabaseBackend,
+    sql: &str,
+    proof: Option<&ResolvedStatement>,
+) -> String {
+    let sql = sql.to_string();
+    let sql = if backend == DatabaseBackend::Postgres {
+        if let Some(proof) = proof {
+            match apply_text_collate_from_proof(&sql, proof) {
+                Ok(s) => s,
+                Err(_) => sql,
+            }
+        } else {
+            sql
+        }
+    } else {
+        sql
+    };
+    let sql = rewrite_div_mod_null_on_zero(&sql);
+    let sql = rewrite_insert_or_ignore_unique_conflict(&sql);
     if backend != DatabaseBackend::Postgres {
         return rewrite_like_to_glob(&sql);
     }
-    let sql = lower_canonical_to_postgres_helpers(&sql);
-    rewrite_postgres_text_collate(&sql, env)
+    lower_canonical_to_postgres_helpers(&sql)
 }
 
 /// Lowers canonical SQLite-shaped SQL onto PostgreSQL.
 #[must_use]
 pub fn lower_canonical_to_postgres(sql: &str) -> String {
-    let sql = rewrite_insert_or_ignore_unique_conflict(sql);
+    let sql = rewrite_div_mod_null_on_zero(sql);
+    let sql = rewrite_insert_or_ignore_unique_conflict(&sql);
     lower_canonical_to_postgres_helpers(&sql)
 }
 
@@ -275,254 +296,68 @@ fn skip_balanced(sql: &str, open: usize) -> usize {
     sql.len()
 }
 
-/// Tracks positions where `COLLATE "C"` on an identifier is not valid Postgres.
+/// Inserts `COLLATE "C"` at TEXT spans recorded on `proof`.
 ///
-/// Wrapping is for comparison / `ORDER BY` / scalar TEXT expressions. Column
-/// *targets* (`INSERT` lists, `ON CONFLICT` targets, `UPDATE SET` lhs, CTE
-/// column lists, `AS` aliases, `FROM`/`JOIN`/`UPDATE` relation names) must
-/// stay bare names.
-#[derive(Default)]
-struct CollateIdentCtx {
-    /// `1` after `INSERT`, `2` after `INTO`, `3` while reading the table name.
-    insert_await: u8,
-    /// Parenthesis depth inside an `INSERT` column list.
-    insert_col_depth: i32,
-    /// Next `(` starts an `ON CONFLICT` target list.
-    conflict_await: bool,
-    /// Parenthesis depth inside `ON CONFLICT (…)` .
-    conflict_col_depth: i32,
-    /// `1` after `WITH` (CTE name next), `2` waiting for optional `(cols)`.
-    cte_await: u8,
-    /// Parenthesis depth inside a CTE column list.
-    cte_col_depth: i32,
-    /// Inside `UPDATE … SET` / `DO UPDATE SET`.
-    set_clause: bool,
-    /// Next identifier is an assignment target.
-    set_lhs: bool,
-    /// Paren depth on the SET rhs so inner commas are not new assignments.
-    set_expr_depth: i32,
-    /// Next identifier is an `AS` alias.
-    after_as: bool,
-    /// Next identifier is a `FROM` / `JOIN` / `UPDATE` relation name.
-    after_relation: bool,
+/// # Errors
+///
+/// Returns when `proof` is not bound to `sql`.
+fn apply_text_collate_from_proof(
+    sql: &str,
+    proof: &ResolvedStatement,
+) -> Result<String, bookclerk_plugin_abi::PluginError> {
+    assert_proof_matches_sql(proof, sql)?;
+    let mut sites: Vec<_> = proof.text_collate_sites.iter().map(|s| s.span).collect();
+    sites.sort_by_key(|s| std::cmp::Reverse(s.start));
+    let mut out = sql.to_string();
+    for span in sites {
+        if span.end > out.len() || span.start >= span.end {
+            continue;
+        }
+        let piece = out[span.start..span.end].to_string();
+        let piece = piece.trim_end();
+        if piece.is_empty() {
+            continue;
+        }
+        let end = span.start + piece.len();
+        if piece.contains("COLLATE") {
+            continue;
+        }
+        if piece.starts_with('\'') {
+            let inner = piece.trim_matches('\'');
+            if inner.starts_with('$') || inner.starts_with('{') {
+                continue;
+            }
+        }
+        let wrapped = format!("({piece} COLLATE \"C\")");
+        out.replace_range(span.start..end, &wrapped);
+    }
+    Ok(out)
 }
 
-impl CollateIdentCtx {
-    /// True when the current identifier is a name, not a TEXT expression.
-    fn skip_ident_wrap(&self) -> bool {
-        self.insert_await >= 2
-            || self.insert_col_depth > 0
-            || self.conflict_col_depth > 0
-            || self.cte_await == 1
-            || self.cte_col_depth > 0
-            || self.set_lhs
-            || self.after_as
-            || self.after_relation
-    }
-
-    /// Advances keyword / list state from the identifier at `[s, e)`.
-    fn on_ident(&mut self, sql: &str, s: usize, e: usize) {
-        if self.after_as {
-            self.after_as = false;
-            return;
-        }
-        if ident_eq_ci(sql, s, "INSERT") {
-            self.insert_await = 1;
-        } else if self.insert_await == 1 && ident_eq_ci(sql, s, "INTO") {
-            self.insert_await = 2;
-        } else if self.insert_await == 1 {
-            self.insert_await = 0;
-        } else if self.insert_await == 2 || self.insert_await == 3 {
-            self.insert_await = 3;
-            let after = skip_trivia_idx(sql, e);
-            if sql.as_bytes().get(after) != Some(&b'.') && sql.as_bytes().get(after) != Some(&b'(')
-            {
-                self.insert_await = 0;
-            }
-        }
-        if ident_eq_ci(sql, s, "ON") {
-            let after = skip_trivia_idx(sql, e);
-            self.conflict_await = ident_eq_ci(sql, after, "CONFLICT");
-        }
-        if ident_eq_ci(sql, s, "CONFLICT") {
-            let after = skip_trivia_idx(sql, e);
-            if sql.as_bytes().get(after) != Some(&b'(') {
-                self.conflict_await = false;
-            }
-        }
-        if ident_eq_ci(sql, s, "WITH") {
-            self.cte_await = 1;
-        } else if self.cte_await == 1 {
-            self.cte_await = 2;
-            let after = skip_trivia_idx(sql, e);
-            if sql.as_bytes().get(after) != Some(&b'(') {
-                self.cte_await = 0;
-            }
-        }
-        if ident_eq_ci(sql, s, "SET") {
-            self.set_clause = true;
-            self.set_lhs = true;
-            self.set_expr_depth = 0;
-        }
-        if ident_eq_ci(sql, s, "WHERE")
-            || ident_eq_ci(sql, s, "RETURNING")
-            || ident_eq_ci(sql, s, "HAVING")
-            || ident_eq_ci(sql, s, "ORDER")
-            || ident_eq_ci(sql, s, "GROUP")
-            || ident_eq_ci(sql, s, "LIMIT")
-        {
-            self.set_clause = false;
-            self.set_lhs = false;
-            self.set_expr_depth = 0;
-        }
-        if ident_eq_ci(sql, s, "AS") {
-            self.after_as = true;
-        }
-        if ident_eq_ci(sql, s, "FROM") || ident_eq_ci(sql, s, "JOIN") {
-            self.after_relation = true;
-        }
-        if ident_eq_ci(sql, s, "UPDATE") {
-            let after = skip_trivia_idx(sql, e);
-            if !ident_eq_ci(sql, after, "SET") {
-                self.after_relation = true;
-            }
-        }
-        if self.after_relation
-            && !ident_eq_ci(sql, s, "FROM")
-            && !ident_eq_ci(sql, s, "JOIN")
-            && !ident_eq_ci(sql, s, "UPDATE")
-        {
-            let after = skip_trivia_idx(sql, e);
-            if sql.as_bytes().get(after) != Some(&b'.') {
-                self.after_relation = false;
-            }
-        }
-    }
-
-    /// Opens a parenthesis that may start a column-name list.
-    fn on_lparen(&mut self) {
-        self.after_relation = false;
-        if self.insert_await == 3 {
-            self.insert_col_depth = 1;
-            self.insert_await = 0;
-        } else if self.insert_col_depth > 0 {
-            self.insert_col_depth += 1;
-        } else if self.conflict_await {
-            self.conflict_col_depth = 1;
-            self.conflict_await = false;
-        } else if self.conflict_col_depth > 0 {
-            self.conflict_col_depth += 1;
-        } else if self.cte_await == 2 {
-            self.cte_col_depth = 1;
-            self.cte_await = 0;
-        } else if self.cte_col_depth > 0 {
-            self.cte_col_depth += 1;
-        } else if self.set_clause && !self.set_lhs {
-            self.set_expr_depth += 1;
-        }
-    }
-
-    /// Closes a parenthesis that may end a column-name list.
-    fn on_rparen(&mut self) {
-        if self.insert_col_depth > 0 {
-            self.insert_col_depth -= 1;
-        } else if self.conflict_col_depth > 0 {
-            self.conflict_col_depth -= 1;
-        } else if self.cte_col_depth > 0 {
-            self.cte_col_depth -= 1;
-        } else if self.set_expr_depth > 0 {
-            self.set_expr_depth -= 1;
-        }
-    }
-
-    /// Ends a SET lhs when seeing `=`.
-    fn on_eq(&mut self) {
-        if self.set_lhs {
-            self.set_lhs = false;
-        }
-    }
-
-    /// Starts the next SET assignment after a top-level comma.
-    fn on_comma(&mut self) {
-        if self.set_clause
-            && !self.set_lhs
-            && self.set_expr_depth == 0
-            && self.insert_col_depth == 0
-            && self.conflict_col_depth == 0
-            && self.cte_col_depth == 0
-        {
-            self.set_lhs = true;
-        }
-    }
-}
-
-/// Postgres binary TEXT: `COLLATE "C"` on typed TEXT columns and string literals.
-fn rewrite_postgres_text_collate(sql: &str, env: &SqlTypeEnv) -> String {
+/// Portable `/` and `%` by zero: `NULL` (SQLite/D1 already; Postgres `NULLIF`).
+fn rewrite_div_mod_null_on_zero(sql: &str) -> String {
     let mut i = 0;
-    let mut out = String::with_capacity(sql.len() + 32);
-    let mut ctx = CollateIdentCtx::default();
+    let mut out = String::with_capacity(sql.len() + 16);
     while i < sql.len() {
         if let Some(len) = literal_or_comment_len(&sql[i..]) {
-            let lit = &sql[i..i + len];
-            let after = skip_trivia_idx(sql, i + len);
-            if lit.starts_with('\'')
-                && should_collate_string_lit(lit)
-                && !ident_eq_ci(sql, after, "COLLATE")
-            {
-                out.push('(');
-                out.push_str(lit);
-                out.push_str(" COLLATE \"C\")");
-            } else {
-                out.push_str(lit);
-            }
+            out.push_str(&sql[i..i + len]);
             i += len;
             continue;
         }
-        if let Some((s, e)) = ident_span_at(sql, i) {
-            let skip_wrap = ctx.skip_ident_wrap();
-            ctx.on_ident(sql, s, e);
-            let name = &sql[s..e];
-            let after = skip_trivia_idx(sql, e);
-            if sql.as_bytes().get(after) == Some(&b'(') || ident_eq_ci(sql, after, "COLLATE") {
-                out.push_str(name);
-                i = e;
-                continue;
-            }
-            if sql.as_bytes().get(after) == Some(&b'.') {
-                let col_at = skip_trivia_idx(sql, after + 1);
-                if let Some((cs, ce)) = ident_span_at(sql, col_at) {
-                    let col = &sql[cs..ce];
-                    let after_col = skip_trivia_idx(sql, ce);
-                    if !skip_wrap
-                        && sql.as_bytes().get(after_col) != Some(&b'(')
-                        && !ident_eq_ci(sql, after_col, "COLLATE")
-                        && env.column_type(name, col) == Some(SqlType::Text)
-                    {
-                        out.push_str(&format!("({name}.{col} COLLATE \"C\")"));
-                        i = ce;
-                        continue;
-                    }
-                    out.push_str(&sql[s..ce]);
-                    i = ce;
-                    continue;
-                }
-            }
-            if !skip_wrap && env.ident_is_text(name) {
-                out.push_str(&format!("({name} COLLATE \"C\")"));
-                i = e;
-                continue;
-            }
-            out.push_str(name);
-            i = e;
-            continue;
-        }
         let ch = sql[i..].chars().next().unwrap_or('\0');
-        match ch {
-            '(' => ctx.on_lparen(),
-            ')' => ctx.on_rparen(),
-            '=' => ctx.on_eq(),
-            ',' => ctx.on_comma(),
-            _ => {}
+        if ch == '/' || ch == '%' {
+            out.push(ch);
+            i += ch.len_utf8();
+            let j = skip_trivia_idx(sql, i);
+            out.push_str(&sql[i..j]);
+            if let Some((atom_end, atom)) = take_div_operand(sql, j) {
+                out.push_str("NULLIF(");
+                out.push_str(atom);
+                out.push_str(", 0)");
+                i = atom_end;
+                continue;
+            }
+            continue;
         }
         out.push(ch);
         i += ch.len_utf8();
@@ -530,10 +365,29 @@ fn rewrite_postgres_text_collate(sql: &str, env: &SqlTypeEnv) -> String {
     out
 }
 
-/// True when a SQL string literal should receive Postgres `COLLATE "C"`.
-fn should_collate_string_lit(lit: &str) -> bool {
-    let inner = lit.trim_start_matches('\'').trim_end_matches('\'');
-    !(inner.starts_with('$') || inner.starts_with('{'))
+/// Operand of `/` or `%`: parenthesized group, ident, or number.
+fn take_div_operand(sql: &str, start: usize) -> Option<(usize, &str)> {
+    let s = skip_trivia_idx(sql, start);
+    if sql.as_bytes().get(s) == Some(&b'(') {
+        let end = skip_balanced(sql, s);
+        return Some((end, &sql[s..end]));
+    }
+    if let Some((a, b)) = ident_span_at(sql, s) {
+        return Some((b, &sql[a..b]));
+    }
+    let bytes = sql.as_bytes();
+    let mut i = s;
+    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+        i += 1;
+    }
+    let num_start = i;
+    while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+        i += 1;
+    }
+    if i > num_start {
+        return Some((i, &sql[s..i]));
+    }
+    None
 }
 
 /// Maps SQLite helpers used in host plans onto PostgreSQL equivalents.
@@ -1559,6 +1413,33 @@ fn dollar_quote_len(s: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookclerk_plugin_abi::{
+        typecheck_execute_request_proofs, DbPlanStatementKind, DbResultSelection, ExecuteRequest,
+        SqlType, SqlTypeEnv, TypedDbStatement,
+    };
+
+    fn proof_of(sql: &str, env: &SqlTypeEnv) -> ResolvedStatement {
+        let req = ExecuteRequest {
+            operation_id: "t".into(),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![TypedDbStatement {
+                sql: sql.into(),
+                parameters: Vec::new(),
+                kind: DbPlanStatementKind::Select,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+        };
+        typecheck_execute_request_proofs(&req, env)
+            .unwrap_or_else(|err| panic!("{sql}: {err}"))
+            .remove(0)
+    }
+
+    fn lower_pg(sql: &str, env: &SqlTypeEnv) -> String {
+        let proof = proof_of(sql, env);
+        lower_canonical_sql_typed(DatabaseBackend::Postgres, sql, Some(&proof))
+    }
 
     #[test]
     fn postgres_rewrites_placeholders_and_json_extract() {
@@ -1870,72 +1751,48 @@ mod tests {
     fn postgres_collate_skips_insert_update_and_conflict_targets() {
         let mut env = SqlTypeEnv::new();
         env.insert_table(
-            "bookclerk_sql_catalog",
-            [
-                ("table_name".into(), SqlType::Text),
-                ("column_name".into(), SqlType::Text),
-                ("sql_type".into(), SqlType::Text),
-            ],
-        );
-        env.insert_table(
             "t",
             [
                 ("body".into(), SqlType::Text),
                 ("id".into(), SqlType::Integer),
             ],
         );
-        let insert = lower_canonical_sql_typed(
-            DatabaseBackend::Postgres,
-            "INSERT INTO bookclerk_sql_catalog (table_name, column_name, sql_type) \
-             VALUES ('t', 'body', 'text') ON CONFLICT (table_name, column_name) \
-             DO UPDATE SET sql_type = excluded.sql_type",
-            &env,
-        );
-        assert!(
-            insert
-                .contains("INSERT INTO bookclerk_sql_catalog (table_name, column_name, sql_type)"),
-            "{insert}"
-        );
-        assert!(
-            insert.contains("ON CONFLICT (table_name, column_name)"),
-            "{insert}"
-        );
-        assert!(insert.contains("SET sql_type ="), "{insert}");
-        assert!(
-            !insert.contains("INSERT INTO bookclerk_sql_catalog (("),
-            "{insert}"
-        );
-        assert!(!insert.contains("ON CONFLICT (("), "{insert}");
-        assert!(!insert.contains("SET (sql_type COLLATE"), "{insert}");
-        assert!(insert.contains("COLLATE \"C\""), "{insert}");
-
-        let dml = lower_canonical_sql_typed(
-            DatabaseBackend::Postgres,
-            "INSERT OR IGNORE INTO t (id, body) VALUES (1, 'A')",
-            &env,
-        );
+        let dml = lower_pg("INSERT OR IGNORE INTO t (id, body) VALUES (1, 'A')", &env);
         assert!(dml.contains("INSERT INTO t (id, body)"), "{dml}");
         assert!(!dml.contains("INSERT INTO t (id, (body"), "{dml}");
         assert!(dml.contains("('A' COLLATE \"C\")"), "{dml}");
 
-        let where_sql = lower_canonical_sql_typed(
-            DatabaseBackend::Postgres,
-            "SELECT body FROM t WHERE body = 'A' ORDER BY body",
-            &env,
-        );
+        let where_sql = lower_pg("SELECT body FROM t WHERE body = 'A' ORDER BY body", &env);
         assert!(where_sql.contains("(body COLLATE \"C\")"), "{where_sql}");
         assert!(where_sql.contains("('A' COLLATE \"C\")"), "{where_sql}");
         assert!(!where_sql.contains("FROM (t COLLATE"), "{where_sql}");
 
-        let update = lower_canonical_sql_typed(
-            DatabaseBackend::Postgres,
-            "UPDATE t SET body = 'A' WHERE body = 'B'",
-            &env,
+        let mut mixed = SqlTypeEnv::new();
+        mixed.insert_table("a", vec![("name".into(), SqlType::Text)]);
+        mixed.insert_table("b", vec![("name".into(), SqlType::Integer)]);
+        let host_order = lower_pg("SELECT name FROM a ORDER BY name", &mixed);
+        assert!(
+            host_order.contains("(name COLLATE \"C\")"),
+            "host-authored TEXT ORDER BY must collate: {host_order}"
         );
+        let alias = lower_pg("SELECT b.name FROM a AS b ORDER BY b.name", &mixed);
+        assert!(
+            alias.contains("(b.name COLLATE \"C\")") || alias.contains("COLLATE \"C\""),
+            "{alias}"
+        );
+
+        let update = lower_pg("UPDATE t SET body = 'A' WHERE body = 'B'", &env);
         assert!(update.contains("SET body ="), "{update}");
         assert!(!update.contains("SET (body COLLATE"), "{update}");
         assert!(update.contains("WHERE (body COLLATE \"C\")"), "{update}");
         assert!(update.contains("('A' COLLATE \"C\")"), "{update}");
+    }
+
+    #[test]
+    fn div_and_mod_by_zero_lower_to_nullif() {
+        let sql = rewrite_div_mod_null_on_zero("SELECT 1 / 0, 4 % 0, a / b");
+        assert!(sql.contains("NULLIF(0, 0)"), "{sql}");
+        assert!(sql.contains("NULLIF(b, 0)"), "{sql}");
     }
 
     #[test]
@@ -1947,7 +1804,7 @@ mod tests {
         let typed = lower_canonical_sql_typed(
             DatabaseBackend::Postgres,
             "SELECT CASE WHEN 'İ' LIKE 'i' THEN 1 ELSE 0 END AS c0",
-            &SqlTypeEnv::new(),
+            None,
         );
         assert!(typed.contains("LIKE"), "{typed}");
     }

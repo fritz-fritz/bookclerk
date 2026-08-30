@@ -1029,7 +1029,7 @@ fn receipt_payload_update(
         PayloadKind::Identity => {
             let payload = payload_stmt?;
             let sql = format!(
-                "UPDATE db_atomic_receipts SET payload = ({}{})) \
+                "UPDATE db_atomic_receipts SET payload = ({}{}) AS ident) \
                  WHERE operation_id = ? AND status = '{ok}' AND payload IS NULL",
                 identity_payload_json_sql(),
                 payload.sql,
@@ -2283,7 +2283,7 @@ fn plan_dispatch_event_deliveries(
             "INSERT OR IGNORE INTO event_outbox_stats (\
                 id, retries_total, suspensions_total, dead_letters_total, \
                 dispatch_latency_ms_sum, dispatch_count, handler_latency_ms_sum, handler_count\
-             ) SELECT 1, 0, 0, 0, 0, 0, 0, 0 WHERE 1",
+             ) SELECT 1, 0, 0, 0, 0, 0, 0, 0 WHERE TRUE",
             vec![],
         ));
         statements.push(sql(
@@ -2883,6 +2883,26 @@ mod tests {
         plan_atomic(&req.operation_id, &req.operation, now)
     }
 
+    fn assert_host_plan_typechecks(plan: &crate::sql_plan::DbAtomicPlan) {
+        let env = crate::migrations::host_sql_type_env();
+        for (i, stmt) in plan.statements.iter().enumerate() {
+            let req = bookclerk_plugin_abi::ExecuteRequest {
+                operation_id: "t".into(),
+                request_hash: String::new(),
+                deadline_unix_ms: 0,
+                statements: vec![bookclerk_plugin_abi::TypedDbStatement {
+                    sql: stmt.sql.clone(),
+                    parameters: Vec::new(),
+                    kind: stmt.kind,
+                    max_rows: 0,
+                    result_selection: bookclerk_plugin_abi::DbResultSelection::Discard,
+                }],
+            };
+            bookclerk_plugin_abi::typecheck_execute_request_proofs(&req, &env)
+                .unwrap_or_else(|err| panic!("stmt {i}: {err}\n{}", stmt.sql));
+        }
+    }
+
     fn migrate(conn: &Connection) {
         for sql in crate::migrations::migration_sql() {
             conn.execute_batch(sql).unwrap();
@@ -2941,6 +2961,7 @@ mod tests {
             update_idx < insert_idx,
             "receipt insert must follow domain writes"
         );
+        assert_host_plan_typechecks(&compiled.plan);
     }
 
     #[test]
@@ -2984,6 +3005,27 @@ mod tests {
             "receipt must use the pre-write snapshot: {}",
             compiled.plan.statements[insert_idx].sql
         );
+        assert_host_plan_typechecks(&compiled.plan);
+    }
+
+    #[test]
+    fn wrapped_redeem_claim_typechecks_against_host_schema() {
+        let compiled = super::compile_named_request(
+            "redeem-op",
+            &DbAtomicParams::RedeemClaimTicket {
+                token_hash: "aa".repeat(32),
+                session_hash: "bb".repeat(32),
+                expires_at: "2024-06-02T00:00:00Z".into(),
+                user_agent: None,
+                device_type: None,
+                client_label: None,
+                new_password_hash: None,
+                password_fingerprint: None,
+            },
+            "2024-06-01T00:00:00Z",
+        )
+        .unwrap();
+        assert_host_plan_typechecks(&compiled.plan);
     }
 
     #[test]

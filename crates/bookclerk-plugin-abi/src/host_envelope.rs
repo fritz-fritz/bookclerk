@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::sql_proof::ResolvedStatement;
 use crate::ExecuteRequest;
 
 /// Host-only hint for adapters to persist guest replay payload before COMMIT.
@@ -36,6 +37,8 @@ pub struct HostExecuteEnvelope {
     pub request: ExecuteRequest,
     /// Host-only finalize hint stamped by guest receipt wrap.
     pub guest_receipt: GuestReceiptPersist,
+    /// One resolved proof per envelope statement, bound to that statement's SQL.
+    pub proofs: Vec<ResolvedStatement>,
 }
 
 #[cfg_attr(not(feature = "host"), allow(dead_code))]
@@ -46,6 +49,14 @@ impl HostExecuteEnvelope {
         Self {
             request,
             guest_receipt,
+            proofs: Vec::new(),
         }
+    }
+
+    /// Stamps host-private proofs (one per statement, including receipt wrappers).
+    #[must_use]
+    pub fn with_proofs(mut self, proofs: Vec<ResolvedStatement>) -> Self {
+        self.proofs = proofs;
+        self
     }
 }

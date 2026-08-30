@@ -36,15 +36,14 @@ async fn run_binding(
     let caps = DbCapabilities::advertised_sqlite();
     let env = bookclerk_db_exec::load_sql_type_env(db)
         .await
-        .unwrap_or_else(|_| bookclerk_plugin_abi::SqlTypeEnv::new());
+        .expect("load binding catalog");
     let policy = GuestSqlPolicy::binding_owned().with_sql_types(env);
     bookclerk_library::execute_guest_atomic_with(request, &caps, &policy, |envelope| async move {
         let deadline =
             (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
-        bookclerk_db_exec::execute_typed_on_session(
+        bookclerk_db_exec::execute_typed_envelope(
             db,
-            &envelope.request,
-            envelope.guest_receipt,
+            &envelope,
             "sqlite_txn",
             bookclerk_db_exec::ExecCaps::from_capabilities(&DbCapabilities::advertised_sqlite()),
             bookclerk_db_exec::AtomicSession::from_deadline(deadline),
@@ -341,10 +340,9 @@ async fn binding_cancel_before_begin_does_not_commit() {
         async move {
             let deadline = (envelope.request.deadline_unix_ms > 0)
                 .then_some(envelope.request.deadline_unix_ms);
-            bookclerk_db_exec::execute_typed_on_session(
+            bookclerk_db_exec::execute_typed_envelope(
                     &db,
-                    &envelope.request,
-                    envelope.guest_receipt,
+                    &envelope,
                     "sqlite_txn",
                     bookclerk_db_exec::ExecCaps::from_capabilities(
                         &DbCapabilities::advertised_sqlite(),
@@ -408,10 +406,9 @@ async fn binding_cancel_around_commit_rolls_back() {
         async move {
             let deadline = (envelope.request.deadline_unix_ms > 0)
                 .then_some(envelope.request.deadline_unix_ms);
-            bookclerk_db_exec::execute_typed_on_session(
+            bookclerk_db_exec::execute_typed_envelope(
                     &db,
-                    &envelope.request,
-                    envelope.guest_receipt,
+                    &envelope,
                     "sqlite_txn",
                     bookclerk_db_exec::ExecCaps::from_capabilities(
                         &DbCapabilities::advertised_sqlite(),
@@ -1182,4 +1179,70 @@ async fn binding_sql_v1_p1_vectors() {
         err.to_string().contains("incompatible") || err.to_string().contains("invalid"),
         "{err}"
     );
+}
+
+#[tokio::test]
+async fn binding_refuses_orphan_physical_table() {
+    let db = binding_db().await;
+    db.execute_raw(Statement::from_string(
+        db.get_database_backend(),
+        "CREATE TABLE orphaned (n INTEGER)".to_string(),
+    ))
+    .await
+    .expect("physical orphan");
+    let err = run_binding(
+        &db,
+        req(
+            "adopt-orphan",
+            vec![stmt(
+                "CREATE TABLE IF NOT EXISTS orphaned (n INTEGER)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect_err("must not adopt orphan physical table");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("physical") || msg.contains("adopt") || msg.contains("catalog"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn binding_runtime_edges_and_type_negatives() {
+    let db = binding_db().await;
+    let err = run_binding(
+        &db,
+        req("where-int", vec![stmt("SELECT 1 WHERE 1", vec![])]),
+    )
+    .await
+    .expect_err("WHERE 1 is not BOOLEAN");
+    assert!(
+        err.to_string().contains("BOOLEAN") || err.to_string().contains("invalid"),
+        "{err}"
+    );
+
+    run_binding(
+        &db,
+        req(
+            "ddl-typed",
+            vec![stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_AUTOINCREMENT_BLOB,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("typed ddl");
+    let mut edges = stmt(bookclerk_db_exec::sql_v1::PORTABLE_RUNTIME_EDGES, vec![]);
+    edges.max_rows = 8;
+    let reply = run_binding(&db, req("runtime-edges", vec![edges]))
+        .await
+        .expect("runtime edges");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_runtime_edges_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
 }

@@ -565,7 +565,15 @@ const BINDING_SQL_CATALOG_SQLITE: &str = r#"
         table_name TEXT NOT NULL,
         column_name TEXT NOT NULL,
         sql_type TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        is_identity INTEGER NOT NULL,
+        default_sql TEXT NOT NULL,
         PRIMARY KEY (table_name, column_name)
+    );
+    CREATE TABLE IF NOT EXISTS bookclerk_sql_schema (
+        table_name TEXT PRIMARY KEY NOT NULL,
+        fingerprint TEXT NOT NULL,
+        identity_column TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS bookclerk_identity (
         table_name TEXT PRIMARY KEY NOT NULL,
@@ -1383,9 +1391,61 @@ mod tests {
             "expected accounts in {:?}",
             env.iter().map(|(t, _, _)| t).collect::<Vec<_>>()
         );
-        assert_eq!(
-            env.column_type("accounts", "account_id"),
-            Some(bookclerk_plugin_abi::SqlType::Text)
+        assert!(
+            env.column_type("portal_identities", "user_id").is_some(),
+            "ALTER ADD COLUMN user_id must land in the host type env"
         );
+        assert!(
+            env.has_table("domain_events"),
+            "rebuild RENAME must restore domain_events"
+        );
+        assert!(
+            !env.has_table("domain_events_v27"),
+            "v27 rebuild table must be renamed away"
+        );
+        let req = bookclerk_plugin_abi::ExecuteRequest {
+            operation_id: "host-order".into(),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![bookclerk_plugin_abi::TypedDbStatement {
+                sql: "SELECT title FROM books ORDER BY title".into(),
+                parameters: Vec::new(),
+                kind: bookclerk_plugin_abi::DbPlanStatementKind::Select,
+                max_rows: 8,
+                result_selection: bookclerk_plugin_abi::DbResultSelection::Rows,
+            }],
+        };
+        let proofs = bookclerk_plugin_abi::typecheck_execute_request_proofs(&req, &env)
+            .expect("host ORDER BY TEXT must typecheck against the canonical host schema");
+        assert!(
+            !proofs[0].text_collate_sites.is_empty(),
+            "host TEXT ORDER BY must record collate sites: {:?}",
+            proofs[0]
+        );
+        let mut working = env.clone();
+        for stmt in bookclerk_db_exec::split_schema_statements(greenfield_baseline_canonical()) {
+            bookclerk_plugin_abi::apply_schema_sql_to_env(&mut working, &stmt);
+            if bookclerk_plugin_abi::statement_is_ddl(&stmt) {
+                continue;
+            }
+            let upper = stmt.trim().to_ascii_uppercase();
+            if upper.starts_with("PRAGMA ") || upper.starts_with("ALTER ") {
+                continue;
+            }
+            let one = bookclerk_plugin_abi::ExecuteRequest {
+                operation_id: "host-ddl-dml".into(),
+                request_hash: String::new(),
+                deadline_unix_ms: 0,
+                statements: vec![bookclerk_plugin_abi::TypedDbStatement {
+                    sql: stmt.clone(),
+                    parameters: Vec::new(),
+                    kind: bookclerk_plugin_abi::DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: bookclerk_plugin_abi::DbResultSelection::Discard,
+                }],
+            };
+            bookclerk_plugin_abi::typecheck_execute_request_proofs(&one, &working)
+                .unwrap_or_else(|err| panic!("host schema DML failed on `{stmt}`: {err}"));
+        }
     }
 }

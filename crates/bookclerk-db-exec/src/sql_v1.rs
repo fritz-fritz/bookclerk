@@ -378,6 +378,44 @@ pub fn portable_uncast_sum_avg_expects() -> &'static [PortableExpect] {
     &[PortableExpect::Int(2), PortableExpect::Float(2.0)]
 }
 
+/// Runtime-edge operators/helpers (`/` `%` zero → NULL, `round` halfway, `substr`, `length`, `replace`, `abs`, `lower`).
+pub const PORTABLE_RUNTIME_EDGES: &str = "SELECT \
+     1 / 0 AS d0, \
+     4 % 0 AS m0, \
+     CAST(round(1.5) AS INTEGER) AS r0, \
+     CAST(round(2.5) AS INTEGER) AS r1, \
+     substr('hello', 2, 2) AS s0, \
+     length('hi') AS ln, \
+     replace('aa', 'a', 'b') AS rp, \
+     abs(-3) AS ab, \
+     lower('Hi') AS lo";
+
+/// Expected [`PORTABLE_RUNTIME_EDGES`] cells.
+#[must_use]
+pub fn portable_runtime_edges_expects() -> &'static [PortableExpect] {
+    &[
+        PortableExpect::Null,
+        PortableExpect::Null,
+        PortableExpect::Int(2),
+        PortableExpect::Int(3),
+        PortableExpect::Text("el"),
+        PortableExpect::Int(2),
+        PortableExpect::Text("bb"),
+        PortableExpect::Int(3),
+        PortableExpect::Text("hi"),
+    ]
+}
+
+/// Formats a mismatch for [`PORTABLE_RUNTIME_EDGES`].
+#[must_use]
+pub fn portable_runtime_edges_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_statement_mismatch(
+        stmt,
+        portable_runtime_edges_expects(),
+        "portable runtime edges",
+    )
+}
+
 /// Formats a mismatch for [`PORTABLE_MIN_MAX_NULL`].
 #[must_use]
 pub fn portable_min_max_null_mismatch(stmt: &StatementResult) -> Option<String> {
@@ -467,7 +505,7 @@ pub const PORTABLE_IGNORE_SELECT: &str = "INSERT OR IGNORE INTO ign_sel (id) SEL
 
 /// `WITH` source for `INSERT OR IGNORE`.
 pub const PORTABLE_IGNORE_SELECT_WITH: &str =
-    "INSERT OR IGNORE INTO ign_sel (id) WITH s AS (SELECT ?) SELECT * FROM s RETURNING id";
+    "INSERT OR IGNORE INTO ign_sel (id) WITH s(id) AS (SELECT ?) SELECT * FROM s RETURNING id";
 
 /// Compound `UNION ALL` source.
 pub const PORTABLE_IGNORE_SELECT_UNION: &str =

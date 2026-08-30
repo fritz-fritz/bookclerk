@@ -56,9 +56,16 @@ pub async fn execute_statements_on(
     timing_source: &str,
     max_result_rows: u32,
 ) -> Result<DbPlanExecResult> {
-    bookclerk_db_exec::execute_statements_on(db, plan, operation_id, timing_source, max_result_rows)
-        .await
-        .map_err(LibraryError::Orm)
+    bookclerk_db_exec::execute_statements_on_session(
+        db,
+        plan,
+        operation_id,
+        timing_source,
+        max_result_rows,
+        AtomicSession::default().with_type_env(crate::migrations::host_sql_type_env()),
+    )
+    .await
+    .map_err(LibraryError::Orm)
 }
 
 /// [`execute_statements_on`] with session cancel / deadline checks.
@@ -80,7 +87,7 @@ pub async fn execute_statements_on_session(
         operation_id,
         timing_source,
         max_result_rows,
-        session,
+        session.with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .map_err(LibraryError::Orm)

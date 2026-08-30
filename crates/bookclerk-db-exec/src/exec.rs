@@ -1,11 +1,18 @@
 //! Run a generic [`DbAtomicPlan`] on a SeaORM connection (one native transaction).
 
+#![allow(clippy::missing_docs_in_private_items)]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::host_ir::{DbAtomicPlan, DbAtomicTiming, DbPlanExecResult, DbPlanStmtExecResult};
-use bookclerk_plugin_abi::{DbCapabilities, DbPlanStatementKind};
+use bookclerk_plugin_abi::{
+    apply_schema_sql_to_env, catalog_companions_for_action, sql_host_bookkeeping_type_env,
+    statement_is_ddl, typecheck_execute_request_proofs, DbCapabilities, DbPlanStatementKind,
+    DbResultSelection, ExecuteRequest, ResolvedStatement, SchemaAction, SqlTypeEnv,
+    TypedDbStatement,
+};
 use futures::TryStreamExt;
 use sea_orm::{
     from_query_result_to_proxy_row, ConnectionTrait, DatabaseConnection, DbErr, QueryResult,
@@ -19,7 +26,7 @@ use crate::proxy_txn::{
     record_query_rows_seen, take_txn_fault, with_exec_budget, AtomicInterruptKind,
     AtomicInterruptPhase, ExecBudget,
 };
-use crate::typed::load_sql_type_env;
+use crate::typed::{load_physical_sql_type_env, load_sql_type_env};
 
 /// Session-level cancel / deadline for one atomic attempt (not hashed).
 #[derive(Clone, Default)]
@@ -28,6 +35,9 @@ pub struct AtomicSession {
     pub cancel: Option<Arc<AtomicBool>>,
     /// Guest-visible deadline (`deadlineUnixMs` on the wire).
     pub deadline_unix_ms: Option<u64>,
+    /// Extra catalog snapshot merged before typing host-authored SQL
+    /// (canonical host schema). Empty for plugin-binding execute.
+    pub type_env: SqlTypeEnv,
 }
 
 impl AtomicSession {
@@ -37,6 +47,7 @@ impl AtomicSession {
         Self {
             cancel: None,
             deadline_unix_ms,
+            type_env: SqlTypeEnv::new(),
         }
     }
 
@@ -44,6 +55,14 @@ impl AtomicSession {
     #[must_use]
     pub fn with_cancel(mut self, cancel: Option<Arc<AtomicBool>>) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// Merges `env` (typically the canonical host schema) into this session so
+    /// host DML is typed against library tables, not the plugin catalog.
+    #[must_use]
+    pub fn with_type_env(mut self, env: SqlTypeEnv) -> Self {
+        self.type_env = env;
         self
     }
 
@@ -80,12 +99,87 @@ async fn apply_exec_identity_companions(
     txn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
     canonical: &str,
+    action: &SchemaAction,
 ) -> Result<(), DbErr> {
-    for companion in crate::schema_postgres::binding_companions(backend, canonical) {
+    let mut companions = catalog_companions_for_action(canonical, Some(action));
+    if backend == sea_orm::DatabaseBackend::Postgres {
+        match action {
+            SchemaAction::Create { noop: true, .. } | SchemaAction::None => {}
+            _ => companions.extend(crate::schema_postgres::postgres_identity_companions(
+                canonical,
+            )),
+        }
+    }
+    for companion in companions {
         txn.execute_raw(Statement::from_string(backend, companion))
             .await?;
     }
     Ok(())
+}
+
+fn plan_as_typed_request(plan: &DbAtomicPlan, operation_id: &str) -> ExecuteRequest {
+    ExecuteRequest {
+        operation_id: operation_id.to_string(),
+        request_hash: String::new(),
+        deadline_unix_ms: 0,
+        statements: plan
+            .statements
+            .iter()
+            .map(|stmt| TypedDbStatement {
+                sql: stmt.sql.clone(),
+                parameters: Vec::new(),
+                kind: stmt.kind,
+                max_rows: stmt.max_rows,
+                result_selection: DbResultSelection::Rows,
+            })
+            .collect(),
+    }
+}
+
+/// Host plans may include already-lowered schema companions (`PRAGMA`,
+/// `CREATE FUNCTION`, …). Those get a hash-bound empty proof. Canonical DML
+/// and queries are typed against the merged host schema, in statement order.
+fn proofs_for_host_plan(
+    req: &ExecuteRequest,
+    env: &SqlTypeEnv,
+) -> Result<Vec<ResolvedStatement>, DbErr> {
+    let mut working = env.clone();
+    let mut proofs = Vec::with_capacity(req.statements.len());
+    for stmt in &req.statements {
+        let sql = stmt.sql.trim();
+        if host_adapter_private_sql(sql) || statement_is_ddl(sql) {
+            apply_schema_sql_to_env(&mut working, sql);
+            proofs.push(ResolvedStatement::bound_empty(sql));
+            continue;
+        }
+        let one = ExecuteRequest {
+            operation_id: req.operation_id.clone(),
+            request_hash: req.request_hash.clone(),
+            deadline_unix_ms: req.deadline_unix_ms,
+            statements: vec![stmt.clone()],
+        };
+        let mut typed = typecheck_execute_request_proofs(&one, &working)
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
+        proofs.push(typed.pop().ok_or_else(|| {
+            DbErr::Custom("host SQL typecheck returned no proof for a statement".into())
+        })?);
+    }
+    Ok(proofs)
+}
+
+fn host_adapter_private_sql(sql: &str) -> bool {
+    let t = sql.trim();
+    let u = t.to_ascii_uppercase();
+    crate::is_host_schema_version_marker(t)
+        || u.starts_with("PRAGMA ")
+        || u.starts_with("SET LOCAL ")
+        || u.starts_with("CREATE OR REPLACE FUNCTION")
+        || u.starts_with("CREATE FUNCTION")
+        || u.starts_with("CREATE TRIGGER")
+        || u.starts_with("DROP FUNCTION")
+        || u.starts_with("DROP TRIGGER")
+        || u.starts_with("ALTER TABLE")
+        || u.starts_with("DO $")
 }
 
 /// Per-statement result bounds. Row/byte `0` means unlimited at execute time.
@@ -211,12 +305,39 @@ async fn execute_statements_body(
         }
     }
     let sql_started = Instant::now();
-    let mut env = load_sql_type_env(&txn)
-        .await
-        .unwrap_or_else(|_| bookclerk_plugin_abi::SqlTypeEnv::new());
+    // Physical tables first so ad-hoc host test tables (created via raw SQL)
+    // are visible. Canonical host schema and the plugin catalog overwrite
+    // overlapping names; plugin typed execute never calls this loader.
+    let mut env = match load_physical_sql_type_env(&txn).await {
+        Ok(env) => env,
+        Err(err) => {
+            let _ = txn.rollback().await;
+            let _ = take_txn_fault();
+            return Err(err);
+        }
+    };
+    match load_sql_type_env(&txn).await {
+        Ok(catalog) => env.merge(&catalog),
+        Err(err) => {
+            let _ = txn.rollback().await;
+            let _ = take_txn_fault();
+            return Err(err);
+        }
+    }
+    env.merge(&sql_host_bookkeeping_type_env());
+    env.merge(&session.type_env);
+    let type_req = plan_as_typed_request(plan, operation_id);
+    let proofs = match proofs_for_host_plan(&type_req, &env) {
+        Ok(proofs) => proofs,
+        Err(err) => {
+            let _ = txn.rollback().await;
+            let _ = take_txn_fault();
+            return Err(err);
+        }
+    };
     let mut statements = Vec::with_capacity(plan.statements.len());
     let mut used_atomic = atomic_result_envelope_len(operation_id);
-    for stmt in &plan.statements {
+    for (stmt, proof) in plan.statements.iter().zip(proofs.iter()) {
         if let Err(err) = session.check(AtomicInterruptPhase::BetweenStatements) {
             let _ = txn.rollback().await;
             let _ = take_txn_fault();
@@ -232,7 +353,7 @@ async fn execute_statements_body(
         let sql = if bookclerk_plugin_abi::statement_is_ddl(&canonical) {
             sql
         } else {
-            lower_canonical_sql_typed(backend, &sql, &env)
+            lower_canonical_sql_typed(backend, &sql, Some(proof))
         };
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = if stmt.kind.collects_rows() {
@@ -263,12 +384,14 @@ async fn execute_statements_body(
                 rows_affected: exec.rows_affected(),
             }
         };
-        if let Err(err) = apply_exec_identity_companions(&txn, backend, &canonical).await {
+        if let Err(err) =
+            apply_exec_identity_companions(&txn, backend, &canonical, &proof.schema_action).await
+        {
             let _ = txn.rollback().await;
             let _ = take_txn_fault();
             return Err(err);
         }
-        bookclerk_plugin_abi::apply_schema_sql_to_env(&mut env, &canonical);
+        apply_schema_sql_to_env(&mut env, &canonical);
         if let Err(err) = note_atomic_stmt_bytes(
             &mut used_atomic,
             statements.len(),

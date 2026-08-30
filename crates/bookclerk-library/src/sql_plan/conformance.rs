@@ -123,10 +123,7 @@ async fn sqlite_recursive_cte_honors_deadline() {
         "op-deadline",
         "sqlite_txn",
         0,
-        super::AtomicSession {
-            cancel: None,
-            deadline_unix_ms: Some(deadline),
-        },
+        super::AtomicSession::from_deadline(Some(deadline)),
     )
     .await
     .unwrap_err();
@@ -245,10 +242,7 @@ async fn concurrent_attempts_keep_independent_deadlines_and_caps() {
         "op-conc-deadline",
         "sqlite_txn",
         0,
-        AtomicSession {
-            cancel: None,
-            deadline_unix_ms: Some(now.saturating_add(80)),
-        },
+        AtomicSession::from_deadline(Some(now.saturating_add(80))),
     );
     let cap = execute_statements_on_session(
         &db_cap,
@@ -256,10 +250,7 @@ async fn concurrent_attempts_keep_independent_deadlines_and_caps() {
         "op-conc-cap",
         "sqlite_txn",
         5,
-        AtomicSession {
-            cancel: None,
-            deadline_unix_ms: Some(now.saturating_add(60_000)),
-        },
+        AtomicSession::from_deadline(Some(now.saturating_add(60_000))),
     );
     let (deadline, cap) = tokio::join!(
         tokio::time::timeout(std::time::Duration::from_secs(3), deadline),
@@ -1368,7 +1359,8 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await;
     match reply {
@@ -1384,7 +1376,7 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
         }
     }
 
-    let empty = typed_query("empty", "SELECT x FROM typed_probe WHERE 0");
+    let empty = typed_query("empty", "SELECT x FROM typed_probe WHERE FALSE");
     let reply = bookclerk_db_exec::execute_typed_on_session(
         &db,
         &empty,
@@ -1393,7 +1385,8 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .unwrap();
@@ -1410,7 +1403,8 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .unwrap();
@@ -1460,7 +1454,8 @@ async fn typed_sqlite_select_stops_after_cap_plus_one() {
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .unwrap_err();
@@ -1506,7 +1501,8 @@ async fn typed_sqlite_statement_max_rows_is_a_proven_bound() {
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .unwrap_err();
@@ -1518,7 +1514,8 @@ async fn typed_sqlite_statement_max_rows_is_a_proven_bound() {
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .unwrap();
@@ -1569,7 +1566,8 @@ async fn typed_sqlite_per_statement_max_result_bytes() {
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .unwrap_err();
@@ -1593,7 +1591,8 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .unwrap_err();
@@ -1611,7 +1610,8 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .unwrap();
@@ -1632,7 +1632,8 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .unwrap();
@@ -1672,7 +1673,8 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .unwrap();
@@ -1688,7 +1690,8 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None),
+        bookclerk_db_exec::AtomicSession::from_deadline(None)
+            .with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
     .unwrap();
@@ -1755,16 +1758,15 @@ async fn run_postgres_binding(
     let caps = DbCapabilities::advertised_postgres();
     let env = bookclerk_db_exec::load_sql_type_env(db)
         .await
-        .unwrap_or_else(|_| bookclerk_plugin_abi::SqlTypeEnv::new());
+        .expect("load binding catalog");
     let policy = bookclerk_plugin_abi::GuestSqlPolicy::binding_owned().with_sql_types(env);
     let exec_caps = caps.clone();
     super::execute_guest_atomic_with(request, &caps, &policy, |envelope| async move {
         let deadline =
             (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
-        bookclerk_db_exec::execute_typed_on_session(
+        bookclerk_db_exec::execute_typed_envelope(
             db,
-            &envelope.request,
-            envelope.guest_receipt,
+            &envelope,
             "postgres_txn",
             bookclerk_db_exec::ExecCaps::from_capabilities(&exec_caps),
             bookclerk_db_exec::AtomicSession::from_deadline(deadline),
@@ -2571,4 +2573,66 @@ async fn postgres_binding_sql_v1_p1_vectors() {
         maxed2.statements[0].rows[0].values[0],
         bookclerk_plugin_abi::DbValue::Int64(1)
     );
+
+    let err = run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-where-int",
+            vec![binding_stmt("SELECT 1 WHERE 1", vec![])],
+        ),
+    )
+    .await
+    .expect_err("WHERE 1 is not BOOLEAN");
+    assert!(
+        err.to_string().contains("BOOLEAN") || err.to_string().contains("invalid"),
+        "{err}"
+    );
+    sea_orm::ConnectionTrait::execute_raw(
+        &db,
+        sea_orm::Statement::from_string(
+            sea_orm::ConnectionTrait::get_database_backend(&db),
+            "CREATE TABLE orphaned (n INTEGER)".to_string(),
+        ),
+    )
+    .await
+    .expect("physical orphan");
+    let err = run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-adopt-orphan",
+            vec![binding_stmt(
+                "CREATE TABLE IF NOT EXISTS orphaned (n INTEGER)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect_err("must not adopt orphan physical table");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("physical") || msg.contains("adopt") || msg.contains("catalog"),
+        "{err}"
+    );
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ddl-typed",
+            vec![binding_stmt(
+                bookclerk_db_exec::sql_v1::BINDING_DDL_AUTOINCREMENT_BLOB,
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("typed ddl");
+    let mut edges = binding_stmt(bookclerk_db_exec::sql_v1::PORTABLE_RUNTIME_EDGES, vec![]);
+    edges.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-runtime-edges", vec![edges]))
+        .await
+        .expect("runtime edges");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_runtime_edges_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
 }

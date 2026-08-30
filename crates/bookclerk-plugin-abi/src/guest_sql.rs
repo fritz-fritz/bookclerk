@@ -9,8 +9,9 @@
 
 use crate::{
     sql_types::{
-        typecheck_execute_request, SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS,
-        SQL_CATALOG_TABLE, SQL_IDENTITY_TABLE,
+        sql_host_bookkeeping_type_env, typecheck_execute_request,
+        typecheck_execute_request_resolved, SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS,
+        SQL_CATALOG_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
     },
     DbPlanStatementKind, DbResultSelection, ExecuteRequest, PluginError, Result, TypedDbStatement,
 };
@@ -26,6 +27,7 @@ const DENIED_TABLES: &[&str] = &[
     "information_schema",
     SQL_CATALOG_TABLE,
     SQL_IDENTITY_TABLE,
+    SQL_SCHEMA_TABLE,
     INSERT_SELECT_WRAP_ALIAS,
 ];
 
@@ -77,8 +79,9 @@ const DENIED_VERBS: &[&str] = &[
 ///
 /// Empty [`Self::deny_all`] denies every table. Catalog identifiers
 /// (`encrypted_secrets`, `sqlite_*`, `pg_*`, `information_schema`) are always
-/// refused even if listed. [`Self::host_authoritative`] skips this layer so a
-/// Cap'n `DatabaseSession` can be the single authorization authority.
+/// refused even if listed. [`Self::host_authoritative`] skips table-scope
+/// authorization so a Cap'n `DatabaseSession` can be the single authorization
+/// authority; typing still runs at execute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestSqlPolicy {
     tables: std::collections::BTreeSet<String>,
@@ -115,7 +118,8 @@ impl GuestSqlPolicy {
     }
 
     /// Broker passthrough: grammar/size checks still run; table scope is the
-    /// host `DatabaseSession`'s responsibility.
+    /// host `DatabaseSession`'s responsibility. Typing and TEXT lowering still
+    /// run at execute against the host catalog.
     #[must_use]
     pub fn host_authoritative() -> Self {
         Self {
@@ -320,6 +324,7 @@ const BINDING_RESERVED_TABLES: &[&str] = &[
     "plugin_databases",
     SQL_CATALOG_TABLE,
     SQL_IDENTITY_TABLE,
+    SQL_SCHEMA_TABLE,
     INSERT_SELECT_WRAP_ALIAS,
 ];
 
@@ -434,14 +439,25 @@ pub struct GuestSqlRefs {
 /// Returns [`PluginError::invalid_params`] when a referenced object is outside
 /// `policy`.
 pub fn authorize_guest_sql_policy(req: &ExecuteRequest, policy: &GuestSqlPolicy) -> Result<()> {
-    for (i, stmt) in req.statements.iter().enumerate() {
-        if policy.is_binding_owned() && binding_ddl_verb(&stmt.sql).is_some() {
-            // Bounded DDL inside a plugin-owned binding; the ref parser does
-            // not understand DDL shapes, so target names and function
-            // expressions are checked here.
-            authorize_binding_ddl(i, &stmt.sql, policy)?;
-            continue;
+    if policy.host_authoritative {
+        return Ok(());
+    }
+    if policy.is_binding_owned() {
+        let mut env = sql_host_bookkeeping_type_env();
+        env.merge(policy.sql_types());
+        let proofs = typecheck_execute_request_resolved(req, &env)?;
+        for (i, (stmt, proof)) in req.statements.iter().zip(proofs.iter()).enumerate() {
+            if binding_ddl_verb(&stmt.sql).is_some() {
+                authorize_binding_ddl(i, &stmt.sql, policy)?;
+                continue;
+            }
+            for access in &proof.physical_accesses {
+                policy.authorize_table(i, &access.table)?;
+            }
         }
+        return Ok(());
+    }
+    for (i, stmt) in req.statements.iter().enumerate() {
         policy.authorize(i, &parse_guest_sql_refs(&stmt.sql)?)?;
     }
     Ok(())
@@ -1052,8 +1068,25 @@ fn parse_v1_returning(index: usize, scan: &mut Scan<'_>) -> Result<()> {
 /// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn parse_v1_ident(index: usize, scan: &mut Scan<'_>) -> Result<String> {
     deny_quoted_ident(index, scan)?;
-    scan.read_ident()
-        .ok_or_else(|| v1_grammar_err(index, "identifier required"))
+    let ident = scan
+        .read_ident()
+        .ok_or_else(|| v1_grammar_err(index, "identifier required"))?;
+    reject_oversize_ident(index, &ident)?;
+    Ok(ident)
+}
+
+fn reject_oversize_ident(index: usize, ident: &str) -> Result<()> {
+    if crate::sql_types::sql_v1_ident_in_bounds(ident) {
+        Ok(())
+    } else {
+        Err(v1_grammar_err(
+            index,
+            &format!(
+                "identifier exceeds {} bytes after case fold",
+                crate::sql_types::SQL_V1_MAX_IDENT_BYTES
+            ),
+        ))
+    }
 }
 
 /// # Errors
@@ -1361,17 +1394,12 @@ fn parse_v1_atom(index: usize, scan: &mut Scan<'_>) -> Result<()> {
         return Ok(());
     }
     deny_quoted_ident(index, scan)?;
-    let Some(name) = scan.read_ident() else {
-        return Err(v1_grammar_err(index, "expression atom"));
-    };
+    let name = parse_v1_ident(index, scan)?;
     if scan.take_byte(b'.') {
         if scan.take_byte(b'*') {
             return Ok(());
         }
-        deny_quoted_ident(index, scan)?;
-        if scan.read_ident().is_none() {
-            return Err(v1_grammar_err(index, "qualified identifier"));
-        }
+        parse_v1_ident(index, scan)?;
     }
     if scan.take_byte(b'(') {
         parse_v1_call_args(index, scan, &name)?;
@@ -1685,10 +1713,7 @@ fn validate_binding_create_index_v1(index: usize, inner: &str, tail: &str) -> Re
     deny_binding_v1_operators(index, inner)?;
     let mut scan = Scan { sql: inner, i: 0 };
     loop {
-        deny_quoted_ident(index, &mut scan)?;
-        if scan.read_ident().is_none() {
-            return Err(v1_grammar_err(index, "CREATE INDEX requires a column list"));
-        }
+        parse_v1_ident(index, &mut scan)?;
         let _ = scan.take_kw("ASC");
         let _ = scan.take_kw("DESC");
         if scan.take_byte(b',') {
@@ -1711,13 +1736,8 @@ fn validate_binding_create_index_v1(index: usize, inner: &str, tail: &str) -> Re
 /// Returns [`PluginError::invalid_params`] when the column name, type, or
 /// constraints are not portable SQL v1.
 fn parse_column_def(index: usize, scan: &mut Scan<'_>) -> Result<()> {
-    deny_quoted_ident(index, scan)?;
-    if scan.read_ident().is_none() {
-        return Err(v1_grammar_err(index, "column name required"));
-    }
-    let ty = scan
-        .read_ident()
-        .ok_or_else(|| v1_grammar_err(index, "column type required"))?;
+    parse_v1_ident(index, scan)?;
+    let ty = parse_v1_ident(index, scan)?;
     if !V1_COLUMN_TYPES.contains(&ty.as_str()) {
         return Err(v1_grammar_err(
             index,
@@ -1748,9 +1768,7 @@ fn parse_column_constraints(index: usize, scan: &mut Scan<'_>, ty: &str) -> Resu
             return Ok(());
         }
         if scan.take_kw("CONSTRAINT") {
-            if scan.read_ident().is_none() {
-                return Err(v1_grammar_err(index, "CONSTRAINT requires a name"));
-            }
+            parse_v1_ident(index, scan)?;
             continue;
         }
         if scan.take_kw("PRIMARY") {
@@ -1814,8 +1832,8 @@ fn parse_column_constraints(index: usize, scan: &mut Scan<'_>, ty: &str) -> Resu
 /// Returns [`PluginError::invalid_params`] when a table constraint is not
 /// portable SQL v1.
 fn parse_table_constraint(index: usize, scan: &mut Scan<'_>) -> Result<()> {
-    if scan.take_kw("CONSTRAINT") && scan.read_ident().is_none() {
-        return Err(v1_grammar_err(index, "CONSTRAINT requires a name"));
+    if scan.take_kw("CONSTRAINT") {
+        parse_v1_ident(index, scan)?;
     }
     if scan.take_kw("PRIMARY") {
         if !scan.take_kw("KEY") {
@@ -2218,6 +2236,7 @@ fn check_binding_ddl_name(index: usize, scan: &mut Scan<'_>, what: &str) -> Resu
             "statement {index} is not allowed binding DDL ({what})"
         ))
     })?;
+    reject_oversize_ident(index, &name)?;
     if scan.take_byte(b'.') || binding_table_denied(&name) {
         return Err(PluginError::invalid_params(format!(
             "statement {index} names reserved or qualified object {name}"
@@ -2532,8 +2551,12 @@ pub fn validate_guest_execute_request_for_policy(
     for (i, stmt) in req.statements.iter().enumerate() {
         validate_guest_statement_for(i, stmt, policy)?;
     }
-    if policy.is_binding_owned() || !policy.sql_types().is_empty() {
-        typecheck_execute_request(req, policy.sql_types(), policy.host_authoritative)?;
+    if policy.is_binding_owned() {
+        let mut env = sql_host_bookkeeping_type_env();
+        env.merge(policy.sql_types());
+        typecheck_execute_request(req, &env)?;
+    } else if !policy.sql_types().is_empty() {
+        typecheck_execute_request(req, policy.sql_types())?;
     }
     Ok(())
 }
@@ -3501,6 +3524,7 @@ fn for_each_unquoted(sql: &str, mut step: impl FnMut(&str, usize) -> usize) {
 #[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
+    use crate::sql_types::apply_schema_sql_to_env;
     use crate::{DbValue, ExecuteRequest};
 
     fn req(
@@ -3644,7 +3668,21 @@ mod tests {
     /// Returns [`PluginError::invalid_params`] when the statement is outside
     /// `GuestSqlPolicy::binding_owned`.
     fn binding_check(sql: &str, selection: DbResultSelection, max_rows: u32) -> Result<()> {
-        let policy = GuestSqlPolicy::binding_owned();
+        let mut env = SqlTypeEnv::new();
+        apply_schema_sql_to_env(
+            &mut env,
+            "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT, flag BOOLEAN)",
+        );
+        apply_schema_sql_to_env(
+            &mut env,
+            "CREATE TABLE IF NOT EXISTS typed (v TEXT, n REAL, r REAL)",
+        );
+        apply_schema_sql_to_env(&mut env, "CREATE TABLE IF NOT EXISTS ign_sel (id INTEGER)");
+        apply_schema_sql_to_env(
+            &mut env,
+            "CREATE TABLE IF NOT EXISTS anything_i_own (id INTEGER)",
+        );
+        let policy = GuestSqlPolicy::binding_owned().with_sql_types(env);
         let request = req(sql, vec![], selection, max_rows);
         validate_guest_execute_request_for_policy(&request, &policy)?;
         authorize_guest_sql_policy(&request, &policy)
@@ -3666,7 +3704,7 @@ mod tests {
         .unwrap();
         binding_check("DROP TABLE IF EXISTS memos", DbResultSelection::Discard, 0).unwrap();
         binding_check(
-            "CREATE TABLE IF NOT EXISTS typed (v TEXT DEFAULT 'x', n REAL)",
+            "CREATE TABLE IF NOT EXISTS typed_defaults (v TEXT DEFAULT 'x', n REAL)",
             DbResultSelection::Discard,
             0,
         )
@@ -3684,7 +3722,7 @@ mod tests {
         )
         .unwrap();
         binding_check(
-            "INSERT OR IGNORE INTO ign_sel (id) WITH s AS (SELECT 1) SELECT * FROM s RETURNING id",
+            "INSERT OR IGNORE INTO ign_sel (id) WITH s(id) AS (SELECT 1) SELECT * FROM s RETURNING id",
             DbResultSelection::Rows,
             0,
         )
@@ -3719,6 +3757,24 @@ mod tests {
             1,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn sql_v1_identifier_bound_is_63_bytes_after_case_fold() {
+        let ok = format!(
+            "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY)",
+            "a".repeat(63)
+        );
+        binding_check(&ok, DbResultSelection::Discard, 0).unwrap();
+        let too_long = format!(
+            "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY)",
+            "a".repeat(64)
+        );
+        let err = binding_check(&too_long, DbResultSelection::Discard, 0).unwrap_err();
+        assert!(err.to_string().contains("identifier exceeds"), "{err}");
+        let col = format!("CREATE TABLE IF NOT EXISTS t ({} INTEGER)", "b".repeat(64));
+        let err = binding_check(&col, DbResultSelection::Discard, 0).unwrap_err();
+        assert!(err.to_string().contains("identifier exceeds"), "{err}");
     }
 
     #[test]
@@ -3766,7 +3822,9 @@ mod tests {
                     || err.to_string().contains("disallowed")
                     || err.to_string().contains("not allowed")
                     || err.to_string().contains("column list")
-                    || err.to_string().contains("reserved"),
+                    || err.to_string().contains("reserved")
+                    || err.to_string().contains("unknown column")
+                    || err.to_string().contains("round()"),
                 "{sql}: {err}"
             );
         }
@@ -3785,7 +3843,9 @@ mod tests {
         ] {
             let err = binding_check(sql, DbResultSelection::Discard, 0).unwrap_err();
             assert!(
-                err.to_string().contains("reserved") || err.to_string().contains("unauthorized"),
+                err.to_string().contains("reserved")
+                    || err.to_string().contains("unauthorized")
+                    || err.to_string().contains("unknown"),
                 "{sql}: {err}"
             );
         }
@@ -3907,7 +3967,8 @@ mod tests {
         ] {
             let err = binding_check(sql, DbResultSelection::Rows, 1).unwrap_err();
             assert!(
-                err.to_string().contains("unauthorized function"),
+                err.to_string().contains("unauthorized function")
+                    || err.to_string().contains("unknown helper"),
                 "{sql}: {err}"
             );
         }
@@ -3937,7 +3998,8 @@ mod tests {
         let err =
             binding_check("SELECT hex(body) FROM notes", DbResultSelection::Rows, 1).unwrap_err();
         assert!(
-            err.to_string().contains("unauthorized function"),
+            err.to_string().contains("unauthorized function")
+                || err.to_string().contains("unknown helper"),
             "hex is not portable: {err}"
         );
         let library = GuestSqlPolicy::allow_tables(["notes"]);

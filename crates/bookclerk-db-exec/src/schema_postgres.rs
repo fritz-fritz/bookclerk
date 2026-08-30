@@ -132,7 +132,8 @@ pub fn postgres_identity_companions(sql: &str) -> Vec<String> {
         if !is_safe_ident(table) || !is_safe_ident(col) {
             return Vec::new();
         }
-        let fn_name = format!("bookclerk_ident_{table}");
+        let fn_name = bookclerk_plugin_abi::postgres_identity_function_name(table);
+        let trig_name = bookclerk_plugin_abi::postgres_identity_trigger_name(table);
         return vec![
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (\
@@ -163,9 +164,9 @@ pub fn postgres_identity_companions(sql: &str) -> Vec<String> {
                 bookclerk_plugin_abi::SQL_IDENTITY_TABLE,
                 bookclerk_plugin_abi::SQL_IDENTITY_TABLE
             ),
-            format!("DROP TRIGGER IF EXISTS {fn_name} ON {table}"),
+            format!("DROP TRIGGER IF EXISTS {trig_name} ON {table}"),
             format!(
-                "CREATE TRIGGER {fn_name} BEFORE INSERT ON {table} \
+                "CREATE TRIGGER {trig_name} BEFORE INSERT ON {table} \
              FOR EACH ROW EXECUTE FUNCTION {fn_name}()"
             ),
         ];
@@ -174,7 +175,7 @@ pub fn postgres_identity_companions(sql: &str) -> Vec<String> {
         if !is_safe_ident(&table) {
             return Vec::new();
         }
-        let fn_name = format!("bookclerk_ident_{table}");
+        let fn_name = bookclerk_plugin_abi::postgres_identity_function_name(&table);
         return vec![
             format!(
                 "CREATE TABLE IF NOT EXISTS {} (\
@@ -185,7 +186,6 @@ pub fn postgres_identity_companions(sql: &str) -> Vec<String> {
                 "DELETE FROM {} WHERE table_name = '{table}'",
                 bookclerk_plugin_abi::SQL_IDENTITY_TABLE
             ),
-            format!("DROP TRIGGER IF EXISTS {fn_name} ON {table}"),
             format!("DROP FUNCTION IF EXISTS {fn_name}()"),
         ];
     }
@@ -266,6 +266,7 @@ fn is_safe_ident(s: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && bookclerk_plugin_abi::sql_v1_ident_in_bounds(s)
 }
 
 /// Expands a typed host schema batch at the adapter execution edge.
@@ -383,8 +384,9 @@ mod tests {
             expanded.iter().any(|s| s.contains("BIGINT PRIMARY KEY")),
             "adapter must lower canonical sqlite DDL for postgres: {expanded:?}"
         );
+        let fn_name = bookclerk_plugin_abi::postgres_identity_function_name("users");
         assert!(
-            expanded.iter().any(|s| s.contains("bookclerk_ident_users")),
+            expanded.iter().any(|s| s.contains(&fn_name)),
             "identity CREATE TABLE must install transactional identity companions: {expanded:?}"
         );
         assert!(
@@ -434,11 +436,9 @@ mod tests {
                 .any(|s| s.sql.contains("BIGINT PRIMARY KEY")),
             "typed execute must lower canonical DDL at adapter edge"
         );
+        let fn_name = bookclerk_plugin_abi::postgres_identity_function_name("users");
         assert!(
-            expanded
-                .statements
-                .iter()
-                .any(|s| s.sql.contains("bookclerk_ident_users")),
+            expanded.statements.iter().any(|s| s.sql.contains(&fn_name)),
             "typed execute must attach identity companions"
         );
         assert!(
@@ -568,13 +568,15 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS ident (id INTEGER PRIMARY KEY AUTOINCREMENT, n INTEGER)";
         let companions = postgres_identity_companions(sql);
         assert_eq!(companions.len(), 4, "{companions:?}");
+        let fn_name = bookclerk_plugin_abi::postgres_identity_function_name("ident");
+        let trig_name = bookclerk_plugin_abi::postgres_identity_trigger_name("ident");
         assert!(
             companions[0].contains("bookclerk_identity"),
             "{}",
             companions[0]
         );
         assert!(
-            companions[1].contains("CREATE OR REPLACE FUNCTION bookclerk_ident_ident"),
+            companions[1].contains(&format!("CREATE OR REPLACE FUNCTION {fn_name}")),
             "{}",
             companions[1]
         );
@@ -584,7 +586,7 @@ mod tests {
             companions[1]
         );
         assert!(
-            companions[2].contains("DROP TRIGGER IF EXISTS bookclerk_ident_ident ON ident"),
+            companions[2].contains(&format!("DROP TRIGGER IF EXISTS {trig_name} ON ident")),
             "{}",
             companions[2]
         );
@@ -606,8 +608,35 @@ mod tests {
         );
         assert!(
             drop.iter()
-                .any(|s| s.contains("DROP TRIGGER IF EXISTS bookclerk_ident_ident")),
+                .any(|s| s.contains(&format!("DROP FUNCTION IF EXISTS {fn_name}"))),
             "{drop:?}"
         );
+        assert!(
+            drop.iter().all(|s| !s.contains("DROP TRIGGER")),
+            "DROP TABLE companions must not name the dropped relation: {drop:?}"
+        );
+    }
+
+    #[test]
+    fn hashed_identity_names_split_postgres_truncation_collisions() {
+        // `bookclerk_ident_` is 16 bytes; PostgreSQL truncates at 63, so
+        // table names that share a 47-byte prefix collided under the old
+        // `bookclerk_ident_<table>` spelling.
+        let prefix = "a".repeat(47);
+        let left = format!("{prefix}x");
+        let right = format!("{prefix}y");
+        let old_left = format!("bookclerk_ident_{left}");
+        let old_right = format!("bookclerk_ident_{right}");
+        assert_eq!(&old_left[..63], &old_right[..63]);
+        let fn_left = bookclerk_plugin_abi::postgres_identity_function_name(&left);
+        let fn_right = bookclerk_plugin_abi::postgres_identity_function_name(&right);
+        let trig_left = bookclerk_plugin_abi::postgres_identity_trigger_name(&left);
+        let trig_right = bookclerk_plugin_abi::postgres_identity_trigger_name(&right);
+        assert_ne!(fn_left, fn_right);
+        assert_ne!(trig_left, trig_right);
+        assert_ne!(fn_left, trig_left);
+        assert!(fn_left.len() < 63 && trig_left.len() < 63);
+        assert!(fn_left.starts_with(bookclerk_plugin_abi::POSTGRES_IDENT_FN_PREFIX));
+        assert!(trig_left.starts_with(bookclerk_plugin_abi::POSTGRES_IDENT_TRIGGER_PREFIX));
     }
 }

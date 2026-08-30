@@ -8,8 +8,8 @@ use bookclerk_db_exec::{
     GuestReceiptPersist, HostExecuteEnvelope, GUEST_RECEIPT_WRAP_PREFIX, GUEST_RECEIPT_WRITE_GATE,
 };
 use bookclerk_plugin_abi::{
-    DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, ExecuteRequest, PluginError,
-    TypedDbStatement,
+    typecheck_execute_request_proofs, DbPlanStatementKind, DbResultSelection, DbValue,
+    ExecuteReply, ExecuteRequest, PluginError, SqlTypeEnv, TypedDbStatement,
 };
 use chrono::{Duration, Utc};
 
@@ -26,7 +26,10 @@ const GUEST_TYPED_KIND: &str = "guestTyped";
 /// not the original guest SQL, and stamps a host-only finalize hint so
 /// adapters persist replay payload before COMMIT.
 #[must_use]
-pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> HostExecuteEnvelope {
+pub(crate) fn wrap_guest_typed_request(
+    mut req: ExecuteRequest,
+    type_env: &SqlTypeEnv,
+) -> HostExecuteEnvelope {
     let now = Utc::now();
     let created = now.to_rfc3339();
     let operation_id = req.operation_id.clone();
@@ -80,6 +83,9 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> HostExecuteEn
 
     req.statements = statements;
     req.request_hash.clear();
+    let mut env = receipt_wrap_type_env();
+    env.merge(type_env);
+    let proofs = typecheck_execute_request_proofs(&req, &env).unwrap_or_else(|_| Vec::new());
     HostExecuteEnvelope::new(
         req,
         GuestReceiptPersist {
@@ -87,6 +93,12 @@ pub(crate) fn wrap_guest_typed_request(mut req: ExecuteRequest) -> HostExecuteEn
             guest_request_hash: request_hash,
         },
     )
+    .with_proofs(proofs)
+}
+
+/// Bookkeeping tables present when typing receipt-wrapper SQL.
+fn receipt_wrap_type_env() -> SqlTypeEnv {
+    bookclerk_plugin_abi::sql_host_bookkeeping_type_env()
 }
 
 /// Interprets a wrapped guest reply: replay from stored payload, else strip wrapper rows.
@@ -223,8 +235,15 @@ fn receipt_hash_from(stmt: &bookclerk_plugin_abi::StatementResult) -> Option<Str
 mod replay_finalize {
     use super::*;
     use bookclerk_plugin_abi::{
-        DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+        sql_type_env_from_canonical_ddl, DbPlanStatementKind, DbResultSelection, ExecuteRequest,
+        TypedDbStatement,
     };
+
+    fn slots_env() -> SqlTypeEnv {
+        sql_type_env_from_canonical_ddl(
+            "CREATE TABLE db_serialization_slots (slot_key TEXT NOT NULL, bump INTEGER NOT NULL)",
+        )
+    }
 
     #[tokio::test]
     async fn guest_receipt_finalize_enables_replay_after_commit() {
@@ -246,25 +265,26 @@ mod replay_finalize {
             }],
             deadline_unix_ms: 0,
         };
-        let wrapped = wrap_guest_typed_request(req);
+        let wrapped = wrap_guest_typed_request(req, &slots_env());
         assert!(!wrapped.guest_receipt.is_absent());
         let guest_len = wrapped.guest_receipt.guest_statement_len as usize;
-        let reply = bookclerk_db_exec::execute_typed_on_session(
+        let reply = bookclerk_db_exec::execute_typed_envelope(
             &db,
-            &wrapped.request,
-            wrapped.guest_receipt.clone(),
+            &wrapped,
             "sqlite_txn",
             bookclerk_db_exec::ExecCaps::from_capabilities(
                 &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
             ),
-            bookclerk_db_exec::AtomicSession::from_deadline(None),
+            bookclerk_db_exec::AtomicSession::from_deadline(None)
+                .with_type_env(crate::migrations::host_sql_type_env()),
         )
         .await
         .expect("first execute");
         let guest = unwrap_guest_typed_reply(reply, guest_len, &guest_hash).expect("unwrap");
         assert_eq!(guest.statements[0].rows_affected, 1);
 
-        let replay_wrapped = wrap_guest_typed_request(ExecuteRequest {
+        let replay_wrapped = wrap_guest_typed_request(
+            ExecuteRequest {
             operation_id: "guest-replay-op".into(),
             request_hash: guest_hash.clone(),
             statements: vec![TypedDbStatement {
@@ -276,16 +296,18 @@ mod replay_finalize {
                 result_selection: DbResultSelection::AffectedRows,
             }],
             deadline_unix_ms: 0,
-        });
-        let replay = bookclerk_db_exec::execute_typed_on_session(
+        },
+            &slots_env(),
+        );
+        let replay = bookclerk_db_exec::execute_typed_envelope(
             &db,
-            &replay_wrapped.request,
-            replay_wrapped.guest_receipt.clone(),
+            &replay_wrapped,
             "sqlite_txn",
             bookclerk_db_exec::ExecCaps::from_capabilities(
                 &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
             ),
-            bookclerk_db_exec::AtomicSession::from_deadline(None),
+            bookclerk_db_exec::AtomicSession::from_deadline(None)
+                .with_type_env(crate::migrations::host_sql_type_env()),
         )
         .await
         .expect("replay execute");
@@ -316,7 +338,7 @@ mod tests {
 
     #[test]
     fn wrap_rewrites_insert_values_and_gates_writes() {
-        let wrapped = wrap_guest_typed_request(guest_insert());
+        let wrapped = wrap_guest_typed_request(guest_insert(), &SqlTypeEnv::new());
         assert!(wrapped.request.request_hash.is_empty());
         assert_eq!(wrapped.request.statements.len(), 4);
         assert!(!wrapped.guest_receipt.is_absent());
@@ -359,7 +381,7 @@ mod tests {
             }],
             deadline_unix_ms: 0,
         };
-        let wrapped = wrap_guest_typed_request(req);
+        let wrapped = wrap_guest_typed_request(req, &SqlTypeEnv::new());
         let ddl = &wrapped.request.statements[2];
         assert!(
             !ddl.sql.contains("db_atomic_receipts"),
@@ -399,7 +421,7 @@ mod tests {
             ],
             deadline_unix_ms: 0,
         };
-        let wrapped = wrap_guest_typed_request(req);
+        let wrapped = wrap_guest_typed_request(req, &SqlTypeEnv::new());
         let ddl = &wrapped.request.statements[2];
         let dml = &wrapped.request.statements[3];
         assert!(

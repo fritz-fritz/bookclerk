@@ -624,5 +624,6 @@ pub(super) fn read_host_execute_envelope(
     Ok(HostExecuteEnvelope {
         request: read_execute_request(r.get_request().map_err(from_capnp)?)?,
         guest_receipt: read_guest_receipt_persist(r.get_guest_receipt().map_err(from_capnp)?)?,
+        proofs: Vec::new(),
     })
 }

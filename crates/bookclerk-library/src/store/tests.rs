@@ -6367,7 +6367,8 @@ async fn execute_guest_atomic_allow_tables_selects_books() {
     let reply = store
         .execute_guest_atomic(
             guest_select("SELECT product_id FROM books WHERE product_id = 'B00GUEST'"),
-            &crate::GuestSqlPolicy::allow_tables(["books"]),
+            &crate::GuestSqlPolicy::allow_tables(["books"])
+                .with_sql_types(crate::migrations::host_sql_type_env()),
         )
         .await
         .unwrap();
