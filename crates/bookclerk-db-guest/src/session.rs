@@ -307,7 +307,14 @@ pub async fn guest_bootstrap(
     })
 }
 
-/// Typed `DatabaseSession.executeAtomic`.
+/// Library-connection typed session: non-empty `type_env` so catalog snapshot
+/// merges live physical tables (host schema) instead of catalog-only bindings.
+fn library_typed_session(deadline: Option<u64>) -> bookclerk_db_exec::AtomicSession {
+    bookclerk_db_exec::AtomicSession::from_deadline(deadline)
+        .with_type_env(bookclerk_plugin_abi::sql_host_bookkeeping_type_env())
+}
+
+/// Typed `DatabaseSession.executeAtomic` on the shared library connection.
 ///
 /// Runs [`ExecuteRequest`] directly (no JSON `DbAtomicRequest` conversion).
 /// The guest encodes [`ExecuteReply`] before COMMIT; post-commit failures are
@@ -324,7 +331,9 @@ pub async fn guest_execute_atomic(
     let conn = connection()
         .await
         .map_err(bookclerk_plugin_abi::PluginError::internal)?;
-    guest_execute_atomic_on(&conn, envelope).await
+    let deadline =
+        (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
+    guest_execute_typed(&conn, envelope, library_typed_session(deadline)).await
 }
 
 /// Typed `executeAtomic` on an explicit connection (per-binding sessions).
@@ -340,19 +349,33 @@ pub async fn guest_execute_atomic_on(
     conn: &DatabaseConnection,
     envelope: HostExecuteEnvelope,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
+    let deadline =
+        (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
+    guest_execute_typed(
+        conn,
+        envelope,
+        bookclerk_db_exec::AtomicSession::from_deadline(deadline),
+    )
+    .await
+}
+
+/// Runs a typed envelope with the given session (library vs binding type env).
+async fn guest_execute_typed(
+    conn: &DatabaseConnection,
+    envelope: HostExecuteEnvelope,
+    session: bookclerk_db_exec::AtomicSession,
+) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
     let caps = capabilities_for(conn);
     let timing_source = match conn.get_database_backend() {
         DbBackend::Postgres => "postgres_txn",
         _ => "sqlite_txn",
     };
-    let deadline =
-        (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
     bookclerk_db_exec::execute_typed_envelope(
         conn,
         &envelope,
         timing_source,
         bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
-        bookclerk_db_exec::AtomicSession::from_deadline(deadline),
+        session,
     )
     .await
     .map_err(|e| plugin_error_from_db_err(&e))
@@ -679,7 +702,7 @@ async fn txn_worker(
                             &request,
                             timing_source,
                             bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
-                            bookclerk_db_exec::AtomicSession::from_deadline(deadline),
+                            library_typed_session(deadline),
                             Some(&conn),
                         )
                         .await
