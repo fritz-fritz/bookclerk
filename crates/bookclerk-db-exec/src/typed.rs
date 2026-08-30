@@ -149,6 +149,9 @@ fn catalog_missing_table(err: &DbErr) -> bool {
         || msg.contains("unknown table")
 }
 
+/// # Errors
+///
+/// Returns [`DbErr`] when a catalog page query fails or a cell is malformed.
 async fn load_sql_type_env_paged(
     conn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
@@ -240,6 +243,10 @@ async fn load_sql_type_env_paged(
 /// Host plans may query tables created outside the canonical host snapshot
 /// (tests, `PRAGMA`/raw DDL); those columns are merged here so typing still
 /// runs.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the physical catalog query fails.
 pub async fn load_physical_sql_type_env(conn: &impl ConnectionTrait) -> Result<SqlTypeEnv, DbErr> {
     let _guard = suspend_execute_row_cap();
     let backend = conn.get_database_backend();
@@ -255,6 +262,10 @@ pub async fn load_physical_sql_type_env(conn: &impl ConnectionTrait) -> Result<S
 /// Plugin bindings (`session.type_env` empty) see only [`SQL_CATALOG_TABLE`].
 /// Host sessions merge live physical tables, then the canonical host schema,
 /// so ad-hoc host test tables typecheck without adopting plugin orphans.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when the catalog or physical snapshot cannot be loaded.
 async fn catalog_env_for_typed(
     conn: &impl ConnectionTrait,
     session: &AtomicSession,
@@ -269,6 +280,9 @@ async fn catalog_env_for_typed(
     Ok(env)
 }
 
+/// # Errors
+///
+/// Returns [`DbErr`] when `sqlite_master` cannot be queried.
 async fn load_physical_sqlite(
     conn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
@@ -301,6 +315,9 @@ async fn load_physical_sqlite(
     Ok(env)
 }
 
+/// # Errors
+///
+/// Returns [`DbErr`] when `PRAGMA table_info` fails.
 async fn sqlite_pragma_columns(
     conn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
@@ -347,6 +364,9 @@ fn declared_sql_type(ty: &str) -> Option<SqlType> {
     SqlType::from_column_ident(head)
 }
 
+/// # Errors
+///
+/// Returns [`DbErr`] when `pg_catalog` cannot be queried.
 async fn load_physical_postgres(
     conn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
@@ -387,6 +407,10 @@ fn sql_string_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// # Errors
+///
+/// Returns [`DbErr`] when a stamped proof is not bound to its SQL, or when
+/// typecheck fails for an unstamped request.
 fn proofs_for_request(
     catalog: &SqlTypeEnv,
     req: &ExecuteRequest,
@@ -409,6 +433,10 @@ fn type_env_with_bookkeeping(catalog: &SqlTypeEnv) -> SqlTypeEnv {
     env
 }
 
+/// # Errors
+///
+/// Returns [`DbErr`] when the physical table is missing, is an uncatalogued
+/// orphan, or does not match the catalog fingerprint.
 async fn reconcile_physical(
     txn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
@@ -474,6 +502,9 @@ fn physical_columns_match(catalog: &[(String, SqlType)], physical: &[(String, Sq
             .all(|((a, ta), (b, tb))| a == b && ta == tb)
 }
 
+/// # Errors
+///
+/// Returns [`DbErr`] when the existence probe query fails.
 async fn physical_table_exists(
     txn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
@@ -499,6 +530,9 @@ async fn physical_table_exists(
     Ok(!rows.is_empty())
 }
 
+/// # Errors
+///
+/// Returns [`DbErr`] when `sqlite_master` cannot be queried.
 async fn physical_table_fingerprint(
     txn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
@@ -521,6 +555,9 @@ async fn physical_table_fingerprint(
     Ok(parse_create_table_schema(&ddl).map(|s| s.fingerprint()))
 }
 
+/// # Errors
+///
+/// Returns [`DbErr`] when the PostgreSQL attribute catalog cannot be queried.
 async fn physical_table_columns(
     txn: &impl ConnectionTrait,
     backend: sea_orm::DatabaseBackend,
@@ -1099,6 +1136,9 @@ pub async fn execute_typed_envelope(
     .await
 }
 
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails, encoding fails, or COMMIT fails.
 async fn execute_typed_on_session_proofs(
     db: &DatabaseConnection,
     req: &ExecuteRequest,
@@ -1184,6 +1224,10 @@ where
     .await
 }
 
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails, `then` fails, encoding fails, or
+/// COMMIT fails.
 #[allow(clippy::too_many_arguments)]
 async fn execute_typed_on_session_then_proofs<F>(
     db: &DatabaseConnection,

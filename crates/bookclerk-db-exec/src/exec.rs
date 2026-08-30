@@ -139,6 +139,10 @@ fn plan_as_typed_request(plan: &DbAtomicPlan, operation_id: &str) -> ExecuteRequ
 /// Host plans may include already-lowered schema companions (`PRAGMA`,
 /// `CREATE FUNCTION`, …). Those get a hash-bound empty proof. Canonical DML
 /// and queries are typed against the merged host schema, in statement order.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a canonical statement fails SQL v1 typecheck.
 fn proofs_for_host_plan(
     req: &ExecuteRequest,
     env: &SqlTypeEnv,
