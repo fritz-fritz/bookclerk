@@ -2154,6 +2154,29 @@ mod tests {
         (server, proxy, conn, interrupt, drop, oversized)
     }
 
+    /// Reloads `bookclerk_sql_catalog` into the guest policy (host binding path).
+    async fn execute_d1_guest_atomic(
+        db: &sea_orm::DatabaseConnection,
+        proxy: D1Proxy,
+        req: bookclerk_plugin_abi::ExecuteRequest,
+    ) -> Result<bookclerk_plugin_abi::ExecuteReply, bookclerk_plugin_abi::PluginError> {
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
+        let env = bookclerk_db_exec::load_sql_type_env(db)
+            .await
+            .expect("load binding catalog");
+        let policy = bookclerk_library::GuestSqlPolicy::binding_owned().with_sql_types(env);
+        bookclerk_library::execute_guest_atomic_with(req, &caps, &policy, |envelope| {
+            let proxy = proxy.clone();
+            async move {
+                proxy
+                    .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                    .await
+                    .map_err(crate::atomic::plugin_error_from_d1)
+            }
+        })
+        .await
+    }
+
     #[tokio::test]
     async fn plugin_error_from_d1_maps_guest_receipt_result_lost_to_unavailable() {
         let err = DbErr::Custom(bookclerk_db_exec::GUEST_RECEIPT_RESULT_LOST.into());
@@ -3352,7 +3375,6 @@ mod tests {
     /// Portable SQL v1 helpers and AUTOINCREMENT/BLOB DDL execute on D1.
     #[tokio::test]
     async fn executing_mock_portable_functions_and_binding_ddl() {
-        use bookclerk_library::GuestSqlPolicy;
         use bookclerk_plugin_sdk::{
             DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
         };
@@ -3376,24 +3398,10 @@ mod tests {
         .await
         .expect("host schema for portable fns");
 
-        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
-        let policy = GuestSqlPolicy::binding_owned();
         let run = |req: ExecuteRequest| {
             let proxy = proxy.clone();
-            let caps = caps.clone();
-            let policy = policy.clone();
-            async move {
-                bookclerk_library::execute_guest_atomic_with(req, &caps, &policy, |envelope| {
-                    let proxy = proxy.clone();
-                    async move {
-                        proxy
-                            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
-                            .await
-                            .map_err(crate::atomic::plugin_error_from_d1)
-                    }
-                })
-                .await
-            }
+            let db = db.clone();
+            async move { execute_d1_guest_atomic(&db, proxy, req).await }
         };
         run(ExecuteRequest {
             operation_id: "d1-ddl-typed".into(),
@@ -3468,7 +3476,6 @@ mod tests {
     /// Canonical BOOLEAN columns round-trip as [`DbValue::Boolean`] / typed-null.
     #[tokio::test]
     async fn executing_mock_portable_boolean_column() {
-        use bookclerk_library::GuestSqlPolicy;
         use bookclerk_plugin_sdk::{
             DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
         };
@@ -3492,24 +3499,10 @@ mod tests {
         .await
         .expect("host schema for boolean");
 
-        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
-        let policy = GuestSqlPolicy::binding_owned();
         let run = |req: ExecuteRequest| {
             let proxy = proxy.clone();
-            let caps = caps.clone();
-            let policy = policy.clone();
-            async move {
-                bookclerk_library::execute_guest_atomic_with(req, &caps, &policy, |envelope| {
-                    let proxy = proxy.clone();
-                    async move {
-                        proxy
-                            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
-                            .await
-                            .map_err(crate::atomic::plugin_error_from_d1)
-                    }
-                })
-                .await
-            }
+            let db = db.clone();
+            async move { execute_d1_guest_atomic(&db, proxy, req).await }
         };
         run(ExecuteRequest {
             operation_id: "d1-ddl-bool".into(),
@@ -3563,7 +3556,6 @@ mod tests {
     /// Lowercase DDL types and `insert or ignore … returning` execute on D1.
     #[tokio::test]
     async fn executing_mock_lowercase_ddl_and_insert_or_ignore_returning() {
-        use bookclerk_library::GuestSqlPolicy;
         use bookclerk_plugin_sdk::{
             DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
         };
@@ -3587,24 +3579,10 @@ mod tests {
         .await
         .expect("host schema for lowercase");
 
-        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
-        let policy = GuestSqlPolicy::binding_owned();
         let run = |req: ExecuteRequest| {
             let proxy = proxy.clone();
-            let caps = caps.clone();
-            let policy = policy.clone();
-            async move {
-                bookclerk_library::execute_guest_atomic_with(req, &caps, &policy, |envelope| {
-                    let proxy = proxy.clone();
-                    async move {
-                        proxy
-                            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
-                            .await
-                            .map_err(crate::atomic::plugin_error_from_d1)
-                    }
-                })
-                .await
-            }
+            let db = db.clone();
+            async move { execute_d1_guest_atomic(&db, proxy, req).await }
         };
         run(ExecuteRequest {
             operation_id: "d1-ddl-lc".into(),
@@ -3672,7 +3650,6 @@ mod tests {
     /// AUTOINCREMENT identity, unquoted fold, and uncast helper wire types.
     #[tokio::test]
     async fn executing_mock_sql_v1_semantic_vectors() {
-        use bookclerk_library::GuestSqlPolicy;
         use bookclerk_plugin_sdk::{
             DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
         };
@@ -3696,24 +3673,10 @@ mod tests {
         .await
         .expect("host schema for semantic vectors");
 
-        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
-        let policy = GuestSqlPolicy::binding_owned();
         let run = |req: ExecuteRequest| {
             let proxy = proxy.clone();
-            let caps = caps.clone();
-            let policy = policy.clone();
-            async move {
-                bookclerk_library::execute_guest_atomic_with(req, &caps, &policy, |envelope| {
-                    let proxy = proxy.clone();
-                    async move {
-                        proxy
-                            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
-                            .await
-                            .map_err(crate::atomic::plugin_error_from_d1)
-                    }
-                })
-                .await
-            }
+            let db = db.clone();
+            async move { execute_d1_guest_atomic(&db, proxy, req).await }
         };
         let exec = |op: &str, sql: &str| {
             run(ExecuteRequest {
