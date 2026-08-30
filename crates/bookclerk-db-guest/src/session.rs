@@ -1287,6 +1287,33 @@ mod tests {
         }
     }
 
+    /// Binding CREATE must go through typed execute so catalog companions land.
+    /// Untyped `guest_execute` creates a physical table the guest typechecker
+    /// will not adopt (`unknown table`).
+    async fn typed_create_table(sql: &str) {
+        use bookclerk_plugin_abi::{
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, GuestReceiptPersist,
+            TypedDbStatement,
+        };
+        guest_execute_atomic(HostExecuteEnvelope::new(
+            ExecuteRequest {
+                operation_id: "create".into(),
+                request_hash: String::new(),
+                statements: vec![TypedDbStatement {
+                    sql: sql.into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::Discard,
+                }],
+                deadline_unix_ms: 0,
+            },
+            GuestReceiptPersist::default(),
+        ))
+        .await
+        .unwrap_or_else(|err| panic!("typed CREATE TABLE failed: {err}\n{sql}"));
+    }
+
     #[test]
     fn wrap_select_for_page_limits_and_offsets() {
         let sql = wrap_select_for_page("SELECT id FROM t", 11, 10).unwrap();
@@ -1917,11 +1944,10 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        guest_execute(stmt(
-            "CREATE TABLE nested_typed (id INTEGER PRIMARY KEY, v TEXT)",
-        ))
-        .await
-        .unwrap();
+        typed_create_table(
+            "CREATE TABLE IF NOT EXISTS nested_typed (id INTEGER PRIMARY KEY, v TEXT)",
+        )
+        .await;
         let txn_id = guest_begin(None).await.unwrap();
         let reply = guest_execute_atomic_on_txn(
             txn_id.clone(),
@@ -1960,11 +1986,10 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        guest_execute(stmt(
-            "CREATE TABLE nested_savepoint (id INTEGER PRIMARY KEY, v TEXT)",
-        ))
-        .await
-        .unwrap();
+        typed_create_table(
+            "CREATE TABLE IF NOT EXISTS nested_savepoint (id INTEGER PRIMARY KEY, v TEXT)",
+        )
+        .await;
         let txn_id = guest_begin(None).await.unwrap();
         let err = guest_execute_atomic_on_txn(
             txn_id.clone(),
@@ -2020,11 +2045,10 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        guest_execute(stmt(
-            "CREATE TABLE nested_release (id INTEGER PRIMARY KEY, v TEXT)",
-        ))
-        .await
-        .unwrap();
+        typed_create_table(
+            "CREATE TABLE IF NOT EXISTS nested_release (id INTEGER PRIMARY KEY, v TEXT)",
+        )
+        .await;
         let txn_id = guest_begin(None).await.unwrap();
         bookclerk_db_exec::inject_savepoint_release_failures(1);
         let err = guest_execute_atomic_on_txn(
@@ -2074,11 +2098,10 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        guest_execute(stmt(
-            "CREATE TABLE nested_rollback (id INTEGER PRIMARY KEY, v TEXT)",
-        ))
-        .await
-        .unwrap();
+        typed_create_table(
+            "CREATE TABLE IF NOT EXISTS nested_rollback (id INTEGER PRIMARY KEY, v TEXT)",
+        )
+        .await;
         let txn_id = guest_begin(None).await.unwrap();
         bookclerk_db_exec::inject_savepoint_rollback_failures(1);
         let err = guest_execute_atomic_on_txn(
