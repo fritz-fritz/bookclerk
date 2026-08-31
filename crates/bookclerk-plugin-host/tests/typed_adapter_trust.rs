@@ -27,7 +27,8 @@ impl TypedAtomicExec for SessionTypedAdapter {
             envelope.guest_receipt,
             "sqlite_txn",
             bookclerk_db_exec::ExecCaps::from_capabilities(&DbCapabilities::advertised_sqlite()),
-            bookclerk_db_exec::AtomicSession::from_deadline(None),
+            bookclerk_db_exec::AtomicSession::from_deadline(None)
+                .with_type_env(bookclerk_library::migrations::host_sql_type_env()),
         )
         .await
         .map_err(|err| AbiPluginError::unavailable(err.to_string()))?;
