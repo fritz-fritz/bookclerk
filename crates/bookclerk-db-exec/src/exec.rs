@@ -330,16 +330,16 @@ async fn execute_statements_body(
         }
         let values: Vec<Value> = stmt.binds.iter().map(json_to_sea).collect();
         let canonical = stmt.sql.clone();
-        let sql = if stmt.kind.wrap_select_limit() {
-            cap_query_sql(&canonical, caps.max_result_rows)
-        } else {
-            canonical.clone()
-        };
         let sql = if bookclerk_plugin_abi::statement_is_ddl(&canonical) {
-            sql
+            canonical.clone()
         } else {
-            lower_canonical_sql_typed(backend, &sql, Some(proof))
+            lower_canonical_sql_typed(backend, canonical.trim(), Some(proof))
                 .map_err(|err| DbErr::Custom(err.to_string()))?
+        };
+        let sql = if stmt.kind.wrap_select_limit() {
+            cap_query_sql(&sql, caps.max_result_rows)
+        } else {
+            sql
         };
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = if stmt.kind.collects_rows() {

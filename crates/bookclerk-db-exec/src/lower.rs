@@ -47,7 +47,7 @@ pub fn lower_canonical_sql_typed(
     let mut collate = Vec::new();
     if let Some(proof) = proof {
         assert_proof_matches_sql(proof, &sql)?;
-        let rewritten = apply_integer_overflow_from_proof(&sql, proof);
+        let rewritten = apply_integer_overflow_from_proof(backend, &sql, proof);
         sql = rewritten.sql;
         collate = rewritten.collate;
     }
@@ -342,24 +342,35 @@ fn apply_text_collate_spans(sql: &str, sites: &[SqlSpan]) -> String {
     out
 }
 
-/// i64::MIN as a portable SQL integer (avoid a literal that some parsers reject).
-const I64_MIN_SQL: &str = "(-9223372036854775807 - 1)";
 /// i64::MAX as a portable SQL integer.
 const I64_MAX_SQL: &str = "9223372036854775807";
+
+/// i64::MIN without evaluating an overflowing BIGINT subtraction.
+fn i64_min_sql(backend: DatabaseBackend) -> &'static str {
+    if backend == DatabaseBackend::Postgres {
+        "CAST('-9223372036854775808' AS BIGINT)"
+    } else {
+        "CAST('-9223372036854775808' AS INTEGER)"
+    }
+}
 
 struct OverflowRewrite {
     sql: String,
     collate: Vec<SqlSpan>,
 }
 
-fn apply_integer_overflow_from_proof(sql: &str, proof: &ResolvedStatement) -> OverflowRewrite {
+fn apply_integer_overflow_from_proof(
+    backend: DatabaseBackend,
+    sql: &str,
+    proof: &ResolvedStatement,
+) -> OverflowRewrite {
     let mut sites = proof.integer_arith_sites.clone();
     sites.sort_by_key(|s| (s.full.end, s.full.start));
     let mut collate: Vec<SqlSpan> = proof.text_collate_sites.iter().map(|s| s.span).collect();
     let mut out = sql.to_string();
     for i in 0..sites.len() {
         let site = sites[i];
-        let Some(wrapped) = wrap_integer_arith(&out, &site) else {
+        let Some(wrapped) = wrap_integer_arith(backend, &out, &site) else {
             continue;
         };
         if site.full.end > out.len() || site.full.start >= site.full.end {
@@ -396,7 +407,24 @@ fn shift_span(span: SqlSpan, repl_end: usize, delta: usize) -> SqlSpan {
     }
 }
 
-fn wrap_integer_arith(sql: &str, site: &IntegerArithSite) -> Option<String> {
+/// Derived-table source that evaluates overflow operands once.
+///
+/// Postgres `FROM (SELECT col …)` is not correlated with an outer `UPDATE`/`SELECT`,
+/// so `LATERAL` is required for column refs such as `attempt_count + 1`. SQLite
+/// FROM-subqueries already correlate and do not accept `LATERAL`.
+fn overflow_row_source(backend: DatabaseBackend, cols: &str) -> String {
+    if backend == DatabaseBackend::Postgres {
+        format!("LATERAL (SELECT {cols}) _bc_ov")
+    } else {
+        format!("(SELECT {cols}) _bc_ov")
+    }
+}
+
+fn wrap_integer_arith(
+    backend: DatabaseBackend,
+    sql: &str,
+    site: &IntegerArithSite,
+) -> Option<String> {
     if site.full.end > sql.len()
         || site.lhs.end > sql.len()
         || site.rhs.end > sql.len()
@@ -405,45 +433,51 @@ fn wrap_integer_arith(sql: &str, site: &IntegerArithSite) -> Option<String> {
     {
         return None;
     }
+    let min = i64_min_sql(backend);
     match site.kind {
         IntegerArithKind::Abs => {
             let full = &sql[site.full.start..site.full.end];
             let arg = abs_call_arg(full).unwrap_or(full);
+            let src = overflow_row_source(backend, &format!("({arg}) AS a"));
             Some(format!(
-                "(CASE WHEN ({arg}) IS NULL THEN NULL WHEN ({arg}) = {I64_MIN_SQL} THEN NULL ELSE abs({arg}) END)"
+                "(SELECT CASE WHEN a IS NULL THEN NULL WHEN a = {min} THEN NULL ELSE abs(a) END \
+                 FROM {src})"
             ))
         }
         IntegerArithKind::Add => {
             let a = &sql[site.lhs.start..site.lhs.end];
             let b = &sql[site.rhs.start..site.rhs.end];
+            let src = overflow_row_source(backend, &format!("({a}) AS a, ({b}) AS b"));
             Some(format!(
-                "(CASE WHEN ({a}) IS NULL OR ({b}) IS NULL THEN ({a}) + ({b}) \
-                 WHEN ({a}) > 0 AND ({b}) > 0 AND ({a}) > {I64_MAX_SQL} - ({b}) THEN NULL \
-                 WHEN ({a}) < 0 AND ({b}) < 0 AND ({a}) < {I64_MIN_SQL} - ({b}) THEN NULL \
-                 ELSE ({a}) + ({b}) END)"
+                "(SELECT CASE WHEN a IS NULL OR b IS NULL THEN a + b \
+                 WHEN a > 0 AND b > 0 AND a > {I64_MAX_SQL} - b THEN NULL \
+                 WHEN a < 0 AND b < 0 AND a < {min} - b THEN NULL \
+                 ELSE a + b END FROM {src})"
             ))
         }
         IntegerArithKind::Sub => {
             let a = &sql[site.lhs.start..site.lhs.end];
             let b = &sql[site.rhs.start..site.rhs.end];
+            let src = overflow_row_source(backend, &format!("({a}) AS a, ({b}) AS b"));
             Some(format!(
-                "(CASE WHEN ({a}) IS NULL OR ({b}) IS NULL THEN ({a}) - ({b}) \
-                 WHEN ({b}) < 0 AND ({a}) > {I64_MAX_SQL} + ({b}) THEN NULL \
-                 WHEN ({b}) > 0 AND ({a}) < {I64_MIN_SQL} + ({b}) THEN NULL \
-                 ELSE ({a}) - ({b}) END)"
+                "(SELECT CASE WHEN a IS NULL OR b IS NULL THEN a - b \
+                 WHEN b < 0 AND a > {I64_MAX_SQL} + b THEN NULL \
+                 WHEN b > 0 AND a < {min} + b THEN NULL \
+                 ELSE a - b END FROM {src})"
             ))
         }
         IntegerArithKind::Mul => {
             let a = &sql[site.lhs.start..site.lhs.end];
             let b = &sql[site.rhs.start..site.rhs.end];
+            let src = overflow_row_source(backend, &format!("({a}) AS a, ({b}) AS b"));
             Some(format!(
-                "(CASE WHEN ({a}) IS NULL OR ({b}) IS NULL THEN ({a}) * ({b}) \
-                 WHEN ({a}) = 0 OR ({b}) = 0 THEN 0 \
-                 WHEN (({a}) = {I64_MIN_SQL} AND ({b}) = -1) OR (({b}) = {I64_MIN_SQL} AND ({a}) = -1) THEN NULL \
-                 WHEN ({b}) = -1 THEN (0 - ({a})) \
-                 WHEN ({b}) > 0 AND (({a}) > {I64_MAX_SQL} / ({b}) OR ({a}) < {I64_MIN_SQL} / ({b})) THEN NULL \
-                 WHEN ({b}) < 0 AND (({a}) < {I64_MAX_SQL} / ({b}) OR ({a}) > {I64_MIN_SQL} / ({b})) THEN NULL \
-                 ELSE ({a}) * ({b}) END)"
+                "(SELECT CASE WHEN a IS NULL OR b IS NULL THEN a * b \
+                 WHEN a = 0 OR b = 0 THEN 0 \
+                 WHEN (a = {min} AND b = -1) OR (b = {min} AND a = -1) THEN NULL \
+                 WHEN b = -1 THEN (0 - a) \
+                 WHEN b > 0 AND (a > {I64_MAX_SQL} / b OR a < {min} / b) THEN NULL \
+                 WHEN b < 0 AND (a < {I64_MAX_SQL} / b OR a > {min} / b) THEN NULL \
+                 ELSE a * b END FROM {src})"
             ))
         }
     }
@@ -1569,8 +1603,8 @@ fn dollar_quote_len(s: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use bookclerk_plugin_abi::{
-        typecheck_execute_request_proofs, DbPlanStatementKind, DbResultSelection, ExecuteRequest,
-        SqlType, SqlTypeEnv, TypedDbStatement,
+        typecheck_execute_request_proofs, DbPlanStatementKind, DbResultSelection, DbValue,
+        ExecuteRequest, SqlType, SqlTypeEnv, TypedDbStatement,
     };
 
     fn proof_of(sql: &str, env: &SqlTypeEnv) -> ResolvedStatement {
@@ -2013,5 +2047,67 @@ mod tests {
             .expect("sqlite overflow wrap")
         };
         assert!(sqlite.contains("THEN NULL"), "{sqlite}");
+    }
+
+    #[test]
+    fn integer_overflow_wrap_keeps_each_placeholder_once() {
+        let sql = "SELECT ? + ?";
+        let req = ExecuteRequest {
+            operation_id: "t".into(),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![TypedDbStatement {
+                sql: sql.into(),
+                parameters: vec![DbValue::Int64(1), DbValue::Int64(2)],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+        };
+        let proof = typecheck_execute_request_proofs(&req, &SqlTypeEnv::new())
+            .expect("typecheck")
+            .remove(0);
+        let sqlite = lower_canonical_sql_typed(DatabaseBackend::Sqlite, sql, Some(&proof))
+            .expect("sqlite overflow wrap");
+        assert_eq!(sqlite.bytes().filter(|b| *b == b'?').count(), 2, "{sqlite}");
+        assert!(sqlite.contains("_bc_ov"), "{sqlite}");
+        assert!(!sqlite.contains("LATERAL"), "{sqlite}");
+        let pg = lower_canonical_sql_typed(DatabaseBackend::Postgres, sql, Some(&proof))
+            .expect("postgres overflow wrap");
+        assert!(pg.contains("$1") && pg.contains("$2"), "{pg}");
+        assert!(!pg.contains("$3"), "{pg}");
+        assert!(pg.contains("LATERAL"), "{pg}");
+    }
+
+    #[test]
+    fn integer_overflow_min_is_cast_not_bigint_subtraction() {
+        let sql = lower_pg("SELECT abs(-3)", &SqlTypeEnv::new());
+        assert!(
+            sql.contains("CAST('-9223372036854775808' AS BIGINT)"),
+            "{sql}"
+        );
+        assert!(!sql.contains("9223372036854775807 - 1"), "{sql}");
+        let sqlite = {
+            let proof = proof_of("SELECT abs(-3)", &SqlTypeEnv::new());
+            lower_canonical_sql_typed(DatabaseBackend::Sqlite, "SELECT abs(-3)", Some(&proof))
+                .expect("sqlite abs wrap")
+        };
+        assert!(
+            sqlite.contains("CAST('-9223372036854775808' AS INTEGER)"),
+            "{sqlite}"
+        );
+        assert!(!sqlite.contains("9223372036854775807 - 1"), "{sqlite}");
+    }
+
+    #[test]
+    fn typed_lowering_binds_proof_to_canonical_sql_before_limit_wrap() {
+        let sql = "SELECT 1";
+        let proof = proof_of(sql, &SqlTypeEnv::new());
+        let capped = crate::cap_query_sql(sql, 5);
+        let err = lower_canonical_sql_typed(DatabaseBackend::Sqlite, &capped, Some(&proof))
+            .expect_err("capped SQL is not the proof's canonical text");
+        assert!(err.to_string().contains("proof"), "{err}");
+        lower_canonical_sql_typed(DatabaseBackend::Sqlite, sql, Some(&proof))
+            .expect("canonical SQL matches the proof");
     }
 }
