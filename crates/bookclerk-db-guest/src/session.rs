@@ -359,6 +359,64 @@ pub async fn guest_execute_atomic_on(
     .await
 }
 
+/// Pre-admission typed execute: may typecheck. Public `DatabaseSession.execute`.
+///
+/// # Errors
+///
+/// Returns when no connection is open or the engine rejects the work.
+pub async fn guest_execute_request(
+    request: bookclerk_plugin_abi::ExecuteRequest,
+) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
+    let gate = txn_gate();
+    let _gate = gate.lock().await;
+    let conn = connection()
+        .await
+        .map_err(bookclerk_plugin_abi::PluginError::internal)?;
+    let deadline = (request.deadline_unix_ms > 0).then_some(request.deadline_unix_ms);
+    guest_execute_typed_on_session(&conn, request, library_typed_session(deadline)).await
+}
+
+/// Pre-admission typed execute on an explicit connection.
+///
+/// # Errors
+///
+/// Returns when the engine rejects the work.
+pub async fn guest_execute_request_on(
+    conn: &DatabaseConnection,
+    request: bookclerk_plugin_abi::ExecuteRequest,
+) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
+    let deadline = (request.deadline_unix_ms > 0).then_some(request.deadline_unix_ms);
+    guest_execute_typed_on_session(
+        conn,
+        request,
+        bookclerk_db_exec::AtomicSession::from_deadline(deadline),
+    )
+    .await
+}
+
+/// Pre-admission typed execute: may typecheck against the session type env.
+async fn guest_execute_typed_on_session(
+    conn: &DatabaseConnection,
+    request: bookclerk_plugin_abi::ExecuteRequest,
+    session: bookclerk_db_exec::AtomicSession,
+) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
+    let caps = capabilities_for(conn);
+    let timing_source = match conn.get_database_backend() {
+        DbBackend::Postgres => "postgres_txn",
+        _ => "sqlite_txn",
+    };
+    bookclerk_db_exec::execute_typed_on_session(
+        conn,
+        &request,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
+        timing_source,
+        bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
+        session,
+    )
+    .await
+    .map_err(|e| plugin_error_from_db_err(&e))
+}
+
 /// Runs a typed envelope with the given session (library vs binding type env).
 async fn guest_execute_typed(
     conn: &DatabaseConnection,
@@ -1315,24 +1373,20 @@ mod tests {
     /// will not adopt (`unknown table`).
     async fn typed_create_table(sql: &str) {
         use bookclerk_plugin_abi::{
-            DbPlanStatementKind, DbResultSelection, ExecuteRequest, GuestReceiptPersist,
-            TypedDbStatement,
+            DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
         };
-        guest_execute_atomic(HostExecuteEnvelope::new(
-            ExecuteRequest {
-                operation_id: "create".into(),
-                request_hash: String::new(),
-                statements: vec![TypedDbStatement {
-                    sql: sql.into(),
-                    parameters: vec![],
-                    kind: DbPlanStatementKind::Execute,
-                    max_rows: 0,
-                    result_selection: DbResultSelection::Discard,
-                }],
-                deadline_unix_ms: 0,
-            },
-            GuestReceiptPersist::default(),
-        ))
+        guest_execute_request(ExecuteRequest {
+            operation_id: "create".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: sql.into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::Discard,
+            }],
+            deadline_unix_ms: 0,
+        })
         .await
         .unwrap_or_else(|err| panic!("typed CREATE TABLE failed: {err}\n{sql}"));
     }

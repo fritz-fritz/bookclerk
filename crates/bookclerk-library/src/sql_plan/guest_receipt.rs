@@ -25,11 +25,15 @@ const GUEST_TYPED_KIND: &str = "guestTyped";
 /// DML. Clears `requestHash` so a later host re-authorize stamps the wrapper,
 /// not the original guest SQL, and stamps a host-only finalize hint so
 /// adapters persist replay payload before COMMIT.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns when the wrapped SQL fails typecheck. Callers must not dispatch
+/// the adapter on this error.
 pub(crate) fn wrap_guest_typed_request(
     mut req: ExecuteRequest,
     type_env: &SqlTypeEnv,
-) -> HostExecuteEnvelope {
+) -> Result<HostExecuteEnvelope, PluginError> {
     let now = Utc::now();
     let created = now.to_rfc3339();
     let operation_id = req.operation_id.clone();
@@ -85,15 +89,15 @@ pub(crate) fn wrap_guest_typed_request(
     req.request_hash.clear();
     let mut env = receipt_wrap_type_env();
     env.merge(type_env);
-    let proofs = typecheck_execute_request_proofs(&req, &env).unwrap_or_else(|_| Vec::new());
-    HostExecuteEnvelope::new(
+    let proofs = typecheck_execute_request_proofs(&req, &env)?;
+    Ok(HostExecuteEnvelope::new(
         req,
         GuestReceiptPersist {
             guest_statement_len: guest_len,
             guest_request_hash: request_hash,
         },
     )
-    .with_proofs(proofs)
+    .with_proofs(proofs))
 }
 
 /// Bookkeeping tables present when typing receipt-wrapper SQL.
@@ -265,7 +269,7 @@ mod replay_finalize {
             }],
             deadline_unix_ms: 0,
         };
-        let wrapped = wrap_guest_typed_request(req, &slots_env());
+        let wrapped = wrap_guest_typed_request(req, &slots_env()).expect("wrap");
         assert!(!wrapped.guest_receipt.is_absent());
         let guest_len = wrapped.guest_receipt.guest_statement_len as usize;
         let reply = bookclerk_db_exec::execute_typed_envelope(
@@ -298,7 +302,8 @@ mod replay_finalize {
             deadline_unix_ms: 0,
         },
             &slots_env(),
-        );
+        )
+        .expect("wrap replay");
         let replay = bookclerk_db_exec::execute_typed_envelope(
             &db,
             &replay_wrapped,
@@ -338,7 +343,10 @@ mod tests {
 
     #[test]
     fn wrap_rewrites_insert_values_and_gates_writes() {
-        let wrapped = wrap_guest_typed_request(guest_insert(), &SqlTypeEnv::new());
+        let env = bookclerk_plugin_abi::sql_type_env_from_canonical_ddl(
+            "CREATE TABLE counters (id INTEGER, n INTEGER)",
+        );
+        let wrapped = wrap_guest_typed_request(guest_insert(), &env).expect("wrap");
         assert!(wrapped.request.request_hash.is_empty());
         assert_eq!(wrapped.request.statements.len(), 4);
         assert!(!wrapped.guest_receipt.is_absent());
@@ -365,6 +373,23 @@ mod tests {
             gated.sql
         );
         assert_eq!(gated.parameters.len(), 3);
+        assert_eq!(
+            wrapped.proofs.len(),
+            wrapped.request.statements.len(),
+            "wrap must stamp 1:1 proofs"
+        );
+    }
+
+    #[test]
+    fn wrap_typecheck_failure_does_not_stamp_empty_proofs() {
+        let err = match wrap_guest_typed_request(guest_insert(), &SqlTypeEnv::new()) {
+            Ok(_) => panic!("wrap must fail closed when guest SQL cannot typecheck"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("unknown table") || err.to_string().contains("counters"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -381,7 +406,7 @@ mod tests {
             }],
             deadline_unix_ms: 0,
         };
-        let wrapped = wrap_guest_typed_request(req, &SqlTypeEnv::new());
+        let wrapped = wrap_guest_typed_request(req, &SqlTypeEnv::new()).expect("wrap");
         let ddl = &wrapped.request.statements[2];
         assert!(
             !ddl.sql.contains("db_atomic_receipts"),
@@ -421,7 +446,7 @@ mod tests {
             ],
             deadline_unix_ms: 0,
         };
-        let wrapped = wrap_guest_typed_request(req, &SqlTypeEnv::new());
+        let wrapped = wrap_guest_typed_request(req, &SqlTypeEnv::new()).expect("wrap");
         let ddl = &wrapped.request.statements[2];
         let dml = &wrapped.request.statements[3];
         assert!(

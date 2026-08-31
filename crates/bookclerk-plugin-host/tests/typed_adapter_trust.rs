@@ -5,9 +5,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bookclerk_library::{compile_named_request, DbAtomicParams, TypedAtomicExec};
 use bookclerk_plugin_abi::{
-    DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbType, DbValue,
-    ExecuteReply, ExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope,
-    PluginError as AbiPluginError, PluginErrorCode, StatementResult, TypedDbStatement,
+    typecheck_execute_request_proofs, DbCapabilities, DbColumn, DbPlanStatementKind,
+    DbResultSelection, DbRow, DbType, DbValue, ExecuteReply, ExecuteRequest, GuestReceiptPersist,
+    HostExecuteEnvelope, PluginError as AbiPluginError, PluginErrorCode, StatementResult,
+    TypedDbStatement,
 };
 
 struct SessionTypedAdapter {
@@ -21,10 +22,9 @@ impl TypedAtomicExec for SessionTypedAdapter {
         envelope: HostExecuteEnvelope,
     ) -> std::result::Result<ExecuteReply, AbiPluginError> {
         let req = envelope.request.clone();
-        let reply = bookclerk_db_exec::execute_typed_on_session(
+        let reply = bookclerk_db_exec::execute_typed_envelope(
             &self.db,
-            &envelope.request,
-            envelope.guest_receipt,
+            &envelope,
             "sqlite_txn",
             bookclerk_db_exec::ExecCaps::from_capabilities(&DbCapabilities::advertised_sqlite()),
             bookclerk_db_exec::AtomicSession::from_deadline(None)
@@ -96,7 +96,10 @@ async fn external_adapter_replays_named_atomic_after_commit() {
     )
     .expect("compile");
     let typed = compiled.clone().into_typed_request("host-replay-op");
-    let envelope = HostExecuteEnvelope::new(typed.clone(), GuestReceiptPersist::default());
+    let env = bookclerk_library::migrations::host_sql_type_env();
+    let proofs = typecheck_execute_request_proofs(&typed, &env).expect("stamp proofs");
+    let envelope =
+        HostExecuteEnvelope::new(typed.clone(), GuestReceiptPersist::default()).with_proofs(proofs);
     let first = adapter
         .execute_typed(envelope.clone())
         .await

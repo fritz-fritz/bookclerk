@@ -4,10 +4,13 @@
 //! one [`ResolvedStatement`] per statement; authorization, schema companions,
 //! and adapter lowering consume it. This module is not a guest SDK surface.
 
+use serde::{Deserialize, Serialize};
+
 use super::{statement_sql_hash, SqlType};
 
 /// Byte span in the exact canonical SQL string a proof is bound to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SqlSpan {
     /// Inclusive start byte offset.
     pub start: usize,
@@ -16,14 +19,44 @@ pub struct SqlSpan {
 }
 
 /// One TEXT expression that PostgreSQL must collate as `"C"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TextCollateSite {
     /// Identifier or string-literal span in canonical SQL.
     pub span: SqlSpan,
 }
 
+/// INTEGER `+` `-` `*` `abs` site lowered to overflow → NULL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IntegerArithKind {
+    /// `lhs + rhs`
+    Add,
+    /// `lhs - rhs`
+    Sub,
+    /// `lhs * rhs`
+    Mul,
+    /// `abs(arg)` (`lhs` is the argument span)
+    Abs,
+}
+
+/// One INTEGER arithmetic expression that must not wrap or error on overflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegerArithSite {
+    /// Full expression span (`a + b` or `abs(n)`).
+    pub full: SqlSpan,
+    /// Left operand (or `abs` argument).
+    pub lhs: SqlSpan,
+    /// Right operand (`abs` repeats `lhs`).
+    pub rhs: SqlSpan,
+    /// Operator.
+    pub kind: IntegerArithKind,
+}
+
 /// Physical table/column access used for authorization.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PhysicalAccess {
     /// Folded physical table name.
     pub table: String,
@@ -32,7 +65,8 @@ pub struct PhysicalAccess {
 }
 
 /// Destination assignment `lhs = rhs` (INSERT, UPDATE, …).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolvedAssignment {
     /// Physical table of the destination column.
     pub table: String,
@@ -45,7 +79,8 @@ pub struct ResolvedAssignment {
 }
 
 /// CREATE/DROP action recorded on a proof.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SchemaAction {
     /// Not DDL.
     None,
@@ -68,7 +103,8 @@ pub enum SchemaAction {
 }
 
 /// One resolved typed proof bound to an exact canonical statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolvedStatement {
     /// SHA-256 hex of the exact canonical SQL this proof claims.
     pub statement_hash: String,
@@ -80,6 +116,9 @@ pub struct ResolvedStatement {
     pub assignments: Vec<ResolvedAssignment>,
     /// TEXT expression spans for `COLLATE "C"` (already excluding dest/FROM/AS).
     pub text_collate_sites: Vec<TextCollateSite>,
+    /// INTEGER overflow sites (`+` `-` `*` `abs`).
+    #[serde(default)]
+    pub integer_arith_sites: Vec<IntegerArithSite>,
     /// DDL action + fingerprint.
     pub schema_action: SchemaAction,
 }
@@ -94,6 +133,7 @@ impl ResolvedStatement {
             physical_accesses: Vec::new(),
             assignments: Vec::new(),
             text_collate_sites: Vec::new(),
+            integer_arith_sites: Vec::new(),
             schema_action: SchemaAction::None,
         }
     }

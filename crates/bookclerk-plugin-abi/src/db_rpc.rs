@@ -605,13 +605,23 @@ fn read_guest_receipt_persist(
     })
 }
 
+/// Writes a host-private execute envelope, including stamped proofs.
+///
+/// # Panics
+///
+/// Panics when `envelope.proofs` cannot be serialized. Proof types are
+/// serde-derived; failure is a programming error rather than a transport
+/// fallback to an empty sidecar.
 #[cfg(feature = "host")]
 pub(super) fn write_host_execute_envelope(
     mut b: host_execute_envelope_capnp::Builder<'_>,
     envelope: &HostExecuteEnvelope,
 ) {
     write_execute_request(b.reborrow().init_request(), &envelope.request);
-    write_guest_receipt_persist(b.init_guest_receipt(), &envelope.guest_receipt);
+    write_guest_receipt_persist(b.reborrow().init_guest_receipt(), &envelope.guest_receipt);
+    let proofs_json = serde_json::to_string(&envelope.proofs)
+        .expect("ResolvedStatement proofs are serde-serializable");
+    b.set_proofs_json(&proofs_json);
 }
 
 /// # Errors
@@ -621,9 +631,19 @@ pub(super) fn write_host_execute_envelope(
 pub(super) fn read_host_execute_envelope(
     r: host_execute_envelope_capnp::Reader<'_>,
 ) -> Result<HostExecuteEnvelope> {
+    let request = read_execute_request(r.get_request().map_err(from_capnp)?)?;
+    let guest_receipt = read_guest_receipt_persist(r.get_guest_receipt().map_err(from_capnp)?)?;
+    let json = text_of(r.get_proofs_json().map_err(from_capnp)?);
+    let proofs = if json.is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(&json).map_err(|err| {
+            PluginError::internal(format!("host execute envelope proofsJson: {err}"))
+        })?
+    };
     Ok(HostExecuteEnvelope {
-        request: read_execute_request(r.get_request().map_err(from_capnp)?)?,
-        guest_receipt: read_guest_receipt_persist(r.get_guest_receipt().map_err(from_capnp)?)?,
-        proofs: Vec::new(),
+        request,
+        guest_receipt,
+        proofs,
     })
 }

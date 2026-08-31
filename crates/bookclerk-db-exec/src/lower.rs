@@ -6,7 +6,12 @@
 //! and block comments, and PostgreSQL dollar quotes are copied verbatim.
 //! Do not call this from host domain compilers.
 
-use bookclerk_plugin_abi::{assert_proof_matches_sql, ResolvedStatement, INSERT_SELECT_WRAP_ALIAS};
+#![allow(clippy::missing_docs_in_private_items)]
+
+use bookclerk_plugin_abi::{
+    assert_proof_matches_sql, IntegerArithKind, IntegerArithSite, ResolvedStatement, SqlSpan,
+    INSERT_SELECT_WRAP_ALIAS,
+};
 use sea_orm::DatabaseBackend;
 
 /// Lowers canonical Bookclerk **DML/query** SQL for `backend`.
@@ -21,32 +26,38 @@ use sea_orm::DatabaseBackend;
 /// so this function does not classify statements.
 #[must_use]
 pub fn lower_canonical_sql(backend: DatabaseBackend, sql: &str) -> String {
-    lower_canonical_sql_typed(backend, sql, None)
+    lower_mechanical(backend, sql.to_string())
 }
 
-/// [`lower_canonical_sql`] plus proof-directed Postgres `COLLATE "C"` on TEXT.
+/// [`lower_canonical_sql`] plus proof-directed overflow and Postgres `COLLATE "C"`.
 ///
 /// `proof` must be bound to `sql` (the canonical string before mechanical
-/// lowering). When absent, TEXT collation is not applied.
-#[must_use]
+/// lowering). When absent, TEXT collation and INTEGER overflow wraps are not
+/// applied.
+///
+/// # Errors
+///
+/// Returns when `proof` is present and not bound to `sql`.
 pub fn lower_canonical_sql_typed(
     backend: DatabaseBackend,
     sql: &str,
     proof: Option<&ResolvedStatement>,
-) -> String {
-    let sql = sql.to_string();
-    let sql = if backend == DatabaseBackend::Postgres {
-        if let Some(proof) = proof {
-            match apply_text_collate_from_proof(&sql, proof) {
-                Ok(s) => s,
-                Err(_) => sql,
-            }
-        } else {
-            sql
-        }
-    } else {
-        sql
-    };
+) -> Result<String, bookclerk_plugin_abi::PluginError> {
+    let mut sql = sql.to_string();
+    let mut collate = Vec::new();
+    if let Some(proof) = proof {
+        assert_proof_matches_sql(proof, &sql)?;
+        let rewritten = apply_integer_overflow_from_proof(&sql, proof);
+        sql = rewritten.sql;
+        collate = rewritten.collate;
+    }
+    if backend == DatabaseBackend::Postgres {
+        sql = apply_text_collate_spans(&sql, &collate);
+    }
+    Ok(lower_mechanical(backend, sql))
+}
+
+fn lower_mechanical(backend: DatabaseBackend, sql: String) -> String {
     let sql = rewrite_div_mod_null_on_zero(&sql);
     let sql = rewrite_insert_or_ignore_unique_conflict(&sql);
     if backend != DatabaseBackend::Postgres {
@@ -301,12 +312,18 @@ fn skip_balanced(sql: &str, open: usize) -> usize {
 /// # Errors
 ///
 /// Returns when `proof` is not bound to `sql`.
+#[allow(dead_code)]
 fn apply_text_collate_from_proof(
     sql: &str,
     proof: &ResolvedStatement,
 ) -> Result<String, bookclerk_plugin_abi::PluginError> {
     assert_proof_matches_sql(proof, sql)?;
-    let mut sites: Vec<_> = proof.text_collate_sites.iter().map(|s| s.span).collect();
+    let sites: Vec<_> = proof.text_collate_sites.iter().map(|s| s.span).collect();
+    Ok(apply_text_collate_spans(sql, &sites))
+}
+
+fn apply_text_collate_spans(sql: &str, sites: &[SqlSpan]) -> String {
+    let mut sites = sites.to_vec();
     sites.sort_by_key(|s| std::cmp::Reverse(s.start));
     let mut out = sql.to_string();
     for span in sites {
@@ -319,19 +336,126 @@ fn apply_text_collate_from_proof(
             continue;
         }
         let end = span.start + piece.len();
-        if piece.contains("COLLATE") {
-            continue;
-        }
-        if piece.starts_with('\'') {
-            let inner = piece.trim_matches('\'');
-            if inner.starts_with('$') || inner.starts_with('{') {
-                continue;
-            }
-        }
         let wrapped = format!("({piece} COLLATE \"C\")");
         out.replace_range(span.start..end, &wrapped);
     }
-    Ok(out)
+    out
+}
+
+/// i64::MIN as a portable SQL integer (avoid a literal that some parsers reject).
+const I64_MIN_SQL: &str = "(-9223372036854775807 - 1)";
+/// i64::MAX as a portable SQL integer.
+const I64_MAX_SQL: &str = "9223372036854775807";
+
+struct OverflowRewrite {
+    sql: String,
+    collate: Vec<SqlSpan>,
+}
+
+fn apply_integer_overflow_from_proof(sql: &str, proof: &ResolvedStatement) -> OverflowRewrite {
+    let mut sites = proof.integer_arith_sites.clone();
+    sites.sort_by_key(|s| (s.full.end, s.full.start));
+    let mut collate: Vec<SqlSpan> = proof.text_collate_sites.iter().map(|s| s.span).collect();
+    let mut out = sql.to_string();
+    for i in 0..sites.len() {
+        let site = sites[i];
+        let Some(wrapped) = wrap_integer_arith(&out, &site) else {
+            continue;
+        };
+        if site.full.end > out.len() || site.full.start >= site.full.end {
+            continue;
+        }
+        let old_len = site.full.end - site.full.start;
+        let delta = wrapped.len().saturating_sub(old_len);
+        let repl_end = site.full.end;
+        out.replace_range(site.full.start..site.full.end, &wrapped);
+        for later in sites.iter_mut().skip(i + 1) {
+            later.full = shift_span(later.full, repl_end, delta);
+            later.lhs = shift_span(later.lhs, repl_end, delta);
+            later.rhs = shift_span(later.rhs, repl_end, delta);
+        }
+        for span in &mut collate {
+            *span = shift_span(*span, repl_end, delta);
+        }
+    }
+    OverflowRewrite { sql: out, collate }
+}
+
+fn shift_span(span: SqlSpan, repl_end: usize, delta: usize) -> SqlSpan {
+    SqlSpan {
+        start: if span.start >= repl_end {
+            span.start.saturating_add(delta)
+        } else {
+            span.start
+        },
+        end: if span.end >= repl_end {
+            span.end.saturating_add(delta)
+        } else {
+            span.end
+        },
+    }
+}
+
+fn wrap_integer_arith(sql: &str, site: &IntegerArithSite) -> Option<String> {
+    if site.full.end > sql.len()
+        || site.lhs.end > sql.len()
+        || site.rhs.end > sql.len()
+        || site.lhs.start >= site.lhs.end
+        || site.full.start >= site.full.end
+    {
+        return None;
+    }
+    match site.kind {
+        IntegerArithKind::Abs => {
+            let full = &sql[site.full.start..site.full.end];
+            let arg = abs_call_arg(full).unwrap_or(full);
+            Some(format!(
+                "(CASE WHEN ({arg}) IS NULL THEN NULL WHEN ({arg}) = {I64_MIN_SQL} THEN NULL ELSE abs({arg}) END)"
+            ))
+        }
+        IntegerArithKind::Add => {
+            let a = &sql[site.lhs.start..site.lhs.end];
+            let b = &sql[site.rhs.start..site.rhs.end];
+            Some(format!(
+                "(CASE WHEN ({a}) IS NULL OR ({b}) IS NULL THEN ({a}) + ({b}) \
+                 WHEN ({a}) > 0 AND ({b}) > 0 AND ({a}) > {I64_MAX_SQL} - ({b}) THEN NULL \
+                 WHEN ({a}) < 0 AND ({b}) < 0 AND ({a}) < {I64_MIN_SQL} - ({b}) THEN NULL \
+                 ELSE ({a}) + ({b}) END)"
+            ))
+        }
+        IntegerArithKind::Sub => {
+            let a = &sql[site.lhs.start..site.lhs.end];
+            let b = &sql[site.rhs.start..site.rhs.end];
+            Some(format!(
+                "(CASE WHEN ({a}) IS NULL OR ({b}) IS NULL THEN ({a}) - ({b}) \
+                 WHEN ({b}) < 0 AND ({a}) > {I64_MAX_SQL} + ({b}) THEN NULL \
+                 WHEN ({b}) > 0 AND ({a}) < {I64_MIN_SQL} + ({b}) THEN NULL \
+                 ELSE ({a}) - ({b}) END)"
+            ))
+        }
+        IntegerArithKind::Mul => {
+            let a = &sql[site.lhs.start..site.lhs.end];
+            let b = &sql[site.rhs.start..site.rhs.end];
+            Some(format!(
+                "(CASE WHEN ({a}) IS NULL OR ({b}) IS NULL THEN ({a}) * ({b}) \
+                 WHEN ({a}) = 0 OR ({b}) = 0 THEN 0 \
+                 WHEN (({a}) = {I64_MIN_SQL} AND ({b}) = -1) OR (({b}) = {I64_MIN_SQL} AND ({a}) = -1) THEN NULL \
+                 WHEN ({b}) = -1 THEN (0 - ({a})) \
+                 WHEN ({b}) > 0 AND (({a}) > {I64_MAX_SQL} / ({b}) OR ({a}) < {I64_MIN_SQL} / ({b})) THEN NULL \
+                 WHEN ({b}) < 0 AND (({a}) < {I64_MAX_SQL} / ({b}) OR ({a}) > {I64_MIN_SQL} / ({b})) THEN NULL \
+                 ELSE ({a}) * ({b}) END)"
+            ))
+        }
+    }
+}
+
+fn abs_call_arg(full: &str) -> Option<&str> {
+    let open = full.as_bytes().iter().position(|b| *b == b'(')?;
+    let close = full.as_bytes().iter().rposition(|b| *b == b')')?;
+    if close <= open {
+        return None;
+    }
+    Some(full[open + 1..close].trim())
 }
 
 /// Portable `/` and `%` by zero: `NULL` (SQLite/D1 already; Postgres `NULLIF`).
@@ -365,27 +489,58 @@ fn rewrite_div_mod_null_on_zero(sql: &str) -> String {
     out
 }
 
-/// Operand of `/` or `%`: parenthesized group, ident, or number.
+/// Operand of `/` or `%`: admitted primary (paren, ident, call, CAST, unary, number, bind).
 fn take_div_operand(sql: &str, start: usize) -> Option<(usize, &str)> {
     let s = skip_trivia_idx(sql, start);
-    if sql.as_bytes().get(s) == Some(&b'(') {
-        let end = skip_balanced(sql, s);
-        return Some((end, &sql[s..end]));
+    let end = take_div_primary(sql, s)?;
+    if end > s {
+        Some((end, &sql[s..end]))
+    } else {
+        None
     }
-    if let Some((a, b)) = ident_span_at(sql, s) {
-        return Some((b, &sql[a..b]));
-    }
+}
+
+fn take_div_primary(sql: &str, start: usize) -> Option<usize> {
+    let s = skip_trivia_idx(sql, start);
     let bytes = sql.as_bytes();
+    if bytes.get(s) == Some(&b'(') {
+        return Some(skip_balanced(sql, s));
+    }
+    if bytes.get(s) == Some(&b'?') {
+        return Some(s + 1);
+    }
+    if bytes.get(s) == Some(&b'+') || bytes.get(s) == Some(&b'-') {
+        return take_div_primary(sql, s + 1);
+    }
+    if let Some((_, end)) = ident_span_at(sql, s) {
+        let mut j = end;
+        loop {
+            let k = skip_trivia_idx(sql, j);
+            if bytes.get(k) == Some(&b'.') {
+                let k2 = skip_trivia_idx(sql, k + 1);
+                if let Some((_, e2)) = ident_span_at(sql, k2) {
+                    j = e2;
+                    continue;
+                }
+            }
+            if bytes.get(k) == Some(&b'(') {
+                return Some(skip_balanced(sql, k));
+            }
+            return Some(j);
+        }
+    }
     let mut i = s;
-    if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
-        i += 1;
-    }
-    let num_start = i;
-    while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
-        i += 1;
-    }
-    if i > num_start {
-        return Some((i, &sql[s..i]));
+    if i < bytes.len() && bytes[i].is_ascii_digit() {
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b'.') {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        return Some(i);
     }
     None
 }
@@ -1439,6 +1594,7 @@ mod tests {
     fn lower_pg(sql: &str, env: &SqlTypeEnv) -> String {
         let proof = proof_of(sql, env);
         lower_canonical_sql_typed(DatabaseBackend::Postgres, sql, Some(&proof))
+            .unwrap_or_else(|err| panic!("{sql}: {err}"))
     }
 
     #[test]
@@ -1805,7 +1961,57 @@ mod tests {
             DatabaseBackend::Postgres,
             "SELECT CASE WHEN 'İ' LIKE 'i' THEN 1 ELSE 0 END AS c0",
             None,
-        );
+        )
+        .expect("untyped lowering");
         assert!(typed.contains("LIKE"), "{typed}");
+    }
+
+    #[test]
+    fn div_operand_covers_call_qualified_unary_and_cast() {
+        let sql = rewrite_div_mod_null_on_zero(
+            "SELECT 10 / abs(n), 10 / t.n, 10 / -n, 10 / CAST(n AS INTEGER), 10 / (n + 1)",
+        );
+        assert!(sql.contains("NULLIF(abs(n), 0)"), "{sql}");
+        assert!(sql.contains("NULLIF(t.n, 0)"), "{sql}");
+        assert!(sql.contains("NULLIF(-n, 0)"), "{sql}");
+        assert!(sql.contains("NULLIF(CAST(n AS INTEGER), 0)"), "{sql}");
+        assert!(sql.contains("NULLIF((n + 1), 0)"), "{sql}");
+    }
+
+    #[test]
+    fn typed_lowering_fails_closed_on_mismatched_proof() {
+        let env = SqlTypeEnv::new();
+        let proof = proof_of("SELECT 1", &env);
+        let err = lower_canonical_sql_typed(DatabaseBackend::Postgres, "SELECT 2", Some(&proof))
+            .expect_err("mismatched hash");
+        assert!(err.to_string().contains("proof"), "{err}");
+    }
+
+    #[test]
+    fn collate_wraps_literals_that_look_like_bind_or_collate_text() {
+        let sql = lower_pg("SELECT '$ä', '{ä', 'COLLATEä'", &SqlTypeEnv::new());
+        assert!(sql.contains("('$ä' COLLATE \"C\")"), "{sql}");
+        assert!(sql.contains("('{ä' COLLATE \"C\")"), "{sql}");
+        assert!(sql.contains("('COLLATEä' COLLATE \"C\")"), "{sql}");
+    }
+
+    #[test]
+    fn integer_overflow_lowers_to_null_case() {
+        let sql = lower_pg(
+            "SELECT 9223372036854775807 + 1, abs(-9223372036854775807 - 1)",
+            &SqlTypeEnv::new(),
+        );
+        assert!(sql.contains("THEN NULL"), "{sql}");
+        assert!(sql.contains("abs("), "{sql}");
+        let sqlite = {
+            let proof = proof_of("SELECT 9223372036854775807 + 1", &SqlTypeEnv::new());
+            lower_canonical_sql_typed(
+                DatabaseBackend::Sqlite,
+                "SELECT 9223372036854775807 + 1",
+                Some(&proof),
+            )
+            .expect("sqlite overflow wrap")
+        };
+        assert!(sqlite.contains("THEN NULL"), "{sqlite}");
     }
 }

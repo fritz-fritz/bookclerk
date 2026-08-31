@@ -222,6 +222,7 @@ impl D1Proxy {
         &self,
         req: &ExecuteRequest,
         guest_receipt: bookclerk_plugin_abi::GuestReceiptPersist,
+        proofs: &[bookclerk_plugin_abi::ResolvedStatement],
     ) -> std::result::Result<ExecuteReply, DbErr> {
         let started = std::time::Instant::now();
         let deadline = (req.deadline_unix_ms > 0).then_some(req.deadline_unix_ms);
@@ -262,19 +263,31 @@ impl D1Proxy {
         let retry_safe = !guest_receipt.is_absent() || typed_is_read_only(&req.statements);
         let d1_caps = DbCapabilities::advertised_d1();
         let cap = d1_caps.max_result_rows;
+        if (!guest_receipt.is_absent() || !proofs.is_empty()) && proofs.len() != wire_len {
+            return Err(DbErr::Custom(
+                "host execute envelope proofs must match statement count".into(),
+            ));
+        }
+        let expanded_proofs = proofs_for_expanded(proofs, &companion_groups)?;
+        if expanded_proofs.len() != req.statements.len() {
+            return Err(DbErr::Custom(
+                "host execute envelope proofs must match statement count".into(),
+            ));
+        }
         let statements: Vec<SqlStmt> = req
             .statements
             .iter()
-            .map(|s| {
-                let (sql, binds) = d1_typed_statement(&s.sql, &s.parameters);
+            .enumerate()
+            .map(|(i, s)| {
+                let (sql, binds) = d1_typed_statement(&s.sql, &s.parameters, expanded_proofs[i])?;
                 let sql = if s.kind.wrap_select_limit() {
                     bookclerk_db_exec::cap_query_sql(&sql, cap)
                 } else {
                     sql
                 };
-                (sql, binds)
+                Ok((sql, binds))
             })
-            .collect();
+            .collect::<Result<Vec<_>, DbErr>>()?;
         // D1 cannot skip later statements in the same HTTP batch based on
         // earlier results. Claim the receipt stub INSERT first so two hosts
         // cannot both run ungated guest DDL. Do not send prune as its own
@@ -401,15 +414,16 @@ impl D1Proxy {
                             let fin_stmts: Vec<SqlStmt> = finalize
                                 .iter()
                                 .map(|s| {
-                                    let (sql, binds) = d1_typed_statement(&s.sql, &s.parameters);
+                                    let (sql, binds) =
+                                        d1_typed_statement(&s.sql, &s.parameters, None)?;
                                     let sql = if s.kind.wrap_select_limit() {
                                         bookclerk_db_exec::cap_query_sql(&sql, cap)
                                     } else {
                                         sql
                                     };
-                                    (sql, binds)
+                                    Ok((sql, binds))
                                 })
-                                .collect();
+                                .collect::<Result<Vec<_>, DbErr>>()?;
                             self.run_batch_with_timeout(&fin_stmts, timeout).await?;
                         }
                     }
@@ -589,7 +603,8 @@ impl D1Proxy {
             rest_req_stmts.push(typed);
         }
         let applied = bookclerk_db_exec::guest_receipt_applied_stmt(&req.operation_id);
-        let (applied_sql, applied_binds) = d1_typed_statement(&applied.sql, &applied.parameters);
+        let (applied_sql, applied_binds) =
+            d1_typed_statement(&applied.sql, &applied.parameters, None)?;
         rest_sql.push((applied_sql, applied_binds));
         rest_req_stmts.push(applied);
         let rest_req = ExecuteRequest {
@@ -633,15 +648,15 @@ impl D1Proxy {
             let fin_stmts: Vec<SqlStmt> = finalize
                 .iter()
                 .map(|s| {
-                    let (sql, binds) = d1_typed_statement(&s.sql, &s.parameters);
+                    let (sql, binds) = d1_typed_statement(&s.sql, &s.parameters, None)?;
                     let sql = if s.kind.wrap_select_limit() {
                         bookclerk_db_exec::cap_query_sql(&sql, cap)
                     } else {
                         sql
                     };
-                    (sql, binds)
+                    Ok((sql, binds))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, DbErr>>()?;
             self.run_batch_with_timeout(&fin_stmts, timeout).await?;
         }
         Ok(reply)
@@ -825,12 +840,42 @@ fn d1_unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Maps 1:1 wire proofs onto expanded companion groups (companions have no proof).
+fn proofs_for_expanded<'a>(
+    proofs: &'a [bookclerk_plugin_abi::ResolvedStatement],
+    groups: &[usize],
+) -> Result<Vec<Option<&'a bookclerk_plugin_abi::ResolvedStatement>>, DbErr> {
+    let expanded_len: usize = groups.iter().copied().sum();
+    if proofs.is_empty() {
+        return Ok(vec![None; expanded_len]);
+    }
+    if proofs.len() != groups.len() {
+        return Err(DbErr::Custom(
+            "host execute envelope proofs must match statement count".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(expanded_len);
+    for (proof, &g) in proofs.iter().zip(groups.iter()) {
+        out.push(Some(proof));
+        for _ in 1..g {
+            out.push(None);
+        }
+    }
+    Ok(out)
+}
+
 /// D1 HTTP statement for one typed statement: `Bytes` placeholders are
 /// rewritten to `unhex(?)` with hex-encoded text params so D1 stores true
 /// BLOBs (JSON has no binary scalar). All other values map directly; text is
 /// never re-encoded, so a `Text` cell can never masquerade as bytes.
-pub(crate) fn d1_typed_statement(sql: &str, params: &[DbValue]) -> SqlStmt {
-    let sql = bookclerk_db_exec::lower_canonical_sql(sea_orm::DatabaseBackend::Sqlite, sql);
+pub(crate) fn d1_typed_statement(
+    sql: &str,
+    params: &[DbValue],
+    proof: Option<&bookclerk_plugin_abi::ResolvedStatement>,
+) -> Result<SqlStmt, DbErr> {
+    let sql =
+        bookclerk_db_exec::lower_canonical_sql_typed(sea_orm::DatabaseBackend::Sqlite, sql, proof)
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
     let sql = wrap_bytes_placeholders(&sql, params);
     let binds = params
         .iter()
@@ -843,7 +888,7 @@ pub(crate) fn d1_typed_statement(sql: &str, params: &[DbValue]) -> SqlStmt {
             DbValue::Bytes(b) => JsonValue::String(hex::encode(b)),
         })
         .collect();
-    (sql, binds)
+    Ok((sql, binds))
 }
 
 /// Rewrites the i-th `?` placeholder to `unhex(?)` when parameter `i` is
@@ -1824,6 +1869,31 @@ fn parse_batch_results(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn proofs_for_expanded_keeps_original_and_skips_companions() {
+        let original = bookclerk_plugin_abi::ResolvedStatement::bound_empty("SELECT 1");
+        let create = bookclerk_plugin_abi::ResolvedStatement::bound_empty(
+            "CREATE TABLE IF NOT EXISTS t (n INTEGER)",
+        );
+        let proofs = [original, create];
+        let mapped = proofs_for_expanded(&proofs, &[1, 3]).expect("map");
+        assert_eq!(mapped.len(), 4);
+        assert!(mapped[0].is_some());
+        assert!(mapped[1].is_some());
+        assert!(mapped[2].is_none());
+        assert!(mapped[3].is_none());
+        let empty = proofs_for_expanded(&[], &[1, 2]).expect("pre-admission");
+        assert_eq!(empty.len(), 3);
+        assert!(empty.iter().all(|p| p.is_none()));
+        proofs_for_expanded(
+            &[bookclerk_plugin_abi::ResolvedStatement::bound_empty(
+                "SELECT 1",
+            )],
+            &[1, 1],
+        )
+        .expect_err("misaligned sidecar");
+    }
 
     #[test]
     fn missing_result_array_is_ambiguous() {

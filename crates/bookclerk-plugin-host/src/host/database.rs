@@ -16,8 +16,9 @@ use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, Datab
 use bookclerk_db_exec::db_value_from_sea;
 use bookclerk_plugin_abi::HostExecuteEnvelope;
 use bookclerk_plugin_abi::{
-    database_context_from_params, DbBootstrap, DbCapabilities, DbConnectParams, DbValue, SqlType,
-    SqlTypeEnv, FIRST_PARTY_MAX_RESULT_ROWS, SQL_CATALOG_TABLE,
+    catalog_page_statement, database_context_from_params, reserved_catalog_relation_missing,
+    sql_catalog_page_rows, DbBootstrap, DbCapabilities, DbConnectParams, DbValue, SqlType,
+    SqlTypeEnv, SQL_CATALOG_TABLE, SQL_SCHEMA_TABLE,
 };
 use bookclerk_plugin_sdk::GuestDatabase;
 use bookclerk_plugin_sdk::PRODUCT_API_VERSION;
@@ -369,6 +370,7 @@ impl GuestDatabase for BindingGuestDatabase {
             &self.key,
             &self.cancel,
             request.deadline_unix_ms,
+            self.caps.max_result_rows,
         )
         .await?;
         let policy = bookclerk_library::GuestSqlPolicy::binding_owned().with_sql_types(env);
@@ -432,8 +434,9 @@ async fn load_binding_sql_type_env(
     key: &str,
     cancel: &Arc<AtomicBool>,
     deadline_unix_ms: u64,
+    max_result_rows: u32,
 ) -> std::result::Result<SqlTypeEnv, AbiPluginError> {
-    let page = FIRST_PARTY_MAX_RESULT_ROWS.max(1);
+    let page = sql_catalog_page_rows(max_result_rows);
     let mut env = SqlTypeEnv::new();
     let mut cursor_table = String::new();
     let mut cursor_ord: i64 = -1;
@@ -466,20 +469,13 @@ async fn load_binding_sql_type_env(
         {
             Ok(reply) => reply,
             Err(err) => {
-                let msg = err.to_string().to_ascii_lowercase();
-                if msg.contains("no such table")
-                    || msg.contains("does not exist")
-                    || msg.contains("undefined table")
-                    || msg.contains("unknown table")
-                {
+                if reserved_catalog_relation_missing(&err.to_string(), SQL_CATALOG_TABLE) {
                     return Ok(SqlTypeEnv::new());
                 }
                 return Err(host_err_to_abi(err));
             }
         };
-        let Some(stmt) = reply.statements.first() else {
-            break;
-        };
+        let stmt = catalog_page_statement(&reply)?;
         if stmt.rows.is_empty() {
             break;
         }
@@ -535,10 +531,9 @@ async fn load_binding_sql_schema_env(
             statements: vec![TypedDbStatement {
                 sql: format!(
                     "SELECT table_name, fingerprint, identity_column \
-                     FROM {} \
+                     FROM {SQL_SCHEMA_TABLE} \
                      WHERE table_name > {ct} \
                      ORDER BY table_name LIMIT {page}",
-                    bookclerk_plugin_abi::SQL_SCHEMA_TABLE,
                 ),
                 parameters: Vec::new(),
                 kind: DbPlanStatementKind::Select,
@@ -552,20 +547,13 @@ async fn load_binding_sql_schema_env(
         {
             Ok(reply) => reply,
             Err(err) => {
-                let msg = err.to_string().to_ascii_lowercase();
-                if msg.contains("no such table")
-                    || msg.contains("does not exist")
-                    || msg.contains("undefined table")
-                    || msg.contains("unknown table")
-                {
+                if reserved_catalog_relation_missing(&err.to_string(), SQL_SCHEMA_TABLE) {
                     return Ok(());
                 }
                 return Err(host_err_to_abi(err));
             }
         };
-        let Some(stmt) = reply.statements.first() else {
-            break;
-        };
+        let stmt = catalog_page_statement(&reply)?;
         if stmt.rows.is_empty() {
             break;
         }

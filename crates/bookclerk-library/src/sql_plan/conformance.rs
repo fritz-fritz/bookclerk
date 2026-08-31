@@ -2644,4 +2644,124 @@ async fn postgres_binding_sql_v1_p1_vectors() {
     {
         panic!("{err}");
     }
+    let mut overflow = binding_stmt(bookclerk_db_exec::sql_v1::PORTABLE_INTEGER_OVERFLOW, vec![]);
+    overflow.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-integer-overflow", vec![overflow]))
+        .await
+        .expect("integer overflow");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_integer_overflow_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
+    let mut div = binding_stmt(bookclerk_db_exec::sql_v1::PORTABLE_DIV_OPERANDS, vec![]);
+    div.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-div-operands", vec![div]))
+        .await
+        .expect("div operands");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_div_operands_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-div-qual-ddl",
+            vec![binding_stmt(
+                "CREATE TABLE IF NOT EXISTS divops (n INTEGER)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("divops ddl");
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-div-qual-ins",
+            vec![binding_stmt("INSERT INTO divops (n) VALUES (0)", vec![])],
+        ),
+    )
+    .await
+    .expect("divops insert");
+    let mut qdiv = binding_stmt(
+        "SELECT 10 / abs(n) AS d0, 10 / t.n AS d1, 10 / -n AS d2, 10 / CAST(n AS INTEGER) AS d3, 10 / (n + 0) AS d4 FROM divops t",
+        vec![],
+    );
+    qdiv.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-div-qualified", vec![qdiv]))
+        .await
+        .expect("qualified div");
+    assert!(
+        reply.statements[0].rows[0]
+            .values
+            .iter()
+            .all(|v| matches!(v, bookclerk_plugin_abi::DbValue::Null(_))),
+        "{:?}",
+        reply.statements[0].rows[0].values
+    );
+    let mut prefixes = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_TEXT_PREFIX_LITERALS,
+        vec![],
+    );
+    prefixes.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-text-prefixes", vec![prefixes]))
+        .await
+        .expect("text prefixes");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_text_prefix_literals_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
+    run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ins-dest-ddl",
+            vec![binding_stmt(
+                "CREATE TABLE IF NOT EXISTS dest_int (n INTEGER)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("dest ddl");
+    let err = run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-ins-sel-text",
+            vec![binding_stmt("INSERT INTO dest_int(n) SELECT 'x'", vec![])],
+        ),
+    )
+    .await
+    .expect_err("INSERT SELECT TEXT into INTEGER");
+    assert!(
+        err.to_string().contains("incompatible") || err.to_string().contains("invalid"),
+        "{err}"
+    );
+    let err = run_postgres_binding(
+        &db,
+        binding_req(
+            "pg-fp-mismatch",
+            vec![binding_stmt(
+                "CREATE TABLE IF NOT EXISTS dest_int (n TEXT)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect_err("CREATE IF NOT EXISTS fingerprint mismatch");
+    assert!(
+        err.to_string().contains("does not match") || err.to_string().contains("invalid"),
+        "{err}"
+    );
+    let mut rec = binding_stmt(
+        "WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SELECT n FROM t",
+        vec![],
+    );
+    rec.max_rows = 8;
+    let rec_reply = run_postgres_binding(&db, binding_req("pg-recursive-cte", vec![rec]))
+        .await
+        .expect("recursive CTE");
+    assert_eq!(rec_reply.statements[0].rows.len(), 3);
 }

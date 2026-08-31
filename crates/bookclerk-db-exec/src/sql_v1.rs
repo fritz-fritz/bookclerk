@@ -406,6 +406,85 @@ pub fn portable_runtime_edges_expects() -> &'static [PortableExpect] {
     ]
 }
 
+/// INTEGER overflow (`+` `-` `*` `abs(i64::MIN)`) yields NULL on every backend.
+pub const PORTABLE_INTEGER_OVERFLOW: &str = "SELECT \
+     9223372036854775807 + 1 AS o0, \
+     (-9223372036854775807 - 1) - 1 AS o1, \
+     9223372036854775807 * 2 AS o2, \
+     abs(-9223372036854775807 - 1) AS o3";
+
+/// Expected [`PORTABLE_INTEGER_OVERFLOW`] cells.
+#[must_use]
+pub fn portable_integer_overflow_expects() -> &'static [PortableExpect] {
+    &[
+        PortableExpect::Null,
+        PortableExpect::Null,
+        PortableExpect::Null,
+        PortableExpect::Null,
+    ]
+}
+
+/// Formats a mismatch for [`PORTABLE_INTEGER_OVERFLOW`].
+#[must_use]
+pub fn portable_integer_overflow_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_statement_mismatch(
+        stmt,
+        portable_integer_overflow_expects(),
+        "portable integer overflow",
+    )
+}
+
+/// `/` RHS covering call, unary, CAST, and parenthesized zero.
+pub const PORTABLE_DIV_OPERANDS: &str = "SELECT \
+     10 / abs(0) AS d0, \
+     10 / -0 AS d1, \
+     10 / CAST(0 AS INTEGER) AS d2, \
+     10 / (0) AS d3";
+
+/// Expected [`PORTABLE_DIV_OPERANDS`] cells.
+#[must_use]
+pub fn portable_div_operands_expects() -> &'static [PortableExpect] {
+    &[
+        PortableExpect::Null,
+        PortableExpect::Null,
+        PortableExpect::Null,
+        PortableExpect::Null,
+    ]
+}
+
+/// Formats a mismatch for [`PORTABLE_DIV_OPERANDS`].
+#[must_use]
+pub fn portable_div_operands_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_statement_mismatch(
+        stmt,
+        portable_div_operands_expects(),
+        "portable div operands",
+    )
+}
+
+/// TEXT literals whose contents look like bind placeholders or `COLLATE`.
+pub const PORTABLE_TEXT_PREFIX_LITERALS: &str = "SELECT '$ä' AS a, '{ä' AS b, 'COLLATEä' AS c";
+
+/// Expected [`PORTABLE_TEXT_PREFIX_LITERALS`] cells.
+#[must_use]
+pub fn portable_text_prefix_literals_expects() -> &'static [PortableExpect] {
+    &[
+        PortableExpect::Text("$ä"),
+        PortableExpect::Text("{ä"),
+        PortableExpect::Text("COLLATEä"),
+    ]
+}
+
+/// Formats a mismatch for [`PORTABLE_TEXT_PREFIX_LITERALS`].
+#[must_use]
+pub fn portable_text_prefix_literals_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_statement_mismatch(
+        stmt,
+        portable_text_prefix_literals_expects(),
+        "portable text prefix literals",
+    )
+}
+
 /// Formats a mismatch for [`PORTABLE_RUNTIME_EDGES`].
 #[must_use]
 pub fn portable_runtime_edges_mismatch(stmt: &StatementResult) -> Option<String> {

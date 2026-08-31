@@ -178,13 +178,19 @@ impl LibraryStore {
             .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
         let guest_len = req.statements.len();
         let guest_hash = req.request_hash.clone();
-        // Library connection: type against the canonical host schema (plus any
-        // policy catalog). Empty policy types used to wrap with receipts only,
-        // so execute rebuilt proofs from `bookclerk_sql_catalog` and missed
-        // host columns such as `books.id`.
-        let mut type_env = crate::migrations::host_sql_type_env();
+        // Library connection: wrap with the same snapshot execute uses
+        // (physical tables + durable catalog + host schema + policy types).
+        let mut type_env = bookclerk_db_exec::load_physical_sql_type_env(&self.db)
+            .await
+            .map_err(plugin_err_from_db)?;
+        type_env.merge(
+            &bookclerk_db_exec::load_sql_type_env(&self.db)
+                .await
+                .map_err(plugin_err_from_db)?,
+        );
+        type_env.merge(&crate::migrations::host_sql_type_env());
         type_env.merge(policy.sql_types());
-        let envelope = crate::sql_plan::wrap_guest_typed_request(req, &type_env);
+        let envelope = crate::sql_plan::wrap_guest_typed_request(req, &type_env)?;
         let reply = if let Some(exec) = &self.typed_exec {
             let reply = exec.execute_typed(envelope.clone()).await?;
             crate::validate_execute_reply(&envelope.request, &reply, self.db_capabilities())

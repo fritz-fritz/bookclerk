@@ -153,7 +153,7 @@ impl HostAdapterDatabaseSession for D1DedicatedHostSession {
         envelope: HostExecuteEnvelope,
     ) -> Result<ExecuteReply, PluginError> {
         self.proxy
-            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+            .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
             .await
             .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
     }
@@ -176,7 +176,7 @@ impl HostAdapterDatabaseSession for D1HostSession {
         let proxy = bookclerk_plugin_database_d1::shared_proxy()
             .ok_or_else(|| PluginError::internal("d1 guest is not connected"))?;
         proxy
-            .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+            .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
             .await
             .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
     }
@@ -208,7 +208,7 @@ impl AdapterDatabaseSession for D1Session {
 
     async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {
         self.proxy()?
-            .run_typed_atomic(&request, GuestReceiptPersist::default())
+            .run_typed_atomic(&request, GuestReceiptPersist::default(), &[])
             .await
             .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
     }

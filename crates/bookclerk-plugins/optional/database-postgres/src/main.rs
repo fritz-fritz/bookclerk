@@ -4,12 +4,11 @@
 
 use async_trait::async_trait;
 use bookclerk_db_guest::{
-    bootstrap_for, capabilities_for, guest_bootstrap, guest_capabilities, guest_execute_atomic,
-    guest_execute_atomic_on, host_session, host_session_on, set_connection,
+    bootstrap_for, capabilities_for, guest_bootstrap, guest_capabilities, guest_execute_request,
+    guest_execute_request_on, host_session, host_session_on, set_connection,
 };
 use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
 use bookclerk_plugin_abi::HostAdapterDatabaseSession;
-use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
 use bookclerk_plugin_sdk::{
     serve, DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, PluginError, PluginMetadata,
 };
@@ -142,10 +141,9 @@ impl AdapterDatabaseSession for PostgresSession {
     }
 
     async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {
-        let envelope = HostExecuteEnvelope::new(request, GuestReceiptPersist::default());
         match &self.dedicated {
-            Some(conn) => guest_execute_atomic_on(conn, envelope).await,
-            None => guest_execute_atomic(envelope).await,
+            Some(conn) => guest_execute_request_on(conn, request).await,
+            None => guest_execute_request(request).await,
         }
     }
 }

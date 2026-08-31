@@ -2169,7 +2169,7 @@ mod tests {
             let proxy = proxy.clone();
             async move {
                 proxy
-                    .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                    .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
                     .await
                     .map_err(crate::atomic::plugin_error_from_d1)
             }
@@ -2524,6 +2524,7 @@ mod tests {
                         .run_typed_atomic(
                             &req,
                             bookclerk_plugin_abi::GuestReceiptPersist::default(),
+                            &[],
                         )
                         .await
                 }
@@ -2561,7 +2562,11 @@ mod tests {
                 deadline_unix_ms: 0,
             };
             let reply = proxy
-                .run_typed_atomic(&req, bookclerk_plugin_abi::GuestReceiptPersist::default())
+                .run_typed_atomic(
+                    &req,
+                    bookclerk_plugin_abi::GuestReceiptPersist::default(),
+                    &[],
+                )
                 .await
                 .unwrap_or_else(|e| panic!("{label}: {e}"));
             let got = reply.statements[0].rows[0].values[0].clone();
@@ -2748,7 +2753,7 @@ mod tests {
             bookclerk_plugin_sdk::PluginError,
         > {
             self.proxy
-                .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
                 .await
                 .map_err(crate::atomic::plugin_error_from_d1)
         }
@@ -3039,7 +3044,11 @@ mod tests {
                 let proxy = p1.clone();
                 async move {
                     proxy
-                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .run_typed_atomic(
+                            &envelope.request,
+                            envelope.guest_receipt,
+                            &envelope.proofs,
+                        )
                         .await
                         .map_err(crate::atomic::plugin_error_from_d1)
                 }
@@ -3048,7 +3057,11 @@ mod tests {
                 let proxy = p2.clone();
                 async move {
                     proxy
-                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .run_typed_atomic(
+                            &envelope.request,
+                            envelope.guest_receipt,
+                            &envelope.proofs,
+                        )
                         .await
                         .map_err(crate::atomic::plugin_error_from_d1)
                 }
@@ -3144,7 +3157,11 @@ mod tests {
                 let proxy = proxy.clone();
                 async move {
                     proxy
-                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .run_typed_atomic(
+                            &envelope.request,
+                            envelope.guest_receipt,
+                            &envelope.proofs,
+                        )
                         .await
                         .map_err(crate::atomic::plugin_error_from_d1)
                 }
@@ -3170,7 +3187,7 @@ mod tests {
             let proxy = proxy.clone();
             async move {
                 proxy
-                    .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                    .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
                     .await
                     .map_err(crate::atomic::plugin_error_from_d1)
             }
@@ -3250,7 +3267,11 @@ mod tests {
                 let proxy = proxy.clone();
                 async move {
                     proxy
-                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .run_typed_atomic(
+                            &envelope.request,
+                            envelope.guest_receipt,
+                            &envelope.proofs,
+                        )
                         .await
                         .map_err(crate::atomic::plugin_error_from_d1)
                 }
@@ -3263,7 +3284,11 @@ mod tests {
                 let proxy = proxy.clone();
                 async move {
                     proxy
-                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .run_typed_atomic(
+                            &envelope.request,
+                            envelope.guest_receipt,
+                            &envelope.proofs,
+                        )
                         .await
                         .map_err(crate::atomic::plugin_error_from_d1)
                 }
@@ -3335,7 +3360,11 @@ mod tests {
                 let proxy = proxy.clone();
                 async move {
                     proxy
-                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .run_typed_atomic(
+                            &envelope.request,
+                            envelope.guest_receipt,
+                            &envelope.proofs,
+                        )
                         .await
                         .map_err(crate::atomic::plugin_error_from_d1)
                 }
@@ -3348,7 +3377,11 @@ mod tests {
                 let proxy = proxy.clone();
                 async move {
                     proxy
-                        .run_typed_atomic(&envelope.request, envelope.guest_receipt)
+                        .run_typed_atomic(
+                            &envelope.request,
+                            envelope.guest_receipt,
+                            &envelope.proofs,
+                        )
                         .await
                         .map_err(crate::atomic::plugin_error_from_d1)
                 }
@@ -4137,6 +4170,63 @@ mod tests {
             folded.statements[0].rows[0].values[0],
             bookclerk_plugin_abi::DbValue::Int64(7)
         );
+
+        let ov = sel(
+            "d1-overflow",
+            bookclerk_db_exec::sql_v1::PORTABLE_INTEGER_OVERFLOW,
+        )
+        .await
+        .expect("integer overflow");
+        if let Some(err) =
+            bookclerk_db_exec::sql_v1::portable_integer_overflow_mismatch(&ov.statements[0])
+        {
+            panic!("{err}");
+        }
+        let div = sel(
+            "d1-div-operands",
+            bookclerk_db_exec::sql_v1::PORTABLE_DIV_OPERANDS,
+        )
+        .await
+        .expect("div operands");
+        if let Some(err) =
+            bookclerk_db_exec::sql_v1::portable_div_operands_mismatch(&div.statements[0])
+        {
+            panic!("{err}");
+        }
+        exec(
+            "d1-div-ddl",
+            "CREATE TABLE IF NOT EXISTS divops (n INTEGER)",
+        )
+        .await
+        .expect("divops ddl");
+        exec("d1-div-ins", "INSERT INTO divops (n) VALUES (0)")
+            .await
+            .expect("divops insert");
+        let qdiv = sel(
+            "d1-div-qual",
+            "SELECT 10 / abs(n) AS d0, 10 / t.n AS d1, 10 / -n AS d2, 10 / CAST(n AS INTEGER) AS d3, 10 / (n + 0) AS d4 FROM divops t",
+        )
+        .await
+        .expect("qualified div");
+        assert!(
+            qdiv.statements[0].rows[0]
+                .values
+                .iter()
+                .all(|v| matches!(v, bookclerk_plugin_abi::DbValue::Null(_))),
+            "{:?}",
+            qdiv.statements[0].rows[0].values
+        );
+        let prefixes = sel(
+            "d1-text-prefixes",
+            bookclerk_db_exec::sql_v1::PORTABLE_TEXT_PREFIX_LITERALS,
+        )
+        .await
+        .expect("text prefixes");
+        if let Some(err) = bookclerk_db_exec::sql_v1::portable_text_prefix_literals_mismatch(
+            &prefixes.statements[0],
+        ) {
+            panic!("{err}");
+        }
     }
 
     /// A direct (unwrapped, non-receipt-gated) typed mutation whose reply is
@@ -4170,7 +4260,11 @@ mod tests {
             deadline_unix_ms: 0,
         };
         let err = proxy
-            .run_typed_atomic(&req, bookclerk_plugin_abi::GuestReceiptPersist::default())
+            .run_typed_atomic(
+                &req,
+                bookclerk_plugin_abi::GuestReceiptPersist::default(),
+                &[],
+            )
             .await
             .expect_err("lost reply on an unwrapped mutation must not be retried");
         assert!(crate::atomic::is_ambiguous_d1(&err), "{err}");
@@ -4295,7 +4389,11 @@ mod tests {
             deadline_unix_ms: 0,
         };
         let reply = proxy
-            .run_typed_atomic(&req, bookclerk_plugin_abi::GuestReceiptPersist::default())
+            .run_typed_atomic(
+                &req,
+                bookclerk_plugin_abi::GuestReceiptPersist::default(),
+                &[],
+            )
             .await
             .expect("read-only lost reply must be retried transparently");
         assert_eq!(reply.statements[0].rows[0].values[0], DbValue::Int64(7));

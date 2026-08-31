@@ -91,5 +91,6 @@ pub use schema_postgres::{
 };
 pub use typed::{
     db_value_from_sea, db_value_to_sea, execute_typed_envelope, execute_typed_on_session,
-    execute_typed_on_session_then, execute_typed_on_txn, load_sql_type_env,
+    execute_typed_on_session_then, execute_typed_on_txn, load_physical_sql_type_env,
+    load_sql_type_env, load_sql_type_env_capped,
 };

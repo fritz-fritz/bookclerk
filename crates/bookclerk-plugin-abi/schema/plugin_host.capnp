@@ -27,6 +27,8 @@ struct HostGuestReceiptPersist {
 struct HostExecuteEnvelope {
   request @0 :Plugin.ExecuteRequest;
   guestReceipt @1 :HostGuestReceiptPersist;
+  # Host-private JSON of Vec<ResolvedStatement> (not on public ExecuteRequest).
+  proofsJson @2 :Text;
 }
 
 interface HostAdapterDatabaseSession {

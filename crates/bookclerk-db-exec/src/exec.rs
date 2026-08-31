@@ -339,6 +339,7 @@ async fn execute_statements_body(
             sql
         } else {
             lower_canonical_sql_typed(backend, &sql, Some(proof))
+                .map_err(|err| DbErr::Custom(err.to_string()))?
         };
         let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
         let stmt_result = if stmt.kind.collects_rows() {

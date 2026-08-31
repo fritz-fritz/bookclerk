@@ -142,13 +142,14 @@ pub use kind::*;
 pub use methods::METHOD_NAMES;
 #[cfg(feature = "host")]
 pub use sql_proof::{
-    assert_proof_matches_sql, PhysicalAccess, ResolvedAssignment, ResolvedStatement, SchemaAction,
-    SqlSpan, TextCollateSite,
+    assert_proof_matches_sql, IntegerArithKind, IntegerArithSite, PhysicalAccess,
+    ResolvedAssignment, ResolvedStatement, SchemaAction, SqlSpan, TextCollateSite,
 };
 pub use sql_types::{
-    apply_schema_sql_to_env, catalog_companions, parse_create_table_schema, parse_drop_table_name,
-    postgres_identity_function_name, postgres_identity_object_digest,
-    postgres_identity_trigger_name, sql_catalog_create_table_sql, sql_host_bookkeeping_type_env,
+    apply_schema_sql_to_env, catalog_companions, catalog_page_statement, parse_create_table_schema,
+    parse_drop_table_name, postgres_identity_function_name, postgres_identity_object_digest,
+    postgres_identity_trigger_name, reserved_catalog_relation_missing,
+    sql_catalog_create_table_sql, sql_catalog_page_rows, sql_host_bookkeeping_type_env,
     sql_type_env_from_canonical_ddl, sql_v1_ident_in_bounds, statement_sql_hash,
     typecheck_execute_request, CreateTableSchema, SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS,
     POSTGRES_IDENT_FN_PREFIX, POSTGRES_IDENT_TRIGGER_PREFIX, SQL_CATALOG_TABLE, SQL_IDENTITY_TABLE,

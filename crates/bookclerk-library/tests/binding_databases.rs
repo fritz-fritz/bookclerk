@@ -1245,4 +1245,202 @@ async fn binding_runtime_edges_and_type_negatives() {
     {
         panic!("{err}");
     }
+    let mut overflow = stmt(bookclerk_db_exec::sql_v1::PORTABLE_INTEGER_OVERFLOW, vec![]);
+    overflow.max_rows = 8;
+    let reply = run_binding(&db, req("integer-overflow", vec![overflow]))
+        .await
+        .expect("integer overflow");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_integer_overflow_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
+
+    run_binding(
+        &db,
+        req(
+            "ins-dest-ddl",
+            vec![stmt(
+                "CREATE TABLE IF NOT EXISTS dest_int (n INTEGER)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("dest ddl");
+    let err = run_binding(
+        &db,
+        req(
+            "ins-sel-text",
+            vec![stmt("INSERT INTO dest_int(n) SELECT 'x'", vec![])],
+        ),
+    )
+    .await
+    .expect_err("INSERT SELECT TEXT into INTEGER");
+    assert!(
+        err.to_string().contains("incompatible") || err.to_string().contains("invalid"),
+        "{err}"
+    );
+    let err = run_binding(
+        &db,
+        req(
+            "fp-mismatch",
+            vec![stmt("CREATE TABLE IF NOT EXISTS dest_int (n TEXT)", vec![])],
+        ),
+    )
+    .await
+    .expect_err("CREATE IF NOT EXISTS fingerprint mismatch");
+    assert!(
+        err.to_string().contains("does not match") || err.to_string().contains("invalid"),
+        "{err}"
+    );
+    let mut rec = stmt(
+        "WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SELECT n FROM t",
+        vec![],
+    );
+    rec.max_rows = 8;
+    let rec_reply = run_binding(&db, req("recursive-cte", vec![rec]))
+        .await
+        .expect("recursive CTE");
+    assert_eq!(rec_reply.statements[0].rows.len(), 3);
+
+    let mut div = stmt(bookclerk_db_exec::sql_v1::PORTABLE_DIV_OPERANDS, vec![]);
+    div.max_rows = 8;
+    let reply = run_binding(&db, req("div-operands", vec![div]))
+        .await
+        .expect("div operands");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_div_operands_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
+    run_binding(
+        &db,
+        req(
+            "div-qual-ddl",
+            vec![stmt(
+                "CREATE TABLE IF NOT EXISTS divops (n INTEGER)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("divops ddl");
+    run_binding(
+        &db,
+        req(
+            "div-qual-ins",
+            vec![stmt("INSERT INTO divops (n) VALUES (0)", vec![])],
+        ),
+    )
+    .await
+    .expect("divops insert");
+    let mut qdiv = stmt(
+        "SELECT 10 / abs(n) AS d0, 10 / t.n AS d1, 10 / -n AS d2, 10 / CAST(n AS INTEGER) AS d3, 10 / (n + 0) AS d4 FROM divops t",
+        vec![],
+    );
+    qdiv.max_rows = 8;
+    let reply = run_binding(&db, req("div-qualified", vec![qdiv]))
+        .await
+        .expect("qualified div");
+    assert_eq!(reply.statements[0].rows[0].values.len(), 5);
+    assert!(
+        reply.statements[0].rows[0]
+            .values
+            .iter()
+            .all(|v| matches!(v, bookclerk_plugin_abi::DbValue::Null(_))),
+        "{:?}",
+        reply.statements[0].rows[0].values
+    );
+    let mut prefixes = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_TEXT_PREFIX_LITERALS,
+        vec![],
+    );
+    prefixes.max_rows = 8;
+    let reply = run_binding(&db, req("text-prefixes", vec![prefixes]))
+        .await
+        .expect("text prefixes");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_text_prefix_literals_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
+}
+
+#[tokio::test]
+async fn binding_catalog_pages_below_negotiated_cap() {
+    let db = binding_db().await;
+    for i in 0..5 {
+        run_binding(
+            &db,
+            req(
+                &format!("page-ddl-{i}"),
+                vec![stmt(
+                    &format!("CREATE TABLE IF NOT EXISTS p{i} (n INTEGER)"),
+                    vec![],
+                )],
+            ),
+        )
+        .await
+        .expect("paged catalog ddl");
+    }
+    let env = bookclerk_db_exec::load_sql_type_env_capped(&db, 2)
+        .await
+        .expect("page size 2 catalog load");
+    for i in 0..5 {
+        assert!(
+            env.table_columns(&format!("p{i}")).is_some(),
+            "missing p{i} after multi-page catalog load"
+        );
+    }
+}
+
+#[tokio::test]
+async fn binding_stamped_proofs_survive_catalog_wipe() {
+    let db = binding_db().await;
+    run_binding(
+        &db,
+        req(
+            "wipe-ddl",
+            vec![stmt(
+                "CREATE TABLE IF NOT EXISTS keep_n (n INTEGER)",
+                vec![],
+            )],
+        ),
+    )
+    .await
+    .expect("keep_n ddl");
+    let env = bookclerk_db_exec::load_sql_type_env(&db)
+        .await
+        .expect("catalog before wipe");
+    let req = req("wipe-sel", vec![stmt("SELECT n + 1 FROM keep_n", vec![])]);
+    let proofs = bookclerk_plugin_abi::typecheck_execute_request_proofs(&req, &env)
+        .expect("admit against catalog");
+    db.execute_raw(Statement::from_string(
+        db.get_database_backend(),
+        "DELETE FROM bookclerk_sql_catalog".to_string(),
+    ))
+    .await
+    .expect("wipe catalog");
+    db.execute_raw(Statement::from_string(
+        db.get_database_backend(),
+        "DELETE FROM bookclerk_sql_schema".to_string(),
+    ))
+    .await
+    .expect("wipe schema catalog");
+    let envelope = bookclerk_plugin_abi::HostExecuteEnvelope::new(
+        req,
+        bookclerk_plugin_abi::GuestReceiptPersist::default(),
+    )
+    .with_proofs(proofs);
+    let reply = bookclerk_db_exec::execute_typed_envelope(
+        &db,
+        &envelope,
+        "sqlite_txn",
+        bookclerk_db_exec::ExecCaps::from_capabilities(&DbCapabilities::advertised_sqlite()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None),
+    )
+    .await
+    .expect("stamped proofs must not re-typecheck against a wiped catalog");
+    assert_eq!(reply.statements.len(), 1);
 }

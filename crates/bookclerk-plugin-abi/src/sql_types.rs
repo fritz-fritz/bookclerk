@@ -7,9 +7,13 @@
 #![allow(clippy::missing_docs_in_private_items, clippy::missing_errors_doc)]
 
 use crate::sql_proof::{
-    PhysicalAccess, ResolvedAssignment, ResolvedStatement, SchemaAction, SqlSpan, TextCollateSite,
+    IntegerArithKind, IntegerArithSite, PhysicalAccess, ResolvedAssignment, ResolvedStatement,
+    SchemaAction, SqlSpan, TextCollateSite,
 };
-use crate::{DbType, DbValue, ExecuteRequest, PluginError, Result, TypedDbStatement};
+use crate::{
+    DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, Result, StatementResult,
+    TypedDbStatement, FIRST_PARTY_MAX_RESULT_ROWS,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Reserved catalog of `(table, column, sql_type)` for isolated bindings.
@@ -29,6 +33,69 @@ pub const SQL_V1_MAX_IDENT_BYTES: usize = 63;
 
 /// Table-level durable schema fingerprint (identity + constraints).
 pub const SQL_SCHEMA_TABLE: &str = "bookclerk_sql_schema";
+
+/// Page size for durable catalog / schema SELECTs.
+///
+/// Uses the negotiated adapter `maxResultRows` when it is nonzero, then caps
+/// at [`FIRST_PARTY_MAX_RESULT_ROWS`].
+#[must_use]
+pub fn sql_catalog_page_rows(max_result_rows: u32) -> u32 {
+    let negotiated = if max_result_rows == 0 {
+        FIRST_PARTY_MAX_RESULT_ROWS
+    } else {
+        max_result_rows
+    };
+    negotiated.clamp(1, FIRST_PARTY_MAX_RESULT_ROWS)
+}
+
+/// True when `message` is a missing-relation error for reserved `table`.
+///
+/// Matches SQLite `no such table: bookclerk_sql_catalog` (optional `main.`)
+/// and PostgreSQL `relation "bookclerk_sql_catalog" does not exist`. Does not
+/// match missing-column errors (`column "ordinal" does not exist`).
+#[must_use]
+pub fn reserved_catalog_relation_missing(message: &str, table: &str) -> bool {
+    let msg = message.to_ascii_lowercase();
+    let table = table.to_ascii_lowercase();
+    let quoted = format!("\"{table}\"");
+    let patterns = [
+        format!("no such table: {table}"),
+        format!("no such table: main.{table}"),
+        format!("relation {quoted} does not exist"),
+        format!("table {quoted} does not exist"),
+        format!("undefined table: {table}"),
+        format!("unknown table: {table}"),
+    ];
+    patterns.iter().any(|pat| {
+        let Some(at) = msg.find(pat.as_str()) else {
+            return false;
+        };
+        let after = at + pat.len();
+        msg[after..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+    })
+}
+
+/// Requires a catalog page execute reply to contain exactly one statement.
+///
+/// Empty **rows** still mean end-of-catalog. An empty `statements` vec is not
+/// EOF — adapters must fail closed rather than treat a dropped statement as
+/// a finished scan.
+///
+/// # Errors
+///
+/// Returns when `reply.statements` is not length 1.
+pub fn catalog_page_statement(reply: &ExecuteReply) -> Result<&StatementResult> {
+    if reply.statements.len() != 1 {
+        return Err(PluginError::internal(format!(
+            "catalog page must return exactly one statement result; got {}",
+            reply.statements.len()
+        )));
+    }
+    Ok(&reply.statements[0])
+}
 
 /// Postgres adapter-private identity function prefix (`bc_if_<digest>`).
 pub const POSTGRES_IDENT_FN_PREFIX: &str = "bc_if_";
@@ -79,7 +146,10 @@ pub fn statement_sql_hash(sql: &str) -> String {
 }
 
 /// Canonical SQL v1 column / expression type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "camelCase")]
 pub enum SqlType {
     /// `INTEGER` / `DbValue::Int64`.
     Integer,
@@ -923,6 +993,7 @@ fn typecheck_statement(
             }],
             assignments: Vec::new(),
             text_collate_sites: Vec::new(),
+            integer_arith_sites: Vec::new(),
             schema_action: SchemaAction::Drop { table },
         });
     }
@@ -941,6 +1012,7 @@ fn typecheck_statement(
         physical: BTreeSet::new(),
         assignments: Vec::new(),
         text_spans: Vec::new(),
+        integer_arith_sites: Vec::new(),
         output_columns: Vec::new(),
         require_named_derived: false,
     };
@@ -989,6 +1061,7 @@ fn typecheck_create(
         }],
         assignments: Vec::new(),
         text_collate_sites: Vec::new(),
+        integer_arith_sites: Vec::new(),
         schema_action: SchemaAction::Create {
             table: schema.table,
             fingerprint,
@@ -1060,6 +1133,7 @@ fn typecheck_index_ddl(index: usize, sql: &str, env: &SqlTypeEnv) -> Result<Reso
         }],
         assignments: Vec::new(),
         text_collate_sites: Vec::new(),
+        integer_arith_sites: Vec::new(),
         schema_action: SchemaAction::None,
     })
 }
@@ -1094,6 +1168,7 @@ fn typecheck_create_checks(
         physical: BTreeSet::new(),
         assignments: Vec::new(),
         text_spans: Vec::new(),
+        integer_arith_sites: Vec::new(),
         output_columns: Vec::new(),
         require_named_derived: false,
     };
@@ -1149,6 +1224,7 @@ struct TypeCx<'a> {
     physical: BTreeSet<(String, Option<String>)>,
     assignments: Vec<ResolvedAssignment>,
     text_spans: Vec<SqlSpan>,
+    integer_arith_sites: Vec<IntegerArithSite>,
     output_columns: Vec<(String, SqlType)>,
     require_named_derived: bool,
 }
@@ -1157,6 +1233,12 @@ impl TypeCx<'_> {
     fn note_text(&mut self, start: usize, end: usize) {
         if start < end {
             self.text_spans.push(SqlSpan { start, end });
+        }
+    }
+
+    fn note_arith(&mut self, site: IntegerArithSite) {
+        if site.full.start < site.full.end {
+            self.integer_arith_sites.push(site);
         }
     }
 
@@ -1182,6 +1264,7 @@ impl TypeCx<'_> {
                 .into_iter()
                 .map(|span| TextCollateSite { span })
                 .collect(),
+            integer_arith_sites: self.integer_arith_sites,
             schema_action: SchemaAction::None,
         }
     }
@@ -1218,7 +1301,7 @@ fn parse_optional_with(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<()> 
             .take_balanced_inner()
             .ok_or_else(|| ty_err(cx.index, "CTE body"))?;
         let cols = if recursive {
-            typecheck_recursive_cte(inner, cx, &name, &explicit_names)?
+            typecheck_recursive_cte(inner, scan.base_of(inner), cx, &name, &explicit_names)?
         } else {
             let saved = cx.require_named_derived;
             cx.require_named_derived = explicit_names.is_empty();
@@ -1264,6 +1347,7 @@ fn reject_duplicate_names(index: usize, cols: &[(String, SqlType)]) -> Result<()
 
 fn typecheck_recursive_cte(
     sql: &str,
+    base: usize,
     cx: &mut TypeCx<'_>,
     name: &str,
     explicit: &[String],
@@ -1272,7 +1356,7 @@ fn typecheck_recursive_cte(
         sql,
         i: 0,
         took_real: false,
-        base: 0,
+        base,
     };
     let saved = cx.require_named_derived;
     cx.require_named_derived = explicit.is_empty();
@@ -1786,6 +1870,7 @@ fn lookahead_from(scan: &TScan<'_>, cx: &mut TypeCx<'_>) {
                     let saved_named = cx.require_named_derived;
                     let saved_bind = cx.bind_i;
                     let saved_spans = cx.text_spans.len();
+                    let saved_arith = cx.integer_arith_sites.len();
                     let saved_physical = cx.physical.clone();
                     let saved_assign = cx.assignments.len();
                     cx.require_named_derived = true;
@@ -1793,6 +1878,7 @@ fn lookahead_from(scan: &TScan<'_>, cx: &mut TypeCx<'_>) {
                     cx.require_named_derived = saved_named;
                     cx.bind_i = saved_bind;
                     cx.text_spans.truncate(saved_spans);
+                    cx.integer_arith_sites.truncate(saved_arith);
                     cx.physical = saved_physical;
                     cx.assignments.truncate(saved_assign);
                     let _ = tmp.take_kw("AS");
@@ -2119,27 +2205,81 @@ fn infer_concat(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
 }
 
 fn infer_add(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
+    scan.skip();
+    let lhs_start = scan.abs(scan.i);
     let mut t = infer_mul(scan, cx)?;
     loop {
-        if scan.take_op("+") || scan.take_op("-") {
-            let r = infer_mul(scan, cx)?;
-            t = unify_numeric(cx.index, t, r)?;
+        scan.skip();
+        let lhs_end = scan.abs(scan.i);
+        let kind = if scan.take_op("+") {
+            IntegerArithKind::Add
+        } else if scan.take_op("-") {
+            IntegerArithKind::Sub
         } else {
             break;
+        };
+        scan.skip();
+        let rhs_start = scan.abs(scan.i);
+        let r = infer_mul(scan, cx)?;
+        let rhs_end = scan.abs(scan.i);
+        t = unify_numeric(cx.index, t, r)?;
+        if t == SqlType::Integer {
+            cx.note_arith(IntegerArithSite {
+                full: SqlSpan {
+                    start: lhs_start,
+                    end: rhs_end,
+                },
+                lhs: SqlSpan {
+                    start: lhs_start,
+                    end: lhs_end,
+                },
+                rhs: SqlSpan {
+                    start: rhs_start,
+                    end: rhs_end,
+                },
+                kind,
+            });
         }
     }
     Ok(t)
 }
 
 fn infer_mul(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
+    scan.skip();
+    let lhs_start = scan.abs(scan.i);
     let mut t = infer_prefix(scan, cx)?;
     loop {
+        scan.skip();
+        let lhs_end = scan.abs(scan.i);
         if scan.take_op("%") {
             let r = infer_prefix(scan, cx)?;
             t = unify_integer_mod(cx.index, t, r)?;
-        } else if scan.take_op("*") || scan.take_op("/") {
+        } else if scan.take_op("/") {
             let r = infer_prefix(scan, cx)?;
             t = unify_numeric(cx.index, t, r)?;
+        } else if scan.take_op("*") {
+            scan.skip();
+            let rhs_start = scan.abs(scan.i);
+            let r = infer_prefix(scan, cx)?;
+            let rhs_end = scan.abs(scan.i);
+            t = unify_numeric(cx.index, t, r)?;
+            if t == SqlType::Integer {
+                cx.note_arith(IntegerArithSite {
+                    full: SqlSpan {
+                        start: lhs_start,
+                        end: rhs_end,
+                    },
+                    lhs: SqlSpan {
+                        start: lhs_start,
+                        end: lhs_end,
+                    },
+                    rhs: SqlSpan {
+                        start: rhs_start,
+                        end: rhs_end,
+                    },
+                    kind: IntegerArithKind::Mul,
+                });
+            }
         } else {
             break;
         }
@@ -2265,7 +2405,7 @@ fn infer_atom(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
         return Err(ty_err(cx.index, "expression atom"));
     };
     if scan.take_byte(b'(') {
-        return infer_call(scan, cx, &name);
+        return infer_call(scan, cx, &name, ident_start);
     }
     if scan.take_byte(b'.') {
         let col_start = scan.i;
@@ -2308,7 +2448,12 @@ fn string_lit_start(scan: &TScan<'_>, end: usize) -> usize {
     0
 }
 
-fn infer_call(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>, name: &str) -> Result<SqlType> {
+fn infer_call(
+    scan: &mut TScan<'_>,
+    cx: &mut TypeCx<'_>,
+    name: &str,
+    ident_start: usize,
+) -> Result<SqlType> {
     let mut args = Vec::new();
     if !scan.peek_byte(b')') {
         if name == "count" && scan.take_byte(b'*') {
@@ -2363,11 +2508,24 @@ fn infer_call(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>, name: &str) -> Result<S
             if t != SqlType::Null && !t.is_numeric() {
                 return Err(ty_err(cx.index, "abs() requires INTEGER or REAL"));
             }
-            Ok(if t == SqlType::Null {
+            let out = if t == SqlType::Null {
                 SqlType::Integer
             } else {
                 t
-            })
+            };
+            if out == SqlType::Integer {
+                let full = SqlSpan {
+                    start: scan.abs(ident_start),
+                    end: scan.abs(scan.i),
+                };
+                cx.note_arith(IntegerArithSite {
+                    full,
+                    lhs: full,
+                    rhs: full,
+                    kind: IntegerArithKind::Abs,
+                });
+            }
+            Ok(out)
         }
         "round" => {
             if args.is_empty() || args.len() > 2 {
@@ -3297,5 +3455,77 @@ mod tests {
         assert!(fn_name.starts_with(POSTGRES_IDENT_FN_PREFIX));
         assert!(trig.starts_with(POSTGRES_IDENT_TRIGGER_PREFIX));
         assert_ne!(fn_name, trig);
+    }
+
+    #[test]
+    fn substr_index_must_be_integer() {
+        let err =
+            typecheck_execute_request(&req("SELECT substr('hello', 'x')"), &SqlTypeEnv::new())
+                .unwrap_err();
+        assert!(err.to_string().contains("INTEGER"), "{err}");
+    }
+
+    #[test]
+    fn reserved_catalog_relation_missing_is_structured() {
+        assert!(reserved_catalog_relation_missing(
+            "no such table: bookclerk_sql_catalog",
+            SQL_CATALOG_TABLE
+        ));
+        assert!(reserved_catalog_relation_missing(
+            "no such table: main.bookclerk_sql_catalog",
+            SQL_CATALOG_TABLE
+        ));
+        assert!(reserved_catalog_relation_missing(
+            r#"relation "bookclerk_sql_schema" does not exist"#,
+            SQL_SCHEMA_TABLE
+        ));
+        assert!(
+            !reserved_catalog_relation_missing(
+                r#"column "ordinal" does not exist"#,
+                SQL_CATALOG_TABLE
+            ),
+            "missing column must not look like a missing catalog table"
+        );
+        assert!(!reserved_catalog_relation_missing(
+            r#"relation "other" does not exist"#,
+            SQL_CATALOG_TABLE
+        ));
+        assert_eq!(sql_catalog_page_rows(0), FIRST_PARTY_MAX_RESULT_ROWS);
+        assert_eq!(sql_catalog_page_rows(2), 2);
+        assert_eq!(
+            sql_catalog_page_rows(FIRST_PARTY_MAX_RESULT_ROWS.saturating_mul(4)),
+            FIRST_PARTY_MAX_RESULT_ROWS
+        );
+        let empty = ExecuteReply {
+            operation_id: "c".into(),
+            statements: Vec::new(),
+            timing: crate::DbTiming::default(),
+        };
+        assert!(catalog_page_statement(&empty).is_err());
+    }
+
+    #[test]
+    fn integer_arith_sites_are_recorded() {
+        let proofs = typecheck_execute_request_resolved(
+            &req("SELECT 1 + 2, abs(-3), 4 * 5"),
+            &SqlTypeEnv::new(),
+        )
+        .unwrap();
+        assert!(
+            proofs[0]
+                .integer_arith_sites
+                .iter()
+                .any(|s| s.kind == IntegerArithKind::Add),
+            "{:?}",
+            proofs[0].integer_arith_sites
+        );
+        assert!(proofs[0]
+            .integer_arith_sites
+            .iter()
+            .any(|s| s.kind == IntegerArithKind::Abs));
+        assert!(proofs[0]
+            .integer_arith_sites
+            .iter()
+            .any(|s| s.kind == IntegerArithKind::Mul));
     }
 }
