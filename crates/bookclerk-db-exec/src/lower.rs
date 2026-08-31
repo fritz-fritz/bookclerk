@@ -335,6 +335,11 @@ fn apply_text_collate_spans(sql: &str, sites: &[SqlSpan]) -> String {
         if piece.is_empty() {
             continue;
         }
+        // JSON path literals must stay `'$.a.b'` so `json_extract` lowering can
+        // parse them. COLLATE on the extract document/result is enough.
+        if piece.starts_with("'$.") {
+            continue;
+        }
         let end = span.start + piece.len();
         let wrapped = format!("({piece} COLLATE \"C\")");
         out.replace_range(span.start..end, &wrapped);
@@ -1047,16 +1052,33 @@ fn rewrite_json_extract(sql: &str) -> String {
 }
 
 /// Parses `expr, '$.path')` from `json_extract(` arguments (string-aware).
+///
+/// The path may already be wrapped as `('$.path' COLLATE "C")` when TEXT
+/// collation ran before this rewrite.
 fn parse_json_extract_args(after: &str) -> Option<(&str, &str, &str)> {
     let comma = find_top_level_comma(after)?;
     let expr = after[..comma].trim();
     let after_comma = after[comma + 1..].trim_start();
-    let path = after_comma.strip_prefix("'$.")?;
-    let endq = path.find('\'')?;
-    let json_path = &path[..endq];
-    let remainder = path[endq + 1..].trim_start();
-    let rest2 = remainder.strip_prefix(')')?;
+    let (json_path, remainder) = take_json_extract_path_arg(after_comma)?;
+    let rest2 = remainder.trim_start().strip_prefix(')')?;
     Some((expr, json_path, rest2))
+}
+
+/// `'$.a.b'` or `('$.a.b' COLLATE "C")`, returning the path without `$.`.
+fn take_json_extract_path_arg(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if let Some(rest) = s.strip_prefix("'$.") {
+        let endq = rest.find('\'')?;
+        return Some((&rest[..endq], &rest[endq + 1..]));
+    }
+    let inner = s.strip_prefix('(')?.trim_start().strip_prefix("'$.")?;
+    let endq = inner.find('\'')?;
+    let path = &inner[..endq];
+    let after = inner[endq + 1..].trim_start();
+    let after = strip_prefix_ci(after, "COLLATE")?.trim_start();
+    let after = after.strip_prefix("\"C\"")?.trim_start();
+    let after = after.strip_prefix(')')?;
+    Some((path, after))
 }
 
 /// Index of the first comma at parenthesis depth 0, skipping literals.
@@ -1603,8 +1625,8 @@ fn dollar_quote_len(s: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use bookclerk_plugin_abi::{
-        typecheck_execute_request_proofs, DbPlanStatementKind, DbResultSelection, DbValue,
-        ExecuteRequest, SqlType, SqlTypeEnv, TypedDbStatement,
+        sql_type_env_from_canonical_ddl, typecheck_execute_request_proofs, DbPlanStatementKind,
+        DbResultSelection, DbValue, ExecuteRequest, SqlType, SqlTypeEnv, TypedDbStatement,
     };
 
     fn proof_of(sql: &str, env: &SqlTypeEnv) -> ResolvedStatement {
@@ -2027,6 +2049,15 @@ mod tests {
         assert!(sql.contains("('$ä' COLLATE \"C\")"), "{sql}");
         assert!(sql.contains("('{ä' COLLATE \"C\")"), "{sql}");
         assert!(sql.contains("('COLLATEä' COLLATE \"C\")"), "{sql}");
+    }
+
+    #[test]
+    fn typed_json_extract_survives_text_collate_on_document() {
+        let env = sql_type_env_from_canonical_ddl("CREATE TABLE t (payload TEXT)");
+        let sql = lower_pg("SELECT json_extract(payload, '$.k') FROM t", &env);
+        assert!(!sql.to_ascii_lowercase().contains("json_extract("), "{sql}");
+        assert!(sql.contains("#>>"), "{sql}");
+        assert!(sql.contains("COLLATE \"C\""), "{sql}");
     }
 
     #[test]
