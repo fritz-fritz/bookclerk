@@ -144,6 +144,7 @@ pub use methods::METHOD_NAMES;
 pub use sql_proof::{
     assert_proof_matches_sql, IntegerArithKind, IntegerArithSite, PhysicalAccess,
     ResolvedAssignment, ResolvedStatement, SchemaAction, SqlSpan, TextCollateSite,
+    PHYSICAL_STAR_COLUMN,
 };
 pub use sql_types::{
     apply_schema_action_to_env, apply_schema_sql_to_env, catalog_companions,

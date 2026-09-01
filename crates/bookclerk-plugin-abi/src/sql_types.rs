@@ -8,7 +8,7 @@
 
 use crate::sql_proof::{
     IntegerArithKind, IntegerArithSite, PhysicalAccess, ResolvedAssignment, ResolvedStatement,
-    SchemaAction, SqlSpan, TextCollateSite,
+    SchemaAction, SqlSpan, TextCollateSite, PHYSICAL_STAR_COLUMN,
 };
 use crate::{
     DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, Result, StatementResult,
@@ -1654,22 +1654,7 @@ fn typecheck_sql(sql: &str, cx: &mut TypeCx<'_>) -> Result<()> {
             cx.from = dest_from;
         }
         if scan.take_kw("RETURNING") {
-            let mut out = Vec::new();
-            loop {
-                if scan.take_byte(b'*') {
-                    out.extend(star_columns(cx)?);
-                    break;
-                }
-                let start = scan.i;
-                let ty = infer_expr(&mut scan, cx)?;
-                let expr_sql = scan.sql.get(start..scan.i).unwrap_or("");
-                let name = select_item_name(&mut scan, cx, out.len(), expr_sql)?;
-                out.push((name, ty));
-                if !scan.take_byte(b',') {
-                    break;
-                }
-            }
-            cx.output_columns = out;
+            cx.output_columns = parse_returning_list(&mut scan, cx)?;
         }
         return Ok(());
     }
@@ -1709,22 +1694,7 @@ fn typecheck_sql(sql: &str, cx: &mut TypeCx<'_>) -> Result<()> {
             require_booleanish(cx.index, ty, "WHERE")?;
         }
         if scan.take_kw("RETURNING") {
-            let mut out = Vec::new();
-            loop {
-                if scan.take_byte(b'*') {
-                    out.extend(star_columns(cx)?);
-                    break;
-                }
-                let start = scan.i;
-                let ty = infer_expr(&mut scan, cx)?;
-                let expr_sql = scan.sql.get(start..scan.i).unwrap_or("");
-                let name = select_item_name(&mut scan, cx, out.len(), expr_sql)?;
-                out.push((name, ty));
-                if !scan.take_byte(b',') {
-                    break;
-                }
-            }
-            cx.output_columns = out;
+            cx.output_columns = parse_returning_list(&mut scan, cx)?;
         }
         return Ok(());
     }
@@ -1853,8 +1823,8 @@ fn infer_select_core(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<Vec<(S
     lookahead_from(scan, cx);
     let mut cols = Vec::new();
     loop {
-        if scan.take_byte(b'*') {
-            cols.extend(star_columns(cx)?);
+        if let Some(star) = take_select_star(scan, cx)? {
+            cols.extend(star);
         } else {
             let start = scan.i;
             let ty = infer_expr(scan, cx)?;
@@ -2161,29 +2131,104 @@ fn skip_join_on_predicate(scan: &mut TScan<'_>) {
     }
 }
 
-fn star_columns(cx: &TypeCx<'_>) -> Result<Vec<(String, SqlType)>> {
+fn parse_returning_list(
+    scan: &mut TScan<'_>,
+    cx: &mut TypeCx<'_>,
+) -> Result<Vec<(String, SqlType)>> {
     let mut out = Vec::new();
-    for src in cx.from.values() {
-        match src {
-            FromSrc::Cte(name) => {
-                if let Some(cols) = cx.ctes.get(name) {
-                    out.extend(cols.clone());
-                    continue;
-                }
-            }
-            FromSrc::Physical(table) => {
-                if let Some(cols) = cx.env.table_columns(table) {
-                    out.extend(cols.iter().cloned());
-                    continue;
-                }
-            }
+    loop {
+        if let Some(star) = take_select_star(scan, cx)? {
+            out.extend(star);
+        } else {
+            let start = scan.i;
+            let ty = infer_expr(scan, cx)?;
+            let expr_sql = scan.sql.get(start..scan.i).unwrap_or("");
+            let name = select_item_name(scan, cx, out.len(), expr_sql)?;
+            out.push((name, ty));
         }
+        if !scan.take_byte(b',') {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// `*` or `alias.*` in a SELECT/RETURNING list.
+///
+/// # Errors
+///
+/// Returns when the starred source is unknown.
+fn take_select_star(
+    scan: &mut TScan<'_>,
+    cx: &mut TypeCx<'_>,
+) -> Result<Option<Vec<(String, SqlType)>>> {
+    scan.skip();
+    if scan.take_byte(b'*') {
+        return Ok(Some(star_columns(cx)?));
+    }
+    let saved = scan.i;
+    if let Some(qual) = scan.read_ident() {
+        if scan.take_byte(b'.') && scan.take_byte(b'*') {
+            return Ok(Some(qualified_star_columns(cx, &qual)?));
+        }
+    }
+    scan.i = saved;
+    Ok(None)
+}
+
+fn star_columns(cx: &mut TypeCx<'_>) -> Result<Vec<(String, SqlType)>> {
+    let mut out = Vec::new();
+    let sources: Vec<FromSrc> = cx.from.values().cloned().collect();
+    if sources.is_empty() {
         return Err(PluginError::invalid_params(format!(
             "statement {} SELECT * names unknown source",
             cx.index
         )));
     }
+    for src in &sources {
+        out.extend(star_columns_for_src(cx, src)?);
+    }
     Ok(out)
+}
+
+fn qualified_star_columns(cx: &mut TypeCx<'_>, qual: &str) -> Result<Vec<(String, SqlType)>> {
+    if let Some(src) = lookup_visible_src(cx, qual) {
+        return star_columns_for_src(cx, &src);
+    }
+    if let Some(cols) = cx.ctes.get(qual).cloned() {
+        return Ok(cols);
+    }
+    if cx.env.has_table(qual) {
+        return star_columns_for_src(cx, &FromSrc::Physical(qual.to_string()));
+    }
+    Err(PluginError::invalid_params(format!(
+        "statement {} SELECT * names unknown source",
+        cx.index
+    )))
+}
+
+fn star_columns_for_src(cx: &mut TypeCx<'_>, src: &FromSrc) -> Result<Vec<(String, SqlType)>> {
+    match src {
+        FromSrc::Cte(name) => {
+            if let Some(cols) = cx.ctes.get(name) {
+                return Ok(cols.clone());
+            }
+        }
+        FromSrc::Physical(table) => {
+            if let Some(cols) = cx.env.table_columns(table) {
+                let cols = cols.to_vec();
+                for (col, _) in &cols {
+                    cx.note_physical(table, Some(col));
+                }
+                cx.note_physical(table, Some(PHYSICAL_STAR_COLUMN));
+                return Ok(cols);
+            }
+        }
+    }
+    Err(PluginError::invalid_params(format!(
+        "statement {} SELECT * names unknown source",
+        cx.index
+    )))
 }
 
 fn take_from_item(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<()> {
@@ -3695,6 +3740,56 @@ mod tests {
             timing: crate::DbTiming::default(),
         };
         assert!(catalog_page_statement(&empty).is_err());
+    }
+
+    #[test]
+    fn select_star_records_physical_wildcard_and_columns() {
+        let mut env = SqlTypeEnv::new();
+        env.insert_table(
+            "books",
+            [
+                ("id".into(), SqlType::Integer),
+                ("token".into(), SqlType::Text),
+            ],
+        );
+        for sql in [
+            "SELECT * FROM books",
+            "SELECT books.* FROM books",
+            "SELECT b.* FROM books b",
+        ] {
+            let proofs = typecheck_execute_request_resolved(&req(sql), &env).unwrap();
+            let accesses = &proofs[0].physical_accesses;
+            assert!(
+                accesses.iter().any(|a| {
+                    a.table == "books" && a.column.as_deref() == Some(PHYSICAL_STAR_COLUMN)
+                }),
+                "{sql}: {accesses:?}"
+            );
+            assert!(
+                accesses
+                    .iter()
+                    .any(|a| a.table == "books" && a.column.as_deref() == Some("id")),
+                "{sql}: {accesses:?}"
+            );
+            assert!(
+                accesses
+                    .iter()
+                    .any(|a| a.table == "books" && a.column.as_deref() == Some("token")),
+                "{sql}: {accesses:?}"
+            );
+        }
+        let cte = typecheck_execute_request_resolved(
+            &req("WITH secret AS (SELECT id FROM books) SELECT * FROM secret"),
+            &env,
+        )
+        .unwrap();
+        assert!(
+            !cte[0].physical_accesses.iter().any(|a| {
+                a.table == "secret" && a.column.as_deref() == Some(PHYSICAL_STAR_COLUMN)
+            }),
+            "CTE star must not mark a physical wildcard: {:?}",
+            cte[0].physical_accesses
+        );
     }
 
     #[test]

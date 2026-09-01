@@ -8,7 +8,7 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use crate::{
-    sql_proof::ResolvedStatement,
+    sql_proof::{ResolvedStatement, PHYSICAL_STAR_COLUMN},
     sql_types::{
         require_sql_v1_helper_arity, sql_host_bookkeeping_type_env, typecheck_execute_request,
         typecheck_execute_request_resolved, SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS,
@@ -482,15 +482,29 @@ fn authorize_from_proof(
 ) -> Result<()> {
     for access in &proof.physical_accesses {
         policy.authorize_table(index, &access.table)?;
-        if let Some(column) = &access.column {
-            if let Some(allowed) = policy.columns.get(&access.table) {
-                if !allowed.contains(column) {
+        if policy.binding_owned {
+            continue;
+        }
+        match access.column.as_deref() {
+            Some(PHYSICAL_STAR_COLUMN) => {
+                if policy.columns.contains_key(&access.table) {
                     return Err(PluginError::invalid_params(format!(
-                        "statement {index} names unauthorized column {}.{}",
-                        access.table, column
+                        "statement {index} SELECT * is not allowed on column-restricted table {}",
+                        access.table
                     )));
                 }
             }
+            Some(column) => {
+                if let Some(allowed) = policy.columns.get(&access.table) {
+                    if !allowed.contains(column) {
+                        return Err(PluginError::invalid_params(format!(
+                            "statement {index} names unauthorized column {}.{}",
+                            access.table, column
+                        )));
+                    }
+                }
+            }
+            None => {}
         }
     }
     for func in &proof.functions {
@@ -4476,6 +4490,50 @@ mod tests {
             &GuestSqlPolicy::host_authoritative(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn proof_auth_rejects_star_under_column_restriction() {
+        let mut env = SqlTypeEnv::new();
+        apply_schema_sql_to_env(
+            &mut env,
+            "CREATE TABLE IF NOT EXISTS books (id INTEGER, token TEXT)",
+        );
+        let restricted = GuestSqlPolicy::allow_tables(["books"])
+            .restrict_columns("books", ["id"])
+            .with_sql_types(env);
+        for sql in [
+            "SELECT * FROM books",
+            "SELECT books.* FROM books",
+            "SELECT b.* FROM books b",
+            "SELECT b.* FROM books AS b",
+        ] {
+            let err = authorize_guest_sql_policy(
+                &req(sql, vec![], DbResultSelection::Rows, 1),
+                &restricted,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("SELECT * is not allowed"),
+                "{sql}: {err}"
+            );
+        }
+        authorize_guest_sql_policy(
+            &req("SELECT id FROM books", vec![], DbResultSelection::Rows, 1),
+            &restricted,
+        )
+        .unwrap();
+        let err = authorize_guest_sql_policy(
+            &req(
+                "SELECT token FROM books",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &restricted,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unauthorized column"), "{err}");
     }
 
     #[test]

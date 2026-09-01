@@ -55,6 +55,9 @@ pub struct IntegerArithSite {
     pub kind: IntegerArithKind,
 }
 
+/// Column name recorded for `SELECT *` / `alias.*` / `RETURNING *` on a physical table.
+pub const PHYSICAL_STAR_COLUMN: &str = "*";
+
 /// Physical table/column access used for authorization.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +65,10 @@ pub struct PhysicalAccess {
     /// Folded physical table name.
     pub table: String,
     /// Folded column name when the access is column-specific.
+    ///
+    /// [`PHYSICAL_STAR_COLUMN`] (`"*"`) means a projection wildcard on this
+    /// table (`SELECT *`, `alias.*`, `RETURNING *`). `None` is table presence
+    /// only (FROM / INSERT / UPDATE / DELETE / DROP), not a wildcard.
     pub column: Option<String>,
 }
 
