@@ -1,8 +1,8 @@
 //! Generic D1 HTTP `batch()` executor for host-authored SQL plans.
 //!
 //! The guest does not parse Bookclerk operation names. Production uses
-//! [`D1Proxy::run_typed_atomic`] (`ExecuteRequest`). [`D1Proxy::run_atomic`]
-//! is the in-process JSON host-IR path used by crate tests.
+//! [`D1Proxy::run_typed_atomic`] (`ExecuteRequest`). `run_atomic` is the
+//! in-process JSON host-IR path used by crate tests.
 
 use std::time::Duration;
 
