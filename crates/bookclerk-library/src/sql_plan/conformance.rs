@@ -4,8 +4,8 @@
 //! [`super::typed_vectors::run_typed_request_vectors`] with a callback that
 //! executes native [`ExecuteRequest`] / [`ExecuteReply`] (Cap'n Proto on the wire).
 //! [`super::vectors::run_conn_vectors`] and
-//! [`super::vectors::run_request_vectors`] remain for the legacy JSON
-//! [`DbAtomicRequest`] bridge and in-process sqlite/postgres hosts.
+//! [`super::vectors::run_request_vectors`] cover the in-process JSON-bind
+//! [`DbAtomicRequest`] host IR used by sqlite/postgres SeaORM executors.
 
 use crate::atomic_ops::{atomic_status, DbAtomicParams};
 

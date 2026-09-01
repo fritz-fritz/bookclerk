@@ -25,7 +25,6 @@ members = [
     "crates/bookclerk-sandbox",
     "crates/bookclerk-search",
     "crates/bookclerk-source",
-    "crates/bookclerk-sql-frontend-spike",
     "crates/bookclerk-storage",
     "crates/bookclerk-tray",
     "crates/bookclerk-workerd",

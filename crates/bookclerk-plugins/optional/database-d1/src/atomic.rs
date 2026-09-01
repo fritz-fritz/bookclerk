@@ -1,15 +1,27 @@
 //! Generic D1 HTTP `batch()` executor for host-authored SQL plans.
 //!
-//! The guest does not parse Bookclerk operation names. The host compiles
-//! domain work into [`DbAtomicPlan`]; this module runs that list as one
-//! D1 `{ "batch": [...] }` SQL transaction and returns statement results.
+//! The guest does not parse Bookclerk operation names. Production uses
+//! [`D1Proxy::run_typed_atomic`] (`ExecuteRequest`). [`D1Proxy::run_atomic`]
+//! is the in-process JSON host-IR path used by crate tests.
 
 use std::time::Duration;
 
+use bookclerk_db_exec::DbPlanStatementKind;
+#[cfg(test)]
 use bookclerk_db_exec::{
     sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
-    DbPlanStatementKind, DbPlanStmtExecResult,
+    DbPlanStmtExecResult,
 };
+use bookclerk_plugin_abi::DbCapabilities;
+use bookclerk_plugin_sdk::{
+    encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbResultSelection,
+    DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, StatementResult,
+    TypedDbStatement,
+};
+use sea_orm::DbErr;
+use serde_json::Value as JsonValue;
+
+use super::d1::D1Proxy;
 
 /// Collapses adapter-private companions then host-schema pack extras.
 fn collapse_d1_wire(
@@ -22,16 +34,6 @@ fn collapse_d1_wire(
         bookclerk_db_exec::collapse_companion_groups(groups, statements),
     )
 }
-use bookclerk_plugin_abi::DbCapabilities;
-use bookclerk_plugin_sdk::{
-    encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbResultSelection,
-    DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, StatementResult,
-    TypedDbStatement,
-};
-use sea_orm::DbErr;
-use serde_json::Value as JsonValue;
-
-use super::d1::D1Proxy;
 
 /// One statement in a D1 HTTP batch body.
 pub(crate) type SqlStmt = (String, Vec<JsonValue>);
@@ -103,6 +105,7 @@ fn table_cache_key(name: &str) -> String {
 
 /// True when every plan statement is a read (`Select`) — resubmitting after an
 /// ambiguous response cannot mutate state twice.
+#[cfg(test)]
 fn plan_is_read_only(plan: &DbAtomicPlan) -> bool {
     plan.statements
         .iter()
@@ -117,12 +120,14 @@ fn typed_is_read_only(statements: &[TypedDbStatement]) -> bool {
 }
 
 impl D1Proxy {
-    /// Runs a host-authored plan as one D1 HTTP batch (one SQL transaction).
+    /// JSON host-IR executor used by crate tests. Production guests call
+    /// [`Self::run_typed_atomic`].
     ///
     /// # Errors
     ///
     /// Returns an error when the plan is missing, HTTP fails, or the batch
     /// response is malformed.
+    #[cfg(test)]
     pub async fn run_atomic(
         &self,
         req: DbAtomicRequest,
@@ -962,6 +967,7 @@ fn wrap_bytes_placeholders(sql: &str, params: &[DbValue]) -> String {
 }
 
 /// D1 HTTP params are untyped JSON; typed `$sea_null` objects become SQL NULL.
+#[cfg(test)]
 fn d1_wire_binds(binds: &[JsonValue]) -> Vec<JsonValue> {
     binds
         .iter()
@@ -1060,6 +1066,7 @@ fn ambiguous_d1(msg: impl std::fmt::Display) -> DbErr {
 /// Cloudflare commits the batch before JSON is parsed. `Returning` requires a
 /// host-IR `maxRows = 1`. Top-level `;` (multi-statement SQL) and multi-tuple
 /// `VALUES` are rejected before HTTP.
+#[cfg(test)]
 fn reject_unbounded_returning(plan: &DbAtomicPlan) -> std::result::Result<(), DbErr> {
     let cap = DbCapabilities::advertised_d1().max_result_rows;
     for (i, stmt) in plan.statements.iter().enumerate() {
@@ -1740,6 +1747,7 @@ fn d1_sql_duration_us(raw: &JsonValue) -> Option<u64> {
 }
 
 /// Parses a D1 batch for a host-authored [`DbAtomicPlan`].
+#[cfg(test)]
 fn parse_generic_batch(
     plan: &DbAtomicPlan,
     value: &JsonValue,
@@ -1789,6 +1797,7 @@ fn parse_generic_batch(
 }
 
 /// Parses the D1 `result` array; a `success: false` entry is a hard statement failure.
+#[cfg(test)]
 fn parse_batch_results(
     plan: &DbAtomicPlan,
     value: &JsonValue,

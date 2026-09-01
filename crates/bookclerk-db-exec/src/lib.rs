@@ -70,8 +70,7 @@ pub use guest_receipt::{
 };
 pub use host_ir::{
     sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
-    DbPlanStatement, DbPlanStmtExecResult, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
-    SEA_NULL_KEY,
+    DbPlanStatement, DbPlanStmtExecResult, SEA_NULL_KEY,
 };
 pub use json_bridge::{db_value_from_json, db_value_to_json};
 pub use lower::{

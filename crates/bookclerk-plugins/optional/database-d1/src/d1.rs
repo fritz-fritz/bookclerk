@@ -4,7 +4,7 @@
 //! Autocommit statements use the documented `{ "sql", "params" }` REST body.
 //! Interactive `BEGIN` is rejected: Time Travel is not a substitute for rollback, and
 //! mid-transaction SeaORM reads cannot be satisfied without committing.
-//! Atomic library operations use [`D1Proxy::run_atomic`], which sends
+//! Atomic library operations use [`D1Proxy::run_typed_atomic`], which sends
 //! `{ "batch": [...] }` (a real SQL transaction) with control flow
 //! encoded in SQL and a durable `operationId` receipt.
 
