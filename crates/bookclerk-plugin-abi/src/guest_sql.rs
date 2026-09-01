@@ -470,6 +470,11 @@ pub fn authorize_guest_sql_policy(req: &ExecuteRequest, policy: &GuestSqlPolicy)
 }
 
 /// Authorizes one resolved statement from the typed proof (no lexical reparse).
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a proven table or column is
+/// outside `policy`.
 fn authorize_from_proof(
     index: usize,
     proof: &ResolvedStatement,
