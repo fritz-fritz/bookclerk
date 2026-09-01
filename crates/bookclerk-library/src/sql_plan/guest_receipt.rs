@@ -107,6 +107,9 @@ fn receipt_wrap_type_env() -> SqlTypeEnv {
 
 /// Interprets a wrapped guest reply: replay from stored payload, else strip wrapper rows.
 ///
+/// A matching prior row with empty payload is unavailable, except a `claimed`
+/// row whose guest slice has this-attempt results (SELECT ran before finalize).
+///
 /// # Errors
 ///
 /// Returns [`PluginError::conflict`] when a prior receipt exists with a
@@ -136,7 +139,14 @@ pub(crate) fn unwrap_guest_typed_reply(
                 if let Some(replayed) = decode_guest_replay_payload(prior)? {
                     return Ok(replayed);
                 }
-            } else if !bookclerk_db_exec::prior_receipt_is_claimed(prior) {
+            } else if !bookclerk_db_exec::prior_receipt_is_claimed(prior)
+                || guest_slice_is_gated_noop(&reply, guest_len)
+            {
+                // `ok`/`applied` with no payload is result-lost. A `claimed`
+                // row with empty payload is the pre-finalize SELECT: drain
+                // only when this attempt re-ran remaining guest work. Gated
+                // DML zeros (lost HTTP after the stub committed) stay
+                // unavailable so callers cannot treat a no-op as success.
                 return Err(PluginError::unavailable(
                     "executeAtomic committed with an empty guest receipt payload; retry after finalize",
                 ));
@@ -148,6 +158,16 @@ pub(crate) fn unwrap_guest_typed_reply(
         .drain(WRAP_PREFIX..WRAP_PREFIX + guest_len)
         .collect();
     Ok(reply)
+}
+
+/// True when the guest slice is empty rows and zero `rows_affected` (gated retry).
+fn guest_slice_is_gated_noop(reply: &ExecuteReply, guest_len: usize) -> bool {
+    reply
+        .statements
+        .iter()
+        .skip(WRAP_PREFIX)
+        .take(guest_len)
+        .all(|stmt| stmt.rows.is_empty() && stmt.rows_affected == 0)
 }
 
 /// Reconstructs a guest [`ExecuteReply`] from a prior-receipt select row.
@@ -747,5 +767,55 @@ mod tests {
         let guest = unwrap_guest_typed_reply(reply, 1, &"a".repeat(64)).expect("claimed resume");
         assert_eq!(guest.statements.len(), 1);
         assert_eq!(guest.statements[0].rows_affected, 7);
+    }
+
+    #[test]
+    fn unwrap_claimed_empty_payload_gated_zeros_is_unavailable() {
+        let prior = bookclerk_plugin_abi::StatementResult {
+            rows: vec![bookclerk_plugin_abi::DbRow {
+                values: vec![
+                    DbValue::Text("guest-op".into()),
+                    DbValue::Text("a".repeat(64)),
+                    DbValue::Text("claimed".into()),
+                    DbValue::Text(String::new()),
+                    DbValue::Text("2026-01-01T00:00:00Z".into()),
+                ],
+            }],
+            columns: vec![
+                bookclerk_plugin_abi::DbColumn {
+                    name: "operation_id".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "request_hash".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "status".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "payload".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "created_at".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+            ],
+            rows_affected: 0,
+        };
+        let reply = ExecuteReply {
+            operation_id: "guest-op".into(),
+            statements: vec![
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+                prior,
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+            ],
+            timing: bookclerk_plugin_abi::DbTiming::default(),
+        };
+        let err = unwrap_guest_typed_reply(reply, 1, &"a".repeat(64)).unwrap_err();
+        assert_eq!(err.code, bookclerk_plugin_abi::PluginErrorCode::Unavailable);
     }
 }
