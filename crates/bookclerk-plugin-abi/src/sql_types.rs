@@ -1039,7 +1039,7 @@ pub fn sql_v1_helper_arity(name: &str) -> Option<(usize, usize)> {
         "sum" | "avg" | "abs" | "length" | "lower" | "upper" | "json_valid" | "count" => (1, 1),
         "round" => (1, 2),
         "json_extract" => (2, 2),
-        "json_object" => (2, 32),
+        "json_object" => (2, 64),
         "replace" => (3, 3),
         "substr" => (2, 3),
         "trim" => (1, 2),
@@ -3754,6 +3754,9 @@ mod tests {
         assert!(!sql_v1_helper_arity_ok("json_object", 3));
         assert!(sql_v1_helper_arity_ok("json_object", 2));
         assert!(sql_v1_helper_arity_ok("json_object", 4));
+        assert!(sql_v1_helper_arity_ok("json_object", 42));
+        assert!(sql_v1_helper_arity_ok("json_object", 64));
+        assert!(!sql_v1_helper_arity_ok("json_object", 65));
         assert!(sql_v1_helper_arity_ok("coalesce", 2));
         for sql in [
             "SELECT abs()",

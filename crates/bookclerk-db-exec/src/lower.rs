@@ -462,6 +462,12 @@ fn overflow_row_source(backend: DatabaseBackend, cols: &str) -> String {
     }
 }
 
+/// Renders one INTEGER overflow CASE wrap for `site`.
+///
+/// # Errors
+///
+/// Returns when `site` is not a valid UTF-8 range in `sql`, or an `abs` site
+/// is not a call.
 fn wrap_integer_arith(
     backend: DatabaseBackend,
     sql: &str,
