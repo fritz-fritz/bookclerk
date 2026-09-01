@@ -9,8 +9,8 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use bookclerk_plugin_abi::{
-    assert_proof_matches_sql, IntegerArithKind, IntegerArithSite, ResolvedStatement, SqlSpan,
-    INSERT_SELECT_WRAP_ALIAS,
+    assert_proof_matches_sql, IntegerArithKind, IntegerArithSite, PluginError, ResolvedStatement,
+    SqlSpan, INSERT_SELECT_WRAP_ALIAS,
 };
 use sea_orm::DatabaseBackend;
 
@@ -33,26 +33,29 @@ pub fn lower_canonical_sql(backend: DatabaseBackend, sql: &str) -> String {
 ///
 /// `proof` must be bound to `sql` (the canonical string before mechanical
 /// lowering). When absent, TEXT collation and INTEGER overflow wraps are not
-/// applied.
+/// applied. TEXT collation runs **before** INTEGER overflow wrapping so a
+/// TEXT span nested in `length(name) + 1` is remapped into the overflow
+/// operands. Overflow sites are applied innermost-first.
 ///
 /// # Errors
 ///
-/// Returns when `proof` is present and not bound to `sql`.
+/// Returns when `proof` is present and not bound to `sql`, or when a
+/// hash-correct sidecar cannot be applied (`ResolvedStatement::validate_for`).
 pub fn lower_canonical_sql_typed(
     backend: DatabaseBackend,
     sql: &str,
     proof: Option<&ResolvedStatement>,
 ) -> Result<String, bookclerk_plugin_abi::PluginError> {
     let mut sql = sql.to_string();
-    let mut collate = Vec::new();
     if let Some(proof) = proof {
         assert_proof_matches_sql(proof, &sql)?;
-        let rewritten = apply_integer_overflow_from_proof(backend, &sql, proof);
-        sql = rewritten.sql;
-        collate = rewritten.collate;
-    }
-    if backend == DatabaseBackend::Postgres {
-        sql = apply_text_collate_spans(&sql, &collate);
+        proof.validate_for(&sql)?;
+        let mut arith = proof.integer_arith_sites.clone();
+        let collate: Vec<SqlSpan> = proof.text_collate_sites.iter().map(|s| s.span).collect();
+        if backend == DatabaseBackend::Postgres {
+            sql = apply_text_collate_spans(&sql, &collate, &mut arith)?;
+        }
+        sql = apply_integer_overflow_from_proof(backend, &sql, &arith)?;
     }
     Ok(lower_mechanical(backend, sql))
 }
@@ -307,44 +310,67 @@ fn skip_balanced(sql: &str, open: usize) -> usize {
     sql.len()
 }
 
-/// Inserts `COLLATE "C"` at TEXT spans recorded on `proof`.
+/// Wrap each TEXT span as `(piece COLLATE "C")` (Postgres).
+///
+/// Applied **before** INTEGER overflow wrapping. Spans are applied
+/// right-to-left. Trailing trivia on a TEXT span is left outside the wrap;
+/// INTEGER sites shift from the trimmed end.
+///
+/// JSON `json_extract` path literals are **not** skipped by contents here. The
+/// typechecker omits those path args from `text_collate_sites`
+/// (`suppress_string_collate`) so a comparison / `ORDER BY` on a `'$.…'`
+/// string still gets `"C"`.
 ///
 /// # Errors
 ///
-/// Returns when `proof` is not bound to `sql`.
-#[allow(dead_code)]
-fn apply_text_collate_from_proof(
+/// Returns when a span is empty, past `sql`, or not on a UTF-8 boundary.
+fn apply_text_collate_spans(
     sql: &str,
-    proof: &ResolvedStatement,
-) -> Result<String, bookclerk_plugin_abi::PluginError> {
-    assert_proof_matches_sql(proof, sql)?;
-    let sites: Vec<_> = proof.text_collate_sites.iter().map(|s| s.span).collect();
-    Ok(apply_text_collate_spans(sql, &sites))
-}
-
-fn apply_text_collate_spans(sql: &str, sites: &[SqlSpan]) -> String {
-    let mut sites = sites.to_vec();
-    sites.sort_by_key(|s| std::cmp::Reverse(s.start));
+    sites: &[SqlSpan],
+    arith: &mut [IntegerArithSite],
+) -> Result<String, PluginError> {
+    let mut ordered = sites.to_vec();
+    ordered.sort_by_key(|s| std::cmp::Reverse(s.start));
     let mut out = sql.to_string();
-    for span in sites {
-        if span.end > out.len() || span.start >= span.end {
-            continue;
+    for span in ordered {
+        if span.start >= span.end || span.end > out.len() {
+            return Err(PluginError::internal(
+                "text collate span is empty or past end of SQL",
+            ));
         }
-        let piece = out[span.start..span.end].to_string();
-        let piece = piece.trim_end();
+        if !out.is_char_boundary(span.start) || !out.is_char_boundary(span.end) {
+            return Err(PluginError::internal(
+                "text collate span is not on a UTF-8 boundary",
+            ));
+        }
+        let raw = &out[span.start..span.end];
+        // TypeCx expression walks skip trailing trivia into some TEXT spans
+        // (`infer_add` looks ahead for `+`). Wrap the trimmed ident/literal so
+        // `SELECT body FROM` stays `SELECT (body COLLATE "C") FROM`.
+        let piece = raw.trim_end();
         if piece.is_empty() {
-            continue;
+            return Err(PluginError::internal("text collate span is empty"));
         }
-        // JSON path literals must stay `'$.a.b'` so `json_extract` lowering can
-        // parse them. COLLATE on the extract document/result is enough.
-        if piece.starts_with("'$.") {
-            continue;
+        let trim_end = span.start + piece.len();
+        if !out.is_char_boundary(trim_end) {
+            return Err(PluginError::internal(
+                "text collate span trim is not on a UTF-8 boundary",
+            ));
         }
-        let end = span.start + piece.len();
         let wrapped = format!("({piece} COLLATE \"C\")");
-        out.replace_range(span.start..end, &wrapped);
+        let old_len = piece.len();
+        if wrapped.len() < old_len {
+            return Err(PluginError::internal("text collate wrap shrank the span"));
+        }
+        let delta = wrapped.len() - old_len;
+        out.replace_range(span.start..trim_end, &wrapped);
+        for site in arith.iter_mut() {
+            site.full = shift_span(site.full, trim_end, delta);
+            site.lhs = shift_span(site.lhs, trim_end, delta);
+            site.rhs = shift_span(site.rhs, trim_end, delta);
+        }
     }
-    out
+    Ok(out)
 }
 
 /// i64::MAX as a portable SQL integer.
@@ -359,30 +385,44 @@ fn i64_min_sql(backend: DatabaseBackend) -> &'static str {
     }
 }
 
-struct OverflowRewrite {
-    sql: String,
-    collate: Vec<SqlSpan>,
-}
-
+/// Wrap each INTEGER `+`/`-`/`*`/`abs` site in a portable overflow CASE.
+///
+/// Sites are applied **innermost-first** (`full.end`, then reverse `full.start`)
+/// so right-nested `1 + abs(n)` rewrites the `abs` call before the outer add.
+/// After each wrap, remaining (outer) sites shift by the inserted byte count.
+///
+/// # Errors
+///
+/// Returns when a site is empty, past `sql`, not on a UTF-8 boundary, or cannot
+/// be wrapped as the recorded operator.
 fn apply_integer_overflow_from_proof(
     backend: DatabaseBackend,
     sql: &str,
-    proof: &ResolvedStatement,
-) -> OverflowRewrite {
-    let mut sites = proof.integer_arith_sites.clone();
-    sites.sort_by_key(|s| (s.full.end, s.full.start));
-    let mut collate: Vec<SqlSpan> = proof.text_collate_sites.iter().map(|s| s.span).collect();
+    sites: &[IntegerArithSite],
+) -> Result<String, PluginError> {
+    let mut sites = sites.to_vec();
+    sites.sort_by_key(|s| (s.full.end, std::cmp::Reverse(s.full.start)));
     let mut out = sql.to_string();
     for i in 0..sites.len() {
         let site = sites[i];
-        let Some(wrapped) = wrap_integer_arith(backend, &out, &site) else {
-            continue;
-        };
-        if site.full.end > out.len() || site.full.start >= site.full.end {
-            continue;
+        if site.full.start >= site.full.end || site.full.end > out.len() {
+            return Err(PluginError::internal(
+                "INTEGER overflow site is empty or past end of SQL",
+            ));
         }
+        if !out.is_char_boundary(site.full.start) || !out.is_char_boundary(site.full.end) {
+            return Err(PluginError::internal(
+                "INTEGER overflow site is not on a UTF-8 boundary",
+            ));
+        }
+        let wrapped = wrap_integer_arith(backend, &out, &site)?;
         let old_len = site.full.end - site.full.start;
-        let delta = wrapped.len().saturating_sub(old_len);
+        if wrapped.len() < old_len {
+            return Err(PluginError::internal(
+                "INTEGER overflow wrap shrank the site",
+            ));
+        }
+        let delta = wrapped.len() - old_len;
         let repl_end = site.full.end;
         out.replace_range(site.full.start..site.full.end, &wrapped);
         for later in sites.iter_mut().skip(i + 1) {
@@ -390,11 +430,8 @@ fn apply_integer_overflow_from_proof(
             later.lhs = shift_span(later.lhs, repl_end, delta);
             later.rhs = shift_span(later.rhs, repl_end, delta);
         }
-        for span in &mut collate {
-            *span = shift_span(*span, repl_end, delta);
-        }
     }
-    OverflowRewrite { sql: out, collate }
+    Ok(out)
 }
 
 fn shift_span(span: SqlSpan, repl_end: usize, delta: usize) -> SqlSpan {
@@ -429,22 +466,31 @@ fn wrap_integer_arith(
     backend: DatabaseBackend,
     sql: &str,
     site: &IntegerArithSite,
-) -> Option<String> {
+) -> Result<String, PluginError> {
     if site.full.end > sql.len()
         || site.lhs.end > sql.len()
         || site.rhs.end > sql.len()
         || site.lhs.start >= site.lhs.end
         || site.full.start >= site.full.end
+        || !sql.is_char_boundary(site.full.start)
+        || !sql.is_char_boundary(site.full.end)
+        || !sql.is_char_boundary(site.lhs.start)
+        || !sql.is_char_boundary(site.lhs.end)
+        || !sql.is_char_boundary(site.rhs.start)
+        || !sql.is_char_boundary(site.rhs.end)
     {
-        return None;
+        return Err(PluginError::internal(
+            "INTEGER overflow site is not a valid UTF-8 range in the statement",
+        ));
     }
     let min = i64_min_sql(backend);
     match site.kind {
         IntegerArithKind::Abs => {
             let full = &sql[site.full.start..site.full.end];
-            let arg = abs_call_arg(full).unwrap_or(full);
+            let arg = abs_call_arg(full)
+                .ok_or_else(|| PluginError::internal("INTEGER overflow abs site is not a call"))?;
             let src = overflow_row_source(backend, &format!("({arg}) AS a"));
-            Some(format!(
+            Ok(format!(
                 "(SELECT CASE WHEN a IS NULL THEN NULL WHEN a = {min} THEN NULL ELSE abs(a) END \
                  FROM {src})"
             ))
@@ -453,7 +499,7 @@ fn wrap_integer_arith(
             let a = &sql[site.lhs.start..site.lhs.end];
             let b = &sql[site.rhs.start..site.rhs.end];
             let src = overflow_row_source(backend, &format!("({a}) AS a, ({b}) AS b"));
-            Some(format!(
+            Ok(format!(
                 "(SELECT CASE WHEN a IS NULL OR b IS NULL THEN a + b \
                  WHEN a > 0 AND b > 0 AND a > {I64_MAX_SQL} - b THEN NULL \
                  WHEN a < 0 AND b < 0 AND a < {min} - b THEN NULL \
@@ -464,7 +510,7 @@ fn wrap_integer_arith(
             let a = &sql[site.lhs.start..site.lhs.end];
             let b = &sql[site.rhs.start..site.rhs.end];
             let src = overflow_row_source(backend, &format!("({a}) AS a, ({b}) AS b"));
-            Some(format!(
+            Ok(format!(
                 "(SELECT CASE WHEN a IS NULL OR b IS NULL THEN a - b \
                  WHEN b < 0 AND a > {I64_MAX_SQL} + b THEN NULL \
                  WHEN b > 0 AND a < {min} + b THEN NULL \
@@ -475,7 +521,7 @@ fn wrap_integer_arith(
             let a = &sql[site.lhs.start..site.lhs.end];
             let b = &sql[site.rhs.start..site.rhs.end];
             let src = overflow_row_source(backend, &format!("({a}) AS a, ({b}) AS b"));
-            Some(format!(
+            Ok(format!(
                 "(SELECT CASE WHEN a IS NULL OR b IS NULL THEN a * b \
                  WHEN a = 0 OR b = 0 THEN 0 \
                  WHEN (a = {min} AND b = -1) OR (b = {min} AND a = -1) THEN NULL \
@@ -2140,5 +2186,126 @@ mod tests {
         assert!(err.to_string().contains("proof"), "{err}");
         lower_canonical_sql_typed(DatabaseBackend::Sqlite, sql, Some(&proof))
             .expect("canonical SQL matches the proof");
+    }
+
+    #[test]
+    fn nested_integer_arith_lowers_innermost_first() {
+        let env = sql_type_env_from_canonical_ddl("CREATE TABLE t (n INTEGER, body TEXT)");
+        let sql = "SELECT 1 + abs(n) FROM t";
+        let sqlite = {
+            let proof = proof_of(sql, &env);
+            lower_canonical_sql_typed(DatabaseBackend::Sqlite, sql, Some(&proof))
+                .expect("nested abs")
+        };
+        assert!(sqlite.contains("abs(a)"), "{sqlite}");
+        assert!(
+            sqlite.matches("_bc_ov").count() >= 2,
+            "inner abs and outer add each need a derived table: {sqlite}"
+        );
+        let mul = "SELECT 1 + 2 * 3";
+        let sqlite_mul = {
+            let proof = proof_of(mul, &SqlTypeEnv::new());
+            lower_canonical_sql_typed(DatabaseBackend::Sqlite, mul, Some(&proof))
+                .expect("nested mul")
+        };
+        assert!(sqlite_mul.matches("_bc_ov").count() >= 2, "{sqlite_mul}");
+        let binds = "SELECT ? + abs(?)";
+        let req = ExecuteRequest {
+            operation_id: "t".into(),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![TypedDbStatement {
+                sql: binds.into(),
+                parameters: vec![DbValue::Int64(1), DbValue::Int64(-2)],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+        };
+        let proof = typecheck_execute_request_proofs(&req, &SqlTypeEnv::new())
+            .expect("typecheck")
+            .remove(0);
+        let sqlite_b = lower_canonical_sql_typed(DatabaseBackend::Sqlite, binds, Some(&proof))
+            .expect("bind nested");
+        assert_eq!(
+            sqlite_b.bytes().filter(|b| *b == b'?').count(),
+            2,
+            "{sqlite_b}"
+        );
+        let pg_b = lower_canonical_sql_typed(DatabaseBackend::Postgres, binds, Some(&proof))
+            .expect("pg bind nested");
+        assert!(pg_b.contains("$1") && pg_b.contains("$2"), "{pg_b}");
+        assert!(!pg_b.contains("$3"), "{pg_b}");
+    }
+
+    #[test]
+    fn text_collate_inside_overflow_is_remapped() {
+        let env = sql_type_env_from_canonical_ddl("CREATE TABLE t (body TEXT)");
+        let sql = "SELECT length(body) + 1 FROM t";
+        let pg = lower_pg(sql, &env);
+        assert!(pg.contains("THEN NULL"), "{pg}");
+        assert!(
+            pg.contains("length((body COLLATE \"C\"))") || pg.contains("(body COLLATE \"C\")"),
+            "TEXT span inside overflow must already be collated: {pg}"
+        );
+        assert!(pg.contains("LATERAL"), "{pg}");
+    }
+
+    #[test]
+    fn json_path_like_literal_outside_extract_still_collates() {
+        let sql = "SELECT CASE WHEN '$.ä' < 'a' THEN 1 ELSE 0 END";
+        let pg = lower_pg(sql, &SqlTypeEnv::new());
+        assert!(
+            pg.contains("('$.ä' COLLATE \"C\")"),
+            "non-json_extract '$.…' must collate: {pg}"
+        );
+        let sqlite = {
+            let proof = proof_of(sql, &SqlTypeEnv::new());
+            lower_canonical_sql_typed(DatabaseBackend::Sqlite, sql, Some(&proof)).expect("sqlite")
+        };
+        assert!(sqlite.contains("'$.ä'"), "{sqlite}");
+        assert!(!sqlite.contains("COLLATE"), "{sqlite}");
+        let env = sql_type_env_from_canonical_ddl("CREATE TABLE t (payload TEXT)");
+        let extract = lower_pg("SELECT json_extract(payload, '$.ä') FROM t", &env);
+        assert!(
+            !extract.to_ascii_lowercase().contains("json_extract("),
+            "{extract}"
+        );
+        assert!(extract.contains("#>>"), "{extract}");
+        assert!(
+            !extract.contains("('$.ä' COLLATE"),
+            "json_extract path must stay a literal: {extract}"
+        );
+    }
+
+    #[test]
+    fn typed_lowering_fails_closed_on_malformed_sidecar() {
+        let sql = "SELECT 'ä'";
+        let mut proof = proof_of(sql, &SqlTypeEnv::new());
+        let span = proof
+            .text_collate_sites
+            .first()
+            .copied()
+            .expect("literal collate site");
+        let mid = (span.span.start + 1..span.span.end)
+            .find(|&i| !sql.is_char_boundary(i))
+            .expect("ä is multi-byte");
+        proof.text_collate_sites[0].span.end = mid;
+        let err = lower_canonical_sql_typed(DatabaseBackend::Postgres, sql, Some(&proof))
+            .expect_err("mid-character TEXT span");
+        assert!(
+            err.to_string().contains("proof") || err.to_string().contains("UTF-8"),
+            "{err}"
+        );
+
+        let add = "SELECT 1 + 2";
+        let mut arith = proof_of(add, &SqlTypeEnv::new());
+        arith.integer_arith_sites[0].full.end = add.len() + 8;
+        let err = lower_canonical_sql_typed(DatabaseBackend::Sqlite, add, Some(&arith))
+            .expect_err("out-of-range arith site");
+        assert!(
+            err.to_string().contains("proof") || err.to_string().contains("span"),
+            "{err}"
+        );
     }
 }

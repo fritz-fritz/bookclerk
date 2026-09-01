@@ -1255,6 +1255,47 @@ async fn binding_runtime_edges_and_type_negatives() {
     {
         panic!("{err}");
     }
+    let mut nested = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_NESTED_INTEGER_ARITH,
+        vec![],
+    );
+    nested.max_rows = 8;
+    let reply = run_binding(&db, req("nested-arith", vec![nested]))
+        .await
+        .expect("nested integer arith");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_nested_integer_arith_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
+    let mut nested_b = stmt(
+        "SELECT ? + abs(?)",
+        vec![
+            bookclerk_plugin_abi::DbValue::Int64(1),
+            bookclerk_plugin_abi::DbValue::Int64(-2),
+        ],
+    );
+    nested_b.max_rows = 8;
+    let reply = run_binding(&db, req("nested-arith-binds", vec![nested_b]))
+        .await
+        .expect("nested arith binds");
+    assert_eq!(
+        reply.statements[0].rows[0].values[0],
+        bookclerk_plugin_abi::DbValue::Int64(3)
+    );
+    let mut path_cmp = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_JSON_PATH_LIKE_COMPARE,
+        vec![],
+    );
+    path_cmp.max_rows = 8;
+    let reply = run_binding(&db, req("json-path-like-compare", vec![path_cmp]))
+        .await
+        .expect("json-path-like compare");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_json_path_like_compare_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
 
     run_binding(
         &db,

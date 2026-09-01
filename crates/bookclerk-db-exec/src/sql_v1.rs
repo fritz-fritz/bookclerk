@@ -434,6 +434,54 @@ pub fn portable_integer_overflow_mismatch(stmt: &StatementResult) -> Option<Stri
     )
 }
 
+/// Nested INTEGER `+`/`*`/`abs` plus TEXT-inside-overflow (`length('ä') + 1`).
+pub const PORTABLE_NESTED_INTEGER_ARITH: &str = "SELECT \
+     1 + abs(-2) AS n0, \
+     1 + 2 * 3 AS n1, \
+     1 + abs(-9223372036854775807 - 1) AS n2, \
+     length('ä') + 1 AS n3";
+
+/// Expected [`PORTABLE_NESTED_INTEGER_ARITH`] cells.
+#[must_use]
+pub fn portable_nested_integer_arith_expects() -> &'static [PortableExpect] {
+    &[
+        PortableExpect::Int(3),
+        PortableExpect::Int(7),
+        PortableExpect::Null,
+        PortableExpect::Int(2),
+    ]
+}
+
+/// Formats a mismatch for [`PORTABLE_NESTED_INTEGER_ARITH`].
+#[must_use]
+pub fn portable_nested_integer_arith_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_statement_mismatch(
+        stmt,
+        portable_nested_integer_arith_expects(),
+        "portable nested integer arith",
+    )
+}
+
+/// `'$.…'` compared as TEXT (not a `json_extract` path) — Postgres must COLLATE.
+pub const PORTABLE_JSON_PATH_LIKE_COMPARE: &str =
+    "SELECT CASE WHEN '$.ä' < 'a' THEN 1 ELSE 0 END AS c0";
+
+/// Expected [`PORTABLE_JSON_PATH_LIKE_COMPARE`] cells.
+#[must_use]
+pub fn portable_json_path_like_compare_expects() -> &'static [PortableExpect] {
+    &[PortableExpect::Int(1)]
+}
+
+/// Formats a mismatch for [`PORTABLE_JSON_PATH_LIKE_COMPARE`].
+#[must_use]
+pub fn portable_json_path_like_compare_mismatch(stmt: &StatementResult) -> Option<String> {
+    portable_statement_mismatch(
+        stmt,
+        portable_json_path_like_compare_expects(),
+        "portable json-path-like compare",
+    )
+}
+
 /// `/` RHS covering call, unary, CAST, and parenthesized zero.
 pub const PORTABLE_DIV_OPERANDS: &str = "SELECT \
      10 / abs(0) AS d0, \

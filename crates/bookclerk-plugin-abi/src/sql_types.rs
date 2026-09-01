@@ -1029,6 +1029,55 @@ pub fn cast_is_legal(from: SqlType, to: SqlType) -> bool {
     )
 }
 
+/// SQL-v1 helper arity `(min, max)` inclusive. Unknown names return `None`.
+#[must_use]
+pub fn sql_v1_helper_arity(name: &str) -> Option<(usize, usize)> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "ifnull" | "nullif" => (2, 2),
+        "coalesce" => (2, 32),
+        "min" | "max" => (1, 32),
+        "sum" | "avg" | "abs" | "length" | "lower" | "upper" | "json_valid" | "count" => (1, 1),
+        "round" => (1, 2),
+        "json_extract" => (2, 2),
+        "json_object" => (2, 32),
+        "replace" => (3, 3),
+        "substr" => (2, 3),
+        "trim" => (1, 2),
+        "json" | "julianday" => (1, 1),
+        _ => return None,
+    })
+}
+
+/// True when `n` matches the SQL-v1 signature for `name`.
+#[must_use]
+pub fn sql_v1_helper_arity_ok(name: &str, n: usize) -> bool {
+    let Some((min, max)) = sql_v1_helper_arity(name) else {
+        return true;
+    };
+    if n < min || n > max {
+        return false;
+    }
+    if name.eq_ignore_ascii_case("json_object") && !n.is_multiple_of(2) {
+        return false;
+    }
+    true
+}
+
+/// Rejects a helper call whose argument count is outside the v1 matrix.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `n` is not a legal arity.
+pub fn require_sql_v1_helper_arity(index: usize, name: &str, n: usize) -> Result<()> {
+    if sql_v1_helper_arity_ok(name, n) {
+        Ok(())
+    } else {
+        Err(PluginError::invalid_params(format!(
+            "statement {index} is not Bookclerk SQL v1 (function {name} has arity {n})"
+        )))
+    }
+}
+
 /// Unifies two types (`NULL` is the identity; INTEGER+REAL → REAL).
 ///
 /// # Errors
@@ -1118,9 +1167,12 @@ fn typecheck_statement(
         integer_arith_sites: Vec::new(),
         output_columns: Vec::new(),
         require_named_derived: false,
+        suppress_string_collate: false,
     };
     typecheck_sql(sql, &mut cx)?;
-    Ok(cx.into_proof(sql))
+    let proof = cx.into_proof(sql);
+    proof.validate_for(sql)?;
+    Ok(proof)
 }
 
 fn typecheck_create(
@@ -1276,6 +1328,7 @@ fn typecheck_create_checks(
         integer_arith_sites: Vec::new(),
         output_columns: Vec::new(),
         require_named_derived: false,
+        suppress_string_collate: false,
     };
     for check in schema
         .column_checks
@@ -1296,6 +1349,12 @@ fn typecheck_create_checks(
         };
         let ty = infer_expr(&mut scan, &mut cx)?;
         require_booleanish(index, ty, "CHECK")?;
+        if !cx.integer_arith_sites.is_empty() {
+            return Err(ty_err(
+                index,
+                "CHECK cannot use INTEGER + - * abs (overflow wrapping is DML-only)",
+            ));
+        }
     }
     Ok(())
 }
@@ -1333,6 +1392,9 @@ struct TypeCx<'a> {
     integer_arith_sites: Vec<IntegerArithSite>,
     output_columns: Vec<(String, SqlType)>,
     require_named_derived: bool,
+    /// When set, string literals are not recorded as TEXT collate sites
+    /// (`json_extract` path arguments).
+    suppress_string_collate: bool,
 }
 
 impl TypeCx<'_> {
@@ -2479,7 +2541,9 @@ fn infer_atom(scan: &mut TScan<'_>, cx: &mut TypeCx<'_>) -> Result<SqlType> {
     if scan.take_string() {
         let end = scan.i;
         let start = string_lit_start(scan, end);
-        cx.note_text(scan.abs(start), scan.abs(end));
+        if !cx.suppress_string_collate {
+            cx.note_text(scan.abs(start), scan.abs(end));
+        }
         return Ok(SqlType::Text);
     }
     if scan.take_number() {
@@ -2567,7 +2631,19 @@ fn infer_call(
 ) -> Result<SqlType> {
     let mut args = Vec::new();
     cx.functions.insert(name.to_ascii_lowercase());
-    if !scan.peek_byte(b')') {
+    if name == "json_extract" {
+        if !scan.peek_byte(b')') {
+            args.push(infer_expr(scan, cx)?);
+            if scan.take_byte(b',') {
+                cx.suppress_string_collate = true;
+                args.push(infer_expr(scan, cx)?);
+                cx.suppress_string_collate = false;
+                while scan.take_byte(b',') {
+                    args.push(infer_expr(scan, cx)?);
+                }
+            }
+        }
+    } else if !scan.peek_byte(b')') {
         if name == "count" && scan.take_byte(b'*') {
             args.push(SqlType::Integer);
         } else {
@@ -2582,6 +2658,7 @@ fn infer_call(
     if !scan.take_byte(b')') {
         return Err(ty_err(cx.index, "call )"));
     }
+    require_sql_v1_helper_arity(cx.index, name, args.len())?;
     match name {
         "ifnull" | "coalesce" | "nullif" => {
             let mut t = SqlType::Null;
@@ -3401,7 +3478,10 @@ mod tests {
         assert!(err.to_string().contains("TEXT"), "{err}");
         let err =
             typecheck_execute_request(&req("SELECT substr('x')"), &SqlTypeEnv::new()).unwrap_err();
-        assert!(err.to_string().contains("substr()"), "{err}");
+        assert!(
+            err.to_string().contains("substr") && err.to_string().contains("arity"),
+            "{err}"
+        );
         let err = typecheck_execute_request(&req("SELECT round(1, 'x')"), &SqlTypeEnv::new())
             .unwrap_err();
         assert!(err.to_string().contains("round()"), "{err}");
@@ -3640,6 +3720,96 @@ mod tests {
             .integer_arith_sites
             .iter()
             .any(|s| s.kind == IntegerArithKind::Mul));
+    }
+
+    #[test]
+    fn json_extract_path_is_not_a_text_collate_site() {
+        let env = sql_type_env_from_canonical_ddl("CREATE TABLE t (payload TEXT)");
+        let sql = "SELECT json_extract(payload, '$.k') FROM t";
+        let proofs = typecheck_execute_request_resolved(&req(sql), &env).unwrap();
+        for site in &proofs[0].text_collate_sites {
+            let piece = &sql[site.span.start..site.span.end];
+            assert!(
+                !piece.contains("$."),
+                "json_extract path must not collate: {piece:?}"
+            );
+        }
+        let cmp = "SELECT '$.ä' < 'a'";
+        let cmp_proofs = typecheck_execute_request_resolved(&req(cmp), &SqlTypeEnv::new()).unwrap();
+        assert!(
+            cmp_proofs[0]
+                .text_collate_sites
+                .iter()
+                .any(|s| { cmp[s.span.start..s.span.end].contains("$.ä") }),
+            "{:?}",
+            cmp_proofs[0].text_collate_sites
+        );
+    }
+
+    #[test]
+    fn helper_arity_matrix_rejects_wrong_counts() {
+        assert!(!sql_v1_helper_arity_ok("abs", 0));
+        assert!(!sql_v1_helper_arity_ok("ifnull", 1));
+        assert!(!sql_v1_helper_arity_ok("json_object", 1));
+        assert!(!sql_v1_helper_arity_ok("json_object", 3));
+        assert!(sql_v1_helper_arity_ok("json_object", 2));
+        assert!(sql_v1_helper_arity_ok("json_object", 4));
+        assert!(sql_v1_helper_arity_ok("coalesce", 2));
+        for sql in [
+            "SELECT abs()",
+            "SELECT ifnull(1)",
+            "SELECT json_object('k')",
+            "SELECT json_object('a', 1, 'b')",
+        ] {
+            let err = typecheck_execute_request(&req(sql), &SqlTypeEnv::new()).unwrap_err();
+            assert!(err.to_string().contains("arity"), "{sql}: {err}");
+        }
+    }
+
+    #[test]
+    fn create_check_rejects_integer_overflow_ops() {
+        typecheck_execute_request(
+            &req("CREATE TABLE IF NOT EXISTS checked (n INTEGER CHECK (n > 0))"),
+            &SqlTypeEnv::new(),
+        )
+        .expect("comparison CHECK");
+        let err = typecheck_execute_request(
+            &req("CREATE TABLE IF NOT EXISTS checked (n INTEGER CHECK (n + 1 > n))"),
+            &SqlTypeEnv::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("CHECK") && err.to_string().contains("overflow"),
+            "{err}"
+        );
+        let err = typecheck_execute_request(
+            &req("CREATE TABLE IF NOT EXISTS checked (n INTEGER CHECK (abs(n) > 0))"),
+            &SqlTypeEnv::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("CHECK"), "{err}");
+    }
+
+    #[test]
+    fn validate_for_rejects_malformed_sidecar() {
+        let sql = "SELECT 1 + 2";
+        let mut proof = typecheck_execute_request_resolved(&req(sql), &SqlTypeEnv::new())
+            .unwrap()
+            .remove(0);
+        proof.validate_for(sql).expect("fresh proof");
+        proof.integer_arith_sites[0].full.end = sql.len() + 4;
+        assert!(proof.validate_for(sql).is_err());
+
+        let lit = "SELECT 'ä'";
+        let mut text = typecheck_execute_request_resolved(&req(lit), &SqlTypeEnv::new())
+            .unwrap()
+            .remove(0);
+        let span = text.text_collate_sites[0].span;
+        let mid = (span.start + 1..span.end)
+            .find(|&i| !lit.is_char_boundary(i))
+            .expect("ä is multi-byte");
+        text.text_collate_sites[0].span.end = mid;
+        assert!(text.validate_for(lit).is_err());
     }
 
     #[test]

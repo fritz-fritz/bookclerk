@@ -10,7 +10,7 @@
 use crate::{
     sql_proof::ResolvedStatement,
     sql_types::{
-        sql_host_bookkeeping_type_env, typecheck_execute_request,
+        require_sql_v1_helper_arity, sql_host_bookkeeping_type_env, typecheck_execute_request,
         typecheck_execute_request_resolved, SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS,
         SQL_CATALOG_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
     },
@@ -1488,26 +1488,7 @@ fn parse_v1_call_args(index: usize, scan: &mut Scan<'_>, name: &str) -> Result<(
 ///
 /// Returns [`PluginError::invalid_params`] when the construct is not SQL v1.
 fn check_v1_arity(index: usize, name: &str, n: usize) -> Result<()> {
-    let (min, max) = match name {
-        "round" => (1, 2),
-        "avg" | "sum" | "abs" | "length" | "lower" | "upper" | "json_valid" | "count" => (1, 1),
-        "ifnull" | "nullif" => (2, 2),
-        "coalesce" => (2, 32),
-        "min" | "max" => (1, 32),
-        "json_extract" => (2, 2),
-        "json_object" => (2, 32),
-        "replace" => (3, 3),
-        "substr" => (2, 3),
-        "trim" => (1, 2),
-        _ => return Ok(()),
-    };
-    if n < min || n > max {
-        return Err(v1_grammar_err(
-            index,
-            &format!("function {name} has arity {n}; expected {min}..={max}"),
-        ));
-    }
-    Ok(())
+    require_sql_v1_helper_arity(index, name, n)
 }
 
 /// # Errors
@@ -3867,10 +3848,34 @@ mod tests {
                     || err.to_string().contains("column list")
                     || err.to_string().contains("reserved")
                     || err.to_string().contains("unknown column")
-                    || err.to_string().contains("round()"),
+                    || err.to_string().contains("round()")
+                    || err.to_string().contains("arity"),
                 "{sql}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn binding_owned_rejects_helper_arity_and_check_overflow() {
+        for sql in [
+            "SELECT abs() FROM notes",
+            "SELECT ifnull(id) FROM notes",
+            "SELECT json_object('k') FROM notes",
+            "SELECT json_object('a', 1, 'b') FROM notes",
+        ] {
+            let err = binding_check(sql, DbResultSelection::Rows, 1).unwrap_err();
+            assert!(err.to_string().contains("arity"), "{sql}: {err}");
+        }
+        let err = binding_check(
+            "CREATE TABLE IF NOT EXISTS t (n INTEGER CHECK (n + 1 > n))",
+            DbResultSelection::Discard,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("CHECK") || err.to_string().contains("overflow"),
+            "{err}"
+        );
     }
 
     #[test]

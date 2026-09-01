@@ -147,6 +147,72 @@ impl ResolvedStatement {
     pub fn proves(&self, sql: &str) -> bool {
         self.statement_hash == statement_sql_hash(sql)
     }
+
+    /// Rejects a hash-correct proof whose TEXT/arithmetic sidecar cannot be applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns when a span is empty, out of range, not on a UTF-8 boundary,
+    /// operands are not contained in `full`, sites partially overlap, or an
+    /// arithmetic kind does not match the operator in `sql`.
+    pub fn validate_for(&self, sql: &str) -> crate::Result<()> {
+        for site in &self.text_collate_sites {
+            span_in_sql(sql, site.span, "TEXT collation")?;
+        }
+        for (i, site) in self.integer_arith_sites.iter().enumerate() {
+            span_in_sql(sql, site.full, "INTEGER arithmetic")?;
+            span_in_sql(sql, site.lhs, "INTEGER arithmetic lhs")?;
+            span_in_sql(sql, site.rhs, "INTEGER arithmetic rhs")?;
+            if !span_contains(site.full, site.lhs) || !span_contains(site.full, site.rhs) {
+                return Err(crate::PluginError::internal(
+                    "resolved SQL proof arithmetic operands are not inside the full site",
+                ));
+            }
+            match site.kind {
+                IntegerArithKind::Abs => {
+                    let piece = sql[site.full.start..site.full.end].trim_start();
+                    let head = piece.as_bytes().get(..3);
+                    if !head.is_some_and(|h| h.eq_ignore_ascii_case(b"abs")) {
+                        return Err(crate::PluginError::internal(
+                            "resolved SQL proof abs site does not start with abs",
+                        ));
+                    }
+                }
+                IntegerArithKind::Add => {
+                    if !binary_op_between(sql, site.lhs.end, site.rhs.start, '+') {
+                        return Err(crate::PluginError::internal(
+                            "resolved SQL proof arithmetic kind does not match the operator",
+                        ));
+                    }
+                }
+                IntegerArithKind::Sub => {
+                    if !binary_op_between(sql, site.lhs.end, site.rhs.start, '-') {
+                        return Err(crate::PluginError::internal(
+                            "resolved SQL proof arithmetic kind does not match the operator",
+                        ));
+                    }
+                }
+                IntegerArithKind::Mul => {
+                    if !binary_op_between(sql, site.lhs.end, site.rhs.start, '*') {
+                        return Err(crate::PluginError::internal(
+                            "resolved SQL proof arithmetic kind does not match the operator",
+                        ));
+                    }
+                }
+            }
+            for (j, other) in self.integer_arith_sites.iter().enumerate() {
+                if j <= i {
+                    continue;
+                }
+                if !spans_nested_or_disjoint(site.full, other.full) {
+                    return Err(crate::PluginError::internal(
+                        "resolved SQL proof arithmetic sites partially overlap",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Require `proof` to be bound to `sql`.
@@ -163,4 +229,38 @@ pub fn assert_proof_matches_sql(proof: &ResolvedStatement, sql: &str) -> crate::
             "resolved SQL proof is not bound to this canonical statement",
         ))
     }
+}
+
+/// # Errors
+///
+/// Returns when the span is empty, past `sql`, or not on a UTF-8 boundary.
+fn span_in_sql(sql: &str, span: SqlSpan, what: &str) -> crate::Result<()> {
+    if span.start >= span.end
+        || span.end > sql.len()
+        || !sql.is_char_boundary(span.start)
+        || !sql.is_char_boundary(span.end)
+    {
+        return Err(crate::PluginError::internal(format!(
+            "resolved SQL proof {what} span is not a valid UTF-8 range in the statement"
+        )));
+    }
+    Ok(())
+}
+
+/// True when `inner` lies inside `outer` (inclusive on both ends).
+fn span_contains(outer: SqlSpan, inner: SqlSpan) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
+}
+
+/// True when two spans nest or do not overlap (partial overlap is rejected).
+fn spans_nested_or_disjoint(a: SqlSpan, b: SqlSpan) -> bool {
+    a.end <= b.start || b.end <= a.start || span_contains(a, b) || span_contains(b, a)
+}
+
+/// True when `want` is the first non-whitespace operator between operands.
+fn binary_op_between(sql: &str, lhs_end: usize, rhs_start: usize, want: char) -> bool {
+    if lhs_end > rhs_start || rhs_start > sql.len() {
+        return false;
+    }
+    sql[lhs_end..rhs_start].trim_start().starts_with(want)
 }

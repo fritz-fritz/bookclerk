@@ -1398,20 +1398,14 @@ impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
             .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
         let validate_req = request.clone();
         let cancel = Arc::new(AtomicBool::new(false));
-        let reply = if envelope.guest_receipt.is_absent() {
-            self.session
-                .db_execute_request(request, cancel)
-                .await
-                .map_err(host_err_to_abi)?
-        } else {
-            self.session
-                .db_execute_envelope_request(
-                    HostExecuteEnvelope::new(request, envelope.guest_receipt).with_proofs(proofs),
-                    cancel,
-                )
-                .await
-                .map_err(host_err_to_abi)?
-        };
+        let reply = self
+            .session
+            .db_execute_envelope_request(
+                HostExecuteEnvelope::new(request, envelope.guest_receipt).with_proofs(proofs),
+                cancel,
+            )
+            .await
+            .map_err(host_err_to_abi)?;
         bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)
             .map_err(map_reply_validation_abi)?;
         Ok(reply)

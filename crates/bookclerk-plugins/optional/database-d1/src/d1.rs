@@ -4182,6 +4182,49 @@ mod tests {
         {
             panic!("{err}");
         }
+        let nested = sel(
+            "d1-nested-arith",
+            bookclerk_db_exec::sql_v1::PORTABLE_NESTED_INTEGER_ARITH,
+        )
+        .await
+        .expect("nested integer arith");
+        if let Some(err) =
+            bookclerk_db_exec::sql_v1::portable_nested_integer_arith_mismatch(&nested.statements[0])
+        {
+            panic!("{err}");
+        }
+        let nested_b = run(ExecuteRequest {
+            operation_id: "d1-nested-arith-binds".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT ? + abs(?)".into(),
+                parameters: vec![
+                    bookclerk_plugin_abi::DbValue::Int64(1),
+                    bookclerk_plugin_abi::DbValue::Int64(-2),
+                ],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 8,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        })
+        .await
+        .expect("nested arith binds");
+        assert_eq!(
+            nested_b.statements[0].rows[0].values[0],
+            bookclerk_plugin_abi::DbValue::Int64(3)
+        );
+        let path_cmp = sel(
+            "d1-json-path-like-compare",
+            bookclerk_db_exec::sql_v1::PORTABLE_JSON_PATH_LIKE_COMPARE,
+        )
+        .await
+        .expect("json-path-like compare");
+        if let Some(err) = bookclerk_db_exec::sql_v1::portable_json_path_like_compare_mismatch(
+            &path_cmp.statements[0],
+        ) {
+            panic!("{err}");
+        }
         let div = sel(
             "d1-div-operands",
             bookclerk_db_exec::sql_v1::PORTABLE_DIV_OPERANDS,
