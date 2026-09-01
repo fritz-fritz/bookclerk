@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import unittest
 
-from bookclerk_plugin_sdk.db_value import encode_execute_request
 from bookclerk_plugin_sdk.workerd import granted_job_context
 
 
