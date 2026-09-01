@@ -197,15 +197,23 @@ async fn staged_first_party_plugins_describe() {
                 language: None,
             })
             .expect("search params");
-            let raw = session
+            let raw = match session
                 .content_source_json("{}", "searchCatalog", params)
                 .await
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "{} search_catalog must succeed (empty ok): {e}",
+            {
+                Ok(raw) => raw,
+                Err(e) if live_storefront_unavailable(&e) => {
+                    eprintln!(
+                        "{} search_catalog skipped (live storefront unavailable): {e}",
                         plugin.manifest.id
-                    )
-                });
+                    );
+                    continue;
+                }
+                Err(e) => panic!(
+                    "{} search_catalog must succeed (empty ok): {e}",
+                    plugin.manifest.id
+                ),
+            };
             let hits: Vec<CatalogHitDto> = serde_json::from_str(&raw).unwrap_or_default();
             assert!(
                 hits.len() <= 1,
@@ -216,14 +224,21 @@ async fn staged_first_party_plugins_describe() {
         }
 
         if plugin.manifest.id == "chirp" && session.has_capability("listDeals") {
-            let raw = session
+            let raw = match session
                 .content_source_json(
                     "{}",
                     "listDeals",
                     serde_json::json!({ "limit": 1 }).to_string(),
                 )
                 .await
-                .unwrap_or_else(|e| panic!("chirp list_deals must succeed (empty ok): {e}"));
+            {
+                Ok(raw) => raw,
+                Err(e) if live_storefront_unavailable(&e) => {
+                    eprintln!("chirp list_deals skipped (live storefront unavailable): {e}");
+                    continue;
+                }
+                Err(e) => panic!("chirp list_deals must succeed (empty ok): {e}"),
+            };
             let deals: Vec<CatalogHitDto> = serde_json::from_str(&raw).unwrap_or_default();
             assert!(
                 deals.len() <= 1,
@@ -234,4 +249,15 @@ async fn staged_first_party_plugins_describe() {
     }
 
     std::env::remove_var("BOOKCLERK_PLUGIN_DIRS");
+}
+
+/// True when a staged-plugin smoke call failed because a live storefront was down.
+fn live_storefront_unavailable(err: &impl std::fmt::Display) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("http status")
+        || msg.contains("timed out")
+        || msg.contains("timeout")
+        || msg.contains("connection refused")
+        || msg.contains("dns error")
+        || msg.contains("error sending request")
 }
