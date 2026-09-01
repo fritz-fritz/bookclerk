@@ -31,7 +31,6 @@ use crate::exec::{
     collect_capped_query_results, exceeds_result_row_cap, remaining_deadline_ms,
     rows_affected_for_kind, AtomicSession, ExecCaps,
 };
-use crate::lower_canonical_sql_typed;
 use crate::proxy_txn::{
     consume_commit_injection, consume_savepoint_release_injection,
     consume_savepoint_rollback_injection, is_txn_broken, note_commit_failed,
@@ -42,6 +41,7 @@ use crate::{
     cap_query_sql, record_query_rows_seen, set_positional_result_columns,
     take_positional_result_columns,
 };
+use crate::{lower_canonical_sql, lower_canonical_sql_typed};
 
 /// Proven row bound for one statement: `maxRows` when set, otherwise the
 /// negotiated adapter cap. Zero on either side means "unlimited".
@@ -178,11 +178,14 @@ async fn load_sql_type_env_paged(
     let mut cursor_table = String::new();
     let mut cursor_ord: i64 = -1;
     loop {
-        let sql = format!(
-            "SELECT table_name, column_name, sql_type, ordinal, is_identity, default_sql \
-             FROM {SQL_CATALOG_TABLE} \
-             WHERE table_name > ? OR (table_name = ? AND ordinal > ?) \
-             ORDER BY table_name, ordinal LIMIT {page}"
+        let sql = lower_canonical_sql(
+            backend,
+            &format!(
+                "SELECT table_name, column_name, sql_type, ordinal, is_identity, default_sql \
+                 FROM {SQL_CATALOG_TABLE} \
+                 WHERE table_name > ? OR (table_name = ? AND ordinal > ?) \
+                 ORDER BY table_name, ordinal LIMIT {page}"
+            ),
         );
         let rows = conn
             .query_all_raw(Statement::from_sql_and_values(
@@ -227,9 +230,12 @@ async fn load_sql_type_env_paged(
     }
     let mut schema_cursor = String::new();
     loop {
-        let schema_sql = format!(
-            "SELECT table_name, fingerprint, identity_column FROM {SQL_SCHEMA_TABLE} \
-             WHERE table_name > ? ORDER BY table_name LIMIT {page}"
+        let schema_sql = lower_canonical_sql(
+            backend,
+            &format!(
+                "SELECT table_name, fingerprint, identity_column FROM {SQL_SCHEMA_TABLE} \
+                 WHERE table_name > ? ORDER BY table_name LIMIT {page}"
+            ),
         );
         match conn
             .query_all_raw(Statement::from_sql_and_values(
@@ -1986,6 +1992,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_page_sql_rewrites_placeholders_for_postgres() {
+        let sql = format!(
+            "SELECT table_name FROM {SQL_CATALOG_TABLE} \
+             WHERE table_name > ? OR (table_name = ? AND ordinal > ?)"
+        );
+        let pg = lower_canonical_sql(sea_orm::DatabaseBackend::Postgres, &sql);
+        assert!(
+            pg.contains("$1") && pg.contains("$2") && pg.contains("$3"),
+            "postgres catalog page SQL must not keep SQLite `?` (jsonb operator): {pg}"
+        );
+        assert!(
+            !pg.contains('?'),
+            "leftover `?` is a jsonb operator on postgres: {pg}"
+        );
+        let sqlite = lower_canonical_sql(sea_orm::DatabaseBackend::Sqlite, &sql);
+        assert!(
+            sqlite.contains('?'),
+            "sqlite catalog page SQL keeps `?`: {sqlite}"
+        );
+    }
 
     #[test]
     fn text_starting_with_b64_stays_text() {
