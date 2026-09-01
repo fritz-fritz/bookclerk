@@ -146,9 +146,3 @@ pub struct DbPlanExecResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<DbAtomicTiming>,
 }
-
-/// Sentinel SQL for the host-internal atomic proxy transport.
-pub const DB_ATOMIC_SENTINEL: &str = "bookclerk.atomic";
-
-/// Sentinel SQL for capability negotiation (host-internal).
-pub const DB_CAPABILITIES_SENTINEL: &str = "bookclerk.capabilities";

@@ -1,7 +1,7 @@
 //! Typed adapter conformance (`ExecuteRequest` / `ExecuteReply`).
 //!
 //! [`run_typed_request_vectors`] is the #178 admission path for database plugins.
-//! Legacy JSON [`super::vectors::run_request_vectors`] remains for the atomic bridge.
+//! [`super::vectors::run_request_vectors`] covers the in-process JSON-bind host IR.
 
 use std::future::Future;
 

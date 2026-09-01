@@ -1010,7 +1010,7 @@ impl RpcDatabaseProxy {
     }
 
     /// Validates `req` against negotiated caps, stamps the host request hash,
-    /// then sends `executeAtomic`.
+    /// then sends typed `execute`.
     ///
     /// Guest-supplied statement kinds are replaced with host-authored kinds
     /// derived from the SQL. After validation the host stamps the canonical
@@ -1021,7 +1021,7 @@ impl RpcDatabaseProxy {
     ///
     /// Returns a plugin ABI `invalid_params` error when the request exceeds
     /// negotiated caps or the retry hash does not match, and a plugin error
-    /// when `executeAtomic` fails.
+    /// when typed `execute` fails.
     async fn execute_typed_validated(
         &self,
         mut req: ExecuteRequest,
@@ -1187,14 +1187,14 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
 
 /// Host [`AtomicTxnBackend`] that runs named security ops as one guest atomic batch.
 struct RpcAtomicBackend {
-    /// Cap'n Proto session used for a single `bookclerk.atomic` query per operation.
+    /// Cap'n Proto session used for a single typed `execute` per operation.
     session: Arc<PluginSession>,
     /// Full negotiated capabilities used to reject oversized plans before RPC.
     caps: DbCapabilities,
 }
 
 impl RpcAtomicBackend {
-    /// Sends one `bookclerk.atomic` query; ambiguous transport maps to [`LibraryError::Unavailable`].
+    /// Sends one typed `execute` batch; ambiguous transport maps to [`LibraryError::Unavailable`].
     async fn call(
         &self,
         params: bookclerk_library::DbAtomicParams,
@@ -1203,7 +1203,7 @@ impl RpcAtomicBackend {
         self.call_with_id(operation_id, params).await
     }
 
-    /// Sends `bookclerk.atomic` with a caller-chosen idempotency key (replay-safe claims).
+    /// Sends typed `execute` with a caller-chosen idempotency key (replay-safe claims).
     async fn call_with_id(
         &self,
         operation_id: String,
@@ -1219,7 +1219,7 @@ impl RpcAtomicBackend {
     ///
     /// # Errors
     ///
-    /// Returns when validation, `executeAtomic`, or result interpretation fails.
+    /// Returns when validation, typed `execute`, or result interpretation fails.
     async fn send_compiled(
         &self,
         compiled: bookclerk_library::CompiledAtomic,
@@ -1309,7 +1309,7 @@ fn unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Runs host DDL as one `bookclerk.atomic` batch (D1 V27).
+/// Runs host DDL as one typed `execute` batch (D1 V27).
 async fn exec_host_ddl_batch(
     session: &PluginSession,
     caps: &DbCapabilities,

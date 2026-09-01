@@ -22,10 +22,9 @@ use bookclerk_plugin_abi::{encoded_execute_request_bytes, DbCapabilities, Execut
 
 pub use bookclerk_plugin_abi::DbPlanStatementKind;
 pub use host_ir::{
-    atomic_from_execute_request, execute_request_from_atomic, plan_exec_from_execute_reply,
-    sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
-    DbPlanStatement, DbPlanStmtExecResult, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
-    SEA_NULL_KEY,
+    execute_request_from_atomic, plan_exec_from_execute_reply, sea_null, sea_null_kind,
+    DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult, DbPlanStatement,
+    DbPlanStmtExecResult, SEA_NULL_KEY,
 };
 
 pub use exec::{
@@ -52,13 +51,13 @@ pub struct CompiledAtomic {
 }
 
 impl CompiledAtomic {
-    /// Envelope sent on `bookclerk.atomic`.
+    /// In-process host IR envelope (JSON binds for the SeaORM executor).
     #[must_use]
     pub fn into_request(self, operation_id: impl Into<String>) -> DbAtomicRequest {
         DbAtomicRequest::with_plan(operation_id, self.expected_hash, self.plan)
     }
 
-    /// Typed [`ExecuteRequest`] for adapter conformance (`executeAtomic`).
+    /// Typed [`ExecuteRequest`] for adapter `execute` (Cap'n data plane).
     ///
     /// # Panics
     ///
@@ -143,7 +142,7 @@ pub fn validate_plan(plan: &DbAtomicPlan, caps: &DbCapabilities) -> crate::error
 ///
 /// `maxRequestBytes` is measured against the Cap'n-encoded [`ExecuteRequest`]
 /// that will be sent, not the JSON [`DbAtomicRequest`] envelope used by the
-/// in-process sentinel path.
+/// in-process SeaORM executor.
 ///
 /// # Errors
 ///

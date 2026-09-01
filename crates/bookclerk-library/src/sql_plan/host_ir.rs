@@ -8,8 +8,7 @@
 
 pub use bookclerk_db_exec::host_ir::{
     sea_null, sea_null_kind, DbAtomicPlan, DbAtomicRequest, DbAtomicTiming, DbPlanExecResult,
-    DbPlanStatement, DbPlanStmtExecResult, DB_ATOMIC_SENTINEL, DB_CAPABILITIES_SENTINEL,
-    SEA_NULL_KEY,
+    DbPlanStatement, DbPlanStmtExecResult, SEA_NULL_KEY,
 };
 
 use bookclerk_db_exec::{db_value_from_json, db_value_to_json};
@@ -36,17 +35,6 @@ pub fn typed_statement_from_plan(stmt: &DbPlanStatement) -> Result<TypedDbStatem
         max_rows: stmt.max_rows,
         result_selection: selection_for_kind(stmt.kind),
     })
-}
-
-/// JSON-bind plan statement used by in-process executors.
-#[must_use]
-pub fn plan_statement_from_typed(stmt: &TypedDbStatement) -> DbPlanStatement {
-    DbPlanStatement {
-        sql: stmt.sql.clone(),
-        binds: stmt.parameters.iter().map(db_value_to_json).collect(),
-        kind: stmt.kind,
-        max_rows: stmt.max_rows,
-    }
 }
 
 fn selection_for_kind(kind: DbPlanStatementKind) -> DbResultSelection {
@@ -79,38 +67,6 @@ pub fn execute_request_from_atomic(req: &DbAtomicRequest) -> Result<ExecuteReque
         request_hash: req.request_hash.clone().unwrap_or_default(),
         statements,
         deadline_unix_ms: req.deadline_unix_ms.unwrap_or(0),
-    })
-}
-
-/// Host IR envelope from a typed [`ExecuteRequest`].
-///
-/// # Errors
-///
-/// Returns when the statement list is empty.
-pub fn atomic_from_execute_request(req: ExecuteRequest) -> Result<DbAtomicRequest, String> {
-    if req.statements.is_empty() {
-        return Err("executeAtomic statements must be non-empty".into());
-    }
-    let plan = DbAtomicPlan {
-        statements: req
-            .statements
-            .iter()
-            .map(plan_statement_from_typed)
-            .collect(),
-        outcome_index: 0,
-        payload_index: None,
-        prior_receipt_index: None,
-        receipt_select_index: None,
-    };
-    Ok(DbAtomicRequest {
-        operation_id: req.operation_id,
-        request_hash: if req.request_hash.is_empty() {
-            None
-        } else {
-            Some(req.request_hash)
-        },
-        plan: Some(plan),
-        deadline_unix_ms: (req.deadline_unix_ms > 0).then_some(req.deadline_unix_ms),
     })
 }
 
