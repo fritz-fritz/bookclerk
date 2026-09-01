@@ -89,6 +89,19 @@ only on semantic capabilities, not on plugin id or `sqlFamily`.
 `sqlContractVersion` versions are monotonic supersets; hosts require
 `>= SQL_CONTRACT_VERSION`.
 
+### SQL frontend (issue #178)
+
+Canonical SQL text stays the public representation. Parser-library AST never
+appears on Cap’n Proto, guest SDKs, or `ExecuteRequest`. A host-only spike
+compared Syntaqlite 0.9 (Lemon C + Analyzer) and sqlparser-rs 0.59
+(`SQLiteDialect` + Visitor) against the SQL-v1 corpus. Neither deletes a
+Bookclerk-owned category of machinery: Syntaqlite `physical_tables_accessed`
+omits DML destinations and is SQLite-typed; sqlparser-rs has no semantic
+analysis, so `TScan` / TypeCx would remain. Admission stays the fail-closed
+recursive-descent grammar. Independent wins that *did* land: full CREATE
+schema on `ResolvedStatement`, SeaQuery for host catalog DML, and
+proof-directed authorization when a type env exists.
+
 ### Bootstrap metadata isolation
 
 `sqlFamily` and SeaORM `dialect` are bootstrap-only (typed `DbBootstrap` on
