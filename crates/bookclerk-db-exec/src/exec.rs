@@ -8,10 +8,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::host_ir::{DbAtomicPlan, DbAtomicTiming, DbPlanExecResult, DbPlanStmtExecResult};
 use bookclerk_plugin_abi::{
-    apply_schema_sql_to_env, catalog_companions_for_action, sql_host_bookkeeping_type_env,
-    statement_is_ddl, typecheck_execute_request_proofs, DbCapabilities, DbPlanStatementKind,
-    DbResultSelection, ExecuteRequest, ResolvedStatement, SchemaAction, SqlTypeEnv,
-    TypedDbStatement,
+    apply_schema_action_to_env, apply_schema_sql_to_env, catalog_companions_for_action,
+    sql_host_bookkeeping_type_env, statement_is_ddl, typecheck_execute_request_proofs,
+    DbCapabilities, DbPlanStatementKind, DbResultSelection, ExecuteRequest, ResolvedStatement,
+    SchemaAction, SqlTypeEnv, TypedDbStatement,
 };
 use futures::TryStreamExt;
 use sea_orm::{
@@ -105,9 +105,12 @@ async fn apply_exec_identity_companions(
     if backend == sea_orm::DatabaseBackend::Postgres {
         match action {
             SchemaAction::Create { noop: true, .. } | SchemaAction::None => {}
-            _ => companions.extend(crate::schema_postgres::postgres_identity_companions(
-                canonical,
-            )),
+            _ => companions.extend(
+                crate::schema_postgres::postgres_identity_companions_for_action(
+                    canonical,
+                    Some(action),
+                ),
+            ),
         }
     }
     for companion in companions {
@@ -377,7 +380,7 @@ async fn execute_statements_body(
             let _ = take_txn_fault();
             return Err(err);
         }
-        apply_schema_sql_to_env(&mut env, &canonical);
+        apply_schema_action_to_env(&mut env, &proof.schema_action);
         if let Err(err) = note_atomic_stmt_bytes(
             &mut used_atomic,
             statements.len(),

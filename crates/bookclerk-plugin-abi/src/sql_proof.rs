@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::sql_types::CreateTableSchema;
 use super::{statement_sql_hash, SqlType};
 
 /// Byte span in the exact canonical SQL string a proof is bound to.
@@ -86,12 +87,10 @@ pub enum SchemaAction {
     None,
     /// `CREATE TABLE` — `noop` when the durable fingerprint already matches.
     Create {
-        /// Folded table name.
-        table: String,
+        /// Parsed SQL-v1 table schema (columns, nullability, identity, constraints).
+        schema: Box<CreateTableSchema>,
         /// Structured schema fingerprint (hex SHA-256).
         fingerprint: String,
-        /// Identity column, if any.
-        identity_column: Option<String>,
         /// True when catalog already has this exact fingerprint.
         noop: bool,
     },
@@ -119,6 +118,9 @@ pub struct ResolvedStatement {
     /// INTEGER overflow sites (`+` `-` `*` `abs`).
     #[serde(default)]
     pub integer_arith_sites: Vec<IntegerArithSite>,
+    /// Function names invoked in code spans (folded), for authorization.
+    #[serde(default)]
+    pub functions: Vec<String>,
     /// DDL action + fingerprint.
     pub schema_action: SchemaAction,
 }
@@ -134,6 +136,7 @@ impl ResolvedStatement {
             assignments: Vec::new(),
             text_collate_sites: Vec::new(),
             integer_arith_sites: Vec::new(),
+            functions: Vec::new(),
             schema_action: SchemaAction::None,
         }
     }

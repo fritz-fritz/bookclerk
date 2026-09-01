@@ -8,6 +8,7 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use crate::{
+    sql_proof::ResolvedStatement,
     sql_types::{
         sql_host_bookkeeping_type_env, typecheck_execute_request,
         typecheck_execute_request_resolved, SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS,
@@ -451,14 +452,48 @@ pub fn authorize_guest_sql_policy(req: &ExecuteRequest, policy: &GuestSqlPolicy)
                 authorize_binding_ddl(i, &stmt.sql, policy)?;
                 continue;
             }
-            for access in &proof.physical_accesses {
-                policy.authorize_table(i, &access.table)?;
-            }
+            authorize_from_proof(i, proof, policy)?;
+        }
+        return Ok(());
+    }
+    if !policy.sql_types().is_empty() {
+        let proofs = typecheck_execute_request_resolved(req, policy.sql_types())?;
+        for (i, proof) in proofs.iter().enumerate() {
+            authorize_from_proof(i, proof, policy)?;
         }
         return Ok(());
     }
     for (i, stmt) in req.statements.iter().enumerate() {
         policy.authorize(i, &parse_guest_sql_refs(&stmt.sql)?)?;
+    }
+    Ok(())
+}
+
+/// Authorizes one resolved statement from the typed proof (no lexical reparse).
+fn authorize_from_proof(
+    index: usize,
+    proof: &ResolvedStatement,
+    policy: &GuestSqlPolicy,
+) -> Result<()> {
+    for access in &proof.physical_accesses {
+        policy.authorize_table(index, &access.table)?;
+        if let Some(column) = &access.column {
+            if let Some(allowed) = policy.columns.get(&access.table) {
+                if !allowed.contains(column) {
+                    return Err(PluginError::invalid_params(format!(
+                        "statement {index} names unauthorized column {}.{}",
+                        access.table, column
+                    )));
+                }
+            }
+        }
+    }
+    for func in &proof.functions {
+        if !policy.functions.contains(func) {
+            return Err(PluginError::invalid_params(format!(
+                "statement {index} names unauthorized function {func}"
+            )));
+        }
     }
     Ok(())
 }
@@ -4505,5 +4540,88 @@ mod tests {
             &books,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn proof_auth_ignores_comment_and_cte_shadow() {
+        let mut env = SqlTypeEnv::new();
+        apply_schema_sql_to_env(
+            &mut env,
+            "CREATE TABLE IF NOT EXISTS allowed (id INTEGER, body TEXT)",
+        );
+        apply_schema_sql_to_env(&mut env, "CREATE TABLE IF NOT EXISTS secret (id INTEGER)");
+        let policy = GuestSqlPolicy::allow_tables(["allowed"]).with_sql_types(env);
+        authorize_guest_sql_policy(
+            &req(
+                "SELECT id FROM allowed -- FROM secret\n",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &policy,
+        )
+        .unwrap();
+        authorize_guest_sql_policy(
+            &req(
+                "WITH secret AS (SELECT id FROM allowed) SELECT * FROM secret",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &policy,
+        )
+        .unwrap();
+        let err = authorize_guest_sql_policy(
+            &req("SELECT id FROM secret", vec![], DbResultSelection::Rows, 1),
+            &policy,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unauthorized"), "{err}");
+        let err = authorize_guest_sql_policy(
+            &req(
+                "SELECT id FROM allowed WHERE EXISTS (SELECT 1 FROM secret)",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &policy,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unauthorized"), "{err}");
+    }
+
+    #[test]
+    fn proof_auth_records_functions() {
+        let mut env = SqlTypeEnv::new();
+        apply_schema_sql_to_env(
+            &mut env,
+            "CREATE TABLE IF NOT EXISTS notes (id INTEGER, body TEXT)",
+        );
+        let policy = GuestSqlPolicy::allow_tables(["notes"]).with_sql_types(env);
+        authorize_guest_sql_policy(
+            &req(
+                "SELECT length(body), ifnull(body, '') FROM notes",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &policy,
+        )
+        .unwrap();
+        let err = authorize_guest_sql_policy(
+            &req(
+                "SELECT hex(body) FROM notes",
+                vec![],
+                DbResultSelection::Rows,
+                1,
+            ),
+            &policy,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown helper")
+                || err.to_string().contains("unauthorized function"),
+            "{err}"
+        );
     }
 }

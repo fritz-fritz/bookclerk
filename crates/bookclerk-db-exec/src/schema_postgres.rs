@@ -124,24 +124,54 @@ pub fn expand_host_schema_batch(backend: DatabaseBackend, batch: &[String]) -> O
 /// is not `CREATE TABLE` with `INTEGER PRIMARY KEY AUTOINCREMENT`.
 #[must_use]
 pub fn postgres_identity_companions(sql: &str) -> Vec<String> {
-    if let Some(schema) = bookclerk_plugin_abi::parse_create_table_schema(sql) {
-        let Some(col) = schema.identity_column.as_deref() else {
-            return Vec::new();
-        };
-        let table = schema.table.as_str();
-        if !is_safe_ident(table) || !is_safe_ident(col) {
-            return Vec::new();
+    postgres_identity_companions_for_action(sql, None)
+}
+
+/// [`postgres_identity_companions`] using a resolved schema action when present.
+#[must_use]
+pub fn postgres_identity_companions_for_action(
+    sql: &str,
+    action: Option<&bookclerk_plugin_abi::SchemaAction>,
+) -> Vec<String> {
+    match action {
+        Some(bookclerk_plugin_abi::SchemaAction::Create { noop: true, .. })
+        | Some(bookclerk_plugin_abi::SchemaAction::None) => return Vec::new(),
+        Some(bookclerk_plugin_abi::SchemaAction::Create { schema, .. }) => {
+            return postgres_identity_create(schema);
         }
-        let fn_name = bookclerk_plugin_abi::postgres_identity_function_name(table);
-        let trig_name = bookclerk_plugin_abi::postgres_identity_trigger_name(table);
-        return vec![
-            format!(
-                "CREATE TABLE IF NOT EXISTS {} (\
+        Some(bookclerk_plugin_abi::SchemaAction::Drop { table }) => {
+            return postgres_identity_drop(table);
+        }
+        None => {}
+    }
+    if let Some(schema) = bookclerk_plugin_abi::parse_create_table_schema(sql) {
+        return postgres_identity_create(&schema);
+    }
+    if let Some(table) = bookclerk_plugin_abi::parse_drop_table_name(sql) {
+        return postgres_identity_drop(&table);
+    }
+    Vec::new()
+}
+
+/// Builds CREATE-table identity trigger/function companions from a resolved schema.
+fn postgres_identity_create(schema: &bookclerk_plugin_abi::CreateTableSchema) -> Vec<String> {
+    let Some(col) = schema.identity_column.as_deref() else {
+        return Vec::new();
+    };
+    let table = schema.table.as_str();
+    if !is_safe_ident(table) || !is_safe_ident(col) {
+        return Vec::new();
+    }
+    let fn_name = bookclerk_plugin_abi::postgres_identity_function_name(table);
+    let trig_name = bookclerk_plugin_abi::postgres_identity_trigger_name(table);
+    vec![
+        format!(
+            "CREATE TABLE IF NOT EXISTS {} (\
              table_name TEXT PRIMARY KEY, last BIGINT NOT NULL)",
-                bookclerk_plugin_abi::SQL_IDENTITY_TABLE
-            ),
-            format!(
-                "CREATE OR REPLACE FUNCTION {fn_name}() RETURNS trigger \
+            bookclerk_plugin_abi::SQL_IDENTITY_TABLE
+        ),
+        format!(
+            "CREATE OR REPLACE FUNCTION {fn_name}() RETURNS trigger \
              LANGUAGE plpgsql AS $bookclerk_ident$ \
              DECLARE nxt bigint; \
              BEGIN \
@@ -159,37 +189,37 @@ pub fn postgres_identity_companions(sql: &str) -> Vec<String> {
                RETURN NEW; \
              END; \
              $bookclerk_ident$",
-                bookclerk_plugin_abi::SQL_IDENTITY_TABLE,
-                bookclerk_plugin_abi::SQL_IDENTITY_TABLE,
-                bookclerk_plugin_abi::SQL_IDENTITY_TABLE,
-                bookclerk_plugin_abi::SQL_IDENTITY_TABLE
-            ),
-            format!("DROP TRIGGER IF EXISTS {trig_name} ON {table}"),
-            format!(
-                "CREATE TRIGGER {trig_name} BEFORE INSERT ON {table} \
+            bookclerk_plugin_abi::SQL_IDENTITY_TABLE,
+            bookclerk_plugin_abi::SQL_IDENTITY_TABLE,
+            bookclerk_plugin_abi::SQL_IDENTITY_TABLE,
+            bookclerk_plugin_abi::SQL_IDENTITY_TABLE
+        ),
+        format!("DROP TRIGGER IF EXISTS {trig_name} ON {table}"),
+        format!(
+            "CREATE TRIGGER {trig_name} BEFORE INSERT ON {table} \
              FOR EACH ROW EXECUTE FUNCTION {fn_name}()"
-            ),
-        ];
+        ),
+    ]
+}
+
+/// Builds DROP-table identity cleanup companions.
+fn postgres_identity_drop(table: &str) -> Vec<String> {
+    if !is_safe_ident(table) {
+        return Vec::new();
     }
-    if let Some(table) = bookclerk_plugin_abi::parse_drop_table_name(sql) {
-        if !is_safe_ident(&table) {
-            return Vec::new();
-        }
-        let fn_name = bookclerk_plugin_abi::postgres_identity_function_name(&table);
-        return vec![
-            format!(
-                "CREATE TABLE IF NOT EXISTS {} (\
-                 table_name TEXT PRIMARY KEY, last BIGINT NOT NULL)",
-                bookclerk_plugin_abi::SQL_IDENTITY_TABLE
-            ),
-            format!(
-                "DELETE FROM {} WHERE table_name = '{table}'",
-                bookclerk_plugin_abi::SQL_IDENTITY_TABLE
-            ),
-            format!("DROP FUNCTION IF EXISTS {fn_name}()"),
-        ];
-    }
-    Vec::new()
+    let fn_name = bookclerk_plugin_abi::postgres_identity_function_name(table);
+    vec![
+        format!(
+            "CREATE TABLE IF NOT EXISTS {} (\
+             table_name TEXT PRIMARY KEY, last BIGINT NOT NULL)",
+            bookclerk_plugin_abi::SQL_IDENTITY_TABLE
+        ),
+        format!(
+            "DELETE FROM {} WHERE table_name = '{table}'",
+            bookclerk_plugin_abi::SQL_IDENTITY_TABLE
+        ),
+        format!("DROP FUNCTION IF EXISTS {fn_name}()"),
+    ]
 }
 
 /// Catalog + Postgres identity companions for one canonical binding statement.

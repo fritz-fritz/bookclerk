@@ -372,7 +372,8 @@ impl SqlTypeEnv {
 }
 
 /// Parsed `CREATE TABLE` column list (canonical SQL v1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateTableSchema {
     /// Unquoted folded table name.
     pub table: String,
@@ -395,7 +396,8 @@ pub struct CreateTableSchema {
 }
 
 /// Table-level constraint captured in the structured schema IR.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum TableConstraint {
     /// `PRIMARY KEY (cols…)`.
     PrimaryKey(Vec<String>),
@@ -750,76 +752,175 @@ pub fn catalog_companions(sql: &str) -> Vec<String> {
 }
 
 /// Catalog companions gated by a resolved schema action.
+///
+/// When `action` carries a [`SchemaAction::Create`] schema, companions are
+/// built from that proof (no CREATE reparse). Callers without a proof still
+/// parse canonical SQL.
 #[must_use]
 pub fn catalog_companions_for_action(sql: &str, action: Option<&SchemaAction>) -> Vec<String> {
-    if let Some(SchemaAction::Create { noop: true, .. }) = action {
-        return Vec::new();
-    }
-    if matches!(action, Some(SchemaAction::None)) {
-        return Vec::new();
+    match action {
+        Some(SchemaAction::Create { noop: true, .. }) | Some(SchemaAction::None) => {
+            return Vec::new();
+        }
+        Some(SchemaAction::Create {
+            schema,
+            fingerprint,
+            noop: false,
+        }) => {
+            return catalog_dml_for_create(schema, fingerprint);
+        }
+        Some(SchemaAction::Drop { table }) => return catalog_dml_for_drop(table),
+        None => {}
     }
     if let Some(schema) = parse_create_table_schema(sql) {
-        if schema.columns.is_empty() {
-            return Vec::new();
-        }
-        if matches!(action, Some(SchemaAction::Create { noop: true, .. })) {
-            return Vec::new();
-        }
-        let values = schema
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(i, (col, ty))| {
-                let ident = i32::from(schema.identity_column.as_deref() == Some(col.as_str()));
-                let default_sql = schema
-                    .column_defaults
-                    .get(i)
-                    .map(String::as_str)
-                    .unwrap_or("");
-                format!(
-                    "('{}', '{}', '{}', {}, {ident}, '{}')",
-                    escape_sql_str(&schema.table),
-                    escape_sql_str(col),
-                    ty.as_str(),
-                    i,
-                    escape_sql_str(default_sql)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let ident = schema.identity_column.clone().unwrap_or_default();
-        return vec![
-            sql_catalog_create_table_sql(),
-            sql_schema_create_table_sql(),
-            format!(
-                "INSERT INTO {SQL_CATALOG_TABLE} \
-                 (table_name, column_name, sql_type, ordinal, is_identity, default_sql) \
-                 VALUES {values}"
-            ),
-            format!(
-                "INSERT INTO {SQL_SCHEMA_TABLE} (table_name, fingerprint, identity_column) \
-                 VALUES ('{}', '{}', '{}')",
-                escape_sql_str(&schema.table),
-                escape_sql_str(&schema.fingerprint()),
-                escape_sql_str(&ident)
-            ),
-        ];
+        let fingerprint = schema.fingerprint();
+        return catalog_dml_for_create(&schema, &fingerprint);
     }
     if let Some(table) = parse_drop_table_name(sql) {
-        return vec![
-            sql_catalog_create_table_sql(),
-            sql_schema_create_table_sql(),
-            format!(
-                "DELETE FROM {SQL_CATALOG_TABLE} WHERE table_name = '{}'",
-                escape_sql_str(&table)
-            ),
-            format!(
-                "DELETE FROM {SQL_SCHEMA_TABLE} WHERE table_name = '{}'",
-                escape_sql_str(&table)
-            ),
-        ];
+        return catalog_dml_for_drop(&table);
     }
     Vec::new()
+}
+
+fn catalog_dml_for_create(schema: &CreateTableSchema, fingerprint: &str) -> Vec<String> {
+    if schema.columns.is_empty() {
+        return Vec::new();
+    }
+    let ident = schema.identity_column.clone().unwrap_or_default();
+    vec![
+        sql_catalog_create_table_sql(),
+        sql_schema_create_table_sql(),
+        catalog_insert_columns_sql(schema),
+        catalog_insert_schema_sql(&schema.table, fingerprint, &ident),
+    ]
+}
+
+fn catalog_dml_for_drop(table: &str) -> Vec<String> {
+    vec![
+        sql_catalog_create_table_sql(),
+        sql_schema_create_table_sql(),
+        catalog_delete_sql(SQL_CATALOG_TABLE, table),
+        catalog_delete_sql(SQL_SCHEMA_TABLE, table),
+    ]
+}
+
+#[cfg(feature = "host")]
+fn catalog_insert_columns_sql(schema: &CreateTableSchema) -> String {
+    let mut insert = sea_query::Query::insert();
+    insert.into_table(SQL_CATALOG_TABLE).columns([
+        "table_name",
+        "column_name",
+        "sql_type",
+        "ordinal",
+        "is_identity",
+        "default_sql",
+    ]);
+    for (i, (col, ty)) in schema.columns.iter().enumerate() {
+        let ident = i32::from(schema.identity_column.as_deref() == Some(col.as_str()));
+        let default_sql = schema
+            .column_defaults
+            .get(i)
+            .map(String::as_str)
+            .unwrap_or("");
+        insert.values_panic([
+            schema.table.clone().into(),
+            col.clone().into(),
+            ty.as_str().into(),
+            i64::try_from(i).unwrap_or(i64::MAX).into(),
+            i64::from(ident).into(),
+            default_sql.into(),
+        ]);
+    }
+    insert.to_string(sea_query::SqliteQueryBuilder)
+}
+
+#[cfg(not(feature = "host"))]
+fn catalog_insert_columns_sql(schema: &CreateTableSchema) -> String {
+    let values = schema
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, (col, ty))| {
+            let ident = i32::from(schema.identity_column.as_deref() == Some(col.as_str()));
+            let default_sql = schema
+                .column_defaults
+                .get(i)
+                .map(String::as_str)
+                .unwrap_or("");
+            format!(
+                "('{}', '{}', '{}', {}, {ident}, '{}')",
+                escape_sql_str(&schema.table),
+                escape_sql_str(col),
+                ty.as_str(),
+                i,
+                escape_sql_str(default_sql)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "INSERT INTO {SQL_CATALOG_TABLE} \
+         (table_name, column_name, sql_type, ordinal, is_identity, default_sql) \
+         VALUES {values}"
+    )
+}
+
+#[cfg(feature = "host")]
+fn catalog_insert_schema_sql(table: &str, fingerprint: &str, ident: &str) -> String {
+    sea_query::Query::insert()
+        .into_table(SQL_SCHEMA_TABLE)
+        .columns(["table_name", "fingerprint", "identity_column"])
+        .values_panic([table.into(), fingerprint.into(), ident.into()])
+        .to_string(sea_query::SqliteQueryBuilder)
+}
+
+#[cfg(not(feature = "host"))]
+fn catalog_insert_schema_sql(table: &str, fingerprint: &str, ident: &str) -> String {
+    format!(
+        "INSERT INTO {SQL_SCHEMA_TABLE} (table_name, fingerprint, identity_column) \
+         VALUES ('{}', '{}', '{}')",
+        escape_sql_str(table),
+        escape_sql_str(fingerprint),
+        escape_sql_str(ident)
+    )
+}
+
+#[cfg(feature = "host")]
+fn catalog_delete_sql(catalog_table: &str, table: &str) -> String {
+    sea_query::Query::delete()
+        .from_table(sea_query::Alias::new(catalog_table))
+        .and_where(sea_query::ExprTrait::eq(
+            sea_query::Expr::col("table_name"),
+            table,
+        ))
+        .to_string(sea_query::SqliteQueryBuilder)
+}
+
+#[cfg(not(feature = "host"))]
+fn catalog_delete_sql(catalog_table: &str, table: &str) -> String {
+    format!(
+        "DELETE FROM {catalog_table} WHERE table_name = '{}'",
+        escape_sql_str(table)
+    )
+}
+
+/// Applies a resolved schema action to `env` without reparsing CREATE SQL.
+pub fn apply_schema_action_to_env(env: &mut SqlTypeEnv, action: &SchemaAction) {
+    match action {
+        SchemaAction::Create { schema, noop, .. } => {
+            if *noop || env.has_table(&schema.table) {
+                return;
+            }
+            env.insert_table_schema(
+                schema.table.clone(),
+                schema.columns.iter().cloned(),
+                schema.identity_column.clone(),
+                schema.fingerprint(),
+            );
+        }
+        SchemaAction::Drop { table } => env.drop_table(table),
+        SchemaAction::None => {}
+    }
 }
 
 /// Applies one statement's `CREATE`/`DROP TABLE` effects to `env`.
@@ -994,6 +1095,7 @@ fn typecheck_statement(
             assignments: Vec::new(),
             text_collate_sites: Vec::new(),
             integer_arith_sites: Vec::new(),
+            functions: Vec::new(),
             schema_action: SchemaAction::Drop { table },
         });
     }
@@ -1010,6 +1112,7 @@ fn typecheck_statement(
         outer_from: Vec::new(),
         ctes: BTreeMap::new(),
         physical: BTreeSet::new(),
+        functions: BTreeSet::new(),
         assignments: Vec::new(),
         text_spans: Vec::new(),
         integer_arith_sites: Vec::new(),
@@ -1062,10 +1165,10 @@ fn typecheck_create(
         assignments: Vec::new(),
         text_collate_sites: Vec::new(),
         integer_arith_sites: Vec::new(),
+        functions: Vec::new(),
         schema_action: SchemaAction::Create {
-            table: schema.table,
+            schema: Box::new(schema),
             fingerprint,
-            identity_column: schema.identity_column,
             noop,
         },
     })
@@ -1134,6 +1237,7 @@ fn typecheck_index_ddl(index: usize, sql: &str, env: &SqlTypeEnv) -> Result<Reso
         assignments: Vec::new(),
         text_collate_sites: Vec::new(),
         integer_arith_sites: Vec::new(),
+        functions: Vec::new(),
         schema_action: SchemaAction::None,
     })
 }
@@ -1166,6 +1270,7 @@ fn typecheck_create_checks(
         outer_from: Vec::new(),
         ctes: BTreeMap::new(),
         physical: BTreeSet::new(),
+        functions: BTreeSet::new(),
         assignments: Vec::new(),
         text_spans: Vec::new(),
         integer_arith_sites: Vec::new(),
@@ -1222,6 +1327,7 @@ struct TypeCx<'a> {
     outer_from: Vec<BTreeMap<String, FromSrc>>,
     ctes: BTreeMap<String, Vec<(String, SqlType)>>,
     physical: BTreeSet<(String, Option<String>)>,
+    functions: BTreeSet<String>,
     assignments: Vec<ResolvedAssignment>,
     text_spans: Vec<SqlSpan>,
     integer_arith_sites: Vec<IntegerArithSite>,
@@ -1265,6 +1371,11 @@ impl TypeCx<'_> {
                 .map(|span| TextCollateSite { span })
                 .collect(),
             integer_arith_sites: self.integer_arith_sites,
+            functions: {
+                let mut fns: Vec<String> = self.functions.into_iter().collect();
+                fns.sort();
+                fns
+            },
             schema_action: SchemaAction::None,
         }
     }
@@ -2455,6 +2566,7 @@ fn infer_call(
     ident_start: usize,
 ) -> Result<SqlType> {
     let mut args = Vec::new();
+    cx.functions.insert(name.to_ascii_lowercase());
     if !scan.peek_byte(b')') {
         if name == "count" && scan.take_byte(b'*') {
             args.push(SqlType::Integer);
@@ -2765,6 +2877,7 @@ fn ty_err(index: usize, msg: &str) -> PluginError {
     PluginError::invalid_params(format!("statement {index} {msg}"))
 }
 
+#[cfg(not(feature = "host"))]
 fn escape_sql_str(s: &str) -> String {
     s.replace('\'', "''")
 }
@@ -3527,5 +3640,33 @@ mod tests {
             .integer_arith_sites
             .iter()
             .any(|s| s.kind == IntegerArithKind::Mul));
+    }
+
+    #[test]
+    fn create_proof_carries_full_schema() {
+        let sql =
+            "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT)";
+        let proofs = typecheck_execute_request_resolved(&req(sql), &SqlTypeEnv::new()).unwrap();
+        match &proofs[0].schema_action {
+            SchemaAction::Create {
+                schema,
+                fingerprint,
+                noop,
+            } => {
+                assert!(!*noop);
+                assert_eq!(schema.table, "notes");
+                assert_eq!(schema.identity_column.as_deref(), Some("id"));
+                assert_eq!(schema.columns.len(), 2);
+                assert_eq!(schema.fingerprint(), *fingerprint);
+                let companions = catalog_companions_for_action(sql, Some(&proofs[0].schema_action));
+                assert!(
+                    companions
+                        .iter()
+                        .any(|s| s.contains("notes") && s.to_ascii_uppercase().contains("INSERT")),
+                    "{companions:?}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bookclerk_plugin_abi::{
-    apply_schema_sql_to_env, assert_proof_matches_sql, catalog_companions_for_action,
-    encoded_execute_reply_bytes, encoded_statement_result_bytes, parse_create_table_schema,
-    sql_host_bookkeeping_type_env, typecheck_execute_request_proofs, ResolvedStatement,
-    SchemaAction,
+    apply_schema_action_to_env, apply_schema_sql_to_env, assert_proof_matches_sql,
+    catalog_companions_for_action, encoded_execute_reply_bytes, encoded_statement_result_bytes,
+    parse_create_table_schema, sql_host_bookkeeping_type_env, typecheck_execute_request_proofs,
+    ResolvedStatement, SchemaAction,
 };
 use bookclerk_plugin_abi::{
     sql_catalog_page_rows, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming,
@@ -72,9 +72,12 @@ async fn apply_binding_companions(
         match action {
             SchemaAction::Create { noop: true, .. } => {}
             SchemaAction::None => {}
-            _ => companions.extend(crate::schema_postgres::postgres_identity_companions(
-                canonical,
-            )),
+            _ => companions.extend(
+                crate::schema_postgres::postgres_identity_companions_for_action(
+                    canonical,
+                    Some(action),
+                ),
+            ),
         }
     }
     for companion in companions {
@@ -495,11 +498,11 @@ async fn reconcile_physical(
 ) -> Result<(), DbErr> {
     match action {
         SchemaAction::Create {
-            table,
+            schema,
             fingerprint,
             noop,
-            ..
         } => {
+            let table = schema.table.as_str();
             let exists = physical_table_exists(txn, backend, table).await?;
             if *noop {
                 if !exists {
@@ -1525,7 +1528,7 @@ async fn execute_typed_join_body(
             }
         };
         apply_binding_companions(txn, backend, &canonical, &proof.schema_action).await?;
-        apply_schema_sql_to_env(&mut env, &canonical);
+        apply_schema_action_to_env(&mut env, &proof.schema_action);
         statements.push(stmt_result);
     }
     session.check(AtomicInterruptPhase::AroundCommit)?;
@@ -1758,7 +1761,11 @@ where
             let _ = take_txn_fault();
             return Err(err);
         }
-        apply_schema_sql_to_env(&mut env, &canonical);
+        if let Some(proof) = proof {
+            apply_schema_action_to_env(&mut env, &proof.schema_action);
+        } else {
+            apply_schema_sql_to_env(&mut env, &canonical);
+        }
         statements.push(stmt_result);
         if skip_guest_on_prior
             && crate::guest_receipt::should_skip_remaining_guest_work(
