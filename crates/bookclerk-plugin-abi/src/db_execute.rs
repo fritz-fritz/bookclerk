@@ -842,4 +842,33 @@ mod tests {
             "\"returning\""
         );
     }
+
+    #[test]
+    fn decode_execute_request_rejects_multi_segment_messages() {
+        use crate::{decode_execute_request_bytes, encoded_execute_request_bytes};
+        let req = ExecuteRequest {
+            operation_id: "op".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 1".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let mut bytes = encoded_execute_request_bytes(&req).unwrap();
+        assert_eq!(bytes[0], 0, "fixture must be a single-segment stream");
+        bytes[0] = 1;
+        let err = decode_execute_request_bytes(&bytes).unwrap_err();
+        assert!(err.to_string().contains("multi-segment"), "{err}");
+    }
+
+    #[test]
+    fn decode_execute_request_rejects_truncated_messages() {
+        use crate::decode_execute_request_bytes;
+        let err = decode_execute_request_bytes(&[0, 0, 0]).unwrap_err();
+        assert!(err.to_string().contains("truncated"), "{err}");
+    }
 }

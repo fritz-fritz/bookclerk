@@ -22,7 +22,7 @@ use crate::rpc::{from_capnp, read_error, text_of, write_error};
 use crate::{
     DbBootstrap, DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming,
     DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, Result, StatementResult,
-    TypedDbStatement,
+    TypedDbStatement, MAX_SCALAR_BYTES,
 };
 
 pub(super) fn write_db_type(ty: DbType) -> CapnpDbType {
@@ -533,15 +533,48 @@ pub fn encoded_execute_result_reply_bytes(outcome: Result<ExecuteReply>) -> Resu
     write_message_bytes(&message)
 }
 
+/// Reads one unpacked single-segment Cap'n message.
+///
+/// Rejects multi-segment streams (matching the TypeScript SDK) and caps
+/// traversal to the input size so a small buffer cannot expand into a large
+/// graph. Intra-segment far pointers remain allowed so rustc-encoded messages
+/// still round-trip.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the stream is truncated or
+/// multi-segment, and [`PluginError::unavailable`] when Cap'n decode fails.
+fn read_unpacked_message(
+    bytes: &[u8],
+) -> Result<capnp::message::Reader<capnp::serialize::OwnedSegments>> {
+    if bytes.len() < 8 {
+        return Err(PluginError::invalid_params("truncated Cap'n message"));
+    }
+    let mut nseg_minus_bytes = [0u8; 4];
+    nseg_minus_bytes.copy_from_slice(&bytes[..4]);
+    let nseg = u32::from_le_bytes(nseg_minus_bytes).saturating_add(1);
+    if nseg != 1 {
+        return Err(PluginError::invalid_params(
+            "multi-segment Cap'n messages are not supported",
+        ));
+    }
+    let words = (bytes.len() / 8)
+        .saturating_add(16)
+        .min(usize::try_from(MAX_SCALAR_BYTES).unwrap_or(usize::MAX) / 8);
+    let mut opts = capnp::message::ReaderOptions::new();
+    opts.traversal_limit_in_words(Some(words));
+    opts.nesting_limit(32);
+    let mut cursor = std::io::Cursor::new(bytes);
+    capnp::serialize::read_message(&mut cursor, opts).map_err(from_capnp)
+}
+
 /// Decodes a standalone Cap'n `ExecuteAtomicReply` message.
 ///
 /// # Errors
 ///
 /// Returns the guest [`PluginError`] on `err`, or a decode failure on `ok`.
 pub fn decode_execute_result_reply_bytes(bytes: &[u8]) -> Result<ExecuteReply> {
-    let mut cursor = std::io::Cursor::new(bytes);
-    let reader = capnp::serialize::read_message(&mut cursor, capnp::message::ReaderOptions::new())
-        .map_err(from_capnp)?;
+    let reader = read_unpacked_message(bytes)?;
     read_execute_result_reply(reader.get_root().map_err(from_capnp)?)
 }
 
@@ -565,9 +598,7 @@ pub fn encoded_statement_result_bytes(stmt: &StatementResult) -> Result<Vec<u8>>
 ///
 /// Returns when the buffer is not a valid unpacked `DbValue`.
 pub fn decode_db_value_bytes(bytes: &[u8]) -> Result<DbValue> {
-    let mut cursor = std::io::Cursor::new(bytes);
-    let reader = capnp::serialize::read_message(&mut cursor, capnp::message::ReaderOptions::new())
-        .map_err(from_capnp)?;
+    let reader = read_unpacked_message(bytes)?;
     read_db_value(reader.get_root().map_err(from_capnp)?)
 }
 
@@ -577,9 +608,7 @@ pub fn decode_db_value_bytes(bytes: &[u8]) -> Result<DbValue> {
 ///
 /// Returns when the buffer is not a valid unpacked `ExecuteRequest`.
 pub fn decode_execute_request_bytes(bytes: &[u8]) -> Result<ExecuteRequest> {
-    let mut cursor = std::io::Cursor::new(bytes);
-    let reader = capnp::serialize::read_message(&mut cursor, capnp::message::ReaderOptions::new())
-        .map_err(from_capnp)?;
+    let reader = read_unpacked_message(bytes)?;
     read_execute_request(reader.get_root().map_err(from_capnp)?)
 }
 

@@ -181,13 +181,19 @@ async fn load_sql_type_env_paged(
         let sql = format!(
             "SELECT table_name, column_name, sql_type, ordinal, is_identity, default_sql \
              FROM {SQL_CATALOG_TABLE} \
-             WHERE table_name > {ct} OR (table_name = {ct} AND ordinal > {co}) \
-             ORDER BY table_name, ordinal LIMIT {page}",
-            ct = sql_string_literal(&cursor_table),
-            co = cursor_ord,
+             WHERE table_name > ? OR (table_name = ? AND ordinal > ?) \
+             ORDER BY table_name, ordinal LIMIT {page}"
         );
         let rows = conn
-            .query_all_raw(Statement::from_string(backend, sql))
+            .query_all_raw(Statement::from_sql_and_values(
+                backend,
+                sql,
+                [
+                    SeaValue::String(Some(cursor_table.clone())),
+                    SeaValue::String(Some(cursor_table.clone())),
+                    SeaValue::BigInt(Some(cursor_ord)),
+                ],
+            ))
             .await?;
         if rows.is_empty() {
             break;
@@ -223,11 +229,14 @@ async fn load_sql_type_env_paged(
     loop {
         let schema_sql = format!(
             "SELECT table_name, fingerprint, identity_column FROM {SQL_SCHEMA_TABLE} \
-             WHERE table_name > {ct} ORDER BY table_name LIMIT {page}",
-            ct = sql_string_literal(&schema_cursor),
+             WHERE table_name > ? ORDER BY table_name LIMIT {page}"
         );
         match conn
-            .query_all_raw(Statement::from_string(backend, schema_sql))
+            .query_all_raw(Statement::from_sql_and_values(
+                backend,
+                schema_sql,
+                [SeaValue::String(Some(schema_cursor.clone()))],
+            ))
             .await
         {
             Ok(rows) => {
@@ -354,6 +363,10 @@ async fn load_physical_sqlite(
     Ok(env)
 }
 
+fn sql_string_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
 /// # Errors
 ///
 /// Returns [`DbErr`] when `PRAGMA table_info` fails.
@@ -440,10 +453,6 @@ async fn load_physical_postgres(
         env.insert_column(&table, &column, ty);
     }
     Ok(env)
-}
-
-fn sql_string_literal(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
 }
 
 /// # Errors
@@ -1452,19 +1461,26 @@ where
     .await?;
     match f().await {
         Ok(value) => {
-            if consume_savepoint_release_injection() {
-                let msg = "database savepoint RELEASE failed: injected savepoint RELEASE failure";
-                note_commit_failed(msg);
-                return Err(DbErr::Custom(msg.into()));
-            }
-            if let Err(err) = txn
-                .execute_raw(Statement::from_string(
+            let release_err = if consume_savepoint_release_injection() {
+                Some(DbErr::Custom(
+                    "database savepoint RELEASE failed: injected savepoint RELEASE failure".into(),
+                ))
+            } else {
+                txn.execute_raw(Statement::from_string(
                     backend,
                     format!("RELEASE SAVEPOINT {NESTED_ATOMIC_SAVEPOINT}"),
                 ))
                 .await
-            {
+                .err()
+            };
+            if let Some(err) = release_err {
                 note_commit_failed(format!("database savepoint RELEASE failed: {err}"));
+                let _ = txn
+                    .execute_raw(Statement::from_string(
+                        backend,
+                        format!("ROLLBACK TO SAVEPOINT {NESTED_ATOMIC_SAVEPOINT}"),
+                    ))
+                    .await;
                 return Err(err);
             }
             Ok(value)

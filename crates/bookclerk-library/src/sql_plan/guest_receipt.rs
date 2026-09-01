@@ -8,8 +8,8 @@ use bookclerk_db_exec::{
     GuestReceiptPersist, HostExecuteEnvelope, GUEST_RECEIPT_WRAP_PREFIX, GUEST_RECEIPT_WRITE_GATE,
 };
 use bookclerk_plugin_abi::{
-    typecheck_execute_request_proofs, DbPlanStatementKind, DbResultSelection, DbValue,
-    ExecuteReply, ExecuteRequest, PluginError, SqlTypeEnv, TypedDbStatement,
+    typecheck_execute_request_proofs, DbCapabilities, DbPlanStatementKind, DbResultSelection,
+    DbValue, ExecuteReply, ExecuteRequest, PluginError, SqlTypeEnv, TypedDbStatement,
 };
 use chrono::{Duration, Utc};
 
@@ -107,18 +107,26 @@ fn receipt_wrap_type_env() -> SqlTypeEnv {
 
 /// Interprets a wrapped guest reply: replay from stored payload, else strip wrapper rows.
 ///
+/// Reconstructed replay payloads are re-validated against `guest_req` and
+/// `caps` so a lying adapter cannot return a wrap-shaped prior-SELECT whose
+/// JSON body skips guest row/cell/byte caps.
+///
 /// A matching prior row with empty payload is unavailable, except a `claimed`
 /// row whose guest slice has this-attempt results (SELECT ran before finalize).
 ///
 /// # Errors
 ///
 /// Returns [`PluginError::conflict`] when a prior receipt exists with a
-/// different hash, or [`PluginError::internal`] when the envelope is malformed.
+/// different hash, [`PluginError::unavailable`] when a stored payload fails
+/// guest reply validation, or [`PluginError::internal`] when the envelope is
+/// malformed.
 pub(crate) fn unwrap_guest_typed_reply(
     mut reply: ExecuteReply,
-    guest_len: usize,
-    guest_hash: &str,
+    guest_req: &ExecuteRequest,
+    caps: &DbCapabilities,
 ) -> Result<ExecuteReply, PluginError> {
+    let guest_len = guest_req.statements.len();
+    let guest_hash = guest_req.request_hash.as_str();
     let expected = WRAP_PREFIX
         .saturating_add(guest_len)
         .saturating_add(bookclerk_db_exec::GUEST_RECEIPT_STUB_SUFFIX);
@@ -137,6 +145,8 @@ pub(crate) fn unwrap_guest_typed_reply(
             }
             if receipt_payload_text(prior).is_some() {
                 if let Some(replayed) = decode_guest_replay_payload(prior)? {
+                    crate::validate_execute_reply(guest_req, &replayed, caps)
+                        .map_err(|err| PluginError::unavailable(err.to_string()))?;
                     return Ok(replayed);
                 }
             } else if !bookclerk_db_exec::prior_receipt_is_claimed(prior)
@@ -289,26 +299,24 @@ mod replay_finalize {
             }],
             deadline_unix_ms: 0,
         };
+        let guest_req = req.clone();
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_sqlite();
         let wrapped = wrap_guest_typed_request(req, &slots_env()).expect("wrap");
         assert!(!wrapped.guest_receipt.is_absent());
-        let guest_len = wrapped.guest_receipt.guest_statement_len as usize;
         let reply = bookclerk_db_exec::execute_typed_envelope(
             &db,
             &wrapped,
             "sqlite_txn",
-            bookclerk_db_exec::ExecCaps::from_capabilities(
-                &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
-            ),
+            bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
             bookclerk_db_exec::AtomicSession::from_deadline(None)
                 .with_type_env(crate::migrations::host_sql_type_env()),
         )
         .await
         .expect("first execute");
-        let guest = unwrap_guest_typed_reply(reply, guest_len, &guest_hash).expect("unwrap");
+        let guest = unwrap_guest_typed_reply(reply, &guest_req, &caps).expect("unwrap");
         assert_eq!(guest.statements[0].rows_affected, 1);
 
-        let replay_wrapped = wrap_guest_typed_request(
-            ExecuteRequest {
+        let replay_req = ExecuteRequest {
             operation_id: "guest-replay-op".into(),
             request_hash: guest_hash.clone(),
             statements: vec![TypedDbStatement {
@@ -320,23 +328,20 @@ mod replay_finalize {
                 result_selection: DbResultSelection::AffectedRows,
             }],
             deadline_unix_ms: 0,
-        },
-            &slots_env(),
-        )
-        .expect("wrap replay");
+        };
+        let replay_wrapped =
+            wrap_guest_typed_request(replay_req.clone(), &slots_env()).expect("wrap replay");
         let replay = bookclerk_db_exec::execute_typed_envelope(
             &db,
             &replay_wrapped,
             "sqlite_txn",
-            bookclerk_db_exec::ExecCaps::from_capabilities(
-                &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
-            ),
+            bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
             bookclerk_db_exec::AtomicSession::from_deadline(None)
                 .with_type_env(crate::migrations::host_sql_type_env()),
         )
         .await
         .expect("replay execute");
-        let replayed = unwrap_guest_typed_reply(replay, guest_len, &guest_hash).expect("replay");
+        let replayed = unwrap_guest_typed_reply(replay, &replay_req, &caps).expect("replay");
         assert_eq!(replayed.statements[0].rows_affected, 1);
     }
 
@@ -362,24 +367,23 @@ mod replay_finalize {
             }],
             deadline_unix_ms: 0,
         };
+        let guest_req = req.clone();
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_sqlite();
         let wrapped = wrap_guest_typed_request(req, &slots_env()).expect("wrap");
         assert!(!wrapped.guest_receipt.is_absent());
-        let guest_len = wrapped.guest_receipt.guest_statement_len as usize;
         let txn = db.begin().await.expect("begin");
         let reply = bookclerk_db_exec::execute_typed_on_txn_envelope(
             &txn,
             &wrapped,
             "sqlite_txn",
-            bookclerk_db_exec::ExecCaps::from_capabilities(
-                &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
-            ),
+            bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
             bookclerk_db_exec::AtomicSession::from_deadline(None)
                 .with_type_env(crate::migrations::host_sql_type_env()),
             Some(&db),
         )
         .await
         .expect("nested wrap");
-        let guest = unwrap_guest_typed_reply(reply, guest_len, &guest_hash).expect("unwrap");
+        let guest = unwrap_guest_typed_reply(reply, &guest_req, &caps).expect("unwrap");
         assert_eq!(guest.statements[0].rows_affected, 1);
         txn.commit().await.expect("outer commit");
 
@@ -400,36 +404,32 @@ mod replay_finalize {
             "nested executeEnvelope must persist replay payload before outer commit"
         );
 
-        let replay_wrapped = wrap_guest_typed_request(
-            ExecuteRequest {
-                operation_id: "guest-nested-op".into(),
-                request_hash: guest_hash.clone(),
-                statements: vec![TypedDbStatement {
-                    sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('guest-nested', 99)"
-                        .into(),
-                    parameters: vec![],
-                    kind: DbPlanStatementKind::Execute,
-                    max_rows: 0,
-                    result_selection: DbResultSelection::AffectedRows,
-                }],
-                deadline_unix_ms: 0,
-            },
-            &slots_env(),
-        )
-        .expect("wrap replay");
+        let replay_req = ExecuteRequest {
+            operation_id: "guest-nested-op".into(),
+            request_hash: guest_hash.clone(),
+            statements: vec![TypedDbStatement {
+                sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('guest-nested', 99)"
+                    .into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let replay_wrapped =
+            wrap_guest_typed_request(replay_req.clone(), &slots_env()).expect("wrap replay");
         let replay = bookclerk_db_exec::execute_typed_envelope(
             &db,
             &replay_wrapped,
             "sqlite_txn",
-            bookclerk_db_exec::ExecCaps::from_capabilities(
-                &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
-            ),
+            bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
             bookclerk_db_exec::AtomicSession::from_deadline(None)
                 .with_type_env(crate::migrations::host_sql_type_env()),
         )
         .await
         .expect("replay execute");
-        let replayed = unwrap_guest_typed_reply(replay, guest_len, &guest_hash).expect("replay");
+        let replayed = unwrap_guest_typed_reply(replay, &replay_req, &caps).expect("replay");
         assert_eq!(replayed.statements[0].rows_affected, 1);
     }
 }
@@ -438,6 +438,10 @@ mod replay_finalize {
 mod tests {
     use super::*;
     use crate::sql_plan::DbPlanStatementKind;
+
+    fn sqlite_caps() -> DbCapabilities {
+        bookclerk_plugin_abi::DbCapabilities::advertised_sqlite()
+    }
 
     fn guest_insert() -> ExecuteRequest {
         ExecuteRequest {
@@ -628,9 +632,69 @@ mod tests {
             ],
             timing: bookclerk_plugin_abi::DbTiming::default(),
         };
-        let replayed = unwrap_guest_typed_reply(reply, 1, &"a".repeat(64)).expect("replay");
+        let replayed = unwrap_guest_typed_reply(reply, &guest, &sqlite_caps()).expect("replay");
         assert_eq!(replayed.statements.len(), 1);
         assert_eq!(replayed.statements[0].rows_affected, 1);
+    }
+
+    #[test]
+    fn unwrap_rejects_replay_payload_that_fails_guest_reply_validation() {
+        let guest = guest_insert();
+        let payload = serde_json::to_string(&GuestReplayPayload {
+            operation_id: "other-op".into(),
+            statements: vec![
+                bookclerk_plugin_abi::StatementResult::from_affected(1),
+                bookclerk_plugin_abi::StatementResult::from_affected(1),
+            ],
+            timing: bookclerk_plugin_abi::DbTiming::default(),
+        })
+        .expect("encode");
+        let prior = bookclerk_plugin_abi::StatementResult {
+            rows: vec![bookclerk_plugin_abi::DbRow {
+                values: vec![
+                    DbValue::Text("guest-op".into()),
+                    DbValue::Text("a".repeat(64)),
+                    DbValue::Text("ok".into()),
+                    DbValue::Text(payload),
+                    DbValue::Text("2026-01-01T00:00:00Z".into()),
+                ],
+            }],
+            columns: vec![
+                bookclerk_plugin_abi::DbColumn {
+                    name: "operation_id".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "request_hash".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "status".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "payload".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "created_at".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+            ],
+            rows_affected: 0,
+        };
+        let reply = ExecuteReply {
+            operation_id: "guest-op".into(),
+            statements: vec![
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+                prior,
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+            ],
+            timing: bookclerk_plugin_abi::DbTiming::default(),
+        };
+        let err = unwrap_guest_typed_reply(reply, &guest, &sqlite_caps()).unwrap_err();
+        assert_eq!(err.code, bookclerk_plugin_abi::PluginErrorCode::Unavailable);
     }
 
     #[test]
@@ -664,7 +728,9 @@ mod tests {
             ],
             timing: bookclerk_plugin_abi::DbTiming::default(),
         };
-        let err = unwrap_guest_typed_reply(reply, 1, "expected-hash").unwrap_err();
+        let mut guest = guest_insert();
+        guest.request_hash = "expected-hash".into();
+        let err = unwrap_guest_typed_reply(reply, &guest, &sqlite_caps()).unwrap_err();
         assert_eq!(err.code, bookclerk_plugin_abi::PluginErrorCode::Conflict);
     }
 
@@ -714,7 +780,7 @@ mod tests {
             ],
             timing: bookclerk_plugin_abi::DbTiming::default(),
         };
-        let err = unwrap_guest_typed_reply(reply, 1, &"a".repeat(64)).unwrap_err();
+        let err = unwrap_guest_typed_reply(reply, &guest_insert(), &sqlite_caps()).unwrap_err();
         assert_eq!(err.code, bookclerk_plugin_abi::PluginErrorCode::Unavailable);
     }
 
@@ -764,7 +830,8 @@ mod tests {
             ],
             timing: bookclerk_plugin_abi::DbTiming::default(),
         };
-        let guest = unwrap_guest_typed_reply(reply, 1, &"a".repeat(64)).expect("claimed resume");
+        let guest = unwrap_guest_typed_reply(reply, &guest_insert(), &sqlite_caps())
+            .expect("claimed resume");
         assert_eq!(guest.statements.len(), 1);
         assert_eq!(guest.statements[0].rows_affected, 7);
     }
@@ -815,7 +882,7 @@ mod tests {
             ],
             timing: bookclerk_plugin_abi::DbTiming::default(),
         };
-        let err = unwrap_guest_typed_reply(reply, 1, &"a".repeat(64)).unwrap_err();
+        let err = unwrap_guest_typed_reply(reply, &guest_insert(), &sqlite_caps()).unwrap_err();
         assert_eq!(err.code, bookclerk_plugin_abi::PluginErrorCode::Unavailable);
     }
 }

@@ -452,12 +452,14 @@ async fn load_binding_sql_type_env(
                 sql: format!(
                     "SELECT table_name, column_name, sql_type, ordinal, is_identity, default_sql \
                      FROM {SQL_CATALOG_TABLE} \
-                     WHERE table_name > {ct} OR (table_name = {ct} AND ordinal > {co}) \
-                     ORDER BY table_name, ordinal LIMIT {page}",
-                    ct = format!("'{}'", cursor_table.replace('\'', "''")),
-                    co = cursor_ord,
+                     WHERE table_name > ? OR (table_name = ? AND ordinal > ?) \
+                     ORDER BY table_name, ordinal LIMIT {page}"
                 ),
-                parameters: Vec::new(),
+                parameters: vec![
+                    DbValue::Text(cursor_table.clone()),
+                    DbValue::Text(cursor_table.clone()),
+                    DbValue::Int64(cursor_ord),
+                ],
                 kind: DbPlanStatementKind::Select,
                 max_rows: page,
                 result_selection: DbResultSelection::Rows,
@@ -523,7 +525,6 @@ async fn load_binding_sql_schema_env(
         if cancel.load(Ordering::SeqCst) {
             return Err(AbiPluginError::cancelled("fence lost"));
         }
-        let ct = format!("'{}'", cursor.replace('\'', "''"));
         let req = ExecuteRequest {
             operation_id: format!("binding-schema-{key}"),
             request_hash: String::new(),
@@ -532,10 +533,10 @@ async fn load_binding_sql_schema_env(
                 sql: format!(
                     "SELECT table_name, fingerprint, identity_column \
                      FROM {SQL_SCHEMA_TABLE} \
-                     WHERE table_name > {ct} \
-                     ORDER BY table_name LIMIT {page}",
+                     WHERE table_name > ? \
+                     ORDER BY table_name LIMIT {page}"
                 ),
-                parameters: Vec::new(),
+                parameters: vec![DbValue::Text(cursor.clone())],
                 kind: DbPlanStatementKind::Select,
                 max_rows: page,
                 result_selection: DbResultSelection::Rows,

@@ -176,8 +176,7 @@ impl LibraryStore {
     {
         crate::authorize_guest_typed_request(&mut req, self.db_capabilities(), policy)
             .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
-        let guest_len = req.statements.len();
-        let guest_hash = req.request_hash.clone();
+        let guest_req = req.clone();
         // Library connection: wrap with the same snapshot execute uses
         // (physical tables + durable catalog + host schema + policy types).
         let mut type_env = bookclerk_db_exec::load_physical_sql_type_env(&self.db)
@@ -216,7 +215,7 @@ impl LibraryStore {
                 .map_err(|err| bookclerk_plugin_abi::PluginError::unavailable(err.to_string()))?;
             reply
         };
-        crate::sql_plan::unwrap_guest_typed_reply(reply, guest_len, &guest_hash)
+        crate::sql_plan::unwrap_guest_typed_reply(reply, &guest_req, self.db_capabilities())
     }
 
     /// Subscribers packed into one dispatch plan (receipt overhead is ~12 statements).

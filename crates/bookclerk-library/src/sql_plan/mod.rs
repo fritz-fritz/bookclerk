@@ -286,13 +286,12 @@ where
 {
     authorize_guest_typed_request(&mut req, caps, policy)
         .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
-    let guest_len = req.statements.len();
-    let guest_hash = req.request_hash.clone();
+    let guest_req = req.clone();
     let envelope = wrap_guest_typed_request(req, policy.sql_types())?;
     let reply = exec(envelope.clone()).await?;
     crate::validate_execute_reply(&envelope.request, &reply, caps)
         .map_err(|err| bookclerk_plugin_abi::PluginError::unavailable(err.to_string()))?;
-    unwrap_guest_typed_reply(reply, guest_len, &guest_hash)
+    unwrap_guest_typed_reply(reply, &guest_req, caps)
 }
 
 /// Authorizes a **guest-authored** typed batch.
