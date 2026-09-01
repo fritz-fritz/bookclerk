@@ -40,6 +40,10 @@ impl AdapterTransaction for GuestHostAdapterTransaction {
         guest_execute_atomic_on_txn(self.txn_id.clone(), request).await
     }
 
+    async fn execute_envelope(&self, envelope: HostExecuteEnvelope) -> Result<ExecuteReply> {
+        crate::session::guest_execute_atomic_on_txn_envelope(self.txn_id.clone(), envelope).await
+    }
+
     async fn commit(&self) -> Result<()> {
         guest_commit(self.txn_id.clone())
             .await

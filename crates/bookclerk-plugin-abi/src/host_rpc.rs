@@ -66,6 +66,26 @@ impl adapter_transaction_capnp::Server for AdapterTransactionServer {
         Ok(())
     }
 
+    async fn execute_envelope(
+        self: Rc<Self>,
+        params: adapter_transaction_capnp::ExecuteEnvelopeParams,
+        mut results: adapter_transaction_capnp::ExecuteEnvelopeResults,
+    ) -> capnp::Result<()> {
+        let envelope = params
+            .get()?
+            .get_envelope()
+            .map_err(|err| capnp::Error::failed(err.to_string()))
+            .and_then(|r| {
+                crate::db_rpc::read_host_execute_envelope(r)
+                    .map_err(|err| capnp::Error::failed(err.to_string()))
+            })?;
+        crate::db_rpc::write_execute_result_reply(
+            results.get().init_result(),
+            self.inner.execute_envelope(envelope).await,
+        );
+        Ok(())
+    }
+
     async fn commit(
         self: Rc<Self>,
         _params: adapter_transaction_capnp::CommitParams,
@@ -103,6 +123,22 @@ impl AdapterTransaction for HostAdapterTransactionClient {
     async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
         let mut req = self.client.execute_request();
         crate::db_rpc::write_execute_request(req.get().init_request(), &request);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        crate::db_rpc::read_execute_result_reply(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
+
+    async fn execute_envelope(
+        &self,
+        envelope: crate::host_envelope::HostExecuteEnvelope,
+    ) -> Result<crate::ExecuteReply> {
+        let mut req = self.client.execute_envelope_request();
+        crate::db_rpc::write_host_execute_envelope(req.get().init_envelope(), &envelope);
         let reply = req.send().promise.await.map_err(from_capnp)?;
         crate::db_rpc::read_execute_result_reply(
             reply

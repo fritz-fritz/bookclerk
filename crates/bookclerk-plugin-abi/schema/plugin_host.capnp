@@ -17,6 +17,7 @@ interface AdapterTransaction {
   execute @0 (request :Plugin.ExecuteRequest) -> (result :Plugin.ExecuteResultReply);
   commit @1 () -> (result :Plugin.EmptyReply);
   rollback @2 () -> (result :Plugin.EmptyReply);
+  executeEnvelope @3 (envelope :HostExecuteEnvelope) -> (result :Plugin.ExecuteResultReply);
 }
 
 struct HostGuestReceiptPersist {

@@ -344,7 +344,11 @@ async fn load_physical_sqlite(
         match sqlite_pragma_columns(conn, backend, &name).await {
             Ok(cols) if !cols.is_empty() => env.insert_table(name, cols),
             Ok(_) => {}
-            Err(_) => {}
+            Err(err) => {
+                return Err(DbErr::Custom(format!(
+                    "unavailable: declared types for {name} could not be loaded: {err}"
+                )));
+            }
         }
     }
     Ok(env)
@@ -1362,18 +1366,63 @@ pub async fn execute_typed_on_txn(
     session: AtomicSession,
     describe: Option<&DatabaseConnection>,
 ) -> Result<ExecuteReply, DbErr> {
+    execute_typed_on_txn_envelope(
+        txn,
+        &HostExecuteEnvelope::new(req.clone(), GuestReceiptPersist::default()),
+        timing_source,
+        caps,
+        session,
+        describe,
+    )
+    .await
+}
+
+/// [`execute_typed_on_txn`] with a host-only guest-receipt persist hint and proofs.
+///
+/// Finalize SQL runs inside the nested savepoint before returning, so an outer
+/// `commit()` persists the caller-visible payload.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when a statement fails, finalize fails, or the encoded
+/// reply exceeds `max_atomic_result_bytes`.
+pub async fn execute_typed_on_txn_envelope(
+    txn: &DatabaseTransaction,
+    envelope: &HostExecuteEnvelope,
+    timing_source: &str,
+    caps: impl Into<ExecCaps>,
+    session: AtomicSession,
+    describe: Option<&DatabaseConnection>,
+) -> Result<ExecuteReply, DbErr> {
     let caps = caps.into();
-    if req.statements.is_empty() {
+    if envelope.request.statements.is_empty() {
         return Err(DbErr::Custom(
             "executeAtomic statements must be non-empty".into(),
         ));
     }
+    if !envelope.proofs.is_empty() && envelope.proofs.len() != envelope.request.statements.len() {
+        return Err(DbErr::Custom(format!(
+            "host execute envelope proofs must match statement count ({} proofs, {} statements)",
+            envelope.proofs.len(),
+            envelope.request.statements.len()
+        )));
+    }
     session.check(AtomicInterruptPhase::BetweenStatements)?;
     let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
     let seen_budget = Arc::clone(&budget);
+    let persist = envelope.guest_receipt.clone();
     let result = with_exec_budget(Arc::clone(&budget), || {
         nested_savepoint(txn, || {
-            execute_typed_join_body(txn, describe, req, timing_source, caps, session)
+            execute_typed_join_body(
+                txn,
+                describe,
+                &envelope.request,
+                timing_source,
+                caps,
+                session,
+                persist,
+                &envelope.proofs,
+            )
         })
     })
     .await;
@@ -1464,6 +1513,7 @@ where
 /// # Errors
 ///
 /// Returns [`DbErr`] when a statement fails, encoding fails, or a result budget is exceeded.
+#[allow(clippy::too_many_arguments)]
 async fn execute_typed_join_body(
     txn: &DatabaseTransaction,
     describe: Option<&DatabaseConnection>,
@@ -1471,13 +1521,17 @@ async fn execute_typed_join_body(
     timing_source: &str,
     caps: ExecCaps,
     session: AtomicSession,
+    guest_receipt: GuestReceiptPersist,
+    stamped: &[ResolvedStatement],
 ) -> Result<ExecuteReply, DbErr> {
     let started = Instant::now();
     let backend = ConnectionTrait::get_database_backend(txn);
     let sql_started = Instant::now();
     let mut env = catalog_env_for_typed(txn, &session).await?;
-    let proofs = proofs_for_request(&env, req, &[], false)?;
+    let require_stamped = !stamped.is_empty();
+    let proofs = proofs_for_request(&env, req, stamped, require_stamped)?;
     let mut statements = Vec::with_capacity(req.statements.len());
+    let skip_guest_on_prior = !guest_receipt.is_absent();
     for (stmt, proof) in req.statements.iter().zip(proofs.iter()) {
         session.check(AtomicInterruptPhase::BetweenStatements)?;
         let values: Vec<SeaValue> = stmt.parameters.iter().map(db_value_to_sea).collect();
@@ -1530,6 +1584,44 @@ async fn execute_typed_join_body(
         apply_binding_companions(txn, backend, &canonical, &proof.schema_action).await?;
         apply_schema_action_to_env(&mut env, &proof.schema_action);
         statements.push(stmt_result);
+        if skip_guest_on_prior
+            && crate::guest_receipt::should_skip_remaining_guest_work(
+                &statements,
+                req.statements.len(),
+                &guest_receipt.guest_request_hash,
+            )
+        {
+            crate::guest_receipt::pad_skipped_guest_results(&mut statements, req.statements.len());
+            break;
+        }
+    }
+    if !guest_receipt.is_absent() {
+        let partial = ExecuteReply {
+            operation_id: req.operation_id.clone(),
+            statements: statements.clone(),
+            timing: DbTiming {
+                attempt_elapsed_us: 0,
+                db_execution_us: 0,
+                db_timing_source: timing_source.to_string(),
+            },
+        };
+        let guest_len = usize::try_from(guest_receipt.guest_statement_len).unwrap_or(usize::MAX);
+        for stmt in crate::guest_receipt::guest_receipt_finalize_stmts(
+            &partial,
+            guest_len,
+            &guest_receipt.guest_request_hash,
+        )? {
+            session.check(AtomicInterruptPhase::BetweenStatements)?;
+            let values: Vec<SeaValue> = stmt.parameters.iter().map(db_value_to_sea).collect();
+            let sql = if bookclerk_plugin_abi::statement_is_ddl(&stmt.sql) {
+                stmt.sql.clone()
+            } else {
+                lower_canonical_sql_typed(backend, &stmt.sql, None)
+                    .map_err(|err| DbErr::Custom(err.to_string()))?
+            };
+            let sea_stmt = Statement::from_sql_and_values(backend, &sql, values);
+            txn.execute_raw(sea_stmt).await?;
+        }
     }
     session.check(AtomicInterruptPhase::AroundCommit)?;
     let db_execution_us = u64::try_from(sql_started.elapsed().as_micros()).unwrap_or(u64::MAX);

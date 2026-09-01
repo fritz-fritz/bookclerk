@@ -97,8 +97,8 @@ enum TxnOp {
     ExecuteAtomic {
         /// Opaque txn id the host attached to this batch.
         txn_id: String,
-        /// Typed statements to run on the open transaction.
-        request: ExecuteRequest,
+        /// Typed envelope (request + optional guest-receipt persist).
+        envelope: HostExecuteEnvelope,
         /// Oneshot used to return the typed reply.
         reply:
             oneshot::Sender<std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError>>,
@@ -468,13 +468,32 @@ pub async fn guest_execute_atomic_on_txn(
     txn_id: String,
     request: ExecuteRequest,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
+    guest_execute_atomic_on_txn_envelope(
+        txn_id,
+        HostExecuteEnvelope::new(
+            request,
+            bookclerk_plugin_abi::GuestReceiptPersist::default(),
+        ),
+    )
+    .await
+}
+
+/// Typed `Transaction.executeAtomic` with a host-only guest-receipt persist hint.
+///
+/// # Errors
+///
+/// Returns when the txn id is unknown or the engine rejects the work.
+pub async fn guest_execute_atomic_on_txn_envelope(
+    txn_id: String,
+    envelope: HostExecuteEnvelope,
+) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
     let tx = route(&txn_id)
         .await
         .map_err(bookclerk_plugin_abi::PluginError::internal)?;
     let (reply, rx) = oneshot::channel();
     tx.send(TxnOp::ExecuteAtomic {
         txn_id,
-        request,
+        envelope,
         reply,
     })
     .await
@@ -740,7 +759,7 @@ async fn txn_worker(
             }
             TxnOp::ExecuteAtomic {
                 txn_id,
-                request,
+                envelope,
                 reply,
             } => {
                 let result = match stack_txn(&stack, &txn_id) {
@@ -753,11 +772,11 @@ async fn txn_worker(
                             DbBackend::Postgres => "postgres_txn",
                             _ => "sqlite_txn",
                         };
-                        let deadline =
-                            (request.deadline_unix_ms > 0).then_some(request.deadline_unix_ms);
-                        bookclerk_db_exec::execute_typed_on_txn(
+                        let deadline = (envelope.request.deadline_unix_ms > 0)
+                            .then_some(envelope.request.deadline_unix_ms);
+                        bookclerk_db_exec::execute_typed_on_txn_envelope(
                             txn,
-                            &request,
+                            &envelope,
                             timing_source,
                             bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
                             library_typed_session(deadline),
@@ -2049,6 +2068,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows.rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn nested_execute_envelope_persists_guest_receipt() {
+        use bookclerk_plugin_abi::{
+            sql_type_env_from_canonical_ddl, DbCapabilities, DbPlanStatementKind,
+            DbResultSelection, DbValue, ExecuteRequest, GuestSqlPolicy, TypedDbStatement,
+        };
+        let _lock = SESSION_LOCK.lock().await;
+        set_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        )
+        .await;
+        typed_create_table(
+            "CREATE TABLE IF NOT EXISTS nested_receipt (id INTEGER PRIMARY KEY, v TEXT)",
+        )
+        .await;
+        let txn_id = guest_begin(None).await.unwrap();
+        let caps = DbCapabilities::advertised_sqlite();
+        let env = sql_type_env_from_canonical_ddl(
+            "CREATE TABLE nested_receipt (id INTEGER PRIMARY KEY, v TEXT)",
+        );
+        let policy = GuestSqlPolicy::allow_tables(["nested_receipt"]).with_sql_types(env);
+        let reply = bookclerk_library::execute_guest_atomic_with(
+            ExecuteRequest {
+                operation_id: "nested-receipt-op".into(),
+                request_hash: String::new(),
+                statements: vec![TypedDbStatement {
+                    sql: "INSERT INTO nested_receipt (id, v) VALUES (?, ?)".into(),
+                    parameters: vec![DbValue::Int64(1), DbValue::Text("a".into())],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                }],
+                deadline_unix_ms: 0,
+            },
+            &caps,
+            &policy,
+            |envelope| {
+                let txn_id = txn_id.clone();
+                async move { guest_execute_atomic_on_txn_envelope(txn_id, envelope).await }
+            },
+        )
+        .await
+        .expect("nested wrap envelope");
+        assert_eq!(reply.statements.len(), 1);
+        assert_eq!(reply.statements[0].rows_affected, 1);
+        guest_commit(txn_id).await.unwrap();
+        let rows = guest_query(stmt(
+            "SELECT payload, status FROM db_atomic_receipts WHERE operation_id = 'nested-receipt-op'",
+        ))
+        .await
+        .unwrap();
+        assert_eq!(rows.rows.len(), 1);
+        assert_eq!(
+            rows.rows[0].values.get("status").and_then(|v| v.as_str()),
+            Some("ok")
+        );
+        let payload = rows.rows[0]
+            .values
+            .get("payload")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            !payload.is_empty(),
+            "nested executeEnvelope must persist replay payload before outer commit, got {payload:?}"
+        );
     }
 
     #[tokio::test]

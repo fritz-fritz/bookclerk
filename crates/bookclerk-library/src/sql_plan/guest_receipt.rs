@@ -136,7 +136,7 @@ pub(crate) fn unwrap_guest_typed_reply(
                 if let Some(replayed) = decode_guest_replay_payload(prior)? {
                     return Ok(replayed);
                 }
-            } else {
+            } else if !bookclerk_db_exec::prior_receipt_is_claimed(prior) {
                 return Err(PluginError::unavailable(
                     "executeAtomic committed with an empty guest receipt payload; retry after finalize",
                 ));
@@ -301,6 +301,99 @@ mod replay_finalize {
             }],
             deadline_unix_ms: 0,
         },
+            &slots_env(),
+        )
+        .expect("wrap replay");
+        let replay = bookclerk_db_exec::execute_typed_envelope(
+            &db,
+            &replay_wrapped,
+            "sqlite_txn",
+            bookclerk_db_exec::ExecCaps::from_capabilities(
+                &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
+            ),
+            bookclerk_db_exec::AtomicSession::from_deadline(None)
+                .with_type_env(crate::migrations::host_sql_type_env()),
+        )
+        .await
+        .expect("replay execute");
+        let replayed = unwrap_guest_typed_reply(replay, guest_len, &guest_hash).expect("replay");
+        assert_eq!(replayed.statements[0].rows_affected, 1);
+    }
+
+    #[tokio::test]
+    async fn nested_txn_wrap_finalizes_payload_before_outer_commit() {
+        use sea_orm::{ConnectionTrait, Statement, TransactionTrait};
+
+        let db = bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .expect("mem db");
+        let guest_hash = "b".repeat(64);
+        let req = ExecuteRequest {
+            operation_id: "guest-nested-op".into(),
+            request_hash: guest_hash.clone(),
+            statements: vec![TypedDbStatement {
+                sql:
+                    "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('guest-nested', 1)"
+                        .into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        let wrapped = wrap_guest_typed_request(req, &slots_env()).expect("wrap");
+        assert!(!wrapped.guest_receipt.is_absent());
+        let guest_len = wrapped.guest_receipt.guest_statement_len as usize;
+        let txn = db.begin().await.expect("begin");
+        let reply = bookclerk_db_exec::execute_typed_on_txn_envelope(
+            &txn,
+            &wrapped,
+            "sqlite_txn",
+            bookclerk_db_exec::ExecCaps::from_capabilities(
+                &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
+            ),
+            bookclerk_db_exec::AtomicSession::from_deadline(None)
+                .with_type_env(crate::migrations::host_sql_type_env()),
+            Some(&db),
+        )
+        .await
+        .expect("nested wrap");
+        let guest = unwrap_guest_typed_reply(reply, guest_len, &guest_hash).expect("unwrap");
+        assert_eq!(guest.statements[0].rows_affected, 1);
+        txn.commit().await.expect("outer commit");
+
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                db.get_database_backend(),
+                "SELECT payload, status FROM db_atomic_receipts \
+                 WHERE operation_id = 'guest-nested-op'",
+            ))
+            .await
+            .expect("select receipt");
+        assert_eq!(rows.len(), 1);
+        let payload: String = rows[0].try_get("", "payload").expect("payload");
+        let status: String = rows[0].try_get("", "status").expect("status");
+        assert_eq!(status, "ok");
+        assert!(
+            !payload.is_empty(),
+            "nested executeEnvelope must persist replay payload before outer commit"
+        );
+
+        let replay_wrapped = wrap_guest_typed_request(
+            ExecuteRequest {
+                operation_id: "guest-nested-op".into(),
+                request_hash: guest_hash.clone(),
+                statements: vec![TypedDbStatement {
+                    sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('guest-nested', 99)"
+                        .into(),
+                    parameters: vec![],
+                    kind: DbPlanStatementKind::Execute,
+                    max_rows: 0,
+                    result_selection: DbResultSelection::AffectedRows,
+                }],
+                deadline_unix_ms: 0,
+            },
             &slots_env(),
         )
         .expect("wrap replay");
@@ -556,58 +649,103 @@ mod tests {
     }
 
     #[test]
-    fn unwrap_unavailable_on_claimed_or_ok_empty_payload() {
-        for status in ["claimed", "ok"] {
-            let prior = bookclerk_plugin_abi::StatementResult {
-                rows: vec![bookclerk_plugin_abi::DbRow {
-                    values: vec![
-                        DbValue::Text("guest-op".into()),
-                        DbValue::Text("a".repeat(64)),
-                        DbValue::Text(status.into()),
-                        DbValue::Text(String::new()),
-                        DbValue::Text("2026-01-01T00:00:00Z".into()),
-                    ],
-                }],
-                columns: vec![
-                    bookclerk_plugin_abi::DbColumn {
-                        name: "operation_id".into(),
-                        db_type: bookclerk_plugin_abi::DbType::Text,
-                    },
-                    bookclerk_plugin_abi::DbColumn {
-                        name: "request_hash".into(),
-                        db_type: bookclerk_plugin_abi::DbType::Text,
-                    },
-                    bookclerk_plugin_abi::DbColumn {
-                        name: "status".into(),
-                        db_type: bookclerk_plugin_abi::DbType::Text,
-                    },
-                    bookclerk_plugin_abi::DbColumn {
-                        name: "payload".into(),
-                        db_type: bookclerk_plugin_abi::DbType::Text,
-                    },
-                    bookclerk_plugin_abi::DbColumn {
-                        name: "created_at".into(),
-                        db_type: bookclerk_plugin_abi::DbType::Text,
-                    },
+    fn unwrap_unavailable_on_ok_empty_payload() {
+        let prior = bookclerk_plugin_abi::StatementResult {
+            rows: vec![bookclerk_plugin_abi::DbRow {
+                values: vec![
+                    DbValue::Text("guest-op".into()),
+                    DbValue::Text("a".repeat(64)),
+                    DbValue::Text("ok".into()),
+                    DbValue::Text(String::new()),
+                    DbValue::Text("2026-01-01T00:00:00Z".into()),
                 ],
-                rows_affected: 0,
-            };
-            let reply = ExecuteReply {
-                operation_id: "guest-op".into(),
-                statements: vec![
-                    bookclerk_plugin_abi::StatementResult::from_affected(0),
-                    prior,
-                    bookclerk_plugin_abi::StatementResult::from_affected(0),
-                    bookclerk_plugin_abi::StatementResult::from_affected(0),
+            }],
+            columns: vec![
+                bookclerk_plugin_abi::DbColumn {
+                    name: "operation_id".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "request_hash".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "status".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "payload".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "created_at".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+            ],
+            rows_affected: 0,
+        };
+        let reply = ExecuteReply {
+            operation_id: "guest-op".into(),
+            statements: vec![
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+                prior,
+                bookclerk_plugin_abi::StatementResult::from_affected(7),
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+            ],
+            timing: bookclerk_plugin_abi::DbTiming::default(),
+        };
+        let err = unwrap_guest_typed_reply(reply, 1, &"a".repeat(64)).unwrap_err();
+        assert_eq!(err.code, bookclerk_plugin_abi::PluginErrorCode::Unavailable);
+    }
+
+    #[test]
+    fn unwrap_claimed_empty_payload_uses_guest_slice() {
+        let prior = bookclerk_plugin_abi::StatementResult {
+            rows: vec![bookclerk_plugin_abi::DbRow {
+                values: vec![
+                    DbValue::Text("guest-op".into()),
+                    DbValue::Text("a".repeat(64)),
+                    DbValue::Text("claimed".into()),
+                    DbValue::Text(String::new()),
+                    DbValue::Text("2026-01-01T00:00:00Z".into()),
                 ],
-                timing: bookclerk_plugin_abi::DbTiming::default(),
-            };
-            let err = unwrap_guest_typed_reply(reply, 1, &"a".repeat(64)).unwrap_err();
-            assert_eq!(
-                err.code,
-                bookclerk_plugin_abi::PluginErrorCode::Unavailable,
-                "{status}"
-            );
-        }
+            }],
+            columns: vec![
+                bookclerk_plugin_abi::DbColumn {
+                    name: "operation_id".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "request_hash".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "status".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "payload".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+                bookclerk_plugin_abi::DbColumn {
+                    name: "created_at".into(),
+                    db_type: bookclerk_plugin_abi::DbType::Text,
+                },
+            ],
+            rows_affected: 0,
+        };
+        let reply = ExecuteReply {
+            operation_id: "guest-op".into(),
+            statements: vec![
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+                prior,
+                bookclerk_plugin_abi::StatementResult::from_affected(7),
+                bookclerk_plugin_abi::StatementResult::from_affected(0),
+            ],
+            timing: bookclerk_plugin_abi::DbTiming::default(),
+        };
+        let guest = unwrap_guest_typed_reply(reply, 1, &"a".repeat(64)).expect("claimed resume");
+        assert_eq!(guest.statements.len(), 1);
+        assert_eq!(guest.statements[0].rows_affected, 7);
     }
 }
