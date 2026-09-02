@@ -336,7 +336,7 @@ impl ExecuteReply {
     }
 }
 
-/// Semantic SQL-contract advertisement (`DatabaseSession.capabilities`).
+/// Semantic SQL-contract advertisement (`AdapterDatabaseSession.capabilities`).
 ///
 /// Bootstrap metadata (`sql_family`, `diagnostic_engine`, SeaORM `dialect`) is
 /// negotiated separately via [`DbBootstrap`] — not on this typed capability plane.

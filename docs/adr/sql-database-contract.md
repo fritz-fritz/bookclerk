@@ -43,7 +43,7 @@ repository interface.
 
 ### Capability negotiation
 
-After `openSession` the host calls typed `DatabaseSession.capabilities`
+After `openSession` the host calls typed `AdapterDatabaseSession.capabilities`
 (`abiMinor` ≥ 7). `DbCapabilities` advertises the SQL contract version,
 execution semantics (`atomicBatch`, `returning`, `affectedRows`,
 `cancellation`, `timing`), schema versioning (`pragmaUserVersion` /
