@@ -194,8 +194,18 @@ where
 }
 
 /// True when schema apply should retry after re-reading durable state.
-fn is_schema_unavailable(err: &LibraryError) -> bool {
-    matches!(err, LibraryError::Unavailable(_))
+///
+/// [`LibraryError::Unavailable`] covers locks, deadlocks, and lost commits.
+/// [`LibraryError::Conflict`] covers concurrent `CREATE TABLE IF NOT EXISTS`
+/// catalog uniqueness (Postgres `23505` on `pg_type`) and a peer inserting the
+/// version marker before this migrator observes it. Callers re-read the
+/// version first; retrying the idempotent DDL+marker batch is not a blind
+/// re-apply.
+fn is_schema_retryable(err: &LibraryError) -> bool {
+    matches!(
+        err,
+        LibraryError::Unavailable(_) | LibraryError::Conflict(_)
+    )
 }
 
 /// Applies pending SQLite `PRAGMA user_version` migrations via `run_batch`.
@@ -249,7 +259,7 @@ where
                 if version <= sqlite_user_version(db).await? {
                     return Ok(());
                 }
-                if attempt + 1 < 8 && is_schema_unavailable(&err) {
+                if attempt + 1 < 8 && is_schema_retryable(&err) {
                     last_applied_err = Some(err);
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     delay_ms = delay_ms.saturating_mul(2).min(250);
@@ -303,7 +313,7 @@ where
                     {
                         break;
                     }
-                    if attempt + 1 < 8 && is_schema_unavailable(&err) {
+                    if attempt + 1 < 8 && is_schema_retryable(&err) {
                         last_err = Some(err);
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                         delay_ms = delay_ms.saturating_mul(2).min(250);
@@ -365,7 +375,7 @@ async fn apply_one_sqlite_version(
                 if version <= sqlite_user_version(db).await? {
                     return Ok(());
                 }
-                if attempt + 1 < 8 && is_schema_unavailable(&err) {
+                if attempt + 1 < 8 && is_schema_retryable(&err) {
                     last_applied_err = Some(err);
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     delay_ms = delay_ms.saturating_mul(2).min(250);
@@ -455,7 +465,7 @@ async fn apply_one_schema_migration(
                 {
                     return Ok(());
                 }
-                if attempt + 1 < 8 && is_schema_unavailable(&err) {
+                if attempt + 1 < 8 && is_schema_retryable(&err) {
                     last_err = Some(err);
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     delay_ms = delay_ms.saturating_mul(2).min(250);
@@ -487,11 +497,7 @@ async fn ensure_schema_migrations(db: &DatabaseConnection, backend: DbBackend) -
         .await
         {
             Ok(()) => return Ok(()),
-            Err(err)
-                if attempt + 1 < 8
-                    && (is_schema_unavailable(&err)
-                        || matches!(err, LibraryError::Conflict(_))) =>
-            {
+            Err(err) if attempt + 1 < 8 && is_schema_retryable(&err) => {
                 last_err = Some(err);
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms = delay_ms.saturating_mul(2).min(250);
@@ -577,6 +583,19 @@ async fn exec_sql(db: &DatabaseConnection, backend: DbBackend, sql: &str) -> Res
 mod tests {
     use super::*;
     use bookclerk_plugin_abi::DbCapabilities;
+
+    #[test]
+    fn schema_retryable_covers_conflict_and_unavailable() {
+        assert!(is_schema_retryable(&LibraryError::Unavailable(
+            "SQLITE_BUSY".into()
+        )));
+        assert!(is_schema_retryable(&LibraryError::Conflict(
+            "duplicate key".into()
+        )));
+        assert!(!is_schema_retryable(&LibraryError::Orm(
+            sea_orm::DbErr::Custom("syntax error".into())
+        )));
+    }
 
     #[test]
     fn schema_batch_keeps_version_marker_last() {
@@ -845,5 +864,59 @@ mod tests {
         );
         a.expect("first apply");
         b.expect("second apply");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+    async fn postgres_sqlx_unique_violation_is_conflict() {
+        if std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_none()
+        {
+            return;
+        }
+        let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL").unwrap();
+        let db = sea_orm::Database::connect(url.as_str())
+            .await
+            .expect("connect");
+        let backend = sea_orm::ConnectionTrait::get_database_backend(&db);
+        let table = format!("uniq_{}", uuid::Uuid::new_v4().as_simple());
+        sea_orm::ConnectionTrait::execute_raw(
+            &db,
+            sea_orm::Statement::from_string(
+                backend,
+                format!("CREATE TEMP TABLE {table} (id INTEGER PRIMARY KEY)"),
+            ),
+        )
+        .await
+        .expect("temp table");
+        sea_orm::ConnectionTrait::execute_raw(
+            &db,
+            sea_orm::Statement::from_string(
+                backend,
+                format!("INSERT INTO {table} (id) VALUES (1)"),
+            ),
+        )
+        .await
+        .expect("insert");
+        let err = sea_orm::ConnectionTrait::execute_raw(
+            &db,
+            sea_orm::Statement::from_string(
+                backend,
+                format!("INSERT INTO {table} (id) VALUES (1)"),
+            ),
+        )
+        .await
+        .expect_err("duplicate key");
+        assert_eq!(
+            bookclerk_db_exec::classify_db_err(&err),
+            bookclerk_db_exec::DbErrorClass::Conflict,
+            "display={err} debug={err:?}"
+        );
+        assert!(
+            matches!(LibraryError::from_db_err(err), LibraryError::Conflict(_)),
+            "typed 23505 must map to Conflict even when Display omits the SQLSTATE"
+        );
     }
 }
