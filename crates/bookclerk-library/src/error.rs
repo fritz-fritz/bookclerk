@@ -59,3 +59,19 @@ pub enum LibraryError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
+
+impl LibraryError {
+    /// Maps a SeaORM / adapter [`sea_orm::DbErr`] onto a typed library error.
+    ///
+    /// Busy, deadlock, and lost-commit tokens become [`Self::Unavailable`].
+    /// Unique/constraint tokens become [`Self::Conflict`]. Everything else
+    /// stays [`Self::Orm`].
+    #[must_use]
+    pub fn from_db_err(err: sea_orm::DbErr) -> Self {
+        match bookclerk_db_exec::classify_db_err(&err) {
+            bookclerk_db_exec::DbErrorClass::Unavailable => Self::Unavailable(err.to_string()),
+            bookclerk_db_exec::DbErrorClass::Conflict => Self::Conflict(err.to_string()),
+            bookclerk_db_exec::DbErrorClass::Other => Self::Orm(err),
+        }
+    }
+}

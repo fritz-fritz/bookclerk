@@ -2020,19 +2020,6 @@ fn adapter_config_context(
         .map_err(|err| DbErr::Custom(err.to_string()))
 }
 
-/// Maps advertised schema capabilities to a SeaORM [`DbBackend`].
-///
-/// Schema kind is the versioning mechanic, not SQL-family identity. Prefer
-/// [`seaorm_backend_from_bootstrap`] when opening the SeaORM proxy.
-#[cfg(test)]
-fn schema_kind_to_backend(kind: bookclerk_library::HostSchemaKind) -> DbBackend {
-    match kind {
-        bookclerk_library::HostSchemaKind::PragmaMarker
-        | bookclerk_library::HostSchemaKind::AtomicBatchMarker => DbBackend::Sqlite,
-        bookclerk_library::HostSchemaKind::RowMarker => DbBackend::Postgres,
-    }
-}
-
 /// SeaORM proxy backend from [`DbBootstrap`] metadata.
 fn seaorm_backend_from_bootstrap(bootstrap: &DbBootstrap) -> Result<DbBackend, DbErr> {
     match bootstrap.sql_family.to_ascii_lowercase().as_str() {
@@ -2146,28 +2133,6 @@ mod tests {
             seaorm_backend_from_bootstrap(&unknown).unwrap(),
             DbBackend::Sqlite
         );
-    }
-
-    #[test]
-    fn maps_schema_kind_to_backend() {
-        assert_eq!(
-            schema_kind_to_backend(bookclerk_library::HostSchemaKind::PragmaMarker),
-            DbBackend::Sqlite
-        );
-        assert_eq!(
-            schema_kind_to_backend(bookclerk_library::HostSchemaKind::AtomicBatchMarker),
-            DbBackend::Sqlite
-        );
-        assert_eq!(
-            schema_kind_to_backend(bookclerk_library::HostSchemaKind::RowMarker),
-            DbBackend::Postgres
-        );
-        let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(
-            &DbCapabilities::advertised_sqlite(),
-        )
-        .unwrap();
-        assert_eq!(kind, bookclerk_library::HostSchemaKind::PragmaMarker);
-        assert_eq!(schema_kind_to_backend(kind), DbBackend::Sqlite);
     }
 
     #[test]

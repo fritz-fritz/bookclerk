@@ -44,7 +44,9 @@ pub use db_atomic::{
 };
 pub use email::{gravatar_hash, is_valid_user_email, normalize_user_email};
 pub use error::{LibraryError, Result};
-pub use host_schema::{apply_host_schema, apply_host_schema_with_batch, HostSchemaKind};
+pub use host_schema::{
+    apply_host_schema, apply_host_schema_with_batch, HostSchemaKind, SchemaBatch,
+};
 pub use in_process_atomic::InProcessSqliteAtomic;
 pub use master_key::{
     configure_master_key, configure_master_key_with, inspect_master_key, master_key_path,

@@ -22,6 +22,45 @@ use crate::error::{LibraryError, Result};
 use crate::migrations::{host_migration_plan, HostMigrationStep};
 use crate::sql_plan::{execute_statements_on, DbAtomicPlan, DbPlanStatement};
 
+/// Timing label for host schema apply (not an adapter identity).
+const SCHEMA_TXN_TIMING: &str = "schema_txn";
+
+/// Canonical schema apply batch: host DDL followed by the version marker.
+///
+/// Production and test-only executors must consume this same representation.
+/// Adapters lower and split the pack at execution
+/// ([`bookclerk_db_exec::expand_host_schema_batch`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaBatch {
+    /// Ordered SQL strings; the last statement is the version marker.
+    pub statements: Vec<String>,
+}
+
+impl SchemaBatch {
+    /// Builds a batch from one canonical DDL pack plus a trailing marker.
+    #[must_use]
+    pub fn from_ddl_and_marker(ddl: impl Into<String>, marker: impl Into<String>) -> Self {
+        Self {
+            statements: vec![ddl.into(), marker.into()],
+        }
+    }
+
+    /// SQLite `PRAGMA user_version` marker last.
+    #[must_use]
+    pub fn with_pragma_marker(ddl: &str, version: i64) -> Self {
+        Self::from_ddl_and_marker(ddl, format!("PRAGMA user_version = {version}"))
+    }
+
+    /// `schema_migrations` row marker last.
+    #[must_use]
+    pub fn with_row_marker(ddl: &str, version: i64) -> Self {
+        Self::from_ddl_and_marker(
+            ddl,
+            format!("INSERT INTO schema_migrations (version) VALUES ({version})"),
+        )
+    }
+}
+
 /// Which versioning mechanic the host should use.
 ///
 /// Flags choose **how** versions are stored and applied, not which SQL pack
@@ -117,8 +156,13 @@ pub async fn apply_host_schema(db: &DatabaseConnection, kind: HostSchemaKind) ->
         HostSchemaKind::PragmaMarker => apply_sqlite_user_version(db).await,
         HostSchemaKind::RowMarker | HostSchemaKind::AtomicBatchMarker => {
             let backend = db.get_database_backend();
-            let timing = schema_migration_timing(backend);
-            apply_schema_migrations_from_plan(db, backend, timing, &host_migration_plan()).await
+            apply_schema_migrations_from_plan(
+                db,
+                backend,
+                SCHEMA_TXN_TIMING,
+                &host_migration_plan(),
+            )
+            .await
         }
     }
 }
@@ -149,13 +193,9 @@ where
     }
 }
 
-/// Timing label for schema migration transactions on `backend`.
-fn schema_migration_timing(backend: DbBackend) -> &'static str {
-    if backend == DbBackend::Postgres {
-        "postgres_txn"
-    } else {
-        "sqlite_txn"
-    }
+/// True when schema apply should retry after re-reading durable state.
+fn is_schema_unavailable(err: &LibraryError) -> bool {
+    matches!(err, LibraryError::Unavailable(_))
 }
 
 /// Applies pending SQLite `PRAGMA user_version` migrations via `run_batch`.
@@ -196,30 +236,27 @@ where
     F: FnMut(Vec<String>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
+    let batch = SchemaBatch::with_pragma_marker(schema, version);
     let mut delay_ms = 20u64;
     let mut last_applied_err = None;
     for attempt in 0..8 {
         if version <= sqlite_user_version(db).await? {
             return Ok(());
         }
-        // Canonical through planning/authorization/routing: adapters lower
-        // and split this pack at execution (see `expand_host_schema_batch`).
-        let stmts = vec![
-            schema.to_string(),
-            format!("PRAGMA user_version = {version}"),
-        ];
-        match run_batch(stmts).await {
+        match run_batch(batch.statements.clone()).await {
             Ok(()) => return Ok(()),
-            Err(err) if is_already_applied_ddl(&err) => {
-                tokio::time::sleep(Duration::from_millis(15)).await;
-                last_applied_err = Some(err);
+            Err(err) => {
+                if version <= sqlite_user_version(db).await? {
+                    return Ok(());
+                }
+                if attempt + 1 < 8 && is_schema_unavailable(&err) {
+                    last_applied_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2).min(250);
+                    continue;
+                }
+                return Err(err);
             }
-            Err(err) if attempt + 1 < 8 && is_schema_lock_err(&err) => {
-                last_applied_err = Some(err);
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                delay_ms = delay_ms.saturating_mul(2).min(250);
-            }
-            Err(err) => return Err(err),
         }
     }
     if version <= sqlite_user_version(db).await? {
@@ -247,6 +284,7 @@ where
     for step in steps {
         let version = step.version;
         let schema = step.canonical;
+        let batch = SchemaBatch::with_row_marker(schema, version);
         let mut delay_ms = 20u64;
         let mut last_err = None;
         for attempt in 0..8 {
@@ -256,24 +294,23 @@ where
             {
                 break;
             }
-            // Canonical through planning/authorization/routing: adapters
-            // lower and split this pack at execution.
-            let stmts = vec![
-                schema.to_string(),
-                format!("INSERT INTO schema_migrations (version) VALUES ({version})"),
-            ];
-            match run_batch(stmts).await {
+            match run_batch(batch.statements.clone()).await {
                 Ok(()) => break,
-                Err(err) if is_already_applied_ddl(&err) => {
-                    tokio::time::sleep(Duration::from_millis(15)).await;
-                    last_err = Some(err);
+                Err(err) => {
+                    if schema_versions_applied(db, backend)
+                        .await?
+                        .contains(&version)
+                    {
+                        break;
+                    }
+                    if attempt + 1 < 8 && is_schema_unavailable(&err) {
+                        last_err = Some(err);
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        delay_ms = delay_ms.saturating_mul(2).min(250);
+                        continue;
+                    }
+                    return Err(err);
                 }
-                Err(err) if attempt + 1 < 8 && is_schema_lock_err(&err) => {
-                    last_err = Some(err);
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms = delay_ms.saturating_mul(2).min(250);
-                }
-                Err(err) => return Err(err),
             }
         }
         if !schema_versions_applied(db, backend)
@@ -313,31 +350,29 @@ async fn apply_one_sqlite_version(
         if version <= sqlite_user_version(db).await? {
             return Ok(());
         }
-        let stmts = vec![
-            schema.to_string(),
-            format!("PRAGMA user_version = {version}"),
-        ];
+        let batch = SchemaBatch::with_pragma_marker(schema, version);
         match run_atomic_ddl(
             db,
             backend,
-            "sqlite_txn",
+            SCHEMA_TXN_TIMING,
             &format!("migrate-sqlite-{version}"),
-            stmts,
+            batch.statements,
         )
         .await
         {
             Ok(()) => return Ok(()),
-            Err(err) if is_already_applied_ddl(&err) => {
-                // Peer's ALTER is visible before its version marker commits.
-                tokio::time::sleep(Duration::from_millis(15)).await;
-                last_applied_err = Some(err);
+            Err(err) => {
+                if version <= sqlite_user_version(db).await? {
+                    return Ok(());
+                }
+                if attempt + 1 < 8 && is_schema_unavailable(&err) {
+                    last_applied_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2).min(250);
+                    continue;
+                }
+                return Err(err);
             }
-            Err(err) if attempt + 1 < 8 && is_schema_lock_err(&err) => {
-                last_applied_err = Some(err);
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                delay_ms = delay_ms.saturating_mul(2).min(250);
-            }
-            Err(err) => return Err(err),
         }
     }
     if version <= sqlite_user_version(db).await? {
@@ -402,30 +437,32 @@ async fn apply_one_schema_migration(
         {
             return Ok(());
         }
-        let stmts = vec![
-            schema.to_string(),
-            format!("INSERT INTO schema_migrations (version) VALUES ({version})"),
-        ];
+        let batch = SchemaBatch::with_row_marker(schema, version);
         match run_atomic_ddl(
             db,
             backend,
             timing,
             &format!("migrate-{timing}-{version}"),
-            stmts,
+            batch.statements,
         )
         .await
         {
             Ok(()) => return Ok(()),
-            Err(err) if is_already_applied_ddl(&err) => {
-                tokio::time::sleep(Duration::from_millis(15)).await;
-                last_err = Some(err);
+            Err(err) => {
+                if schema_versions_applied(db, backend)
+                    .await?
+                    .contains(&version)
+                {
+                    return Ok(());
+                }
+                if attempt + 1 < 8 && is_schema_unavailable(&err) {
+                    last_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2).min(250);
+                    continue;
+                }
+                return Err(err);
             }
-            Err(err) if attempt + 1 < 8 && is_schema_lock_err(&err) => {
-                last_err = Some(err);
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                delay_ms = delay_ms.saturating_mul(2).min(250);
-            }
-            Err(err) => return Err(err),
         }
     }
     if schema_versions_applied(db, backend)
@@ -452,7 +489,8 @@ async fn ensure_schema_migrations(db: &DatabaseConnection, backend: DbBackend) -
             Ok(()) => return Ok(()),
             Err(err)
                 if attempt + 1 < 8
-                    && (is_already_applied_ddl(&err) || is_schema_lock_err(&err)) =>
+                    && (is_schema_unavailable(&err)
+                        || matches!(err, LibraryError::Conflict(_))) =>
             {
                 last_err = Some(err);
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -503,32 +541,6 @@ async fn run_atomic_ddl(
     Ok(())
 }
 
-/// Runs `stmts` as one generic atomic execute plan (version marker last).
-fn is_already_applied_ddl(err: &LibraryError) -> bool {
-    let s = format!("{err}\n{err:?}").to_lowercase();
-    s.contains("duplicate column")
-        || s.contains("already exists")
-        || s.contains("duplicate key")
-        || s.contains("23505")
-        || s.contains("sqlite_constraint")
-}
-
-/// True when a concurrent migrator or ambiguous D1 commit should retry this version.
-fn is_schema_lock_err(err: &LibraryError) -> bool {
-    let s = format!("{err}\n{err:?}").to_ascii_lowercase();
-    s.contains("sqlite_busy")
-        || s.contains("sqlite_locked")
-        || s.contains("database is locked")
-        || s.contains("begin failed")
-        || s.contains("40p01")
-        || s.contains("40001")
-        || s.contains("55p03")
-        // D1 committed-but-lost / 5xx after commit: retry; version marker makes re-apply safe.
-        || s.contains("d1 ambiguous")
-        || s.contains("ambiguous response")
-        || s.contains("commit reply lost")
-}
-
 /// Loads `schema_migrations.version` rows.
 async fn schema_versions_applied(
     db: &DatabaseConnection,
@@ -557,7 +569,7 @@ async fn schema_versions_applied(
 async fn exec_sql(db: &DatabaseConnection, backend: DbBackend, sql: &str) -> Result<()> {
     db.execute_raw(Statement::from_string(backend, sql.to_string()))
         .await
-        .map_err(LibraryError::Orm)?;
+        .map_err(LibraryError::from_db_err)?;
     Ok(())
 }
 
@@ -565,6 +577,18 @@ async fn exec_sql(db: &DatabaseConnection, backend: DbBackend, sql: &str) -> Res
 mod tests {
     use super::*;
     use bookclerk_plugin_abi::DbCapabilities;
+
+    #[test]
+    fn schema_batch_keeps_version_marker_last() {
+        let batch = SchemaBatch::with_pragma_marker("CREATE TABLE t (id INTEGER)", 3);
+        assert_eq!(batch.statements.len(), 2);
+        assert_eq!(batch.statements.last().unwrap(), "PRAGMA user_version = 3");
+        let rows = SchemaBatch::with_row_marker("CREATE TABLE t (id INTEGER)", 2);
+        assert_eq!(
+            rows.statements.last().unwrap(),
+            "INSERT INTO schema_migrations (version) VALUES (2)"
+        );
+    }
 
     #[test]
     fn host_migration_plan_starts_with_greenfield_baseline() {

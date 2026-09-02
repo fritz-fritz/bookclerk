@@ -65,7 +65,7 @@ pub async fn execute_statements_on(
         AtomicSession::default().with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
-    .map_err(LibraryError::Orm)
+    .map_err(LibraryError::from_db_err)
 }
 
 /// [`execute_statements_on`] with session cancel / deadline checks.
@@ -90,5 +90,5 @@ pub async fn execute_statements_on_session(
         session.with_type_env(crate::migrations::host_sql_type_env()),
     )
     .await
-    .map_err(LibraryError::Orm)
+    .map_err(LibraryError::from_db_err)
 }

@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use bookclerk_plugin_abi::DbColumn;
 
 mod b64;
+mod classify;
 mod exec;
 pub mod guest_receipt;
 pub mod host_ir;
@@ -52,6 +53,7 @@ pub fn take_positional_result_columns() -> Option<Vec<DbColumn>> {
 pub use b64::{b64_string_to_bytes, bytes_to_b64_string};
 pub use bookclerk_plugin_abi::DbPlanStatementKind;
 pub use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
+pub use classify::{classify_db_err, classify_db_err_message, DbErrorClass};
 pub use exec::{
     cap_query_sql, encoded_proxy_row_len, execute_statements_on, execute_statements_on_session,
     json_cell_utf8_len, note_encoded_result_bytes, sea_value_to_json, AtomicSession, ExecCaps,
