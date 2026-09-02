@@ -886,11 +886,11 @@ mod tests {
             &db,
             sea_orm::Statement::from_string(
                 backend,
-                format!("CREATE TEMP TABLE {table} (id INTEGER PRIMARY KEY)"),
+                format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY)"),
             ),
         )
         .await
-        .expect("temp table");
+        .expect("create table");
         sea_orm::ConnectionTrait::execute_raw(
             &db,
             sea_orm::Statement::from_string(
@@ -909,6 +909,11 @@ mod tests {
         )
         .await
         .expect_err("duplicate key");
+        let _ = sea_orm::ConnectionTrait::execute_raw(
+            &db,
+            sea_orm::Statement::from_string(backend, format!("DROP TABLE IF EXISTS {table}")),
+        )
+        .await;
         assert_eq!(
             bookclerk_db_exec::classify_db_err(&err),
             bookclerk_db_exec::DbErrorClass::Conflict,
