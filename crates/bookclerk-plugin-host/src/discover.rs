@@ -245,14 +245,24 @@ pub fn settings_table(config: &Config, plugin: &DiscoveredPlugin) -> toml::Table
     }
 }
 
-/// Serializes `[database.sqlite|d1|postgres]` for the matching database plugin id.
+/// Serializes `[database.<id>]` for the matching database plugin id.
+///
+/// First-party ids use their typed config sections; third-party adapters get
+/// the opaque `[database.<id>]` table (delivered as `DatabaseAdapterConfig`).
 fn database_settings_table(config: &Config, plugin: &DiscoveredPlugin) -> toml::Table {
     let id = plugin.manifest.id.to_ascii_lowercase();
     let value = match id.as_str() {
         "sqlite" => toml::Value::try_from(&config.database.sqlite),
         "d1" => toml::Value::try_from(&config.database.d1),
         "postgres" => toml::Value::try_from(&config.database.postgres),
-        _ => return toml::Table::new(),
+        _ => {
+            return config
+                .database
+                .plugin_table(&plugin.manifest.id)
+                .or_else(|| config.database.plugin_table(&id))
+                .cloned()
+                .unwrap_or_default();
+        }
     };
     match value {
         Ok(toml::Value::Table(table)) => table,
@@ -260,7 +270,7 @@ fn database_settings_table(config: &Config, plugin: &DiscoveredPlugin) -> toml::
     }
 }
 
-/// Serializes `[output.s3]` into the handshake settings table.
+/// Serializes `[output.s3]` into the spawn settings table.
 fn output_s3_settings_table(cfg: &bookclerk_config::OutputS3Config) -> toml::Table {
     match toml::Value::try_from(cfg) {
         Ok(toml::Value::Table(table)) => table,
@@ -268,7 +278,7 @@ fn output_s3_settings_table(cfg: &bookclerk_config::OutputS3Config) -> toml::Tab
     }
 }
 
-/// Serializes `[output.local]` into the handshake settings table.
+/// Serializes `[output.local]` into the spawn settings table.
 fn output_local_settings_table(cfg: &bookclerk_config::OutputLocalConfig) -> toml::Table {
     match toml::Value::try_from(cfg) {
         Ok(toml::Value::Table(table)) => table,
@@ -277,7 +287,7 @@ fn output_local_settings_table(cfg: &bookclerk_config::OutputLocalConfig) -> tom
 }
 
 /// When ABS config lacks `api_key`, inject `BOOKCLERK_ABS_API_KEY` into the
-/// handshake table (plugin processes do not inherit Bookclerk env secrets).
+/// spawn config table (plugin processes do not inherit Bookclerk env secrets).
 fn inject_abs_api_key_from_env(plugin_id: &str, table: &mut toml::Table) {
     match plugin_id.trim().to_ascii_lowercase().as_str() {
         "audiobookshelf" | "abs" => {}
