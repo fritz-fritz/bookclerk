@@ -500,10 +500,8 @@ fn proofs_for_request(
 }
 
 /// Host plans may include already-lowered schema companions (`PRAGMA`,
-/// `CREATE FUNCTION`, …) and greenfield packs whose `CREATE TABLE IF NOT EXISTS`
-/// fragments evolve in-batch (V21 create, later V27 rebuild). Those get a
-/// hash-bound empty proof. Canonical DML is typed against the merged schema
-/// in statement order.
+/// `CREATE FUNCTION`, …) and greenfield DDL. Those get a hash-bound empty
+/// proof. Canonical DML is typed against the merged schema in statement order.
 fn proofs_for_host_plan(
     req: &ExecuteRequest,
     env: &SqlTypeEnv,

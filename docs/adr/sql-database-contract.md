@@ -183,8 +183,8 @@ limits is not loaded.
 
 - First-party database plugins shrink to connect, ping, proxy CRUD, and a
   generic batch executor. The host selects and applies schema versions after
-  capability negotiation (generic execute / one atomic batch; D1 V27 is
-  still one host-compiled HTTP batch).
+  capability negotiation (generic execute / one atomic batch; D1 schema
+  apply is still one host-compiled HTTP batch).
 - An architecture lint forbids plugin and `bookclerk-db-guest` production
   sources from importing Bookclerk migrations, embedding application table
   names, or interpreting named operations (`DbAtomicParams`, `atomic_status`,

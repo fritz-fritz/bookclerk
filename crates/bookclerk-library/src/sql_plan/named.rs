@@ -2936,9 +2936,8 @@ mod tests {
     }
 
     fn migrate(conn: &Connection) {
-        for sql in crate::migrations::migration_sql() {
-            conn.execute_batch(sql).unwrap();
-        }
+        conn.execute_batch(crate::migrations::greenfield_baseline_canonical())
+            .unwrap();
     }
 
     #[test]
