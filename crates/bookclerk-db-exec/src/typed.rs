@@ -496,7 +496,55 @@ fn proofs_for_request(
         ));
     }
     let env = type_env_with_bookkeeping(catalog);
-    typecheck_execute_request_proofs(req, &env).map_err(|err| DbErr::Custom(err.to_string()))
+    proofs_for_host_plan(req, &env)
+}
+
+/// Host plans may include already-lowered schema companions (`PRAGMA`,
+/// `CREATE FUNCTION`, …) and greenfield packs whose `CREATE TABLE IF NOT EXISTS`
+/// fragments evolve in-batch (V21 create, later V27 rebuild). Those get a
+/// hash-bound empty proof. Canonical DML is typed against the merged schema
+/// in statement order.
+fn proofs_for_host_plan(
+    req: &ExecuteRequest,
+    env: &SqlTypeEnv,
+) -> Result<Vec<ResolvedStatement>, DbErr> {
+    let mut working = env.clone();
+    let mut proofs = Vec::with_capacity(req.statements.len());
+    for stmt in &req.statements {
+        let sql = stmt.sql.trim();
+        if host_adapter_private_sql(sql) || bookclerk_plugin_abi::statement_is_ddl(sql) {
+            apply_schema_sql_to_env(&mut working, sql);
+            proofs.push(ResolvedStatement::bound_empty(sql));
+            continue;
+        }
+        let one = ExecuteRequest {
+            operation_id: req.operation_id.clone(),
+            request_hash: req.request_hash.clone(),
+            deadline_unix_ms: req.deadline_unix_ms,
+            statements: vec![stmt.clone()],
+        };
+        let mut typed = typecheck_execute_request_proofs(&one, &working)
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
+        proofs.push(typed.pop().ok_or_else(|| {
+            DbErr::Custom("host SQL typecheck returned no proof for a statement".into())
+        })?);
+    }
+    Ok(proofs)
+}
+
+fn host_adapter_private_sql(sql: &str) -> bool {
+    let t = sql.trim();
+    let u = t.to_ascii_uppercase();
+    crate::is_host_schema_version_marker(t)
+        || u.starts_with("PRAGMA ")
+        || u.starts_with("SET LOCAL ")
+        || u.starts_with("CREATE OR REPLACE FUNCTION")
+        || u.starts_with("CREATE FUNCTION")
+        || u.starts_with("CREATE TRIGGER")
+        || u.starts_with("DROP FUNCTION")
+        || u.starts_with("DROP TRIGGER")
+        || u.starts_with("ALTER TABLE")
+        || u.starts_with("DO $")
 }
 
 fn type_env_with_bookkeeping(catalog: &SqlTypeEnv) -> SqlTypeEnv {
