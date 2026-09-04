@@ -12,6 +12,7 @@
 mod atomic_ops;
 mod atomic_txn;
 mod backend_migrate;
+mod backup;
 mod db_atomic;
 pub mod email;
 pub mod entities;
@@ -25,6 +26,8 @@ mod models;
 pub mod operator_token;
 pub mod password;
 pub mod proxy_txn;
+mod schema_state;
+mod schema_walk;
 pub mod scope;
 pub mod secrets;
 mod session_client;
@@ -38,6 +41,21 @@ mod wishlist_merge;
 pub use atomic_ops::{atomic_status, DbAtomicParams, DbAtomicResult};
 pub use atomic_txn::{AtomicTxnBackend, TypedAtomicExec};
 pub use backend_migrate::{migrate_library_backend, BackendMigrateOptions, BackendMigrateSummary};
+pub use backup::encode::{CanonicalObject, CHUNK_TARGET_UNCOMPRESSED_BYTES};
+pub use backup::repository::BackupRepository;
+pub use backup::restore::restore_backup_unit;
+pub use backup::schema::{library_ddl_for_schema_state, sort_tables_by_foreign_keys};
+pub use backup::verify::verify_recovery_point;
+pub use backup::{
+    admit_canonical_schema, apply_admitted_sql, archive_backup, backup_library,
+    extract_backup_archive, library_canonical_schema, library_canonical_schema_for_state,
+    list_backups, plugin_canonical_schema_from_ddl_catalog, prune_automatic_backups,
+    resolve_backup_spec, restore_backup, restore_backup_in_repo, BackupListEntry, BackupManifest,
+    BackupOutcome, BackupReason, BackupRequest, BackupResolve, BackupUnit, CanonicalDatabaseSchema,
+    CanonicalExportOpts, CanonicalRestoreKind, CanonicalRestoreOpts, CanonicalTableSchema,
+    DatabaseUnitKind, IdentityHighWater, PreparedPluginUnit, RestorePlan, SchemaBackupOpts,
+    ValidatedBackup, BACKUPS_DIR, BACKUP_FORMAT_VERSION, BACKUP_RETENTION, LIBRARY_SKIP_TABLES,
+};
 pub use bookclerk_plugin_abi::GuestSqlPolicy;
 pub use db_atomic::{
     db_atomic_operation_id, db_atomic_request_hash, execute_db_atomic, execute_named_atomic,
@@ -45,7 +63,10 @@ pub use db_atomic::{
 pub use email::{gravatar_hash, is_valid_user_email, normalize_user_email};
 pub use error::{LibraryError, Result};
 pub use host_schema::{
-    apply_host_schema, apply_host_schema_with_batch, HostSchemaKind, SchemaBatch,
+    apply_host_schema, apply_host_schema_with_batch, apply_host_schema_with_batch_opts,
+    apply_host_schema_with_options, current_schema_state, current_schema_version,
+    migrate_host_schema_to, migrate_host_schema_to_with_batch, HostSchemaKind, SchemaApplyOptions,
+    SchemaBatch,
 };
 pub use in_process_atomic::InProcessSqliteAtomic;
 pub use master_key::{
@@ -53,6 +74,12 @@ pub use master_key::{
     require_master_key, resolve_master_key, resolve_master_key_with, seal_with_dek,
     unseal_with_dek, wrap_master_key, MasterKey, MasterKeyFormat,
     AUTH_PASSWORD_ENV as MASTER_KEY_AUTH_PASSWORD_ENV, MASTER_KEY_FILE_NAME,
+};
+pub use migrations::{
+    binding_bootstrap_sql, current_canonical_schema, current_canonical_table_names,
+    host_migration_plan, latest_schema_postgres, latest_schema_sqlite, unreleased_checksum,
+    HostMigrationStep, MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
+    UNRELEASED_SQL,
 };
 pub use models::{
     catalog_subscribers_for_event, collapse_live_subscriber_nodes, content_kind_from_classic,
@@ -89,6 +116,10 @@ pub use proxy_txn::{
     inject_savepoint_rollback_failures, is_txn_broken, note_begin_failed, note_commit_failed,
     note_query_row, query_row_cap, query_rows_seen, take_txn_fault, txn_broken_err,
     with_exec_budget, AtomicInterruptKind, AtomicInterruptPhase, ExecBudget,
+};
+pub use schema_state::{SchemaState, SCHEMA_STATE_FROZEN, SCHEMA_STATE_UNRELEASED};
+pub use schema_walk::{
+    plan_downgrade_to_binary, plan_schema_walk, plan_schema_walk_from_state, SchemaWalk,
 };
 pub use scope::SourceScope;
 pub use secrets::{

@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 18;
+const abiMinor :UInt32 = 19;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -780,6 +780,10 @@ struct DatabaseAdapterConfig {
   # library open. Third-party adapters must key isolated databases on this
   # value rather than `binding` alone (two plugins may both declare `DB`).
   instanceId @3 :Text;
+  # Append-only (abiMinor 19). When false, open an existing binding unit and
+  # do not provision a missing one (read-only backup capture). Omitted/true
+  # on older hosts means the adapter may create the unit.
+  provision @4 :Bool;
 }
 
 # JSON health payload for guests that report identity alongside liveness.
@@ -1089,6 +1093,13 @@ struct DbCapabilities {
   # Append-only (abiMinor 18). Adapter can open additional isolated sessions
   # for plugin-owned database bindings (per-binding file / schema / database).
   pluginDatabases @17 :Bool;
+  # Append-only (abiMinor 19). Adapter can expose one stable logical
+  # database state while the host reads schema, rows, and identity.
+  consistentBackupRead @18 :Bool;
+  # Append-only (abiMinor 19). Adapter can destructively replace one logical
+  # database unit so an ordinary restore failure does not leave that unit
+  # partially replaced.
+  atomicUnitRestore @19 :Bool;
 }
 
 struct DbBootstrapReply {

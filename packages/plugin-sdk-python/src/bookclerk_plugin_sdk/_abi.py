@@ -12,7 +12,7 @@ PRODUCT_API_VERSION: int = 2
 ABI_MAJOR: int = 2
 """Major ABI number advertised on `describe().abiMajor`."""
 
-ABI_MINOR: int = 18
+ABI_MINOR: int = 19
 """Minor ABI number. Hosts ignore unknown optional fields."""
 
 ENVELOPE_VERSION: int = 1
