@@ -502,6 +502,10 @@ fn proofs_for_request(
 /// Host plans may include already-lowered schema companions (`PRAGMA`,
 /// `CREATE FUNCTION`, …) and greenfield DDL. Those get a hash-bound empty
 /// proof. Canonical DML is typed against the merged schema in statement order.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when typecheck fails or a statement yields no proof.
 fn proofs_for_host_plan(
     req: &ExecuteRequest,
     env: &SqlTypeEnv,
