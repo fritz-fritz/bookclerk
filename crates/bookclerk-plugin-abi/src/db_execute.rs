@@ -233,6 +233,19 @@ pub struct ExecuteRequest {
     pub deadline_unix_ms: u64,
 }
 
+/// Transaction isolation the adapter must realize (abiMinor 20).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum IsolationReq {
+    /// One atomic batch (`BEGIN` / D1 HTTP batch).
+    #[default]
+    AtomicBatch,
+    /// Nested savepoint inside an already-open transaction.
+    NestedSavepoint,
+    /// Consistent snapshot for backup capture.
+    ConsistentSnapshot,
+}
+
 /// Result of one statement in [`ExecuteReply`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]

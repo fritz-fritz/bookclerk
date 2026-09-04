@@ -14,11 +14,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_db_exec::db_value_from_sea;
-use bookclerk_plugin_abi::HostExecuteEnvelope;
 use bookclerk_plugin_abi::{
     catalog_page_statement, database_context_from_params, reserved_catalog_relation_missing,
-    sql_catalog_page_rows, DbBootstrap, DbCapabilities, DbConnectParams, DbValue, SqlType,
-    SqlTypeEnv, SQL_CATALOG_TABLE, SQL_SCHEMA_TABLE,
+    sql_catalog_page_rows, AdapterExecuteRequest, DbBootstrap, DbCapabilities, DbConnectParams,
+    DbValue, HostExecuteEnvelope, IsolationReq, SqlType, SqlTypeEnv, SQL_CATALOG_TABLE,
+    SQL_SCHEMA_TABLE,
 };
 use bookclerk_plugin_sdk::GuestDatabase;
 use bookclerk_plugin_sdk::PRODUCT_API_VERSION;
@@ -38,6 +38,33 @@ use crate::jail::plugin_data_dir;
 use crate::rpc_session::{PluginSession, OPERATOR_ACCOUNT};
 use crate::{PluginError, Result as PluginResult};
 use bookclerk_library::{atomic_status, DbAtomicParams};
+
+/// Stamps 1:1 proofs on host-authored canonical SQL for adapter execute.
+fn stamp_adapter_request(
+    mut req: ExecuteRequest,
+    catalog: &SqlTypeEnv,
+    isolation: IsolationReq,
+) -> std::result::Result<AdapterExecuteRequest, crate::PluginError> {
+    bookclerk_plugin_abi::desugar_execute_request(&mut req);
+    let proofs = bookclerk_db_exec::stamp_host_proofs(&req, catalog)
+        .map_err(|err| crate::PluginError::from_abi(Some("invalid_params"), err.to_string()))?;
+    Ok(
+        AdapterExecuteRequest::new(req, bookclerk_plugin_abi::GuestReceiptPersist::default())
+            .with_proofs(proofs)
+            .with_isolation(isolation),
+    )
+}
+
+fn stamp_library_adapter_request(
+    req: ExecuteRequest,
+    isolation: IsolationReq,
+) -> std::result::Result<AdapterExecuteRequest, crate::PluginError> {
+    stamp_adapter_request(
+        req,
+        &bookclerk_library::migrations::host_sql_type_env(),
+        isolation,
+    )
+}
 
 /// External database backend spawned for `[database].plugin`.
 #[derive(Clone)]
@@ -453,6 +480,7 @@ impl GuestDatabase for BindingGuestDatabase {
             &self.cancel,
             request.deadline_unix_ms,
             self.caps.max_result_rows,
+            false,
         )
         .await?;
         let policy = bookclerk_library::GuestSqlPolicy::binding_owned().with_sql_types(env);
@@ -545,6 +573,32 @@ pub fn backup_adapter_id(plugin_id: &str) -> String {
     }
 }
 
+fn binding_isolation(on_txn: bool) -> IsolationReq {
+    if on_txn {
+        IsolationReq::NestedSavepoint
+    } else {
+        IsolationReq::AtomicBatch
+    }
+}
+
+async fn exec_binding_request(
+    session: &PluginSession,
+    key: &str,
+    stamped: AdapterExecuteRequest,
+    cancel: &Arc<AtomicBool>,
+    on_txn: bool,
+) -> std::result::Result<ExecuteReply, crate::PluginError> {
+    if on_txn {
+        session
+            .db_txn_execute_binding_request(key, stamped, Arc::clone(cancel))
+            .await
+    } else {
+        session
+            .db_execute_binding_request(key, stamped, Arc::clone(cancel))
+            .await
+    }
+}
+
 /// Reads the durable binding catalog through the host (guest-denied) path.
 async fn load_binding_sql_type_env(
     session: &PluginSession,
@@ -552,6 +606,7 @@ async fn load_binding_sql_type_env(
     cancel: &Arc<AtomicBool>,
     deadline_unix_ms: u64,
     max_result_rows: u32,
+    on_txn: bool,
 ) -> std::result::Result<SqlTypeEnv, AbiPluginError> {
     let page = sql_catalog_page_rows(max_result_rows);
     let mut env = SqlTypeEnv::new();
@@ -582,10 +637,9 @@ async fn load_binding_sql_type_env(
                 result_selection: DbResultSelection::Rows,
             }],
         };
-        let reply = match session
-            .db_execute_binding_request(key, req, Arc::clone(cancel))
-            .await
-        {
+        let stamped = stamp_adapter_request(req, &SqlTypeEnv::new(), binding_isolation(on_txn))
+            .map_err(host_err_to_abi)?;
+        let reply = match exec_binding_request(session, key, stamped, cancel, on_txn).await {
             Ok(reply) => reply,
             Err(err) => {
                 if reserved_catalog_relation_missing(&err.to_string(), SQL_CATALOG_TABLE) {
@@ -624,7 +678,16 @@ async fn load_binding_sql_type_env(
             break;
         }
     }
-    load_binding_sql_schema_env(session, key, cancel, deadline_unix_ms, page, &mut env).await?;
+    load_binding_sql_schema_env(
+        session,
+        key,
+        cancel,
+        deadline_unix_ms,
+        page,
+        on_txn,
+        &mut env,
+    )
+    .await?;
     Ok(env)
 }
 
@@ -635,6 +698,7 @@ async fn load_binding_sql_schema_env(
     cancel: &Arc<AtomicBool>,
     deadline_unix_ms: u64,
     page: u32,
+    on_txn: bool,
     env: &mut SqlTypeEnv,
 ) -> std::result::Result<(), AbiPluginError> {
     let mut cursor = String::new();
@@ -659,10 +723,9 @@ async fn load_binding_sql_schema_env(
                 result_selection: DbResultSelection::Rows,
             }],
         };
-        let reply = match session
-            .db_execute_binding_request(key, req, Arc::clone(cancel))
-            .await
-        {
+        let stamped = stamp_adapter_request(req, &SqlTypeEnv::new(), binding_isolation(on_txn))
+            .map_err(host_err_to_abi)?;
+        let reply = match exec_binding_request(session, key, stamped, cancel, on_txn).await {
             Ok(reply) => reply,
             Err(err) => {
                 if reserved_catalog_relation_missing(&err.to_string(), SQL_SCHEMA_TABLE) {
@@ -822,7 +885,11 @@ impl ExternalDatabase {
             self.session
                 .db_execute_binding_request(
                     &key,
-                    binding_bootstrap_request(owner_plugin_id, binding),
+                    stamp_adapter_request(
+                        binding_bootstrap_request(owner_plugin_id, binding),
+                        &SqlTypeEnv::new(),
+                        IsolationReq::AtomicBatch,
+                    )?,
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await?;
@@ -882,7 +949,11 @@ impl ExternalDatabase {
             self.session
                 .db_execute_binding_request(
                     &key,
-                    binding_bootstrap_request(owner_plugin_id, binding),
+                    stamp_adapter_request(
+                        binding_bootstrap_request(owner_plugin_id, binding),
+                        &SqlTypeEnv::new(),
+                        IsolationReq::AtomicBatch,
+                    )?,
                     Arc::new(AtomicBool::new(false)),
                 )
                 .await?;
@@ -1200,20 +1271,37 @@ impl RpcDatabaseProxy {
             .map_err(|err| crate::PluginError::from_abi(Some("invalid_params"), err.to_string()))?;
         let validate_req = req.clone();
         let cancel = Arc::new(AtomicBool::new(false));
-        let reply = if self.depth() > 0 {
+        let on_txn = self.depth() > 0;
+        let isolation = binding_isolation(on_txn);
+        let catalog = if let Some(binding) = self.binding.as_deref() {
+            load_binding_sql_type_env(
+                &self.session,
+                binding,
+                &cancel,
+                req.deadline_unix_ms,
+                self.caps.max_result_rows,
+                on_txn,
+            )
+            .await
+            .map_err(|err| crate::PluginError::from_abi(Some("invalid_params"), err.to_string()))?
+        } else {
+            bookclerk_library::migrations::host_sql_type_env()
+        };
+        let stamped = stamp_adapter_request(req, &catalog, isolation)?;
+        let reply = if on_txn {
             if let Some(binding) = self.binding.as_deref() {
                 self.session
-                    .db_txn_execute_binding_request(binding, req, cancel)
+                    .db_txn_execute_binding_request(binding, stamped, cancel)
                     .await
             } else {
-                self.session.db_txn_execute_request(req, cancel).await
+                self.session.db_txn_execute_request(stamped, cancel).await
             }
         } else if let Some(binding) = self.binding.as_deref() {
             self.session
-                .db_execute_binding_request(binding, req, cancel)
+                .db_execute_binding_request(binding, stamped, cancel)
                 .await
         } else {
-            self.session.db_execute_request(req, cancel).await
+            self.session.db_execute_request(stamped, cancel).await
         }?;
         bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)
             .map_err(map_reply_validation_err)?;
@@ -1434,11 +1522,15 @@ impl RpcAtomicBackend {
         let deadline_unix_ms = unix_now_ms().saturating_add(120_000);
         let mut typed = compiled.clone().into_typed_request(operation_id.clone());
         typed.deadline_unix_ms = deadline_unix_ms;
-        bookclerk_library::validate_execute_request(&typed, &self.caps)?;
+        bookclerk_library::authorize_typed_request(&mut typed, &self.caps).map_err(|err| {
+            bookclerk_library::LibraryError::Other(anyhow::anyhow!(err.to_string()))
+        })?;
         let validate_req = typed.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let _guard = CancelOnDrop(Arc::clone(&cancel));
         let remaining_ms = deadline_unix_ms.saturating_sub(unix_now_ms()).max(1);
+        let stamped = stamp_library_adapter_request(typed, IsolationReq::AtomicBatch)
+            .map_err(|err| bookclerk_library::LibraryError::Orm(DbErr::Custom(err.to_string())))?;
         tokio::select! {
             () = tokio::time::sleep(std::time::Duration::from_millis(remaining_ms)) => {
                 cancel.store(true, Ordering::SeqCst);
@@ -1446,7 +1538,7 @@ impl RpcAtomicBackend {
                     "deadline_exceeded: host RPC deadline elapsed".into(),
                 ))
             }
-            result = self.session.db_execute_request(typed, Arc::clone(&cancel)) => match result {
+            result = self.session.db_execute_request(stamped, Arc::clone(&cancel)) => match result {
                 Ok(reply) => {
                     bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)?;
                     Ok(bookclerk_library::interpret_typed_exec(
@@ -1534,8 +1626,10 @@ async fn exec_host_ddl_batch(
     };
     let validate_req = typed.clone();
     let cancel = Arc::new(AtomicBool::new(false));
+    let stamped = stamp_library_adapter_request(typed, IsolationReq::AtomicBatch)
+        .map_err(|err| bookclerk_library::LibraryError::Orm(DbErr::Custom(err.to_string())))?;
     let reply = session
-        .db_execute_request(typed, cancel)
+        .db_execute_request(stamped, cancel)
         .await
         .map_err(|err| bookclerk_library::LibraryError::Orm(DbErr::Custom(err.to_string())))?;
     bookclerk_library::validate_execute_reply(&validate_req, &reply, caps)?;
@@ -1597,12 +1691,23 @@ impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
             .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
         let validate_req = request.clone();
         let cancel = Arc::new(AtomicBool::new(false));
+        let mut stamped = HostExecuteEnvelope::new(request, envelope.guest_receipt)
+            .with_proofs(proofs)
+            .with_isolation(envelope.isolation);
+        if stamped.require_proofs().is_err() {
+            let proofs = bookclerk_db_exec::stamp_host_proofs(
+                &stamped.request,
+                &bookclerk_library::migrations::host_sql_type_env(),
+            )
+            .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
+            stamped = stamped.with_proofs(proofs);
+            stamped
+                .require_proofs()
+                .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
+        }
         let reply = self
             .session
-            .db_execute_envelope_request(
-                HostExecuteEnvelope::new(request, envelope.guest_receipt).with_proofs(proofs),
-                cancel,
-            )
+            .db_execute_request(stamped, cancel)
             .await
             .map_err(host_err_to_abi)?;
         bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)
@@ -2635,5 +2740,30 @@ mod tests {
                 .await
                 .expect_err("unknown adapter must not unregister");
         assert!(err.to_string().contains("cannot drop"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guest_database_execute_does_not_require_caller_proofs() {
+        let store = bookclerk_library::LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .expect("mem db"),
+        );
+        let db = granted_job_database(store);
+        let req = ExecuteRequest {
+            operation_id: "guest-no-proofs".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 1".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        db.execute(req)
+            .await
+            .expect("GuestDatabase.execute stays untrusted ExecuteRequest");
     }
 }

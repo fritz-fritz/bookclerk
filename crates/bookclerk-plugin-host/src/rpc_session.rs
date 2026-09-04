@@ -168,7 +168,7 @@ enum Work {
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::DbBootstrap>>,
     },
     DbExecuteRequest {
-        request: bookclerk_plugin_sdk::ExecuteRequest,
+        request: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
@@ -178,7 +178,7 @@ enum Work {
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
     DbTxnExecuteRequest {
-        request: bookclerk_plugin_sdk::ExecuteRequest,
+        request: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
@@ -194,7 +194,7 @@ enum Work {
     DbExecuteBindingRequest {
         /// Binding name previously opened with [`Work::DbOpenBinding`].
         name: String,
-        request: bookclerk_plugin_sdk::ExecuteRequest,
+        request: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
@@ -224,7 +224,7 @@ enum Work {
     /// Typed execute on the vat-held binding transaction.
     DbTxnExecuteBindingRequest {
         name: String,
-        request: bookclerk_plugin_sdk::ExecuteRequest,
+        request: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
@@ -814,7 +814,7 @@ impl PluginSession {
     pub async fn db_execute_binding_request(
         &self,
         name: &str,
-        request: bookclerk_plugin_sdk::ExecuteRequest,
+        request: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
         let name = name.to_string();
@@ -877,7 +877,7 @@ impl PluginSession {
     /// Returns a plugin error when the guest rejects the call or `cancel` is set.
     pub async fn db_execute_request(
         &self,
-        request: bookclerk_plugin_sdk::ExecuteRequest,
+        request: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
         self.call(|reply| Work::DbExecuteRequest {
@@ -914,7 +914,7 @@ impl PluginSession {
     /// the call, or `cancel` is set.
     pub async fn db_txn_execute_request(
         &self,
-        request: bookclerk_plugin_sdk::ExecuteRequest,
+        request: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
         self.call(|reply| Work::DbTxnExecuteRequest {
@@ -993,7 +993,7 @@ impl PluginSession {
     pub async fn db_txn_execute_binding_request(
         &self,
         name: &str,
-        request: bookclerk_plugin_sdk::ExecuteRequest,
+        request: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
         let name = name.to_string();

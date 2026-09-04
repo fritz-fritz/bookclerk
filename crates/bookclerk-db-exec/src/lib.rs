@@ -52,7 +52,7 @@ pub fn take_positional_result_columns() -> Option<Vec<DbColumn>> {
 
 pub use b64::{b64_string_to_bytes, bytes_to_b64_string};
 pub use bookclerk_plugin_abi::DbPlanStatementKind;
-pub use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
+pub use bookclerk_plugin_abi::{AdapterExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope};
 pub use classify::{
     classify_db_err, classify_db_err_message, is_schema_apply_retryable, DbErrorClass,
 };
@@ -92,5 +92,6 @@ pub use schema_postgres::{
 pub use typed::{
     db_value_from_sea, db_value_to_sea, execute_typed_envelope, execute_typed_on_session,
     execute_typed_on_session_then, execute_typed_on_txn, execute_typed_on_txn_envelope,
-    load_physical_sql_type_env, load_sql_type_env, load_sql_type_env_capped,
+    load_physical_sql_type_env, load_sql_type_env, load_sql_type_env_capped, proofs_for_host_plan,
+    stamp_adapter_execute, stamp_host_proofs,
 };

@@ -56,7 +56,7 @@ impl adapter_transaction_capnp::Server for AdapterTransactionServer {
             .get_request()
             .map_err(|err| capnp::Error::failed(err.to_string()))
             .and_then(|r| {
-                crate::db_rpc::read_execute_request(r)
+                crate::db_rpc::read_adapter_execute_request(r)
                     .map_err(|err| capnp::Error::failed(err.to_string()))
             })?;
         crate::db_rpc::write_execute_result_reply(
@@ -73,10 +73,10 @@ impl adapter_transaction_capnp::Server for AdapterTransactionServer {
     ) -> capnp::Result<()> {
         let envelope = params
             .get()?
-            .get_envelope()
+            .get_request()
             .map_err(|err| capnp::Error::failed(err.to_string()))
             .and_then(|r| {
-                crate::db_rpc::read_host_execute_envelope(r)
+                crate::db_rpc::read_adapter_execute_request(r)
                     .map_err(|err| capnp::Error::failed(err.to_string()))
             })?;
         crate::db_rpc::write_execute_result_reply(
@@ -120,9 +120,12 @@ pub struct HostAdapterTransactionClient {
 
 #[async_trait::async_trait(?Send)]
 impl AdapterTransaction for HostAdapterTransactionClient {
-    async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
+    async fn execute(
+        &self,
+        request: crate::host_envelope::AdapterExecuteRequest,
+    ) -> Result<crate::ExecuteReply> {
         let mut req = self.client.execute_request();
-        crate::db_rpc::write_execute_request(req.get().init_request(), &request);
+        crate::db_rpc::write_adapter_execute_request(req.get().init_request(), &request);
         let reply = req.send().promise.await.map_err(from_capnp)?;
         crate::db_rpc::read_execute_result_reply(
             reply
@@ -135,10 +138,10 @@ impl AdapterTransaction for HostAdapterTransactionClient {
 
     async fn execute_envelope(
         &self,
-        envelope: crate::host_envelope::HostExecuteEnvelope,
+        envelope: crate::host_envelope::AdapterExecuteRequest,
     ) -> Result<crate::ExecuteReply> {
         let mut req = self.client.execute_envelope_request();
-        crate::db_rpc::write_host_execute_envelope(req.get().init_envelope(), &envelope);
+        crate::db_rpc::write_adapter_execute_request(req.get().init_request(), &envelope);
         let reply = req.send().promise.await.map_err(from_capnp)?;
         crate::db_rpc::read_execute_result_reply(
             reply
@@ -210,10 +213,10 @@ impl HostAdapterDatabaseSession for HostAdapterDatabaseSessionClient {
 
     async fn execute_envelope(
         &self,
-        envelope: crate::host_envelope::HostExecuteEnvelope,
+        envelope: crate::host_envelope::AdapterExecuteRequest,
     ) -> Result<crate::ExecuteReply> {
         let mut req = self.client.execute_envelope_request();
-        crate::db_rpc::write_host_execute_envelope(req.get().init_envelope(), &envelope);
+        crate::db_rpc::write_adapter_execute_request(req.get().init_request(), &envelope);
         let reply = req.send().promise.await.map_err(from_capnp)?;
         crate::db_rpc::read_execute_result_reply(
             reply

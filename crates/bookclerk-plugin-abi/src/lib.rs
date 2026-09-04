@@ -58,7 +58,6 @@ pub mod db_value;
 pub mod error;
 mod features;
 pub mod guest_sql;
-#[cfg(feature = "host")]
 pub(crate) mod host_envelope;
 #[cfg(feature = "host")]
 mod host_roles;
@@ -126,7 +125,7 @@ pub use db::{
 pub use db_execute::{
     sql_payload_bytes, sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn,
     DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest,
-    StatementResult, TypedDbStatement, D1_MAX_BINDS, FIRST_PARTY_MAX_RESULT_BYTES,
+    IsolationReq, StatementResult, TypedDbStatement, D1_MAX_BINDS, FIRST_PARTY_MAX_RESULT_BYTES,
     FIRST_PARTY_MAX_RESULT_ROWS, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
     HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS,
     POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
@@ -139,6 +138,7 @@ pub use guest_sql::{
     validate_guest_execute_request_for_policy, validate_sql_v1_grammar, GuestSqlPolicy,
     GuestSqlRefs,
 };
+pub use host_envelope::AdapterExecuteRequest;
 #[cfg(feature = "host")]
 pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
 pub use kind::*;

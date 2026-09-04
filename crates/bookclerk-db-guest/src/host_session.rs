@@ -3,13 +3,12 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use bookclerk_plugin_abi::HostExecuteEnvelope;
-use bookclerk_plugin_abi::{AdapterTransaction, HostAdapterDatabaseSession};
-use bookclerk_plugin_abi::{ExecuteReply, ExecuteRequest, Result};
+use bookclerk_plugin_abi::{AdapterExecuteRequest, AdapterTransaction, HostAdapterDatabaseSession};
+use bookclerk_plugin_abi::{ExecuteReply, IsolationReq, Result};
 use sea_orm::DatabaseConnection;
 
 use crate::session::{
-    guest_begin, guest_commit, guest_execute_atomic, guest_execute_atomic_on,
-    guest_execute_atomic_on_txn, guest_rollback,
+    guest_begin, guest_commit, guest_execute_atomic, guest_execute_atomic_on, guest_rollback,
 };
 use bookclerk_plugin_sdk::database_adapter::plugin_error_from_engine;
 
@@ -36,12 +35,17 @@ struct GuestHostAdapterTransaction {
 
 #[async_trait::async_trait(?Send)]
 impl AdapterTransaction for GuestHostAdapterTransaction {
-    async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
-        guest_execute_atomic_on_txn(self.txn_id.clone(), request).await
-    }
-
-    async fn execute_envelope(&self, envelope: HostExecuteEnvelope) -> Result<ExecuteReply> {
-        crate::session::guest_execute_atomic_on_txn_envelope(self.txn_id.clone(), envelope).await
+    async fn execute(&self, request: AdapterExecuteRequest) -> Result<ExecuteReply> {
+        request.require_proofs()?;
+        match request.isolation {
+            IsolationReq::ConsistentSnapshot => {
+                return Err(bookclerk_plugin_abi::PluginError::unsupported(
+                    "ConsistentSnapshot requires a dedicated capture session",
+                ));
+            }
+            IsolationReq::AtomicBatch | IsolationReq::NestedSavepoint => {}
+        }
+        crate::session::guest_execute_atomic_on_txn_envelope(self.txn_id.clone(), request).await
     }
 
     async fn commit(&self) -> Result<()> {

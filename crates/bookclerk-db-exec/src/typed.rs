@@ -13,8 +13,9 @@ use std::time::Instant;
 use bookclerk_plugin_abi::{
     apply_schema_action_to_env, apply_schema_sql_to_env, assert_proof_matches_sql,
     catalog_companions_for_action, encoded_execute_reply_bytes, encoded_statement_result_bytes,
-    parse_create_table_schema, sql_host_bookkeeping_type_env, typecheck_execute_request_proofs,
-    ResolvedStatement, SchemaAction,
+    parse_create_table_schema, sql_catalog_create_table_sql, sql_ddl_create_table_sql,
+    sql_host_bookkeeping_type_env, sql_schema_create_table_sql, typecheck_execute_request_proofs,
+    AdapterExecuteRequest, ResolvedStatement, SchemaAction,
 };
 use bookclerk_plugin_abi::{
     sql_catalog_page_rows, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming,
@@ -498,6 +499,35 @@ fn proofs_for_request(
     proofs_for_host_plan(req, &type_env_with_bookkeeping(catalog))
 }
 
+/// Stamps 1:1 proofs for host-authored canonical SQL (planner / SeaORM).
+///
+/// Host companion SQL (`PRAGMA`, identity functions, DDL) gets a hash-bound
+/// empty proof. Canonical DML is typed against bookkeeping + catalog tables
+/// plus `catalog`.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when typecheck fails.
+pub fn stamp_host_proofs(
+    req: &ExecuteRequest,
+    catalog: &SqlTypeEnv,
+) -> Result<Vec<ResolvedStatement>, DbErr> {
+    proofs_for_host_plan(req, &type_env_with_bookkeeping(catalog))
+}
+
+/// Host-stamped [`AdapterExecuteRequest`] for first-party adapter execute.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when typecheck fails.
+pub fn stamp_adapter_execute(
+    request: ExecuteRequest,
+    catalog: &SqlTypeEnv,
+) -> Result<AdapterExecuteRequest, DbErr> {
+    let proofs = stamp_host_proofs(&request, catalog)?;
+    Ok(AdapterExecuteRequest::new(request, GuestReceiptPersist::default()).with_proofs(proofs))
+}
+
 /// Host plans may include already-lowered schema companions (`PRAGMA`,
 /// `CREATE FUNCTION`, …) and greenfield DDL. Those get a hash-bound empty
 /// proof. Canonical DML is typed against the merged schema in statement order.
@@ -505,7 +535,7 @@ fn proofs_for_request(
 /// # Errors
 ///
 /// Returns [`DbErr::Custom`] when typecheck fails or a statement yields no proof.
-fn proofs_for_host_plan(
+pub fn proofs_for_host_plan(
     req: &ExecuteRequest,
     env: &SqlTypeEnv,
 ) -> Result<Vec<ResolvedStatement>, DbErr> {
@@ -551,6 +581,9 @@ fn host_adapter_private_sql(sql: &str) -> bool {
 
 fn type_env_with_bookkeeping(catalog: &SqlTypeEnv) -> SqlTypeEnv {
     let mut env = sql_host_bookkeeping_type_env();
+    apply_schema_sql_to_env(&mut env, &sql_catalog_create_table_sql());
+    apply_schema_sql_to_env(&mut env, &sql_schema_create_table_sql());
+    apply_schema_sql_to_env(&mut env, &sql_ddl_create_table_sql());
     env.merge(catalog);
     env
 }
@@ -1265,6 +1298,9 @@ pub async fn execute_typed_envelope(
             envelope.request.statements.len()
         )));
     }
+    envelope
+        .require_proofs()
+        .map_err(|err| DbErr::Custom(err.to_string()))?;
     execute_typed_on_session_proofs(
         db,
         &envelope.request,
@@ -1431,15 +1467,8 @@ pub async fn execute_typed_on_txn(
     session: AtomicSession,
     describe: Option<&DatabaseConnection>,
 ) -> Result<ExecuteReply, DbErr> {
-    execute_typed_on_txn_envelope(
-        txn,
-        &HostExecuteEnvelope::new(req.clone(), GuestReceiptPersist::default()),
-        timing_source,
-        caps,
-        session,
-        describe,
-    )
-    .await
+    let envelope = stamp_adapter_execute(req.clone(), &session.type_env)?;
+    execute_typed_on_txn_envelope(txn, &envelope, timing_source, caps, session, describe).await
 }
 
 /// [`execute_typed_on_txn`] with a host-only guest-receipt persist hint and proofs.
@@ -1465,13 +1494,9 @@ pub async fn execute_typed_on_txn_envelope(
             "executeAtomic statements must be non-empty".into(),
         ));
     }
-    if !envelope.proofs.is_empty() && envelope.proofs.len() != envelope.request.statements.len() {
-        return Err(DbErr::Custom(format!(
-            "host execute envelope proofs must match statement count ({} proofs, {} statements)",
-            envelope.proofs.len(),
-            envelope.request.statements.len()
-        )));
-    }
+    envelope
+        .require_proofs()
+        .map_err(|err| DbErr::Custom(err.to_string()))?;
     session.check(AtomicInterruptPhase::BetweenStatements)?;
     let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
     let seen_budget = Arc::clone(&budget);
@@ -1487,6 +1512,7 @@ pub async fn execute_typed_on_txn_envelope(
                 session,
                 persist,
                 &envelope.proofs,
+                true,
             )
         })
     })
@@ -1595,6 +1621,7 @@ async fn execute_typed_join_body(
     session: AtomicSession,
     guest_receipt: GuestReceiptPersist,
     stamped: &[ResolvedStatement],
+    require_stamped: bool,
 ) -> Result<ExecuteReply, DbErr> {
     let started = Instant::now();
     let backend = ConnectionTrait::get_database_backend(txn);
@@ -1602,7 +1629,6 @@ async fn execute_typed_join_body(
     bookclerk_plugin_abi::desugar_execute_request(&mut req);
     let sql_started = Instant::now();
     let mut env = catalog_env_for_typed(txn, &session).await?;
-    let require_stamped = !stamped.is_empty();
     let proofs = proofs_for_request(&env, &req, stamped, require_stamped)?;
     let mut statements = Vec::with_capacity(req.statements.len());
     let skip_guest_on_prior = !guest_receipt.is_absent();
@@ -2216,5 +2242,25 @@ mod tests {
         let proofs = proofs_for_request(&SqlTypeEnv::new(), &req, &[], false)
             .expect("mixed host schema DDL + markers typecheck");
         assert_eq!(proofs.len(), 4);
+    }
+
+    #[test]
+    fn stamped_proofs_fail_closed_on_hash_mismatch() {
+        let req = ExecuteRequest {
+            operation_id: "mismatch".into(),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 1".into(),
+                parameters: Vec::new(),
+                kind: DbPlanStatementKind::Select,
+                max_rows: 1,
+                result_selection: DbResultSelection::Rows,
+            }],
+        };
+        let proof = ResolvedStatement::bound_empty("SELECT 2");
+        let err = proofs_for_request(&SqlTypeEnv::new(), &req, &[proof], true)
+            .expect_err("hash mismatch must fail closed");
+        assert!(err.to_string().contains("not bound"), "{err}");
     }
 }

@@ -1896,6 +1896,32 @@ mod tests {
     }
 
     #[test]
+    fn postgres_collate_comes_from_text_collate_sites() {
+        let env = sql_type_env_from_canonical_ddl("CREATE TABLE t (name TEXT)");
+        let sql = "SELECT name FROM t WHERE name = 'a'";
+        let proof = proof_of(sql, &env);
+        assert!(
+            !proof.text_collate_sites.is_empty(),
+            "TEXT comparisons must record collate sites"
+        );
+        let lowered = lower_canonical_sql_typed(DatabaseBackend::Postgres, sql, Some(&proof))
+            .expect("postgres collate from sites");
+        assert!(
+            lowered.contains("COLLATE \"C\""),
+            "postgres must wrap TEXT from proof sites: {lowered}"
+        );
+        let mut without_sites = proof.clone();
+        without_sites.text_collate_sites.clear();
+        let no_collate =
+            lower_canonical_sql_typed(DatabaseBackend::Postgres, sql, Some(&without_sites))
+                .expect("empty sites skip collate");
+        assert!(
+            !no_collate.contains("COLLATE"),
+            "clearing text_collate_sites must skip COLLATE: {no_collate}"
+        );
+    }
+
+    #[test]
     fn integer_overflow_lowers_to_null_case() {
         let sql = lower_pg(
             "SELECT 9223372036854775807 + 1, abs(-9223372036854775807 - 1)",

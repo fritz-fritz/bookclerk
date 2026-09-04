@@ -293,8 +293,11 @@ pub trait AdapterDatabaseSession {
         ))
     }
 
-    /// Typed atomic batch (`execute`). Every request is a non-empty ordered statement list.
-    async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply>;
+    /// Typed atomic batch (`execute`). Canonical SQL plus required 1:1 proofs.
+    async fn execute(
+        &self,
+        request: crate::host_envelope::AdapterExecuteRequest,
+    ) -> Result<crate::ExecuteReply>;
 
     /// Close the session.
     async fn close(&self) -> Result<()> {

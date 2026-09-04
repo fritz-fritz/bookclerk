@@ -10,11 +10,11 @@ use bookclerk_db_guest::{
 use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
 use bookclerk_plugin_abi::HostAdapterDatabaseSession;
 use bookclerk_plugin_sdk::{
-    serve, DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, PluginError, PluginMetadata,
+    serve, AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot,
+    ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
-    FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    AdapterExecuteRequest, DbBootstrap, DbCapabilities, ExecuteReply, PluginError, PluginMetadata,
 };
 
 fn describe_metadata() -> Result<String, PluginError> {
@@ -144,7 +144,7 @@ impl AdapterDatabaseSession for PostgresSession {
         }
     }
 
-    async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply, PluginError> {
+    async fn execute(&self, request: AdapterExecuteRequest) -> Result<ExecuteReply, PluginError> {
         match &self.dedicated {
             Some(conn) => guest_execute_request_on(conn, request).await,
             None => guest_execute_request(request).await,

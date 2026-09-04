@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 19;
+const abiMinor :UInt32 = 20;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -1045,6 +1045,151 @@ struct ExecuteRequest {
   deadlineUnixMs @3 :UInt64;
 }
 
+# Host → adapter execute (abiMinor 20). GuestDatabase stays ExecuteRequest-only.
+enum IsolationReq {
+  atomicBatch @0;
+  nestedSavepoint @1;
+  consistentSnapshot @2;
+}
+
+enum ResolvedSqlType {
+  integer @0;
+  real @1;
+  text @2;
+  blob @3;
+  boolean @4;
+  null @5;
+}
+
+struct SqlSpan {
+  start @0 :UInt32;
+  end @1 :UInt32;
+}
+
+struct TextCollateSite {
+  span @0 :SqlSpan;
+}
+
+enum IntegerArithKind {
+  add @0;
+  sub @1;
+  mul @2;
+  abs @3;
+}
+
+struct IntegerArithSite {
+  full @0 :SqlSpan;
+  lhs @1 :SqlSpan;
+  rhs @2 :SqlSpan;
+  kind @3 :IntegerArithKind;
+}
+
+struct PhysicalAccess {
+  table @0 :Text;
+  # Empty = table presence only; "*" = projection wildcard.
+  column @1 :Text;
+}
+
+struct ResolvedAssignment {
+  table @0 :Text;
+  column @1 :Text;
+  dest @2 :ResolvedSqlType;
+  source @3 :ResolvedSqlType;
+}
+
+struct NamedSqlType {
+  name @0 :Text;
+  sqlType @1 :ResolvedSqlType;
+}
+
+struct ColumnReference {
+  refTable @0 :Text;
+  refColumns @1 :List(Text);
+}
+
+struct OptionalColumnReference {
+  union {
+    none @0 :Void;
+    some @1 :ColumnReference;
+  }
+}
+
+struct ForeignKeyConstraint {
+  columns @0 :List(Text);
+  refTable @1 :Text;
+  refColumns @2 :List(Text);
+}
+
+struct TableConstraint {
+  union {
+    primaryKey @0 :List(Text);
+    unique @1 :List(Text);
+    check @2 :Text;
+    foreignKey @3 :ForeignKeyConstraint;
+  }
+}
+
+struct CreateTableSchema {
+  table @0 :Text;
+  columns @1 :List(NamedSqlType);
+  identityColumn @2 :Text;
+  columnNotNull @3 :List(Bool);
+  columnUnique @4 :List(Bool);
+  columnPrimaryKey @5 :List(Bool);
+  columnDefaults @6 :List(Text);
+  columnChecks @7 :List(Text);
+  columnReferences @8 :List(OptionalColumnReference);
+  tableConstraints @9 :List(TableConstraint);
+}
+
+struct SchemaCreate {
+  schema @0 :CreateTableSchema;
+  fingerprint @1 :Text;
+  noop @2 :Bool;
+}
+
+struct SchemaAction {
+  union {
+    none @0 :Void;
+    create @1 :SchemaCreate;
+    drop @2 :Text;
+  }
+}
+
+struct ResolvedStatement {
+  statementHash @0 :Text;
+  outputColumns @1 :List(NamedSqlType);
+  physicalAccesses @2 :List(PhysicalAccess);
+  assignments @3 :List(ResolvedAssignment);
+  textCollateSites @4 :List(TextCollateSite);
+  integerArithSites @5 :List(IntegerArithSite);
+  functions @6 :List(Text);
+  schemaAction @7 :SchemaAction;
+}
+
+struct AdapterReceipt {
+  guestLen @0 :UInt32;
+  guestHash @1 :Text;
+}
+
+struct AdapterStatement {
+  sql @0 :Text;
+  parameters @1 :List(DbValue);
+  kind @2 :DbStatementKind;
+  maxRows @3 :UInt32;
+  resultSelection @4 :DbResultSelection;
+  proof @5 :ResolvedStatement;
+}
+
+struct AdapterExecuteRequest {
+  operationId @0 :Text;
+  requestHash @1 :Text;
+  statements @2 :List(AdapterStatement);
+  deadlineUnixMs @3 :UInt64;
+  isolation @4 :IsolationReq;
+  receipt @5 :AdapterReceipt;
+}
+
 struct StatementResult {
   rows @0 :List(DbRow);
   columns @1 :List(DbColumn);
@@ -1128,7 +1273,8 @@ interface Database {
 # Host ↔ database adapter plugin. Capability negotiation + typed execute only.
 interface AdapterDatabaseSession {
   capabilities @0 () -> (result :DbCapabilitiesReply);
-  execute @1 (request :ExecuteRequest) -> (result :ExecuteResultReply);
+  # abiMinor 20: canonical SQL + required structured proofs (not JSON).
+  execute @1 (request :AdapterExecuteRequest) -> (result :ExecuteResultReply);
   close @2 () -> (result :EmptyReply);
   # Bootstrap-only SeaORM proxy metadata (not part of DbCapabilities).
   bootstrap @3 () -> (result :DbBootstrapReply);

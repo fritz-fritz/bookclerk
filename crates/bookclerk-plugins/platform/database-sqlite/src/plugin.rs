@@ -18,7 +18,7 @@ use bookclerk_plugin_sdk::{
     FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
-    DbBootstrap, DbCapabilities, ExecuteReply, ExecuteRequest, PluginError,
+    AdapterExecuteRequest, DbBootstrap, DbCapabilities, ExecuteReply, PluginError,
 };
 use sea_orm::DatabaseConnection;
 
@@ -196,7 +196,7 @@ impl AdapterDatabaseSession for SqliteSession {
         }
     }
 
-    async fn execute(&self, request: ExecuteRequest) -> Result<ExecuteReply> {
+    async fn execute(&self, request: AdapterExecuteRequest) -> Result<ExecuteReply> {
         match &self.dedicated {
             Some(conn) => guest_execute_request_on(conn, request).await,
             None => guest_execute_request(request).await,

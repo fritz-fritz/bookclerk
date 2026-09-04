@@ -17,7 +17,9 @@ use crate::sql::{
     GuestStatement,
 };
 use bookclerk_plugin_abi::HostExecuteEnvelope;
-use bookclerk_plugin_abi::{DbCapabilities, ExecuteReply, ExecuteRequest};
+use bookclerk_plugin_abi::{
+    AdapterExecuteRequest, DbCapabilities, ExecuteReply, IsolationReq, PluginError,
+};
 use bookclerk_plugin_sdk::database_adapter::plugin_error_from_db_err;
 use bookclerk_plugin_sdk::{QueryPage, MAX_LIST_PAGE, MAX_SCALAR_BYTES};
 use futures::TryStreamExt;
@@ -293,15 +295,18 @@ fn library_typed_session(deadline: Option<u64>) -> bookclerk_db_exec::AtomicSess
 
 /// Typed `AdapterDatabaseSession.execute` on the shared library connection.
 ///
-/// Runs [`ExecuteRequest`] directly. The guest encodes [`ExecuteReply`]
-/// before COMMIT; post-commit failures are classified as `unavailable`.
+/// Proofs are required. The guest encodes [`ExecuteReply`] before COMMIT;
+/// post-commit failures are classified as `unavailable`.
 ///
 /// # Errors
 ///
-/// Returns when no connection is open or the engine rejects the work.
+/// Returns when no connection is open, proofs are missing, isolation is
+/// unsupported, or the engine rejects the work.
 pub async fn guest_execute_atomic(
     envelope: HostExecuteEnvelope,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
+    require_session_isolation(envelope.isolation)?;
+    envelope.require_proofs()?;
     let gate = txn_gate();
     let _gate = gate.lock().await;
     let conn = connection()
@@ -325,6 +330,8 @@ pub async fn guest_execute_atomic_on(
     conn: &DatabaseConnection,
     envelope: HostExecuteEnvelope,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
+    require_session_isolation(envelope.isolation)?;
+    envelope.require_proofs()?;
     let deadline =
         (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
     guest_execute_typed(
@@ -335,62 +342,40 @@ pub async fn guest_execute_atomic_on(
     .await
 }
 
-/// Pre-admission typed execute: may typecheck. Public `AdapterDatabaseSession.execute`.
+/// First-party adapter execute: proofs required (`require_stamped=true`).
 ///
 /// # Errors
 ///
-/// Returns when no connection is open or the engine rejects the work.
+/// Returns when no connection is open, proofs are missing, or the engine
+/// rejects the work.
 pub async fn guest_execute_request(
-    request: bookclerk_plugin_abi::ExecuteRequest,
+    request: AdapterExecuteRequest,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
-    let gate = txn_gate();
-    let _gate = gate.lock().await;
-    let conn = connection()
-        .await
-        .map_err(bookclerk_plugin_abi::PluginError::internal)?;
-    let deadline = (request.deadline_unix_ms > 0).then_some(request.deadline_unix_ms);
-    guest_execute_typed_on_session(&conn, request, library_typed_session(deadline)).await
+    guest_execute_atomic(request).await
 }
 
-/// Pre-admission typed execute on an explicit connection.
+/// First-party adapter execute on an explicit connection.
 ///
 /// # Errors
 ///
-/// Returns when the engine rejects the work.
+/// Returns when proofs are missing or the engine rejects the work.
 pub async fn guest_execute_request_on(
     conn: &DatabaseConnection,
-    request: bookclerk_plugin_abi::ExecuteRequest,
+    request: AdapterExecuteRequest,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
-    let deadline = (request.deadline_unix_ms > 0).then_some(request.deadline_unix_ms);
-    guest_execute_typed_on_session(
-        conn,
-        request,
-        bookclerk_db_exec::AtomicSession::from_deadline(deadline),
-    )
-    .await
+    guest_execute_atomic_on(conn, request).await
 }
 
-/// Pre-admission typed execute: may typecheck against the session type env.
-async fn guest_execute_typed_on_session(
-    conn: &DatabaseConnection,
-    request: bookclerk_plugin_abi::ExecuteRequest,
-    session: bookclerk_db_exec::AtomicSession,
-) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
-    let caps = capabilities_for(conn);
-    let timing_source = match conn.get_database_backend() {
-        DbBackend::Postgres => "postgres_txn",
-        _ => "sqlite_txn",
-    };
-    bookclerk_db_exec::execute_typed_on_session(
-        conn,
-        &request,
-        bookclerk_plugin_abi::GuestReceiptPersist::default(),
-        timing_source,
-        bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
-        session,
-    )
-    .await
-    .map_err(|e| plugin_error_from_db_err(&e))
+fn require_session_isolation(iso: IsolationReq) -> std::result::Result<(), PluginError> {
+    match iso {
+        IsolationReq::AtomicBatch => Ok(()),
+        IsolationReq::NestedSavepoint => Err(PluginError::unsupported(
+            "NestedSavepoint requires an open adapter transaction",
+        )),
+        IsolationReq::ConsistentSnapshot => Err(PluginError::unsupported(
+            "ConsistentSnapshot is not implemented on this session path",
+        )),
+    }
 }
 
 /// Runs a typed envelope with the given session (library vs binding type env).
@@ -442,16 +427,9 @@ pub fn bootstrap_for(conn: &DatabaseConnection) -> bookclerk_plugin_abi::DbBoots
 /// Returns when the txn id is unknown or the engine rejects the work.
 pub async fn guest_execute_atomic_on_txn(
     txn_id: String,
-    request: ExecuteRequest,
+    request: AdapterExecuteRequest,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
-    guest_execute_atomic_on_txn_envelope(
-        txn_id,
-        HostExecuteEnvelope::new(
-            request,
-            bookclerk_plugin_abi::GuestReceiptPersist::default(),
-        ),
-    )
-    .await
+    guest_execute_atomic_on_txn_envelope(txn_id, request).await
 }
 
 /// Typed `Transaction.executeAtomic` with a host-only guest-receipt persist hint.
@@ -463,6 +441,15 @@ pub async fn guest_execute_atomic_on_txn_envelope(
     txn_id: String,
     envelope: HostExecuteEnvelope,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
+    envelope.require_proofs()?;
+    match envelope.isolation {
+        IsolationReq::NestedSavepoint | IsolationReq::AtomicBatch => {}
+        IsolationReq::ConsistentSnapshot => {
+            return Err(PluginError::unsupported(
+                "ConsistentSnapshot requires a dedicated capture session",
+            ));
+        }
+    }
     let tx = route(&txn_id)
         .await
         .map_err(bookclerk_plugin_abi::PluginError::internal)?;
@@ -1348,12 +1335,44 @@ pub fn row_to_dto(row: &sea_orm::QueryResult) -> GuestRow {
 mod tests {
     use super::GuestStatement;
     use super::*;
+    use bookclerk_plugin_abi::ExecuteRequest;
     use sea_orm::{DbBackend, Statement};
     use std::sync::LazyLock;
     use tokio::sync::Mutex;
 
     /// Serializes tests that mutate the process-wide SeaORM session.
     static SESSION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn stamp_req(
+        req: ExecuteRequest,
+    ) -> std::result::Result<AdapterExecuteRequest, bookclerk_plugin_abi::PluginError> {
+        stamp_req_env(req, &bookclerk_library::migrations::host_sql_type_env())
+    }
+
+    fn stamp_req_env(
+        mut req: ExecuteRequest,
+        env: &bookclerk_plugin_abi::SqlTypeEnv,
+    ) -> std::result::Result<AdapterExecuteRequest, bookclerk_plugin_abi::PluginError> {
+        bookclerk_plugin_abi::desugar_execute_request(&mut req);
+        bookclerk_db_exec::stamp_adapter_execute(req, env)
+            .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))
+    }
+
+    async fn execute_stamped(
+        req: ExecuteRequest,
+    ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
+        guest_execute_request(stamp_req(req)?).await
+    }
+
+    fn stamp_txn_req(req: ExecuteRequest, extra_ddl: &str) -> AdapterExecuteRequest {
+        let mut env = bookclerk_library::migrations::host_sql_type_env();
+        env.merge(&bookclerk_plugin_abi::sql_type_env_from_canonical_ddl(
+            extra_ddl,
+        ));
+        stamp_req_env(req, &env)
+            .expect("stamp host proofs")
+            .with_isolation(IsolationReq::NestedSavepoint)
+    }
 
     fn stmt(sql: &str) -> GuestStatement {
         GuestStatement {
@@ -1370,7 +1389,7 @@ mod tests {
         use bookclerk_plugin_abi::{
             DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
         };
-        guest_execute_request(ExecuteRequest {
+        execute_stamped(ExecuteRequest {
             operation_id: "create".into(),
             request_hash: String::new(),
             statements: vec![TypedDbStatement {
@@ -1673,7 +1692,7 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        let unique_err = guest_execute_request(typed_exec(
+        let unique_err = execute_stamped(typed_exec(
             "dup-op",
             &[
                 "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('dup-g', 0)",
@@ -1694,7 +1713,7 @@ mod tests {
         );
 
         bookclerk_db_exec::inject_commit_failures(1);
-        let commit_err = guest_execute_request(typed_exec(
+        let commit_err = execute_stamped(typed_exec(
             "commit-op",
             &["INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('c-g', 0)"],
         ))
@@ -1706,7 +1725,7 @@ mod tests {
             "{commit_err}"
         );
 
-        let syn_err = guest_execute_request(typed_exec("syn-op", &["FROMM nowhere"]))
+        let syn_err = execute_stamped(typed_exec("syn-op", &["FROMM nowhere"]))
             .await
             .unwrap_err();
         assert!(
@@ -1728,7 +1747,7 @@ mod tests {
             .await
             .expect("host postgres schema");
         set_connection(db).await;
-        let err = guest_execute_request(typed_exec(
+        let err = execute_stamped(typed_exec(
             "pg-dup",
             &[
                 "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('pg-dup', 0)",
@@ -1970,18 +1989,21 @@ mod tests {
         let txn_id = guest_begin(None).await.unwrap();
         let reply = guest_execute_atomic_on_txn(
             txn_id.clone(),
-            ExecuteRequest {
-                operation_id: "nested".into(),
-                request_hash: String::new(),
-                statements: vec![TypedDbStatement {
-                    sql: "INSERT INTO nested_typed (id, v) VALUES (?, ?)".into(),
-                    parameters: vec![DbValue::Int64(1), DbValue::Text("a".into())],
-                    kind: DbPlanStatementKind::Execute,
-                    max_rows: 0,
-                    result_selection: DbResultSelection::AffectedRows,
-                }],
-                deadline_unix_ms: 0,
-            },
+            stamp_txn_req(
+                ExecuteRequest {
+                    operation_id: "nested".into(),
+                    request_hash: String::new(),
+                    statements: vec![TypedDbStatement {
+                        sql: "INSERT INTO nested_typed (id, v) VALUES (?, ?)".into(),
+                        parameters: vec![DbValue::Int64(1), DbValue::Text("a".into())],
+                        kind: DbPlanStatementKind::Execute,
+                        max_rows: 0,
+                        result_selection: DbResultSelection::AffectedRows,
+                    }],
+                    deadline_unix_ms: 0,
+                },
+                "CREATE TABLE nested_typed (id INTEGER PRIMARY KEY, v TEXT)",
+            ),
         )
         .await
         .expect("typed on open txn");
@@ -2081,27 +2103,30 @@ mod tests {
         let txn_id = guest_begin(None).await.unwrap();
         let err = guest_execute_atomic_on_txn(
             txn_id.clone(),
-            ExecuteRequest {
-                operation_id: "nested-partial".into(),
-                request_hash: String::new(),
-                statements: vec![
-                    TypedDbStatement {
-                        sql: "INSERT INTO nested_savepoint (id, v) VALUES (?, ?)".into(),
-                        parameters: vec![DbValue::Int64(1), DbValue::Text("keep".into())],
-                        kind: DbPlanStatementKind::Execute,
-                        max_rows: 0,
-                        result_selection: DbResultSelection::AffectedRows,
-                    },
-                    TypedDbStatement {
-                        sql: "INSERT INTO nested_savepoint (id, v) VALUES (?, ?)".into(),
-                        parameters: vec![DbValue::Int64(1), DbValue::Text("dup".into())],
-                        kind: DbPlanStatementKind::Execute,
-                        max_rows: 0,
-                        result_selection: DbResultSelection::AffectedRows,
-                    },
-                ],
-                deadline_unix_ms: 0,
-            },
+            stamp_txn_req(
+                ExecuteRequest {
+                    operation_id: "nested-partial".into(),
+                    request_hash: String::new(),
+                    statements: vec![
+                        TypedDbStatement {
+                            sql: "INSERT INTO nested_savepoint (id, v) VALUES (?, ?)".into(),
+                            parameters: vec![DbValue::Int64(1), DbValue::Text("keep".into())],
+                            kind: DbPlanStatementKind::Execute,
+                            max_rows: 0,
+                            result_selection: DbResultSelection::AffectedRows,
+                        },
+                        TypedDbStatement {
+                            sql: "INSERT INTO nested_savepoint (id, v) VALUES (?, ?)".into(),
+                            parameters: vec![DbValue::Int64(1), DbValue::Text("dup".into())],
+                            kind: DbPlanStatementKind::Execute,
+                            max_rows: 0,
+                            result_selection: DbResultSelection::AffectedRows,
+                        },
+                    ],
+                    deadline_unix_ms: 0,
+                },
+                "CREATE TABLE nested_savepoint (id INTEGER PRIMARY KEY, v TEXT)",
+            ),
         )
         .await
         .expect_err("second insert conflicts");
@@ -2141,18 +2166,21 @@ mod tests {
         bookclerk_db_exec::inject_savepoint_release_failures(1);
         let err = guest_execute_atomic_on_txn(
             txn_id.clone(),
-            ExecuteRequest {
-                operation_id: "nested-release".into(),
-                request_hash: String::new(),
-                statements: vec![TypedDbStatement {
-                    sql: "INSERT INTO nested_release (id, v) VALUES (?, ?)".into(),
-                    parameters: vec![DbValue::Int64(1), DbValue::Text("x".into())],
-                    kind: DbPlanStatementKind::Execute,
-                    max_rows: 0,
-                    result_selection: DbResultSelection::AffectedRows,
-                }],
-                deadline_unix_ms: 0,
-            },
+            stamp_txn_req(
+                ExecuteRequest {
+                    operation_id: "nested-release".into(),
+                    request_hash: String::new(),
+                    statements: vec![TypedDbStatement {
+                        sql: "INSERT INTO nested_release (id, v) VALUES (?, ?)".into(),
+                        parameters: vec![DbValue::Int64(1), DbValue::Text("x".into())],
+                        kind: DbPlanStatementKind::Execute,
+                        max_rows: 0,
+                        result_selection: DbResultSelection::AffectedRows,
+                    }],
+                    deadline_unix_ms: 0,
+                },
+                "CREATE TABLE nested_release (id INTEGER PRIMARY KEY, v TEXT)",
+            ),
         )
         .await
         .expect_err("injected RELEASE must fail");
@@ -2194,27 +2222,30 @@ mod tests {
         bookclerk_db_exec::inject_savepoint_rollback_failures(1);
         let err = guest_execute_atomic_on_txn(
             txn_id.clone(),
-            ExecuteRequest {
-                operation_id: "nested-rollback".into(),
-                request_hash: String::new(),
-                statements: vec![
-                    TypedDbStatement {
-                        sql: "INSERT INTO nested_rollback (id, v) VALUES (?, ?)".into(),
-                        parameters: vec![DbValue::Int64(1), DbValue::Text("keep".into())],
-                        kind: DbPlanStatementKind::Execute,
-                        max_rows: 0,
-                        result_selection: DbResultSelection::AffectedRows,
-                    },
-                    TypedDbStatement {
-                        sql: "INSERT INTO nested_rollback (id, v) VALUES (?, ?)".into(),
-                        parameters: vec![DbValue::Int64(1), DbValue::Text("dup".into())],
-                        kind: DbPlanStatementKind::Execute,
-                        max_rows: 0,
-                        result_selection: DbResultSelection::AffectedRows,
-                    },
-                ],
-                deadline_unix_ms: 0,
-            },
+            stamp_txn_req(
+                ExecuteRequest {
+                    operation_id: "nested-rollback".into(),
+                    request_hash: String::new(),
+                    statements: vec![
+                        TypedDbStatement {
+                            sql: "INSERT INTO nested_rollback (id, v) VALUES (?, ?)".into(),
+                            parameters: vec![DbValue::Int64(1), DbValue::Text("keep".into())],
+                            kind: DbPlanStatementKind::Execute,
+                            max_rows: 0,
+                            result_selection: DbResultSelection::AffectedRows,
+                        },
+                        TypedDbStatement {
+                            sql: "INSERT INTO nested_rollback (id, v) VALUES (?, ?)".into(),
+                            parameters: vec![DbValue::Int64(1), DbValue::Text("dup".into())],
+                            kind: DbPlanStatementKind::Execute,
+                            max_rows: 0,
+                            result_selection: DbResultSelection::AffectedRows,
+                        },
+                    ],
+                    deadline_unix_ms: 0,
+                },
+                "CREATE TABLE nested_rollback (id INTEGER PRIMARY KEY, v TEXT)",
+            ),
         )
         .await
         .expect_err("injected ROLLBACK must fail after inner unique error");

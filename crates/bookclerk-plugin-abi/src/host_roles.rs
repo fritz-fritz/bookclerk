@@ -6,22 +6,19 @@ use crate::Result;
 #[async_trait::async_trait(?Send)]
 pub trait AdapterTransaction {
     /// Typed statements on this open transaction (no second `BEGIN`).
-    async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply>;
-
-    /// Typed execute with a host-only guest receipt finalize hint.
     ///
-    /// Default forwards [`Self::execute`] when the envelope has no persist
-    /// hint and no proofs. Nested guest-receipt batches must override this.
+    /// Proofs are required ([`crate::AdapterExecuteRequest::require_proofs`]).
+    async fn execute(
+        &self,
+        request: crate::host_envelope::AdapterExecuteRequest,
+    ) -> Result<crate::ExecuteReply>;
+
+    /// Same payload as [`Self::execute`]; kept for the Cap'n `executeEnvelope` ordinal.
     async fn execute_envelope(
         &self,
-        envelope: crate::host_envelope::HostExecuteEnvelope,
+        envelope: crate::host_envelope::AdapterExecuteRequest,
     ) -> Result<crate::ExecuteReply> {
-        if envelope.guest_receipt.is_absent() && envelope.proofs.is_empty() {
-            return self.execute(envelope.request).await;
-        }
-        Err(crate::PluginError::unsupported(
-            "nested host executeEnvelope not implemented",
-        ))
+        self.execute(envelope).await
     }
 
     /// Commit.
@@ -37,10 +34,10 @@ pub trait HostAdapterDatabaseSession {
     /// Opens a host-internal interactive transaction (SeaORM proxy).
     async fn begin(&self) -> Result<Box<dyn AdapterTransaction>>;
 
-    /// Typed execute with a host-only guest receipt finalize hint.
+    /// Same payload as [`crate::AdapterDatabaseSession::execute`].
     async fn execute_envelope(
         &self,
-        envelope: crate::host_envelope::HostExecuteEnvelope,
+        envelope: crate::host_envelope::AdapterExecuteRequest,
     ) -> Result<crate::ExecuteReply> {
         let _ = envelope;
         Err(crate::PluginError::unsupported(
