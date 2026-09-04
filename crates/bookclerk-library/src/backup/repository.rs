@@ -13,9 +13,12 @@
 //! no retained manifest references.
 
 use std::collections::BTreeSet;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::ThreadId;
 
 use super::encode::{
     decode_canonical_object, encode_canonical_object, sha256_hex, unwrap_stored_object,
@@ -29,6 +32,43 @@ use crate::error::{LibraryError, Result};
 pub struct BackupRepository {
     /// `$BOOKCLERK_FILES_DIR/backups`.
     root: PathBuf,
+    /// In-process reentrant exclusive lock; flocks `backups/.lock` at depth 0.
+    lock: Arc<RepoLock>,
+}
+
+#[derive(Debug)]
+struct RepoLock {
+    inner: Mutex<RepoLockInner>,
+    cv: Condvar,
+}
+
+#[derive(Debug)]
+struct RepoLockInner {
+    file: Option<File>,
+    depth: u32,
+    owner: Option<ThreadId>,
+}
+
+/// Held exclusive backup-repository lock (publication vs GC/prune).
+pub struct RepoLockGuard<'a> {
+    repo: &'a BackupRepository,
+}
+
+impl Drop for RepoLockGuard<'_> {
+    fn drop(&mut self) {
+        let mut inner = self
+            .repo
+            .lock
+            .inner
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        inner.depth = inner.depth.saturating_sub(1);
+        if inner.depth == 0 {
+            inner.owner = None;
+            inner.file = None;
+            self.repo.lock.cv.notify_all();
+        }
+    }
 }
 
 impl BackupRepository {
@@ -51,6 +91,14 @@ impl BackupRepository {
         fs::create_dir_all(root.join("objects"))?;
         Ok(Self {
             root: root.to_path_buf(),
+            lock: Arc::new(RepoLock {
+                inner: Mutex::new(RepoLockInner {
+                    file: None,
+                    depth: 0,
+                    owner: None,
+                }),
+                cv: Condvar::new(),
+            }),
         })
     }
 
@@ -60,16 +108,63 @@ impl BackupRepository {
         &self.root
     }
 
+    /// Exclusive lock covering object publication and GC/prune.
+    ///
+    /// Same-thread reentry is allowed so [`Self::put_object`] can nest under a
+    /// backup that already holds the lock. Other threads wait. Other processes
+    /// block on `backups/.lock`.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the lock file cannot be created or flocked.
+    pub fn lock_exclusive(&self) -> Result<RepoLockGuard<'_>> {
+        let me = std::thread::current().id();
+        let mut inner = self
+            .lock
+            .inner
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        loop {
+            if inner.depth == 0 {
+                let file = OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(self.root.join(".lock"))?;
+                file.lock()?;
+                inner.file = Some(file);
+                inner.depth = 1;
+                inner.owner = Some(me);
+                return Ok(RepoLockGuard { repo: self });
+            }
+            if inner.owner == Some(me) {
+                inner.depth = inner.depth.saturating_add(1);
+                return Ok(RepoLockGuard { repo: self });
+            }
+            inner = self
+                .lock
+                .cv
+                .wait(inner)
+                .unwrap_or_else(|err| err.into_inner());
+        }
+    }
+
     /// Writes `object` if missing. Returns the uncompressed SHA-256 hex.
     ///
-    /// The write is into a sibling temp file then renamed so readers never see
-    /// a partial object. An existing object is reused only after its bytes
-    /// verify; a truncated or corrupt file is replaced atomically.
+    /// The write uses a unique same-directory temp file, fsyncs it, then
+    /// installs with a no-clobber hard link. An existing object is reused only
+    /// after its bytes verify; a truncated or corrupt file is replaced.
     ///
     /// # Errors
     ///
     /// Returns when encoding, compression, or the filesystem write fails.
     pub fn put_object(&self, object: &CanonicalObject) -> Result<String> {
+        let _lock = self.lock_exclusive()?;
+        self.put_object_locked(object)
+    }
+
+    fn put_object_locked(&self, object: &CanonicalObject) -> Result<String> {
         let uncompressed = encode_canonical_object(object)?;
         let digest = sha256_hex(&uncompressed);
         let path = self.object_path(&digest)?;
@@ -77,22 +172,35 @@ impl BackupRepository {
             match self.get_object(&digest) {
                 Ok(_) => return Ok(digest),
                 Err(_) => {
-                    // Corrupt or truncated: replace below.
+                    fs::remove_file(&path)?;
                 }
             }
         }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
+            fsync_dir(parent);
         }
         let stored = wrap_stored_object(&uncompressed)?;
-        let tmp = path.with_extension("tmp");
+        let tmp = unique_tmp_path(&path);
         {
-            let mut f = File::create(&tmp)?;
+            let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
             f.write_all(&stored)?;
             f.sync_all()?;
         }
-        fs::rename(&tmp, &path)?;
-        Ok(digest)
+        install_no_clobber(&tmp, &path)?;
+        if path.is_file() {
+            match self.get_object(&digest) {
+                Ok(_) => Ok(digest),
+                Err(err) => {
+                    let _ = fs::remove_file(&path);
+                    Err(err)
+                }
+            }
+        } else {
+            Err(LibraryError::Schema(format!(
+                "backup object `{digest}` was not installed"
+            )))
+        }
     }
 
     /// Loads and verifies one object by uncompressed digest.
@@ -137,6 +245,7 @@ impl BackupRepository {
     /// Returns when a referenced object is missing or corrupt, or the
     /// filesystem write fails.
     pub fn publish_manifest(&self, manifest: &BackupManifest) -> Result<PathBuf> {
+        let _lock = self.lock_exclusive()?;
         for digest in manifest.referenced_objects() {
             self.get_object(&digest).map_err(|err| {
                 LibraryError::Schema(format!("cannot publish backup `{}`: {err}", manifest.id))
@@ -146,13 +255,17 @@ impl BackupRepository {
             .map_err(|err| LibraryError::Other(anyhow::anyhow!("backup manifest json: {err}")))?;
         let dir = self.root.join("manifests");
         fs::create_dir_all(&dir)?;
-        let staging = dir.join(format!(".staging-{}.json", manifest.id));
+        let staging = unique_tmp_path(&dir.join(format!("{}.json", manifest.id)));
         let final_path = dir.join(format!("{}.json", manifest.id));
         let hash_path = dir.join(format!("{}.sha256", manifest.id));
-        fs::write(&staging, &json)?;
+        write_tmp_fsync(&staging, &json)?;
         let digest = sha256_hex(&json);
-        fs::write(&hash_path, format!("{digest}\n"))?;
+        let hash_tmp = unique_tmp_path(&hash_path);
+        write_tmp_fsync(&hash_tmp, format!("{digest}\n").as_bytes())?;
+        fs::rename(&hash_tmp, &hash_path)?;
+        fsync_dir(&dir);
         fs::rename(&staging, &final_path)?;
+        fsync_dir(&dir);
         Ok(final_path)
     }
 
@@ -274,6 +387,7 @@ impl BackupRepository {
     /// Returns when the id is unsafe or unlink fails for a reason other than
     /// not found.
     pub fn delete_manifest(&self, id: &str) -> Result<bool> {
+        let _lock = self.lock_exclusive()?;
         if !manifest_id_ok(id) {
             return Err(LibraryError::Schema(format!(
                 "backup recovery-point id `{id}` is not a safe path"
@@ -303,6 +417,7 @@ impl BackupRepository {
     /// Returns when a published manifest cannot be verified, a directory
     /// cannot be read, or an unreferenced object cannot be unlinked.
     pub fn gc_unreferenced_objects(&self) -> Result<usize> {
+        let _lock = self.lock_exclusive()?;
         let mut live = BTreeSet::new();
         for manifest in self.list_manifests_strict()? {
             live.extend(manifest.referenced_objects());
@@ -322,13 +437,13 @@ impl BackupRepository {
             };
             for file in files.flatten() {
                 let file_path = file.path();
-                if file_path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                    let _ = fs::remove_file(&file_path);
-                    continue;
-                }
                 let Some(name) = file_path.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
+                if name.starts_with('.') {
+                    let _ = fs::remove_file(&file_path);
+                    continue;
+                }
                 let Some(dir) = path.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
@@ -355,6 +470,57 @@ impl BackupRepository {
             .join("objects")
             .join(&digest[..2])
             .join(&digest[2..]))
+    }
+}
+
+/// Unique same-directory temp path (`.{name}.tmp-<pid>-<nonce>-<n>`).
+fn unique_tmp_path(final_path: &Path) -> PathBuf {
+    let name = final_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("object");
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nonce = rand::random::<u64>();
+    final_path.with_file_name(format!(
+        ".{name}.tmp-{}-{nonce:016x}-{n}",
+        std::process::id()
+    ))
+}
+
+/// Writes `bytes` to `path` (must not exist) and `sync_all`s the file.
+fn write_tmp_fsync(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut f = OpenOptions::new().write(true).create_new(true).open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// Installs `tmp` onto `final_path` without clobbering a winner; fsyncs the parent.
+fn install_no_clobber(tmp: &Path, final_path: &Path) -> Result<()> {
+    match fs::hard_link(tmp, final_path) {
+        Ok(()) => {
+            let _ = fs::remove_file(tmp);
+            if let Some(parent) = final_path.parent() {
+                fsync_dir(parent);
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(tmp);
+            Ok(())
+        }
+        Err(err) => {
+            let _ = fs::remove_file(tmp);
+            Err(err.into())
+        }
+    }
+}
+
+/// Best-effort directory fsync so a rename/hard-link is durable.
+fn fsync_dir(dir: &Path) {
+    if let Ok(file) = File::open(dir) {
+        let _ = file.sync_all();
     }
 }
 

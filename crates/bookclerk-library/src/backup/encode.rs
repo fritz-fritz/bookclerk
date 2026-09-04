@@ -19,12 +19,16 @@ use crate::error::{LibraryError, Result};
 
 /// Magic prefix for stored backup objects (`BCKO`).
 pub const OBJECT_MAGIC: &[u8; 4] = b"BCKO";
-/// Stored object envelope version.
-pub const OBJECT_STORE_VERSION: u8 = 1;
+/// Stored object envelope version (`uncompressed_len` after the digest).
+pub const OBJECT_STORE_VERSION: u8 = 2;
 /// Stored payload is uncompressed canonical JSON.
 pub const CODEC_RAW: u8 = 0;
 /// Stored payload is gzip of canonical JSON.
 pub const CODEC_GZIP: u8 = 1;
+/// Envelope bytes before the codec payload (`magic…uncompressed_len`).
+pub const OBJECT_HEADER_LEN: usize = 48;
+/// Hard cap on one object's uncompressed canonical JSON.
+pub const MAX_OBJECT_UNCOMPRESSED_BYTES: usize = 32 * 1024 * 1024;
 
 /// Target uncompressed JSON size for one table-data chunk.
 ///
@@ -87,12 +91,19 @@ pub fn decode_canonical_object(bytes: &[u8]) -> Result<CanonicalObject> {
         .map_err(|err| LibraryError::Schema(format!("canonical backup object json: {err}")))
 }
 
-/// Encodes an on-disk object: magic, version, gzip codec, digest, payload.
+/// Encodes an on-disk object: magic, version, gzip codec, digest, length, payload.
 ///
 /// # Errors
 ///
-/// Returns when gzip compression fails.
+/// Returns when `uncompressed` exceeds [`MAX_OBJECT_UNCOMPRESSED_BYTES`] or gzip
+/// compression fails.
 pub fn wrap_stored_object(uncompressed: &[u8]) -> Result<Vec<u8>> {
+    if uncompressed.len() > MAX_OBJECT_UNCOMPRESSED_BYTES {
+        return Err(LibraryError::Schema(format!(
+            "backup object uncompressed size {} exceeds {MAX_OBJECT_UNCOMPRESSED_BYTES} bytes",
+            uncompressed.len()
+        )));
+    }
     let digest = Sha256::digest(uncompressed);
     let mut gz = GzEncoder::new(Vec::new(), Compression::default());
     gz.write_all(uncompressed)
@@ -100,24 +111,34 @@ pub fn wrap_stored_object(uncompressed: &[u8]) -> Result<Vec<u8>> {
     let payload = gz
         .finish()
         .map_err(|err| LibraryError::Other(anyhow::anyhow!("backup object gzip finish: {err}")))?;
-    let mut out = Vec::with_capacity(4 + 1 + 1 + 2 + 32 + payload.len());
+    let mut out = Vec::with_capacity(OBJECT_HEADER_LEN + payload.len());
     out.extend_from_slice(OBJECT_MAGIC);
     out.push(OBJECT_STORE_VERSION);
     out.push(CODEC_GZIP);
     out.extend_from_slice(&[0, 0]);
     out.extend_from_slice(&digest);
+    out.extend_from_slice(
+        &u64::try_from(uncompressed.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
     out.extend_from_slice(&payload);
     Ok(out)
 }
 
 /// Unwraps a stored object, verifying the embedded uncompressed digest.
 ///
+/// Gzip payloads are decoded with the envelope's uncompressed-length budget
+/// (capped by [`MAX_OBJECT_UNCOMPRESSED_BYTES`]) so a small crafted object
+/// cannot expand until the process OOMs.
+///
 /// # Errors
 ///
 /// Returns when the envelope is truncated, the codec is unknown, gzip fails,
-/// or the uncompressed SHA-256 does not match the embedded digest.
+/// expansion exceeds the declared or maximum length, or the uncompressed
+/// SHA-256 does not match the embedded digest.
 pub fn unwrap_stored_object(stored: &[u8]) -> Result<Vec<u8>> {
-    if stored.len() < 40 {
+    if stored.len() < OBJECT_HEADER_LEN {
         return Err(LibraryError::Schema(
             "backup object is truncated or corrupt".into(),
         ));
@@ -137,23 +158,42 @@ pub fn unwrap_stored_object(stored: &[u8]) -> Result<Vec<u8>> {
     let embedded: [u8; 32] = stored[8..40]
         .try_into()
         .map_err(|_| LibraryError::Schema("backup object digest is truncated".into()))?;
-    let payload = &stored[40..];
+    let declared = u64::from_be_bytes(
+        stored[40..OBJECT_HEADER_LEN]
+            .try_into()
+            .map_err(|_| LibraryError::Schema("backup object length is truncated".into()))?,
+    );
+    let declared = usize::try_from(declared).unwrap_or(usize::MAX);
+    if declared > MAX_OBJECT_UNCOMPRESSED_BYTES {
+        return Err(LibraryError::Schema(format!(
+            "backup object declared uncompressed size {declared} exceeds \
+             {MAX_OBJECT_UNCOMPRESSED_BYTES} bytes"
+        )));
+    }
+    let payload = &stored[OBJECT_HEADER_LEN..];
     let uncompressed = match codec {
-        CODEC_RAW => payload.to_vec(),
-        CODEC_GZIP => {
-            let mut dec = GzDecoder::new(payload);
-            let mut out = Vec::new();
-            dec.read_to_end(&mut out).map_err(|err| {
-                LibraryError::Schema(format!("backup object gzip decode failed: {err}"))
-            })?;
-            out
+        CODEC_RAW => {
+            if payload.len() != declared {
+                return Err(LibraryError::Schema(format!(
+                    "backup object raw payload is {} bytes, declared {declared}",
+                    payload.len()
+                )));
+            }
+            payload.to_vec()
         }
+        CODEC_GZIP => decode_gzip_bounded(payload, declared)?,
         other => {
             return Err(LibraryError::Schema(format!(
                 "unknown backup object codec {other}"
             )));
         }
     };
+    if uncompressed.len() != declared {
+        return Err(LibraryError::Schema(format!(
+            "backup object uncompressed size {} does not match declared {declared}",
+            uncompressed.len()
+        )));
+    }
     let actual = Sha256::digest(&uncompressed);
     if actual.as_slice() != embedded {
         return Err(LibraryError::Schema(
@@ -161,6 +201,30 @@ pub fn unwrap_stored_object(stored: &[u8]) -> Result<Vec<u8>> {
         ));
     }
     Ok(uncompressed)
+}
+
+/// Gzips `payload` stopping after `declared` uncompressed bytes.
+fn decode_gzip_bounded(payload: &[u8], declared: usize) -> Result<Vec<u8>> {
+    let mut dec = GzDecoder::new(payload);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    let mut remaining = declared;
+    loop {
+        let n = dec.read(&mut buf).map_err(|err| {
+            LibraryError::Schema(format!("backup object gzip decode failed: {err}"))
+        })?;
+        if n == 0 {
+            break;
+        }
+        if n > remaining {
+            return Err(LibraryError::Schema(
+                "backup object gzip expansion exceeds declared uncompressed length".into(),
+            ));
+        }
+        out.extend_from_slice(&buf[..n]);
+        remaining -= n;
+    }
+    Ok(out)
 }
 
 /// True when adding `row` to `chunk` would exceed `target` and the chunk

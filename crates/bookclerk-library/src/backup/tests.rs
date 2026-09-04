@@ -5,7 +5,8 @@
 use super::*;
 use crate::backup::encode::{
     decode_canonical_object, encode_canonical_object, sha256_hex, unwrap_stored_object,
-    wrap_stored_object, CanonicalObject, CHUNK_TARGET_UNCOMPRESSED_BYTES,
+    wrap_stored_object, CanonicalObject, CHUNK_TARGET_UNCOMPRESSED_BYTES, CODEC_GZIP,
+    MAX_OBJECT_UNCOMPRESSED_BYTES, OBJECT_HEADER_LEN, OBJECT_MAGIC, OBJECT_STORE_VERSION,
 };
 use crate::backup::repository::BackupRepository;
 use crate::backup::restore::{apply_admitted_sql, restore_backup_unit};
@@ -161,6 +162,36 @@ fn gzip_envelope_preserves_uncompressed_digest() {
         assert!(CHUNK_TARGET_UNCOMPRESSED_BYTES >= 128 * 1024);
         assert!(CHUNK_TARGET_UNCOMPRESSED_BYTES <= 512 * 1024);
     }
+}
+
+#[test]
+fn gzip_envelope_rejects_declared_length_over_cap() {
+    let mut stored = vec![0u8; OBJECT_HEADER_LEN];
+    stored[..4].copy_from_slice(OBJECT_MAGIC);
+    stored[4] = OBJECT_STORE_VERSION;
+    stored[5] = CODEC_GZIP;
+    let too_big = u64::try_from(MAX_OBJECT_UNCOMPRESSED_BYTES)
+        .unwrap()
+        .saturating_add(1);
+    stored[40..OBJECT_HEADER_LEN].copy_from_slice(&too_big.to_be_bytes());
+    let err = unwrap_stored_object(&stored).unwrap_err();
+    assert!(
+        err.to_string().contains("exceeds") && err.to_string().contains("uncompressed"),
+        "{err}"
+    );
+}
+
+#[test]
+fn gzip_envelope_rejects_expansion_past_declared_length() {
+    let uncompressed = vec![b'x'; 64];
+    let mut stored = wrap_stored_object(&uncompressed).unwrap();
+    stored[40..OBJECT_HEADER_LEN].copy_from_slice(&8u64.to_be_bytes());
+    let err = unwrap_stored_object(&stored).unwrap_err();
+    assert!(
+        err.to_string().contains("exceeds declared")
+            || err.to_string().contains("does not match declared"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -369,6 +400,89 @@ fn put_object_replaces_corrupt_existing_digest() {
         CanonicalObject::Identity { entries } => assert!(entries.is_empty()),
         other => panic!("expected Identity, got {other:?}"),
     }
+}
+
+#[test]
+fn put_object_concurrent_same_digest_is_stable() {
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let object = CanonicalObject::Identity {
+        entries: BTreeMap::new(),
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let repo = repo.clone();
+            let object = object.clone();
+            scope.spawn(move || repo.put_object(&object).unwrap());
+        }
+    });
+    let digest = repo.put_object(&object).unwrap();
+    match repo.get_object(&digest).unwrap() {
+        CanonicalObject::Identity { entries } => assert!(entries.is_empty()),
+        other => panic!("expected Identity, got {other:?}"),
+    }
+}
+
+#[test]
+fn gc_waits_for_publication_lock_and_keeps_live_objects() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let object = CanonicalObject::Identity {
+        entries: BTreeMap::new(),
+    };
+    let guard = repo.lock_exclusive().unwrap();
+    let digest = repo.put_object(&object).unwrap();
+    let started = std::sync::Arc::new(AtomicBool::new(false));
+    let finished = std::sync::Arc::new(AtomicBool::new(false));
+    let started_gc = started.clone();
+    let finished_gc = finished.clone();
+    let repo_gc = repo.clone();
+    let handle = std::thread::spawn(move || {
+        started_gc.store(true, Ordering::SeqCst);
+        repo_gc.gc_unreferenced_objects().unwrap();
+        finished_gc.store(true, Ordering::SeqCst);
+    });
+    while !started.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+    std::thread::sleep(Duration::from_millis(80));
+    assert!(
+        !finished.load(Ordering::SeqCst),
+        "gc must not run while the publication lock is held"
+    );
+    assert!(repo.object_exists(&digest));
+    let unit = BackupUnit {
+        kind: DatabaseUnitKind::Library,
+        plugin_id: None,
+        binding: None,
+        backend_at_capture: "sqlite".into(),
+        sql_contract_version: SQL_CONTRACT_VERSION,
+        schema_object: digest.clone(),
+        identity_object: digest.clone(),
+        tables: Vec::new(),
+    };
+    let manifest = BackupManifest {
+        format_version: BACKUP_FORMAT_VERSION,
+        id: "lock-test".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        schema_state: "unreleased".into(),
+        schema_checksum: None,
+        frozen_version: None,
+        sql_contract_version: SQL_CONTRACT_VERSION,
+        app_version: "test".into(),
+        reason: BackupReason::Manual,
+        migrate_to: 0,
+        include_plugin_databases: false,
+        units: vec![unit],
+    };
+    repo.publish_manifest(&manifest).unwrap();
+    drop(guard);
+    handle.join().unwrap();
+    assert!(repo.object_exists(&digest));
+    assert!(finished.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -1567,6 +1681,65 @@ async fn library_only_restore_preserves_plugin_registry() {
 }
 
 #[tokio::test]
+async fn restore_sqlite_keeps_foreign_keys_enforced() {
+    let files = tempfile::tempdir().unwrap();
+    let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_host_schema(&src, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap();
+    src.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO accounts (account_id, marketplace, source, created_at, updated_at) \
+         VALUES ('keep', 'us', 'audible', 't', 't')",
+    ))
+    .await
+    .unwrap();
+    let state = current_schema_state(&src, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap();
+    let outcome = backup_library(&src, &backup_req(files.path(), state, BackupReason::Manual))
+        .await
+        .unwrap()
+        .unwrap();
+    let dest = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_host_schema(&dest, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap();
+    restore_backup(&dest, files.path(), &outcome.manifest.id, &restore_ok())
+        .await
+        .unwrap();
+    let fk = dest
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA foreign_keys",
+        ))
+        .await
+        .unwrap();
+    let fk_on = fk
+        .first()
+        .and_then(|row| row.try_get_by_index::<i64>(0).ok())
+        .unwrap_or(0);
+    assert_eq!(fk_on, 1, "restore must not leave PRAGMA foreign_keys off");
+    let err = dest
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO books (uuid, source, account_id, product_id, marketplace, title, created_at, updated_at) \
+             VALUES ('u', 'audible', 'missing', 'p', 'us', 't', 't', 't')",
+        ))
+        .await
+        .expect_err("orphan book insert must fail");
+    let s = err.to_string().to_lowercase();
+    assert!(
+        s.contains("foreign") || s.contains("constraint") || s.contains("787"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
 async fn include_plugin_databases_fails_closed_without_prepared_unit() {
     let files = tempfile::tempdir().unwrap();
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
@@ -1846,6 +2019,90 @@ fn extract_rejects_non_regular_entries() {
     let out = dir.path().join("out");
     let err = extract_backup_archive(&archive, &out).unwrap_err();
     assert!(err.to_string().contains("not allowed"), "{err}");
+}
+
+fn write_targz(path: &Path, files: &[(&str, &[u8])]) {
+    let file = std::fs::File::create(path).unwrap();
+    let enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut builder = tar::Builder::new(enc);
+    for (name, body) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_path(name).unwrap();
+        header.set_size(u64::try_from(body.len()).unwrap());
+        header.set_cksum();
+        builder.append(&header, *body).unwrap();
+    }
+    builder.finish().unwrap();
+}
+
+#[test]
+fn extract_rejects_oversized_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("big.tar.gz");
+    write_targz(&archive, &[("objects/aa/bb", b"hello world")]);
+    let out = dir.path().join("out");
+    let err = extract_backup_archive_limited(
+        &archive,
+        &out,
+        ArchiveExtractLimits {
+            max_entries: MAX_BACKUP_ARCHIVE_ENTRIES,
+            max_entry_bytes: 4,
+            max_total_bytes: MAX_BACKUP_ARCHIVE_TOTAL_BYTES,
+            max_stream_bytes: MAX_BACKUP_ARCHIVE_STREAM_BYTES,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("entry") && err.to_string().contains("bytes"),
+        "{err}"
+    );
+}
+
+#[test]
+fn extract_rejects_too_many_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("many.tar.gz");
+    write_targz(
+        &archive,
+        &[("a.txt", b"one"), ("b.txt", b"two"), ("c.txt", b"three")],
+    );
+    let out = dir.path().join("out");
+    let err = extract_backup_archive_limited(
+        &archive,
+        &out,
+        ArchiveExtractLimits {
+            max_entries: 2,
+            max_entry_bytes: MAX_BACKUP_ARCHIVE_ENTRY_BYTES,
+            max_total_bytes: MAX_BACKUP_ARCHIVE_TOTAL_BYTES,
+            max_stream_bytes: MAX_BACKUP_ARCHIVE_STREAM_BYTES,
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("more than 2 entries"), "{err}");
+}
+
+#[test]
+fn extract_rejects_total_expanded_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("total.tar.gz");
+    write_targz(&archive, &[("a.txt", b"hello"), ("b.txt", b"world")]);
+    let out = dir.path().join("out");
+    let err = extract_backup_archive_limited(
+        &archive,
+        &out,
+        ArchiveExtractLimits {
+            max_entries: MAX_BACKUP_ARCHIVE_ENTRIES,
+            max_entry_bytes: MAX_BACKUP_ARCHIVE_ENTRY_BYTES,
+            max_total_bytes: 8,
+            max_stream_bytes: MAX_BACKUP_ARCHIVE_STREAM_BYTES,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("expanded size") && err.to_string().contains("exceeds"),
+        "{err}"
+    );
 }
 
 fn postgres_url() -> Option<String> {

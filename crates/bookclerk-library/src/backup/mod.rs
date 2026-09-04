@@ -19,6 +19,7 @@ pub mod util;
 pub mod verify;
 
 use std::collections::{BTreeSet, HashSet};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use bookclerk_plugin_abi::{
@@ -54,6 +55,16 @@ pub const BACKUP_RETENTION: usize = 5;
 
 /// Manifest format written by this binary.
 pub const BACKUP_FORMAT_VERSION: u32 = 1;
+
+/// Max tar members in one recovery-point `.tar.gz`.
+pub const MAX_BACKUP_ARCHIVE_ENTRIES: u64 = 50_000;
+/// Max expanded size of one archive member (same cap as a stored object).
+pub const MAX_BACKUP_ARCHIVE_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
+/// Max total expanded bytes across archive members.
+pub const MAX_BACKUP_ARCHIVE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+/// Max gzip-decoded tar bytes (member payloads plus ustar headers).
+pub const MAX_BACKUP_ARCHIVE_STREAM_BYTES: u64 =
+    MAX_BACKUP_ARCHIVE_TOTAL_BYTES + MAX_BACKUP_ARCHIVE_ENTRIES * 1024;
 
 /// Library registry rows are environment-local (`unit_ref` is not portable).
 pub const LIBRARY_SKIP_TABLES: &[&str] = &["plugin_databases"];
@@ -487,55 +498,59 @@ pub async fn backup_library(
         max_atomic_result_bytes: req.max_atomic_result_bytes.max(1),
         chunk_target_bytes: CHUNK_TARGET_UNCOMPRESSED_BYTES,
     };
-    let library_unit = capture_library_unit(
-        db,
-        &repo,
-        &req.schema_state,
-        &export_opts,
-        &req.backend_at_capture,
-    )
-    .await?;
+    let manifest = {
+        let _lock = repo.lock_exclusive()?;
+        let library_unit = capture_library_unit(
+            db,
+            &repo,
+            &req.schema_state,
+            &export_opts,
+            &req.backend_at_capture,
+        )
+        .await?;
 
-    let mut units = vec![library_unit];
-    for prepared in &plugin_prepared {
-        let plugin_opts = CanonicalExportOpts {
-            consistent_backup_read: true,
-            skip_tables: BTreeSet::new(),
-            max_result_rows: prepared.max_result_rows.max(1),
-            max_result_bytes: prepared.max_result_bytes.max(1),
-            max_atomic_result_bytes: prepared.max_atomic_result_bytes.max(1),
-            chunk_target_bytes: CHUNK_TARGET_UNCOMPRESSED_BYTES,
+        let mut units = vec![library_unit];
+        for prepared in &plugin_prepared {
+            let plugin_opts = CanonicalExportOpts {
+                consistent_backup_read: true,
+                skip_tables: BTreeSet::new(),
+                max_result_rows: prepared.max_result_rows.max(1),
+                max_result_bytes: prepared.max_result_bytes.max(1),
+                max_atomic_result_bytes: prepared.max_atomic_result_bytes.max(1),
+                chunk_target_bytes: CHUNK_TARGET_UNCOMPRESSED_BYTES,
+            };
+            units.push(
+                capture_plugin_unit(
+                    &prepared.db,
+                    &repo,
+                    &plugin_opts,
+                    &prepared.plugin_id,
+                    &prepared.binding,
+                    &prepared.backend_at_capture,
+                )
+                .await?,
+            );
+        }
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let created = Utc::now();
+        let manifest = BackupManifest {
+            format_version: BACKUP_FORMAT_VERSION,
+            id: id.clone(),
+            created_at: created.to_rfc3339(),
+            schema_state: req.schema_state.display(),
+            schema_checksum: req.schema_state.checksum().map(str::to_string),
+            frozen_version: req.schema_state.frozen_version(),
+            sql_contract_version: units[0].sql_contract_version,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            reason: req.reason,
+            migrate_to: req.to_version,
+            include_plugin_databases: req.include_plugin_databases,
+            units: units.clone(),
         };
-        units.push(
-            capture_plugin_unit(
-                &prepared.db,
-                &repo,
-                &plugin_opts,
-                &prepared.plugin_id,
-                &prepared.binding,
-                &prepared.backend_at_capture,
-            )
-            .await?,
-        );
-    }
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let created = Utc::now();
-    let manifest = BackupManifest {
-        format_version: BACKUP_FORMAT_VERSION,
-        id: id.clone(),
-        created_at: created.to_rfc3339(),
-        schema_state: req.schema_state.display(),
-        schema_checksum: req.schema_state.checksum().map(str::to_string),
-        frozen_version: req.schema_state.frozen_version(),
-        sql_contract_version: units[0].sql_contract_version,
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
-        reason: req.reason,
-        migrate_to: req.to_version,
-        include_plugin_databases: req.include_plugin_databases,
-        units,
+        repo.publish_manifest(&manifest)?;
+        manifest
     };
-    repo.publish_manifest(&manifest)?;
     if req.reason == BackupReason::PreMigrate {
         prune_automatic_backups(&req.files_dir)?;
     }
@@ -793,17 +808,101 @@ pub fn archive_backup(files_dir: &Path, id: &str, dest: &Path) -> Result<()> {
 
 /// Extracts a `.tar.gz` recovery-point archive into `dest` (a backups root).
 ///
+/// Expansion is bounded by entry count, per-entry size, total expanded bytes,
+/// and gzip-decoded tar stream size so a small archive cannot fill the disk.
+///
 /// # Errors
 ///
-/// Returns when the archive is missing, malformed, or a path escapes `dest`.
+/// Returns when the archive is missing, malformed, a path escapes `dest`, or
+/// an extract budget would be exceeded.
 pub fn extract_backup_archive(archive: &Path, dest: &Path) -> Result<()> {
+    extract_backup_archive_limited(archive, dest, ArchiveExtractLimits::default())
+}
+
+/// Budgets applied while streaming a recovery-point archive.
+#[derive(Debug, Clone, Copy)]
+struct ArchiveExtractLimits {
+    max_entries: u64,
+    max_entry_bytes: u64,
+    max_total_bytes: u64,
+    max_stream_bytes: u64,
+}
+
+impl Default for ArchiveExtractLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: MAX_BACKUP_ARCHIVE_ENTRIES,
+            max_entry_bytes: MAX_BACKUP_ARCHIVE_ENTRY_BYTES,
+            max_total_bytes: MAX_BACKUP_ARCHIVE_TOTAL_BYTES,
+            max_stream_bytes: MAX_BACKUP_ARCHIVE_STREAM_BYTES,
+        }
+    }
+}
+
+/// [`Read`] adapter that fails when more than `remaining` bytes are produced.
+struct BudgetReader<R> {
+    inner: R,
+    remaining: u64,
+}
+
+impl<R: Read> Read for BudgetReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            let mut probe = [0u8; 1];
+            return match self.inner.read(&mut probe) {
+                Ok(0) => Ok(0),
+                Ok(_) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "backup archive gzip stream exceeded budget",
+                )),
+                Err(err) => Err(err),
+            };
+        }
+        let max = usize::try_from(self.remaining)
+            .unwrap_or(buf.len())
+            .min(buf.len());
+        let n = self.inner.read(&mut buf[..max])?;
+        self.remaining -= n as u64;
+        Ok(n)
+    }
+}
+
+fn map_extract_io(err: io::Error) -> LibraryError {
+    if err.kind() == io::ErrorKind::InvalidData {
+        LibraryError::Schema(err.to_string())
+    } else {
+        err.into()
+    }
+}
+
+fn extract_backup_archive_limited(
+    archive: &Path,
+    dest: &Path,
+    limits: ArchiveExtractLimits,
+) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     let file = std::fs::File::open(archive)?;
     let dec = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(dec);
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
+    let bounded = BudgetReader {
+        inner: dec,
+        remaining: limits.max_stream_bytes,
+    };
+    let mut archive = tar::Archive::new(bounded);
+    let mut entries = 0u64;
+    let mut total_bytes = 0u64;
+    for entry in archive.entries().map_err(map_extract_io)? {
+        let mut entry = entry.map_err(map_extract_io)?;
+        entries = entries.saturating_add(1);
+        if entries > limits.max_entries {
+            return Err(LibraryError::Schema(format!(
+                "backup archive has more than {} entries",
+                limits.max_entries
+            )));
+        }
+        let path = entry.path().map_err(map_extract_io)?.into_owned();
         if path.is_absolute()
             || path
                 .components()
@@ -814,8 +913,25 @@ pub fn extract_backup_archive(archive: &Path, dest: &Path) -> Result<()> {
                 path.display()
             )));
         }
+        let size = entry.header().size().map_err(map_extract_io)?;
         match entry.header().entry_type() {
-            tar::EntryType::Regular | tar::EntryType::Directory => {}
+            tar::EntryType::Regular => {
+                if size > limits.max_entry_bytes {
+                    return Err(LibraryError::Schema(format!(
+                        "backup archive entry `{}` is {size} bytes (max {})",
+                        path.display(),
+                        limits.max_entry_bytes
+                    )));
+                }
+                total_bytes = total_bytes.saturating_add(size);
+                if total_bytes > limits.max_total_bytes {
+                    return Err(LibraryError::Schema(format!(
+                        "backup archive expanded size {total_bytes} exceeds {} bytes",
+                        limits.max_total_bytes
+                    )));
+                }
+            }
+            tar::EntryType::Directory => {}
             other => {
                 return Err(LibraryError::Schema(format!(
                     "backup archive entry type {other:?} is not allowed"
@@ -829,7 +945,7 @@ pub fn extract_backup_archive(archive: &Path, dest: &Path) -> Result<()> {
                 path.display()
             )));
         }
-        entry.unpack(dest_path)?;
+        entry.unpack(dest_path).map_err(map_extract_io)?;
     }
     Ok(())
 }
