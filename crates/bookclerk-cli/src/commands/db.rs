@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use bookclerk_config::Config;
 use bookclerk_library::migrations::host_migration_plan;
 use bookclerk_library::{
-    archive_backup, backup_library, current_schema_state, extract_backup_archive, list_backups,
-    prune_automatic_backups, resolve_backup_spec, restore_backup, restore_backup_in_repo,
-    verify_recovery_point, BackupReason, BackupRepository, BackupRequest, BackupResolve,
-    CanonicalRestoreOpts, HostSchemaKind, SchemaApplyOptions, SchemaBackupOpts, SchemaState,
-    SCHEMA_VERSION,
+    archive_backup, backup_library, current_schema_state, ensure_restore_target_is_replaceable,
+    extract_backup_archive, list_backups, prune_automatic_backups, resolve_backup_spec,
+    restore_backup, restore_backup_in_repo, verify_recovery_point, BackupReason, BackupRepository,
+    BackupRequest, BackupResolve, CanonicalRestoreOpts, HostSchemaKind, SchemaApplyOptions,
+    SchemaBackupOpts, SchemaState, SCHEMA_VERSION,
 };
 use clap::Subcommand;
 use sea_orm::DatabaseConnection;
@@ -322,12 +322,15 @@ async fn run_restore(config: &Config, format: OutputFormat, from: String) -> any
     let files_dir = config.paths().files_dir.clone();
     let (repo_root, id, is_archive, _unpack) = resolve_for_use(&files_dir, &from)?;
 
-    let (db, _, caps) = open_unmigrated(config).await?;
+    let (db, kind, caps) = open_unmigrated(config).await?;
     if !caps.supports_atomic_unit_restore() {
         anyhow::bail!(
             "database adapter does not advertise atomicUnitRestore; restore is unsupported"
         );
     }
+    ensure_restore_target_is_replaceable(&db, kind)
+        .await
+        .map_err(|err| anyhow::anyhow!("{err}"))?;
     let plan = if is_archive {
         let repo = BackupRepository::open_root(&repo_root)?;
         let opts = CanonicalRestoreOpts::from_caps(&caps);

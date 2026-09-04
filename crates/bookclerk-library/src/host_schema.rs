@@ -1,8 +1,8 @@
 //! Host-owned schema application after a database guest connects.
 //!
 //! The host reads [`crate::SchemaState`] (`Uninitialized` / `Unreleased` /
-//! `Frozen`) and applies [`crate::migrations::current_canonical_schema`] as
-//! **one** atomic unit (DDL + state marker last). A frozen database newer than
+//! `Frozen`) and applies remaining canonical schema as atomic units (each
+//! frozen plan step, then the unreleased pack). A frozen database newer than
 //! this binary fails closed. Marker kind selects only the versioning mechanic.
 
 use std::collections::{HashMap, HashSet};
@@ -17,7 +17,7 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, QueryResult, State
 use crate::backup::{backup_library, BackupReason, BackupRequest, SchemaBackupOpts};
 use crate::error::{LibraryError, Result};
 use crate::migrations::{
-    current_canonical_schema, host_migration_plan, unreleased_checksum, HostMigrationStep,
+    host_migration_plan, migration_step_checksum, unreleased_checksum, HostMigrationStep,
     SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
 };
 use crate::schema_state::{SchemaState, SCHEMA_STATE_FROZEN, SCHEMA_STATE_UNRELEASED};
@@ -300,6 +300,10 @@ where
                 )));
             }
             if checksum == expected {
+                if base_version > 0 {
+                    verify_applied_checksums(db, backend, &host_migration_plan(), base_version)
+                        .await?;
+                }
                 Ok(())
             } else {
                 Err(LibraryError::Schema(format!(
@@ -512,17 +516,21 @@ fn schema_state_from_migration_rows(rows: Vec<QueryResult>) -> Result<Option<Sch
             }
             _ => {}
         }
+        let found: HashMap<i64, String> = frozen.into_iter().collect();
+        verify_frozen_checksums(&host_migration_plan(), &found, base_version)?;
         return Ok(Some(SchemaState::Unreleased {
             base_version,
             checksum,
         }));
     }
-    if let Some((version, checksum)) = frozen.into_iter().max_by_key(|(v, _)| *v) {
+    if let Some((version, checksum)) = frozen.iter().cloned().max_by_key(|(v, _)| *v) {
         if version < 1 {
             return Err(LibraryError::Schema(format!(
                 "frozen schema version {version} is invalid"
             )));
         }
+        let found: HashMap<i64, String> = frozen.into_iter().collect();
+        verify_frozen_checksums(&host_migration_plan(), &found, version)?;
         return Ok(Some(SchemaState::Frozen { version, checksum }));
     }
     Ok(None)
@@ -570,7 +578,11 @@ fn unreleased_marker_sql(checksum: &str, base_version: i64) -> String {
     )
 }
 
-/// Applies [`current_canonical_schema`] plus the unreleased checksum marker.
+/// Applies frozen plan steps, then the unreleased pack, on a fresh database.
+///
+/// When `unreleased` is empty, the database ends [`SchemaState::Frozen`] at the
+/// last plan version (or stays uninitialized if the plan is also empty). When
+/// the unreleased bucket is non-empty, frozen checksums are recorded first.
 async fn apply_unreleased_pack<F, Fut>(
     db: &DatabaseConnection,
     kind: HostSchemaKind,
@@ -580,7 +592,54 @@ where
     F: FnMut(Vec<String>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    apply_unreleased_sql(db, kind, run_batch, current_canonical_schema()).await
+    apply_fresh_schema(
+        db,
+        kind,
+        run_batch,
+        &host_migration_plan(),
+        crate::migrations::UNRELEASED_SQL,
+        SCHEMA_VERSION,
+    )
+    .await
+}
+
+/// Testable fresh-init apply: frozen steps then optional unreleased marker.
+pub(crate) async fn apply_fresh_schema<F, Fut>(
+    db: &DatabaseConnection,
+    kind: HostSchemaKind,
+    run_batch: &mut F,
+    plan: &[HostMigrationStep],
+    unreleased: &str,
+    schema_version: i64,
+) -> Result<()>
+where
+    F: FnMut(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let backend = db.get_database_backend();
+    ensure_schema_migrations(db, backend).await?;
+    for step in plan {
+        match kind {
+            HostSchemaKind::PragmaMarker => {
+                apply_one_sqlite_version_with_batch(db, step, run_batch).await?;
+            }
+            HostSchemaKind::RowMarker | HostSchemaKind::AtomicBatchMarker => {
+                apply_one_schema_migration_with_batch(db, backend, step, run_batch).await?;
+            }
+        }
+    }
+    if unreleased.trim().is_empty() {
+        return Ok(());
+    }
+    apply_unreleased_sql(
+        db,
+        kind,
+        run_batch,
+        unreleased,
+        &migration_step_checksum(unreleased, None),
+        schema_version,
+    )
+    .await
 }
 
 /// Applies only [`crate::migrations::UNRELEASED_SQL`] after frozen ups.
@@ -593,7 +652,15 @@ where
     F: FnMut(Vec<String>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    apply_unreleased_sql(db, kind, run_batch, crate::migrations::UNRELEASED_SQL).await
+    apply_unreleased_sql(
+        db,
+        kind,
+        run_batch,
+        crate::migrations::UNRELEASED_SQL,
+        &unreleased_checksum(),
+        SCHEMA_VERSION,
+    )
+    .await
 }
 
 /// Applies one unreleased DDL pack plus the checksum marker.
@@ -602,14 +669,15 @@ async fn apply_unreleased_sql<F, Fut>(
     kind: HostSchemaKind,
     run_batch: &mut F,
     ddl: &str,
+    checksum: &str,
+    base_version: i64,
 ) -> Result<()>
 where
     F: FnMut(Vec<String>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let checksum = unreleased_checksum();
     let batch =
-        SchemaBatch::from_ddl_and_marker(ddl, unreleased_marker_sql(&checksum, SCHEMA_VERSION));
+        SchemaBatch::from_ddl_and_marker(ddl, unreleased_marker_sql(checksum, base_version));
     let stmts = batch.statements;
     let mut delay_ms = 20u64;
     for attempt in 0..8 {
@@ -730,6 +798,61 @@ pub async fn current_schema_version(db: &DatabaseConnection, kind: HostSchemaKin
         .unwrap_or(0))
 }
 
+/// Fails closed when this binary cannot interpret the target database's
+/// schema history well enough to drop every unknown table before restore.
+///
+/// Uninitialized targets are replaceable. Frozen history newer than this
+/// binary, unreleased checksums this binary does not know, and unreadable
+/// markers are not.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Schema`] when the target is newer or uninterpretable.
+pub async fn ensure_restore_target_is_replaceable(
+    db: &DatabaseConnection,
+    kind: HostSchemaKind,
+) -> Result<()> {
+    let state = current_schema_state(db, kind).await?;
+    let plan = host_migration_plan();
+    let backend = db.get_database_backend();
+    match state {
+        SchemaState::Uninitialized => Ok(()),
+        SchemaState::Frozen { version, checksum } => {
+            let max_plan = plan.iter().map(|s| s.version).max().unwrap_or(0);
+            if version > max_plan {
+                return Err(LibraryError::Schema(format!(
+                    "restore target is frozen@{version}+{checksum}, newer than this binary \
+                     (frozen plan ends at {max_plan}); run a newer Bookclerk binary"
+                )));
+            }
+            verify_applied_checksums(db, backend, &plan, version).await
+        }
+        SchemaState::Unreleased {
+            base_version,
+            checksum,
+        } => {
+            if base_version > SCHEMA_VERSION {
+                return Err(LibraryError::Schema(format!(
+                    "restore target is unreleased@base{base_version}+{checksum}, newer than \
+                     this binary (base {SCHEMA_VERSION}); run a newer Bookclerk binary"
+                )));
+            }
+            let expected = unreleased_checksum();
+            if checksum != expected {
+                return Err(LibraryError::Schema(format!(
+                    "restore target unreleased checksum {checksum} is not this binary \
+                     ({expected}); reset or recreate the database — this binary cannot \
+                     list unknown tables to drop"
+                )));
+            }
+            if base_version > 0 {
+                verify_applied_checksums(db, backend, &plan, base_version).await?;
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Canonical DDL plus version markers (`PRAGMA` and/or `schema_migrations` insert).
 fn version_marker_statements(kind: HostSchemaKind, step: &HostMigrationStep) -> Vec<String> {
     let mut stmts = vec![step.canonical.to_string()];
@@ -785,7 +908,7 @@ async fn verify_applied_checksums(
     let rows = db
         .query_all_raw(Statement::from_string(
             backend,
-            "SELECT version, checksum FROM schema_migrations",
+            "SELECT version, state, checksum FROM schema_migrations",
         ))
         .await
         .map_err(|err| {
@@ -795,6 +918,14 @@ async fn verify_applied_checksums(
         })?;
     let mut found_by_version = HashMap::new();
     for row in rows {
+        let state = row
+            .try_get::<String>("", "state")
+            .ok()
+            .or_else(|| row.try_get_by_index::<String>(1).ok())
+            .unwrap_or_default();
+        if state != SCHEMA_STATE_FROZEN {
+            continue;
+        }
         let version = row
             .try_get::<i64>("", "version")
             .ok()
@@ -803,11 +934,24 @@ async fn verify_applied_checksums(
         let checksum = row
             .try_get::<String>("", "checksum")
             .ok()
-            .or_else(|| row.try_get_by_index::<String>(1).ok())
+            .or_else(|| row.try_get_by_index::<String>(2).ok())
             .unwrap_or_default();
         found_by_version.insert(version, checksum);
     }
-    for step in plan.iter().filter(|s| s.version <= current) {
+    verify_frozen_checksums(plan, &found_by_version, current)
+}
+
+/// Refuses when frozen `schema_migrations` rows through `through_version` are
+/// missing or do not match this binary's plan.
+pub(crate) fn verify_frozen_checksums(
+    plan: &[HostMigrationStep],
+    found_by_version: &HashMap<i64, String>,
+    through_version: i64,
+) -> Result<()> {
+    if through_version <= 0 {
+        return Ok(());
+    }
+    for step in plan.iter().filter(|s| s.version <= through_version) {
         let expected = step.checksum();
         let found = found_by_version
             .get(&step.version)
@@ -1080,7 +1224,7 @@ async fn exec_sql(db: &DatabaseConnection, backend: DbBackend, sql: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migrations::unreleased_checksum;
+    use crate::migrations::{current_canonical_schema, unreleased_checksum};
     use bookclerk_plugin_abi::DbCapabilities;
 
     #[test]
@@ -1132,6 +1276,142 @@ mod tests {
         assert!(HostSchemaKind::PragmaMarker
             .advertised_db_capabilities_match(&none)
             .is_err());
+    }
+
+    #[test]
+    fn verify_frozen_checksums_rejects_missing_and_tampered_rows() {
+        const V1: &str = "CREATE TABLE t (id INTEGER PRIMARY KEY)";
+        let plan = [HostMigrationStep {
+            version: 1,
+            canonical: V1,
+            down: None,
+            introduced_in: "0.0.0",
+        }];
+        let mut found = HashMap::new();
+        found.insert(1, plan[0].checksum());
+        verify_frozen_checksums(&plan, &found, 1).expect("matching frozen row");
+        found.insert(1, "deadbeef".repeat(8));
+        let err = verify_frozen_checksums(&plan, &found, 1).expect_err("tampered");
+        assert!(err.to_string().contains("checksum mismatch"), "{err}");
+        found.clear();
+        let err = verify_frozen_checksums(&plan, &found, 1).expect_err("missing");
+        assert!(err.to_string().contains("missing"), "{err}");
+        verify_frozen_checksums(&plan, &HashMap::new(), 0).expect("pre-v1");
+    }
+
+    #[tokio::test]
+    async fn fresh_init_synthetic_v1_empty_unreleased_is_frozen() {
+        let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+            .await
+            .expect("sqlite");
+        const V1: &str =
+            "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)";
+        let plan = [HostMigrationStep {
+            version: 1,
+            canonical: V1,
+            down: None,
+            introduced_in: "0.0.0",
+        }];
+        let exec = db.clone();
+        let mut run_batch = move |stmts: Vec<String>| {
+            let exec = exec.clone();
+            async move {
+                run_atomic_ddl(
+                    &exec,
+                    exec.get_database_backend(),
+                    SCHEMA_TXN_TIMING,
+                    "schema-apply",
+                    stmts,
+                )
+                .await
+            }
+        };
+        apply_fresh_schema(&db, HostSchemaKind::RowMarker, &mut run_batch, &plan, "", 1)
+            .await
+            .expect("fresh frozen");
+        let state = current_schema_state(&db, HostSchemaKind::RowMarker)
+            .await
+            .expect("state");
+        match state {
+            SchemaState::Frozen { version, checksum } => {
+                assert_eq!(version, 1);
+                assert_eq!(checksum, plan[0].checksum());
+            }
+            other => panic!("expected Frozen@1, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_init_synthetic_v1_then_unreleased_records_frozen_history() {
+        let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+            .await
+            .expect("sqlite");
+        const V1: &str =
+            "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)";
+        const EXTRA: &str = "CREATE TABLE extra_dev (id INTEGER PRIMARY KEY)";
+        let plan = [HostMigrationStep {
+            version: 1,
+            canonical: V1,
+            down: None,
+            introduced_in: "0.0.0",
+        }];
+        let exec = db.clone();
+        let mut run_batch = move |stmts: Vec<String>| {
+            let exec = exec.clone();
+            async move {
+                run_atomic_ddl(
+                    &exec,
+                    exec.get_database_backend(),
+                    SCHEMA_TXN_TIMING,
+                    "schema-apply",
+                    stmts,
+                )
+                .await
+            }
+        };
+        apply_fresh_schema(
+            &db,
+            HostSchemaKind::RowMarker,
+            &mut run_batch,
+            &plan,
+            EXTRA,
+            1,
+        )
+        .await
+        .expect("fresh unreleased");
+        let state = current_schema_state(&db, HostSchemaKind::RowMarker)
+            .await
+            .expect("state");
+        match state {
+            SchemaState::Unreleased {
+                base_version,
+                checksum,
+            } => {
+                assert_eq!(base_version, 1);
+                assert_eq!(checksum, migration_step_checksum(EXTRA, None));
+            }
+            other => panic!("expected Unreleased@base1, got {other}"),
+        }
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT version, state, checksum FROM schema_migrations ORDER BY state, version",
+            ))
+            .await
+            .expect("rows");
+        assert_eq!(rows.len(), 2, "frozen@1 plus unreleased marker");
+        let mut saw_frozen = false;
+        for row in &rows {
+            let state: String = row.try_get("", "state").unwrap();
+            let version: i64 = row.try_get("", "version").unwrap();
+            let checksum: String = row.try_get("", "checksum").unwrap();
+            if state == SCHEMA_STATE_FROZEN {
+                saw_frozen = true;
+                assert_eq!(version, 1);
+                assert_eq!(checksum, plan[0].checksum());
+            }
+        }
+        assert!(saw_frozen);
     }
 
     #[tokio::test]

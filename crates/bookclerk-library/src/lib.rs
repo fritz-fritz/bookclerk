@@ -65,8 +65,8 @@ pub use error::{LibraryError, Result};
 pub use host_schema::{
     apply_host_schema, apply_host_schema_with_batch, apply_host_schema_with_batch_opts,
     apply_host_schema_with_options, current_schema_state, current_schema_version,
-    migrate_host_schema_to, migrate_host_schema_to_with_batch, HostSchemaKind, SchemaApplyOptions,
-    SchemaBatch,
+    ensure_restore_target_is_replaceable, migrate_host_schema_to,
+    migrate_host_schema_to_with_batch, HostSchemaKind, SchemaApplyOptions, SchemaBatch,
 };
 pub use in_process_atomic::InProcessSqliteAtomic;
 pub use master_key::{

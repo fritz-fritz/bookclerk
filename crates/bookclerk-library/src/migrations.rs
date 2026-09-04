@@ -4,7 +4,10 @@
 //! is empty until a release cut. Live DDL lives in [`UNRELEASED_SQL`]. Fresh
 //! databases apply [`current_canonical_schema`] (frozen ups + unreleased) and
 //! persist [`crate::SchemaState::Unreleased`] with `base_version` equal to
-//! [`SCHEMA_VERSION`] (`0` today: no frozen revisions). Adapters lower canonical DDL at
+//! [`SCHEMA_VERSION`] (`0` today: no frozen revisions). Fresh init records each
+//! frozen plan step's checksum before the unreleased marker; when the
+//! unreleased bucket is empty the database ends [`crate::SchemaState::Frozen`].
+//! Adapters lower canonical DDL at
 //! the execution edge ([`bookclerk_db_exec::expand_host_schema_batch`]).
 
 use std::sync::OnceLock;
