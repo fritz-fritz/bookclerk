@@ -19,8 +19,9 @@ use sea_orm::DatabaseBackend;
 /// Every backend rewrites `INSERT OR IGNORE` to unique/PK `ON CONFLICT DO
 /// NOTHING` (SQLite `OR IGNORE` would otherwise swallow `NOT NULL`). Postgres
 /// adapters then rewrite helpers (`IFNULL`, `json_extract`, 2+-arg `min`/`max`,
-/// `json_valid`, `round`/`sum`/`avg`), `ORDER BY` NULL ordering, and `?`
-/// placeholders. Binding and host **DDL** type/identity rewrites
+/// `json_valid`, `round`/`sum`/`avg`) and `?` placeholders. Default `ORDER BY`
+/// NULLS and `/` `%` by-zero `NULLIF` are host semantic desugars, not adapter
+/// rewrites. Binding and host **DDL** type/identity rewrites
 /// (`AUTOINCREMENT`, `BLOB`, `INTEGER`) stay on the adapter execution edge
 /// ([`crate::schema_sql_for_backend`], [`crate::lower_binding_ddl_execute_request`])
 /// so this function does not classify statements.
@@ -61,7 +62,6 @@ pub fn lower_canonical_sql_typed(
 }
 
 fn lower_mechanical(backend: DatabaseBackend, sql: String) -> String {
-    let sql = rewrite_div_mod_null_on_zero(&sql);
     let sql = rewrite_insert_or_ignore_unique_conflict(&sql);
     if backend != DatabaseBackend::Postgres {
         return rewrite_like_to_glob(&sql);
@@ -72,15 +72,17 @@ fn lower_mechanical(backend: DatabaseBackend, sql: String) -> String {
 /// Lowers canonical SQLite-shaped SQL onto PostgreSQL.
 #[must_use]
 pub fn lower_canonical_to_postgres(sql: &str) -> String {
-    let sql = rewrite_div_mod_null_on_zero(sql);
-    let sql = rewrite_insert_or_ignore_unique_conflict(&sql);
+    let sql = rewrite_insert_or_ignore_unique_conflict(sql);
     lower_canonical_to_postgres_helpers(&sql)
 }
 
-/// Postgres helper / NULLS / placeholder rewrites (after unique-conflict INSERT).
+/// Postgres helper / placeholder rewrites (after unique-conflict INSERT).
+///
+/// Default `ORDER BY` NULLS and `/` `%` by-zero `NULLIF` are host semantic
+/// desugars ([`bookclerk_plugin_abi::desugar_canonical_sql`]), not adapter
+/// dialect generation.
 fn lower_canonical_to_postgres_helpers(sql: &str) -> String {
     let sql = sqlite_fns_to_postgres(sql);
-    let sql = rewrite_order_by_nulls_postgres(&sql);
     rewrite_placeholders_postgres(&sql)
 }
 
@@ -549,93 +551,6 @@ fn abs_call_arg(full: &str) -> Option<&str> {
     Some(full[open + 1..close].trim())
 }
 
-/// Portable `/` and `%` by zero: `NULL` (SQLite/D1 already; Postgres `NULLIF`).
-fn rewrite_div_mod_null_on_zero(sql: &str) -> String {
-    let mut i = 0;
-    let mut out = String::with_capacity(sql.len() + 16);
-    while i < sql.len() {
-        if let Some(len) = literal_or_comment_len(&sql[i..]) {
-            out.push_str(&sql[i..i + len]);
-            i += len;
-            continue;
-        }
-        let ch = sql[i..].chars().next().unwrap_or('\0');
-        if ch == '/' || ch == '%' {
-            out.push(ch);
-            i += ch.len_utf8();
-            let j = skip_trivia_idx(sql, i);
-            out.push_str(&sql[i..j]);
-            if let Some((atom_end, atom)) = take_div_operand(sql, j) {
-                out.push_str("NULLIF(");
-                out.push_str(atom);
-                out.push_str(", 0)");
-                i = atom_end;
-                continue;
-            }
-            continue;
-        }
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    out
-}
-
-/// Operand of `/` or `%`: admitted primary (paren, ident, call, CAST, unary, number, bind).
-fn take_div_operand(sql: &str, start: usize) -> Option<(usize, &str)> {
-    let s = skip_trivia_idx(sql, start);
-    let end = take_div_primary(sql, s)?;
-    if end > s {
-        Some((end, &sql[s..end]))
-    } else {
-        None
-    }
-}
-
-fn take_div_primary(sql: &str, start: usize) -> Option<usize> {
-    let s = skip_trivia_idx(sql, start);
-    let bytes = sql.as_bytes();
-    if bytes.get(s) == Some(&b'(') {
-        return Some(skip_balanced(sql, s));
-    }
-    if bytes.get(s) == Some(&b'?') {
-        return Some(s + 1);
-    }
-    if bytes.get(s) == Some(&b'+') || bytes.get(s) == Some(&b'-') {
-        return take_div_primary(sql, s + 1);
-    }
-    if let Some((_, end)) = ident_span_at(sql, s) {
-        let mut j = end;
-        loop {
-            let k = skip_trivia_idx(sql, j);
-            if bytes.get(k) == Some(&b'.') {
-                let k2 = skip_trivia_idx(sql, k + 1);
-                if let Some((_, e2)) = ident_span_at(sql, k2) {
-                    j = e2;
-                    continue;
-                }
-            }
-            if bytes.get(k) == Some(&b'(') {
-                return Some(skip_balanced(sql, k));
-            }
-            return Some(j);
-        }
-    }
-    let mut i = s;
-    if i < bytes.len() && bytes[i].is_ascii_digit() {
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
-        }
-        if bytes.get(i) == Some(&b'.') {
-            i += 1;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-        }
-        return Some(i);
-    }
-    None
-}
-
 /// Maps SQLite helpers used in host plans onto PostgreSQL equivalents.
 fn sqlite_fns_to_postgres(sql: &str) -> String {
     let mut sql = rewrite_fn_name(sql, "ifnull", "COALESCE");
@@ -833,143 +748,6 @@ fn rewrite_sum_or_avg(sql: &str, name: &str, pg_type: &str) -> String {
         i += ch.len_utf8();
     }
     out
-}
-
-/// Appends SQLite-equivalent NULL ordering (`ASC NULLS FIRST`, `DESC NULLS LAST`).
-fn rewrite_order_by_nulls_postgres(sql: &str) -> String {
-    let mut i = 0;
-    let mut out = String::with_capacity(sql.len() + 32);
-    while i < sql.len() {
-        if let Some(len) = literal_or_comment_len(&sql[i..]) {
-            out.push_str(&sql[i..i + len]);
-            i += len;
-            continue;
-        }
-        if ident_eq_ci(sql, i, "ORDER") {
-            let after_order = skip_trivia_idx(sql, i + "ORDER".len());
-            if ident_eq_ci(sql, after_order, "BY") {
-                let by_end = after_order + "BY".len();
-                out.push_str(&sql[i..by_end]);
-                i = rewrite_order_by_items(sql, by_end, &mut out);
-                continue;
-            }
-        }
-        let ch = sql[i..].chars().next().unwrap_or('\0');
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    out
-}
-
-/// Copies one `ORDER BY` item list, inserting NULLS FIRST/LAST when omitted.
-fn rewrite_order_by_items(sql: &str, mut i: usize, out: &mut String) -> usize {
-    loop {
-        let start = i;
-        i = skip_trivia_idx(sql, i);
-        out.push_str(&sql[start..i]);
-        if i >= sql.len() {
-            return i;
-        }
-        let expr_end = skip_order_by_expr(sql, i);
-        out.push_str(&sql[i..expr_end]);
-        i = skip_trivia_idx(sql, expr_end);
-        let mut desc = false;
-        if ident_eq_ci(sql, i, "ASC") {
-            out.push(' ');
-            out.push_str(&sql[i..i + "ASC".len()]);
-            i = skip_trivia_idx(sql, i + "ASC".len());
-        } else if ident_eq_ci(sql, i, "DESC") {
-            out.push(' ');
-            out.push_str(&sql[i..i + "DESC".len()]);
-            i = skip_trivia_idx(sql, i + "DESC".len());
-            desc = true;
-        }
-        if ident_eq_ci(sql, i, "NULLS") {
-            let after_nulls = skip_trivia_idx(sql, i + "NULLS".len());
-            if ident_eq_ci(sql, after_nulls, "FIRST") || ident_eq_ci(sql, after_nulls, "LAST") {
-                let kw_len = if ident_eq_ci(sql, after_nulls, "FIRST") {
-                    "FIRST".len()
-                } else {
-                    "LAST".len()
-                };
-                out.push(' ');
-                out.push_str(&sql[i..after_nulls + kw_len]);
-                i = skip_trivia_idx(sql, after_nulls + kw_len);
-            }
-        } else if desc {
-            out.push_str(" NULLS LAST");
-        } else {
-            out.push_str(" NULLS FIRST");
-        }
-        if let Some(next) = sql[i..].chars().next() {
-            if !next.is_whitespace() && next != ',' && next != ';' && next != ')' {
-                out.push(' ');
-            }
-        }
-        if sql.as_bytes().get(i) == Some(&b',') {
-            out.push(',');
-            i += 1;
-            continue;
-        }
-        return i;
-    }
-}
-
-/// Byte offset after one `ORDER BY` expression (balanced parens, literals skipped).
-fn skip_order_by_expr(sql: &str, mut i: usize) -> usize {
-    let mut depth = 0i32;
-    while i < sql.len() {
-        if let Some(len) = literal_or_comment_len(&sql[i..]) {
-            i += len;
-            continue;
-        }
-        let ch = sql[i..].chars().next().unwrap_or('\0');
-        if ch == '(' {
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if ch == ')' {
-            if depth == 0 {
-                return i;
-            }
-            depth -= 1;
-            i += 1;
-            continue;
-        }
-        if depth == 0 {
-            if ch == ',' || ch == ';' {
-                return i;
-            }
-            if ch.is_whitespace() {
-                let next = skip_trivia_idx(sql, i);
-                if order_by_item_terminator(sql, next) {
-                    return i;
-                }
-            }
-            if order_by_item_terminator(sql, i) {
-                return i;
-            }
-        }
-        i += ch.len_utf8();
-    }
-    i
-}
-
-/// True when `ORDER BY` item parsing should stop (`ASC`/`LIMIT`/…).
-fn order_by_item_terminator(sql: &str, i: usize) -> bool {
-    ident_eq_ci(sql, i, "ASC")
-        || ident_eq_ci(sql, i, "DESC")
-        || ident_eq_ci(sql, i, "NULLS")
-        || ident_eq_ci(sql, i, "LIMIT")
-        || ident_eq_ci(sql, i, "OFFSET")
-        || ident_eq_ci(sql, i, "RETURNING")
-        || ident_eq_ci(sql, i, "UNION")
-        || ident_eq_ci(sql, i, "EXCEPT")
-        || ident_eq_ci(sql, i, "INTERSECT")
-        || ident_eq_ci(sql, i, "FETCH")
-        || ident_eq_ci(sql, i, "FOR")
-        || ident_eq_ci(sql, i, "WINDOW")
 }
 
 /// Rewrites `json_valid(expr) = 0/1` and bare `json_valid(expr)` to `IS [NOT] JSON`.
@@ -1943,22 +1721,22 @@ mod tests {
     }
 
     #[test]
-    fn postgres_order_by_appends_sqlite_null_ordering() {
+    fn postgres_order_by_preserves_host_desugared_nulls() {
+        let canonical =
+            bookclerk_plugin_abi::desugar_canonical_sql("SELECT a FROM t ORDER BY a, b DESC");
         assert_eq!(
-            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a"),
-            "SELECT a FROM t ORDER BY a NULLS FIRST"
+            canonical,
+            "SELECT a FROM t ORDER BY a NULLS FIRST, b DESC NULLS LAST"
         );
-        assert_eq!(
-            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a DESC"),
-            "SELECT a FROM t ORDER BY a DESC NULLS LAST"
-        );
+        assert_eq!(lower_canonical_to_postgres(&canonical), canonical);
         assert_eq!(
             lower_canonical_to_postgres("SELECT a FROM t ORDER BY a ASC NULLS LAST"),
             "SELECT a FROM t ORDER BY a ASC NULLS LAST"
         );
+        // Adapter mechanical lowering does not insert unspecified NULLS.
         assert_eq!(
-            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a LIMIT 1"),
-            "SELECT a FROM t ORDER BY a NULLS FIRST LIMIT 1"
+            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a"),
+            "SELECT a FROM t ORDER BY a"
         );
     }
 
@@ -2053,10 +1831,15 @@ mod tests {
     }
 
     #[test]
-    fn div_and_mod_by_zero_lower_to_nullif() {
-        let sql = rewrite_div_mod_null_on_zero("SELECT 1 / 0, 4 % 0, a / b");
+    fn div_and_mod_by_zero_are_host_desugars() {
+        let sql = bookclerk_plugin_abi::desugar_canonical_sql("SELECT 1 / 0, 4 % 0, a / b");
         assert!(sql.contains("NULLIF(0, 0)"), "{sql}");
         assert!(sql.contains("NULLIF(b, 0)"), "{sql}");
+        assert_eq!(
+            lower_canonical_sql(DatabaseBackend::Postgres, &sql),
+            sql,
+            "adapter must not double-wrap NULLIF: {sql}"
+        );
     }
 
     #[test]
@@ -2076,7 +1859,7 @@ mod tests {
 
     #[test]
     fn div_operand_covers_call_qualified_unary_and_cast() {
-        let sql = rewrite_div_mod_null_on_zero(
+        let sql = bookclerk_plugin_abi::desugar_canonical_sql(
             "SELECT 10 / abs(n), 10 / t.n, 10 / -n, 10 / CAST(n AS INTEGER), 10 / (n + 1)",
         );
         assert!(sql.contains("NULLIF(abs(n), 0)"), "{sql}");

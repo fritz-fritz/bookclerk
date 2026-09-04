@@ -1598,10 +1598,12 @@ async fn execute_typed_join_body(
 ) -> Result<ExecuteReply, DbErr> {
     let started = Instant::now();
     let backend = ConnectionTrait::get_database_backend(txn);
+    let mut req = req.clone();
+    bookclerk_plugin_abi::desugar_execute_request(&mut req);
     let sql_started = Instant::now();
     let mut env = catalog_env_for_typed(txn, &session).await?;
     let require_stamped = !stamped.is_empty();
-    let proofs = proofs_for_request(&env, req, stamped, require_stamped)?;
+    let proofs = proofs_for_request(&env, &req, stamped, require_stamped)?;
     let mut statements = Vec::with_capacity(req.statements.len());
     let skip_guest_on_prior = !guest_receipt.is_absent();
     for (stmt, proof) in req.statements.iter().zip(proofs.iter()) {
@@ -1756,11 +1758,13 @@ where
     }
     let started = Instant::now();
     let backend = ConnectionTrait::get_database_backend(db);
+    let mut req = req.clone();
+    bookclerk_plugin_abi::desugar_execute_request(&mut req);
     // Host schema batches travel canonical; this adapter edge lowers/splits
     // them for the live backend and collapses the results back to the wire
     // request shape below.
     let wire_len = req.statements.len();
-    let req = expand_host_schema_execute_request(backend, req);
+    let req = expand_host_schema_execute_request(backend, &req);
     let canonical_sqls: Vec<String> = req.statements.iter().map(|s| s.sql.clone()).collect();
     // Binding CREATE/DROP stays canonical on the wire; Postgres adapters
     // lower types/`AUTOINCREMENT` here (not in `lower_canonical_sql`).

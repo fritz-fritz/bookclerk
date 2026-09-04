@@ -294,7 +294,8 @@ where
     C: ConnectionTrait,
 {
     let backend = db.get_database_backend();
-    let lowered = crate::lower_canonical_sql(backend, sql);
+    let sql = bookclerk_plugin_abi::desugar_canonical_sql(sql);
+    let lowered = crate::lower_canonical_sql(backend, &sql);
     db.execute_raw(Statement::from_sql_and_values(backend, lowered, values))
         .await
 }
@@ -313,7 +314,8 @@ where
     C: ConnectionTrait,
 {
     let backend = db.get_database_backend();
-    let lowered = crate::lower_canonical_sql(backend, sql);
+    let sql = bookclerk_plugin_abi::desugar_canonical_sql(sql);
+    let lowered = crate::lower_canonical_sql(backend, &sql);
     db.query_all_raw(Statement::from_sql_and_values(backend, lowered, values))
         .await
 }

@@ -86,6 +86,7 @@ pub(crate) fn wrap_guest_typed_request(
     ));
 
     req.statements = statements;
+    bookclerk_plugin_abi::desugar_execute_request(&mut req);
     req.request_hash.clear();
     let mut env = receipt_wrap_type_env();
     env.merge(type_env);

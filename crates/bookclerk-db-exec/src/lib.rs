@@ -1,12 +1,13 @@
 //! Neutral SQL executor / adapter SDK for Bookclerk database guests.
 //!
 //! Hosts compile domain work into a typed [`bookclerk_plugin_abi::ExecuteRequest`]
-//! of **canonical** Bookclerk SQL (`?` placeholders). This crate owns physical
-//! lowering and native execution. It must not import Bookclerk entities or
-//! host domain planners. Postgres adapters lower host-schema packs and binding
-//! DDL types at execute ([`schema_sql_for_backend`],
-//! [`lower_binding_ddl_execute_request`]); [`lower_canonical_sql`] stays
-//! DML/query helpers. Host crates must not call those lowerers.
+//! of **canonical** Bookclerk SQL (`?` placeholders, host-desugared NULLS /
+//! `NULLIF`). This crate owns physical lowering and native execution. It must
+//! not import Bookclerk entities or host domain planners. Postgres adapters
+//! lower host-schema packs and binding DDL types at execute
+//! ([`schema_sql_for_backend`], [`lower_binding_ddl_execute_request`]);
+//! [`lower_canonical_sql`] stays DML/query helpers. Host crates must not call
+//! those lowerers.
 
 use std::cell::RefCell;
 

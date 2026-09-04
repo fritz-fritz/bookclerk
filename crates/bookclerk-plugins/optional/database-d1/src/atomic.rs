@@ -141,13 +141,15 @@ impl D1Proxy {
             bookclerk_db_exec::AtomicInterruptPhase::BeforeBegin,
             deadline,
         )?;
+        let mut req = req.clone();
+        bookclerk_plugin_abi::desugar_execute_request(&mut req);
         // Host schema batches travel canonical; this adapter edge splits the
         // pack for the SQLite family and collapses results back to the wire
         // request shape after parsing.
         let wire_len = req.statements.len();
         let expanded = bookclerk_db_exec::expand_host_schema_execute_request(
             sea_orm::DatabaseBackend::Sqlite,
-            req,
+            &req,
         );
         let host_schema = expanded
             .statements

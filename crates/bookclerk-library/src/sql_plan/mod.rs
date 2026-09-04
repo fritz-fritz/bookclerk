@@ -169,6 +169,7 @@ pub fn authorize_typed_request(
     req: &mut ExecuteRequest,
     caps: &DbCapabilities,
 ) -> crate::error::Result<()> {
+    bookclerk_plugin_abi::desugar_execute_request(req);
     for stmt in &mut req.statements {
         stmt.kind = host_statement_kind(&stmt.sql);
     }
@@ -532,6 +533,39 @@ mod limits_tests {
         req.request_hash = "deadbeef".into();
         let err = super::authorize_typed_request(&mut req, &caps).unwrap_err();
         assert!(err.to_string().contains("requestHash"), "{err}");
+    }
+
+    #[test]
+    fn authorize_typed_request_desugars_order_by_and_div_before_hash() {
+        use bookclerk_plugin_abi::{
+            canonical_execute_request_hash, desugar_canonical_sql, DbResultSelection,
+            ExecuteRequest, TypedDbStatement,
+        };
+        let caps = DbCapabilities::advertised_sqlite();
+        let mut req = ExecuteRequest {
+            operation_id: "guest-op".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 1 / n FROM t ORDER BY n".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        };
+        super::authorize_typed_request(&mut req, &caps).unwrap();
+        let expected_sql = desugar_canonical_sql("SELECT 1 / n FROM t ORDER BY n");
+        assert_eq!(req.statements[0].sql, expected_sql);
+        assert!(expected_sql.contains("NULLIF(n, 0)"), "{expected_sql}");
+        assert!(expected_sql.contains("NULLS FIRST"), "{expected_sql}");
+        let expected = canonical_execute_request_hash(&req).unwrap();
+        assert_eq!(req.request_hash, expected);
+        // Retry with the original (un-desugared) SQL and the desugared hash.
+        req.statements[0].sql = "SELECT 1 / n FROM t ORDER BY n".into();
+        super::authorize_typed_request(&mut req, &caps).unwrap();
+        assert_eq!(req.statements[0].sql, expected_sql);
+        assert_eq!(req.request_hash, expected);
     }
 
     #[test]

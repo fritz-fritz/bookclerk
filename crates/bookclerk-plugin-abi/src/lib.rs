@@ -47,7 +47,8 @@
 //! | [`kind`] | Kind-specific DTOs (source / integration / output) |
 //! | [`db`] | Host-private database connect params (feature `host`) |
 //! | [`error`] | [`PluginError`] / [`PluginErrorCode`] |
-//! | [`plugin_capnp`] | Generated Cap'n Proto RPC interfaces |
+//! | [`guest_sql`] | SQL-v1 grammar / guest admission |
+//! | [`sql_desugar`] | Host-only semantic desugars (`NULLS`, `NULLIF`) |
 
 pub mod db;
 pub mod db_execute;
@@ -70,6 +71,7 @@ mod roles;
 mod rpc;
 mod rpc_types;
 mod sdk_wire;
+pub mod sql_desugar;
 mod sql_proof;
 pub mod sql_types;
 pub mod types;
@@ -140,6 +142,7 @@ pub use guest_sql::{
 pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
+pub use sql_desugar::{desugar_canonical_sql, desugar_execute_request};
 #[cfg(feature = "host")]
 pub use sql_proof::{
     assert_proof_matches_sql, IntegerArithKind, IntegerArithSite, PhysicalAccess,
