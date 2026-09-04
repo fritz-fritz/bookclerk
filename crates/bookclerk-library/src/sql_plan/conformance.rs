@@ -788,9 +788,8 @@ fn d1_compat_execute(
 
 fn d1_compat_mem() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
-    for sql in crate::migrations::migration_sql() {
-        conn.execute_batch(sql).unwrap();
-    }
+    conn.execute_batch(crate::migrations::greenfield_baseline_canonical())
+        .unwrap();
     conn
 }
 

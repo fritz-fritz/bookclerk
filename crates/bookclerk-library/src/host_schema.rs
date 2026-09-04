@@ -9,8 +9,8 @@
 //! backend chooses adapter-edge lowering via
 //! [`bookclerk_db_exec::expand_host_schema_batch`] at execution time.
 //!
-//! Version 1 is the concatenated greenfield baseline (`migration_sql()`);
-//! version 2 adds `plugin_databases`.
+//! Version 1 is the current flattened library schema (including
+//! `plugin_databases`). There is no incremental V2–V29 chain.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -67,7 +67,7 @@ impl SchemaBatch {
 /// Which versioning mechanic the host should use.
 ///
 /// Flags choose **how** versions are stored and applied, not which SQL pack
-/// to emit. Canonical Bookclerk SQL is [`crate::migrations::migration_sql`].
+/// to emit. Canonical Bookclerk SQL is [`crate::migrations::host_migration_plan`].
 /// Adapters lower canonical DDL for the live connection backend at execution
 /// (see [`bookclerk_db_exec::expand_host_schema_batch`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -619,17 +619,13 @@ mod tests {
 
     #[test]
     fn host_migration_plan_starts_with_greenfield_baseline() {
-        use crate::migrations::{
-            greenfield_baseline_canonical, host_migration_plan, migration_sql,
-        };
+        use crate::migrations::{greenfield_baseline_canonical, host_migration_plan};
         let plan = host_migration_plan();
+        assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].version, 1);
         assert_eq!(plan[0].canonical, greenfield_baseline_canonical());
-        assert!(plan[0].canonical.contains(migration_sql()[0]));
-        // Versions are contiguous starting at 1.
-        for (i, step) in plan.iter().enumerate() {
-            assert_eq!(step.version, i as i64 + 1);
-        }
+        assert!(plan[0].canonical.contains("plugin_databases"));
+        assert!(!plan[0].canonical.contains("domain_events_v27"));
     }
 
     #[test]

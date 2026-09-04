@@ -1302,7 +1302,7 @@ fn unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Runs host DDL as one typed `execute` batch (D1 V27).
+/// Runs host DDL as one typed `execute` batch.
 async fn exec_host_ddl_batch(
     session: &PluginSession,
     caps: &DbCapabilities,
