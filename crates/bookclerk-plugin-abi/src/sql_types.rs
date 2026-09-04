@@ -398,8 +398,20 @@ pub struct CreateTableSchema {
     pub column_defaults: Vec<String>,
     /// Per-column CHECK SQL (empty if none).
     pub column_checks: Vec<String>,
+    /// Per-column `REFERENCES` targets (same order as `columns`).
+    pub column_references: Vec<Option<ColumnReference>>,
     /// Table-level constraints in declaration order.
     pub table_constraints: Vec<TableConstraint>,
+}
+
+/// Column-level `REFERENCES table [(cols…)]` captured in the structured schema IR.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnReference {
+    /// Referenced table.
+    pub ref_table: String,
+    /// Referenced columns (empty if omitted).
+    pub ref_columns: Vec<String>,
 }
 
 /// Table-level constraint captured in the structured schema IR.
@@ -479,6 +491,18 @@ impl CreateTableSchema {
                     .as_bytes(),
             );
             h.update(b"\0");
+            match self.column_references.get(i).and_then(|r| r.as_ref()) {
+                Some(r) => {
+                    h.update(b"cfk\0");
+                    h.update(r.ref_table.as_bytes());
+                    h.update(b"\0");
+                    for col in &r.ref_columns {
+                        h.update(col.as_bytes());
+                        h.update(b"\0");
+                    }
+                }
+                None => h.update(b"cfk\0\0"),
+            }
         }
         for c in &self.table_constraints {
             match c {
@@ -522,6 +546,24 @@ impl CreateTableSchema {
         }
         hex::encode(h.finalize())
     }
+
+    /// Foreign-key parent table names from column-level and table-level IR.
+    ///
+    /// Does not scan `CREATE TABLE` text, so `REFERENCES` inside DEFAULT/CHECK
+    /// string literals is not a dependency.
+    #[must_use]
+    pub fn referenced_tables(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for r in self.column_references.iter().flatten() {
+            out.push(r.ref_table.clone());
+        }
+        for c in &self.table_constraints {
+            if let TableConstraint::ForeignKey { ref_table, .. } = c {
+                out.push(ref_table.clone());
+            }
+        }
+        out
+    }
 }
 
 /// Parses a canonical `CREATE TABLE` into columns / identity, if the head matches.
@@ -555,6 +597,7 @@ pub fn parse_create_table_schema(sql: &str) -> Option<CreateTableSchema> {
     let mut column_primary_key = Vec::new();
     let mut column_defaults = Vec::new();
     let mut column_checks = Vec::new();
+    let mut column_references = Vec::new();
     let mut table_constraints = Vec::new();
     for def in split_top_level_commas(inner) {
         let def = skip_ws(def);
@@ -584,6 +627,12 @@ pub fn parse_create_table_schema(sql: &str) -> Option<CreateTableSchema> {
         column_primary_key.push(flags.primary_key);
         column_defaults.push(flags.default_sql);
         column_checks.push(flags.check_sql);
+        column_references.push(
+            parse_column_reference(rest).map(|(ref_table, ref_columns)| ColumnReference {
+                ref_table,
+                ref_columns,
+            }),
+        );
     }
     if columns.is_empty() {
         return None;
@@ -597,6 +646,7 @@ pub fn parse_create_table_schema(sql: &str) -> Option<CreateTableSchema> {
         column_primary_key,
         column_defaults,
         column_checks,
+        column_references,
         table_constraints,
     })
 }
@@ -626,6 +676,91 @@ fn parse_column_constraint_flags(rest: &str) -> ColumnFlags {
         default_sql,
         check_sql,
     }
+}
+
+/// Column-level `REFERENCES` outside DEFAULT/CHECK string literals.
+fn parse_column_reference(rest: &str) -> Option<(String, Vec<String>)> {
+    let mut scan = rest;
+    loop {
+        scan = skip_ws(scan);
+        if scan.is_empty() {
+            return None;
+        }
+        if starts_kw(scan, "REFERENCES") {
+            let after = skip_kw(scan, "REFERENCES")?;
+            let (table, after) = read_ident(after)?;
+            let ref_columns = if skip_ws(after).starts_with('(') {
+                ident_list(balanced_inner(skip_ws(after))?)
+            } else {
+                Vec::new()
+            };
+            return Some((table, ref_columns));
+        }
+        if starts_kw(scan, "DEFAULT") {
+            scan = skip_kw(scan, "DEFAULT")?;
+            scan = skip_ws(scan);
+            if scan.starts_with('\'') {
+                scan = skip_sql_string(scan)?;
+            } else if scan.starts_with('(') {
+                let inner = balanced_inner(scan)?;
+                scan = scan.get(inner.len() + 2..).unwrap_or("");
+            } else if let Some((_, rest)) = read_ident(scan) {
+                scan = rest;
+            } else {
+                let end = scan
+                    .find(|c: char| c.is_whitespace() || c == ',')
+                    .unwrap_or(scan.len());
+                scan = scan.get(end..).unwrap_or("");
+            }
+            continue;
+        }
+        if starts_kw(scan, "CHECK") {
+            scan = skip_kw(scan, "CHECK")?;
+            scan = skip_ws(scan);
+            let inner = balanced_inner(scan)?;
+            scan = scan.get(inner.len() + 2..).unwrap_or("");
+            continue;
+        }
+        if starts_kw(scan, "CONSTRAINT") {
+            scan = skip_kw(scan, "CONSTRAINT")?;
+            let (_, rest) = read_ident(scan)?;
+            scan = rest;
+            continue;
+        }
+        if let Some((_, rest)) = read_ident(scan) {
+            scan = rest;
+            continue;
+        }
+        if scan.starts_with('(') {
+            let inner = balanced_inner(scan)?;
+            scan = scan.get(inner.len() + 2..).unwrap_or("");
+            continue;
+        }
+        if scan.starts_with('\'') {
+            scan = skip_sql_string(scan)?;
+            continue;
+        }
+        scan = scan.get(1..).unwrap_or("");
+    }
+}
+
+fn skip_sql_string(s: &str) -> Option<&str> {
+    if !s.starts_with('\'') {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if bytes.get(i + 1) == Some(&b'\'') {
+                i += 2;
+                continue;
+            }
+            return Some(&s[i + 1..]);
+        }
+        i += 1;
+    }
+    None
 }
 
 fn extract_keyword_arg(s: &str, kw: &str) -> Option<String> {
@@ -744,7 +879,10 @@ pub fn parse_drop_table_name(sql: &str) -> Option<String> {
     Some(name)
 }
 
-/// Parses `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table …`.
+/// Parses `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table (cols…) [WHERE …]`.
+///
+/// The column list and any supported tail must be complete SQL v1. Trailing
+/// tokens (`USING`, `INCLUDE`, `COLLATE`, or garbage after `ON table`) fail.
 #[must_use]
 pub fn parse_create_index_sql(sql: &str) -> Option<CreateIndexSchema> {
     let mut s = skip_ws(sql);
@@ -763,13 +901,61 @@ pub fn parse_create_index_sql(sql: &str) -> Option<CreateIndexSchema> {
     }
     let (name, rest) = read_ident(s)?;
     let rest = skip_kw(skip_ws(rest), "ON")?;
-    let (table, _) = read_ident(rest)?;
+    let (table, rest) = read_ident(rest)?;
+    let rest = skip_ws(rest);
+    if !rest.starts_with('(') {
+        return None;
+    }
+    let inner = balanced_inner(rest)?;
+    parse_index_column_list(inner)?;
+    let after = skip_ws(rest.get(inner.len() + 2..).unwrap_or(""));
+    let after = after.trim_end_matches(';').trim_end();
+    if after.is_empty() {
+        return Some(CreateIndexSchema {
+            name,
+            table,
+            unique,
+            canonical_sql: sql.trim().trim_end_matches(';').trim().to_string(),
+        });
+    }
+    if !starts_kw(after, "WHERE") {
+        return None;
+    }
+    let pred = skip_ws(skip_kw(after, "WHERE")?);
+    if pred.trim_end_matches(';').trim().is_empty() {
+        return None;
+    }
     Some(CreateIndexSchema {
         name,
         table,
         unique,
         canonical_sql: sql.trim().trim_end_matches(';').trim().to_string(),
     })
+}
+
+/// Column list of `CREATE INDEX … (ident [ASC|DESC], …)`. Leftover tokens fail.
+fn parse_index_column_list(inner: &str) -> Option<Vec<String>> {
+    let parts = split_top_level_commas(inner);
+    if parts.is_empty() {
+        return None;
+    }
+    let mut cols = Vec::new();
+    for part in parts {
+        let (name, rest) = read_ident(part)?;
+        let rest = skip_ws(rest);
+        let rest = if starts_kw(rest, "ASC") {
+            skip_ws(skip_kw(rest, "ASC")?)
+        } else if starts_kw(rest, "DESC") {
+            skip_ws(skip_kw(rest, "DESC")?)
+        } else {
+            rest
+        };
+        if !rest.is_empty() {
+            return None;
+        }
+        cols.push(name);
+    }
+    Some(cols)
 }
 
 /// Parses `DROP INDEX [IF EXISTS] name`.
@@ -1459,31 +1645,14 @@ fn typecheck_index_ddl(index: usize, sql: &str, env: &SqlTypeEnv) -> Result<Reso
         let _ = scan.read_ident();
         return Ok(ResolvedStatement::bound_empty(sql));
     }
-    if !scan.take_kw("CREATE") {
-        return Err(ty_err(index, "CREATE INDEX"));
-    }
-    let _ = scan.take_kw("UNIQUE");
-    if !scan.take_kw("INDEX") {
-        return Err(ty_err(index, "CREATE INDEX"));
-    }
-    let _ = scan.take_kw("IF");
-    let _ = scan.take_kw("NOT");
-    let _ = scan.take_kw("EXISTS");
-    let _ = scan
-        .read_ident()
-        .ok_or_else(|| ty_err(index, "CREATE INDEX name"))?;
-    if !scan.take_kw("ON") {
-        return Err(ty_err(index, "CREATE INDEX ON"));
-    }
-    let table = scan
-        .read_ident()
-        .ok_or_else(|| ty_err(index, "CREATE INDEX table"))?;
-    require_table_in_env(index, env, &table)?;
+    let parsed = parse_create_index_sql(sql)
+        .ok_or_else(|| ty_err(index, "CREATE INDEX is not admitted SQL v1"))?;
+    require_table_in_env(index, env, &parsed.table)?;
     Ok(ResolvedStatement {
         statement_hash: statement_sql_hash(sql),
         output_columns: Vec::new(),
         physical_accesses: vec![PhysicalAccess {
-            table,
+            table: parsed.table,
             column: None,
         }],
         assignments: Vec::new(),
@@ -4161,6 +4330,48 @@ mod tests {
         assert!(idx.unique);
         let drop = parse_drop_index_name("DROP INDEX IF EXISTS idx_notes_body").expect("drop");
         assert_eq!(drop, "idx_notes_body");
+    }
+
+    #[test]
+    fn parse_create_index_sql_rejects_trailing_tokens_and_malformed_lists() {
+        assert!(
+            parse_create_index_sql("CREATE INDEX idx ON t THIS IS NOT SQL").is_none(),
+            "garbage after ON table must not admit"
+        );
+        assert!(
+            parse_create_index_sql("CREATE INDEX idx ON t (a) THIS IS NOT SQL").is_none(),
+            "garbage after column list must not admit"
+        );
+        assert!(parse_create_index_sql("CREATE INDEX idx ON t (a) USING btree").is_none());
+        assert!(parse_create_index_sql("CREATE INDEX idx ON t (a) INCLUDE (id)").is_none());
+        assert!(parse_create_index_sql("CREATE INDEX idx ON t (body COLLATE NOCASE)").is_none());
+        assert!(parse_create_index_sql("CREATE INDEX idx ON t ()").is_none());
+        let ok = parse_create_index_sql("CREATE INDEX idx ON t (a ASC, b DESC)").expect("index");
+        assert_eq!(ok.table, "t");
+        assert!(!ok.unique);
+        assert!(parse_create_index_sql("CREATE INDEX idx ON t (a) WHERE a IS NOT NULL").is_some());
+        assert!(parse_create_index_sql("CREATE INDEX idx ON t (a) WHERE").is_none());
+    }
+
+    #[test]
+    fn parse_create_table_column_references_ignore_string_defaults() {
+        let fake = parse_create_table_schema(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, note TEXT DEFAULT 'REFERENCES parent')",
+        )
+        .expect("table");
+        assert!(fake.column_references.iter().all(Option::is_none));
+        assert!(fake.referenced_tables().is_empty());
+        let real = parse_create_table_schema(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent (id))",
+        )
+        .expect("table");
+        assert_eq!(
+            real.column_references[1]
+                .as_ref()
+                .map(|r| r.ref_table.as_str()),
+            Some("parent")
+        );
+        assert_eq!(real.referenced_tables(), vec!["parent".to_string()]);
     }
 
     #[test]
