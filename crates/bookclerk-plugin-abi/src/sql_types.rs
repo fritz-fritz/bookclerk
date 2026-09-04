@@ -445,6 +445,9 @@ pub struct CreateIndexSchema {
     pub table: String,
     /// True when the statement is `CREATE UNIQUE INDEX`.
     pub unique: bool,
+    /// Optional partial-index `WHERE` predicate (no `WHERE` keyword).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub where_sql: Option<String>,
     /// Canonical statement text (no trailing semicolon).
     pub canonical_sql: String,
 }
@@ -915,6 +918,7 @@ pub fn parse_create_index_sql(sql: &str) -> Option<CreateIndexSchema> {
             name,
             table,
             unique,
+            where_sql: None,
             canonical_sql: sql.trim().trim_end_matches(';').trim().to_string(),
         });
     }
@@ -922,13 +926,15 @@ pub fn parse_create_index_sql(sql: &str) -> Option<CreateIndexSchema> {
         return None;
     }
     let pred = skip_ws(skip_kw(after, "WHERE")?);
-    if pred.trim_end_matches(';').trim().is_empty() {
+    let pred = pred.trim_end_matches(';').trim();
+    if pred.is_empty() {
         return None;
     }
     Some(CreateIndexSchema {
         name,
         table,
         unique,
+        where_sql: Some(pred.to_string()),
         canonical_sql: sql.trim().trim_end_matches(';').trim().to_string(),
     })
 }
@@ -1496,6 +1502,17 @@ pub fn typecheck_execute_request(req: &ExecuteRequest, env: &SqlTypeEnv) -> Resu
     Ok(())
 }
 
+/// Typechecks one canonical `CREATE INDEX` (including a partial `WHERE`).
+///
+/// # Errors
+///
+/// Returns when the statement is not admitted SQL v1, the table is missing,
+/// or a `WHERE` predicate is not a complete boolean SQL-v1 expression.
+pub fn typecheck_create_index_sql(sql: &str, env: &SqlTypeEnv) -> Result<()> {
+    let _ = typecheck_index_ddl(0, sql, env)?;
+    Ok(())
+}
+
 /// [`typecheck_execute_request`] plus the host-private resolved proofs.
 pub(crate) fn typecheck_execute_request_resolved(
     req: &ExecuteRequest,
@@ -1648,6 +1665,9 @@ fn typecheck_index_ddl(index: usize, sql: &str, env: &SqlTypeEnv) -> Result<Reso
     let parsed = parse_create_index_sql(sql)
         .ok_or_else(|| ty_err(index, "CREATE INDEX is not admitted SQL v1"))?;
     require_table_in_env(index, env, &parsed.table)?;
+    if let Some(pred) = parsed.where_sql.as_deref() {
+        typecheck_index_where(index, &parsed.table, pred, env)?;
+    }
     Ok(ResolvedStatement {
         statement_hash: statement_sql_hash(sql),
         output_columns: Vec::new(),
@@ -1661,6 +1681,61 @@ fn typecheck_index_ddl(index: usize, sql: &str, env: &SqlTypeEnv) -> Result<Reso
         functions: Vec::new(),
         schema_action: SchemaAction::None,
     })
+}
+
+/// Typechecks a partial-index `WHERE` predicate and requires full consumption.
+fn typecheck_index_where(
+    index: usize,
+    table: &str,
+    predicate: &str,
+    env: &SqlTypeEnv,
+) -> Result<()> {
+    let binds: Vec<SqlType> = Vec::new();
+    let mut cx = TypeCx {
+        index,
+        env,
+        binds: &binds,
+        bind_i: 0,
+        from: BTreeMap::from([(table.to_string(), FromSrc::Physical(table.to_string()))]),
+        outer_from: Vec::new(),
+        ctes: BTreeMap::new(),
+        physical: BTreeSet::new(),
+        functions: BTreeSet::new(),
+        assignments: Vec::new(),
+        text_spans: Vec::new(),
+        integer_arith_sites: Vec::new(),
+        output_columns: Vec::new(),
+        require_named_derived: false,
+        suppress_string_collate: false,
+    };
+    let mut scan = TScan {
+        sql: predicate,
+        i: 0,
+        took_real: false,
+        base: 0,
+    };
+    let ty = infer_expr(&mut scan, &mut cx)?;
+    require_booleanish(index, ty, "CREATE INDEX WHERE")?;
+    if !cx.integer_arith_sites.is_empty() {
+        return Err(ty_err(
+            index,
+            "CREATE INDEX WHERE cannot use INTEGER + - * abs (overflow wrapping is DML-only)",
+        ));
+    }
+    scan.skip();
+    let rest = scan
+        .sql
+        .get(scan.i..)
+        .unwrap_or("")
+        .trim_end_matches(';')
+        .trim();
+    if !rest.is_empty() {
+        return Err(ty_err(
+            index,
+            "CREATE INDEX WHERE is not a complete SQL v1 predicate",
+        ));
+    }
+    Ok(())
 }
 
 fn require_table_in_env(index: usize, env: &SqlTypeEnv, table: &str) -> Result<()> {
@@ -4351,6 +4426,41 @@ mod tests {
         assert!(!ok.unique);
         assert!(parse_create_index_sql("CREATE INDEX idx ON t (a) WHERE a IS NOT NULL").is_some());
         assert!(parse_create_index_sql("CREATE INDEX idx ON t (a) WHERE").is_none());
+        let partial =
+            parse_create_index_sql("CREATE INDEX idx ON t (a) WHERE a IS NOT NULL").expect("where");
+        assert_eq!(partial.where_sql.as_deref(), Some("a IS NOT NULL"));
+    }
+
+    #[test]
+    fn typecheck_create_index_where_requires_sql_v1_predicate() {
+        let mut env = SqlTypeEnv::new();
+        env.insert_table("t", [("a".into(), SqlType::Integer)]);
+        typecheck_execute_request(&req("CREATE INDEX idx ON t (a) WHERE a IS NOT NULL"), &env)
+            .expect("valid partial index");
+        typecheck_execute_request(
+            &req("CREATE INDEX idx ON t (a) WHERE wake_pending = 1"),
+            &env,
+        )
+        .expect_err("unknown column");
+        let err = typecheck_execute_request(
+            &req("CREATE INDEX idx ON t (a) WHERE THIS IS NOT SQL"),
+            &env,
+        )
+        .expect_err("garbage predicate");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WHERE") || msg.contains("IS NULL") || msg.contains("unknown"),
+            "{msg}"
+        );
+        let err = typecheck_execute_request(
+            &req("CREATE INDEX idx ON t (a) WHERE a IS NOT NULL TRAILING"),
+            &env,
+        )
+        .expect_err("leftover tokens");
+        assert!(
+            err.to_string().contains("WHERE") || err.to_string().contains("complete"),
+            "{err}"
+        );
     }
 
     #[test]
