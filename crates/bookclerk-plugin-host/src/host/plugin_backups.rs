@@ -139,7 +139,12 @@ pub async fn restore_plugin_backup_units(
                  adapter does not advertise atomicUnitRestore"
             )));
         }
-        let opts = CanonicalRestoreOpts::from_caps(&caps);
+        let opts = CanonicalRestoreOpts::from_caps(&caps).map_err(|err| {
+            PluginError::message(format!(
+                "plugin restore failed after {restored} unit(s); `{plugin_id}/{binding}` \
+                 advertised schema flags are not a known versioning contract: {err}"
+            ))
+        })?;
         restore_backup_unit(
             &db,
             repo,

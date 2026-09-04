@@ -66,6 +66,30 @@ fn restore_without_atomic() -> CanonicalRestoreOpts {
     }
 }
 
+/// Third-party SQLite-family adapter: `schemaMigrations` without `pragmaUserVersion`.
+fn third_party_sqlite_row_marker_caps() -> DbCapabilities {
+    let mut caps = DbCapabilities::advertised_sqlite();
+    caps.pragma_user_version = false;
+    caps.schema_migrations = true;
+    caps
+}
+
+async fn seed_sqlite_with_leftover_pragma(db: &sea_orm::DatabaseConnection) {
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        SCHEMA_MIGRATIONS_DDL.to_string(),
+    ))
+    .await
+    .unwrap();
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "PRAGMA user_version = 5",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(db.get_database_backend(), DbBackend::Sqlite);
+}
+
 fn prepared_plugin(
     plugin_id: &str,
     binding: &str,
@@ -221,6 +245,27 @@ fn admit_rejects_create_index_with_trailing_tokens() {
     .unwrap_err();
     assert!(
         err.to_string().contains("not fully admitted") || err.to_string().contains("INDEX"),
+        "{err}"
+    );
+}
+
+#[test]
+fn restore_opts_kind_comes_from_capabilities_not_identity() {
+    let sqlite = CanonicalRestoreOpts::from_caps(&DbCapabilities::advertised_sqlite()).unwrap();
+    assert_eq!(sqlite.host_schema_kind, HostSchemaKind::PragmaMarker);
+
+    let postgres = CanonicalRestoreOpts::from_caps(&DbCapabilities::advertised_postgres()).unwrap();
+    assert_eq!(postgres.host_schema_kind, HostSchemaKind::RowMarker);
+
+    let third_party =
+        CanonicalRestoreOpts::from_caps(&third_party_sqlite_row_marker_caps()).unwrap();
+    assert_eq!(third_party.host_schema_kind, HostSchemaKind::RowMarker);
+
+    let mut mixed = DbCapabilities::advertised_sqlite();
+    mixed.schema_migrations = true;
+    let err = CanonicalRestoreOpts::from_caps(&mixed).unwrap_err();
+    assert!(
+        err.to_string().contains("not a known versioning contract"),
         "{err}"
     );
 }
@@ -978,13 +1023,7 @@ async fn restore_uses_capability_kind_not_seaorm_backend() {
     let dest_pragma = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    dest_pragma
-        .execute_raw(Statement::from_string(
-            DbBackend::Sqlite,
-            "PRAGMA user_version = 5",
-        ))
-        .await
-        .unwrap();
+    seed_sqlite_with_leftover_pragma(&dest_pragma).await;
     let err = restore_backup_in_repo(
         &dest_pragma,
         &repo,
@@ -1001,17 +1040,8 @@ async fn restore_uses_capability_kind_not_seaorm_backend() {
     let dest_row = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    dest_row
-        .execute_raw(Statement::from_string(
-            DbBackend::Sqlite,
-            "PRAGMA user_version = 5",
-        ))
-        .await
-        .unwrap();
-    let mut caps = DbCapabilities::advertised_sqlite();
-    caps.pragma_user_version = false;
-    caps.schema_migrations = true;
-    let opts = CanonicalRestoreOpts::from_caps(&caps);
+    seed_sqlite_with_leftover_pragma(&dest_row).await;
+    let opts = CanonicalRestoreOpts::from_caps(&third_party_sqlite_row_marker_caps()).unwrap();
     assert_eq!(opts.host_schema_kind, HostSchemaKind::RowMarker);
     restore_backup_in_repo(&dest_row, &repo, &outcome.manifest.id, &opts)
         .await
