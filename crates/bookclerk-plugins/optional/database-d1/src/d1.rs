@@ -136,6 +136,33 @@ fn d1_management_client() -> std::result::Result<reqwest::Client, DbErr> {
         .map_err(|e| DbErr::Custom(format!("d1 client: {e}")))
 }
 
+/// Resolves an existing D1 database UUID by name. Does not create.
+///
+/// # Errors
+///
+/// Returns when lookup fails or no database with `name` exists.
+pub async fn lookup_database(
+    api_base: &str,
+    account_id: &str,
+    api_token: &str,
+    name: &str,
+) -> std::result::Result<String, DbErr> {
+    let client = d1_management_client()?;
+    let list_url = d1_management_url(
+        api_base,
+        &format!("/accounts/{account_id}/d1/database?name={name}"),
+    )?;
+    let (_status, listed) =
+        d1_management_json(&client, reqwest::Method::GET, list_url, api_token, None)
+            .await
+            .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?;
+    d1_database_uuid_by_name(&listed, name).ok_or_else(|| {
+        DbErr::Custom(format!(
+            "d1 database `{name}` does not exist (lookup-only; will not provision)"
+        ))
+    })
+}
+
 /// Resolves (and provisions) a Cloudflare D1 database by name, returning its UUID.
 ///
 /// Used for named plugin database bindings: each binding gets its own D1
@@ -151,18 +178,12 @@ pub async fn ensure_database(
     api_token: &str,
     name: &str,
 ) -> std::result::Result<String, DbErr> {
-    let client = d1_management_client()?;
-    let list_url = d1_management_url(
-        api_base,
-        &format!("/accounts/{account_id}/d1/database?name={name}"),
-    )?;
-    let (_status, listed) =
-        d1_management_json(&client, reqwest::Method::GET, list_url, api_token, None)
-            .await
-            .map_err(|e| DbErr::Custom(format!("d1 database lookup `{name}`: {e}")))?;
-    if let Some(uuid) = d1_database_uuid_by_name(&listed, name) {
-        return Ok(uuid);
+    match lookup_database(api_base, account_id, api_token, name).await {
+        Ok(uuid) => return Ok(uuid),
+        Err(err) if err.to_string().contains("does not exist") => {}
+        Err(err) => return Err(err),
     }
+    let client = d1_management_client()?;
     let create_url = d1_management_url(api_base, &format!("/accounts/{account_id}/d1/database"))?;
     let (_status, created) = d1_management_json(
         &client,
@@ -259,6 +280,109 @@ pub async fn delete_database(
         )));
     }
     Ok(())
+}
+
+/// Exports a D1 database as SQL via the Cloudflare REST export API (polling).
+///
+/// Time Travel is not used. The returned bytes are a native SQL dump of the
+/// named database (an operational aid, not the portable Bookclerk backup).
+///
+/// # Errors
+///
+/// Returns when the token cannot start or poll the export, or the download fails.
+pub async fn export_sql(
+    api_base: &str,
+    account_id: &str,
+    api_token: &str,
+    database_id: &str,
+) -> std::result::Result<Vec<u8>, DbErr> {
+    export_sql_with_limits(
+        api_base,
+        account_id,
+        api_token,
+        database_id,
+        20,
+        Duration::from_millis(500),
+    )
+    .await
+}
+
+/// [`export_sql`] with explicit poll budget (tests use a short delay).
+///
+/// # Errors
+///
+/// Returns when the token cannot start or poll the export, the poll budget
+/// is exhausted before a signed URL appears, or the download fails.
+pub async fn export_sql_with_limits(
+    api_base: &str,
+    account_id: &str,
+    api_token: &str,
+    database_id: &str,
+    max_polls: u32,
+    poll_delay: Duration,
+) -> std::result::Result<Vec<u8>, DbErr> {
+    let client = d1_management_client()?;
+    let url = d1_management_url(
+        api_base,
+        &format!("/accounts/{account_id}/d1/database/{database_id}/export"),
+    )?;
+    let mut bookmark: Option<String> = None;
+    let mut signed: Option<String> = None;
+    for _ in 0..max_polls.max(1) {
+        let body = crate::export_protocol::d1_export_poll_body(bookmark.as_deref());
+        let (_status, polled) = d1_management_json(
+            &client,
+            reqwest::Method::POST,
+            url.clone(),
+            api_token,
+            Some(body),
+        )
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 export: {e}")))?;
+        match crate::export_protocol::parse_d1_export_envelope(&polled).map_err(DbErr::Custom)? {
+            crate::export_protocol::D1ExportPoll::InProgress { bookmark: next } => {
+                if next.is_some() {
+                    bookmark = next;
+                }
+            }
+            crate::export_protocol::D1ExportPoll::Complete { signed_url, .. } => {
+                signed = Some(signed_url);
+                break;
+            }
+            crate::export_protocol::D1ExportPoll::Failed { message } => {
+                return Err(DbErr::Custom(message));
+            }
+        }
+        if signed.is_some() {
+            break;
+        }
+        tokio::time::sleep(poll_delay).await;
+    }
+    let signed =
+        signed.ok_or_else(|| DbErr::Custom("d1 export timed out waiting for signed_url".into()))?;
+    let signed_url = d1_signed_download_url(&signed)?;
+    let bytes = client
+        .get(signed_url)
+        .send()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 export download: {e}")))?
+        .bytes()
+        .await
+        .map_err(|e| DbErr::Custom(format!("d1 export download: {e}")))?;
+    Ok(bytes.to_vec())
+}
+
+/// Cloudflare-issued export download URL; HTTPS off-loopback.
+fn d1_signed_download_url(signed: &str) -> std::result::Result<reqwest::Url, DbErr> {
+    let parsed = reqwest::Url::parse(signed)
+        .map_err(|e| DbErr::Custom(format!("d1 export signed_url: {e}")))?;
+    match parsed.scheme() {
+        "https" => Ok(parsed),
+        "http" if cfg!(test) && host_is_loopback(&parsed) => Ok(parsed),
+        scheme => Err(DbErr::Custom(format!(
+            "d1 export signed_url must be https (got {scheme})"
+        ))),
+    }
 }
 
 /// Extracts the UUID of a D1 database named exactly `name` from a list reply.
@@ -1836,6 +1960,146 @@ mod tests {
         assert_eq!(text, Value::String(Some("b64:YWJj".into())));
         let blob = json_to_sea_value(&JsonValue::String("b64:AA==".into()), "ciphertext").unwrap();
         assert_eq!(blob, Value::Bytes(Some(vec![0])));
+    }
+
+    #[test]
+    fn export_urls_require_https() {
+        let err = d1_management_url(
+            "http://example.com/client/v4",
+            "/accounts/a/d1/database/d/export",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must be https"), "{err}");
+        assert!(d1_management_url(
+            "https://api.cloudflare.com/client/v4",
+            "/accounts/a/d1/database/d/export"
+        )
+        .is_ok());
+        let signed = d1_signed_download_url("http://example.com/dump.sql").unwrap_err();
+        assert!(signed.to_string().contains("must be https"), "{signed}");
+        assert!(d1_signed_download_url("https://example.com/dump.sql").is_ok());
+    }
+
+    #[tokio::test]
+    async fn export_sql_polls_bookmark_and_downloads_nested_signed_url() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wiremock::Respond;
+
+        let server = MockServer::start().await;
+        let signed = format!("{}/dump.sql", server.uri());
+        Mock::given(method("GET"))
+            .and(path_regex(r"/dump\.sql$"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("SELECT 1;"))
+            .mount(&server)
+            .await;
+
+        struct ExportThenComplete {
+            hits: Arc<AtomicUsize>,
+            signed: String,
+        }
+        impl Respond for ExportThenComplete {
+            fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                let n = self.hits.fetch_add(1, Ordering::SeqCst);
+                let body: JsonValue = serde_json::from_slice(&request.body).unwrap_or(json!({}));
+                if n == 0 {
+                    assert_eq!(body.get("current_bookmark"), None, "{body}");
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "success": true,
+                        "result": {
+                            "at_bookmark": "bm-1",
+                            "status": "running",
+                            "type": "export"
+                        }
+                    }))
+                } else {
+                    assert_eq!(
+                        body.get("current_bookmark").and_then(JsonValue::as_str),
+                        Some("bm-1"),
+                        "{body}"
+                    );
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "success": true,
+                        "result": {
+                            "at_bookmark": "bm-1",
+                            "status": "complete",
+                            "result": {
+                                "filename": "db.sql",
+                                "signed_url": self.signed
+                            }
+                        }
+                    }))
+                }
+            }
+        }
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path_regex(r"/export$"))
+            .respond_with(ExportThenComplete {
+                hits: hits.clone(),
+                signed,
+            })
+            .mount(&server)
+            .await;
+
+        let bytes = export_sql_with_limits(
+            &server.uri(),
+            "acct",
+            "tok",
+            "dbid",
+            5,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(bytes, b"SELECT 1;");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn export_sql_timeout_and_error_and_http_signed_url_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/export$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": { "at_bookmark": "bm", "status": "running" }
+            })))
+            .mount(&server)
+            .await;
+        let err = export_sql_with_limits(
+            &server.uri(),
+            "acct",
+            "tok",
+            "dbid",
+            2,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"/export$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": { "status": "error", "error": "export exploded" }
+            })))
+            .mount(&server)
+            .await;
+        let err = export_sql_with_limits(
+            &server.uri(),
+            "acct",
+            "tok",
+            "dbid",
+            2,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("export exploded"), "{err}");
     }
 
     #[test]

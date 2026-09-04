@@ -206,6 +206,28 @@ enum Work {
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
+    /// Begin a vat-held transaction on a named plugin database binding.
+    DbBeginBinding {
+        name: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Commit the vat-held binding transaction.
+    DbCommitBinding {
+        name: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Roll back the vat-held binding transaction.
+    DbRollbackBinding {
+        name: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// Typed execute on the vat-held binding transaction.
+    DbTxnExecuteBindingRequest {
+        name: String,
+        request: bookclerk_plugin_sdk::ExecuteRequest,
+        cancel: Arc<AtomicBool>,
+        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
+    },
     /// Drop the vat.
     Shutdown,
 }
@@ -929,6 +951,60 @@ impl PluginSession {
     pub async fn db_rollback(&self) -> Result<()> {
         self.call(|reply| Work::DbRollback { reply }).await
     }
+
+    /// Begin a transaction on a named plugin database binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the binding is not open or begin fails.
+    pub async fn db_begin_binding(&self, name: &str) -> Result<()> {
+        let name = name.to_string();
+        self.call(|reply| Work::DbBeginBinding { name, reply })
+            .await
+    }
+
+    /// Commit a named plugin database binding transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns when no binding transaction is open or commit fails.
+    pub async fn db_commit_binding(&self, name: &str) -> Result<()> {
+        let name = name.to_string();
+        self.call(|reply| Work::DbCommitBinding { name, reply })
+            .await
+    }
+
+    /// Roll back a named plugin database binding transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns when no binding transaction is open or rollback fails.
+    pub async fn db_rollback_binding(&self, name: &str) -> Result<()> {
+        let name = name.to_string();
+        self.call(|reply| Work::DbRollbackBinding { name, reply })
+            .await
+    }
+
+    /// Typed execute on the vat-held binding transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns when no binding transaction is open or the guest rejects the call.
+    pub async fn db_txn_execute_binding_request(
+        &self,
+        name: &str,
+        request: bookclerk_plugin_sdk::ExecuteRequest,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
+        let name = name.to_string();
+        self.call(|reply| Work::DbTxnExecuteBindingRequest {
+            name,
+            request,
+            cancel,
+            reply,
+        })
+        .await
+    }
 }
 
 impl Drop for PluginSession {
@@ -1144,6 +1220,10 @@ fn vat_thread(
                     bookclerk_plugin_abi::HostAdapterDatabaseSessionClient,
                 > = None;
                 let mut db_txn: Option<Box<dyn bookclerk_plugin_abi::AdapterTransaction>> = None;
+                let mut db_binding_txns: std::collections::HashMap<
+                    String,
+                    Box<dyn bookclerk_plugin_abi::AdapterTransaction>,
+                > = std::collections::HashMap::new();
                 while let Some(work) = rx.recv().await {
                     match work {
                         Work::Shutdown => break,
@@ -1461,6 +1541,65 @@ fn vat_thread(
                                         ))
                                     })?;
                                     host.host.execute_envelope(envelope).await.map_err(map_abi)
+                                } => out,
+                            };
+                            let _ = reply.send(out);
+                        }
+                        Work::DbBeginBinding { name, reply } => {
+                            let out = async {
+                                let host = db_bindings.get(&name).ok_or_else(|| {
+                                    PluginError::message(format!(
+                                        "database binding `{name}` session not open",
+                                    ))
+                                })?;
+                                let txn = host.host.begin().await.map_err(map_abi)?;
+                                db_binding_txns.insert(name, txn);
+                                Ok(())
+                            }
+                            .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbCommitBinding { name, reply } => {
+                            let out = async {
+                                let txn = db_binding_txns.remove(&name).ok_or_else(|| {
+                                    PluginError::message(format!(
+                                        "database binding `{name}` transaction not open",
+                                    ))
+                                })?;
+                                txn.commit().await.map_err(map_abi)
+                            }
+                            .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbRollbackBinding { name, reply } => {
+                            let out = async {
+                                let txn = db_binding_txns.remove(&name).ok_or_else(|| {
+                                    PluginError::message(format!(
+                                        "database binding `{name}` transaction not open",
+                                    ))
+                                })?;
+                                txn.rollback().await.map_err(map_abi)
+                            }
+                            .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbTxnExecuteBindingRequest {
+                            name,
+                            request,
+                            cancel,
+                            reply,
+                        } => {
+                            let out = tokio::select! {
+                                () = wait_flag(Arc::clone(&cancel)) => {
+                                    Err(PluginError::from_abi(Some("cancelled"), "rpc cancelled"))
+                                }
+                                out = async {
+                                    match db_binding_txns.get_mut(&name) {
+                                        Some(txn) => txn.execute(request).await.map_err(map_abi),
+                                        None => Err(PluginError::message(format!(
+                                            "database binding `{name}` transaction not open",
+                                        ))),
+                                    }
                                 } => out,
                             };
                             let _ = reply.send(out);

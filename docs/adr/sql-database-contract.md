@@ -57,7 +57,12 @@ execution semantics (`atomicBatch`, `returning`, `affectedRows`,
 (`sqlFamily`, SeaORM `dialect`) is **not** on typed `DbCapabilities`;
 it travels on the separate typed `DbBootstrap` / the host connect path after
 semantic negotiation succeeds. `DbCapabilities` `@17` is `pluginDatabases`
-and `@21` is `maxLoweredStatementBytes`.
+and `@21` is `maxLoweredStatementBytes`. `@22` `consistentBackupRead` and
+`@23` `atomicUnitRestore` split consistent capture from complete per-unit
+replacement. Backup orchestration must not branch on sqlite/postgres/d1
+plugin identity. First-party D1 advertises neither flag (sequential HTTP is
+not a consistent image and is not complete unit replacement). Native D1
+export/import is not a Bookclerk backup path.
 
 The host must not invent capabilities from the plugin id. Missing required
 fields, `atomicBatch: false`, `returning: false`, unspecified (`0`) limits,

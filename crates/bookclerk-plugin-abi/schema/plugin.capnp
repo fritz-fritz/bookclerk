@@ -778,6 +778,10 @@ struct DatabaseAdapterConfig {
   # library open. Third-party adapters must key isolated databases on this
   # value rather than `binding` alone (two plugins may both declare `DB`).
   instanceId @3 :Text;
+  # Append-only (abiMinor 19). When false, open an existing binding unit and
+  # do not provision a missing one (read-only backup capture). Omitted/true
+  # on older hosts means the adapter may create the unit.
+  provision @4 :Bool;
 }
 
 # JSON health payload for guests that report identity alongside liveness.
@@ -1104,6 +1108,12 @@ struct DbCapabilities {
   # D1 advertises 100000. Hosts compare a standardized Bookclerk lowering
   # upper bound against this number and must not branch on engine identity.
   maxLoweredStatementBytes @21 :UInt32;
+  # Adapter can expose one stable logical database state while the host
+  # reads schema, rows, and identity.
+  consistentBackupRead @22 :Bool;
+  # Adapter can destructively replace one logical database unit so an
+  # ordinary restore failure does not leave that unit partially replaced.
+  atomicUnitRestore @23 :Bool;
 }
 
 struct DbBootstrapReply {
