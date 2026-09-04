@@ -4,8 +4,10 @@ use std::collections::BTreeSet;
 
 use bookclerk_plugin_abi::{
     encoded_statement_result_bytes, parse_create_index_sql, parse_create_table_schema,
-    reserved_catalog_relation_missing, DbColumn, DbRow, DbType, DbValue, StatementResult,
-    FIRST_PARTY_MAX_RESULT_ROWS, SQL_CATALOG_TABLE, SQL_CONTRACT_VERSION, SQL_DDL_TABLE,
+    reserved_catalog_relation_missing, sql_ddl_create_table_sql, sql_schema_create_table_sql,
+    sql_type_env_from_canonical_ddl, typecheck_execute_request_proofs, DbColumn,
+    DbPlanStatementKind, DbResultSelection, DbRow, DbType, DbValue, ExecuteRequest, SqlTypeEnv,
+    StatementResult, TypedDbStatement, SQL_CATALOG_TABLE, SQL_CONTRACT_VERSION, SQL_DDL_TABLE,
     SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
 };
 use sea_orm::{
@@ -121,7 +123,7 @@ async fn capture_plugin_on<C>(
 where
     C: ConnectionTrait,
 {
-    let schema = plugin_canonical_schema_from_ddl_catalog_on(conn).await?;
+    let schema = plugin_canonical_schema_from_ddl_catalog_on(conn, opts).await?;
     capture_unit_on(
         conn,
         repo,
@@ -335,6 +337,11 @@ where
     let max_rows = opts.max_result_rows.max(1);
     let byte_budget = opts.page_byte_budget();
     let backend = conn.get_database_backend();
+    let mut env = SqlTypeEnv::new();
+    env.insert_table(
+        table.parsed.table.clone(),
+        table.parsed.columns.iter().cloned(),
+    );
     let mut page = max_rows;
     let mut offset: u64 = 0;
     let mut chunks = Vec::new();
@@ -351,7 +358,7 @@ where
             "SELECT {} FROM {name} ORDER BY {order_sql} LIMIT {page} OFFSET {offset}",
             columns.join(", "),
         );
-        let sql = bookclerk_db_exec::lower_canonical_sql(backend, &canonical_sql);
+        let sql = lower_capture_select(backend, &canonical_sql, &env, page)?;
         let rows = match conn
             .query_all_raw(Statement::from_string(backend, sql))
             .await
@@ -568,18 +575,19 @@ where
 pub async fn plugin_canonical_schema_from_ddl_catalog(
     db: &DatabaseConnection,
 ) -> Result<CanonicalDatabaseSchema> {
-    plugin_canonical_schema_from_ddl_catalog_on(db).await
+    plugin_canonical_schema_from_ddl_catalog_on(db, &CanonicalExportOpts::default()).await
 }
 
 /// Read plugin canonical DDL from `bookclerk_sql_ddl` on an open connection.
 pub(super) async fn plugin_canonical_schema_from_ddl_catalog_on<C>(
     conn: &C,
+    opts: &CanonicalExportOpts,
 ) -> Result<CanonicalDatabaseSchema>
 where
     C: ConnectionTrait,
 {
     let backend = conn.get_database_backend();
-    let page = FIRST_PARTY_MAX_RESULT_ROWS.max(1);
+    let env = catalog_type_env();
     let rows = match paged_select(
         conn,
         backend,
@@ -587,7 +595,8 @@ where
             "SELECT kind, name, table_name, canonical_sql FROM {SQL_DDL_TABLE} \
              ORDER BY kind, name"
         ),
-        page,
+        opts,
+        &env,
     )
     .await
     {
@@ -596,8 +605,8 @@ where
             if reserved_catalog_relation_missing(&err.to_string(), SQL_DDL_TABLE) {
                 return Err(LibraryError::Schema(format!(
                     "plugin database has no durable canonical DDL catalog (`{SQL_DDL_TABLE}`); \
-                     reopen the binding after upgrading Bookclerk so admitted CREATE TABLE/INDEX \
-                     is recorded (a matching CREATE TABLE IF NOT EXISTS backfills metadata)"
+                     reset or recreate the binding — Bookclerk will not merge captured schema \
+                     onto an unknown existing database"
                 )));
             }
             return Err(LibraryError::Schema(format!(
@@ -639,15 +648,14 @@ where
         }
     }
     let schema_sql = format!("SELECT table_name FROM {SQL_SCHEMA_TABLE} ORDER BY table_name");
-    match paged_select(conn, backend, &schema_sql, page).await {
+    match paged_select(conn, backend, &schema_sql, opts, &env).await {
         Ok(schema_rows) => {
             for row in schema_rows {
                 let name = cell_text(&row, "table_name")?;
                 if !table_names.contains(&name) {
                     return Err(LibraryError::Schema(format!(
                         "plugin table `{name}` is fingerprint-catalogued but has no canonical DDL \
-                         row in `{SQL_DDL_TABLE}`; reopen the binding so a matching \
-                         CREATE TABLE IF NOT EXISTS can backfill metadata"
+                         row in `{SQL_DDL_TABLE}`; reset or recreate the binding"
                     )));
                 }
             }
@@ -662,6 +670,41 @@ where
     sort_schema(admit_canonical_schema(SQL_CONTRACT_VERSION, &sql)?)
 }
 
+/// Type environment for reserved catalog companion tables.
+fn catalog_type_env() -> SqlTypeEnv {
+    sql_type_env_from_canonical_ddl(&format!(
+        "{}; {}",
+        sql_ddl_create_table_sql(),
+        sql_schema_create_table_sql()
+    ))
+}
+
+/// Proof-directed lowering so Postgres TEXT ORDER BY uses `COLLATE "C"`.
+fn lower_capture_select(
+    backend: DbBackend,
+    sql: &str,
+    env: &SqlTypeEnv,
+    max_rows: u32,
+) -> Result<String> {
+    let req = ExecuteRequest {
+        operation_id: "backup-capture".into(),
+        request_hash: String::new(),
+        statements: vec![TypedDbStatement {
+            sql: sql.to_string(),
+            parameters: Vec::new(),
+            kind: DbPlanStatementKind::Select,
+            max_rows,
+            result_selection: DbResultSelection::Rows,
+        }],
+        deadline_unix_ms: 0,
+    };
+    let proofs = typecheck_execute_request_proofs(&req, env).map_err(|err| {
+        LibraryError::Schema(format!("backup SELECT is not admitted SQL v1: {err}"))
+    })?;
+    bookclerk_db_exec::lower_canonical_sql_typed(backend, sql, proofs.first())
+        .map_err(|err| LibraryError::Schema(format!("backup SELECT cannot be lowered: {err}")))
+}
+
 /// Default skip set for library capture (`plugin_databases` is environment-local).
 #[must_use]
 pub fn library_skip_tables() -> BTreeSet<String> {
@@ -671,24 +714,43 @@ pub fn library_skip_tables() -> BTreeSet<String> {
         .collect()
 }
 
-/// Run `ordered_select` with `LIMIT/OFFSET` using `page` as the page size.
+/// Run `ordered_select` with `LIMIT/OFFSET` using adapter page size and byte budget.
 async fn paged_select<C>(
     conn: &C,
     backend: DbBackend,
     ordered_select: &str,
-    page: u32,
+    opts: &CanonicalExportOpts,
+    env: &SqlTypeEnv,
 ) -> std::result::Result<Vec<sea_orm::QueryResult>, sea_orm::DbErr>
 where
     C: ConnectionTrait,
 {
-    let page = page.max(1);
+    let max_rows = opts.max_result_rows.max(1);
+    let mut page = max_rows;
     let mut offset = 0u64;
     let mut out = Vec::new();
     loop {
-        let sql = format!("{ordered_select} LIMIT {page} OFFSET {offset}");
-        let batch = conn
+        let canonical = format!("{ordered_select} LIMIT {page} OFFSET {offset}");
+        let sql = match lower_capture_select(backend, &canonical, env, page) {
+            Ok(sql) => sql,
+            Err(err) => {
+                return Err(sea_orm::DbErr::Custom(err.to_string()));
+            }
+        };
+        let batch = match conn
             .query_all_raw(Statement::from_string(backend, sql))
-            .await?;
+            .await
+        {
+            Ok(batch) => batch,
+            Err(err) if result_bytes_exceeded(&err.to_string()) => {
+                if page <= 1 {
+                    return Err(err);
+                }
+                page = (page / 2).max(1);
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         if batch.is_empty() {
             break;
         }
@@ -698,6 +760,7 @@ where
         if n < page {
             break;
         }
+        page = max_rows;
     }
     Ok(out)
 }

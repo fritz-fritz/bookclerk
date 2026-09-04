@@ -6,13 +6,13 @@ use bookclerk_plugin_abi::{
     parse_create_index_sql, parse_create_table_schema, DbValue, SQL_CATALOG_TABLE, SQL_DDL_TABLE,
     SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, TransactionTrait};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait};
 
 use super::capture::plugin_canonical_schema_from_ddl_catalog;
 use super::encode::CanonicalObject;
 use super::repository::BackupRepository;
 use super::schema::{library_canonical_schema, sort_tables_by_foreign_keys};
-use super::util::{exec_bound, exec_sql, ident_ok, table_exists};
+use super::util::{cell_text, exec_bound, exec_sql, ident_ok, table_exists};
 use super::verify::{load_admitted_schema, verify_unit};
 use super::{
     BackupUnit, CanonicalDatabaseSchema, CanonicalRestoreKind, CanonicalRestoreOpts,
@@ -60,6 +60,13 @@ pub async fn restore_backup_unit(
                 if msg.contains("no durable canonical DDL catalog")
                     || msg.contains(&format!("plugin backup cannot read `{SQL_DDL_TABLE}`"))
                 {
+                    if binding_has_user_tables(db).await? {
+                        return Err(LibraryError::Schema(format!(
+                            "plugin database has no durable canonical DDL catalog (`{SQL_DDL_TABLE}`); \
+                             reset or recreate the binding — Bookclerk will not merge captured schema \
+                             onto an unknown existing database"
+                        )));
+                    }
                     Vec::new()
                 } else {
                     return Err(err);
@@ -165,7 +172,12 @@ where
 {
     let name = table.parsed.table.as_str();
     let Some(meta) = unit.tables.iter().find(|t| t.name == name) else {
-        return Ok(());
+        if is_registry_table(name) {
+            return Ok(());
+        }
+        return Err(LibraryError::Schema(format!(
+            "backup unit is missing table `{name}` (empty tables still require a BackupTable entry)"
+        )));
     };
     let backend = conn.get_database_backend();
     for digest in &meta.chunks {
@@ -405,6 +417,34 @@ fn is_registry_table(name: &str) -> bool {
     LIBRARY_SKIP_TABLES
         .iter()
         .any(|t| t.eq_ignore_ascii_case(name))
+}
+
+/// True when the binding has any non-sqlite user table (catalog missing + tables
+/// means restore would merge).
+async fn binding_has_user_tables(db: &DatabaseConnection) -> Result<bool> {
+    let backend = db.get_database_backend();
+    let sql = match backend {
+        DbBackend::Postgres => {
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
+        }
+        _ => "SELECT name FROM sqlite_master WHERE type = 'table'",
+    };
+    let rows = db
+        .query_all_raw(Statement::from_string(backend, sql))
+        .await
+        .map_err(LibraryError::from_db_err)?;
+    for row in rows {
+        let name = match backend {
+            DbBackend::Postgres => cell_text(&row, "table_name")?,
+            _ => cell_text(&row, "name")?,
+        };
+        if name.starts_with("sqlite_") {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Applies admitted canonical DDL plus binding companions (tests / bootstrap).

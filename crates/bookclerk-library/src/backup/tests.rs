@@ -14,8 +14,10 @@ use crate::backup::schema::{
     order_key_columns, sort_tables_by_foreign_keys,
 };
 use crate::backup::util::validate_cell;
-use crate::backup::verify::verify_recovery_point;
-use crate::host_schema::{apply_host_schema, current_schema_state, HostSchemaKind};
+use crate::backup::verify::{verify_recovery_point, verify_unit};
+use crate::host_schema::{
+    apply_host_schema, current_schema_state, ensure_restore_target_is_replaceable, HostSchemaKind,
+};
 use crate::migrations::{HostMigrationStep, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION};
 use crate::LibraryStore;
 use bookclerk_plugin_abi::{
@@ -718,6 +720,261 @@ async fn missing_and_corrupt_objects_fail_verify() {
     std::fs::remove_file(&path).unwrap();
     let err = verify_recovery_point(&repo, &outcome.manifest.id).unwrap_err();
     assert!(err.to_string().contains("missing"), "{err}");
+}
+
+#[tokio::test]
+async fn omitted_backup_table_fails_verify_before_restore_mutates() {
+    let files = tempfile::tempdir().unwrap();
+    let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap();
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO accounts (account_id, marketplace, source, created_at, updated_at) \
+         VALUES ('keep', 'us', 'audible', 't', 't')",
+    ))
+    .await
+    .unwrap();
+    let before = count(
+        &db,
+        "SELECT COUNT(*) AS count FROM accounts WHERE account_id = 'keep'",
+    )
+    .await;
+    assert_eq!(before, 1);
+    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap();
+    let outcome = backup_library(&db, &backup_req(files.path(), state, BackupReason::Manual))
+        .await
+        .unwrap()
+        .unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let mut manifest = repo.read_manifest(&outcome.manifest.id).unwrap();
+    manifest.units[0].tables.retain(|t| t.name != "books");
+    repo.publish_manifest(&manifest).unwrap();
+    let err = verify_recovery_point(&repo, &outcome.manifest.id).unwrap_err();
+    assert!(
+        err.to_string().contains("books") && err.to_string().contains("missing"),
+        "{err}"
+    );
+    let err = restore_backup_in_repo(&db, &repo, &outcome.manifest.id, &restore_ok())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("books") || err.to_string().contains("table set"),
+        "{err}"
+    );
+    let after = count(
+        &db,
+        "SELECT COUNT(*) AS count FROM accounts WHERE account_id = 'keep'",
+    )
+    .await;
+    assert_eq!(after, 1, "restore must fail before DROP");
+}
+
+#[tokio::test]
+async fn identity_object_must_cover_every_identity_table() {
+    let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_bootstrap(&src).await;
+    apply_admitted_sql(
+        &src,
+        &["CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL)"],
+        CanonicalRestoreKind::PluginBinding,
+    )
+    .await
+    .unwrap();
+    src.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO notes (body) VALUES ('a')",
+    ))
+    .await
+    .unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let mut unit = capture::capture_plugin_unit(
+        &src,
+        &repo,
+        &CanonicalExportOpts::default(),
+        "demo",
+        "notes",
+        "sqlite",
+    )
+    .await
+    .unwrap();
+    let CanonicalObject::Identity { mut entries } = repo.get_object(&unit.identity_object).unwrap()
+    else {
+        panic!("expected identity");
+    };
+    entries.remove("notes");
+    unit.identity_object = repo
+        .put_object(&CanonicalObject::Identity { entries })
+        .unwrap();
+    let err = verify_unit(&repo, &unit).unwrap_err();
+    assert!(
+        err.to_string().contains("identity") && err.to_string().contains("notes"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn restore_fails_closed_when_target_frozen_history_is_newer() {
+    let files = tempfile::tempdir().unwrap();
+    let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap();
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO accounts (account_id, marketplace, source, created_at, updated_at) \
+         VALUES ('keep', 'us', 'audible', 't', 't')",
+    ))
+    .await
+    .unwrap();
+    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap();
+    let outcome = backup_library(&db, &backup_req(files.path(), state, BackupReason::Manual))
+        .await
+        .unwrap()
+        .unwrap();
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "DELETE FROM schema_migrations",
+    ))
+    .await
+    .unwrap();
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO schema_migrations (version, state, checksum, app_version, applied_at) \
+         VALUES (1, 'frozen', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '0', 't')",
+    ))
+    .await
+    .unwrap();
+    let err = ensure_restore_target_is_replaceable(&db, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("newer") || err.to_string().contains("frozen@1"),
+        "{err}"
+    );
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let err = restore_backup_in_repo(&db, &repo, &outcome.manifest.id, &restore_ok())
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("newer") || err.to_string().contains("frozen@1"),
+        "{err}"
+    );
+    let after = count(
+        &db,
+        "SELECT COUNT(*) AS count FROM accounts WHERE account_id = 'keep'",
+    )
+    .await;
+    assert_eq!(after, 1, "restore must fail before DROP");
+}
+
+#[tokio::test]
+async fn plugin_restore_fails_closed_when_stale_binding_lacks_catalog() {
+    let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_bootstrap(&src).await;
+    apply_admitted_sql(
+        &src,
+        &["CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)"],
+        CanonicalRestoreKind::PluginBinding,
+    )
+    .await
+    .unwrap();
+    src.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO notes (id, body) VALUES (1, 'src')",
+    ))
+    .await
+    .unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let unit = capture::capture_plugin_unit(
+        &src,
+        &repo,
+        &CanonicalExportOpts::default(),
+        "demo",
+        "notes",
+        "sqlite",
+    )
+    .await
+    .unwrap();
+    let dest = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    dest.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE TABLE leftover (id INTEGER PRIMARY KEY)",
+    ))
+    .await
+    .unwrap();
+    dest.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO leftover (id) VALUES (7)",
+    ))
+    .await
+    .unwrap();
+    let err = restore_backup_unit(
+        &dest,
+        &repo,
+        &unit,
+        CanonicalRestoreKind::PluginBinding,
+        &restore_ok(),
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("reset or recreate")
+            || err.to_string().contains("no durable canonical DDL catalog"),
+        "{err}"
+    );
+    assert_eq!(
+        count(&dest, "SELECT COUNT(*) AS count FROM leftover").await,
+        1
+    );
+}
+
+#[test]
+fn capture_text_order_by_lowers_postgres_collate_c() {
+    let parsed =
+        parse_create_table_schema("CREATE TABLE items (k TEXT PRIMARY KEY, extra TEXT)").unwrap();
+    let order = canonical_order_by_sql(&parsed);
+    let sql = format!("SELECT k, extra FROM items ORDER BY {order} LIMIT 10 OFFSET 0");
+    let mut env = bookclerk_plugin_abi::SqlTypeEnv::new();
+    env.insert_table("items", parsed.columns.clone());
+    let req = bookclerk_plugin_abi::ExecuteRequest {
+        operation_id: "backup-capture".into(),
+        request_hash: String::new(),
+        statements: vec![bookclerk_plugin_abi::TypedDbStatement {
+            sql: sql.clone(),
+            parameters: Vec::new(),
+            kind: bookclerk_plugin_abi::DbPlanStatementKind::Select,
+            max_rows: 10,
+            result_selection: bookclerk_plugin_abi::DbResultSelection::Rows,
+        }],
+        deadline_unix_ms: 0,
+    };
+    let proofs = bookclerk_plugin_abi::typecheck_execute_request_proofs(&req, &env).unwrap();
+    let lowered =
+        bookclerk_db_exec::lower_canonical_sql_typed(DbBackend::Postgres, &sql, proofs.first())
+            .unwrap();
+    assert!(
+        lowered.contains("COLLATE \"C\""),
+        "TEXT ORDER BY must be binary-portable on Postgres: {lowered}"
+    );
 }
 
 #[tokio::test]
@@ -1540,6 +1797,58 @@ async fn postgres_capture_orders_nulls_first_with_declared_tiebreakers() {
             vec![DbValue::Null(DbType::Text), DbValue::Text("z".into())],
             vec![DbValue::Text("m".into()), DbValue::Text("b".into())],
         ]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_capture_text_order_matches_utf8_binary() {
+    let Some((db, _)) = postgres_throwaway().await else {
+        return;
+    };
+    apply_admitted_sql(
+        &db,
+        &["CREATE TABLE items (k TEXT PRIMARY KEY)"],
+        CanonicalRestoreKind::PluginBinding,
+    )
+    .await
+    .unwrap();
+    for value in ["a", "B"] {
+        db.execute_raw(Statement::from_string(
+            DbBackend::Postgres,
+            format!("INSERT INTO items (k) VALUES ('{value}')"),
+        ))
+        .await
+        .unwrap();
+    }
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let unit = capture::capture_plugin_unit(
+        &db,
+        &repo,
+        &CanonicalExportOpts::default(),
+        "demo",
+        "items",
+        "postgres",
+    )
+    .await
+    .unwrap();
+    let meta = unit.tables.iter().find(|t| t.name == "items").unwrap();
+    let mut rows = Vec::new();
+    for digest in &meta.chunks {
+        let CanonicalObject::TableChunk { rows: chunk, .. } = repo.get_object(digest).unwrap()
+        else {
+            panic!("expected table chunk");
+        };
+        rows.extend(chunk);
+    }
+    assert_eq!(
+        rows,
+        vec![
+            vec![DbValue::Text("B".into())],
+            vec![DbValue::Text("a".into())],
+        ],
+        "UTF-8 binary order is B (0x42) then a (0x61); locale order would flip them"
     );
 }
 

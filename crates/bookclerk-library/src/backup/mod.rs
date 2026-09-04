@@ -30,6 +30,7 @@ use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{LibraryError, Result};
+use crate::host_schema::{ensure_restore_target_is_replaceable, HostSchemaKind};
 use crate::schema_state::SchemaState;
 use crate::store::LibraryStore;
 
@@ -694,6 +695,11 @@ pub async fn restore_backup_in_repo(
     id: &str,
     opts: &CanonicalRestoreOpts,
 ) -> Result<RestorePlan> {
+    let kind = match db.get_database_backend() {
+        sea_orm::DbBackend::Sqlite => HostSchemaKind::PragmaMarker,
+        _ => HostSchemaKind::RowMarker,
+    };
+    ensure_restore_target_is_replaceable(db, kind).await?;
     let validated = verify_recovery_point(repo, id)?;
     restore_backup_unit(
         db,
