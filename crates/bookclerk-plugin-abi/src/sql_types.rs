@@ -445,6 +445,8 @@ pub struct CreateIndexSchema {
     pub table: String,
     /// True when the statement is `CREATE UNIQUE INDEX`.
     pub unique: bool,
+    /// Indexed columns in declaration order (`ident [ASC|DESC]`, no expressions).
+    pub columns: Vec<String>,
     /// Optional partial-index `WHERE` predicate (no `WHERE` keyword).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_sql: Option<String>,
@@ -910,31 +912,27 @@ pub fn parse_create_index_sql(sql: &str) -> Option<CreateIndexSchema> {
         return None;
     }
     let inner = balanced_inner(rest)?;
-    parse_index_column_list(inner)?;
+    let columns = parse_index_column_list(inner)?;
     let after = skip_ws(rest.get(inner.len() + 2..).unwrap_or(""));
     let after = after.trim_end_matches(';').trim_end();
-    if after.is_empty() {
-        return Some(CreateIndexSchema {
-            name,
-            table,
-            unique,
-            where_sql: None,
-            canonical_sql: sql.trim().trim_end_matches(';').trim().to_string(),
-        });
-    }
-    if !starts_kw(after, "WHERE") {
+    let where_sql = if after.is_empty() {
+        None
+    } else if !starts_kw(after, "WHERE") {
         return None;
-    }
-    let pred = skip_ws(skip_kw(after, "WHERE")?);
-    let pred = pred.trim_end_matches(';').trim();
-    if pred.is_empty() {
-        return None;
-    }
+    } else {
+        let pred = skip_ws(skip_kw(after, "WHERE")?);
+        let pred = pred.trim_end_matches(';').trim();
+        if pred.is_empty() {
+            return None;
+        }
+        Some(pred.to_string())
+    };
     Some(CreateIndexSchema {
         name,
         table,
         unique,
-        where_sql: Some(pred.to_string()),
+        columns,
+        where_sql,
         canonical_sql: sql.trim().trim_end_matches(';').trim().to_string(),
     })
 }
@@ -1507,7 +1505,8 @@ pub fn typecheck_execute_request(req: &ExecuteRequest, env: &SqlTypeEnv) -> Resu
 /// # Errors
 ///
 /// Returns when the statement is not admitted SQL v1, the table is missing,
-/// or a `WHERE` predicate is not a complete boolean SQL-v1 expression.
+/// an indexed column is not in [`SqlTypeEnv`], or a `WHERE` predicate is not
+/// a complete boolean SQL-v1 expression.
 pub fn typecheck_create_index_sql(sql: &str, env: &SqlTypeEnv) -> Result<()> {
     let _ = typecheck_index_ddl(0, sql, env)?;
     Ok(())
@@ -1665,6 +1664,9 @@ fn typecheck_index_ddl(index: usize, sql: &str, env: &SqlTypeEnv) -> Result<Reso
     let parsed = parse_create_index_sql(sql)
         .ok_or_else(|| ty_err(index, "CREATE INDEX is not admitted SQL v1"))?;
     require_table_in_env(index, env, &parsed.table)?;
+    for column in &parsed.columns {
+        require_column_in_env(index, env, &parsed.table, column)?;
+    }
     if let Some(pred) = parsed.where_sql.as_deref() {
         typecheck_index_where(index, &parsed.table, pred, env)?;
     }
@@ -1743,6 +1745,14 @@ fn require_table_in_env(index: usize, env: &SqlTypeEnv, table: &str) -> Result<(
         Ok(())
     } else {
         Err(ty_err(index, &format!("unknown table {table}")))
+    }
+}
+
+fn require_column_in_env(index: usize, env: &SqlTypeEnv, table: &str, column: &str) -> Result<()> {
+    if env.column_type(table, column).is_some() {
+        Ok(())
+    } else {
+        Err(ty_err(index, &format!("unknown column {table}.{column}")))
     }
 }
 
@@ -4402,6 +4412,7 @@ mod tests {
         .expect("index");
         assert_eq!(idx.name, "idx_notes_body");
         assert_eq!(idx.table, "notes");
+        assert_eq!(idx.columns, vec!["body".to_string()]);
         assert!(idx.unique);
         let drop = parse_drop_index_name("DROP INDEX IF EXISTS idx_notes_body").expect("drop");
         assert_eq!(drop, "idx_notes_body");
@@ -4423,6 +4434,7 @@ mod tests {
         assert!(parse_create_index_sql("CREATE INDEX idx ON t ()").is_none());
         let ok = parse_create_index_sql("CREATE INDEX idx ON t (a ASC, b DESC)").expect("index");
         assert_eq!(ok.table, "t");
+        assert_eq!(ok.columns, vec!["a".to_string(), "b".to_string()]);
         assert!(!ok.unique);
         assert!(parse_create_index_sql("CREATE INDEX idx ON t (a) WHERE a IS NOT NULL").is_some());
         assert!(parse_create_index_sql("CREATE INDEX idx ON t (a) WHERE").is_none());
@@ -4461,6 +4473,23 @@ mod tests {
             err.to_string().contains("WHERE") || err.to_string().contains("complete"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn typecheck_create_index_requires_known_columns() {
+        let mut env = SqlTypeEnv::new();
+        env.insert_table("t", [("a".into(), SqlType::Integer)]);
+        typecheck_create_index_sql("CREATE INDEX idx ON t (a)", &env).expect("known column");
+        let err = typecheck_create_index_sql("CREATE INDEX idx ON t (no_such_column)", &env)
+            .expect_err("unknown indexed column");
+        assert!(
+            err.to_string().contains("unknown column")
+                && err.to_string().contains("no_such_column"),
+            "{err}"
+        );
+        let err = typecheck_execute_request(&req("CREATE INDEX idx ON t (no_such_column)"), &env)
+            .expect_err("execute path");
+        assert!(err.to_string().contains("unknown column"), "{err}");
     }
 
     #[test]

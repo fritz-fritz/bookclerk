@@ -207,6 +207,7 @@ fn admit_covers_pk_unique_fk_index_default_and_check() {
     assert_eq!(ordered[1].parsed.table, "a_child");
     assert_eq!(schema.indexes.len(), 1);
     assert_eq!(schema.indexes[0].name, "idx_child_parent");
+    assert_eq!(schema.indexes[0].columns, vec!["parent_id".to_string()]);
 }
 
 #[test]
@@ -286,6 +287,25 @@ fn admit_rejects_create_index_with_malformed_where() {
         "CREATE TABLE t (id INTEGER PRIMARY KEY);\nCREATE INDEX idx ON t (id) WHERE id IS NOT NULL",
     )
     .expect("valid partial index");
+}
+
+#[test]
+fn admit_rejects_create_index_with_unknown_column() {
+    let err = admit_canonical_schema(
+        SQL_CONTRACT_VERSION,
+        "CREATE TABLE t (id INTEGER);\nCREATE INDEX idx ON t (no_such_column)",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("not fully admitted")
+            || err.to_string().contains("unknown column"),
+        "{err}"
+    );
+    admit_canonical_schema(
+        SQL_CONTRACT_VERSION,
+        "CREATE TABLE t (id INTEGER);\nCREATE INDEX idx ON t (id)",
+    )
+    .expect("indexed column exists");
 }
 
 #[test]
