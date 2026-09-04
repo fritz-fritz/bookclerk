@@ -868,7 +868,8 @@ mod tests {
             "baseline must include namespaced domain_events uniqueness"
         );
         assert!(
-            canonical.contains("FOREIGN KEY(event_id) REFERENCES domain_events(id) ON DELETE CASCADE"),
+            canonical
+                .contains("FOREIGN KEY(event_id) REFERENCES domain_events(id) ON DELETE CASCADE"),
             "baseline must include event_deliveries FK onto domain_events"
         );
         assert!(
