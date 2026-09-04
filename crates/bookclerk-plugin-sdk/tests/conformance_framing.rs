@@ -2,8 +2,7 @@
 #![allow(clippy::missing_panics_doc)]
 
 use bookclerk_plugin_sdk::{
-    methods, v2::PRODUCT_API_VERSION, HOST_MANIFEST_API_VERSION_MAX, MAX_RPC_LINE_BYTES,
-    PROTOCOL_NAME,
+    methods, HOST_MANIFEST_API_VERSION_MAX, MAX_RPC_LINE_BYTES, PRODUCT_API_VERSION, PROTOCOL_NAME,
 };
 
 #[test]
