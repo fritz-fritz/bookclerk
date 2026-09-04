@@ -499,6 +499,36 @@ fn proofs_for_request(
     proofs_for_host_plan(req, &type_env_with_bookkeeping(catalog))
 }
 
+/// After [`expand_host_schema_execute_request`], proofs stay 1:1 with the
+/// **wire** request. Expanded companions / split DDL get hash-bound empty
+/// proofs; the version marker keeps the last wire proof when the SQL matches.
+fn proofs_after_adapter_expand(
+    catalog: &SqlTypeEnv,
+    wire: &ExecuteRequest,
+    expanded: &ExecuteRequest,
+    stamped: &[ResolvedStatement],
+    require_stamped: bool,
+) -> Result<Vec<ResolvedStatement>, DbErr> {
+    let wire_proofs = proofs_for_request(catalog, wire, stamped, require_stamped)?;
+    if expanded.statements.len() == wire.statements.len() {
+        return Ok(wire_proofs);
+    }
+    let mut out = Vec::with_capacity(expanded.statements.len());
+    let last = expanded.statements.len().saturating_sub(1);
+    for (i, stmt) in expanded.statements.iter().enumerate() {
+        if i == last {
+            if let Some(proof) = wire_proofs.last() {
+                if assert_proof_matches_sql(proof, stmt.sql.trim()).is_ok() {
+                    out.push(proof.clone());
+                    continue;
+                }
+            }
+        }
+        out.push(ResolvedStatement::bound_empty(stmt.sql.trim()));
+    }
+    Ok(out)
+}
+
 /// Stamps 1:1 proofs for host-authored canonical SQL (planner / SeaORM).
 ///
 /// Host companion SQL (`PRAGMA`, identity functions, DDL) gets a hash-bound
@@ -1788,8 +1818,9 @@ where
     bookclerk_plugin_abi::desugar_execute_request(&mut req);
     // Host schema batches travel canonical; this adapter edge lowers/splits
     // them for the live backend and collapses the results back to the wire
-    // request shape below.
-    let wire_len = req.statements.len();
+    // request shape below. Proofs are checked against the wire SQL first.
+    let wire = req.clone();
+    let wire_len = wire.statements.len();
     let req = expand_host_schema_execute_request(backend, &req);
     let canonical_sqls: Vec<String> = req.statements.iter().map(|s| s.sql.clone()).collect();
     // Binding CREATE/DROP stays canonical on the wire; Postgres adapters
@@ -1801,7 +1832,7 @@ where
     for (stmt, canon) in type_req.statements.iter_mut().zip(canonical_sqls.iter()) {
         stmt.sql = canon.clone();
     }
-    let proofs = proofs_for_request(&env, &type_req, stamped, require_stamped)?;
+    let proofs = proofs_after_adapter_expand(&env, &wire, &type_req, stamped, require_stamped)?;
     let txn = db.begin().await?;
     if is_txn_broken() {
         let _ = txn.rollback().await;

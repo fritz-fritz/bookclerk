@@ -343,7 +343,6 @@ where
     let order_sql = canonical_order_by_sql(&table.parsed);
     let max_rows = opts.max_result_rows.max(1);
     let byte_budget = opts.page_byte_budget();
-    let backend = conn.get_database_backend();
     let mut env = SqlTypeEnv::new();
     env.insert_table(
         table.parsed.table.clone(),
@@ -365,11 +364,7 @@ where
             "SELECT {} FROM {name} ORDER BY {order_sql} LIMIT {page} OFFSET {offset}",
             columns.join(", "),
         );
-        let sql = lower_capture_select(backend, &canonical_sql, &env, page)?;
-        let rows = match conn
-            .query_all_raw(Statement::from_string(backend, sql))
-            .await
-        {
+        let rows = match capture_select(conn, &canonical_sql, &env, page).await {
             Ok(rows) => rows,
             Err(err) if result_bytes_exceeded(&err.to_string()) => {
                 if page <= 1 {
@@ -686,13 +681,16 @@ fn catalog_type_env() -> SqlTypeEnv {
     ))
 }
 
-/// Proof-directed lowering so Postgres TEXT ORDER BY uses `COLLATE "C"`.
-fn lower_capture_select(
-    backend: DbBackend,
+/// Proof-directed SELECT so Postgres TEXT ORDER BY uses `COLLATE "C"`.
+async fn capture_select<C>(
+    conn: &C,
     sql: &str,
     env: &SqlTypeEnv,
     max_rows: u32,
-) -> Result<String> {
+) -> Result<Vec<sea_orm::QueryResult>>
+where
+    C: ConnectionTrait,
+{
     let req = ExecuteRequest {
         operation_id: "backup-capture".into(),
         request_hash: String::new(),
@@ -708,8 +706,9 @@ fn lower_capture_select(
     let proofs = typecheck_execute_request_proofs(&req, env).map_err(|err| {
         LibraryError::Schema(format!("backup SELECT is not admitted SQL v1: {err}"))
     })?;
-    bookclerk_db_exec::lower_canonical_sql_typed(backend, sql, proofs.first())
-        .map_err(|err| LibraryError::Schema(format!("backup SELECT cannot be lowered: {err}")))
+    bookclerk_db_exec::query_canonical_sql_typed(conn, sql, proofs.first(), [])
+        .await
+        .map_err(|err| LibraryError::Schema(format!("backup SELECT failed: {err}")))
 }
 
 /// Default skip set for library capture (`plugin_databases` is environment-local).
@@ -724,7 +723,7 @@ pub fn library_skip_tables() -> BTreeSet<String> {
 /// Run `ordered_select` with `LIMIT/OFFSET` using adapter page size and byte budget.
 async fn paged_select<C>(
     conn: &C,
-    backend: DbBackend,
+    _backend: DbBackend,
     ordered_select: &str,
     opts: &CanonicalExportOpts,
     env: &SqlTypeEnv,
@@ -738,25 +737,18 @@ where
     let mut out = Vec::new();
     loop {
         let canonical = format!("{ordered_select} LIMIT {page} OFFSET {offset}");
-        let sql = match lower_capture_select(backend, &canonical, env, page) {
-            Ok(sql) => sql,
-            Err(err) => {
-                return Err(sea_orm::DbErr::Custom(err.to_string()));
-            }
-        };
-        let batch = match conn
-            .query_all_raw(Statement::from_string(backend, sql))
-            .await
-        {
+        let batch = match capture_select(conn, &canonical, env, page).await {
             Ok(batch) => batch,
             Err(err) if result_bytes_exceeded(&err.to_string()) => {
                 if page <= 1 {
-                    return Err(err);
+                    return Err(sea_orm::DbErr::Custom(err.to_string()));
                 }
                 page = (page / 2).max(1);
                 continue;
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                return Err(sea_orm::DbErr::Custom(err.to_string()));
+            }
         };
         if batch.is_empty() {
             break;

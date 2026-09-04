@@ -313,9 +313,28 @@ pub async fn query_canonical_sql<C>(
 where
     C: ConnectionTrait,
 {
+    query_canonical_sql_typed(db, sql, None, values).await
+}
+
+/// [`query_canonical_sql`] with an optional hash-bound proof (TEXT collate /
+/// INTEGER overflow on Postgres).
+///
+/// # Errors
+///
+/// Returns when the proof is not bound to `sql` or the engine rejects the work.
+pub async fn query_canonical_sql_typed<C>(
+    db: &C,
+    sql: &str,
+    proof: Option<&bookclerk_plugin_abi::ResolvedStatement>,
+    values: impl IntoIterator<Item = Value>,
+) -> Result<Vec<QueryResult>, DbErr>
+where
+    C: ConnectionTrait,
+{
     let backend = db.get_database_backend();
     let sql = bookclerk_plugin_abi::desugar_canonical_sql(sql);
-    let lowered = crate::lower_canonical_sql(backend, &sql);
+    let lowered = crate::lower_canonical_sql_typed(backend, &sql, proof)
+        .map_err(|err| DbErr::Custom(err.to_string()))?;
     db.query_all_raw(Statement::from_sql_and_values(backend, lowered, values))
         .await
 }

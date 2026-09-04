@@ -234,6 +234,52 @@ pub fn binding_companions(backend: DatabaseBackend, canonical: &str) -> Vec<Stri
     out
 }
 
+/// Applies one canonical host DDL statement (library restore / schema).
+///
+/// Postgres identity companions are installed; binding catalog DML is not.
+///
+/// # Errors
+///
+/// Returns when the engine rejects the lowered DDL or a companion.
+pub async fn realize_host_ddl<C>(conn: &C, canonical: &str) -> Result<(), sea_orm::DbErr>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let backend = conn.get_database_backend();
+    let lowered = schema_sql_for_backend(backend, canonical).into_owned();
+    conn.execute_raw(sea_orm::Statement::from_string(backend, lowered))
+        .await?;
+    if backend == DatabaseBackend::Postgres {
+        for companion in postgres_identity_companions(canonical) {
+            conn.execute_raw(sea_orm::Statement::from_string(backend, companion))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Applies one canonical binding DDL statement (plugin restore).
+///
+/// Includes adapter-private catalog DML and Postgres identity companions.
+///
+/// # Errors
+///
+/// Returns when the engine rejects the lowered DDL or a companion.
+pub async fn realize_binding_ddl<C>(conn: &C, canonical: &str) -> Result<(), sea_orm::DbErr>
+where
+    C: sea_orm::ConnectionTrait,
+{
+    let backend = conn.get_database_backend();
+    let lowered = schema_sql_for_backend(backend, canonical).into_owned();
+    conn.execute_raw(sea_orm::Statement::from_string(backend, lowered))
+        .await?;
+    for companion in binding_companions(backend, canonical) {
+        conn.execute_raw(sea_orm::Statement::from_string(backend, companion))
+            .await?;
+    }
+    Ok(())
+}
+
 /// Expands a binding request with adapter-private catalog/identity companions.
 ///
 /// Returns the expanded request and per-original-statement group sizes so

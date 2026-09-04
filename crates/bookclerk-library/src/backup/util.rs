@@ -85,7 +85,7 @@ where
 /// rejects the statement.
 pub(crate) async fn exec_bound<C>(
     conn: &C,
-    backend: DbBackend,
+    _backend: DbBackend,
     opts: &CanonicalRestoreOpts,
     sql: &str,
     params: Vec<DbValue>,
@@ -130,12 +130,11 @@ where
             opts.max_request_bytes
         )));
     }
-    let engine_sql = bookclerk_db_exec::lower_canonical_sql(backend, sql);
-    conn.execute_raw(Statement::from_sql_and_values(
-        backend,
-        engine_sql,
+    bookclerk_db_exec::execute_canonical_sql(
+        conn,
+        sql,
         params.iter().map(bookclerk_db_exec::db_value_to_sea),
-    ))
+    )
     .await
     .map_err(LibraryError::from_db_err)?;
     Ok(())

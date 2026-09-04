@@ -321,7 +321,7 @@ where
 /// Execute one admitted CREATE TABLE / CREATE INDEX statement plus companions.
 async fn apply_canonical_ddl<C>(
     conn: &C,
-    backend: DbBackend,
+    _backend: DbBackend,
     canonical: &str,
     kind: CanonicalRestoreKind,
 ) -> Result<()>
@@ -333,22 +333,15 @@ where
             "restore refuses SQL that is not admitted Bookclerk DDL: `{canonical}`"
         )));
     }
-    let lowered = bookclerk_db_exec::schema_sql_for_backend(backend, canonical);
-    exec_sql(conn, backend, lowered.as_ref()).await?;
-    let companions = match kind {
-        CanonicalRestoreKind::Library => {
-            if backend == DbBackend::Postgres {
-                bookclerk_db_exec::postgres_identity_companions(canonical)
-            } else {
-                Vec::new()
-            }
-        }
+    match kind {
+        CanonicalRestoreKind::Library => bookclerk_db_exec::realize_host_ddl(conn, canonical)
+            .await
+            .map_err(LibraryError::from_db_err)?,
         CanonicalRestoreKind::PluginBinding => {
-            bookclerk_db_exec::binding_companions(backend, canonical)
+            bookclerk_db_exec::realize_binding_ddl(conn, canonical)
+                .await
+                .map_err(LibraryError::from_db_err)?
         }
-    };
-    for sql in companions {
-        exec_sql(conn, backend, &sql).await?;
     }
     Ok(())
 }

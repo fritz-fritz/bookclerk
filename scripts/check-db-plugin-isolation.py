@@ -161,15 +161,17 @@ def iter_plugin_sources() -> list[Path]:
 
 
 def strip_cfg_test_regions(src: str) -> str:
-    """Replace `#[cfg(test)]` modules and item blocks with spaces (keep newlines)."""
+    """Replace test-only modules and `#[test]` / `#[tokio::test]` items with spaces."""
     out = list(src)
+    markers = ("#[cfg(test)]", "#[test]", "#[tokio::test")
     i = 0
-    marker = "#[cfg(test)]"
     while True:
-        idx = src.find(marker, i)
+        idx = min(
+            (src.find(m, i) for m in markers if src.find(m, i) >= 0),
+            default=-1,
+        )
         if idx < 0:
             break
-        # Find the next `{` after the attribute (mod tests { ... } or fn ... {).
         brace = src.find("{", idx)
         if brace < 0:
             break
@@ -255,12 +257,30 @@ FORBIDDEN_LIBRARY_PLACEHOLDER_REWRITE = (
     re.compile(r"""push_str\(['\"]\$['\"]\)"""),
 )
 
+# Adapter-owned physical lowering: library production sources must not call it.
+FORBIDDEN_LIBRARY_LOWERING = (
+    re.compile(r"\blower_canonical_sql\b"),
+    re.compile(r"\blower_canonical_sql_typed\b"),
+    re.compile(r"\blower_canonical_to_postgres\b"),
+    re.compile(r"\blower_canonical_ddl_to_postgres\b"),
+    re.compile(r"\bschema_sql_for_backend\b"),
+    re.compile(r"\bexpand_host_schema_batch\b"),
+    re.compile(r"\bpostgres_identity_companions\b"),
+    re.compile(r"\bbinding_companions\b"),
+)
+
 
 def iter_library_sources() -> list[Path]:
     files: list[Path] = []
     for glob in LIBRARY_BOOTSTRAP_GLOBS:
         files.extend(ROOT.glob(glob))
-    return sorted({p.resolve() for p in files if p.is_file()})
+    return sorted(
+        {
+            p.resolve()
+            for p in files
+            if p.is_file() and p.name != "tests.rs"
+        }
+    )
 
 
 def check_library_bootstrap_isolation(path: Path) -> list[str]:
@@ -283,6 +303,13 @@ def check_library_bootstrap_isolation(path: Path) -> list[str]:
             hits.append(
                 f"{rel}:{line}: host SQL must stay canonical `?` (`{m.group(0)}`); "
                 "adapter SDK lowers placeholders"
+            )
+    for rx in FORBIDDEN_LIBRARY_LOWERING:
+        for m in rx.finditer(scanned):
+            line = scanned.count("\n", 0, m.start()) + 1
+            hits.append(
+                f"{rel}:{line}: host must not call adapter lowering `{m.group(0)}`; "
+                "send canonical SQL through AdapterDatabaseSession.execute"
             )
     return hits
 

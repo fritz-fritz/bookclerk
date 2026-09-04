@@ -29,8 +29,7 @@ const SCHEMA_TXN_TIMING: &str = "schema_txn";
 
 /// Canonical schema apply batch: host DDL followed by the state marker.
 ///
-/// Adapters lower and split the pack at execution
-/// ([`bookclerk_db_exec::expand_host_schema_batch`]).
+/// Adapters lower and split the pack at execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaBatch {
     /// Ordered SQL strings; the last statement is the version/state marker.
@@ -64,8 +63,7 @@ pub struct SchemaApplyOptions {
 ///
 /// Flags choose **how** versions are stored and applied, not which SQL pack
 /// to emit. Canonical Bookclerk SQL is [`crate::migrations::current_canonical_schema`].
-/// Adapters lower canonical DDL for the live connection backend at execution
-/// (see [`bookclerk_db_exec::expand_host_schema_batch`]).
+/// Adapters lower canonical DDL for the live connection backend at execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostSchemaKind {
     /// `PRAGMA user_version` on an interactive SQLite-family connection.
@@ -1143,16 +1141,13 @@ async fn sqlite_user_version(db: &DatabaseConnection) -> Result<i64> {
 }
 
 /// `CREATE TABLE IF NOT EXISTS schema_migrations`.
-async fn ensure_schema_migrations(db: &DatabaseConnection, backend: DbBackend) -> Result<()> {
+async fn ensure_schema_migrations(db: &DatabaseConnection, _backend: DbBackend) -> Result<()> {
     let mut delay_ms = 20u64;
     let mut last_err = None;
     for attempt in 0..8 {
-        match exec_sql(
-            db,
-            backend,
-            &bookclerk_db_exec::schema_sql_for_backend(backend, SCHEMA_MIGRATIONS_DDL),
-        )
-        .await
+        match bookclerk_db_exec::realize_host_ddl(db, SCHEMA_MIGRATIONS_DDL)
+            .await
+            .map_err(LibraryError::from_db_err)
         {
             Ok(()) => return Ok(()),
             Err(err)
@@ -1169,12 +1164,9 @@ async fn ensure_schema_migrations(db: &DatabaseConnection, backend: DbBackend) -
             Err(err) => return Err(err),
         }
     }
-    match exec_sql(
-        db,
-        backend,
-        &bookclerk_db_exec::schema_sql_for_backend(backend, SCHEMA_MIGRATIONS_DDL),
-    )
-    .await
+    match bookclerk_db_exec::realize_host_ddl(db, SCHEMA_MIGRATIONS_DDL)
+        .await
+        .map_err(LibraryError::from_db_err)
     {
         Ok(()) => Ok(()),
         Err(_) if last_err.is_some() => {
@@ -1188,7 +1180,7 @@ async fn ensure_schema_migrations(db: &DatabaseConnection, backend: DbBackend) -
 /// Runs `stmts` as one generic atomic execute plan (version marker last).
 async fn run_atomic_ddl(
     db: &DatabaseConnection,
-    backend: DbBackend,
+    _backend: DbBackend,
     timing: &str,
     operation_id: &str,
     stmts: Vec<String>,
@@ -1196,7 +1188,6 @@ async fn run_atomic_ddl(
     if stmts.is_empty() {
         return Ok(());
     }
-    let stmts = bookclerk_db_exec::expand_host_schema_batch(backend, &stmts).unwrap_or(stmts);
     let req = ExecuteRequest {
         operation_id: operation_id.to_string(),
         request_hash: String::new(),
