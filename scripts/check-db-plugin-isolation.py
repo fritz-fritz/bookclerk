@@ -248,6 +248,13 @@ FORBIDDEN_BOOTSTRAP_READS = (
     re.compile(r"\bdiagnostic_engine\s*:"),
 )
 
+# Host domain/planner crates must not rewrite canonical `?` into engine `$n`.
+FORBIDDEN_LIBRARY_PLACEHOLDER_REWRITE = (
+    re.compile(r"rewrite_sql_placeholders"),
+    re.compile(r"""push\(['\"]\$['\"]\)"""),
+    re.compile(r"""push_str\(['\"]\$['\"]\)"""),
+)
+
 
 def iter_library_sources() -> list[Path]:
     files: list[Path] = []
@@ -269,6 +276,13 @@ def check_library_bootstrap_isolation(path: Path) -> list[str]:
                 f"{rel}:{line}: bootstrap-only engine metadata `{m.group(0)}` "
                 "must not drive host schema/plan/domain code "
                 "(see docs/sql-contract/v1.md; SeaORM bootstrap stays in plugin-host)"
+            )
+    for rx in FORBIDDEN_LIBRARY_PLACEHOLDER_REWRITE:
+        for m in rx.finditer(scanned):
+            line = scanned.count("\n", 0, m.start()) + 1
+            hits.append(
+                f"{rel}:{line}: host SQL must stay canonical `?` (`{m.group(0)}`); "
+                "adapter SDK lowers placeholders"
             )
     return hits
 

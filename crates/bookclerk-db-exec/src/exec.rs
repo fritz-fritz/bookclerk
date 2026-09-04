@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bookclerk_plugin_abi::{DbCapabilities, DbPlanStatementKind, SqlTypeEnv};
 use futures::TryStreamExt;
-use sea_orm::{ConnectionTrait, DbErr, QueryResult, Statement, StreamTrait, Value};
+use sea_orm::{ConnectionTrait, DbErr, ExecResult, QueryResult, Statement, StreamTrait, Value};
 use serde_json::Value as JsonValue;
 
 use crate::proxy_txn::{
@@ -277,6 +277,47 @@ pub fn encoded_proxy_row_len<'a>(
     JsonValue::Object(map).to_string().len()
 }
 
+/// Executes host-canonical SQL (`?` placeholders) on `db`.
+///
+/// Physical lowering (`?` → `$n`, helpers) stays in this adapter SDK. Host
+/// domain code must not rewrite placeholders.
+///
+/// # Errors
+///
+/// Returns when the engine rejects the lowered statement.
+pub async fn execute_canonical_sql<C>(
+    db: &C,
+    sql: &str,
+    values: impl IntoIterator<Item = Value>,
+) -> Result<ExecResult, DbErr>
+where
+    C: ConnectionTrait,
+{
+    let backend = db.get_database_backend();
+    let lowered = crate::lower_canonical_sql(backend, sql);
+    db.execute_raw(Statement::from_sql_and_values(backend, lowered, values))
+        .await
+}
+
+/// Queries host-canonical SQL (`?` placeholders) on `db`.
+///
+/// # Errors
+///
+/// Returns when the engine rejects the lowered statement.
+pub async fn query_canonical_sql<C>(
+    db: &C,
+    sql: &str,
+    values: impl IntoIterator<Item = Value>,
+) -> Result<Vec<QueryResult>, DbErr>
+where
+    C: ConnectionTrait,
+{
+    let backend = db.get_database_backend();
+    let lowered = crate::lower_canonical_sql(backend, sql);
+    db.query_all_raw(Statement::from_sql_and_values(backend, lowered, values))
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::cap_query_sql;
@@ -310,6 +351,20 @@ mod tests {
             nbytes > alias.len(),
             "JSON punctuation and the numeric cell must count: {nbytes} vs alias {}",
             alias.len()
+        );
+    }
+
+    #[test]
+    fn canonical_sql_keeps_question_marks_until_postgres_lower() {
+        use sea_orm::DatabaseBackend;
+        let sql = "SELECT id FROM t WHERE a = ? AND b IN (?, ?)";
+        assert_eq!(
+            crate::lower_canonical_sql(DatabaseBackend::Postgres, sql),
+            "SELECT id FROM t WHERE a = $1 AND b IN ($2, $3)"
+        );
+        assert_eq!(
+            crate::lower_canonical_sql(DatabaseBackend::Sqlite, sql),
+            sql
         );
     }
 }

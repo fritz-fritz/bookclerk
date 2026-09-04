@@ -36,11 +36,10 @@ pub async fn export_registered_plugin_units(
         Err(err) if registry_missing(&err.to_string()) => return Ok(Vec::new()),
         Err(err) => return Err(PluginError::message(err.to_string())),
     };
-    let backend = library.get_database_backend();
     let backend_at_capture = backup_adapter_id(&config.database.plugin);
     let mut out = Vec::with_capacity(registered.len());
     for rec in registered {
-        out.push(export_one_plugin_unit(ext, config, &rec, backend, &backend_at_capture).await?);
+        out.push(export_one_plugin_unit(ext, config, &rec, &backend_at_capture).await?);
     }
     Ok(out)
 }
@@ -50,18 +49,10 @@ async fn export_one_plugin_unit(
     ext: &ExternalDatabase,
     config: &Config,
     rec: &PluginDatabaseRecord,
-    backend: sea_orm::DbBackend,
     backend_at_capture: &str,
 ) -> Result<PreparedPluginUnit> {
     let (db, caps) = ext
-        .open_binding_seaorm(
-            config,
-            &rec.plugin_id,
-            &rec.binding,
-            &rec.unit_ref,
-            false,
-            backend,
-        )
+        .open_binding_seaorm(config, &rec.plugin_id, &rec.binding, &rec.unit_ref, false)
         .await?;
     if !caps.supports_consistent_backup_read() {
         return Err(PluginError::message(format!(
@@ -115,7 +106,6 @@ pub async fn restore_plugin_backup_units(
     }
     let kind = DatabasePluginKind::parse(&config.database.plugin);
     let backend_kind = backup_adapter_id(&config.database.plugin);
-    let backend = library.get_database_backend();
     let store = LibraryStore::from_connection(library.clone());
     for (restored, prepared) in units.iter().enumerate() {
         let plugin_id = prepared.plugin_id.as_deref().ok_or_else(|| {
@@ -126,7 +116,7 @@ pub async fn restore_plugin_backup_units(
         })?;
         let unit_ref = plugin_binding_unit_ref(config, kind, plugin_id, binding);
         let (db, caps) = ext
-            .open_binding_seaorm(config, plugin_id, binding, &unit_ref, true, backend)
+            .open_binding_seaorm(config, plugin_id, binding, &unit_ref, true)
             .await
             .map_err(|err| {
                 PluginError::message(format!(

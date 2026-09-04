@@ -155,14 +155,14 @@ impl ExternalDatabase {
         if let Some(reason) = bootstrap.backend_failure_reason() {
             return Err(DbErr::Custom(reason));
         }
-        let backend = seaorm_backend_from_bootstrap(&bootstrap)?;
+        let _ = seaorm_backend_from_bootstrap(&bootstrap)?;
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
             session: self.session.clone(),
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
             caps: caps.clone(),
             binding: None,
         }));
-        let db = Database::connect_proxy(backend, proxy).await?;
+        let db = Database::connect_proxy(canonical_seaorm_backend(), proxy).await?;
         Ok((db, caps))
     }
 
@@ -859,7 +859,6 @@ impl ExternalDatabase {
         binding: &str,
         unit_ref: &str,
         provision: bool,
-        backend: DbBackend,
     ) -> PluginResult<(DatabaseConnection, DbCapabilities)> {
         let kind = DatabasePluginKind::parse(&self.plugin_id);
         let ctx = self.binding_connect_context(
@@ -894,7 +893,7 @@ impl ExternalDatabase {
             caps: binding_caps.clone(),
             binding: Some(key),
         }));
-        let db = Database::connect_proxy(backend, proxy)
+        let db = Database::connect_proxy(canonical_seaorm_backend(), proxy)
             .await
             .map_err(|err| PluginError::message(err.to_string()))?;
         Ok((db, binding_caps))
@@ -1139,6 +1138,10 @@ impl RpcDatabaseProxy {
     }
 
     /// Serializes a SeaORM statement into a typed `ExecuteRequest` statement.
+    ///
+    /// The proxy is opened with the canonical SQLite SeaORM backend, so
+    /// `statement.sql` uses Bookclerk `?` placeholders. Adapters lower at
+    /// execute.
     ///
     /// # Errors
     ///
@@ -2218,25 +2221,21 @@ fn adapter_config_context(
         .map_err(|err| DbErr::Custom(err.to_string()))
 }
 
-/// SeaORM proxy backend from [`DbBootstrap`] metadata.
+/// SeaORM proxy backend used for host query building.
+///
+/// Always SQLite-shaped so SeaORM emits canonical Bookclerk SQL (`?`
+/// placeholders). Adapters lower at execute. Bootstrap `sqlFamily` is still
+/// validated fail-closed; it does not select a query dialect.
+fn canonical_seaorm_backend() -> DbBackend {
+    DbBackend::Sqlite
+}
+
+/// Validates bootstrap `sqlFamily` / `dialect` without using them to generate SQL.
 fn seaorm_backend_from_bootstrap(bootstrap: &DbBootstrap) -> Result<DbBackend, DbErr> {
-    match bootstrap.sql_family.to_ascii_lowercase().as_str() {
-        "postgres" | "postgresql" | "pg" => return Ok(DbBackend::Postgres),
-        "sqlite" => return Ok(DbBackend::Sqlite),
-        "" => {}
-        other => {
-            return Err(DbErr::Custom(format!(
-                "unknown database bootstrap sqlFamily `{other}`"
-            )));
-        }
+    if let Some(reason) = bootstrap.backend_failure_reason() {
+        return Err(DbErr::Custom(reason));
     }
-    match bootstrap.dialect.to_ascii_lowercase().as_str() {
-        "postgres" | "postgresql" | "pg" => Ok(DbBackend::Postgres),
-        "sqlite" => Ok(DbBackend::Sqlite),
-        other => Err(DbErr::Custom(format!(
-            "unknown database bootstrap dialect `{other}`"
-        ))),
-    }
+    Ok(canonical_seaorm_backend())
 }
 
 /// Fills missing bootstrap-only SeaORM proxy metadata from the plugin id.
@@ -2339,6 +2338,11 @@ mod tests {
         assert_eq!(
             seaorm_backend_from_bootstrap(&unknown).unwrap(),
             DbBackend::Sqlite
+        );
+        assert_eq!(
+            seaorm_backend_from_bootstrap(&DbBootstrap::postgres()).unwrap(),
+            DbBackend::Sqlite,
+            "SeaORM query building is canonical SQLite-shaped for every engine family"
         );
     }
 

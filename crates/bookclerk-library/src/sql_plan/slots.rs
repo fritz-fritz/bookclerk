@@ -1,6 +1,6 @@
 //! Portable COUNT+mutate serialization via `db_serialization_slots`.
 
-use sea_orm::{ConnectionTrait, Statement};
+use sea_orm::ConnectionTrait;
 
 use crate::error::{LibraryError, Result};
 
@@ -20,31 +20,24 @@ pub fn event_inflight_slot(plugin_id: &str, resource_class: &str) -> String {
 
 /// Inserts the slot row if missing, then bumps it (transaction-scoped write lock).
 ///
+/// Canonical SQL uses `?` placeholders. Adapter-SDK execute lowers for the
+/// live engine (this must run on the caller's transaction, not a nested
+/// `BEGIN`).
+///
 /// # Errors
 ///
 /// Returns [`LibraryError::Orm`] when either statement fails.
 pub async fn lock_serialization_slot<C: ConnectionTrait>(db: &C, slot_key: &str) -> Result<()> {
-    let backend = db.get_database_backend();
     const INSERT: &str = "INSERT OR IGNORE INTO db_serialization_slots (slot_key, bump) \
          SELECT ?, 0 WHERE NOT EXISTS (\
             SELECT 1 FROM db_serialization_slots WHERE slot_key = ?\
          )";
     const BUMP: &str = "UPDATE db_serialization_slots SET bump = bump + 1 WHERE slot_key = ?";
-    let insert = bookclerk_db_exec::lower_canonical_sql(backend, INSERT);
-    let bump = bookclerk_db_exec::lower_canonical_sql(backend, BUMP);
-    db.execute_raw(Statement::from_sql_and_values(
-        backend,
-        &insert,
-        [slot_key.into(), slot_key.into()],
-    ))
-    .await
-    .map_err(LibraryError::Orm)?;
-    db.execute_raw(Statement::from_sql_and_values(
-        backend,
-        &bump,
-        [slot_key.into()],
-    ))
-    .await
-    .map_err(LibraryError::Orm)?;
+    bookclerk_db_exec::execute_canonical_sql(db, INSERT, [slot_key.into(), slot_key.into()])
+        .await
+        .map_err(LibraryError::Orm)?;
+    bookclerk_db_exec::execute_canonical_sql(db, BUMP, [slot_key.into()])
+        .await
+        .map_err(LibraryError::Orm)?;
     Ok(())
 }

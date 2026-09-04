@@ -9,8 +9,8 @@ use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::{NotSet, Set},
-    ColumnTrait, Condition, ConnectionTrait, DatabaseBackend, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -75,37 +75,6 @@ const WAKE_UPDATE_FIXED_BINDS: usize = 4;
 const EVENT_OUTBOX_STATS_ID: i64 = 1;
 const EVENT_WAKE_FAR_FUTURE: &str = "9999-12-31T23:59:59+00:00";
 
-/// Rewrite SQLite `?` placeholders to Postgres `$1`…`$n` (sqlx does not).
-fn rewrite_sql_placeholders(backend: DatabaseBackend, sql: &str) -> String {
-    if backend != DatabaseBackend::Postgres {
-        return sql.to_string();
-    }
-    let mut n = 0u32;
-    let mut out = String::with_capacity(sql.len() + 16);
-    for ch in sql.chars() {
-        if ch == '?' {
-            n += 1;
-            out.push('$');
-            out.push_str(&n.to_string());
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-fn statement_for_backend(
-    backend: DatabaseBackend,
-    sql: impl Into<String>,
-    values: impl IntoIterator<Item = sea_orm::Value>,
-) -> Statement {
-    Statement::from_sql_and_values(
-        backend,
-        rewrite_sql_placeholders(backend, &sql.into()),
-        values,
-    )
-}
-
 /// Fenced sleeper UPDATE: one statement so a stale owner cannot clear a later registration.
 fn wake_fenced_update_sql(id_count: usize) -> String {
     let placeholders = vec!["?"; id_count].join(", ");
@@ -143,7 +112,6 @@ pub(crate) async fn wake_deliveries_fenced_on<C: ConnectionTrait>(
     if ids.is_empty() {
         return Ok(0);
     }
-    let backend = db.get_database_backend();
     let chunk_size = wake_in_chunk_size(max_binds);
     let mut woken = 0u32;
     for chunk in ids.chunks(chunk_size) {
@@ -156,8 +124,7 @@ pub(crate) async fn wake_deliveries_fenced_on<C: ConnectionTrait>(
         }
         values.push(event_id.to_string().into());
         values.push(owner.to_string().into());
-        let res = db
-            .execute_raw(statement_for_backend(backend, sql, values))
+        let res = bookclerk_db_exec::execute_canonical_sql(db, &sql, values)
             .await
             .map_err(LibraryError::Orm)?;
         woken = woken.saturating_add(u32::try_from(res.rows_affected()).unwrap_or(0));
@@ -1616,10 +1583,7 @@ impl LibraryStore {
         }
         sql.push_str(" ORDER BY e.created_at ASC, e.id ASC LIMIT ?");
         values.push(i64::try_from(limit).unwrap_or(200).into());
-        let backend = self.db.get_database_backend();
-        let rows = self
-            .db
-            .query_all_raw(statement_for_backend(backend, sql, values))
+        let rows = bookclerk_db_exec::query_canonical_sql(&self.db, &sql, values)
             .await
             .map_err(LibraryError::Orm)?;
         let mut ids = Vec::new();
@@ -1876,19 +1840,16 @@ impl LibraryStore {
             .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
-        let backend = self.db.get_database_backend();
-        let events = self
-            .db
-            .execute_raw(statement_for_backend(
-                backend,
-                "DELETE FROM domain_events WHERE dispatch_state = 'dispatched' \
-                 AND created_at <= ? AND NOT EXISTS ( \
-                    SELECT 1 FROM event_deliveries d WHERE d.event_id = domain_events.id \
-                 )",
-                [terminal_cutoff.into()],
-            ))
-            .await
-            .map_err(LibraryError::Orm)?;
+        let events = bookclerk_db_exec::execute_canonical_sql(
+            &self.db,
+            "DELETE FROM domain_events WHERE dispatch_state = 'dispatched' \
+             AND created_at <= ? AND NOT EXISTS ( \
+                SELECT 1 FROM event_deliveries d WHERE d.event_id = domain_events.id \
+             )",
+            [terminal_cutoff.into()],
+        )
+        .await
+        .map_err(LibraryError::Orm)?;
         Ok(acked.rows_affected
             + dead.rows_affected
             + stale_nodes.rows_affected
@@ -2731,7 +2692,6 @@ async fn bump_event_stats<C: ConnectionTrait>(
     handler_latency_ms: Option<i64>,
 ) -> Result<()> {
     let _ = ensure_event_outbox_stats(db).await?;
-    let backend = db.get_database_backend();
     let (dispatch_sum, dispatch_n) = match dispatch_latency_ms {
         Some(ms) => (ms, 1i64),
         None => (0, 0),
@@ -2740,8 +2700,8 @@ async fn bump_event_stats<C: ConnectionTrait>(
         Some(ms) => (ms, 1i64),
         None => (0, 0),
     };
-    db.execute_raw(statement_for_backend(
-        backend,
+    bookclerk_db_exec::execute_canonical_sql(
+        db,
         "UPDATE event_outbox_stats SET \
             retries_total = retries_total + ?, \
             suspensions_total = suspensions_total + ?, \
@@ -2761,7 +2721,7 @@ async fn bump_event_stats<C: ConnectionTrait>(
             handler_n.into(),
             EVENT_OUTBOX_STATS_ID.into(),
         ],
-    ))
+    )
     .await
     .map_err(LibraryError::Orm)?;
     Ok(())
@@ -2812,14 +2772,19 @@ mod placeholder_tests {
     use super::*;
 
     #[test]
-    fn postgres_rewrites_question_marks_in_order() {
-        assert_eq!(
-            rewrite_sql_placeholders(DatabaseBackend::Postgres, "a = ? AND b IN (?, ?) LIMIT ?"),
-            "a = $1 AND b IN ($2, $3) LIMIT $4"
+    fn host_wake_sql_stays_canonical_question_marks() {
+        let sql = wake_fenced_update_sql(3);
+        assert_eq!(sql.matches('?').count(), wake_delivery_update_bind_count(3));
+        assert!(
+            !sql.contains('$'),
+            "host SQL must not embed Postgres $n placeholders: {sql}"
         );
         assert_eq!(
-            rewrite_sql_placeholders(DatabaseBackend::Sqlite, "a = ? AND b IN (?, ?)"),
-            "a = ? AND b IN (?, ?)"
+            bookclerk_db_exec::lower_canonical_sql(
+                sea_orm::DatabaseBackend::Postgres,
+                "a = ? AND b IN (?, ?) LIMIT ?"
+            ),
+            "a = $1 AND b IN ($2, $3) LIMIT $4"
         );
     }
 
