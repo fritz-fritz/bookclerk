@@ -994,12 +994,115 @@ pub fn typecheck_execute_request_proofs(
     typecheck_execute_request_resolved(req, env)
 }
 
+/// Splits canonical SQL-v1 text on top-level statement boundaries (`;`).
+///
+/// Semicolons inside string literals (`'a;b'` / `''` escapes), quoted
+/// identifiers, comments, and parentheses are not boundaries. Empty
+/// fragments are dropped. Schema packs and type-env reconstruction must use
+/// this helper rather than `str::split(';')`.
+#[must_use]
+pub fn split_sql_statements(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut depth = 0usize;
+    let mut in_s = false;
+    let mut in_d = false;
+    let mut in_b = false;
+    let mut in_line = false;
+    let mut in_block = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_line {
+            if c == b'\n' {
+                in_line = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_block {
+            if c == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                in_block = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if in_s {
+            if c == b'\'' {
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_s = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_d {
+            if c == b'"' {
+                if bytes.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
+                in_d = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_b {
+            if c == b'`' {
+                if bytes.get(i + 1) == Some(&b'`') {
+                    i += 2;
+                    continue;
+                }
+                in_b = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'-' && bytes.get(i + 1) == Some(&b'-') {
+            in_line = true;
+            i += 2;
+            continue;
+        }
+        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            in_block = true;
+            i += 2;
+            continue;
+        }
+        match c {
+            b'\'' => in_s = true,
+            b'"' => in_d = true,
+            b'`' => in_b = true,
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b';' if depth == 0 => {
+                let stmt = sql[start..i].trim();
+                if !stmt.is_empty() {
+                    out.push(stmt.to_string());
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let tail = sql[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
+}
+
 /// Reconstructs a type environment from canonical `CREATE TABLE` statements.
 #[must_use]
 pub fn sql_type_env_from_canonical_ddl(sql: &str) -> SqlTypeEnv {
     let mut env = SqlTypeEnv::new();
-    for stmt in sql.split(';') {
-        apply_schema_sql_to_env(&mut env, stmt);
+    for stmt in split_sql_statements(sql) {
+        apply_schema_sql_to_env(&mut env, &stmt);
     }
     env
 }
@@ -3445,6 +3548,35 @@ mod tests {
         );
         assert_eq!(from_ddl.column_type("a", "id"), Some(SqlType::Integer));
         assert_eq!(from_ddl.column_type("b", "body"), Some(SqlType::Text));
+    }
+
+    #[test]
+    fn split_sql_statements_keeps_semicolon_inside_quoted_literal() {
+        let stmts = split_sql_statements(
+            "CREATE TABLE t (name TEXT NOT NULL DEFAULT 'a;b');\n\
+             CREATE TABLE u (id INTEGER CHECK (id <> ';'));",
+        );
+        assert_eq!(stmts.len(), 2, "{stmts:?}");
+        assert!(
+            stmts[0].contains("DEFAULT 'a;b'"),
+            "literal semicolon must stay in the CREATE: {stmts:?}"
+        );
+        assert!(
+            stmts[1].contains("CHECK (id <> ';')"),
+            "CHECK string semicolon must stay in the CREATE: {stmts:?}"
+        );
+        let escaped = split_sql_statements("CREATE TABLE t (name TEXT DEFAULT 'a;''b;c');");
+        assert_eq!(escaped.len(), 1, "{escaped:?}");
+        assert!(escaped[0].contains("DEFAULT 'a;''b;c'"), "{escaped:?}");
+        let commented = split_sql_statements(
+            "CREATE TABLE t (id INTEGER /* ; */);\n-- not; a statement\nCREATE TABLE u (id INTEGER);",
+        );
+        assert_eq!(commented.len(), 2, "{commented:?}");
+        let env = sql_type_env_from_canonical_ddl(
+            "CREATE TABLE t (name TEXT DEFAULT 'a;b'); CREATE TABLE u (id INTEGER);",
+        );
+        assert_eq!(env.column_type("t", "name"), Some(SqlType::Text));
+        assert_eq!(env.column_type("u", "id"), Some(SqlType::Integer));
     }
 
     #[test]

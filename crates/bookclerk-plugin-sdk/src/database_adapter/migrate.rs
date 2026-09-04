@@ -26,14 +26,13 @@ pub async fn execute_sql_scripts(
     Ok(())
 }
 
-/// Splits a script on `;` and drops empty fragments.
+/// Splits a script on top-level `;` and drops empty fragments.
+///
+/// Semicolons inside quoted literals, comments, and parentheses are not
+/// statement boundaries (same tokenizer as host schema packs).
 #[must_use]
 pub fn split_sql_statements(sql: &str) -> Vec<String> {
-    sql.split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+    bookclerk_plugin_abi::split_sql_statements(sql)
 }
 
 /// Typed SQL `NULL` for proxy columns so SeaORM `Option<T>` decoding works.

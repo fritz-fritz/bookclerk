@@ -71,14 +71,13 @@ pub fn is_host_schema_version_marker(sql: &str) -> bool {
     t.starts_with("INSERT INTO schema_migrations") || t.starts_with("PRAGMA user_version =")
 }
 
-/// Splits a migration script on `;` and drops empty fragments.
+/// Splits a canonical schema pack on top-level `;` (quote-aware).
+///
+/// Uses [`bookclerk_plugin_abi::split_sql_statements`] so literals such as
+/// `DEFAULT 'a;b'` stay inside one statement.
 #[must_use]
 pub fn split_schema_statements(sql: &str) -> Vec<String> {
-    sql.split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
+    bookclerk_plugin_abi::split_sql_statements(sql)
 }
 
 /// Expands `[canonical_ddl, version_marker, …]` at the adapter execution edge.
@@ -94,22 +93,23 @@ pub fn expand_host_schema_batch(backend: DatabaseBackend, batch: &[String]) -> O
     if !is_host_schema_version_marker(version) {
         return None;
     }
-    let canonical = batch.first()?;
     // Split first, lower per statement: statement-shaped rewrites such as
     // `INSERT OR IGNORE` → `ON CONFLICT DO NOTHING` anchor on the statement
-    // head.
+    // head. Every non-marker entry is a canonical pack (quote-aware split).
     let mut stmts: Vec<String> = Vec::new();
-    for stmt in split_schema_statements(canonical) {
-        let lowered = schema_sql_for_backend(backend, &stmt).into_owned();
-        let companions = if backend == DatabaseBackend::Postgres {
-            postgres_identity_companions(&stmt)
-        } else {
-            Vec::new()
-        };
-        stmts.push(lowered);
-        stmts.extend(companions);
+    for canonical in &batch[..batch.len() - 1] {
+        for stmt in split_schema_statements(canonical) {
+            let lowered = schema_sql_for_backend(backend, &stmt).into_owned();
+            let companions = if backend == DatabaseBackend::Postgres {
+                postgres_identity_companions(&stmt)
+            } else {
+                Vec::new()
+            };
+            stmts.push(lowered);
+            stmts.extend(companions);
+        }
     }
-    stmts.extend(batch.iter().skip(1).cloned());
+    stmts.push(version.clone());
     Some(stmts)
 }
 
@@ -423,6 +423,45 @@ mod tests {
             !expanded[0].contains("AUTOINCREMENT"),
             "host canonical must not be pre-lowered: {}",
             expanded[0]
+        );
+        assert_eq!(
+            expanded.last().map(String::as_str),
+            Some("INSERT INTO schema_migrations (version) VALUES (1)")
+        );
+    }
+
+    #[test]
+    fn expand_host_schema_batch_keeps_semicolon_inside_quoted_default() {
+        let canonical = "CREATE TABLE IF NOT EXISTS notes (body TEXT NOT NULL DEFAULT 'a;b');\n\
+             CREATE TABLE IF NOT EXISTS tags (id INTEGER);";
+        let naive = canonical
+            .split(';')
+            .filter(|s| !s.trim().is_empty())
+            .count();
+        assert!(
+            naive > 2,
+            "raw split must be the broken baseline this test locks out: {naive}"
+        );
+        let stmts = split_schema_statements(canonical);
+        assert_eq!(stmts.len(), 2, "{stmts:?}");
+        assert!(
+            stmts[0].contains("DEFAULT 'a;b'"),
+            "quoted semicolon must not become a statement boundary: {stmts:?}"
+        );
+        let batch = vec![
+            canonical.to_string(),
+            "INSERT INTO schema_migrations (version) VALUES (1)".to_string(),
+        ];
+        let expanded =
+            expand_host_schema_batch(DatabaseBackend::Sqlite, &batch).expect("host schema batch");
+        assert_eq!(expanded.len(), 3, "{expanded:?}");
+        assert!(
+            expanded[0].contains("DEFAULT 'a;b'"),
+            "adapter expand must keep the DEFAULT literal intact: {expanded:?}"
+        );
+        assert!(
+            expanded[1].contains("CREATE TABLE IF NOT EXISTS tags"),
+            "second CREATE must survive as its own statement: {expanded:?}"
         );
         assert_eq!(
             expanded.last().map(String::as_str),
