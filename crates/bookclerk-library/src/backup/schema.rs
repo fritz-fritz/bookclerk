@@ -128,7 +128,7 @@ pub fn sort_tables_by_foreign_keys(
         .collect();
     let mut remaining_parents: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
     for (i, table) in tables.iter().enumerate() {
-        for parent in referenced_tables(&table.create_sql, &table.parsed) {
+        for parent in table.parsed.referenced_tables() {
             if parent == table.parsed.table {
                 continue;
             }
@@ -161,38 +161,6 @@ pub fn sort_tables_by_foreign_keys(
         ordered_idx.push(i);
     }
     Ok(ordered_idx.into_iter().map(|i| tables[i].clone()).collect())
-}
-
-/// Foreign-key parent table names referenced by `parsed` / `create_sql`.
-fn referenced_tables(create_sql: &str, parsed: &CreateTableSchema) -> Vec<String> {
-    let mut out = Vec::new();
-    for c in &parsed.table_constraints {
-        if let TableConstraint::ForeignKey { ref_table, .. } = c {
-            out.push(ref_table.clone());
-        }
-    }
-    out.extend(scan_references_keyword(create_sql));
-    out
-}
-
-/// Scans `CREATE TABLE` text for `REFERENCES ident` (column-level FKs).
-fn scan_references_keyword(sql: &str) -> Vec<String> {
-    let upper = sql.to_ascii_uppercase();
-    let mut i = 0;
-    let mut out = Vec::new();
-    while let Some(rel) = upper[i..].find("REFERENCES") {
-        let abs = i + rel + "REFERENCES".len();
-        let rest = sql.get(abs..).unwrap_or("").trim_start();
-        let ident: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        if !ident.is_empty() {
-            out.push(ident.to_ascii_lowercase());
-        }
-        i = abs.saturating_add(1);
-    }
-    out
 }
 
 /// Deterministic `ORDER BY` columns for one table.
