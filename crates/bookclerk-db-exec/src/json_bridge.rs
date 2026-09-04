@@ -1,29 +1,16 @@
-//! Legacy JSON bind bridge for host SeaORM proxy paths (adapter edge only).
+//! Domain JSON projection for typed [`DbValue`] cells.
 
 use bookclerk_plugin_abi::{DbType, DbValue};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 
-use crate::host_ir::{sea_null, sea_null_kind};
-
-/// Converts a legacy JSON bind onto [`DbValue`].
+/// Converts JSON onto [`DbValue`] for leftover adapter-edge helpers.
 ///
 /// # Errors
 ///
 /// Returns a static reason when the JSON value is outside the universal domain.
 pub fn db_value_from_json(v: &serde_json::Value) -> Result<DbValue, String> {
-    if let Some(kind) = sea_null_kind(v) {
-        let ty = match kind {
-            "Bytes" => DbType::Bytes,
-            "BigInt" | "Int" | "TinyInt" | "SmallInt" | "TinyUnsigned" | "SmallUnsigned"
-            | "Unsigned" | "BigUnsigned" => DbType::Int64,
-            "Bool" => DbType::Bool,
-            "Double" | "Float" => DbType::Float64,
-            _ => DbType::Text,
-        };
-        return Ok(DbValue::Null(ty));
-    }
     match v {
         serde_json::Value::Null => Ok(DbValue::Null(DbType::Unspecified)),
         serde_json::Value::Bool(b) => Ok(DbValue::Boolean(*b)),
@@ -58,15 +45,11 @@ pub fn db_value_from_json(v: &serde_json::Value) -> Result<DbValue, String> {
     }
 }
 
-/// Encodes [`DbValue`] as the legacy JSON bind used by in-process executors.
+/// Encodes [`DbValue`] as domain JSON (typed nulls become JSON null).
 #[must_use]
 pub fn db_value_to_json(v: &DbValue) -> serde_json::Value {
     match v {
-        DbValue::Null(DbType::Bytes) => sea_null("Bytes"),
-        DbValue::Null(DbType::Int64) => sea_null("BigInt"),
-        DbValue::Null(DbType::Bool) => sea_null("Bool"),
-        DbValue::Null(DbType::Float64) => sea_null("Double"),
-        DbValue::Null(DbType::Text | DbType::Unspecified) => serde_json::Value::Null,
+        DbValue::Null(_) => serde_json::Value::Null,
         DbValue::Boolean(b) => serde_json::Value::Bool(*b),
         DbValue::Int64(n) => serde_json::json!(*n),
         DbValue::Float64(n) => serde_json::json!(*n),
@@ -81,10 +64,13 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn typed_null_bytes_roundtrip() {
-        let v = db_value_from_json(&sea_null("Bytes")).unwrap();
-        assert_eq!(v, DbValue::Null(DbType::Bytes));
-        assert_eq!(sea_null_kind(&db_value_to_json(&v)), Some("Bytes"));
+    fn null_and_bytes_roundtrip_without_sea_null() {
+        assert_eq!(
+            db_value_to_json(&DbValue::Null(DbType::Bytes)),
+            serde_json::Value::Null
+        );
+        let bytes = db_value_from_json(&json!("b64:AA==")).unwrap();
+        assert_eq!(bytes, DbValue::Bytes(vec![0]));
     }
 
     #[test]

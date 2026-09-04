@@ -9,18 +9,21 @@
 //! backend chooses adapter-edge lowering via
 //! [`bookclerk_db_exec::expand_host_schema_batch`] at execution time.
 //!
-//! TODO(#squash): collapse the long migration chain to a single baseline version.
+//! Version 1 is the concatenated greenfield baseline (`migration_sql()`);
+//! version 2 adds `plugin_databases`.
 
 use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;
 
-use bookclerk_plugin_abi::DbPlanStatementKind;
+use bookclerk_plugin_abi::{
+    DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 
 use crate::error::{LibraryError, Result};
 use crate::migrations::{host_migration_plan, HostMigrationStep};
-use crate::sql_plan::{execute_statements_on, DbAtomicPlan, DbPlanStatement};
+use crate::sql_plan::execute_typed_on;
 
 /// Timing label for host schema apply (not an adapter identity).
 const SCHEMA_TXN_TIMING: &str = "schema_txn";
@@ -533,17 +536,22 @@ async fn run_atomic_ddl(
         return Ok(());
     }
     let stmts = bookclerk_db_exec::expand_host_schema_batch(backend, &stmts).unwrap_or(stmts);
-    let plan = DbAtomicPlan {
+    let req = ExecuteRequest {
+        operation_id: operation_id.to_string(),
+        request_hash: String::new(),
+        deadline_unix_ms: 0,
         statements: stmts
             .into_iter()
-            .map(|sql| DbPlanStatement::new(sql, Vec::new(), DbPlanStatementKind::Execute))
+            .map(|sql| TypedDbStatement {
+                sql,
+                parameters: Vec::new(),
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            })
             .collect(),
-        outcome_index: 0,
-        payload_index: None,
-        prior_receipt_index: None,
-        receipt_select_index: None,
     };
-    execute_statements_on(db, &plan, operation_id, timing, 0).await?;
+    execute_typed_on(db, &req, timing, 0).await?;
     Ok(())
 }
 

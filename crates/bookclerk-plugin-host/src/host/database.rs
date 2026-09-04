@@ -1225,7 +1225,7 @@ impl RpcAtomicBackend {
         compiled: bookclerk_library::CompiledAtomic,
         operation_id: String,
     ) -> bookclerk_library::Result<bookclerk_library::DbAtomicResult> {
-        bookclerk_library::validate_plan(&compiled.plan, &self.caps)?;
+        bookclerk_library::validate_plan(&compiled, &self.caps)?;
         let deadline_unix_ms = unix_now_ms().saturating_add(120_000);
         let mut typed = compiled.clone().into_typed_request(operation_id.clone());
         typed.deadline_unix_ms = deadline_unix_ms;
@@ -1244,16 +1244,9 @@ impl RpcAtomicBackend {
             result = self.session.db_execute_request(typed, Arc::clone(&cancel)) => match result {
                 Ok(reply) => {
                     bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)?;
-                    let exec = bookclerk_library::plan_exec_from_execute_reply(reply);
-                    bookclerk_library::validate_exec_result(
-                        &compiled.plan,
-                        &exec,
-                        &self.caps,
-                        &operation_id,
-                    )?;
-                    Ok(bookclerk_library::interpret_exec(
-                        &compiled.plan,
-                        &exec,
+                    Ok(bookclerk_library::interpret_typed_exec(
+                        &compiled,
+                        &reply,
                         &compiled.expected_hash,
                     ))
                 }
@@ -2249,7 +2242,7 @@ mod tests {
 
     #[test]
     fn omitted_rows_affected_fails_deserialize() {
-        let err = serde_json::from_str::<bookclerk_db_exec::DbPlanStmtExecResult>(r#"{"rows":[]}"#)
+        let err = serde_json::from_str::<bookclerk_plugin_abi::StatementResult>(r#"{"rows":[]}"#)
             .unwrap_err();
         assert!(
             err.to_string().contains("rowsAffected") || err.to_string().contains("missing field"),

@@ -1,4 +1,4 @@
-//! Native [`ExecuteRequest`] execution (no JSON `DbAtomicRequest` conversion).
+//! Native [`ExecuteRequest`] execution.
 //!
 //! [`DbValue::Text`] stays a string even when the payload starts with `b64:`.
 //! [`DbValue::Bytes`] maps to SeaORM bytes. Typed nulls use the matching

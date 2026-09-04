@@ -4,11 +4,13 @@
 
 use std::future::Future;
 
-use super::host_ir::{DbAtomicPlan, DbPlanStatement};
-use bookclerk_plugin_abi::{DbCapabilities, DbPlanStatementKind, ExecuteReply, ExecuteRequest};
+use bookclerk_plugin_abi::{
+    DbCapabilities, DbPlanStatementKind, DbResultSelection, ExecuteReply, ExecuteRequest,
+    TypedDbStatement,
+};
 use serde_json::Value as JsonValue;
 
-use super::{compile_named_request, interpret_typed_exec, CompiledAtomic};
+use super::{compile_named_request, interpret_typed_exec};
 use crate::atomic_ops::{atomic_status, DbAtomicParams};
 
 /// Runs the native typed contract suite.
@@ -629,16 +631,10 @@ where
     let err = run(
         typed_request(
             "vec-agg",
-            DbAtomicPlan {
-                statements: vec![
-                    DbPlanStatement::new(pad.clone(), vec![], DbPlanStatementKind::Select),
-                    DbPlanStatement::new(pad, vec![], DbPlanStatementKind::Select),
-                ],
-                outcome_index: 0,
-                payload_index: None,
-                prior_receipt_index: None,
-                receipt_select_index: None,
-            },
+            vec![
+                typed_stmt(pad.clone(), DbPlanStatementKind::Select),
+                typed_stmt(pad, DbPlanStatementKind::Select),
+            ],
         ),
         0,
     )
@@ -807,79 +803,76 @@ fn recursive_insert_returning(table: &str, col: &str, n: u32) -> String {
 }
 
 /// Envelope for a vector plan with no request hash.
-fn typed_request(operation_id: &str, plan: DbAtomicPlan) -> ExecuteRequest {
-    CompiledAtomic {
-        plan,
-        expected_hash: String::new(),
+fn typed_request(operation_id: &str, statements: Vec<TypedDbStatement>) -> ExecuteRequest {
+    ExecuteRequest {
+        operation_id: operation_id.into(),
+        request_hash: String::new(),
+        statements,
+        deadline_unix_ms: 0,
     }
-    .into_typed_request(operation_id)
+}
+
+fn selection_for_kind(kind: DbPlanStatementKind) -> DbResultSelection {
+    match kind {
+        DbPlanStatementKind::Execute => DbResultSelection::AffectedRows,
+        _ => DbResultSelection::Rows,
+    }
+}
+
+fn typed_stmt(sql: impl Into<String>, kind: DbPlanStatementKind) -> TypedDbStatement {
+    TypedDbStatement {
+        sql: sql.into(),
+        parameters: Vec::new(),
+        kind,
+        max_rows: 0,
+        result_selection: selection_for_kind(kind),
+    }
 }
 
 /// Single Select statement plan.
-fn select_plan(sql: &str) -> DbAtomicPlan {
+fn select_plan(sql: &str) -> Vec<TypedDbStatement> {
     stmt_plan(sql, DbPlanStatementKind::Select)
 }
 
 /// Single DML `RETURNING` statement plan (`maxRows = 0`, unproven).
-fn returning_plan(sql: &str) -> DbAtomicPlan {
+fn returning_plan(sql: &str) -> Vec<TypedDbStatement> {
     stmt_plan(sql, DbPlanStatementKind::Returning)
 }
 
 /// Proven 1-row DML `RETURNING` (host-IR `maxRows = 1`).
-fn returning_plan_proven(sql: &str) -> DbAtomicPlan {
+fn returning_plan_proven(sql: &str) -> Vec<TypedDbStatement> {
     let mut plan = returning_plan(sql);
-    plan.statements[0].max_rows = 1;
+    plan[0].max_rows = 1;
     plan
 }
 
 /// Single-statement plan with an explicit wire `kind`.
-fn stmt_plan(sql: &str, kind: DbPlanStatementKind) -> DbAtomicPlan {
-    DbAtomicPlan {
-        statements: vec![DbPlanStatement::new(sql, vec![], kind)],
-        outcome_index: 0,
-        payload_index: None,
-        prior_receipt_index: None,
-        receipt_select_index: None,
-    }
+fn stmt_plan(sql: &str, kind: DbPlanStatementKind) -> Vec<TypedDbStatement> {
+    vec![typed_stmt(sql, kind)]
 }
 
 /// Execute-only plan from borrowed SQL strings.
-fn exec_plan(sqls: &[&str]) -> DbAtomicPlan {
+fn exec_plan(sqls: &[&str]) -> Vec<TypedDbStatement> {
     exec_plan_owned(sqls.iter().map(|s| (*s).to_string()).collect())
 }
 
 /// Execute-only plan from owned SQL strings.
-fn exec_plan_owned(sqls: Vec<String>) -> DbAtomicPlan {
-    DbAtomicPlan {
-        statements: sqls
-            .into_iter()
-            .map(|sql| DbPlanStatement::new(sql, vec![], DbPlanStatementKind::Execute))
-            .collect(),
-        outcome_index: 0,
-        payload_index: None,
-        prior_receipt_index: None,
-        receipt_select_index: None,
-    }
+fn exec_plan_owned(sqls: Vec<String>) -> Vec<TypedDbStatement> {
+    sqls.into_iter()
+        .map(|sql| typed_stmt(sql, DbPlanStatementKind::Execute))
+        .collect()
 }
 
 /// Two inserts of the same `db_serialization_slots` key.
-fn dup_slot_plan(key: &str) -> DbAtomicPlan {
-    DbAtomicPlan {
-        statements: vec![
-            DbPlanStatement::new(
-                format!("INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{key}', 0)"),
-                vec![],
-                DbPlanStatementKind::Execute,
-            ),
-            DbPlanStatement::new(
-                format!("INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{key}', 1)"),
-                vec![],
-                DbPlanStatementKind::Execute,
-            ),
-        ],
-        outcome_index: 0,
-        payload_index: None,
-        prior_receipt_index: None,
-        receipt_select_index: None,
-    }
+fn dup_slot_plan(key: &str) -> Vec<TypedDbStatement> {
+    vec![
+        typed_stmt(
+            format!("INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{key}', 0)"),
+            DbPlanStatementKind::Execute,
+        ),
+        typed_stmt(
+            format!("INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{key}', 1)"),
+            DbPlanStatementKind::Execute,
+        ),
+    ]
 }
