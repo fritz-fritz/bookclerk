@@ -30,7 +30,6 @@ const SCHEMA_TXN_TIMING: &str = "schema_txn";
 
 /// Canonical schema apply batch: host DDL followed by the version marker.
 ///
-/// Production and test-only executors must consume this same representation.
 /// Adapters lower and split the pack at execution
 /// ([`bookclerk_db_exec::expand_host_schema_batch`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -618,12 +617,12 @@ mod tests {
     }
 
     #[test]
-    fn host_migration_plan_starts_with_greenfield_baseline() {
-        use crate::migrations::{greenfield_baseline_canonical, host_migration_plan};
+    fn host_migration_plan_is_current_schema() {
+        use crate::migrations::{host_migration_plan, latest_schema_sqlite};
         let plan = host_migration_plan();
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].version, 1);
-        assert_eq!(plan[0].canonical, greenfield_baseline_canonical());
+        assert_eq!(plan[0].canonical, latest_schema_sqlite());
         assert!(plan[0].canonical.contains("plugin_databases"));
         assert!(!plan[0].canonical.contains("domain_events_v27"));
     }

@@ -13,6 +13,17 @@ use serde_json::Value as JsonValue;
 use super::{compile_named_request, interpret_typed_exec};
 use crate::atomic_ops::{atomic_status, DbAtomicParams};
 
+/// One ~160 KiB TEXT cell without embedding the payload in statement text.
+///
+/// D1 `maxPayloadBytes` and the 100 KiB physical SQL limit cannot admit a
+/// 150 KiB literal. Doubling CTE: `10 * 2^14 = 163840` bytes. Two such
+/// statements exceed [`bookclerk_plugin_abi::FIRST_PARTY_MAX_RESULT_BYTES`].
+const LARGE_RESULT_PAD_SQL: &str = "WITH RECURSIVE t(n, s) AS (\
+ SELECT 1, 'aaaaaaaaaa' \
+ UNION ALL \
+ SELECT n + 1, s || s FROM t WHERE n < 15\
+) SELECT s AS pad FROM t WHERE n = 15";
+
 /// Runs the native typed contract suite.
 pub async fn run_typed_contract_vectors<F, Fut>(_connect: DbCapabilities, row_cap: u32, mut run: F)
 where
@@ -614,7 +625,7 @@ where
 {
     // Two ~160 KiB cells exceed FIRST_PARTY_MAX_RESULT_BYTES (256 KiB aggregate).
     // SQL stays small so D1 payload / physical statement caps still admit it.
-    let pad = super::vectors::LARGE_RESULT_PAD_SQL;
+    let pad = LARGE_RESULT_PAD_SQL;
     run(
         typed_request(
             "vec-agg-setup",
