@@ -650,28 +650,29 @@ where
     assert_eq!(before, after, "aggregate overflow must not write rows");
 }
 
-/// One result whose encoded JSON exceeds `maxResultBytes` with tiny numeric cells.
+/// One result whose Cap'n-encoded [`StatementResult`] exceeds `maxResultBytes`.
+///
+/// Tiny integer cells stay compact on the typed wire, so this uses repeated
+/// TEXT cells. The SQL text itself stays well under `maxPayloadBytes`.
 async fn typed_wide_numeric_row_cap<F, Fut>(run: &mut F)
 where
     F: FnMut(ExecuteRequest, u32) -> Fut,
     Fut: Future<Output = Result<ExecuteReply, String>>,
 {
-    let pad = "x".repeat(50);
-    let cols: Vec<String> = (0..40).map(|i| format!("t.i AS c{i:02}_{pad}")).collect();
+    let pad = "x".repeat(3_000);
     let sql = format!(
-        "WITH RECURSIVE t(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM t WHERE i < 120) \
-         SELECT {} FROM t",
-        cols.join(", ")
+        "WITH RECURSIVE t(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM t WHERE i < 100) \
+         SELECT '{pad}' AS pad FROM t"
     );
     let err = run(typed_request("vec-wide", select_plan(&sql)), 0)
         .await
-        .expect_err("wide numeric result must exceed maxResultBytes");
+        .expect_err("wide result must exceed maxResultBytes");
     assert!(
         err.to_lowercase().contains("maxresultbytes")
             || err.to_lowercase().contains("maxatomicresultbytes")
             || err.to_lowercase().contains("body")
             || err.to_lowercase().contains("exceeds"),
-        "wide-row JSON budget must fail closed: {err}"
+        "result-byte budget must fail closed: {err}"
     );
 }
 
