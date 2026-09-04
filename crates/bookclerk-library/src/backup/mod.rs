@@ -822,9 +822,13 @@ pub fn extract_backup_archive(archive: &Path, dest: &Path) -> Result<()> {
 /// Budgets applied while streaming a recovery-point archive.
 #[derive(Debug, Clone, Copy)]
 struct ArchiveExtractLimits {
+    /// Max tar members (files and directories).
     max_entries: u64,
+    /// Max expanded size of one regular file member.
     max_entry_bytes: u64,
+    /// Max total expanded bytes across regular file members.
     max_total_bytes: u64,
+    /// Max gzip-decoded tar stream bytes.
     max_stream_bytes: u64,
 }
 
@@ -841,7 +845,9 @@ impl Default for ArchiveExtractLimits {
 
 /// [`Read`] adapter that fails when more than `remaining` bytes are produced.
 struct BudgetReader<R> {
+    /// Inner gzip decoder (or other reader).
     inner: R,
+    /// Bytes still allowed before the stream budget is exhausted.
     remaining: u64,
 }
 
@@ -870,6 +876,7 @@ impl<R: Read> Read for BudgetReader<R> {
     }
 }
 
+/// Maps tar/gzip `InvalidData` (budget overruns) onto [`LibraryError::Schema`].
 fn map_extract_io(err: io::Error) -> LibraryError {
     if err.kind() == io::ErrorKind::InvalidData {
         LibraryError::Schema(err.to_string())
@@ -878,6 +885,12 @@ fn map_extract_io(err: io::Error) -> LibraryError {
     }
 }
 
+/// Extracts `archive` into `dest` using `limits` instead of the production caps.
+///
+/// # Errors
+///
+/// Returns when the archive is missing, malformed, a path escapes `dest`, or
+/// an extract budget would be exceeded.
 fn extract_backup_archive_limited(
     archive: &Path,
     dest: &Path,

@@ -36,21 +36,29 @@ pub struct BackupRepository {
     lock: Arc<RepoLock>,
 }
 
+/// In-process reentrant exclusive lock; flocks `backups/.lock` at depth 0.
 #[derive(Debug)]
 struct RepoLock {
+    /// Mutex protecting owner/depth and the flocked file handle.
     inner: Mutex<RepoLockInner>,
+    /// Wakes threads waiting for the in-process exclusive lock.
     cv: Condvar,
 }
 
+/// Owner, nesting depth, and optional flocked `backups/.lock` handle.
 #[derive(Debug)]
 struct RepoLockInner {
+    /// Open lock file while `depth > 0`.
     file: Option<File>,
+    /// Same-thread reentry count.
     depth: u32,
+    /// Thread that currently holds the in-process lock.
     owner: Option<ThreadId>,
 }
 
 /// Held exclusive backup-repository lock (publication vs GC/prune).
 pub struct RepoLockGuard<'a> {
+    /// Repository whose lock this guard releases on drop.
     repo: &'a BackupRepository,
 }
 
@@ -164,6 +172,7 @@ impl BackupRepository {
         self.put_object_locked(object)
     }
 
+    /// Writes `object` assuming [`Self::lock_exclusive`] is already held.
     fn put_object_locked(&self, object: &CanonicalObject) -> Result<String> {
         let uncompressed = encode_canonical_object(object)?;
         let digest = sha256_hex(&uncompressed);
