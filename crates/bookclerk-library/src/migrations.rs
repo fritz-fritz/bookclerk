@@ -12,6 +12,9 @@
 
 use std::sync::OnceLock;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use sha2::{Digest, Sha256};
 
 /// Final SQLite DDL for a fresh Bookclerk library database.
@@ -769,7 +772,7 @@ pub fn binding_bootstrap_sql() -> &'static str {
 pub fn current_canonical_schema() -> &'static str {
     static SQL: OnceLock<String> = OnceLock::new();
     SQL.get_or_init(|| {
-        let mut parts: Vec<&str> = host_migration_plan()
+        let mut parts: Vec<&str> = production_host_migration_plan()
             .iter()
             .map(|step| step.canonical)
             .collect();
@@ -841,7 +844,44 @@ pub fn host_sql_type_env() -> bookclerk_plugin_abi::SqlTypeEnv {
 /// [`UNRELEASED_SQL`] into version 1.
 #[must_use]
 pub fn host_migration_plan() -> Vec<HostMigrationStep> {
+    #[cfg(test)]
+    {
+        if let Some(plan) = HOST_PLAN_OVERRIDE.with(Cell::get) {
+            return plan.to_vec();
+        }
+    }
+    production_host_migration_plan()
+}
+
+/// Production frozen plan (empty until a release cut). Test overrides must not
+/// feed [`current_canonical_schema`]'s `OnceLock`.
+fn production_host_migration_plan() -> Vec<HostMigrationStep> {
     Vec::new()
+}
+
+#[cfg(test)]
+thread_local! {
+    static HOST_PLAN_OVERRIDE: Cell<Option<&'static [HostMigrationStep]>> = const { Cell::new(None) };
+}
+
+/// Test-only: [`host_migration_plan`] returns `plan` until the guard drops.
+#[cfg(test)]
+pub(crate) struct HostPlanOverrideGuard;
+
+#[cfg(test)]
+impl Drop for HostPlanOverrideGuard {
+    fn drop(&mut self) {
+        HOST_PLAN_OVERRIDE.with(|cell| cell.set(None));
+    }
+}
+
+/// Installs a test-only frozen plan for [`host_migration_plan`] until drop.
+#[cfg(test)]
+pub(crate) fn override_host_migration_plan(
+    plan: &'static [HostMigrationStep],
+) -> HostPlanOverrideGuard {
+    HOST_PLAN_OVERRIDE.with(|cell| cell.set(Some(plan)));
+    HostPlanOverrideGuard
 }
 
 /// Final PostgreSQL DDL for a fresh Bookclerk library database.
