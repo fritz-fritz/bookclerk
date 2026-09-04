@@ -2927,16 +2927,10 @@ mod tests {
         let env = crate::migrations::host_sql_type_env();
         for (i, stmt) in compiled.request.statements.iter().enumerate() {
             let req = ExecuteRequest {
-                operation_id: "t".into(),
-                request_hash: String::new(),
-                deadline_unix_ms: 0,
-                statements: vec![TypedDbStatement {
-                    sql: stmt.sql.clone(),
-                    parameters: Vec::new(),
-                    kind: stmt.kind,
-                    max_rows: 0,
-                    result_selection: DbResultSelection::Discard,
-                }],
+                operation_id: compiled.request.operation_id.clone(),
+                request_hash: compiled.request.request_hash.clone(),
+                deadline_unix_ms: compiled.request.deadline_unix_ms,
+                statements: vec![stmt.clone()],
             };
             bookclerk_plugin_abi::typecheck_execute_request_proofs(&req, &env)
                 .unwrap_or_else(|err| panic!("stmt {i}: {err}\n{}", stmt.sql));
@@ -4056,6 +4050,7 @@ mod tests {
             lowered.contains("$5"),
             "adapter lowering must number blob binds:\n{lowered}"
         );
+        assert_host_plan_typechecks(&compiled);
     }
 
     #[test]
@@ -4100,6 +4095,7 @@ mod tests {
             "TEXT dedup_key must not be inferred as bytes: {:?}",
             insert.parameters
         );
+        assert_host_plan_typechecks(&compiled);
     }
 
     fn seed_totp_secret(conn: &Connection, user_id: i64, name: &str) {
