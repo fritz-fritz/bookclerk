@@ -10,8 +10,8 @@ use crate::backup::encode::{
 use crate::backup::repository::BackupRepository;
 use crate::backup::restore::{apply_admitted_sql, restore_backup_unit};
 use crate::backup::schema::{
-    admit_canonical_schema, library_ddl_for_schema_state_with, order_key_columns,
-    sort_tables_by_foreign_keys,
+    admit_canonical_schema, canonical_order_by_sql, library_ddl_for_schema_state_with,
+    order_key_columns, sort_tables_by_foreign_keys,
 };
 use crate::backup::util::validate_cell;
 use crate::backup::verify::verify_recovery_point;
@@ -189,17 +189,62 @@ fn order_key_prefers_pk_then_unique_then_full_row() {
     let pk =
         parse_create_table_schema("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
             .unwrap();
-    assert_eq!(order_key_columns(&pk), vec!["id".to_string()]);
+    assert_eq!(
+        order_key_columns(&pk),
+        vec!["id".to_string(), "name".to_string()]
+    );
+    assert_eq!(
+        canonical_order_by_sql(&pk),
+        "id ASC NULLS FIRST, name ASC NULLS FIRST"
+    );
     let uniq = parse_create_table_schema("CREATE TABLE t (a TEXT, b TEXT, UNIQUE (b, a))").unwrap();
     assert_eq!(
         order_key_columns(&uniq),
         vec!["b".to_string(), "a".to_string()]
+    );
+    let one_unique =
+        parse_create_table_schema("CREATE TABLE t (k TEXT UNIQUE, extra TEXT)").unwrap();
+    assert_eq!(
+        order_key_columns(&one_unique),
+        vec!["k".to_string(), "extra".to_string()]
     );
     let keyless = parse_create_table_schema("CREATE TABLE t (a TEXT, b TEXT)").unwrap();
     assert_eq!(
         order_key_columns(&keyless),
         vec!["a".to_string(), "b".to_string()]
     );
+}
+
+#[test]
+fn restore_insert_sql_lowers_question_marks_on_postgres() {
+    let sql = "INSERT INTO t (a, b) VALUES (?, ?)";
+    assert_eq!(
+        bookclerk_db_exec::lower_canonical_sql(DbBackend::Postgres, sql),
+        "INSERT INTO t (a, b) VALUES ($1, $2)"
+    );
+}
+
+#[test]
+fn put_object_replaces_corrupt_existing_digest() {
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let object = CanonicalObject::Identity {
+        entries: BTreeMap::new(),
+    };
+    let digest = repo.put_object(&object).unwrap();
+    let path = files
+        .path()
+        .join(BACKUPS_DIR)
+        .join("objects")
+        .join(&digest[..2])
+        .join(&digest[2..]);
+    std::fs::write(&path, b"truncated").unwrap();
+    assert!(repo.get_object(&digest).is_err());
+    assert_eq!(repo.put_object(&object).unwrap(), digest);
+    match repo.get_object(&digest).unwrap() {
+        CanonicalObject::Identity { entries } => assert!(entries.is_empty()),
+        other => panic!("expected Identity, got {other:?}"),
+    }
 }
 
 #[test]
@@ -543,6 +588,68 @@ async fn gc_fails_closed_when_published_manifest_is_unreadable() {
         );
     }
     verify_recovery_point(&repo, &second.manifest.id).unwrap();
+}
+
+#[tokio::test]
+async fn capture_orders_nulls_first_with_declared_tiebreakers() {
+    let files = tempfile::tempdir().unwrap();
+    let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_bootstrap(&db).await;
+    apply_admitted_sql(
+        &db,
+        &["CREATE TABLE items (k TEXT UNIQUE, extra TEXT)"],
+        CanonicalRestoreKind::PluginBinding,
+    )
+    .await
+    .unwrap();
+    for (k, extra) in [(Some("m"), Some("b")), (None, Some("z")), (None, Some("a"))] {
+        db.execute_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO items (k, extra) VALUES (?, ?)",
+            [
+                bookclerk_db_exec::db_value_to_sea(&match k {
+                    Some(s) => DbValue::Text(s.into()),
+                    None => DbValue::Null(DbType::Text),
+                }),
+                bookclerk_db_exec::db_value_to_sea(&match extra {
+                    Some(s) => DbValue::Text(s.into()),
+                    None => DbValue::Null(DbType::Text),
+                }),
+            ],
+        ))
+        .await
+        .unwrap();
+    }
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let unit = capture::capture_plugin_unit(
+        &db,
+        &repo,
+        &CanonicalExportOpts::default(),
+        "demo",
+        "items",
+        "sqlite",
+    )
+    .await
+    .unwrap();
+    let meta = unit.tables.iter().find(|t| t.name == "items").unwrap();
+    let mut rows = Vec::new();
+    for digest in &meta.chunks {
+        let CanonicalObject::TableChunk { rows: chunk, .. } = repo.get_object(digest).unwrap()
+        else {
+            panic!("expected table chunk");
+        };
+        rows.extend(chunk);
+    }
+    assert_eq!(
+        rows,
+        vec![
+            vec![DbValue::Null(DbType::Text), DbValue::Text("a".into())],
+            vec![DbValue::Null(DbType::Text), DbValue::Text("z".into())],
+            vec![DbValue::Text("m".into()), DbValue::Text("b".into())],
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1260,15 +1367,28 @@ fn extract_rejects_non_regular_entries() {
 }
 
 fn postgres_url() -> Option<String> {
-    std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
+    let url = std::env::var("BOOKCLERK_TEST_POSTGRES_URL")
         .ok()
-        .filter(|s| !s.trim().is_empty())
+        .filter(|s| !s.trim().is_empty());
+    if url.is_some() {
+        return url;
+    }
+    assert!(
+        std::env::var("BOOKCLERK_REQUIRE_POSTGRES_TESTS")
+            .ok()
+            .as_deref()
+            != Some("1"),
+        "BOOKCLERK_TEST_POSTGRES_URL is required when BOOKCLERK_REQUIRE_POSTGRES_TESTS=1"
+    );
+    None
 }
 
 async fn postgres_throwaway() -> Option<(DatabaseConnection, String)> {
     let url = postgres_url()?;
     let db_name = format!("bck_{}", uuid::Uuid::new_v4().as_simple());
-    let admin = sea_orm::Database::connect(url.as_str()).await.ok()?;
+    let admin = sea_orm::Database::connect(url.as_str())
+        .await
+        .unwrap_or_else(|err| panic!("connect BOOKCLERK_TEST_POSTGRES_URL: {err}"));
     let backend = admin.get_database_backend();
     admin
         .execute_raw(Statement::from_string(
@@ -1276,18 +1396,22 @@ async fn postgres_throwaway() -> Option<(DatabaseConnection, String)> {
             format!("CREATE DATABASE {db_name}"),
         ))
         .await
-        .ok()?;
+        .unwrap_or_else(|err| panic!("CREATE DATABASE {db_name}: {err}"));
     let (base, query) = match url.split_once('?') {
         Some((base, q)) => (base, Some(q)),
         None => (url.as_str(), None),
     };
     let trimmed = base.trim_end_matches('/');
-    let slash = trimmed.rfind('/')?;
+    let slash = trimmed
+        .rfind('/')
+        .unwrap_or_else(|| panic!("BOOKCLERK_TEST_POSTGRES_URL has no database path: {url}"));
     let db_url = match query {
         Some(q) => format!("{}/{db_name}?{q}", &trimmed[..slash]),
         None => format!("{}/{db_name}", &trimmed[..slash]),
     };
-    let db = sea_orm::Database::connect(&db_url).await.ok()?;
+    let db = sea_orm::Database::connect(&db_url)
+        .await
+        .unwrap_or_else(|err| panic!("connect throwaway {db_name}: {err}"));
     Some((db, db_name))
 }
 
@@ -1339,6 +1463,59 @@ async fn postgres_library_backup_round_trip() {
 
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
+async fn postgres_capture_orders_nulls_first_with_declared_tiebreakers() {
+    let Some((db, _)) = postgres_throwaway().await else {
+        return;
+    };
+    apply_admitted_sql(
+        &db,
+        &["CREATE TABLE items (k TEXT UNIQUE, extra TEXT)"],
+        CanonicalRestoreKind::PluginBinding,
+    )
+    .await
+    .unwrap();
+    for sql in [
+        "INSERT INTO items (k, extra) VALUES (NULL, 'z')",
+        "INSERT INTO items (k, extra) VALUES (NULL, 'a')",
+        "INSERT INTO items (k, extra) VALUES ('m', 'b')",
+    ] {
+        db.execute_raw(Statement::from_string(DbBackend::Postgres, sql))
+            .await
+            .unwrap();
+    }
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let unit = capture::capture_plugin_unit(
+        &db,
+        &repo,
+        &CanonicalExportOpts::default(),
+        "demo",
+        "items",
+        "postgres",
+    )
+    .await
+    .unwrap();
+    let meta = unit.tables.iter().find(|t| t.name == "items").unwrap();
+    let mut rows = Vec::new();
+    for digest in &meta.chunks {
+        let CanonicalObject::TableChunk { rows: chunk, .. } = repo.get_object(digest).unwrap()
+        else {
+            panic!("expected table chunk");
+        };
+        rows.extend(chunk);
+    }
+    assert_eq!(
+        rows,
+        vec![
+            vec![DbValue::Null(DbType::Text), DbValue::Text("a".into())],
+            vec![DbValue::Null(DbType::Text), DbValue::Text("z".into())],
+            vec![DbValue::Text("m".into()), DbValue::Text("b".into())],
+        ]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
 async fn postgres_library_restores_to_sqlite() {
     let Some((pg, _)) = postgres_throwaway().await else {
         return;
@@ -1381,7 +1558,7 @@ async fn postgres_library_restores_to_sqlite() {
 
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
-async fn sqlite_library_restores_to_postgres() {
+async fn postgres_sqlite_library_restores_to_postgres() {
     let Some((pg, _)) = postgres_throwaway().await else {
         return;
     };
