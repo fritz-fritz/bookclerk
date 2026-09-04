@@ -12,7 +12,7 @@ use crate::{
     sql_types::{
         require_sql_v1_helper_arity, sql_host_bookkeeping_type_env, typecheck_execute_request,
         typecheck_execute_request_resolved, SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS,
-        SQL_CATALOG_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
+        SQL_CATALOG_TABLE, SQL_DDL_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
     },
     DbPlanStatementKind, DbResultSelection, ExecuteRequest, PluginError, Result, TypedDbStatement,
 };
@@ -29,6 +29,7 @@ const DENIED_TABLES: &[&str] = &[
     SQL_CATALOG_TABLE,
     SQL_IDENTITY_TABLE,
     SQL_SCHEMA_TABLE,
+    SQL_DDL_TABLE,
     INSERT_SELECT_WRAP_ALIAS,
 ];
 
@@ -326,6 +327,7 @@ const BINDING_RESERVED_TABLES: &[&str] = &[
     SQL_CATALOG_TABLE,
     SQL_IDENTITY_TABLE,
     SQL_SCHEMA_TABLE,
+    SQL_DDL_TABLE,
     INSERT_SELECT_WRAP_ALIAS,
 ];
 

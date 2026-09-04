@@ -34,6 +34,13 @@ pub const SQL_V1_MAX_IDENT_BYTES: usize = 63;
 /// Table-level durable schema fingerprint (identity + constraints).
 pub const SQL_SCHEMA_TABLE: &str = "bookclerk_sql_schema";
 
+/// Admitted canonical `CREATE TABLE` / `CREATE INDEX` SQL for backup restore.
+///
+/// Fingerprints in [`SQL_SCHEMA_TABLE`] are not invertible. This table stores
+/// the host-admitted canonical DDL so a plugin binding can be reconstructed
+/// without reverse-engineering adapter catalogs.
+pub const SQL_DDL_TABLE: &str = "bookclerk_sql_ddl";
+
 /// Page size for durable catalog / schema SELECTs.
 ///
 /// Uses the negotiated adapter `maxResultRows` when it is nonzero, then caps
@@ -416,6 +423,20 @@ pub enum TableConstraint {
     },
 }
 
+/// Parsed `CREATE [UNIQUE] INDEX` (canonical SQL v1).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateIndexSchema {
+    /// Unquoted folded index name.
+    pub name: String,
+    /// Table the index is on.
+    pub table: String,
+    /// True when the statement is `CREATE UNIQUE INDEX`.
+    pub unique: bool,
+    /// Canonical statement text (no trailing semicolon).
+    pub canonical_sql: String,
+}
+
 impl CreateTableSchema {
     /// Structured fingerprint (SHA-256 hex) of this schema IR.
     #[must_use]
@@ -723,6 +744,48 @@ pub fn parse_drop_table_name(sql: &str) -> Option<String> {
     Some(name)
 }
 
+/// Parses `CREATE [UNIQUE] INDEX [IF NOT EXISTS] name ON table …`.
+#[must_use]
+pub fn parse_create_index_sql(sql: &str) -> Option<CreateIndexSchema> {
+    let mut s = skip_ws(sql);
+    s = skip_kw(s, "CREATE")?;
+    let unique = if starts_kw(s, "UNIQUE") {
+        s = skip_kw(s, "UNIQUE")?;
+        true
+    } else {
+        false
+    };
+    s = skip_kw(s, "INDEX")?;
+    if starts_kw(s, "IF") {
+        s = skip_kw(s, "IF")?;
+        s = skip_kw(s, "NOT")?;
+        s = skip_kw(s, "EXISTS")?;
+    }
+    let (name, rest) = read_ident(s)?;
+    let rest = skip_kw(skip_ws(rest), "ON")?;
+    let (table, _) = read_ident(rest)?;
+    Some(CreateIndexSchema {
+        name,
+        table,
+        unique,
+        canonical_sql: sql.trim().trim_end_matches(';').trim().to_string(),
+    })
+}
+
+/// Parses `DROP INDEX [IF EXISTS] name`.
+#[must_use]
+pub fn parse_drop_index_name(sql: &str) -> Option<String> {
+    let mut s = skip_ws(sql);
+    s = skip_kw(s, "DROP")?;
+    s = skip_kw(s, "INDEX")?;
+    if starts_kw(s, "IF") {
+        s = skip_kw(s, "IF")?;
+        s = skip_kw(s, "EXISTS")?;
+    }
+    let (name, _) = read_ident(s)?;
+    Some(name)
+}
+
 /// `CREATE TABLE IF NOT EXISTS` for the reserved SQL v1 catalog.
 #[must_use]
 pub fn sql_catalog_create_table_sql() -> String {
@@ -743,6 +806,16 @@ pub fn sql_schema_create_table_sql() -> String {
     )
 }
 
+/// Durable canonical DDL companion table.
+#[must_use]
+pub fn sql_ddl_create_table_sql() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {SQL_DDL_TABLE} (\
+         kind TEXT NOT NULL, name TEXT NOT NULL, table_name TEXT NOT NULL, \
+         canonical_sql TEXT NOT NULL, PRIMARY KEY (kind, name))"
+    )
+}
+
 /// Catalog DML companions for one canonical DDL statement (all backends).
 ///
 /// Callers must skip this when [`SchemaAction::Create`] is a fingerprint no-op.
@@ -755,53 +828,131 @@ pub fn catalog_companions(sql: &str) -> Vec<String> {
 ///
 /// When `action` carries a [`SchemaAction::Create`] schema, companions are
 /// built from that proof (no CREATE reparse). Callers without a proof still
-/// parse canonical SQL.
+/// parse canonical SQL. [`SchemaAction::None`] still persists `CREATE INDEX`
+/// / `DROP INDEX` so backups can rebuild admitted indexes. A fingerprint
+/// matching [`SchemaAction::Create`] no-op backfills missing
+/// `bookclerk_sql_ddl` rows without rewriting catalog, identity, or
+/// plugin-owned state.
 #[must_use]
 pub fn catalog_companions_for_action(sql: &str, action: Option<&SchemaAction>) -> Vec<String> {
     match action {
-        Some(SchemaAction::Create { noop: true, .. }) | Some(SchemaAction::None) => {
-            return Vec::new();
+        Some(SchemaAction::Create {
+            schema, noop: true, ..
+        }) => {
+            return catalog_ddl_backfill(schema, sql);
         }
         Some(SchemaAction::Create {
             schema,
             fingerprint,
             noop: false,
         }) => {
-            return catalog_dml_for_create(schema, fingerprint);
+            return catalog_dml_for_create(schema, fingerprint, sql);
         }
         Some(SchemaAction::Drop { table }) => return catalog_dml_for_drop(table),
-        None => {}
+        Some(SchemaAction::None) | None => {}
     }
     if let Some(schema) = parse_create_table_schema(sql) {
         let fingerprint = schema.fingerprint();
-        return catalog_dml_for_create(&schema, &fingerprint);
+        return catalog_dml_for_create(&schema, &fingerprint, sql);
     }
     if let Some(table) = parse_drop_table_name(sql) {
         return catalog_dml_for_drop(&table);
     }
+    if let Some(index) = parse_create_index_sql(sql) {
+        return catalog_dml_for_create_index(&index);
+    }
+    if let Some(name) = parse_drop_index_name(sql) {
+        return catalog_dml_for_drop_index(&name);
+    }
     Vec::new()
 }
 
-fn catalog_dml_for_create(schema: &CreateTableSchema, fingerprint: &str) -> Vec<String> {
-    if schema.columns.is_empty() {
-        return Vec::new();
-    }
-    let ident = schema.identity_column.clone().unwrap_or_default();
+fn catalog_ensure_tables() -> Vec<String> {
     vec![
         sql_catalog_create_table_sql(),
         sql_schema_create_table_sql(),
-        catalog_insert_columns_sql(schema),
-        catalog_insert_schema_sql(&schema.table, fingerprint, &ident),
+        sql_ddl_create_table_sql(),
     ]
 }
 
+/// Host-managed catalog/identity tables are not guest-owned plugin schema.
+fn is_reserved_sql_catalog_ident(name: &str) -> bool {
+    matches!(
+        name,
+        SQL_CATALOG_TABLE | SQL_SCHEMA_TABLE | SQL_DDL_TABLE | SQL_IDENTITY_TABLE
+    )
+}
+
+/// Backfill `bookclerk_sql_ddl` for a fingerprint-matching `CREATE TABLE IF NOT EXISTS`.
+///
+/// Existing bindings may already have `bookclerk_sql_catalog` / `_schema` from
+/// an older Bookclerk without the durable canonical DDL catalog. A matching
+/// no-op CREATE must insert missing DDL metadata without changing physical
+/// schema, identity, or plugin-owned rows.
+fn catalog_ddl_backfill(schema: &CreateTableSchema, sql: &str) -> Vec<String> {
+    if schema.columns.is_empty() || is_reserved_sql_catalog_ident(&schema.table) {
+        return Vec::new();
+    }
+    let mut out = vec![sql_ddl_create_table_sql()];
+    out.extend(catalog_insert_ddl_sql(
+        "table",
+        &schema.table,
+        &schema.table,
+        sql,
+    ));
+    out
+}
+
+fn catalog_dml_for_create(schema: &CreateTableSchema, fingerprint: &str, sql: &str) -> Vec<String> {
+    if schema.columns.is_empty() || is_reserved_sql_catalog_ident(&schema.table) {
+        return Vec::new();
+    }
+    let ident = schema.identity_column.clone().unwrap_or_default();
+    let mut out = catalog_ensure_tables();
+    out.push(catalog_insert_columns_sql(schema));
+    out.push(catalog_insert_schema_sql(
+        &schema.table,
+        fingerprint,
+        &ident,
+    ));
+    out.extend(catalog_insert_ddl_sql(
+        "table",
+        &schema.table,
+        &schema.table,
+        sql,
+    ));
+    out
+}
+
 fn catalog_dml_for_drop(table: &str) -> Vec<String> {
-    vec![
-        sql_catalog_create_table_sql(),
-        sql_schema_create_table_sql(),
-        catalog_delete_sql(SQL_CATALOG_TABLE, table),
-        catalog_delete_sql(SQL_SCHEMA_TABLE, table),
-    ]
+    if is_reserved_sql_catalog_ident(table) {
+        return Vec::new();
+    }
+    let mut out = catalog_ensure_tables();
+    out.push(catalog_delete_sql(SQL_CATALOG_TABLE, table));
+    out.push(catalog_delete_sql(SQL_SCHEMA_TABLE, table));
+    out.push(catalog_delete_ddl_for_table_sql(table));
+    out
+}
+
+fn catalog_dml_for_create_index(index: &CreateIndexSchema) -> Vec<String> {
+    if is_reserved_sql_catalog_ident(&index.table) {
+        return Vec::new();
+    }
+    let mut out = catalog_ensure_tables();
+    out.extend(catalog_insert_ddl_sql(
+        "index",
+        &index.name,
+        &index.table,
+        &index.canonical_sql,
+    ));
+    out
+}
+
+fn catalog_dml_for_drop_index(name: &str) -> Vec<String> {
+    let mut out = catalog_ensure_tables();
+    out.push(catalog_delete_ddl_kind_name_sql("index", name));
+    out
 }
 
 #[cfg(feature = "host")]
@@ -902,6 +1053,74 @@ fn catalog_delete_sql(catalog_table: &str, table: &str) -> String {
         "DELETE FROM {catalog_table} WHERE table_name = '{}'",
         escape_sql_str(table)
     )
+}
+
+fn catalog_insert_ddl_sql(kind: &str, name: &str, table_name: &str, sql: &str) -> Vec<String> {
+    let canonical = sql.trim().trim_end_matches(';').trim().to_string();
+    vec![
+        catalog_delete_ddl_kind_name_sql(kind, name),
+        catalog_insert_ddl_row_sql(kind, name, table_name, &canonical),
+    ]
+}
+
+#[cfg(feature = "host")]
+fn catalog_insert_ddl_row_sql(kind: &str, name: &str, table_name: &str, sql: &str) -> String {
+    sea_query::Query::insert()
+        .into_table(SQL_DDL_TABLE)
+        .columns(["kind", "name", "table_name", "canonical_sql"])
+        .values_panic([kind.into(), name.into(), table_name.into(), sql.into()])
+        .to_string(sea_query::SqliteQueryBuilder)
+}
+
+#[cfg(not(feature = "host"))]
+fn catalog_insert_ddl_row_sql(kind: &str, name: &str, table_name: &str, sql: &str) -> String {
+    format!(
+        "INSERT INTO {SQL_DDL_TABLE} (kind, name, table_name, canonical_sql) \
+         VALUES ('{}', '{}', '{}', '{}')",
+        escape_sql_str(kind),
+        escape_sql_str(name),
+        escape_sql_str(table_name),
+        escape_sql_str(sql)
+    )
+}
+
+fn catalog_delete_ddl_for_table_sql(table: &str) -> String {
+    #[cfg(feature = "host")]
+    {
+        sea_query::Query::delete()
+            .from_table(sea_query::Alias::new(SQL_DDL_TABLE))
+            .and_where(sea_query::ExprTrait::eq(
+                sea_query::Expr::col("table_name"),
+                table,
+            ))
+            .to_string(sea_query::SqliteQueryBuilder)
+    }
+    #[cfg(not(feature = "host"))]
+    {
+        format!(
+            "DELETE FROM {SQL_DDL_TABLE} WHERE table_name = '{}'",
+            escape_sql_str(table)
+        )
+    }
+}
+
+fn catalog_delete_ddl_kind_name_sql(kind: &str, name: &str) -> String {
+    #[cfg(feature = "host")]
+    {
+        sea_query::Query::delete()
+            .from_table(sea_query::Alias::new(SQL_DDL_TABLE))
+            .and_where(sea_query::ExprTrait::eq(sea_query::Expr::col("kind"), kind))
+            .and_where(sea_query::ExprTrait::eq(sea_query::Expr::col("name"), name))
+            .to_string(sea_query::SqliteQueryBuilder)
+    }
+    #[cfg(not(feature = "host"))]
+    {
+        format!(
+            "DELETE FROM {SQL_DDL_TABLE} WHERE kind = '{}' AND name = '{}'",
+            escape_sql_str(kind),
+            escape_sql_str(name)
+        )
+    }
 }
 
 /// Applies a resolved schema action to `env` without reparsing CREATE SQL.
@@ -1012,8 +1231,13 @@ pub fn sql_type_env_from_canonical_ddl(sql: &str) -> SqlTypeEnv {
 pub fn sql_host_bookkeeping_type_env() -> SqlTypeEnv {
     sql_type_env_from_canonical_ddl(
         "CREATE TABLE db_atomic_receipts (\
-         operation_id TEXT NOT NULL, operation_kind TEXT NOT NULL, request_hash TEXT NOT NULL, \
-         status TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL)",
+         operation_id TEXT PRIMARY KEY NOT NULL, operation_kind TEXT NOT NULL, \
+         request_hash TEXT NOT NULL, status TEXT NOT NULL, payload TEXT, \
+         created_at TEXT NOT NULL, expires_at TEXT NOT NULL, consume_key TEXT UNIQUE);\
+         CREATE TABLE pragma_user_version (user_version INTEGER NOT NULL);\
+         CREATE TABLE pragma_table_info (\
+         cid INTEGER NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, \
+         notnull INTEGER NOT NULL, dflt_value TEXT, pk INTEGER NOT NULL)",
     )
 }
 
@@ -3655,6 +3879,18 @@ mod tests {
             proofs[0].schema_action,
             SchemaAction::Create { noop: true, .. }
         ));
+        let backfill = catalog_companions_for_action(sql, Some(&proofs[0].schema_action));
+        assert!(
+            backfill
+                .iter()
+                .any(|s| s.contains(SQL_DDL_TABLE) && s.to_ascii_uppercase().contains("INSERT")),
+            "matching IF NOT EXISTS CREATE must backfill `{SQL_DDL_TABLE}`: {backfill:?}"
+        );
+        assert!(
+            !backfill.iter().any(|s| s.contains(SQL_CATALOG_TABLE)
+                && s.to_ascii_uppercase().contains("INSERT")),
+            "noop CREATE must not rewrite catalog/identity: {backfill:?}"
+        );
         let err = typecheck_execute_request(&req("CREATE TABLE IF NOT EXISTS t (n TEXT)"), &env)
             .unwrap_err();
         assert!(err.to_string().contains("does not match"), "{err}");
@@ -3933,8 +4169,68 @@ mod tests {
                         .any(|s| s.contains("notes") && s.to_ascii_uppercase().contains("INSERT")),
                     "{companions:?}"
                 );
+                assert!(
+                    companions
+                        .iter()
+                        .any(|s| s.contains(SQL_DDL_TABLE)
+                            && s.to_ascii_uppercase().contains("INSERT")),
+                    "CREATE TABLE must persist canonical DDL: {companions:?}"
+                );
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_create_index_sql_reads_unique_and_table() {
+        let idx = parse_create_index_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_body ON notes (body)",
+        )
+        .expect("index");
+        assert_eq!(idx.name, "idx_notes_body");
+        assert_eq!(idx.table, "notes");
+        assert!(idx.unique);
+        let drop = parse_drop_index_name("DROP INDEX IF EXISTS idx_notes_body").expect("drop");
+        assert_eq!(drop, "idx_notes_body");
+    }
+
+    #[test]
+    fn catalog_companions_persist_and_drop_index_sql() {
+        let sql = "CREATE INDEX IF NOT EXISTS idx_notes_body ON notes (body)";
+        let companions = catalog_companions(sql);
+        assert!(
+            companions
+                .iter()
+                .any(|s| s.contains(SQL_DDL_TABLE) && s.contains("idx_notes_body")),
+            "{companions:?}"
+        );
+        let drop = catalog_companions("DROP INDEX IF EXISTS idx_notes_body");
+        assert!(
+            drop.iter()
+                .any(|s| s.to_ascii_uppercase().contains("DELETE") && s.contains("idx_notes_body")),
+            "{drop:?}"
+        );
+    }
+
+    #[test]
+    fn catalog_companions_skip_reserved_identity_and_catalog_tables() {
+        let sql = format!(
+            "CREATE TABLE IF NOT EXISTS {SQL_IDENTITY_TABLE} (\
+             table_name TEXT PRIMARY KEY, last INTEGER NOT NULL)"
+        );
+        assert!(
+            catalog_companions(&sql).is_empty(),
+            "identity-table DDL must not be catalogued as plugin schema"
+        );
+        assert!(catalog_companions(&format!(
+            "CREATE TABLE IF NOT EXISTS {SQL_CATALOG_TABLE} (table_name TEXT, column_name TEXT)"
+        ))
+        .is_empty());
+        assert!(catalog_companions(&format!(
+            "CREATE TABLE IF NOT EXISTS {SQL_DDL_TABLE} (\
+             kind TEXT NOT NULL, name TEXT NOT NULL, table_name TEXT NOT NULL, \
+             canonical_sql TEXT NOT NULL, PRIMARY KEY (kind, name))"
+        ))
+        .is_empty());
     }
 }
