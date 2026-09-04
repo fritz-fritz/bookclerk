@@ -104,6 +104,13 @@ fn typed_is_read_only(statements: &[TypedDbStatement]) -> bool {
         .all(|s| matches!(s.kind, DbPlanStatementKind::Select))
 }
 
+/// True when the batch includes host `db_atomic_receipts` gating (named atomics).
+fn typed_is_receipt_gated(statements: &[TypedDbStatement]) -> bool {
+    statements
+        .iter()
+        .any(|s| s.sql.to_ascii_lowercase().contains("db_atomic_receipts"))
+}
+
 impl D1Proxy {
     /// Runs a typed [`ExecuteRequest`] as one D1 HTTP batch.
     ///
@@ -164,7 +171,9 @@ impl D1Proxy {
         // exactly-once only when the request is receipt-gated (replay detects
         // the prior commit) or provably read-only. An unwrapped mutation must
         // surface the ambiguity instead of resubmitting.
-        let retry_safe = !guest_receipt.is_absent() || typed_is_read_only(&req.statements);
+        let retry_safe = !guest_receipt.is_absent()
+            || typed_is_read_only(&req.statements)
+            || typed_is_receipt_gated(&req.statements);
         let d1_caps = DbCapabilities::advertised_d1();
         let cap = d1_caps.max_result_rows;
         if (!guest_receipt.is_absent() || !proofs.is_empty()) && proofs.len() != wire_len {

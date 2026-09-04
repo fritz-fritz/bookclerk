@@ -1037,6 +1037,31 @@ mod tests {
         }
     }
 
+    fn is_declared_type_query(body: &JsonValue) -> bool {
+        body["batch"].as_array().is_some_and(|batch| {
+            !batch.is_empty()
+                && batch.iter().all(|stmt| {
+                    stmt["sql"]
+                        .as_str()
+                        .is_some_and(|sql| sql.to_ascii_lowercase().contains("pragma_table_info"))
+                })
+        })
+    }
+
+    fn atomic_http_batches(queries: &[JsonValue]) -> Vec<&JsonValue> {
+        queries
+            .iter()
+            .filter(|q| !is_declared_type_query(q))
+            .collect()
+    }
+
+    fn request_is_declared_types(request: &wiremock::Request) -> bool {
+        std::str::from_utf8(&request.body)
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("pragma_table_info")
+    }
+
     fn query_ok() -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(json!({
             "success": true,
@@ -1339,8 +1364,9 @@ mod tests {
             .filter(|r| r.url.path().ends_with("/query"))
             .map(|r| serde_json::from_slice(&r.body).unwrap())
             .collect();
-        assert_eq!(queries.len(), 1);
-        let batch = queries[0]["batch"]
+        let atomic = atomic_http_batches(&queries);
+        assert_eq!(atomic.len(), 1, "{queries:?}");
+        let batch = atomic[0]["batch"]
             .as_array()
             .expect("atomic execute must use the documented { batch: [...] } envelope");
         assert!(
@@ -1398,8 +1424,9 @@ mod tests {
             .filter(|r| r.url.path().ends_with("/query"))
             .map(|r| serde_json::from_slice(&r.body).unwrap())
             .collect();
-        assert_eq!(queries.len(), 1);
-        let batch = queries[0]["batch"]
+        let atomic = atomic_http_batches(&queries);
+        assert_eq!(atomic.len(), 1, "{queries:?}");
+        let batch = atomic[0]["batch"]
             .as_array()
             .expect("atomic execute must use the documented { batch: [...] } envelope");
         assert!(
@@ -1415,7 +1442,7 @@ mod tests {
         assert!(sql.contains("encrypted_secrets"), "{sql}");
         assert!(sql.contains("totp_enabled"), "{sql}");
         assert!(sql.contains("db_atomic_receipts"), "{sql}");
-        let body = serde_json::to_string(&queries[0]).unwrap();
+        let body = serde_json::to_string(atomic[0]).unwrap();
         assert!(
             !body.contains("$sea_null"),
             "D1 HTTP params must flatten typed nulls to JSON null: {body}"
@@ -1453,8 +1480,9 @@ mod tests {
             .filter(|r| r.url.path().ends_with("/query"))
             .map(|r| serde_json::from_slice(&r.body).unwrap())
             .collect();
-        assert_eq!(queries.len(), 1);
-        let batch = queries[0]["batch"]
+        let atomic = atomic_http_batches(&queries);
+        assert_eq!(atomic.len(), 1, "{queries:?}");
+        let batch = atomic[0]["batch"]
             .as_array()
             .expect("atomic execute must use the documented { batch: [...] } envelope");
         let sql: String = batch
@@ -1479,6 +1507,9 @@ mod tests {
         }
         impl Respond for FirstMangledThenOk {
             fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                if request_is_declared_types(request) {
+                    return d1_success_for_batch_request(request);
+                }
                 if self.hits.fetch_add(1, Ordering::SeqCst) == 0 {
                     ResponseTemplate::new(200).set_body_string("{\"success\":")
                 } else {
@@ -1522,6 +1553,9 @@ mod tests {
         }
         impl Respond for FirstIncompleteThenOk {
             fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                if request_is_declared_types(request) {
+                    return d1_success_for_batch_request(request);
+                }
                 if self.hits.fetch_add(1, Ordering::SeqCst) == 0 {
                     incomplete_batch_ok()
                 } else {
@@ -1565,6 +1599,9 @@ mod tests {
         }
         impl Respond for TwoIncompleteThenOk {
             fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                if request_is_declared_types(request) {
+                    return d1_success_for_batch_request(request);
+                }
                 if self.hits.fetch_add(1, Ordering::SeqCst) < 2 {
                     incomplete_batch_ok()
                 } else {
@@ -1611,6 +1648,9 @@ mod tests {
         }
         impl Respond for ThreeIncompleteThenOk {
             fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                if request_is_declared_types(request) {
+                    return d1_success_for_batch_request(request);
+                }
                 if self.hits.fetch_add(1, Ordering::SeqCst) < 3 {
                     incomplete_batch_ok()
                 } else {
@@ -1654,7 +1694,10 @@ mod tests {
             hits: Arc<AtomicUsize>,
         }
         impl Respond for Always400 {
-            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+            fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                if request_is_declared_types(request) {
+                    return d1_success_for_batch_request(request);
+                }
                 self.hits.fetch_add(1, Ordering::SeqCst);
                 ResponseTemplate::new(400)
                     .set_body_string("{\"success\":false,\"errors\":[\"bad\"]}")
@@ -1698,6 +1741,9 @@ mod tests {
         }
         impl Respond for First503ThenOk {
             fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                if request_is_declared_types(request) {
+                    return d1_success_for_batch_request(request);
+                }
                 if self.hits.fetch_add(1, Ordering::SeqCst) == 0 {
                     ResponseTemplate::new(503)
                         .insert_header("Retry-After", "0")

@@ -34,6 +34,7 @@ pub fn typed_rows_to_json(columns: &[DbColumn], rows: &[DbRow]) -> Vec<JsonValue
         .collect()
 }
 
+/// Encodes one typed cell as domain JSON (nulls stay JSON null; bytes use `b64:`).
 fn db_value_to_domain_json(v: &DbValue) -> JsonValue {
     match v {
         DbValue::Null(_) => JsonValue::Null,

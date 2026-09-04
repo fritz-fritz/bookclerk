@@ -56,7 +56,6 @@ fn typed_stmt(
     kind: bookclerk_plugin_abi::DbPlanStatementKind,
 ) -> bookclerk_plugin_abi::TypedDbStatement {
     use bookclerk_plugin_abi::{DbResultSelection, TypedDbStatement};
-    let kind = kind;
     TypedDbStatement {
         sql: sql.into(),
         parameters: vec![],
