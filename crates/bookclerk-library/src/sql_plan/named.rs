@@ -737,13 +737,9 @@ fn j_i64(n: i64) -> DbValue {
     DbValue::Int64(n)
 }
 
-/// Text bind; a `b64:` prefix is decoded to [`DbValue::Bytes`].
+/// Text bind. Contents stay [`DbValue::Text`] even when they start with `b64:`.
 fn j_str(s: &str) -> DbValue {
-    if let Some(bytes) = crate::b64_string_to_bytes(s) {
-        DbValue::Bytes(bytes)
-    } else {
-        DbValue::Text(s.to_string())
-    }
+    DbValue::Text(s.to_string())
 }
 
 /// Text bind, or an untyped SQL null when the optional value is absent.
@@ -762,10 +758,22 @@ fn j_opt_i64(n: Option<i64>) -> DbValue {
     }
 }
 
+/// Blob bind: decode a `b64:`-prefixed string to [`DbValue::Bytes`].
+///
+/// Used only for BLOB columns (`ciphertext`, `kdf_salt`, `cipher_nonce`). A
+/// missing or invalid `b64:` prefix is treated as the raw octet string so the
+/// column never silently becomes text.
+fn j_blob(s: &str) -> DbValue {
+    match crate::b64_string_to_bytes(s) {
+        Some(bytes) => DbValue::Bytes(bytes),
+        None => DbValue::Bytes(s.as_bytes().to_vec()),
+    }
+}
+
 /// Blob bind, or a typed Bytes null when the optional value is absent.
 fn j_opt_blob(s: Option<&str>) -> DbValue {
     match s {
-        Some(v) => j_str(v),
+        Some(v) => j_blob(v),
         None => DbValue::Null(DbType::Bytes),
     }
 }
@@ -1515,7 +1523,7 @@ fn plan_confirm_totp_enrollment(
                 vec![
                     j_str(&account_id),
                     j_str(format),
-                    j_str(ciphertext),
+                    j_blob(ciphertext),
                     j_opt_str(kdf_algorithm),
                     j_opt_blob(kdf_salt),
                     j_opt_i64(kdf_m_cost),
@@ -4047,6 +4055,50 @@ mod tests {
         assert!(
             lowered.contains("$5"),
             "adapter lowering must number blob binds:\n{lowered}"
+        );
+    }
+
+    #[test]
+    fn text_binds_keep_decodable_b64_prefix_as_text() {
+        let req = test_req(
+            DbAtomicParams::PublishDomainEvent {
+                id: "evt-b64-text".into(),
+                event_type: "book_acquired".into(),
+                schema_version: 1,
+                account_id: "acct".into(),
+                source: String::new(),
+                correlation_id: String::new(),
+                causation_id: String::new(),
+                dedup_key: "b64:YWJj".into(),
+                payload: "{}".into(),
+                ordering_key: String::new(),
+            },
+            "evt-b64-text",
+        );
+        let compiled =
+            compile_named_request(&req.operation_id, &req.operation, "2024-06-01T00:00:00Z")
+                .unwrap();
+        let insert = compiled
+            .request
+            .statements
+            .iter()
+            .find(|s| s.sql.contains("INSERT INTO domain_events"))
+            .expect("publish plan inserts domain_events");
+        assert!(
+            insert
+                .parameters
+                .iter()
+                .any(|p| *p == DbValue::Text("b64:YWJj".into())),
+            "TEXT dedup_key must stay text even with a decodable b64: prefix: {:?}",
+            insert.parameters
+        );
+        assert!(
+            !insert
+                .parameters
+                .iter()
+                .any(|p| matches!(p, DbValue::Bytes(b) if b == b"abc")),
+            "TEXT dedup_key must not be inferred as bytes: {:?}",
+            insert.parameters
         );
     }
 
