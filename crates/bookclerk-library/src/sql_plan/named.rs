@@ -737,7 +737,7 @@ fn j_i64(n: i64) -> DbValue {
     DbValue::Int64(n)
 }
 
-/// Text bind; a `b64:` prefix is decoded to [`DbValue::Bytes`] (legacy JSON IR).
+/// Text bind; a `b64:` prefix is decoded to [`DbValue::Bytes`].
 fn j_str(s: &str) -> DbValue {
     if let Some(bytes) = crate::b64_string_to_bytes(s) {
         DbValue::Bytes(bytes)
@@ -2936,7 +2936,7 @@ mod tests {
     }
 
     fn migrate(conn: &Connection) {
-        conn.execute_batch(crate::migrations::greenfield_baseline_canonical())
+        conn.execute_batch(crate::migrations::latest_schema_sqlite())
             .unwrap();
     }
 

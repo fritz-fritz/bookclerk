@@ -15,8 +15,10 @@ mod named;
 mod reply;
 mod slots;
 mod typed_vectors;
-pub mod vectors;
 mod vectors_typed;
+
+/// Injected `maxResultRows` for conn-vector row-cap cases (sqlite / postgres).
+pub(crate) const CONTRACT_VECTOR_ROW_CAP: u32 = 5;
 
 use bookclerk_plugin_abi::{encoded_execute_request_bytes, DbCapabilities, ExecuteRequest};
 
@@ -393,6 +395,15 @@ mod limits_tests {
             0,
         );
         let err = validate_plan(&plan, &tiny_caps()).unwrap_err();
+        assert!(err.to_string().contains("maxBinds"), "{err}");
+    }
+
+    #[test]
+    fn advertised_d1_rejects_more_than_max_binds() {
+        let caps = DbCapabilities::advertised_d1();
+        let binds = vec![DbValue::Int64(1); (caps.max_binds as usize) + 1];
+        let plan = compiled(vec![stmt("SELECT 1", binds)], 0);
+        let err = validate_plan(&plan, &caps).unwrap_err();
         assert!(err.to_string().contains("maxBinds"), "{err}");
     }
 

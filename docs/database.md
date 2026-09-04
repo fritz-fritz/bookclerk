@@ -41,8 +41,8 @@ daemon/CLI:
 
 - Entity / `ActiveModel` workflow closest to Prisma Client usage patterns.
 - Same `DatabaseConnection` for local SQLite and D1 (proxy).
-- Migrations and schema stay SQL-first (compatible with existing
-  `library.db` files) while queries move onto typed entities over time.
+- Schema stays SQL-first (one greenfield version-1 pack) while queries
+  use typed entities.
 
 ### `libsqlite3` alignment note
 
@@ -52,8 +52,8 @@ link two `links = "sqlite3"` crates in one binary.
 
 Bookclerk therefore:
 
-- Pins workspace `rusqlite` to **0.37** and `rusqlite_migration` to **2.3** so
-  they share `libsqlite3-sys` 0.35 with a single SQLite link.
+- Pins workspace `rusqlite` to **0.37** so it shares `libsqlite3-sys` 0.35
+  with a single SQLite link.
 - Vendors `audible-rs` under [`third_party/audible-rs`](../third_party/audible-rs)
   (see `BOOKCLERK_PATCH.md` there). The plugin uses audible-rs as a library
   (`default-features = false`); its optional `cli` feature still pins

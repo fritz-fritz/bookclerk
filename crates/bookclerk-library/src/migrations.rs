@@ -700,7 +700,7 @@ pub fn binding_bootstrap_sql() -> &'static str {
 /// Column types implied by canonical host library DDL.
 #[must_use]
 pub fn host_sql_type_env() -> bookclerk_plugin_abi::SqlTypeEnv {
-    bookclerk_plugin_abi::sql_type_env_from_canonical_ddl(greenfield_baseline_canonical())
+    bookclerk_plugin_abi::sql_type_env_from_canonical_ddl(latest_schema_sqlite())
 }
 
 /// Returns the canonical host migration plan shared by every marker kind.
@@ -711,22 +711,8 @@ pub fn host_sql_type_env() -> bookclerk_plugin_abi::SqlTypeEnv {
 pub fn host_migration_plan() -> Vec<HostMigrationStep> {
     vec![HostMigrationStep {
         version: 1,
-        canonical: greenfield_baseline_canonical(),
+        canonical: latest_schema_sqlite(),
     }]
-}
-
-/// Current canonical sqlite-shaped library DDL.
-#[must_use]
-pub(crate) fn greenfield_baseline_canonical() -> &'static str {
-    SQLITE_SCHEMA
-}
-
-/// Canonical SQLite-shaped DDL for `step` (never backend-selected at the host).
-///
-/// Adapters lower this at execution via [`bookclerk_db_exec::expand_host_schema_batch`].
-#[must_use]
-pub fn host_migration_sql(_backend: sea_orm::DbBackend, step: &HostMigrationStep) -> &'static str {
-    step.canonical
 }
 
 /// Final PostgreSQL DDL for a fresh Bookclerk library database.
@@ -743,19 +729,13 @@ pub fn latest_schema_postgres() -> String {
         .join(";\n")
 }
 
-/// Collects canonical SQLite DDL for `steps` (shared plan, not a D1-only pack).
-#[must_use]
-pub fn host_migration_sqlite_steps(steps: &[HostMigrationStep]) -> Vec<&'static str> {
-    steps.iter().map(|step| step.canonical).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::Connection;
 
     fn apply_greenfield(conn: &Connection) {
-        conn.execute_batch(greenfield_baseline_canonical()).unwrap();
+        conn.execute_batch(latest_schema_sqlite()).unwrap();
     }
 
     const EVENT_INSERT: &str = "INSERT INTO domain_events (
@@ -862,7 +842,7 @@ mod tests {
 
     #[test]
     fn greenfield_event_deliveries_enforce_foreign_keys() {
-        let canonical = greenfield_baseline_canonical();
+        let canonical = latest_schema_sqlite();
         assert!(
             canonical.contains("UNIQUE(account_id, source, event_type, dedup_key)"),
             "baseline must include namespaced domain_events uniqueness"
@@ -922,7 +902,7 @@ mod tests {
             proofs[0]
         );
         let mut working = env.clone();
-        for stmt in bookclerk_db_exec::split_schema_statements(greenfield_baseline_canonical()) {
+        for stmt in bookclerk_db_exec::split_schema_statements(latest_schema_sqlite()) {
             bookclerk_plugin_abi::apply_schema_sql_to_env(&mut working, &stmt);
             if bookclerk_plugin_abi::statement_is_ddl(&stmt) {
                 continue;
