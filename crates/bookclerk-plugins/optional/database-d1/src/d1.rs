@@ -866,7 +866,11 @@ fn is_binary_column(column: &str) -> bool {
     BINARY_COLUMNS.contains(&column)
 }
 
-/// Maps a D1 JSON cell back to a SeaORM [`Value`], decoding `b64:` or known binary columns.
+/// Maps a D1 JSON cell back to a SeaORM [`Value`].
+///
+/// `b64:` decoding applies only to known blob columns (`ciphertext`,
+/// `kdf_salt`, `cipher_nonce`, `vector`). Ordinary TEXT stays a string even
+/// when it starts with a decodable `b64:` prefix.
 ///
 /// String and blob cells larger than [`MAX_SCALAR_BYTES`] are rejected before
 /// clone or base64 decode.
@@ -887,14 +891,13 @@ fn json_to_sea_value(v: &JsonValue, column: &str) -> std::result::Result<Value, 
             }
         }
         JsonValue::String(s) => {
-            // Decode b64:-prefixed strings or known binary columns.
-            if let Some(bytes) = b64_string_to_bytes(s) {
-                if bytes.len() > MAX_SCALAR_BYTES as usize {
-                    return Err(oversized_cell_err(column, bytes.len()));
-                }
-                return Ok(Value::Bytes(Some(bytes)));
-            }
             if is_binary_column(column) {
+                if let Some(bytes) = b64_string_to_bytes(s) {
+                    if bytes.len() > MAX_SCALAR_BYTES as usize {
+                        return Err(oversized_cell_err(column, bytes.len()));
+                    }
+                    return Ok(Value::Bytes(Some(bytes)));
+                }
                 // Legacy: try base64 without prefix (shouldn't happen with new writes).
                 if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s.as_bytes()) {
                     if bytes.len() > MAX_SCALAR_BYTES as usize {
@@ -902,6 +905,7 @@ fn json_to_sea_value(v: &JsonValue, column: &str) -> std::result::Result<Value, 
                     }
                     return Ok(Value::Bytes(Some(bytes)));
                 }
+                return Ok(Value::Bytes(Some(s.as_bytes().to_vec())));
             }
             Ok(Value::String(Some(s.clone())))
         }
@@ -1824,6 +1828,14 @@ mod tests {
             "SELECT * FROM (SELECT id FROM t) AS _bookclerk_page LIMIT 11 OFFSET 0"
         ));
         assert!(!sql_is_bookclerk_page("SELECT 1"));
+    }
+
+    #[test]
+    fn json_to_sea_value_keeps_decodable_b64_text_unless_blob_column() {
+        let text = json_to_sea_value(&JsonValue::String("b64:YWJj".into()), "note").unwrap();
+        assert_eq!(text, Value::String(Some("b64:YWJj".into())));
+        let blob = json_to_sea_value(&JsonValue::String("b64:AA==".into()), "ciphertext").unwrap();
+        assert_eq!(blob, Value::Bytes(Some(vec![0])));
     }
 
     #[test]
