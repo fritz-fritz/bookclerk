@@ -199,6 +199,8 @@ fn scan_references_keyword(sql: &str) -> Vec<String> {
 ///
 /// Preference: primary key columns, else a table-level UNIQUE key, else a
 /// single-column UNIQUE, else every declared column (keyless full-row sort).
+/// Remaining declared columns are always appended as tie-breakers so two
+/// rows that share a nullable UNIQUE key still have a total order.
 /// Physical order, `rowid`, and heap order are never used.
 #[must_use]
 pub fn order_key_columns(parsed: &CreateTableSchema) -> Vec<String> {
@@ -209,34 +211,61 @@ pub fn order_key_columns(parsed: &CreateTableSchema) -> Vec<String> {
         .filter(|(i, _)| parsed.column_primary_key.get(*i).copied().unwrap_or(false))
         .map(|(_, (n, _))| n.clone())
         .collect();
-    if !inline_pk.is_empty() {
-        return inline_pk;
-    }
-    for c in &parsed.table_constraints {
-        if let TableConstraint::PrimaryKey(cols) = c {
-            if !cols.is_empty() {
-                return cols.clone();
-            }
+    let leading = if !inline_pk.is_empty() {
+        inline_pk
+    } else if let Some(cols) = parsed.table_constraints.iter().find_map(|c| match c {
+        TableConstraint::PrimaryKey(cols) if !cols.is_empty() => Some(cols.clone()),
+        _ => None,
+    }) {
+        cols
+    } else if let Some(cols) = parsed.table_constraints.iter().find_map(|c| match c {
+        TableConstraint::Unique(cols) if !cols.is_empty() => Some(cols.clone()),
+        _ => None,
+    }) {
+        cols
+    } else {
+        let uniques: Vec<String> = parsed
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| parsed.column_unique.get(*i).copied().unwrap_or(false))
+            .map(|(_, (n, _))| n.clone())
+            .collect();
+        if uniques.len() == 1 {
+            uniques
+        } else {
+            parsed.columns.iter().map(|(n, _)| n.clone()).collect()
+        }
+    };
+    append_declared_tiebreakers(parsed, leading)
+}
+
+/// Canonical `ORDER BY` item list (`col ASC NULLS FIRST`, declared tie-breakers).
+///
+/// SQLite and PostgreSQL disagree on default NULL placement; the explicit
+/// NULLS clause is the portable order. Capture SELECT uses this string;
+/// adapters may still run it through [`bookclerk_db_exec::lower_canonical_sql`].
+#[must_use]
+pub fn canonical_order_by_sql(parsed: &CreateTableSchema) -> String {
+    order_key_columns(parsed)
+        .into_iter()
+        .map(|col| format!("{col} ASC NULLS FIRST"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Append remaining declared columns so two rows that share a PK (or have no PK)
+/// still sort in a total, schema-stable order.
+fn append_declared_tiebreakers(
+    parsed: &CreateTableSchema,
+    mut leading: Vec<String>,
+) -> Vec<String> {
+    for (name, _) in &parsed.columns {
+        if !leading.iter().any(|existing| existing == name) {
+            leading.push(name.clone());
         }
     }
-    for c in &parsed.table_constraints {
-        if let TableConstraint::Unique(cols) = c {
-            if !cols.is_empty() {
-                return cols.clone();
-            }
-        }
-    }
-    let uniques: Vec<String> = parsed
-        .columns
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| parsed.column_unique.get(*i).copied().unwrap_or(false))
-        .map(|(_, (n, _))| n.clone())
-        .collect();
-    if uniques.len() == 1 {
-        return uniques;
-    }
-    parsed.columns.iter().map(|(n, _)| n.clone()).collect()
+    leading
 }
 
 /// Maps a declared SQL-v1 type onto `bookclerk_plugin_abi::DbType`.
