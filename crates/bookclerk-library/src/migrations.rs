@@ -675,9 +675,6 @@ pub const SCHEMA_VERSION: i64 = 0;
 /// Oldest frozen schema version this binary can run. Unused while the plan is empty.
 pub const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 1;
 
-/// Workspace semver reserved for a future first freeze. Not a production promise.
-pub const SCHEMA_V1_INTRODUCED_IN: &str = "0.1.0";
-
 /// Live development DDL. Until a release cut this **is** the library schema.
 pub const UNRELEASED_SQL: &str = SQLITE_SCHEMA;
 

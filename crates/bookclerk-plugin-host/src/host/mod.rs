@@ -9,8 +9,8 @@ mod source;
 
 pub use database::{
     backup_adapter_id, database_connect_context, load_external_database, migrate_database_plugin,
-    migrate_library_schema, open_library_store, open_library_store_for_plugin,
-    snapshot_adapter_flags, DatabaseRegistry, ExternalDatabase,
+    migrate_library_schema, open_library_store, open_library_store_for_plugin, DatabaseRegistry,
+    ExternalDatabase,
 };
 pub use destination::{load_external_destinations, DestinationRegistry};
 pub use integration::{load_external_integrations, ExternalIntegration};

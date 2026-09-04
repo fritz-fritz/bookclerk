@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use bookclerk_config::Config;
-use bookclerk_library::migrations::{host_migration_plan, SCHEMA_V1_INTRODUCED_IN};
+use bookclerk_library::migrations::host_migration_plan;
 use bookclerk_library::{
     archive_backup, backup_library, current_schema_state, extract_backup_archive, list_backups,
     prune_automatic_backups, resolve_backup_spec, restore_backup, restore_backup_in_repo,
@@ -178,7 +178,7 @@ async fn run_version(config: &Config, format: OutputFormat) -> anyhow::Result<()
         "database_schema_state": state.display(),
         "database_frozen_version": frozen,
         "checksum": state.checksum(),
-        "introduced_in": step.map(|s| s.introduced_in).unwrap_or(SCHEMA_V1_INTRODUCED_IN),
+        "introduced_in": step.map(|s| s.introduced_in),
         "app_version": env!("CARGO_PKG_VERSION"),
         "reversible": step.map(|s| s.reversible()).unwrap_or(false),
     });
