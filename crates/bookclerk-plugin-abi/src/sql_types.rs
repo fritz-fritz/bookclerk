@@ -830,17 +830,13 @@ pub fn catalog_companions(sql: &str) -> Vec<String> {
 /// built from that proof (no CREATE reparse). Callers without a proof still
 /// parse canonical SQL. [`SchemaAction::None`] still persists `CREATE INDEX`
 /// / `DROP INDEX` so backups can rebuild admitted indexes. A fingerprint
-/// matching [`SchemaAction::Create`] no-op backfills missing
-/// `bookclerk_sql_ddl` rows without rewriting catalog, identity, or
-/// plugin-owned state.
+/// matching [`SchemaAction::Create`] no-op emits no companions: the first
+/// admitted CREATE already persisted complete catalog DDL, and a binding
+/// missing that catalog fails closed.
 #[must_use]
 pub fn catalog_companions_for_action(sql: &str, action: Option<&SchemaAction>) -> Vec<String> {
     match action {
-        Some(SchemaAction::Create {
-            schema, noop: true, ..
-        }) => {
-            return catalog_ddl_backfill(schema, sql);
-        }
+        Some(SchemaAction::Create { noop: true, .. }) => return Vec::new(),
         Some(SchemaAction::Create {
             schema,
             fingerprint,
@@ -881,26 +877,6 @@ fn is_reserved_sql_catalog_ident(name: &str) -> bool {
         name,
         SQL_CATALOG_TABLE | SQL_SCHEMA_TABLE | SQL_DDL_TABLE | SQL_IDENTITY_TABLE
     )
-}
-
-/// Backfill `bookclerk_sql_ddl` for a fingerprint-matching `CREATE TABLE IF NOT EXISTS`.
-///
-/// Existing bindings may already have `bookclerk_sql_catalog` / `_schema` from
-/// an older Bookclerk without the durable canonical DDL catalog. A matching
-/// no-op CREATE must insert missing DDL metadata without changing physical
-/// schema, identity, or plugin-owned rows.
-fn catalog_ddl_backfill(schema: &CreateTableSchema, sql: &str) -> Vec<String> {
-    if schema.columns.is_empty() || is_reserved_sql_catalog_ident(&schema.table) {
-        return Vec::new();
-    }
-    let mut out = vec![sql_ddl_create_table_sql()];
-    out.extend(catalog_insert_ddl_sql(
-        "table",
-        &schema.table,
-        &schema.table,
-        sql,
-    ));
-    out
 }
 
 fn catalog_dml_for_create(schema: &CreateTableSchema, fingerprint: &str, sql: &str) -> Vec<String> {
@@ -3879,17 +3855,10 @@ mod tests {
             proofs[0].schema_action,
             SchemaAction::Create { noop: true, .. }
         ));
-        let backfill = catalog_companions_for_action(sql, Some(&proofs[0].schema_action));
+        let companions = catalog_companions_for_action(sql, Some(&proofs[0].schema_action));
         assert!(
-            backfill
-                .iter()
-                .any(|s| s.contains(SQL_DDL_TABLE) && s.to_ascii_uppercase().contains("INSERT")),
-            "matching IF NOT EXISTS CREATE must backfill `{SQL_DDL_TABLE}`: {backfill:?}"
-        );
-        assert!(
-            !backfill.iter().any(|s| s.contains(SQL_CATALOG_TABLE)
-                && s.to_ascii_uppercase().contains("INSERT")),
-            "noop CREATE must not rewrite catalog/identity: {backfill:?}"
+            companions.is_empty(),
+            "fingerprint-matching IF NOT EXISTS CREATE must not emit catalog companions: {companions:?}"
         );
         let err = typecheck_execute_request(&req("CREATE TABLE IF NOT EXISTS t (n TEXT)"), &env)
             .unwrap_err();
