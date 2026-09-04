@@ -86,8 +86,8 @@ pub use host::{
     backup_adapter_id, database_connect_context, export_registered_plugin_units,
     load_external_database, load_external_destinations, load_external_integrations,
     load_external_sources, migrate_database_plugin, migrate_library_schema, open_library_store,
-    open_library_store_for_plugin, restore_plugin_backup_units, snapshot_adapter_flags,
-    DatabaseRegistry, DestinationRegistry, ExternalDatabase, ExternalIntegration, ExternalSource,
+    open_library_store_for_plugin, restore_plugin_backup_units, DatabaseRegistry,
+    DestinationRegistry, ExternalDatabase, ExternalIntegration, ExternalSource,
 };
 pub use jail::plugin_data_dir;
 pub use manifest::{
