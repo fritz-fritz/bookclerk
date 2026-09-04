@@ -1207,8 +1207,9 @@ metadata is durable in adapter-private `bookclerk_sql_catalog` /
 `bookclerk_sql_schema` / `bookclerk_sql_ddl` (Postgres identity in
 `bookclerk_identity`); all are guest-denied. Opening a binding
 reloads types from that catalog. A matching no-op `CREATE TABLE IF NOT
-EXISTS` backfills missing `bookclerk_sql_ddl` rows without changing
-physical schema or identity so existing bindings can become backup-capable.
+EXISTS` does not rewrite catalog or identity: the first admitted CREATE
+must persist complete canonical DDL, and a binding missing that catalog
+fails closed (reset/recreate).
 See [`docs/sql-contract/v1.md`](sql-contract/v1.md).
 A mixed `CREATE` + `INSERT` batch is one atomic receipt: first execution
 applies both statements on SQLite, PostgreSQL, and D1 (D1 claims the receipt
