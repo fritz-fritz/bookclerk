@@ -130,9 +130,10 @@ where
             opts.max_request_bytes
         )));
     }
+    let engine_sql = bookclerk_db_exec::lower_canonical_sql(backend, sql);
     conn.execute_raw(Statement::from_sql_and_values(
         backend,
-        sql.to_string(),
+        engine_sql,
         params.iter().map(bookclerk_db_exec::db_value_to_sea),
     ))
     .await
