@@ -49,6 +49,7 @@
 //! | [`error`] | [`PluginError`] / [`PluginErrorCode`] |
 //! | [`guest_sql`] | SQL-v1 grammar / guest admission |
 //! | [`sql_desugar`] | Host-only semantic desugars (`NULLS`, `NULLIF`) |
+//! | [`plugin_capnp`] | Generated Cap'n Proto RPC interfaces |
 
 pub mod db;
 pub mod db_execute;
