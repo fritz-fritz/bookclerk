@@ -16,8 +16,8 @@ use sea_orm::{
 use super::encode::{chunk_would_overflow, CanonicalObject};
 use super::repository::BackupRepository;
 use super::schema::{
-    admit_canonical_schema, library_canonical_schema_for_state, order_key_columns, sort_schema,
-    sql_type_to_db_type,
+    admit_canonical_schema, canonical_order_by_sql, library_canonical_schema_for_state,
+    order_key_columns, sort_schema, sql_type_to_db_type,
 };
 use super::util::{cell_text, cell_to_db_value, ident_ok, int_cell};
 use super::{
@@ -331,6 +331,7 @@ where
             )));
         }
     }
+    let order_sql = canonical_order_by_sql(&table.parsed);
     let max_rows = opts.max_result_rows.max(1);
     let byte_budget = opts.page_byte_budget();
     let backend = conn.get_database_backend();
@@ -346,11 +347,11 @@ where
         .as_ref()
         .and_then(|c| columns.iter().position(|n| n == c));
     loop {
-        let sql = format!(
-            "SELECT {} FROM {name} ORDER BY {} LIMIT {page} OFFSET {offset}",
+        let canonical_sql = format!(
+            "SELECT {} FROM {name} ORDER BY {order_sql} LIMIT {page} OFFSET {offset}",
             columns.join(", "),
-            order.join(", ")
         );
+        let sql = bookclerk_db_exec::lower_canonical_sql(backend, &canonical_sql);
         let rows = match conn
             .query_all_raw(Statement::from_string(backend, sql))
             .await
