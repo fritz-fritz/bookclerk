@@ -52,6 +52,8 @@ pub struct ExternalDatabase {
     /// Granted `[database.<id>]` settings delivered to third-party adapters
     /// via the public `DatabaseAdapterConfig` payload.
     settings_json: Value,
+    /// Files dir used for in-place schema snapshots before upgrades.
+    files_dir: std::path::PathBuf,
 }
 
 impl ExternalDatabase {
@@ -96,6 +98,7 @@ impl ExternalDatabase {
             plugin_id: plugin.manifest.id.clone(),
             plugin_data_dir,
             settings_json: config_json,
+            files_dir: config.paths().files_dir.clone(),
         })
     }
 
@@ -105,6 +108,20 @@ impl ExternalDatabase {
     ///
     /// Returns an error when the operation fails.
     pub async fn connect(
+        &self,
+        config: &Config,
+    ) -> Result<(DatabaseConnection, DbCapabilities), DbErr> {
+        let (db, caps) = self.connect_without_migrate(config).await?;
+        self.apply_host_schema(&db, &caps).await?;
+        Ok((db, caps))
+    }
+
+    /// Open the library connection without applying host schema (CLI migrate / version).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the guest cannot open a session.
+    pub async fn connect_without_migrate(
         &self,
         config: &Config,
     ) -> Result<(DatabaseConnection, DbCapabilities), DbErr> {
@@ -143,9 +160,9 @@ impl ExternalDatabase {
             session: self.session.clone(),
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
             caps: caps.clone(),
+            binding: None,
         }));
         let db = Database::connect_proxy(backend, proxy).await?;
-        self.apply_host_schema(&db, &caps).await?;
         Ok((db, caps))
     }
 
@@ -159,7 +176,45 @@ impl ExternalDatabase {
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         let session = self.session.clone();
         let caps = caps.clone();
-        bookclerk_library::apply_host_schema_with_batch(db, kind, move |stmts| {
+        let backend_at_capture = backup_adapter_id(&self.plugin_id);
+        let opts = bookclerk_library::SchemaApplyOptions {
+            backup: Some(bookclerk_library::SchemaBackupOpts {
+                files_dir: self.files_dir.clone(),
+                include_plugin_databases: false,
+                consistent_backup_read: caps.supports_consistent_backup_read(),
+                backend_at_capture,
+                max_result_rows: caps.max_result_rows,
+                max_result_bytes: caps.max_result_bytes,
+                max_atomic_result_bytes: caps.max_atomic_result_bytes,
+                plugin_units: Vec::new(),
+            }),
+        };
+        bookclerk_library::apply_host_schema_with_batch_opts(db, kind, opts, move |stmts| {
+            let session = session.clone();
+            let caps = caps.clone();
+            async move { exec_host_ddl_batch(&session, &caps, stmts).await }
+        })
+        .await
+        .map_err(|err| DbErr::Custom(err.to_string()))
+    }
+
+    /// Migrates toward `target` using guest `executeAtomic` batches (CLI migrate / downgrade).
+    ///
+    /// # Errors
+    ///
+    /// Returns when capability flags are unknown or a schema batch fails.
+    pub async fn migrate_to(
+        &self,
+        db: &DatabaseConnection,
+        caps: &DbCapabilities,
+        target: i64,
+        opts: bookclerk_library::SchemaApplyOptions,
+    ) -> Result<bookclerk_library::SchemaWalk, DbErr> {
+        let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(caps)
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
+        let session = self.session.clone();
+        let caps = caps.clone();
+        bookclerk_library::migrate_host_schema_to_with_batch(db, kind, target, opts, move |stmts| {
             let session = session.clone();
             let caps = caps.clone();
             async move { exec_host_ddl_batch(&session, &caps, stmts).await }
@@ -245,6 +300,33 @@ pub async fn load_external_database(config: &Config) -> PluginResult<DatabaseReg
         )));
     }
     Ok(registry)
+}
+
+/// Opens the active database guest without auto-apply and migrates to `target`.
+///
+/// Uses guest `executeAtomic` batches (the same path as daemon connect).
+///
+/// # Errors
+///
+/// Returns when the guest cannot start, connect, or apply schema.
+pub async fn migrate_library_schema(
+    config: &Config,
+    target: i64,
+    opts: bookclerk_library::SchemaApplyOptions,
+) -> PluginResult<bookclerk_library::SchemaWalk> {
+    let registry = load_external_database(config).await?;
+    let ext = registry.active().ok_or_else(|| {
+        PluginError::message(
+            "no active database plugin — stage and enable [database].plugin".to_string(),
+        )
+    })?;
+    let (db, caps) = ext
+        .connect_without_migrate(config)
+        .await
+        .map_err(|err| PluginError::message(err.to_string()))?;
+    ext.migrate_to(&db, &caps, target, opts)
+        .await
+        .map_err(|err| PluginError::message(err.to_string()))
 }
 
 /// Open [`bookclerk_library::LibraryStore`] via the external database guest (required).
@@ -426,6 +508,41 @@ fn d1_binding_database_name(owner_plugin_id: &str, binding: &str) -> String {
         "bookclerk-pb-{}",
         &binding_instance_id(owner_plugin_id, binding)[..32]
     )
+}
+
+/// Backend-native unit ref for one `(plugin, binding)` on the active adapter.
+pub(crate) fn plugin_binding_unit_ref(
+    config: &Config,
+    kind: Option<DatabasePluginKind>,
+    owner_plugin_id: &str,
+    binding: &str,
+) -> String {
+    match kind {
+        Some(DatabasePluginKind::Sqlite) => config
+            .paths()
+            .files_dir
+            .join("plugin-databases")
+            .join(owner_plugin_id)
+            .join(format!("{binding}.db"))
+            .display()
+            .to_string(),
+        Some(DatabasePluginKind::Postgres) => {
+            postgres_binding_database_name(owner_plugin_id, binding)
+        }
+        Some(DatabasePluginKind::D1) => d1_binding_database_name(owner_plugin_id, binding),
+        None => binding_instance_id(owner_plugin_id, binding),
+    }
+}
+
+/// Adapter id recorded on a backup (diagnostic; restore is capability-driven).
+#[must_use]
+pub fn backup_adapter_id(plugin_id: &str) -> String {
+    match DatabasePluginKind::parse(plugin_id) {
+        Some(DatabasePluginKind::Sqlite) => "sqlite".into(),
+        Some(DatabasePluginKind::Postgres) => "postgres".into(),
+        Some(DatabasePluginKind::D1) => "d1".into(),
+        None => plugin_id.to_string(),
+    }
 }
 
 /// Reads the durable binding catalog through the host (guest-denied) path.
@@ -691,6 +808,7 @@ impl ExternalDatabase {
                 owner_plugin_id,
                 binding,
                 &record.unit_ref,
+                true,
             )?;
             let key = format!("{owner_plugin_id}/{binding}");
             let binding_caps = self.session.db_open_binding(&key, ctx).await?;
@@ -725,6 +843,63 @@ impl ExternalDatabase {
         Ok(out)
     }
 
+    /// Opens one plugin binding as a SeaORM connection through the guest session.
+    ///
+    /// Physical provisioning is adapter-owned (`provision`). Logical identity is
+    /// `(plugin_id, binding)`. Does not switch on sqlite/postgres/d1 beyond
+    /// building the adapter's own connect context.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the guest cannot open the binding or the proxy fails.
+    pub async fn open_binding_seaorm(
+        &self,
+        config: &Config,
+        owner_plugin_id: &str,
+        binding: &str,
+        unit_ref: &str,
+        provision: bool,
+        backend: DbBackend,
+    ) -> PluginResult<(DatabaseConnection, DbCapabilities)> {
+        let kind = DatabasePluginKind::parse(&self.plugin_id);
+        let ctx = self.binding_connect_context(
+            config,
+            kind,
+            owner_plugin_id,
+            binding,
+            unit_ref,
+            provision,
+        )?;
+        let key = format!("{owner_plugin_id}/{binding}");
+        let binding_caps = self.session.db_open_binding(&key, ctx).await?;
+        if !binding_caps.meets_host_minimums() {
+            return Err(PluginError::message(format!(
+                "database binding `{owner_plugin_id}/{binding}` failed host capability \
+                 minima: {}",
+                binding_caps.capability_failure_reason()
+            )));
+        }
+        if provision {
+            self.session
+                .db_execute_binding_request(
+                    &key,
+                    binding_bootstrap_request(owner_plugin_id, binding),
+                    Arc::new(AtomicBool::new(false)),
+                )
+                .await?;
+        }
+        let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
+            session: self.session.clone(),
+            txn_depth: Arc::new(Mutex::new(HashMap::new())),
+            caps: binding_caps.clone(),
+            binding: Some(key),
+        }));
+        let db = Database::connect_proxy(backend, proxy)
+            .await
+            .map_err(|err| PluginError::message(err.to_string()))?;
+        Ok((db, binding_caps))
+    }
+
     /// Backend-native default unit for one `(plugin, binding)` pair.
     fn default_binding_unit(
         &self,
@@ -733,22 +908,7 @@ impl ExternalDatabase {
         owner_plugin_id: &str,
         binding: &str,
     ) -> String {
-        match kind {
-            Some(DatabasePluginKind::Sqlite) => config
-                .paths()
-                .files_dir
-                .join("plugin-databases")
-                .join(owner_plugin_id)
-                .join(format!("{binding}.db"))
-                .display()
-                .to_string(),
-            Some(DatabasePluginKind::Postgres) => {
-                postgres_binding_database_name(owner_plugin_id, binding)
-            }
-            Some(DatabasePluginKind::D1) => d1_binding_database_name(owner_plugin_id, binding),
-            // Third-party adapters receive the instance id; record it as the unit.
-            None => binding_instance_id(owner_plugin_id, binding),
-        }
+        plugin_binding_unit_ref(config, kind, owner_plugin_id, binding)
     }
 
     /// Per-binding `database.openSession` factory context.
@@ -759,6 +919,7 @@ impl ExternalDatabase {
         owner_plugin_id: &str,
         binding: &str,
         unit_ref: &str,
+        provision: bool,
     ) -> PluginResult<bookclerk_plugin_sdk::DatabaseContext> {
         let data_dir = self.plugin_data_dir.display().to_string();
         let params = match kind {
@@ -766,6 +927,7 @@ impl ExternalDatabase {
                 plugin_data_dir: data_dir,
                 sqlite_path: Some(unit_ref.to_string()),
                 binding: Some(binding.to_string()),
+                provision,
             },
             Some(DatabasePluginKind::Postgres) => DbConnectParams::Postgres {
                 plugin_data_dir: data_dir,
@@ -773,6 +935,7 @@ impl ExternalDatabase {
                     .map_err(|err| PluginError::message(err.to_string()))?,
                 binding: Some(binding.to_string()),
                 database: Some(unit_ref.to_string()),
+                provision,
             },
             Some(DatabasePluginKind::D1) => DbConnectParams::D1 {
                 plugin_data_dir: data_dir,
@@ -783,6 +946,7 @@ impl ExternalDatabase {
                     .map_err(|err| PluginError::message(err.to_string()))?,
                 binding: Some(binding.to_string()),
                 database_name: Some(unit_ref.to_string()),
+                provision,
             },
             None => {
                 let adapter_config = bookclerk_plugin_abi::DatabaseAdapterConfig {
@@ -794,6 +958,7 @@ impl ExternalDatabase {
                     },
                     binding: Some(binding.to_string()),
                     instance_id: Some(binding_instance_id(owner_plugin_id, binding)),
+                    provision,
                 };
                 return bookclerk_plugin_abi::database_context_from_adapter_config(&adapter_config)
                     .map_err(|err| PluginError::message(err.to_string()));
@@ -926,6 +1091,8 @@ struct RpcDatabaseProxy {
     txn_depth: Arc<Mutex<HashMap<TaskKey, usize>>>,
     /// Negotiated guest capabilities (statement/bind/request byte limits).
     caps: DbCapabilities,
+    /// Binding key when this proxy is a plugin database unit (`plugin_id/binding`).
+    binding: Option<String>,
 }
 
 impl std::fmt::Debug for RpcDatabaseProxy {
@@ -1031,13 +1198,39 @@ impl RpcDatabaseProxy {
         let validate_req = req.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let reply = if self.depth() > 0 {
-            self.session.db_txn_execute_request(req, cancel).await
+            if let Some(binding) = self.binding.as_deref() {
+                self.session
+                    .db_txn_execute_binding_request(binding, req, cancel)
+                    .await
+            } else {
+                self.session.db_txn_execute_request(req, cancel).await
+            }
+        } else if let Some(binding) = self.binding.as_deref() {
+            self.session
+                .db_execute_binding_request(binding, req, cancel)
+                .await
         } else {
             self.session.db_execute_request(req, cancel).await
         }?;
         bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)
             .map_err(map_reply_validation_err)?;
         Ok(reply)
+    }
+
+    /// Commit the guest transaction for this proxy's library or binding session.
+    async fn commit_rpc(&self) -> crate::Result<()> {
+        match self.binding.as_deref() {
+            Some(binding) => self.session.db_commit_binding(binding).await,
+            None => self.session.db_commit().await,
+        }
+    }
+
+    /// Roll back the guest transaction for this proxy's library or binding session.
+    async fn rollback_rpc(&self) -> crate::Result<()> {
+        match self.binding.as_deref() {
+            Some(binding) => self.session.db_rollback_binding(binding).await,
+            None => self.session.db_rollback().await,
+        }
     }
 }
 
@@ -1114,7 +1307,10 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         if prev != 0 {
             return;
         }
-        if let Err(err) = self.session.db_begin().await {
+        if let Err(err) = match self.binding.as_deref() {
+            Some(binding) => self.session.db_begin_binding(binding).await,
+            None => self.session.db_begin().await,
+        } {
             self.pop_depth();
             bookclerk_library::note_begin_failed(&err);
             tracing::error!(error = %err, "database plugin begin failed");
@@ -1124,7 +1320,7 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
     async fn commit(&self) {
         if bookclerk_library::consume_commit_injection() {
             if self.pop_depth().is_some() && self.depth() == 0 {
-                if let Err(err) = self.session.db_rollback().await {
+                if let Err(err) = self.rollback_rpc().await {
                     tracing::error!(
                         error = %err,
                         "database plugin rollback after injected commit failure"
@@ -1144,10 +1340,10 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         if next != 0 {
             return;
         }
-        if let Err(err) = self.session.db_commit().await {
+        if let Err(err) = self.commit_rpc().await {
             bookclerk_library::note_commit_failed(&err);
             tracing::error!(error = %err, "database plugin commit failed");
-            if let Err(rb) = self.session.db_rollback().await {
+            if let Err(rb) = self.rollback_rpc().await {
                 tracing::error!(error = %rb, "database plugin rollback after commit failure");
             }
         }
@@ -1160,7 +1356,7 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         if next != 0 {
             return;
         }
-        if let Err(err) = self.session.db_rollback().await {
+        if let Err(err) = self.rollback_rpc().await {
             tracing::error!(error = %err, "database plugin rollback failed");
         }
     }
@@ -1173,12 +1369,18 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
             return;
         }
         let session = self.session.clone();
+        let binding = self.binding.clone();
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             tracing::error!("database plugin rollback skipped: no tokio runtime");
             return;
         };
         if let Err(err) = tokio::task::block_in_place(|| {
-            handle.block_on(async move { session.db_rollback().await.map(|_| ()) })
+            handle.block_on(async move {
+                match binding.as_deref() {
+                    Some(name) => session.db_rollback_binding(name).await.map(|_| ()),
+                    None => session.db_rollback().await.map(|_| ()),
+                }
+            })
         }) {
             tracing::error!(error = %err, "database plugin rollback failed");
         }
@@ -1976,6 +2178,7 @@ fn connect_context(
                 api_token: resolve_d1_api_token().map_err(map_config_err)?,
                 binding: None,
                 database_name: None,
+                provision: true,
             }
         }
         Some(DatabasePluginKind::Postgres) => {
@@ -1987,6 +2190,7 @@ fn connect_context(
                 url: resolve_postgres_url(config).map_err(map_config_err)?,
                 binding: None,
                 database: None,
+                provision: true,
             }
         }
         None => return adapter_config_context(&data_dir, settings_json),
@@ -2008,6 +2212,7 @@ fn adapter_config_context(
         },
         binding: None,
         instance_id: None,
+        provision: true,
     };
     bookclerk_plugin_abi::database_context_from_adapter_config(&adapter_config)
         .map_err(|err| DbErr::Custom(err.to_string()))
@@ -2062,6 +2267,7 @@ fn sqlite_connect_params(config: &Config, plugin_data_dir: &Path) -> DbConnectPa
         plugin_data_dir: plugin_data_dir.display().to_string(),
         sqlite_path: Some(path.display().to_string()),
         binding: None,
+        provision: true,
     }
 }
 
@@ -2104,6 +2310,14 @@ fn toml_to_json(value: &toml::Value) -> Value {
 mod tests {
     use super::*;
     use bookclerk_plugin_sdk::DbCapabilities;
+
+    #[test]
+    fn backup_adapter_id_keeps_third_party_plugin_id() {
+        assert_eq!(backup_adapter_id("sqlite"), "sqlite");
+        assert_eq!(backup_adapter_id("postgres"), "postgres");
+        assert_eq!(backup_adapter_id("d1"), "d1");
+        assert_eq!(backup_adapter_id("sql-conformance"), "sql-conformance");
+    }
 
     #[test]
     fn apply_bootstrap_metadata_from_plugin_id() {

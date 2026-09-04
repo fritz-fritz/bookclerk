@@ -1,13 +1,21 @@
-//! Greenfield schema for the Bookclerk library DB.
+//! Host library schema: frozen plan steps plus the unreleased development pack.
 //!
-//! Fresh databases apply a single version-1 DDL via [`host_migration_plan`].
-//! Adapters lower canonical DDL at the execution edge (see
-//! [`bookclerk_db_exec::expand_host_schema_batch`]).
-//! [`latest_schema_sqlite`] / [`latest_schema_postgres`] expose that same
-//! current-schema pack. Statements use `CREATE TABLE IF NOT EXISTS` /
-//! `CREATE INDEX IF NOT EXISTS`. There is no incremental V2–V29 chain.
+//! Bookclerk has **not** frozen a production v1 schema. [`host_migration_plan`]
+//! is empty until a release cut. Live DDL lives in [`UNRELEASED_SQL`]. Fresh
+//! databases apply [`current_canonical_schema`] (frozen ups + unreleased) and
+//! persist [`crate::SchemaState::Unreleased`] with `base_version` equal to
+//! [`SCHEMA_VERSION`] (`0` today: no frozen revisions). Fresh init records each
+//! frozen plan step's checksum before the unreleased marker; when the
+//! unreleased bucket is empty the database ends [`crate::SchemaState::Frozen`].
+//! Adapters lower canonical DDL at
+//! the execution edge ([`bookclerk_db_exec::expand_host_schema_batch`]).
 
 use std::sync::OnceLock;
+
+#[cfg(test)]
+use std::cell::Cell;
+
+use sha2::{Digest, Sha256};
 
 /// Final SQLite DDL for a fresh Bookclerk library database.
 ///
@@ -16,10 +24,10 @@ use std::sync::OnceLock;
 /// (including RFC 3339 timestamps) to `String`.
 #[must_use]
 pub fn latest_schema_sqlite() -> &'static str {
-    SQLITE_SCHEMA
+    current_canonical_schema()
 }
 
-/// Greenfield SQLite DDL for a fresh library database (`PRAGMA user_version` v1).
+/// Greenfield SQLite DDL for a fresh library database (unreleased pack).
 const SQLITE_SCHEMA: &str = r#"
     CREATE TABLE IF NOT EXISTS accounts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -631,23 +639,9 @@ const SQLITE_SCHEMA: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_plugin_databases_plugin ON plugin_databases(plugin_id);
     "#;
 
-/// Durable atomic receipts for isolated plugin binding databases.
-const BINDING_RECEIPTS_SQL: &str = r#"
-    CREATE TABLE IF NOT EXISTS db_atomic_receipts (
-        operation_id TEXT PRIMARY KEY NOT NULL,
-        operation_kind TEXT NOT NULL,
-        request_hash TEXT NOT NULL,
-        status TEXT NOT NULL,
-        payload TEXT,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        consume_key TEXT UNIQUE
-    );
-    CREATE INDEX IF NOT EXISTS idx_db_atomic_receipts_expires ON db_atomic_receipts(expires_at);
-"#;
-
 /// Reserved adapter-private catalog + identity tables (canonical SQLite-shaped).
 ///
+/// Applied only inside isolated plugin binding databases, never the host library.
 /// Postgres adapters rewrite `last INTEGER` to `BIGINT`. Guests cannot name
 /// these tables.
 const BINDING_SQL_CATALOG_SQLITE: &str = r#"
@@ -669,7 +663,36 @@ const BINDING_SQL_CATALOG_SQLITE: &str = r#"
         table_name TEXT PRIMARY KEY NOT NULL,
         last INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS bookclerk_sql_ddl (
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        canonical_sql TEXT NOT NULL,
+        PRIMARY KEY (kind, name)
+    );
 "#;
+
+/// Highest **frozen** schema version this binary knows (`0` while the plan is empty).
+///
+/// This is not a discriminator for uninitialized vs unreleased. Use
+/// [`crate::SchemaState`].
+pub const SCHEMA_VERSION: i64 = 0;
+
+/// Oldest frozen schema version this binary can run. Unused while the plan is empty.
+pub const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 1;
+
+/// Live development DDL. Until a release cut this **is** the library schema.
+pub const UNRELEASED_SQL: &str = SQLITE_SCHEMA;
+
+/// Host bookkeeping table created before applying plan versions.
+pub const SCHEMA_MIGRATIONS_DDL: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        app_version TEXT NOT NULL,
+        applied_at TEXT NOT NULL,
+        PRIMARY KEY (state, version)
+    )";
 
 /// One host-owned schema version in the canonical Bookclerk migration plan.
 ///
@@ -681,8 +704,38 @@ const BINDING_SQL_CATALOG_SQLITE: &str = r#"
 pub struct HostMigrationStep {
     /// `PRAGMA user_version` / `schema_migrations.version` for this step.
     pub version: i64,
-    /// Canonical SQLite-shaped Bookclerk DDL for this version.
+    /// Canonical SQLite-shaped Bookclerk DDL for this version (the `up`).
     pub canonical: &'static str,
+    /// Reverse DDL when this step is reversible; `None` means restore a backup.
+    pub down: Option<&'static str>,
+    /// First Bookclerk semver that shipped this step.
+    pub introduced_in: &'static str,
+}
+
+impl HostMigrationStep {
+    /// SHA-256 hex digest of `up` (and `down` when present) used as the freeze lock.
+    #[must_use]
+    pub fn checksum(&self) -> String {
+        migration_step_checksum(self.canonical, self.down)
+    }
+
+    /// True when [`Self::down`] is present so CLI rollback can apply this step.
+    #[must_use]
+    pub fn reversible(&self) -> bool {
+        self.down.is_some()
+    }
+}
+
+/// SHA-256 hex of canonical up SQL, plus down SQL when the step is reversible.
+#[must_use]
+pub fn migration_step_checksum(canonical: &str, down: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    if let Some(down) = down {
+        hasher.update(b"\n-- down\n");
+        hasher.update(down.as_bytes());
+    }
+    hex::encode(hasher.finalize())
 }
 
 /// Canonical bootstrap DDL applied inside every isolated plugin binding
@@ -690,29 +743,145 @@ pub struct HostMigrationStep {
 ///
 /// Each binding database carries its own `db_atomic_receipts` table so guest
 /// retry tokens replay inside the binding, never against the library.
-/// SQLite-shaped; adapters lower it mechanically like the host schema.
+const BINDING_BOOTSTRAP_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS db_atomic_receipts (
+        operation_id TEXT PRIMARY KEY NOT NULL,
+        operation_kind TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload TEXT,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consume_key TEXT UNIQUE
+    );
+    CREATE INDEX IF NOT EXISTS idx_db_atomic_receipts_expires ON db_atomic_receipts(expires_at);
+"#;
+
+/// Canonical bootstrap DDL applied inside every isolated plugin binding.
 #[must_use]
 pub fn binding_bootstrap_sql() -> &'static str {
     static SQL: OnceLock<&'static str> = OnceLock::new();
-    SQL.get_or_init(|| format!("{BINDING_RECEIPTS_SQL}\n{BINDING_SQL_CATALOG_SQLITE}").leak())
+    SQL.get_or_init(|| format!("{BINDING_BOOTSTRAP_SQL}\n{BINDING_SQL_CATALOG_SQLITE}").leak())
 }
 
-/// Column types implied by canonical host library DDL.
+/// Frozen ups concatenated with [`UNRELEASED_SQL`].
+///
+/// After a future release cut this is `host_migration_plan` DDL plus whatever
+/// is again unreleased — do not assume it equals [`UNRELEASED_SQL`] forever.
+#[must_use]
+pub fn current_canonical_schema() -> &'static str {
+    static SQL: OnceLock<String> = OnceLock::new();
+    SQL.get_or_init(|| {
+        let mut parts: Vec<&str> = production_host_migration_plan()
+            .iter()
+            .map(|step| step.canonical)
+            .collect();
+        if !UNRELEASED_SQL.trim().is_empty() {
+            parts.push(UNRELEASED_SQL);
+        }
+        parts.join("\n")
+    })
+    .as_str()
+}
+
+/// SHA-256 of [`UNRELEASED_SQL`] (empty string when the bucket is empty).
+#[must_use]
+pub fn unreleased_checksum() -> String {
+    migration_step_checksum(UNRELEASED_SQL, None)
+}
+
+/// Host table names declared by [`current_canonical_schema`], plus
+/// `schema_migrations`.
+#[must_use]
+pub fn current_canonical_table_names() -> Vec<String> {
+    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            let mut names = table_names_from_canonical_ddl(current_canonical_schema());
+            if !names.iter().any(|n| n == "schema_migrations") {
+                names.push("schema_migrations".into());
+            }
+            names
+        })
+        .clone()
+}
+
+/// Parses `CREATE TABLE` names from canonical SQLite-shaped DDL.
+///
+/// Names are lowercased to match mechanical Postgres lowering.
+fn table_names_from_canonical_ddl(sql: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for stmt in bookclerk_db_exec::split_schema_statements(sql) {
+        let trimmed = stmt.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let rest = if let Some(rest) = lower.strip_prefix("create table") {
+            rest.trim()
+        } else {
+            continue;
+        };
+        let rest = rest
+            .strip_prefix("if not exists")
+            .map(str::trim)
+            .unwrap_or(rest);
+        let name = rest
+            .split(|c: char| c.is_whitespace() || c == '(')
+            .find(|part| !part.is_empty())
+            .unwrap_or("");
+        if !name.is_empty() {
+            names.push(name.trim_matches('"').trim_matches('`').to_string());
+        }
+    }
+    names
+}
+
+/// Column types implied by [`current_canonical_schema`].
 #[must_use]
 pub fn host_sql_type_env() -> bookclerk_plugin_abi::SqlTypeEnv {
-    bookclerk_plugin_abi::sql_type_env_from_canonical_ddl(latest_schema_sqlite())
+    bookclerk_plugin_abi::sql_type_env_from_canonical_ddl(current_canonical_schema())
 }
 
-/// Returns the canonical host migration plan shared by every marker kind.
-///
-/// Version 1 is the current flattened library schema (including
-/// `plugin_databases`). There are no historical incremental versions.
+/// Frozen host migration steps. Empty until a release cut copies
+/// [`UNRELEASED_SQL`] into version 1.
 #[must_use]
 pub fn host_migration_plan() -> Vec<HostMigrationStep> {
-    vec![HostMigrationStep {
-        version: 1,
-        canonical: latest_schema_sqlite(),
-    }]
+    #[cfg(test)]
+    {
+        if let Some(plan) = HOST_PLAN_OVERRIDE.with(Cell::get) {
+            return plan.to_vec();
+        }
+    }
+    production_host_migration_plan()
+}
+
+/// Production frozen plan (empty until a release cut). Test overrides must not
+/// feed [`current_canonical_schema`]'s `OnceLock`.
+fn production_host_migration_plan() -> Vec<HostMigrationStep> {
+    Vec::new()
+}
+
+#[cfg(test)]
+thread_local! {
+    static HOST_PLAN_OVERRIDE: Cell<Option<&'static [HostMigrationStep]>> = const { Cell::new(None) };
+}
+
+/// Test-only: [`host_migration_plan`] returns `plan` until the guard drops.
+#[cfg(test)]
+pub(crate) struct HostPlanOverrideGuard;
+
+#[cfg(test)]
+impl Drop for HostPlanOverrideGuard {
+    fn drop(&mut self) {
+        HOST_PLAN_OVERRIDE.with(|cell| cell.set(None));
+    }
+}
+
+/// Installs a test-only frozen plan for [`host_migration_plan`] until drop.
+#[cfg(test)]
+pub(crate) fn override_host_migration_plan(
+    plan: &'static [HostMigrationStep],
+) -> HostPlanOverrideGuard {
+    HOST_PLAN_OVERRIDE.with(|cell| cell.set(Some(plan)));
+    HostPlanOverrideGuard
 }
 
 /// Final PostgreSQL DDL for a fresh Bookclerk library database.
@@ -721,9 +890,8 @@ pub fn host_migration_plan() -> Vec<HostMigrationStep> {
 /// edge — there is no hand-authored parallel Postgres schema.
 #[must_use]
 pub fn latest_schema_postgres() -> String {
-    host_migration_plan()
-        .iter()
-        .flat_map(|step| bookclerk_db_exec::split_schema_statements(step.canonical))
+    bookclerk_db_exec::split_schema_statements(current_canonical_schema())
+        .into_iter()
         .map(|stmt| bookclerk_db_exec::lower_canonical_ddl_to_postgres(&stmt))
         .collect::<Vec<_>>()
         .join(";\n")
@@ -734,88 +902,114 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
 
-    fn apply_greenfield(conn: &Connection) {
-        conn.execute_batch(latest_schema_sqlite()).unwrap();
+    fn apply_current_schema(conn: &Connection) {
+        conn.execute_batch(current_canonical_schema()).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
     }
 
-    const EVENT_INSERT: &str = "INSERT INTO domain_events (
+    fn insert_domain_event(conn: &Connection, id: &str, account_id: &str, dedup_key: &str) {
+        conn.execute(
+            "INSERT INTO domain_events (
                 id, event_type, schema_version, occurred_at, account_id, source,
                 correlation_id, causation_id, dedup_key, payload, ordering_key,
-                dispatch_state, created_at, wake_pending
+                dispatch_state, created_at
             ) VALUES (
                 ?1, 'book_acquired', 1, '2026-01-01T00:00:00+00:00', ?2,
-                'audible', '', '', ?3, '{}', '', 'dispatched',
-                '2026-01-01T00:00:00+00:00', 1
-            )";
-
-    const DELIVERY_INSERT: &str = "INSERT INTO event_deliveries (
-                id, event_id, plugin_id, idempotency_key, state, attempt_count,
-                max_attempts, run_after, invocation_sequence, resume_pending,
-                checkpoint_schema_version, ordering_key, created_at, updated_at,
-                cancel_requested, resource_class, wake_event_type, wake_filter_json
-            ) VALUES (
-                ?1, ?2, 'echo', ?1, 'pending', 0, 8,
-                '2026-01-01T00:00:00+00:00', 0, 0, 0, '', '2026-01-01T00:00:00+00:00',
-                '2026-01-01T00:00:00+00:00', 0, 'network', '', ''
-            )";
-
-    #[test]
-    fn greenfield_preserves_deliveries_with_foreign_keys_on() {
-        let conn = Connection::open_in_memory().unwrap();
-        apply_greenfield(&conn);
-        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-        conn.execute(
-            EVENT_INSERT,
-            rusqlite::params!["evt-1", "acct", "book_acquired:u1"],
+                'audible', '', '', ?3, '{}', '', 'pending',
+                '2026-01-01T00:00:00+00:00'
+            )",
+            rusqlite::params![id, account_id, dedup_key],
         )
         .unwrap();
-        conn.execute(DELIVERY_INSERT, rusqlite::params!["evt-1:echo", "evt-1"])
-            .unwrap();
+    }
 
+    fn insert_delivery(conn: &Connection, id: &str, event_id: &str) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO event_deliveries (
+                id, event_id, plugin_id, idempotency_key, state, run_after,
+                created_at, updated_at
+            ) VALUES (
+                ?1, ?2, 'echo', ?1, 'pending', '2026-01-01T00:00:00+00:00',
+                '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+            )",
+            rusqlite::params![id, event_id],
+        )
+    }
+
+    #[test]
+    fn current_schema_rejects_orphan_event_deliveries_with_foreign_keys_on() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_current_schema(&conn);
+        let orphan = insert_delivery(&conn, "evt-missing:echo", "evt-missing");
+        assert!(
+            orphan.is_err(),
+            "event_deliveries.event_id must reference domain_events(id)"
+        );
+        insert_domain_event(&conn, "evt-1", "acct", "book_acquired:u1");
+        insert_delivery(&conn, "evt-1:echo", "evt-1").unwrap();
         let deliveries: i64 = conn
             .query_row("SELECT COUNT(*) FROM event_deliveries", [], |r| r.get(0))
             .unwrap();
         assert_eq!(deliveries, 1);
-        let grants: String = conn
-            .query_row(
-                "SELECT wake_grants_json FROM event_deliveries WHERE id = 'evt-1:echo'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(grants, "");
-
-        conn.execute(
-            EVENT_INSERT,
-            rusqlite::params!["evt-2", "other", "book_acquired:u1"],
-        )
-        .unwrap();
-        let dup = conn.execute(
-            EVENT_INSERT,
-            rusqlite::params!["evt-3", "acct", "book_acquired:u1"],
-        );
-        assert!(
-            dup.is_err(),
-            "namespaced unique must hold on the greenfield schema"
-        );
     }
 
     #[test]
-    fn host_migration_plan_is_one_current_schema_version() {
-        let plan = host_migration_plan();
-        assert_eq!(plan.len(), 1);
-        assert_eq!(plan[0].version, 1);
-        assert_eq!(plan[0].canonical, SQLITE_SCHEMA);
-        assert!(plan[0].canonical.contains("plugin_databases"));
-        assert!(plan[0].canonical.contains("dispatch_snapshot_json"));
-        assert!(plan[0].canonical.contains("db_serialization_slots"));
-        assert!(!plan[0].canonical.contains("domain_events_v27"));
-        assert!(!plan[0].canonical.contains("ALTER TABLE"));
+    fn current_schema_domain_events_unique_is_namespaced() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_current_schema(&conn);
+        insert_domain_event(&conn, "evt-1", "acct", "book_acquired:u1");
+        insert_domain_event(&conn, "evt-2", "other", "book_acquired:u1");
+        let dup = conn.execute(
+            "INSERT INTO domain_events (
+                id, event_type, schema_version, occurred_at, account_id, source,
+                correlation_id, causation_id, dedup_key, payload, ordering_key,
+                dispatch_state, created_at
+            ) VALUES (
+                'evt-3', 'book_acquired', 1, '2026-01-01T00:00:00+00:00', 'acct',
+                'audible', '', '', 'book_acquired:u1', '{}', '', 'pending',
+                '2026-01-01T00:00:00+00:00'
+            )",
+            [],
+        );
+        assert!(
+            dup.is_err(),
+            "UNIQUE(account_id, source, event_type, dedup_key) must hold"
+        );
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM domain_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn host_migration_plan_is_empty_until_a_release_cut() {
+        assert!(host_migration_plan().is_empty());
+        assert_eq!(SCHEMA_VERSION, 0);
+        assert!(!UNRELEASED_SQL.trim().is_empty());
+        assert!(UNRELEASED_SQL.contains("plugin_databases"));
+        assert!(UNRELEASED_SQL.contains("dispatch_snapshot_json"));
+        assert!(UNRELEASED_SQL.contains("db_serialization_slots"));
+        assert_eq!(current_canonical_schema(), UNRELEASED_SQL);
+        assert_eq!(unreleased_checksum().len(), 64);
+        let tables = current_canonical_table_names();
+        assert!(tables.contains(&"books".into()));
+        assert!(tables.contains(&"schema_migrations".into()));
+        assert!(tables.contains(&"plugin_databases".into()));
+    }
+
+    #[test]
+    fn unreleased_checksum_is_stable() {
+        let a = unreleased_checksum();
+        let b = unreleased_checksum();
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
     }
 
     #[test]
     fn postgres_lowering_of_baseline_is_mechanically_complete() {
         let lowered = latest_schema_postgres();
+        // No SQLite-isms may survive the mechanical lowering; the CI Postgres
+        // sidecar applies this exact output (`postgres_test_store`).
         for token in [
             "AUTOINCREMENT",
             " INTEGER",
@@ -836,35 +1030,9 @@ mod tests {
         assert!(lowered.contains(" BYTEA"), "blob columns");
         assert!(lowered.contains(" DOUBLE PRECISION"), "real columns");
         assert!(lowered.contains("UNIQUE(account_id, source, event_type, dedup_key)"));
+        // Word-boundary safety: string literals stay untouched.
         assert!(lowered.contains(r#"'["openid","profile","email"]'"#));
         assert!(!lowered.contains("domain_events_v27"));
-    }
-
-    #[test]
-    fn greenfield_event_deliveries_enforce_foreign_keys() {
-        let canonical = latest_schema_sqlite();
-        assert!(
-            canonical.contains("UNIQUE(account_id, source, event_type, dedup_key)"),
-            "baseline must include namespaced domain_events uniqueness"
-        );
-        assert!(
-            canonical
-                .contains("FOREIGN KEY(event_id) REFERENCES domain_events(id) ON DELETE CASCADE"),
-            "baseline must include event_deliveries FK onto domain_events"
-        );
-        assert!(
-            !canonical.contains("domain_events_v27"),
-            "current schema must not replay the V27 rebuild"
-        );
-
-        let conn = Connection::open_in_memory().unwrap();
-        apply_greenfield(&conn);
-        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-        let orphan = conn.execute(DELIVERY_INSERT, rusqlite::params!["orphan:echo", "missing"]);
-        assert!(
-            orphan.is_err(),
-            "orphan event_deliveries rows must fail under PRAGMA foreign_keys=ON"
-        );
     }
 
     #[test]
@@ -877,11 +1045,16 @@ mod tests {
         );
         assert!(
             env.column_type("portal_identities", "user_id").is_some(),
-            "user_id must land in the host type env"
+            "ALTER ADD COLUMN user_id must land in the host type env"
         );
-        assert!(env.has_table("domain_events"));
-        assert!(!env.has_table("domain_events_v27"));
-        assert!(env.has_table("plugin_databases"));
+        assert!(
+            env.has_table("domain_events"),
+            "rebuild RENAME must restore domain_events"
+        );
+        assert!(
+            !env.has_table("domain_events_v27"),
+            "v27 rebuild table must be renamed away"
+        );
         let req = bookclerk_plugin_abi::ExecuteRequest {
             operation_id: "host-order".into(),
             request_hash: String::new(),

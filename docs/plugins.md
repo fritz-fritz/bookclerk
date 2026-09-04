@@ -1172,7 +1172,10 @@ separate from the Bookclerk library and from every other plugin
   the REST API. Provisioning fails closed with an operator-facing error when
   the API token cannot create databases.
 - **Third-party adapters** — advertise `DbCapabilities.pluginDatabases` and
-  receive the binding name on the public `DatabaseAdapterConfig`; adapters
+  the backup flags they can actually provide (`consistentBackupRead`,
+  `atomicUnitRestore`). The host opens plugin bindings through the active
+  adapter session (`DatabaseAdapterConfig` + `provision`); it does not
+  switch on sqlite/postgres/d1 crates. Adapters
   that do not advertise support fail the job rather than sharing a database.
 
 Consent: each binding appears as a `database:<NAME>` grant entry and requires
@@ -1200,10 +1203,14 @@ D1 (`SELECT`/`WITH` sources are wrapped as `SELECT * FROM (<source>) AS
 _bc_src WHERE true`); helper arity and wire types are enforced so callers need
 not `CAST` for `round` / `sum` / `avg` / `count`. Canonical `LIKE` is
 case-sensitive (SQLite/D1 `GLOB` lowering; Postgres `COLLATE "C"`). Schema
-metadata is durable in adapter-private `bookclerk_sql_catalog` (Postgres
-identity in `bookclerk_identity`); both are guest-denied. Opening a binding
-reloads types from that catalog. See
-[`docs/sql-contract/v1.md`](sql-contract/v1.md)).
+metadata is durable in adapter-private `bookclerk_sql_catalog` /
+`bookclerk_sql_schema` / `bookclerk_sql_ddl` (Postgres identity in
+`bookclerk_identity`); all are guest-denied. Opening a binding
+reloads types from that catalog. A matching no-op `CREATE TABLE IF NOT
+EXISTS` does not rewrite catalog or identity: the first admitted CREATE
+must persist complete canonical DDL, and a binding missing that catalog
+fails closed (reset/recreate).
+See [`docs/sql-contract/v1.md`](sql-contract/v1.md).
 A mixed `CREATE` + `INSERT` batch is one atomic receipt: first execution
 applies both statements on SQLite, PostgreSQL, and D1 (D1 claims the receipt
 before ungated DDL, then ungates DML for the claim owner). Same-token replay
