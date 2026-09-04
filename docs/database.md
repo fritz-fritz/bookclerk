@@ -268,8 +268,7 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   state records its frozen base (`unreleased@base0+…` today). A frozen
   database newer than this binary fails closed (restore a backup).
   Guests connect and ping only. Portable backups are canonical Bookclerk
-  recovery points (not D1 REST export, VACUUM, or `pg_dump`). Native D1 REST
-  export/import remains an emergency aid and is not the durable format.
+  recovery points (not D1 REST export, VACUUM, or `pg_dump`).
 
 ### Boundary: core vs database plugins
 
