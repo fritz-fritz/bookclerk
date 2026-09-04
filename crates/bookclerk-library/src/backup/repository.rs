@@ -63,7 +63,8 @@ impl BackupRepository {
     /// Writes `object` if missing. Returns the uncompressed SHA-256 hex.
     ///
     /// The write is into a sibling temp file then renamed so readers never see
-    /// a partial object. Existing objects are left untouched (immutable).
+    /// a partial object. An existing object is reused only after its bytes
+    /// verify; a truncated or corrupt file is replaced atomically.
     ///
     /// # Errors
     ///
@@ -73,7 +74,12 @@ impl BackupRepository {
         let digest = sha256_hex(&uncompressed);
         let path = self.object_path(&digest)?;
         if path.is_file() {
-            return Ok(digest);
+            match self.get_object(&digest) {
+                Ok(_) => return Ok(digest),
+                Err(_) => {
+                    // Corrupt or truncated: replace below.
+                }
+            }
         }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -120,22 +126,21 @@ impl BackupRepository {
             .unwrap_or(false)
     }
 
-    /// Publishes `manifest` only after all referenced objects exist.
+    /// Publishes `manifest` only after all referenced objects exist **and**
+    /// verify.
     ///
     /// Writes JSON then a sibling `.sha256` of the exact file bytes. Incomplete
     /// staging uses `manifests/.staging-<id>.json` and is ignored by list/GC.
     ///
     /// # Errors
     ///
-    /// Returns when a referenced object is missing or the filesystem write fails.
+    /// Returns when a referenced object is missing or corrupt, or the
+    /// filesystem write fails.
     pub fn publish_manifest(&self, manifest: &BackupManifest) -> Result<PathBuf> {
         for digest in manifest.referenced_objects() {
-            if !self.object_exists(&digest) {
-                return Err(LibraryError::Schema(format!(
-                    "cannot publish backup `{}`: object `{digest}` is missing",
-                    manifest.id
-                )));
-            }
+            self.get_object(&digest).map_err(|err| {
+                LibraryError::Schema(format!("cannot publish backup `{}`: {err}", manifest.id))
+            })?;
         }
         let json = serde_json::to_vec_pretty(manifest)
             .map_err(|err| LibraryError::Other(anyhow::anyhow!("backup manifest json: {err}")))?;
