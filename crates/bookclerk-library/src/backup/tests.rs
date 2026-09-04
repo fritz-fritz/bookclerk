@@ -1608,7 +1608,7 @@ async fn postgres_sqlite_library_restores_to_postgres() {
 
 #[tokio::test]
 #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL"]
-async fn sqlite_plugin_restores_to_postgres() {
+async fn postgres_sqlite_plugin_restores_to_postgres() {
     let Some((pg, _)) = postgres_throwaway().await else {
         return;
     };
