@@ -200,6 +200,8 @@ pub struct CanonicalRestoreOpts {
     pub max_payload_bytes: u32,
     /// Maximum encoded bytes of one [`bookclerk_plugin_abi::ExecuteRequest`].
     pub max_request_bytes: u32,
+    /// Capability-derived schema marker contract (never inferred from `DbBackend`).
+    pub host_schema_kind: HostSchemaKind,
 }
 
 impl Default for CanonicalRestoreOpts {
@@ -217,6 +219,8 @@ impl CanonicalRestoreOpts {
             max_binds: caps.max_binds.max(1),
             max_payload_bytes: caps.max_payload_bytes.max(1),
             max_request_bytes: caps.max_request_bytes.max(1),
+            host_schema_kind: HostSchemaKind::from_db_capabilities(caps)
+                .unwrap_or(HostSchemaKind::RowMarker),
         }
     }
 }
@@ -695,11 +699,7 @@ pub async fn restore_backup_in_repo(
     id: &str,
     opts: &CanonicalRestoreOpts,
 ) -> Result<RestorePlan> {
-    let kind = match db.get_database_backend() {
-        sea_orm::DbBackend::Sqlite => HostSchemaKind::PragmaMarker,
-        _ => HostSchemaKind::RowMarker,
-    };
-    ensure_restore_target_is_replaceable(db, kind).await?;
+    ensure_restore_target_is_replaceable(db, opts.host_schema_kind).await?;
     let validated = verify_recovery_point(repo, id)?;
     restore_backup_unit(
         db,
