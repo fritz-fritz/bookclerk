@@ -7,7 +7,6 @@
 //! for introspection. Base DDL uses `CREATE TABLE IF NOT EXISTS` /
 //! `CREATE INDEX IF NOT EXISTS`.
 
-use rusqlite_migration::{Migrations, M};
 use std::sync::OnceLock;
 
 /// Final SQLite DDL for a fresh Bookclerk library database.
@@ -942,12 +941,6 @@ pub fn migration_sql() -> &'static [&'static str] {
     ]
 }
 
-/// SQLite-family migration steps before the V27 FK-safe rebuild (through wake-pending).
-///
-/// Legacy helper for tests and isolation checks; the host applies
-/// [`host_migration_plan`] for every marker kind.
-const D1_PRE_V27_STEPS: usize = 27;
-
 /// One host-owned schema version in the canonical Bookclerk migration plan.
 ///
 /// Marker capabilities ([`crate::HostSchemaKind`]) choose only how each version
@@ -1044,156 +1037,10 @@ pub fn latest_schema_postgres() -> String {
         .join(";\n")
 }
 
-/// SQLite DDL through the step before the V27 rebuild (legacy test helper).
-#[cfg(test)]
-#[must_use]
-pub fn migration_sql_d1() -> &'static [&'static str] {
-    &migration_sql()[..D1_PRE_V27_STEPS]
-}
-
-/// Additive sqlite steps after the V27 rebuild (serialization slots, dispatch snapshot).
-#[cfg(test)]
-#[must_use]
-pub fn migration_sql_d1_post_v27() -> &'static [&'static str] {
-    &migration_sql()[D1_PRE_V27_STEPS + 1..]
-}
-
 /// Collects canonical SQLite DDL for `steps` (shared plan, not a D1-only pack).
 #[must_use]
 pub fn host_migration_sqlite_steps(steps: &[HostMigrationStep]) -> Vec<&'static str> {
     steps.iter().map(|step| step.canonical).collect()
-}
-
-/// `schema_migrations.version` / plan step for the V27 FK-safe rebuild.
-///
-/// Bookkeeping version 28 (extra V3 portal step in the chain). Legacy D1
-/// deployments may already record this version from the pre-unification batch
-/// path; see TODO(#squash) on host schema apply for a greenfield baseline.
-#[must_use]
-pub fn migration_v27_schema_version() -> i64 {
-    i64::try_from(D1_PRE_V27_STEPS + 1).expect("V27 version fits i64")
-}
-
-/// One-transaction D1 V27: rebuild both tables, drop child then parent, record 27.
-///
-/// Callers must run these statements as a single D1 `{ "batch": [...] }` (one
-/// SQL transaction) and must not send them through statement-by-statement
-/// `execute_raw`. The version row is the last statement so it appears only if
-/// the whole batch committed.
-#[cfg(test)]
-#[must_use]
-pub fn migration_v27_d1_statements() -> &'static [&'static str] {
-    &[
-        r#"CREATE TABLE domain_events_v27 (
-        id TEXT PRIMARY KEY NOT NULL,
-        event_type TEXT NOT NULL,
-        schema_version INTEGER NOT NULL,
-        occurred_at TEXT NOT NULL,
-        account_id TEXT NOT NULL DEFAULT '',
-        source TEXT NOT NULL DEFAULT '',
-        correlation_id TEXT NOT NULL DEFAULT '',
-        causation_id TEXT NOT NULL DEFAULT '',
-        dedup_key TEXT NOT NULL,
-        payload TEXT NOT NULL,
-        ordering_key TEXT NOT NULL DEFAULT '',
-        dispatch_state TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        wake_pending INTEGER NOT NULL DEFAULT 1,
-        wake_lease_owner TEXT,
-        wake_lease_expires_at TEXT,
-        wake_cursor_at TEXT NOT NULL DEFAULT '',
-        wake_cursor_id TEXT NOT NULL DEFAULT '',
-        UNIQUE(account_id, source, event_type, dedup_key)
-    )"#,
-        r#"INSERT INTO domain_events_v27 (
-        id, event_type, schema_version, occurred_at, account_id, source,
-        correlation_id, causation_id, dedup_key, payload, ordering_key,
-        dispatch_state, created_at, wake_pending
-    ) SELECT
-        id, event_type, schema_version, occurred_at, account_id, source,
-        correlation_id, causation_id, dedup_key, payload, ordering_key,
-        dispatch_state, created_at, wake_pending
-    FROM domain_events"#,
-        r#"CREATE TABLE event_deliveries_v27 (
-        id TEXT PRIMARY KEY NOT NULL,
-        event_id TEXT NOT NULL,
-        plugin_id TEXT NOT NULL,
-        idempotency_key TEXT NOT NULL UNIQUE,
-        state TEXT NOT NULL,
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        max_attempts INTEGER NOT NULL DEFAULT 8,
-        lease_owner TEXT,
-        lease_expires_at TEXT,
-        lease_generation INTEGER NOT NULL DEFAULT 0,
-        run_after TEXT NOT NULL,
-        invocation_sequence INTEGER NOT NULL DEFAULT 0,
-        resume_pending INTEGER NOT NULL DEFAULT 0,
-        checkpoint_json TEXT,
-        checkpoint_schema_version INTEGER NOT NULL DEFAULT 0,
-        ordering_key TEXT NOT NULL DEFAULT '',
-        outcome TEXT,
-        error_message TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        cancel_requested INTEGER NOT NULL DEFAULT 0,
-        resource_class TEXT NOT NULL DEFAULT 'network',
-        wake_event_type TEXT NOT NULL DEFAULT '',
-        wake_filter_json TEXT NOT NULL DEFAULT '',
-        wake_grants_json TEXT NOT NULL DEFAULT '',
-        UNIQUE(event_id, plugin_id),
-        FOREIGN KEY(event_id) REFERENCES domain_events_v27(id) ON DELETE CASCADE
-    )"#,
-        r#"INSERT INTO event_deliveries_v27 (
-        id, event_id, plugin_id, idempotency_key, state, attempt_count,
-        max_attempts, lease_owner, lease_expires_at, lease_generation, run_after,
-        invocation_sequence, resume_pending, checkpoint_json,
-        checkpoint_schema_version, ordering_key, outcome, error_message,
-        created_at, updated_at, cancel_requested, resource_class,
-        wake_event_type, wake_filter_json, wake_grants_json
-    ) SELECT
-        id, event_id, plugin_id, idempotency_key, state, attempt_count,
-        max_attempts, lease_owner, lease_expires_at, lease_generation, run_after,
-        invocation_sequence, resume_pending, checkpoint_json,
-        checkpoint_schema_version, ordering_key, outcome, error_message,
-        created_at, updated_at, cancel_requested, resource_class,
-        wake_event_type, wake_filter_json, ''
-    FROM event_deliveries"#,
-        "DROP TABLE event_deliveries",
-        "DROP TABLE domain_events",
-        "ALTER TABLE domain_events_v27 RENAME TO domain_events",
-        "ALTER TABLE event_deliveries_v27 RENAME TO event_deliveries",
-        "CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch ON domain_events(dispatch_state, created_at)",
-        "CREATE INDEX IF NOT EXISTS idx_domain_events_dispatch_created ON domain_events(dispatch_state, created_at, id)",
-        "CREATE INDEX IF NOT EXISTS idx_domain_events_wake_pending ON domain_events(created_at, id) WHERE wake_pending = 1",
-        "CREATE INDEX IF NOT EXISTS idx_event_deliveries_claim ON event_deliveries(state, run_after, created_at)",
-        "CREATE INDEX IF NOT EXISTS idx_event_deliveries_plugin_order ON event_deliveries(plugin_id, ordering_key, created_at)",
-        "CREATE INDEX IF NOT EXISTS idx_event_deliveries_state ON event_deliveries(state)",
-        "CREATE INDEX IF NOT EXISTS idx_event_deliveries_wake ON event_deliveries(state, wake_event_type)",
-        "CREATE INDEX IF NOT EXISTS idx_event_deliveries_plugin_running ON event_deliveries(plugin_id, state)",
-    ]
-}
-
-/// D1 `{ "batch": [...] }` statements for V27, including the version row.
-#[cfg(test)]
-#[must_use]
-pub fn migration_v27_d1_batch() -> Vec<String> {
-    let mut stmts: Vec<String> = migration_v27_d1_statements()
-        .iter()
-        .map(|sql| (*sql).to_string())
-        .collect();
-    stmts.push(format!(
-        "INSERT INTO schema_migrations (version) VALUES ({})",
-        migration_v27_schema_version()
-    ));
-    stmts
-}
-
-/// SQLite schema migrations (single greenfield schema).
-///
-/// Built from [`migration_sql`].
-#[must_use]
-pub fn migrations() -> Migrations<'static> {
-    Migrations::new(migration_sql().iter().map(|sql| M::up(sql)).collect())
 }
 
 #[cfg(test)]
@@ -1201,65 +1048,43 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
 
-    fn apply_d1_through_v26(conn: &Connection) {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)",
-        )
-        .unwrap();
-        for (idx, sql) in migration_sql_d1().iter().enumerate() {
-            conn.execute_batch(sql).unwrap();
-            conn.execute(
-                "INSERT INTO schema_migrations (version) VALUES (?1)",
-                rusqlite::params![i64::try_from(idx + 1).unwrap()],
-            )
-            .unwrap();
-        }
+    fn apply_greenfield(conn: &Connection) {
+        conn.execute_batch(greenfield_baseline_canonical()).unwrap();
     }
 
-    fn apply_d1_v27_batch(conn: &Connection) {
-        let mut sql = String::from("BEGIN;\n");
-        for stmt in migration_v27_d1_batch() {
-            sql.push_str(&stmt);
-            sql.push_str(";\n");
-        }
-        sql.push_str("COMMIT;");
-        conn.execute_batch(&sql).unwrap();
-    }
-
-    #[test]
-    fn d1_v27_batch_preserves_deliveries_with_foreign_keys_on() {
-        let conn = Connection::open_in_memory().unwrap();
-        apply_d1_through_v26(&conn);
-        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-        conn.execute(
-            "INSERT INTO domain_events (
+    const EVENT_INSERT: &str = "INSERT INTO domain_events (
                 id, event_type, schema_version, occurred_at, account_id, source,
                 correlation_id, causation_id, dedup_key, payload, ordering_key,
                 dispatch_state, created_at, wake_pending
             ) VALUES (
-                'evt-1', 'book_acquired', 1, '2026-01-01T00:00:00+00:00', 'acct',
-                'audible', '', '', 'book_acquired:u1', '{}', '', 'dispatched',
+                ?1, 'book_acquired', 1, '2026-01-01T00:00:00+00:00', ?2,
+                'audible', '', '', ?3, '{}', '', 'dispatched',
                 '2026-01-01T00:00:00+00:00', 1
-            )",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO event_deliveries (
+            )";
+
+    const DELIVERY_INSERT: &str = "INSERT INTO event_deliveries (
                 id, event_id, plugin_id, idempotency_key, state, attempt_count,
                 max_attempts, run_after, invocation_sequence, resume_pending,
                 checkpoint_schema_version, ordering_key, created_at, updated_at,
                 cancel_requested, resource_class, wake_event_type, wake_filter_json
             ) VALUES (
-                'evt-1:echo', 'evt-1', 'echo', 'evt-1:echo', 'pending', 0, 8,
+                ?1, ?2, 'echo', ?1, 'pending', 0, 8,
                 '2026-01-01T00:00:00+00:00', 0, 0, 0, '', '2026-01-01T00:00:00+00:00',
                 '2026-01-01T00:00:00+00:00', 0, 'network', '', ''
-            )",
-            [],
+            )";
+
+    #[test]
+    fn greenfield_preserves_deliveries_with_foreign_keys_on() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_greenfield(&conn);
+        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        conn.execute(
+            EVENT_INSERT,
+            rusqlite::params!["evt-1", "acct", "book_acquired:u1"],
         )
         .unwrap();
-
-        apply_d1_v27_batch(&conn);
+        conn.execute(DELIVERY_INSERT, rusqlite::params!["evt-1:echo", "evt-1"])
+            .unwrap();
 
         let deliveries: i64 = conn
             .query_row("SELECT COUNT(*) FROM event_deliveries", [], |r| r.get(0))
@@ -1273,41 +1098,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(grants, "");
-        let version: i64 = conn
-            .query_row(
-                "SELECT version FROM schema_migrations WHERE version = ?1",
-                [migration_v27_schema_version()],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, migration_v27_schema_version());
 
         conn.execute(
-            "INSERT INTO domain_events (
-                id, event_type, schema_version, occurred_at, account_id, source,
-                correlation_id, causation_id, dedup_key, payload, ordering_key,
-                dispatch_state, created_at, wake_pending
-            ) VALUES (
-                'evt-2', 'book_acquired', 1, '2026-01-01T00:00:00+00:00', 'other',
-                'audible', '', '', 'book_acquired:u1', '{}', '', 'pending',
-                '2026-01-01T00:00:00+00:00', 1
-            )",
-            [],
+            EVENT_INSERT,
+            rusqlite::params!["evt-2", "other", "book_acquired:u1"],
         )
         .unwrap();
         let dup = conn.execute(
-            "INSERT INTO domain_events (
-                id, event_type, schema_version, occurred_at, account_id, source,
-                correlation_id, causation_id, dedup_key, payload, ordering_key,
-                dispatch_state, created_at, wake_pending
-            ) VALUES (
-                'evt-3', 'book_acquired', 1, '2026-01-01T00:00:00+00:00', 'acct',
-                'audible', '', '', 'book_acquired:u1', '{}', '', 'pending',
-                '2026-01-01T00:00:00+00:00', 1
-            )",
-            [],
+            EVENT_INSERT,
+            rusqlite::params!["evt-3", "acct", "book_acquired:u1"],
         );
-        assert!(dup.is_err(), "namespaced unique must hold after D1 V27");
+        assert!(
+            dup.is_err(),
+            "namespaced unique must hold on the greenfield baseline"
+        );
     }
 
     #[test]
@@ -1359,28 +1163,27 @@ mod tests {
     }
 
     #[test]
-    fn d1_v27_batch_is_noop_when_version_row_exists() {
-        let conn = Connection::open_in_memory().unwrap();
-        apply_d1_through_v26(&conn);
-        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-        apply_d1_v27_batch(&conn);
-        let before: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
-                [migration_v27_schema_version()],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(before, 1);
-        // Re-run is skipped when the version row exists (crash-safe: the row
-        // only appears if the whole batch committed).
-        assert_eq!(migration_sql_d1().len(), D1_PRE_V27_STEPS);
-        assert_eq!(migration_sql_d1_post_v27().len(), 2);
-        assert_eq!(
-            migration_v27_d1_batch().last().map(String::as_str),
-            Some("INSERT INTO schema_migrations (version) VALUES (28)")
+    fn greenfield_event_deliveries_enforce_foreign_keys() {
+        let canonical = greenfield_baseline_canonical();
+        assert!(
+            canonical.contains("UNIQUE(account_id, source, event_type, dedup_key)"),
+            "baseline must include namespaced domain_events uniqueness"
         );
-        assert_eq!(migration_v27_schema_version(), 28);
+        assert!(
+            canonical.contains(
+                "FOREIGN KEY(event_id) REFERENCES domain_events_v27(id) ON DELETE CASCADE"
+            ),
+            "baseline must include the FK-safe rebuild of event_deliveries"
+        );
+
+        let conn = Connection::open_in_memory().unwrap();
+        apply_greenfield(&conn);
+        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+        let orphan = conn.execute(DELIVERY_INSERT, rusqlite::params!["orphan:echo", "missing"]);
+        assert!(
+            orphan.is_err(),
+            "orphan event_deliveries rows must fail under PRAGMA foreign_keys=ON"
+        );
     }
 
     #[test]
