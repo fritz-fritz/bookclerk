@@ -301,8 +301,7 @@ where
             }
             if checksum == expected {
                 if base_version > 0 {
-                    verify_applied_checksums(db, backend, &host_migration_plan(), base_version)
-                        .await?;
+                    verify_applied_checksums(db, &host_migration_plan(), base_version).await?;
                 }
                 Ok(())
             } else {
@@ -642,6 +641,32 @@ where
     .await
 }
 
+/// Fresh-init helper for tests using the default atomic DDL runner.
+#[cfg(test)]
+pub(crate) async fn apply_fresh_schema_sqlite(
+    db: &DatabaseConnection,
+    kind: HostSchemaKind,
+    plan: &[HostMigrationStep],
+    unreleased: &str,
+    schema_version: i64,
+) -> Result<()> {
+    let exec = db.clone();
+    let mut run_batch = move |stmts: Vec<String>| {
+        let exec = exec.clone();
+        async move {
+            run_atomic_ddl(
+                &exec,
+                exec.get_database_backend(),
+                SCHEMA_TXN_TIMING,
+                "schema-apply",
+                stmts,
+            )
+            .await
+        }
+    };
+    apply_fresh_schema(db, kind, &mut run_batch, plan, unreleased, schema_version).await
+}
+
 /// Applies only [`crate::migrations::UNRELEASED_SQL`] after frozen ups.
 async fn apply_unreleased_bucket<F, Fut>(
     db: &DatabaseConnection,
@@ -721,7 +746,7 @@ async fn prepare_schema_change(
     let state = current_schema_state(db, kind).await?;
     let plan = host_migration_plan();
     if let SchemaState::Frozen { version, .. } = &state {
-        verify_applied_checksums(db, backend, &plan, *version).await?;
+        verify_applied_checksums(db, &host_migration_plan(), *version).await?;
     }
     let walk = crate::schema_walk::plan_schema_walk_from_state(&plan, &state, target)?;
     if !walk.is_noop() {
@@ -814,7 +839,6 @@ pub async fn ensure_restore_target_is_replaceable(
 ) -> Result<()> {
     let state = current_schema_state(db, kind).await?;
     let plan = host_migration_plan();
-    let backend = db.get_database_backend();
     match state {
         SchemaState::Uninitialized => Ok(()),
         SchemaState::Frozen { version, checksum } => {
@@ -825,7 +849,7 @@ pub async fn ensure_restore_target_is_replaceable(
                      (frozen plan ends at {max_plan}); run a newer Bookclerk binary"
                 )));
             }
-            verify_applied_checksums(db, backend, &plan, version).await
+            verify_applied_checksums(db, &plan, version).await
         }
         SchemaState::Unreleased {
             base_version,
@@ -846,7 +870,7 @@ pub async fn ensure_restore_target_is_replaceable(
                 )));
             }
             if base_version > 0 {
-                verify_applied_checksums(db, backend, &plan, base_version).await?;
+                verify_applied_checksums(db, &plan, base_version).await?;
             }
             Ok(())
         }
@@ -896,16 +920,19 @@ fn schema_migrations_insert(step: &HostMigrationStep) -> String {
 
 /// Refuses when a stored checksum is missing, unreadable, or does not match
 /// this binary's frozen SQL.
-async fn verify_applied_checksums(
-    db: &DatabaseConnection,
-    backend: DbBackend,
+pub(crate) async fn verify_applied_checksums<C>(
+    conn: &C,
     plan: &[HostMigrationStep],
     current: i64,
-) -> Result<()> {
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
     if current <= 0 {
         return Ok(());
     }
-    let rows = db
+    let backend = conn.get_database_backend();
+    let rows = conn
         .query_all_raw(Statement::from_string(
             backend,
             "SELECT version, state, checksum FROM schema_migrations",

@@ -27,7 +27,8 @@ use super::{
     DatabaseUnitKind, IdentityHighWater, LIBRARY_SKIP_TABLES,
 };
 use crate::error::{LibraryError, Result};
-use crate::host_schema::schema_state_from_conn;
+use crate::host_schema::{schema_state_from_conn, verify_applied_checksums};
+use crate::migrations::host_migration_plan;
 use crate::schema_state::SchemaState;
 
 /// Adapter-private catalog tables that must never appear in a portable backup.
@@ -243,6 +244,12 @@ where
                 live.display()
             )));
         }
+        let through = match &live {
+            SchemaState::Unreleased { base_version, .. } => *base_version,
+            SchemaState::Frozen { version, .. } => *version,
+            SchemaState::Uninitialized => 0,
+        };
+        verify_applied_checksums(conn, &host_migration_plan(), through).await?;
     }
     let schema_object = repo.put_object(&CanonicalObject::Schema {
         sql_contract_version: schema.sql_contract_version,
