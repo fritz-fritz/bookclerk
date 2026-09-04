@@ -43,7 +43,7 @@ repository interface.
 
 ### Capability negotiation
 
-After `openSession` the host calls typed `DatabaseSession.capabilities`
+After `openSession` the host calls typed `AdapterDatabaseSession.capabilities`
 (`abiMinor` ≥ 7). `DbCapabilities` advertises the SQL contract version,
 execution semantics (`atomicBatch`, `returning`, `affectedRows`,
 `cancellation`, `timing`), schema versioning (`pragmaUserVersion` /
@@ -53,10 +53,10 @@ execution semantics (`atomicBatch`, `returning`, `affectedRows`,
 `maxAtomicResultBytes`). Schema kind is chosen from the schema flags
 (exactly one of `pragmaUserVersion` or `schemaMigrations`;
 `atomicSchemaBatch` requires `schemaMigrations`). Bootstrap metadata
-(`sqlFamily`, SeaORM `dialect`) is **not** on typed `DbCapabilities`
-(`abiMinor` 13 tombstones ordinals @17/@18); it travels on the separate
-typed `DbBootstrap` / the host connect path after semantic negotiation
-succeeds.
+(`sqlFamily`, SeaORM `dialect`) is **not** on typed `DbCapabilities`;
+it travels on the separate typed `DbBootstrap` / the host connect path after
+semantic negotiation succeeds. `DbCapabilities` `@17` is `pluginDatabases`
+(abiMinor 18), not a leftover `sqlFamily` tombstone.
 
 The host must not invent capabilities from the plugin id. Missing required
 fields, `atomicBatch: false`, `returning: false`, unspecified (`0`) limits,
@@ -98,9 +98,10 @@ compared Syntaqlite 0.9 (Lemon C + Analyzer) and sqlparser-rs 0.59
 Bookclerk-owned category of machinery: Syntaqlite `physical_tables_accessed`
 omits DML destinations and is SQLite-typed; sqlparser-rs has no semantic
 analysis, so `TScan` / TypeCx would remain. Admission stays the fail-closed
-recursive-descent grammar. Independent wins that *did* land: full CREATE
-schema on `ResolvedStatement`, SeaQuery for host catalog DML, and
-proof-directed authorization when a type env exists.
+recursive-descent grammar. The comparison crate was removed after go/no-go;
+independent wins that *did* land: full CREATE schema on `ResolvedStatement`,
+SeaQuery for host catalog DML, and proof-directed authorization when a type
+env exists.
 
 ### Bootstrap metadata isolation
 
@@ -121,15 +122,15 @@ fail closed.
 
 ### Generic atomic execute
 
-The data plane is typed `DatabaseSession.executeAtomic(ExecuteRequest) ->
-ExecuteReply`. Every request is an ordered non-empty statement list
+The data plane is typed `AdapterDatabaseSession.execute(ExecuteRequest) ->
+ExecuteReply` (granted job SQL uses `GuestDatabase.execute`). Every request is an ordered non-empty statement list
 (batch-of-one for ordinary reads/mutations). Parameters and rows use
 Cap'n `DbValue` (`null(expectedType)`, `bool`, `int64`, `float64`, `text`,
 `bytes`). Unknown union members fail closed as `unsupported`. Cursor is
-result transport, not a second mutation primitive. Interactive
-`begin`/`query`/`execute` remain for older `abiMinor` guests. Nested first-party
-SeaORM work uses `Transaction.executeAtomic` (`abiMinor` ≥ 9) on the open
-txn so it stays on the typed data plane without a second `BEGIN`.
+result transport, not a second mutation primitive. Host-private interactive
+`begin` lives on `HostAdapterDatabaseSession` for the first-party SeaORM
+proxy (`plugin_host.capnp`); nested work uses `AdapterTransaction.execute`
+on the open txn so it stays on the typed data plane without a second `BEGIN`.
 
 The guest runs the statements as **one SQL transaction** (D1 HTTP
 `{ "batch": [...] }`; SQLite/PostgreSQL `BEGIN`) and returns per-statement
@@ -153,7 +154,7 @@ Stable error categories come from SQLSTATE / rusqlite codes (not English
 `unsupported`; syntax → `invalid_params`.
 
 Cancellation and deadlines stay RPC/session-level (not a field on the SQL
-plan). The host races in-flight `executeAtomic` against a cancel flag
+plan). The host races in-flight typed `execute` against a cancel flag
 (drop aborts the RPC). Guests may see an optional `deadlineUnixMs` on
 `ExecuteRequest` (transport metadata; not hashed). Observed cancel/deadline
 before `BEGIN`/HTTP or between statements is `cancelled` /
@@ -182,8 +183,8 @@ limits is not loaded.
 
 - First-party database plugins shrink to connect, ping, proxy CRUD, and a
   generic batch executor. The host selects and applies schema versions after
-  capability negotiation (generic execute / one atomic batch; D1 V27 is
-  still one host-compiled HTTP batch).
+  capability negotiation (generic execute / one atomic batch; D1 schema
+  apply is still one host-compiled HTTP batch).
 - An architecture lint forbids plugin and `bookclerk-db-guest` production
   sources from importing Bookclerk migrations, embedding application table
   names, or interpreting named operations (`DbAtomicParams`, `atomic_status`,
