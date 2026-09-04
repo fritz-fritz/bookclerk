@@ -176,7 +176,7 @@ impl ExternalDatabase {
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         let session = self.session.clone();
         let caps = caps.clone();
-        let (backend_at_capture, _) = snapshot_adapter_flags(&self.plugin_id);
+        let backend_at_capture = backup_adapter_id(&self.plugin_id);
         let opts = bookclerk_library::SchemaApplyOptions {
             backup: Some(bookclerk_library::SchemaBackupOpts {
                 files_dir: self.files_dir.clone(),
@@ -543,15 +543,6 @@ pub fn backup_adapter_id(plugin_id: &str) -> String {
         Some(DatabasePluginKind::D1) => "d1".into(),
         None => plugin_id.to_string(),
     }
-}
-
-/// Adapter snapshot flags: `(backend_at_capture, sequential_read)`.
-///
-/// Sequential read is no longer used for canonical backups. D1 does not
-/// advertise consistentBackupRead.
-#[must_use]
-pub fn snapshot_adapter_flags(plugin_id: &str) -> (String, bool) {
-    (backup_adapter_id(plugin_id), false)
 }
 
 /// Reads the durable binding catalog through the host (guest-denied) path.
@@ -2326,20 +2317,6 @@ mod tests {
         assert_eq!(backup_adapter_id("postgres"), "postgres");
         assert_eq!(backup_adapter_id("d1"), "d1");
         assert_eq!(backup_adapter_id("sql-conformance"), "sql-conformance");
-    }
-
-    #[test]
-    fn snapshot_adapter_flags_mark_d1_sequential() {
-        assert_eq!(snapshot_adapter_flags("sqlite"), ("sqlite".into(), false));
-        assert_eq!(
-            snapshot_adapter_flags("postgres"),
-            ("postgres".into(), false)
-        );
-        assert_eq!(snapshot_adapter_flags("d1"), ("d1".into(), false));
-        assert_eq!(
-            snapshot_adapter_flags("sql-conformance"),
-            ("sql-conformance".into(), false)
-        );
     }
 
     #[test]
