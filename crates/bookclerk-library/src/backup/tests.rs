@@ -185,6 +185,35 @@ fn fk_cycle_fails_closed() {
 }
 
 #[test]
+fn references_inside_default_string_is_not_a_foreign_key() {
+    let sql = r#"
+        CREATE TABLE parent (id INTEGER PRIMARY KEY);
+        CREATE TABLE child (
+            id INTEGER PRIMARY KEY,
+            note TEXT NOT NULL DEFAULT 'REFERENCES parent'
+        );
+    "#;
+    let schema = admit_canonical_schema(SQL_CONTRACT_VERSION, sql).unwrap();
+    let ordered = sort_tables_by_foreign_keys(schema.tables).unwrap();
+    assert_eq!(ordered[0].parsed.table, "parent");
+    assert_eq!(ordered[1].parsed.table, "child");
+    assert!(ordered[1].parsed.referenced_tables().is_empty());
+}
+
+#[test]
+fn admit_rejects_create_index_with_trailing_tokens() {
+    let err = admit_canonical_schema(
+        SQL_CONTRACT_VERSION,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);\nCREATE INDEX idx ON t THIS IS NOT SQL",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("not fully admitted") || err.to_string().contains("INDEX"),
+        "{err}"
+    );
+}
+
+#[test]
 fn order_key_prefers_pk_then_unique_then_full_row() {
     let pk =
         parse_create_table_schema("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")

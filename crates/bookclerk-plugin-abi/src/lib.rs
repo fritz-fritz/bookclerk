@@ -173,6 +173,7 @@ pub use sql_types::{
     catalog_page_statement, parse_create_index_sql, parse_create_table_schema,
     parse_drop_index_name, parse_drop_table_name, postgres_identity_function_name,
     postgres_identity_object_digest, postgres_identity_trigger_name, require_sql_v1_helper_arity,
+<<<<<<< HEAD
     reserved_catalog_relation_missing, split_sql_statements, sql_catalog_create_table_sql,
     sql_catalog_page_rows, sql_ddl_create_table_sql, sql_host_bookkeeping_type_env,
     sql_type_env_from_canonical_ddl, sql_type_env_from_canonical_statements, sql_v1_helper_arity,
@@ -180,6 +181,14 @@ pub use sql_types::{
     CreateIndexSchema, CreateTableSchema, SqlType, SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS,
     POSTGRES_IDENT_FN_PREFIX, POSTGRES_IDENT_TRIGGER_PREFIX, SQL_CATALOG_TABLE, SQL_DDL_TABLE,
     SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE, SQL_V1_MAX_IDENT_BYTES,
+=======
+    reserved_catalog_relation_missing, sql_catalog_create_table_sql, sql_catalog_page_rows,
+    sql_ddl_create_table_sql, sql_host_bookkeeping_type_env, sql_type_env_from_canonical_ddl,
+    sql_v1_helper_arity, sql_v1_helper_arity_ok, sql_v1_ident_in_bounds, statement_sql_hash,
+    typecheck_execute_request, ColumnReference, CreateIndexSchema, CreateTableSchema, SqlType,
+    SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS, POSTGRES_IDENT_FN_PREFIX, POSTGRES_IDENT_TRIGGER_PREFIX,
+    SQL_CATALOG_TABLE, SQL_DDL_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE, SQL_V1_MAX_IDENT_BYTES,
+>>>>>>> 3d13dfa4 (feat(sql): admit complete CREATE INDEX and store column-level FKs in schema IR)
 };
 #[cfg(feature = "host")]
 pub use sql_types::{
