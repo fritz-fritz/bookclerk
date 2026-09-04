@@ -1,4 +1,4 @@
-//! Domain result-selection metadata kept beside a typed [`ExecuteRequest`].
+//! Domain result-selection metadata kept beside a typed [`bookclerk_plugin_abi::ExecuteRequest`].
 //!
 //! The planner emits [`bookclerk_plugin_abi::ExecuteRequest`] directly. This
 //! module holds only the host-side indexes used to interpret
