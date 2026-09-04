@@ -108,7 +108,7 @@ not VACUUM / `pg_dump` / D1 REST / native pages.
 
 | Adapter | Consistent capture | Complete unit restore |
 | --- | --- | --- |
-| SQLite | Read transaction over admitted tables; paged `ORDER BY` rows as `DbValue` | Transaction + `PRAGMA foreign_keys` off during replace; `sqlite_sequence` high-water |
+| SQLite | Read transaction over admitted tables; paged `ORDER BY` rows as `DbValue` | Restore transaction + `PRAGMA defer_foreign_keys` (never toggle `foreign_keys` on the pool); `PRAGMA foreign_key_check` before commit; `sqlite_sequence` high-water |
 | Postgres | `REPEATABLE READ` transaction | Transactional replace; `bookclerk_identity` high-water (not native sequences) |
 | D1 | **Not advertised.** Sequential HTTP is not a consistent image. | **Not advertised.** Sequential REST DROP/INSERT is not complete per-unit replacement. |
 
@@ -123,11 +123,17 @@ every object digest, admitted schema, typed cells) is verified **before**
 any destructive action. The manifest is published only after every
 referenced object exists.
 
-Crash-safe object write: temp file → fsync-equivalent rename. Incomplete
-staging remains invisible. List/restore ignore unpublished work. Archive
-extraction refuses `..`, absolute paths, symlinks, hardlinks, and
-other non-file/directory tar types. Temporary unpack directories are
-removed on success and failure.
+Crash-safe object write: unique same-directory temp → fsync the file →
+no-clobber hard-link install → fsync the parent directory. Concurrent
+writers that lose the install verify the winner's object. Incomplete
+staging remains invisible. List/restore ignore unpublished work. Object
+publication and GC/prune take an exclusive repository lock (`backups/.lock`)
+so in-progress objects are not collected before the manifest commit.
+Archive extraction refuses `..`, absolute paths, symlinks, hardlinks, and
+other non-file/directory tar types, and enforces entry-count, per-entry,
+total-expanded, and gzip-decoded stream budgets. Stored objects declare
+uncompressed length in the envelope and refuse gzip expansion past that
+cap. Temporary unpack directories are removed on success and failure.
 
 Retention prunes automatic `pre-migrate` recovery points only. **Never** prune
 `manual` backups. Reachability GC deletes objects no retained manifest

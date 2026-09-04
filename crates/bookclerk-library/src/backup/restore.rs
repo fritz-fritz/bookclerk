@@ -28,6 +28,9 @@ use crate::error::{LibraryError, Result};
 /// not drop or replay `plugin_databases` (environment-local placement).
 /// Row inserts are parameterized canonical Bookclerk SQL (`?` + typed
 /// [`DbValue`] binds); adapters lower placeholders at the execute edge.
+/// SQLite restore defers foreign keys on the restore transaction and runs
+/// `PRAGMA foreign_key_check` before commit. It never toggles
+/// `PRAGMA foreign_keys` on the pool connection.
 ///
 /// # Errors
 ///
@@ -77,42 +80,43 @@ pub async fn restore_backup_unit(
         Vec::new()
     };
     let backend = db.get_database_backend();
+    // SQLite `PRAGMA foreign_keys` is per physical connection. Do not toggle it on
+    // `db`: a pooled adapter may run OFF/ON on a different connection than `begin()`,
+    // leaking OFF onto later writes or leaving the restore txn with FKs still ON.
+    // Defer checks on the restore transaction, then `PRAGMA foreign_key_check`
+    // before commit. Changing `foreign_keys` inside an open transaction is a no-op.
+    let txn = db.begin().await.map_err(LibraryError::from_db_err)?;
     if backend == DbBackend::Sqlite {
-        exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
+        exec_sql(&txn, backend, "PRAGMA defer_foreign_keys = ON").await?;
     }
-    let result = {
-        let txn = db.begin().await.map_err(LibraryError::from_db_err)?;
-        let result = restore_unit_on(
-            &txn,
-            repo,
-            unit,
-            &schema,
-            &identity,
-            kind,
-            opts,
-            &extra_drop,
-            preserve_plugin_registry,
-        )
-        .await;
-        match result {
-            Ok(()) => {
-                txn.commit().await.map_err(LibraryError::from_db_err)?;
-                Ok(())
+    match restore_unit_on(
+        &txn,
+        repo,
+        unit,
+        &schema,
+        &identity,
+        kind,
+        opts,
+        &extra_drop,
+        preserve_plugin_registry,
+    )
+    .await
+    {
+        Ok(()) => {
+            if backend == DbBackend::Sqlite {
+                if let Err(err) = sqlite_assert_no_fk_violations(&txn, backend).await {
+                    let _ = txn.rollback().await;
+                    return Err(err);
+                }
             }
-            Err(err) => {
-                let _ = txn.rollback().await;
-                Err(err)
-            }
+            txn.commit().await.map_err(LibraryError::from_db_err)?;
+            Ok(())
         }
-    };
-    if backend == DbBackend::Sqlite {
-        if let Err(err) = exec_sql(db, backend, "PRAGMA foreign_keys = ON").await {
-            if result.is_ok() {
-                return Err(err);
-            }
+        Err(err) => {
+            let _ = txn.rollback().await;
+            Err(err)
         }
     }
-    result
 }
 
 /// Replay one unit onto `conn`: drop owned schema, apply DDL, load rows, restore identity.
@@ -217,6 +221,29 @@ fn load_identity(
             "backup identity object is not Identity".into(),
         )),
     }
+}
+
+/// Fail restore when the open SQLite transaction has foreign-key violations.
+async fn sqlite_assert_no_fk_violations<C>(conn: &C, backend: DbBackend) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let rows = conn
+        .query_all_raw(Statement::from_string(
+            backend,
+            "PRAGMA foreign_key_check".to_string(),
+        ))
+        .await
+        .map_err(LibraryError::from_db_err)?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let table = rows[0]
+        .try_get_by_index::<String>(0)
+        .unwrap_or_else(|_| "unknown".into());
+    Err(LibraryError::Schema(format!(
+        "restore left foreign-key violations (e.g. table `{table}`)"
+    )))
 }
 
 /// Drop indexes then tables owned by `schema` (optionally keeping `plugin_databases`).
