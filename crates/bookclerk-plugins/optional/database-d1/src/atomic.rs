@@ -1792,19 +1792,22 @@ mod tests {
     #[test]
     fn text_starting_with_b64_stays_text() {
         let req = typed_select("SELECT note FROM books");
-        let value = json!({
-            "result": [{
-                "success": true,
-                "results": [{ "note": "b64:not-bytes" }],
-                "meta": { "changes": 0 }
-            }]
-        });
-        let reply = parse_typed_batch(&req, &value, std::time::Instant::now()).unwrap();
-        assert_eq!(
-            reply.statements[0].rows[0].values[0],
-            DbValue::Text("b64:not-bytes".into())
-        );
-        assert_eq!(reply.statements[0].columns[0].db_type, DbType::Text);
+        for note in ["b64:not-bytes", "b64:YWJj"] {
+            let value = json!({
+                "result": [{
+                    "success": true,
+                    "results": [{ "note": note }],
+                    "meta": { "changes": 0 }
+                }]
+            });
+            let reply = parse_typed_batch(&req, &value, std::time::Instant::now()).unwrap();
+            assert_eq!(
+                reply.statements[0].rows[0].values[0],
+                DbValue::Text(note.into()),
+                "{note}"
+            );
+            assert_eq!(reply.statements[0].columns[0].db_type, DbType::Text);
+        }
     }
 
     #[test]

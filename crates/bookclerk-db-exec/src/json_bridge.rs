@@ -2,10 +2,10 @@
 
 use bookclerk_plugin_abi::{DbType, DbValue};
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
-
 /// Converts JSON onto [`DbValue`] for leftover adapter-edge helpers.
+///
+/// JSON strings are always [`DbValue::Text`]. Decode blob fields with
+/// [`db_value_from_b64_json`].
 ///
 /// # Errors
 ///
@@ -31,18 +31,25 @@ pub fn db_value_from_json(v: &serde_json::Value) -> Result<DbValue, String> {
             }
             Ok(DbValue::Float64(f))
         }
-        serde_json::Value::String(s) => {
-            if let Some(rest) = s.strip_prefix("b64:") {
-                let bytes = BASE64
-                    .decode(rest)
-                    .map_err(|err| format!("invalid b64: payload: {err}"))?;
-                return Ok(DbValue::Bytes(bytes));
-            }
-            Ok(DbValue::Text(s.clone()))
-        }
+        serde_json::Value::String(s) => Ok(DbValue::Text(s.clone())),
         serde_json::Value::Array(_) => Err("arrays are not a baseline DbValue".into()),
         serde_json::Value::Object(_) => Err("objects are not a baseline DbValue".into()),
     }
+}
+
+/// Decode a domain JSON string that is known to be a `b64:` blob field.
+///
+/// Use this only for encoded blob columns (`ciphertext`, `kdf_salt`,
+/// `cipher_nonce`, …). Generic JSON strings stay [`DbValue::Text`] via
+/// [`db_value_from_json`].
+///
+/// # Errors
+///
+/// Returns when the string is not a valid `b64:` payload.
+pub fn db_value_from_b64_json(s: &str) -> Result<DbValue, String> {
+    crate::b64_string_to_bytes(s)
+        .map(DbValue::Bytes)
+        .ok_or_else(|| format!("invalid b64: payload: {s}"))
 }
 
 /// Encodes [`DbValue`] as domain JSON (typed nulls become JSON null).
@@ -54,7 +61,7 @@ pub fn db_value_to_json(v: &DbValue) -> serde_json::Value {
         DbValue::Int64(n) => serde_json::json!(*n),
         DbValue::Float64(n) => serde_json::json!(*n),
         DbValue::Text(s) => serde_json::Value::String(s.clone()),
-        DbValue::Bytes(b) => serde_json::Value::String(format!("b64:{}", BASE64.encode(b))),
+        DbValue::Bytes(b) => serde_json::Value::String(crate::bytes_to_b64_string(b)),
     }
 }
 
@@ -69,8 +76,18 @@ mod tests {
             db_value_to_json(&DbValue::Null(DbType::Bytes)),
             serde_json::Value::Null
         );
-        let bytes = db_value_from_json(&json!("b64:AA==")).unwrap();
-        assert_eq!(bytes, DbValue::Bytes(vec![0]));
+        assert_eq!(
+            db_value_from_json(&json!("b64:YWJj")).unwrap(),
+            DbValue::Text("b64:YWJj".into())
+        );
+        assert_eq!(
+            db_value_from_b64_json("b64:AA==").unwrap(),
+            DbValue::Bytes(vec![0])
+        );
+        assert_eq!(
+            db_value_to_json(&DbValue::Bytes(vec![0])),
+            json!("b64:AA==")
+        );
     }
 
     #[test]
