@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bookclerk_plugin_abi::sql_types::TableConstraint;
 use bookclerk_plugin_abi::{
-    parse_create_index_sql, parse_create_table_schema, CreateTableSchema, SqlType,
-    SQL_CONTRACT_VERSION,
+    parse_create_index_sql, parse_create_table_schema, typecheck_create_index_sql,
+    CreateTableSchema, SqlType, SqlTypeEnv, SQL_CONTRACT_VERSION,
 };
 
 use crate::error::{LibraryError, Result};
@@ -42,12 +42,15 @@ pub fn admit_canonical_schema(
     }
     let mut tables = Vec::new();
     let mut indexes = Vec::new();
+    let mut env = SqlTypeEnv::new();
+    let mut pending_indexes = Vec::new();
     for stmt in bookclerk_db_exec::split_schema_statements(sql) {
         let trimmed = stmt.trim().trim_end_matches(';').trim();
         if trimmed.is_empty() {
             continue;
         }
         if let Some(parsed) = parse_create_table_schema(trimmed) {
+            env.insert_table(parsed.table.clone(), parsed.columns.iter().cloned());
             tables.push(CanonicalTableSchema {
                 create_sql: trimmed.to_string(),
                 parsed,
@@ -55,12 +58,20 @@ pub fn admit_canonical_schema(
             continue;
         }
         if let Some(index) = parse_create_index_sql(trimmed) {
-            indexes.push(index);
+            pending_indexes.push((trimmed.to_string(), index));
             continue;
         }
         return Err(LibraryError::Schema(format!(
             "backup schema is not fully admitted Bookclerk SQL: `{trimmed}`"
         )));
+    }
+    for (trimmed, index) in pending_indexes {
+        typecheck_create_index_sql(&trimmed, &env).map_err(|err| {
+            LibraryError::Schema(format!(
+                "backup schema is not fully admitted Bookclerk SQL: `{trimmed}` ({err})"
+            ))
+        })?;
+        indexes.push(index);
     }
     Ok(CanonicalDatabaseSchema {
         sql_contract_version,
