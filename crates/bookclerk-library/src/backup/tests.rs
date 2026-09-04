@@ -16,14 +16,17 @@ use crate::backup::schema::{
 use crate::backup::util::validate_cell;
 use crate::backup::verify::{verify_recovery_point, verify_unit};
 use crate::host_schema::{
-    apply_host_schema, current_schema_state, ensure_restore_target_is_replaceable, HostSchemaKind,
+    apply_fresh_schema_sqlite, apply_host_schema, current_schema_state,
+    ensure_restore_target_is_replaceable, HostSchemaKind,
 };
-use crate::migrations::{HostMigrationStep, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION};
+use crate::migrations::{
+    override_host_migration_plan, HostMigrationStep, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
+};
 use crate::LibraryStore;
 use bookclerk_plugin_abi::{
-    encoded_statement_result_bytes, parse_create_table_schema, DbColumn, DbRow, DbType, DbValue,
-    SqlType, StatementResult, FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_RESULT_ROWS,
-    SQL_CONTRACT_VERSION,
+    encoded_statement_result_bytes, parse_create_table_schema, DbCapabilities, DbColumn, DbRow,
+    DbType, DbValue, SqlType, StatementResult, FIRST_PARTY_MAX_RESULT_BYTES,
+    FIRST_PARTY_MAX_RESULT_ROWS, SQL_CONTRACT_VERSION,
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,6 +50,13 @@ fn backup_req(files: &Path, state: SchemaState, reason: BackupReason) -> BackupR
 
 fn restore_ok() -> CanonicalRestoreOpts {
     CanonicalRestoreOpts::default()
+}
+
+fn restore_for(kind: HostSchemaKind) -> CanonicalRestoreOpts {
+    CanonicalRestoreOpts {
+        host_schema_kind: kind,
+        ..CanonicalRestoreOpts::default()
+    }
 }
 
 fn restore_without_atomic() -> CanonicalRestoreOpts {
@@ -213,6 +223,24 @@ fn admit_rejects_create_index_with_trailing_tokens() {
         err.to_string().contains("not fully admitted") || err.to_string().contains("INDEX"),
         "{err}"
     );
+}
+
+#[test]
+fn admit_rejects_create_index_with_malformed_where() {
+    let err = admit_canonical_schema(
+        SQL_CONTRACT_VERSION,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);\nCREATE INDEX idx ON t (id) WHERE THIS IS NOT SQL",
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("not fully admitted") || err.to_string().contains("WHERE"),
+        "{err}"
+    );
+    admit_canonical_schema(
+        SQL_CONTRACT_VERSION,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);\nCREATE INDEX idx ON t (id) WHERE id IS NOT NULL",
+    )
+    .expect("valid partial index");
 }
 
 #[test]
@@ -878,6 +906,124 @@ async fn restore_fails_closed_when_target_frozen_history_is_newer() {
     )
     .await;
     assert_eq!(after, 1, "restore must fail before DROP");
+}
+
+const SYNTHETIC_V1_SQL: &str =
+    "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)";
+const SYNTHETIC_V1_PLAN: &[HostMigrationStep] = &[HostMigrationStep {
+    version: 1,
+    canonical: SYNTHETIC_V1_SQL,
+    down: None,
+    introduced_in: "0.0.0",
+}];
+
+#[tokio::test]
+async fn backup_fails_closed_when_frozen_checksum_is_tampered() {
+    let _guard = override_host_migration_plan(SYNTHETIC_V1_PLAN);
+    let files = tempfile::tempdir().unwrap();
+    let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_fresh_schema_sqlite(&db, HostSchemaKind::RowMarker, SYNTHETIC_V1_PLAN, "", 1)
+        .await
+        .unwrap();
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
+        .await
+        .unwrap();
+    match &state {
+        SchemaState::Frozen { version, .. } => assert_eq!(*version, 1),
+        other => panic!("expected Frozen@1, got {other}"),
+    }
+    db.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "UPDATE schema_migrations SET checksum = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef' \
+         WHERE state = 'frozen'",
+    ))
+    .await
+    .unwrap();
+    let err = backup_library(&db, &backup_req(files.path(), state, BackupReason::Manual))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("checksum mismatch") || err.to_string().contains("frozen"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn restore_uses_capability_kind_not_seaorm_backend() {
+    let files = tempfile::tempdir().unwrap();
+    let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_host_schema(&src, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap();
+    src.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO accounts (account_id, marketplace, source, created_at, updated_at) \
+         VALUES ('keep', 'us', 'audible', 't', 't')",
+    ))
+    .await
+    .unwrap();
+    let state = current_schema_state(&src, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap();
+    let outcome = backup_library(&src, &backup_req(files.path(), state, BackupReason::Manual))
+        .await
+        .unwrap()
+        .unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+
+    let dest_pragma = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    dest_pragma
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA user_version = 5",
+        ))
+        .await
+        .unwrap();
+    let err = restore_backup_in_repo(
+        &dest_pragma,
+        &repo,
+        &outcome.manifest.id,
+        &restore_for(HostSchemaKind::PragmaMarker),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("PRAGMA user_version") || err.to_string().contains("user_version"),
+        "{err}"
+    );
+
+    let dest_row = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    dest_row
+        .execute_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA user_version = 5",
+        ))
+        .await
+        .unwrap();
+    let mut caps = DbCapabilities::advertised_sqlite();
+    caps.pragma_user_version = false;
+    caps.schema_migrations = true;
+    let opts = CanonicalRestoreOpts::from_caps(&caps);
+    assert_eq!(opts.host_schema_kind, HostSchemaKind::RowMarker);
+    restore_backup_in_repo(&dest_row, &repo, &outcome.manifest.id, &opts)
+        .await
+        .unwrap();
+    assert_eq!(
+        count(
+            &dest_row,
+            "SELECT COUNT(*) AS count FROM accounts WHERE account_id = 'keep'"
+        )
+        .await,
+        1
+    );
 }
 
 #[tokio::test]
@@ -1731,9 +1877,14 @@ async fn postgres_library_backup_round_trip() {
     ))
     .await
     .unwrap();
-    restore_backup(&db, files.path(), &outcome.manifest.id, &restore_ok())
-        .await
-        .unwrap();
+    restore_backup(
+        &db,
+        files.path(),
+        &outcome.manifest.id,
+        &restore_for(HostSchemaKind::RowMarker),
+    )
+    .await
+    .unwrap();
     let n: i64 = db
         .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
@@ -1928,9 +2079,14 @@ async fn postgres_sqlite_library_restores_to_postgres() {
     apply_host_schema(&pg, HostSchemaKind::RowMarker)
         .await
         .unwrap();
-    restore_backup(&pg, files.path(), &outcome.manifest.id, &restore_ok())
-        .await
-        .unwrap();
+    restore_backup(
+        &pg,
+        files.path(),
+        &outcome.manifest.id,
+        &restore_for(HostSchemaKind::RowMarker),
+    )
+    .await
+    .unwrap();
     let n: i64 = pg
         .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
