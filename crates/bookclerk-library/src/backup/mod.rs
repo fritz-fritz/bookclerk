@@ -207,21 +207,30 @@ pub struct CanonicalRestoreOpts {
 impl Default for CanonicalRestoreOpts {
     fn default() -> Self {
         Self::from_caps(&DbCapabilities::advertised_sqlite())
+            .expect("first-party sqlite capabilities are a known versioning contract")
     }
 }
 
 impl CanonicalRestoreOpts {
-    /// Restore limits copied from negotiated adapter capabilities.
-    #[must_use]
-    pub fn from_caps(caps: &DbCapabilities) -> Self {
-        Self {
+    /// Restore limits and marker kind copied from negotiated adapter capabilities.
+    ///
+    /// [`Self::host_schema_kind`] comes from [`HostSchemaKind::from_db_capabilities`],
+    /// never from SeaORM [`sea_orm::DbBackend`]. A SQLite-family adapter that
+    /// advertises `schemaMigrations` is [`HostSchemaKind::RowMarker`].
+    ///
+    /// # Errors
+    ///
+    /// Returns when `caps` is not a known versioning contract (missing, mixed,
+    /// or contradictory `pragmaUserVersion` / `schemaMigrations` /
+    /// `atomicSchemaBatch` flags).
+    pub fn from_caps(caps: &DbCapabilities) -> Result<Self> {
+        Ok(Self {
             atomic_unit_restore: caps.supports_atomic_unit_restore(),
             max_binds: caps.max_binds.max(1),
             max_payload_bytes: caps.max_payload_bytes.max(1),
             max_request_bytes: caps.max_request_bytes.max(1),
-            host_schema_kind: HostSchemaKind::from_db_capabilities(caps)
-                .unwrap_or(HostSchemaKind::RowMarker),
-        }
+            host_schema_kind: HostSchemaKind::from_db_capabilities(caps)?,
+        })
     }
 }
 
@@ -689,6 +698,10 @@ pub async fn restore_backup(
 }
 
 /// Restores from an already-open repository (extracted archives).
+///
+/// Target [`crate::SchemaState`] is read with [`CanonicalRestoreOpts::host_schema_kind`]
+/// (capability-derived). This function never infers a marker contract from
+/// [`sea_orm::DbBackend`].
 ///
 /// # Errors
 ///

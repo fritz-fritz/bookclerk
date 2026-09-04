@@ -331,16 +331,18 @@ async fn run_restore(config: &Config, format: OutputFormat, from: String) -> any
     ensure_restore_target_is_replaceable(&db, kind)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
+    let opts = CanonicalRestoreOpts {
+        host_schema_kind: kind,
+        ..CanonicalRestoreOpts::from_caps(&caps)?
+    };
     let plan = if is_archive {
         let repo = BackupRepository::open_root(&repo_root)?;
-        let opts = CanonicalRestoreOpts::from_caps(&caps);
         let plan = restore_backup_in_repo(&db, &repo, &id, &opts).await?;
         if !plan.plugin_units.is_empty() {
             restore_plugins(config, &db, &repo, &plan.plugin_units).await?;
         }
         plan
     } else {
-        let opts = CanonicalRestoreOpts::from_caps(&caps);
         let plan = restore_backup(&db, &repo_root, &id, &opts).await?;
         if !plan.plugin_units.is_empty() {
             let repo = BackupRepository::open(&repo_root)?;
