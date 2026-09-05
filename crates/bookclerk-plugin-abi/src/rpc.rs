@@ -67,6 +67,15 @@ pub(super) fn read_extensible_config(
     }
 }
 
+pub(super) fn write_extensible_config(
+    mut b: crate::plugin_capnp::extensible_config::Builder<'_>,
+    cfg: &crate::ExtensibleConfig,
+) {
+    b.set_schema_version(cfg.schema_version);
+    b.set_media_type(&cfg.media_type);
+    b.set_payload(&cfg.payload);
+}
+
 pub(super) fn write_error(mut b: plugin_error::Builder<'_>, err: &PluginError) {
     b.set_code(err.wire_str());
     b.set_message(&err.message);
@@ -2703,6 +2712,9 @@ impl PluginClient {
         {
             let mut c = req.get().get_context().map_err(from_capnp)?;
             c.set_json(&ctx.json);
+            // Host-private connect params (postgres URL, D1 token, sqlite path)
+            // travel in `config`, not the json migration bridge.
+            write_extensible_config(c.reborrow().init_config(), &ctx.config);
         }
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
@@ -3482,13 +3494,13 @@ where
 mod tests {
     use super::*;
     use crate::{
-        ByteRange, Cancellation, CopyResult, Destination, DestinationContext, DomainEvent,
-        EventResult, GuestDatabase, HealthOk, Integration, IntegrationContext, JobHandler,
-        JobHandlerContext, JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo,
-        ObjectMetadata, PluginDescribe, PluginRoot, ProgressSink, PutResult, ReadResult,
-        ScalarLimits, Source, SourceContext, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS,
-        FEATURE_STREAMS, MAX_CHECKPOINT_BYTES, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE,
-        PRODUCT_API_VERSION,
+        ByteRange, Cancellation, CopyResult, Database, DatabaseContext, Destination,
+        DestinationContext, DomainEvent, EventResult, ExtensibleConfig, GuestDatabase, HealthOk,
+        Integration, IntegrationContext, JobHandler, JobHandlerContext, JobInvocation, JobOutcome,
+        ListOptions, ListPage, ObjectInfo, ObjectMetadata, PluginDescribe, PluginRoot,
+        ProgressSink, PutResult, ReadResult, ScalarLimits, Source, SourceContext, WorkerContext,
+        WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS, MAX_CHECKPOINT_BYTES,
+        MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, PRODUCT_API_VERSION,
     };
     use crate::{ExecuteRequest, PluginError, PluginErrorCode, Result};
     use std::collections::HashMap;
@@ -3654,6 +3666,31 @@ mod tests {
                 issue_refresh_token: true,
                 origin_config_key: "integrations.audiobookshelf.base_url".into(),
             }])
+        }
+    }
+
+    struct CaptureDbPlugin {
+        seen: Mutex<Option<DatabaseContext>>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl PluginRoot for CaptureDbPlugin {
+        async fn describe(&self) -> Result<PluginDescribe> {
+            Ok(PluginDescribe {
+                api_version: PRODUCT_API_VERSION,
+                id: "db_ctx".into(),
+                kind: "database".into(),
+                display_name: None,
+                rpc_features: vec![FEATURE_SCALAR_LIMITS.into()],
+                scalar_limits: ScalarLimits::default().into(),
+                supported_roles: vec!["database".into()],
+                ..PluginDescribe::default()
+            })
+        }
+
+        async fn database(&self, context: DatabaseContext) -> Result<Box<dyn Database>> {
+            *self.seen.lock().expect("seen") = Some(context);
+            Err(PluginError::unsupported("database"))
         }
     }
 
@@ -4024,6 +4061,50 @@ mod tests {
                     "integrations.audiobookshelf.base_url"
                 );
                 assert_eq!(clients[0].scopes_or_default(), vec!["openid", "profile"]);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn database_factory_forwards_extensible_config() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client_end, server_end) = duplex(64 * 1024);
+                let (server_r, server_w) = tokio::io::split(server_end);
+                let (client_r, client_w) = tokio::io::split(client_end);
+                let plugin = Arc::new(CaptureDbPlugin {
+                    seen: Mutex::new(None),
+                });
+                let seen = Arc::clone(&plugin);
+                tokio::task::spawn_local(async move {
+                    let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;
+                });
+                let (client, rpc) = connect_plugin(client_r, client_w, 64 * 1024);
+                tokio::task::spawn_local(rpc);
+                let sent = DatabaseContext {
+                    json: String::new(),
+                    config: ExtensibleConfig {
+                        schema_version: 1,
+                        media_type: crate::db::DATABASE_ADAPTER_CONFIG_MEDIA_TYPE.into(),
+                        payload: br#"{"backend":"postgres","url":"postgres://example/db"}"#
+                            .to_vec(),
+                    },
+                };
+                let err = match client.database(sent.clone()).await {
+                    Err(err) => err,
+                    Ok(_) => panic!("probe guest must return unsupported, not a session"),
+                };
+                assert_eq!(err.code, PluginErrorCode::Unsupported);
+                let got = seen
+                    .seen
+                    .lock()
+                    .expect("seen")
+                    .clone()
+                    .expect("guest received DatabaseContext");
+                assert_eq!(got.config.schema_version, sent.config.schema_version);
+                assert_eq!(got.config.media_type, sent.config.media_type);
+                assert_eq!(got.config.payload, sent.config.payload);
             })
             .await;
     }
