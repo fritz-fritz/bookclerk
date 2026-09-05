@@ -411,19 +411,24 @@ async fn query_schema_migration_rows(
     .await
 }
 
+/// Postgres `INTEGER` is int4 (`i32`); SQLite INTEGER affinity is `i64`.
+fn schema_migration_version(row: &QueryResult) -> Option<i64> {
+    row.try_get::<i64>("", "version")
+        .ok()
+        .or_else(|| row.try_get_by_index::<i64>(0).ok())
+        .or_else(|| row.try_get::<i32>("", "version").ok().map(i64::from))
+        .or_else(|| row.try_get_by_index::<i32>(0).ok().map(i64::from))
+}
+
 /// Interprets `schema_migrations` rows. `Ok(None)` means the table exists but
 /// has no unreleased or frozen marker.
 fn schema_state_from_migration_rows(rows: Vec<QueryResult>) -> Result<Option<SchemaState>> {
     let mut unreleased = None;
     let mut frozen: Vec<(i64, String)> = Vec::new();
     for row in rows {
-        let version = row
-            .try_get::<i64>("", "version")
-            .ok()
-            .or_else(|| row.try_get_by_index::<i64>(0).ok())
-            .ok_or_else(|| {
-                LibraryError::Schema("schema_migrations row is missing version".into())
-            })?;
+        let version = schema_migration_version(&row).ok_or_else(|| {
+            LibraryError::Schema("schema_migrations row is missing version".into())
+        })?;
         let state = row
             .try_get::<String>("", "state")
             .ok()
@@ -717,6 +722,7 @@ async fn prepare_schema_change(
                     max_atomic_result_bytes: snap.max_atomic_result_bytes.max(1),
                     plugin_units: snap.plugin_units.clone(),
                     adapter: snap.adapter.clone(),
+                    physical_engine: None,
                 };
                 backup_library(db, &req).await?;
             }
@@ -881,11 +887,7 @@ where
         if state != SCHEMA_STATE_FROZEN {
             continue;
         }
-        let version = row
-            .try_get::<i64>("", "version")
-            .ok()
-            .or_else(|| row.try_get_by_index::<i64>(0).ok())
-            .unwrap_or(0);
+        let version = schema_migration_version(&row).unwrap_or(0);
         let checksum = row
             .try_get::<String>("", "checksum")
             .ok()
@@ -1057,16 +1059,7 @@ async fn schema_versions_applied(db: &DatabaseConnection) -> Result<HashSet<i64>
         ))
         .await
         .map_err(LibraryError::Orm)?;
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            row.try_get::<i64>("", "version")
-                .ok()
-                .or_else(|| row.try_get_by_index::<i64>(0).ok())
-                .or_else(|| row.try_get::<i32>("", "version").ok().map(i64::from))
-                .or_else(|| row.try_get_by_index::<i32>(0).ok().map(i64::from))
-        })
-        .collect())
+    Ok(rows.iter().filter_map(schema_migration_version).collect())
 }
 
 /// Executes one SQL string.

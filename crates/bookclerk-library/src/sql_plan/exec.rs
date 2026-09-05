@@ -5,8 +5,12 @@
 //! must not call these helpers — they stamp [`AdapterExecuteRequest`] and
 //! send it to [`crate::TypedAtomicExec`].
 
-use bookclerk_db_exec::{ExecCaps, PhysicalEngine};
-use bookclerk_plugin_abi::ExecuteRequest;
+use bookclerk_db_exec::{db_value_from_sea, ExecCaps, PhysicalEngine};
+use bookclerk_plugin_abi::{
+    DbPlanStatementKind, DbResultSelection, DbRow, ExecuteReply, ExecuteRequest, SqlTypeEnv,
+    TypedDbStatement,
+};
+use sea_orm::{ConnectionTrait, StreamTrait, Value};
 
 use crate::atomic_ops::DbAtomicResult;
 use crate::error::{LibraryError, Result};
@@ -14,6 +18,139 @@ use crate::sql_plan::interpret::interpret_typed_exec;
 use crate::sql_plan::CompiledAtomic;
 
 pub use bookclerk_db_exec::AtomicSession;
+
+/// True when native in-process tests must physically lower at this engine.
+#[must_use]
+pub(crate) fn in_process_postgres(engine: Option<PhysicalEngine>) -> Option<PhysicalEngine> {
+    engine.filter(|e| *e == PhysicalEngine::postgres())
+}
+
+/// Stamp and run one canonical statement on an already-open in-process connection.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Orm`] when typecheck, lowering, or execute fails.
+pub(crate) async fn execute_typed_on_open<C>(
+    engine: PhysicalEngine,
+    conn: &C,
+    req: &ExecuteRequest,
+    type_env: SqlTypeEnv,
+    timing_source: &str,
+    max_result_rows: u32,
+) -> Result<ExecuteReply>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    let envelope = bookclerk_db_exec::stamp_adapter_execute(req.clone(), &type_env)
+        .map_err(LibraryError::from_db_err)?;
+    bookclerk_db_exec::execute_typed_on_open_envelope(
+        engine,
+        conn,
+        &envelope,
+        timing_source,
+        ExecCaps::from(max_result_rows),
+        AtomicSession::from_deadline(None).with_type_env(type_env),
+        None,
+    )
+    .await
+    .map_err(LibraryError::from_db_err)
+}
+
+/// Execute canonical SQL: sqlite-shaped transport, or in-process postgres lowering.
+///
+/// # Errors
+///
+/// Returns when the connection rejects the statement.
+pub(crate) async fn execute_sql_on<C>(
+    engine: Option<PhysicalEngine>,
+    conn: &C,
+    sql: &str,
+    values: impl IntoIterator<Item = Value>,
+    type_env: SqlTypeEnv,
+) -> Result<u64>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    let values: Vec<Value> = values.into_iter().collect();
+    if let Some(engine) = in_process_postgres(engine) {
+        let parameters = values
+            .iter()
+            .map(db_value_from_sea)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|err| LibraryError::from_db_err(sea_orm::DbErr::Custom(err)))?;
+        let req = ExecuteRequest {
+            operation_id: "in-process-sql".into(),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![TypedDbStatement {
+                sql: sql.to_string(),
+                parameters,
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::AffectedRows,
+            }],
+        };
+        let reply = execute_typed_on_open(engine, conn, &req, type_env, "postgres_txn", 0).await?;
+        return Ok(reply
+            .statements
+            .first()
+            .map(|stmt| stmt.rows_affected)
+            .unwrap_or(0));
+    }
+    let res = crate::host_sql::execute_host_canonical(conn, sql, values)
+        .await
+        .map_err(LibraryError::from_db_err)?;
+    Ok(res.rows_affected())
+}
+
+/// Query canonical SQL: sqlite-shaped transport, or in-process postgres lowering.
+///
+/// # Errors
+///
+/// Returns when typecheck, lowering, or execute fails.
+pub(crate) async fn query_sql_on<C>(
+    engine: Option<PhysicalEngine>,
+    conn: &C,
+    sql: &str,
+    type_env: &SqlTypeEnv,
+    max_rows: u32,
+) -> Result<Vec<DbRow>>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    let Some(engine) = in_process_postgres(engine) else {
+        return Err(LibraryError::Schema(
+            "query_sql_on requires an in-process postgres engine".into(),
+        ));
+    };
+    let req = ExecuteRequest {
+        operation_id: "in-process-query".into(),
+        request_hash: String::new(),
+        deadline_unix_ms: 0,
+        statements: vec![TypedDbStatement {
+            sql: sql.to_string(),
+            parameters: Vec::new(),
+            kind: DbPlanStatementKind::Select,
+            max_rows,
+            result_selection: DbResultSelection::Rows,
+        }],
+    };
+    let reply = execute_typed_on_open(
+        engine,
+        conn,
+        &req,
+        type_env.clone(),
+        "postgres_txn",
+        max_rows,
+    )
+    .await?;
+    Ok(reply
+        .statements
+        .into_iter()
+        .next()
+        .map(|stmt| stmt.rows)
+        .unwrap_or_default())
+}
 
 /// Executes a compiled named atomic as one transaction and interprets the reply.
 ///

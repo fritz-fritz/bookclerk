@@ -47,6 +47,7 @@ fn backup_req(files: &Path, state: SchemaState, reason: BackupReason) -> BackupR
         max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
         plugin_units: Vec::new(),
         adapter: None,
+        physical_engine: None,
     }
 }
 
@@ -65,6 +66,31 @@ fn restore_without_atomic() -> CanonicalRestoreOpts {
     CanonicalRestoreOpts {
         atomic_unit_restore: false,
         ..CanonicalRestoreOpts::default()
+    }
+}
+
+fn postgres_engine() -> bookclerk_db_exec::PhysicalEngine {
+    bookclerk_db_exec::PhysicalEngine::postgres()
+}
+
+fn restore_postgres() -> CanonicalRestoreOpts {
+    CanonicalRestoreOpts {
+        physical_engine: Some(postgres_engine()),
+        ..restore_for(HostSchemaKind::RowMarker)
+    }
+}
+
+fn restore_postgres_plugin() -> CanonicalRestoreOpts {
+    CanonicalRestoreOpts {
+        physical_engine: Some(postgres_engine()),
+        ..restore_ok()
+    }
+}
+
+fn export_postgres() -> CanonicalExportOpts {
+    CanonicalExportOpts {
+        physical_engine: Some(postgres_engine()),
+        ..CanonicalExportOpts::default()
     }
 }
 
@@ -619,6 +645,7 @@ async fn uninitialized_skips_even_with_include_plugin_databases() {
             max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             plugin_units: Vec::new(),
             adapter: None,
+            physical_engine: None,
         },
     )
     .await
@@ -2139,7 +2166,7 @@ async fn postgres_library_backup_round_trip() {
     let Some((db, _)) = postgres_throwaway().await else {
         return;
     };
-    apply_host_schema(&db, HostSchemaKind::RowMarker)
+    apply_host_schema_on(postgres_engine(), &db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     db.execute_raw(Statement::from_string(
@@ -2155,6 +2182,7 @@ async fn postgres_library_backup_round_trip() {
     let files = tempfile::tempdir().unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
     req.backend_at_capture = "postgres".into();
+    req.physical_engine = Some(postgres_engine());
     let outcome = backup_library(&db, &req).await.unwrap().unwrap();
     db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
@@ -2163,14 +2191,9 @@ async fn postgres_library_backup_round_trip() {
     ))
     .await
     .unwrap();
-    restore_backup(
-        &db,
-        files.path(),
-        &outcome.manifest.id,
-        &restore_for(HostSchemaKind::RowMarker),
-    )
-    .await
-    .unwrap();
+    restore_backup(&db, files.path(), &outcome.manifest.id, &restore_postgres())
+        .await
+        .unwrap();
     let n: i64 = db
         .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
@@ -2208,16 +2231,10 @@ async fn postgres_capture_orders_nulls_first_with_declared_tiebreakers() {
     }
     let files = tempfile::tempdir().unwrap();
     let repo = BackupRepository::open(files.path()).unwrap();
-    let unit = capture::capture_plugin_unit(
-        &db,
-        &repo,
-        &CanonicalExportOpts::default(),
-        "demo",
-        "items",
-        "postgres",
-    )
-    .await
-    .unwrap();
+    let unit =
+        capture::capture_plugin_unit(&db, &repo, &export_postgres(), "demo", "items", "postgres")
+            .await
+            .unwrap();
     let meta = unit.tables.iter().find(|t| t.name == "items").unwrap();
     let mut rows = Vec::new();
     for digest in &meta.chunks {
@@ -2260,16 +2277,10 @@ async fn postgres_capture_text_order_matches_utf8_binary() {
     }
     let files = tempfile::tempdir().unwrap();
     let repo = BackupRepository::open(files.path()).unwrap();
-    let unit = capture::capture_plugin_unit(
-        &db,
-        &repo,
-        &CanonicalExportOpts::default(),
-        "demo",
-        "items",
-        "postgres",
-    )
-    .await
-    .unwrap();
+    let unit =
+        capture::capture_plugin_unit(&db, &repo, &export_postgres(), "demo", "items", "postgres")
+            .await
+            .unwrap();
     let meta = unit.tables.iter().find(|t| t.name == "items").unwrap();
     let mut rows = Vec::new();
     for digest in &meta.chunks {
@@ -2315,6 +2326,7 @@ async fn postgres_library_restores_to_sqlite() {
     let files = tempfile::tempdir().unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
     req.backend_at_capture = "postgres".into();
+    req.physical_engine = Some(postgres_engine());
     let outcome = backup_library(&pg, &req).await.unwrap().unwrap();
     let sqlite = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
@@ -2373,14 +2385,9 @@ async fn postgres_sqlite_library_restores_to_postgres() {
     )
     .await
     .unwrap();
-    restore_backup(
-        &pg,
-        files.path(),
-        &outcome.manifest.id,
-        &restore_for(HostSchemaKind::RowMarker),
-    )
-    .await
-    .unwrap();
+    restore_backup(&pg, files.path(), &outcome.manifest.id, &restore_postgres())
+        .await
+        .unwrap();
     let n: i64 = pg
         .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
@@ -2453,7 +2460,7 @@ async fn postgres_sqlite_plugin_restores_to_postgres() {
         &repo,
         &unit,
         CanonicalRestoreKind::PluginBinding,
-        &restore_ok(),
+        &restore_postgres_plugin(),
         false,
     )
     .await

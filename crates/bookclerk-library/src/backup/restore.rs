@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 
 use bookclerk_plugin_abi::{
-    parse_create_index_sql, parse_create_table_schema, DbIdentityHighWater, SQL_CATALOG_TABLE,
-    SQL_DDL_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
+    parse_create_index_sql, parse_create_table_schema, DbIdentityHighWater, SqlTypeEnv,
+    SQL_CATALOG_TABLE, SQL_DDL_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
+use sea_orm::{ConnectionTrait, DatabaseConnection, StreamTrait, TransactionTrait};
 
 use super::capture::plugin_canonical_schema_from_ddl_catalog;
 use super::encode::CanonicalObject;
@@ -131,7 +131,7 @@ async fn restore_unit_on<C>(
     preserve_plugin_registry: bool,
 ) -> Result<()>
 where
-    C: ConnectionTrait,
+    C: ConnectionTrait + StreamTrait,
 {
     let preserve_registry = kind == CanonicalRestoreKind::Library
         && preserve_plugin_registry
@@ -149,7 +149,7 @@ where
         if preserve_registry && is_registry_table(&table.parsed.table) {
             continue;
         }
-        apply_canonical_ddl(conn, &table.create_sql, kind).await?;
+        apply_canonical_ddl(conn, &table.create_sql, kind, opts.physical_engine).await?;
     }
     let ordered = sort_tables_by_foreign_keys(schema.tables.clone())?;
     for table in &ordered {
@@ -162,7 +162,7 @@ where
         if preserve_registry && is_registry_table(&index.table) {
             continue;
         }
-        apply_canonical_ddl(conn, &index.canonical_sql, kind).await?;
+        apply_canonical_ddl(conn, &index.canonical_sql, kind, opts.physical_engine).await?;
     }
     restore_identity(conn, identity, opts).await?;
     Ok(())
@@ -177,7 +177,7 @@ async fn restore_table_rows<C>(
     opts: &CanonicalRestoreOpts,
 ) -> Result<()>
 where
-    C: ConnectionTrait,
+    C: ConnectionTrait + StreamTrait,
 {
     let name = table.parsed.table.as_str();
     let Some(meta) = unit.tables.iter().find(|t| t.name == name) else {
@@ -206,9 +206,14 @@ where
                 "restore refuses unsafe table `{name}`"
             )));
         }
+        let mut type_env = SqlTypeEnv::new();
+        type_env.insert_table(
+            table.parsed.table.clone(),
+            table.parsed.columns.iter().cloned(),
+        );
         for row in rows {
             let insert = insert_sql(name, &columns, row.len())?;
-            exec_bound(conn, opts, &insert, row).await?;
+            exec_bound(conn, opts, &insert, row, type_env.clone()).await?;
         }
     }
     Ok(())
@@ -276,27 +281,38 @@ where
 }
 
 /// Execute one admitted CREATE TABLE / CREATE INDEX statement plus companions.
-async fn apply_canonical_ddl<C>(conn: &C, canonical: &str, kind: CanonicalRestoreKind) -> Result<()>
+async fn apply_canonical_ddl<C>(
+    conn: &C,
+    canonical: &str,
+    kind: CanonicalRestoreKind,
+    engine: Option<bookclerk_db_exec::PhysicalEngine>,
+) -> Result<()>
 where
-    C: ConnectionTrait,
+    C: ConnectionTrait + StreamTrait,
 {
     if !statement_is_admitted(canonical) {
         return Err(LibraryError::Schema(format!(
             "restore refuses SQL that is not admitted Bookclerk DDL: `{canonical}`"
         )));
     }
-    crate::host_sql::execute_host_canonical(conn, canonical, std::iter::empty::<sea_orm::Value>())
-        .await
-        .map_err(LibraryError::from_db_err)?;
+    crate::sql_plan::execute_sql_on(
+        engine,
+        conn,
+        canonical,
+        std::iter::empty::<sea_orm::Value>(),
+        crate::migrations::host_sql_type_env(),
+    )
+    .await?;
     if kind == CanonicalRestoreKind::PluginBinding {
         for companion in bookclerk_plugin_abi::catalog_companions(canonical) {
-            crate::host_sql::execute_host_canonical(
+            crate::sql_plan::execute_sql_on(
+                engine,
                 conn,
                 &companion,
                 std::iter::empty::<sea_orm::Value>(),
+                crate::migrations::host_sql_type_env(),
             )
-            .await
-            .map_err(LibraryError::from_db_err)?;
+            .await?;
         }
     }
     Ok(())
@@ -375,7 +391,7 @@ pub async fn apply_admitted_sql(
     kind: CanonicalRestoreKind,
 ) -> Result<()> {
     for sql in statements {
-        apply_canonical_ddl(db, sql, kind).await?;
+        apply_canonical_ddl(db, sql, kind, None).await?;
     }
     Ok(())
 }

@@ -5563,6 +5563,7 @@ async fn stale_wake_delivery_update_does_not_clear(store: &LibraryStore) {
     let now = chrono::Utc::now().to_rfc3339();
     let woken = super::event_outbox::wake_deliveries_fenced_on(
         store.db(),
+        store.physical_engine(),
         &trigger_id,
         "token-b",
         std::slice::from_ref(&parked.id),
@@ -5590,6 +5591,7 @@ async fn stale_wake_delivery_update_does_not_clear(store: &LibraryStore) {
 
     let stale = super::event_outbox::wake_deliveries_fenced_on(
         store.db(),
+        store.physical_engine(),
         &trigger_id,
         "token-a",
         std::slice::from_ref(&parked.id),
@@ -6042,10 +6044,15 @@ async fn postgres_test_store() -> LibraryStore {
         .expect("connect to disposable postgres database");
     // `host_migration_plan()` is empty until a release cut. Apply the current
     // canonical pack (unreleased) through the same host state machine as connect.
-    crate::apply_host_schema(&db, crate::HostSchemaKind::RowMarker)
-        .await
-        .expect("apply unreleased host schema");
+    crate::apply_host_schema_on(
+        bookclerk_db_exec::PhysicalEngine::postgres(),
+        &db,
+        crate::HostSchemaKind::RowMarker,
+    )
+    .await
+    .expect("apply unreleased host schema");
     LibraryStore::from_connection(db)
+        .with_physical_engine(bookclerk_db_exec::PhysicalEngine::postgres())
 }
 
 #[tokio::test]

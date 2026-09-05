@@ -201,14 +201,17 @@ pub fn cap_query_sql(sql: &str, max_result_rows: u32) -> String {
 /// # Errors
 ///
 /// Returns when the engine stream/query fails.
-pub(crate) async fn collect_capped_query_results(
-    txn: &sea_orm::DatabaseTransaction,
+pub(crate) async fn collect_capped_query_results<C>(
+    conn: &C,
     stmt: Statement,
     max_result_rows: u32,
-) -> Result<Vec<QueryResult>, DbErr> {
+) -> Result<Vec<QueryResult>, DbErr>
+where
+    C: ConnectionTrait + StreamTrait,
+{
     let stop_after = row_stop_after(max_result_rows);
-    if ConnectionTrait::get_database_backend(txn) == sea_orm::DatabaseBackend::Postgres {
-        let stream = txn.stream_raw(stmt).await?;
+    if ConnectionTrait::get_database_backend(conn) == sea_orm::DatabaseBackend::Postgres {
+        let stream = conn.stream_raw(stmt).await?;
         futures::pin_mut!(stream);
         let mut rows = Vec::new();
         while let Some(row) = stream.try_next().await? {
@@ -220,7 +223,7 @@ pub(crate) async fn collect_capped_query_results(
         }
         return Ok(rows);
     }
-    let rows = txn.query_all_raw(stmt).await?;
+    let rows = conn.query_all_raw(stmt).await?;
     Ok(rows.into_iter().take(stop_after).collect())
 }
 

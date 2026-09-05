@@ -3,9 +3,9 @@
 use bookclerk_plugin_abi::{
     encoded_execute_request_bytes, sql_payload_exceeds, DbIdentityHighWater, DbPlanStatementKind,
     DbResultSelection, DbType, DbValue, ExecuteRequest, SharedAdapterBackupOps, SqlType,
-    TypedDbStatement,
+    SqlTypeEnv, TypedDbStatement,
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection, QueryResult};
+use sea_orm::{ConnectionTrait, DatabaseConnection, QueryResult, StreamTrait};
 
 use crate::error::{LibraryError, Result};
 
@@ -74,9 +74,10 @@ pub(crate) async fn exec_bound<C>(
     opts: &CanonicalRestoreOpts,
     sql: &str,
     params: Vec<DbValue>,
+    type_env: SqlTypeEnv,
 ) -> Result<()>
 where
-    C: ConnectionTrait,
+    C: ConnectionTrait + StreamTrait,
 {
     let nbinds = u32::try_from(params.len()).unwrap_or(u32::MAX);
     if nbinds > opts.max_binds {
@@ -114,6 +115,11 @@ where
             encoded.len(),
             opts.max_request_bytes
         )));
+    }
+    if let Some(engine) = crate::sql_plan::in_process_postgres(opts.physical_engine) {
+        crate::sql_plan::execute_typed_on_open(engine, conn, &req, type_env, "postgres_txn", 0)
+            .await?;
+        return Ok(());
     }
     crate::host_sql::execute_host_canonical(
         conn,

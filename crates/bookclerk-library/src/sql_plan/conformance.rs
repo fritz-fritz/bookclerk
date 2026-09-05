@@ -1476,6 +1476,7 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
         "n",
         bookclerk_plugin_abi::SqlType::Integer,
     );
+    type_env.insert_column("typed_counter", "n", bookclerk_plugin_abi::SqlType::Integer);
     let empty = typed_query("bump", "SELECT n FROM typed_bump_view LIMIT 0");
     let reply = bookclerk_db_exec::execute_typed_on_session(
         &db,
@@ -1501,7 +1502,7 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(type_env),
     )
     .await
     .unwrap();

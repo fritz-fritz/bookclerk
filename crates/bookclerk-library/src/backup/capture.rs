@@ -10,7 +10,7 @@ use bookclerk_plugin_abi::{
     StatementResult, TypedDbStatement, UnresolvedExecuteRequest, SQL_CATALOG_TABLE,
     SQL_CONTRACT_VERSION, SQL_DDL_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction, StreamTrait};
 
 use super::encode::{chunk_would_overflow, CanonicalObject};
 use super::repository::BackupRepository;
@@ -109,7 +109,7 @@ async fn capture_plugin_on<C>(
     backend_at_capture: &str,
 ) -> Result<BackupUnit>
 where
-    C: ConnectionTrait,
+    C: ConnectionTrait + StreamTrait,
 {
     let schema = plugin_canonical_schema_from_ddl_catalog_on(conn, opts).await?;
     capture_unit_on(
@@ -189,7 +189,7 @@ async fn capture_unit_on<C>(
     expected_state: Option<&SchemaState>,
 ) -> Result<BackupUnit>
 where
-    C: ConnectionTrait,
+    C: ConnectionTrait + StreamTrait,
 {
     if let Some(expected) = expected_state {
         let live = schema_state_from_conn(conn).await?;
@@ -266,7 +266,7 @@ async fn capture_table<C>(
     opts: &CanonicalExportOpts,
 ) -> Result<(Vec<String>, Vec<String>, i64)>
 where
-    C: ConnectionTrait,
+    C: ConnectionTrait + StreamTrait,
 {
     let name = table.parsed.table.as_str();
     let columns: Vec<String> = table
@@ -325,7 +325,17 @@ where
             "SELECT {} FROM {name} ORDER BY {order_sql} LIMIT {page} OFFSET {offset}",
             columns.join(", "),
         );
-        let rows = match capture_select(conn, &canonical_sql, &env, page).await {
+        let cells_rows = match capture_table_page(
+            conn,
+            &canonical_sql,
+            &env,
+            page,
+            &columns,
+            &types,
+            opts.physical_engine,
+        )
+        .await
+        {
             Ok(rows) => rows,
             Err(err) if result_bytes_exceeded(&err.to_string()) => {
                 if page <= 1 {
@@ -343,16 +353,8 @@ where
                 )));
             }
         };
-        if rows.is_empty() {
+        if cells_rows.is_empty() {
             break;
-        }
-        let mut cells_rows = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let mut cells = Vec::with_capacity(columns.len());
-            for (col, ty) in columns.iter().zip(types.iter()) {
-                cells.push(cell_to_db_value(row, col, *ty)?);
-            }
-            cells_rows.push(cells);
         }
         let encoded = encoded_select_page_bytes(&columns, &types, &cells_rows)?;
         if encoded > byte_budget {
@@ -567,6 +569,36 @@ fn catalog_type_env() -> SqlTypeEnv {
         sql_ddl_create_table_sql(),
         sql_schema_create_table_sql()
     ))
+}
+
+/// Fetch one capture page: physically lowered SELECT on in-process postgres,
+/// otherwise canonical SeaORM transport.
+async fn capture_table_page<C>(
+    conn: &C,
+    sql: &str,
+    env: &SqlTypeEnv,
+    page: u32,
+    columns: &[String],
+    types: &[DbType],
+    engine: Option<bookclerk_db_exec::PhysicalEngine>,
+) -> Result<Vec<Vec<DbValue>>>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    if crate::sql_plan::in_process_postgres(engine).is_some() {
+        let rows = crate::sql_plan::query_sql_on(engine, conn, sql, env, page).await?;
+        return Ok(rows.into_iter().map(|row| row.values).collect());
+    }
+    let rows = capture_select(conn, sql, env, page).await?;
+    let mut cells_rows = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mut cells = Vec::with_capacity(columns.len());
+        for (col, ty) in columns.iter().zip(types.iter()) {
+            cells.push(cell_to_db_value(row, col, *ty)?);
+        }
+        cells_rows.push(cells);
+    }
+    Ok(cells_rows)
 }
 
 /// Proof-directed SELECT so Postgres TEXT ORDER BY uses `COLLATE "C"`.

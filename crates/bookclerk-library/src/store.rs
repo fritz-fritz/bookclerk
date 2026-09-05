@@ -59,6 +59,12 @@ pub struct LibraryStore {
     max_payload_bytes: u32,
     /// Full negotiated capability advertisement (limits, schema flags, timing).
     caps: Arc<bookclerk_plugin_abi::DbCapabilities>,
+    /// In-process physical engine for leftover canonical `?` SQL.
+    ///
+    /// Production plugin-host stays [`bookclerk_db_exec::PhysicalEngine::sqlite`]
+    /// (sqlite-shaped proxy). Native postgres tests set
+    /// [`bookclerk_db_exec::PhysicalEngine::postgres`].
+    physical_engine: bookclerk_db_exec::PhysicalEngine,
 }
 
 impl std::fmt::Debug for LibraryStore {
@@ -84,7 +90,21 @@ impl LibraryStore {
             max_result_rows: 256,
             max_payload_bytes: 256 * 1024,
             caps: Arc::new(bookclerk_plugin_abi::DbCapabilities::advertised_d1()),
+            physical_engine: bookclerk_db_exec::PhysicalEngine::sqlite(),
         }
+    }
+
+    /// Sets the in-process physical engine used for leftover canonical SQL.
+    #[must_use]
+    pub fn with_physical_engine(mut self, engine: bookclerk_db_exec::PhysicalEngine) -> Self {
+        self.physical_engine = engine;
+        self
+    }
+
+    /// In-process physical engine for leftover canonical `?` SQL.
+    #[must_use]
+    pub fn physical_engine(&self) -> bookclerk_db_exec::PhysicalEngine {
+        self.physical_engine
     }
 
     /// Attach a guest atomic backend for named security operations.

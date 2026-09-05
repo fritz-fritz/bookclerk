@@ -161,6 +161,8 @@ pub struct CanonicalExportOpts {
     pub chunk_target_bytes: usize,
     /// Adapter snapshot/identity hooks. `None` uses the in-process SDK (tests).
     pub adapter: Option<SharedAdapterBackupOps>,
+    /// In-process physical engine. `None` sends canonical SQL (plugin-host proxy).
+    pub physical_engine: Option<bookclerk_db_exec::PhysicalEngine>,
 }
 
 impl std::fmt::Debug for CanonicalExportOpts {
@@ -173,6 +175,7 @@ impl std::fmt::Debug for CanonicalExportOpts {
             .field("max_atomic_result_bytes", &self.max_atomic_result_bytes)
             .field("chunk_target_bytes", &self.chunk_target_bytes)
             .field("adapter", &self.adapter.as_ref().map(|_| "Some"))
+            .field("physical_engine", &self.physical_engine)
             .finish()
     }
 }
@@ -187,6 +190,7 @@ impl Default for CanonicalExportOpts {
             max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             chunk_target_bytes: CHUNK_TARGET_UNCOMPRESSED_BYTES,
             adapter: None,
+            physical_engine: None,
         }
     }
 }
@@ -203,6 +207,7 @@ impl CanonicalExportOpts {
             max_atomic_result_bytes: caps.max_atomic_result_bytes.max(1),
             chunk_target_bytes: CHUNK_TARGET_UNCOMPRESSED_BYTES,
             adapter: None,
+            physical_engine: None,
         }
     }
 
@@ -233,6 +238,8 @@ pub struct CanonicalRestoreOpts {
     pub host_schema_kind: HostSchemaKind,
     /// Adapter restore hooks. `None` uses the in-process SDK (tests).
     pub adapter: Option<SharedAdapterBackupOps>,
+    /// In-process physical engine. `None` sends canonical SQL (plugin-host proxy).
+    pub physical_engine: Option<bookclerk_db_exec::PhysicalEngine>,
 }
 
 impl std::fmt::Debug for CanonicalRestoreOpts {
@@ -244,6 +251,7 @@ impl std::fmt::Debug for CanonicalRestoreOpts {
             .field("max_request_bytes", &self.max_request_bytes)
             .field("host_schema_kind", &self.host_schema_kind)
             .field("adapter", &self.adapter.as_ref().map(|_| "Some"))
+            .field("physical_engine", &self.physical_engine)
             .finish()
     }
 }
@@ -274,6 +282,7 @@ impl CanonicalRestoreOpts {
             max_request_bytes: caps.max_request_bytes.max(1),
             host_schema_kind: HostSchemaKind::from_db_capabilities(caps)?,
             adapter: None,
+            physical_engine: None,
         })
     }
 }
@@ -471,6 +480,8 @@ pub struct BackupRequest {
     pub plugin_units: Vec<PreparedPluginUnit>,
     /// Library adapter hooks. `None` uses the in-process SDK (tests).
     pub adapter: Option<SharedAdapterBackupOps>,
+    /// In-process physical engine. `None` sends canonical SQL (plugin-host proxy).
+    pub physical_engine: Option<bookclerk_db_exec::PhysicalEngine>,
 }
 
 impl std::fmt::Debug for BackupRequest {
@@ -488,6 +499,7 @@ impl std::fmt::Debug for BackupRequest {
             .field("max_atomic_result_bytes", &self.max_atomic_result_bytes)
             .field("plugin_units", &self.plugin_units)
             .field("adapter", &self.adapter.as_ref().map(|_| "Some"))
+            .field("physical_engine", &self.physical_engine)
             .finish()
     }
 }
@@ -568,6 +580,7 @@ pub async fn backup_library(
         max_atomic_result_bytes: req.max_atomic_result_bytes.max(1),
         chunk_target_bytes: CHUNK_TARGET_UNCOMPRESSED_BYTES,
         adapter: req.adapter.clone(),
+        physical_engine: req.physical_engine,
     };
     let manifest = {
         let _lock = repo.lock_exclusive()?;
@@ -590,6 +603,7 @@ pub async fn backup_library(
                 max_atomic_result_bytes: prepared.max_atomic_result_bytes.max(1),
                 chunk_target_bytes: CHUNK_TARGET_UNCOMPRESSED_BYTES,
                 adapter: prepared.adapter.clone().or_else(|| req.adapter.clone()),
+                physical_engine: req.physical_engine,
             };
             units.push(
                 capture_plugin_unit(

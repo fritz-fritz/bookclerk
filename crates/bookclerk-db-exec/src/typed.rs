@@ -25,7 +25,7 @@ use bookclerk_plugin_abi::{
 };
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, Statement,
-    TransactionTrait, Value as SeaValue,
+    StreamTrait, TransactionTrait, Value as SeaValue,
 };
 
 use crate::exec::{
@@ -1497,7 +1497,8 @@ pub async fn execute_typed_on_txn(
     session: AtomicSession,
     describe: Option<&DatabaseConnection>,
 ) -> Result<ExecuteReply, DbErr> {
-    let engine = PhysicalEngine::from_adapter_backend(txn.get_database_backend());
+    let engine =
+        PhysicalEngine::from_adapter_backend(ConnectionTrait::get_database_backend(txn));
     let envelope = stamp_adapter_execute(req.clone(), &session.type_env)?;
     execute_typed_on_txn_envelope(
         engine,
@@ -1557,6 +1558,60 @@ pub async fn execute_typed_on_txn_envelope(
                 true,
             )
         })
+    })
+    .await;
+    record_query_rows_seen(seen_budget.rows_seen());
+    result
+}
+
+/// Run a stamped envelope on an already-open connection (no BEGIN/COMMIT).
+///
+/// In-process postgres tests use this when the caller already holds a SeaORM
+/// connection or transaction and must physically lower canonical SQL. Host
+/// RPC/proxy paths must not call this — they send [`AdapterExecuteRequest`].
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when proofs are missing, a statement fails, or the encoded
+/// reply exceeds `max_atomic_result_bytes`.
+pub async fn execute_typed_on_open_envelope<C>(
+    engine: PhysicalEngine,
+    conn: &C,
+    envelope: &AdapterExecuteRequest,
+    timing_source: &str,
+    caps: impl Into<ExecCaps>,
+    session: AtomicSession,
+    describe: Option<&DatabaseConnection>,
+) -> Result<ExecuteReply, DbErr>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    let caps = caps.into();
+    if envelope.request.statements.is_empty() {
+        return Err(DbErr::Custom(
+            "executeAtomic statements must be non-empty".into(),
+        ));
+    }
+    envelope
+        .require_proofs()
+        .map_err(|err| DbErr::Custom(err.to_string()))?;
+    session.check(AtomicInterruptPhase::BetweenStatements)?;
+    let budget = ExecBudget::new(session.deadline_unix_ms, caps.max_result_rows);
+    let seen_budget = Arc::clone(&budget);
+    let persist = envelope.guest_receipt.clone();
+    let result = with_exec_budget(Arc::clone(&budget), || {
+        execute_typed_join_body(
+            engine,
+            conn,
+            describe,
+            &envelope.request,
+            timing_source,
+            caps,
+            session,
+            persist,
+            &envelope.proofs,
+            true,
+        )
     })
     .await;
     record_query_rows_seen(seen_budget.rows_seen());
@@ -1654,9 +1709,9 @@ where
 ///
 /// Returns [`DbErr`] when a statement fails, encoding fails, or a result budget is exceeded.
 #[allow(clippy::too_many_arguments)]
-async fn execute_typed_join_body(
+async fn execute_typed_join_body<C>(
     engine: PhysicalEngine,
-    txn: &DatabaseTransaction,
+    txn: &C,
     describe: Option<&DatabaseConnection>,
     req: &ExecuteRequest,
     timing_source: &str,
@@ -1665,7 +1720,10 @@ async fn execute_typed_join_body(
     guest_receipt: GuestReceiptPersist,
     stamped: &[ResolvedStatement],
     require_stamped: bool,
-) -> Result<ExecuteReply, DbErr> {
+) -> Result<ExecuteReply, DbErr>
+where
+    C: ConnectionTrait + StreamTrait,
+{
     let started = Instant::now();
     let backend = engine.backend();
     let req = req.clone();

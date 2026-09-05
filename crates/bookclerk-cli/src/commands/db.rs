@@ -232,6 +232,7 @@ async fn run_backup_create(
         max_atomic_result_bytes: caps.max_atomic_result_bytes,
         plugin_units,
         adapter: Some(ext.library_backup_ops()),
+        physical_engine: None,
     };
     let outcome = backup_library(&db, &req)
         .await?

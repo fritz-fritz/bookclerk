@@ -5,12 +5,13 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::anyhow;
+use bookclerk_db_exec::PhysicalEngine;
 use chrono::{Duration, Utc};
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::{NotSet, Set},
     ColumnTrait, Condition, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, TransactionTrait,
+    QuerySelect, StreamTrait, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -100,15 +101,39 @@ fn wake_in_chunk_size(max_binds: usize) -> usize {
     max_binds.saturating_sub(WAKE_UPDATE_FIXED_BINDS).max(1)
 }
 
-/// Wake matching pending deliveries when `owner` still holds the event's wake lease.
-pub(crate) async fn wake_deliveries_fenced_on<C: ConnectionTrait>(
+/// Execute leftover canonical host SQL (`?` placeholders) on `engine`.
+async fn exec_host_sql<C>(
     db: &C,
+    engine: PhysicalEngine,
+    sql: &str,
+    values: impl IntoIterator<Item = sea_orm::Value>,
+) -> Result<u64>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    crate::sql_plan::execute_sql_on(
+        Some(engine),
+        db,
+        sql,
+        values,
+        crate::migrations::host_sql_type_env(),
+    )
+    .await
+}
+
+/// Wake matching pending deliveries when `owner` still holds the event's wake lease.
+pub(crate) async fn wake_deliveries_fenced_on<C>(
+    db: &C,
+    engine: PhysicalEngine,
     event_id: &str,
     owner: &str,
     ids: &[String],
     now: &str,
     max_binds: usize,
-) -> Result<u32> {
+) -> Result<u32>
+where
+    C: ConnectionTrait + StreamTrait,
+{
     if ids.is_empty() {
         return Ok(0);
     }
@@ -124,10 +149,8 @@ pub(crate) async fn wake_deliveries_fenced_on<C: ConnectionTrait>(
         }
         values.push(event_id.to_string().into());
         values.push(owner.to_string().into());
-        let res = crate::host_sql::execute_host_canonical(db, &sql, values)
-            .await
-            .map_err(LibraryError::Orm)?;
-        woken = woken.saturating_add(u32::try_from(res.rows_affected()).unwrap_or(0));
+        let affected = exec_host_sql(db, engine, &sql, values).await?;
+        woken = woken.saturating_add(u32::try_from(affected).unwrap_or(0));
     }
     Ok(woken)
 }
@@ -325,7 +348,8 @@ impl LibraryStore {
             return Ok(total);
         }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match dispatch_event_deliveries_on(&txn, event_id, subscribers).await {
+        match dispatch_event_deliveries_on(&txn, self.physical_engine, event_id, subscribers).await
+        {
             Ok(n) => {
                 txn.commit().await.map_err(LibraryError::Orm)?;
                 Ok(n)
@@ -486,10 +510,11 @@ impl LibraryStore {
         let max_binds =
             usize::try_from(self.max_binds).unwrap_or(bookclerk_plugin_abi::D1_MAX_BINDS as usize);
         if self.atomic.is_some() {
-            return wake_one_page_on(&self.db, row, owner, page, max_binds).await;
+            return wake_one_page_on(&self.db, self.physical_engine, row, owner, page, max_binds)
+                .await;
         }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match wake_one_page_on(&txn, row, owner, page, max_binds).await {
+        match wake_one_page_on(&txn, self.physical_engine, row, owner, page, max_binds).await {
             Ok(n) => {
                 txn.commit().await.map_err(LibraryError::Orm)?;
                 Ok(n)
@@ -800,7 +825,7 @@ impl LibraryStore {
         )
         .await?;
         if ok {
-            bump_event_stats(&self.db, 0, 0, 1, None, None).await?;
+            bump_event_stats(&self.db, self.physical_engine, 0, 0, 1, None, None).await?;
         }
         Ok(ok)
     }
@@ -878,7 +903,7 @@ impl LibraryStore {
             .await
             .map_err(LibraryError::Orm)?;
         if res.rows_affected == 1 {
-            bump_event_stats(&self.db, 1, 0, 0, None, None).await?;
+            bump_event_stats(&self.db, self.physical_engine, 1, 0, 0, None, None).await?;
             return Ok(true);
         }
         Ok(false)
@@ -998,7 +1023,7 @@ impl LibraryStore {
             .await
             .map_err(LibraryError::Orm)?;
         if res.rows_affected == 1 {
-            bump_event_stats(&self.db, 0, 1, 0, None, None).await?;
+            bump_event_stats(&self.db, self.physical_engine, 0, 1, 0, None, None).await?;
             Ok(true)
         } else {
             Ok(false)
@@ -1116,6 +1141,7 @@ impl LibraryStore {
         if res.rows_affected > 0 {
             bump_event_stats(
                 &self.db,
+                self.physical_engine,
                 i64::try_from(res.rows_affected).unwrap_or(0),
                 0,
                 0,
@@ -1352,7 +1378,16 @@ impl LibraryStore {
     ///
     /// Returns [`LibraryError::Orm`] when the write fails.
     pub async fn record_event_handler_latency(&self, duration_ms: i64) -> Result<()> {
-        bump_event_stats(&self.db, 0, 0, 0, None, Some(duration_ms.max(0))).await
+        bump_event_stats(
+            &self.db,
+            self.physical_engine,
+            0,
+            0,
+            0,
+            None,
+            Some(duration_ms.max(0)),
+        )
+        .await
     }
 
     /// Outbox envelopes in `dispatch_state`, oldest first.
@@ -1840,20 +1875,17 @@ impl LibraryStore {
             .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
-        let events = crate::host_sql::execute_host_canonical(
+        let events = exec_host_sql(
             &self.db,
+            self.physical_engine,
             "DELETE FROM domain_events WHERE dispatch_state = 'dispatched' \
              AND created_at <= ? AND NOT EXISTS ( \
                 SELECT 1 FROM event_deliveries d WHERE d.event_id = domain_events.id \
              )",
             [terminal_cutoff.into()],
         )
-        .await
-        .map_err(LibraryError::Orm)?;
-        Ok(acked.rows_affected
-            + dead.rows_affected
-            + stale_nodes.rows_affected
-            + events.rows_affected())
+        .await?;
+        Ok(acked.rows_affected + dead.rows_affected + stale_nodes.rows_affected + events)
     }
 }
 
@@ -2039,13 +2071,17 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
 ///
 /// Cursor release and finish require `wake_lease_owner = owner` and `wake_pending = 1`.
 /// Zero rows affected is fence loss: do not overwrite another owner’s cursor.
-async fn wake_one_page_on<C: ConnectionTrait>(
+async fn wake_one_page_on<C>(
     db: &C,
+    engine: PhysicalEngine,
     row: &domain_events::Model,
     owner: &str,
     page: u64,
     max_binds: usize,
-) -> Result<u32> {
+) -> Result<u32>
+where
+    C: ConnectionTrait + StreamTrait,
+{
     let event = map_event(row.clone())?;
     if event.event_type.trim().is_empty() {
         let _ = finish_wake_on(db, &event.id, owner).await?;
@@ -2112,7 +2148,8 @@ async fn wake_one_page_on<C: ConnectionTrait>(
             ids.push(delivery.id);
         }
     }
-    let woken = wake_deliveries_fenced_on(db, &event.id, owner, &ids, &now, max_binds).await?;
+    let woken =
+        wake_deliveries_fenced_on(db, engine, &event.id, owner, &ids, &now, max_binds).await?;
     if u64::try_from(page_len).unwrap_or(page) < page {
         let _ = finish_wake_on(db, &event.id, owner).await?;
     } else {
@@ -2192,11 +2229,15 @@ pub(crate) async fn finish_wake_on<C: ConnectionTrait>(
 }
 
 /// Create deliveries for `subscribers` and mark the event dispatched.
-pub(crate) async fn dispatch_event_deliveries_on<C: ConnectionTrait>(
+pub(crate) async fn dispatch_event_deliveries_on<C>(
     db: &C,
+    engine: PhysicalEngine,
     event_id: &str,
     subscribers: &[EventSubscriber],
-) -> Result<u32> {
+) -> Result<u32>
+where
+    C: ConnectionTrait + StreamTrait,
+{
     let Some(event) = domain_events::Entity::find_by_id(event_id)
         .one(db)
         .await
@@ -2267,7 +2308,7 @@ pub(crate) async fn dispatch_event_deliveries_on<C: ConnectionTrait>(
         .map_err(LibraryError::Orm)?;
     if first_dispatch && dispatched.rows_affected == 1 {
         let ms = (Utc::now() - created_at).num_milliseconds().max(0);
-        bump_event_stats(db, 0, 0, 0, Some(ms), None).await?;
+        bump_event_stats(db, engine, 0, 0, 0, Some(ms), None).await?;
     }
     Ok(created)
 }
@@ -2683,14 +2724,18 @@ async fn ensure_event_outbox_stats<C: ConnectionTrait>(
         .ok_or_else(|| LibraryError::Other(anyhow!("event_outbox_stats singleton missing")))
 }
 
-async fn bump_event_stats<C: ConnectionTrait>(
+async fn bump_event_stats<C>(
     db: &C,
+    engine: PhysicalEngine,
     retries: i64,
     suspensions: i64,
     dead_letters: i64,
     dispatch_latency_ms: Option<i64>,
     handler_latency_ms: Option<i64>,
-) -> Result<()> {
+) -> Result<()>
+where
+    C: ConnectionTrait + StreamTrait,
+{
     let _ = ensure_event_outbox_stats(db).await?;
     let (dispatch_sum, dispatch_n) = match dispatch_latency_ms {
         Some(ms) => (ms, 1i64),
@@ -2700,8 +2745,9 @@ async fn bump_event_stats<C: ConnectionTrait>(
         Some(ms) => (ms, 1i64),
         None => (0, 0),
     };
-    crate::host_sql::execute_host_canonical(
+    exec_host_sql(
         db,
+        engine,
         "UPDATE event_outbox_stats SET \
             retries_total = retries_total + ?, \
             suspensions_total = suspensions_total + ?, \
@@ -2722,8 +2768,7 @@ async fn bump_event_stats<C: ConnectionTrait>(
             EVENT_OUTBOX_STATS_ID.into(),
         ],
     )
-    .await
-    .map_err(LibraryError::Orm)?;
+    .await?;
     Ok(())
 }
 
