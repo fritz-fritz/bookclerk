@@ -12,7 +12,6 @@
 
 use std::future::Future;
 
-use bookclerk_db_exec::{AtomicSession, ExecCaps};
 use bookclerk_plugin_abi::{
     apply_schema_sql_to_env, AdapterExecuteRequest, DbCapabilities, ExecuteReply, ExecuteRequest,
     SqlTypeEnv,
@@ -66,7 +65,7 @@ pub fn stamp_typed_vector(
     Ok(envelope)
 }
 
-/// Runs the shared contract suite through typed `execute_typed_on_session`.
+/// Runs the shared contract suite through the host stamp + adapter execute path.
 ///
 /// # Panics
 ///
@@ -84,18 +83,12 @@ pub async fn run_typed_conn_vectors(
         let timing = timing.clone();
         let connect = connect_for_run.clone();
         async move {
-            let mut caps = ExecCaps::from_capabilities(&connect);
-            if cap > 0 {
-                caps.max_result_rows = cap;
-            }
-            let reply = bookclerk_db_exec::execute_typed_on_session(
+            let reply = crate::sql_plan::execute_typed_on_session(
                 &db,
                 &typed,
-                bookclerk_db_exec::GuestReceiptPersist::default(),
                 &timing,
-                caps,
-                AtomicSession::from_deadline(None)
-                    .with_type_env(crate::migrations::host_sql_type_env()),
+                cap,
+                crate::sql_plan::AtomicSession::from_deadline(None),
             )
             .await
             .map_err(|err| err.to_string())?;
@@ -152,6 +145,7 @@ fn validate_typed_reply(
 #[cfg(test)]
 mod typed_value_matrix {
     use super::*;
+    use bookclerk_db_exec::{AtomicSession, ExecCaps};
     use bookclerk_plugin_abi::{
         DbPlanStatementKind, DbResultSelection, DbType, DbValue, ExecuteRequest, TypedDbStatement,
     };
