@@ -8,8 +8,9 @@ use bookclerk_db_exec::{
     AdapterExecuteRequest, GuestReceiptPersist, GUEST_RECEIPT_WRAP_PREFIX, GUEST_RECEIPT_WRITE_GATE,
 };
 use bookclerk_plugin_abi::{
-    typecheck_execute_request_proofs, DbCapabilities, DbPlanStatementKind, DbResultSelection,
-    DbValue, ExecuteReply, ExecuteRequest, PluginError, SqlTypeEnv, TypedDbStatement,
+    typecheck_execute_request_proofs, CanonicalExecuteRequest, DbCapabilities, DbPlanStatementKind,
+    DbResultSelection, DbValue, ExecuteReply, ExecuteRequest, PluginError, SqlTypeEnv,
+    TypedDbStatement,
 };
 use chrono::{Duration, Utc};
 
@@ -90,14 +91,12 @@ pub(crate) fn wrap_guest_typed_request(
     let mut env = receipt_wrap_type_env();
     env.merge(type_env);
     let proofs = typecheck_execute_request_proofs(&req, &env)?;
-    Ok(AdapterExecuteRequest::new(
-        req,
-        GuestReceiptPersist {
+    CanonicalExecuteRequest::from_desugared(req)
+        .with_guest_receipt(GuestReceiptPersist {
             guest_statement_len: guest_len,
             guest_request_hash: request_hash,
-        },
-    )
-    .with_proofs(proofs))
+        })
+        .bind_proofs(proofs)
 }
 
 /// Bookkeeping tables present when typing receipt-wrapper SQL.
