@@ -193,6 +193,21 @@ impl ExternalDatabase {
         Ok((db, caps))
     }
 
+    /// Adapter snapshot/identity/restore hooks for the library session.
+    #[must_use]
+    pub fn library_backup_ops(&self) -> bookclerk_plugin_abi::SharedAdapterBackupOps {
+        crate::rpc_session::RpcBackupOps::library(self.session.clone()).shared()
+    }
+
+    /// Adapter snapshot/identity/restore hooks for one named binding session.
+    #[must_use]
+    pub fn binding_backup_ops(
+        &self,
+        key: impl Into<String>,
+    ) -> bookclerk_plugin_abi::SharedAdapterBackupOps {
+        crate::rpc_session::RpcBackupOps::binding(self.session.clone(), key).shared()
+    }
+
     /// Reads the guest schema version and applies remaining host-authored DDL.
     async fn apply_host_schema(
         &self,
@@ -214,6 +229,7 @@ impl ExternalDatabase {
                 max_result_bytes: caps.max_result_bytes,
                 max_atomic_result_bytes: caps.max_atomic_result_bytes,
                 plugin_units: Vec::new(),
+                adapter: Some(self.library_backup_ops()),
             }),
         };
         bookclerk_library::apply_host_schema_with_batch_opts(db, kind, opts, move |stmts| {
@@ -1398,9 +1414,10 @@ impl ProxyDatabaseTrait for RpcDatabaseProxy {
         if prev != 0 {
             return;
         }
+        let isolation = bookclerk_db_exec::pending_begin_isolation();
         if let Err(err) = match self.binding.as_deref() {
-            Some(binding) => self.session.db_begin_binding(binding).await,
-            None => self.session.db_begin().await,
+            Some(binding) => self.session.db_begin_binding(binding, isolation).await,
+            None => self.session.db_begin(isolation).await,
         } {
             self.pop_depth();
             bookclerk_library::note_begin_failed(&err);

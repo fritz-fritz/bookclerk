@@ -8,7 +8,10 @@ use bookclerk_plugin_abi::{ExecuteReply, IsolationReq, Result};
 use sea_orm::DatabaseConnection;
 
 use crate::session::{
-    guest_begin, guest_commit, guest_execute_atomic, guest_execute_atomic_on, guest_rollback,
+    guest_assert_restore_constraints_on_txn, guest_begin_isolated, guest_begin_on_isolated,
+    guest_commit, guest_drop_user_relations_on_txn, guest_execute_atomic, guest_execute_atomic_on,
+    guest_export_identity_on_txn, guest_import_identity_on_txn, guest_list_user_relations_on_txn,
+    guest_prepare_unit_restore_on_txn, guest_rollback,
 };
 use bookclerk_plugin_sdk::database_adapter::plugin_error_from_engine;
 
@@ -17,8 +20,10 @@ pub struct GuestHostAdapterSession;
 
 #[async_trait::async_trait(?Send)]
 impl HostAdapterDatabaseSession for GuestHostAdapterSession {
-    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>> {
-        let txn_id = guest_begin(None).await.map_err(plugin_error_from_engine)?;
+    async fn begin(&self, isolation: IsolationReq) -> Result<Box<dyn AdapterTransaction>> {
+        let txn_id = guest_begin_isolated(None, isolation)
+            .await
+            .map_err(plugin_error_from_engine)?;
         Ok(Box::new(GuestHostAdapterTransaction { txn_id }))
     }
 
@@ -59,6 +64,45 @@ impl AdapterTransaction for GuestHostAdapterTransaction {
             .await
             .map_err(plugin_error_from_engine)
     }
+
+    async fn export_identity(&self) -> Result<Vec<bookclerk_plugin_abi::DbIdentityHighWater>> {
+        guest_export_identity_on_txn(self.txn_id.clone())
+            .await
+            .map_err(plugin_error_from_engine)
+    }
+
+    async fn import_identity(
+        &self,
+        rows: &[bookclerk_plugin_abi::DbIdentityHighWater],
+    ) -> Result<()> {
+        guest_import_identity_on_txn(self.txn_id.clone(), rows.to_vec())
+            .await
+            .map_err(plugin_error_from_engine)
+    }
+
+    async fn list_user_relations(&self) -> Result<Vec<String>> {
+        guest_list_user_relations_on_txn(self.txn_id.clone())
+            .await
+            .map_err(plugin_error_from_engine)
+    }
+
+    async fn prepare_unit_restore(&self) -> Result<()> {
+        guest_prepare_unit_restore_on_txn(self.txn_id.clone())
+            .await
+            .map_err(plugin_error_from_engine)
+    }
+
+    async fn drop_user_relations(&self, names: &[String]) -> Result<()> {
+        guest_drop_user_relations_on_txn(self.txn_id.clone(), names.to_vec())
+            .await
+            .map_err(plugin_error_from_engine)
+    }
+
+    async fn assert_restore_constraints(&self) -> Result<()> {
+        guest_assert_restore_constraints_on_txn(self.txn_id.clone())
+            .await
+            .map_err(plugin_error_from_engine)
+    }
 }
 
 /// Maps engine failures from [`guest_begin`] to structured plugin errors.
@@ -73,8 +117,8 @@ pub struct BoundGuestHostAdapterSession {
 
 #[async_trait::async_trait(?Send)]
 impl HostAdapterDatabaseSession for BoundGuestHostAdapterSession {
-    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>> {
-        let txn_id = crate::session::guest_begin_on(self.conn.clone())
+    async fn begin(&self, isolation: IsolationReq) -> Result<Box<dyn AdapterTransaction>> {
+        let txn_id = guest_begin_on_isolated(self.conn.clone(), isolation)
             .await
             .map_err(plugin_error_from_engine)?;
         Ok(Box::new(GuestHostAdapterTransaction { txn_id }))

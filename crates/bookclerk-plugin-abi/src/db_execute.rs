@@ -246,6 +246,18 @@ pub enum IsolationReq {
     ConsistentSnapshot,
 }
 
+/// Adapter identity high-water (`sqlite_sequence` / `bookclerk_identity`).
+///
+/// The generated column name lives in the canonical backup schema, not here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbIdentityHighWater {
+    /// Folded table name.
+    pub table: String,
+    /// Highest generated or stored value that must not be reused.
+    pub last: i64,
+}
+
 /// Result of one statement in [`ExecuteReply`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]

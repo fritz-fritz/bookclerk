@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use bookclerk_plugin_abi::DbColumn;
 
 mod b64;
+mod backup;
 mod classify;
 mod exec;
 pub mod guest_receipt;
@@ -51,6 +52,11 @@ pub fn take_positional_result_columns() -> Option<Vec<DbColumn>> {
 }
 
 pub use b64::{b64_string_to_bytes, bytes_to_b64_string};
+pub use backup::{
+    apply_begin_isolation, assert_restore_constraints, begin_consistent_snapshot,
+    drop_user_relations, export_identity, import_identity, list_user_relations,
+    pending_begin_isolation, prepare_unit_restore,
+};
 pub use bookclerk_plugin_abi::DbPlanStatementKind;
 pub use bookclerk_plugin_abi::{AdapterExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope};
 pub use classify::{

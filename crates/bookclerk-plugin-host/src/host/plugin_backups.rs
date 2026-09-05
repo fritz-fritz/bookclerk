@@ -68,6 +68,7 @@ async fn export_one_plugin_unit(
         max_result_rows: caps.max_result_rows,
         max_result_bytes: caps.max_result_bytes,
         max_atomic_result_bytes: caps.max_atomic_result_bytes,
+        adapter: Some(ext.binding_backup_ops(format!("{}/{}", rec.plugin_id, rec.binding))),
     })
 }
 
@@ -129,12 +130,15 @@ pub async fn restore_plugin_backup_units(
                  adapter does not advertise atomicUnitRestore"
             )));
         }
-        let opts = CanonicalRestoreOpts::from_caps(&caps).map_err(|err| {
-            PluginError::message(format!(
-                "plugin restore failed after {restored} unit(s); `{plugin_id}/{binding}` \
-                 advertised schema flags are not a known versioning contract: {err}"
-            ))
-        })?;
+        let opts = CanonicalRestoreOpts {
+            adapter: Some(ext.binding_backup_ops(format!("{plugin_id}/{binding}"))),
+            ..CanonicalRestoreOpts::from_caps(&caps).map_err(|err| {
+                PluginError::message(format!(
+                    "plugin restore failed after {restored} unit(s); `{plugin_id}/{binding}` \
+                     advertised schema flags are not a known versioning contract: {err}"
+                ))
+            })?
+        };
         restore_backup_unit(
             &db,
             repo,

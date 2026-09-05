@@ -269,6 +269,17 @@ FORBIDDEN_LIBRARY_LOWERING = (
     re.compile(r"\bbinding_companions\b"),
 )
 
+# Host backup/schema must not emit engine catalog or isolation SQL.
+FORBIDDEN_LIBRARY_DIALECT_SQL = (
+    re.compile(r"FROM\s+sqlite_sequence\b", re.IGNORECASE),
+    re.compile(r"INTO\s+sqlite_sequence\b", re.IGNORECASE),
+    re.compile(r"FROM\s+sqlite_master\b", re.IGNORECASE),
+    re.compile(r"\binformation_schema\b", re.IGNORECASE),
+    re.compile(r"REPEATABLE\s+READ", re.IGNORECASE),
+    re.compile(r"defer_foreign_keys", re.IGNORECASE),
+    re.compile(r"DROP\s+FUNCTION\b", re.IGNORECASE),
+)
+
 
 def iter_library_sources() -> list[Path]:
     files: list[Path] = []
@@ -310,6 +321,13 @@ def check_library_bootstrap_isolation(path: Path) -> list[str]:
             hits.append(
                 f"{rel}:{line}: host must not call adapter lowering `{m.group(0)}`; "
                 "send canonical SQL through AdapterDatabaseSession.execute"
+            )
+    for rx in FORBIDDEN_LIBRARY_DIALECT_SQL:
+        for m in rx.finditer(scanned):
+            line = scanned.count("\n", 0, m.start()) + 1
+            hits.append(
+                f"{rel}:{line}: host must not emit engine dialect SQL `{m.group(0)}`; "
+                "adapters own snapshot/identity/restore primitives"
             )
     return hits
 

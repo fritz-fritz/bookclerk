@@ -148,7 +148,10 @@ struct D1DedicatedHostSession {
 
 #[async_trait(?Send)]
 impl HostAdapterDatabaseSession for D1DedicatedHostSession {
-    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>, PluginError> {
+    async fn begin(
+        &self,
+        _isolation: IsolationReq,
+    ) -> Result<Box<dyn AdapterTransaction>, PluginError> {
         Err(PluginError::unsupported(
             "D1 does not support interactive transactions",
         ))
@@ -175,7 +178,10 @@ struct D1HostSession;
 
 #[async_trait(?Send)]
 impl HostAdapterDatabaseSession for D1HostSession {
-    async fn begin(&self) -> Result<Box<dyn AdapterTransaction>, PluginError> {
+    async fn begin(
+        &self,
+        _isolation: IsolationReq,
+    ) -> Result<Box<dyn AdapterTransaction>, PluginError> {
         Err(PluginError::unsupported(
             "D1 does not support interactive transactions",
         ))
@@ -235,6 +241,47 @@ impl AdapterDatabaseSession for D1Session {
             .run_typed_atomic(&request.request, request.guest_receipt, &request.proofs)
             .await
             .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
+    }
+
+    async fn export_identity(
+        &self,
+    ) -> Result<Vec<bookclerk_plugin_sdk::DbIdentityHighWater>, PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not advertise consistentBackupRead",
+        ))
+    }
+
+    async fn import_identity(
+        &self,
+        _rows: &[bookclerk_plugin_sdk::DbIdentityHighWater],
+    ) -> Result<(), PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not advertise atomicUnitRestore",
+        ))
+    }
+
+    async fn list_user_relations(&self) -> Result<Vec<String>, PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not advertise consistentBackupRead",
+        ))
+    }
+
+    async fn prepare_unit_restore(&self) -> Result<(), PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not advertise atomicUnitRestore",
+        ))
+    }
+
+    async fn drop_user_relations(&self, _names: &[String]) -> Result<(), PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not advertise atomicUnitRestore",
+        ))
+    }
+
+    async fn assert_restore_constraints(&self) -> Result<(), PluginError> {
+        Err(PluginError::unsupported(
+            "D1 does not advertise atomicUnitRestore",
+        ))
     }
 }
 

@@ -19,9 +19,17 @@ interface AdapterTransaction {
   rollback @2 () -> (result :Plugin.EmptyReply);
   # Same payload as `execute` (abiMinor 20). Ordinal kept; do not reuse.
   executeEnvelope @3 (request :Plugin.AdapterExecuteRequest) -> (result :Plugin.ExecuteResultReply);
+  # abiMinor 21: same primitives as AdapterDatabaseSession, on the open txn.
+  exportIdentity @4 () -> (result :Plugin.IdentityExportReply);
+  importIdentity @5 (rows :List(Plugin.IdentityHighWater)) -> (result :Plugin.EmptyReply);
+  listUserRelations @6 () -> (result :Plugin.UserRelationsReply);
+  prepareUnitRestore @7 () -> (result :Plugin.EmptyReply);
+  dropUserRelations @8 (names :List(Text)) -> (result :Plugin.EmptyReply);
+  assertRestoreConstraints @9 () -> (result :Plugin.EmptyReply);
 }
 
 interface HostAdapterDatabaseSession {
-  begin @0 () -> (result :AdapterTransactionReply);
+  # isolation defaults to atomicBatch when omitted (Cap'n zero).
+  begin @0 (isolation :Plugin.IsolationReq) -> (result :AdapterTransactionReply);
   executeEnvelope @1 (request :Plugin.AdapterExecuteRequest) -> (result :Plugin.ExecuteResultReply);
 }

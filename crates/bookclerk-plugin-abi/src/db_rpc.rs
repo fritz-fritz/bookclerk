@@ -10,21 +10,22 @@ use crate::plugin_capnp::{
     db_bootstrap_reply, db_capabilities as db_caps_capnp, db_capabilities_reply,
     db_column as db_column_capnp, db_row as db_row_capnp, db_statement as db_statement_capnp,
     db_timing as db_timing_capnp, db_value as db_value_capnp, execute_reply as execute_reply_capnp,
-    execute_request as execute_request_capnp, execute_result_reply,
+    execute_request as execute_request_capnp, execute_result_reply, identity_export_reply,
+    identity_high_water as identity_high_water_capnp,
     integer_arith_site as integer_arith_site_capnp, named_sql_type as named_sql_type_capnp,
     optional_column_reference as optional_column_reference_capnp,
     resolved_statement as resolved_statement_capnp, schema_action as schema_action_capnp,
     sql_span as sql_span_capnp, statement_result as statement_result_capnp,
-    table_constraint as table_constraint_capnp, DbResultSelection as CapnpDbResultSelection,
-    DbStatementKind as CapnpDbStatementKind, DbType as CapnpDbType,
-    IntegerArithKind as CapnpIntegerArithKind, IsolationReq as CapnpIsolationReq,
-    ResolvedSqlType as CapnpResolvedSqlType,
+    table_constraint as table_constraint_capnp, user_relations_reply,
+    DbResultSelection as CapnpDbResultSelection, DbStatementKind as CapnpDbStatementKind,
+    DbType as CapnpDbType, IntegerArithKind as CapnpIntegerArithKind,
+    IsolationReq as CapnpIsolationReq, ResolvedSqlType as CapnpResolvedSqlType,
 };
 use crate::rpc::{from_capnp, read_error, text_of, write_error};
 use crate::{
-    DbBootstrap, DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming,
-    DbType, DbValue, ExecuteReply, ExecuteRequest, IsolationReq, PluginError, Result,
-    StatementResult, TypedDbStatement, MAX_SCALAR_BYTES,
+    DbBootstrap, DbCapabilities, DbColumn, DbIdentityHighWater, DbPlanStatementKind,
+    DbResultSelection, DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest,
+    IsolationReq, PluginError, Result, StatementResult, TypedDbStatement, MAX_SCALAR_BYTES,
 };
 
 pub(super) fn write_db_type(ty: DbType) -> CapnpDbType {
@@ -682,7 +683,7 @@ pub(super) fn read_adapter_execute_request(
     })
 }
 
-fn write_isolation(iso: IsolationReq) -> CapnpIsolationReq {
+pub(crate) fn write_isolation(iso: IsolationReq) -> CapnpIsolationReq {
     match iso {
         IsolationReq::AtomicBatch => CapnpIsolationReq::AtomicBatch,
         IsolationReq::NestedSavepoint => CapnpIsolationReq::NestedSavepoint,
@@ -690,7 +691,7 @@ fn write_isolation(iso: IsolationReq) -> CapnpIsolationReq {
     }
 }
 
-fn read_isolation(iso: CapnpIsolationReq) -> Result<IsolationReq> {
+pub(crate) fn read_isolation(iso: CapnpIsolationReq) -> Result<IsolationReq> {
     match iso {
         CapnpIsolationReq::AtomicBatch => Ok(IsolationReq::AtomicBatch),
         CapnpIsolationReq::NestedSavepoint => Ok(IsolationReq::NestedSavepoint),
@@ -1188,10 +1189,87 @@ fn write_text_list(mut b: capnp::text_list::Builder<'_>, vals: &[String]) {
     }
 }
 
-fn read_text_list(r: capnp::text_list::Reader<'_>) -> Result<Vec<String>> {
+pub(super) fn read_text_list(r: capnp::text_list::Reader<'_>) -> Result<Vec<String>> {
     let mut out = Vec::with_capacity(r.len() as usize);
     for item in r.iter() {
         out.push(text_of(item.map_err(from_capnp)?));
     }
     Ok(out)
+}
+
+pub(super) fn write_identity_high_water(
+    mut b: identity_high_water_capnp::Builder<'_>,
+    row: &DbIdentityHighWater,
+) {
+    b.set_table(&row.table);
+    b.set_last(row.last);
+}
+
+pub(super) fn read_identity_high_water(
+    r: identity_high_water_capnp::Reader<'_>,
+) -> Result<DbIdentityHighWater> {
+    Ok(DbIdentityHighWater {
+        table: text_of(r.get_table().map_err(from_capnp)?),
+        last: r.get_last(),
+    })
+}
+
+pub(super) fn write_identity_list(
+    mut b: capnp::struct_list::Builder<'_, identity_high_water_capnp::Owned>,
+    rows: &[DbIdentityHighWater],
+) {
+    for (i, row) in rows.iter().enumerate() {
+        write_identity_high_water(b.reborrow().get(i as u32), row);
+    }
+}
+
+pub(super) fn read_identity_list(
+    r: capnp::struct_list::Reader<'_, identity_high_water_capnp::Owned>,
+) -> Result<Vec<DbIdentityHighWater>> {
+    let mut out = Vec::with_capacity(r.len() as usize);
+    for item in r.iter() {
+        out.push(read_identity_high_water(item)?);
+    }
+    Ok(out)
+}
+
+pub(super) fn write_identity_export_reply(
+    result: identity_export_reply::Builder<'_>,
+    outcome: Result<Vec<DbIdentityHighWater>>,
+) {
+    match outcome {
+        Ok(rows) => {
+            let mut ok = result.init_ok(rows.len() as u32);
+            write_identity_list(ok.reborrow(), &rows);
+        }
+        Err(err) => write_error(result.init_err(), &err),
+    }
+}
+
+pub(super) fn read_identity_export_reply(
+    result: identity_export_reply::Reader<'_>,
+) -> Result<Vec<DbIdentityHighWater>> {
+    match result.which().map_err(from_capnp)? {
+        identity_export_reply::Ok(ok) => read_identity_list(ok.map_err(from_capnp)?),
+        identity_export_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+    }
+}
+
+pub(super) fn write_user_relations_reply(
+    result: user_relations_reply::Builder<'_>,
+    outcome: Result<Vec<String>>,
+) {
+    match outcome {
+        Ok(names) => write_text_list(result.init_ok(names.len() as u32), &names),
+        Err(err) => write_error(result.init_err(), &err),
+    }
+}
+
+pub(super) fn read_user_relations_reply(
+    result: user_relations_reply::Reader<'_>,
+) -> Result<Vec<String>> {
+    match result.which().map_err(from_capnp)? {
+        user_relations_reply::Ok(ok) => read_text_list(ok.map_err(from_capnp)?),
+        user_relations_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+    }
 }

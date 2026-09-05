@@ -546,18 +546,7 @@ fn is_schema_marker_visibility_race(err: &LibraryError) -> bool {
 
 /// True when a host table (`books`) exists without relying on schema state.
 async fn host_tables_present(db: &DatabaseConnection, backend: DbBackend) -> Result<bool> {
-    let sql = match backend {
-        DbBackend::Postgres => {
-            "SELECT 1 FROM information_schema.tables \
-             WHERE table_schema = current_schema() AND table_name = 'books' LIMIT 1"
-        }
-        _ => "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'books' LIMIT 1",
-    };
-    let rows = db
-        .query_all_raw(Statement::from_string(backend, sql))
-        .await
-        .map_err(LibraryError::from_db_err)?;
-    Ok(!rows.is_empty())
+    crate::backup::util::table_exists(db, backend, "books").await
 }
 
 /// `INSERT` for the unreleased `schema_migrations` row (no `PRAGMA user_version`).
@@ -762,6 +751,7 @@ async fn prepare_schema_change(
                     max_result_bytes: snap.max_result_bytes.max(1),
                     max_atomic_result_bytes: snap.max_atomic_result_bytes.max(1),
                     plugin_units: snap.plugin_units.clone(),
+                    adapter: snap.adapter.clone(),
                 };
                 backup_library(db, &req).await?;
             }

@@ -56,7 +56,7 @@ pub use backup::{
     DatabaseUnitKind, IdentityHighWater, PreparedPluginUnit, RestorePlan, SchemaBackupOpts,
     ValidatedBackup, BACKUPS_DIR, BACKUP_FORMAT_VERSION, BACKUP_RETENTION, LIBRARY_SKIP_TABLES,
 };
-pub use bookclerk_plugin_abi::GuestSqlPolicy;
+pub use bookclerk_plugin_abi::{AdapterBackupOps, GuestSqlPolicy, SharedAdapterBackupOps};
 pub use db_atomic::{
     db_atomic_operation_id, db_atomic_request_hash, execute_db_atomic, execute_named_atomic,
 };

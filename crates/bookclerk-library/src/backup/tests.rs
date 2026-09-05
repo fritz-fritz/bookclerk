@@ -46,6 +46,7 @@ fn backup_req(files: &Path, state: SchemaState, reason: BackupReason) -> BackupR
         max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
         max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
         plugin_units: Vec::new(),
+        adapter: None,
     }
 }
 
@@ -104,6 +105,7 @@ fn prepared_plugin(
         max_result_rows: FIRST_PARTY_MAX_RESULT_ROWS,
         max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
         max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+        adapter: None,
     }
 }
 
@@ -626,6 +628,7 @@ async fn uninitialized_skips_even_with_include_plugin_databases() {
             max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             plugin_units: Vec::new(),
+            adapter: None,
         },
     )
     .await

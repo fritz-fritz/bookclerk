@@ -10,10 +10,7 @@ use bookclerk_plugin_abi::{
     StatementResult, TypedDbStatement, SQL_CATALOG_TABLE, SQL_CONTRACT_VERSION, SQL_DDL_TABLE,
     SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
 };
-use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, Statement,
-    TransactionTrait,
-};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend};
 
 use super::encode::{chunk_would_overflow, CanonicalObject};
 use super::repository::BackupRepository;
@@ -21,7 +18,7 @@ use super::schema::{
     admit_canonical_schema, canonical_order_by_sql, library_canonical_schema_for_state,
     order_key_columns, sort_schema, sql_type_to_db_type,
 };
-use super::util::{cell_text, cell_to_db_value, ident_ok, int_cell};
+use super::util::{cell_text, cell_to_db_value, ident_ok};
 use super::{
     BackupTable, BackupUnit, CanonicalDatabaseSchema, CanonicalExportOpts, CanonicalTableSchema,
     DatabaseUnitKind, IdentityHighWater, LIBRARY_SKIP_TABLES,
@@ -94,22 +91,12 @@ pub async fn capture_plugin_unit(
                 .into(),
         ));
     }
-    match db.get_database_backend() {
-        DbBackend::Postgres => {
-            let txn = begin_repeatable_read(db).await?;
-            let result =
-                capture_plugin_on(&txn, repo, opts, plugin_id, binding, backend_at_capture).await;
-            finish_txn(txn, result.is_ok()).await?;
-            result
-        }
-        _ => {
-            let txn = db.begin().await.map_err(LibraryError::from_db_err)?;
-            let result =
-                capture_plugin_on(&txn, repo, opts, plugin_id, binding, backend_at_capture).await;
-            finish_txn(txn, result.is_ok()).await?;
-            result
-        }
-    }
+    let txn = bookclerk_db_exec::begin_consistent_snapshot(db)
+        .await
+        .map_err(LibraryError::from_db_err)?;
+    let result = capture_plugin_on(&txn, repo, opts, plugin_id, binding, backend_at_capture).await;
+    finish_txn(txn, result.is_ok()).await?;
+    result
 }
 
 /// Capture plugin schema, rows, and identity from an already-open view.
@@ -159,42 +146,23 @@ async fn capture_unit(
                 .into(),
         ));
     }
-    match db.get_database_backend() {
-        DbBackend::Postgres => {
-            let txn = begin_repeatable_read(db).await?;
-            let result = capture_unit_on(
-                &txn,
-                repo,
-                schema,
-                opts,
-                kind,
-                plugin_id,
-                binding,
-                backend_at_capture,
-                expected_state,
-            )
-            .await;
-            finish_txn(txn, result.is_ok()).await?;
-            result
-        }
-        _ => {
-            let txn = db.begin().await.map_err(LibraryError::from_db_err)?;
-            let result = capture_unit_on(
-                &txn,
-                repo,
-                schema,
-                opts,
-                kind,
-                plugin_id,
-                binding,
-                backend_at_capture,
-                expected_state,
-            )
-            .await;
-            finish_txn(txn, result.is_ok()).await?;
-            result
-        }
-    }
+    let txn = bookclerk_db_exec::begin_consistent_snapshot(db)
+        .await
+        .map_err(LibraryError::from_db_err)?;
+    let result = capture_unit_on(
+        &txn,
+        repo,
+        schema,
+        opts,
+        kind,
+        plugin_id,
+        binding,
+        backend_at_capture,
+        expected_state,
+    )
+    .await;
+    finish_txn(txn, result.is_ok()).await?;
+    result
 }
 
 /// Commit a successful capture transaction, or roll it back on failure.
@@ -205,18 +173,6 @@ async fn finish_txn(txn: DatabaseTransaction, commit: bool) -> Result<()> {
         let _ = txn.rollback().await;
     }
     Ok(())
-}
-
-/// Begin a PostgreSQL REPEATABLE READ transaction for a stable read view.
-async fn begin_repeatable_read(db: &DatabaseConnection) -> Result<DatabaseTransaction> {
-    let txn = db.begin().await.map_err(LibraryError::from_db_err)?;
-    txn.execute_raw(Statement::from_string(
-        DbBackend::Postgres,
-        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
-    ))
-    .await
-    .map_err(LibraryError::from_db_err)?;
-    Ok(txn)
 }
 
 /// Export admitted schema, paged table chunks, and identity on `conn`.
@@ -257,6 +213,11 @@ where
     })?;
     let mut tables_meta = Vec::new();
     let mut identity = std::collections::BTreeMap::new();
+    let catalog = super::util::backup_export_identity(conn, opts.adapter.as_ref()).await?;
+    let catalog_last: std::collections::BTreeMap<String, i64> = catalog
+        .into_iter()
+        .map(|row| (row.table, row.last))
+        .collect();
     for table in &schema.tables {
         let name = table.parsed.table.as_str();
         if skip_table(name, &opts.skip_tables) {
@@ -269,7 +230,7 @@ where
         }
         let (columns, chunks, last) = capture_table(conn, repo, table, opts).await?;
         if let Some(col) = table.parsed.identity_column.as_deref() {
-            let hw = identity_high_water(conn, conn.get_database_backend(), name, last).await?;
+            let hw = last.max(catalog_last.get(name).copied().unwrap_or(0));
             identity.insert(
                 name.to_string(),
                 IdentityHighWater {
@@ -496,77 +457,6 @@ fn flush_chunk(
 fn skip_table(name: &str, extra: &BTreeSet<String>) -> bool {
     let folded = name.to_ascii_lowercase();
     ADAPTER_PRIVATE_TABLES.contains(&folded.as_str()) || extra.contains(&folded)
-}
-
-/// Highest identity value for `table` from rows plus adapter catalogs.
-async fn identity_high_water<C>(
-    conn: &C,
-    backend: DbBackend,
-    table: &str,
-    from_rows: i64,
-) -> Result<i64>
-where
-    C: ConnectionTrait,
-{
-    let mut last = from_rows;
-    if backend == DbBackend::Sqlite {
-        if let Some(seq) = sqlite_sequence(conn, table).await? {
-            last = last.max(seq);
-        }
-    }
-    if let Some(hw) = bookclerk_identity_last(conn, backend, table).await? {
-        last = last.max(hw);
-    }
-    Ok(last)
-}
-
-/// SQLite `sqlite_sequence` high-water for `table`, if present.
-async fn sqlite_sequence<C>(conn: &C, table: &str) -> Result<Option<i64>>
-where
-    C: ConnectionTrait,
-{
-    let sql = format!("SELECT seq FROM sqlite_sequence WHERE name = '{table}'");
-    match conn
-        .query_all_raw(Statement::from_string(DbBackend::Sqlite, sql))
-        .await
-    {
-        Ok(rows) => Ok(rows.first().and_then(|row| int_cell(row, "seq"))),
-        Err(err)
-            if err
-                .to_string()
-                .to_ascii_lowercase()
-                .contains("sqlite_sequence") =>
-        {
-            Ok(None)
-        }
-        Err(err) => Err(LibraryError::Schema(format!(
-            "backup cannot read sqlite_sequence for `{table}`: {err}"
-        ))),
-    }
-}
-
-/// Bookclerk identity high-water from `bookclerk_identity_last`, if present.
-async fn bookclerk_identity_last<C>(
-    conn: &C,
-    backend: DbBackend,
-    table: &str,
-) -> Result<Option<i64>>
-where
-    C: ConnectionTrait,
-{
-    let sql = format!("SELECT last FROM {SQL_IDENTITY_TABLE} WHERE table_name = '{table}'");
-    match conn
-        .query_all_raw(Statement::from_string(backend, sql))
-        .await
-    {
-        Ok(rows) => Ok(rows.first().and_then(|row| int_cell(row, "last"))),
-        Err(err) if reserved_catalog_relation_missing(&err.to_string(), SQL_IDENTITY_TABLE) => {
-            Ok(None)
-        }
-        Err(err) => Err(LibraryError::Schema(format!(
-            "backup cannot read `{SQL_IDENTITY_TABLE}` for `{table}`: {err}"
-        ))),
-    }
 }
 
 /// Rebuilds plugin schema from durable `bookclerk_sql_ddl` on an open connection.

@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 20;
+const abiMinor :UInt32 = 21;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -1270,6 +1270,27 @@ interface Database {
   openSession @0 () -> (result :AdapterSessionReply);
 }
 
+# Adapter-private identity high-water (sqlite_sequence / bookclerk_identity).
+# Column names live in the canonical backup schema, not this catalog.
+struct IdentityHighWater {
+  table @0 :Text;
+  last @1 :Int64;
+}
+
+struct IdentityExportReply {
+  union {
+    ok @0 :List(IdentityHighWater);
+    err @1 :PluginError;
+  }
+}
+
+struct UserRelationsReply {
+  union {
+    ok @0 :List(Text);
+    err @1 :PluginError;
+  }
+}
+
 # Host ↔ database adapter plugin. Capability negotiation + typed execute only.
 interface AdapterDatabaseSession {
   capabilities @0 () -> (result :DbCapabilitiesReply);
@@ -1278,6 +1299,13 @@ interface AdapterDatabaseSession {
   close @2 () -> (result :EmptyReply);
   # Bootstrap-only SeaORM proxy metadata (not part of DbCapabilities).
   bootstrap @3 () -> (result :DbBootstrapReply);
+  # abiMinor 21: snapshot/identity/restore primitives (not a SQL dialect API).
+  exportIdentity @4 () -> (result :IdentityExportReply);
+  importIdentity @5 (rows :List(IdentityHighWater)) -> (result :EmptyReply);
+  listUserRelations @6 () -> (result :UserRelationsReply);
+  prepareUnitRestore @7 () -> (result :EmptyReply);
+  dropUserRelations @8 (names :List(Text)) -> (result :EmptyReply);
+  assertRestoreConstraints @9 () -> (result :EmptyReply);
 }
 
 # Host-granted SQL for job plugin authors. SDK `DatabaseBinding` mirrors the
