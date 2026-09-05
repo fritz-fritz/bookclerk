@@ -693,6 +693,14 @@ mod tests {
             drop.iter().all(|s| !s.contains("DROP TRIGGER")),
             "DROP TABLE companions must not name the dropped relation: {drop:?}"
         );
+        let none = postgres_identity_companions_for_action(
+            sql,
+            Some(&bookclerk_plugin_abi::SchemaAction::None),
+        );
+        assert!(
+            none.is_empty(),
+            "stamped None must not emit identity companions unless the caller parses SQL"
+        );
     }
 
     #[test]

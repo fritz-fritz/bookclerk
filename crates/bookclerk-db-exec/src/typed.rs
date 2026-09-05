@@ -67,19 +67,25 @@ async fn apply_binding_companions(
     backend: sea_orm::DatabaseBackend,
     canonical: &str,
     action: &SchemaAction,
+    apply_catalog: bool,
 ) -> Result<(), DbErr> {
-    let mut companions = catalog_companions_for_action(canonical, Some(action));
+    let mut companions = if apply_catalog {
+        catalog_companions_for_action(canonical, Some(action))
+    } else {
+        Vec::new()
+    };
     if backend == sea_orm::DatabaseBackend::Postgres {
-        match action {
-            SchemaAction::Create { noop: true, .. } => {}
-            SchemaAction::None => {}
-            _ => companions.extend(
-                crate::schema_postgres::postgres_identity_companions_for_action(
-                    canonical,
-                    Some(action),
-                ),
+        // Host/restore DDL is stamped `SchemaAction::None` (`bound_empty`).
+        // Identity companions still parse canonical AUTOINCREMENT CREATE/DROP.
+        let identity = match action {
+            SchemaAction::Create { noop: true, .. } => Vec::new(),
+            SchemaAction::None => crate::schema_postgres::postgres_identity_companions(canonical),
+            _ => crate::schema_postgres::postgres_identity_companions_for_action(
+                canonical,
+                Some(action),
             ),
-        }
+        };
+        companions.extend(identity);
     }
     for companion in companions {
         txn.execute_raw(Statement::from_string(backend, companion))
@@ -1573,7 +1579,8 @@ pub async fn execute_typed_on_txn_envelope(
 /// Binding catalog companions are skipped: leftover DML and restore DDL run
 /// against a catalog the caller already applied (`apply_host_schema` or
 /// [`bookclerk_plugin_abi::catalog_companions`]). Re-inserting those rows
-/// conflicts with `bookclerk_sql_catalog_pkey`.
+/// conflicts with `bookclerk_sql_catalog_pkey`. Postgres identity companions
+/// still run so restore can recreate `bookclerk_identity` after dropping it.
 ///
 /// # Errors
 ///
@@ -1788,9 +1795,14 @@ where
                 }
             }
         };
-        if apply_companions {
-            apply_binding_companions(txn, backend, &canonical, &proof.schema_action).await?;
-        }
+        apply_binding_companions(
+            txn,
+            backend,
+            &canonical,
+            &proof.schema_action,
+            apply_companions,
+        )
+        .await?;
         apply_schema_action_to_env(&mut env, &proof.schema_action);
         statements.push(stmt_result);
         if skip_guest_on_prior
@@ -2058,6 +2070,7 @@ where
             proof
                 .map(|p| &p.schema_action)
                 .unwrap_or(&SchemaAction::None),
+            true,
         )
         .await
         {
