@@ -7,7 +7,12 @@
 //! `execute` batches; SQLite and Postgres run named security ops via host IR
 //! envelopes and durable receipts.
 
-#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc, dead_code)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::missing_docs_in_private_items,
+    dead_code
+)]
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock};

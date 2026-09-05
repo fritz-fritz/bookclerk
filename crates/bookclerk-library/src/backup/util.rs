@@ -284,6 +284,7 @@ pub fn validate_cell(
     }
 }
 
+/// Maps an adapter primitive error onto [`LibraryError::Schema`].
 fn adapter_err(err: bookclerk_plugin_abi::PluginError) -> LibraryError {
     LibraryError::Schema(err.to_string())
 }

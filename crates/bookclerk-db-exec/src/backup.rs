@@ -4,6 +4,8 @@
 //! host SeaORM RPC proxy). Library tests may call the same helpers on an
 //! in-process sqlite/postgres `DatabaseConnection`.
 
+#![allow(clippy::missing_docs_in_private_items)]
+
 use bookclerk_plugin_abi::{
     postgres_identity_function_name, DbIdentityHighWater, IsolationReq, SQL_IDENTITY_TABLE,
 };

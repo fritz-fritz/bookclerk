@@ -653,7 +653,7 @@ pub(super) fn read_adapter_execute_request(
     r: adapter_execute_request_capnp::Reader<'_>,
 ) -> Result<AdapterExecuteRequest> {
     let list = r.get_statements().map_err(from_capnp)?;
-    if list.len() == 0 {
+    if list.is_empty() {
         return Err(PluginError::invalid_params(
             "executeAtomic statements must be non-empty",
         ));

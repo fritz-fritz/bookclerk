@@ -54,6 +54,7 @@ fn stamp_adapter_request(
     )
 }
 
+/// [`stamp_adapter_request`] against the host library SQL catalog.
 fn stamp_library_adapter_request(
     req: ExecuteRequest,
     isolation: IsolationReq,
@@ -588,6 +589,7 @@ pub fn backup_adapter_id(plugin_id: &str) -> String {
     }
 }
 
+/// Nested savepoint when a binding transaction is already open; else atomic batch.
 fn binding_isolation(on_txn: bool) -> IsolationReq {
     if on_txn {
         IsolationReq::NestedSavepoint
@@ -596,6 +598,7 @@ fn binding_isolation(on_txn: bool) -> IsolationReq {
     }
 }
 
+/// Typed execute on a named binding session, or on its open transaction.
 async fn exec_binding_request(
     session: &PluginSession,
     key: &str,
