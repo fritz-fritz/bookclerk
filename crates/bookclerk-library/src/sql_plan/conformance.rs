@@ -69,6 +69,24 @@ fn typed_stmt(
     }
 }
 
+/// Seeds host-catalog rows so row-cap SELECTs typecheck (`rowcap_probe` is not
+/// in the host SQL type environment).
+async fn seed_rowcap_slots(db: &sea_orm::DatabaseConnection, n: i32) {
+    let backend = sea_orm::ConnectionTrait::get_database_backend(db);
+    for i in 0..n {
+        sea_orm::ConnectionTrait::execute_raw(
+            db,
+            sea_orm::Statement::from_sql_and_values(
+                backend,
+                "INSERT INTO db_serialization_slots (slot_key, bump) VALUES (?, 0)",
+                [format!("rowcap-{i:02}").into()],
+            ),
+        )
+        .await
+        .unwrap();
+    }
+}
+
 fn typed_req(
     op: &str,
     statements: Vec<bookclerk_plugin_abi::TypedDbStatement>,
@@ -139,31 +157,10 @@ async fn sqlite_recursive_cte_honors_deadline() {
 #[tokio::test]
 async fn sqlite_query_stops_after_cap_plus_one() {
     let db = mem_db().await;
-    let backend = sea_orm::ConnectionTrait::get_database_backend(&db);
-    sea_orm::ConnectionTrait::execute_raw(
-        &db,
-        sea_orm::Statement::from_string(
-            backend,
-            "CREATE TABLE IF NOT EXISTS rowcap_probe (x INTEGER)",
-        ),
-    )
-    .await
-    .ok();
-    for i in 0..50 {
-        sea_orm::ConnectionTrait::execute_raw(
-            &db,
-            sea_orm::Statement::from_sql_and_values(
-                backend,
-                "INSERT INTO rowcap_probe (x) VALUES (?)",
-                [i.into()],
-            ),
-        )
-        .await
-        .unwrap();
-    }
+    seed_rowcap_slots(&db, 50).await;
     let plan = vec![{
         let mut s = typed_stmt(
-            "SELECT x FROM rowcap_probe",
+            "SELECT slot_key FROM db_serialization_slots WHERE slot_key LIKE 'rowcap-%' ORDER BY slot_key",
             bookclerk_plugin_abi::DbPlanStatementKind::Returning,
         );
         s.max_rows = 0;
@@ -184,28 +181,7 @@ async fn sqlite_query_stops_after_cap_plus_one() {
 async fn concurrent_attempts_keep_independent_deadlines_and_caps() {
     let db_deadline = mem_db().await;
     let db_cap = mem_db().await;
-    let backend = sea_orm::ConnectionTrait::get_database_backend(&db_cap);
-    sea_orm::ConnectionTrait::execute_raw(
-        &db_cap,
-        sea_orm::Statement::from_string(
-            backend,
-            "CREATE TABLE IF NOT EXISTS rowcap_probe (x INTEGER)",
-        ),
-    )
-    .await
-    .ok();
-    for i in 0..50 {
-        sea_orm::ConnectionTrait::execute_raw(
-            &db_cap,
-            sea_orm::Statement::from_sql_and_values(
-                backend,
-                "INSERT INTO rowcap_probe (x) VALUES (?)",
-                [i.into()],
-            ),
-        )
-        .await
-        .unwrap();
-    }
+    seed_rowcap_slots(&db_cap, 50).await;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -217,7 +193,7 @@ async fn concurrent_attempts_keep_independent_deadlines_and_caps() {
     }];
     let select = vec![{
         let mut s = typed_stmt(
-            "SELECT x FROM rowcap_probe",
+            "SELECT slot_key FROM db_serialization_slots WHERE slot_key LIKE 'rowcap-%' ORDER BY slot_key",
             bookclerk_plugin_abi::DbPlanStatementKind::Returning,
         );
         s.max_rows = 0;
