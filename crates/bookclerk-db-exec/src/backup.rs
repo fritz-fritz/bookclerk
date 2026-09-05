@@ -192,7 +192,10 @@ where
             .try_get::<String>("", "name")
             .or_else(|_| row.try_get_by_index::<String>(0))
             .unwrap_or_default();
-        if name.is_empty() || is_engine_catalog(&name) {
+        if name.is_empty() {
+            continue;
+        }
+        if backend == DbBackend::Sqlite && is_sqlite_reserved_catalog(&name) {
             continue;
         }
         names.push(name);
@@ -297,9 +300,35 @@ fn portable_ident(s: &str) -> bool {
         && bookclerk_plugin_abi::sql_v1_ident_in_bounds(s)
 }
 
-fn is_engine_catalog(name: &str) -> bool {
-    let folded = name.to_ascii_lowercase();
-    folded.starts_with("sqlite_") || folded.starts_with("pg_") || folded == "information_schema"
+/// SQLite engine catalogs only (`sqlite_master`, `sqlite_sequence`, …).
+///
+/// User tables may be named `pg_notes` or `information_schema`; those are not
+/// catalogs. PostgreSQL listing already restricts to `current_schema()`.
+fn is_sqlite_reserved_catalog(name: &str) -> bool {
+    name.to_ascii_lowercase().starts_with("sqlite_")
+}
+
+/// True when `err` is a missing optional catalog relation, not permission or
+/// other failures that mention the same name.
+///
+/// PostgreSQL `42P01` (undefined_table) still requires
+/// [`reserved_catalog_relation_missing`] so a missing *other* relation does
+/// not look like an absent identity catalog. `42501` (insufficient_privilege)
+/// and every other SQLSTATE propagate.
+fn optional_catalog_absent(err: &DbErr, missing_name: &str) -> bool {
+    if let Some(code) = crate::classify::sqlx_engine_code(err) {
+        match code.to_ascii_uppercase().as_str() {
+            "42501" => return false,
+            "42P01" => {
+                return bookclerk_plugin_abi::reserved_catalog_relation_missing(
+                    &err.to_string(),
+                    missing_name,
+                );
+            }
+            _ => {}
+        }
+    }
+    bookclerk_plugin_abi::reserved_catalog_relation_missing(&err.to_string(), missing_name)
 }
 
 fn merge_identity_rows(
@@ -423,18 +452,7 @@ where
             }
             Ok(out)
         }
-        Err(err)
-            if err
-                .to_string()
-                .to_ascii_lowercase()
-                .contains(&missing_name.to_ascii_lowercase())
-                || bookclerk_plugin_abi::reserved_catalog_relation_missing(
-                    &err.to_string(),
-                    missing_name,
-                ) =>
-        {
-            Ok(Vec::new())
-        }
+        Err(err) if optional_catalog_absent(&err, missing_name) => Ok(Vec::new()),
         Err(err) => Err(err),
     }
 }
@@ -499,13 +517,37 @@ mod tests {
     }
 
     #[test]
-    fn engine_catalogs_are_skipped() {
-        assert!(is_engine_catalog("sqlite_sequence"));
-        assert!(is_engine_catalog("sqlite_master"));
-        assert!(is_engine_catalog("pg_class"));
-        assert!(is_engine_catalog("information_schema"));
-        assert!(!is_engine_catalog("books"));
-        assert!(!is_engine_catalog("bookclerk_identity"));
+    fn sqlite_reserved_catalogs_are_name_prefixed() {
+        assert!(is_sqlite_reserved_catalog("sqlite_sequence"));
+        assert!(is_sqlite_reserved_catalog("sqlite_master"));
+        assert!(!is_sqlite_reserved_catalog("pg_notes"));
+        assert!(!is_sqlite_reserved_catalog("pg_class"));
+        assert!(!is_sqlite_reserved_catalog("information_schema"));
+        assert!(!is_sqlite_reserved_catalog("books"));
+        assert!(!is_sqlite_reserved_catalog("bookclerk_identity"));
+    }
+
+    #[test]
+    fn optional_catalog_absent_is_structured_undefined_relation() {
+        assert!(optional_catalog_absent(
+            &DbErr::Custom(r#"relation "bookclerk_identity" does not exist"#.into()),
+            SQL_IDENTITY_TABLE
+        ));
+        assert!(optional_catalog_absent(
+            &DbErr::Custom("no such table: bookclerk_identity".into()),
+            SQL_IDENTITY_TABLE
+        ));
+        assert!(
+            !optional_catalog_absent(
+                &DbErr::Custom("permission denied for table bookclerk_identity".into()),
+                SQL_IDENTITY_TABLE
+            ),
+            "permission errors must not look like a missing optional catalog"
+        );
+        assert!(!optional_catalog_absent(
+            &DbErr::Custom("syntax error at or near bookclerk_identity".into()),
+            SQL_IDENTITY_TABLE
+        ));
     }
 
     #[test]

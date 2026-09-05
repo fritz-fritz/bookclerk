@@ -1260,6 +1260,135 @@ async fn plugin_restore_fails_closed_when_stale_binding_lacks_catalog() {
     );
 }
 
+#[tokio::test]
+async fn plugin_backup_round_trips_user_table_named_pg_notes() {
+    let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_bootstrap(&src).await;
+    apply_admitted_sql(
+        &src,
+        &["CREATE TABLE pg_notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)"],
+        CanonicalRestoreKind::PluginBinding,
+    )
+    .await
+    .unwrap();
+    src.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO pg_notes (id, body) VALUES (1, 'keep')",
+    ))
+    .await
+    .unwrap();
+    let names = super::util::backup_list_user_relations(&src, None)
+        .await
+        .unwrap();
+    assert!(
+        names.iter().any(|n| n == "pg_notes"),
+        "user table pg_notes must not be treated as an engine catalog: {names:?}"
+    );
+
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let unit = capture::capture_plugin_unit(
+        &src,
+        &repo,
+        &CanonicalExportOpts::default(),
+        "demo",
+        "pg_notes",
+        "sqlite",
+    )
+    .await
+    .unwrap();
+    let dest = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    restore_backup_unit(
+        &dest,
+        &repo,
+        &unit,
+        CanonicalRestoreKind::PluginBinding,
+        &restore_ok(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        count(
+            &dest,
+            "SELECT COUNT(*) AS count FROM pg_notes WHERE body = 'keep'"
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn plugin_restore_fails_closed_when_pg_notes_leftover_lacks_catalog() {
+    let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_bootstrap(&src).await;
+    apply_admitted_sql(
+        &src,
+        &["CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)"],
+        CanonicalRestoreKind::PluginBinding,
+    )
+    .await
+    .unwrap();
+    src.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO notes (id, body) VALUES (1, 'src')",
+    ))
+    .await
+    .unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let unit = capture::capture_plugin_unit(
+        &src,
+        &repo,
+        &CanonicalExportOpts::default(),
+        "demo",
+        "notes",
+        "sqlite",
+    )
+    .await
+    .unwrap();
+    let dest = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    dest.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE TABLE pg_notes (id INTEGER PRIMARY KEY)",
+    ))
+    .await
+    .unwrap();
+    dest.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO pg_notes (id) VALUES (7)",
+    ))
+    .await
+    .unwrap();
+    let err = restore_backup_unit(
+        &dest,
+        &repo,
+        &unit,
+        CanonicalRestoreKind::PluginBinding,
+        &restore_ok(),
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("reset or recreate")
+            || err.to_string().contains("no durable canonical DDL catalog"),
+        "{err}"
+    );
+    assert_eq!(
+        count(&dest, "SELECT COUNT(*) AS count FROM pg_notes").await,
+        1
+    );
+}
+
 #[test]
 fn capture_text_order_by_desugars_and_proves_collate_sites() {
     let parsed =
