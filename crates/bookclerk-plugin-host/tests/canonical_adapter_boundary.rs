@@ -163,6 +163,143 @@ async fn host_like_stays_canonical_until_adapter_lowering() {
     assert!(!sqlite.contains("$1"), "{sqlite}");
 }
 
+#[derive(Debug)]
+struct RecordingProxy {
+    seen_sql: Arc<Mutex<Vec<String>>>,
+    stamped_sql: Arc<Mutex<Vec<String>>>,
+}
+
+/// Same frontend as production `RpcDatabaseProxy::query`: SeaORM sqlite-shaped
+/// `Statement` → typed request → host authorize → proof stamp.
+fn proxy_statement_to_typed(
+    statement: &Statement,
+    kind: DbPlanStatementKind,
+) -> std::result::Result<TypedDbStatement, sea_orm::DbErr> {
+    let parameters = match &statement.values {
+        Some(values) => values
+            .0
+            .iter()
+            .map(bookclerk_db_exec::db_value_from_sea)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sea_orm::DbErr::Custom)?,
+        None => Vec::new(),
+    };
+    Ok(TypedDbStatement {
+        sql: statement.sql.clone(),
+        parameters,
+        kind,
+        max_rows: 0,
+        result_selection: DbResultSelection::Rows,
+    })
+}
+
+#[async_trait]
+impl sea_orm::ProxyDatabaseTrait for RecordingProxy {
+    async fn query(
+        &self,
+        statement: sea_orm::Statement,
+    ) -> std::result::Result<Vec<sea_orm::ProxyRow>, sea_orm::DbErr> {
+        self.seen_sql
+            .lock()
+            .expect("seen sql")
+            .push(statement.sql.clone());
+        let typed = proxy_statement_to_typed(
+            &statement,
+            bookclerk_library::proxy_read_kind(&statement.sql),
+        )?;
+        let mut req = ExecuteRequest {
+            operation_id: "proxy-query".into(),
+            request_hash: String::new(),
+            statements: vec![typed],
+            deadline_unix_ms: 0,
+        };
+        bookclerk_library::authorize_typed_request(&mut req, &DbCapabilities::advertised_sqlite())
+            .map_err(|err| sea_orm::DbErr::Custom(err.to_string()))?;
+        let proofs = bookclerk_db_exec::stamp_host_proofs(
+            &req,
+            &bookclerk_library::migrations::host_sql_type_env(),
+        )
+        .map_err(|err| sea_orm::DbErr::Custom(err.to_string()))?;
+        let envelope = CanonicalExecuteRequest::from_desugared(req)
+            .bind_proofs(proofs)
+            .map_err(|err| sea_orm::DbErr::Custom(err.to_string()))?;
+        envelope
+            .require_proofs()
+            .map_err(|err| sea_orm::DbErr::Custom(err.to_string()))?;
+        self.stamped_sql
+            .lock()
+            .expect("stamped sql")
+            .push(envelope.request.statements[0].sql.clone());
+        Ok(Vec::new())
+    }
+
+    async fn execute(
+        &self,
+        statement: sea_orm::Statement,
+    ) -> std::result::Result<sea_orm::ProxyExecResult, sea_orm::DbErr> {
+        self.seen_sql
+            .lock()
+            .expect("seen sql")
+            .push(statement.sql.clone());
+        Ok(sea_orm::ProxyExecResult {
+            last_insert_id: 0,
+            rows_affected: 0,
+        })
+    }
+
+    async fn ping(&self) -> std::result::Result<(), sea_orm::DbErr> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn seaorm_rpc_proxy_frontend_keeps_like_and_question_marks() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let stamped = Arc::new(Mutex::new(Vec::new()));
+    let proxy: Arc<Box<dyn sea_orm::ProxyDatabaseTrait>> = Arc::new(Box::new(RecordingProxy {
+        seen_sql: Arc::clone(&seen),
+        stamped_sql: Arc::clone(&stamped),
+    }));
+    let db = sea_orm::Database::connect_proxy(sea_orm::DatabaseBackend::Sqlite, proxy)
+        .await
+        .expect("proxy");
+    sea_orm::ConnectionTrait::query_all_raw(
+        &db,
+        Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            "SELECT slot_key FROM db_serialization_slots WHERE slot_key LIKE ?",
+            [Value::from("rowcap-%")],
+        ),
+    )
+    .await
+    .expect("proxy query");
+
+    let seen_sql = seen
+        .lock()
+        .expect("seen")
+        .iter()
+        .filter(|sql| sql.contains("LIKE") || sql.contains("GLOB"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(seen_sql.len(), 1, "{seen_sql:?}");
+    assert!(seen_sql[0].contains("LIKE"), "{}", seen_sql[0]);
+    assert!(!seen_sql[0].contains("GLOB"), "{}", seen_sql[0]);
+    assert!(seen_sql[0].contains('?'), "{}", seen_sql[0]);
+    assert!(!seen_sql[0].contains("$1"), "{}", seen_sql[0]);
+
+    let boundary = stamped.lock().expect("stamped").clone();
+    assert_eq!(boundary.len(), 1, "{boundary:?}");
+    assert!(boundary[0].contains("LIKE"), "{}", boundary[0]);
+    assert!(!boundary[0].contains("GLOB"), "{}", boundary[0]);
+    assert!(boundary[0].contains('?'), "{}", boundary[0]);
+    assert!(!boundary[0].contains("$1"), "{}", boundary[0]);
+
+    let pg = bookclerk_db_exec::lower_canonical_sql(DatabaseBackend::Postgres, &boundary[0]);
+    assert!(pg.contains("$1"), "{pg}");
+    assert!(pg.contains("LIKE"), "{pg}");
+    assert!(!pg.contains("GLOB"), "{pg}");
+}
+
 #[tokio::test]
 async fn adapter_execute_fails_closed_without_proofs() {
     let db = bookclerk_plugin_database_sqlite::open_memory()
