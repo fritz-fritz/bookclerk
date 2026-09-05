@@ -171,6 +171,10 @@ struct RecordingProxy {
 
 /// Same frontend as production `RpcDatabaseProxy::query`: SeaORM sqlite-shaped
 /// `Statement` → typed request → host authorize → proof stamp.
+///
+/// The production `PluginSession` / Cap'n path is
+/// `production_rpc_proxy_keeps_like_through_*_guest` in
+/// `bookclerk-plugin-host` lib tests.
 fn proxy_statement_to_typed(
     statement: &Statement,
     kind: DbPlanStatementKind,

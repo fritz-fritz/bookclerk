@@ -4,6 +4,8 @@
 //! SeaORM proxy calls over JSON-RPC. Engine connect/proxy quirks live in the
 //! database guest. There is no in-process fallback.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,6 +39,37 @@ use crate::jail::plugin_data_dir;
 use crate::rpc_session::{PluginSession, OPERATOR_ACCOUNT};
 use crate::{PluginError, Result as PluginResult};
 use bookclerk_library::{atomic_status, DbAtomicParams};
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Stamped Cap'n SQL captured by [`capture_outbound_adapter_sql`].
+    static ADAPTER_SQL_CAPTURE: RefCell<Vec<String>>;
+}
+
+/// Records stamped adapter SQL when a test has [`capture_outbound_adapter_sql`] in scope.
+#[cfg(test)]
+fn note_outbound_adapter_sql(req: &AdapterExecuteRequest) {
+    let _ = ADAPTER_SQL_CAPTURE.try_with(|slot| {
+        slot.borrow_mut()
+            .extend(req.request.statements.iter().map(|stmt| stmt.sql.clone()));
+    });
+}
+
+/// Runs `f` and returns SQL that [`RpcDatabaseProxy`] stamped for Cap'n `execute`.
+#[cfg(test)]
+pub(super) async fn capture_outbound_adapter_sql<F, Fut, T>(f: F) -> (T, Vec<String>)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    ADAPTER_SQL_CAPTURE
+        .scope(RefCell::new(Vec::new()), async {
+            let value = f().await;
+            let sql = ADAPTER_SQL_CAPTURE.with(|slot| slot.borrow().clone());
+            (value, sql)
+        })
+        .await
+}
 
 /// Stamps 1:1 proofs on already-canonical host SQL for adapter execute.
 fn stamp_adapter_request(
@@ -1302,6 +1335,8 @@ impl RpcDatabaseProxy {
             bookclerk_library::migrations::host_sql_type_env()
         };
         let stamped = stamp_adapter_request(req, &catalog, isolation)?;
+        #[cfg(test)]
+        note_outbound_adapter_sql(&stamped);
         let reply = if on_txn {
             if let Some(binding) = self.binding.as_deref() {
                 self.session
