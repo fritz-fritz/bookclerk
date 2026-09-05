@@ -2231,7 +2231,7 @@ mod tests {
                 result_selection: DbResultSelection::Rows,
             }],
         };
-        let proofs = proofs_for_request(&SqlTypeEnv::new(), &req, &[], false)
+        let proofs = proofs_for_host_plan(&req, &SqlTypeEnv::new())
             .expect("pragma eponymous SELECT is host-private");
         assert_eq!(proofs.len(), 1);
     }
@@ -2282,7 +2282,7 @@ mod tests {
                 },
             ],
         };
-        let proofs = proofs_for_request(&SqlTypeEnv::new(), &req, &[], false)
+        let proofs = proofs_for_host_plan(&req, &SqlTypeEnv::new())
             .expect("mixed host schema DDL + markers typecheck");
         assert_eq!(proofs.len(), 4);
     }
