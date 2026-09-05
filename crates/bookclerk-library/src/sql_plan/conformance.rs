@@ -836,7 +836,7 @@ async fn host_applies_schema_to_unmigrated_sqlite() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .expect("unmigrated sqlite");
-    crate::apply_host_schema(&db, crate::HostSchemaKind::PragmaMarker)
+    crate::apply_host_schema(&db, crate::HostSchemaKind::RowMarker)
         .await
         .expect("host schema");
     let rows = sea_orm::ConnectionTrait::query_all_raw(

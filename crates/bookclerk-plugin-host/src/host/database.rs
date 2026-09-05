@@ -2470,11 +2470,12 @@ mod tests {
 
     #[test]
     fn row_migrations_kind_is_independent_of_sqlite_bootstrap() {
-        let mut caps = DbCapabilities::advertised_sqlite();
-        caps.pragma_user_version = false;
-        caps.schema_migrations = true;
+        let caps = DbCapabilities::advertised_sqlite();
         let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps).unwrap();
         assert_eq!(kind, bookclerk_library::HostSchemaKind::RowMarker);
+        let mut mixed = caps;
+        mixed.pragma_user_version = true;
+        assert!(bookclerk_library::HostSchemaKind::from_db_capabilities(&mixed).is_err());
         assert_eq!(
             seaorm_backend_from_bootstrap(&DbBootstrap::sqlite()).unwrap(),
             DbBackend::Sqlite

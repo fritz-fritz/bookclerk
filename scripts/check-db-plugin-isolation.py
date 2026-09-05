@@ -278,6 +278,8 @@ FORBIDDEN_LIBRARY_DIALECT_SQL = (
     re.compile(r"REPEATABLE\s+READ", re.IGNORECASE),
     re.compile(r"defer_foreign_keys", re.IGNORECASE),
     re.compile(r"DROP\s+FUNCTION\b", re.IGNORECASE),
+    re.compile(r"PRAGMA\s+user_version", re.IGNORECASE),
+    re.compile(r"FROM\s+pragma_user_version\b", re.IGNORECASE),
 )
 
 

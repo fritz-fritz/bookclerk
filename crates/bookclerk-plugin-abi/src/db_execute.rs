@@ -377,14 +377,22 @@ pub struct DbCapabilities {
     /// Guest reports `rowsAffected`.
     pub affected_rows: bool,
     /// Guest versions schema with a `schema_migrations` table.
+    ///
+    /// Host policy requires this flag. `pragmaUserVersion` is not a host
+    /// versioning contract.
     pub schema_migrations: bool,
-    /// Guest versions schema with `PRAGMA user_version`.
+    /// Adapter-private SQLite `PRAGMA user_version` advertisement.
+    ///
+    /// Host policy ignores this flag and fails closed when it is offered as a
+    /// substitute for [`Self::schema_migrations`].
     pub pragma_user_version: bool,
-    /// Each schema version must be applied as one atomic batch.
+    /// Adapter-private hint that each schema version is one atomic HTTP batch.
+    ///
+    /// Host policy ignores this flag (`atomicBatch` is already required).
     pub atomic_schema_batch: bool,
     /// Guest honors RPC/session cancellation.
     pub cancellation: bool,
-    /// Guest can fill [`DbTiming::db_execution_us`].
+    /// Guest can fill [`DbTiming::db_execution_us`]. Not a host connect minimum.
     pub timing: bool,
     /// Maximum bound parameters per statement.
     pub max_binds: u32,
@@ -530,7 +538,10 @@ impl DbCapabilities {
         self.atomic_unit_restore
     }
 
-    /// First-party SQLite capability advertisement (`PRAGMA user_version` marker).
+    /// First-party SQLite capability advertisement (`schema_migrations` rows).
+    ///
+    /// The adapter may still set `PRAGMA user_version` privately; it must not
+    /// advertise `pragmaUserVersion` as a host versioning contract.
     #[must_use]
     pub fn advertised_sqlite() -> Self {
         Self {
@@ -538,8 +549,8 @@ impl DbCapabilities {
             atomic_batch: true,
             returning: true,
             affected_rows: true,
-            schema_migrations: false,
-            pragma_user_version: true,
+            schema_migrations: true,
+            pragma_user_version: false,
             atomic_schema_batch: false,
             cancellation: true,
             timing: true,
@@ -648,8 +659,16 @@ mod tests {
                 caps.capability_failure_reason()
             );
             assert_eq!(caps.sql_contract_version, SQL_CONTRACT_VERSION);
-            assert_ne!(caps.pragma_user_version, caps.schema_migrations);
+            assert!(caps.schema_migrations);
+            assert!(!caps.pragma_user_version);
         }
+        let mut no_timing = DbCapabilities::advertised_sqlite();
+        no_timing.timing = false;
+        assert!(
+            no_timing.meets_host_minimums(),
+            "timing is not a host connect minimum: {}",
+            no_timing.capability_failure_reason()
+        );
         assert_eq!(
             DbCapabilities::advertised_sqlite().max_binds,
             SQLITE_MAX_BINDS

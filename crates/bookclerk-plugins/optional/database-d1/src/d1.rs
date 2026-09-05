@@ -2489,7 +2489,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -2570,7 +2570,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         let err = bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -2585,7 +2585,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -2607,7 +2607,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -2727,7 +2727,7 @@ mod tests {
         let (a, b) = tokio::join!(
             bookclerk_library::apply_host_schema_with_batch(
                 &db1,
-                bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+                bookclerk_library::HostSchemaKind::RowMarker,
                 move |stmts| {
                     let proxy = p1.clone();
                     async move { run_schema_batch(proxy, stmts).await }
@@ -2735,7 +2735,7 @@ mod tests {
             ),
             bookclerk_library::apply_host_schema_with_batch(
                 &db2,
-                bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+                bookclerk_library::HostSchemaKind::RowMarker,
                 move |stmts| {
                     let proxy = p2.clone();
                     async move { run_schema_batch(proxy, stmts).await }
@@ -2814,7 +2814,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -2863,7 +2863,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -2928,7 +2928,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -2995,7 +2995,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -3087,7 +3087,7 @@ mod tests {
         let proxy_for_batch = proxy1.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -3213,7 +3213,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -3311,7 +3311,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -3408,7 +3408,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -3507,7 +3507,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -3608,7 +3608,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -3688,7 +3688,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -3782,7 +3782,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
@@ -4433,7 +4433,7 @@ mod tests {
         let proxy_for_batch = proxy.clone();
         bookclerk_library::apply_host_schema_with_batch(
             &db,
-            bookclerk_library::HostSchemaKind::AtomicBatchMarker,
+            bookclerk_library::HostSchemaKind::RowMarker,
             move |stmts| {
                 let proxy = proxy_for_batch.clone();
                 async move { run_schema_batch(proxy, stmts).await }
