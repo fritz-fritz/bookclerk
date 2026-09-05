@@ -313,6 +313,79 @@ fn merge_identity_rows(
     }
 }
 
+/// Canonical identity upsert (`?` placeholders). Postgres adapters lower `$1`/`$2`
+/// at the execute edge — sending `VALUES (?, ?)` verbatim is
+/// `syntax error at or near ","` at character 60.
+fn identity_upsert_sql(backend: DbBackend) -> String {
+    match backend {
+        DbBackend::Postgres => format!(
+            "INSERT INTO {SQL_IDENTITY_TABLE} (table_name, last) VALUES (?, ?) \
+             ON CONFLICT (table_name) DO UPDATE SET last = GREATEST({SQL_IDENTITY_TABLE}.last, EXCLUDED.last)"
+        ),
+        _ => format!("INSERT OR REPLACE INTO {SQL_IDENTITY_TABLE} (table_name, last) VALUES (?, ?)"),
+    }
+}
+
+/// Runs `op` under a PostgreSQL savepoint so a missing-catalog error does not
+/// abort the current transaction (`25P02`). No-op savepoint on SQLite / when
+/// `BEGIN` has not opened a transaction.
+///
+/// # Errors
+///
+/// Returns the error from `op`. Savepoint begin/rollback/release failures are
+/// ignored so a missing `BEGIN` still runs `op`.
+async fn with_postgres_savepoint<C, T, Fut>(
+    conn: &C,
+    name: &'static str,
+    op: Fut,
+) -> Result<T, DbErr>
+where
+    C: ConnectionTrait,
+    Fut: std::future::Future<Output = Result<T, DbErr>>,
+{
+    let backend = conn.get_database_backend();
+    let savepoint = backend == DbBackend::Postgres
+        && conn
+            .execute_raw(Statement::from_string(backend, format!("SAVEPOINT {name}")))
+            .await
+            .is_ok();
+    match op.await {
+        Ok(value) => {
+            if savepoint {
+                let _ = conn
+                    .execute_raw(Statement::from_string(
+                        backend,
+                        format!("RELEASE SAVEPOINT {name}"),
+                    ))
+                    .await;
+            }
+            Ok(value)
+        }
+        Err(err) => {
+            if savepoint {
+                let _ = conn
+                    .execute_raw(Statement::from_string(
+                        backend,
+                        format!("ROLLBACK TO SAVEPOINT {name}"),
+                    ))
+                    .await;
+                let _ = conn
+                    .execute_raw(Statement::from_string(
+                        backend,
+                        format!("RELEASE SAVEPOINT {name}"),
+                    ))
+                    .await;
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Optional catalog probe (`sqlite_sequence` / [`SQL_IDENTITY_TABLE`]).
+///
+/// # Errors
+///
+/// Returns when the query fails for a reason other than a missing catalog.
 async fn query_optional<C>(
     conn: &C,
     backend: DbBackend,
@@ -324,10 +397,13 @@ async fn query_optional<C>(
 where
     C: ConnectionTrait,
 {
-    match conn
-        .query_all_raw(Statement::from_string(backend, sql.to_string()))
-        .await
-    {
+    let sql = sql.to_string();
+    let result = with_postgres_savepoint(conn, "bookclerk_backup_optional", async {
+        conn.query_all_raw(Statement::from_string(backend, sql))
+            .await
+    })
+    .await;
+    match result {
         Ok(rows) => {
             let mut out = Vec::new();
             for row in rows {
@@ -363,6 +439,13 @@ where
     }
 }
 
+/// Writes one identity high-water row, lowering `?` at the execute edge.
+///
+/// # Errors
+///
+/// Returns when the upsert fails. A missing identity table is ignored on SQLite,
+/// and on Postgres when `last` is 0; a positive `last` without a table fails
+/// closed.
 async fn upsert_bookclerk_identity<C>(
     conn: &C,
     backend: DbBackend,
@@ -371,25 +454,21 @@ async fn upsert_bookclerk_identity<C>(
 where
     C: ConnectionTrait,
 {
-    let sql = match backend {
-        DbBackend::Postgres => format!(
-            "INSERT INTO {SQL_IDENTITY_TABLE} (table_name, last) VALUES (?, ?) \
-             ON CONFLICT (table_name) DO UPDATE SET last = GREATEST({SQL_IDENTITY_TABLE}.last, EXCLUDED.last)"
-        ),
-        _ => format!("INSERT OR REPLACE INTO {SQL_IDENTITY_TABLE} (table_name, last) VALUES (?, ?)"),
-    };
-    match conn
-        .execute_raw(Statement::from_sql_and_values(
-            backend,
-            sql,
-            [
-                sea_orm::Value::from(row.table.clone()),
-                sea_orm::Value::from(row.last),
-            ],
-        ))
+    let sql = identity_upsert_sql(backend);
+    let table = row.table.clone();
+    let last = row.last;
+    let result = with_postgres_savepoint(conn, "bookclerk_identity_upsert", async {
+        crate::execute_canonical_sql(
+            conn,
+            &sql,
+            [sea_orm::Value::from(table), sea_orm::Value::from(last)],
+        )
         .await
-    {
-        Ok(_) => Ok(()),
+        .map(|_| ())
+    })
+    .await;
+    match result {
+        Ok(()) => Ok(()),
         Err(err)
             if bookclerk_plugin_abi::reserved_catalog_relation_missing(
                 &err.to_string(),
@@ -436,5 +515,25 @@ mod tests {
         assert!(!portable_ident("sqlite_sequence;drop"));
         assert!(!portable_ident("pg class"));
         assert!(!portable_ident("1books"));
+    }
+
+    #[test]
+    fn postgres_identity_upsert_lowers_question_marks() {
+        let sql = identity_upsert_sql(DbBackend::Postgres);
+        assert_eq!(
+            sql.as_bytes().get(59),
+            Some(&b','),
+            "VALUES (?, ?) comma is at character 60 when unlowered: {sql}"
+        );
+        let lowered = crate::lower_canonical_sql(sea_orm::DatabaseBackend::Postgres, &sql);
+        assert!(
+            lowered.contains("$1") && lowered.contains("$2"),
+            "{lowered}"
+        );
+        assert!(
+            !lowered.contains('?'),
+            "Postgres must not see `?` binds (syntax error at the VALUES comma): {lowered}"
+        );
+        assert!(lowered.contains("GREATEST("), "{lowered}");
     }
 }

@@ -502,6 +502,10 @@ fn proofs_for_request(
 /// After [`expand_host_schema_execute_request`], proofs stay 1:1 with the
 /// **wire** request. Expanded companions / split DDL get hash-bound empty
 /// proofs; the version marker keeps the last wire proof when the SQL matches.
+///
+/// # Errors
+///
+/// Returns when wire proofs cannot be produced for `wire`.
 fn proofs_after_adapter_expand(
     catalog: &SqlTypeEnv,
     wire: &ExecuteRequest,

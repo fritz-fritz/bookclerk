@@ -1740,6 +1740,49 @@ mod tests {
         );
     }
 
+    /// Mirrors backup capture_select: host desugar, then proof-directed Postgres lower.
+    fn capture_lower_pg(sql: &str, env: &SqlTypeEnv) -> String {
+        let desugared = bookclerk_plugin_abi::desugar_canonical_sql(sql);
+        let proof = proof_of(&desugared, env);
+        lower_canonical_sql_typed(DatabaseBackend::Postgres, &desugared, Some(&proof))
+            .unwrap_or_else(|err| panic!("{desugared}: {err}"))
+    }
+
+    #[test]
+    fn postgres_backup_catalog_select_collates_text_and_keeps_nulls() {
+        let env = sql_type_env_from_canonical_ddl(&format!(
+            "{}; {}",
+            bookclerk_plugin_abi::sql_ddl_create_table_sql(),
+            bookclerk_plugin_abi::sql_schema_create_table_sql()
+        ));
+        let catalog = format!(
+            "SELECT kind, name, table_name, canonical_sql FROM {} \
+             ORDER BY kind, name LIMIT 1000 OFFSET 0",
+            bookclerk_plugin_abi::SQL_DDL_TABLE
+        );
+        let catalog_pg = capture_lower_pg(&catalog, &env);
+        assert!(catalog_pg.contains("(kind COLLATE \"C\")"), "{catalog_pg}");
+        assert!(
+            catalog_pg.contains("ORDER BY kind NULLS FIRST, name NULLS FIRST"),
+            "{catalog_pg}"
+        );
+
+        let mut items = SqlTypeEnv::new();
+        items.insert_table(
+            "items",
+            [("k".into(), SqlType::Text), ("extra".into(), SqlType::Text)],
+        );
+        let items_pg = capture_lower_pg(
+            "SELECT k, extra FROM items ORDER BY k ASC NULLS FIRST, extra ASC NULLS FIRST LIMIT 1000 OFFSET 0",
+            &items,
+        );
+        assert!(items_pg.contains("(k COLLATE \"C\")"), "{items_pg}");
+        assert!(
+            items_pg.contains("ORDER BY k ASC NULLS FIRST, extra ASC NULLS FIRST"),
+            "{items_pg}"
+        );
+    }
+
     #[test]
     fn postgres_round_sum_avg_cast_to_wire_types() {
         let sql = lower_canonical_to_postgres("SELECT round(r, 2), sum(n), avg(n) FROM typed");
