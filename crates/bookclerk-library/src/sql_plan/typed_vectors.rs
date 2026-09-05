@@ -53,13 +53,12 @@ pub async fn run_typed_request_vectors<F, Fut, E>(
 ///
 /// Returns when typecheck fails.
 pub fn stamp_typed_vector(
-    mut req: ExecuteRequest,
+    req: ExecuteRequest,
     catalog: &mut SqlTypeEnv,
 ) -> Result<AdapterExecuteRequest, String> {
-    bookclerk_plugin_abi::desugar_execute_request(&mut req);
     let envelope = bookclerk_db_exec::stamp_adapter_execute(req.clone(), catalog)
         .map_err(|err| err.to_string())?;
-    for stmt in &req.statements {
+    for stmt in &envelope.request.statements {
         apply_schema_sql_to_env(catalog, &stmt.sql);
     }
     Ok(envelope)
@@ -71,6 +70,7 @@ pub fn stamp_typed_vector(
 ///
 /// Panics when a vector fails.
 pub async fn run_typed_conn_vectors(
+    engine: bookclerk_db_exec::PhysicalEngine,
     db: &DatabaseConnection,
     connect: DbCapabilities,
     timing: &str,
@@ -91,6 +91,7 @@ pub async fn run_typed_conn_vectors(
                 caps.max_result_rows = cap;
             }
             let reply = bookclerk_db_exec::execute_typed_envelope(
+                engine,
                 &db,
                 &envelope,
                 &timing,

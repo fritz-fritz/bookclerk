@@ -1049,12 +1049,13 @@ mod tests {
         proxy: &D1Proxy,
         req: bookclerk_plugin_abi::ExecuteRequest,
     ) -> std::result::Result<bookclerk_plugin_abi::ExecuteReply, sea_orm::DbErr> {
+        let envelope = bookclerk_db_exec::stamp_adapter_execute(
+            req,
+            &bookclerk_library::migrations::host_sql_type_env(),
+        )
+        .map_err(|err| sea_orm::DbErr::Custom(err.to_string()))?;
         proxy
-            .run_typed_atomic(
-                &req,
-                bookclerk_plugin_abi::GuestReceiptPersist::default(),
-                &[],
-            )
+            .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
             .await
     }
 
@@ -2688,12 +2689,13 @@ mod tests {
                 }],
                 deadline_unix_ms: 0,
             };
+            let envelope = bookclerk_db_exec::stamp_adapter_execute(
+                req,
+                &bookclerk_library::migrations::host_sql_type_env(),
+            )
+            .expect("stamp");
             let reply = proxy
-                .run_typed_atomic(
-                    &req,
-                    bookclerk_plugin_abi::GuestReceiptPersist::default(),
-                    &[],
-                )
+                .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
                 .await
                 .unwrap_or_else(|e| panic!("{label}: {e}"));
             let got = reply.statements[0].rows[0].values[0].clone();
@@ -4413,12 +4415,13 @@ mod tests {
             }],
             deadline_unix_ms: 0,
         };
+        let envelope = bookclerk_db_exec::stamp_adapter_execute(
+            req,
+            &bookclerk_library::migrations::host_sql_type_env(),
+        )
+        .expect("stamp");
         let err = proxy
-            .run_typed_atomic(
-                &req,
-                bookclerk_plugin_abi::GuestReceiptPersist::default(),
-                &[],
-            )
+            .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
             .await
             .expect_err("lost reply on an unwrapped mutation must not be retried");
         assert!(crate::atomic::is_ambiguous_d1(&err), "{err}");
@@ -4542,12 +4545,13 @@ mod tests {
             }],
             deadline_unix_ms: 0,
         };
+        let envelope = bookclerk_db_exec::stamp_adapter_execute(
+            req,
+            &bookclerk_library::migrations::host_sql_type_env(),
+        )
+        .expect("stamp");
         let reply = proxy
-            .run_typed_atomic(
-                &req,
-                bookclerk_plugin_abi::GuestReceiptPersist::default(),
-                &[],
-            )
+            .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
             .await
             .expect("read-only lost reply must be retried transparently");
         assert_eq!(reply.statements[0].rows[0].values[0], DbValue::Int64(7));

@@ -458,7 +458,8 @@ where
     let table = row.table.clone();
     let last = row.last;
     let result = with_postgres_savepoint(conn, "bookclerk_identity_upsert", async {
-        crate::execute_canonical_sql(
+        crate::execute_physical_sql(
+            crate::PhysicalEngine::from_adapter_backend(backend),
             conn,
             &sql,
             [sea_orm::Value::from(table), sea_orm::Value::from(last)],

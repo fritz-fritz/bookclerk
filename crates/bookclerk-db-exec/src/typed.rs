@@ -30,7 +30,7 @@ use sea_orm::{
 
 use crate::exec::{
     collect_capped_query_results, exceeds_result_row_cap, remaining_deadline_ms,
-    rows_affected_for_kind, AtomicSession, ExecCaps,
+    rows_affected_for_kind, AtomicSession, ExecCaps, PhysicalEngine,
 };
 use crate::proxy_txn::{
     consume_commit_injection, consume_savepoint_release_injection,
@@ -464,39 +464,23 @@ async fn load_physical_postgres(
 
 /// # Errors
 ///
-/// Returns [`DbErr`] when a stamped proof is not bound to its SQL, or when
-/// typecheck fails for an unstamped pre-admission request.
+/// Returns [`DbErr`] when a stamped proof is not bound to its SQL.
 fn proofs_for_request(
-    catalog: &SqlTypeEnv,
+    _catalog: &SqlTypeEnv,
     req: &ExecuteRequest,
     stamped: &[ResolvedStatement],
-    require_stamped: bool,
+    _require_stamped: bool,
 ) -> Result<Vec<ResolvedStatement>, DbErr> {
-    if require_stamped {
-        if stamped.len() != req.statements.len() {
-            return Err(DbErr::Custom(
-                "host execute envelope proofs must match statement count".into(),
-            ));
-        }
-        for (stmt, proof) in req.statements.iter().zip(stamped.iter()) {
-            assert_proof_matches_sql(proof, stmt.sql.trim())
-                .map_err(|err| DbErr::Custom(err.to_string()))?;
-        }
-        return Ok(stamped.to_vec());
-    }
-    if stamped.len() == req.statements.len() && !stamped.is_empty() {
-        for (stmt, proof) in req.statements.iter().zip(stamped.iter()) {
-            assert_proof_matches_sql(proof, stmt.sql.trim())
-                .map_err(|err| DbErr::Custom(err.to_string()))?;
-        }
-        return Ok(stamped.to_vec());
-    }
-    if !stamped.is_empty() {
+    if stamped.len() != req.statements.len() {
         return Err(DbErr::Custom(
             "host execute envelope proofs must match statement count".into(),
         ));
     }
-    proofs_for_host_plan(req, &type_env_with_bookkeeping(catalog))
+    for (stmt, proof) in req.statements.iter().zip(stamped.iter()) {
+        assert_proof_matches_sql(proof, stmt.sql.trim())
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
+    }
+    Ok(stamped.to_vec())
 }
 
 /// After [`expand_host_schema_execute_request`], proofs stay 1:1 with the
@@ -551,19 +535,22 @@ pub fn stamp_host_proofs(
 
 /// Host-stamped [`AdapterExecuteRequest`] for first-party adapter execute.
 ///
-/// Desugars canonical SQL first (`ORDER BY NULLS`, `NULLIF`) so proofs bind
-/// to the same text the execute edge will check.
+/// Desugars canonical SQL exactly once (`ORDER BY NULLS`, `NULLIF`) so proofs
+/// bind to the same text that crosses the adapter boundary. Adapters must not
+/// call this.
 ///
 /// # Errors
 ///
-/// Returns [`DbErr::Custom`] when typecheck fails.
+/// Returns [`DbErr::Custom`] when typecheck fails or proofs do not bind.
 pub fn stamp_adapter_execute(
-    mut request: ExecuteRequest,
+    request: ExecuteRequest,
     catalog: &SqlTypeEnv,
 ) -> Result<AdapterExecuteRequest, DbErr> {
-    bookclerk_plugin_abi::desugar_execute_request(&mut request);
-    let proofs = stamp_host_proofs(&request, catalog)?;
-    Ok(AdapterExecuteRequest::new(request, GuestReceiptPersist::default()).with_proofs(proofs))
+    let canonical = bookclerk_plugin_abi::UnresolvedExecuteRequest::new(request).canonicalize();
+    let proofs = stamp_host_proofs(&canonical.request, catalog)?;
+    canonical
+        .bind_proofs(proofs)
+        .map_err(|err| DbErr::Custom(err.to_string()))
 }
 
 /// Host plans may include already-lowered schema companions (`PRAGMA`,
@@ -1298,17 +1285,11 @@ pub async fn execute_typed_on_session(
     caps: impl Into<ExecCaps>,
     session: AtomicSession,
 ) -> Result<ExecuteReply, DbErr> {
-    execute_typed_on_session_proofs(
-        db,
-        req,
-        guest_receipt,
-        &[],
-        timing_source,
-        caps,
-        session,
-        false,
-    )
-    .await
+    let engine = PhysicalEngine::from_adapter_backend(db.get_database_backend());
+    let type_env = session.type_env.clone();
+    let mut envelope = stamp_adapter_execute(req.clone(), &type_env)?;
+    envelope.guest_receipt = guest_receipt;
+    execute_typed_envelope(engine, db, &envelope, timing_source, caps, session).await
 }
 
 /// [`execute_typed_on_session`] using host-private proofs already stamped on `envelope`.
@@ -1323,6 +1304,7 @@ pub async fn execute_typed_on_session(
 /// the encoded reply exceeds `max_atomic_result_bytes`, or the session is
 /// interrupted.
 pub async fn execute_typed_envelope(
+    engine: PhysicalEngine,
     db: &DatabaseConnection,
     envelope: &AdapterExecuteRequest,
     timing_source: &str,
@@ -1340,6 +1322,7 @@ pub async fn execute_typed_envelope(
         .require_proofs()
         .map_err(|err| DbErr::Custom(err.to_string()))?;
     execute_typed_on_session_proofs(
+        engine,
         db,
         &envelope.request,
         envelope.guest_receipt.clone(),
@@ -1357,6 +1340,7 @@ pub async fn execute_typed_envelope(
 /// Returns [`DbErr`] when a statement fails, encoding fails, or COMMIT fails.
 #[allow(clippy::too_many_arguments)]
 async fn execute_typed_on_session_proofs(
+    engine: PhysicalEngine,
     db: &DatabaseConnection,
     req: &ExecuteRequest,
     guest_receipt: GuestReceiptPersist,
@@ -1373,6 +1357,7 @@ async fn execute_typed_on_session_proofs(
         let seen_budget = Arc::clone(&budget);
         let result = with_exec_budget(Arc::clone(&budget), || {
             execute_typed_body(
+                engine,
                 db,
                 req,
                 timing_source,
@@ -1391,6 +1376,7 @@ async fn execute_typed_on_session_proofs(
     let hint = guest_receipt;
     let guest_hash = hint.guest_request_hash.clone();
     execute_typed_on_session_then_proofs(
+        engine,
         db,
         req,
         timing_source,
@@ -1431,16 +1417,20 @@ pub async fn execute_typed_on_session_then<F>(
 where
     F: FnOnce(ExecuteReply) -> Result<Vec<TypedDbStatement>, DbErr>,
 {
+    let engine = PhysicalEngine::from_adapter_backend(db.get_database_backend());
+    let type_env = session.type_env.clone();
+    let envelope = stamp_adapter_execute(req.clone(), &type_env)?;
     execute_typed_on_session_then_proofs(
+        engine,
         db,
-        req,
+        &envelope.request,
         timing_source,
         caps,
         session,
         then,
         guest_hash,
-        &[],
-        false,
+        &envelope.proofs,
+        true,
     )
     .await
 }
@@ -1451,6 +1441,7 @@ where
 /// COMMIT fails.
 #[allow(clippy::too_many_arguments)]
 async fn execute_typed_on_session_then_proofs<F>(
+    engine: PhysicalEngine,
     db: &DatabaseConnection,
     req: &ExecuteRequest,
     timing_source: &str,
@@ -1470,6 +1461,7 @@ where
     let seen_budget = Arc::clone(&budget);
     let result = with_exec_budget(Arc::clone(&budget), || {
         execute_typed_body(
+            engine,
             db,
             req,
             timing_source,
@@ -1505,8 +1497,18 @@ pub async fn execute_typed_on_txn(
     session: AtomicSession,
     describe: Option<&DatabaseConnection>,
 ) -> Result<ExecuteReply, DbErr> {
+    let engine = PhysicalEngine::from_adapter_backend(txn.get_database_backend());
     let envelope = stamp_adapter_execute(req.clone(), &session.type_env)?;
-    execute_typed_on_txn_envelope(txn, &envelope, timing_source, caps, session, describe).await
+    execute_typed_on_txn_envelope(
+        engine,
+        txn,
+        &envelope,
+        timing_source,
+        caps,
+        session,
+        describe,
+    )
+    .await
 }
 
 /// [`execute_typed_on_txn`] with a host-only guest-receipt persist hint and proofs.
@@ -1519,6 +1521,7 @@ pub async fn execute_typed_on_txn(
 /// Returns [`DbErr`] when a statement fails, finalize fails, or the encoded
 /// reply exceeds `max_atomic_result_bytes`.
 pub async fn execute_typed_on_txn_envelope(
+    engine: PhysicalEngine,
     txn: &DatabaseTransaction,
     envelope: &AdapterExecuteRequest,
     timing_source: &str,
@@ -1542,6 +1545,7 @@ pub async fn execute_typed_on_txn_envelope(
     let result = with_exec_budget(Arc::clone(&budget), || {
         nested_savepoint(txn, || {
             execute_typed_join_body(
+                engine,
                 txn,
                 describe,
                 &envelope.request,
@@ -1651,6 +1655,7 @@ where
 /// Returns [`DbErr`] when a statement fails, encoding fails, or a result budget is exceeded.
 #[allow(clippy::too_many_arguments)]
 async fn execute_typed_join_body(
+    engine: PhysicalEngine,
     txn: &DatabaseTransaction,
     describe: Option<&DatabaseConnection>,
     req: &ExecuteRequest,
@@ -1662,9 +1667,8 @@ async fn execute_typed_join_body(
     require_stamped: bool,
 ) -> Result<ExecuteReply, DbErr> {
     let started = Instant::now();
-    let backend = ConnectionTrait::get_database_backend(txn);
-    let mut req = req.clone();
-    bookclerk_plugin_abi::desugar_execute_request(&mut req);
+    let backend = engine.backend();
+    let req = req.clone();
     let sql_started = Instant::now();
     let mut env = catalog_env_for_typed(txn, &session).await?;
     let proofs = proofs_for_request(&env, &req, stamped, require_stamped)?;
@@ -1802,6 +1806,7 @@ async fn execute_typed_join_body(
 /// Returns [`DbErr`] when a statement fails, encoding fails, or COMMIT fails.
 #[allow(clippy::too_many_arguments)]
 async fn execute_typed_body<F>(
+    engine: PhysicalEngine,
     db: &DatabaseConnection,
     req: &ExecuteRequest,
     timing_source: &str,
@@ -1821,9 +1826,8 @@ where
         ));
     }
     let started = Instant::now();
-    let backend = ConnectionTrait::get_database_backend(db);
-    let mut req = req.clone();
-    bookclerk_plugin_abi::desugar_execute_request(&mut req);
+    let backend = engine.backend();
+    let req = req.clone();
     // Host schema batches travel canonical; this adapter edge lowers/splits
     // them for the live backend and collapses the results back to the wire
     // request shape below. Proofs are checked against the wire SQL first.

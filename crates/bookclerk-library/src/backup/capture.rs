@@ -3,14 +3,14 @@
 use std::collections::BTreeSet;
 
 use bookclerk_plugin_abi::{
-    desugar_execute_request, encoded_statement_result_bytes, parse_create_index_sql,
-    parse_create_table_schema, reserved_catalog_relation_missing, sql_ddl_create_table_sql,
-    sql_schema_create_table_sql, sql_type_env_from_canonical_ddl, typecheck_execute_request_proofs,
-    DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbType, DbValue, ExecuteRequest,
-    SqlTypeEnv, StatementResult, TypedDbStatement, SQL_CATALOG_TABLE, SQL_CONTRACT_VERSION,
-    SQL_DDL_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
+    encoded_statement_result_bytes, parse_create_index_sql, parse_create_table_schema,
+    reserved_catalog_relation_missing, sql_ddl_create_table_sql, sql_schema_create_table_sql,
+    sql_type_env_from_canonical_ddl, typecheck_execute_request_proofs, DbColumn,
+    DbPlanStatementKind, DbResultSelection, DbRow, DbType, DbValue, ExecuteRequest, SqlTypeEnv,
+    StatementResult, TypedDbStatement, UnresolvedExecuteRequest, SQL_CATALOG_TABLE,
+    SQL_CONTRACT_VERSION, SQL_DDL_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction};
 
 use super::encode::{chunk_would_overflow, CanonicalObject};
 use super::repository::BackupRepository;
@@ -478,11 +478,9 @@ pub(super) async fn plugin_canonical_schema_from_ddl_catalog_on<C>(
 where
     C: ConnectionTrait,
 {
-    let backend = conn.get_database_backend();
     let env = catalog_type_env();
     let rows = match paged_select(
         conn,
-        backend,
         &format!(
             "SELECT kind, name, table_name, canonical_sql FROM {SQL_DDL_TABLE} \
              ORDER BY kind, name"
@@ -540,7 +538,7 @@ where
         }
     }
     let schema_sql = format!("SELECT table_name FROM {SQL_SCHEMA_TABLE} ORDER BY table_name");
-    match paged_select(conn, backend, &schema_sql, opts, &env).await {
+    match paged_select(conn, &schema_sql, opts, &env).await {
         Ok(schema_rows) => {
             for row in schema_rows {
                 let name = cell_text(&row, "table_name")?;
@@ -581,7 +579,7 @@ async fn capture_select<C>(
 where
     C: ConnectionTrait,
 {
-    let mut req = ExecuteRequest {
+    let req = ExecuteRequest {
         operation_id: "backup-capture".into(),
         request_hash: String::new(),
         statements: vec![TypedDbStatement {
@@ -593,18 +591,13 @@ where
         }],
         deadline_unix_ms: 0,
     };
-    // Proofs bind to host-desugared SQL (explicit NULLS / NULLIF), which
-    // `query_canonical_sql_typed` executes after the same desugar.
-    desugar_execute_request(&mut req);
-    let proofs = typecheck_execute_request_proofs(&req, env).map_err(|err| {
+    // Desugar a copy for host admission/typecheck. Send **source** SQL through
+    // SeaORM so the proxy frontend desugars exactly once before proofs.
+    let canonical = UnresolvedExecuteRequest::new(req).canonicalize();
+    typecheck_execute_request_proofs(&canonical.request, env).map_err(|err| {
         LibraryError::Schema(format!("backup SELECT is not admitted SQL v1: {err}"))
     })?;
-    let sql = req
-        .statements
-        .first()
-        .map(|stmt| stmt.sql.as_str())
-        .unwrap_or(sql);
-    bookclerk_db_exec::query_canonical_sql_typed(conn, sql, proofs.first(), [])
+    crate::host_sql::query_host_canonical(conn, sql, [])
         .await
         .map_err(|err| LibraryError::Schema(format!("backup SELECT failed: {err}")))
 }
@@ -621,7 +614,6 @@ pub fn library_skip_tables() -> BTreeSet<String> {
 /// Run `ordered_select` with `LIMIT/OFFSET` using adapter page size and byte budget.
 async fn paged_select<C>(
     conn: &C,
-    _backend: DbBackend,
     ordered_select: &str,
     opts: &CanonicalExportOpts,
     env: &SqlTypeEnv,

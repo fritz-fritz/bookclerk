@@ -38,20 +38,18 @@ use crate::rpc_session::{PluginSession, OPERATOR_ACCOUNT};
 use crate::{PluginError, Result as PluginResult};
 use bookclerk_library::{atomic_status, DbAtomicParams};
 
-/// Stamps 1:1 proofs on host-authored canonical SQL for adapter execute.
+/// Stamps 1:1 proofs on already-canonical host SQL for adapter execute.
 fn stamp_adapter_request(
-    mut req: ExecuteRequest,
+    req: ExecuteRequest,
     catalog: &SqlTypeEnv,
     isolation: IsolationReq,
 ) -> std::result::Result<AdapterExecuteRequest, crate::PluginError> {
-    bookclerk_plugin_abi::desugar_execute_request(&mut req);
     let proofs = bookclerk_db_exec::stamp_host_proofs(&req, catalog)
         .map_err(|err| crate::PluginError::from_abi(Some("invalid_params"), err.to_string()))?;
-    Ok(
-        AdapterExecuteRequest::new(req, bookclerk_plugin_abi::GuestReceiptPersist::default())
-            .with_proofs(proofs)
-            .with_isolation(isolation),
-    )
+    bookclerk_plugin_abi::CanonicalExecuteRequest::from_desugared(req)
+        .with_isolation(isolation)
+        .bind_proofs(proofs)
+        .map_err(|err| crate::PluginError::from_abi(Some("invalid_params"), err.to_string()))
 }
 
 /// [`stamp_adapter_request`] against the host library SQL catalog.
@@ -179,10 +177,7 @@ impl ExternalDatabase {
             Err(err) => return Err(map_rpc_err(err)),
         };
         apply_bootstrap_metadata(&mut bootstrap, &self.plugin_id);
-        if let Some(reason) = bootstrap.backend_failure_reason() {
-            return Err(DbErr::Custom(reason));
-        }
-        let _ = seaorm_backend_from_bootstrap(&bootstrap)?;
+        let _ = &bootstrap;
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
             session: self.session.clone(),
             txn_depth: Arc::new(Mutex::new(HashMap::new())),
@@ -1704,29 +1699,14 @@ impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
         &self,
         envelope: AdapterExecuteRequest,
     ) -> std::result::Result<ExecuteReply, AbiPluginError> {
-        let mut request = envelope.request.clone();
-        let proofs = envelope.proofs.clone();
-        bookclerk_library::authorize_typed_request(&mut request, &self.caps)
+        envelope
+            .require_proofs()
             .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
-        let validate_req = request.clone();
+        let validate_req = envelope.request.clone();
         let cancel = Arc::new(AtomicBool::new(false));
-        let mut stamped = AdapterExecuteRequest::new(request, envelope.guest_receipt)
-            .with_proofs(proofs)
-            .with_isolation(envelope.isolation);
-        if stamped.require_proofs().is_err() {
-            let proofs = bookclerk_db_exec::stamp_host_proofs(
-                &stamped.request,
-                &bookclerk_library::migrations::host_sql_type_env(),
-            )
-            .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
-            stamped = stamped.with_proofs(proofs);
-            stamped
-                .require_proofs()
-                .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
-        }
         let reply = self
             .session
-            .db_execute_request(stamped, cancel)
+            .db_execute_request(envelope, cancel)
             .await
             .map_err(host_err_to_abi)?;
         bookclerk_library::validate_execute_reply(&validate_req, &reply, &self.caps)
@@ -2348,39 +2328,26 @@ fn adapter_config_context(
 /// SeaORM proxy backend used for host query building.
 ///
 /// Always SQLite-shaped so SeaORM emits canonical Bookclerk SQL (`?`
-/// placeholders). Adapters lower at execute. Bootstrap `sqlFamily` is still
-/// validated fail-closed; it does not select a query dialect.
+/// placeholders). Adapters lower at execute. Bootstrap `engine` is diagnostic
+/// only and never selects a query dialect or gates connect.
 fn canonical_seaorm_backend() -> DbBackend {
     DbBackend::Sqlite
 }
 
-/// Validates bootstrap `sqlFamily` / `dialect` without using them to generate SQL.
-fn seaorm_backend_from_bootstrap(bootstrap: &DbBootstrap) -> Result<DbBackend, DbErr> {
-    if let Some(reason) = bootstrap.backend_failure_reason() {
-        return Err(DbErr::Custom(reason));
-    }
-    Ok(canonical_seaorm_backend())
-}
-
-/// Fills missing bootstrap-only SeaORM proxy metadata from the plugin id.
+/// Fills missing diagnostic engine identity from the plugin id.
 ///
-/// Guest-reported `sqlFamily` / `dialect` always win; the configured
-/// first-party plugin id only fills fields the guest left empty.
+/// Guest-reported `engine` always wins. The host never requires sqlite or
+/// postgres names.
 fn apply_bootstrap_metadata(bootstrap: &mut DbBootstrap, plugin_id: &str) {
-    if !bootstrap.sql_family.is_empty() && !bootstrap.dialect.is_empty() {
+    if !bootstrap.engine.is_empty() {
         return;
     }
-    let (sql_family, dialect) = match DatabasePluginKind::parse(plugin_id) {
-        Some(DatabasePluginKind::Postgres) => ("postgres", "postgres"),
-        Some(DatabasePluginKind::D1) | Some(DatabasePluginKind::Sqlite) => ("sqlite", "sqlite"),
-        None => return,
+    bootstrap.engine = match DatabasePluginKind::parse(plugin_id) {
+        Some(DatabasePluginKind::Postgres) => "postgres".into(),
+        Some(DatabasePluginKind::D1) => "d1".into(),
+        Some(DatabasePluginKind::Sqlite) => "sqlite".into(),
+        None => plugin_id.to_string(),
     };
-    if bootstrap.sql_family.is_empty() {
-        bootstrap.sql_family = sql_family.into();
-    }
-    if bootstrap.dialect.is_empty() {
-        bootstrap.dialect = dialect.into();
-    }
 }
 
 /// SQLite connect params for first-party `sqlite` and arbitrary sqlite-family ids.
@@ -2446,28 +2413,33 @@ mod tests {
     fn apply_bootstrap_metadata_from_plugin_id() {
         let mut bootstrap = DbBootstrap::default();
         apply_bootstrap_metadata(&mut bootstrap, "d1");
-        assert_eq!(bootstrap.sql_family, "sqlite");
-        assert_eq!(bootstrap.dialect, "sqlite");
-        assert!(bootstrap.backend_failure_reason().is_none());
+        assert_eq!(bootstrap.engine, "d1");
 
         let mut pg = DbBootstrap::default();
         apply_bootstrap_metadata(&mut pg, "postgres");
-        assert_eq!(pg.sql_family, "postgres");
-        assert_eq!(pg.dialect, "postgres");
+        assert_eq!(pg.engine, "postgres");
 
-        let mut unknown = DbBootstrap::sqlite();
+        let mut unknown = DbBootstrap::default();
         apply_bootstrap_metadata(&mut unknown, "sql-conformance");
-        assert_eq!(unknown.sql_family, "sqlite");
-        assert_eq!(unknown.dialect, "sqlite");
+        assert_eq!(unknown.engine, "sql-conformance");
+        assert_eq!(canonical_seaorm_backend(), DbBackend::Sqlite);
         assert_eq!(
-            seaorm_backend_from_bootstrap(&unknown).unwrap(),
-            DbBackend::Sqlite
-        );
-        assert_eq!(
-            seaorm_backend_from_bootstrap(&DbBootstrap::postgres()).unwrap(),
+            canonical_seaorm_backend(),
             DbBackend::Sqlite,
-            "SeaORM query building is canonical SQLite-shaped for every engine family"
+            "SeaORM query building is canonical SQLite-shaped for every engine"
         );
+    }
+
+    #[test]
+    fn unfamiliar_engine_is_accepted_without_sqlite_or_postgres_metadata() {
+        let mut reported = DbBootstrap::diagnostic("foundationdb-sql");
+        apply_bootstrap_metadata(&mut reported, "custom-sql");
+        assert_eq!(reported.engine, "foundationdb-sql");
+        let caps = DbCapabilities::advertised_sqlite();
+        assert!(caps.meets_host_minimums());
+        let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps).unwrap();
+        assert_eq!(kind, bookclerk_library::HostSchemaKind::RowMarker);
+        assert_eq!(canonical_seaorm_backend(), DbBackend::Sqlite);
     }
 
     #[test]
@@ -2475,13 +2447,10 @@ mod tests {
         let caps = DbCapabilities::advertised_sqlite();
         let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps).unwrap();
         assert_eq!(kind, bookclerk_library::HostSchemaKind::RowMarker);
-        let mut mixed = caps;
-        mixed.pragma_user_version = true;
-        assert!(bookclerk_library::HostSchemaKind::from_db_capabilities(&mixed).is_err());
-        assert_eq!(
-            seaorm_backend_from_bootstrap(&DbBootstrap::sqlite()).unwrap(),
-            DbBackend::Sqlite
-        );
+        let mut none = caps;
+        none.schema_migrations = false;
+        assert!(bookclerk_library::HostSchemaKind::from_db_capabilities(&none).is_err());
+        assert_eq!(canonical_seaorm_backend(), DbBackend::Sqlite);
     }
 
     #[test]
@@ -2546,12 +2515,8 @@ mod tests {
     fn guest_bootstrap_from_session_overrides_plugin_id_inference() {
         let mut bootstrap = DbBootstrap::sqlite();
         apply_bootstrap_metadata(&mut bootstrap, "postgres");
-        assert_eq!(bootstrap.sql_family, "sqlite");
-        assert!(bootstrap.backend_failure_reason().is_none());
-        assert_eq!(
-            seaorm_backend_from_bootstrap(&bootstrap).unwrap(),
-            DbBackend::Sqlite
-        );
+        assert_eq!(bootstrap.engine, "sqlite");
+        assert_eq!(canonical_seaorm_backend(), DbBackend::Sqlite);
     }
 
     #[test]

@@ -42,6 +42,7 @@ async fn run_binding(
         let deadline =
             (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
         bookclerk_db_exec::execute_typed_envelope(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
             db,
             &envelope,
             "sqlite_txn",
@@ -341,6 +342,7 @@ async fn binding_cancel_before_begin_does_not_commit() {
             let deadline = (envelope.request.deadline_unix_ms > 0)
                 .then_some(envelope.request.deadline_unix_ms);
             bookclerk_db_exec::execute_typed_envelope(
+                    bookclerk_db_exec::PhysicalEngine::sqlite(),
                     &db,
                     &envelope,
                     "sqlite_txn",
@@ -407,6 +409,7 @@ async fn binding_cancel_around_commit_rolls_back() {
             let deadline = (envelope.request.deadline_unix_ms > 0)
                 .then_some(envelope.request.deadline_unix_ms);
             bookclerk_db_exec::execute_typed_envelope(
+                    bookclerk_db_exec::PhysicalEngine::sqlite(),
                     &db,
                     &envelope,
                     "sqlite_txn",
@@ -1475,6 +1478,7 @@ async fn binding_stamped_proofs_survive_catalog_wipe() {
     )
     .with_proofs(proofs);
     let reply = bookclerk_db_exec::execute_typed_envelope(
+        bookclerk_db_exec::PhysicalEngine::sqlite(),
         &db,
         &envelope,
         "sqlite_txn",

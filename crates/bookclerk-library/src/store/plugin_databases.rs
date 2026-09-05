@@ -43,7 +43,7 @@ impl LibraryStore {
         }
         // Valid on SQLite (3.24+), PostgreSQL, and D1 alike.
         let conflict = "ON CONFLICT (plugin_id, binding) DO NOTHING";
-        bookclerk_db_exec::execute_canonical_sql(
+        crate::host_sql::execute_host_canonical(
             self.db(),
             &format!(
                 "INSERT INTO plugin_databases \
@@ -79,7 +79,7 @@ impl LibraryStore {
         plugin_id: &str,
         binding: &str,
     ) -> Result<Option<PluginDatabaseRecord>> {
-        let rows = bookclerk_db_exec::query_canonical_sql(
+        let rows = crate::host_sql::query_host_canonical(
             self.db(),
             "SELECT plugin_id, binding, backend_kind, unit_ref, created_at \
              FROM plugin_databases WHERE plugin_id = ? AND binding = ?",
@@ -101,7 +101,7 @@ impl LibraryStore {
     ) -> Result<Vec<PluginDatabaseRecord>> {
         let rows = match plugin_id {
             Some(id) => {
-                bookclerk_db_exec::query_canonical_sql(
+                crate::host_sql::query_host_canonical(
                     self.db(),
                     "SELECT plugin_id, binding, backend_kind, unit_ref, created_at \
                      FROM plugin_databases WHERE plugin_id = ? ORDER BY plugin_id, binding",
@@ -110,7 +110,7 @@ impl LibraryStore {
                 .await
             }
             None => {
-                bookclerk_db_exec::query_canonical_sql(
+                crate::host_sql::query_host_canonical(
                     self.db(),
                     "SELECT plugin_id, binding, backend_kind, unit_ref, created_at \
                      FROM plugin_databases ORDER BY plugin_id, binding",
@@ -138,7 +138,7 @@ impl LibraryStore {
     ) -> Result<u64> {
         let res = match binding {
             Some(binding) => {
-                bookclerk_db_exec::execute_canonical_sql(
+                crate::host_sql::execute_host_canonical(
                     self.db(),
                     "DELETE FROM plugin_databases WHERE plugin_id = ? AND binding = ?",
                     [plugin_id.into(), binding.into()],
@@ -146,7 +146,7 @@ impl LibraryStore {
                 .await
             }
             None => {
-                bookclerk_db_exec::execute_canonical_sql(
+                crate::host_sql::execute_host_canonical(
                     self.db(),
                     "DELETE FROM plugin_databases WHERE plugin_id = ?",
                     [plugin_id.into()],
@@ -174,7 +174,7 @@ impl LibraryStore {
         unit_ref: &str,
     ) -> Result<PluginDatabaseRecord> {
         let now = now_str();
-        bookclerk_db_exec::execute_canonical_sql(
+        crate::host_sql::execute_host_canonical(
             self.db(),
             "UPDATE plugin_databases SET backend_kind = ?, unit_ref = ? \
              WHERE plugin_id = ? AND binding = ?",
@@ -190,7 +190,7 @@ impl LibraryStore {
         if let Some(existing) = self.get_plugin_database(plugin_id, binding).await? {
             return Ok(existing);
         }
-        bookclerk_db_exec::execute_canonical_sql(
+        crate::host_sql::execute_host_canonical(
             self.db(),
             "INSERT INTO plugin_databases \
              (plugin_id, binding, backend_kind, unit_ref, created_at) \

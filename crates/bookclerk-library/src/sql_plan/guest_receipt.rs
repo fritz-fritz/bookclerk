@@ -86,7 +86,6 @@ pub(crate) fn wrap_guest_typed_request(
     ));
 
     req.statements = statements;
-    bookclerk_plugin_abi::desugar_execute_request(&mut req);
     req.request_hash.clear();
     let mut env = receipt_wrap_type_env();
     env.merge(type_env);
@@ -305,6 +304,7 @@ mod replay_finalize {
         let wrapped = wrap_guest_typed_request(req, &slots_env()).expect("wrap");
         assert!(!wrapped.guest_receipt.is_absent());
         let reply = bookclerk_db_exec::execute_typed_envelope(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
             &db,
             &wrapped,
             "sqlite_txn",
@@ -333,6 +333,7 @@ mod replay_finalize {
         let replay_wrapped =
             wrap_guest_typed_request(replay_req.clone(), &slots_env()).expect("wrap replay");
         let replay = bookclerk_db_exec::execute_typed_envelope(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
             &db,
             &replay_wrapped,
             "sqlite_txn",
@@ -374,6 +375,7 @@ mod replay_finalize {
         assert!(!wrapped.guest_receipt.is_absent());
         let txn = db.begin().await.expect("begin");
         let reply = bookclerk_db_exec::execute_typed_on_txn_envelope(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
             &txn,
             &wrapped,
             "sqlite_txn",
@@ -421,6 +423,7 @@ mod replay_finalize {
         let replay_wrapped =
             wrap_guest_typed_request(replay_req.clone(), &slots_env()).expect("wrap replay");
         let replay = bookclerk_db_exec::execute_typed_envelope(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
             &db,
             &replay_wrapped,
             "sqlite_txn",

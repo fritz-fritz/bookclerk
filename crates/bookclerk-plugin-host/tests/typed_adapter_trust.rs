@@ -22,6 +22,7 @@ impl TypedAtomicExec for SessionTypedAdapter {
     ) -> std::result::Result<ExecuteReply, AbiPluginError> {
         let req = envelope.request.clone();
         let reply = bookclerk_db_exec::execute_typed_envelope(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
             &self.db,
             &envelope,
             "sqlite_txn",

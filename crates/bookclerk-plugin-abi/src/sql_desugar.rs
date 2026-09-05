@@ -10,8 +10,9 @@ use crate::ExecuteRequest;
 
 /// Applies host semantic desugars to canonical SQL.
 ///
-/// Idempotent: explicit `NULLS FIRST`/`LAST` and an already-wrapped
-/// `NULLIF(divisor, 0)` are left unchanged.
+/// Explicit `NULLS FIRST`/`LAST` and an already-wrapped `NULLIF(divisor, 0)`
+/// are left unchanged. Callers must run this **once** before proof generation;
+/// adapters must not repeat it.
 #[must_use]
 pub fn desugar_canonical_sql(sql: &str) -> String {
     let sql = rewrite_div_mod_null_on_zero(sql);
@@ -52,6 +53,9 @@ fn rewrite_div_mod_null_on_zero(sql: &str) -> String {
                 i = atom_end;
                 continue;
             }
+            // Trivia after `/` or `%` was already copied. Advance past it so an
+            // unparsable operand cannot duplicate whitespace or comments.
+            i = j;
             continue;
         }
         out.push(ch);
@@ -457,5 +461,15 @@ mod tests {
     fn literals_are_not_rewritten() {
         let sql = "SELECT 'a / b ORDER BY x' FROM t";
         assert_eq!(desugar_canonical_sql(sql), sql);
+    }
+
+    #[test]
+    fn unparsable_div_operand_does_not_duplicate_trivia() {
+        let sql = "SELECT 1 /  /*c*/ * FROM t";
+        let out = desugar_canonical_sql(sql);
+        assert_eq!(out, sql, "trivia after `/` must be copied once: {out}");
+        assert_eq!(out.matches("/*c*/").count(), 1, "{out}");
+        let spaces = "SELECT 1 /   * FROM t";
+        assert_eq!(desugar_canonical_sql(spaces), spaces);
     }
 }

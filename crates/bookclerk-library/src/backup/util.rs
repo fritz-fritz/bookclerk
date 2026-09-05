@@ -5,7 +5,7 @@ use bookclerk_plugin_abi::{
     DbResultSelection, DbType, DbValue, ExecuteRequest, SharedAdapterBackupOps, SqlType,
     TypedDbStatement,
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, QueryResult, Statement};
+use sea_orm::{ConnectionTrait, DatabaseConnection, QueryResult};
 
 use crate::error::{LibraryError, Result};
 
@@ -26,21 +26,21 @@ pub fn ident_ok(s: &str) -> bool {
 
 /// True when relation `name` exists (empty tables still count).
 ///
-/// Uses a bounded `SELECT` so a missing table is an engine error rather than
-/// an adapter catalog probe.
-pub async fn table_exists<C>(conn: &C, backend: DbBackend, name: &str) -> Result<bool>
+/// Uses a bounded canonical `SELECT` so a missing table is an engine error
+/// rather than an adapter catalog probe. Never inspects the physical backend.
+pub async fn table_exists<C>(conn: &C, name: &str) -> Result<bool>
 where
     C: ConnectionTrait,
 {
     if !ident_ok(name) {
         return Ok(false);
     }
-    match conn
-        .query_all_raw(Statement::from_string(
-            backend,
-            format!("SELECT 1 FROM {name} LIMIT 1"),
-        ))
-        .await
+    match crate::host_sql::query_host_canonical(
+        conn,
+        &format!("SELECT 1 FROM {name} LIMIT 1"),
+        std::iter::empty::<sea_orm::Value>(),
+    )
+    .await
     {
         Ok(_) => Ok(true),
         Err(err)
@@ -63,7 +63,7 @@ where
 /// Executes one canonical statement with typed [`DbValue`] binds.
 ///
 /// Honors negotiated `maxBinds`, `maxPayloadBytes`, and `maxRequestBytes`.
-/// Placeholders are Bookclerk `?`; SeaORM lowers them per backend.
+/// Placeholders stay Bookclerk `?`; adapters lower at execute.
 ///
 /// # Errors
 ///
@@ -115,7 +115,7 @@ where
             opts.max_request_bytes
         )));
     }
-    bookclerk_db_exec::execute_canonical_sql(
+    crate::host_sql::execute_host_canonical(
         conn,
         sql,
         params.iter().map(bookclerk_db_exec::db_value_to_sea),

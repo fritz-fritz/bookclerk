@@ -17,7 +17,7 @@ use crate::backup::schema::{
 use crate::backup::util::validate_cell;
 use crate::backup::verify::{verify_recovery_point, verify_unit};
 use crate::host_schema::{
-    apply_fresh_schema_sqlite, apply_host_schema, current_schema_state,
+    apply_fresh_schema_sqlite, apply_host_schema, apply_host_schema_on, current_schema_state,
     ensure_restore_target_is_replaceable, HostSchemaKind,
 };
 use crate::migrations::{
@@ -68,10 +68,9 @@ fn restore_without_atomic() -> CanonicalRestoreOpts {
     }
 }
 
-/// Third-party SQLite-family adapter: `schemaMigrations` without `pragmaUserVersion`.
+/// Third-party adapter: `schemaMigrations` without extra flags.
 fn third_party_sqlite_row_marker_caps() -> DbCapabilities {
     let mut caps = DbCapabilities::advertised_sqlite();
-    caps.pragma_user_version = false;
     caps.schema_migrations = true;
     caps
 }
@@ -295,9 +294,9 @@ fn restore_opts_kind_comes_from_capabilities_not_identity() {
         CanonicalRestoreOpts::from_caps(&third_party_sqlite_row_marker_caps()).unwrap();
     assert_eq!(third_party.host_schema_kind, HostSchemaKind::RowMarker);
 
-    let mut mixed = DbCapabilities::advertised_sqlite();
-    mixed.pragma_user_version = true;
-    let err = CanonicalRestoreOpts::from_caps(&mixed).unwrap_err();
+    let mut none = DbCapabilities::advertised_sqlite();
+    none.schema_migrations = false;
+    let err = CanonicalRestoreOpts::from_caps(&none).unwrap_err();
     assert!(
         err.to_string().contains("not a known versioning contract"),
         "{err}"
@@ -2296,9 +2295,13 @@ async fn postgres_library_restores_to_sqlite() {
     let Some((pg, _)) = postgres_throwaway().await else {
         return;
     };
-    apply_host_schema(&pg, HostSchemaKind::RowMarker)
-        .await
-        .unwrap();
+    apply_host_schema_on(
+        bookclerk_db_exec::PhysicalEngine::postgres(),
+        &pg,
+        HostSchemaKind::RowMarker,
+    )
+    .await
+    .unwrap();
     pg.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         "INSERT INTO accounts (account_id, marketplace, source, created_at, updated_at) \
@@ -2363,9 +2366,13 @@ async fn postgres_sqlite_library_restores_to_postgres() {
     .await
     .unwrap()
     .unwrap();
-    apply_host_schema(&pg, HostSchemaKind::RowMarker)
-        .await
-        .unwrap();
+    apply_host_schema_on(
+        bookclerk_db_exec::PhysicalEngine::postgres(),
+        &pg,
+        HostSchemaKind::RowMarker,
+    )
+    .await
+    .unwrap();
     restore_backup(
         &pg,
         files.path(),

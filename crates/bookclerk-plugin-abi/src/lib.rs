@@ -141,9 +141,9 @@ pub use guest_sql::{
     validate_guest_execute_request_for_policy, validate_sql_v1_grammar, GuestSqlPolicy,
     GuestSqlRefs,
 };
-pub use host_envelope::AdapterExecuteRequest;
 #[cfg(feature = "host")]
 pub use host_envelope::GuestReceiptPersist;
+pub use host_envelope::{AdapterExecuteRequest, CanonicalExecuteRequest, UnresolvedExecuteRequest};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
 pub use sql_desugar::{desugar_canonical_sql, desugar_execute_request};

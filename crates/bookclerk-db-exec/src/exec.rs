@@ -15,6 +15,48 @@ use crate::proxy_txn::{
     consume_atomic_interrupt, note_query_row, AtomicInterruptKind, AtomicInterruptPhase,
 };
 
+/// Real engine the adapter opened.
+///
+/// Hosts must not construct this from a SeaORM proxy connection. Physical
+/// lowering ([`crate::lower_canonical_sql`]) happens only against this identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PhysicalEngine {
+    backend: sea_orm::DatabaseBackend,
+}
+
+impl PhysicalEngine {
+    /// SQLite / D1 / other SQLite-family physical engines.
+    #[must_use]
+    pub const fn sqlite() -> Self {
+        Self {
+            backend: sea_orm::DatabaseBackend::Sqlite,
+        }
+    }
+
+    /// PostgreSQL physical engine.
+    #[must_use]
+    pub const fn postgres() -> Self {
+        Self {
+            backend: sea_orm::DatabaseBackend::Postgres,
+        }
+    }
+
+    /// Adapter-only: the backend of a connection this adapter opened.
+    #[must_use]
+    pub fn from_adapter_backend(backend: sea_orm::DatabaseBackend) -> Self {
+        match backend {
+            sea_orm::DatabaseBackend::Postgres => Self::postgres(),
+            _ => Self::sqlite(),
+        }
+    }
+
+    /// SeaORM backend used for physical SQL and typed binds.
+    #[must_use]
+    pub const fn backend(self) -> sea_orm::DatabaseBackend {
+        self.backend
+    }
+}
+
 /// Session-level cancel / deadline for one atomic attempt (not hashed).
 #[derive(Clone, Default)]
 pub struct AtomicSession {
@@ -277,15 +319,16 @@ pub fn encoded_proxy_row_len<'a>(
     JsonValue::Object(map).to_string().len()
 }
 
-/// Executes host-canonical SQL (`?` placeholders) on `db`.
+/// Executes canonical SQL on a physical engine the adapter opened.
 ///
-/// Physical lowering (`?` → `$n`, helpers) stays in this adapter SDK. Host
-/// domain code must not rewrite placeholders.
+/// Does **not** run host semantic desugars. Callers must pass already-canonical
+/// SQL (`?` placeholders). Host/library code must not call this helper.
 ///
 /// # Errors
 ///
 /// Returns when the engine rejects the lowered statement.
-pub async fn execute_canonical_sql<C>(
+pub async fn execute_physical_sql<C>(
+    engine: PhysicalEngine,
     db: &C,
     sql: &str,
     values: impl IntoIterator<Item = Value>,
@@ -293,19 +336,19 @@ pub async fn execute_canonical_sql<C>(
 where
     C: ConnectionTrait,
 {
-    let backend = db.get_database_backend();
-    let sql = bookclerk_plugin_abi::desugar_canonical_sql(sql);
-    let lowered = crate::lower_canonical_sql(backend, &sql);
+    let backend = engine.backend();
+    let lowered = crate::lower_canonical_sql(backend, sql);
     db.execute_raw(Statement::from_sql_and_values(backend, lowered, values))
         .await
 }
 
-/// Queries host-canonical SQL (`?` placeholders) on `db`.
+/// Queries canonical SQL on a physical engine the adapter opened.
 ///
 /// # Errors
 ///
 /// Returns when the engine rejects the lowered statement.
-pub async fn query_canonical_sql<C>(
+pub async fn query_physical_sql<C>(
+    engine: PhysicalEngine,
     db: &C,
     sql: &str,
     values: impl IntoIterator<Item = Value>,
@@ -313,16 +356,17 @@ pub async fn query_canonical_sql<C>(
 where
     C: ConnectionTrait,
 {
-    query_canonical_sql_typed(db, sql, None, values).await
+    query_physical_sql_typed(engine, db, sql, None, values).await
 }
 
-/// [`query_canonical_sql`] with an optional hash-bound proof (TEXT collate /
+/// [`query_physical_sql`] with an optional hash-bound proof (TEXT collate /
 /// INTEGER overflow on Postgres).
 ///
 /// # Errors
 ///
 /// Returns when the proof is not bound to `sql` or the engine rejects the work.
-pub async fn query_canonical_sql_typed<C>(
+pub async fn query_physical_sql_typed<C>(
+    engine: PhysicalEngine,
     db: &C,
     sql: &str,
     proof: Option<&bookclerk_plugin_abi::ResolvedStatement>,
@@ -331,9 +375,8 @@ pub async fn query_canonical_sql_typed<C>(
 where
     C: ConnectionTrait,
 {
-    let backend = db.get_database_backend();
-    let sql = bookclerk_plugin_abi::desugar_canonical_sql(sql);
-    let lowered = crate::lower_canonical_sql_typed(backend, &sql, proof)
+    let backend = engine.backend();
+    let lowered = crate::lower_canonical_sql_typed(backend, sql, proof)
         .map_err(|err| DbErr::Custom(err.to_string()))?;
     db.query_all_raw(Statement::from_sql_and_values(backend, lowered, values))
         .await

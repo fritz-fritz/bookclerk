@@ -53,14 +53,14 @@ After `openSession` the host calls typed `AdapterDatabaseSession.capabilities`
 (`abiMinor` ≥ 7). `DbCapabilities` advertises the SQL contract version,
 execution semantics (`atomicBatch`, `returning`, `affectedRows`,
 `cancellation`), schema versioning (`schemaMigrations` is required; host
-policy ignores `pragmaUserVersion` / `atomicSchemaBatch` / `timing`), and all
+policy ignores `timing`), and all
 numeric limits (`maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`,
 `maxResultBytes`, `maxCellBytes`, `maxRequestBytes`,
-`maxAtomicResultBytes`). Bootstrap metadata (`sqlFamily`, SeaORM `dialect`) is
-**not** on typed `DbCapabilities`; it travels on the separate typed
-`DbBootstrap` / the host connect path after semantic negotiation succeeds.
-`DbCapabilities` `@17` is `pluginDatabases` (abiMinor 18), not a leftover
-`sqlFamily` tombstone. `@18` `consistentBackupRead` and `@19`
+`maxAtomicResultBytes`). Bootstrap metadata is a diagnostic `engine` string on
+`DbBootstrap` — **not** on typed `DbCapabilities` — and never admits a guest
+or selects a SQL dialect. `DbCapabilities` `@15` is `pluginDatabases`.
+abiMinor 22 removed `pragmaUserVersion` / `atomicSchemaBatch` and compacted
+later ordinals. `@16` `consistentBackupRead` and `@17`
 `atomicUnitRestore` (abiMinor 19) split consistent capture from complete
 per-unit replacement. Backup orchestration must not branch on sqlite/postgres/d1
 plugin identity. First-party D1 advertises neither flag (sequential HTTP is
@@ -69,9 +69,8 @@ export/import is not a Bookclerk backup path.
 
 The host must not invent capabilities from the plugin id. Missing required
 fields, `atomicBatch: false`, `returning: false`, unspecified (`0`) limits,
-limits below the host's compiled minimums, `maxPayloadBytes` /
-`maxRequestBytes` / `maxAtomicResultBytes` above `MAX_SCALAR_BYTES`, or a
-bootstrap `dialect` that does not match `sqlFamily` are a hard error. Wake
+limits below the host's compiled minimums, or `maxPayloadBytes` /
+`maxRequestBytes` / `maxAtomicResultBytes` above `MAX_SCALAR_BYTES` are a hard error. Wake
 page size and `IN (…)` chunking are derived from `maxBinds`.
 `maxPayloadBytes` bounds request SQL plus binds per statement and must not
 exceed the scalar ceiling. `maxRequestBytes` / `maxAtomicResultBytes` bound
@@ -97,7 +96,7 @@ Bookclerk SQL v1 conformance,” not affinity with SQLite/PostgreSQL identity.
 Adapter SDKs lower placeholders, helpers, collation, and overflow at execute
 time (`bookclerk-db-exec::lower_canonical_sql_typed`) using structured proofs
 on `AdapterDatabaseSession.execute`. Optional plan choices may branch only on
-semantic capabilities, not on plugin id or `sqlFamily`.
+semantic capabilities, not on plugin id or diagnostic engine identity.
 `sqlContractVersion` versions are monotonic supersets; hosts require
 `>= SQL_CONTRACT_VERSION`.
 
@@ -117,20 +116,21 @@ env exists.
 
 ### Bootstrap metadata isolation
 
-`sqlFamily` and SeaORM `dialect` are bootstrap-only (typed `DbBootstrap` on
-the plugin-host connect path). Typed `DbCapabilities` does not carry them
-(`abiMinor` 13). An architecture lint (`scripts/check-db-plugin-isolation.py`)
-forbids `bookclerk-library` production sources from reading bootstrap fields
-(or defining planner-side `SqlFamily`). SeaORM proxy open maps bootstrap in
-`bookclerk-plugin-host` after typed capability negotiation succeeds.
+`DbBootstrap.engine` is a diagnostic physical-engine name on the plugin-host
+connect path. Typed `DbCapabilities` does not carry engine identity.
+The host never admits, rejects, or generates SQL from `engine` — any string
+is valid (including engines the host has never heard of). An architecture
+lint (`scripts/check-db-plugin-isolation.py`) forbids `bookclerk-library`
+production sources from reading bootstrap fields, calling physical lowering
+helpers, or inspecting SeaORM `get_database_backend` for SQL generation.
+SeaORM proxy open always uses the canonical SQLite-shaped query builder.
 
 First-party connect wiring (`DbConnectParams::{Sqlite,D1,Postgres}`) injects
 host-resolved paths and secrets for `sqlite` / `d1` / `postgres`. That is a
 convenience, not the contract: any other `kind = "database"` plugin id receives
-`DbConnectParams::Guest { pluginDataDir }` and must read connection settings
-from plugin-owned config / secrets bindings, then return bootstrap
-`sqlFamily` / `dialect` on connect. Missing or mismatched bootstrap fields
-fail closed.
+the public `DatabaseAdapterConfig` payload and must read connection settings
+from plugin-owned config / secrets bindings. Missing semantic capabilities
+fail closed; an unfamiliar diagnostic `engine` does not.
 
 ### Generic atomic execute
 
@@ -201,9 +201,11 @@ limits is not loaded.
   sources from importing Bookclerk migrations, embedding application table
   names, or interpreting named operations (`DbAtomicParams`, `atomic_status`,
   `interpret_plan`). The same lint forbids `bookclerk-library` planners and
-  domain code from reading bootstrap-only `sqlFamily` / `diagnosticEngine`,
-  rewriting placeholders, calling adapter lowering (`lower_canonical_*`),
-  or emitting engine catalog/isolation SQL. Plugins may import
+  domain code from reading bootstrap-only `engine`,
+  rewriting placeholders, calling adapter lowering (`lower_canonical_*` /
+  `realize_*_ddl` / `from_adapter_backend`), inspecting
+  `get_database_backend` for SQL generation, or emitting engine
+  catalog/isolation SQL. Plugins may import
   `bookclerk-db-exec` lowering and typed execute.
 - Equal performance across engines is not guaranteed.
 - Integration plugins never receive database credentials or raw

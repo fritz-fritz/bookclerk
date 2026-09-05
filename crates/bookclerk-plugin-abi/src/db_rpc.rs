@@ -353,8 +353,6 @@ pub(super) fn write_db_capabilities(mut b: db_caps_capnp::Builder<'_>, caps: &Db
     b.set_returning(caps.returning);
     b.set_affected_rows(caps.affected_rows);
     b.set_schema_migrations(caps.schema_migrations);
-    b.set_pragma_user_version(caps.pragma_user_version);
-    b.set_atomic_schema_batch(caps.atomic_schema_batch);
     b.set_cancellation(caps.cancellation);
     b.set_timing(caps.timing);
     b.set_max_binds(caps.max_binds);
@@ -382,8 +380,6 @@ pub(super) fn read_db_capabilities(r: db_caps_capnp::Reader<'_>) -> Result<DbCap
         returning: r.get_returning(),
         affected_rows: r.get_affected_rows(),
         schema_migrations: r.get_schema_migrations(),
-        pragma_user_version: r.get_pragma_user_version(),
-        atomic_schema_batch: r.get_atomic_schema_batch(),
         cancellation: r.get_cancellation(),
         timing: r.get_timing(),
         max_binds: r.get_max_binds(),
@@ -424,19 +420,17 @@ pub(super) fn read_db_capabilities_reply(
 
 /// Writes bootstrap-only SeaORM proxy metadata into a Cap'n builder.
 pub(super) fn write_db_bootstrap(mut b: db_bootstrap_capnp::Builder<'_>, bootstrap: &DbBootstrap) {
-    b.set_sql_family(&bootstrap.sql_family);
-    b.set_dialect(&bootstrap.dialect);
+    b.set_engine(&bootstrap.engine);
 }
 
-/// Decodes bootstrap-only SeaORM proxy metadata from a Cap'n Proto reader.
+/// Decodes bootstrap-only diagnostic engine identity from a Cap'n Proto reader.
 ///
 /// # Errors
 ///
 /// Returns a decode failure when Cap'n text fields cannot be read.
 pub(super) fn read_db_bootstrap(r: db_bootstrap_capnp::Reader<'_>) -> Result<DbBootstrap> {
     Ok(DbBootstrap {
-        sql_family: text_of(r.get_sql_family().map_err(from_capnp)?),
-        dialect: text_of(r.get_dialect().map_err(from_capnp)?),
+        engine: text_of(r.get_engine().map_err(from_capnp)?),
     })
 }
 

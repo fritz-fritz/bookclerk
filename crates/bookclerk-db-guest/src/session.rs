@@ -689,6 +689,7 @@ async fn guest_execute_typed(
         _ => "sqlite_txn",
     };
     bookclerk_db_exec::execute_typed_envelope(
+        bookclerk_db_exec::PhysicalEngine::from_adapter_backend(conn.get_database_backend()),
         conn,
         &envelope,
         timing_source,
@@ -1043,6 +1044,9 @@ async fn txn_worker(
                         let deadline = (envelope.request.deadline_unix_ms > 0)
                             .then_some(envelope.request.deadline_unix_ms);
                         bookclerk_db_exec::execute_typed_on_txn_envelope(
+                            bookclerk_db_exec::PhysicalEngine::from_adapter_backend(
+                                ConnectionTrait::get_database_backend(txn),
+                            ),
                             txn,
                             &envelope,
                             timing_source,
@@ -1717,10 +1721,9 @@ mod tests {
     }
 
     fn stamp_req_env(
-        mut req: ExecuteRequest,
+        req: ExecuteRequest,
         env: &bookclerk_plugin_abi::SqlTypeEnv,
     ) -> std::result::Result<AdapterExecuteRequest, bookclerk_plugin_abi::PluginError> {
-        bookclerk_plugin_abi::desugar_execute_request(&mut req);
         bookclerk_db_exec::stamp_adapter_execute(req, env)
             .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))
     }

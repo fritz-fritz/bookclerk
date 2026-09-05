@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 21;
+const abiMinor :UInt32 = 22;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -1215,36 +1215,33 @@ struct ExecuteResultReply {
   }
 }
 
-# Semantic SQL-contract advertisement. Bootstrap metadata (`sqlFamily`,
-# `dialect`) is not part of the capability plane — see `DbBootstrap`.
+# Semantic SQL-contract advertisement. Diagnostic engine identity is not
+# part of the capability plane — see `DbBootstrap`.
 struct DbCapabilities {
   sqlContractVersion @0 :UInt32;
   atomicBatch @1 :Bool;
   returning @2 :Bool;
   affectedRows @3 :Bool;
   schemaMigrations @4 :Bool;
-  pragmaUserVersion @5 :Bool;
-  atomicSchemaBatch @6 :Bool;
-  cancellation @7 :Bool;
-  timing @8 :Bool;
-  maxBinds @9 :UInt32;
-  maxStatements @10 :UInt32;
-  maxResultRows @11 :UInt32;
-  maxPayloadBytes @12 :UInt32;
-  maxResultBytes @13 :UInt32;
-  maxCellBytes @14 :UInt32;
-  maxRequestBytes @15 :UInt32;
-  maxAtomicResultBytes @16 :UInt32;
-  # Append-only (abiMinor 18). Adapter can open additional isolated sessions
-  # for plugin-owned database bindings (per-binding file / schema / database).
-  pluginDatabases @17 :Bool;
-  # Append-only (abiMinor 19). Adapter can expose one stable logical
-  # database state while the host reads schema, rows, and identity.
-  consistentBackupRead @18 :Bool;
-  # Append-only (abiMinor 19). Adapter can destructively replace one logical
-  # database unit so an ordinary restore failure does not leave that unit
-  # partially replaced.
-  atomicUnitRestore @19 :Bool;
+  cancellation @5 :Bool;
+  timing @6 :Bool;
+  maxBinds @7 :UInt32;
+  maxStatements @8 :UInt32;
+  maxResultRows @9 :UInt32;
+  maxPayloadBytes @10 :UInt32;
+  maxResultBytes @11 :UInt32;
+  maxCellBytes @12 :UInt32;
+  maxRequestBytes @13 :UInt32;
+  maxAtomicResultBytes @14 :UInt32;
+  # Adapter can open additional isolated sessions for plugin-owned
+  # database bindings (per-binding file / schema / database).
+  pluginDatabases @15 :Bool;
+  # Adapter can expose one stable logical database state while the host
+  # reads schema, rows, and identity.
+  consistentBackupRead @16 :Bool;
+  # Adapter can destructively replace one logical database unit so an
+  # ordinary restore failure does not leave that unit partially replaced.
+  atomicUnitRestore @17 :Bool;
 }
 
 struct DbBootstrapReply {
@@ -1255,8 +1252,9 @@ struct DbBootstrapReply {
 }
 
 struct DbBootstrap {
-  sqlFamily @0 :Text;
-  dialect @1 :Text;
+  # Diagnostic physical engine name. Hosts must not admit or generate SQL
+  # from this value. Any string is valid.
+  engine @0 :Text;
 }
 
 struct DbCapabilitiesReply {

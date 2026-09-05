@@ -120,8 +120,9 @@ the host. First-party ids receive host-private connect params with
 host-injected paths/secrets (`sqlite` / `d1` / `postgres`), while any other
 database plugin id receives the public `DatabaseAdapterConfig` payload
 (`pluginDataDir` plus its granted `[database.<id>]` settings). The guest
-returns bootstrap `{ "sqlFamily", "dialect" }` (and related capability fields)
-so the host builds the RPC proxy without hardcoding backends.
+returns bootstrap `{ "engine" }` for diagnostics only. The host always builds
+the SeaORM RPC proxy as SQLite-shaped canonical SQL (`?` placeholders) and
+never admits or rejects a guest based on physical engine identity.
 
 First-party guests: `bookclerk-plugin-database-sqlite` (platform),
 `bookclerk-plugin-database-d1` and `bookclerk-plugin-database-postgres` (optional).
@@ -239,8 +240,7 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   use `DELETE … RETURNING` so a missing or expired row cannot be observed
   twice. After `openSession` the host calls typed
   `AdapterDatabaseSession.capabilities`. Host schema markers use
-  `schemaMigrations` (required). `pragmaUserVersion`, `atomicSchemaBatch`, and
-  `timing` are not host policy. D1 reports `maxBinds: 100` and does not
+  `schemaMigrations` (required). `timing` is not host policy. D1 reports `maxBinds: 100` and does not
   advertise backup flags. The host stores the
   negotiated `DbCapabilities` and rejects plans that exceed `maxStatements`,
   per-statement `maxBinds`, `maxPayloadBytes`, or out-of-range selectors.
@@ -251,8 +251,8 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   limit. D1 refuses
   `RETURNING` unless host-IR `maxRows` is `1` (and rejects multi-tuple
   `VALUES` / semicolon-joined SQL) before HTTP; overflow or an oversized body
-  after HTTP commit is `unavailable`. Guests that omit `returning`, advertise
-  `0` row/payload/atomic caps, or mismatch bootstrap `dialect`/`sqlFamily`
+  after HTTP commit is `unavailable`. Guests that omit `returning` or advertise
+  `0` row/payload/atomic caps
   are not loaded. Time Travel is not used.
 - Guest failures are classified from SQLSTATE / `SQLITE_*` codes (not English
   `"unique"` matching). Constraint → `conflict`; busy/serialization →

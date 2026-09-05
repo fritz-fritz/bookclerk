@@ -63,9 +63,9 @@ pub use classify::{
     classify_db_err, classify_db_err_message, is_schema_apply_retryable, DbErrorClass,
 };
 pub use exec::{
-    cap_query_sql, encoded_proxy_row_len, execute_canonical_sql, json_cell_utf8_len,
-    note_encoded_result_bytes, query_canonical_sql, query_canonical_sql_typed, sea_value_to_json,
-    AtomicSession, ExecCaps,
+    cap_query_sql, encoded_proxy_row_len, execute_physical_sql, json_cell_utf8_len,
+    note_encoded_result_bytes, query_physical_sql, query_physical_sql_typed, sea_value_to_json,
+    AtomicSession, ExecCaps, PhysicalEngine,
 };
 pub use guest_receipt::{
     guest_receipt_applied_stmt, guest_receipt_finalize_stmts, is_guest_receipt_result_lost,

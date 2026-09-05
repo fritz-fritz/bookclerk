@@ -133,10 +133,9 @@ async fn restore_unit_on<C>(
 where
     C: ConnectionTrait,
 {
-    let backend = conn.get_database_backend();
     let preserve_registry = kind == CanonicalRestoreKind::Library
         && preserve_plugin_registry
-        && table_exists(conn, backend, "plugin_databases").await?;
+        && table_exists(conn, "plugin_databases").await?;
     drop_owned_schema(
         conn,
         schema,
@@ -286,14 +285,18 @@ where
             "restore refuses SQL that is not admitted Bookclerk DDL: `{canonical}`"
         )));
     }
-    match kind {
-        CanonicalRestoreKind::Library => bookclerk_db_exec::realize_host_ddl(conn, canonical)
+    crate::host_sql::execute_host_canonical(conn, canonical, std::iter::empty::<sea_orm::Value>())
+        .await
+        .map_err(LibraryError::from_db_err)?;
+    if kind == CanonicalRestoreKind::PluginBinding {
+        for companion in bookclerk_plugin_abi::catalog_companions(canonical) {
+            crate::host_sql::execute_host_canonical(
+                conn,
+                &companion,
+                std::iter::empty::<sea_orm::Value>(),
+            )
             .await
-            .map_err(LibraryError::from_db_err)?,
-        CanonicalRestoreKind::PluginBinding => {
-            bookclerk_db_exec::realize_binding_ddl(conn, canonical)
-                .await
-                .map_err(LibraryError::from_db_err)?
+            .map_err(LibraryError::from_db_err)?;
         }
     }
     Ok(())

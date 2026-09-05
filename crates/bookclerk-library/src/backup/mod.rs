@@ -260,12 +260,12 @@ impl CanonicalRestoreOpts {
     ///
     /// [`Self::host_schema_kind`] comes from [`HostSchemaKind::from_db_capabilities`],
     /// never from SeaORM [`sea_orm::DbBackend`]. Host policy requires
-    /// `schemaMigrations` and rejects `pragmaUserVersion`.
+    /// `schemaMigrations`.
     ///
     /// # Errors
     ///
     /// Returns when `caps` is not a known versioning contract (`schemaMigrations`
-    /// missing or mixed with `pragmaUserVersion`).
+    /// missing).
     pub fn from_caps(caps: &DbCapabilities) -> Result<Self> {
         Ok(Self {
             atomic_unit_restore: caps.supports_atomic_unit_restore(),

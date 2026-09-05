@@ -60,82 +60,37 @@ pub const FIRST_PARTY_MAX_RESULT_BYTES: u32 = MAX_SCALAR_BYTES;
 /// negotiated range until then.
 pub const SQL_CONTRACT_VERSION: u32 = 1;
 
-/// Bootstrap-only SeaORM proxy metadata returned by `AdapterDatabaseSession.bootstrap`.
+/// Diagnostic engine identity returned by `AdapterDatabaseSession.bootstrap`.
 ///
-/// Not part of the typed [`DbCapabilities`] plane.
+/// Not part of the typed [`DbCapabilities`] plane. The host must not admit,
+/// reject, or generate SQL from this value. Any string is valid (including
+/// engines the host has never heard of).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DbBootstrap {
-    /// SQL family for SeaORM proxy bootstrap (`sqlite` or `postgres`).
-    pub sql_family: String,
-    /// Engine dialect name (`sqlite`, `postgres`, or `postgresql`).
-    pub dialect: String,
+    /// Diagnostic physical engine name (`sqlite`, `postgres`, `duckdb`, …).
+    pub engine: String,
 }
 
 impl DbBootstrap {
-    /// Bootstrap metadata for a sqlite-family connection.
+    /// Diagnostic bootstrap for an arbitrary physical engine.
+    #[must_use]
+    pub fn diagnostic(engine: impl Into<String>) -> Self {
+        Self {
+            engine: engine.into(),
+        }
+    }
+
+    /// Bootstrap metadata for a sqlite-family connection (diagnostics only).
     #[must_use]
     pub fn sqlite() -> Self {
-        Self {
-            sql_family: "sqlite".into(),
-            dialect: "sqlite".into(),
-        }
+        Self::diagnostic("sqlite")
     }
 
-    /// Bootstrap metadata for a postgres-family connection.
+    /// Bootstrap metadata for a postgres-family connection (diagnostics only).
     #[must_use]
     pub fn postgres() -> Self {
-        Self {
-            sql_family: "postgres".into(),
-            dialect: "postgres".into(),
-        }
-    }
-
-    /// SeaORM proxy backend failure from bootstrap metadata (`dialect` / `sqlFamily`).
-    #[must_use]
-    pub fn backend_failure_reason(&self) -> Option<String> {
-        let family = self.sql_family.to_ascii_lowercase();
-        if !family.is_empty() {
-            if family != "sqlite" && family != "postgres" {
-                return Some(format!(
-                    "database guest sqlFamily {:?} is not sqlite or postgres (SQL-like backends only)",
-                    self.sql_family
-                ));
-            }
-            if !self.dialect.is_empty() && !dialect_matches_sql_family(&self.dialect, &family) {
-                return Some(format!(
-                    "database guest dialect {:?} does not match sqlFamily {:?}",
-                    self.dialect, self.sql_family
-                ));
-            }
-            return None;
-        }
-        let dialect = self.dialect.to_ascii_lowercase();
-        if dialect.is_empty() {
-            return Some("database guest dialect is required for SeaORM proxy bootstrap".into());
-        }
-        if dialect == "sqlite"
-            || dialect == "postgres"
-            || dialect == "postgresql"
-            || dialect == "pg"
-        {
-            return None;
-        }
-        Some(format!(
-            "database guest dialect {:?} is not sqlite or postgres (SQL-like backends only)",
-            self.dialect
-        ))
-    }
-}
-
-/// True when SeaORM `dialect` names the same SQL family as `sql_family`.
-fn dialect_matches_sql_family(dialect: &str, sql_family: &str) -> bool {
-    match sql_family {
-        "sqlite" => dialect.eq_ignore_ascii_case("sqlite"),
-        "postgres" => {
-            dialect.eq_ignore_ascii_case("postgres") || dialect.eq_ignore_ascii_case("postgresql")
-        }
-        _ => false,
+        Self::diagnostic("postgres")
     }
 }
 
@@ -363,8 +318,8 @@ impl ExecuteReply {
 
 /// Semantic SQL-contract advertisement (`AdapterDatabaseSession.capabilities`).
 ///
-/// Bootstrap metadata (`sql_family`, `diagnostic_engine`, SeaORM `dialect`) is
-/// negotiated separately via [`DbBootstrap`] — not on this typed capability plane.
+/// Diagnostic engine identity is negotiated separately via [`DbBootstrap`] —
+/// not on this typed capability plane.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct DbCapabilities {
@@ -377,19 +332,7 @@ pub struct DbCapabilities {
     /// Guest reports `rowsAffected`.
     pub affected_rows: bool,
     /// Guest versions schema with a `schema_migrations` table.
-    ///
-    /// Host policy requires this flag. `pragmaUserVersion` is not a host
-    /// versioning contract.
     pub schema_migrations: bool,
-    /// Adapter-private SQLite `PRAGMA user_version` advertisement.
-    ///
-    /// Host policy ignores this flag and fails closed when it is offered as a
-    /// substitute for [`Self::schema_migrations`].
-    pub pragma_user_version: bool,
-    /// Adapter-private hint that each schema version is one atomic HTTP batch.
-    ///
-    /// Host policy ignores this flag (`atomicBatch` is already required).
-    pub atomic_schema_batch: bool,
     /// Guest honors RPC/session cancellation.
     pub cancellation: bool,
     /// Guest can fill [`DbTiming::db_execution_us`]. Not a host connect minimum.
@@ -539,9 +482,6 @@ impl DbCapabilities {
     }
 
     /// First-party SQLite capability advertisement (`schema_migrations` rows).
-    ///
-    /// The adapter may still set `PRAGMA user_version` privately; it must not
-    /// advertise `pragmaUserVersion` as a host versioning contract.
     #[must_use]
     pub fn advertised_sqlite() -> Self {
         Self {
@@ -550,8 +490,6 @@ impl DbCapabilities {
             returning: true,
             affected_rows: true,
             schema_migrations: true,
-            pragma_user_version: false,
-            atomic_schema_batch: false,
             cancellation: true,
             timing: true,
             max_binds: SQLITE_MAX_BINDS,
@@ -568,8 +506,7 @@ impl DbCapabilities {
         }
     }
 
-    /// First-party Cloudflare D1 capability advertisement
-    /// (`schema_migrations` rows, one atomic HTTP batch per schema version).
+    /// First-party Cloudflare D1 capability advertisement (`schema_migrations`).
     ///
     /// D1 HTTP has no interactive transaction and no complete per-unit
     /// replacement primitive on sequential REST statements, so it does **not**
@@ -578,8 +515,6 @@ impl DbCapabilities {
     pub fn advertised_d1() -> Self {
         Self {
             schema_migrations: true,
-            pragma_user_version: false,
-            atomic_schema_batch: true,
             max_binds: D1_MAX_BINDS,
             consistent_backup_read: false,
             atomic_unit_restore: false,
@@ -592,8 +527,6 @@ impl DbCapabilities {
     pub fn advertised_postgres() -> Self {
         Self {
             schema_migrations: true,
-            pragma_user_version: false,
-            atomic_schema_batch: false,
             max_binds: POSTGRES_MAX_BINDS,
             ..Self::advertised_sqlite()
         }
@@ -660,7 +593,6 @@ mod tests {
             );
             assert_eq!(caps.sql_contract_version, SQL_CONTRACT_VERSION);
             assert!(caps.schema_migrations);
-            assert!(!caps.pragma_user_version);
         }
         let mut no_timing = DbCapabilities::advertised_sqlite();
         no_timing.timing = false;
@@ -678,8 +610,6 @@ mod tests {
             POSTGRES_MAX_BINDS
         );
         assert_eq!(DbCapabilities::advertised_d1().max_binds, D1_MAX_BINDS);
-        assert!(DbCapabilities::advertised_d1().atomic_schema_batch);
-        assert!(!DbCapabilities::advertised_postgres().atomic_schema_batch);
         assert!(DbCapabilities::advertised_sqlite().supports_consistent_backup_read());
         assert!(DbCapabilities::advertised_sqlite().supports_atomic_unit_restore());
         assert!(DbCapabilities::advertised_postgres().supports_consistent_backup_read());
@@ -743,21 +673,12 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_backend_failure_reason_rejects_non_sql_families() {
-        let mut bootstrap = DbBootstrap::sqlite();
-        bootstrap.sql_family = "mystery".into();
-        let reason = bootstrap.backend_failure_reason().expect("reject");
-        assert!(reason.contains("sqlFamily"), "{reason}");
-
-        let mut mismatch = DbBootstrap::sqlite();
-        mismatch.dialect = "postgres".into();
-        let reason = mismatch.backend_failure_reason().expect("reject");
-        assert!(reason.contains("does not match"), "{reason}");
-
-        assert!(DbBootstrap::sqlite().backend_failure_reason().is_none());
-        assert!(DbBootstrap::postgres().backend_failure_reason().is_none());
-        let empty = DbBootstrap::default();
-        assert!(empty.backend_failure_reason().is_some());
+    fn bootstrap_engine_is_diagnostic_only() {
+        let mystery = DbBootstrap::diagnostic("foundationdb-sql");
+        assert_eq!(mystery.engine, "foundationdb-sql");
+        assert_eq!(DbBootstrap::sqlite().engine, "sqlite");
+        assert_eq!(DbBootstrap::postgres().engine, "postgres");
+        assert!(DbBootstrap::default().engine.is_empty());
     }
 
     #[test]

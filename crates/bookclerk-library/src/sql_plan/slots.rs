@@ -20,9 +20,9 @@ pub fn event_inflight_slot(plugin_id: &str, resource_class: &str) -> String {
 
 /// Inserts the slot row if missing, then bumps it (transaction-scoped write lock).
 ///
-/// Canonical SQL uses `?` placeholders. Adapter-SDK execute lowers for the
-/// live engine (this must run on the caller's transaction, not a nested
-/// `BEGIN`).
+/// Canonical SQL uses `?` placeholders. Host transport never lowers; adapters
+/// realize `INSERT OR IGNORE` at the execute edge. This helper must run on the
+/// caller's transaction, not a nested `BEGIN`.
 ///
 /// # Errors
 ///
@@ -33,10 +33,10 @@ pub async fn lock_serialization_slot<C: ConnectionTrait>(db: &C, slot_key: &str)
             SELECT 1 FROM db_serialization_slots WHERE slot_key = ?\
          )";
     const BUMP: &str = "UPDATE db_serialization_slots SET bump = bump + 1 WHERE slot_key = ?";
-    bookclerk_db_exec::execute_canonical_sql(db, INSERT, [slot_key.into(), slot_key.into()])
+    crate::host_sql::execute_host_canonical(db, INSERT, [slot_key.into(), slot_key.into()])
         .await
         .map_err(LibraryError::Orm)?;
-    bookclerk_db_exec::execute_canonical_sql(db, BUMP, [slot_key.into()])
+    crate::host_sql::execute_host_canonical(db, BUMP, [slot_key.into()])
         .await
         .map_err(LibraryError::Orm)?;
     Ok(())

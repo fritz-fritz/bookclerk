@@ -124,7 +124,7 @@ pub(crate) async fn wake_deliveries_fenced_on<C: ConnectionTrait>(
         }
         values.push(event_id.to_string().into());
         values.push(owner.to_string().into());
-        let res = bookclerk_db_exec::execute_canonical_sql(db, &sql, values)
+        let res = crate::host_sql::execute_host_canonical(db, &sql, values)
             .await
             .map_err(LibraryError::Orm)?;
         woken = woken.saturating_add(u32::try_from(res.rows_affected()).unwrap_or(0));
@@ -1583,7 +1583,7 @@ impl LibraryStore {
         }
         sql.push_str(" ORDER BY e.created_at ASC, e.id ASC LIMIT ?");
         values.push(i64::try_from(limit).unwrap_or(200).into());
-        let rows = bookclerk_db_exec::query_canonical_sql(&self.db, &sql, values)
+        let rows = crate::host_sql::query_host_canonical(&self.db, &sql, values)
             .await
             .map_err(LibraryError::Orm)?;
         let mut ids = Vec::new();
@@ -1840,7 +1840,7 @@ impl LibraryStore {
             .exec(&self.db)
             .await
             .map_err(LibraryError::Orm)?;
-        let events = bookclerk_db_exec::execute_canonical_sql(
+        let events = crate::host_sql::execute_host_canonical(
             &self.db,
             "DELETE FROM domain_events WHERE dispatch_state = 'dispatched' \
              AND created_at <= ? AND NOT EXISTS ( \
@@ -2700,7 +2700,7 @@ async fn bump_event_stats<C: ConnectionTrait>(
         Some(ms) => (ms, 1i64),
         None => (0, 0),
     };
-    bookclerk_db_exec::execute_canonical_sql(
+    crate::host_sql::execute_host_canonical(
         db,
         "UPDATE event_outbox_stats SET \
             retries_total = retries_total + ?, \
