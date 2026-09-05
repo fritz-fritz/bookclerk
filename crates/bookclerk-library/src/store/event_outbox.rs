@@ -2779,13 +2779,6 @@ mod placeholder_tests {
             !sql.contains('$'),
             "host SQL must not embed Postgres $n placeholders: {sql}"
         );
-        assert_eq!(
-            bookclerk_db_exec::lower_canonical_sql(
-                sea_orm::DatabaseBackend::Postgres,
-                "a = ? AND b IN (?, ?) LIMIT ?"
-            ),
-            "a = $1 AND b IN ($2, $3) LIMIT $4"
-        );
     }
 
     #[test]

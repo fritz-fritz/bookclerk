@@ -4045,11 +4045,6 @@ mod tests {
             "host compiler must emit canonical SQL, not $n:\n{}",
             insert.sql
         );
-        let lowered = bookclerk_db_exec::lower_canonical_to_postgres(&insert.sql);
-        assert!(
-            lowered.contains("$5"),
-            "adapter lowering must number blob binds:\n{lowered}"
-        );
         assert_host_plan_typechecks(&compiled);
     }
 

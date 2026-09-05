@@ -174,7 +174,7 @@ enum Work {
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
     DbExecuteEnvelopeRequest {
-        envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
+        envelope: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
@@ -203,7 +203,7 @@ enum Work {
     DbExecuteBindingEnvelopeRequest {
         /// Binding name previously opened with [`Work::DbOpenBinding`].
         name: String,
-        envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
+        envelope: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExecuteReply>>,
     },
@@ -851,7 +851,7 @@ impl PluginSession {
 
     /// Host-private envelope execute on a named plugin database binding.
     ///
-    /// Forwards [`bookclerk_plugin_abi::HostExecuteEnvelope`] so the adapter
+    /// Forwards [`bookclerk_plugin_abi::AdapterExecuteRequest`] so the adapter
     /// persists guest receipt payloads before COMMIT.
     ///
     /// # Errors
@@ -861,7 +861,7 @@ impl PluginSession {
     pub async fn db_execute_binding_envelope_request(
         &self,
         name: &str,
-        envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
+        envelope: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
         let name = name.to_string();
@@ -917,7 +917,7 @@ impl PluginSession {
     /// Returns a plugin error when the guest rejects the call or `cancel` is set.
     pub async fn db_execute_envelope_request(
         &self,
-        envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
+        envelope: bookclerk_plugin_abi::AdapterExecuteRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<bookclerk_plugin_sdk::ExecuteReply> {
         self.call(|reply| Work::DbExecuteEnvelopeRequest {

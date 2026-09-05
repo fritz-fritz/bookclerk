@@ -270,6 +270,7 @@ FORBIDDEN_LIBRARY_LOWERING = (
     re.compile(r"bookclerk_db_exec::execute_typed_on_session"),
     re.compile(r"bookclerk_db_exec::execute_typed_on_txn\b"),
     re.compile(r"bookclerk_db_exec::execute_typed_join_body"),
+    re.compile(r"\bHostExecuteEnvelope\b"),
 )
 
 # Host backup/schema must not emit engine catalog or isolation SQL.

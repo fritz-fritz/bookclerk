@@ -143,7 +143,7 @@ pub use guest_sql::{
 };
 pub use host_envelope::AdapterExecuteRequest;
 #[cfg(feature = "host")]
-pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
+pub use host_envelope::GuestReceiptPersist;
 pub use kind::*;
 pub use methods::METHOD_NAMES;
 pub use sql_desugar::{desugar_canonical_sql, desugar_execute_request};

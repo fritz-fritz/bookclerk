@@ -2832,7 +2832,7 @@ mod tests {
     impl bookclerk_library::TypedAtomicExec for ProxyTypedExec {
         async fn execute_typed(
             &self,
-            envelope: bookclerk_plugin_abi::HostExecuteEnvelope,
+            envelope: bookclerk_plugin_abi::AdapterExecuteRequest,
         ) -> std::result::Result<
             bookclerk_plugin_sdk::ExecuteReply,
             bookclerk_plugin_sdk::PluginError,

@@ -5,7 +5,7 @@
 //! apply guest mutations twice after an ambiguous commit.
 
 use bookclerk_db_exec::{
-    GuestReceiptPersist, HostExecuteEnvelope, GUEST_RECEIPT_WRAP_PREFIX, GUEST_RECEIPT_WRITE_GATE,
+    AdapterExecuteRequest, GuestReceiptPersist, GUEST_RECEIPT_WRAP_PREFIX, GUEST_RECEIPT_WRITE_GATE,
 };
 use bookclerk_plugin_abi::{
     typecheck_execute_request_proofs, DbCapabilities, DbPlanStatementKind, DbResultSelection,
@@ -33,7 +33,7 @@ const GUEST_TYPED_KIND: &str = "guestTyped";
 pub(crate) fn wrap_guest_typed_request(
     mut req: ExecuteRequest,
     type_env: &SqlTypeEnv,
-) -> Result<HostExecuteEnvelope, PluginError> {
+) -> Result<AdapterExecuteRequest, PluginError> {
     let now = Utc::now();
     let created = now.to_rfc3339();
     let operation_id = req.operation_id.clone();
@@ -91,7 +91,7 @@ pub(crate) fn wrap_guest_typed_request(
     let mut env = receipt_wrap_type_env();
     env.merge(type_env);
     let proofs = typecheck_execute_request_proofs(&req, &env)?;
-    Ok(HostExecuteEnvelope::new(
+    Ok(AdapterExecuteRequest::new(
         req,
         GuestReceiptPersist {
             guest_statement_len: guest_len,

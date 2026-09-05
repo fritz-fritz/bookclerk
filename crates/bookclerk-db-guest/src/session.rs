@@ -16,7 +16,6 @@ use crate::sql::{
     guest_statement_to_seaorm, row_to_guest_row, GuestExecResult, GuestQueryResult, GuestRow,
     GuestStatement,
 };
-use bookclerk_plugin_abi::HostExecuteEnvelope;
 use bookclerk_plugin_abi::{
     AdapterExecuteRequest, DbCapabilities, DbIdentityHighWater, ExecuteReply, IsolationReq,
     PluginError,
@@ -100,7 +99,7 @@ enum TxnOp {
         /// Opaque txn id the host attached to this batch.
         txn_id: String,
         /// Typed envelope (request + optional guest-receipt persist).
-        envelope: HostExecuteEnvelope,
+        envelope: AdapterExecuteRequest,
         /// Oneshot used to return the typed reply.
         reply:
             oneshot::Sender<std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError>>,
@@ -598,7 +597,7 @@ fn library_typed_session(deadline: Option<u64>) -> bookclerk_db_exec::AtomicSess
 /// Returns when no connection is open, proofs are missing, isolation is
 /// unsupported, or the engine rejects the work.
 pub async fn guest_execute_atomic(
-    envelope: HostExecuteEnvelope,
+    envelope: AdapterExecuteRequest,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
     require_session_isolation(envelope.isolation)?;
     envelope.require_proofs()?;
@@ -623,7 +622,7 @@ pub async fn guest_execute_atomic(
 /// Returns when the engine rejects the work.
 pub async fn guest_execute_atomic_on(
     conn: &DatabaseConnection,
-    envelope: HostExecuteEnvelope,
+    envelope: AdapterExecuteRequest,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
     require_session_isolation(envelope.isolation)?;
     envelope.require_proofs()?;
@@ -676,7 +675,7 @@ fn require_session_isolation(iso: IsolationReq) -> std::result::Result<(), Plugi
 /// Runs a typed envelope with the given session (library vs binding type env).
 async fn guest_execute_typed(
     conn: &DatabaseConnection,
-    envelope: HostExecuteEnvelope,
+    envelope: AdapterExecuteRequest,
     session: bookclerk_db_exec::AtomicSession,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
     let caps = capabilities_for(conn);
@@ -734,7 +733,7 @@ pub async fn guest_execute_atomic_on_txn(
 /// Returns when the txn id is unknown or the engine rejects the work.
 pub async fn guest_execute_atomic_on_txn_envelope(
     txn_id: String,
-    envelope: HostExecuteEnvelope,
+    envelope: AdapterExecuteRequest,
 ) -> std::result::Result<ExecuteReply, bookclerk_plugin_abi::PluginError> {
     envelope.require_proofs()?;
     match envelope.isolation {

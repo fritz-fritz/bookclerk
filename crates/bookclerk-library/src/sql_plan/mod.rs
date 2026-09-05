@@ -34,9 +34,7 @@ pub use interpret::{interpret_typed_exec, PlanStmtResult};
 pub use named::{compile_claim_event_delivery, compile_named_request};
 pub use reply::validate_execute_reply;
 pub use slots::{event_inflight_slot, lock_serialization_slot, JOB_QUEUE_SLOT};
-pub use typed_vectors::{
-    run_typed_conn_vectors, run_typed_request_vectors, stamp_typed_vector,
-};
+pub use typed_vectors::{run_typed_conn_vectors, run_typed_request_vectors, stamp_typed_vector};
 pub use vectors_typed::run_typed_contract_vectors;
 
 /// Compiled typed request plus host result-selection indexes.
@@ -228,7 +226,7 @@ pub async fn execute_guest_atomic_with<F, Fut>(
     exec: F,
 ) -> std::result::Result<bookclerk_plugin_abi::ExecuteReply, bookclerk_plugin_abi::PluginError>
 where
-    F: FnOnce(bookclerk_db_exec::HostExecuteEnvelope) -> Fut,
+    F: FnOnce(bookclerk_db_exec::AdapterExecuteRequest) -> Fut,
     Fut: std::future::Future<
         Output = std::result::Result<
             bookclerk_plugin_abi::ExecuteReply,

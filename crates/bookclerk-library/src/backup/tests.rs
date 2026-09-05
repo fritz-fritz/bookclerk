@@ -373,15 +373,6 @@ fn order_key_prefers_pk_then_unique_then_full_row() {
 }
 
 #[test]
-fn restore_insert_sql_lowers_question_marks_on_postgres() {
-    let sql = "INSERT INTO t (a, b) VALUES (?, ?)";
-    assert_eq!(
-        bookclerk_db_exec::lower_canonical_sql(DbBackend::Postgres, sql),
-        "INSERT INTO t (a, b) VALUES ($1, $2)"
-    );
-}
-
-#[test]
 fn put_object_replaces_corrupt_existing_digest() {
     let files = tempfile::tempdir().unwrap();
     let repo = BackupRepository::open(files.path()).unwrap();
@@ -1244,7 +1235,7 @@ async fn plugin_restore_fails_closed_when_stale_binding_lacks_catalog() {
 }
 
 #[test]
-fn capture_text_order_by_lowers_postgres_collate_c() {
+fn capture_text_order_by_desugars_and_proves_collate_sites() {
     let parsed =
         parse_create_table_schema("CREATE TABLE items (k TEXT PRIMARY KEY, extra TEXT)").unwrap();
     let order = canonical_order_by_sql(&parsed);
@@ -1266,12 +1257,13 @@ fn capture_text_order_by_lowers_postgres_collate_c() {
     bookclerk_plugin_abi::desugar_execute_request(&mut req);
     let proofs = bookclerk_plugin_abi::typecheck_execute_request_proofs(&req, &env).unwrap();
     let sql = req.statements[0].sql.as_str();
-    let lowered =
-        bookclerk_db_exec::lower_canonical_sql_typed(DbBackend::Postgres, sql, proofs.first())
-            .unwrap();
     assert!(
-        lowered.contains("COLLATE \"C\""),
-        "TEXT ORDER BY must be binary-portable on Postgres: {lowered}"
+        sql.contains("NULLS"),
+        "host desugar must make ORDER BY NULLS explicit: {sql}"
+    );
+    assert!(
+        proofs.iter().any(|p| !p.text_collate_sites.is_empty()),
+        "TEXT ORDER BY must prove collate sites for adapter COLLATE realization"
     );
 }
 

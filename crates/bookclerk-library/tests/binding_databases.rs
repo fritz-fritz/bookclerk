@@ -1469,7 +1469,7 @@ async fn binding_stamped_proofs_survive_catalog_wipe() {
     ))
     .await
     .expect("wipe schema catalog");
-    let envelope = bookclerk_plugin_abi::HostExecuteEnvelope::new(
+    let envelope = bookclerk_plugin_abi::AdapterExecuteRequest::new(
         req,
         bookclerk_plugin_abi::GuestReceiptPersist::default(),
     )

@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
+use bookclerk_plugin_abi::GuestReceiptPersist;
 use bookclerk_plugin_abi::{
     apply_schema_action_to_env, apply_schema_sql_to_env, assert_proof_matches_sql,
     catalog_companions_for_action, encoded_execute_reply_bytes, encoded_statement_result_bytes,
@@ -22,7 +23,6 @@ use bookclerk_plugin_abi::{
     DbType, DbValue, ExecuteReply, ExecuteRequest, SqlType, SqlTypeEnv, StatementResult,
     TypedDbStatement, FIRST_PARTY_MAX_RESULT_ROWS, SQL_CATALOG_TABLE, SQL_SCHEMA_TABLE,
 };
-use bookclerk_plugin_abi::{GuestReceiptPersist, HostExecuteEnvelope};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, QueryResult, Statement,
     TransactionTrait, Value as SeaValue,
@@ -1316,7 +1316,7 @@ pub async fn execute_typed_on_session(
 /// interrupted.
 pub async fn execute_typed_envelope(
     db: &DatabaseConnection,
-    envelope: &HostExecuteEnvelope,
+    envelope: &AdapterExecuteRequest,
     timing_source: &str,
     caps: impl Into<ExecCaps>,
     session: AtomicSession,
@@ -1512,7 +1512,7 @@ pub async fn execute_typed_on_txn(
 /// reply exceeds `max_atomic_result_bytes`.
 pub async fn execute_typed_on_txn_envelope(
     txn: &DatabaseTransaction,
-    envelope: &HostExecuteEnvelope,
+    envelope: &AdapterExecuteRequest,
     timing_source: &str,
     caps: impl Into<ExecCaps>,
     session: AtomicSession,

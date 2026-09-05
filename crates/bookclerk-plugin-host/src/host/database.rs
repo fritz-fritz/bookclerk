@@ -17,8 +17,7 @@ use bookclerk_db_exec::db_value_from_sea;
 use bookclerk_plugin_abi::{
     catalog_page_statement, database_context_from_params, reserved_catalog_relation_missing,
     sql_catalog_page_rows, AdapterExecuteRequest, DbBootstrap, DbCapabilities, DbConnectParams,
-    DbValue, HostExecuteEnvelope, IsolationReq, SqlType, SqlTypeEnv, SQL_CATALOG_TABLE,
-    SQL_SCHEMA_TABLE,
+    DbValue, IsolationReq, SqlType, SqlTypeEnv, SQL_CATALOG_TABLE, SQL_SCHEMA_TABLE,
 };
 use bookclerk_plugin_sdk::GuestDatabase;
 use bookclerk_plugin_sdk::PRODUCT_API_VERSION;
@@ -1700,7 +1699,7 @@ fn decode_payload<T: serde::de::DeserializeOwned>(
 impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
     async fn execute_typed(
         &self,
-        envelope: HostExecuteEnvelope,
+        envelope: AdapterExecuteRequest,
     ) -> std::result::Result<ExecuteReply, AbiPluginError> {
         let mut request = envelope.request.clone();
         let proofs = envelope.proofs.clone();
@@ -1708,7 +1707,7 @@ impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
             .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
         let validate_req = request.clone();
         let cancel = Arc::new(AtomicBool::new(false));
-        let mut stamped = HostExecuteEnvelope::new(request, envelope.guest_receipt)
+        let mut stamped = AdapterExecuteRequest::new(request, envelope.guest_receipt)
             .with_proofs(proofs)
             .with_isolation(envelope.isolation);
         if stamped.require_proofs().is_err() {

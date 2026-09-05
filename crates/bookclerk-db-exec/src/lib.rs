@@ -58,7 +58,7 @@ pub use backup::{
     pending_begin_isolation, prepare_unit_restore,
 };
 pub use bookclerk_plugin_abi::DbPlanStatementKind;
-pub use bookclerk_plugin_abi::{AdapterExecuteRequest, GuestReceiptPersist, HostExecuteEnvelope};
+pub use bookclerk_plugin_abi::{AdapterExecuteRequest, GuestReceiptPersist};
 pub use classify::{
     classify_db_err, classify_db_err_message, is_schema_apply_retryable, DbErrorClass,
 };

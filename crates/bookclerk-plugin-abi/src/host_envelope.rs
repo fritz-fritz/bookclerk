@@ -40,10 +40,6 @@ pub struct AdapterExecuteRequest {
     pub isolation: IsolationReq,
 }
 
-/// Host-private alias for [`AdapterExecuteRequest`] (receipt wrap / SeaORM proxy).
-#[cfg(feature = "host")]
-pub type HostExecuteEnvelope = AdapterExecuteRequest;
-
 #[cfg_attr(not(feature = "host"), allow(dead_code))]
 impl AdapterExecuteRequest {
     /// Builds an adapter execute request without proofs.

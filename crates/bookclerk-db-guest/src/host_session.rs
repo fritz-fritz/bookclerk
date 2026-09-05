@@ -2,7 +2,6 @@
 
 #![allow(clippy::missing_docs_in_private_items)]
 
-use bookclerk_plugin_abi::HostExecuteEnvelope;
 use bookclerk_plugin_abi::{AdapterExecuteRequest, AdapterTransaction, HostAdapterDatabaseSession};
 use bookclerk_plugin_abi::{ExecuteReply, IsolationReq, Result};
 use sea_orm::DatabaseConnection;
@@ -27,7 +26,7 @@ impl HostAdapterDatabaseSession for GuestHostAdapterSession {
         Ok(Box::new(GuestHostAdapterTransaction { txn_id }))
     }
 
-    async fn execute_envelope(&self, envelope: HostExecuteEnvelope) -> Result<ExecuteReply> {
+    async fn execute_envelope(&self, envelope: AdapterExecuteRequest) -> Result<ExecuteReply> {
         guest_execute_atomic(envelope)
             .await
             .map_err(plugin_error_from_engine)
@@ -124,7 +123,7 @@ impl HostAdapterDatabaseSession for BoundGuestHostAdapterSession {
         Ok(Box::new(GuestHostAdapterTransaction { txn_id }))
     }
 
-    async fn execute_envelope(&self, envelope: HostExecuteEnvelope) -> Result<ExecuteReply> {
+    async fn execute_envelope(&self, envelope: AdapterExecuteRequest) -> Result<ExecuteReply> {
         guest_execute_atomic_on(&self.conn, envelope).await
     }
 }

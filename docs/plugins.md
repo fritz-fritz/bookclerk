@@ -1138,8 +1138,10 @@ interactive SeaORM transaction and returns an `AdapterTransaction`
 (`execute` / `commit` / `rollback`); the host records a sticky per-task fault
 when `begin` fails so later statements cannot fall back to autocommit, and a
 failed `commit` is surfaced to `LibraryStore` (SeaORM's proxy hook is
-infallible). `HostAdapterDatabaseSession.executeEnvelope` carries the durable
-receipt-persist envelope. D1 keeps `begin` unsupported and routes
+infallible). `AdapterDatabaseSession.execute` and
+`HostAdapterDatabaseSession.executeEnvelope` carry the same
+`AdapterExecuteRequest` (canonical SQL, structured proofs, optional
+receipt-persist hint). D1 keeps `begin` unsupported and routes
 `executeEnvelope` through its native batch proxy.
 
 Built-in ids: `sqlite`, `d1`, `postgres` (match `[database].plugin`).
