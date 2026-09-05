@@ -671,6 +671,9 @@ impl ProxyDatabaseTrait for D1Proxy {
         let params = statement_json_params(&statement);
         let paged = sql_is_bookclerk_page(&statement.sql);
         let value = self.run_sql(&statement.sql, params).await?;
+        if let Some(msg) = d1_last_statement_error(&value) {
+            return Err(DbErr::Custom(msg));
+        }
         let results = first_result_rows_ref(&value);
         let mut rows = Vec::with_capacity(results.len());
         let mut encoded = 1usize;
@@ -703,6 +706,9 @@ impl ProxyDatabaseTrait for D1Proxy {
         }
         let params = statement_json_params(&statement);
         let value = self.run_sql(&statement.sql, params).await?;
+        if let Some(msg) = d1_last_statement_error(&value) {
+            return Err(DbErr::Custom(msg));
+        }
         let meta = first_result_meta(&value);
         let last_insert_id = meta
             .and_then(|m| m.get("last_row_id"))
@@ -828,6 +834,23 @@ fn first_result_entry(value: &JsonValue) -> Option<&JsonValue> {
         .get("result")
         .and_then(|v| v.as_array())
         .and_then(|arr| arr.last())
+}
+
+/// Error text when the last D1 result entry is `success: false`.
+///
+/// Top-level HTTP `success` can still be true; a missing table is nested.
+fn d1_last_statement_error(value: &JsonValue) -> Option<String> {
+    let entry = first_result_entry(value)?;
+    if entry.get("success").and_then(JsonValue::as_bool) != Some(false) {
+        return None;
+    }
+    Some(
+        entry
+            .get("error")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("D1 statement failed")
+            .to_string(),
+    )
 }
 
 /// Row objects from the last result entry's `results` array, or empty.
@@ -2615,17 +2638,20 @@ mod tests {
         )
         .await
         .expect("host D1 schema");
+        let mut catalog = bookclerk_library::migrations::host_sql_type_env();
         bookclerk_library::sql_plan::run_typed_request_vectors(
             bookclerk_plugin_abi::DbCapabilities::advertised_d1(),
             bookclerk_plugin_abi::DbCapabilities::advertised_d1().max_result_rows,
             |req| {
                 let proxy = proxy.clone();
+                let envelope = bookclerk_library::sql_plan::stamp_typed_vector(req, &mut catalog);
                 async move {
+                    let envelope = envelope.map_err(sea_orm::DbErr::Custom)?;
                     proxy
                         .run_typed_atomic(
-                            &req,
-                            bookclerk_plugin_abi::GuestReceiptPersist::default(),
-                            &[],
+                            &envelope.request,
+                            envelope.guest_receipt,
+                            &envelope.proofs,
                         )
                         .await
                 }

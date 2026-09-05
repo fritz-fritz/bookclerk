@@ -78,21 +78,30 @@ pub async fn run_typed_conn_vectors(
     let db = db.clone();
     let timing = timing.to_string();
     let connect_for_run = connect.clone();
+    let mut catalog = crate::migrations::host_sql_type_env();
     run_typed_contract_vectors(connect, CONTRACT_VECTOR_ROW_CAP, move |typed, cap| {
+        let stamped = stamp_typed_vector(typed, &mut catalog);
         let db = db.clone();
         let timing = timing.clone();
         let connect = connect_for_run.clone();
         async move {
-            let reply = crate::sql_plan::execute_typed_on_session(
+            let envelope = stamped?;
+            let mut caps = bookclerk_db_exec::ExecCaps::from_capabilities(&connect);
+            if cap > 0 {
+                caps.max_result_rows = cap;
+            }
+            let reply = bookclerk_db_exec::execute_typed_envelope(
                 &db,
-                &typed,
+                &envelope,
                 &timing,
-                cap,
-                crate::sql_plan::AtomicSession::from_deadline(None),
+                caps,
+                bookclerk_db_exec::AtomicSession::from_deadline(None)
+                    .with_type_env(crate::migrations::host_sql_type_env()),
             )
             .await
             .map_err(|err| err.to_string())?;
-            validate_execute_reply(&typed, &reply, &connect).map_err(|err| err.to_string())?;
+            validate_execute_reply(&envelope.request, &reply, &connect)
+                .map_err(|err| err.to_string())?;
             Ok(reply)
         }
     })

@@ -547,13 +547,17 @@ pub fn stamp_host_proofs(
 
 /// Host-stamped [`AdapterExecuteRequest`] for first-party adapter execute.
 ///
+/// Desugars canonical SQL first (`ORDER BY NULLS`, `NULLIF`) so proofs bind
+/// to the same text the execute edge will check.
+///
 /// # Errors
 ///
 /// Returns [`DbErr::Custom`] when typecheck fails.
 pub fn stamp_adapter_execute(
-    request: ExecuteRequest,
+    mut request: ExecuteRequest,
     catalog: &SqlTypeEnv,
 ) -> Result<AdapterExecuteRequest, DbErr> {
+    bookclerk_plugin_abi::desugar_execute_request(&mut request);
     let proofs = stamp_host_proofs(&request, catalog)?;
     Ok(AdapterExecuteRequest::new(request, GuestReceiptPersist::default()).with_proofs(proofs))
 }
