@@ -1268,7 +1268,7 @@ fn capture_text_order_by_lowers_postgres_collate_c() {
     let sql = format!("SELECT k, extra FROM items ORDER BY {order} LIMIT 10 OFFSET 0");
     let mut env = bookclerk_plugin_abi::SqlTypeEnv::new();
     env.insert_table("items", parsed.columns.clone());
-    let req = bookclerk_plugin_abi::ExecuteRequest {
+    let mut req = bookclerk_plugin_abi::ExecuteRequest {
         operation_id: "backup-capture".into(),
         request_hash: String::new(),
         statements: vec![bookclerk_plugin_abi::TypedDbStatement {
@@ -1280,9 +1280,11 @@ fn capture_text_order_by_lowers_postgres_collate_c() {
         }],
         deadline_unix_ms: 0,
     };
+    bookclerk_plugin_abi::desugar_execute_request(&mut req);
     let proofs = bookclerk_plugin_abi::typecheck_execute_request_proofs(&req, &env).unwrap();
+    let sql = req.statements[0].sql.as_str();
     let lowered =
-        bookclerk_db_exec::lower_canonical_sql_typed(DbBackend::Postgres, &sql, proofs.first())
+        bookclerk_db_exec::lower_canonical_sql_typed(DbBackend::Postgres, sql, proofs.first())
             .unwrap();
     assert!(
         lowered.contains("COLLATE \"C\""),

@@ -3,12 +3,12 @@
 use std::collections::BTreeSet;
 
 use bookclerk_plugin_abi::{
-    encoded_statement_result_bytes, parse_create_index_sql, parse_create_table_schema,
-    reserved_catalog_relation_missing, sql_ddl_create_table_sql, sql_schema_create_table_sql,
-    sql_type_env_from_canonical_ddl, typecheck_execute_request_proofs, DbColumn,
-    DbPlanStatementKind, DbResultSelection, DbRow, DbType, DbValue, ExecuteRequest, SqlTypeEnv,
-    StatementResult, TypedDbStatement, SQL_CATALOG_TABLE, SQL_CONTRACT_VERSION, SQL_DDL_TABLE,
-    SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
+    desugar_execute_request, encoded_statement_result_bytes, parse_create_index_sql,
+    parse_create_table_schema, reserved_catalog_relation_missing, sql_ddl_create_table_sql,
+    sql_schema_create_table_sql, sql_type_env_from_canonical_ddl, typecheck_execute_request_proofs,
+    DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbType, DbValue, ExecuteRequest,
+    SqlTypeEnv, StatementResult, TypedDbStatement, SQL_CATALOG_TABLE, SQL_CONTRACT_VERSION,
+    SQL_DDL_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend};
 
@@ -581,7 +581,7 @@ async fn capture_select<C>(
 where
     C: ConnectionTrait,
 {
-    let req = ExecuteRequest {
+    let mut req = ExecuteRequest {
         operation_id: "backup-capture".into(),
         request_hash: String::new(),
         statements: vec![TypedDbStatement {
@@ -593,9 +593,17 @@ where
         }],
         deadline_unix_ms: 0,
     };
+    // Proofs bind to host-desugared SQL (explicit NULLS / NULLIF), which
+    // `query_canonical_sql_typed` executes after the same desugar.
+    desugar_execute_request(&mut req);
     let proofs = typecheck_execute_request_proofs(&req, env).map_err(|err| {
         LibraryError::Schema(format!("backup SELECT is not admitted SQL v1: {err}"))
     })?;
+    let sql = req
+        .statements
+        .first()
+        .map(|stmt| stmt.sql.as_str())
+        .unwrap_or(sql);
     bookclerk_db_exec::query_canonical_sql_typed(conn, sql, proofs.first(), [])
         .await
         .map_err(|err| LibraryError::Schema(format!("backup SELECT failed: {err}")))
