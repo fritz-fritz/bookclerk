@@ -68,7 +68,7 @@
     },
     {
       "id": "order-by-nulls-default",
-      "canonical": "SELECT a FROM t ORDER BY a, b DESC",
+      "canonical": "SELECT a FROM t ORDER BY a NULLS FIRST, b DESC NULLS LAST",
       "postgres": "SELECT a FROM t ORDER BY a NULLS FIRST, b DESC NULLS LAST"
     },
     {
@@ -82,7 +82,7 @@
     },
     {
       "id": "div-mod-null-on-zero",
-      "canonical": "SELECT 1 / 0, 4 % 0, a / b",
+      "canonical": "SELECT 1 / NULLIF(0, 0), 4 % NULLIF(0, 0), a / NULLIF(b, 0)",
       "postgresContains": ["NULLIF(0, 0)", "NULLIF(b, 0)"]
     }
   ],

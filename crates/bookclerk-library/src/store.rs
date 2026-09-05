@@ -59,6 +59,12 @@ pub struct LibraryStore {
     max_payload_bytes: u32,
     /// Full negotiated capability advertisement (limits, schema flags, timing).
     caps: Arc<bookclerk_plugin_abi::DbCapabilities>,
+    /// Leftover canonical `?` SQL execution target.
+    ///
+    /// Production plugin-host stays [`bookclerk_db_exec::SqlExecTarget::Canonical`]
+    /// so the sqlite-shaped proxy never physically lowers. Native in-process
+    /// tests set [`bookclerk_db_exec::SqlExecTarget::Physical`].
+    sql_exec: bookclerk_db_exec::SqlExecTarget,
 }
 
 impl std::fmt::Debug for LibraryStore {
@@ -84,7 +90,27 @@ impl LibraryStore {
             max_result_rows: 256,
             max_payload_bytes: 256 * 1024,
             caps: Arc::new(bookclerk_plugin_abi::DbCapabilities::advertised_d1()),
+            sql_exec: bookclerk_db_exec::SqlExecTarget::Canonical,
         }
+    }
+
+    /// Sets the in-process physical engine used for leftover canonical SQL.
+    #[must_use]
+    pub fn with_physical_engine(mut self, engine: bookclerk_db_exec::PhysicalEngine) -> Self {
+        self.sql_exec = bookclerk_db_exec::SqlExecTarget::Physical(engine);
+        self
+    }
+
+    /// Leftover SQL engine: `None` is canonical transport; `Some` lowers once.
+    #[must_use]
+    pub(crate) fn leftover_engine(&self) -> Option<bookclerk_db_exec::PhysicalEngine> {
+        self.sql_exec.leftover_engine()
+    }
+
+    /// In-process named-atomic engine (sqlite default for canonical stores).
+    #[must_use]
+    pub(crate) fn named_engine(&self) -> bookclerk_db_exec::PhysicalEngine {
+        self.sql_exec.named_engine()
     }
 
     /// Attach a guest atomic backend for named security operations.
@@ -170,52 +196,42 @@ impl LibraryStore {
     /// error when the batch fails.
     pub async fn execute_guest_atomic(
         &self,
-        mut req: bookclerk_plugin_abi::ExecuteRequest,
+        req: bookclerk_plugin_abi::ExecuteRequest,
         policy: &bookclerk_plugin_abi::GuestSqlPolicy,
     ) -> std::result::Result<bookclerk_plugin_abi::ExecuteReply, bookclerk_plugin_abi::PluginError>
     {
-        crate::authorize_guest_typed_request(&mut req, self.db_capabilities(), policy)
-            .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
-        let guest_req = req.clone();
-        // Library connection: wrap with the same snapshot execute uses
-        // (physical tables + durable catalog + host schema + policy types).
-        let mut type_env = bookclerk_db_exec::load_physical_sql_type_env(&self.db)
-            .await
-            .map_err(plugin_err_from_db)?;
-        type_env.merge(
-            &bookclerk_db_exec::load_sql_type_env(&self.db)
-                .await
-                .map_err(plugin_err_from_db)?,
-        );
-        type_env.merge(&crate::migrations::host_sql_type_env());
-        type_env.merge(policy.sql_types());
-        let envelope = crate::sql_plan::wrap_guest_typed_request(req, &type_env)?;
-        let reply = if let Some(exec) = &self.typed_exec {
-            let reply = exec.execute_typed(envelope.clone()).await?;
-            crate::validate_execute_reply(&envelope.request, &reply, self.db_capabilities())
-                .map_err(|err| bookclerk_plugin_abi::PluginError::unavailable(err.to_string()))?;
-            reply
-        } else {
-            let timing = match self.db.get_database_backend() {
-                sea_orm::DatabaseBackend::Postgres => "postgres_txn",
-                _ => "sqlite_txn",
-            };
-            let deadline = (envelope.request.deadline_unix_ms > 0)
-                .then_some(envelope.request.deadline_unix_ms);
-            let reply = bookclerk_db_exec::execute_typed_envelope(
-                &self.db,
-                &envelope,
-                timing,
-                bookclerk_db_exec::ExecCaps::from_capabilities(self.db_capabilities()),
-                bookclerk_db_exec::AtomicSession::from_deadline(deadline).with_type_env(type_env),
-            )
-            .await
-            .map_err(plugin_err_from_db)?;
-            crate::validate_execute_reply(&envelope.request, &reply, self.db_capabilities())
-                .map_err(|err| bookclerk_plugin_abi::PluginError::unavailable(err.to_string()))?;
-            reply
-        };
-        crate::sql_plan::unwrap_guest_typed_reply(reply, &guest_req, self.db_capabilities())
+        let db = self.db.clone();
+        let caps = self.db_capabilities().clone();
+        let typed_exec = self.typed_exec.clone();
+        let exec_caps = caps.clone();
+        let engine = self.named_engine();
+        crate::sql_plan::execute_guest_atomic_with(req, &caps, policy, move |envelope| {
+            let db = db.clone();
+            let caps = exec_caps.clone();
+            let typed_exec = typed_exec.clone();
+            async move {
+                if let Some(exec) = typed_exec {
+                    exec.execute_typed(envelope).await
+                } else {
+                    // In-process tests (no RPC adapter). Production hosts
+                    // always inject [`crate::TypedAtomicExec`].
+                    let deadline = (envelope.request.deadline_unix_ms > 0)
+                        .then_some(envelope.request.deadline_unix_ms);
+                    bookclerk_db_exec::execute_typed_envelope(
+                        engine,
+                        &db,
+                        &envelope,
+                        engine.timing_source(),
+                        bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
+                        bookclerk_db_exec::AtomicSession::from_deadline(deadline)
+                            .with_type_env(crate::migrations::host_sql_type_env()),
+                    )
+                    .await
+                    .map_err(plugin_err_from_db)
+                }
+            }
+        })
+        .await
     }
 
     /// Subscribers packed into one dispatch plan (receipt overhead is ~12 statements).
@@ -1021,7 +1037,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.delete_user(id).await;
         }
-        crate::db_atomic::delete_user(&self.db, id).await
+        crate::db_atomic::delete_user(self.named_engine(), &self.db, id).await
     }
 
     /// Deletes a user and related portal rows inside an open transaction; refuses the last owner.
@@ -1159,7 +1175,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.set_user_status(id, status).await;
         }
-        crate::db_atomic::set_user_status(&self.db, id, status).await
+        crate::db_atomic::set_user_status(self.named_engine(), &self.db, id, status).await
     }
 
     /// Sets user status inside an open transaction; disabling the last owner fails.
@@ -1231,7 +1247,8 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.set_user_password_hash(id, password_hash).await;
         }
-        crate::db_atomic::set_user_password_hash(&self.db, id, password_hash).await
+        crate::db_atomic::set_user_password_hash(self.named_engine(), &self.db, id, password_hash)
+            .await
     }
 
     /// Sets or clears the Argon2id password hash inside an open transaction and bumps `security_version`.
@@ -1504,7 +1521,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.set_user_role(id, role).await;
         }
-        crate::db_atomic::set_user_role(&self.db, id, role).await
+        crate::db_atomic::set_user_role(self.named_engine(), &self.db, id, role).await
     }
 
     /// Sets user role inside an open transaction; demoting the last active owner fails.
@@ -1958,6 +1975,7 @@ impl LibraryStore {
                 .await;
         }
         crate::db_atomic::redeem_claim_ticket_to_session(
+            self.named_engine(),
             &self.db,
             token_hash,
             session_hash,
@@ -2694,7 +2712,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.take_oidc_rp_state(state_hash).await;
         }
-        crate::db_atomic::take_oidc_rp_state(&self.db, state_hash).await
+        crate::db_atomic::take_oidc_rp_state(self.named_engine(), &self.db, state_hash).await
     }
 
     /// Deletes and returns one-shot OIDC RP state by hash; `None` if missing or already taken.
@@ -2916,7 +2934,8 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.confirm_totp_enrollment(user_id, &record).await;
         }
-        crate::db_atomic::confirm_totp_enrollment(&self.db, user_id, &record).await
+        crate::db_atomic::confirm_totp_enrollment(self.named_engine(), &self.db, user_id, &record)
+            .await
     }
 
     /// Promote a sealed TOTP secret to `primary` and set `totp_enabled` inside an open transaction.
@@ -2949,7 +2968,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.disable_user_totp(user_id).await;
         }
-        crate::db_atomic::disable_user_totp(&self.db, user_id).await
+        crate::db_atomic::disable_user_totp(self.named_engine(), &self.db, user_id).await
     }
 
     /// Delete TOTP secrets and clear `totp_enabled` inside an open transaction.
@@ -3025,7 +3044,8 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.take_webauthn_challenge(challenge_id, kind).await;
         }
-        crate::db_atomic::take_webauthn_challenge(&self.db, challenge_id, kind).await
+        crate::db_atomic::take_webauthn_challenge(self.named_engine(), &self.db, challenge_id, kind)
+            .await
     }
 
     /// Deletes and returns a one-shot WebAuthn challenge; `None` if missing or already taken.

@@ -47,8 +47,11 @@
 //! | [`kind`] | Kind-specific DTOs (source / integration / output) |
 //! | [`db`] | Host-private database connect params (feature `host`) |
 //! | [`error`] | [`PluginError`] / [`PluginErrorCode`] |
+//! | [`guest_sql`] | SQL-v1 grammar / guest admission |
+//! | [`sql_desugar`] | Host-only semantic desugars (`NULLS`, `NULLIF`) |
 //! | [`plugin_capnp`] | Generated Cap'n Proto RPC interfaces |
 
+pub mod backup_ops;
 pub mod db;
 pub mod db_execute;
 mod db_rpc;
@@ -56,7 +59,6 @@ pub mod db_value;
 pub mod error;
 mod features;
 pub mod guest_sql;
-#[cfg(feature = "host")]
 pub(crate) mod host_envelope;
 #[cfg(feature = "host")]
 mod host_roles;
@@ -70,6 +72,7 @@ mod roles;
 mod rpc;
 mod rpc_types;
 mod sdk_wire;
+pub mod sql_desugar;
 mod sql_proof;
 pub mod sql_types;
 pub mod types;
@@ -114,6 +117,7 @@ pub mod plugin_host_capnp {
 #[cfg(test)]
 mod wire_fixtures;
 
+pub use backup_ops::{AdapterBackupOps, SharedAdapterBackupOps};
 #[cfg(feature = "host")]
 pub use db::{connect_params_from_context, database_context_from_params, DbConnectParams};
 pub use db::{
@@ -122,11 +126,12 @@ pub use db::{
 };
 pub use db_execute::{
     sql_payload_bytes, sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn,
-    DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest,
-    StatementResult, TypedDbStatement, D1_MAX_BINDS, FIRST_PARTY_MAX_RESULT_BYTES,
-    FIRST_PARTY_MAX_RESULT_ROWS, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
-    HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS,
-    POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS, SQL_CONTRACT_VERSION,
+    DbIdentityHighWater, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, ExecuteReply,
+    ExecuteRequest, IsolationReq, StatementResult, TypedDbStatement, D1_MAX_BINDS,
+    FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_RESULT_ROWS, FIRST_PARTY_MAX_STATEMENTS,
+    HOST_MIN_BINDS, HOST_MIN_CELL_BYTES, HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES,
+    HOST_MIN_RESULT_ROWS, HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS, SQLITE_MAX_BINDS,
+    SQL_CONTRACT_VERSION,
 };
 pub use db_value::{db_type_from_declared, normalize_db_value_for_column, DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
@@ -137,9 +142,11 @@ pub use guest_sql::{
     GuestSqlRefs,
 };
 #[cfg(feature = "host")]
-pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
+pub use host_envelope::GuestReceiptPersist;
+pub use host_envelope::{AdapterExecuteRequest, CanonicalExecuteRequest, UnresolvedExecuteRequest};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
+pub use sql_desugar::{desugar_canonical_sql, desugar_execute_request};
 #[cfg(feature = "host")]
 pub use sql_proof::{
     assert_proof_matches_sql, IntegerArithKind, IntegerArithSite, PhysicalAccess,

@@ -7,8 +7,7 @@
 //! [`SCHEMA_VERSION`] (`0` today: no frozen revisions). Fresh init records each
 //! frozen plan step's checksum before the unreleased marker; when the
 //! unreleased bucket is empty the database ends [`crate::SchemaState::Frozen`].
-//! Adapters lower canonical DDL at
-//! the execution edge ([`bookclerk_db_exec::expand_host_schema_batch`]).
+//! Adapters lower canonical DDL at the execution edge.
 
 use std::sync::OnceLock;
 
@@ -884,19 +883,6 @@ pub(crate) fn override_host_migration_plan(
     HostPlanOverrideGuard
 }
 
-/// Final PostgreSQL DDL for a fresh Bookclerk library database.
-///
-/// The canonical baseline lowered mechanically per statement at the adapter
-/// edge — there is no hand-authored parallel Postgres schema.
-#[must_use]
-pub fn latest_schema_postgres() -> String {
-    bookclerk_db_exec::split_schema_statements(current_canonical_schema())
-        .into_iter()
-        .map(|stmt| bookclerk_db_exec::lower_canonical_ddl_to_postgres(&stmt))
-        .collect::<Vec<_>>()
-        .join(";\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1007,7 +993,11 @@ mod tests {
 
     #[test]
     fn postgres_lowering_of_baseline_is_mechanically_complete() {
-        let lowered = latest_schema_postgres();
+        let lowered = bookclerk_db_exec::split_schema_statements(current_canonical_schema())
+            .into_iter()
+            .map(|stmt| bookclerk_db_exec::lower_canonical_ddl_to_postgres(&stmt))
+            .collect::<Vec<_>>()
+            .join(";\n");
         // No SQLite-isms may survive the mechanical lowering; the CI Postgres
         // sidecar applies this exact output (`postgres_test_store`).
         for token in [

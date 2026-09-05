@@ -18,6 +18,7 @@ pub mod email;
 pub mod entities;
 mod error;
 mod host_schema;
+mod host_sql;
 mod in_process_atomic;
 pub mod master_key;
 pub mod migrations;
@@ -31,7 +32,7 @@ mod schema_walk;
 pub mod scope;
 pub mod secrets;
 mod session_client;
-/// Host-owned generic SQL atomic plans for thin database adapters.
+/// Host-owned generic SQL atomic plans for database adapters.
 pub mod sql_plan;
 mod store;
 mod text;
@@ -56,16 +57,16 @@ pub use backup::{
     DatabaseUnitKind, IdentityHighWater, PreparedPluginUnit, RestorePlan, SchemaBackupOpts,
     ValidatedBackup, BACKUPS_DIR, BACKUP_FORMAT_VERSION, BACKUP_RETENTION, LIBRARY_SKIP_TABLES,
 };
-pub use bookclerk_plugin_abi::GuestSqlPolicy;
+pub use bookclerk_plugin_abi::{AdapterBackupOps, GuestSqlPolicy, SharedAdapterBackupOps};
 pub use db_atomic::{
     db_atomic_operation_id, db_atomic_request_hash, execute_db_atomic, execute_named_atomic,
 };
 pub use email::{gravatar_hash, is_valid_user_email, normalize_user_email};
 pub use error::{LibraryError, Result};
 pub use host_schema::{
-    apply_host_schema, apply_host_schema_with_batch, apply_host_schema_with_batch_opts,
-    apply_host_schema_with_options, current_schema_state, current_schema_version,
-    ensure_restore_target_is_replaceable, migrate_host_schema_to,
+    apply_host_schema, apply_host_schema_on, apply_host_schema_with_batch,
+    apply_host_schema_with_batch_opts, apply_host_schema_with_options, current_schema_state,
+    current_schema_version, ensure_restore_target_is_replaceable, migrate_host_schema_to,
     migrate_host_schema_to_with_batch, HostSchemaKind, SchemaApplyOptions, SchemaBatch,
 };
 pub use in_process_atomic::InProcessSqliteAtomic;
@@ -77,9 +78,8 @@ pub use master_key::{
 };
 pub use migrations::{
     binding_bootstrap_sql, current_canonical_schema, current_canonical_table_names,
-    host_migration_plan, latest_schema_postgres, latest_schema_sqlite, unreleased_checksum,
-    HostMigrationStep, MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
-    UNRELEASED_SQL,
+    host_migration_plan, latest_schema_sqlite, unreleased_checksum, HostMigrationStep,
+    MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION, UNRELEASED_SQL,
 };
 pub use models::{
     catalog_subscribers_for_event, collapse_live_subscriber_nodes, content_kind_from_classic,

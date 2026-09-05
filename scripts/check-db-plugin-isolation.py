@@ -35,6 +35,10 @@ FORBIDDEN_IMPORTS = (
     re.compile(r"\binterpret_plan\b"),
     re.compile(r"\bDbAtomicParams\b"),
     re.compile(r"\batomic_status\b"),
+    # Host semantic frontend — adapters must not rerun it.
+    re.compile(r"\bdesugar_canonical_sql\b"),
+    re.compile(r"\bdesugar_execute_request\b"),
+    re.compile(r"\bUnresolvedExecuteRequest\b"),
 )
 
 # Application tables the host owns. Guests must not mention these identifiers.
@@ -161,15 +165,17 @@ def iter_plugin_sources() -> list[Path]:
 
 
 def strip_cfg_test_regions(src: str) -> str:
-    """Replace `#[cfg(test)]` modules and item blocks with spaces (keep newlines)."""
+    """Replace test-only modules and `#[test]` / `#[tokio::test]` items with spaces."""
     out = list(src)
+    markers = ("#[cfg(test)]", "#[test]", "#[tokio::test")
     i = 0
-    marker = "#[cfg(test)]"
     while True:
-        idx = src.find(marker, i)
+        idx = min(
+            (src.find(m, i) for m in markers if src.find(m, i) >= 0),
+            default=-1,
+        )
         if idx < 0:
             break
-        # Find the next `{` after the attribute (mod tests { ... } or fn ... {).
         brace = src.find("{", idx)
         if brace < 0:
             break
@@ -248,12 +254,63 @@ FORBIDDEN_BOOTSTRAP_READS = (
     re.compile(r"\bdiagnostic_engine\s*:"),
 )
 
+# Host domain/planner crates must not rewrite canonical `?` into engine `$n`.
+FORBIDDEN_LIBRARY_PLACEHOLDER_REWRITE = (
+    re.compile(r"rewrite_sql_placeholders"),
+    re.compile(r"""push\(['\"]\$['\"]\)"""),
+    re.compile(r"""push_str\(['\"]\$['\"]\)"""),
+)
+
+# Adapter-owned physical lowering: library production sources must not call it.
+FORBIDDEN_LIBRARY_LOWERING = (
+    re.compile(r"\blower_canonical_sql\b"),
+    re.compile(r"\blower_canonical_sql_typed\b"),
+    re.compile(r"\blower_canonical_to_postgres\b"),
+    re.compile(r"\blower_canonical_ddl_to_postgres\b"),
+    re.compile(r"\bschema_sql_for_backend\b"),
+    re.compile(r"\bexpand_host_schema_batch\b"),
+    re.compile(r"\bpostgres_identity_companions\b"),
+    re.compile(r"\bbinding_companions\b"),
+    re.compile(r"\brealize_host_ddl\b"),
+    re.compile(r"\brealize_binding_ddl\b"),
+    re.compile(r"\bfrom_adapter_backend\b"),
+    re.compile(r"\bexecute_physical_sql\b"),
+    re.compile(r"\bquery_physical_sql\b"),
+    re.compile(r"\bquery_physical_sql_typed\b"),
+    re.compile(r"\bload_physical_sql_type_env\b"),
+    re.compile(r"bookclerk_db_exec::execute_typed_on_session"),
+    re.compile(r"bookclerk_db_exec::execute_typed_on_txn\b"),
+    re.compile(r"bookclerk_db_exec::execute_typed_join_body"),
+    re.compile(r"\bHostExecuteEnvelope\b"),
+    re.compile(r"\bget_database_backend\b"),
+)
+
+# Host backup/schema must not emit engine catalog or isolation SQL.
+FORBIDDEN_LIBRARY_DIALECT_SQL = (
+    re.compile(r"FROM\s+sqlite_sequence\b", re.IGNORECASE),
+    re.compile(r"INTO\s+sqlite_sequence\b", re.IGNORECASE),
+    re.compile(r"FROM\s+sqlite_master\b", re.IGNORECASE),
+    re.compile(r"\binformation_schema\b", re.IGNORECASE),
+    re.compile(r"REPEATABLE\s+READ", re.IGNORECASE),
+    re.compile(r"defer_foreign_keys", re.IGNORECASE),
+    re.compile(r"DROP\s+FUNCTION\b", re.IGNORECASE),
+    re.compile(r"PRAGMA\s+user_version", re.IGNORECASE),
+    re.compile(r"FROM\s+pragma_user_version\b", re.IGNORECASE),
+)
+
 
 def iter_library_sources() -> list[Path]:
     files: list[Path] = []
     for glob in LIBRARY_BOOTSTRAP_GLOBS:
         files.extend(ROOT.glob(glob))
-    return sorted({p.resolve() for p in files if p.is_file()})
+    skip_names = {"tests.rs", "conformance.rs"}
+    return sorted(
+        {
+            p.resolve()
+            for p in files
+            if p.is_file() and p.name not in skip_names
+        }
+    )
 
 
 def check_library_bootstrap_isolation(path: Path) -> list[str]:
@@ -270,6 +327,65 @@ def check_library_bootstrap_isolation(path: Path) -> list[str]:
                 "must not drive host schema/plan/domain code "
                 "(see docs/sql-contract/v1.md; SeaORM bootstrap stays in plugin-host)"
             )
+    for rx in FORBIDDEN_LIBRARY_PLACEHOLDER_REWRITE:
+        for m in rx.finditer(scanned):
+            line = scanned.count("\n", 0, m.start()) + 1
+            hits.append(
+                f"{rel}:{line}: host SQL must stay canonical `?` (`{m.group(0)}`); "
+                "adapter SDK lowers placeholders"
+            )
+    for rx in FORBIDDEN_LIBRARY_LOWERING:
+        for m in rx.finditer(scanned):
+            line = scanned.count("\n", 0, m.start()) + 1
+            hits.append(
+                f"{rel}:{line}: host must not call adapter lowering `{m.group(0)}`; "
+                "send canonical SQL through AdapterDatabaseSession.execute"
+            )
+    for rx in FORBIDDEN_LIBRARY_DIALECT_SQL:
+        for m in rx.finditer(scanned):
+            line = scanned.count("\n", 0, m.start()) + 1
+            hits.append(
+                f"{rel}:{line}: host must not emit engine dialect SQL `{m.group(0)}`; "
+                "adapters own snapshot/identity/restore primitives"
+            )
+    return hits
+
+
+PLUGIN_HOST_GLOBS = ("crates/bookclerk-plugin-host/src/**/*.rs",)
+
+FORBIDDEN_PLUGIN_HOST_LOWERING = (
+    re.compile(r"\blower_canonical_sql\b"),
+    re.compile(r"\blower_canonical_sql_typed\b"),
+    re.compile(r"\blower_canonical_ddl_to_postgres\b"),
+    re.compile(r"\bschema_sql_for_backend\b"),
+    re.compile(r"\brealize_host_ddl\b"),
+    re.compile(r"\brealize_binding_ddl\b"),
+    re.compile(r"\bfrom_adapter_backend\b"),
+    re.compile(r"\bexecute_physical_sql\b"),
+    re.compile(r"\bquery_physical_sql\b"),
+)
+
+
+def iter_plugin_host_sources() -> list[Path]:
+    files: list[Path] = []
+    for glob in PLUGIN_HOST_GLOBS:
+        files.extend(ROOT.glob(glob))
+    return sorted({p.resolve() for p in files if p.is_file()})
+
+
+def check_plugin_host_isolation(path: Path) -> list[str]:
+    """Forbid plugin-host production from calling adapter physical lowering."""
+    rel = path.relative_to(ROOT).as_posix()
+    src = path.read_text(encoding="utf-8")
+    scanned = strip_comments(strip_cfg_test_regions(src))
+    hits: list[str] = []
+    for rx in FORBIDDEN_PLUGIN_HOST_LOWERING:
+        for m in rx.finditer(scanned):
+            line = scanned.count("\n", 0, m.start()) + 1
+            hits.append(
+                f"{rel}:{line}: plugin-host must not call adapter lowering `{m.group(0)}`; "
+                "send canonical AdapterExecuteRequest"
+            )
     return hits
 
 
@@ -285,20 +401,24 @@ def main() -> int:
     library_files = iter_library_sources()
     for path in library_files:
         hits.extend(check_library_bootstrap_isolation(path))
+    host_files = iter_plugin_host_sources()
+    for path in host_files:
+        hits.extend(check_plugin_host_isolation(path))
     if hits:
         print("Database plugin isolation violations:", file=sys.stderr)
         for h in hits:
             print(f"  {h}", file=sys.stderr)
         print(
             "Guests must execute host-authored plans only; host selects schema versions. "
-            "Bootstrap sqlFamily/diagnosticEngine must not branch host planners. "
+            "Host SQL stays canonical; adapters own physical lowering. "
+            "Diagnostic engine identity must not admit or generate SQL. "
             "See docs/adr/sql-database-contract.md and docs/sql-contract/v1.md",
             file=sys.stderr,
         )
         return 1
     print(
         f"ok: {len(files)} database plugin sources + {len(library_files)} library sources "
-        "+ cargo metadata"
+        f"+ {len(host_files)} plugin-host sources + cargo metadata"
     )
     return 0
 

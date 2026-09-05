@@ -17,7 +17,7 @@ use crate::backup::schema::{
 use crate::backup::util::validate_cell;
 use crate::backup::verify::{verify_recovery_point, verify_unit};
 use crate::host_schema::{
-    apply_fresh_schema_sqlite, apply_host_schema, current_schema_state,
+    apply_fresh_schema_sqlite, apply_host_schema, apply_host_schema_on, current_schema_state,
     ensure_restore_target_is_replaceable, HostSchemaKind,
 };
 use crate::migrations::{
@@ -46,6 +46,8 @@ fn backup_req(files: &Path, state: SchemaState, reason: BackupReason) -> BackupR
         max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
         max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
         plugin_units: Vec::new(),
+        adapter: None,
+        physical_engine: None,
     }
 }
 
@@ -67,10 +69,34 @@ fn restore_without_atomic() -> CanonicalRestoreOpts {
     }
 }
 
-/// Third-party SQLite-family adapter: `schemaMigrations` without `pragmaUserVersion`.
+fn postgres_engine() -> bookclerk_db_exec::PhysicalEngine {
+    bookclerk_db_exec::PhysicalEngine::postgres()
+}
+
+fn restore_postgres() -> CanonicalRestoreOpts {
+    CanonicalRestoreOpts {
+        physical_engine: Some(postgres_engine()),
+        ..restore_for(HostSchemaKind::RowMarker)
+    }
+}
+
+fn restore_postgres_plugin() -> CanonicalRestoreOpts {
+    CanonicalRestoreOpts {
+        physical_engine: Some(postgres_engine()),
+        ..restore_ok()
+    }
+}
+
+fn export_postgres() -> CanonicalExportOpts {
+    CanonicalExportOpts {
+        physical_engine: Some(postgres_engine()),
+        ..CanonicalExportOpts::default()
+    }
+}
+
+/// Third-party adapter: `schemaMigrations` without extra flags.
 fn third_party_sqlite_row_marker_caps() -> DbCapabilities {
     let mut caps = DbCapabilities::advertised_sqlite();
-    caps.pragma_user_version = false;
     caps.schema_migrations = true;
     caps
 }
@@ -104,6 +130,7 @@ fn prepared_plugin(
         max_result_rows: FIRST_PARTY_MAX_RESULT_ROWS,
         max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
         max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
+        adapter: None,
     }
 }
 
@@ -284,7 +311,7 @@ fn admit_rejects_create_index_with_trailing_tokens() {
 #[test]
 fn restore_opts_kind_comes_from_capabilities_not_identity() {
     let sqlite = CanonicalRestoreOpts::from_caps(&DbCapabilities::advertised_sqlite()).unwrap();
-    assert_eq!(sqlite.host_schema_kind, HostSchemaKind::PragmaMarker);
+    assert_eq!(sqlite.host_schema_kind, HostSchemaKind::RowMarker);
 
     let postgres = CanonicalRestoreOpts::from_caps(&DbCapabilities::advertised_postgres()).unwrap();
     assert_eq!(postgres.host_schema_kind, HostSchemaKind::RowMarker);
@@ -293,9 +320,9 @@ fn restore_opts_kind_comes_from_capabilities_not_identity() {
         CanonicalRestoreOpts::from_caps(&third_party_sqlite_row_marker_caps()).unwrap();
     assert_eq!(third_party.host_schema_kind, HostSchemaKind::RowMarker);
 
-    let mut mixed = DbCapabilities::advertised_sqlite();
-    mixed.schema_migrations = true;
-    let err = CanonicalRestoreOpts::from_caps(&mixed).unwrap_err();
+    let mut none = DbCapabilities::advertised_sqlite();
+    none.schema_migrations = false;
+    let err = CanonicalRestoreOpts::from_caps(&none).unwrap_err();
     assert!(
         err.to_string().contains("not a known versioning contract"),
         "{err}"
@@ -367,15 +394,6 @@ fn order_key_prefers_pk_then_unique_then_full_row() {
     assert_eq!(
         order_key_columns(&keyless),
         vec!["a".to_string(), "b".to_string()]
-    );
-}
-
-#[test]
-fn restore_insert_sql_lowers_question_marks_on_postgres() {
-    let sql = "INSERT INTO t (a, b) VALUES (?, ?)";
-    assert_eq!(
-        bookclerk_db_exec::lower_canonical_sql(DbBackend::Postgres, sql),
-        "INSERT INTO t (a, b) VALUES ($1, $2)"
     );
 }
 
@@ -626,6 +644,8 @@ async fn uninitialized_skips_even_with_include_plugin_databases() {
             max_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             plugin_units: Vec::new(),
+            adapter: None,
+            physical_engine: None,
         },
     )
     .await
@@ -639,7 +659,7 @@ async fn sqlite_library_round_trip_replaces_not_merges() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     db.execute_raw(Statement::from_string(
@@ -649,7 +669,7 @@ async fn sqlite_library_round_trip_replaces_not_merges() {
     ))
     .await
     .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let outcome = backup_library(&db, &backup_req(files.path(), state, BackupReason::Manual))
@@ -679,7 +699,7 @@ async fn second_recovery_point_reuses_unchanged_objects() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     db.execute_raw(Statement::from_string(
@@ -689,7 +709,7 @@ async fn second_recovery_point_reuses_unchanged_objects() {
     ))
     .await
     .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let first = backup_library(
@@ -727,10 +747,10 @@ async fn gc_retains_live_objects_and_drops_orphans() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let first = backup_library(
@@ -770,10 +790,10 @@ async fn gc_fails_closed_when_published_manifest_is_unreadable() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let first = backup_library(
@@ -896,10 +916,10 @@ async fn missing_and_corrupt_objects_fail_verify() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let outcome = backup_library(&db, &backup_req(files.path(), state, BackupReason::Manual))
@@ -935,7 +955,7 @@ async fn omitted_backup_table_fails_verify_before_restore_mutates() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     db.execute_raw(Statement::from_string(
@@ -951,7 +971,7 @@ async fn omitted_backup_table_fails_verify_before_restore_mutates() {
     )
     .await;
     assert_eq!(before, 1);
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let outcome = backup_library(&db, &backup_req(files.path(), state, BackupReason::Manual))
@@ -1034,7 +1054,7 @@ async fn restore_fails_closed_when_target_frozen_history_is_newer() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     db.execute_raw(Statement::from_string(
@@ -1044,7 +1064,7 @@ async fn restore_fails_closed_when_target_frozen_history_is_newer() {
     ))
     .await
     .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let outcome = backup_library(&db, &backup_req(files.path(), state, BackupReason::Manual))
@@ -1064,7 +1084,7 @@ async fn restore_fails_closed_when_target_frozen_history_is_newer() {
     ))
     .await
     .unwrap();
-    let err = ensure_restore_target_is_replaceable(&db, HostSchemaKind::PragmaMarker)
+    let err = ensure_restore_target_is_replaceable(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap_err();
     assert!(
@@ -1135,7 +1155,7 @@ async fn restore_uses_capability_kind_not_seaorm_backend() {
     let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&src, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&src, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     src.execute_raw(Statement::from_string(
@@ -1145,7 +1165,7 @@ async fn restore_uses_capability_kind_not_seaorm_backend() {
     ))
     .await
     .unwrap();
-    let state = current_schema_state(&src, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&src, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let outcome = backup_library(&src, &backup_req(files.path(), state, BackupReason::Manual))
@@ -1154,35 +1174,18 @@ async fn restore_uses_capability_kind_not_seaorm_backend() {
         .unwrap();
     let repo = BackupRepository::open(files.path()).unwrap();
 
-    let dest_pragma = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+    let dest = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    seed_sqlite_with_leftover_pragma(&dest_pragma).await;
-    let err = restore_backup_in_repo(
-        &dest_pragma,
-        &repo,
-        &outcome.manifest.id,
-        &restore_for(HostSchemaKind::PragmaMarker),
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("PRAGMA user_version") || err.to_string().contains("user_version"),
-        "{err}"
-    );
-
-    let dest_row = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
-        .await
-        .unwrap();
-    seed_sqlite_with_leftover_pragma(&dest_row).await;
+    seed_sqlite_with_leftover_pragma(&dest).await;
     let opts = CanonicalRestoreOpts::from_caps(&third_party_sqlite_row_marker_caps()).unwrap();
     assert_eq!(opts.host_schema_kind, HostSchemaKind::RowMarker);
-    restore_backup_in_repo(&dest_row, &repo, &outcome.manifest.id, &opts)
+    restore_backup_in_repo(&dest, &repo, &outcome.manifest.id, &opts)
         .await
         .unwrap();
     assert_eq!(
         count(
-            &dest_row,
+            &dest,
             "SELECT COUNT(*) AS count FROM accounts WHERE account_id = 'keep'"
         )
         .await,
@@ -1257,15 +1260,144 @@ async fn plugin_restore_fails_closed_when_stale_binding_lacks_catalog() {
     );
 }
 
+#[tokio::test]
+async fn plugin_backup_round_trips_user_table_named_pg_notes() {
+    let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_bootstrap(&src).await;
+    apply_admitted_sql(
+        &src,
+        &["CREATE TABLE pg_notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)"],
+        CanonicalRestoreKind::PluginBinding,
+    )
+    .await
+    .unwrap();
+    src.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO pg_notes (id, body) VALUES (1, 'keep')",
+    ))
+    .await
+    .unwrap();
+    let names = super::util::backup_list_user_relations(&src, None)
+        .await
+        .unwrap();
+    assert!(
+        names.iter().any(|n| n == "pg_notes"),
+        "user table pg_notes must not be treated as an engine catalog: {names:?}"
+    );
+
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let unit = capture::capture_plugin_unit(
+        &src,
+        &repo,
+        &CanonicalExportOpts::default(),
+        "demo",
+        "pg_notes",
+        "sqlite",
+    )
+    .await
+    .unwrap();
+    let dest = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    restore_backup_unit(
+        &dest,
+        &repo,
+        &unit,
+        CanonicalRestoreKind::PluginBinding,
+        &restore_ok(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        count(
+            &dest,
+            "SELECT COUNT(*) AS count FROM pg_notes WHERE body = 'keep'"
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn plugin_restore_fails_closed_when_pg_notes_leftover_lacks_catalog() {
+    let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_bootstrap(&src).await;
+    apply_admitted_sql(
+        &src,
+        &["CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)"],
+        CanonicalRestoreKind::PluginBinding,
+    )
+    .await
+    .unwrap();
+    src.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO notes (id, body) VALUES (1, 'src')",
+    ))
+    .await
+    .unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let unit = capture::capture_plugin_unit(
+        &src,
+        &repo,
+        &CanonicalExportOpts::default(),
+        "demo",
+        "notes",
+        "sqlite",
+    )
+    .await
+    .unwrap();
+    let dest = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    dest.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE TABLE pg_notes (id INTEGER PRIMARY KEY)",
+    ))
+    .await
+    .unwrap();
+    dest.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO pg_notes (id) VALUES (7)",
+    ))
+    .await
+    .unwrap();
+    let err = restore_backup_unit(
+        &dest,
+        &repo,
+        &unit,
+        CanonicalRestoreKind::PluginBinding,
+        &restore_ok(),
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("reset or recreate")
+            || err.to_string().contains("no durable canonical DDL catalog"),
+        "{err}"
+    );
+    assert_eq!(
+        count(&dest, "SELECT COUNT(*) AS count FROM pg_notes").await,
+        1
+    );
+}
+
 #[test]
-fn capture_text_order_by_lowers_postgres_collate_c() {
+fn capture_text_order_by_desugars_and_proves_collate_sites() {
     let parsed =
         parse_create_table_schema("CREATE TABLE items (k TEXT PRIMARY KEY, extra TEXT)").unwrap();
     let order = canonical_order_by_sql(&parsed);
     let sql = format!("SELECT k, extra FROM items ORDER BY {order} LIMIT 10 OFFSET 0");
     let mut env = bookclerk_plugin_abi::SqlTypeEnv::new();
     env.insert_table("items", parsed.columns.clone());
-    let req = bookclerk_plugin_abi::ExecuteRequest {
+    let mut req = bookclerk_plugin_abi::ExecuteRequest {
         operation_id: "backup-capture".into(),
         request_hash: String::new(),
         statements: vec![bookclerk_plugin_abi::TypedDbStatement {
@@ -1277,13 +1409,16 @@ fn capture_text_order_by_lowers_postgres_collate_c() {
         }],
         deadline_unix_ms: 0,
     };
+    bookclerk_plugin_abi::desugar_execute_request(&mut req);
     let proofs = bookclerk_plugin_abi::typecheck_execute_request_proofs(&req, &env).unwrap();
-    let lowered =
-        bookclerk_db_exec::lower_canonical_sql_typed(DbBackend::Postgres, &sql, proofs.first())
-            .unwrap();
+    let sql = req.statements[0].sql.as_str();
     assert!(
-        lowered.contains("COLLATE \"C\""),
-        "TEXT ORDER BY must be binary-portable on Postgres: {lowered}"
+        sql.contains("NULLS"),
+        "host desugar must make ORDER BY NULLS explicit: {sql}"
+    );
+    assert!(
+        proofs.iter().any(|p| !p.text_collate_sites.is_empty()),
+        "TEXT ORDER BY must prove collate sites for adapter COLLATE realization"
     );
 }
 
@@ -1293,10 +1428,10 @@ async fn retention_never_deletes_manual_backups() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     backup_library(
@@ -1332,10 +1467,10 @@ async fn missing_consistent_backup_read_fails_closed() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
@@ -1350,7 +1485,7 @@ async fn restore_without_atomic_unit_restore_fails_before_drop() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     db.execute_raw(Statement::from_string(
@@ -1360,7 +1495,7 @@ async fn restore_without_atomic_unit_restore_fails_before_drop() {
     ))
     .await
     .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let outcome = backup_library(&db, &backup_req(files.path(), state, BackupReason::Manual))
@@ -1523,10 +1658,10 @@ async fn capture_fails_closed_when_schema_state_changes_inside_txn() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     db.execute_raw(Statement::from_string(
@@ -1654,14 +1789,14 @@ async fn library_only_restore_preserves_plugin_registry() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     LibraryStore::from_connection(db.clone())
         .record_plugin_database("demoplug", "notes", "sqlite", "/tmp/live.db")
         .await
         .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let outcome = backup_library(&db, &backup_req(files.path(), state, BackupReason::Manual))
@@ -1686,7 +1821,7 @@ async fn restore_sqlite_keeps_foreign_keys_enforced() {
     let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&src, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&src, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     src.execute_raw(Statement::from_string(
@@ -1696,7 +1831,7 @@ async fn restore_sqlite_keeps_foreign_keys_enforced() {
     ))
     .await
     .unwrap();
-    let state = current_schema_state(&src, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&src, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let outcome = backup_library(&src, &backup_req(files.path(), state, BackupReason::Manual))
@@ -1706,7 +1841,7 @@ async fn restore_sqlite_keeps_foreign_keys_enforced() {
     let dest = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&dest, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&dest, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     restore_backup(&dest, files.path(), &outcome.manifest.id, &restore_ok())
@@ -1745,14 +1880,14 @@ async fn include_plugin_databases_fails_closed_without_prepared_unit() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     LibraryStore::from_connection(db.clone())
         .record_plugin_database("demoplug", "notes", "sqlite", "/tmp/unused.db")
         .await
         .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
@@ -1770,7 +1905,7 @@ async fn include_plugin_databases_captures_and_restores_plugin_unit() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let plugin = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
@@ -1795,7 +1930,7 @@ async fn include_plugin_databases_captures_and_restores_plugin_unit() {
         .record_plugin_database("demoplug", "notes", "sqlite", "memory")
         .await
         .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
@@ -1854,7 +1989,7 @@ async fn include_plugin_databases_captures_two_bindings() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let notes = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
@@ -1888,7 +2023,7 @@ async fn include_plugin_databases_captures_two_bindings() {
         .record_plugin_database("demoplug", "cache", "sqlite", "memory-cache")
         .await
         .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
@@ -1910,7 +2045,7 @@ async fn quoted_unicode_text_round_trips() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     db.execute_raw(Statement::from_string(
@@ -1920,7 +2055,7 @@ async fn quoted_unicode_text_round_trips() {
     ))
     .await
     .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let outcome = backup_library(&db, &backup_req(files.path(), state, BackupReason::Manual))
@@ -1950,7 +2085,7 @@ async fn missing_host_table_aborts_backup() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     db.execute_raw(Statement::from_string(
@@ -1959,7 +2094,7 @@ async fn missing_host_table_aborts_backup() {
     ))
     .await
     .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let err = backup_library(&db, &backup_req(files.path(), state, BackupReason::Manual))
@@ -2160,7 +2295,7 @@ async fn postgres_library_backup_round_trip() {
     let Some((db, _)) = postgres_throwaway().await else {
         return;
     };
-    apply_host_schema(&db, HostSchemaKind::RowMarker)
+    apply_host_schema_on(postgres_engine(), &db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     db.execute_raw(Statement::from_string(
@@ -2176,6 +2311,7 @@ async fn postgres_library_backup_round_trip() {
     let files = tempfile::tempdir().unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
     req.backend_at_capture = "postgres".into();
+    req.physical_engine = Some(postgres_engine());
     let outcome = backup_library(&db, &req).await.unwrap().unwrap();
     db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
@@ -2184,14 +2320,9 @@ async fn postgres_library_backup_round_trip() {
     ))
     .await
     .unwrap();
-    restore_backup(
-        &db,
-        files.path(),
-        &outcome.manifest.id,
-        &restore_for(HostSchemaKind::RowMarker),
-    )
-    .await
-    .unwrap();
+    restore_backup(&db, files.path(), &outcome.manifest.id, &restore_postgres())
+        .await
+        .unwrap();
     let n: i64 = db
         .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
@@ -2229,16 +2360,10 @@ async fn postgres_capture_orders_nulls_first_with_declared_tiebreakers() {
     }
     let files = tempfile::tempdir().unwrap();
     let repo = BackupRepository::open(files.path()).unwrap();
-    let unit = capture::capture_plugin_unit(
-        &db,
-        &repo,
-        &CanonicalExportOpts::default(),
-        "demo",
-        "items",
-        "postgres",
-    )
-    .await
-    .unwrap();
+    let unit =
+        capture::capture_plugin_unit(&db, &repo, &export_postgres(), "demo", "items", "postgres")
+            .await
+            .unwrap();
     let meta = unit.tables.iter().find(|t| t.name == "items").unwrap();
     let mut rows = Vec::new();
     for digest in &meta.chunks {
@@ -2281,16 +2406,10 @@ async fn postgres_capture_text_order_matches_utf8_binary() {
     }
     let files = tempfile::tempdir().unwrap();
     let repo = BackupRepository::open(files.path()).unwrap();
-    let unit = capture::capture_plugin_unit(
-        &db,
-        &repo,
-        &CanonicalExportOpts::default(),
-        "demo",
-        "items",
-        "postgres",
-    )
-    .await
-    .unwrap();
+    let unit =
+        capture::capture_plugin_unit(&db, &repo, &export_postgres(), "demo", "items", "postgres")
+            .await
+            .unwrap();
     let meta = unit.tables.iter().find(|t| t.name == "items").unwrap();
     let mut rows = Vec::new();
     for digest in &meta.chunks {
@@ -2316,9 +2435,13 @@ async fn postgres_library_restores_to_sqlite() {
     let Some((pg, _)) = postgres_throwaway().await else {
         return;
     };
-    apply_host_schema(&pg, HostSchemaKind::RowMarker)
-        .await
-        .unwrap();
+    apply_host_schema_on(
+        bookclerk_db_exec::PhysicalEngine::postgres(),
+        &pg,
+        HostSchemaKind::RowMarker,
+    )
+    .await
+    .unwrap();
     pg.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         "INSERT INTO accounts (account_id, marketplace, source, created_at, updated_at) \
@@ -2332,11 +2455,12 @@ async fn postgres_library_restores_to_sqlite() {
     let files = tempfile::tempdir().unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
     req.backend_at_capture = "postgres".into();
+    req.physical_engine = Some(postgres_engine());
     let outcome = backup_library(&pg, &req).await.unwrap().unwrap();
     let sqlite = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&sqlite, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&sqlite, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     restore_backup(&sqlite, files.path(), &outcome.manifest.id, &restore_ok())
@@ -2361,7 +2485,7 @@ async fn postgres_sqlite_library_restores_to_postgres() {
     let sqlite = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&sqlite, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&sqlite, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     sqlite
@@ -2372,7 +2496,7 @@ async fn postgres_sqlite_library_restores_to_postgres() {
         ))
         .await
         .unwrap();
-    let state = current_schema_state(&sqlite, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&sqlite, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let files = tempfile::tempdir().unwrap();
@@ -2383,17 +2507,16 @@ async fn postgres_sqlite_library_restores_to_postgres() {
     .await
     .unwrap()
     .unwrap();
-    apply_host_schema(&pg, HostSchemaKind::RowMarker)
-        .await
-        .unwrap();
-    restore_backup(
+    apply_host_schema_on(
+        bookclerk_db_exec::PhysicalEngine::postgres(),
         &pg,
-        files.path(),
-        &outcome.manifest.id,
-        &restore_for(HostSchemaKind::RowMarker),
+        HostSchemaKind::RowMarker,
     )
     .await
     .unwrap();
+    restore_backup(&pg, files.path(), &outcome.manifest.id, &restore_postgres())
+        .await
+        .unwrap();
     let n: i64 = pg
         .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
@@ -2466,7 +2589,7 @@ async fn postgres_sqlite_plugin_restores_to_postgres() {
         &repo,
         &unit,
         CanonicalRestoreKind::PluginBinding,
-        &restore_ok(),
+        &restore_postgres_plugin(),
         false,
     )
     .await

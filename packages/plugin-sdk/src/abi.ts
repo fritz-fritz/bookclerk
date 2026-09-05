@@ -12,7 +12,7 @@ export const PRODUCT_API_VERSION = 2 as const;
 export const ABI_MAJOR = 2 as const;
 
 /** Minor ABI number. Hosts ignore unknown optional fields. */
-export const ABI_MINOR = 19 as const;
+export const ABI_MINOR = 22 as const;
 
 /** Current envelope schema version for `JobInvocation`. */
 export const ENVELOPE_VERSION = 1 as const;
