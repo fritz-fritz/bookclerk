@@ -19,12 +19,6 @@ use crate::sql_plan::CompiledAtomic;
 
 pub use bookclerk_db_exec::AtomicSession;
 
-/// True when native in-process tests must physically lower at this engine.
-#[must_use]
-pub(crate) fn in_process_postgres(engine: Option<PhysicalEngine>) -> Option<PhysicalEngine> {
-    engine.filter(|e| *e == PhysicalEngine::postgres())
-}
-
 /// Stamp and run one canonical statement on an already-open in-process connection.
 ///
 /// # Errors
@@ -35,7 +29,6 @@ pub(crate) async fn execute_typed_on_open<C>(
     conn: &C,
     req: &ExecuteRequest,
     type_env: SqlTypeEnv,
-    timing_source: &str,
     max_result_rows: u32,
 ) -> Result<ExecuteReply>
 where
@@ -47,7 +40,7 @@ where
         engine,
         conn,
         &envelope,
-        timing_source,
+        engine.timing_source(),
         ExecCaps::from(max_result_rows),
         AtomicSession::from_deadline(None).with_type_env(type_env),
         None,
@@ -56,7 +49,7 @@ where
     .map_err(LibraryError::from_db_err)
 }
 
-/// Execute canonical SQL: sqlite-shaped transport, or in-process postgres lowering.
+/// Execute leftover SQL: canonical transport, or one physical lowering pass.
 ///
 /// # Errors
 ///
@@ -72,7 +65,7 @@ where
     C: ConnectionTrait + StreamTrait,
 {
     let values: Vec<Value> = values.into_iter().collect();
-    if let Some(engine) = in_process_postgres(engine) {
+    if let Some(engine) = engine {
         let parameters = values
             .iter()
             .map(db_value_from_sea)
@@ -90,7 +83,7 @@ where
                 result_selection: DbResultSelection::AffectedRows,
             }],
         };
-        let reply = execute_typed_on_open(engine, conn, &req, type_env, "postgres_txn", 0).await?;
+        let reply = execute_typed_on_open(engine, conn, &req, type_env, 0).await?;
         return Ok(reply
             .statements
             .first()
@@ -103,7 +96,7 @@ where
     Ok(res.rows_affected())
 }
 
-/// Query canonical SQL: sqlite-shaped transport, or in-process postgres lowering.
+/// Query leftover SQL on a real in-process engine (one physical lowering pass).
 ///
 /// # Errors
 ///
@@ -119,9 +112,9 @@ pub(crate) async fn query_sql_on<C>(
 where
     C: ConnectionTrait + StreamTrait,
 {
-    let Some(engine) = in_process_postgres(engine) else {
+    let Some(engine) = engine else {
         return Err(LibraryError::Schema(
-            "query_sql_on requires an in-process postgres engine".into(),
+            "query_sql_on requires a physical in-process engine".into(),
         ));
     };
     let parameters = values
@@ -141,15 +134,7 @@ where
             result_selection: DbResultSelection::Rows,
         }],
     };
-    let reply = execute_typed_on_open(
-        engine,
-        conn,
-        &req,
-        type_env.clone(),
-        "postgres_txn",
-        max_rows,
-    )
-    .await?;
+    let reply = execute_typed_on_open(engine, conn, &req, type_env.clone(), max_rows).await?;
     Ok(reply
         .statements
         .into_iter()

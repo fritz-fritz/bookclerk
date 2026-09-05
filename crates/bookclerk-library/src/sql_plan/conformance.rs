@@ -483,12 +483,49 @@ async fn timing_receipt_shape_is_uniform() {
 }
 
 #[tokio::test]
+async fn leftover_physical_sqlite_glob_lowers_like_case_sensitivity() {
+    let db = mem_db().await;
+    crate::host_sql::execute_host_canonical(
+        &db,
+        "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('ABC', 0)",
+        std::iter::empty::<sea_orm::Value>(),
+    )
+    .await
+    .unwrap();
+    let sql = "SELECT slot_key FROM db_serialization_slots WHERE slot_key LIKE 'abc'";
+    let canonical =
+        crate::host_sql::query_host_canonical(&db, sql, std::iter::empty::<sea_orm::Value>())
+            .await
+            .unwrap();
+    assert_eq!(
+        canonical.len(),
+        1,
+        "canonical leftover LIKE must stay sqlite nocase"
+    );
+
+    let physical = crate::sql_plan::query_sql_on(
+        Some(PhysicalEngine::sqlite()),
+        &db,
+        sql,
+        std::iter::empty::<sea_orm::Value>(),
+        &crate::migrations::host_sql_type_env(),
+        8,
+    )
+    .await
+    .unwrap();
+    assert!(
+        physical.is_empty(),
+        "physical sqlite leftover must GLOB-lower (case-sensitive): {physical:?}"
+    );
+}
+
+#[tokio::test]
 async fn serialization_slot_bump_is_monotonic() {
     let db = mem_db().await;
-    crate::sql_plan::lock_serialization_slot(&db, PhysicalEngine::sqlite(), "job-queue")
+    crate::sql_plan::lock_serialization_slot(&db, Some(PhysicalEngine::sqlite()), "job-queue")
         .await
         .unwrap();
-    crate::sql_plan::lock_serialization_slot(&db, PhysicalEngine::sqlite(), "job-queue")
+    crate::sql_plan::lock_serialization_slot(&db, Some(PhysicalEngine::sqlite()), "job-queue")
         .await
         .unwrap();
     let rows = sea_orm::ConnectionTrait::query_all_raw(

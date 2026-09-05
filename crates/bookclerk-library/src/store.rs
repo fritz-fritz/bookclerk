@@ -59,12 +59,12 @@ pub struct LibraryStore {
     max_payload_bytes: u32,
     /// Full negotiated capability advertisement (limits, schema flags, timing).
     caps: Arc<bookclerk_plugin_abi::DbCapabilities>,
-    /// In-process physical engine for leftover canonical `?` SQL.
+    /// Leftover canonical `?` SQL execution target.
     ///
-    /// Production plugin-host stays [`bookclerk_db_exec::PhysicalEngine::sqlite`]
-    /// (sqlite-shaped proxy). Native postgres tests set
-    /// [`bookclerk_db_exec::PhysicalEngine::postgres`].
-    physical_engine: bookclerk_db_exec::PhysicalEngine,
+    /// Production plugin-host stays [`bookclerk_db_exec::SqlExecTarget::Canonical`]
+    /// so the sqlite-shaped proxy never physically lowers. Native in-process
+    /// tests set [`bookclerk_db_exec::SqlExecTarget::Physical`].
+    sql_exec: bookclerk_db_exec::SqlExecTarget,
 }
 
 impl std::fmt::Debug for LibraryStore {
@@ -90,21 +90,27 @@ impl LibraryStore {
             max_result_rows: 256,
             max_payload_bytes: 256 * 1024,
             caps: Arc::new(bookclerk_plugin_abi::DbCapabilities::advertised_d1()),
-            physical_engine: bookclerk_db_exec::PhysicalEngine::sqlite(),
+            sql_exec: bookclerk_db_exec::SqlExecTarget::Canonical,
         }
     }
 
     /// Sets the in-process physical engine used for leftover canonical SQL.
     #[must_use]
     pub fn with_physical_engine(mut self, engine: bookclerk_db_exec::PhysicalEngine) -> Self {
-        self.physical_engine = engine;
+        self.sql_exec = bookclerk_db_exec::SqlExecTarget::Physical(engine);
         self
     }
 
-    /// In-process physical engine for leftover canonical `?` SQL.
+    /// Leftover SQL engine: `None` is canonical transport; `Some` lowers once.
     #[must_use]
-    pub fn physical_engine(&self) -> bookclerk_db_exec::PhysicalEngine {
-        self.physical_engine
+    pub(crate) fn leftover_engine(&self) -> Option<bookclerk_db_exec::PhysicalEngine> {
+        self.sql_exec.leftover_engine()
+    }
+
+    /// In-process named-atomic engine (sqlite default for canonical stores).
+    #[must_use]
+    pub(crate) fn named_engine(&self) -> bookclerk_db_exec::PhysicalEngine {
+        self.sql_exec.named_engine()
     }
 
     /// Attach a guest atomic backend for named security operations.
@@ -198,7 +204,7 @@ impl LibraryStore {
         let caps = self.db_capabilities().clone();
         let typed_exec = self.typed_exec.clone();
         let exec_caps = caps.clone();
-        let engine = self.physical_engine;
+        let engine = self.named_engine();
         crate::sql_plan::execute_guest_atomic_with(req, &caps, policy, move |envelope| {
             let db = db.clone();
             let caps = exec_caps.clone();
@@ -211,16 +217,11 @@ impl LibraryStore {
                     // always inject [`crate::TypedAtomicExec`].
                     let deadline = (envelope.request.deadline_unix_ms > 0)
                         .then_some(envelope.request.deadline_unix_ms);
-                    let timing = if engine == bookclerk_db_exec::PhysicalEngine::postgres() {
-                        "postgres_txn"
-                    } else {
-                        "sqlite_txn"
-                    };
                     bookclerk_db_exec::execute_typed_envelope(
                         engine,
                         &db,
                         &envelope,
-                        timing,
+                        engine.timing_source(),
                         bookclerk_db_exec::ExecCaps::from_capabilities(&caps),
                         bookclerk_db_exec::AtomicSession::from_deadline(deadline)
                             .with_type_env(crate::migrations::host_sql_type_env()),
@@ -1036,7 +1037,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.delete_user(id).await;
         }
-        crate::db_atomic::delete_user(self.physical_engine, &self.db, id).await
+        crate::db_atomic::delete_user(self.named_engine(), &self.db, id).await
     }
 
     /// Deletes a user and related portal rows inside an open transaction; refuses the last owner.
@@ -1174,7 +1175,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.set_user_status(id, status).await;
         }
-        crate::db_atomic::set_user_status(self.physical_engine, &self.db, id, status).await
+        crate::db_atomic::set_user_status(self.named_engine(), &self.db, id, status).await
     }
 
     /// Sets user status inside an open transaction; disabling the last owner fails.
@@ -1246,7 +1247,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.set_user_password_hash(id, password_hash).await;
         }
-        crate::db_atomic::set_user_password_hash(self.physical_engine, &self.db, id, password_hash)
+        crate::db_atomic::set_user_password_hash(self.named_engine(), &self.db, id, password_hash)
             .await
     }
 
@@ -1520,7 +1521,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.set_user_role(id, role).await;
         }
-        crate::db_atomic::set_user_role(self.physical_engine, &self.db, id, role).await
+        crate::db_atomic::set_user_role(self.named_engine(), &self.db, id, role).await
     }
 
     /// Sets user role inside an open transaction; demoting the last active owner fails.
@@ -1974,7 +1975,7 @@ impl LibraryStore {
                 .await;
         }
         crate::db_atomic::redeem_claim_ticket_to_session(
-            self.physical_engine,
+            self.named_engine(),
             &self.db,
             token_hash,
             session_hash,
@@ -2711,7 +2712,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.take_oidc_rp_state(state_hash).await;
         }
-        crate::db_atomic::take_oidc_rp_state(self.physical_engine, &self.db, state_hash).await
+        crate::db_atomic::take_oidc_rp_state(self.named_engine(), &self.db, state_hash).await
     }
 
     /// Deletes and returns one-shot OIDC RP state by hash; `None` if missing or already taken.
@@ -2933,7 +2934,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.confirm_totp_enrollment(user_id, &record).await;
         }
-        crate::db_atomic::confirm_totp_enrollment(self.physical_engine, &self.db, user_id, &record)
+        crate::db_atomic::confirm_totp_enrollment(self.named_engine(), &self.db, user_id, &record)
             .await
     }
 
@@ -2967,7 +2968,7 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.disable_user_totp(user_id).await;
         }
-        crate::db_atomic::disable_user_totp(self.physical_engine, &self.db, user_id).await
+        crate::db_atomic::disable_user_totp(self.named_engine(), &self.db, user_id).await
     }
 
     /// Delete TOTP secrets and clear `totp_enabled` inside an open transaction.
@@ -3043,13 +3044,8 @@ impl LibraryStore {
         if let Some(atomic) = &self.atomic {
             return atomic.take_webauthn_challenge(challenge_id, kind).await;
         }
-        crate::db_atomic::take_webauthn_challenge(
-            self.physical_engine,
-            &self.db,
-            challenge_id,
-            kind,
-        )
-        .await
+        crate::db_atomic::take_webauthn_challenge(self.named_engine(), &self.db, challenge_id, kind)
+            .await
     }
 
     /// Deletes and returns a one-shot WebAuthn challenge; `None` if missing or already taken.

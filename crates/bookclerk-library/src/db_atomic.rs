@@ -18,11 +18,7 @@ use crate::{bytes_to_b64_string, SessionClientInfo};
 
 /// Timing source label for in-process named atomics (`sqlite_txn` / `postgres_txn`).
 fn atomic_timing_source(engine: bookclerk_db_exec::PhysicalEngine) -> &'static str {
-    if engine == bookclerk_db_exec::PhysicalEngine::postgres() {
-        "postgres_txn"
-    } else {
-        "sqlite_txn"
-    }
+    engine.timing_source()
 }
 
 /// Runs a compiled named atomic as one native SQL transaction.

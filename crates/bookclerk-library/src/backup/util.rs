@@ -116,9 +116,8 @@ where
             opts.max_request_bytes
         )));
     }
-    if let Some(engine) = crate::sql_plan::in_process_postgres(opts.physical_engine) {
-        crate::sql_plan::execute_typed_on_open(engine, conn, &req, type_env, "postgres_txn", 0)
-            .await?;
+    if let Some(engine) = opts.physical_engine {
+        crate::sql_plan::execute_typed_on_open(engine, conn, &req, type_env, 0).await?;
         return Ok(());
     }
     crate::host_sql::execute_host_canonical(

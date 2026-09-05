@@ -29,7 +29,7 @@ pub use exec::{
     execute_compiled_on, execute_compiled_on_capped, execute_typed_on, execute_typed_on_session,
     AtomicSession,
 };
-pub(crate) use exec::{execute_sql_on, execute_typed_on_open, in_process_postgres, query_sql_on};
+pub(crate) use exec::{execute_sql_on, execute_typed_on_open, query_sql_on};
 pub(crate) use guest_receipt::{unwrap_guest_typed_reply, wrap_guest_typed_request};
 pub use interpret::{interpret_typed_exec, PlanStmtResult};
 pub use named::{compile_claim_event_delivery, compile_named_request};

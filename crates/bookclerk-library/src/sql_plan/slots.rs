@@ -23,15 +23,16 @@ pub fn event_inflight_slot(plugin_id: &str, resource_class: &str) -> String {
 ///
 /// Canonical SQL uses `?` placeholders. Host transport never lowers; adapters
 /// realize `INSERT OR IGNORE` at the execute edge. This helper must run on the
-/// caller's transaction, not a nested `BEGIN`. In-process postgres tests pass
-/// [`PhysicalEngine::postgres`] so leftover SQL is lowered before execute.
+/// caller's transaction, not a nested `BEGIN`. [`None`] is canonical leftover
+/// SQL (production proxy). [`Some`] physically lowers once for that real
+/// in-process engine.
 ///
 /// # Errors
 ///
 /// Returns [`crate::LibraryError::Orm`] when either statement fails.
 pub async fn lock_serialization_slot<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     slot_key: &str,
 ) -> Result<()>
 where
@@ -44,14 +45,14 @@ where
     const BUMP: &str = "UPDATE db_serialization_slots SET bump = bump + 1 WHERE slot_key = ?";
     let env = crate::migrations::host_sql_type_env();
     crate::sql_plan::execute_sql_on(
-        Some(engine),
+        engine,
         db,
         INSERT,
         [slot_key.into(), slot_key.into()],
         env.clone(),
     )
     .await?;
-    crate::sql_plan::execute_sql_on(Some(engine), db, BUMP, [slot_key.into()], env).await?;
+    crate::sql_plan::execute_sql_on(engine, db, BUMP, [slot_key.into()], env).await?;
     Ok(())
 }
 

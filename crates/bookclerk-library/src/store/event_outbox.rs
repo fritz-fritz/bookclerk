@@ -104,7 +104,7 @@ fn wake_in_chunk_size(max_binds: usize) -> usize {
 /// Execute leftover canonical host SQL (`?` placeholders) on `engine`.
 async fn exec_host_sql<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     sql: &str,
     values: impl IntoIterator<Item = sea_orm::Value>,
 ) -> Result<u64>
@@ -112,7 +112,7 @@ where
     C: ConnectionTrait + StreamTrait,
 {
     crate::sql_plan::execute_sql_on(
-        Some(engine),
+        engine,
         db,
         sql,
         values,
@@ -124,7 +124,7 @@ where
 /// Query leftover canonical host SQL (`?` placeholders) on `engine`.
 async fn query_host_sql_first_text<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     sql: &str,
     values: impl IntoIterator<Item = sea_orm::Value>,
     max_rows: u32,
@@ -133,7 +133,7 @@ where
     C: ConnectionTrait + StreamTrait,
 {
     let values: Vec<sea_orm::Value> = values.into_iter().collect();
-    if crate::sql_plan::in_process_postgres(Some(engine)).is_some() {
+    if let Some(engine) = engine {
         let rows = crate::sql_plan::query_sql_on(
             Some(engine),
             db,
@@ -168,7 +168,7 @@ where
 /// Wake matching pending deliveries when `owner` still holds the event's wake lease.
 pub(crate) async fn wake_deliveries_fenced_on<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     event_id: &str,
     owner: &str,
     ids: &[String],
@@ -392,7 +392,8 @@ impl LibraryStore {
             return Ok(total);
         }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match dispatch_event_deliveries_on(&txn, self.physical_engine, event_id, subscribers).await
+        match dispatch_event_deliveries_on(&txn, self.leftover_engine(), event_id, subscribers)
+            .await
         {
             Ok(n) => {
                 txn.commit().await.map_err(LibraryError::Orm)?;
@@ -554,11 +555,18 @@ impl LibraryStore {
         let max_binds =
             usize::try_from(self.max_binds).unwrap_or(bookclerk_plugin_abi::D1_MAX_BINDS as usize);
         if self.atomic.is_some() {
-            return wake_one_page_on(&self.db, self.physical_engine, row, owner, page, max_binds)
-                .await;
+            return wake_one_page_on(
+                &self.db,
+                self.leftover_engine(),
+                row,
+                owner,
+                page,
+                max_binds,
+            )
+            .await;
         }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match wake_one_page_on(&txn, self.physical_engine, row, owner, page, max_binds).await {
+        match wake_one_page_on(&txn, self.leftover_engine(), row, owner, page, max_binds).await {
             Ok(n) => {
                 txn.commit().await.map_err(LibraryError::Orm)?;
                 Ok(n)
@@ -609,7 +617,7 @@ impl LibraryStore {
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
         match claim_next_event_delivery_on(
             &txn,
-            self.physical_engine,
+            self.leftover_engine(),
             owner,
             lease_secs,
             plugin_ids,
@@ -870,7 +878,7 @@ impl LibraryStore {
         )
         .await?;
         if ok {
-            bump_event_stats(&self.db, self.physical_engine, 0, 0, 1, None, None).await?;
+            bump_event_stats(&self.db, self.leftover_engine(), 0, 0, 1, None, None).await?;
         }
         Ok(ok)
     }
@@ -948,7 +956,7 @@ impl LibraryStore {
             .await
             .map_err(LibraryError::Orm)?;
         if res.rows_affected == 1 {
-            bump_event_stats(&self.db, self.physical_engine, 1, 0, 0, None, None).await?;
+            bump_event_stats(&self.db, self.leftover_engine(), 1, 0, 0, None, None).await?;
             return Ok(true);
         }
         Ok(false)
@@ -1068,7 +1076,7 @@ impl LibraryStore {
             .await
             .map_err(LibraryError::Orm)?;
         if res.rows_affected == 1 {
-            bump_event_stats(&self.db, self.physical_engine, 0, 1, 0, None, None).await?;
+            bump_event_stats(&self.db, self.leftover_engine(), 0, 1, 0, None, None).await?;
             Ok(true)
         } else {
             Ok(false)
@@ -1186,7 +1194,7 @@ impl LibraryStore {
         if res.rows_affected > 0 {
             bump_event_stats(
                 &self.db,
-                self.physical_engine,
+                self.leftover_engine(),
                 i64::try_from(res.rows_affected).unwrap_or(0),
                 0,
                 0,
@@ -1425,7 +1433,7 @@ impl LibraryStore {
     pub async fn record_event_handler_latency(&self, duration_ms: i64) -> Result<()> {
         bump_event_stats(
             &self.db,
-            self.physical_engine,
+            self.leftover_engine(),
             0,
             0,
             0,
@@ -1664,8 +1672,9 @@ impl LibraryStore {
         sql.push_str(" ORDER BY e.created_at ASC, e.id ASC LIMIT ?");
         values.push(i64::try_from(limit).unwrap_or(200).into());
         let max_rows = u32::try_from(limit).unwrap_or(200).max(1);
-        let ids = query_host_sql_first_text(&self.db, self.physical_engine, &sql, values, max_rows)
-            .await?;
+        let ids =
+            query_host_sql_first_text(&self.db, self.leftover_engine(), &sql, values, max_rows)
+                .await?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1914,7 +1923,7 @@ impl LibraryStore {
             .map_err(LibraryError::Orm)?;
         let events = exec_host_sql(
             &self.db,
-            self.physical_engine,
+            self.leftover_engine(),
             "DELETE FROM domain_events WHERE dispatch_state = 'dispatched' \
              AND created_at <= ? AND NOT EXISTS ( \
                 SELECT 1 FROM event_deliveries d WHERE d.event_id = domain_events.id \
@@ -2110,7 +2119,7 @@ pub(crate) async fn publish_domain_event_on<C: ConnectionTrait>(
 /// Zero rows affected is fence loss: do not overwrite another owner’s cursor.
 async fn wake_one_page_on<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     row: &domain_events::Model,
     owner: &str,
     page: u64,
@@ -2268,7 +2277,7 @@ pub(crate) async fn finish_wake_on<C: ConnectionTrait>(
 /// Create deliveries for `subscribers` and mark the event dispatched.
 pub(crate) async fn dispatch_event_deliveries_on<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     event_id: &str,
     subscribers: &[EventSubscriber],
 ) -> Result<u32>
@@ -2353,7 +2362,7 @@ where
 /// Claim the next ready delivery, skipping blocked FIFO keys.
 pub(crate) async fn claim_next_event_delivery_on<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     owner: &str,
     lease_secs: u64,
     plugin_ids: &[String],
@@ -2538,7 +2547,7 @@ fn is_unique_violation(err: &sea_orm::DbErr) -> bool {
 /// Serialize COUNT+claim per plugin under every isolation level.
 async fn lock_plugin_in_flight<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     plugin_id: &str,
     resource_class: &str,
 ) -> Result<()>
@@ -2771,7 +2780,7 @@ async fn ensure_event_outbox_stats<C: ConnectionTrait>(
 
 async fn bump_event_stats<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     retries: i64,
     suspensions: i64,
     dead_letters: i64,

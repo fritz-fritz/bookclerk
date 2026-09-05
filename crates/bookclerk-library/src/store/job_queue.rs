@@ -39,7 +39,7 @@ impl LibraryStore {
             return atomic.enqueue_job(spec).await;
         }
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
-        match enqueue_job_on(&txn, self.physical_engine, spec).await {
+        match enqueue_job_on(&txn, self.leftover_engine(), spec).await {
             Ok(outcome) => {
                 txn.commit().await.map_err(LibraryError::Orm)?;
                 Ok(outcome)
@@ -74,7 +74,7 @@ impl LibraryStore {
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
         match claim_next_job_on(
             &txn,
-            self.physical_engine,
+            self.leftover_engine(),
             resource_class,
             owner,
             lease_secs,
@@ -675,7 +675,7 @@ impl LibraryStore {
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
         match reserve_job_temp_path_on(
             &txn,
-            self.physical_engine,
+            self.leftover_engine(),
             job_id,
             path,
             reserved_bytes,
@@ -971,7 +971,7 @@ impl LibraryStore {
 /// # Errors
 ///
 /// Returns [`LibraryError::Orm`] when the lock statement fails.
-pub(crate) async fn lock_job_queue<C>(db: &C, engine: PhysicalEngine) -> Result<()>
+pub(crate) async fn lock_job_queue<C>(db: &C, engine: Option<PhysicalEngine>) -> Result<()>
 where
     C: ConnectionTrait + StreamTrait,
 {
@@ -981,7 +981,7 @@ where
 /// Transactional admission used by the local path and guest atomic execute.
 pub(crate) async fn enqueue_job_on<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     spec: EnqueueJobSpec,
 ) -> Result<EnqueueOutcome>
 where
@@ -1055,7 +1055,7 @@ where
 /// Transactional claim: one conditional `pending` → `running` mutation.
 pub(crate) async fn claim_next_job_on<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     resource_class: JobResourceClass,
     owner: &str,
     lease_secs: u64,
@@ -1196,7 +1196,7 @@ where
 /// Transactional quota reservation for one scratch path.
 pub(crate) async fn reserve_job_temp_path_on<C>(
     db: &C,
-    engine: PhysicalEngine,
+    engine: Option<PhysicalEngine>,
     job_id: &str,
     path: &str,
     reserved_bytes: u64,

@@ -55,6 +55,50 @@ impl PhysicalEngine {
     pub const fn backend(self) -> sea_orm::DatabaseBackend {
         self.backend
     }
+
+    /// Timing source label for this physical engine (`sqlite_txn` / `postgres_txn`).
+    #[must_use]
+    pub const fn timing_source(self) -> &'static str {
+        match self.backend {
+            sea_orm::DatabaseBackend::Postgres => "postgres_txn",
+            _ => "sqlite_txn",
+        }
+    }
+}
+
+/// How leftover host SQL reaches a SeaORM connection.
+///
+/// [`Self::Canonical`] is sqlite-shaped transport with no physical lowering
+/// (production plugin-host proxy). [`Self::Physical`] lowers exactly once for
+/// a real in-process engine (native sqlite or postgres tests).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SqlExecTarget {
+    /// Canonical `?` SQL. Adapters lower after RPC.
+    #[default]
+    Canonical,
+    /// In-process adapter connection. Lower once for this engine.
+    Physical(PhysicalEngine),
+}
+
+impl SqlExecTarget {
+    /// Native leftover engine, if this target physically lowers.
+    #[must_use]
+    pub const fn leftover_engine(self) -> Option<PhysicalEngine> {
+        match self {
+            Self::Canonical => None,
+            Self::Physical(engine) => Some(engine),
+        }
+    }
+
+    /// In-process named-atomic engine. Canonical stores use sqlite-family
+    /// lowering only on a real sqlite connection (tests), never as a proxy hint.
+    #[must_use]
+    pub const fn named_engine(self) -> PhysicalEngine {
+        match self {
+            Self::Canonical => PhysicalEngine::sqlite(),
+            Self::Physical(engine) => engine,
+        }
+    }
 }
 
 /// Session-level cancel / deadline for one atomic attempt (not hashed).
@@ -419,6 +463,30 @@ mod tests {
             "JSON punctuation and the numeric cell must count: {nbytes} vs alias {}",
             alias.len()
         );
+    }
+
+    #[test]
+    fn sql_exec_target_separates_canonical_proxy_from_physical_engines() {
+        use super::{PhysicalEngine, SqlExecTarget};
+        assert_eq!(SqlExecTarget::Canonical.leftover_engine(), None);
+        assert_eq!(
+            SqlExecTarget::Physical(PhysicalEngine::sqlite()).leftover_engine(),
+            Some(PhysicalEngine::sqlite())
+        );
+        assert_eq!(
+            SqlExecTarget::Physical(PhysicalEngine::postgres()).leftover_engine(),
+            Some(PhysicalEngine::postgres())
+        );
+        assert_eq!(
+            SqlExecTarget::Canonical.named_engine(),
+            PhysicalEngine::sqlite()
+        );
+        assert_eq!(
+            SqlExecTarget::Physical(PhysicalEngine::postgres()).named_engine(),
+            PhysicalEngine::postgres()
+        );
+        assert_eq!(PhysicalEngine::postgres().timing_source(), "postgres_txn");
+        assert_eq!(PhysicalEngine::sqlite().timing_source(), "sqlite_txn");
     }
 
     #[test]

@@ -5563,7 +5563,7 @@ async fn stale_wake_delivery_update_does_not_clear(store: &LibraryStore) {
     let now = chrono::Utc::now().to_rfc3339();
     let woken = super::event_outbox::wake_deliveries_fenced_on(
         store.db(),
-        store.physical_engine(),
+        store.leftover_engine(),
         &trigger_id,
         "token-b",
         std::slice::from_ref(&parked.id),
@@ -5591,7 +5591,7 @@ async fn stale_wake_delivery_update_does_not_clear(store: &LibraryStore) {
 
     let stale = super::event_outbox::wake_deliveries_fenced_on(
         store.db(),
-        store.physical_engine(),
+        store.leftover_engine(),
         &trigger_id,
         "token-a",
         std::slice::from_ref(&parked.id),

@@ -585,7 +585,7 @@ async fn capture_table_page<C>(
 where
     C: ConnectionTrait + StreamTrait,
 {
-    if crate::sql_plan::in_process_postgres(engine).is_some() {
+    if engine.is_some() {
         let rows = crate::sql_plan::query_sql_on(
             engine,
             conn,
