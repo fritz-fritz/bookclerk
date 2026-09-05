@@ -28,7 +28,7 @@ pub fn event_inflight_slot(plugin_id: &str, resource_class: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`LibraryError::Orm`] when either statement fails.
+/// Returns [`crate::LibraryError::Orm`] when either statement fails.
 pub async fn lock_serialization_slot<C>(
     db: &C,
     engine: PhysicalEngine,
