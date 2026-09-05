@@ -1071,6 +1071,7 @@ async fn schema_versions_applied(
 }
 
 /// Executes one SQL string.
+#[cfg(test)]
 async fn exec_sql(db: &DatabaseConnection, backend: DbBackend, sql: &str) -> Result<()> {
     db.execute_raw(Statement::from_string(backend, sql.to_string()))
         .await
