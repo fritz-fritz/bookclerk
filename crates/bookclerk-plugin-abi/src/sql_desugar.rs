@@ -398,6 +398,7 @@ fn dollar_quote_len(s: &str) -> Option<usize> {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
 

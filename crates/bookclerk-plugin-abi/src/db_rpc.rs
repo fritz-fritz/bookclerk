@@ -1,6 +1,6 @@
 //! Cap'n Proto codec for typed database execute / capabilities.
 
-#![allow(clippy::missing_docs_in_private_items)]
+#![allow(clippy::missing_docs_in_private_items, clippy::missing_errors_doc)]
 
 use crate::host_envelope::{AdapterExecuteRequest, GuestReceiptPersist};
 use crate::plugin_capnp::{
