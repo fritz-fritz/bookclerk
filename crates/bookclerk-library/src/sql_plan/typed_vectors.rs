@@ -1,11 +1,22 @@
 //! Typed adapter conformance (`ExecuteRequest` / `ExecuteReply`).
 //!
-//! [`super::typed_vectors::run_typed_request_vectors`] is the #178 admission path for database plugins.
+//! Shared vectors run on three first-party adapters:
+//! - SQLite in-process: [`run_typed_conn_vectors`] and
+//!   `bookclerk-plugin-database-sqlite` `typed_conformance` (guest execute)
+//! - PostgreSQL: [`run_typed_conn_vectors`] when `BOOKCLERK_TEST_POSTGRES_URL`
+//!   is set (`typed_shared_vectors_on_postgres`)
+//! - D1 HTTP mock: `database-d1` `executing_mock_typed_shared_vectors`
+//!
+//! [`super::typed_vectors::run_typed_request_vectors`] is the #178 admission
+//! path for database plugins.
 
 use std::future::Future;
 
 use bookclerk_db_exec::{AtomicSession, ExecCaps};
-use bookclerk_plugin_abi::{DbCapabilities, ExecuteReply, ExecuteRequest};
+use bookclerk_plugin_abi::{
+    apply_schema_sql_to_env, AdapterExecuteRequest, DbCapabilities, ExecuteReply, ExecuteRequest,
+    SqlTypeEnv,
+};
 use sea_orm::DatabaseConnection;
 
 use super::{validate_execute_reply, CONTRACT_VECTOR_ROW_CAP};
@@ -32,6 +43,27 @@ pub async fn run_typed_request_vectors<F, Fut, E>(
         async move { fut.await.map_err(|err| err.to_string()) }
     })
     .await;
+}
+
+/// Desugars and stamps proofs for one vector, recording DDL in `catalog`.
+///
+/// Adapter-boundary tests (guest execute) must stamp against the host catalog
+/// plus tables created by earlier vectors.
+///
+/// # Errors
+///
+/// Returns when typecheck fails.
+pub fn stamp_typed_vector(
+    mut req: ExecuteRequest,
+    catalog: &mut SqlTypeEnv,
+) -> Result<AdapterExecuteRequest, String> {
+    bookclerk_plugin_abi::desugar_execute_request(&mut req);
+    let envelope = bookclerk_db_exec::stamp_adapter_execute(req.clone(), catalog)
+        .map_err(|err| err.to_string())?;
+    for stmt in &req.statements {
+        apply_schema_sql_to_env(catalog, &stmt.sql);
+    }
+    Ok(envelope)
 }
 
 /// Runs the shared contract suite through typed `execute_typed_on_session`.

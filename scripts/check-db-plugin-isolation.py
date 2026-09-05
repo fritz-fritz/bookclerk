@@ -267,6 +267,9 @@ FORBIDDEN_LIBRARY_LOWERING = (
     re.compile(r"\bexpand_host_schema_batch\b"),
     re.compile(r"\bpostgres_identity_companions\b"),
     re.compile(r"\bbinding_companions\b"),
+    re.compile(r"bookclerk_db_exec::execute_typed_on_session"),
+    re.compile(r"bookclerk_db_exec::execute_typed_on_txn\b"),
+    re.compile(r"bookclerk_db_exec::execute_typed_join_body"),
 )
 
 # Host backup/schema must not emit engine catalog or isolation SQL.

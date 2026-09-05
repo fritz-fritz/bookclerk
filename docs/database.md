@@ -238,9 +238,10 @@ avoid the `libsqlite3-sys` link conflict with `rusqlite 0.37`.
   `passwordRequired`, `notFound`, and `idempotencyConflict`. Consume-once ops
   use `DELETE … RETURNING` so a missing or expired row cannot be observed
   twice. After `openSession` the host calls typed
-  `AdapterDatabaseSession.capabilities`. Schema selection uses `pragmaUserVersion` /
-  `schemaMigrations` / `atomicSchemaBatch`, not `sqlFamily`. D1 reports
-  `atomicSchemaBatch: true` and `maxBinds: 100`. The host stores the
+  `AdapterDatabaseSession.capabilities`. Host schema markers use
+  `schemaMigrations` (required). `pragmaUserVersion`, `atomicSchemaBatch`, and
+  `timing` are not host policy. D1 reports `maxBinds: 100` and does not
+  advertise backup flags. The host stores the
   negotiated `DbCapabilities` and rejects plans that exceed `maxStatements`,
   per-statement `maxBinds`, `maxPayloadBytes`, or out-of-range selectors.
   A statement that yields more than `maxResultRows` **fails the plan**

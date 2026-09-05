@@ -31,7 +31,7 @@ mod schema_walk;
 pub mod scope;
 pub mod secrets;
 mod session_client;
-/// Host-owned generic SQL atomic plans for thin database adapters.
+/// Host-owned generic SQL atomic plans for database adapters.
 pub mod sql_plan;
 mod store;
 mod text;

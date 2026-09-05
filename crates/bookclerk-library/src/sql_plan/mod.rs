@@ -34,7 +34,9 @@ pub use interpret::{interpret_typed_exec, PlanStmtResult};
 pub use named::{compile_claim_event_delivery, compile_named_request};
 pub use reply::validate_execute_reply;
 pub use slots::{event_inflight_slot, lock_serialization_slot, JOB_QUEUE_SLOT};
-pub use typed_vectors::{run_typed_conn_vectors, run_typed_request_vectors};
+pub use typed_vectors::{
+    run_typed_conn_vectors, run_typed_request_vectors, stamp_typed_vector,
+};
 pub use vectors_typed::run_typed_contract_vectors;
 
 /// Compiled typed request plus host result-selection indexes.
