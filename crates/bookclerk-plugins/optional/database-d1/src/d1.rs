@@ -1045,15 +1045,33 @@ mod tests {
             .into_typed_request(operation_id)
     }
 
+    fn stamp_catalog(extra_ddl: &[&str]) -> bookclerk_plugin_abi::SqlTypeEnv {
+        let mut env = bookclerk_library::migrations::host_sql_type_env();
+        for sql in extra_ddl {
+            bookclerk_plugin_abi::apply_schema_sql_to_env(&mut env, sql);
+        }
+        env
+    }
+
     async fn run_named_atomic(
         proxy: &D1Proxy,
         req: bookclerk_plugin_abi::ExecuteRequest,
     ) -> std::result::Result<bookclerk_plugin_abi::ExecuteReply, sea_orm::DbErr> {
-        let envelope = bookclerk_db_exec::stamp_adapter_execute(
+        run_named_atomic_catalog(
+            proxy,
             req,
             &bookclerk_library::migrations::host_sql_type_env(),
         )
-        .map_err(|err| sea_orm::DbErr::Custom(err.to_string()))?;
+        .await
+    }
+
+    async fn run_named_atomic_catalog(
+        proxy: &D1Proxy,
+        req: bookclerk_plugin_abi::ExecuteRequest,
+        catalog: &bookclerk_plugin_abi::SqlTypeEnv,
+    ) -> std::result::Result<bookclerk_plugin_abi::ExecuteReply, sea_orm::DbErr> {
+        let envelope = bookclerk_db_exec::stamp_adapter_execute(req, catalog)
+            .map_err(|err| sea_orm::DbErr::Custom(err.to_string()))?;
         proxy
             .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
             .await
@@ -2394,7 +2412,13 @@ mod tests {
             ],
             0,
         );
-        let err = run_named_atomic(&proxy, req).await.unwrap_err();
+        let err = run_named_atomic_catalog(
+            &proxy,
+            req,
+            &stamp_catalog(&["CREATE TABLE t (k TEXT PRIMARY KEY)"]),
+        )
+        .await
+        .unwrap_err();
         let mapped = crate::atomic::plugin_error_from_d1(err);
         assert_eq!(
             mapped.code,
@@ -2490,7 +2514,13 @@ mod tests {
             )],
             0,
         );
-        let err = run_named_atomic(&proxy, req).await.unwrap_err();
+        let err = run_named_atomic_catalog(
+            &proxy,
+            req,
+            &stamp_catalog(&["CREATE TABLE rowcap (x INTEGER)"]),
+        )
+        .await
+        .unwrap_err();
         assert!(
             err.to_string().contains("maxResultRows"),
             "row cap must fail closed: {err}"
@@ -2905,7 +2935,8 @@ mod tests {
             .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
                 proxy: proxy.clone(),
             }));
-        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"]);
+        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"])
+            .with_sql_types(bookclerk_library::migrations::host_sql_type_env());
         let guest_hash = String::new();
         let req = ExecuteRequest {
             operation_id: "d1-guest-replay".into(),
@@ -2970,7 +3001,8 @@ mod tests {
             .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
                 proxy: proxy.clone(),
             }));
-        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"]);
+        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"])
+            .with_sql_types(bookclerk_library::migrations::host_sql_type_env());
         drop_reply.store(true, std::sync::atomic::Ordering::SeqCst);
         let req = ExecuteRequest {
             operation_id: "d1-guest-lost-reply".into(),
@@ -3037,7 +3069,8 @@ mod tests {
             .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
                 proxy: proxy.clone(),
             }));
-        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"]);
+        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"])
+            .with_sql_types(bookclerk_library::migrations::host_sql_type_env());
         fail_pragma.store(true, std::sync::atomic::Ordering::SeqCst);
         let req = ExecuteRequest {
             operation_id: "d1-guest-pragma-fail".into(),
@@ -4417,7 +4450,7 @@ mod tests {
         };
         let envelope = bookclerk_db_exec::stamp_adapter_execute(
             req,
-            &bookclerk_library::migrations::host_sql_type_env(),
+            &stamp_catalog(&["CREATE TABLE direct_ops (k TEXT)"]),
         )
         .expect("stamp");
         let err = proxy

@@ -405,7 +405,8 @@ pub async fn open_library_store(
 fn granted_job_database(store: bookclerk_library::LibraryStore) -> Arc<dyn GuestDatabase> {
     granted_job_database_with_policy(
         store,
-        bookclerk_library::GuestSqlPolicy::allow_tables(["books"]),
+        bookclerk_library::GuestSqlPolicy::allow_tables(["books"])
+            .with_sql_types(bookclerk_library::migrations::host_sql_type_env()),
     )
 }
 
@@ -2625,17 +2626,18 @@ mod tests {
                 .unwrap(),
         )
         .with_db_capabilities(DbCapabilities::advertised_sqlite());
+        const COUNTERS_DDL: &str =
+            "CREATE TABLE counters (id INTEGER PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0)";
         store
             .connection()
-            .execute_raw(Statement::from_string(
-                DbBackend::Sqlite,
-                "CREATE TABLE counters (id INTEGER PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0)",
-            ))
+            .execute_raw(Statement::from_string(DbBackend::Sqlite, COUNTERS_DDL))
             .await
             .unwrap();
+        let mut env = bookclerk_library::migrations::host_sql_type_env();
+        bookclerk_plugin_abi::apply_schema_sql_to_env(&mut env, COUNTERS_DDL);
         let session = granted_job_database_with_policy(
             store,
-            bookclerk_library::GuestSqlPolicy::allow_tables(["counters"]),
+            bookclerk_library::GuestSqlPolicy::allow_tables(["counters"]).with_sql_types(env),
         );
         let binding = DatabaseBinding::from_session(session);
         let token = RetryToken {

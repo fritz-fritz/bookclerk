@@ -1145,6 +1145,19 @@ async fn seed_typed_probe(db: &sea_orm::DatabaseConnection, sql_values: &str) {
         .unwrap();
 }
 
+fn typed_probe_type_env() -> bookclerk_plugin_abi::SqlTypeEnv {
+    let mut env = crate::migrations::host_sql_type_env();
+    bookclerk_plugin_abi::apply_schema_sql_to_env(
+        &mut env,
+        "CREATE TABLE typed_probe (x INTEGER, y TEXT)",
+    );
+    bookclerk_plugin_abi::apply_schema_sql_to_env(
+        &mut env,
+        "CREATE TABLE typed_rowcap (x INTEGER)",
+    );
+    env
+}
+
 #[tokio::test]
 async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
     let db = mem_db().await;
@@ -1158,8 +1171,7 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
     )
     .await;
     match reply {
@@ -1184,8 +1196,7 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
     )
     .await
     .unwrap();
@@ -1202,8 +1213,7 @@ async fn typed_sqlite_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
     )
     .await
     .unwrap();
@@ -1253,8 +1263,7 @@ async fn typed_sqlite_select_stops_after_cap_plus_one() {
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
     )
     .await
     .unwrap_err();
@@ -1300,8 +1309,7 @@ async fn typed_sqlite_statement_max_rows_is_a_proven_bound() {
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
     )
     .await
     .unwrap_err();
@@ -1313,8 +1321,7 @@ async fn typed_sqlite_statement_max_rows_is_a_proven_bound() {
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
     )
     .await
     .unwrap();
@@ -1365,8 +1372,7 @@ async fn typed_sqlite_per_statement_max_result_bytes() {
         bookclerk_db_exec::GuestReceiptPersist::default(),
         "sqlite_txn",
         caps,
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
     )
     .await
     .unwrap_err();
@@ -1390,8 +1396,7 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
     )
     .await
     .unwrap_err();
@@ -1409,8 +1414,7 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
     )
     .await
     .unwrap();
@@ -1431,8 +1435,7 @@ async fn typed_postgres_duplicate_alias_zero_row_and_null_metadata() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
     )
     .await
     .unwrap();
@@ -1498,8 +1501,7 @@ async fn typed_postgres_empty_select_describe_does_not_reexecute() {
         bookclerk_db_exec::ExecCaps::from_capabilities(
             &bookclerk_plugin_abi::DbCapabilities::advertised_postgres(),
         ),
-        bookclerk_db_exec::AtomicSession::from_deadline(None)
-            .with_type_env(crate::migrations::host_sql_type_env()),
+        bookclerk_db_exec::AtomicSession::from_deadline(None).with_type_env(typed_probe_type_env()),
     )
     .await
     .unwrap();

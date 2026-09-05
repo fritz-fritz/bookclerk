@@ -266,14 +266,18 @@ mod typed_value_matrix {
             }],
             deadline_unix_ms: 0,
         };
+        let mut catalog = crate::migrations::host_sql_type_env();
+        bookclerk_plugin_abi::apply_schema_sql_to_env(
+            &mut catalog,
+            "CREATE TABLE typed_null_probe (v INTEGER)",
+        );
         let reply = bookclerk_db_exec::execute_typed_on_session(
             &db,
             &req,
             bookclerk_db_exec::GuestReceiptPersist::default(),
             "sqlite_txn",
             sqlite_caps(),
-            AtomicSession::from_deadline(None)
-                .with_type_env(crate::migrations::host_sql_type_env()),
+            AtomicSession::from_deadline(None).with_type_env(catalog),
         )
         .await
         .expect("typed execute");
