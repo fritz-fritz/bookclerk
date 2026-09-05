@@ -153,7 +153,12 @@ impl AtomicTxnBackend for InProcessSqliteAtomic {
             &compiled,
             &bookclerk_plugin_abi::DbCapabilities::advertised_sqlite(),
         )?;
-        let result = execute_db_atomic(&self.db, compiled).await?;
+        let result = execute_db_atomic(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
+            &self.db,
+            compiled,
+        )
+        .await?;
         if result.status == atomic_status::NOT_FOUND {
             return Err(LibraryError::NotFound(format!("event {event_id}")));
         }
@@ -194,7 +199,12 @@ impl AtomicTxnBackend for InProcessSqliteAtomic {
             &now,
         )
         .map_err(LibraryError::Orm)?;
-        let result = execute_db_atomic(&self.db, compiled).await?;
+        let result = execute_db_atomic(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
+            &self.db,
+            compiled,
+        )
+        .await?;
         if result.status == atomic_status::EMPTY {
             return Ok(None);
         }

@@ -1497,8 +1497,7 @@ pub async fn execute_typed_on_txn(
     session: AtomicSession,
     describe: Option<&DatabaseConnection>,
 ) -> Result<ExecuteReply, DbErr> {
-    let engine =
-        PhysicalEngine::from_adapter_backend(ConnectionTrait::get_database_backend(txn));
+    let engine = PhysicalEngine::from_adapter_backend(ConnectionTrait::get_database_backend(txn));
     let envelope = stamp_adapter_execute(req.clone(), &session.type_env)?;
     execute_typed_on_txn_envelope(
         engine,
@@ -1556,6 +1555,7 @@ pub async fn execute_typed_on_txn_envelope(
                 persist,
                 &envelope.proofs,
                 true,
+                true,
             )
         })
     })
@@ -1569,6 +1569,11 @@ pub async fn execute_typed_on_txn_envelope(
 /// In-process postgres tests use this when the caller already holds a SeaORM
 /// connection or transaction and must physically lower canonical SQL. Host
 /// RPC/proxy paths must not call this — they send [`AdapterExecuteRequest`].
+///
+/// Binding catalog companions are skipped: leftover DML and restore DDL run
+/// against a catalog the caller already applied (`apply_host_schema` or
+/// [`bookclerk_plugin_abi::catalog_companions`]). Re-inserting those rows
+/// conflicts with `bookclerk_sql_catalog_pkey`.
 ///
 /// # Errors
 ///
@@ -1611,6 +1616,7 @@ where
             persist,
             &envelope.proofs,
             true,
+            false,
         )
     })
     .await;
@@ -1720,6 +1726,7 @@ async fn execute_typed_join_body<C>(
     guest_receipt: GuestReceiptPersist,
     stamped: &[ResolvedStatement],
     require_stamped: bool,
+    apply_companions: bool,
 ) -> Result<ExecuteReply, DbErr>
 where
     C: ConnectionTrait + StreamTrait,
@@ -1781,7 +1788,9 @@ where
                 }
             }
         };
-        apply_binding_companions(txn, backend, &canonical, &proof.schema_action).await?;
+        if apply_companions {
+            apply_binding_companions(txn, backend, &canonical, &proof.schema_action).await?;
+        }
         apply_schema_action_to_env(&mut env, &proof.schema_action);
         statements.push(stmt_result);
         if skip_guest_on_prior

@@ -121,6 +121,50 @@ where
     .await
 }
 
+/// Query leftover canonical host SQL (`?` placeholders) on `engine`.
+async fn query_host_sql_first_text<C>(
+    db: &C,
+    engine: PhysicalEngine,
+    sql: &str,
+    values: impl IntoIterator<Item = sea_orm::Value>,
+    max_rows: u32,
+) -> Result<Vec<String>>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    let values: Vec<sea_orm::Value> = values.into_iter().collect();
+    if crate::sql_plan::in_process_postgres(Some(engine)).is_some() {
+        let rows = crate::sql_plan::query_sql_on(
+            Some(engine),
+            db,
+            sql,
+            values,
+            &crate::migrations::host_sql_type_env(),
+            max_rows,
+        )
+        .await?;
+        return Ok(rows
+            .into_iter()
+            .filter_map(|row| match row.values.first() {
+                Some(bookclerk_plugin_abi::DbValue::Text(s)) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            })
+            .collect());
+    }
+    let rows = crate::host_sql::query_host_canonical(db, sql, values)
+        .await
+        .map_err(LibraryError::Orm)?;
+    let mut ids = Vec::new();
+    for row in rows {
+        if let Ok(id) = row.try_get_by_index::<String>(0) {
+            if !id.is_empty() {
+                ids.push(id);
+            }
+        }
+    }
+    Ok(ids)
+}
+
 /// Wake matching pending deliveries when `owner` still holds the event's wake lease.
 pub(crate) async fn wake_deliveries_fenced_on<C>(
     db: &C,
@@ -565,6 +609,7 @@ impl LibraryStore {
         let txn = self.db.begin().await.map_err(LibraryError::Orm)?;
         match claim_next_event_delivery_on(
             &txn,
+            self.physical_engine,
             owner,
             lease_secs,
             plugin_ids,
@@ -1618,17 +1663,9 @@ impl LibraryStore {
         }
         sql.push_str(" ORDER BY e.created_at ASC, e.id ASC LIMIT ?");
         values.push(i64::try_from(limit).unwrap_or(200).into());
-        let rows = crate::host_sql::query_host_canonical(&self.db, &sql, values)
-            .await
-            .map_err(LibraryError::Orm)?;
-        let mut ids = Vec::new();
-        for row in rows {
-            if let Ok(id) = row.try_get_by_index::<String>(0) {
-                if !id.is_empty() {
-                    ids.push(id);
-                }
-            }
-        }
+        let max_rows = u32::try_from(limit).unwrap_or(200).max(1);
+        let ids = query_host_sql_first_text(&self.db, self.physical_engine, &sql, values, max_rows)
+            .await?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -2314,14 +2351,18 @@ where
 }
 
 /// Claim the next ready delivery, skipping blocked FIFO keys.
-pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
+pub(crate) async fn claim_next_event_delivery_on<C>(
     db: &C,
+    engine: PhysicalEngine,
     owner: &str,
     lease_secs: u64,
     plugin_ids: &[String],
     max_in_flight: u32,
     node_id: &str,
-) -> Result<Option<EventDeliveryRecord>> {
+) -> Result<Option<EventDeliveryRecord>>
+where
+    C: ConnectionTrait + StreamTrait,
+{
     if plugin_ids.is_empty() {
         return Ok(None);
     }
@@ -2363,7 +2404,7 @@ pub(crate) async fn claim_next_event_delivery_on<C: ConnectionTrait>(
             {
                 continue;
             }
-            lock_plugin_in_flight(db, &model.plugin_id, &model.resource_class).await?;
+            lock_plugin_in_flight(db, engine, &model.plugin_id, &model.resource_class).await?;
             if plugin_in_flight_at_cap(db, &model.plugin_id, &model.resource_class, max_in_flight)
                 .await?
             {
@@ -2495,18 +2536,22 @@ fn is_unique_violation(err: &sea_orm::DbErr) -> bool {
 }
 
 /// Serialize COUNT+claim per plugin under every isolation level.
-async fn lock_plugin_in_flight<C: ConnectionTrait>(
+async fn lock_plugin_in_flight<C>(
     db: &C,
+    engine: PhysicalEngine,
     plugin_id: &str,
     resource_class: &str,
-) -> Result<()> {
+) -> Result<()>
+where
+    C: ConnectionTrait + StreamTrait,
+{
     let class = if resource_class.trim().is_empty() {
         EVENT_RESOURCE_CLASS_NETWORK
     } else {
         resource_class.trim()
     };
     let key = crate::sql_plan::event_inflight_slot(plugin_id, class);
-    crate::sql_plan::lock_serialization_slot(db, &key).await
+    crate::sql_plan::lock_serialization_slot(db, engine, &key).await
 }
 
 async fn plugin_in_flight_at_cap<C: ConnectionTrait>(
@@ -2845,5 +2890,40 @@ mod placeholder_tests {
             "wake page {page} exceeds D1's {cap} for parent SELECT IN"
         );
         assert!(wake_in_chunk_size(cap) + WAKE_UPDATE_FIXED_BINDS <= cap);
+    }
+
+    #[test]
+    fn missing_dispatched_events_sql_typechecks_against_host_env() {
+        let sql = "SELECT e.id FROM domain_events e \
+             WHERE e.dispatch_state = 'dispatched' \
+               AND e.created_at > ? \
+               AND e.event_type IN (?) \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM event_deliveries d \
+                 WHERE d.event_id = e.id AND d.plugin_id = ? \
+               ) \
+             ORDER BY e.created_at ASC, e.id ASC LIMIT ?";
+        let req = bookclerk_plugin_abi::ExecuteRequest {
+            operation_id: "reconcile".into(),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![bookclerk_plugin_abi::TypedDbStatement {
+                sql: sql.into(),
+                parameters: vec![
+                    bookclerk_plugin_abi::DbValue::Text("t".into()),
+                    bookclerk_plugin_abi::DbValue::Text("book_acquired".into()),
+                    bookclerk_plugin_abi::DbValue::Text("echo".into()),
+                    bookclerk_plugin_abi::DbValue::Int64(200),
+                ],
+                kind: bookclerk_plugin_abi::DbPlanStatementKind::Select,
+                max_rows: 200,
+                result_selection: bookclerk_plugin_abi::DbResultSelection::Rows,
+            }],
+        };
+        bookclerk_plugin_abi::typecheck_execute_request_proofs(
+            &req,
+            &crate::migrations::host_sql_type_env(),
+        )
+        .expect("reconcile leftover SELECT must typecheck");
     }
 }

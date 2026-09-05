@@ -304,15 +304,17 @@ where
     )
     .await?;
     if kind == CanonicalRestoreKind::PluginBinding {
+        // SeaQuery catalog DML uses quoted identifiers that typed typecheck
+        // rejects. Host-canonical transport skips typecheck; the CREATE/INDEX
+        // itself still lowers through `execute_sql_on` so AUTOINCREMENT works.
         for companion in bookclerk_plugin_abi::catalog_companions(canonical) {
-            crate::sql_plan::execute_sql_on(
-                engine,
+            crate::host_sql::execute_host_canonical(
                 conn,
                 &companion,
                 std::iter::empty::<sea_orm::Value>(),
-                crate::migrations::host_sql_type_env(),
             )
-            .await?;
+            .await
+            .map_err(LibraryError::from_db_err)?;
         }
     }
     Ok(())

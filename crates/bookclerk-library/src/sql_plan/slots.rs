@@ -1,8 +1,9 @@
 //! Portable COUNT+mutate serialization via `db_serialization_slots`.
 
-use sea_orm::ConnectionTrait;
+use bookclerk_db_exec::PhysicalEngine;
+use sea_orm::{ConnectionTrait, StreamTrait};
 
-use crate::error::{LibraryError, Result};
+use crate::error::Result;
 
 /// Slot key for job admit / claim / scratch-quota serialization.
 pub const JOB_QUEUE_SLOT: &str = "job-queue";
@@ -22,22 +23,69 @@ pub fn event_inflight_slot(plugin_id: &str, resource_class: &str) -> String {
 ///
 /// Canonical SQL uses `?` placeholders. Host transport never lowers; adapters
 /// realize `INSERT OR IGNORE` at the execute edge. This helper must run on the
-/// caller's transaction, not a nested `BEGIN`.
+/// caller's transaction, not a nested `BEGIN`. In-process postgres tests pass
+/// [`PhysicalEngine::postgres`] so leftover SQL is lowered before execute.
 ///
 /// # Errors
 ///
 /// Returns [`LibraryError::Orm`] when either statement fails.
-pub async fn lock_serialization_slot<C: ConnectionTrait>(db: &C, slot_key: &str) -> Result<()> {
+pub async fn lock_serialization_slot<C>(
+    db: &C,
+    engine: PhysicalEngine,
+    slot_key: &str,
+) -> Result<()>
+where
+    C: ConnectionTrait + StreamTrait,
+{
     const INSERT: &str = "INSERT OR IGNORE INTO db_serialization_slots (slot_key, bump) \
          SELECT ?, 0 WHERE NOT EXISTS (\
             SELECT 1 FROM db_serialization_slots WHERE slot_key = ?\
          )";
     const BUMP: &str = "UPDATE db_serialization_slots SET bump = bump + 1 WHERE slot_key = ?";
-    crate::host_sql::execute_host_canonical(db, INSERT, [slot_key.into(), slot_key.into()])
-        .await
-        .map_err(LibraryError::Orm)?;
-    crate::host_sql::execute_host_canonical(db, BUMP, [slot_key.into()])
-        .await
-        .map_err(LibraryError::Orm)?;
+    let env = crate::migrations::host_sql_type_env();
+    crate::sql_plan::execute_sql_on(
+        Some(engine),
+        db,
+        INSERT,
+        [slot_key.into(), slot_key.into()],
+        env.clone(),
+    )
+    .await?;
+    crate::sql_plan::execute_sql_on(Some(engine), db, BUMP, [slot_key.into()], env).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use bookclerk_plugin_abi::{
+        typecheck_execute_request_proofs, DbPlanStatementKind, DbResultSelection, DbValue,
+        ExecuteRequest, TypedDbStatement,
+    };
+
+    fn exec_stmt(sql: &str, binds: usize) -> TypedDbStatement {
+        TypedDbStatement {
+            sql: sql.to_string(),
+            parameters: vec![DbValue::Text("job-queue".into()); binds],
+            kind: DbPlanStatementKind::Execute,
+            max_rows: 0,
+            result_selection: DbResultSelection::AffectedRows,
+        }
+    }
+
+    #[test]
+    fn serialization_slot_sql_typechecks_against_host_env() {
+        const INSERT: &str = "INSERT OR IGNORE INTO db_serialization_slots (slot_key, bump) \
+         SELECT ?, 0 WHERE NOT EXISTS (\
+            SELECT 1 FROM db_serialization_slots WHERE slot_key = ?\
+         )";
+        const BUMP: &str = "UPDATE db_serialization_slots SET bump = bump + 1 WHERE slot_key = ?";
+        let env = crate::migrations::host_sql_type_env();
+        let req = ExecuteRequest {
+            operation_id: "slot".into(),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![exec_stmt(INSERT, 2), exec_stmt(BUMP, 1)],
+        };
+        typecheck_execute_request_proofs(&req, &env).expect("slot SQL must typecheck");
+    }
 }

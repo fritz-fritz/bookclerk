@@ -586,7 +586,15 @@ where
     C: ConnectionTrait + StreamTrait,
 {
     if crate::sql_plan::in_process_postgres(engine).is_some() {
-        let rows = crate::sql_plan::query_sql_on(engine, conn, sql, env, page).await?;
+        let rows = crate::sql_plan::query_sql_on(
+            engine,
+            conn,
+            sql,
+            std::iter::empty::<sea_orm::Value>(),
+            env,
+            page,
+        )
+        .await?;
         return Ok(rows.into_iter().map(|row| row.values).collect());
     }
     let rows = capture_select(conn, sql, env, page).await?;

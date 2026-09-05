@@ -485,10 +485,10 @@ async fn timing_receipt_shape_is_uniform() {
 #[tokio::test]
 async fn serialization_slot_bump_is_monotonic() {
     let db = mem_db().await;
-    crate::sql_plan::lock_serialization_slot(&db, "job-queue")
+    crate::sql_plan::lock_serialization_slot(&db, PhysicalEngine::sqlite(), "job-queue")
         .await
         .unwrap();
-    crate::sql_plan::lock_serialization_slot(&db, "job-queue")
+    crate::sql_plan::lock_serialization_slot(&db, PhysicalEngine::sqlite(), "job-queue")
         .await
         .unwrap();
     let rows = sea_orm::ConnectionTrait::query_all_raw(

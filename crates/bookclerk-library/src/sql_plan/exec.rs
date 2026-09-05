@@ -112,6 +112,7 @@ pub(crate) async fn query_sql_on<C>(
     engine: Option<PhysicalEngine>,
     conn: &C,
     sql: &str,
+    values: impl IntoIterator<Item = Value>,
     type_env: &SqlTypeEnv,
     max_rows: u32,
 ) -> Result<Vec<DbRow>>
@@ -123,13 +124,18 @@ where
             "query_sql_on requires an in-process postgres engine".into(),
         ));
     };
+    let parameters = values
+        .into_iter()
+        .map(|value| db_value_from_sea(&value))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| LibraryError::from_db_err(sea_orm::DbErr::Custom(err)))?;
     let req = ExecuteRequest {
         operation_id: "in-process-query".into(),
         request_hash: String::new(),
         deadline_unix_ms: 0,
         statements: vec![TypedDbStatement {
             sql: sql.to_string(),
-            parameters: Vec::new(),
+            parameters,
             kind: DbPlanStatementKind::Select,
             max_rows,
             result_selection: DbResultSelection::Rows,
