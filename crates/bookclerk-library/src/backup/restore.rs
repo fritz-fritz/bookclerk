@@ -30,7 +30,7 @@ use crate::error::{LibraryError, Result};
 /// migrations. When `preserve_plugin_registry` is true, library restore does
 /// not drop or replay `plugin_databases` (environment-local placement).
 /// Row inserts are parameterized canonical Bookclerk SQL (`?` + typed
-/// [`DbValue`] binds); adapters lower placeholders at the execute edge.
+/// `DbValue` binds); adapters lower placeholders at the execute edge.
 /// SQLite restore defers foreign keys on the restore transaction and runs
 /// `PRAGMA foreign_key_check` before commit. It never toggles
 /// `PRAGMA foreign_keys` on the pool connection.

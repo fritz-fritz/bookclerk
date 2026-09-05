@@ -104,7 +104,7 @@ impl AdapterTransaction for GuestHostAdapterTransaction {
     }
 }
 
-/// Maps engine failures from [`guest_begin`] to structured plugin errors.
+/// Returns the default host adapter session on the shared guest connection.
 pub fn host_session() -> GuestHostAdapterSession {
     GuestHostAdapterSession
 }
