@@ -2113,9 +2113,13 @@ mod tests {
         use bookclerk_plugin_abi::PluginErrorCode;
         let _lock = SESSION_LOCK.lock().await;
         let db = postgres_test_pool().await;
-        bookclerk_library::apply_host_schema(&db, bookclerk_library::HostSchemaKind::RowMarker)
-            .await
-            .expect("host postgres schema");
+        bookclerk_library::apply_host_schema_on(
+            bookclerk_db_exec::PhysicalEngine::postgres(),
+            &db,
+            bookclerk_library::HostSchemaKind::RowMarker,
+        )
+        .await
+        .expect("host postgres schema");
         set_connection(db).await;
         let err = execute_stamped(typed_exec(
             "pg-dup",
