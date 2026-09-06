@@ -343,7 +343,7 @@ async fn apply_sqlite_user_version(db: &DatabaseConnection) -> Result<()> {
     exec_sql(db, backend, "PRAGMA foreign_keys = OFF").await?;
     let steps = host_migration_plan();
     for step in &steps {
-        apply_one_sqlite_version(db, backend, step.version, step.canonical).await?;
+        apply_one_sqlite_version(db, step.version, step.canonical).await?;
     }
     exec_sql(db, backend, "PRAGMA foreign_keys = ON").await?;
     Ok(())
@@ -352,7 +352,6 @@ async fn apply_sqlite_user_version(db: &DatabaseConnection) -> Result<()> {
 /// Applies one file-SQLite version, recovering when a peer committed DDL first.
 async fn apply_one_sqlite_version(
     db: &DatabaseConnection,
-    backend: DbBackend,
     version: i64,
     schema: &str,
 ) -> Result<()> {
