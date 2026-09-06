@@ -606,9 +606,10 @@ fn catalog_cell_i64(v: Option<&DbValue>) -> Option<i64> {
 
 /// Host-authored bootstrap request creating binding-local receipt tables.
 fn binding_bootstrap_request(owner: &str, binding: &str) -> ExecuteRequest {
-    let statements = bookclerk_db_exec::split_schema_statements(
+    let statements = bookclerk_plugin_abi::sql_v1_pack_statements(
         bookclerk_library::migrations::binding_bootstrap_sql(),
     )
+    .expect("binding bootstrap packs")
     .into_iter()
     .map(|sql| TypedDbStatement {
         sql,

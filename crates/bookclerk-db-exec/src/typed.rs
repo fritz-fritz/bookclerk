@@ -37,7 +37,7 @@ use crate::proxy_txn::{
     consume_savepoint_rollback_injection, is_txn_broken, note_commit_failed,
     suspend_execute_row_cap, take_txn_fault, with_exec_budget, AtomicInterruptPhase, ExecBudget,
 };
-use crate::schema_postgres::expand_host_schema_execute_request;
+use crate::schema_postgres::expand_host_schema_execute_request_grouped;
 use crate::{
     cap_query_sql, record_query_rows_seen, set_positional_result_columns,
     take_positional_result_columns,
@@ -1802,9 +1802,8 @@ where
     let backend = ConnectionTrait::get_database_backend(db);
     // Host schema batches travel canonical; this adapter edge lowers/splits
     // them for the live backend and collapses the results back to the wire
-    // request shape below.
-    let wire_len = req.statements.len();
-    let req = expand_host_schema_execute_request(backend, req);
+    // request shape below. Proofs are checked against the wire SQL first.
+    let (req, schema_groups) = expand_host_schema_execute_request_grouped(backend, req);
     let canonical_sqls: Vec<String> = req.statements.iter().map(|s| s.sql.clone()).collect();
     // Binding CREATE/DROP stays canonical on the wire; Postgres adapters
     // lower types/`AUTOINCREMENT` here (not in `lower_canonical_sql`).
@@ -1986,7 +1985,8 @@ where
             break;
         }
     }
-    let statements = crate::schema_postgres::collapse_host_schema_results(wire_len, statements);
+    let statements =
+        crate::schema_postgres::collapse_host_schema_results(&schema_groups, statements);
     if let Some(then) = then {
         let partial = ExecuteReply {
             operation_id: req.operation_id.clone(),
