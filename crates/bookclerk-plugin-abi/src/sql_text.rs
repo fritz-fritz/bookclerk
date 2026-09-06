@@ -45,6 +45,52 @@ pub fn require_portable_text_binds(parameters: &[crate::DbValue]) -> Result<()> 
     Ok(())
 }
 
+/// Prefix of the sqlite-family LIKE→GLOB `replace(...)` wrap (before the pattern).
+///
+/// Must stay identical to the GLOB wrap in `bookclerk-db-exec`.
+pub const LIKE_GLOB_WRAP_PREFIX: &str = "replace(replace(replace(replace(replace((";
+
+/// Suffix of the sqlite-family LIKE→GLOB `replace(...)` wrap (after the pattern).
+pub const LIKE_GLOB_WRAP_SUFFIX: &str =
+    "), '[', '[[]'), '*', '[*]'), '?', '[?]'), '%', '*'), '_', '?')";
+
+/// Bytes added around a LIKE pattern by [`LIKE_GLOB_WRAP_PREFIX`] /
+/// [`LIKE_GLOB_WRAP_SUFFIX`] (the pattern itself is unchanged).
+pub const LIKE_GLOB_PATTERN_WRAP_BYTES: usize =
+    LIKE_GLOB_WRAP_PREFIX.len() + LIKE_GLOB_WRAP_SUFFIX.len();
+
+/// Extra byte when `LIKE` is immediately followed by its pattern (no trivia):
+/// the rewrite emits `GLOB ` (5) in place of `LIKE` (4).
+pub const LIKE_TO_GLOB_KEYWORD_EXTRA: usize = 1;
+
+/// Worst-case extra bytes per `LIKE` / `NOT LIKE` after sqlite-family GLOB wrapping.
+pub const LIKE_GLOB_REWRITE_OVERHEAD: usize =
+    LIKE_GLOB_PATTERN_WRAP_BYTES + LIKE_TO_GLOB_KEYWORD_EXTRA;
+
+/// Extra bytes for one `/` or `%` rewritten to `NULLIF(operand, 0)`.
+pub const SQLITE_FAMILY_DIV_MOD_NULLIF_EXTRA: usize = 11;
+
+/// Conservative extra bytes for one `INSERT OR IGNORE` unique-conflict rewrite
+/// (conflict clause plus optional `SELECT` source wrap).
+pub const SQLITE_FAMILY_INSERT_OR_IGNORE_MAX_EXTRA: usize = 256;
+
+/// Upper bound on sqlite-family mechanical lowering length for a canonical
+/// statement of `canonical_len` bytes (`div`/`mod` NULLIF, `INSERT OR IGNORE`,
+/// LIKE→GLOB). Does not include proof-directed INTEGER overflow wraps.
+///
+/// LIKE→GLOB is the densest per-byte expansion (`LIKE` is 4 bytes, overhead is
+/// [`LIKE_GLOB_REWRITE_OVERHEAD`]). Remaining bytes after packing as many
+/// `LIKE` keywords as possible are charged as `/` `%` NULLIF wraps.
+#[must_use]
+pub const fn sqlite_family_like_divmod_insert_upper_bound(canonical_len: usize) -> usize {
+    let like_extra = (canonical_len / 4).saturating_mul(LIKE_GLOB_REWRITE_OVERHEAD);
+    let remainder_divmod = (canonical_len % 4).saturating_mul(SQLITE_FAMILY_DIV_MOD_NULLIF_EXTRA);
+    canonical_len
+        .saturating_add(like_extra)
+        .saturating_add(remainder_divmod)
+        .saturating_add(SQLITE_FAMILY_INSERT_OR_IGNORE_MAX_EXTRA)
+}
+
 /// UTF-8 byte length of a sqlite-family GLOB pattern after Bookclerk LIKE→GLOB
 /// metacharacter escaping (`[` `*` `?` become three bytes).
 ///
@@ -101,7 +147,7 @@ pub fn sql_v1_pack_statements(sql: &str) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < sql.len() {
-        i = skip_trivia(sql, i);
+        i = skip_trivia(sql, i)?;
         if i >= sql.len() {
             break;
         }
@@ -125,14 +171,14 @@ pub fn sql_v1_pack_statements(sql: &str) -> Result<Vec<String>> {
 ///
 /// # Errors
 ///
-/// Returns [`PluginError::invalid_params`] when a string or quoted identifier
-/// is unterminated.
+/// Returns [`PluginError::invalid_params`] when a string, quoted identifier,
+/// or block comment is unterminated.
 fn statement_span(sql: &str, start: usize) -> Result<(usize, bool)> {
     let bytes = sql.as_bytes();
     let mut i = start;
     let mut depth = 0usize;
     while i < bytes.len() {
-        i = skip_trivia(sql, i);
+        i = skip_trivia(sql, i)?;
         if i >= bytes.len() {
             break;
         }
@@ -165,7 +211,14 @@ fn statement_span(sql: &str, start: usize) -> Result<(usize, bool)> {
 }
 
 /// Skips whitespace, `--` line comments, and `/* */` block comments.
-fn skip_trivia(sql: &str, mut i: usize) -> usize {
+///
+/// Line comments may run to EOF. Block comments must close with `*/`.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a `/*` block comment is not
+/// terminated before EOF.
+fn skip_trivia(sql: &str, mut i: usize) -> Result<usize> {
     let bytes = sql.as_bytes();
     loop {
         while i < bytes.len() && bytes[i].is_ascii_whitespace() {
@@ -180,15 +233,23 @@ fn skip_trivia(sql: &str, mut i: usize) -> usize {
         }
         if bytes.get(i) == Some(&b'/') && bytes.get(i + 1) == Some(&b'*') {
             i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+            loop {
+                if i + 1 >= bytes.len() {
+                    return Err(PluginError::invalid_params(
+                        "unterminated block comment in canonical pack",
+                    ));
+                }
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                    i += 2;
+                    break;
+                }
                 i += 1;
             }
-            i = i.saturating_add(2).min(bytes.len());
             continue;
         }
         break;
     }
-    i
+    Ok(i)
 }
 
 /// Skips a `'…'` SQL string, honoring doubled quotes.
@@ -256,23 +317,32 @@ pub enum LikePatternSrc {
 }
 
 /// Collects LIKE / NOT LIKE pattern sources with proven lengths when possible.
-#[must_use]
-pub fn like_pattern_sources(sql: &str) -> Vec<LikePatternSrc> {
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a string, quoted identifier,
+/// or block comment is unterminated.
+pub fn like_pattern_sources(sql: &str) -> Result<Vec<LikePatternSrc>> {
     let mut out = Vec::new();
     let mut i = 0usize;
     let mut bind_i = 0usize;
     let bytes = sql.as_bytes();
     while i < bytes.len() {
-        i = skip_trivia(sql, i);
+        i = skip_trivia(sql, i)?;
         if i >= bytes.len() {
             break;
         }
         if bytes[i] == b'\'' {
-            if let Ok(end) = skip_sql_string(sql, i) {
-                i = end;
-                continue;
-            }
-            break;
+            i = skip_sql_string(sql, i)?;
+            continue;
+        }
+        if bytes[i] == b'"' || bytes[i] == b'`' {
+            i = skip_quoted(sql, i, bytes[i])?;
+            continue;
+        }
+        if bytes[i] == b'[' {
+            i = skip_quoted(sql, i, b']')?;
+            continue;
         }
         if bytes[i] == b'?' {
             bind_i += 1;
@@ -280,36 +350,45 @@ pub fn like_pattern_sources(sql: &str) -> Vec<LikePatternSrc> {
             continue;
         }
         if keyword_at(sql, i, "LIKE") {
-            let after = skip_trivia(sql, i + 4);
-            out.push(parse_like_pattern(sql, after, bind_i).0);
+            let after = skip_trivia(sql, i + 4)?;
+            out.push(parse_like_pattern(sql, after, bind_i)?.0);
             i = after;
             continue;
         }
         i += 1;
     }
-    out
+    Ok(out)
 }
 
 /// Parses the LIKE pattern starting at `start`.
-fn parse_like_pattern(sql: &str, start: usize, binds_before: usize) -> (LikePatternSrc, usize) {
-    let mut i = skip_trivia(sql, start);
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when trivia or a string in the
+/// pattern is unterminated.
+fn parse_like_pattern(
+    sql: &str,
+    start: usize,
+    binds_before: usize,
+) -> Result<(LikePatternSrc, usize)> {
+    let mut i = skip_trivia(sql, start)?;
     let bytes = sql.as_bytes();
     let mut literal = String::new();
     let mut saw_literal = false;
     let mut bind = None;
     loop {
-        i = skip_trivia(sql, i);
+        i = skip_trivia(sql, i)?;
         if i >= bytes.len() {
             break;
         }
         if bytes[i] == b'\'' {
             let Ok(end) = skip_sql_string(sql, i) else {
-                return (LikePatternSrc::Unproven, i);
+                return Ok((LikePatternSrc::Unproven, i));
             };
             let inner = unquote_sql_string(&sql[i..end]);
             literal.push_str(&inner);
             saw_literal = true;
-            i = skip_trivia(sql, end);
+            i = skip_trivia(sql, end)?;
             if sql.get(i..).is_some_and(|s| s.starts_with("||")) {
                 i += 2;
                 continue;
@@ -323,22 +402,22 @@ fn parse_like_pattern(sql: &str, start: usize, binds_before: usize) -> (LikePatt
         }
         if keyword_at(sql, i, "NULL") {
             if saw_literal || bind.is_some() {
-                return (LikePatternSrc::Unproven, i);
+                return Ok((LikePatternSrc::Unproven, i));
             }
-            return (LikePatternSrc::Null, i + 4);
+            return Ok((LikePatternSrc::Null, i + 4));
         }
-        return (LikePatternSrc::Unproven, i);
+        return Ok((LikePatternSrc::Unproven, i));
     }
     if let Some(b) = bind {
         if saw_literal {
-            return (LikePatternSrc::Unproven, i);
+            return Ok((LikePatternSrc::Unproven, i));
         }
-        return (LikePatternSrc::Bind(b), i);
+        return Ok((LikePatternSrc::Bind(b), i));
     }
     if saw_literal {
-        (LikePatternSrc::Literal(literal), i)
+        Ok((LikePatternSrc::Literal(literal), i))
     } else {
-        (LikePatternSrc::Unproven, i)
+        Ok((LikePatternSrc::Unproven, i))
     }
 }
 
@@ -398,27 +477,31 @@ pub fn sql_v1_helper_is_chunkable(name: &str) -> bool {
 }
 
 /// Collects helper calls in code spans (strings/comments are skipped).
-#[must_use]
-pub fn sql_v1_function_calls(sql: &str) -> Vec<SqlFnCall> {
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a string, quoted identifier,
+/// or block comment is unterminated.
+pub fn sql_v1_function_calls(sql: &str) -> Result<Vec<SqlFnCall>> {
     let mut out = Vec::new();
     let mut i = 0usize;
     let bytes = sql.as_bytes();
     while i < bytes.len() {
-        i = skip_trivia(sql, i);
+        i = skip_trivia(sql, i)?;
         if i >= bytes.len() {
             break;
         }
         match bytes[i] {
             b'\'' => {
-                i = skip_sql_string(sql, i).unwrap_or(i + 1);
+                i = skip_sql_string(sql, i)?;
                 continue;
             }
             b'"' | b'`' => {
-                i = skip_quoted(sql, i, bytes[i]).unwrap_or(i + 1);
+                i = skip_quoted(sql, i, bytes[i])?;
                 continue;
             }
             b'[' => {
-                i = skip_quoted(sql, i, b']').unwrap_or(i + 1);
+                i = skip_quoted(sql, i, b']')?;
                 continue;
             }
             c if is_ident_start(c) => {
@@ -428,9 +511,9 @@ pub fn sql_v1_function_calls(sql: &str) -> Vec<SqlFnCall> {
                     i += 1;
                 }
                 let name = sql[start..i].to_ascii_lowercase();
-                let j = skip_trivia(sql, i);
+                let j = skip_trivia(sql, i)?;
                 if bytes.get(j) == Some(&b'(') && !matches!(name.as_str(), "cast" | "case") {
-                    if let Some((n, end)) = count_call_args(sql, j) {
+                    if let Some((n, end)) = count_call_args(sql, j)? {
                         out.push(SqlFnCall { name, arg_count: n });
                         i = end;
                         continue;
@@ -440,7 +523,7 @@ pub fn sql_v1_function_calls(sql: &str) -> Vec<SqlFnCall> {
             _ => i += 1,
         }
     }
-    out
+    Ok(out)
 }
 
 /// True when `c` may start an unquoted identifier.
@@ -449,31 +532,36 @@ fn is_ident_start(c: u8) -> bool {
 }
 
 /// Counts top-level arguments of a call whose `(` is at `open`.
-fn count_call_args(sql: &str, open: usize) -> Option<(usize, usize)> {
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a string, quoted identifier,
+/// or block comment inside the argument list is unterminated.
+fn count_call_args(sql: &str, open: usize) -> Result<Option<(usize, usize)>> {
     let bytes = sql.as_bytes();
     if bytes.get(open) != Some(&b'(') {
-        return None;
+        return Ok(None);
     }
     let mut i = open + 1;
     let mut depth = 0usize;
     let mut n = 0usize;
     let mut saw_atom = false;
     while i < bytes.len() {
-        i = skip_trivia(sql, i);
+        i = skip_trivia(sql, i)?;
         if i >= bytes.len() {
-            return None;
+            return Ok(None);
         }
         match bytes[i] {
             b'\'' => {
-                i = skip_sql_string(sql, i).ok()?;
+                i = skip_sql_string(sql, i)?;
                 saw_atom = true;
             }
             b'"' | b'`' => {
-                i = skip_quoted(sql, i, bytes[i]).ok()?;
+                i = skip_quoted(sql, i, bytes[i])?;
                 saw_atom = true;
             }
             b'[' => {
-                i = skip_quoted(sql, i, b']').ok()?;
+                i = skip_quoted(sql, i, b']')?;
                 saw_atom = true;
             }
             b'(' => {
@@ -485,7 +573,7 @@ fn count_call_args(sql: &str, open: usize) -> Option<(usize, usize)> {
                 if saw_atom {
                     n = n.saturating_add(1);
                 }
-                return Some((n, i + 1));
+                return Ok(Some((n, i + 1)));
             }
             b')' => {
                 depth = depth.saturating_sub(1);
@@ -502,7 +590,7 @@ fn count_call_args(sql: &str, open: usize) -> Option<(usize, usize)> {
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Enforces [`crate::DbCapabilities::max_function_args`] on non-chunkable helpers.
@@ -521,7 +609,7 @@ pub fn require_function_args_within(sql: &str, max_function_args: u32) -> Result
         ));
     }
     let cap = usize::try_from(max_function_args).unwrap_or(usize::MAX);
-    for call in sql_v1_function_calls(sql) {
+    for call in sql_v1_function_calls(sql)? {
         if sql_v1_helper_is_chunkable(&call.name) {
             continue;
         }
@@ -552,7 +640,7 @@ pub fn require_like_patterns_within(
         ));
     }
     let cap = usize::try_from(max_pattern_bytes).unwrap_or(usize::MAX);
-    for src in like_pattern_sources(sql) {
+    for src in like_pattern_sources(sql)? {
         match src {
             LikePatternSrc::Literal(pat) => {
                 require_portable_text(&pat)?;
@@ -656,7 +744,8 @@ mod tests {
 
     #[test]
     fn like_literal_and_bind_sources() {
-        let srcs = like_pattern_sources("SELECT * FROM t WHERE a LIKE 'ab%' AND b LIKE ?");
+        let srcs = like_pattern_sources("SELECT * FROM t WHERE a LIKE 'ab%' AND b LIKE ?")
+            .expect("like sources");
         assert_eq!(
             srcs,
             vec![
@@ -671,7 +760,8 @@ mod tests {
         let srcs = like_pattern_sources(
             "SELECT CASE WHEN 'A' LIKE NULL THEN 1 ELSE 0 END AS c7, \
              CASE WHEN body LIKE ? THEN 1 ELSE 0 END AS c8 FROM liked",
-        );
+        )
+        .expect("like sources");
         assert_eq!(
             srcs,
             vec![LikePatternSrc::Null, LikePatternSrc::Bind(0)],
@@ -714,7 +804,8 @@ mod tests {
     fn function_call_arity_and_chunkable_helpers() {
         let calls = sql_v1_function_calls(
             "SELECT replace(a, 'x', 'y'), json_object('k', 1, 'm', 2), min(1, 2, 3) FROM t",
-        );
+        )
+        .expect("function calls");
         assert!(
             calls
                 .iter()
@@ -732,6 +823,55 @@ mod tests {
         assert!(err.to_string().contains("maxFunctionArgs"), "{err}");
         require_function_args_within("SELECT json_object('a', 1, 'b', 2, 'c', 3, 'd', 4)", 2)
             .expect("json_object is adapter-chunked");
+    }
+
+    #[test]
+    fn pack_rejects_unterminated_block_comment_string_and_ident() {
+        let block = sql_v1_pack_statements("SELECT 1 /* unterminated").unwrap_err();
+        assert!(
+            block.to_string().contains("unterminated block comment"),
+            "{block}"
+        );
+        let nested = sql_v1_pack_statements("SELECT 1; /* still open").unwrap_err();
+        assert!(
+            nested.to_string().contains("unterminated block comment"),
+            "{nested}"
+        );
+        let string = sql_v1_pack_statements("SELECT 'oops").unwrap_err();
+        assert!(
+            string.to_string().contains("unterminated SQL string"),
+            "{string}"
+        );
+        let ident = sql_v1_pack_statements("SELECT \"oops").unwrap_err();
+        assert!(
+            ident.to_string().contains("unterminated quoted identifier"),
+            "{ident}"
+        );
+        let tick = sql_v1_pack_statements("SELECT `oops").unwrap_err();
+        assert!(
+            tick.to_string().contains("unterminated quoted identifier"),
+            "{tick}"
+        );
+        sql_v1_pack_statements("SELECT 1 /* ok */").expect("terminated block");
+        sql_v1_pack_statements("SELECT 1 -- to eof").expect("line comment to EOF");
+        require_like_patterns_within("SELECT 1 /* ", &[], D1_PORTABLE_LIKE_PATTERN_BYTES)
+            .expect_err("LIKE scan fails closed on unterminated comment");
+        require_function_args_within("SELECT replace(a, 'x', 'y') /* ", 8)
+            .expect_err("function scan fails closed on unterminated comment");
+    }
+
+    #[test]
+    fn like_glob_wrap_affixes_match_documented_overhead() {
+        assert_eq!(
+            LIKE_GLOB_PATTERN_WRAP_BYTES,
+            LIKE_GLOB_WRAP_PREFIX.len() + LIKE_GLOB_WRAP_SUFFIX.len()
+        );
+        assert_eq!(
+            LIKE_GLOB_REWRITE_OVERHEAD,
+            LIKE_GLOB_PATTERN_WRAP_BYTES + LIKE_TO_GLOB_KEYWORD_EXTRA
+        );
+        let wrapped = format!("{}x{}", LIKE_GLOB_WRAP_PREFIX, LIKE_GLOB_WRAP_SUFFIX);
+        assert_eq!(wrapped.len(), 1 + LIKE_GLOB_PATTERN_WRAP_BYTES);
     }
 }
 
@@ -756,6 +896,24 @@ mod proptests {
             let sql = format!("SELECT '{inner};still'");
             let stmts = sql_v1_pack_statements(&sql).expect("quoted semicolon");
             prop_assert_eq!(stmts.len(), 1);
+        }
+
+        #[test]
+        fn unterminated_delimiters_never_pack(
+            prefix in r"[A-Za-z0-9 ]{0,40}",
+            kind in 0u8..4,
+            tail in r"[A-Za-z0-9 .,;]{0,80}"
+        ) {
+            let sql = match kind {
+                0 => format!("SELECT {prefix} /* {tail}"),
+                1 => format!("SELECT {prefix} '{tail}"),
+                2 => format!("SELECT {prefix} \"{tail}"),
+                _ => format!("SELECT {prefix} `{tail}"),
+            };
+            prop_assert!(
+                sql_v1_pack_statements(&sql).is_err(),
+                "malformed delimiters packed as success: {sql:?}"
+            );
         }
     }
 }
