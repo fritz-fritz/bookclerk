@@ -60,13 +60,14 @@ only.
 ### Unreleased pack until a real release cut
 
 [`host_migration_plan()`](../../crates/bookclerk-library/src/migrations.rs)
-is **empty**. Live DDL lives in `UNRELEASED_SQL`. Fresh databases apply
+is **empty**. Live schema lives in `unreleased_ops` (already-separated
+`MigrationOp`s). Fresh databases apply
 [`current_canonical_schema()`](../../crates/bookclerk-library/src/migrations.rs)
-(frozen ups + current unreleased) and persist
+(derived diagnostic SQL: frozen ups + current unreleased) and persist
 `Unreleased { base_version: SCHEMA_VERSION, checksum }`.
 
 `current_canonical_schema()` is **not** permanently equal to
-`UNRELEASED_SQL`. Today the frozen plan is empty, so they coincide. After a
+`unreleased_sql()`. Today the frozen plan is empty, so they coincide. After a
 freeze it is concatenated frozen ups plus whatever is again unreleased.
 
 There is **no** production schema v1 freeze in this tree.
@@ -82,7 +83,7 @@ Connect transitions:
 | `Frozen` newer / unknown / checksum mismatch | **Fail closed** |
 | Pre-state-machine DB (`user_version` ≫ 0, no state row) | Unsupported / malformed; reset |
 
-A future freeze that copies `UNRELEASED_SQL` into
+A future freeze that copies `unreleased_ops` into
 `HostMigrationStep { version: 1 }` must **not** apply v1 ups on top of an
 existing `Unreleased { base_version: 0, … }` database just because both
 historically used integer zero. Default: documented development reset.
@@ -174,9 +175,24 @@ change journal until that design lands.
 
 Plugin bindings may change schema only as **admitted BookclerkSQL** inside the
 plugin’s binding namespace (`GuestSqlPolicy::binding_owned`). The host
-authorizes, typechecks, and records binding `SchemaState`. A plugin cannot
-name host, reserved, or other-plugin tables. Restore writes captured rows and
-does **not** run plugin migrations.
+authorizes, typechecks, and records binding `SchemaState` in that binding’s
+own `schema_migrations` table (same row shape as the library).
+
+Host-owned binding bootstrap is [`binding_bootstrap_ops`](../../crates/bookclerk-library/src/migrations.rs)
+(`Schema` ops: receipts + SQL catalog). `BINDING_SCHEMA_VERSION = 0` until a
+binding freeze. Connect:
+
+| Binding | Open |
+| --- | --- |
+| `Uninitialized` | Apply bootstrap ops + unreleased marker (one atomic unit; retry uniqueness / unavailable after re-read) |
+| Matching `Unreleased { base_version, checksum }` | No-op |
+| Mismatched checksum / unexpected frozen | **Fail closed** (restore or drop the binding) |
+
+There is **no** backend-native escape hatch (`pg_dump`, `VACUUM INTO`, D1 REST
+migrate, sqlite `.dump`). Plugin-owned `CREATE TABLE` / DML is host-mediated
+BookclerkSQL and does **not** bump this host-owned binding `SchemaState`.
+Restore writes captured rows (including `schema_migrations`) and does **not**
+run plugin migrations or re-apply bootstrap when the restored marker matches.
 
 Host schema and plugin schema are separate apply units. Each frozen/unreleased
 **apply unit** is one atomic `ExecuteRequest`. If an adapter cannot perform a
@@ -190,12 +206,19 @@ HostMigrationStep { version, introduced_in, steps, down }
 MigrationOp = Schema(canonical stmt) | Data(canonical stmt)
 ```
 
-`host_migration_plan()` stays **empty**. Live DDL is packed
-[`UNRELEASED_SQL`](../../crates/bookclerk-library/src/migrations.rs)
-(`Schema` ops). Checksums hash the **length-prefixed ordered statement list**,
-not a joined script. Data backfills use the same parser/type/authz/proof path
-as ordinary execute. CLI downgrade applies `down` only when every step has it;
-otherwise restore a backup.
+The **op list is the source of truth**. Human-readable SQL
+(`unreleased_sql()`, `current_canonical_schema()`, `HostMigrationStep::up_sql`)
+is derived by joining already-separated statements with `;\n` for
+diagnostics/export/tests. Apply, checksum, and backup walk the ordered ops.
+Each `MigrationOp` is exactly one BookclerkSQL statement; `Schema` must be
+admitted DDL and `Data` admitted DML, both proven through the SQL-v1
+typechecker before adapter execution. A packer failure on static or imported
+migration SQL fails closed (never checksumed as one opaque statement).
+
+`host_migration_plan()` stays **empty**. Live schema is [`unreleased_ops`](../../crates/bookclerk-library/src/migrations.rs)
+(mostly `Schema`, plus seed `Data` inserts). Checksums hash the
+**length-prefixed ordered statement list**, not a joined script. CLI downgrade
+applies `down` only when every step has it; otherwise restore a backup.
 
 Invariants (locked with synthetic plans, not a v1 freeze):
 
@@ -230,7 +253,7 @@ With an empty frozen plan, schema-version downgrade is a no-op. Time-based
 
 - Fresh databases apply the unreleased pack once and record
   `unreleased@base0+<checksum>` until a freeze exists.
-- Editing `UNRELEASED_SQL` against an existing development DB is a hard
+- Editing `unreleased_ops` against an existing development DB is a hard
   fail + reset, not a silent reshape.
 - There is no incremental V2–V29 chain and no `migrations_legacy` module.
   Current-schema FK/UNIQUE coverage lives on the greenfield pack.

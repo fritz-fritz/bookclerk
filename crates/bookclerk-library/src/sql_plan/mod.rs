@@ -235,7 +235,7 @@ pub fn authorize_typed_request(
 /// e.g. an isolated plugin database binding session. `exec` receives the
 /// receipt-wrapped envelope and must run it atomically on the target
 /// database (which needs its own `db_atomic_receipts` table — see
-/// [`crate::migrations::binding_bootstrap_sql`]).
+/// [`crate::migrations::binding_bootstrap_ops`]).
 ///
 /// # Errors
 ///

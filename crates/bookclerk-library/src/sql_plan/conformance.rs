@@ -1470,10 +1470,8 @@ async fn postgres_binding_db() -> sea_orm::DatabaseConnection {
         .await
         .expect("connect to disposable postgres binding database");
     let backend = sea_orm::ConnectionTrait::get_database_backend(&db);
-    for sql in
-        bookclerk_db_exec::split_schema_statements(crate::migrations::binding_bootstrap_sql())
-    {
-        let sql = bookclerk_db_exec::schema_sql_for_backend(backend, &sql);
+    for sql in crate::migrations::binding_bootstrap_statements() {
+        let sql = bookclerk_db_exec::schema_sql_for_backend(backend, sql);
         sea_orm::ConnectionTrait::execute_raw(
             &db,
             sea_orm::Statement::from_string(backend, sql.into_owned()),

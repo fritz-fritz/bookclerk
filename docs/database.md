@@ -195,7 +195,7 @@ BOOKCLERK_DATABASE_POSTGRES_URL_FILE=/run/secrets/postgres_url
 
 **Schema migrations**: Fresh databases apply
 [`current_canonical_schema`](../crates/bookclerk-library/src/migrations.rs)
-(today: `UNRELEASED_SQL`; Postgres is that pack lowered mechanically in
+(today: derived from `unreleased_ops`; Postgres is that pack lowered mechanically in
 [`schema_postgres.rs`](../crates/bookclerk-db-exec/src/schema_postgres.rs)
 to `BIGSERIAL` / `BIGINT` / `BYTEA`) and persist
 `SchemaState::Unreleased { checksum }`. There is no production frozen v1
@@ -316,12 +316,13 @@ Admin→Owner upgrade; testing and development hosts should recreate
 ### Unreleased host schema (no production freeze)
 
 [`migrations.rs`](../crates/bookclerk-library/src/migrations.rs) exposes
-`current_canonical_schema()` as frozen ups plus `UNRELEASED_SQL`. Today the
-frozen plan is empty, so that helper equals `UNRELEASED_SQL` — do not treat
+`current_canonical_schema()` as frozen ups plus `unreleased_ops`. Today the
+frozen plan is empty, so that helper equals `unreleased_sql()` — do not treat
 that equality as permanent. Postgres receives the same pack lowered
 mechanically ([`schema_postgres.rs`](../crates/bookclerk-db-exec/src/schema_postgres.rs)).
-There is no live incremental chain. Land new DDL in `UNRELEASED_SQL` until a
-**release cut** copies it into a `HostMigrationStep`. See
+There is no live incremental chain. Land new DDL as already-separated
+`MigrationOp`s in `unreleased_ops` until a
+**release cut** copies them into a `HostMigrationStep`. See
 [ADR: schema versioning](adr/schema-versioning.md).
 
 Library open compares explicit [`SchemaState`](../crates/bookclerk-library/src/schema_state.rs).

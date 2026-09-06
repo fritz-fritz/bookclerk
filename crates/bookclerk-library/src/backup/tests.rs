@@ -11,8 +11,8 @@ use crate::backup::encode::{
 use crate::backup::repository::BackupRepository;
 use crate::backup::restore::{apply_admitted_sql, restore_backup_unit};
 use crate::backup::schema::{
-    admit_canonical_schema, canonical_order_by_sql, library_ddl_for_schema_state_with,
-    order_key_columns, sort_tables_by_foreign_keys,
+    admit_canonical_schema, canonical_order_by_sql, filter_library_pack_ddl,
+    library_ddl_for_schema_state_with, order_key_columns, sort_tables_by_foreign_keys,
 };
 use crate::backup::util::validate_cell;
 use crate::backup::verify::{verify_recovery_point, verify_unit};
@@ -122,11 +122,7 @@ async fn count(db: &DatabaseConnection, sql: &str) -> i64 {
 }
 
 async fn apply_bootstrap(db: &DatabaseConnection) {
-    for stmt in crate::migrations::binding_bootstrap_statements() {
-        db.execute_raw(Statement::from_string(DbBackend::Sqlite, stmt.clone()))
-            .await
-            .unwrap();
-    }
+    crate::apply_binding_bootstrap(db).await.unwrap();
 }
 
 #[test]
@@ -553,10 +549,13 @@ fn schema_state_frozen_uses_that_version_not_latest() {
         introduced_in: "0.2.0",
     };
     let plan = [v1, v2];
+    const UNRELEASED_ONLY: &[MigrationOp] = &[MigrationOp::Schema(
+        "CREATE TABLE unreleased_only (id INTEGER PRIMARY KEY)",
+    )];
     let checksum = plan[0].checksum();
     let sql = library_ddl_for_schema_state_with(
         &plan,
-        "CREATE TABLE unreleased_only (id INTEGER PRIMARY KEY);",
+        UNRELEASED_ONLY,
         "deadbeef",
         SCHEMA_MIGRATIONS_DDL,
         2,
@@ -583,18 +582,24 @@ fn library_current_schema_admits_after_filtering_seed_dml() {
         !joined.contains("INSERT"),
         "seed DML must not live in the schema object"
     );
+    let filtered = filter_library_pack_ddl(
+        "INSERT OR IGNORE INTO job_queue_control (id) VALUES (1);\n\
+         CREATE TABLE t (id INTEGER PRIMARY KEY)",
+    )
+    .unwrap();
+    assert!(filtered.to_ascii_uppercase().contains("CREATE TABLE"));
+    assert!(!filtered.to_ascii_uppercase().contains("INSERT"));
 }
 
 #[test]
 fn schema_state_unreleased_includes_matching_pack() {
-    let unreleased = "CREATE TABLE extra (id INTEGER PRIMARY KEY);";
-    let checksum = {
-        use sha2::{Digest, Sha256};
-        hex::encode(Sha256::digest(unreleased.as_bytes()))
-    };
+    const EXTRA_OPS: &[MigrationOp] = &[MigrationOp::Schema(
+        "CREATE TABLE extra (id INTEGER PRIMARY KEY)",
+    )];
+    let checksum = crate::migrations::migration_ops_checksum(EXTRA_OPS, None);
     let sql = library_ddl_for_schema_state_with(
         &[],
-        unreleased,
+        EXTRA_OPS,
         &checksum,
         SCHEMA_MIGRATIONS_DDL,
         SCHEMA_VERSION,
@@ -1109,7 +1114,7 @@ async fn backup_fails_closed_when_frozen_checksum_is_tampered() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_fresh_schema_sqlite(&db, HostSchemaKind::RowMarker, SYNTHETIC_V1_PLAN, "", 1)
+    apply_fresh_schema_sqlite(&db, HostSchemaKind::RowMarker, SYNTHETIC_V1_PLAN, &[], 1)
         .await
         .unwrap();
     let state = current_schema_state(&db, HostSchemaKind::RowMarker)

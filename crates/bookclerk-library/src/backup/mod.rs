@@ -44,7 +44,8 @@ use self::verify::verify_recovery_point;
 pub use self::capture::plugin_canonical_schema_from_ddl_catalog;
 pub use self::restore::apply_admitted_sql;
 pub use self::schema::{
-    admit_canonical_schema, library_canonical_schema, library_canonical_schema_for_state,
+    admit_canonical_schema, admit_canonical_statements, filter_library_pack_ddl,
+    library_canonical_schema, library_canonical_schema_for_state,
 };
 
 /// Subdirectory of `$BOOKCLERK_FILES_DIR` holding the backup repository.

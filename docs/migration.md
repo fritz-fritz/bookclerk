@@ -96,8 +96,9 @@ plugin-owned migration framework). Each database unit is replaced completely; a
 multi-database bundle is not one transaction across independent DBs.
 Unsupported adapters fail closed.
 
-Land new host DDL in `UNRELEASED_SQL` as already-separate statements (packed
-with the SQL-v1 lexer). A future **release cut** may copy that bucket into
+Land new host DDL as already-separated `MigrationOp`s in `unreleased_ops`
+(one BookclerkSQL statement per op; `Schema` vs `Data` is proven). A future
+**release cut** may copy that bucket into
 immutable `HostMigrationStep` ops (`Schema` / `Data`); until then the frozen
 plan stays empty. Do not add a public plan version per PR. See
 [ADR: schema versioning](adr/schema-versioning.md).

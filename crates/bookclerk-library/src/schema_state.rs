@@ -16,7 +16,7 @@ pub enum SchemaState {
     Unreleased {
         /// Highest frozen plan version this unreleased pack sits on (`0` = none).
         base_version: i64,
-        /// SHA-256 hex of [`crate::migrations::UNRELEASED_SQL`].
+        /// SHA-256 hex of [`crate::migrations::unreleased_ops`].
         checksum: String,
     },
     /// A frozen [`crate::migrations::HostMigrationStep`] is applied.

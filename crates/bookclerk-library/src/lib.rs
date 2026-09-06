@@ -13,6 +13,7 @@ mod atomic_ops;
 mod atomic_txn;
 mod backend_migrate;
 mod backup;
+mod binding_schema;
 mod db_atomic;
 pub mod email;
 pub mod entities;
@@ -47,15 +48,17 @@ pub use backup::restore::restore_backup_unit;
 pub use backup::schema::{library_ddl_for_schema_state, sort_tables_by_foreign_keys};
 pub use backup::verify::verify_recovery_point;
 pub use backup::{
-    admit_canonical_schema, apply_admitted_sql, archive_backup, backup_library,
-    extract_backup_archive, library_canonical_schema, library_canonical_schema_for_state,
-    list_backups, plugin_canonical_schema_from_ddl_catalog, prune_automatic_backups,
-    resolve_backup_spec, restore_backup, restore_backup_in_repo, BackupListEntry, BackupManifest,
-    BackupOutcome, BackupReason, BackupRequest, BackupResolve, BackupUnit, CanonicalDatabaseSchema,
-    CanonicalExportOpts, CanonicalRestoreKind, CanonicalRestoreOpts, CanonicalTableSchema,
-    DatabaseUnitKind, IdentityHighWater, PreparedPluginUnit, RestorePlan, SchemaBackupOpts,
-    ValidatedBackup, BACKUPS_DIR, BACKUP_FORMAT_VERSION, BACKUP_RETENTION, LIBRARY_SKIP_TABLES,
+    admit_canonical_schema, admit_canonical_statements, apply_admitted_sql, archive_backup,
+    backup_library, extract_backup_archive, filter_library_pack_ddl, library_canonical_schema,
+    library_canonical_schema_for_state, list_backups, plugin_canonical_schema_from_ddl_catalog,
+    prune_automatic_backups, resolve_backup_spec, restore_backup, restore_backup_in_repo,
+    BackupListEntry, BackupManifest, BackupOutcome, BackupReason, BackupRequest, BackupResolve,
+    BackupUnit, CanonicalDatabaseSchema, CanonicalExportOpts, CanonicalRestoreKind,
+    CanonicalRestoreOpts, CanonicalTableSchema, DatabaseUnitKind, IdentityHighWater,
+    PreparedPluginUnit, RestorePlan, SchemaBackupOpts, ValidatedBackup, BACKUPS_DIR,
+    BACKUP_FORMAT_VERSION, BACKUP_RETENTION, LIBRARY_SKIP_TABLES,
 };
+pub use binding_schema::{apply_binding_bootstrap, binding_bootstrap_plan};
 pub use bookclerk_plugin_abi::GuestSqlPolicy;
 pub use db_atomic::{
     db_atomic_operation_id, db_atomic_request_hash, execute_db_atomic, execute_named_atomic,
@@ -78,8 +81,8 @@ pub use master_key::{
 pub use migrations::{
     binding_bootstrap_sql, binding_bootstrap_statements, current_canonical_schema,
     current_canonical_table_names, host_migration_plan, latest_schema_postgres,
-    latest_schema_sqlite, unreleased_checksum, HostMigrationStep, MigrationOp,
-    MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION, UNRELEASED_SQL,
+    latest_schema_sqlite, unreleased_checksum, unreleased_ops, unreleased_sql, HostMigrationStep,
+    MigrationOp, MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
 };
 pub use models::{
     catalog_subscribers_for_event, collapse_live_subscriber_nodes, content_kind_from_classic,

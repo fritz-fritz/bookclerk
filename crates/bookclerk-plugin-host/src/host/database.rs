@@ -37,7 +37,9 @@ use crate::discover::DiscoveredPlugin;
 use crate::jail::plugin_data_dir;
 use crate::rpc_session::{PluginSession, OPERATOR_ACCOUNT};
 use crate::{PluginError, Result as PluginResult};
-use bookclerk_library::{atomic_status, DbAtomicParams};
+use bookclerk_library::{
+    atomic_status, binding_bootstrap_plan, DbAtomicParams, SchemaState, SCHEMA_MIGRATIONS_DDL,
+};
 
 /// External database backend spawned for `[database].plugin`.
 #[derive(Clone)]
@@ -721,27 +723,80 @@ fn catalog_cell_i64(v: Option<&DbValue>) -> Option<i64> {
     }
 }
 
-/// Host-authored bootstrap request creating binding-local receipt tables.
-fn binding_bootstrap_request(owner: &str, binding: &str) -> ExecuteRequest {
-    let statements = bookclerk_plugin_abi::sql_v1_pack_statements(
-        bookclerk_library::migrations::binding_bootstrap_sql(),
-    )
-    .expect("binding bootstrap packs")
-    .into_iter()
-    .map(|sql| TypedDbStatement {
-        sql,
-        parameters: Vec::new(),
-        kind: DbPlanStatementKind::Execute,
-        max_rows: 0,
-        result_selection: DbResultSelection::Discard,
-    })
-    .collect();
+/// Host-authored statements for one binding bootstrap apply unit.
+fn binding_sql_request(operation_id: String, sqls: Vec<String>) -> ExecuteRequest {
     ExecuteRequest {
-        operation_id: format!("binding-bootstrap-{owner}-{binding}"),
+        operation_id,
         request_hash: String::new(),
         deadline_unix_ms: 0,
-        statements,
+        statements: sqls
+            .into_iter()
+            .map(|sql| TypedDbStatement {
+                sql,
+                parameters: Vec::new(),
+                kind: DbPlanStatementKind::Execute,
+                max_rows: 0,
+                result_selection: DbResultSelection::Discard,
+            })
+            .collect(),
     }
+}
+
+/// Reads binding `schema_migrations` rows into [`SchemaState`].
+fn binding_schema_state_from_reply(reply: &ExecuteReply) -> PluginResult<SchemaState> {
+    let Some(stmt) = reply.statements.first() else {
+        return Ok(SchemaState::Uninitialized);
+    };
+    if stmt.rows.is_empty() {
+        return Ok(SchemaState::Uninitialized);
+    }
+    let mut unreleased = None;
+    let mut frozen: Option<(i64, String)> = None;
+    for row in &stmt.rows {
+        let version = match row.values.first() {
+            Some(DbValue::Int64(n)) => *n,
+            Some(DbValue::Text(s)) => s.parse::<i64>().unwrap_or(0),
+            _ => {
+                return Err(PluginError::message(
+                    "binding schema_migrations row is missing version".into(),
+                ));
+            }
+        };
+        let state = match row.values.get(1) {
+            Some(DbValue::Text(s)) => s.as_str(),
+            _ => "",
+        };
+        let checksum = match row.values.get(2) {
+            Some(DbValue::Text(s)) => s.clone(),
+            _ => String::new(),
+        };
+        match state {
+            "unreleased" => {
+                if unreleased.is_some() {
+                    return Err(PluginError::message(
+                        "binding schema_migrations has multiple unreleased rows".into(),
+                    ));
+                }
+                unreleased = Some((version, checksum));
+            }
+            "frozen" => frozen = Some((version, checksum)),
+            other => {
+                return Err(PluginError::message(format!(
+                    "unrecognized binding schema_migrations.state `{other}`"
+                )));
+            }
+        }
+    }
+    if let Some((base_version, checksum)) = unreleased {
+        return Ok(SchemaState::Unreleased {
+            base_version,
+            checksum,
+        });
+    }
+    if let Some((version, checksum)) = frozen {
+        return Ok(SchemaState::Frozen { version, checksum });
+    }
+    Ok(SchemaState::Uninitialized)
 }
 
 impl ExternalDatabase {
@@ -820,12 +875,7 @@ impl ExternalDatabase {
                     binding_caps.capability_failure_reason()
                 )));
             }
-            self.session
-                .db_execute_binding_request(
-                    &key,
-                    binding_bootstrap_request(owner_plugin_id, binding),
-                    Arc::new(AtomicBool::new(false)),
-                )
+            self.ensure_binding_host_schema(&key, owner_plugin_id, binding)
                 .await?;
             let session = Arc::clone(&self.session);
             let factory_key = key.clone();
@@ -881,12 +931,7 @@ impl ExternalDatabase {
             )));
         }
         if provision {
-            self.session
-                .db_execute_binding_request(
-                    &key,
-                    binding_bootstrap_request(owner_plugin_id, binding),
-                    Arc::new(AtomicBool::new(false)),
-                )
+            self.ensure_binding_host_schema(&key, owner_plugin_id, binding)
                 .await?;
         }
         let proxy: Arc<Box<dyn ProxyDatabaseTrait>> = Arc::new(Box::new(RpcDatabaseProxy {
@@ -899,6 +944,56 @@ impl ExternalDatabase {
             .await
             .map_err(|err| PluginError::message(err.to_string()))?;
         Ok((db, binding_caps))
+    }
+
+    /// Applies host-owned binding bootstrap (SchemaState machine, BookclerkSQL only).
+    async fn ensure_binding_host_schema(
+        &self,
+        key: &str,
+        owner: &str,
+        binding: &str,
+    ) -> PluginResult<()> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.session
+            .db_execute_binding_request(
+                key,
+                binding_sql_request(
+                    format!("binding-schema-migrations-{owner}-{binding}"),
+                    vec![SCHEMA_MIGRATIONS_DDL.to_string()],
+                ),
+                Arc::clone(&cancel),
+            )
+            .await?;
+        let select = ExecuteRequest {
+            operation_id: format!("binding-schema-state-{owner}-{binding}"),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![TypedDbStatement {
+                sql: "SELECT version, state, checksum FROM schema_migrations".into(),
+                parameters: Vec::new(),
+                kind: DbPlanStatementKind::Select,
+                max_rows: 64,
+                result_selection: DbResultSelection::Rows,
+            }],
+        };
+        let reply = self
+            .session
+            .db_execute_binding_request(key, select, Arc::clone(&cancel))
+            .await?;
+        let state = binding_schema_state_from_reply(&reply)?;
+        let Some(stmts) =
+            binding_bootstrap_plan(&state).map_err(|err| PluginError::message(err.to_string()))?
+        else {
+            return Ok(());
+        };
+        self.session
+            .db_execute_binding_request(
+                key,
+                binding_sql_request(format!("binding-bootstrap-{owner}-{binding}"), stmts),
+                cancel,
+            )
+            .await?;
+        Ok(())
     }
 
     /// Backend-native default unit for one `(plugin, binding)` pair.

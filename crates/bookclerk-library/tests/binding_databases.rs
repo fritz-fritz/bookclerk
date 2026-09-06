@@ -18,18 +18,9 @@ async fn binding_db() -> DatabaseConnection {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .expect("in-memory binding database");
-    for sql in bookclerk_plugin_abi::sql_v1_pack_statements(
-        bookclerk_library::migrations::binding_bootstrap_sql(),
-    )
-    .expect("binding bootstrap packs")
-    {
-        db.execute_raw(Statement::from_string(
-            db.get_database_backend(),
-            sql.clone(),
-        ))
+    bookclerk_library::apply_binding_bootstrap(&db)
         .await
-        .expect("binding bootstrap DDL");
-    }
+        .expect("binding bootstrap");
     db
 }
 

@@ -14,8 +14,8 @@ use bookclerk_plugin_abi::{
 
 use crate::error::{LibraryError, Result};
 use crate::migrations::{
-    host_migration_plan, unreleased_checksum, HostMigrationStep, SCHEMA_MIGRATIONS_DDL,
-    SCHEMA_VERSION, UNRELEASED_SQL,
+    host_migration_plan, unreleased_checksum, unreleased_ops, HostMigrationStep, MigrationOp,
+    SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
 };
 use crate::schema_state::SchemaState;
 
@@ -34,6 +34,24 @@ pub fn admit_canonical_schema(
     sql_contract_version: u32,
     sql: &str,
 ) -> Result<CanonicalDatabaseSchema> {
+    let stmts = bookclerk_plugin_abi::sql_v1_pack_statements(sql).map_err(|err| {
+        LibraryError::Schema(format!(
+            "backup schema is not a BookclerkSQL statement list: {err}"
+        ))
+    })?;
+    let refs: Vec<&str> = stmts.iter().map(String::as_str).collect();
+    admit_canonical_statements(sql_contract_version, &refs)
+}
+
+/// Admits already-separated canonical `CREATE TABLE` / `CREATE INDEX` statements.
+///
+/// # Errors
+///
+/// Returns when any statement is not admitted Bookclerk SQL.
+pub fn admit_canonical_statements(
+    sql_contract_version: u32,
+    statements: &[&str],
+) -> Result<CanonicalDatabaseSchema> {
     if sql_contract_version == 0 || sql_contract_version > SQL_CONTRACT_VERSION {
         return Err(LibraryError::Schema(format!(
             "unsupported SQL contract version {sql_contract_version} \
@@ -44,25 +62,27 @@ pub fn admit_canonical_schema(
     let mut indexes = Vec::new();
     let mut env = SqlTypeEnv::new();
     let mut pending_indexes = Vec::new();
-    for stmt in bookclerk_plugin_abi::sql_v1_pack_statements(sql).map_err(|err| {
-        LibraryError::Schema(format!(
-            "backup schema is not a BookclerkSQL statement list: {err}"
-        ))
-    })? {
+    for stmt in statements {
         let trimmed = stmt.trim().trim_end_matches(';').trim();
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(parsed) = parse_create_table_schema(trimmed) {
-            env.insert_table(parsed.table.clone(), parsed.columns.iter().cloned());
-            tables.push(CanonicalTableSchema {
-                create_sql: trimmed.to_string(),
-                parsed,
-            });
-            continue;
+        if parse_create_table_schema(trimmed).is_some() || parse_create_index_sql(trimmed).is_some()
+        {
+            if let Some(parsed) = parse_create_table_schema(trimmed) {
+                env.insert_table(parsed.table.clone(), parsed.columns.iter().cloned());
+                tables.push(CanonicalTableSchema {
+                    create_sql: trimmed.to_string(),
+                    parsed,
+                });
+                continue;
+            }
+            if let Some(index) = parse_create_index_sql(trimmed) {
+                pending_indexes.push((trimmed.to_string(), index));
+                continue;
+            }
         }
-        if let Some(index) = parse_create_index_sql(trimmed) {
-            pending_indexes.push((trimmed.to_string(), index));
+        if is_seed_dml(trimmed) {
             continue;
         }
         return Err(LibraryError::Schema(format!(
@@ -278,7 +298,7 @@ pub fn sql_type_to_db_type(ty: SqlType) -> bookclerk_plugin_abi::DbType {
 pub fn library_ddl_for_schema_state(state: &SchemaState) -> Result<String> {
     library_ddl_for_schema_state_with(
         &host_migration_plan(),
-        UNRELEASED_SQL,
+        unreleased_ops(),
         &unreleased_checksum(),
         SCHEMA_MIGRATIONS_DDL,
         SCHEMA_VERSION,
@@ -286,22 +306,61 @@ pub fn library_ddl_for_schema_state(state: &SchemaState) -> Result<String> {
     )
 }
 
-/// Testable SchemaState → DDL resolver.
+/// Ordered canonical statements matching `state` (schema_migrations, then ops).
+///
+/// # Errors
+///
+/// Returns when the database is uninitialized, checksums do not match, or a
+/// frozen version is unknown to this binary.
+pub fn library_statements_for_schema_state(state: &SchemaState) -> Result<Vec<String>> {
+    library_statements_for_schema_state_with(
+        &host_migration_plan(),
+        unreleased_ops(),
+        &unreleased_checksum(),
+        SCHEMA_MIGRATIONS_DDL,
+        SCHEMA_VERSION,
+        state,
+    )
+}
+
+/// Testable SchemaState → DDL resolver (joined diagnostic SQL).
 ///
 /// # Errors
 ///
 /// Returns when `state` cannot be represented by `plan` / `unreleased`.
 pub fn library_ddl_for_schema_state_with(
     plan: &[HostMigrationStep],
-    unreleased: &str,
+    unreleased: &[MigrationOp],
     unreleased_checksum: &str,
     schema_migrations_ddl: &str,
     schema_version: i64,
     state: &SchemaState,
 ) -> Result<String> {
-    let mut sql = String::new();
-    sql.push_str(schema_migrations_ddl.trim_end_matches(';'));
-    sql.push_str(";\n");
+    Ok(library_statements_for_schema_state_with(
+        plan,
+        unreleased,
+        unreleased_checksum,
+        schema_migrations_ddl,
+        schema_version,
+        state,
+    )?
+    .join(";\n"))
+}
+
+/// Testable SchemaState → ordered statement list.
+///
+/// # Errors
+///
+/// Returns when `state` cannot be represented by `plan` / `unreleased`.
+pub fn library_statements_for_schema_state_with(
+    plan: &[HostMigrationStep],
+    unreleased: &[MigrationOp],
+    unreleased_checksum: &str,
+    schema_migrations_ddl: &str,
+    schema_version: i64,
+    state: &SchemaState,
+) -> Result<Vec<String>> {
+    let mut stmts = vec![schema_migrations_ddl.trim_end_matches(';').to_string()];
     match state {
         SchemaState::Uninitialized => {
             return Err(LibraryError::Schema(
@@ -325,8 +384,7 @@ pub fn library_ddl_for_schema_state_with(
             }
             for s in plan.iter().filter(|s| s.version <= *version) {
                 for op in s.steps {
-                    sql.push_str(op.sql().trim_end_matches(';'));
-                    sql.push_str(";\n");
+                    stmts.push(op.sql().to_string());
                 }
             }
         }
@@ -348,17 +406,15 @@ pub fn library_ddl_for_schema_state_with(
             }
             for s in plan.iter().filter(|s| s.version <= *base_version) {
                 for op in s.steps {
-                    sql.push_str(op.sql().trim_end_matches(';'));
-                    sql.push_str(";\n");
+                    stmts.push(op.sql().to_string());
                 }
             }
-            if !unreleased.trim().is_empty() {
-                sql.push_str(unreleased.trim_end_matches(';'));
-                sql.push_str(";\n");
+            for op in unreleased {
+                stmts.push(op.sql().to_string());
             }
         }
     }
-    Ok(sql)
+    Ok(stmts)
 }
 
 /// Admitted library schema for `state`.
@@ -367,8 +423,9 @@ pub fn library_ddl_for_schema_state_with(
 ///
 /// Returns when DDL cannot be resolved or is not fully admitted.
 pub fn library_canonical_schema_for_state(state: &SchemaState) -> Result<CanonicalDatabaseSchema> {
-    let sql = filter_library_pack_ddl(&library_ddl_for_schema_state(state)?)?;
-    sort_schema(admit_canonical_schema(SQL_CONTRACT_VERSION, &sql)?)
+    let stmts = library_statements_for_schema_state(state)?;
+    let refs: Vec<&str> = stmts.iter().map(String::as_str).collect();
+    sort_schema(admit_canonical_statements(SQL_CONTRACT_VERSION, &refs)?)
 }
 
 /// Admitted library schema for this binary's current pack (frozen ups + unreleased).
@@ -377,12 +434,14 @@ pub fn library_canonical_schema_for_state(state: &SchemaState) -> Result<Canonic
 ///
 /// Returns when current canonical SQL is not fully admitted.
 pub fn library_canonical_schema() -> Result<CanonicalDatabaseSchema> {
-    let mut sql = String::new();
-    sql.push_str(SCHEMA_MIGRATIONS_DDL.trim_end_matches(';'));
-    sql.push_str(";\n");
-    sql.push_str(crate::migrations::current_canonical_schema());
-    let sql = filter_library_pack_ddl(&sql)?;
-    sort_schema(admit_canonical_schema(SQL_CONTRACT_VERSION, &sql)?)
+    let mut stmts = vec![SCHEMA_MIGRATIONS_DDL.to_string()];
+    stmts.extend(
+        crate::migrations::current_canonical_statements()
+            .iter()
+            .cloned(),
+    );
+    let refs: Vec<&str> = stmts.iter().map(String::as_str).collect();
+    sort_schema(admit_canonical_statements(SQL_CONTRACT_VERSION, &refs)?)
 }
 
 /// Sorts tables in `schema` into FK-safe order.

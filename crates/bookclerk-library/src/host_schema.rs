@@ -19,8 +19,8 @@ use crate::error::{LibraryError, Result};
 #[cfg(test)]
 use crate::migrations::MigrationOp;
 use crate::migrations::{
-    host_migration_plan, migration_step_checksum, unreleased_checksum, HostMigrationStep,
-    SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
+    host_migration_plan, unreleased_checksum, unreleased_ops, unreleased_state_marker_sql,
+    HostMigrationStep, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
 };
 use crate::schema_state::{SchemaState, SCHEMA_STATE_FROZEN, SCHEMA_STATE_UNRELEASED};
 use crate::schema_walk::SchemaWalk;
@@ -50,26 +50,13 @@ impl SchemaBatch {
         Self { statements }
     }
 
-    /// Packs canonical DDL with the SQL-v1 lexer, then appends `marker`.
-    ///
-    /// Host compile-time DDL must pack; a failure is a programming error.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `ddl` is not a BookclerkSQL statement list.
-    #[must_use]
-    pub fn from_ddl_and_marker(ddl: impl Into<String>, marker: impl Into<String>) -> Self {
-        let ddl = ddl.into();
-        let stmts = bookclerk_plugin_abi::sql_v1_pack_statements(&ddl).unwrap_or_else(|err| {
-            panic!("host schema DDL is not a BookclerkSQL statement list: {err}")
-        });
-        Self::from_statements_and_marker(stmts, marker)
-    }
-
     /// Unreleased development pack plus `schema_migrations` unreleased row.
     #[must_use]
-    pub fn unreleased(ddl: &str, checksum: &str) -> Self {
-        Self::from_ddl_and_marker(ddl, unreleased_marker_sql(checksum, SCHEMA_VERSION))
+    pub fn unreleased(stmts: impl IntoIterator<Item = impl Into<String>>, checksum: &str) -> Self {
+        Self::from_statements_and_marker(
+            stmts,
+            unreleased_state_marker_sql(checksum, SCHEMA_VERSION),
+        )
     }
 }
 
@@ -326,7 +313,7 @@ where
             }
             let walk = prepare_schema_change(db, kind, SCHEMA_VERSION, opts).await?;
             apply_walk_batch(db, kind, &walk, run_batch).await?;
-            if !crate::migrations::UNRELEASED_SQL.trim().is_empty() {
+            if !unreleased_ops().is_empty() {
                 apply_unreleased_bucket(db, kind, run_batch).await?;
             }
             Ok(())
@@ -570,13 +557,7 @@ async fn host_tables_present(db: &DatabaseConnection, backend: DbBackend) -> Res
 /// any freeze). It is stored in `schema_migrations.version` and is not an
 /// identity for uninitialized databases.
 fn unreleased_marker_sql(checksum: &str, base_version: i64) -> String {
-    let app = env!("CARGO_PKG_VERSION").replace('\'', "''");
-    let at = chrono::Utc::now().to_rfc3339().replace('\'', "''");
-    let checksum = checksum.replace('\'', "''");
-    format!(
-        "INSERT INTO schema_migrations (version, state, checksum, app_version, applied_at) \
-         VALUES ({base_version}, '{SCHEMA_STATE_UNRELEASED}', '{checksum}', '{app}', '{at}')"
-    )
+    unreleased_state_marker_sql(checksum, base_version)
 }
 
 /// Applies frozen plan steps, then the unreleased pack, on a fresh database.
@@ -598,7 +579,7 @@ where
         kind,
         run_batch,
         &host_migration_plan(),
-        crate::migrations::UNRELEASED_SQL,
+        unreleased_ops(),
         SCHEMA_VERSION,
     )
     .await
@@ -610,7 +591,7 @@ pub(crate) async fn apply_fresh_schema<F, Fut>(
     kind: HostSchemaKind,
     run_batch: &mut F,
     plan: &[HostMigrationStep],
-    unreleased: &str,
+    unreleased: &[crate::migrations::MigrationOp],
     schema_version: i64,
 ) -> Result<()>
 where
@@ -620,6 +601,10 @@ where
     let backend = db.get_database_backend();
     ensure_schema_migrations(db, backend).await?;
     for step in plan {
+        crate::migrations::prove_migration_ops(step.steps)?;
+        if let Some(down) = step.down {
+            crate::migrations::prove_migration_ops(down)?;
+        }
         match kind {
             HostSchemaKind::PragmaMarker => {
                 apply_one_sqlite_version_with_batch(db, step, run_batch).await?;
@@ -629,15 +614,16 @@ where
             }
         }
     }
-    if unreleased.trim().is_empty() {
+    if unreleased.is_empty() {
         return Ok(());
     }
-    apply_unreleased_sql(
+    crate::migrations::prove_migration_ops(unreleased)?;
+    apply_unreleased_ops(
         db,
         kind,
         run_batch,
         unreleased,
-        &migration_step_checksum(unreleased, None),
+        &crate::migrations::migration_ops_checksum(unreleased, None),
         schema_version,
     )
     .await
@@ -649,7 +635,7 @@ pub(crate) async fn apply_fresh_schema_sqlite(
     db: &DatabaseConnection,
     kind: HostSchemaKind,
     plan: &[HostMigrationStep],
-    unreleased: &str,
+    unreleased: &[crate::migrations::MigrationOp],
     schema_version: i64,
 ) -> Result<()> {
     let exec = db.clone();
@@ -660,7 +646,7 @@ pub(crate) async fn apply_fresh_schema_sqlite(
     apply_fresh_schema(db, kind, &mut run_batch, plan, unreleased, schema_version).await
 }
 
-/// Applies only [`crate::migrations::UNRELEASED_SQL`] after frozen ups.
+/// Applies only [`crate::migrations::unreleased_ops`] after frozen ups.
 async fn apply_unreleased_bucket<F, Fut>(
     db: &DatabaseConnection,
     kind: HostSchemaKind,
@@ -670,23 +656,23 @@ where
     F: FnMut(Vec<String>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    apply_unreleased_sql(
+    apply_unreleased_ops(
         db,
         kind,
         run_batch,
-        crate::migrations::UNRELEASED_SQL,
+        unreleased_ops(),
         &unreleased_checksum(),
         SCHEMA_VERSION,
     )
     .await
 }
 
-/// Applies one unreleased DDL pack plus the checksum marker.
-async fn apply_unreleased_sql<F, Fut>(
+/// Applies one unreleased op list plus the checksum marker.
+async fn apply_unreleased_ops<F, Fut>(
     db: &DatabaseConnection,
     kind: HostSchemaKind,
     run_batch: &mut F,
-    ddl: &str,
+    ops: &[crate::migrations::MigrationOp],
     checksum: &str,
     base_version: i64,
 ) -> Result<()>
@@ -694,8 +680,10 @@ where
     F: FnMut(Vec<String>) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let batch =
-        SchemaBatch::from_ddl_and_marker(ddl, unreleased_marker_sql(checksum, base_version));
+    let batch = SchemaBatch::from_statements_and_marker(
+        ops.iter().map(|op| op.sql().to_string()),
+        unreleased_marker_sql(checksum, base_version),
+    );
     let stmts = batch.statements;
     let mut delay_ms = 20u64;
     for attempt in 0..8 {
@@ -1136,7 +1124,10 @@ async fn sqlite_user_version(db: &DatabaseConnection) -> Result<i64> {
 }
 
 /// `CREATE TABLE IF NOT EXISTS schema_migrations`.
-async fn ensure_schema_migrations(db: &DatabaseConnection, backend: DbBackend) -> Result<()> {
+pub(crate) async fn ensure_schema_migrations(
+    db: &DatabaseConnection,
+    backend: DbBackend,
+) -> Result<()> {
     let mut delay_ms = 20u64;
     let mut last_err = None;
     for attempt in 0..8 {
@@ -1243,7 +1234,7 @@ async fn exec_sql(db: &DatabaseConnection, backend: DbBackend, sql: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migrations::{current_canonical_schema, unreleased_checksum};
+    use crate::migrations::unreleased_checksum;
     use bookclerk_plugin_abi::DbCapabilities;
 
     #[test]
@@ -1264,9 +1255,9 @@ mod tests {
 
     #[test]
     fn current_canonical_schema_is_unreleased_while_plan_empty() {
-        use crate::migrations::{current_canonical_schema, host_migration_plan, UNRELEASED_SQL};
+        use crate::migrations::{current_canonical_schema, host_migration_plan, unreleased_sql};
         assert!(host_migration_plan().is_empty());
-        assert_eq!(current_canonical_schema(), UNRELEASED_SQL);
+        assert_eq!(current_canonical_schema(), unreleased_sql());
         assert!(current_canonical_schema().contains("plugin_databases"));
         assert!(!current_canonical_schema().contains("domain_events_v27"));
     }
@@ -1338,9 +1329,16 @@ mod tests {
             let exec = exec.clone();
             async move { run_atomic_ddl(&exec, SCHEMA_TXN_TIMING, "schema-apply", stmts).await }
         };
-        apply_fresh_schema(&db, HostSchemaKind::RowMarker, &mut run_batch, &plan, "", 1)
-            .await
-            .expect("fresh frozen");
+        apply_fresh_schema(
+            &db,
+            HostSchemaKind::RowMarker,
+            &mut run_batch,
+            &plan,
+            &[],
+            1,
+        )
+        .await
+        .expect("fresh frozen");
         let state = current_schema_state(&db, HostSchemaKind::RowMarker)
             .await
             .expect("state");
@@ -1362,6 +1360,7 @@ mod tests {
             "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)";
         const EXTRA: &str = "CREATE TABLE extra_dev (id INTEGER PRIMARY KEY)";
         const V1_OPS: &[MigrationOp] = &[MigrationOp::Schema(V1)];
+        const EXTRA_OPS: &[MigrationOp] = &[MigrationOp::Schema(EXTRA)];
         let plan = [HostMigrationStep {
             version: 1,
             steps: V1_OPS,
@@ -1378,7 +1377,7 @@ mod tests {
             HostSchemaKind::RowMarker,
             &mut run_batch,
             &plan,
-            EXTRA,
+            EXTRA_OPS,
             1,
         )
         .await
@@ -1392,7 +1391,10 @@ mod tests {
                 checksum,
             } => {
                 assert_eq!(base_version, 1);
-                assert_eq!(checksum, migration_step_checksum(EXTRA, None));
+                assert_eq!(
+                    checksum,
+                    crate::migrations::migration_ops_checksum(EXTRA_OPS, None)
+                );
             }
             other => panic!("expected Unreleased@base1, got {other}"),
         }
@@ -1435,7 +1437,7 @@ mod tests {
             .expect("table_info");
         assert!(
             !cols.is_empty(),
-            "canonical SQLITE_SCHEMA must create books"
+            "canonical unreleased host schema must create books"
         );
     }
 
@@ -1483,9 +1485,7 @@ mod tests {
         let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
             .await
             .expect("unmigrated sqlite");
-        let ddl = bookclerk_plugin_abi::sql_v1_pack_statements(current_canonical_schema())
-            .expect("pack")
-            .len() as u32;
+        let ddl = crate::migrations::current_canonical_statements().len() as u32;
         crate::inject_atomic_interrupt_after(
             crate::AtomicInterruptPhase::BetweenStatements,
             crate::AtomicInterruptKind::Cancel,
@@ -1576,17 +1576,15 @@ mod tests {
             None => format!("{}/{db_name}", &trimmed[..slash]),
         };
         let db = sea_orm::Database::connect(&db_url).await.expect("connect");
-        let canonical = current_canonical_schema();
-        let ddl = bookclerk_db_exec::expand_host_schema_batch(
-            DbBackend::Postgres,
-            &[
-                canonical.to_string(),
-                unreleased_marker_sql(&unreleased_checksum(), SCHEMA_VERSION),
-            ],
-        )
-        .expect("postgres schema batch")
-        .len()
-        .saturating_sub(1) as u32;
+        let mut batch: Vec<String> = crate::migrations::current_canonical_statements().to_vec();
+        batch.push(unreleased_marker_sql(
+            &unreleased_checksum(),
+            SCHEMA_VERSION,
+        ));
+        let ddl = bookclerk_db_exec::expand_host_schema_batch(DbBackend::Postgres, &batch)
+            .expect("postgres schema batch")
+            .len()
+            .saturating_sub(1) as u32;
         crate::inject_atomic_interrupt_after(
             crate::AtomicInterruptPhase::BetweenStatements,
             crate::AtomicInterruptKind::Cancel,
