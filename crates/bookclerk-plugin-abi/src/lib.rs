@@ -122,16 +122,16 @@ pub use db::{
     DATABASE_ADAPTER_CONFIG_MEDIA_TYPE, DATABASE_ADAPTER_CONFIG_SCHEMA_VERSION,
 };
 pub use db_execute::{
-    sql_payload_bytes, sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn,
-    DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest,
-    StatementResult, TypedDbStatement, D1_MAX_BINDS, D1_MAX_FUNCTION_ARGS, D1_MAX_PAYLOAD_BYTES,
-    D1_MAX_SCHEMA_COLUMNS, D1_MAX_SQL_STATEMENT_BYTES, FIRST_PARTY_MAX_RESULT_BYTES,
-    FIRST_PARTY_MAX_RESULT_ROWS, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
-    HOST_MIN_FUNCTION_ARGS, HOST_MIN_PATTERN_BYTES, HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES,
-    HOST_MIN_RESULT_ROWS, HOST_MIN_SCHEMA_COLUMNS, HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS,
-    POSTGRES_MAX_FUNCTION_ARGS, POSTGRES_MAX_SCHEMA_COLUMNS, SQLITE_MAX_BINDS,
-    SQLITE_MAX_FUNCTION_ARGS, SQLITE_MAX_PATTERN_BYTES, SQLITE_MAX_SCHEMA_COLUMNS,
-    SQL_CONTRACT_VERSION,
+    d1_physical_sql_upper_bound_len, sql_payload_bytes, sql_payload_exceeds, DbBootstrap,
+    DbCapabilities, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming,
+    ExecuteReply, ExecuteRequest, StatementResult, TypedDbStatement, D1_MAX_BINDS,
+    D1_MAX_FUNCTION_ARGS, D1_MAX_PAYLOAD_BYTES, D1_MAX_SCHEMA_COLUMNS, D1_MAX_SQL_STATEMENT_BYTES,
+    FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_RESULT_ROWS, FIRST_PARTY_MAX_STATEMENTS,
+    HOST_MIN_BINDS, HOST_MIN_CELL_BYTES, HOST_MIN_FUNCTION_ARGS, HOST_MIN_PATTERN_BYTES,
+    HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_SCHEMA_COLUMNS,
+    HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS, POSTGRES_MAX_FUNCTION_ARGS,
+    POSTGRES_MAX_SCHEMA_COLUMNS, SQLITE_MAX_BINDS, SQLITE_MAX_FUNCTION_ARGS,
+    SQLITE_MAX_PATTERN_BYTES, SQLITE_MAX_SCHEMA_COLUMNS, SQL_CONTRACT_VERSION,
 };
 pub use db_value::{db_type_from_declared, normalize_db_value_for_column, DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
@@ -155,8 +155,11 @@ pub use sql_text::{
     canonical_statements_checksum, glob_expanded_like_pattern_bytes, like_pattern_sources,
     require_function_args_within, require_like_patterns_within, require_portable_text,
     require_portable_text_binds, sql_v1_function_calls, sql_v1_helper_is_chunkable,
-    sql_v1_pack_statements, text_contains_nul, LikePatternSrc, SqlFnCall,
-    D1_PHYSICAL_LIKE_GLOB_PATTERN_BYTES, D1_PORTABLE_LIKE_PATTERN_BYTES,
+    sql_v1_pack_statements, sqlite_family_like_divmod_insert_upper_bound, text_contains_nul,
+    LikePatternSrc, SqlFnCall, D1_PHYSICAL_LIKE_GLOB_PATTERN_BYTES, D1_PORTABLE_LIKE_PATTERN_BYTES,
+    LIKE_GLOB_PATTERN_WRAP_BYTES, LIKE_GLOB_REWRITE_OVERHEAD, LIKE_GLOB_WRAP_PREFIX,
+    LIKE_GLOB_WRAP_SUFFIX, LIKE_TO_GLOB_KEYWORD_EXTRA, SQLITE_FAMILY_DIV_MOD_NULLIF_EXTRA,
+    SQLITE_FAMILY_INSERT_OR_IGNORE_MAX_EXTRA,
 };
 pub use sql_types::{
     apply_schema_action_to_env, apply_schema_sql_to_env, catalog_companions,

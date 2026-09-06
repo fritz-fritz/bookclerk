@@ -65,7 +65,11 @@ limits below the host's compiled minimums, `maxPayloadBytes` /
 bootstrap `dialect` that does not match `sqlFamily` are a hard error. Wake
 page size and `IN (…)` chunking are derived from `maxBinds`.
 `maxPayloadBytes` bounds request SQL plus binds per statement and must not
-exceed the scalar ceiling. `maxRequestBytes` / `maxAtomicResultBytes` bound
+exceed the scalar ceiling. D1 advertises the largest canonical payload whose
+sqlite-family mechanical lowering (LIKE→GLOB wraps, `div`/`mod` NULLIF,
+`INSERT OR IGNORE`, query LIMIT wrap, `unhex(?)`) is proven to stay within
+the engine's 100 KiB physical statement limit; host planners still only see
+the generic cap. `maxRequestBytes` / `maxAtomicResultBytes` bound
 the whole encoded `ExecuteRequest` / `ExecuteReply`. Guests track encoded
 result bytes incrementally as statement results are built and keep one
 exact pre-commit check.

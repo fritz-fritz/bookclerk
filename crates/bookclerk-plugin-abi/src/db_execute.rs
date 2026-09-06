@@ -27,14 +27,8 @@ pub const POSTGRES_MAX_BINDS: u32 = 65_535;
 /// <https://developers.cloudflare.com/d1/platform/limits/>
 pub const D1_MAX_BINDS: u32 = 100;
 
-/// Cloudflare D1 SQL statement length (bytes) before adapter lowering.
+/// Cloudflare D1 physical SQL statement length (bytes) after adapter lowering.
 pub const D1_MAX_SQL_STATEMENT_BYTES: u32 = 100_000;
-
-/// Conservative canonical SQL+binds cap advertised for D1.
-///
-/// Physical SQL after LIKE/overflow/JSON lowering must stay at or below
-/// [`D1_MAX_SQL_STATEMENT_BYTES`]. A 4× expansion budget is applied here.
-pub const D1_MAX_PAYLOAD_BYTES: u32 = 25_000;
 
 /// Cloudflare D1 maximum arguments to one physical SQL function.
 pub const D1_MAX_FUNCTION_ARGS: u32 = 32;
@@ -85,6 +79,50 @@ pub const HOST_MIN_RESULT_ROWS: u32 = 1;
 
 /// Host refuses guests that do not bound encoded statement payload bytes.
 pub const HOST_MIN_PAYLOAD_BYTES: u32 = 1024;
+
+/// `?` → `unhex(?)` for D1 BLOB binds.
+const D1_UNHEX_PLACEHOLDER_EXTRA: usize = 7;
+
+/// `cap_query_sql` wrap using a 10-digit LIMIT (`u32::MAX + 1`).
+const D1_QUERY_CAP_WRAP_MAX_EXTRA: usize =
+    "SELECT * FROM (".len() + ") AS _bc_cap LIMIT ".len() + 10;
+
+/// Upper bound on D1 physical SQL bytes for a canonical statement of
+/// `canonical_len` after sqlite-family mechanical lowering, the query LIMIT
+/// wrap, and `unhex(?)` for every advertised bind.
+///
+/// Proof-directed INTEGER overflow wraps are fail-closed at the adapter after
+/// typed lowering; they are not a function of payload length alone.
+#[must_use]
+pub const fn d1_physical_sql_upper_bound_len(canonical_len: usize) -> usize {
+    crate::sql_text::sqlite_family_like_divmod_insert_upper_bound(canonical_len)
+        .saturating_add(D1_QUERY_CAP_WRAP_MAX_EXTRA)
+        .saturating_add((D1_MAX_BINDS as usize).saturating_mul(D1_UNHEX_PLACEHOLDER_EXTRA))
+}
+
+/// Largest canonical payload that [`d1_physical_sql_upper_bound_len`] still
+/// proves against [`D1_MAX_SQL_STATEMENT_BYTES`].
+const fn proven_d1_max_payload_bytes() -> u32 {
+    let physical = D1_MAX_SQL_STATEMENT_BYTES as usize;
+    let mut n = HOST_MIN_PAYLOAD_BYTES as usize;
+    let mut best = n;
+    while n <= physical {
+        if d1_physical_sql_upper_bound_len(n) <= physical {
+            best = n;
+            n += 1;
+        } else {
+            break;
+        }
+    }
+    best as u32
+}
+
+/// Canonical SQL+binds cap advertised for D1.
+///
+/// Largest `n >= `[`HOST_MIN_PAYLOAD_BYTES`] such that
+/// [`d1_physical_sql_upper_bound_len`]`(n) <= `[`D1_MAX_SQL_STATEMENT_BYTES`].
+/// Host admission stays provider-neutral (`maxPayloadBytes` only).
+pub const D1_MAX_PAYLOAD_BYTES: u32 = proven_d1_max_payload_bytes();
 
 /// Host refuses guests that do not bound JSON bytes of one statement's rows.
 pub const HOST_MIN_RESULT_BYTES: u32 = 4_096;
@@ -833,9 +871,21 @@ mod tests {
     }
 
     #[test]
-    fn advertised_d1_payload_is_below_physical_statement_cap() {
-        const { assert!(D1_MAX_PAYLOAD_BYTES < D1_MAX_SQL_STATEMENT_BYTES) };
-        const { assert!((D1_MAX_PAYLOAD_BYTES as u64) * 4 <= D1_MAX_SQL_STATEMENT_BYTES as u64) };
+    fn advertised_d1_payload_is_proven_physical_bound() {
+        const { assert!(D1_MAX_PAYLOAD_BYTES >= HOST_MIN_PAYLOAD_BYTES) };
+        const {
+            assert!(
+                d1_physical_sql_upper_bound_len(D1_MAX_PAYLOAD_BYTES as usize)
+                    <= D1_MAX_SQL_STATEMENT_BYTES as usize
+            )
+        };
+        const {
+            assert!(
+                d1_physical_sql_upper_bound_len(D1_MAX_PAYLOAD_BYTES as usize + 1)
+                    > D1_MAX_SQL_STATEMENT_BYTES as usize
+            )
+        };
+        const { assert!(d1_physical_sql_upper_bound_len(25_000) > D1_MAX_SQL_STATEMENT_BYTES as usize) };
     }
 
     #[test]

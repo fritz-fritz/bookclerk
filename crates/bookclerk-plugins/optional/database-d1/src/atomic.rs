@@ -22,7 +22,7 @@ fn collapse_d1_wire(
         bookclerk_db_exec::collapse_companion_groups(groups, statements),
     )
 }
-use bookclerk_plugin_abi::DbCapabilities;
+use bookclerk_plugin_abi::{DbCapabilities, D1_MAX_SQL_STATEMENT_BYTES};
 use bookclerk_plugin_sdk::{
     encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbResultSelection,
     DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, StatementResult,
@@ -157,9 +157,10 @@ impl D1Proxy {
                 };
                 let sql =
                     bookclerk_db_exec::lower_canonical_sql(sea_orm::DatabaseBackend::Sqlite, &sql);
-                (sql, d1_wire_binds(&s.binds))
+                ensure_d1_physical_sql(&sql)?;
+                Ok((sql, d1_wire_binds(&s.binds)))
             })
-            .collect();
+            .collect::<Result<Vec<_>, DbErr>>()?;
         let mut last_err = None;
         for attempt in 0..ATOMIC_HTTP_ATTEMPTS {
             check_d1_session(
@@ -864,6 +865,17 @@ fn proofs_for_expanded<'a>(
     Ok(out)
 }
 
+/// Rejects lowered D1 SQL that exceeds Cloudflare's physical statement limit.
+fn ensure_d1_physical_sql(sql: &str) -> Result<(), DbErr> {
+    if sql.len() > D1_MAX_SQL_STATEMENT_BYTES as usize {
+        return Err(DbErr::Custom(format!(
+            "lowered SQL is {} bytes; D1 physical statement limit is {D1_MAX_SQL_STATEMENT_BYTES}",
+            sql.len()
+        )));
+    }
+    Ok(())
+}
+
 /// D1 HTTP statement for one typed statement: `Bytes` placeholders are
 /// rewritten to `unhex(?)` with hex-encoded text params so D1 stores true
 /// BLOBs (JSON has no binary scalar). All other values map directly; text is
@@ -877,6 +889,7 @@ pub(crate) fn d1_typed_statement(
         bookclerk_db_exec::lower_canonical_sql_typed(sea_orm::DatabaseBackend::Sqlite, sql, proof)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
     let sql = wrap_bytes_placeholders(&sql, params);
+    ensure_d1_physical_sql(&sql)?;
     let binds = params
         .iter()
         .map(|v| match v {
@@ -1893,6 +1906,20 @@ mod tests {
             &[1, 1],
         )
         .expect_err("misaligned sidecar");
+    }
+
+    #[test]
+    fn d1_typed_statement_rejects_over_physical_sql() {
+        let sql = format!(
+            "SELECT '{}'",
+            "a".repeat(bookclerk_plugin_abi::D1_MAX_SQL_STATEMENT_BYTES as usize)
+        );
+        let err = d1_typed_statement(&sql, &[], None).expect_err("physical cap");
+        assert!(
+            err.to_string().contains("physical statement limit"),
+            "{err}"
+        );
+        d1_typed_statement("SELECT 1", &[], None).expect("short SQL");
     }
 
     #[test]

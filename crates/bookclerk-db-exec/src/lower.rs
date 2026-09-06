@@ -10,7 +10,7 @@
 
 use bookclerk_plugin_abi::{
     assert_proof_matches_sql, IntegerArithKind, IntegerArithSite, PluginError, ResolvedStatement,
-    SqlSpan, INSERT_SELECT_WRAP_ALIAS,
+    SqlSpan, INSERT_SELECT_WRAP_ALIAS, LIKE_GLOB_WRAP_PREFIX, LIKE_GLOB_WRAP_SUFFIX,
 };
 use sea_orm::DatabaseBackend;
 
@@ -213,9 +213,7 @@ fn rewrite_like_to_glob(sql: &str) -> String {
 
 /// Bind-safe GLOB conversion of a SQL v1 `LIKE` pattern expression.
 fn glob_pattern_sql(pat: &str) -> String {
-    format!(
-        "replace(replace(replace(replace(replace(({pat}), '[', '[[]'), '*', '[*]'), '?', '[?]'), '%', '*'), '_', '?')"
-    )
+    format!("{LIKE_GLOB_WRAP_PREFIX}{pat}{LIKE_GLOB_WRAP_SUFFIX}")
 }
 
 /// End offset of the `LIKE` pattern expression starting at `start`.
@@ -2312,6 +2310,134 @@ mod tests {
         assert!(
             err.to_string().contains("proof") || err.to_string().contains("span"),
             "{err}"
+        );
+    }
+
+    fn dense_like_json_placeholder_sql(like_count: usize) -> String {
+        let mut sql =
+            String::from("SELECT json_extract(body, '$.k'), json_object('k', ?) FROM t WHERE ");
+        for i in 0..like_count {
+            if i > 0 {
+                sql.push_str(" OR ");
+            }
+            sql.push_str("x LIKE'a'");
+        }
+        sql
+    }
+
+    fn like_placeholder_sql(like_count: usize) -> String {
+        let mut sql = String::from("SELECT json_extract(body, '$.k') FROM t WHERE ");
+        for i in 0..like_count {
+            if i > 0 {
+                sql.push_str(" OR ");
+            }
+            sql.push_str("x LIKE ?");
+        }
+        sql
+    }
+
+    fn d1_host_accepts(sql: &str, params: &[bookclerk_plugin_abi::DbValue]) -> bool {
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
+        if u32::try_from(params.len()).unwrap_or(u32::MAX) > caps.max_binds {
+            return false;
+        }
+        if caps.admit_statement(sql, params).is_err() {
+            return false;
+        }
+        let binds = serde_json::to_vec(params).unwrap_or_default();
+        !bookclerk_plugin_abi::sql_payload_exceeds(
+            sql,
+            &String::from_utf8_lossy(&binds),
+            caps.max_payload_bytes,
+        )
+    }
+
+    fn d1_physical_after_adapter(sql: &str) -> usize {
+        let capped = crate::cap_query_sql(sql, bookclerk_plugin_abi::FIRST_PARTY_MAX_RESULT_ROWS);
+        lower_canonical_sql(DatabaseBackend::Sqlite, &capped).len()
+    }
+
+    #[test]
+    fn like_glob_wrap_uses_abi_affixes_and_empty_trivia_overhead() {
+        let pat = "a";
+        let wrapped = glob_pattern_sql(pat);
+        assert_eq!(
+            wrapped,
+            format!("{LIKE_GLOB_WRAP_PREFIX}{pat}{LIKE_GLOB_WRAP_SUFFIX}")
+        );
+        assert_eq!(
+            wrapped.len(),
+            pat.len() + bookclerk_plugin_abi::LIKE_GLOB_PATTERN_WRAP_BYTES
+        );
+        let empty_trivia = "SELECT 1 WHERE x LIKE'a'";
+        let lowered = lower_canonical_sql(DatabaseBackend::Sqlite, empty_trivia);
+        assert_eq!(
+            lowered.len(),
+            empty_trivia.len() + bookclerk_plugin_abi::LIKE_GLOB_REWRITE_OVERHEAD,
+            "{lowered}"
+        );
+    }
+
+    #[test]
+    fn d1_accepted_short_likes_fit_physical_statement_limit() {
+        use bookclerk_plugin_abi::{
+            d1_physical_sql_upper_bound_len, DbValue, D1_MAX_PAYLOAD_BYTES,
+            D1_MAX_SQL_STATEMENT_BYTES,
+        };
+
+        let bind = [DbValue::Text("v".into())];
+        let mut n_ok = 0usize;
+        let mut n = 1usize;
+        while n < 8_000 {
+            let sql = dense_like_json_placeholder_sql(n);
+            if d1_host_accepts(&sql, &bind) {
+                let physical = d1_physical_after_adapter(&sql);
+                assert!(
+                    physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
+                    "n={n} canonical={} physical={physical} cap={D1_MAX_PAYLOAD_BYTES}",
+                    sql.len()
+                );
+                assert!(
+                    physical <= d1_physical_sql_upper_bound_len(sql.len()),
+                    "n={n} physical={physical} formula={}",
+                    d1_physical_sql_upper_bound_len(sql.len())
+                );
+                n_ok = n;
+                n += 1;
+                continue;
+            }
+            break;
+        }
+        assert!(n_ok >= 1, "expected at least one accepted LIKE chain");
+        let over = dense_like_json_placeholder_sql(n_ok + 1);
+        assert!(
+            !d1_host_accepts(&over, &bind),
+            "N+1 like-count must fail host admission (payload or admit)"
+        );
+
+        let mut bind_ok = 0usize;
+        let mut k = 1usize;
+        while k <= bookclerk_plugin_abi::D1_MAX_BINDS as usize {
+            let sql = like_placeholder_sql(k);
+            let params: Vec<DbValue> = (0..k).map(|_| DbValue::Text("a".into())).collect();
+            if d1_host_accepts(&sql, &params) {
+                let physical = d1_physical_after_adapter(&sql);
+                assert!(
+                    physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
+                    "placeholder n={k} physical={physical}"
+                );
+                bind_ok = k;
+                k += 1;
+                continue;
+            }
+            break;
+        }
+        assert!(bind_ok >= 1, "expected at least one accepted LIKE ? chain");
+        let over_sql = like_placeholder_sql(bind_ok + 1);
+        let over_params: Vec<DbValue> = (0..=bind_ok).map(|_| DbValue::Text("a".into())).collect();
+        assert!(
+            !d1_host_accepts(&over_sql, &over_params),
+            "N+1 LIKE placeholders must fail host admission"
         );
     }
 }
