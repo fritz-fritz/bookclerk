@@ -760,7 +760,7 @@ impl HostMigrationStep {
 pub fn migration_ops_checksum(ups: &[MigrationOp], down: Option<&[MigrationOp]>) -> String {
     let up: Vec<&str> = ups.iter().map(|op| op.sql()).collect();
     let down_sql: Option<Vec<&str>> = down.map(|ops| ops.iter().map(|op| op.sql()).collect());
-    let down_refs: Option<Vec<&str>> = down_sql.as_ref().map(|v| v.iter().copied().collect());
+    let down_refs: Option<Vec<&str>> = down_sql.as_ref().map(|v| v.to_vec());
     migration_statements_checksum(&up, down_refs.as_deref())
 }
 
@@ -776,6 +776,7 @@ pub fn migration_step_checksum(canonical: &str, down: Option<&str>) -> String {
     migration_statements_checksum(&up_refs, down_owned.as_deref())
 }
 
+/// Packs `sql` with the SQL-v1 lexer; falls back to one statement on error.
 fn pack_or_single(sql: &str) -> Vec<String> {
     match sql_v1_pack_statements(sql) {
         Ok(stmts) if !stmts.is_empty() => stmts,
@@ -784,6 +785,7 @@ fn pack_or_single(sql: &str) -> Vec<String> {
     }
 }
 
+/// Length-prefixed checksum of `ups`, then `-- down` and down statements.
 fn migration_statements_checksum(ups: &[&str], down: Option<&[&str]>) -> String {
     let mut parts = Vec::with_capacity(ups.len().saturating_add(1));
     parts.extend(ups.iter().copied());
@@ -1176,8 +1178,8 @@ mod tests {
         );
         let mut working = env.clone();
         for stmt in current_canonical_statements() {
-            bookclerk_plugin_abi::apply_schema_sql_to_env(&mut working, &stmt);
-            if bookclerk_plugin_abi::statement_is_ddl(&stmt) {
+            bookclerk_plugin_abi::apply_schema_sql_to_env(&mut working, stmt);
+            if bookclerk_plugin_abi::statement_is_ddl(stmt) {
                 continue;
             }
             let upper = stmt.trim().to_ascii_uppercase();

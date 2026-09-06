@@ -16,9 +16,15 @@ use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, QueryResult, State
 
 use crate::backup::{backup_library, BackupReason, BackupRequest, SchemaBackupOpts};
 use crate::error::{LibraryError, Result};
+<<<<<<< HEAD
+=======
+use crate::host_sql::{execute_host_canonical, HOST_CANONICAL_BACKEND};
+#[cfg(test)]
+use crate::migrations::MigrationOp;
+>>>>>>> 87798854 (fix(schema): clippy on migration checksum helpers)
 use crate::migrations::{
     host_migration_plan, migration_step_checksum, unreleased_checksum, HostMigrationStep,
-    MigrationOp, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
+    SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
 };
 use crate::schema_state::{SchemaState, SCHEMA_STATE_FROZEN, SCHEMA_STATE_UNRELEASED};
 use crate::schema_walk::SchemaWalk;
