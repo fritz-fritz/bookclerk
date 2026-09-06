@@ -122,6 +122,11 @@ pub fn sql_v1_pack_statements(sql: &str) -> Result<Vec<String>> {
 }
 
 /// Walks one statement starting at `start` (trivia already skipped).
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a string or quoted identifier
+/// is unterminated.
 fn statement_span(sql: &str, start: usize) -> Result<(usize, bool)> {
     let bytes = sql.as_bytes();
     let mut i = start;
@@ -187,6 +192,11 @@ fn skip_trivia(sql: &str, mut i: usize) -> usize {
 }
 
 /// Skips a `'…'` SQL string, honoring doubled quotes.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when `start` is not `'`, or the
+/// string is unterminated.
 fn skip_sql_string(sql: &str, start: usize) -> Result<usize> {
     let bytes = sql.as_bytes();
     if bytes.get(start) != Some(&b'\'') {
@@ -209,6 +219,11 @@ fn skip_sql_string(sql: &str, start: usize) -> Result<usize> {
 }
 
 /// Skips a quoted identifier delimited by `end` (doubled for `"` / `` ` ``).
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the quoted identifier is
+/// unterminated.
 fn skip_quoted(sql: &str, start: usize, end: u8) -> Result<usize> {
     let bytes = sql.as_bytes();
     let mut i = start + 1;
@@ -236,6 +251,8 @@ pub enum LikePatternSrc {
     Bind(usize),
     /// Pattern expression whose length cannot be proven.
     Unproven,
+    /// SQL `NULL` (no pattern bytes).
+    Null,
 }
 
 /// Collects LIKE / NOT LIKE pattern sources with proven lengths when possible.
@@ -303,6 +320,12 @@ fn parse_like_pattern(sql: &str, start: usize, binds_before: usize) -> (LikePatt
             bind = Some(binds_before);
             i += 1;
             break;
+        }
+        if keyword_at(sql, i, "NULL") {
+            if saw_literal || bind.is_some() {
+                return (LikePatternSrc::Unproven, i);
+            }
+            return (LikePatternSrc::Null, i + 4);
         }
         return (LikePatternSrc::Unproven, i);
     }
@@ -562,6 +585,7 @@ pub fn require_like_patterns_within(
                     )));
                 }
             },
+            LikePatternSrc::Null => {}
             LikePatternSrc::Unproven => {
                 return Err(PluginError::invalid_params(
                     "LIKE pattern length is not proven to fit maxPatternBytes",
@@ -640,6 +664,33 @@ mod tests {
                 LikePatternSrc::Bind(0)
             ]
         );
+    }
+
+    #[test]
+    fn like_null_is_proven_and_fits_any_pattern_cap() {
+        let srcs = like_pattern_sources(
+            "SELECT CASE WHEN 'A' LIKE NULL THEN 1 ELSE 0 END AS c7, \
+             CASE WHEN body LIKE ? THEN 1 ELSE 0 END AS c8 FROM liked",
+        );
+        assert_eq!(
+            srcs,
+            vec![LikePatternSrc::Null, LikePatternSrc::Bind(0)],
+            "{srcs:?}"
+        );
+        require_like_patterns_within(
+            "SELECT CASE WHEN 'A' LIKE NULL THEN 1 ELSE 0 END AS c0 FROM t",
+            &[],
+            D1_PORTABLE_LIKE_PATTERN_BYTES,
+        )
+        .expect("LIKE NULL has no pattern bytes");
+        require_like_patterns_within(
+            "SELECT CASE WHEN 'A' LIKE 'a' THEN 1 ELSE 0 END AS c0, \
+             CASE WHEN 'A' LIKE NULL THEN 1 ELSE 0 END AS c7, \
+             CASE WHEN body LIKE ? THEN 1 ELSE 0 END AS c8 FROM liked",
+            &[crate::DbValue::Text("A".into())],
+            D1_PORTABLE_LIKE_PATTERN_BYTES,
+        )
+        .expect("portable LIKE vector patterns");
     }
 
     #[test]
