@@ -1188,9 +1188,16 @@ mod tests {
             let exec = exec.clone();
             async move { run_atomic_ddl(&exec, "schema-apply", stmts).await }
         };
-        apply_fresh_schema(&db, HostSchemaKind::RowMarker, &mut run_batch, &plan, &[], 1)
-            .await
-            .expect("fresh frozen");
+        apply_fresh_schema(
+            &db,
+            HostSchemaKind::RowMarker,
+            &mut run_batch,
+            &plan,
+            &[],
+            1,
+        )
+        .await
+        .expect("fresh frozen");
         let state = current_schema_state(&db, HostSchemaKind::RowMarker)
             .await
             .expect("state");
@@ -1243,7 +1250,10 @@ mod tests {
                 checksum,
             } => {
                 assert_eq!(base_version, 1);
-                assert_eq!(checksum, crate::migrations::migration_ops_checksum(EXTRA_OPS, None));
+                assert_eq!(
+                    checksum,
+                    crate::migrations::migration_ops_checksum(EXTRA_OPS, None)
+                );
             }
             other => panic!("expected Unreleased@base1, got {other}"),
         }
