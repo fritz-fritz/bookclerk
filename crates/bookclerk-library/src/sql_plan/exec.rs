@@ -1,11 +1,11 @@
 //! Run a typed [`ExecuteRequest`] on a SeaORM connection (one native transaction).
 //!
-//! This is the **in-process adapter** entry: callers must pass the
-//! [`bookclerk_db_exec::PhysicalEngine`] they opened. Host RPC/proxy paths
-//! must not call these helpers — they stamp [`AdapterExecuteRequest`] and
-//! send it to [`crate::TypedAtomicExec`].
+//! This is the **in-process adapter** entry: the adapter SDK infers the
+//! physical engine from the opened connection. Host RPC/proxy paths must not
+//! call these helpers — they stamp [`AdapterExecuteRequest`] and send it to
+//! [`crate::TypedAtomicExec`].
 
-use bookclerk_db_exec::{db_value_from_sea, ExecCaps, PhysicalEngine};
+use bookclerk_db_exec::{db_value_from_sea, ExecCaps};
 use bookclerk_plugin_abi::{
     DbPlanStatementKind, DbResultSelection, DbRow, ExecuteReply, ExecuteRequest, SqlTypeEnv,
     TypedDbStatement,
@@ -25,7 +25,6 @@ pub use bookclerk_db_exec::AtomicSession;
 ///
 /// Returns [`LibraryError::Orm`] when typecheck, lowering, or execute fails.
 pub(crate) async fn execute_typed_on_open<C>(
-    engine: PhysicalEngine,
     conn: &C,
     req: &ExecuteRequest,
     type_env: SqlTypeEnv,
@@ -36,11 +35,9 @@ where
 {
     let envelope = bookclerk_db_exec::stamp_adapter_execute(req.clone(), &type_env)
         .map_err(LibraryError::from_db_err)?;
-    bookclerk_db_exec::execute_typed_on_open_envelope(
-        engine,
+    bookclerk_db_exec::execute_typed_on_open_connection(
         conn,
         &envelope,
-        engine.timing_source(),
         ExecCaps::from(max_result_rows),
         AtomicSession::from_deadline(None).with_type_env(type_env),
         None,
@@ -51,11 +48,14 @@ where
 
 /// Execute leftover SQL: canonical transport, or one physical lowering pass.
 ///
+/// `in_process` of `true` infers the adapter engine from `conn` and lowers.
+/// `false` is sqlite-shaped canonical transport (production proxy).
+///
 /// # Errors
 ///
 /// Returns when the connection rejects the statement.
 pub(crate) async fn execute_sql_on<C>(
-    engine: Option<PhysicalEngine>,
+    in_process: bool,
     conn: &C,
     sql: &str,
     values: impl IntoIterator<Item = Value>,
@@ -65,7 +65,7 @@ where
     C: ConnectionTrait + StreamTrait,
 {
     let values: Vec<Value> = values.into_iter().collect();
-    if let Some(engine) = engine {
+    if in_process {
         let parameters = values
             .iter()
             .map(db_value_from_sea)
@@ -83,14 +83,14 @@ where
                 result_selection: DbResultSelection::AffectedRows,
             }],
         };
-        let reply = execute_typed_on_open(engine, conn, &req, type_env, 0).await?;
+        let reply = execute_typed_on_open(conn, &req, type_env, 0).await?;
         return Ok(reply
             .statements
             .first()
             .map(|stmt| stmt.rows_affected)
             .unwrap_or(0));
     }
-    let res = crate::host_sql::execute_host_canonical(conn, sql, values)
+    let res = bookclerk_db_exec::execute_canonical(conn, sql, values)
         .await
         .map_err(LibraryError::from_db_err)?;
     Ok(res.rows_affected())
@@ -102,7 +102,7 @@ where
 ///
 /// Returns when typecheck, lowering, or execute fails.
 pub(crate) async fn query_sql_on<C>(
-    engine: Option<PhysicalEngine>,
+    in_process: bool,
     conn: &C,
     sql: &str,
     values: impl IntoIterator<Item = Value>,
@@ -112,11 +112,11 @@ pub(crate) async fn query_sql_on<C>(
 where
     C: ConnectionTrait + StreamTrait,
 {
-    let Some(engine) = engine else {
+    if !in_process {
         return Err(LibraryError::Schema(
             "query_sql_on requires a physical in-process engine".into(),
         ));
-    };
+    }
     let parameters = values
         .into_iter()
         .map(|value| db_value_from_sea(&value))
@@ -134,7 +134,7 @@ where
             result_selection: DbResultSelection::Rows,
         }],
     };
-    let reply = execute_typed_on_open(engine, conn, &req, type_env.clone(), max_rows).await?;
+    let reply = execute_typed_on_open(conn, &req, type_env.clone(), max_rows).await?;
     Ok(reply
         .statements
         .into_iter()
@@ -150,12 +150,10 @@ where
 /// Returns [`LibraryError::Orm`] when a statement fails. Application statuses
 /// are returned as [`DbAtomicResult`], not errors.
 pub async fn execute_compiled_on(
-    engine: PhysicalEngine,
     db: &sea_orm::DatabaseConnection,
     compiled: CompiledAtomic,
-    timing_source: &str,
 ) -> Result<DbAtomicResult> {
-    execute_compiled_on_capped(engine, db, compiled, timing_source, 0).await
+    execute_compiled_on_capped(db, compiled, 0).await
 }
 
 /// Like [`execute_compiled_on`], failing when a statement returns more than `max_result_rows`.
@@ -166,25 +164,16 @@ pub async fn execute_compiled_on(
 ///
 /// Returns [`LibraryError::Orm`] when a statement fails or exceeds the row cap.
 pub async fn execute_compiled_on_capped(
-    engine: PhysicalEngine,
     db: &sea_orm::DatabaseConnection,
     compiled: CompiledAtomic,
-    timing_source: &str,
     max_result_rows: u32,
 ) -> Result<DbAtomicResult> {
     let hash = compiled.expected_hash.clone();
-    let reply = execute_typed_on(
-        engine,
-        db,
-        &compiled.request,
-        timing_source,
-        max_result_rows,
-    )
-    .await?;
+    let reply = execute_typed_on(db, &compiled.request, max_result_rows).await?;
     Ok(interpret_typed_exec(&compiled, &reply, &hash))
 }
 
-/// Executes a typed request as one transaction on a known physical engine
+/// Executes a typed request as one transaction on the opened adapter connection
 /// against the host library.
 ///
 /// Merges [`crate::migrations::host_sql_type_env`] so host DML typechecks
@@ -195,21 +184,11 @@ pub async fn execute_compiled_on_capped(
 ///
 /// Returns [`LibraryError::Orm`] when a statement fails.
 pub async fn execute_typed_on(
-    engine: PhysicalEngine,
     db: &sea_orm::DatabaseConnection,
     req: &ExecuteRequest,
-    timing_source: &str,
     max_result_rows: u32,
 ) -> Result<bookclerk_plugin_abi::ExecuteReply> {
-    execute_typed_on_session(
-        engine,
-        db,
-        req,
-        timing_source,
-        max_result_rows,
-        AtomicSession::default(),
-    )
-    .await
+    execute_typed_on_session(db, req, max_result_rows, AtomicSession::default()).await
 }
 
 /// Typed execute against an isolated plugin binding.
@@ -247,21 +226,17 @@ pub async fn execute_typed_on_binding(
 ///
 /// Returns [`LibraryError::Orm`] when a statement fails or the session is interrupted.
 pub async fn execute_typed_on_session(
-    engine: PhysicalEngine,
     db: &sea_orm::DatabaseConnection,
     req: &ExecuteRequest,
-    timing_source: &str,
     max_result_rows: u32,
     session: AtomicSession,
 ) -> Result<bookclerk_plugin_abi::ExecuteReply> {
     let type_env = crate::migrations::host_sql_type_env();
     let envelope = bookclerk_db_exec::stamp_adapter_execute(req.clone(), &type_env)
         .map_err(LibraryError::from_db_err)?;
-    bookclerk_db_exec::execute_typed_envelope(
-        engine,
+    bookclerk_db_exec::execute_typed_envelope_on_connection(
         db,
         &envelope,
-        timing_source,
         ExecCaps::from(max_result_rows),
         session.with_type_env(type_env),
     )

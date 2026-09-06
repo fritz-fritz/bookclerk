@@ -281,6 +281,7 @@ FORBIDDEN_LIBRARY_LOWERING = (
     re.compile(r"bookclerk_db_exec::execute_typed_on_session"),
     re.compile(r"bookclerk_db_exec::execute_typed_on_txn\b"),
     re.compile(r"bookclerk_db_exec::execute_typed_join_body"),
+    re.compile(r"bookclerk_db_exec::execute_typed_envelope(?!_on)"),
     re.compile(r"\bHostExecuteEnvelope\b"),
     re.compile(r"\bget_database_backend\b"),
 )
@@ -394,13 +395,7 @@ SQLITE_FALLBACK = re.compile(
 )
 
 LIBRARY_BACKEND_IDENT = re.compile(r"\b(?:DatabaseBackend|DbBackend)::")
-
-# Canonical sqlite-shaped SeaORM builder is not a physical engine branch.
-LIBRARY_BACKEND_ALLOW = frozenset(
-    {
-        "crates/bookclerk-library/src/host_sql.rs",
-    }
-)
+LIBRARY_PHYSICAL_ENGINE = re.compile(r"\bPhysicalEngine\b")
 
 
 def iter_plugin_host_sources() -> list[Path]:
@@ -471,10 +466,8 @@ def check_no_sqlite_fallback(path: Path) -> list[str]:
 
 
 def check_library_no_backend_ident(path: Path) -> list[str]:
-    """Forbid SeaORM backend identity in library production (except canonical transport)."""
+    """Forbid SeaORM backend identity and PhysicalEngine in library production."""
     rel = path.relative_to(ROOT).as_posix()
-    if rel in LIBRARY_BACKEND_ALLOW:
-        return []
     src = path.read_text(encoding="utf-8")
     scanned = strip_comments(strip_cfg_test_regions(src))
     hits: list[str] = []
@@ -482,7 +475,13 @@ def check_library_no_backend_ident(path: Path) -> list[str]:
         line = scanned.count("\n", 0, m.start()) + 1
         hits.append(
             f"{rel}:{line}: library production must not name `{m.group(0)}`; "
-            "canonical transport lives in host_sql.rs; adapters own engines"
+            "canonical transport lives in bookclerk-db-exec; adapters own engines"
+        )
+    for m in LIBRARY_PHYSICAL_ENGINE.finditer(scanned):
+        line = scanned.count("\n", 0, m.start()) + 1
+        hits.append(
+            f"{rel}:{line}: library production must not name `PhysicalEngine`; "
+            "stamp AdapterExecuteRequest and let adapters infer the engine"
         )
     return hits
 

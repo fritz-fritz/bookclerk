@@ -170,15 +170,15 @@ pub use sql_proof::{
     PHYSICAL_STAR_COLUMN,
 };
 pub use sql_text::{
-    canonical_statements_checksum, glob_expanded_like_pattern_bytes, like_pattern_sources,
-    require_function_args_within, require_like_patterns_within, require_portable_text,
-    require_portable_text_binds, sql_v1_function_calls, sql_v1_helper_is_chunkable,
-    sql_v1_pack_statements, sqlite_family_like_divmod_insert_upper_bound,
-    sqlite_family_mechanical_len_upper_bound, text_contains_nul, LikePatternSrc, SqlFnCall,
-    D1_PHYSICAL_LIKE_GLOB_PATTERN_BYTES, D1_PORTABLE_LIKE_PATTERN_BYTES,
-    LIKE_GLOB_PATTERN_WRAP_BYTES, LIKE_GLOB_REWRITE_OVERHEAD, LIKE_GLOB_WRAP_PREFIX,
-    LIKE_GLOB_WRAP_SUFFIX, LIKE_TO_GLOB_KEYWORD_EXTRA, SQLITE_FAMILY_DIV_MOD_NULLIF_EXTRA,
-    SQLITE_FAMILY_INSERT_OR_IGNORE_MAX_EXTRA,
+    admitted_bookclerk_sql_samples, canonical_statements_checksum,
+    glob_expanded_like_pattern_bytes, like_pattern_sources, require_function_args_within,
+    require_like_patterns_within, require_portable_text, require_portable_text_binds,
+    sql_v1_function_calls, sql_v1_helper_is_chunkable, sql_v1_pack_statements,
+    sqlite_family_like_divmod_insert_upper_bound, sqlite_family_mechanical_len_upper_bound,
+    text_contains_nul, LikePatternSrc, SqlFnCall, D1_PHYSICAL_LIKE_GLOB_PATTERN_BYTES,
+    D1_PORTABLE_LIKE_PATTERN_BYTES, LIKE_GLOB_PATTERN_WRAP_BYTES, LIKE_GLOB_REWRITE_OVERHEAD,
+    LIKE_GLOB_WRAP_PREFIX, LIKE_GLOB_WRAP_SUFFIX, LIKE_TO_GLOB_KEYWORD_EXTRA,
+    SQLITE_FAMILY_DIV_MOD_NULLIF_EXTRA, SQLITE_FAMILY_INSERT_OR_IGNORE_MAX_EXTRA,
 };
 pub use sql_types::{
     apply_schema_action_to_env, apply_schema_sql_to_env, catalog_companions,

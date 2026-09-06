@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use bookclerk_config::{Config, Isolation, Paths};
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, Value};
+use sea_orm::{ConnectionTrait, Statement, Value};
 use tempfile::TempDir;
 
 use super::database::{capture_outbound_adapter_sql, ExternalDatabase};
@@ -218,11 +218,7 @@ async fn assert_like_through_production_proxy(config: &Config, plugin: &Discover
     let (query, sqls) = capture_outbound_adapter_sql(|| async {
         ConnectionTrait::query_all_raw(
             &db,
-            Statement::from_sql_and_values(
-                DatabaseBackend::Sqlite,
-                LIKE_SQL,
-                [Value::from("rowcap-%")],
-            ),
+            bookclerk_db_exec::canonical_statement(LIKE_SQL, [Value::from("rowcap-%")]),
         )
         .await
     })

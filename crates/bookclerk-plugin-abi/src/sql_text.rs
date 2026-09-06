@@ -776,6 +776,93 @@ pub fn require_like_patterns_within(
     Ok(())
 }
 
+/// Grammar-aware BookclerkSQL samples for fuzz corpora and differential tests.
+///
+/// Statements stay inside the SQL-v1 grammar (canonical `?`, `LIKE`,
+/// `INSERT OR IGNORE`). TEXT literals are portable UTF-8 without U+0000.
+/// LIKE patterns stay within [`D1_PORTABLE_LIKE_PATTERN_BYTES`].
+#[must_use]
+pub fn admitted_bookclerk_sql_samples(seed: u64, count: usize) -> Vec<String> {
+    let mut rng = SplitMix64::new(seed | 1);
+    let texts = [
+        "ok",
+        "café",
+        "日本語",
+        "a;b",
+        "it's",
+        "emoji😀",
+        "",
+        "line\nbreak",
+    ];
+    let like_pats = ["a%", "_b", "x", "ab", "%", ""];
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let sql = match rng.bounded(8) {
+            0 => format!("SELECT {} AS n", rng.bounded(10_000) as i64 - 5000),
+            1 => {
+                let t = sql_quote(texts[rng.bounded(texts.len() as u64) as usize]);
+                format!("SELECT {t} AS t")
+            }
+            2 => "SELECT ? AS v".to_string(),
+            3 => format!("SELECT {} + {} AS n", rng.bounded(100), rng.bounded(100)),
+            4 => {
+                let t = sql_quote(texts[rng.bounded(texts.len() as u64) as usize]);
+                let p = sql_quote(like_pats[rng.bounded(like_pats.len() as u64) as usize]);
+                format!("SELECT {t} LIKE {p} AS m")
+            }
+            5 => "SELECT 'x' LIKE NULL AS m".to_string(),
+            6 => {
+                let id = format!("s{i:04}");
+                format!(
+                    "INSERT OR IGNORE INTO db_serialization_slots (slot_key, bump) VALUES ('{id}', {})",
+                    rng.bounded(8)
+                )
+            }
+            _ => {
+                let id = format!("s{i:04}");
+                format!(
+                    "SELECT slot_key FROM db_serialization_slots WHERE slot_key = '{id}' ORDER BY slot_key"
+                )
+            }
+        };
+        out.push(sql);
+    }
+    out
+}
+
+/// Doubles single quotes for a SQL string literal.
+fn sql_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// SplitMix64 for deterministic sample generation (no extra crate).
+struct SplitMix64 {
+    /// Generator state.
+    state: u64,
+}
+
+impl SplitMix64 {
+    /// Seeds the generator.
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    /// Next 64-bit value.
+    fn next(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform value in `0..n` (`n == 0` is treated as 1).
+    fn bounded(&mut self, n: u64) -> u64 {
+        self.next() % n.max(1)
+    }
+}
+
+
 #[cfg(test)]
 #[allow(clippy::missing_panics_doc)]
 mod tests {
@@ -934,6 +1021,38 @@ mod tests {
         assert!(err.to_string().contains("maxFunctionArgs"), "{err}");
         require_function_args_within("SELECT json_object('a', 1, 'b', 2, 'c', 3, 'd', 4)", 2)
             .expect("json_object is adapter-chunked");
+    }
+
+    #[test]
+    fn admitted_samples_pack_and_pass_grammar() {
+        for sql in admitted_bookclerk_sql_samples(42, 32) {
+            sql_v1_pack_statements(&sql).unwrap_or_else(|err| panic!("{sql}: {err}"));
+            crate::validate_sql_v1_grammar(&sql, false)
+                .unwrap_or_else(|err| panic!("{sql}: {err}"));
+            require_portable_text(&sql).expect("sample SQL is portable TEXT");
+            require_like_patterns_within(&sql, &[], D1_PORTABLE_LIKE_PATTERN_BYTES)
+                .unwrap_or_else(|err| panic!("{sql}: {err}"));
+        }
+    }
+
+    #[test]
+    fn fuzz_corpus_sql_parse_does_not_panic() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fuzz/corpus/sql_parse");
+        for entry in std::fs::read_dir(&dir).expect("fuzz corpus") {
+            let path = entry.expect("entry").path();
+            if !path.is_file() {
+                continue;
+            }
+            let sql = std::fs::read_to_string(&path).expect("read");
+            let _ = sql_v1_pack_statements(&sql);
+            let _ = crate::validate_sql_v1_grammar(&sql, false);
+            let _ = require_portable_text(&sql);
+            let _ = crate::desugar_canonical_sql(&sql);
+            let _ = like_pattern_sources(&sql);
+            let _ = require_like_patterns_within(&sql, &[], D1_PORTABLE_LIKE_PATTERN_BYTES);
+            let _ = require_function_args_within(&sql, 32);
+        }
     }
 
     #[test]

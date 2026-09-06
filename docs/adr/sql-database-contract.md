@@ -228,9 +228,11 @@ limits is not loaded.
   `realize_*_ddl` / `from_adapter_backend`), inspecting
   `get_database_backend` for SQL generation, or emitting engine
   catalog/isolation SQL. It also forbids `split(';')` on schema/SQL packs,
-  `_ => sqlite` fallbacks, and SeaORM `DatabaseBackend::` in library
-  production (canonical `?` transport in `host_sql.rs` is the exception).
-  Plugins may import `bookclerk-db-exec` lowering and typed execute.
+  `_ => sqlite` fallbacks, SeaORM `DatabaseBackend::` / `DbBackend::`, and
+  `PhysicalEngine` in library production. Canonical `?` transport lives in
+  `bookclerk-db-exec` (`execute_canonical` / `canonical_statement`); adapters
+  own physical engines. Plugins may import `bookclerk-db-exec` lowering and
+  typed execute.
 - Equal performance across engines is not guaranteed.
 - Integration plugins never receive database credentials or raw
   connections.

@@ -15,6 +15,7 @@ use bookclerk_plugin_abi::DbColumn;
 
 mod b64;
 mod backup;
+mod canonical;
 mod classify;
 mod exec;
 pub mod guest_receipt;
@@ -59,6 +60,7 @@ pub use backup::{
 };
 pub use bookclerk_plugin_abi::DbPlanStatementKind;
 pub use bookclerk_plugin_abi::{AdapterExecuteRequest, GuestReceiptPersist};
+pub use canonical::{canonical_statement, execute_canonical, query_canonical};
 pub use classify::{
     classify_db_err, classify_db_err_message, is_schema_apply_retryable, DbErrorClass,
 };
@@ -97,8 +99,10 @@ pub use schema_postgres::{
     realize_binding_ddl, realize_host_ddl, schema_sql_for_backend, split_schema_statements,
 };
 pub use typed::{
-    db_value_from_sea, db_value_to_sea, execute_typed_envelope, execute_typed_on_open_envelope,
-    execute_typed_on_session, execute_typed_on_session_then, execute_typed_on_txn,
-    execute_typed_on_txn_envelope, load_physical_sql_type_env, load_sql_type_env,
-    load_sql_type_env_capped, proofs_for_host_plan, stamp_adapter_execute, stamp_host_proofs,
+    db_value_from_sea, db_value_to_sea, execute_typed_envelope,
+    execute_typed_envelope_on_connection, execute_typed_on_open_connection,
+    execute_typed_on_open_envelope, execute_typed_on_session, execute_typed_on_session_then,
+    execute_typed_on_txn, execute_typed_on_txn_envelope, load_physical_sql_type_env,
+    load_sql_type_env, load_sql_type_env_capped, proofs_for_host_plan, stamp_adapter_execute,
+    stamp_host_proofs,
 };

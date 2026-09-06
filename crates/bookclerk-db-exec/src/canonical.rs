@@ -1,22 +1,22 @@
-//! Host-canonical SQL transport.
+//! Canonical sqlite-shaped SeaORM transport.
 //!
-//! Library production code executes Bookclerk SQL with `?` placeholders on the
-//! canonical SeaORM SQLite-shaped backend. That backend is **not** the physical
-//! engine: it exists so SeaORM and host helpers never emit `$n`, `GLOB`, or
-//! other adapter syntax. Adapters lower at execute.
+//! Host/library leftover SQL stays BookclerkSQL (`?`, `LIKE`). This module
+//! builds SeaORM [`Statement`]s on the sqlite-shaped backend so the production
+//! plugin-host proxy never emits `$n` / `GLOB`. Adapters physically lower
+//! after RPC. Library code must not name [`sea_orm::DatabaseBackend`].
 
 use sea_orm::{ConnectionTrait, DatabaseBackend, DbErr, ExecResult, QueryResult, Statement, Value};
 
-/// SeaORM backend used for host-authored canonical SQL (`?` placeholders).
-pub const HOST_CANONICAL_BACKEND: DatabaseBackend = DatabaseBackend::Sqlite;
+/// SeaORM backend used for canonical `?` transport (not a physical engine).
+const CANONICAL_TRANSPORT: DatabaseBackend = DatabaseBackend::Sqlite;
 
 /// Builds a SeaORM statement that keeps canonical `?` placeholders.
 #[must_use]
-pub fn host_canonical_statement(
+pub fn canonical_statement(
     sql: impl Into<String>,
     values: impl IntoIterator<Item = Value>,
 ) -> Statement {
-    Statement::from_sql_and_values(HOST_CANONICAL_BACKEND, sql, values)
+    Statement::from_sql_and_values(CANONICAL_TRANSPORT, sql, values)
 }
 
 /// Executes already-canonical host SQL. Never desugars or physically lowers.
@@ -24,7 +24,7 @@ pub fn host_canonical_statement(
 /// # Errors
 ///
 /// Returns when the connection rejects the statement.
-pub async fn execute_host_canonical<C>(
+pub async fn execute_canonical<C>(
     db: &C,
     sql: &str,
     values: impl IntoIterator<Item = Value>,
@@ -32,7 +32,7 @@ pub async fn execute_host_canonical<C>(
 where
     C: ConnectionTrait,
 {
-    db.execute_raw(host_canonical_statement(sql, values)).await
+    db.execute_raw(canonical_statement(sql, values)).await
 }
 
 /// Queries already-canonical host SQL. Never desugars or physically lowers.
@@ -40,7 +40,7 @@ where
 /// # Errors
 ///
 /// Returns when the connection rejects the statement.
-pub async fn query_host_canonical<C>(
+pub async fn query_canonical<C>(
     db: &C,
     sql: &str,
     values: impl IntoIterator<Item = Value>,
@@ -48,20 +48,19 @@ pub async fn query_host_canonical<C>(
 where
     C: ConnectionTrait,
 {
-    db.query_all_raw(host_canonical_statement(sql, values))
-        .await
+    db.query_all_raw(canonical_statement(sql, values)).await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{host_canonical_statement, HOST_CANONICAL_BACKEND};
+    use super::{canonical_statement, CANONICAL_TRANSPORT};
     use sea_orm::{DatabaseBackend, Statement};
 
     #[test]
-    fn host_statements_keep_question_marks_and_like() {
+    fn canonical_statements_keep_question_marks_and_like() {
         let sql = "SELECT id FROM t WHERE title LIKE ? AND a = ?";
-        let stmt = host_canonical_statement(sql, Vec::<sea_orm::Value>::new());
-        assert_eq!(stmt.db_backend, HOST_CANONICAL_BACKEND);
+        let stmt = canonical_statement(sql, Vec::<sea_orm::Value>::new());
+        assert_eq!(stmt.db_backend, CANONICAL_TRANSPORT);
         assert_eq!(stmt.db_backend, DatabaseBackend::Sqlite);
         assert!(stmt.sql.contains('?'), "{}", stmt.sql);
         assert!(stmt.sql.contains("LIKE"), "{}", stmt.sql);
