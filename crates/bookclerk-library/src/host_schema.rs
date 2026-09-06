@@ -1255,8 +1255,12 @@ mod tests {
 
     #[test]
     fn current_canonical_schema_is_unreleased_while_plan_empty() {
-        use crate::migrations::{current_canonical_schema, host_migration_plan, unreleased_sql};
+        use crate::migrations::{
+            current_canonical_schema, current_canonical_statements, host_migration_plan,
+            unreleased_sql, unreleased_statements,
+        };
         assert!(host_migration_plan().is_empty());
+        assert_eq!(current_canonical_statements(), unreleased_statements());
         assert_eq!(current_canonical_schema(), unreleased_sql());
         assert!(current_canonical_schema().contains("plugin_databases"));
         assert!(!current_canonical_schema().contains("domain_events_v27"));

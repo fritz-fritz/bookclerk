@@ -604,6 +604,7 @@ mod tests {
         assert!(unreleased_sql().contains("plugin_databases"));
         assert!(unreleased_sql().contains("dispatch_snapshot_json"));
         assert!(unreleased_sql().contains("db_serialization_slots"));
+        assert_eq!(current_canonical_statements(), unreleased_statements());
         assert_eq!(current_canonical_schema(), unreleased_sql());
         assert!(
             unreleased_ops()
