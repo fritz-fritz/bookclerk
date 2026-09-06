@@ -289,10 +289,15 @@ pub fn binding_unreleased_checksum() -> String {
 
 /// Frozen ups concatenated with [`unreleased_ops`] (derived diagnostic SQL).
 ///
-/// After a future release cut this is `host_migration_plan` DDL plus whatever
-/// is again unreleased — do not assume it equals [`unreleased_sql`] forever.
+/// While the production plan is empty this is exactly [`unreleased_sql`]. After
+/// a release cut it is frozen step SQL plus whatever is again unreleased — do
+/// not assume it equals [`unreleased_sql`] forever. Test plan overrides must
+/// not feed this `OnceLock` ([`production_host_migration_plan`] only).
 #[must_use]
 pub fn current_canonical_schema() -> &'static str {
+    if production_host_migration_plan().is_empty() {
+        return unreleased_sql();
+    }
     static SQL: OnceLock<String> = OnceLock::new();
     SQL.get_or_init(|| current_canonical_statements().join(";\n"))
         .as_str()
