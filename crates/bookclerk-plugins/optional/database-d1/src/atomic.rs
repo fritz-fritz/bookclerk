@@ -22,7 +22,9 @@ fn collapse_d1_wire(
         bookclerk_db_exec::collapse_companion_groups(groups, statements),
     )
 }
-use bookclerk_plugin_abi::{DbCapabilities, D1_MAX_SQL_STATEMENT_BYTES};
+use bookclerk_plugin_abi::{
+    d1_physical_sql_preflight_len, DbCapabilities, D1_MAX_SQL_STATEMENT_BYTES,
+};
 use bookclerk_plugin_sdk::{
     encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbResultSelection,
     DbRow, DbTiming, DbType, DbValue, ExecuteReply, ExecuteRequest, PluginError, StatementResult,
@@ -885,6 +887,13 @@ pub(crate) fn d1_typed_statement(
     params: &[DbValue],
     proof: Option<&bookclerk_plugin_abi::ResolvedStatement>,
 ) -> Result<SqlStmt, DbErr> {
+    let pre = d1_physical_sql_preflight_len(sql, params.len())
+        .map_err(|err| DbErr::Custom(format!("D1 physical SQL preflight: {err}")))?;
+    if pre > D1_MAX_SQL_STATEMENT_BYTES as usize {
+        return Err(DbErr::Custom(format!(
+            "D1 physical SQL preflight is {pre} bytes; D1 physical statement limit is {D1_MAX_SQL_STATEMENT_BYTES}"
+        )));
+    }
     let sql =
         bookclerk_db_exec::lower_canonical_sql_typed(sea_orm::DatabaseBackend::Sqlite, sql, proof)
             .map_err(|err| DbErr::Custom(err.to_string()))?;

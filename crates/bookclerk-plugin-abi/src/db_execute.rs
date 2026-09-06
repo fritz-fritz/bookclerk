@@ -100,6 +100,26 @@ pub const fn d1_physical_sql_upper_bound_len(canonical_len: usize) -> usize {
         .saturating_add((D1_MAX_BINDS as usize).saturating_mul(D1_UNHEX_PLACEHOLDER_EXTRA))
 }
 
+/// Deterministic D1 physical-length preflight for one admitted statement.
+///
+/// Uses the counted mechanical lowering bound (actual `LIKE` / `/` `%` /
+/// `INSERT OR IGNORE` occurrences) plus the query LIMIT wrap and `unhex(?)`
+/// for each bind. Always `<=` [`d1_physical_sql_upper_bound_len`]`(sql.len())`
+/// when `bind_count <= `[`D1_MAX_BINDS`].
+///
+/// # Errors
+///
+/// Returns [`crate::PluginError::invalid_params`] when the pack lexer rejects
+/// `sql`.
+pub fn d1_physical_sql_preflight_len(sql: &str, bind_count: usize) -> crate::Result<usize> {
+    let binds = bind_count.min(D1_MAX_BINDS as usize);
+    Ok(
+        crate::sql_text::sqlite_family_mechanical_len_upper_bound(sql)?
+            .saturating_add(D1_QUERY_CAP_WRAP_MAX_EXTRA)
+            .saturating_add(binds.saturating_mul(D1_UNHEX_PLACEHOLDER_EXTRA)),
+    )
+}
+
 /// Largest canonical payload that [`d1_physical_sql_upper_bound_len`] still
 /// proves against [`D1_MAX_SQL_STATEMENT_BYTES`].
 const fn proven_d1_max_payload_bytes() -> u32 {
@@ -886,6 +906,11 @@ mod tests {
             )
         };
         const { assert!(d1_physical_sql_upper_bound_len(25_000) > D1_MAX_SQL_STATEMENT_BYTES as usize) };
+        let sql =
+            "SELECT json_extract(ifnull(body, '{}'), '$.k') FROM t WHERE x LIKE '[%]_?*' AND 1/2";
+        let pre = d1_physical_sql_preflight_len(sql, 0).expect("preflight");
+        assert!(pre <= d1_physical_sql_upper_bound_len(sql.len()), "{pre}");
+        assert!(pre <= D1_MAX_SQL_STATEMENT_BYTES as usize, "{pre}");
     }
 
     #[test]

@@ -78,17 +78,54 @@ pub const SQLITE_FAMILY_INSERT_OR_IGNORE_MAX_EXTRA: usize = 256;
 /// statement of `canonical_len` bytes (`div`/`mod` NULLIF, `INSERT OR IGNORE`,
 /// LIKE→GLOB). Does not include proof-directed INTEGER overflow wraps.
 ///
-/// LIKE→GLOB is the densest per-byte expansion (`LIKE` is 4 bytes, overhead is
-/// [`LIKE_GLOB_REWRITE_OVERHEAD`]). Remaining bytes after packing as many
-/// `LIKE` keywords as possible are charged as `/` `%` NULLIF wraps.
+/// LIKE→GLOB is the densest per-byte expansion among mechanical rewrites
+/// (`LIKE` is 4 bytes; overhead is [`LIKE_GLOB_REWRITE_OVERHEAD`]). The count
+/// `canonical_len / 4` is the maximum number of `LIKE` keywords that can appear
+/// in `canonical_len` bytes — not an expansion-factor guess. Remaining bytes
+/// after packing as many `LIKE` keywords as possible are charged as `/` `%`
+/// NULLIF wraps (1-byte operators).
+///
+/// Proof-directed INTEGER overflow CASE wraps are applied by the adapter from
+/// typed proofs and fail closed against the engine's physical statement limit
+/// after lowering; they are not a function of payload length alone.
 #[must_use]
 pub const fn sqlite_family_like_divmod_insert_upper_bound(canonical_len: usize) -> usize {
+    const {
+        assert!(
+            LIKE_GLOB_REWRITE_OVERHEAD >= 4 * SQLITE_FAMILY_DIV_MOD_NULLIF_EXTRA,
+            "LIKE→GLOB must remain the densest mechanical per-byte expansion"
+        );
+    }
     let like_extra = (canonical_len / 4).saturating_mul(LIKE_GLOB_REWRITE_OVERHEAD);
     let remainder_divmod = (canonical_len % 4).saturating_mul(SQLITE_FAMILY_DIV_MOD_NULLIF_EXTRA);
     canonical_len
         .saturating_add(like_extra)
         .saturating_add(remainder_divmod)
         .saturating_add(SQLITE_FAMILY_INSERT_OR_IGNORE_MAX_EXTRA)
+}
+
+/// Mechanical sqlite-family length bound for one canonical statement, counting
+/// actual `LIKE` occurrences, `/` `%` operators in code spans, and at most one
+/// `INSERT OR IGNORE` rewrite.
+///
+/// Always `<=` [`sqlite_family_like_divmod_insert_upper_bound`]`(sql.len())`
+/// for well-formed packs: the length formula packs the densest rewrite into
+/// every 4-byte window, while this preflight charges only constructs that
+/// lowering actually rewrites.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when quotes or block comments are
+/// unterminated.
+pub fn sqlite_family_mechanical_len_upper_bound(sql: &str) -> Result<usize> {
+    let likes = like_pattern_sources(sql)?.len();
+    let div_mods = count_div_mod_operators(sql)?;
+    let insert_extra = insert_or_ignore_rewrite_extra(sql)?;
+    Ok(sql
+        .len()
+        .saturating_add(likes.saturating_mul(LIKE_GLOB_REWRITE_OVERHEAD))
+        .saturating_add(div_mods.saturating_mul(SQLITE_FAMILY_DIV_MOD_NULLIF_EXTRA))
+        .saturating_add(insert_extra))
 }
 
 /// UTF-8 byte length of a sqlite-family GLOB pattern after Bookclerk LIKE→GLOB
@@ -455,6 +492,60 @@ fn keyword_at(sql: &str, i: usize, kw: &str) -> bool {
 /// True when `c` may continue an unquoted identifier.
 const fn is_ident_cont(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// Counts `/` and `%` operators in code spans (strings, identifiers, and
+/// comments are not operators).
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when quotes or block comments are
+/// unterminated.
+fn count_div_mod_operators(sql: &str) -> Result<usize> {
+    let mut n = 0usize;
+    let mut i = 0usize;
+    let bytes = sql.as_bytes();
+    while i < bytes.len() {
+        i = skip_trivia(sql, i)?;
+        if i >= bytes.len() {
+            break;
+        }
+        match bytes[i] {
+            b'\'' => i = skip_sql_string(sql, i)?,
+            b'"' | b'`' => i = skip_quoted(sql, i, bytes[i])?,
+            b'[' => i = skip_quoted(sql, i, b']')?,
+            b'/' | b'%' => {
+                n = n.saturating_add(1);
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(n)
+}
+
+/// [`SQLITE_FAMILY_INSERT_OR_IGNORE_MAX_EXTRA`] when the statement is
+/// `INSERT OR IGNORE`, otherwise `0`.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a leading block comment is
+/// unterminated.
+fn insert_or_ignore_rewrite_extra(sql: &str) -> Result<usize> {
+    let mut i = skip_trivia(sql, 0)?;
+    if !keyword_at(sql, i, "INSERT") {
+        return Ok(0);
+    }
+    i = skip_trivia(sql, i + "INSERT".len())?;
+    if !keyword_at(sql, i, "OR") {
+        return Ok(0);
+    }
+    i = skip_trivia(sql, i + "OR".len())?;
+    if keyword_at(sql, i, "IGNORE") {
+        Ok(SQLITE_FAMILY_INSERT_OR_IGNORE_MAX_EXTRA)
+    } else {
+        Ok(0)
+    }
 }
 
 /// One helper call found in canonical SQL (code spans only).
@@ -852,12 +943,58 @@ mod tests {
             tick.to_string().contains("unterminated quoted identifier"),
             "{tick}"
         );
+        let bracket = sql_v1_pack_statements("SELECT [oops").unwrap_err();
+        assert!(
+            bracket
+                .to_string()
+                .contains("unterminated quoted identifier"),
+            "{bracket}"
+        );
         sql_v1_pack_statements("SELECT 1 /* ok */").expect("terminated block");
         sql_v1_pack_statements("SELECT 1 -- to eof").expect("line comment to EOF");
+        sql_v1_pack_statements("SELECT 1 /* foo ; bar */").expect("semicolon in block comment");
+        sql_v1_pack_statements("SELECT 1 -- foo ; bar").expect("semicolon in line comment");
+        let nested_open = sql_v1_pack_statements("SELECT 1 /* /* still open").unwrap_err();
+        assert!(
+            nested_open
+                .to_string()
+                .contains("unterminated block comment"),
+            "{nested_open}"
+        );
+        sql_v1_pack_statements("SELECT 1 /* /* nested close */")
+            .expect("SQL block comments are not nested; first */ terminates");
+        sql_v1_pack_statements("SELECT '/* not a comment' /* real */ 'x'")
+            .expect("comment markers inside strings");
+        sql_v1_pack_statements("SELECT 1 /* 'unterminated string in comment */")
+            .expect("quotes inside terminated comments");
+        sql_v1_pack_statements("SELECT /* ' */ 1").expect("quote inside block comment");
+        let odd_quote = sql_v1_pack_statements("SELECT 'a''b").unwrap_err();
+        assert!(
+            odd_quote.to_string().contains("unterminated SQL string"),
+            "{odd_quote}"
+        );
         require_like_patterns_within("SELECT 1 /* ", &[], D1_PORTABLE_LIKE_PATTERN_BYTES)
             .expect_err("LIKE scan fails closed on unterminated comment");
         require_function_args_within("SELECT replace(a, 'x', 'y') /* ", 8)
             .expect_err("function scan fails closed on unterminated comment");
+    }
+
+    #[test]
+    fn mechanical_preflight_charges_likes_not_length_guess() {
+        let sql = "SELECT 1 WHERE x LIKE'a' OR x LIKE'b'";
+        let bound = sqlite_family_mechanical_len_upper_bound(sql).expect("preflight");
+        assert_eq!(bound, sql.len() + 2 * LIKE_GLOB_REWRITE_OVERHEAD, "{bound}");
+        assert!(bound <= sqlite_family_like_divmod_insert_upper_bound(sql.len()));
+        let with_div = "SELECT 1/2";
+        let div_bound = sqlite_family_mechanical_len_upper_bound(with_div).expect("div");
+        assert_eq!(
+            div_bound,
+            with_div.len() + SQLITE_FAMILY_DIV_MOD_NULLIF_EXTRA
+        );
+        let insert = "INSERT OR IGNORE INTO t SELECT 1";
+        let ins = sqlite_family_mechanical_len_upper_bound(insert).expect("insert");
+        assert_eq!(ins, insert.len() + SQLITE_FAMILY_INSERT_OR_IGNORE_MAX_EXTRA);
+        sqlite_family_mechanical_len_upper_bound("SELECT 1 /* ").expect_err("unterminated");
     }
 
     #[test]
@@ -901,18 +1038,38 @@ mod proptests {
         #[test]
         fn unterminated_delimiters_never_pack(
             prefix in r"[A-Za-z0-9 ]{0,40}",
-            kind in 0u8..4,
+            kind in 0u8..5,
             tail in r"[A-Za-z0-9 .,;]{0,80}"
         ) {
             let sql = match kind {
                 0 => format!("SELECT {prefix} /* {tail}"),
                 1 => format!("SELECT {prefix} '{tail}"),
                 2 => format!("SELECT {prefix} \"{tail}"),
-                _ => format!("SELECT {prefix} `{tail}"),
+                3 => format!("SELECT {prefix} `{tail}"),
+                _ => format!("SELECT {prefix} [{tail}"),
             };
             prop_assert!(
                 sql_v1_pack_statements(&sql).is_err(),
                 "malformed delimiters packed as success: {sql:?}"
+            );
+        }
+
+        #[test]
+        fn mechanical_preflight_never_exceeds_length_formula(
+            likes in 0usize..20,
+            divs in 0usize..8
+        ) {
+            let mut sql = String::from("SELECT json_extract(ifnull(body, '{}'), '$.k') FROM t WHERE 1=1");
+            for _ in 0..likes {
+                sql.push_str(" OR x LIKE '[%]_?*'");
+            }
+            for _ in 0..divs {
+                sql.push_str(" AND 1/2");
+            }
+            let pre = sqlite_family_mechanical_len_upper_bound(&sql).expect("preflight");
+            prop_assert!(
+                pre <= sqlite_family_like_divmod_insert_upper_bound(sql.len()),
+                "counted preflight {pre} exceeded length formula for {sql:?}"
             );
         }
     }

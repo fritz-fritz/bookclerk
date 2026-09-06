@@ -2314,8 +2314,33 @@ mod tests {
     }
 
     fn dense_like_json_placeholder_sql(like_count: usize) -> String {
+        let mut sql = String::from(
+            "SELECT json_extract(ifnull(json_object('k', body), '{}'), '$.k'), \
+             json_object('k', ?) FROM t WHERE ",
+        );
+        for i in 0..like_count {
+            if i > 0 {
+                sql.push_str(" OR ");
+            }
+            sql.push_str("x LIKE'[%]_?*'");
+        }
+        sql
+    }
+
+    fn nested_helper_like_sql(like_count: usize) -> String {
         let mut sql =
-            String::from("SELECT json_extract(body, '$.k'), json_object('k', ?) FROM t WHERE ");
+            String::from("SELECT json_extract(ifnull(body, '{}'), '$.a'), 1/2 FROM t WHERE ");
+        for i in 0..like_count {
+            if i > 0 {
+                sql.push_str(" OR ");
+            }
+            sql.push_str("x LIKE ?");
+        }
+        sql
+    }
+
+    fn insert_or_ignore_like_sql(like_count: usize) -> String {
+        let mut sql = String::from("INSERT OR IGNORE INTO t SELECT 1 FROM u WHERE ");
         for i in 0..like_count {
             if i > 0 {
                 sql.push_str(" OR ");
@@ -2353,7 +2378,12 @@ mod tests {
     }
 
     fn d1_physical_after_adapter(sql: &str) -> usize {
-        let capped = crate::cap_query_sql(sql, bookclerk_plugin_abi::FIRST_PARTY_MAX_RESULT_ROWS);
+        let trimmed = sql.trim_start();
+        let capped = if trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("SELECT") {
+            crate::cap_query_sql(sql, bookclerk_plugin_abi::FIRST_PARTY_MAX_RESULT_ROWS)
+        } else {
+            sql.to_string()
+        };
         lower_canonical_sql(DatabaseBackend::Sqlite, &capped).len()
     }
 
@@ -2381,8 +2411,8 @@ mod tests {
     #[test]
     fn d1_accepted_short_likes_fit_physical_statement_limit() {
         use bookclerk_plugin_abi::{
-            d1_physical_sql_upper_bound_len, DbValue, D1_MAX_PAYLOAD_BYTES,
-            D1_MAX_SQL_STATEMENT_BYTES,
+            d1_physical_sql_preflight_len, d1_physical_sql_upper_bound_len, DbValue,
+            D1_MAX_PAYLOAD_BYTES, D1_MAX_SQL_STATEMENT_BYTES,
         };
 
         let bind = [DbValue::Text("v".into())];
@@ -2392,10 +2422,17 @@ mod tests {
             let sql = dense_like_json_placeholder_sql(n);
             if d1_host_accepts(&sql, &bind) {
                 let physical = d1_physical_after_adapter(&sql);
+                let pre = d1_physical_sql_preflight_len(&sql, bind.len()).expect("preflight");
                 assert!(
                     physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
                     "n={n} canonical={} physical={physical} cap={D1_MAX_PAYLOAD_BYTES}",
                     sql.len()
+                );
+                assert!(physical <= pre, "n={n} physical={physical} preflight={pre}");
+                assert!(
+                    pre <= d1_physical_sql_upper_bound_len(sql.len()),
+                    "n={n} preflight={pre} formula={}",
+                    d1_physical_sql_upper_bound_len(sql.len())
                 );
                 assert!(
                     physical <= d1_physical_sql_upper_bound_len(sql.len()),
@@ -2413,6 +2450,65 @@ mod tests {
         assert!(
             !d1_host_accepts(&over, &bind),
             "N+1 like-count must fail host admission (payload or admit)"
+        );
+
+        let mut nested_ok = 0usize;
+        let mut n = 1usize;
+        while n < 8_000 {
+            let sql = nested_helper_like_sql(n);
+            let params: Vec<DbValue> = (0..n).map(|_| DbValue::Text("[%]_?*".into())).collect();
+            if d1_host_accepts(&sql, &params) {
+                let physical = d1_physical_after_adapter(&sql);
+                let pre = d1_physical_sql_preflight_len(&sql, params.len()).expect("preflight");
+                assert!(
+                    physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
+                    "nested n={n}"
+                );
+                assert!(
+                    physical <= pre,
+                    "nested n={n} physical={physical} pre={pre}"
+                );
+                nested_ok = n;
+                n += 1;
+                continue;
+            }
+            break;
+        }
+        assert!(nested_ok >= 1, "expected nested helper LIKE chain");
+        let over_nested = nested_helper_like_sql(nested_ok + 1);
+        let over_nested_params: Vec<DbValue> = (0..=nested_ok)
+            .map(|_| DbValue::Text("[%]_?*".into()))
+            .collect();
+        assert!(
+            !d1_host_accepts(&over_nested, &over_nested_params),
+            "N+1 nested helper LIKE must fail host admission"
+        );
+
+        let mut insert_ok = 0usize;
+        let mut n = 1usize;
+        while n < 8_000 {
+            let sql = insert_or_ignore_like_sql(n);
+            if d1_host_accepts(&sql, &[]) {
+                let physical = d1_physical_after_adapter(&sql);
+                let pre = d1_physical_sql_preflight_len(&sql, 0).expect("preflight");
+                assert!(
+                    physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
+                    "insert n={n}"
+                );
+                assert!(
+                    physical <= pre,
+                    "insert n={n} physical={physical} pre={pre}"
+                );
+                insert_ok = n;
+                n += 1;
+                continue;
+            }
+            break;
+        }
+        assert!(insert_ok >= 1, "expected INSERT OR IGNORE LIKE chain");
+        assert!(
+            !d1_host_accepts(&insert_or_ignore_like_sql(insert_ok + 1), &[]),
+            "N+1 INSERT OR IGNORE LIKE must fail host admission"
         );
 
         let mut bind_ok = 0usize;
