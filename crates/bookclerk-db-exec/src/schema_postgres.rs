@@ -15,6 +15,12 @@ use sea_orm::DatabaseBackend;
 ///
 /// SQLite-family backends return the canonical statement unchanged; Postgres
 /// applies the mechanical DDL lowering. Unknown SeaORM backends fail closed.
+///
+/// # Panics
+///
+/// Panics when `backend` is not SQLite or PostgreSQL. `DatabaseBackend` is
+/// non-exhaustive; BookclerkSQL adapters do not implement other SeaORM
+/// families.
 #[must_use]
 pub fn schema_sql_for_backend(backend: DatabaseBackend, canonical: &str) -> Cow<'_, str> {
     match backend {
@@ -29,6 +35,12 @@ pub fn schema_sql_for_backend(backend: DatabaseBackend, canonical: &str) -> Cow<
 /// Hosts emit canonical SQLite-shaped `CREATE`/`DROP`. Postgres adapters
 /// rewrite `AUTOINCREMENT`/`BLOB`/`INTEGER`/`REAL` here; SQLite/D1 leave the
 /// statement unchanged. DML stays for [`crate::lower_canonical_sql`].
+///
+/// # Panics
+///
+/// Panics when `backend` is not SQLite or PostgreSQL. `DatabaseBackend` is
+/// non-exhaustive; BookclerkSQL adapters do not implement other SeaORM
+/// families.
 #[must_use]
 pub fn lower_binding_sql_for_backend(backend: DatabaseBackend, sql: &str) -> Cow<'_, str> {
     match backend {
@@ -103,6 +115,11 @@ pub fn expand_host_schema_batch_grouped(
     }
     let version = batch.last()?;
     if !is_host_schema_version_marker(version) {
+        return None;
+    }
+    // Identity companions are adapter-private plpgsql (`$bookclerk_ident$`).
+    // Re-running this expander would SQL-v1-split those bodies on `;`.
+    if batch.iter().any(|sql| sql.contains("$bookclerk_ident$")) {
         return None;
     }
     let mut stmts: Vec<String> = Vec::new();
@@ -431,6 +448,10 @@ mod tests {
         assert_eq!(
             expanded.last().map(String::as_str),
             Some("INSERT INTO schema_migrations (version) VALUES (1)")
+        );
+        assert!(
+            expand_host_schema_batch(DatabaseBackend::Postgres, &expanded).is_none(),
+            "already-expanded identity companions must not be packed again"
         );
     }
 

@@ -365,7 +365,6 @@ async fn apply_one_sqlite_version(
         let batch = SchemaBatch::with_pragma_marker(schema, version);
         match run_atomic_ddl(
             db,
-            backend,
             SCHEMA_TXN_TIMING,
             &format!("migrate-sqlite-{version}"),
             batch.statements,
@@ -452,7 +451,6 @@ async fn apply_one_schema_migration(
         let batch = SchemaBatch::with_row_marker(schema, version);
         match run_atomic_ddl(
             db,
-            backend,
             timing,
             &format!("migrate-{timing}-{version}"),
             batch.statements,
@@ -526,7 +524,6 @@ async fn ensure_schema_migrations(db: &DatabaseConnection, backend: DbBackend) -
 /// Runs `stmts` as one generic atomic execute plan (version marker last).
 async fn run_atomic_ddl(
     db: &DatabaseConnection,
-    backend: DbBackend,
     timing: &str,
     operation_id: &str,
     stmts: Vec<String>,
@@ -534,7 +531,7 @@ async fn run_atomic_ddl(
     if stmts.is_empty() {
         return Ok(());
     }
-    let stmts = bookclerk_db_exec::expand_host_schema_batch(backend, &stmts).unwrap_or(stmts);
+    // Canonical pack + marker; `execute_typed_on` expands companions once.
     let req = ExecuteRequest {
         operation_id: operation_id.to_string(),
         request_hash: String::new(),
@@ -682,16 +679,7 @@ mod tests {
         let db_batch = db.clone();
         apply_host_schema_with_batch(&db, HostSchemaKind::AtomicBatchMarker, move |stmts| {
             let db_batch = db_batch.clone();
-            async move {
-                run_atomic_ddl(
-                    &db_batch,
-                    db_batch.get_database_backend(),
-                    "sqlite_txn",
-                    "atomic-batch",
-                    stmts,
-                )
-                .await
-            }
+            async move { run_atomic_ddl(&db_batch, "sqlite_txn", "atomic-batch", stmts).await }
         })
         .await
         .expect("atomic batch schema");
