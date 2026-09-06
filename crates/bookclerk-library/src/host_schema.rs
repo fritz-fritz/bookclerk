@@ -53,6 +53,10 @@ impl SchemaBatch {
     /// Packs canonical DDL with the SQL-v1 lexer, then appends `marker`.
     ///
     /// Host compile-time DDL must pack; a failure is a programming error.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `ddl` is not a BookclerkSQL statement list.
     #[must_use]
     pub fn from_ddl_and_marker(ddl: impl Into<String>, marker: impl Into<String>) -> Self {
         let ddl = ddl.into();
@@ -184,15 +188,7 @@ pub async fn apply_host_schema_with_options(
     let exec = db.clone();
     apply_host_schema_with_batch_opts(db, kind, opts, move |stmts| {
         let exec = exec.clone();
-        async move {
-            run_atomic_ddl(
-                &exec,
-                SCHEMA_TXN_TIMING,
-                "schema-apply",
-                stmts,
-            )
-            .await
-        }
+        async move { run_atomic_ddl(&exec, SCHEMA_TXN_TIMING, "schema-apply", stmts).await }
     })
     .await
 }
@@ -248,15 +244,7 @@ pub async fn migrate_host_schema_to(
     let exec = db.clone();
     migrate_host_schema_to_with_batch(db, kind, target, opts, move |stmts| {
         let exec = exec.clone();
-        async move {
-            run_atomic_ddl(
-                &exec,
-                SCHEMA_TXN_TIMING,
-                "schema-migrate",
-                stmts,
-            )
-            .await
-        }
+        async move { run_atomic_ddl(&exec, SCHEMA_TXN_TIMING, "schema-migrate", stmts).await }
     })
     .await
 }
@@ -667,16 +655,7 @@ pub(crate) async fn apply_fresh_schema_sqlite(
     let exec = db.clone();
     let mut run_batch = move |stmts: Vec<String>| {
         let exec = exec.clone();
-        async move {
-            run_atomic_ddl(
-                &exec,
-                exec.get_database_backend(),
-                SCHEMA_TXN_TIMING,
-                "schema-apply",
-                stmts,
-            )
-            .await
-        }
+        async move { run_atomic_ddl(&exec, SCHEMA_TXN_TIMING, "schema-apply", stmts).await }
     };
     apply_fresh_schema(db, kind, &mut run_batch, plan, unreleased, schema_version).await
 }
@@ -1357,16 +1336,7 @@ mod tests {
         let exec = db.clone();
         let mut run_batch = move |stmts: Vec<String>| {
             let exec = exec.clone();
-            async move {
-                run_atomic_ddl(
-                    &exec,
-                    exec.get_database_backend(),
-                    SCHEMA_TXN_TIMING,
-                    "schema-apply",
-                    stmts,
-                )
-                .await
-            }
+            async move { run_atomic_ddl(&exec, SCHEMA_TXN_TIMING, "schema-apply", stmts).await }
         };
         apply_fresh_schema(&db, HostSchemaKind::RowMarker, &mut run_batch, &plan, "", 1)
             .await
@@ -1401,16 +1371,7 @@ mod tests {
         let exec = db.clone();
         let mut run_batch = move |stmts: Vec<String>| {
             let exec = exec.clone();
-            async move {
-                run_atomic_ddl(
-                    &exec,
-                    exec.get_database_backend(),
-                    SCHEMA_TXN_TIMING,
-                    "schema-apply",
-                    stmts,
-                )
-                .await
-            }
+            async move { run_atomic_ddl(&exec, SCHEMA_TXN_TIMING, "schema-apply", stmts).await }
         };
         apply_fresh_schema(
             &db,
@@ -1486,9 +1447,7 @@ mod tests {
         let db_batch = db.clone();
         apply_host_schema_with_batch(&db, HostSchemaKind::AtomicBatchMarker, move |stmts| {
             let db_batch = db_batch.clone();
-            async move {
-                run_atomic_ddl(&db_batch, "sqlite_txn", "atomic-batch", stmts).await
-            }
+            async move { run_atomic_ddl(&db_batch, "sqlite_txn", "atomic-batch", stmts).await }
         })
         .await
         .expect("atomic batch schema");

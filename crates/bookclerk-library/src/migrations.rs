@@ -823,6 +823,10 @@ pub fn binding_bootstrap_sql() -> &'static str {
 }
 
 /// Ordered canonical statements for [`binding_bootstrap_sql`].
+///
+/// # Panics
+///
+/// Panics when the bootstrap SQL is not a BookclerkSQL statement list.
 #[must_use]
 pub fn binding_bootstrap_statements() -> &'static [String] {
     static STMTS: OnceLock<Vec<String>> = OnceLock::new();
@@ -865,6 +869,10 @@ pub fn current_canonical_statements() -> &'static [String] {
 }
 
 /// Ordered statements in [`UNRELEASED_SQL`].
+///
+/// # Panics
+///
+/// Panics when [`UNRELEASED_SQL`] is not a BookclerkSQL statement list.
 #[must_use]
 pub fn unreleased_statements() -> &'static [String] {
     static STMTS: OnceLock<Vec<String>> = OnceLock::new();
