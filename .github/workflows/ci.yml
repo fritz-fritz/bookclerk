@@ -596,13 +596,17 @@ jobs:
         run: cargo test -p bookclerk-tray
 
   postgres-jobs:
-    name: postgres job queue
+    name: postgres ${{ matrix.postgres }}
     needs: plan
     if: needs.plan.outputs.run_rust == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "17", "18"]
     services:
       postgres:
-        image: postgres:16
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -661,6 +665,15 @@ jobs:
           BOOKCLERK_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
           BOOKCLERK_REQUIRE_POSTGRES_TESTS: "1"
         run: cargo test -p bookclerk-plugin-database-postgres --lib postgres_ -- --ignored --nocapture
+
+      - name: Postgres production RPC proxy LIKE boundary
+        env:
+          BOOKCLERK_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
+          BOOKCLERK_REQUIRE_POSTGRES_TESTS: "1"
+        run: |
+          set -euo pipefail
+          cargo build -p bookclerk-plugin-database-postgres
+          cargo test -p bookclerk-plugin-host --lib production_rpc_proxy_keeps_like_through_postgres_guest -- --ignored --nocapture
 
   ci-gate:
     name: CI Gate

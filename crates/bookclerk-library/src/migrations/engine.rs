@@ -19,7 +19,7 @@ use super::plan::{
 use crate::error::{LibraryError, Result};
 use crate::host_schema::{current_schema_state_in, ensure_schema_migrations, HostSchemaKind};
 use crate::schema_state::SchemaState;
-use crate::sql_plan::{execute_typed_on_binding, lock_serialization_slot};
+use crate::sql_plan::execute_typed_on_binding;
 
 /// Timing label for shared schema apply (not an adapter identity).
 const SCHEMA_TXN_TIMING: &str = "schema_txn";
@@ -376,8 +376,13 @@ fn slot_lock_sql(namespace: &str) -> Vec<String> {
 
 /// Takes the `schema:{namespace}` serialization slot before walking steps.
 async fn lock_schema_slot(db: &DatabaseConnection, namespace: &str) -> Result<()> {
-    let key = schema_slot_key(namespace);
-    match lock_serialization_slot(db, &key).await {
+    match run_atomic_ddl(
+        db,
+        &format!("schema-lock-{namespace}"),
+        slot_lock_sql(namespace),
+    )
+    .await
+    {
         Ok(()) => Ok(()),
         Err(err) => {
             let msg = err.to_string().to_ascii_lowercase();

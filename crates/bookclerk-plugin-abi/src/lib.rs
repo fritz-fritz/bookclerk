@@ -47,8 +47,11 @@
 //! | [`kind`] | Kind-specific DTOs (source / integration / output) |
 //! | [`db`] | Host-private database connect params (feature `host`) |
 //! | [`error`] | [`PluginError`] / [`PluginErrorCode`] |
+//! | [`guest_sql`] | SQL-v1 grammar / guest admission |
+//! | [`sql_desugar`] | Host-only semantic desugars (`NULLS`, `NULLIF`) |
 //! | [`plugin_capnp`] | Generated Cap'n Proto RPC interfaces |
 
+pub mod backup_ops;
 pub mod db;
 pub mod db_execute;
 mod db_rpc;
@@ -56,7 +59,6 @@ pub mod db_value;
 pub mod error;
 mod features;
 pub mod guest_sql;
-#[cfg(feature = "host")]
 pub(crate) mod host_envelope;
 #[cfg(feature = "host")]
 mod host_roles;
@@ -72,6 +74,7 @@ mod rpc;
 mod rpc_types;
 mod sdk_wire;
 mod sql_overflow;
+pub mod sql_desugar;
 mod sql_proof;
 mod sql_text;
 pub mod sql_types;
@@ -117,6 +120,7 @@ pub mod plugin_host_capnp {
 #[cfg(test)]
 mod wire_fixtures;
 
+pub use backup_ops::{AdapterBackupOps, SharedAdapterBackupOps};
 #[cfg(feature = "host")]
 pub use db::{connect_params_from_context, database_context_from_params, DbConnectParams};
 pub use db::{
@@ -127,16 +131,16 @@ pub use db::{
 pub use db_execute::lowered_statement_preflight_len_proven;
 pub use db_execute::{
     lowered_statement_preflight_len, lowered_statement_upper_bound_len, sql_payload_bytes,
-    sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn, DbPlanStatementKind,
-    DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest, StatementResult,
-    TypedDbStatement, D1_MAX_BINDS, D1_MAX_FUNCTION_ARGS, D1_MAX_PAYLOAD_BYTES,
-    D1_MAX_SCHEMA_COLUMNS, D1_MAX_SQL_STATEMENT_BYTES, FIRST_PARTY_MAX_RESULT_BYTES,
-    FIRST_PARTY_MAX_RESULT_ROWS, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
-    HOST_MIN_FUNCTION_ARGS, HOST_MIN_PATTERN_BYTES, HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES,
-    HOST_MIN_RESULT_ROWS, HOST_MIN_SCHEMA_COLUMNS, HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS,
-    POSTGRES_MAX_FUNCTION_ARGS, POSTGRES_MAX_SCHEMA_COLUMNS, SQLITE_MAX_BINDS,
-    SQLITE_MAX_FUNCTION_ARGS, SQLITE_MAX_PATTERN_BYTES, SQLITE_MAX_SCHEMA_COLUMNS,
-    SQL_CONTRACT_VERSION,
+    sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn, DbIdentityHighWater,
+    DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest,
+    IsolationReq, StatementResult, TypedDbStatement, D1_MAX_BINDS, D1_MAX_FUNCTION_ARGS,
+    D1_MAX_PAYLOAD_BYTES, D1_MAX_SCHEMA_COLUMNS, D1_MAX_SQL_STATEMENT_BYTES,
+    FIRST_PARTY_MAX_RESULT_BYTES, FIRST_PARTY_MAX_RESULT_ROWS, FIRST_PARTY_MAX_STATEMENTS,
+    HOST_MIN_BINDS, HOST_MIN_CELL_BYTES, HOST_MIN_FUNCTION_ARGS, HOST_MIN_PATTERN_BYTES,
+    HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES, HOST_MIN_RESULT_ROWS, HOST_MIN_SCHEMA_COLUMNS,
+    HOST_MIN_STATEMENTS, POSTGRES_MAX_BINDS, POSTGRES_MAX_FUNCTION_ARGS,
+    POSTGRES_MAX_SCHEMA_COLUMNS, SQLITE_MAX_BINDS, SQLITE_MAX_FUNCTION_ARGS,
+    SQLITE_MAX_PATTERN_BYTES, SQLITE_MAX_SCHEMA_COLUMNS, SQL_CONTRACT_VERSION,
 };
 pub use db_value::{db_type_from_declared, normalize_db_value_for_column, DbType, DbValue};
 pub use error::{PluginError, PluginErrorCode, Result};
@@ -147,7 +151,8 @@ pub use guest_sql::{
     GuestSqlRefs,
 };
 #[cfg(feature = "host")]
-pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
+pub use host_envelope::GuestReceiptPersist;
+pub use host_envelope::{AdapterExecuteRequest, CanonicalExecuteRequest, UnresolvedExecuteRequest};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
 pub use plugin_migration::{
@@ -155,6 +160,7 @@ pub use plugin_migration::{
     require_plugin_migration_registration, PluginMigration, PluginMigrationOp,
     MAX_PLUGIN_MIGRATION_ID_BYTES, PLUGIN_MIGRATIONS_TABLE,
 };
+pub use sql_desugar::{desugar_canonical_sql, desugar_execute_request};
 #[cfg(feature = "host")]
 pub use sql_overflow::{apply_integer_overflow, OverflowDialect};
 #[cfg(feature = "host")]
@@ -179,10 +185,10 @@ pub use sql_types::{
     catalog_page_statement, parse_create_index_sql, parse_create_table_schema,
     parse_drop_index_name, parse_drop_table_name, postgres_identity_function_name,
     postgres_identity_object_digest, postgres_identity_trigger_name, require_sql_v1_helper_arity,
-    reserved_catalog_relation_missing, split_sql_statements, sql_catalog_create_table_sql,
-    sql_catalog_page_rows, sql_ddl_create_table_sql, sql_host_bookkeeping_type_env,
-    sql_type_env_from_canonical_ddl, sql_type_env_from_canonical_statements, sql_v1_helper_arity,
-    sql_v1_helper_arity_ok, sql_v1_ident_in_bounds, statement_sql_hash, typecheck_create_index_sql,
+    reserved_catalog_relation_missing, sql_catalog_create_table_sql, sql_catalog_page_rows,
+    sql_ddl_create_table_sql, sql_host_bookkeeping_type_env, sql_type_env_from_canonical_ddl,
+    sql_type_env_from_canonical_statements, sql_v1_helper_arity, sql_v1_helper_arity_ok,
+    sql_v1_ident_in_bounds, statement_sql_hash, typecheck_create_index_sql,
     typecheck_execute_request, ColumnReference, CreateIndexSchema, CreateTableSchema, SqlType,
     SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS, POSTGRES_IDENT_FN_PREFIX, POSTGRES_IDENT_TRIGGER_PREFIX,
     SQL_CATALOG_TABLE, SQL_DDL_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE, SQL_V1_MAX_IDENT_BYTES,

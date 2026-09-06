@@ -1379,17 +1379,11 @@ pub fn typecheck_execute_request_proofs(
     typecheck_execute_request_resolved(req, env)
 }
 
-/// Splits canonical SQL-v1 text on top-level statement boundaries (`;`).
+/// Reconstructs a type environment from already-separated canonical
+/// `CREATE TABLE` statements.
 ///
-/// Delegates to [`crate::sql_v1_pack_statements`] so schema packs, type-env
-/// reconstruction, and tests share one lexer. Empty input yields an empty list;
-/// pack errors (for example U+0000 TEXT) yield an empty list.
-#[must_use]
-pub fn split_sql_statements(sql: &str) -> Vec<String> {
-    crate::sql_text::sql_v1_pack_statements(sql).unwrap_or_default()
-}
-
-/// Reconstructs a type environment from an ordered list of canonical statements.
+/// Statement boundaries must come from [`crate::sql_v1_pack_statements`] or an
+/// explicit list — this function does not split on `;`.
 #[must_use]
 pub fn sql_type_env_from_canonical_statements<I, S>(statements: I) -> SqlTypeEnv
 where
@@ -1403,13 +1397,12 @@ where
     env
 }
 
-/// Reconstructs a type environment from canonical `CREATE TABLE` SQL.
+/// Reconstructs a type environment from one canonical `CREATE TABLE` statement.
 ///
-/// Multi-statement scripts are packed with the SQL-v1 lexer. Prefer
-/// [`sql_type_env_from_canonical_statements`] when the caller already has a list.
+/// Multi-statement packs must use [`sql_type_env_from_canonical_statements`].
 #[must_use]
 pub fn sql_type_env_from_canonical_ddl(sql: &str) -> SqlTypeEnv {
-    sql_type_env_from_canonical_statements(split_sql_statements(sql))
+    sql_type_env_from_canonical_statements(std::iter::once(sql))
 }
 
 /// Host bookkeeping tables present on every binding/library database.
@@ -1418,16 +1411,16 @@ pub fn sql_type_env_from_canonical_ddl(sql: &str) -> SqlTypeEnv {
 /// merge it when rebuilding proofs after Cap'n drops host-private proofs.
 #[must_use]
 pub fn sql_host_bookkeeping_type_env() -> SqlTypeEnv {
-    sql_type_env_from_canonical_ddl(
+    sql_type_env_from_canonical_statements([
         "CREATE TABLE db_atomic_receipts (\
          operation_id TEXT PRIMARY KEY NOT NULL, operation_kind TEXT NOT NULL, \
          request_hash TEXT NOT NULL, status TEXT NOT NULL, payload TEXT, \
-         created_at TEXT NOT NULL, expires_at TEXT NOT NULL, consume_key TEXT UNIQUE);\
-         CREATE TABLE pragma_user_version (user_version INTEGER NOT NULL);\
-         CREATE TABLE pragma_table_info (\
+         created_at TEXT NOT NULL, expires_at TEXT NOT NULL, consume_key TEXT UNIQUE)",
+        "CREATE TABLE pragma_user_version (user_version INTEGER NOT NULL)",
+        "CREATE TABLE pragma_table_info (\
          cid INTEGER NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, \
          notnull INTEGER NOT NULL, dflt_value TEXT, pk INTEGER NOT NULL)",
-    )
+    ])
 }
 
 /// Proven v1 CAST matrix: same type, INTEGER↔REAL, or NULL to any admitted type.
@@ -3917,40 +3910,12 @@ mod tests {
         assert_eq!(env.column_type("typed", "body"), Some(SqlType::Text));
         let err = typecheck_execute_request(&req("SELECT missing FROM typed"), &env).unwrap_err();
         assert!(err.to_string().contains("unknown column"), "{err}");
-        let from_ddl = sql_type_env_from_canonical_ddl(
-            "CREATE TABLE a (id INTEGER PRIMARY KEY); CREATE TABLE b (body TEXT);",
-        );
+        let from_ddl = sql_type_env_from_canonical_statements([
+            "CREATE TABLE a (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE b (body TEXT)",
+        ]);
         assert_eq!(from_ddl.column_type("a", "id"), Some(SqlType::Integer));
         assert_eq!(from_ddl.column_type("b", "body"), Some(SqlType::Text));
-    }
-
-    #[test]
-    fn split_sql_statements_keeps_semicolon_inside_quoted_literal() {
-        let stmts = split_sql_statements(
-            "CREATE TABLE t (name TEXT NOT NULL DEFAULT 'a;b');\n\
-             CREATE TABLE u (id INTEGER CHECK (id <> ';'));",
-        );
-        assert_eq!(stmts.len(), 2, "{stmts:?}");
-        assert!(
-            stmts[0].contains("DEFAULT 'a;b'"),
-            "literal semicolon must stay in the CREATE: {stmts:?}"
-        );
-        assert!(
-            stmts[1].contains("CHECK (id <> ';')"),
-            "CHECK string semicolon must stay in the CREATE: {stmts:?}"
-        );
-        let escaped = split_sql_statements("CREATE TABLE t (name TEXT DEFAULT 'a;''b;c');");
-        assert_eq!(escaped.len(), 1, "{escaped:?}");
-        assert!(escaped[0].contains("DEFAULT 'a;''b;c'"), "{escaped:?}");
-        let commented = split_sql_statements(
-            "CREATE TABLE t (id INTEGER /* ; */);\n-- not; a statement\nCREATE TABLE u (id INTEGER);",
-        );
-        assert_eq!(commented.len(), 2, "{commented:?}");
-        let env = sql_type_env_from_canonical_ddl(
-            "CREATE TABLE t (name TEXT DEFAULT 'a;b'); CREATE TABLE u (id INTEGER);",
-        );
-        assert_eq!(env.column_type("t", "name"), Some(SqlType::Text));
-        assert_eq!(env.column_type("u", "id"), Some(SqlType::Integer));
     }
 
     #[test]
