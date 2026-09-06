@@ -508,7 +508,6 @@ mod limits_tests {
         ] {
             advertised.max_binds = advertised.max_binds.min(8);
             advertised.max_statements = advertised.max_statements.min(4);
-            advertised.max_payload_bytes = advertised.max_payload_bytes.min(256);
 
             let n_binds = advertised.max_binds as usize;
             let ok_binds = ExecuteRequest {
@@ -544,6 +543,9 @@ mod limits_tests {
             let err = validate_execute_request(&over_stmts, &advertised).unwrap_err();
             assert!(err.to_string().contains("maxStatements"), "{err}");
 
+            // Shrink only for payload N/N+1 so bind/statement N does not trip
+            // maxPayloadBytes (8× Int64 Cap'n cells exceed 256 bytes).
+            advertised.max_payload_bytes = advertised.max_payload_bytes.min(256);
             let ok_pay = ExecuteRequest {
                 operation_id: "op".into(),
                 request_hash: String::new(),
