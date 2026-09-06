@@ -14,6 +14,17 @@ use crate::atomic_ops::{atomic_status, DbAtomicParams};
 /// Injected `maxResultRows` for conn-vector row-cap cases (sqlite / postgres).
 pub const CONTRACT_VECTOR_ROW_CAP: u32 = 5;
 
+/// One ~160 KiB TEXT cell without embedding the payload in statement text.
+///
+/// D1 `maxPayloadBytes` and the 100 KiB physical SQL limit cannot admit a
+/// 150 KiB literal. Doubling CTE: `10 * 2^14 = 163840` bytes. Two such
+/// statements exceed [`bookclerk_plugin_abi::FIRST_PARTY_MAX_RESULT_BYTES`].
+pub(super) const LARGE_RESULT_PAD_SQL: &str = "WITH RECURSIVE t(n, s) AS (\
+ SELECT 1, 'aaaaaaaaaa' \
+ UNION ALL \
+ SELECT n + 1, s || s FROM t WHERE n < 15\
+) SELECT s AS pad FROM t WHERE n = 15";
+
 /// Runs the contract suite on a SeaORM connection (sqlite / postgres).
 ///
 /// # Panics
@@ -548,9 +559,9 @@ where
     F: FnMut(DbAtomicRequest, u32) -> Fut,
     Fut: Future<Output = Result<DbPlanExecResult, String>>,
 {
-    // Canonical large text — works on every adapter after lowering (no dialect branch).
-    // Two ~150 KiB cells exceed FIRST_PARTY_MAX_RESULT_BYTES (256 KiB aggregate).
-    let pad = format!("SELECT '{}' AS pad", "a".repeat(150_000));
+    // Two ~160 KiB cells exceed FIRST_PARTY_MAX_RESULT_BYTES (256 KiB aggregate).
+    // SQL stays small so D1 payload / physical statement caps still admit it.
+    let pad = LARGE_RESULT_PAD_SQL;
     run(
         request(
             "vec-agg-setup",
@@ -569,7 +580,7 @@ where
             "vec-agg",
             DbAtomicPlan {
                 statements: vec![
-                    DbPlanStatement::new(pad.clone(), vec![], DbPlanStatementKind::Select),
+                    DbPlanStatement::new(pad, vec![], DbPlanStatementKind::Select),
                     DbPlanStatement::new(pad, vec![], DbPlanStatementKind::Select),
                 ],
                 outcome_index: 0,

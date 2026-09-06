@@ -610,9 +610,9 @@ where
     F: FnMut(ExecuteRequest, u32) -> Fut,
     Fut: Future<Output = Result<ExecuteReply, String>>,
 {
-    // Canonical large text — works on every adapter after lowering (no dialect branch).
-    // Two ~150 KiB cells exceed FIRST_PARTY_MAX_RESULT_BYTES (256 KiB aggregate).
-    let pad = format!("SELECT '{}' AS pad", "a".repeat(150_000));
+    // Two ~160 KiB cells exceed FIRST_PARTY_MAX_RESULT_BYTES (256 KiB aggregate).
+    // SQL stays small so D1 payload / physical statement caps still admit it.
+    let pad = super::vectors::LARGE_RESULT_PAD_SQL;
     run(
         typed_request(
             "vec-agg-setup",
@@ -631,7 +631,7 @@ where
             "vec-agg",
             DbAtomicPlan {
                 statements: vec![
-                    DbPlanStatement::new(pad.clone(), vec![], DbPlanStatementKind::Select),
+                    DbPlanStatement::new(pad, vec![], DbPlanStatementKind::Select),
                     DbPlanStatement::new(pad, vec![], DbPlanStatementKind::Select),
                 ],
                 outcome_index: 0,
