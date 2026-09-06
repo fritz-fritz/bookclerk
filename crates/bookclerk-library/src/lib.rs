@@ -19,6 +19,7 @@ pub mod email;
 pub mod entities;
 mod error;
 mod host_schema;
+mod host_sql;
 mod in_process_atomic;
 pub mod master_key;
 pub mod migrations;
@@ -32,7 +33,7 @@ mod schema_walk;
 pub mod scope;
 pub mod secrets;
 mod session_client;
-/// Host-owned generic SQL atomic plans for thin database adapters.
+/// Host-owned generic SQL atomic plans for database adapters.
 pub mod sql_plan;
 mod store;
 mod text;
@@ -59,17 +60,18 @@ pub use backup::{
     BACKUP_FORMAT_VERSION, BACKUP_RETENTION, LIBRARY_SKIP_TABLES,
 };
 pub use binding_schema::{apply_binding_bootstrap, binding_bootstrap_plan};
-pub use bookclerk_plugin_abi::GuestSqlPolicy;
+pub use bookclerk_plugin_abi::{AdapterBackupOps, GuestSqlPolicy, SharedAdapterBackupOps};
 pub use db_atomic::{
     db_atomic_operation_id, db_atomic_request_hash, execute_db_atomic, execute_named_atomic,
 };
 pub use email::{gravatar_hash, is_valid_user_email, normalize_user_email};
 pub use error::{LibraryError, Result};
 pub use host_schema::{
-    apply_host_schema, apply_host_schema_with_batch, apply_host_schema_with_batch_opts,
-    apply_host_schema_with_options, current_schema_state, current_schema_state_in,
-    current_schema_version, ensure_restore_target_is_replaceable, migrate_host_schema_to,
-    migrate_host_schema_to_with_batch, HostSchemaKind, SchemaApplyOptions, SchemaBatch,
+    apply_host_schema, apply_host_schema_on, apply_host_schema_with_batch,
+    apply_host_schema_with_batch_opts, apply_host_schema_with_options, current_schema_state,
+    current_schema_state_in, current_schema_version, ensure_restore_target_is_replaceable,
+    migrate_host_schema_to, migrate_host_schema_to_with_batch, HostSchemaKind, SchemaApplyOptions,
+    SchemaBatch,
 };
 pub use in_process_atomic::InProcessSqliteAtomic;
 pub use master_key::{

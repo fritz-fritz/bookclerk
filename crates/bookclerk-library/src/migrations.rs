@@ -538,19 +538,6 @@ pub(crate) fn override_host_migration_plan(
     HostPlanOverrideGuard
 }
 
-/// Final PostgreSQL DDL for a fresh Bookclerk library database.
-///
-/// The canonical baseline lowered mechanically per statement at the adapter
-/// edge — there is no hand-authored parallel Postgres schema.
-#[must_use]
-pub fn latest_schema_postgres() -> String {
-    current_canonical_statements()
-        .iter()
-        .map(|stmt| bookclerk_db_exec::lower_canonical_ddl_to_postgres(stmt))
-        .collect::<Vec<_>>()
-        .join(";\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

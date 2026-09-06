@@ -7,7 +7,7 @@
 use crate::atomic_ops::{atomic_status, DbAtomicParams, DbAtomicResult};
 use crate::sql_plan::CompiledAtomic;
 use chrono::{DateTime, Utc};
-use sea_orm::{DatabaseConnection, DbBackend};
+use sea_orm::DatabaseConnection;
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
@@ -16,6 +16,11 @@ use crate::models::{PortalIdentity, UserRecord};
 use crate::secrets::EncryptedSecretRecord;
 use crate::{bytes_to_b64_string, SessionClientInfo};
 
+/// Timing source label for in-process named atomics (`sqlite_txn` / `postgres_txn`).
+fn atomic_timing_source(engine: bookclerk_db_exec::PhysicalEngine) -> &'static str {
+    engine.timing_source()
+}
+
 /// Runs a compiled named atomic as one native SQL transaction.
 ///
 /// # Errors
@@ -23,14 +28,11 @@ use crate::{bytes_to_b64_string, SessionClientInfo};
 /// Returns [`LibraryError`] for engine failures. Application outcomes
 /// (`lastOwner`, `empty`, …) are returned as [`DbAtomicResult`], not errors.
 pub async fn execute_db_atomic(
+    engine: bookclerk_db_exec::PhysicalEngine,
     db: &DatabaseConnection,
     compiled: CompiledAtomic,
 ) -> Result<DbAtomicResult> {
-    let timing_source = match db.get_database_backend() {
-        DbBackend::Postgres => "postgres_txn",
-        _ => "sqlite_txn",
-    };
-    crate::sql_plan::execute_compiled_on(db, compiled, timing_source).await
+    crate::sql_plan::execute_compiled_on(engine, db, compiled, atomic_timing_source(engine)).await
 }
 
 /// Compiles `params` and runs the plan as one native SQL transaction.
@@ -39,6 +41,7 @@ pub async fn execute_db_atomic(
 ///
 /// Returns [`LibraryError`] for engine failures or invalid named operations.
 pub async fn execute_named_atomic(
+    engine: bookclerk_db_exec::PhysicalEngine,
     db: &DatabaseConnection,
     operation_id: &str,
     params: &DbAtomicParams,
@@ -46,31 +49,41 @@ pub async fn execute_named_atomic(
     let now = Utc::now().to_rfc3339();
     let compiled = crate::sql_plan::compile_named_request(operation_id, params, &now)
         .map_err(LibraryError::Orm)?;
-    execute_db_atomic(db, compiled).await
+    execute_db_atomic(engine, db, compiled).await
 }
 
 /// Compiles a named op with a stable consume-once / library operation id.
-async fn run_named(db: &DatabaseConnection, operation: DbAtomicParams) -> Result<DbAtomicResult> {
+async fn run_named(
+    engine: bookclerk_db_exec::PhysicalEngine,
+    db: &DatabaseConnection,
+    operation: DbAtomicParams,
+) -> Result<DbAtomicResult> {
     let operation_id = db_atomic_operation_id(&operation);
-    execute_named_atomic(db, &operation_id, &operation).await
+    execute_named_atomic(engine, db, &operation_id, &operation).await
 }
 
 /// Deletes a user in one native atomic transaction (fails closed on last owner).
-pub(crate) async fn delete_user(db: &DatabaseConnection, id: i64) -> Result<()> {
+pub(crate) async fn delete_user(
+    engine: bookclerk_db_exec::PhysicalEngine,
+    db: &DatabaseConnection,
+    id: i64,
+) -> Result<()> {
     unit_from_atomic(
-        run_named(db, DbAtomicParams::DeleteUser { user_id: id }).await?,
+        run_named(engine, db, DbAtomicParams::DeleteUser { user_id: id }).await?,
         format!("user {id}"),
     )
 }
 
 /// Sets a user's status (`active`/`disabled`) inside a atomic transaction.
 pub(crate) async fn set_user_status(
+    engine: bookclerk_db_exec::PhysicalEngine,
     db: &DatabaseConnection,
     id: i64,
     status: crate::UserStatus,
 ) -> Result<UserRecord> {
     user_from_atomic(
         run_named(
+            engine,
             db,
             DbAtomicParams::SetUserStatus {
                 user_id: id,
@@ -84,12 +97,14 @@ pub(crate) async fn set_user_status(
 
 /// Replaces or clears a user's Argon2 password hash inside a atomic transaction.
 pub(crate) async fn set_user_password_hash(
+    engine: bookclerk_db_exec::PhysicalEngine,
     db: &DatabaseConnection,
     id: i64,
     password_hash: Option<&str>,
 ) -> Result<UserRecord> {
     user_from_atomic(
         run_named(
+            engine,
             db,
             DbAtomicParams::SetUserPasswordHash {
                 user_id: id,
@@ -103,12 +118,14 @@ pub(crate) async fn set_user_password_hash(
 
 /// Changes a user's portal role inside a atomic transaction (fails closed on last owner).
 pub(crate) async fn set_user_role(
+    engine: bookclerk_db_exec::PhysicalEngine,
     db: &DatabaseConnection,
     id: i64,
     role: crate::UserRole,
 ) -> Result<UserRecord> {
     user_from_atomic(
         run_named(
+            engine,
             db,
             DbAtomicParams::SetUserRole {
                 user_id: id,
@@ -121,7 +138,9 @@ pub(crate) async fn set_user_role(
 }
 
 /// Consumes a claim ticket and mints a portal session in one atomic transaction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn redeem_claim_ticket_to_session(
+    engine: bookclerk_db_exec::PhysicalEngine,
     db: &DatabaseConnection,
     token_hash: &str,
     session_hash: &str,
@@ -132,6 +151,7 @@ pub(crate) async fn redeem_claim_ticket_to_session(
 ) -> Result<PortalIdentity> {
     identity_from_atomic(
         run_named(
+            engine,
             db,
             DbAtomicParams::RedeemClaimTicket {
                 token_hash: token_hash.to_string(),
@@ -150,10 +170,12 @@ pub(crate) async fn redeem_claim_ticket_to_session(
 
 /// Consumes one-time OIDC RP state (PKCE verifier, nonce) keyed by hashed `state`.
 pub(crate) async fn take_oidc_rp_state(
+    engine: bookclerk_db_exec::PhysicalEngine,
     db: &DatabaseConnection,
     state_hash: &str,
 ) -> Result<Option<(String, String, String, String, Option<i64>)>> {
     let result = run_named(
+        engine,
         db,
         DbAtomicParams::TakeOidcRpState {
             state_hash: state_hash.to_string(),
@@ -178,31 +200,38 @@ pub(crate) async fn take_oidc_rp_state(
 
 /// Promotes a sealed TOTP secret to `primary` and sets `totp_enabled` in one atomic transaction.
 pub(crate) async fn confirm_totp_enrollment(
+    engine: bookclerk_db_exec::PhysicalEngine,
     db: &DatabaseConnection,
     user_id: i64,
     record: &EncryptedSecretRecord,
 ) -> Result<()> {
     unit_from_atomic(
-        run_named(db, confirm_totp_params(user_id, record)).await?,
+        run_named(engine, db, confirm_totp_params(user_id, record)).await?,
         "user".into(),
     )
 }
 
 /// Deletes TOTP secrets and clears `totp_enabled` in one atomic transaction.
-pub(crate) async fn disable_user_totp(db: &DatabaseConnection, user_id: i64) -> Result<()> {
+pub(crate) async fn disable_user_totp(
+    engine: bookclerk_db_exec::PhysicalEngine,
+    db: &DatabaseConnection,
+    user_id: i64,
+) -> Result<()> {
     unit_from_atomic(
-        run_named(db, DbAtomicParams::DisableUserTotp { user_id }).await?,
+        run_named(engine, db, DbAtomicParams::DisableUserTotp { user_id }).await?,
         "user".into(),
     )
 }
 
 /// Consumes a one-time WebAuthn challenge row for login or registration.
 pub(crate) async fn take_webauthn_challenge(
+    engine: bookclerk_db_exec::PhysicalEngine,
     db: &DatabaseConnection,
     challenge_id: &str,
     kind: &str,
 ) -> Result<Option<(Option<i64>, String)>> {
     let result = run_named(
+        engine,
         db,
         DbAtomicParams::TakeWebauthnChallenge {
             challenge_id: challenge_id.to_string(),
@@ -402,6 +431,7 @@ mod tests {
             .await
             .unwrap();
         let first = execute_named_atomic(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
             &db,
             "op-take-1",
             &DbAtomicParams::TakeOidcRpState {
@@ -416,6 +446,7 @@ mod tests {
         assert!(store.take_oidc_rp_state("abc").await.unwrap().is_none());
 
         let second = execute_named_atomic(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
             &db,
             "op-take-1",
             &DbAtomicParams::TakeOidcRpState {
@@ -429,6 +460,7 @@ mod tests {
         assert_eq!(second.payload, first.payload);
 
         let conflict = execute_named_atomic(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
             &db,
             "op-take-1",
             &DbAtomicParams::TakeOidcRpState {

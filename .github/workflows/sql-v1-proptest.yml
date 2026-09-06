@@ -1,0 +1,42 @@
+# Longer SQL-v1 property tests. PR CI keeps modest in-crate case counts.
+name: SQL-v1 property tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+# Least privilege: checkout + local cargo test only.
+permissions:
+  contents: read
+
+jobs:
+  proptest:
+    name: proptest (256 cases)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install capnproto
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends capnproto
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          env-vars: RUSTFLAGS
+          cache-on-failure: true
+
+      - name: Parser / TEXT / pack properties
+        env:
+          PROPTEST_CASES: "256"
+        run: cargo test -p bookclerk-plugin-abi --features host --lib sql_text -- --test-threads=1
+
+      - name: Lowering / proof properties
+        env:
+          PROPTEST_CASES: "256"
+        run: cargo test -p bookclerk-db-exec --lib lower::proptests -- --test-threads=1

@@ -7,32 +7,29 @@
 using Plugin = import "plugin.capnp";
 
 struct AdapterTransactionReply {
-  union {
-    ok @0 :AdapterTransaction;
-    err @1 :Plugin.PluginError;
-  }
+    union {
+        ok @0 :AdapterTransaction;
+        err @1 :Plugin.PluginError;
+    }
 }
 
 interface AdapterTransaction {
-  execute @0 (request :Plugin.ExecuteRequest) -> (result :Plugin.ExecuteResultReply);
+  execute @0 (request :Plugin.AdapterExecuteRequest) -> (result :Plugin.ExecuteResultReply);
   commit @1 () -> (result :Plugin.EmptyReply);
   rollback @2 () -> (result :Plugin.EmptyReply);
-  executeEnvelope @3 (envelope :HostExecuteEnvelope) -> (result :Plugin.ExecuteResultReply);
-}
-
-struct HostGuestReceiptPersist {
-  guestLen @0 :UInt32;
-  guestHash @1 :Text;
-}
-
-struct HostExecuteEnvelope {
-  request @0 :Plugin.ExecuteRequest;
-  guestReceipt @1 :HostGuestReceiptPersist;
-  # Host-private JSON of Vec<ResolvedStatement> (not on public ExecuteRequest).
-  proofsJson @2 :Text;
+  # Same payload as `execute` (abiMinor 20). Ordinal kept; do not reuse.
+  executeEnvelope @3 (request :Plugin.AdapterExecuteRequest) -> (result :Plugin.ExecuteResultReply);
+  # abiMinor 21: same primitives as AdapterDatabaseSession, on the open txn.
+  exportIdentity @4 () -> (result :Plugin.IdentityExportReply);
+  importIdentity @5 (rows :List(Plugin.IdentityHighWater)) -> (result :Plugin.EmptyReply);
+  listUserRelations @6 () -> (result :Plugin.UserRelationsReply);
+  prepareUnitRestore @7 () -> (result :Plugin.EmptyReply);
+  dropUserRelations @8 (names :List(Text)) -> (result :Plugin.EmptyReply);
+  assertRestoreConstraints @9 () -> (result :Plugin.EmptyReply);
 }
 
 interface HostAdapterDatabaseSession {
-  begin @0 () -> (result :AdapterTransactionReply);
-  executeEnvelope @1 (envelope :HostExecuteEnvelope) -> (result :Plugin.ExecuteResultReply);
+  # isolation defaults to atomicBatch when omitted (Cap'n zero).
+  begin @0 (isolation :Plugin.IsolationReq) -> (result :AdapterTransactionReply);
+  executeEnvelope @1 (request :Plugin.AdapterExecuteRequest) -> (result :Plugin.ExecuteResultReply);
 }

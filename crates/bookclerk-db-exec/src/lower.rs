@@ -20,8 +20,9 @@ use sea_orm::DatabaseBackend;
 /// Every backend rewrites `INSERT OR IGNORE` to unique/PK `ON CONFLICT DO
 /// NOTHING` (SQLite `OR IGNORE` would otherwise swallow `NOT NULL`). Postgres
 /// adapters then rewrite helpers (`IFNULL`, `json_extract`, 2+-arg `min`/`max`,
-/// `json_valid`, `round`/`sum`/`avg`), `ORDER BY` NULL ordering, and `?`
-/// placeholders. Binding and host **DDL** type/identity rewrites
+/// `json_valid`, `round`/`sum`/`avg`) and `?` placeholders. Default `ORDER BY`
+/// NULLS and `/` `%` by-zero `NULLIF` are host semantic desugars, not adapter
+/// rewrites. Binding and host **DDL** type/identity rewrites
 /// (`AUTOINCREMENT`, `BLOB`, `INTEGER`) stay on the adapter execution edge
 /// ([`crate::schema_sql_for_backend`], [`crate::lower_binding_ddl_execute_request`])
 /// so this function does not classify statements.
@@ -62,8 +63,12 @@ pub fn lower_canonical_sql_typed(
 }
 
 fn lower_mechanical(backend: DatabaseBackend, sql: String) -> String {
-    let sql = rewrite_div_mod_null_on_zero(&sql);
     let sql = rewrite_insert_or_ignore_unique_conflict(&sql);
+    let sql = if backend == DatabaseBackend::Postgres {
+        sql
+    } else {
+        chunk_json_object_calls(&sql, bookclerk_plugin_abi::D1_MAX_FUNCTION_ARGS as usize)
+    };
     if backend != DatabaseBackend::Postgres {
         return rewrite_like_to_glob(&sql);
     }
@@ -73,15 +78,17 @@ fn lower_mechanical(backend: DatabaseBackend, sql: String) -> String {
 /// Lowers canonical SQLite-shaped SQL onto PostgreSQL.
 #[must_use]
 pub fn lower_canonical_to_postgres(sql: &str) -> String {
-    let sql = rewrite_div_mod_null_on_zero(sql);
-    let sql = rewrite_insert_or_ignore_unique_conflict(&sql);
+    let sql = rewrite_insert_or_ignore_unique_conflict(sql);
     lower_canonical_to_postgres_helpers(&sql)
 }
 
-/// Postgres helper / NULLS / placeholder rewrites (after unique-conflict INSERT).
+/// Postgres helper / placeholder rewrites (after unique-conflict INSERT).
+///
+/// Default `ORDER BY` NULLS and `/` `%` by-zero `NULLIF` are host semantic
+/// desugars ([`bookclerk_plugin_abi::desugar_canonical_sql`]), not adapter
+/// dialect generation.
 fn lower_canonical_to_postgres_helpers(sql: &str) -> String {
     let sql = sqlite_fns_to_postgres(sql);
-    let sql = rewrite_order_by_nulls_postgres(&sql);
     rewrite_placeholders_postgres(&sql)
 }
 
@@ -210,6 +217,57 @@ fn rewrite_like_to_glob(sql: &str) -> String {
         i += ch.len_utf8();
     }
     out
+}
+
+/// Nests `json_object` so each physical call has at most `max_args` arguments.
+///
+/// Cloudflare D1 allows 32 function arguments. Portable SQL-v1 admits even
+/// arity 2–64; sqlite-family adapters hide the extra arity with `json_patch`.
+fn chunk_json_object_calls(sql: &str, max_args: usize) -> String {
+    let max_args = max_args.max(2) & !1;
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len());
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        if ident_call_at(sql, i, "json_object") {
+            let name_end = i + "json_object".len();
+            let open = sql[name_end..]
+                .char_indices()
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(off, _)| name_end + off)
+                .unwrap_or(name_end);
+            if let Some((args, rest)) = split_call_args(&sql[open + 1..]) {
+                let rewritten: Vec<String> = args
+                    .iter()
+                    .map(|a| chunk_json_object_calls(a, max_args))
+                    .collect();
+                out.push_str(&json_object_chunked_expr(&rewritten, max_args));
+                i = sql.len() - rest.len();
+                continue;
+            }
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn json_object_chunked_expr(args: &[String], max_args: usize) -> String {
+    if args.len() <= max_args {
+        return format!("json_object({})", args.join(", "));
+    }
+    let head = &args[..max_args];
+    let tail = &args[max_args..];
+    format!(
+        "json_patch({}, {})",
+        json_object_chunked_expr(head, max_args),
+        json_object_chunked_expr(tail, max_args)
+    )
 }
 
 /// Bind-safe GLOB conversion of a SQL v1 `LIKE` pattern expression.
@@ -679,143 +737,6 @@ fn rewrite_sum_or_avg(sql: &str, name: &str, pg_type: &str) -> String {
         i += ch.len_utf8();
     }
     out
-}
-
-/// Appends SQLite-equivalent NULL ordering (`ASC NULLS FIRST`, `DESC NULLS LAST`).
-fn rewrite_order_by_nulls_postgres(sql: &str) -> String {
-    let mut i = 0;
-    let mut out = String::with_capacity(sql.len() + 32);
-    while i < sql.len() {
-        if let Some(len) = literal_or_comment_len(&sql[i..]) {
-            out.push_str(&sql[i..i + len]);
-            i += len;
-            continue;
-        }
-        if ident_eq_ci(sql, i, "ORDER") {
-            let after_order = skip_trivia_idx(sql, i + "ORDER".len());
-            if ident_eq_ci(sql, after_order, "BY") {
-                let by_end = after_order + "BY".len();
-                out.push_str(&sql[i..by_end]);
-                i = rewrite_order_by_items(sql, by_end, &mut out);
-                continue;
-            }
-        }
-        let ch = sql[i..].chars().next().unwrap_or('\0');
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    out
-}
-
-/// Copies one `ORDER BY` item list, inserting NULLS FIRST/LAST when omitted.
-fn rewrite_order_by_items(sql: &str, mut i: usize, out: &mut String) -> usize {
-    loop {
-        let start = i;
-        i = skip_trivia_idx(sql, i);
-        out.push_str(&sql[start..i]);
-        if i >= sql.len() {
-            return i;
-        }
-        let expr_end = skip_order_by_expr(sql, i);
-        out.push_str(&sql[i..expr_end]);
-        i = skip_trivia_idx(sql, expr_end);
-        let mut desc = false;
-        if ident_eq_ci(sql, i, "ASC") {
-            out.push(' ');
-            out.push_str(&sql[i..i + "ASC".len()]);
-            i = skip_trivia_idx(sql, i + "ASC".len());
-        } else if ident_eq_ci(sql, i, "DESC") {
-            out.push(' ');
-            out.push_str(&sql[i..i + "DESC".len()]);
-            i = skip_trivia_idx(sql, i + "DESC".len());
-            desc = true;
-        }
-        if ident_eq_ci(sql, i, "NULLS") {
-            let after_nulls = skip_trivia_idx(sql, i + "NULLS".len());
-            if ident_eq_ci(sql, after_nulls, "FIRST") || ident_eq_ci(sql, after_nulls, "LAST") {
-                let kw_len = if ident_eq_ci(sql, after_nulls, "FIRST") {
-                    "FIRST".len()
-                } else {
-                    "LAST".len()
-                };
-                out.push(' ');
-                out.push_str(&sql[i..after_nulls + kw_len]);
-                i = skip_trivia_idx(sql, after_nulls + kw_len);
-            }
-        } else if desc {
-            out.push_str(" NULLS LAST");
-        } else {
-            out.push_str(" NULLS FIRST");
-        }
-        if let Some(next) = sql[i..].chars().next() {
-            if !next.is_whitespace() && next != ',' && next != ';' && next != ')' {
-                out.push(' ');
-            }
-        }
-        if sql.as_bytes().get(i) == Some(&b',') {
-            out.push(',');
-            i += 1;
-            continue;
-        }
-        return i;
-    }
-}
-
-/// Byte offset after one `ORDER BY` expression (balanced parens, literals skipped).
-fn skip_order_by_expr(sql: &str, mut i: usize) -> usize {
-    let mut depth = 0i32;
-    while i < sql.len() {
-        if let Some(len) = literal_or_comment_len(&sql[i..]) {
-            i += len;
-            continue;
-        }
-        let ch = sql[i..].chars().next().unwrap_or('\0');
-        if ch == '(' {
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if ch == ')' {
-            if depth == 0 {
-                return i;
-            }
-            depth -= 1;
-            i += 1;
-            continue;
-        }
-        if depth == 0 {
-            if ch == ',' || ch == ';' {
-                return i;
-            }
-            if ch.is_whitespace() {
-                let next = skip_trivia_idx(sql, i);
-                if order_by_item_terminator(sql, next) {
-                    return i;
-                }
-            }
-            if order_by_item_terminator(sql, i) {
-                return i;
-            }
-        }
-        i += ch.len_utf8();
-    }
-    i
-}
-
-/// True when `ORDER BY` item parsing should stop (`ASC`/`LIMIT`/…).
-fn order_by_item_terminator(sql: &str, i: usize) -> bool {
-    ident_eq_ci(sql, i, "ASC")
-        || ident_eq_ci(sql, i, "DESC")
-        || ident_eq_ci(sql, i, "NULLS")
-        || ident_eq_ci(sql, i, "LIMIT")
-        || ident_eq_ci(sql, i, "OFFSET")
-        || ident_eq_ci(sql, i, "RETURNING")
-        || ident_eq_ci(sql, i, "UNION")
-        || ident_eq_ci(sql, i, "EXCEPT")
-        || ident_eq_ci(sql, i, "INTERSECT")
-        || ident_eq_ci(sql, i, "FETCH")
-        || ident_eq_ci(sql, i, "FOR")
-        || ident_eq_ci(sql, i, "WINDOW")
 }
 
 /// Rewrites `json_valid(expr) = 0/1` and bare `json_valid(expr)` to `IS [NOT] JSON`.
@@ -1523,8 +1444,9 @@ fn dollar_quote_len(s: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use bookclerk_plugin_abi::{
-        sql_type_env_from_canonical_ddl, typecheck_execute_request_proofs, DbPlanStatementKind,
-        DbResultSelection, DbValue, ExecuteRequest, SqlType, SqlTypeEnv, TypedDbStatement,
+        sql_type_env_from_canonical_ddl, sql_type_env_from_canonical_statements,
+        typecheck_execute_request_proofs, DbPlanStatementKind, DbResultSelection, DbValue,
+        ExecuteRequest, SqlType, SqlTypeEnv, TypedDbStatement,
     };
 
     fn proof_of(sql: &str, env: &SqlTypeEnv) -> ResolvedStatement {
@@ -1587,6 +1509,20 @@ mod tests {
         assert!(sql.contains("$1"), "{sql}");
         assert!(sql.contains("$2"), "{sql}");
         assert!(!sql.contains("$3"), "{sql}");
+    }
+
+    #[test]
+    fn sqlite_family_chunks_json_object_to_d1_function_arg_cap() {
+        let keys: Vec<String> = (0..20).map(|i| format!("'{i}', {i}")).collect();
+        let sql = format!("SELECT json_object({})", keys.join(", "));
+        let out = lower_canonical_sql(DatabaseBackend::Sqlite, &sql);
+        assert!(out.contains("json_patch("), "{out}");
+        assert!(
+            !out.contains("json_object('0', 0, '1', 1, '2', 2, '3', 3, '4', 4, '5', 5, '6', 6, '7', 7, '8', 8, '9', 9, '10', 10, '11', 11, '12', 12, '13', 13, '14', 14, '15', 15, '16', 16"),
+            "physical json_object must not keep 40 args: {out}"
+        );
+        let lit = lower_canonical_sql(DatabaseBackend::Sqlite, "SELECT json_object('k;semi', 'v')");
+        assert!(lit.contains("'k;semi'"), "{lit}");
     }
 
     #[test]
@@ -1789,22 +1725,64 @@ mod tests {
     }
 
     #[test]
-    fn postgres_order_by_appends_sqlite_null_ordering() {
+    fn postgres_order_by_preserves_host_desugared_nulls() {
+        let canonical =
+            bookclerk_plugin_abi::desugar_canonical_sql("SELECT a FROM t ORDER BY a, b DESC");
         assert_eq!(
-            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a"),
-            "SELECT a FROM t ORDER BY a NULLS FIRST"
+            canonical,
+            "SELECT a FROM t ORDER BY a NULLS FIRST, b DESC NULLS LAST"
         );
-        assert_eq!(
-            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a DESC"),
-            "SELECT a FROM t ORDER BY a DESC NULLS LAST"
-        );
+        assert_eq!(lower_canonical_to_postgres(&canonical), canonical);
         assert_eq!(
             lower_canonical_to_postgres("SELECT a FROM t ORDER BY a ASC NULLS LAST"),
             "SELECT a FROM t ORDER BY a ASC NULLS LAST"
         );
+        // Adapter mechanical lowering does not insert unspecified NULLS.
         assert_eq!(
-            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a LIMIT 1"),
-            "SELECT a FROM t ORDER BY a NULLS FIRST LIMIT 1"
+            lower_canonical_to_postgres("SELECT a FROM t ORDER BY a"),
+            "SELECT a FROM t ORDER BY a"
+        );
+    }
+
+    /// Mirrors backup capture_select: host desugar, then proof-directed Postgres lower.
+    fn capture_lower_pg(sql: &str, env: &SqlTypeEnv) -> String {
+        let desugared = bookclerk_plugin_abi::desugar_canonical_sql(sql);
+        let proof = proof_of(&desugared, env);
+        lower_canonical_sql_typed(DatabaseBackend::Postgres, &desugared, Some(&proof))
+            .unwrap_or_else(|err| panic!("{desugared}: {err}"))
+    }
+
+    #[test]
+    fn postgres_backup_catalog_select_collates_text_and_keeps_nulls() {
+        let env = sql_type_env_from_canonical_statements([
+            bookclerk_plugin_abi::sql_ddl_create_table_sql(),
+            bookclerk_plugin_abi::sql_schema_create_table_sql(),
+        ]);
+        let catalog = format!(
+            "SELECT kind, name, table_name, canonical_sql FROM {} \
+             ORDER BY kind, name LIMIT 1000 OFFSET 0",
+            bookclerk_plugin_abi::SQL_DDL_TABLE
+        );
+        let catalog_pg = capture_lower_pg(&catalog, &env);
+        assert!(catalog_pg.contains("(kind COLLATE \"C\")"), "{catalog_pg}");
+        assert!(
+            catalog_pg.contains("ORDER BY kind NULLS FIRST, name NULLS FIRST"),
+            "{catalog_pg}"
+        );
+
+        let mut items = SqlTypeEnv::new();
+        items.insert_table(
+            "items",
+            [("k".into(), SqlType::Text), ("extra".into(), SqlType::Text)],
+        );
+        let items_pg = capture_lower_pg(
+            "SELECT k, extra FROM items ORDER BY k ASC NULLS FIRST, extra ASC NULLS FIRST LIMIT 1000 OFFSET 0",
+            &items,
+        );
+        assert!(items_pg.contains("(k COLLATE \"C\")"), "{items_pg}");
+        assert!(
+            items_pg.contains("ORDER BY k ASC NULLS FIRST, extra ASC NULLS FIRST"),
+            "{items_pg}"
         );
     }
 
@@ -1899,10 +1877,15 @@ mod tests {
     }
 
     #[test]
-    fn div_and_mod_by_zero_lower_to_nullif() {
-        let sql = rewrite_div_mod_null_on_zero("SELECT 1 / 0, 4 % 0, a / b");
+    fn div_and_mod_by_zero_are_host_desugars() {
+        let sql = bookclerk_plugin_abi::desugar_canonical_sql("SELECT 1 / 0, 4 % 0, a / b");
         assert!(sql.contains("NULLIF(0, 0)"), "{sql}");
         assert!(sql.contains("NULLIF(b, 0)"), "{sql}");
+        assert_eq!(
+            lower_canonical_sql(DatabaseBackend::Postgres, &sql),
+            sql,
+            "adapter must not double-wrap NULLIF: {sql}"
+        );
     }
 
     #[test]
@@ -1922,7 +1905,7 @@ mod tests {
 
     #[test]
     fn div_operand_covers_call_qualified_unary_and_cast() {
-        let sql = rewrite_div_mod_null_on_zero(
+        let sql = bookclerk_plugin_abi::desugar_canonical_sql(
             "SELECT 10 / abs(n), 10 / t.n, 10 / -n, 10 / CAST(n AS INTEGER), 10 / (n + 1)",
         );
         assert!(sql.contains("NULLIF(abs(n), 0)"), "{sql}");
@@ -1956,6 +1939,32 @@ mod tests {
         assert!(!sql.to_ascii_lowercase().contains("json_extract("), "{sql}");
         assert!(sql.contains("#>>"), "{sql}");
         assert!(sql.contains("COLLATE \"C\""), "{sql}");
+    }
+
+    #[test]
+    fn postgres_collate_comes_from_text_collate_sites() {
+        let env = sql_type_env_from_canonical_ddl("CREATE TABLE t (name TEXT)");
+        let sql = "SELECT name FROM t WHERE name = 'a'";
+        let proof = proof_of(sql, &env);
+        assert!(
+            !proof.text_collate_sites.is_empty(),
+            "TEXT comparisons must record collate sites"
+        );
+        let lowered = lower_canonical_sql_typed(DatabaseBackend::Postgres, sql, Some(&proof))
+            .expect("postgres collate from sites");
+        assert!(
+            lowered.contains("COLLATE \"C\""),
+            "postgres must wrap TEXT from proof sites: {lowered}"
+        );
+        let mut without_sites = proof.clone();
+        without_sites.text_collate_sites.clear();
+        let no_collate =
+            lower_canonical_sql_typed(DatabaseBackend::Postgres, sql, Some(&without_sites))
+                .expect("empty sites skip collate");
+        assert!(
+            !no_collate.contains("COLLATE"),
+            "clearing text_collate_sites must skip COLLATE: {no_collate}"
+        );
     }
 
     #[test]
@@ -2259,7 +2268,7 @@ mod tests {
     #[test]
     fn d1_accepted_short_likes_fit_physical_statement_limit() {
         use bookclerk_plugin_abi::{
-            lowered_statement_preflight_len, lowered_statement_upper_bound_len, DbValue,
+            d1_physical_sql_preflight_len, d1_physical_sql_upper_bound_len, DbValue,
             D1_MAX_PAYLOAD_BYTES, D1_MAX_SQL_STATEMENT_BYTES,
         };
 
@@ -2270,7 +2279,7 @@ mod tests {
             let sql = dense_like_json_placeholder_sql(n);
             if d1_host_accepts(&sql, &bind) {
                 let physical = d1_physical_after_adapter(&sql);
-                let pre = lowered_statement_preflight_len(&sql, bind.len()).expect("preflight");
+                let pre = d1_physical_sql_preflight_len(&sql, bind.len()).expect("preflight");
                 assert!(
                     physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
                     "n={n} canonical={} physical={physical} cap={D1_MAX_PAYLOAD_BYTES}",
@@ -2278,14 +2287,14 @@ mod tests {
                 );
                 assert!(physical <= pre, "n={n} physical={physical} preflight={pre}");
                 assert!(
-                    pre <= lowered_statement_upper_bound_len(sql.len()),
+                    pre <= d1_physical_sql_upper_bound_len(sql.len()),
                     "n={n} preflight={pre} formula={}",
-                    lowered_statement_upper_bound_len(sql.len())
+                    d1_physical_sql_upper_bound_len(sql.len())
                 );
                 assert!(
-                    physical <= lowered_statement_upper_bound_len(sql.len()),
+                    physical <= d1_physical_sql_upper_bound_len(sql.len()),
                     "n={n} physical={physical} formula={}",
-                    lowered_statement_upper_bound_len(sql.len())
+                    d1_physical_sql_upper_bound_len(sql.len())
                 );
                 n_ok = n;
                 n += 1;
@@ -2307,7 +2316,7 @@ mod tests {
             let params: Vec<DbValue> = (0..n).map(|_| DbValue::Text("[%]_?*".into())).collect();
             if d1_host_accepts(&sql, &params) {
                 let physical = d1_physical_after_adapter(&sql);
-                let pre = lowered_statement_preflight_len(&sql, params.len()).expect("preflight");
+                let pre = d1_physical_sql_preflight_len(&sql, params.len()).expect("preflight");
                 assert!(
                     physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
                     "nested n={n}"
@@ -2338,7 +2347,7 @@ mod tests {
             let sql = insert_or_ignore_like_sql(n);
             if d1_host_accepts(&sql, &[]) {
                 let physical = d1_physical_after_adapter(&sql);
-                let pre = lowered_statement_preflight_len(&sql, 0).expect("preflight");
+                let pre = d1_physical_sql_preflight_len(&sql, 0).expect("preflight");
                 assert!(
                     physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
                     "insert n={n}"
@@ -2396,7 +2405,7 @@ mod tests {
     #[test]
     fn d1_overflow_n_plus_one_is_rejected_before_lowering() {
         use bookclerk_plugin_abi::{
-            lowered_statement_preflight_len, lowered_statement_preflight_len_proven,
+            d1_physical_sql_preflight_len, d1_physical_sql_preflight_len_proven,
             D1_MAX_SQL_STATEMENT_BYTES,
         };
         let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
@@ -2423,7 +2432,7 @@ mod tests {
         assert!(n_ok >= 1, "expected an admitted add chain");
         let sql = dense_add_sql(n_ok);
         let proof = proof_of(&sql, &SqlTypeEnv::new());
-        let pre = lowered_statement_preflight_len_proven(&sql, 0, Some(&proof)).expect("preflight");
+        let pre = d1_physical_sql_preflight_len_proven(&sql, 0, Some(&proof)).expect("preflight");
         let lowered =
             lower_canonical_sql_typed(DatabaseBackend::Sqlite, &sql, Some(&proof)).expect("lower");
         let physical =
@@ -2438,16 +2447,90 @@ mod tests {
             !d1_host_accepts(&over, &[]),
             "N+1 add chain must fail portable admission"
         );
-        let mechanical = lowered_statement_preflight_len(&over, 0).expect("mechanical");
+        let mechanical = d1_physical_sql_preflight_len(&over, 0).expect("mechanical");
         assert!(
             mechanical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
             "N+1 still fits mechanical-only ({mechanical})"
         );
         let proof = proof_of(&over, &SqlTypeEnv::new());
-        let pre = lowered_statement_preflight_len_proven(&over, 0, Some(&proof)).expect("pre N+1");
+        let pre = d1_physical_sql_preflight_len_proven(&over, 0, Some(&proof)).expect("pre N+1");
         assert!(
             pre > D1_MAX_SQL_STATEMENT_BYTES as usize || caps.admit_statement(&over, &[]).is_err(),
             "N+1 proven preflight {pre} must miss the physical ceiling"
         );
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use bookclerk_plugin_abi::SqlTypeEnv;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 64,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn lower_never_panics_on_arbitrary_text(s in r"[\x01-\x7f]{0,180}") {
+            let _ = lower_canonical_sql(DatabaseBackend::Sqlite, &s);
+            let _ = lower_canonical_sql(DatabaseBackend::Postgres, &s);
+        }
+
+        #[test]
+        fn string_and_comment_semicolons_are_copied_verbatim(inner in r"[^\x00'*/\n]{0,24}") {
+            let sql = format!(
+                "SELECT '{inner};lit' AS x, /* {inner};block */ 1 -- {inner};line\nFROM t"
+            );
+            let sqlite = lower_canonical_sql(DatabaseBackend::Sqlite, &sql);
+            let postgres = lower_canonical_sql(DatabaseBackend::Postgres, &sql);
+            prop_assert!(sqlite.contains(&format!("'{inner};lit'")), "{sqlite}");
+            prop_assert!(postgres.contains(&format!("'{inner};lit'")), "{postgres}");
+            prop_assert!(sqlite.contains(&format!("/* {inner};block */")), "{sqlite}");
+            prop_assert!(postgres.contains(&format!("/* {inner};block */")), "{postgres}");
+            prop_assert!(sqlite.contains(&format!("-- {inner};line")), "{sqlite}");
+            prop_assert!(postgres.contains(&format!("-- {inner};line")), "{postgres}");
+        }
+
+        #[test]
+        fn proof_hash_mismatch_fails_closed(extra in r"[a-z]{1,8}") {
+            let sql = "SELECT 'ok'";
+            let proof = {
+                use bookclerk_plugin_abi::{
+                    typecheck_execute_request_proofs, DbPlanStatementKind, DbResultSelection,
+                    ExecuteRequest, TypedDbStatement,
+                };
+                let req = ExecuteRequest {
+                    operation_id: "p".into(),
+                    request_hash: String::new(),
+                    statements: vec![TypedDbStatement {
+                        sql: sql.into(),
+                        parameters: vec![],
+                        kind: DbPlanStatementKind::Select,
+                        max_rows: 0,
+                        result_selection: DbResultSelection::Rows,
+                    }],
+                    deadline_unix_ms: 0,
+                };
+                typecheck_execute_request_proofs(&req, &SqlTypeEnv::new())
+                    .expect("typecheck")
+                    .into_iter()
+                    .next()
+                    .expect("proof")
+            };
+            let mutated = format!("{sql} /* {extra} */");
+            let err = lower_canonical_sql_typed(
+                DatabaseBackend::Sqlite,
+                &mutated,
+                Some(&proof),
+            )
+            .expect_err("hash mismatch");
+            prop_assert!(
+                err.to_string().contains("proof") || err.to_string().contains("bound"),
+                "{err}"
+            );
+        }
     }
 }

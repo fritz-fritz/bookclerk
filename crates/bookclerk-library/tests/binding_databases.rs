@@ -84,6 +84,7 @@ async fn run_binding_owned(
         let deadline =
             (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
         bookclerk_db_exec::execute_typed_envelope(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
             db,
             &envelope,
             "sqlite_txn",
@@ -383,6 +384,7 @@ async fn binding_cancel_before_begin_does_not_commit() {
             let deadline = (envelope.request.deadline_unix_ms > 0)
                 .then_some(envelope.request.deadline_unix_ms);
             bookclerk_db_exec::execute_typed_envelope(
+                    bookclerk_db_exec::PhysicalEngine::sqlite(),
                     &db,
                     &envelope,
                     "sqlite_txn",
@@ -442,6 +444,7 @@ async fn binding_cancel_around_commit_rolls_back() {
             let deadline = (envelope.request.deadline_unix_ms > 0)
                 .then_some(envelope.request.deadline_unix_ms);
             bookclerk_db_exec::execute_typed_envelope(
+                    bookclerk_db_exec::PhysicalEngine::sqlite(),
                     &db,
                     &envelope,
                     "sqlite_txn",
@@ -1527,12 +1530,13 @@ async fn binding_stamped_proofs_survive_catalog_wipe() {
     ))
     .await
     .expect("wipe schema catalog");
-    let envelope = bookclerk_plugin_abi::HostExecuteEnvelope::new(
+    let envelope = bookclerk_plugin_abi::AdapterExecuteRequest::new(
         req,
         bookclerk_plugin_abi::GuestReceiptPersist::default(),
     )
     .with_proofs(proofs);
     let reply = bookclerk_db_exec::execute_typed_envelope(
+        bookclerk_db_exec::PhysicalEngine::sqlite(),
         &db,
         &envelope,
         "sqlite_txn",
