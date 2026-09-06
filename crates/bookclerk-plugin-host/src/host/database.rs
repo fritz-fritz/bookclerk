@@ -758,7 +758,7 @@ fn binding_schema_state_from_reply(reply: &ExecuteReply) -> PluginResult<SchemaS
             Some(DbValue::Text(s)) => s.parse::<i64>().unwrap_or(0),
             _ => {
                 return Err(PluginError::message(
-                    "binding schema_migrations row is missing version".into(),
+                    "binding schema_migrations row is missing version",
                 ));
             }
         };
@@ -774,7 +774,7 @@ fn binding_schema_state_from_reply(reply: &ExecuteReply) -> PluginResult<SchemaS
             "unreleased" => {
                 if unreleased.is_some() {
                     return Err(PluginError::message(
-                        "binding schema_migrations has multiple unreleased rows".into(),
+                        "binding schema_migrations has multiple unreleased rows",
                     ));
                 }
                 unreleased = Some((version, checksum));

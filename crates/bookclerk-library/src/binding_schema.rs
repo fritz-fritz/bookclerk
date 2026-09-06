@@ -21,7 +21,7 @@ use std::time::Duration;
 use bookclerk_plugin_abi::{
     DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection};
+use sea_orm::DatabaseConnection;
 
 use crate::error::{LibraryError, Result};
 use crate::host_schema::{current_schema_state, ensure_schema_migrations, HostSchemaKind};

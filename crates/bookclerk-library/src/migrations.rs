@@ -357,6 +357,7 @@ pub fn require_single_migration_statement(sql: &str) -> Result<String> {
     }
 }
 
+/// Proves one op: single packed statement, Schema/Data kind, SQL-v1 typecheck.
 fn prove_migration_op(index: usize, op: MigrationOp, env: &mut SqlTypeEnv) -> Result<()> {
     let sql = op.sql();
     let packed = require_single_migration_statement(sql)
@@ -401,6 +402,7 @@ fn prove_migration_op(index: usize, op: MigrationOp, env: &mut SqlTypeEnv) -> Re
     Ok(())
 }
 
+/// Copies each op's canonical SQL into an owned statement list.
 fn ops_to_statements(ops: &[MigrationOp]) -> Vec<String> {
     ops.iter().map(|op| op.sql().to_string()).collect()
 }
