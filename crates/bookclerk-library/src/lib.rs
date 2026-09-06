@@ -19,7 +19,6 @@ pub mod email;
 pub mod entities;
 mod error;
 mod host_schema;
-mod host_sql;
 mod in_process_atomic;
 pub mod master_key;
 pub mod migrations;
@@ -67,11 +66,10 @@ pub use db_atomic::{
 pub use email::{gravatar_hash, is_valid_user_email, normalize_user_email};
 pub use error::{LibraryError, Result};
 pub use host_schema::{
-    apply_host_schema, apply_host_schema_on, apply_host_schema_with_batch,
-    apply_host_schema_with_batch_opts, apply_host_schema_with_options, current_schema_state,
-    current_schema_state_in, current_schema_version, ensure_restore_target_is_replaceable,
-    migrate_host_schema_to, migrate_host_schema_to_with_batch, HostSchemaKind, SchemaApplyOptions,
-    SchemaBatch,
+    apply_host_schema, apply_host_schema_with_batch, apply_host_schema_with_batch_opts,
+    apply_host_schema_with_options, current_schema_state, current_schema_state_in,
+    current_schema_version, ensure_restore_target_is_replaceable, migrate_host_schema_to,
+    migrate_host_schema_to_with_batch, HostSchemaKind, SchemaApplyOptions, SchemaBatch,
 };
 pub use in_process_atomic::InProcessSqliteAtomic;
 pub use master_key::{

@@ -18,7 +18,7 @@ use crate::backup::schema::{
 use crate::backup::util::validate_cell;
 use crate::backup::verify::{verify_recovery_point, verify_unit};
 use crate::host_schema::{
-    apply_fresh_schema_sqlite, apply_host_schema, apply_host_schema_on, current_schema_state,
+    apply_fresh_schema_sqlite, apply_host_schema, current_schema_state,
     ensure_restore_target_is_replaceable, HostSchemaKind,
 };
 use crate::migrations::{
@@ -49,7 +49,7 @@ fn backup_req(files: &Path, state: SchemaState, reason: BackupReason) -> BackupR
         max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
         plugin_units: Vec::new(),
         adapter: None,
-        physical_engine: None,
+        in_process: false,
     }
 }
 
@@ -71,27 +71,23 @@ fn restore_without_atomic() -> CanonicalRestoreOpts {
     }
 }
 
-fn postgres_engine() -> bookclerk_db_exec::PhysicalEngine {
-    bookclerk_db_exec::PhysicalEngine::postgres()
-}
-
 fn restore_postgres() -> CanonicalRestoreOpts {
     CanonicalRestoreOpts {
-        physical_engine: Some(postgres_engine()),
+        in_process: true,
         ..restore_for(HostSchemaKind::RowMarker)
     }
 }
 
 fn restore_postgres_plugin() -> CanonicalRestoreOpts {
     CanonicalRestoreOpts {
-        physical_engine: Some(postgres_engine()),
+        in_process: true,
         ..restore_ok()
     }
 }
 
 fn export_postgres() -> CanonicalExportOpts {
     CanonicalExportOpts {
-        physical_engine: Some(postgres_engine()),
+        in_process: true,
         ..CanonicalExportOpts::default()
     }
 }
@@ -675,7 +671,7 @@ async fn uninitialized_skips_even_with_include_plugin_databases() {
             max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             plugin_units: Vec::new(),
             adapter: None,
-            physical_engine: None,
+            in_process: false,
         },
     )
     .await
@@ -2408,7 +2404,7 @@ async fn postgres_library_backup_round_trip() {
     let Some((db, _)) = postgres_throwaway().await else {
         return;
     };
-    apply_host_schema_on(postgres_engine(), &db, HostSchemaKind::RowMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     db.execute_raw(Statement::from_string(
@@ -2424,7 +2420,7 @@ async fn postgres_library_backup_round_trip() {
     let files = tempfile::tempdir().unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
     req.backend_at_capture = "postgres".into();
-    req.physical_engine = Some(postgres_engine());
+    req.in_process = true;
     let outcome = backup_library(&db, &req).await.unwrap().unwrap();
     db.execute_raw(Statement::from_string(
         DbBackend::Postgres,
@@ -2550,13 +2546,9 @@ async fn postgres_library_restores_to_sqlite() {
     let Some((pg, _)) = postgres_throwaway().await else {
         return;
     };
-    apply_host_schema_on(
-        bookclerk_db_exec::PhysicalEngine::postgres(),
-        &pg,
-        HostSchemaKind::RowMarker,
-    )
-    .await
-    .unwrap();
+    apply_host_schema(&pg, HostSchemaKind::RowMarker)
+        .await
+        .unwrap();
     pg.execute_raw(Statement::from_string(
         DbBackend::Postgres,
         "INSERT INTO accounts (account_id, marketplace, source, created_at, updated_at) \
@@ -2570,7 +2562,7 @@ async fn postgres_library_restores_to_sqlite() {
     let files = tempfile::tempdir().unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
     req.backend_at_capture = "postgres".into();
-    req.physical_engine = Some(postgres_engine());
+    req.in_process = true;
     let outcome = backup_library(&pg, &req).await.unwrap().unwrap();
     let sqlite = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
@@ -2622,13 +2614,9 @@ async fn postgres_sqlite_library_restores_to_postgres() {
     .await
     .unwrap()
     .unwrap();
-    apply_host_schema_on(
-        bookclerk_db_exec::PhysicalEngine::postgres(),
-        &pg,
-        HostSchemaKind::RowMarker,
-    )
-    .await
-    .unwrap();
+    apply_host_schema(&pg, HostSchemaKind::RowMarker)
+        .await
+        .unwrap();
     restore_backup(&pg, files.path(), &outcome.manifest.id, &restore_postgres())
         .await
         .unwrap();

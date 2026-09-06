@@ -88,8 +88,7 @@ pub fn binding_bootstrap_plan(state: &SchemaState) -> Result<Option<Vec<String>>
 ///
 /// Returns when schema apply or the binding state machine fails closed.
 pub async fn apply_binding_bootstrap(db: &DatabaseConnection) -> Result<()> {
-    let backend = db.get_database_backend();
-    ensure_schema_migrations(db, backend).await?;
+    ensure_schema_migrations(db).await?;
     let state = current_schema_state(db, HostSchemaKind::RowMarker).await?;
     let Some(stmts) = binding_bootstrap_plan(&state)? else {
         return Ok(());

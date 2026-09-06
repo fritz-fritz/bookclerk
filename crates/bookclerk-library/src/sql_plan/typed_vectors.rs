@@ -72,20 +72,13 @@ pub fn stamp_typed_vector(
 /// # Panics
 ///
 /// Panics when a vector fails.
-pub async fn run_typed_conn_vectors(
-    engine: bookclerk_db_exec::PhysicalEngine,
-    db: &DatabaseConnection,
-    connect: DbCapabilities,
-    timing: &str,
-) {
+pub async fn run_typed_conn_vectors(db: &DatabaseConnection, connect: DbCapabilities) {
     let db = db.clone();
-    let timing = timing.to_string();
     let connect_for_run = connect.clone();
     let mut catalog = crate::migrations::host_sql_type_env();
     run_typed_contract_vectors(connect, CONTRACT_VECTOR_ROW_CAP, move |typed, cap| {
         let stamped = stamp_typed_vector(typed, &mut catalog);
         let db = db.clone();
-        let timing = timing.clone();
         let connect = connect_for_run.clone();
         async move {
             let envelope = stamped?;
@@ -93,11 +86,9 @@ pub async fn run_typed_conn_vectors(
             if cap > 0 {
                 caps.max_result_rows = cap;
             }
-            let reply = bookclerk_db_exec::execute_typed_envelope(
-                engine,
+            let reply = bookclerk_db_exec::execute_typed_envelope_on_connection(
                 &db,
                 &envelope,
-                &timing,
                 caps,
                 bookclerk_db_exec::AtomicSession::from_deadline(None)
                     .with_type_env(crate::migrations::host_sql_type_env()),

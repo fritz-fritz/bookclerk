@@ -10,7 +10,6 @@ use super::{
     compile_named_request, execute_compiled_on, execute_typed_on_session, AtomicSession,
     CONTRACT_VECTOR_ROW_CAP,
 };
-use bookclerk_db_exec::PhysicalEngine;
 use bookclerk_plugin_abi::DbCapabilities;
 use std::path::PathBuf;
 use std::process::Command;
@@ -103,13 +102,7 @@ fn typed_req(
 #[tokio::test]
 async fn typed_shared_vectors_on_sqlite() {
     let db = mem_db().await;
-    super::typed_vectors::run_typed_conn_vectors(
-        PhysicalEngine::sqlite(),
-        &db,
-        DbCapabilities::advertised_sqlite(),
-        "sqlite_txn",
-    )
-    .await;
+    super::typed_vectors::run_typed_conn_vectors(&db, DbCapabilities::advertised_sqlite()).await;
 }
 
 #[tokio::test]
@@ -119,13 +112,7 @@ async fn typed_shared_vectors_on_postgres() {
         return;
     }
     let db = postgres_migrated_db().await;
-    super::typed_vectors::run_typed_conn_vectors(
-        PhysicalEngine::postgres(),
-        &db,
-        DbCapabilities::advertised_postgres(),
-        "postgres_txn",
-    )
-    .await;
+    super::typed_vectors::run_typed_conn_vectors(&db, DbCapabilities::advertised_postgres()).await;
 }
 
 #[tokio::test]
@@ -142,10 +129,8 @@ async fn sqlite_recursive_cte_honors_deadline() {
         s
     }];
     let err = super::execute_typed_on_session(
-        PhysicalEngine::sqlite(),
         &db,
         &typed_req("op-deadline", plan),
-        "sqlite_txn",
         0,
         super::AtomicSession::from_deadline(Some(deadline)),
     )
@@ -170,15 +155,9 @@ async fn sqlite_query_stops_after_cap_plus_one() {
         s.max_rows = 0;
         s
     }];
-    let err = super::execute_typed_on(
-        PhysicalEngine::sqlite(),
-        &db,
-        &typed_req("op-early", plan),
-        "sqlite_txn",
-        5,
-    )
-    .await
-    .unwrap_err();
+    let err = super::execute_typed_on(&db, &typed_req("op-early", plan), 5)
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("maxResultRows"), "{err}");
     let seen = crate::query_rows_seen();
     assert!(
@@ -212,18 +191,14 @@ async fn concurrent_attempts_keep_independent_deadlines_and_caps() {
     let deadline_req = typed_req("op-conc-deadline", cte);
     let cap_req = typed_req("op-conc-cap", select);
     let deadline = execute_typed_on_session(
-        PhysicalEngine::sqlite(),
         &db_deadline,
         &deadline_req,
-        "sqlite_txn",
         0,
         AtomicSession::from_deadline(Some(now.saturating_add(80))),
     );
     let cap = execute_typed_on_session(
-        PhysicalEngine::sqlite(),
         &db_cap,
         &cap_req,
-        "sqlite_txn",
         5,
         AtomicSession::from_deadline(Some(now.saturating_add(60_000))),
     );
@@ -262,24 +237,10 @@ async fn plan_commit_inserts_receipt() {
         },
     );
     let compiled = compile_named_request(req.id, &req.params, now).unwrap();
-    let result = execute_compiled_on(
-        PhysicalEngine::sqlite(),
-        &db,
-        compiled.clone(),
-        "sqlite_txn",
-    )
-    .await
-    .unwrap();
+    let result = execute_compiled_on(&db, compiled.clone()).await.unwrap();
     assert_eq!(result.status, atomic_status::OK);
     assert!(!result.replayed);
-    let replay = execute_compiled_on(
-        PhysicalEngine::sqlite(),
-        &db,
-        compiled.clone(),
-        "sqlite_txn",
-    )
-    .await
-    .unwrap();
+    let replay = execute_compiled_on(&db, compiled.clone()).await.unwrap();
     assert!(replay.replayed, "same operationId must replay the receipt");
     assert_eq!(replay.status, atomic_status::OK);
 }
@@ -300,14 +261,7 @@ async fn plan_hash_conflict_is_idempotency_conflict() {
         },
     );
     let compiled = compile_named_request(first.id, &first.params, now).unwrap();
-    execute_compiled_on(
-        PhysicalEngine::sqlite(),
-        &db,
-        compiled.clone(),
-        "sqlite_txn",
-    )
-    .await
-    .unwrap();
+    execute_compiled_on(&db, compiled.clone()).await.unwrap();
     let second = named(
         "conf-conflict",
         DbAtomicParams::EnqueueJob {
@@ -320,9 +274,7 @@ async fn plan_hash_conflict_is_idempotency_conflict() {
         },
     );
     let other = compile_named_request(second.id, &second.params, now).unwrap();
-    let result = execute_compiled_on(PhysicalEngine::sqlite(), &db, other, "sqlite_txn")
-        .await
-        .unwrap();
+    let result = execute_compiled_on(&db, other).await.unwrap();
     assert_eq!(result.status, atomic_status::IDEMPOTENCY_CONFLICT);
 }
 
@@ -347,15 +299,9 @@ async fn unique_constraint_on_generic_insert_is_engine_error() {
             s
         },
     ];
-    let err = super::execute_typed_on(
-        PhysicalEngine::sqlite(),
-        &db,
-        &typed_req("op-unique", plan.clone()),
-        "sqlite_txn",
-        0,
-    )
-    .await
-    .unwrap_err();
+    let err = super::execute_typed_on(&db, &typed_req("op-unique", plan.clone()), 0)
+        .await
+        .unwrap_err();
     let msg = err.to_string().to_lowercase();
     assert!(
         msg.contains("unique") || msg.contains("constraint"),
@@ -384,15 +330,11 @@ async fn failed_statement_rolls_back_earlier_inserts() {
             s
         },
     ];
-    assert!(super::execute_typed_on(
-        PhysicalEngine::sqlite(),
-        &db,
-        &typed_req("op-rb", plan.clone()),
-        "sqlite_txn",
-        0
-    )
-    .await
-    .is_err());
+    assert!(
+        super::execute_typed_on(&db, &typed_req("op-rb", plan.clone()), 0)
+            .await
+            .is_err()
+    );
     let rows: Vec<sea_orm::QueryResult> = sea_orm::ConnectionTrait::query_all_raw(
         &db,
         sea_orm::Statement::from_string(
@@ -429,15 +371,9 @@ async fn conditional_update_zero_rows_is_ok_execute() {
             s
         },
     ];
-    let reply = super::execute_typed_on(
-        PhysicalEngine::sqlite(),
-        &db,
-        &typed_req("op-cond", plan.clone()),
-        "sqlite_txn",
-        0,
-    )
-    .await
-    .unwrap();
+    let reply = super::execute_typed_on(&db, &typed_req("op-cond", plan.clone()), 0)
+        .await
+        .unwrap();
     let compiled = super::CompiledAtomic {
         request: typed_req("op-cond", plan),
         selection: super::AtomicSelection {
@@ -468,14 +404,7 @@ async fn timing_receipt_shape_is_uniform() {
         },
     );
     let compiled = compile_named_request(req.id, &req.params, now).unwrap();
-    let result = execute_compiled_on(
-        PhysicalEngine::sqlite(),
-        &db,
-        compiled.clone(),
-        "sqlite_txn",
-    )
-    .await
-    .unwrap();
+    let result = execute_compiled_on(&db, compiled.clone()).await.unwrap();
     let timing = result.timing.expect("timing");
     assert!(timing.attempt_elapsed_us > 0);
     assert_eq!(timing.db_timing_source, "sqlite_txn");
@@ -485,7 +414,7 @@ async fn timing_receipt_shape_is_uniform() {
 #[tokio::test]
 async fn leftover_physical_sqlite_glob_lowers_like_case_sensitivity() {
     let db = mem_db().await;
-    crate::host_sql::execute_host_canonical(
+    bookclerk_db_exec::execute_canonical(
         &db,
         "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('ABC', 0)",
         std::iter::empty::<sea_orm::Value>(),
@@ -494,7 +423,7 @@ async fn leftover_physical_sqlite_glob_lowers_like_case_sensitivity() {
     .unwrap();
     let sql = "SELECT slot_key FROM db_serialization_slots WHERE slot_key LIKE 'abc'";
     let canonical =
-        crate::host_sql::query_host_canonical(&db, sql, std::iter::empty::<sea_orm::Value>())
+        bookclerk_db_exec::query_canonical(&db, sql, std::iter::empty::<sea_orm::Value>())
             .await
             .unwrap();
     assert_eq!(
@@ -504,7 +433,7 @@ async fn leftover_physical_sqlite_glob_lowers_like_case_sensitivity() {
     );
 
     let physical = crate::sql_plan::query_sql_on(
-        Some(PhysicalEngine::sqlite()),
+        true,
         &db,
         sql,
         std::iter::empty::<sea_orm::Value>(),
@@ -522,10 +451,10 @@ async fn leftover_physical_sqlite_glob_lowers_like_case_sensitivity() {
 #[tokio::test]
 async fn serialization_slot_bump_is_monotonic() {
     let db = mem_db().await;
-    crate::sql_plan::lock_serialization_slot(&db, Some(PhysicalEngine::sqlite()), "job-queue")
+    crate::sql_plan::lock_serialization_slot(&db, true, "job-queue")
         .await
         .unwrap();
-    crate::sql_plan::lock_serialization_slot(&db, Some(PhysicalEngine::sqlite()), "job-queue")
+    crate::sql_plan::lock_serialization_slot(&db, true, "job-queue")
         .await
         .unwrap();
     let rows = sea_orm::ConnectionTrait::query_all_raw(
@@ -594,23 +523,9 @@ async fn postgres_plan_receipt_replay() {
         },
     );
     let compiled = compile_named_request(req.id, &req.params, now).unwrap();
-    let first = execute_compiled_on(
-        PhysicalEngine::postgres(),
-        &db,
-        compiled.clone(),
-        "postgres_txn",
-    )
-    .await
-    .unwrap();
+    let first = execute_compiled_on(&db, compiled.clone()).await.unwrap();
     assert_eq!(first.status, atomic_status::OK);
-    let replay = execute_compiled_on(
-        PhysicalEngine::postgres(),
-        &db,
-        compiled.clone(),
-        "postgres_txn",
-    )
-    .await
-    .unwrap();
+    let replay = execute_compiled_on(&db, compiled.clone()).await.unwrap();
     assert!(replay.replayed);
 }
 
@@ -643,13 +558,9 @@ async fn postgres_migrated_db() -> sea_orm::DatabaseConnection {
     let db = sea_orm::Database::connect(&db_url)
         .await
         .expect("connect to disposable postgres database");
-    crate::apply_host_schema_on(
-        PhysicalEngine::postgres(),
-        &db,
-        crate::HostSchemaKind::RowMarker,
-    )
-    .await
-    .expect("host-applied postgres schema");
+    crate::apply_host_schema(&db, crate::HostSchemaKind::RowMarker)
+        .await
+        .expect("host-applied postgres schema");
     db
 }
 
@@ -693,14 +604,9 @@ async fn postgres_claim_malformed_json_is_quarantined() {
         },
     );
     let compiled = compile_named_request(req.id, &req.params, now).unwrap();
-    let result = execute_compiled_on(
-        PhysicalEngine::postgres(),
-        &db,
-        compiled.clone(),
-        "postgres_txn",
-    )
-    .await
-    .expect("malformed payload must not abort the claim batch");
+    let result = execute_compiled_on(&db, compiled.clone())
+        .await
+        .expect("malformed payload must not abort the claim batch");
     assert_eq!(result.status, atomic_status::OK);
     let rows = sea_orm::ConnectionTrait::query_all_raw(
         &db,
@@ -761,15 +667,9 @@ async fn plan_cancel_hook_aborts_before_commit() {
         s.max_rows = 0;
         s
     }];
-    let err = super::execute_typed_on(
-        PhysicalEngine::sqlite(),
-        &db,
-        &typed_req("op-cancel", plan.clone()),
-        "sqlite_txn",
-        0,
-    )
-    .await
-    .unwrap_err();
+    let err = super::execute_typed_on(&db, &typed_req("op-cancel", plan.clone()), 0)
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("commit failed"), "{err}");
     let rows: Vec<sea_orm::QueryResult> = sea_orm::ConnectionTrait::query_all_raw(
         &db,
@@ -803,25 +703,13 @@ async fn execute_caps_collected_rows_at_max_result_rows() {
         s.max_rows = 0;
         s
     }];
-    let exec = super::execute_typed_on(
-        PhysicalEngine::sqlite(),
-        &db,
-        &typed_req("op-cap", plan.clone()),
-        "sqlite_txn",
-        5,
-    )
-    .await
-    .unwrap();
+    let exec = super::execute_typed_on(&db, &typed_req("op-cap", plan.clone()), 5)
+        .await
+        .unwrap();
     assert_eq!(exec.statements[0].rows.len(), 5);
-    let err = super::execute_typed_on(
-        PhysicalEngine::sqlite(),
-        &db,
-        &typed_req("op-cap-over", plan),
-        "sqlite_txn",
-        2,
-    )
-    .await
-    .unwrap_err();
+    let err = super::execute_typed_on(&db, &typed_req("op-cap-over", plan), 2)
+        .await
+        .unwrap_err();
     assert!(
         err.to_string().contains("maxResultRows"),
         "row cap must fail closed: {err}"
@@ -838,23 +726,9 @@ async fn postgres_plan_commit_inserts_receipt() {
     let now = "2024-06-01T00:00:00Z";
     let op = enqueue_scan("pg-conf-enq-2", "pg");
     let compiled = compile_named_request(op.id, &op.params, now).unwrap();
-    let first = execute_compiled_on(
-        PhysicalEngine::postgres(),
-        &db,
-        compiled.clone(),
-        "postgres_txn",
-    )
-    .await
-    .unwrap();
+    let first = execute_compiled_on(&db, compiled.clone()).await.unwrap();
     assert_eq!(first.status, atomic_status::OK);
-    let replay = execute_compiled_on(
-        PhysicalEngine::postgres(),
-        &db,
-        compiled.clone(),
-        "postgres_txn",
-    )
-    .await
-    .unwrap();
+    let replay = execute_compiled_on(&db, compiled.clone()).await.unwrap();
     assert!(replay.replayed);
 }
 
@@ -911,25 +785,13 @@ async fn postgres_execute_caps_collected_rows() {
         s.max_rows = 0;
         s
     }];
-    let exec = super::execute_typed_on(
-        PhysicalEngine::postgres(),
-        &db,
-        &typed_req("op-pg-cap", plan.clone()),
-        "postgres_txn",
-        5,
-    )
-    .await
-    .unwrap();
+    let exec = super::execute_typed_on(&db, &typed_req("op-pg-cap", plan.clone()), 5)
+        .await
+        .unwrap();
     assert_eq!(exec.statements[0].rows.len(), 5);
-    let err = super::execute_typed_on(
-        PhysicalEngine::postgres(),
-        &db,
-        &typed_req("op-pg-cap-over", plan),
-        "postgres_txn",
-        2,
-    )
-    .await
-    .unwrap_err();
+    let err = super::execute_typed_on(&db, &typed_req("op-pg-cap-over", plan), 2)
+        .await
+        .unwrap_err();
     assert!(
         err.to_string().contains("maxResultRows"),
         "row cap must fail closed: {err}"
@@ -989,10 +851,8 @@ async fn plan_cancel_before_begin_does_not_commit() {
         crate::AtomicInterruptKind::Cancel,
     );
     let err = super::execute_typed_on(
-        PhysicalEngine::sqlite(),
         &db,
         &typed_req("op-c-before", interrupt_plan("c-before")),
-        "sqlite_txn",
         0,
     )
     .await
@@ -1009,10 +869,8 @@ async fn plan_cancel_during_statements_rolls_back() {
         crate::AtomicInterruptKind::Cancel,
     );
     let err = super::execute_typed_on(
-        PhysicalEngine::sqlite(),
         &db,
         &typed_req("op-c-during", interrupt_plan("c-during")),
-        "sqlite_txn",
         0,
     )
     .await
@@ -1029,10 +887,8 @@ async fn plan_cancel_around_commit_is_unavailable() {
         crate::AtomicInterruptKind::Cancel,
     );
     let err = super::execute_typed_on(
-        PhysicalEngine::sqlite(),
         &db,
         &typed_req("op-c-commit", interrupt_plan("c-commit")),
-        "sqlite_txn",
         0,
     )
     .await
@@ -1049,10 +905,8 @@ async fn plan_deadline_before_begin() {
         crate::AtomicInterruptKind::Deadline,
     );
     let err = super::execute_typed_on(
-        PhysicalEngine::sqlite(),
         &db,
         &typed_req("op-d-before", interrupt_plan("d-before")),
-        "sqlite_txn",
         0,
     )
     .await
@@ -1073,10 +927,8 @@ async fn postgres_plan_cancel_before_begin() {
         crate::AtomicInterruptKind::Cancel,
     );
     let err = super::execute_typed_on(
-        PhysicalEngine::postgres(),
         &db,
         &typed_req("op-pg-c-before", interrupt_plan("pg-c-before")),
-        "postgres_txn",
         0,
     )
     .await
@@ -1096,10 +948,8 @@ async fn postgres_plan_cancel_during_statements() {
         crate::AtomicInterruptKind::Cancel,
     );
     let err = super::execute_typed_on(
-        PhysicalEngine::postgres(),
         &db,
         &typed_req("op-pg-c-during", interrupt_plan("pg-c-during")),
-        "postgres_txn",
         0,
     )
     .await
@@ -1137,10 +987,8 @@ async fn postgres_plan_cancel_around_commit_is_unavailable() {
         crate::AtomicInterruptKind::Cancel,
     );
     let err = super::execute_typed_on(
-        PhysicalEngine::postgres(),
         &db,
         &typed_req("op-pg-c-commit", interrupt_plan("pg-c-commit")),
-        "postgres_txn",
         0,
     )
     .await
@@ -1610,11 +1458,9 @@ async fn run_postgres_binding(
     super::execute_guest_atomic_with(request, &caps, &policy, |envelope| async move {
         let deadline =
             (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
-        bookclerk_db_exec::execute_typed_envelope(
-            bookclerk_db_exec::PhysicalEngine::postgres(),
+        bookclerk_db_exec::execute_typed_envelope_on_connection(
             db,
             &envelope,
-            "postgres_txn",
             bookclerk_db_exec::ExecCaps::from_capabilities(&exec_caps),
             bookclerk_db_exec::AtomicSession::from_deadline(deadline),
         )

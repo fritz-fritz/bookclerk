@@ -149,7 +149,7 @@ where
         if preserve_registry && is_registry_table(&table.parsed.table) {
             continue;
         }
-        apply_canonical_ddl(conn, &table.create_sql, kind, opts.physical_engine).await?;
+        apply_canonical_ddl(conn, &table.create_sql, kind, opts.in_process).await?;
     }
     let ordered = sort_tables_by_foreign_keys(schema.tables.clone())?;
     for table in &ordered {
@@ -162,7 +162,7 @@ where
         if preserve_registry && is_registry_table(&index.table) {
             continue;
         }
-        apply_canonical_ddl(conn, &index.canonical_sql, kind, opts.physical_engine).await?;
+        apply_canonical_ddl(conn, &index.canonical_sql, kind, opts.in_process).await?;
     }
     restore_identity(conn, identity, opts).await?;
     Ok(())
@@ -285,7 +285,7 @@ async fn apply_canonical_ddl<C>(
     conn: &C,
     canonical: &str,
     kind: CanonicalRestoreKind,
-    engine: Option<bookclerk_db_exec::PhysicalEngine>,
+    in_process: bool,
 ) -> Result<()>
 where
     C: ConnectionTrait + StreamTrait,
@@ -296,7 +296,7 @@ where
         )));
     }
     crate::sql_plan::execute_sql_on(
-        engine,
+        in_process,
         conn,
         canonical,
         std::iter::empty::<sea_orm::Value>(),
@@ -308,7 +308,7 @@ where
         // rejects. Host-canonical transport skips typecheck; the CREATE/INDEX
         // itself still lowers through `execute_sql_on` so AUTOINCREMENT works.
         for companion in bookclerk_plugin_abi::catalog_companions(canonical) {
-            crate::host_sql::execute_host_canonical(
+            bookclerk_db_exec::execute_canonical(
                 conn,
                 &companion,
                 std::iter::empty::<sea_orm::Value>(),
@@ -393,7 +393,7 @@ pub async fn apply_admitted_sql(
     kind: CanonicalRestoreKind,
 ) -> Result<()> {
     for sql in statements {
-        apply_canonical_ddl(db, sql, kind, None).await?;
+        apply_canonical_ddl(db, sql, kind, false).await?;
     }
     Ok(())
 }

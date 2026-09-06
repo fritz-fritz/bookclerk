@@ -7,6 +7,8 @@
 
 #[cfg(test)]
 mod conformance;
+#[cfg(test)]
+mod differential;
 mod exec;
 mod guest_receipt;
 pub mod host_ir;

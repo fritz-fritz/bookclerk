@@ -1,6 +1,5 @@
 //! Portable COUNT+mutate serialization via `db_serialization_slots`.
 
-use bookclerk_db_exec::PhysicalEngine;
 use sea_orm::{ConnectionTrait, StreamTrait};
 
 use crate::error::Result;
@@ -23,18 +22,14 @@ pub fn event_inflight_slot(plugin_id: &str, resource_class: &str) -> String {
 ///
 /// Canonical SQL uses `?` placeholders. Host transport never lowers; adapters
 /// realize `INSERT OR IGNORE` at the execute edge. This helper must run on the
-/// caller's transaction, not a nested `BEGIN`. [`None`] is canonical leftover
-/// SQL (production proxy). [`Some`] physically lowers once for that real
-/// in-process engine.
+/// caller's transaction, not a nested `BEGIN`. `in_process` of `false` is
+/// canonical leftover SQL (production proxy). `true` physically lowers once
+/// on the opened adapter connection.
 ///
 /// # Errors
 ///
 /// Returns [`crate::LibraryError::Orm`] when either statement fails.
-pub async fn lock_serialization_slot<C>(
-    db: &C,
-    engine: Option<PhysicalEngine>,
-    slot_key: &str,
-) -> Result<()>
+pub async fn lock_serialization_slot<C>(db: &C, in_process: bool, slot_key: &str) -> Result<()>
 where
     C: ConnectionTrait + StreamTrait,
 {
@@ -45,14 +40,14 @@ where
     const BUMP: &str = "UPDATE db_serialization_slots SET bump = bump + 1 WHERE slot_key = ?";
     let env = crate::migrations::host_sql_type_env();
     crate::sql_plan::execute_sql_on(
-        engine,
+        in_process,
         db,
         INSERT,
         [slot_key.into(), slot_key.into()],
         env.clone(),
     )
     .await?;
-    crate::sql_plan::execute_sql_on(engine, db, BUMP, [slot_key.into()], env).await?;
+    crate::sql_plan::execute_sql_on(in_process, db, BUMP, [slot_key.into()], env).await?;
     Ok(())
 }
 

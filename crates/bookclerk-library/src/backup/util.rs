@@ -35,7 +35,7 @@ where
     if !ident_ok(name) {
         return Ok(false);
     }
-    match crate::host_sql::query_host_canonical(
+    match bookclerk_db_exec::query_canonical(
         conn,
         &format!("SELECT 1 FROM {name} LIMIT 1"),
         std::iter::empty::<sea_orm::Value>(),
@@ -116,11 +116,11 @@ where
             opts.max_request_bytes
         )));
     }
-    if let Some(engine) = opts.physical_engine {
-        crate::sql_plan::execute_typed_on_open(engine, conn, &req, type_env, 0).await?;
+    if opts.in_process {
+        crate::sql_plan::execute_typed_on_open(conn, &req, type_env, 0).await?;
         return Ok(());
     }
-    crate::host_sql::execute_host_canonical(
+    bookclerk_db_exec::execute_canonical(
         conn,
         sql,
         params.iter().map(bookclerk_db_exec::db_value_to_sea),

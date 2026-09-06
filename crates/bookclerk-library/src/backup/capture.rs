@@ -347,7 +347,7 @@ where
             page,
             &columns,
             &types,
-            opts.physical_engine,
+            opts.in_process,
         )
         .await
         {
@@ -593,14 +593,14 @@ async fn capture_table_page<C>(
     page: u32,
     columns: &[String],
     types: &[DbType],
-    engine: Option<bookclerk_db_exec::PhysicalEngine>,
+    in_process: bool,
 ) -> Result<Vec<Vec<DbValue>>>
 where
     C: ConnectionTrait + StreamTrait,
 {
-    if engine.is_some() {
+    if in_process {
         let rows = crate::sql_plan::query_sql_on(
-            engine,
+            true,
             conn,
             sql,
             std::iter::empty::<sea_orm::Value>(),
@@ -650,7 +650,7 @@ where
     typecheck_execute_request_proofs(&canonical.request, env).map_err(|err| {
         LibraryError::Schema(format!("backup SELECT is not admitted SQL v1: {err}"))
     })?;
-    crate::host_sql::query_host_canonical(conn, sql, [])
+    bookclerk_db_exec::query_canonical(conn, sql, [])
         .await
         .map_err(|err| LibraryError::Schema(format!("backup SELECT failed: {err}")))
 }

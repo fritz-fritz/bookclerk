@@ -1385,6 +1385,57 @@ pub async fn execute_typed_envelope(
     .await
 }
 
+/// [`execute_typed_envelope`] selecting the physical engine from `db`.
+///
+/// In-process sqlite/postgres tests call this instead of naming
+/// [`PhysicalEngine`] in host/library code. Production RPC paths send the
+/// envelope to [`crate::`]`AdapterDatabaseSession.execute` and must not call
+/// this on the sqlite-shaped proxy.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when proofs are missing or mismatched, a statement fails,
+/// the encoded reply exceeds `max_atomic_result_bytes`, or the session is
+/// interrupted.
+pub async fn execute_typed_envelope_on_connection(
+    db: &DatabaseConnection,
+    envelope: &AdapterExecuteRequest,
+    caps: impl Into<ExecCaps>,
+    session: AtomicSession,
+) -> Result<ExecuteReply, DbErr> {
+    let engine = PhysicalEngine::from_adapter_backend(db.get_database_backend());
+    execute_typed_envelope(engine, db, envelope, engine.timing_source(), caps, session).await
+}
+
+/// [`execute_typed_on_open_envelope`] selecting the physical engine from `conn`.
+///
+/// # Errors
+///
+/// Returns [`DbErr`] when proofs are missing, a statement fails, or the encoded
+/// reply exceeds `max_atomic_result_bytes`.
+pub async fn execute_typed_on_open_connection<C>(
+    conn: &C,
+    envelope: &AdapterExecuteRequest,
+    caps: impl Into<ExecCaps>,
+    session: AtomicSession,
+    describe: Option<&DatabaseConnection>,
+) -> Result<ExecuteReply, DbErr>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    let engine = PhysicalEngine::from_adapter_backend(ConnectionTrait::get_database_backend(conn));
+    execute_typed_on_open_envelope(
+        engine,
+        conn,
+        envelope,
+        engine.timing_source(),
+        caps,
+        session,
+        describe,
+    )
+    .await
+}
+
 /// # Errors
 ///
 /// Returns [`DbErr`] when a statement fails, encoding fails, or COMMIT fails.

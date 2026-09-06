@@ -163,7 +163,8 @@ fn binding_database_name_ok(name: &str) -> bool {
 /// # Errors
 ///
 /// Returns an error when the name is unsafe, `CREATE DATABASE` fails (the
-/// role needs `CREATEDB`), or the binding connection cannot ping.
+/// role needs `CREATEDB`), the binding connection cannot ping, or the
+/// binding session is older than [`MIN_POSTGRES_MAJOR`] or not UTF8.
 pub async fn open_binding(
     url: &str,
     database: &str,
@@ -196,6 +197,7 @@ pub async fn open_binding(
     drop(admin);
     let db = Database::connect(postgres_url_with_database(url, database)).await?;
     db.ping().await?;
+    require_postgres_readiness(&db).await?;
     tracing::debug!(plugin = "postgres", database, "opened binding database");
     Ok(db)
 }
@@ -204,7 +206,8 @@ pub async fn open_binding(
 ///
 /// # Errors
 ///
-/// Returns when the name is unsafe, the database is missing, or ping fails.
+/// Returns when the name is unsafe, the database is missing, ping fails, or
+/// the binding session is older than [`MIN_POSTGRES_MAJOR`] or not UTF8.
 pub async fn open_binding_existing(
     url: &str,
     database: &str,
@@ -223,6 +226,7 @@ pub async fn open_binding_existing(
     drop(admin);
     let db = Database::connect(postgres_url_with_database(url, database)).await?;
     db.ping().await?;
+    require_postgres_readiness(&db).await?;
     Ok(db)
 }
 
@@ -472,6 +476,69 @@ mod tests {
         assert!(!present, "reopened binding must not keep the dropped table");
         drop(reopened);
         drop_binding(&url, &name).await.expect("cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+    async fn postgres_binding_latin1_encoding_fails_readiness() {
+        let url = postgres_test_url();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let name = format!("pb_latin1_{suffix}");
+        let name = name.chars().take(63).collect::<String>();
+        let admin = Database::connect(url.as_str()).await.expect("admin");
+        let backend = admin.get_database_backend();
+        admin
+            .execute_raw(Statement::from_string(
+                backend,
+                format!(
+                    "CREATE DATABASE {name} ENCODING 'LATIN1' LC_COLLATE 'C' LC_CTYPE 'C' \
+                     TEMPLATE template0"
+                ),
+            ))
+            .await
+            .expect("create latin1 binding database");
+        drop(admin);
+        let existing = open_binding_existing(&url, &name)
+            .await
+            .expect_err("latin1 binding must fail TEXT readiness");
+        assert!(
+            existing.to_string().contains("UTF8") || existing.to_string().contains("encoding"),
+            "open_binding_existing: {existing}"
+        );
+        let created = open_binding(&url, &name)
+            .await
+            .expect_err("existing latin1 binding must fail TEXT readiness");
+        assert!(
+            created.to_string().contains("UTF8") || created.to_string().contains("encoding"),
+            "open_binding: {created}"
+        );
+        drop_binding(&url, &name).await.expect("cleanup latin1");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires BOOKCLERK_TEST_POSTGRES_URL and a disposable Postgres"]
+    async fn postgres_binding_utf8_session_passes_readiness() {
+        let url = postgres_test_url();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let name = format!("pb_utf8_{suffix}");
+        let name = name.chars().take(63).collect::<String>();
+        let db = open_binding(&url, &name).await.expect("utf8 binding");
+        let server = scalar_text(&db, "SHOW server_encoding")
+            .await
+            .expect("server_encoding");
+        let client = scalar_text(&db, "SHOW client_encoding")
+            .await
+            .expect("client_encoding");
+        assert!(is_utf8_encoding(&server), "server_encoding={server}");
+        assert!(is_utf8_encoding(&client), "client_encoding={client}");
+        drop(db);
+        drop_binding(&url, &name).await.expect("cleanup utf8");
     }
 
     #[test]
