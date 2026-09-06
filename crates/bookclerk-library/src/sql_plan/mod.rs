@@ -190,6 +190,8 @@ pub fn validate_execute_request(
                 )));
             }
         }
+        caps.admit_statement(&stmt.sql, &stmt.parameters)
+            .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!("{err}")))?;
     }
     let cap = atomic_request_cap_bytes(caps);
     if cap == 0 {

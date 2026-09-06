@@ -996,115 +996,35 @@ pub fn typecheck_execute_request_proofs(
 
 /// Splits canonical SQL-v1 text on top-level statement boundaries (`;`).
 ///
-/// Semicolons inside string literals (`'a;b'` / `''` escapes), quoted
-/// identifiers, comments, and parentheses are not boundaries. Empty
-/// fragments are dropped. Schema packs and type-env reconstruction must use
-/// this helper rather than `str::split(';')`.
+/// Delegates to [`crate::sql_v1_pack_statements`] so schema packs, type-env
+/// reconstruction, and tests share one lexer. Empty input yields an empty list;
+/// pack errors (for example U+0000 TEXT) yield an empty list.
 #[must_use]
 pub fn split_sql_statements(sql: &str) -> Vec<String> {
-    let bytes = sql.as_bytes();
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let mut i = 0usize;
-    let mut depth = 0usize;
-    let mut in_s = false;
-    let mut in_d = false;
-    let mut in_b = false;
-    let mut in_line = false;
-    let mut in_block = false;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_line {
-            if c == b'\n' {
-                in_line = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_block {
-            if c == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                in_block = false;
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if in_s {
-            if c == b'\'' {
-                if bytes.get(i + 1) == Some(&b'\'') {
-                    i += 2;
-                    continue;
-                }
-                in_s = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_d {
-            if c == b'"' {
-                if bytes.get(i + 1) == Some(&b'"') {
-                    i += 2;
-                    continue;
-                }
-                in_d = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_b {
-            if c == b'`' {
-                if bytes.get(i + 1) == Some(&b'`') {
-                    i += 2;
-                    continue;
-                }
-                in_b = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == b'-' && bytes.get(i + 1) == Some(&b'-') {
-            in_line = true;
-            i += 2;
-            continue;
-        }
-        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            in_block = true;
-            i += 2;
-            continue;
-        }
-        match c {
-            b'\'' => in_s = true,
-            b'"' => in_d = true,
-            b'`' => in_b = true,
-            b'(' => depth += 1,
-            b')' => depth = depth.saturating_sub(1),
-            b';' if depth == 0 => {
-                let stmt = sql[start..i].trim();
-                if !stmt.is_empty() {
-                    out.push(stmt.to_string());
-                }
-                start = i + 1;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    let tail = sql[start..].trim();
-    if !tail.is_empty() {
-        out.push(tail.to_string());
-    }
-    out
+    crate::sql_text::sql_v1_pack_statements(sql).unwrap_or_default()
 }
 
-/// Reconstructs a type environment from canonical `CREATE TABLE` statements.
+/// Reconstructs a type environment from an ordered list of canonical statements.
 #[must_use]
-pub fn sql_type_env_from_canonical_ddl(sql: &str) -> SqlTypeEnv {
+pub fn sql_type_env_from_canonical_statements<I, S>(statements: I) -> SqlTypeEnv
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut env = SqlTypeEnv::new();
-    for stmt in split_sql_statements(sql) {
-        apply_schema_sql_to_env(&mut env, &stmt);
+    for stmt in statements {
+        apply_schema_sql_to_env(&mut env, stmt.as_ref());
     }
     env
+}
+
+/// Reconstructs a type environment from canonical `CREATE TABLE` SQL.
+///
+/// Multi-statement scripts are packed with the SQL-v1 lexer. Prefer
+/// [`sql_type_env_from_canonical_statements`] when the caller already has a list.
+#[must_use]
+pub fn sql_type_env_from_canonical_ddl(sql: &str) -> SqlTypeEnv {
+    sql_type_env_from_canonical_statements(split_sql_statements(sql))
 }
 
 /// Host bookkeeping tables present on every binding/library database.

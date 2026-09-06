@@ -194,6 +194,7 @@ secrecy = { version = "0.10", features = ["serde"] }
 
 # Test doubles
 wiremock = "0.6"
+proptest = "1"
 
 # HTML / media helpers
 scraper = "0.27"

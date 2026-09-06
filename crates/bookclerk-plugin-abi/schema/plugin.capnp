@@ -25,7 +25,7 @@
 
 const apiVersion :UInt32 = 2;
 const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 18;
+const abiMinor :UInt32 = 23;
 const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
@@ -1089,6 +1089,16 @@ struct DbCapabilities {
   # Append-only (abiMinor 18). Adapter can open additional isolated sessions
   # for plugin-owned database bindings (per-binding file / schema / database).
   pluginDatabases @17 :Bool;
+  # Maximum arguments in one physical function call after adapter hiding
+  # (nested json_object / min / max / coalesce). `0` is unspecified.
+  maxFunctionArgs @18 :UInt32;
+  # Maximum columns in one CREATE TABLE / result row. `0` is unspecified.
+  maxSchemaColumns @19 :UInt32;
+  # Maximum UTF-8 bytes of a BookclerkSQL LIKE pattern value (literals and
+  # TEXT binds). Adapters that expand LIKE into GLOB must advertise a
+  # conservative value that still fits the physical pattern cap. `0` is
+  # unspecified.
+  maxPatternBytes @20 :UInt32;
 }
 
 struct DbBootstrapReply {

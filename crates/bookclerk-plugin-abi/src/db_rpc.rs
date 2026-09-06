@@ -79,7 +79,11 @@ pub(super) fn read_db_value(r: db_value_capnp::Reader<'_>) -> Result<DbValue> {
             }
             Ok(DbValue::Float64(x))
         }
-        Ok(db_value_capnp::Text(t)) => Ok(DbValue::Text(text_of(t.map_err(from_capnp)?))),
+        Ok(db_value_capnp::Text(t)) => {
+            let text = text_of(t.map_err(from_capnp)?);
+            crate::sql_text::require_portable_text(&text)?;
+            Ok(DbValue::Text(text))
+        }
         Ok(db_value_capnp::Bytes(d)) => Ok(DbValue::Bytes(d.map_err(from_capnp)?.to_vec())),
         Err(_) => Err(PluginError::unsupported("unknown DbValue union member")),
     }
@@ -363,6 +367,9 @@ pub(super) fn write_db_capabilities(mut b: db_caps_capnp::Builder<'_>, caps: &Db
     b.set_max_request_bytes(caps.max_request_bytes);
     b.set_max_atomic_result_bytes(caps.max_atomic_result_bytes);
     b.set_plugin_databases(caps.plugin_databases);
+    b.set_max_function_args(caps.max_function_args);
+    b.set_max_schema_columns(caps.max_schema_columns);
+    b.set_max_pattern_bytes(caps.max_pattern_bytes);
 }
 
 /// Decodes negotiated database capabilities from a Cap'n Proto reader.
@@ -390,6 +397,9 @@ pub(super) fn read_db_capabilities(r: db_caps_capnp::Reader<'_>) -> Result<DbCap
         max_request_bytes: r.get_max_request_bytes(),
         max_atomic_result_bytes: r.get_max_atomic_result_bytes(),
         plugin_databases: r.get_plugin_databases(),
+        max_function_args: r.get_max_function_args(),
+        max_schema_columns: r.get_max_schema_columns(),
+        max_pattern_bytes: r.get_max_pattern_bytes(),
     })
 }
 

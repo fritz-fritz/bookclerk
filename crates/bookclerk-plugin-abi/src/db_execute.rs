@@ -10,6 +10,10 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::db_value::{DbType, DbValue};
+use crate::sql_text::{
+    require_function_args_within, require_like_patterns_within, require_portable_text,
+    require_portable_text_binds, D1_PORTABLE_LIKE_PATTERN_BYTES,
+};
 use crate::MAX_SCALAR_BYTES;
 
 /// SQLite family bind cap advertised by the platform sqlite guest.
@@ -22,6 +26,47 @@ pub const POSTGRES_MAX_BINDS: u32 = 65_535;
 ///
 /// <https://developers.cloudflare.com/d1/platform/limits/>
 pub const D1_MAX_BINDS: u32 = 100;
+
+/// Cloudflare D1 SQL statement length (bytes) before adapter lowering.
+pub const D1_MAX_SQL_STATEMENT_BYTES: u32 = 100_000;
+
+/// Conservative canonical SQL+binds cap advertised for D1.
+///
+/// Physical SQL after LIKE/overflow/JSON lowering must stay at or below
+/// [`D1_MAX_SQL_STATEMENT_BYTES`]. A 4× expansion budget is applied here.
+pub const D1_MAX_PAYLOAD_BYTES: u32 = 25_000;
+
+/// Cloudflare D1 maximum arguments to one physical SQL function.
+pub const D1_MAX_FUNCTION_ARGS: u32 = 32;
+
+/// SQLite default `SQLITE_MAX_FUNCTION_ARG`.
+pub const SQLITE_MAX_FUNCTION_ARGS: u32 = 127;
+
+/// PostgreSQL maximum function arguments.
+pub const POSTGRES_MAX_FUNCTION_ARGS: u32 = 100;
+
+/// Cloudflare D1 maximum columns per table.
+pub const D1_MAX_SCHEMA_COLUMNS: u32 = 100;
+
+/// SQLite default `SQLITE_MAX_COLUMN`.
+pub const SQLITE_MAX_SCHEMA_COLUMNS: u32 = 2_000;
+
+/// PostgreSQL maximum columns per table.
+pub const POSTGRES_MAX_SCHEMA_COLUMNS: u32 = 1_600;
+
+/// SQLite default `SQLITE_MAX_LIKE_PATTERN_LENGTH`.
+pub const SQLITE_MAX_PATTERN_BYTES: u32 = 50_000;
+
+/// Host refuses guests that cannot accept at least this many function args.
+pub const HOST_MIN_FUNCTION_ARGS: u32 = 8;
+
+/// Host refuses guests whose schema-column cap is below the library schema.
+///
+/// The widest host table (`books`) currently has 41 columns.
+pub const HOST_MIN_SCHEMA_COLUMNS: u32 = 64;
+
+/// Host refuses guests that cannot prove a LIKE pattern of this many bytes.
+pub const HOST_MIN_PATTERN_BYTES: u32 = 8;
 
 /// D1 / first-party batch statement cap (D1 HTTP batch is 100 queries).
 pub const FIRST_PARTY_MAX_STATEMENTS: u32 = 100;
@@ -382,6 +427,17 @@ pub struct DbCapabilities {
     /// database bindings (per-binding file / schema / database).
     #[serde(default)]
     pub plugin_databases: bool,
+    /// Maximum arguments in one physical function call after adapter hiding
+    /// (abiMinor 23). `0` is unspecified.
+    #[serde(default)]
+    pub max_function_args: u32,
+    /// Maximum columns in one `CREATE TABLE` (abiMinor 23). `0` is unspecified.
+    #[serde(default)]
+    pub max_schema_columns: u32,
+    /// Maximum UTF-8 bytes of a BookclerkSQL `LIKE` pattern value (abiMinor 23).
+    /// `0` is unspecified.
+    #[serde(default)]
+    pub max_pattern_bytes: u32,
 }
 
 impl DbCapabilities {
@@ -480,6 +536,24 @@ impl DbCapabilities {
                 self.sql_contract_version
             ));
         }
+        if self.max_function_args < HOST_MIN_FUNCTION_ARGS {
+            return Some(format!(
+                "database guest maxFunctionArgs {} is below host minimum {HOST_MIN_FUNCTION_ARGS}",
+                self.max_function_args
+            ));
+        }
+        if self.max_schema_columns < HOST_MIN_SCHEMA_COLUMNS {
+            return Some(format!(
+                "database guest maxSchemaColumns {} is below host minimum {HOST_MIN_SCHEMA_COLUMNS}",
+                self.max_schema_columns
+            ));
+        }
+        if self.max_pattern_bytes < HOST_MIN_PATTERN_BYTES {
+            return Some(format!(
+                "database guest maxPatternBytes {} is below host minimum {HOST_MIN_PATTERN_BYTES}",
+                self.max_pattern_bytes
+            ));
+        }
         None
     }
 
@@ -505,6 +579,9 @@ impl DbCapabilities {
             max_request_bytes: MAX_SCALAR_BYTES,
             max_atomic_result_bytes: FIRST_PARTY_MAX_RESULT_BYTES,
             plugin_databases: true,
+            max_function_args: SQLITE_MAX_FUNCTION_ARGS,
+            max_schema_columns: SQLITE_MAX_SCHEMA_COLUMNS,
+            max_pattern_bytes: SQLITE_MAX_PATTERN_BYTES,
         }
     }
 
@@ -517,6 +594,10 @@ impl DbCapabilities {
             pragma_user_version: false,
             atomic_schema_batch: true,
             max_binds: D1_MAX_BINDS,
+            max_payload_bytes: D1_MAX_PAYLOAD_BYTES,
+            max_function_args: D1_MAX_FUNCTION_ARGS,
+            max_schema_columns: D1_MAX_SCHEMA_COLUMNS,
+            max_pattern_bytes: D1_PORTABLE_LIKE_PATTERN_BYTES,
             ..Self::advertised_sqlite()
         }
     }
@@ -529,8 +610,33 @@ impl DbCapabilities {
             pragma_user_version: false,
             atomic_schema_batch: false,
             max_binds: POSTGRES_MAX_BINDS,
+            max_function_args: POSTGRES_MAX_FUNCTION_ARGS,
+            max_schema_columns: POSTGRES_MAX_SCHEMA_COLUMNS,
             ..Self::advertised_sqlite()
         }
+    }
+
+    /// Rejects BookclerkSQL that exceeds this advertisement before dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::PluginError::invalid_params`] when a statement exceeds
+    /// schema-column, LIKE-pattern, or TEXT-domain limits.
+    pub fn admit_statement(&self, sql: &str, parameters: &[crate::DbValue]) -> crate::Result<()> {
+        require_portable_text(sql)?;
+        require_portable_text_binds(parameters)?;
+        require_like_patterns_within(sql, parameters, self.max_pattern_bytes)?;
+        require_function_args_within(sql, self.max_function_args)?;
+        if let Some(schema) = crate::sql_types::parse_create_table_schema(sql) {
+            let n = u32::try_from(schema.columns.len()).unwrap_or(u32::MAX);
+            if self.max_schema_columns > 0 && n > self.max_schema_columns {
+                return Err(crate::PluginError::invalid_params(format!(
+                    "CREATE TABLE has {n} columns; guest maxSchemaColumns is {}",
+                    self.max_schema_columns
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -604,6 +710,22 @@ mod tests {
             POSTGRES_MAX_BINDS
         );
         assert_eq!(DbCapabilities::advertised_d1().max_binds, D1_MAX_BINDS);
+        assert_eq!(
+            DbCapabilities::advertised_d1().max_payload_bytes,
+            D1_MAX_PAYLOAD_BYTES
+        );
+        assert_eq!(
+            DbCapabilities::advertised_d1().max_function_args,
+            D1_MAX_FUNCTION_ARGS
+        );
+        assert_eq!(
+            DbCapabilities::advertised_d1().max_schema_columns,
+            D1_MAX_SCHEMA_COLUMNS
+        );
+        assert_eq!(
+            DbCapabilities::advertised_d1().max_pattern_bytes,
+            D1_PORTABLE_LIKE_PATTERN_BYTES
+        );
         assert!(DbCapabilities::advertised_d1().atomic_schema_batch);
         assert!(!DbCapabilities::advertised_postgres().atomic_schema_batch);
     }
@@ -658,6 +780,62 @@ mod tests {
         assert!(over_scalar
             .capability_failure_reason()
             .contains("maxAtomicResultBytes"));
+
+        let mut zero_fn = DbCapabilities::advertised_sqlite();
+        zero_fn.max_function_args = 0;
+        assert!(!zero_fn.meets_host_minimums());
+        assert!(zero_fn
+            .capability_failure_reason()
+            .contains("maxFunctionArgs"));
+
+        let mut zero_cols = DbCapabilities::advertised_sqlite();
+        zero_cols.max_schema_columns = 0;
+        assert!(!zero_cols.meets_host_minimums());
+        assert!(zero_cols
+            .capability_failure_reason()
+            .contains("maxSchemaColumns"));
+
+        let mut zero_pat = DbCapabilities::advertised_sqlite();
+        zero_pat.max_pattern_bytes = 0;
+        assert!(!zero_pat.meets_host_minimums());
+        assert!(zero_pat
+            .capability_failure_reason()
+            .contains("maxPatternBytes"));
+    }
+
+    #[test]
+    fn admit_statement_enforces_pattern_and_column_n_plus_one() {
+        let mut caps = DbCapabilities::advertised_d1();
+        let n = caps.max_pattern_bytes as usize;
+        let ok_pat = "a".repeat(n);
+        let sql_ok = format!("SELECT * FROM t WHERE x LIKE '{ok_pat}'");
+        caps.admit_statement(&sql_ok, &[]).expect("N pattern");
+        let sql_over = format!("SELECT * FROM t WHERE x LIKE '{}'", "a".repeat(n + 1));
+        let err = caps.admit_statement(&sql_over, &[]).unwrap_err();
+        assert!(err.to_string().contains("maxPatternBytes"), "{err}");
+
+        caps.max_schema_columns = 2;
+        caps.admit_statement("CREATE TABLE t (a INTEGER, b TEXT)", &[])
+            .expect("N columns");
+        let err = caps
+            .admit_statement("CREATE TABLE t (a INTEGER, b TEXT, c REAL)", &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("maxSchemaColumns"), "{err}");
+
+        let err = caps.admit_statement("SELECT '\0'", &[]).unwrap_err();
+        assert!(err.to_string().contains("U+0000"), "{err}");
+        caps.admit_statement("SELECT ?", &[DbValue::Bytes(vec![0])])
+            .expect("BLOB NUL");
+        let err = caps
+            .admit_statement("SELECT ?", &[DbValue::Text("a\0b".into())])
+            .unwrap_err();
+        assert!(err.to_string().contains("U+0000"), "{err}");
+    }
+
+    #[test]
+    fn advertised_d1_payload_is_below_physical_statement_cap() {
+        const { assert!(D1_MAX_PAYLOAD_BYTES < D1_MAX_SQL_STATEMENT_BYTES) };
+        const { assert!((D1_MAX_PAYLOAD_BYTES as u64) * 4 <= D1_MAX_SQL_STATEMENT_BYTES as u64) };
     }
 
     #[test]

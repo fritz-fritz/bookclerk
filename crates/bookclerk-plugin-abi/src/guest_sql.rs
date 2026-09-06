@@ -2624,6 +2624,10 @@ fn validate_guest_statement_for(
         )));
     };
     validate_sql_v1_grammar_at(index, &stmt.sql, policy.is_binding_owned())?;
+    crate::sql_text::require_portable_text(&stmt.sql)
+        .map_err(|err| PluginError::invalid_params(format!("statement {index}: {err}")))?;
+    crate::sql_text::require_portable_text_binds(&stmt.parameters)
+        .map_err(|err| PluginError::invalid_params(format!("statement {index}: {err}")))?;
     let binding_ddl = policy.is_binding_owned()
         && ["CREATE", "ALTER", "DROP"].contains(&verb.to_ascii_uppercase().as_str());
     if !binding_ddl && DENIED_VERBS.iter().any(|v| verb.eq_ignore_ascii_case(v)) {
