@@ -1170,10 +1170,13 @@ impl ExternalDatabase {
         self.session
             .db_execute_binding_request(
                 key,
-                binding_sql_request(
-                    format!("binding-schema-migrations-{owner}-{binding}"),
-                    vec![SCHEMA_MIGRATIONS_DDL.to_string()],
-                ),
+                stamp_library_adapter_request(
+                    binding_sql_request(
+                        format!("binding-schema-migrations-{owner}-{binding}"),
+                        vec![SCHEMA_MIGRATIONS_DDL.to_string()],
+                    ),
+                    IsolationReq::AtomicBatch,
+                )?,
                 Arc::clone(&cancel),
             )
             .await?;
@@ -1195,7 +1198,11 @@ impl ExternalDatabase {
         };
         let reply = self
             .session
-            .db_execute_binding_request(key, select, Arc::clone(&cancel))
+            .db_execute_binding_request(
+                key,
+                stamp_library_adapter_request(select, IsolationReq::AtomicBatch)?,
+                Arc::clone(&cancel),
+            )
             .await?;
         let state = binding_schema_state_from_reply(&reply)?;
         let Some(stmts) =
@@ -1206,7 +1213,10 @@ impl ExternalDatabase {
         self.session
             .db_execute_binding_request(
                 key,
-                binding_sql_request(format!("binding-bootstrap-{owner}-{binding}"), stmts),
+                stamp_library_adapter_request(
+                    binding_sql_request(format!("binding-bootstrap-{owner}-{binding}"), stmts),
+                    IsolationReq::AtomicBatch,
+                )?,
                 cancel,
             )
             .await?;

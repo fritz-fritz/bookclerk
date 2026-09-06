@@ -96,7 +96,7 @@ pub use schema_postgres::{
     expand_binding_execute_request, expand_host_schema_batch, expand_host_schema_execute_request,
     expand_host_schema_execute_request_grouped, is_host_schema_version_marker,
     lower_binding_ddl_execute_request, lower_binding_sql_for_backend, postgres_identity_companions,
-    realize_binding_ddl, realize_host_ddl, schema_sql_for_backend, split_schema_statements,
+    realize_binding_ddl, realize_host_ddl, schema_sql_for_backend,
 };
 pub use typed::{
     db_value_from_sea, db_value_to_sea, execute_typed_envelope,
