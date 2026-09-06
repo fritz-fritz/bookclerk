@@ -61,10 +61,12 @@ only.
 
 [`host_migration_plan()`](../../crates/bookclerk-library/src/migrations.rs)
 is **empty**. Live schema lives in `unreleased_ops` (already-separated
-`MigrationOp`s). Fresh databases apply
-[`current_canonical_schema()`](../../crates/bookclerk-library/src/migrations.rs)
-(derived diagnostic SQL: frozen ups + current unreleased) and persist
-`Unreleased { base_version: SCHEMA_VERSION, checksum }`.
+`MigrationOp`s). Fresh databases apply those ops (frozen ups, then the
+current unreleased list) and persist
+`Unreleased { base_version: SCHEMA_VERSION, checksum }`. Joined scripts
+(`current_canonical_schema()`, `unreleased_sql()`) are derived for
+diagnostics, export, and `execute_batch` fixtures; they are not re-parsed
+to recover statement boundaries.
 
 `current_canonical_schema()` is **not** permanently equal to
 `unreleased_sql()`. Today the frozen plan is empty, so they coincide. After a
@@ -248,6 +250,32 @@ With an empty frozen plan, schema-version downgrade is a no-op. Time-based
 - D1 Time Travel / portable PITR / canonical change journaling
 - Transactional atomicity across library DB + independent plugin DBs
 - Using semver as `schema_migrations.version`
+
+### Deferred: plugin-owned schema migration framework
+
+Host-owned **binding bootstrap** (`binding_bootstrap_ops`,
+`BINDING_SCHEMA_VERSION = 0`, binding `SchemaState`) is implemented.
+Plugin-owned schema evolution **beyond** that bootstrap is **not** a
+shipping framework yet. Plugins still speak only BookclerkSQL; there is
+no backend-native migration escape hatch.
+
+Until a dedicated plugin migration ABI exists, these invariants stay
+explicit rather than implied:
+
+| Concern | Status |
+| --- | --- |
+| Per-plugin / per-binding schema version | Host bootstrap only (`SchemaState` in the binding’s `schema_migrations`). Plugin-owned revision numbers are **not** a host API. |
+| Ordered progression | Host bootstrap is one atomic apply unit. Plugin-owned ordered steps are **deferred**. |
+| Multi-node concurrency | Host uses portable `db_serialization_slots`. Plugin-owned migrators must not invent engine advisory locks. |
+| Retries / interrupted recovery | Host: uniqueness / unavailable after re-read; marker not visible ⇒ retry the same unit. Plugin-owned: **deferred** (must follow the same fail-closed marker rule). |
+| Idempotence | Host bootstrap uses `IF NOT EXISTS` / `INSERT OR IGNORE`. Plugin-owned steps must be idempotent the same way when the framework lands. |
+| Upgrade | Mismatched unreleased checksum or unexpected frozen binding ⇒ **fail closed**. |
+| Downgrade / unsupported old plugin | **Fail closed**; restore a recovery point. No automatic down-migration of plugin-owned schema. |
+| Restore | Restore captured logical rows (including binding `schema_migrations`). **Do not** run plugin migrations or re-apply bootstrap when the restored marker matches. |
+
+Do not treat guest `CREATE TABLE` inside a binding as an implicit host
+schema version bump. That remains `GuestSqlPolicy::binding_owned` SQL,
+not a migration plan.
 
 ## Consequences
 

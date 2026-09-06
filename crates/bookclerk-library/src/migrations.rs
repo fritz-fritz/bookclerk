@@ -757,6 +757,19 @@ mod tests {
                 .contains("not a BookclerkSQL statement list"),
             "{err}"
         );
+        let err = migration_sql_checksum("CREATE TABLE t (id INTEGER PRIMARY KEY) /* ", None)
+            .expect_err("unterminated comment");
+        assert!(
+            err.to_string()
+                .contains("not a BookclerkSQL statement list"),
+            "{err}"
+        );
+        let err = prove_migration_ops(&[MigrationOp::Schema("CREATE TABLE t (id INTEGER /* ")])
+            .expect_err("static Schema must not pack_or_single");
+        assert!(
+            err.to_string().contains("migration op") || err.to_string().contains("BookclerkSQL"),
+            "{err}"
+        );
         let ok = migration_sql_checksum("CREATE TABLE t (id INTEGER PRIMARY KEY)", None)
             .expect("one statement");
         assert_eq!(ok.len(), 64);
