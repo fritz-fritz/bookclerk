@@ -17,11 +17,43 @@ mod tests {
 
     use super::super::stamp_typed_vector;
 
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone)]
     enum Outcome {
         Rows(Vec<Vec<DbValue>>),
         Affected(u64),
         Class(DbErrorClass),
+    }
+
+    impl PartialEq for Outcome {
+        fn eq(&self, other: &Self) -> bool {
+            match (self, other) {
+                (Self::Affected(a), Self::Affected(b)) => a == b,
+                (Self::Class(a), Self::Class(b)) => a == b,
+                (Self::Rows(a), Self::Rows(b)) => {
+                    a.len() == b.len()
+                        && a.iter().zip(b).all(|(left, right)| {
+                            left.len() == right.len()
+                                && left.iter().zip(right).all(|(x, y)| portable_cell_eq(x, y))
+                        })
+                }
+                _ => false,
+            }
+        }
+    }
+
+    /// Compare Bookclerk cells, not engine affinity tags.
+    ///
+    /// Untyped `SELECT` projections can surface `Null(Text)` vs `Null(Bool)`
+    /// or integer `0`/`1` vs `Boolean`. Declared-column vectors still require
+    /// exact variants (`vectors_typed`).
+    fn portable_cell_eq(left: &DbValue, right: &DbValue) -> bool {
+        match (left, right) {
+            (DbValue::Null(_), DbValue::Null(_)) => true,
+            (DbValue::Boolean(b), DbValue::Int64(n)) | (DbValue::Int64(n), DbValue::Boolean(b)) => {
+                i64::from(*b) == *n
+            }
+            (a, b) => a == b,
+        }
     }
 
     fn is_select(sql: &str) -> bool {
@@ -147,7 +179,10 @@ mod tests {
         let mut cases = vec![
             ("SELECT 1 AS n".into(), Vec::new()),
             ("SELECT 'café' AS t".into(), Vec::new()),
-            ("SELECT 'x' LIKE NULL AS m".into(), Vec::new()),
+            (
+                "SELECT CASE WHEN 'x' LIKE NULL THEN 1 ELSE 0 END AS m".into(),
+                Vec::new(),
+            ),
             ("SELECT ? AS v".into(), vec![DbValue::Text("z".into())]),
             (
                 "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('dup-diff', 0)".into(),

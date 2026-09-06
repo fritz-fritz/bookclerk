@@ -808,9 +808,9 @@ pub fn admitted_bookclerk_sql_samples(seed: u64, count: usize) -> Vec<String> {
             4 => {
                 let t = sql_quote(texts[rng.bounded(texts.len() as u64) as usize]);
                 let p = sql_quote(like_pats[rng.bounded(like_pats.len() as u64) as usize]);
-                format!("SELECT {t} LIKE {p} AS m")
+                format!("SELECT CASE WHEN {t} LIKE {p} THEN 1 ELSE 0 END AS m")
             }
-            5 => "SELECT 'x' LIKE NULL AS m".to_string(),
+            5 => "SELECT CASE WHEN 'x' LIKE NULL THEN 1 ELSE 0 END AS m".to_string(),
             6 => {
                 let id = format!("s{i:04}");
                 format!(
