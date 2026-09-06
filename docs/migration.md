@@ -91,13 +91,15 @@ for time travel.
 
 `--include-plugin-databases` captures plugin-owned bindings from the
 `plugin_databases` registry in portable Bookclerk format. Plugin schema
-migration remains plugin-owned. Each database unit is replaced completely; a
+changes are host-mediated BookclerkSQL in the binding namespace (not a
+plugin-owned migration framework). Each database unit is replaced completely; a
 multi-database bundle is not one transaction across independent DBs.
 Unsupported adapters fail closed.
 
-Land new host DDL in `UNRELEASED_SQL`. A future **release cut** may copy that
-bucket into an immutable `HostMigrationStep`; until then the frozen plan stays
-empty. Do not add a public plan version per PR. See
+Land new host DDL in `UNRELEASED_SQL` as already-separate statements (packed
+with the SQL-v1 lexer). A future **release cut** may copy that bucket into
+immutable `HostMigrationStep` ops (`Schema` / `Data`); until then the frozen
+plan stays empty. Do not add a public plan version per PR. See
 [ADR: schema versioning](adr/schema-versioning.md).
 
 ## Postgres (`copydb`)

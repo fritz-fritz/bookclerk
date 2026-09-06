@@ -21,7 +21,8 @@ use crate::host_schema::{
     ensure_restore_target_is_replaceable, HostSchemaKind,
 };
 use crate::migrations::{
-    override_host_migration_plan, HostMigrationStep, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
+    override_host_migration_plan, HostMigrationStep, MigrationOp, SCHEMA_MIGRATIONS_DDL,
+    SCHEMA_VERSION,
 };
 use crate::LibraryStore;
 use bookclerk_plugin_abi::{
@@ -121,10 +122,8 @@ async fn count(db: &DatabaseConnection, sql: &str) -> i64 {
 }
 
 async fn apply_bootstrap(db: &DatabaseConnection) {
-    for stmt in
-        bookclerk_db_exec::split_schema_statements(crate::migrations::binding_bootstrap_sql())
-    {
-        db.execute_raw(Statement::from_string(DbBackend::Sqlite, stmt))
+    for stmt in crate::migrations::binding_bootstrap_statements() {
+        db.execute_raw(Statement::from_string(DbBackend::Sqlite, stmt.clone()))
             .await
             .unwrap();
     }
@@ -535,15 +534,21 @@ fn validate_cell_enforces_types_and_nullability() {
 
 #[test]
 fn schema_state_frozen_uses_that_version_not_latest() {
+    const V1_OPS: &[MigrationOp] = &[MigrationOp::Schema(
+        "CREATE TABLE frozen_v1 (id INTEGER PRIMARY KEY)",
+    )];
+    const V2_OPS: &[MigrationOp] = &[MigrationOp::Schema(
+        "CREATE TABLE frozen_v2 (id INTEGER PRIMARY KEY)",
+    )];
     let v1 = HostMigrationStep {
         version: 1,
-        canonical: "CREATE TABLE frozen_v1 (id INTEGER PRIMARY KEY);",
+        steps: V1_OPS,
         down: None,
         introduced_in: "0.1.0",
     };
     let v2 = HostMigrationStep {
         version: 2,
-        canonical: "CREATE TABLE frozen_v2 (id INTEGER PRIMARY KEY);",
+        steps: V2_OPS,
         down: None,
         introduced_in: "0.2.0",
     };
@@ -1089,9 +1094,10 @@ async fn restore_fails_closed_when_target_frozen_history_is_newer() {
 
 const SYNTHETIC_V1_SQL: &str =
     "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)";
+const SYNTHETIC_V1_OPS: &[MigrationOp] = &[MigrationOp::Schema(SYNTHETIC_V1_SQL)];
 const SYNTHETIC_V1_PLAN: &[HostMigrationStep] = &[HostMigrationStep {
     version: 1,
-    canonical: SYNTHETIC_V1_SQL,
+    steps: SYNTHETIC_V1_OPS,
     down: None,
     introduced_in: "0.0.0",
 }];
@@ -1942,6 +1948,88 @@ async fn quoted_unicode_text_round_trips() {
         .ok()
         .flatten();
     assert_eq!(label.as_deref(), Some("it's \"quoted\" and 🦀"));
+}
+
+#[tokio::test]
+async fn semicolon_default_check_and_unicode_round_trip_as_canonical_bundle() {
+    let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_bootstrap(&src).await;
+    apply_admitted_sql(
+        &src,
+        &["CREATE TABLE notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL DEFAULT 'a;b',
+                flag TEXT CHECK (flag <> ';'),
+                body TEXT
+            )"],
+        CanonicalRestoreKind::PluginBinding,
+    )
+    .await
+    .unwrap();
+    src.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO notes (flag, body) VALUES ('ok', 'café 🎵 שׁ')",
+    ))
+    .await
+    .unwrap();
+    src.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO notes (title, flag, body) VALUES ('x;y', 'z', 'it''s \"quoted\"')",
+    ))
+    .await
+    .unwrap();
+
+    let files = tempfile::tempdir().unwrap();
+    let repo = BackupRepository::open(files.path()).unwrap();
+    let unit = capture::capture_plugin_unit(
+        &src,
+        &repo,
+        &CanonicalExportOpts::default(),
+        "demo",
+        "notes",
+        "d1",
+    )
+    .await
+    .unwrap();
+
+    let dest = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_bootstrap(&dest).await;
+    restore_backup_unit(
+        &dest,
+        &repo,
+        &unit,
+        CanonicalRestoreKind::PluginBinding,
+        &restore_ok(),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let rows = dest
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT title, flag, body FROM notes ORDER BY id",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    let title0 = rows[0]
+        .try_get::<Option<String>>("", "title")
+        .ok()
+        .flatten();
+    assert_eq!(title0.as_deref(), Some("a;b"));
+    let body0 = rows[0].try_get::<Option<String>>("", "body").ok().flatten();
+    assert_eq!(body0.as_deref(), Some("café 🎵 שׁ"));
+    dest.execute_raw(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO notes (flag) VALUES (';')",
+    ))
+    .await
+    .expect_err("CHECK (flag <> ';') must survive restore");
 }
 
 #[tokio::test]

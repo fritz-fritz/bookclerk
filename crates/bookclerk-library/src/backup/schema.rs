@@ -44,7 +44,11 @@ pub fn admit_canonical_schema(
     let mut indexes = Vec::new();
     let mut env = SqlTypeEnv::new();
     let mut pending_indexes = Vec::new();
-    for stmt in bookclerk_db_exec::split_schema_statements(sql) {
+    for stmt in bookclerk_plugin_abi::sql_v1_pack_statements(sql).map_err(|err| {
+        LibraryError::Schema(format!(
+            "backup schema is not a BookclerkSQL statement list: {err}"
+        ))
+    })? {
         let trimmed = stmt.trim().trim_end_matches(';').trim();
         if trimmed.is_empty() {
             continue;
@@ -90,7 +94,11 @@ pub fn admit_canonical_schema(
 /// Returns when a non-empty statement is neither admitted DDL nor seed DML.
 pub fn filter_library_pack_ddl(sql: &str) -> Result<String> {
     let mut out = String::new();
-    for stmt in bookclerk_db_exec::split_schema_statements(sql) {
+    for stmt in bookclerk_plugin_abi::sql_v1_pack_statements(sql).map_err(|err| {
+        LibraryError::Schema(format!(
+            "backup schema is not a BookclerkSQL statement list: {err}"
+        ))
+    })? {
         let trimmed = stmt.trim().trim_end_matches(';').trim();
         if trimmed.is_empty() {
             continue;
@@ -316,8 +324,10 @@ pub fn library_ddl_for_schema_state_with(
                 )));
             }
             for s in plan.iter().filter(|s| s.version <= *version) {
-                sql.push_str(s.canonical.trim_end_matches(';'));
-                sql.push_str(";\n");
+                for op in s.steps {
+                    sql.push_str(op.sql().trim_end_matches(';'));
+                    sql.push_str(";\n");
+                }
             }
         }
         SchemaState::Unreleased {
@@ -337,8 +347,10 @@ pub fn library_ddl_for_schema_state_with(
                 )));
             }
             for s in plan.iter().filter(|s| s.version <= *base_version) {
-                sql.push_str(s.canonical.trim_end_matches(';'));
-                sql.push_str(";\n");
+                for op in s.steps {
+                    sql.push_str(op.sql().trim_end_matches(';'));
+                    sql.push_str(";\n");
+                }
             }
             if !unreleased.trim().is_empty() {
                 sql.push_str(unreleased.trim_end_matches(';'));

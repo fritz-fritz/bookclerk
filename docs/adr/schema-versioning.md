@@ -152,7 +152,9 @@ latest pack).
 `(plugin_id, binding)`, opened through the active adapter session. A failed
 unit fails the requested bundle. Units are replaced individually; a bundle is
 not one transaction across independent databases. Plugin schema/version
-markers restore as ordinary rows; the plugin may migrate after startup.
+markers restore as ordinary rows; the plugin may issue host-mediated
+BookclerkSQL in its binding after startup. Restore does not run plugin
+migrations.
 Library-only restore preserves the target registry. Included restore rebinds
 registry rows to the target adapter’s physical placement (never source
 `unit_ref`).
@@ -168,6 +170,47 @@ tied to the oldest retained base recovery point. This repository’s object
 store is intended to remain the base layer for that work. Do not emit a
 change journal until that design lands.
 
+### Host-mediated plugin schema (not a plugin migration framework)
+
+Plugin bindings may change schema only as **admitted BookclerkSQL** inside the
+plugin’s binding namespace (`GuestSqlPolicy::binding_owned`). The host
+authorizes, typechecks, and records binding `SchemaState`. A plugin cannot
+name host, reserved, or other-plugin tables. Restore writes captured rows and
+does **not** run plugin migrations.
+
+Host schema and plugin schema are separate apply units. Each frozen/unreleased
+**apply unit** is one atomic `ExecuteRequest`. If an adapter cannot perform a
+schema transition atomically, it must not advertise the capability (D1 already
+uses HTTP batch; backup flags stay off).
+
+### Migration ops (still unreleased)
+
+```text
+HostMigrationStep { version, introduced_in, steps, down }
+MigrationOp = Schema(canonical stmt) | Data(canonical stmt)
+```
+
+`host_migration_plan()` stays **empty**. Live DDL is packed
+[`UNRELEASED_SQL`](../../crates/bookclerk-library/src/migrations.rs)
+(`Schema` ops). Checksums hash the **length-prefixed ordered statement list**,
+not a joined script. Data backfills use the same parser/type/authz/proof path
+as ordinary execute. CLI downgrade applies `down` only when every step has it;
+otherwise restore a backup.
+
+Invariants (locked with synthetic plans, not a v1 freeze):
+
+- Integer version order; host vs plugin namespaces; fail closed on
+  contradictory `schema_migrations` rows.
+- Retry uniqueness / duplicate-object / unavailable after re-read; FK / CHECK /
+  NOT NULL are not races.
+- Crash: marker not visible ⇒ retry the same unit.
+- Forward-only on library open; rolling binaries fail closed on unknown newer
+  frozen or mismatched unreleased checksums.
+- Multi-node: portable `db_serialization_slots` (no `pg_advisory_xact_lock`
+  in host).
+- Backup capture is the recorded `SchemaState` statement list; restore into a
+  newer app stays fail-closed until walk/migrate is an explicit operator action.
+
 ### Last-reversible CLI
 
 `bookclerk db version|backup|restore|migrate|downgrade` uses
@@ -179,7 +222,6 @@ With an empty frozen plan, schema-version downgrade is a no-op. Time-based
 ### Out of scope
 
 - Declaring production schema v1
-- Plugin-owned migration framework
 - D1 Time Travel / portable PITR / canonical change journaling
 - Transactional atomicity across library DB + independent plugin DBs
 - Using semver as `schema_migrations.version`

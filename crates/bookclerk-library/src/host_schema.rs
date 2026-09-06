@@ -18,7 +18,7 @@ use crate::backup::{backup_library, BackupReason, BackupRequest, SchemaBackupOpt
 use crate::error::{LibraryError, Result};
 use crate::migrations::{
     host_migration_plan, migration_step_checksum, unreleased_checksum, HostMigrationStep,
-    SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
+    MigrationOp, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
 };
 use crate::schema_state::{SchemaState, SCHEMA_STATE_FROZEN, SCHEMA_STATE_UNRELEASED};
 use crate::schema_walk::SchemaWalk;
@@ -27,10 +27,9 @@ use crate::sql_plan::execute_typed_on;
 /// Timing label for host schema apply (not an adapter identity).
 const SCHEMA_TXN_TIMING: &str = "schema_txn";
 
-/// Canonical schema apply batch: host DDL followed by the state marker.
+/// Canonical schema apply batch: already-separate host statements plus marker.
 ///
-/// Adapters lower and split the pack at execution
-/// ([`bookclerk_db_exec::expand_host_schema_batch`]).
+/// Adapters lower each statement at execution; they must not use `str::split(';')`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaBatch {
     /// Ordered SQL strings; the last statement is the version/state marker.
@@ -38,12 +37,27 @@ pub struct SchemaBatch {
 }
 
 impl SchemaBatch {
-    /// Builds a batch from one canonical DDL pack plus a trailing marker.
+    /// Builds a batch from an ordered statement list plus a trailing marker.
+    #[must_use]
+    pub fn from_statements_and_marker(
+        stmts: impl IntoIterator<Item = impl Into<String>>,
+        marker: impl Into<String>,
+    ) -> Self {
+        let mut statements: Vec<String> = stmts.into_iter().map(Into::into).collect();
+        statements.push(marker.into());
+        Self { statements }
+    }
+
+    /// Packs canonical DDL with the SQL-v1 lexer, then appends `marker`.
+    ///
+    /// Host compile-time DDL must pack; a failure is a programming error.
     #[must_use]
     pub fn from_ddl_and_marker(ddl: impl Into<String>, marker: impl Into<String>) -> Self {
-        Self {
-            statements: vec![ddl.into(), marker.into()],
-        }
+        let ddl = ddl.into();
+        let stmts = bookclerk_plugin_abi::sql_v1_pack_statements(&ddl).unwrap_or_else(|err| {
+            panic!("host schema DDL is not a BookclerkSQL statement list: {err}")
+        });
+        Self::from_statements_and_marker(stmts, marker)
     }
 
     /// Unreleased development pack plus `schema_migrations` unreleased row.
@@ -877,7 +891,7 @@ pub async fn ensure_restore_target_is_replaceable(
 
 /// Canonical DDL plus version markers (`PRAGMA` and/or `schema_migrations` insert).
 fn version_marker_statements(kind: HostSchemaKind, step: &HostMigrationStep) -> Vec<String> {
-    let mut stmts = vec![step.canonical.to_string()];
+    let mut stmts: Vec<String> = step.steps.iter().map(|op| op.sql().to_string()).collect();
     if kind == HostSchemaKind::PragmaMarker {
         stmts.push(format!("PRAGMA user_version = {}", step.version));
     }
@@ -889,7 +903,7 @@ fn version_marker_statements(kind: HostSchemaKind, step: &HostMigrationStep) -> 
 fn down_statements(kind: HostSchemaKind, step: &HostMigrationStep) -> Vec<String> {
     let mut stmts = Vec::new();
     if let Some(down) = step.down {
-        stmts.push(down.to_string());
+        stmts.extend(down.iter().map(|op| op.sql().to_string()));
     }
     stmts.push(format!(
         "DELETE FROM schema_migrations WHERE version = {}",
@@ -1305,9 +1319,10 @@ mod tests {
     #[test]
     fn verify_frozen_checksums_rejects_missing_and_tampered_rows() {
         const V1: &str = "CREATE TABLE t (id INTEGER PRIMARY KEY)";
+        const V1_OPS: &[MigrationOp] = &[MigrationOp::Schema(V1)];
         let plan = [HostMigrationStep {
             version: 1,
-            canonical: V1,
+            steps: V1_OPS,
             down: None,
             introduced_in: "0.0.0",
         }];
@@ -1330,9 +1345,10 @@ mod tests {
             .expect("sqlite");
         const V1: &str =
             "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)";
+        const V1_OPS: &[MigrationOp] = &[MigrationOp::Schema(V1)];
         let plan = [HostMigrationStep {
             version: 1,
-            canonical: V1,
+            steps: V1_OPS,
             down: None,
             introduced_in: "0.0.0",
         }];
@@ -1373,9 +1389,10 @@ mod tests {
         const V1: &str =
             "CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)";
         const EXTRA: &str = "CREATE TABLE extra_dev (id INTEGER PRIMARY KEY)";
+        const V1_OPS: &[MigrationOp] = &[MigrationOp::Schema(V1)];
         let plan = [HostMigrationStep {
             version: 1,
-            canonical: V1,
+            steps: V1_OPS,
             down: None,
             introduced_in: "0.0.0",
         }];
@@ -1505,8 +1522,9 @@ mod tests {
         let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
             .await
             .expect("unmigrated sqlite");
-        let ddl =
-            bookclerk_db_exec::split_schema_statements(current_canonical_schema()).len() as u32;
+        let ddl = bookclerk_plugin_abi::sql_v1_pack_statements(current_canonical_schema())
+            .expect("pack")
+            .len() as u32;
         crate::inject_atomic_interrupt_after(
             crate::AtomicInterruptPhase::BetweenStatements,
             crate::AtomicInterruptKind::Cancel,

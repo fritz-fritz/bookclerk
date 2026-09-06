@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use bookclerk_plugin_abi::{
     encoded_statement_result_bytes, parse_create_index_sql, parse_create_table_schema,
     reserved_catalog_relation_missing, sql_ddl_create_table_sql, sql_schema_create_table_sql,
-    sql_type_env_from_canonical_ddl, typecheck_execute_request_proofs, DbColumn,
+    sql_type_env_from_canonical_statements, typecheck_execute_request_proofs, DbColumn,
     DbPlanStatementKind, DbResultSelection, DbRow, DbType, DbValue, ExecuteRequest, SqlTypeEnv,
     StatementResult, TypedDbStatement, SQL_CATALOG_TABLE, SQL_CONTRACT_VERSION, SQL_DDL_TABLE,
     SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
@@ -679,11 +679,10 @@ where
 
 /// Type environment for reserved catalog companion tables.
 fn catalog_type_env() -> SqlTypeEnv {
-    sql_type_env_from_canonical_ddl(&format!(
-        "{}; {}",
+    sql_type_env_from_canonical_statements([
         sql_ddl_create_table_sql(),
-        sql_schema_create_table_sql()
-    ))
+        sql_schema_create_table_sql(),
+    ])
 }
 
 /// Proof-directed lowering so Postgres TEXT ORDER BY uses `COLLATE "C"`.

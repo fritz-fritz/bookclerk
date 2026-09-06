@@ -176,18 +176,22 @@ pub fn plan_schema_walk_from_state(
 mod tests {
     use super::*;
 
-    fn step(version: i64, down: Option<&'static str>) -> HostMigrationStep {
+    fn step(version: i64, reversible: bool) -> HostMigrationStep {
+        const UP: &[crate::migrations::MigrationOp] =
+            &[crate::migrations::MigrationOp::Schema("UP")];
+        const DOWN: &[crate::migrations::MigrationOp] =
+            &[crate::migrations::MigrationOp::Schema("DOWN")];
         HostMigrationStep {
             version,
-            canonical: "UP",
-            down,
+            steps: UP,
+            down: reversible.then_some(DOWN),
             introduced_in: "0.1.0",
         }
     }
 
     #[test]
     fn upgrade_selects_intervening_ups() {
-        let plan = [step(1, None), step(2, Some("D2")), step(3, Some("D3"))];
+        let plan = [step(1, false), step(2, true), step(3, true)];
         let walk = plan_schema_walk(&plan, 1, 3).unwrap();
         assert_eq!(
             walk.ups.iter().map(|s| s.version).collect::<Vec<_>>(),
@@ -200,7 +204,7 @@ mod tests {
 
     #[test]
     fn downgrade_walks_newest_first_until_irreversible() {
-        let plan = [step(1, None), step(2, Some("D2")), step(3, Some("D3"))];
+        let plan = [step(1, false), step(2, true), step(3, true)];
         let walk = plan_schema_walk(&plan, 3, 1).unwrap();
         assert_eq!(
             walk.downs.iter().map(|s| s.version).collect::<Vec<_>>(),
@@ -212,7 +216,7 @@ mod tests {
 
     #[test]
     fn downgrade_stops_at_last_reversible_when_blocked() {
-        let plan = [step(1, None), step(2, Some("D2")), step(3, Some("D3"))];
+        let plan = [step(1, false), step(2, true), step(3, true)];
         let walk = plan_schema_walk(&plan, 3, 0).unwrap();
         assert_eq!(
             walk.downs.iter().map(|s| s.version).collect::<Vec<_>>(),
@@ -225,14 +229,14 @@ mod tests {
 
     #[test]
     fn unknown_newer_schema_fails_closed() {
-        let plan = [step(1, None)];
+        let plan = [step(1, false)];
         let err = plan_schema_walk(&plan, 2, 1).unwrap_err();
         assert!(err.to_string().contains("newer than this binary"), "{err}");
     }
 
     #[test]
     fn noop_when_already_at_target() {
-        let plan = [step(1, None)];
+        let plan = [step(1, false)];
         let walk = plan_schema_walk(&plan, 1, 1).unwrap();
         assert!(walk.is_noop());
         assert_eq!(walk.stopped_at, 1);
@@ -240,7 +244,7 @@ mod tests {
 
     #[test]
     fn empty_database_is_allowed_when_min_supported_is_one() {
-        let plan = [step(1, None)];
+        let plan = [step(1, false)];
         let walk = plan_schema_walk_bounded(&plan, 0, 1, 1).unwrap();
         assert_eq!(walk.ups.len(), 1);
         assert_eq!(walk.stopped_at, 1);
@@ -248,7 +252,7 @@ mod tests {
 
     #[test]
     fn unreleased_is_not_empty_predecessor_to_frozen() {
-        let plan = [step(1, None)];
+        let plan = [step(1, false)];
         let err = plan_schema_walk_from_state(
             &plan,
             &SchemaState::Unreleased {
@@ -278,7 +282,7 @@ mod tests {
 
     #[test]
     fn unreleased_based_on_v1_is_not_empty_predecessor_to_v2() {
-        let plan = [step(1, None), step(2, None)];
+        let plan = [step(1, false), step(2, false)];
         let err = plan_schema_walk_from_state(
             &plan,
             &SchemaState::Unreleased {
@@ -307,7 +311,7 @@ mod tests {
 
     #[test]
     fn below_min_supported_fails_closed() {
-        let plan = [step(1, None), step(2, Some("D2")), step(3, Some("D3"))];
+        let plan = [step(1, false), step(2, true), step(3, true)];
         let err = plan_schema_walk_bounded(&plan, 1, 3, 2).unwrap_err();
         assert!(
             err.to_string().contains("older than this binary supports"),

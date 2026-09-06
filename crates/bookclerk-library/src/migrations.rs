@@ -10,12 +10,12 @@
 //! Adapters lower canonical DDL at
 //! the execution edge ([`bookclerk_db_exec::expand_host_schema_batch`]).
 
+use bookclerk_plugin_abi::{canonical_statements_checksum, sql_v1_pack_statements};
+
 use std::sync::OnceLock;
 
 #[cfg(test)]
 use std::cell::Cell;
-
-use sha2::{Digest, Sha256};
 
 /// Final SQLite DDL for a fresh Bookclerk library database.
 ///
@@ -694,29 +694,48 @@ pub const SCHEMA_MIGRATIONS_DDL: &str = "CREATE TABLE IF NOT EXISTS schema_migra
         PRIMARY KEY (state, version)
     )";
 
+/// One admitted BookclerkSQL statement in a host migration apply unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationOp {
+    /// Schema mutation (`CREATE` / `DROP` / `ALTER` / index).
+    Schema(&'static str),
+    /// Data backfill (`INSERT` / `UPDATE` / `DELETE`).
+    Data(&'static str),
+}
+
+impl MigrationOp {
+    /// Canonical BookclerkSQL for this op.
+    #[must_use]
+    pub const fn sql(self) -> &'static str {
+        match self {
+            Self::Schema(sql) | Self::Data(sql) => sql,
+        }
+    }
+}
+
 /// One host-owned schema version in the canonical Bookclerk migration plan.
 ///
 /// Marker capabilities ([`crate::HostSchemaKind`]) choose only how each version
-/// is recorded (`PRAGMA user_version`, `schema_migrations` row, or one atomic
-/// batch). The live connection backend lowers [`Self::canonical`] at the adapter
-/// boundary (Postgres) or applies it verbatim (SQLite / D1).
+/// is recorded (`schema_migrations` row). The live connection backend lowers
+/// each [`MigrationOp`] at the adapter boundary (Postgres) or applies it
+/// verbatim (SQLite / D1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostMigrationStep {
-    /// `PRAGMA user_version` / `schema_migrations.version` for this step.
+    /// `schema_migrations.version` for this step.
     pub version: i64,
-    /// Canonical SQLite-shaped Bookclerk DDL for this version (the `up`).
-    pub canonical: &'static str,
-    /// Reverse DDL when this step is reversible; `None` means restore a backup.
-    pub down: Option<&'static str>,
+    /// Ordered schema and data ops for this version (the `up`).
+    pub steps: &'static [MigrationOp],
+    /// Reverse ops when this step is reversible; `None` means restore a backup.
+    pub down: Option<&'static [MigrationOp]>,
     /// First Bookclerk semver that shipped this step.
     pub introduced_in: &'static str,
 }
 
 impl HostMigrationStep {
-    /// SHA-256 hex digest of `up` (and `down` when present) used as the freeze lock.
+    /// SHA-256 hex digest of length-prefixed `up` (and `down` when present).
     #[must_use]
     pub fn checksum(&self) -> String {
-        migration_step_checksum(self.canonical, self.down)
+        migration_ops_checksum(self.steps, self.down)
     }
 
     /// True when [`Self::down`] is present so CLI rollback can apply this step.
@@ -724,18 +743,55 @@ impl HostMigrationStep {
     pub fn reversible(&self) -> bool {
         self.down.is_some()
     }
+
+    /// Concatenated up SQL (tests / derived views). Boundaries are the op list.
+    #[must_use]
+    pub fn up_sql(&self) -> String {
+        self.steps
+            .iter()
+            .map(|op| op.sql())
+            .collect::<Vec<_>>()
+            .join(";\n")
+    }
 }
 
-/// SHA-256 hex of canonical up SQL, plus down SQL when the step is reversible.
+/// SHA-256 of length-prefixed migration ops (not a joined script).
+#[must_use]
+pub fn migration_ops_checksum(ups: &[MigrationOp], down: Option<&[MigrationOp]>) -> String {
+    let up: Vec<&str> = ups.iter().map(|op| op.sql()).collect();
+    let down_sql: Option<Vec<&str>> = down.map(|ops| ops.iter().map(|op| op.sql()).collect());
+    let down_refs: Option<Vec<&str>> = down_sql.as_ref().map(|v| v.iter().copied().collect());
+    migration_statements_checksum(&up, down_refs.as_deref())
+}
+
+/// SHA-256 of canonical up statements, plus down statements when reversible.
 #[must_use]
 pub fn migration_step_checksum(canonical: &str, down: Option<&str>) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
-    if let Some(down) = down {
-        hasher.update(b"\n-- down\n");
-        hasher.update(down.as_bytes());
+    let ups = pack_or_single(canonical);
+    let downs = down.map(pack_or_single);
+    let up_refs: Vec<&str> = ups.iter().map(String::as_str).collect();
+    let down_owned: Option<Vec<&str>> = downs
+        .as_ref()
+        .map(|v| v.iter().map(String::as_str).collect());
+    migration_statements_checksum(&up_refs, down_owned.as_deref())
+}
+
+fn pack_or_single(sql: &str) -> Vec<String> {
+    match sql_v1_pack_statements(sql) {
+        Ok(stmts) if !stmts.is_empty() => stmts,
+        _ if sql.trim().is_empty() => Vec::new(),
+        _ => vec![sql.to_string()],
     }
-    hex::encode(hasher.finalize())
+}
+
+fn migration_statements_checksum(ups: &[&str], down: Option<&[&str]>) -> String {
+    let mut parts = Vec::with_capacity(ups.len().saturating_add(1));
+    parts.extend(ups.iter().copied());
+    if let Some(down) = down {
+        parts.push("-- down");
+        parts.extend(down.iter().copied());
+    }
+    canonical_statements_checksum(&parts)
 }
 
 /// Canonical bootstrap DDL applied inside every isolated plugin binding
@@ -764,6 +820,19 @@ pub fn binding_bootstrap_sql() -> &'static str {
     SQL.get_or_init(|| format!("{BINDING_BOOTSTRAP_SQL}\n{BINDING_SQL_CATALOG_SQLITE}").leak())
 }
 
+/// Ordered canonical statements for [`binding_bootstrap_sql`].
+#[must_use]
+pub fn binding_bootstrap_statements() -> &'static [String] {
+    static STMTS: OnceLock<Vec<String>> = OnceLock::new();
+    STMTS
+        .get_or_init(|| {
+            sql_v1_pack_statements(binding_bootstrap_sql()).unwrap_or_else(|err| {
+                panic!("binding bootstrap SQL is not a BookclerkSQL statement list: {err}")
+            })
+        })
+        .as_slice()
+}
+
 /// Frozen ups concatenated with [`UNRELEASED_SQL`].
 ///
 /// After a future release cut this is `host_migration_plan` DDL plus whatever
@@ -771,23 +840,49 @@ pub fn binding_bootstrap_sql() -> &'static str {
 #[must_use]
 pub fn current_canonical_schema() -> &'static str {
     static SQL: OnceLock<String> = OnceLock::new();
-    SQL.get_or_init(|| {
-        let mut parts: Vec<&str> = production_host_migration_plan()
-            .iter()
-            .map(|step| step.canonical)
-            .collect();
-        if !UNRELEASED_SQL.trim().is_empty() {
-            parts.push(UNRELEASED_SQL);
-        }
-        parts.join("\n")
-    })
-    .as_str()
+    SQL.get_or_init(|| current_canonical_statements().join(";\n"))
+        .as_str()
 }
 
-/// SHA-256 of [`UNRELEASED_SQL`] (empty string when the bucket is empty).
+/// Ordered canonical statements for [`current_canonical_schema`].
+#[must_use]
+pub fn current_canonical_statements() -> &'static [String] {
+    static STMTS: OnceLock<Vec<String>> = OnceLock::new();
+    STMTS
+        .get_or_init(|| {
+            let mut out = Vec::new();
+            for step in production_host_migration_plan() {
+                for op in step.steps {
+                    out.push(op.sql().to_string());
+                }
+            }
+            out.extend(unreleased_statements().iter().cloned());
+            out
+        })
+        .as_slice()
+}
+
+/// Ordered statements in [`UNRELEASED_SQL`].
+#[must_use]
+pub fn unreleased_statements() -> &'static [String] {
+    static STMTS: OnceLock<Vec<String>> = OnceLock::new();
+    STMTS
+        .get_or_init(|| {
+            if UNRELEASED_SQL.trim().is_empty() {
+                return Vec::new();
+            }
+            sql_v1_pack_statements(UNRELEASED_SQL).unwrap_or_else(|err| {
+                panic!("UNRELEASED_SQL is not a BookclerkSQL statement list: {err}")
+            })
+        })
+        .as_slice()
+}
+
+/// SHA-256 of packed [`UNRELEASED_SQL`] statements (empty string when empty).
 #[must_use]
 pub fn unreleased_checksum() -> String {
-    migration_step_checksum(UNRELEASED_SQL, None)
+    let refs: Vec<&str> = unreleased_statements().iter().map(String::as_str).collect();
+    canonical_statements_checksum(&refs)
 }
 
 /// Host table names declared by [`current_canonical_schema`], plus
@@ -811,7 +906,8 @@ pub fn current_canonical_table_names() -> Vec<String> {
 /// Names are lowercased to match mechanical Postgres lowering.
 fn table_names_from_canonical_ddl(sql: &str) -> Vec<String> {
     let mut names = Vec::new();
-    for stmt in bookclerk_db_exec::split_schema_statements(sql) {
+    let stmts = sql_v1_pack_statements(sql).unwrap_or_default();
+    for stmt in stmts {
         let trimmed = stmt.trim();
         let lower = trimmed.to_ascii_lowercase();
         let rest = if let Some(rest) = lower.strip_prefix("create table") {
@@ -837,7 +933,7 @@ fn table_names_from_canonical_ddl(sql: &str) -> Vec<String> {
 /// Column types implied by [`current_canonical_schema`].
 #[must_use]
 pub fn host_sql_type_env() -> bookclerk_plugin_abi::SqlTypeEnv {
-    bookclerk_plugin_abi::sql_type_env_from_canonical_ddl(current_canonical_schema())
+    bookclerk_plugin_abi::sql_type_env_from_canonical_statements(current_canonical_statements())
 }
 
 /// Frozen host migration steps. Empty until a release cut copies
@@ -890,9 +986,9 @@ pub(crate) fn override_host_migration_plan(
 /// edge — there is no hand-authored parallel Postgres schema.
 #[must_use]
 pub fn latest_schema_postgres() -> String {
-    bookclerk_db_exec::split_schema_statements(current_canonical_schema())
-        .into_iter()
-        .map(|stmt| bookclerk_db_exec::lower_canonical_ddl_to_postgres(&stmt))
+    current_canonical_statements()
+        .iter()
+        .map(|stmt| bookclerk_db_exec::lower_canonical_ddl_to_postgres(stmt))
         .collect::<Vec<_>>()
         .join(";\n")
 }
@@ -1007,7 +1103,11 @@ mod tests {
 
     #[test]
     fn postgres_lowering_of_baseline_is_mechanically_complete() {
-        let lowered = latest_schema_postgres();
+        let lowered = current_canonical_statements()
+            .iter()
+            .map(|stmt| bookclerk_db_exec::lower_canonical_ddl_to_postgres(stmt))
+            .collect::<Vec<_>>()
+            .join(";\n");
         // No SQLite-isms may survive the mechanical lowering; the CI Postgres
         // sidecar applies this exact output (`postgres_test_store`).
         for token in [
@@ -1075,7 +1175,7 @@ mod tests {
             proofs[0]
         );
         let mut working = env.clone();
-        for stmt in bookclerk_db_exec::split_schema_statements(latest_schema_sqlite()) {
+        for stmt in current_canonical_statements() {
             bookclerk_plugin_abi::apply_schema_sql_to_env(&mut working, &stmt);
             if bookclerk_plugin_abi::statement_is_ddl(&stmt) {
                 continue;

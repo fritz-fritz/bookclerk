@@ -76,10 +76,10 @@ pub use master_key::{
     AUTH_PASSWORD_ENV as MASTER_KEY_AUTH_PASSWORD_ENV, MASTER_KEY_FILE_NAME,
 };
 pub use migrations::{
-    binding_bootstrap_sql, current_canonical_schema, current_canonical_table_names,
-    host_migration_plan, latest_schema_postgres, latest_schema_sqlite, unreleased_checksum,
-    HostMigrationStep, MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
-    UNRELEASED_SQL,
+    binding_bootstrap_sql, binding_bootstrap_statements, current_canonical_schema,
+    current_canonical_table_names, host_migration_plan, latest_schema_postgres, latest_schema_sqlite,
+    unreleased_checksum, HostMigrationStep, MigrationOp, MIN_SUPPORTED_SCHEMA_VERSION,
+    SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION, UNRELEASED_SQL,
 };
 pub use models::{
     catalog_subscribers_for_event, collapse_live_subscriber_nodes, content_kind_from_classic,
