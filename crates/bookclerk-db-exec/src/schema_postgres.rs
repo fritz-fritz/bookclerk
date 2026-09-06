@@ -20,9 +20,7 @@ pub fn schema_sql_for_backend(backend: DatabaseBackend, canonical: &str) -> Cow<
     match backend {
         DatabaseBackend::Postgres => Cow::Owned(crate::lower_canonical_ddl_to_postgres(canonical)),
         DatabaseBackend::Sqlite => Cow::Borrowed(canonical),
-        DatabaseBackend::MySql => {
-            panic!("BookclerkSQL adapters do not support the MySQL SeaORM backend")
-        }
+        other => panic!("BookclerkSQL adapters do not support SeaORM backend {other:?}"),
     }
 }
 
@@ -38,9 +36,7 @@ pub fn lower_binding_sql_for_backend(backend: DatabaseBackend, sql: &str) -> Cow
             Cow::Owned(crate::lower::rewrite_canonical_ddl_types_for_postgres(sql))
         }
         DatabaseBackend::Postgres | DatabaseBackend::Sqlite => Cow::Borrowed(sql),
-        DatabaseBackend::MySql => {
-            panic!("BookclerkSQL adapters do not support the MySQL SeaORM backend")
-        }
+        other => panic!("BookclerkSQL adapters do not support SeaORM backend {other:?}"),
     }
 }
 

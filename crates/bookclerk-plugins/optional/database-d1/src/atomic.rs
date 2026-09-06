@@ -19,16 +19,12 @@ use serde_json::Value as JsonValue;
 
 use super::d1::D1Proxy;
 
-/// Collapses adapter-private companions then host-schema pack extras.
+/// Collapses adapter-private companions (and host-schema identity extras).
 fn collapse_d1_wire(
-    wire_len: usize,
     groups: &[usize],
     statements: Vec<bookclerk_plugin_abi::StatementResult>,
 ) -> Vec<bookclerk_plugin_abi::StatementResult> {
-    bookclerk_db_exec::collapse_host_schema_results(
-        wire_len,
-        bookclerk_db_exec::collapse_companion_groups(groups, statements),
-    )
+    bookclerk_db_exec::collapse_companion_groups(groups, statements)
 }
 
 /// One statement in a D1 HTTP batch body.
@@ -147,17 +143,17 @@ impl D1Proxy {
         // pack for the SQLite family and collapses results back to the wire
         // request shape after parsing.
         let wire_len = req.statements.len();
-        let expanded = bookclerk_db_exec::expand_host_schema_execute_request(
-            sea_orm::DatabaseBackend::Sqlite,
-            req,
-        );
+        let (expanded, schema_groups) =
+            bookclerk_db_exec::expand_host_schema_execute_request_grouped(
+                sea_orm::DatabaseBackend::Sqlite,
+                req,
+            );
         let host_schema = expanded
             .statements
             .last()
             .is_some_and(|s| bookclerk_db_exec::is_host_schema_version_marker(&s.sql));
         let (expanded, companion_groups) = if host_schema {
-            let n = expanded.statements.len();
-            (expanded, vec![1usize; n])
+            (expanded, schema_groups)
         } else {
             bookclerk_db_exec::expand_binding_execute_request(
                 sea_orm::DatabaseBackend::Sqlite,
@@ -313,8 +309,7 @@ impl D1Proxy {
                 Ok(mut reply) => {
                     self.normalize_reply_from_declared(req, &mut reply, timeout)
                         .await?;
-                    reply.statements =
-                        collapse_d1_wire(wire_len, &companion_groups, reply.statements);
+                    reply.statements = collapse_d1_wire(&companion_groups, reply.statements);
                     if !guest_receipt.is_absent() {
                         // Guest-receipt finalize needs statement results, so D1 runs a
                         // follow-up HTTP batch after the main batch commits. Same-batch
@@ -476,7 +471,7 @@ impl D1Proxy {
         let mut out = vec![StatementResult::from_affected(0)];
         out.extend(std::mem::take(&mut reply.statements));
         bookclerk_db_exec::pad_skipped_guest_results(&mut out, req.statements.len());
-        reply.statements = collapse_d1_wire(wire_len, companion_groups, out);
+        reply.statements = collapse_d1_wire(companion_groups, out);
         Ok(reply)
     }
 
@@ -497,7 +492,7 @@ impl D1Proxy {
         timeout: Duration,
         deadline: Option<u64>,
         started: std::time::Instant,
-        wire_len: usize,
+        _wire_len: usize,
         companion_groups: &[usize],
         guest_receipt: &bookclerk_plugin_abi::GuestReceiptPersist,
         cap: u32,
@@ -553,7 +548,7 @@ impl D1Proxy {
         reply.statements = assembled;
         self.normalize_reply_from_declared(req, &mut reply, timeout)
             .await?;
-        reply.statements = collapse_d1_wire(wire_len, companion_groups, reply.statements);
+        reply.statements = collapse_d1_wire(companion_groups, reply.statements);
         let finalize = bookclerk_db_exec::guest_receipt_finalize_stmts(
             &reply,
             usize::try_from(guest_receipt.guest_statement_len).unwrap_or(usize::MAX),
