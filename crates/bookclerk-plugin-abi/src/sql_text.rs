@@ -862,7 +862,6 @@ impl SplitMix64 {
     }
 }
 
-
 #[cfg(test)]
 #[allow(clippy::missing_panics_doc)]
 mod tests {
