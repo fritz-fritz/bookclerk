@@ -201,14 +201,14 @@ pub async fn execute_typed_on(
 pub async fn execute_typed_on_binding(
     db: &sea_orm::DatabaseConnection,
     req: &ExecuteRequest,
-    timing_source: &str,
+    _timing_source: &str,
     max_result_rows: u32,
 ) -> Result<bookclerk_plugin_abi::ExecuteReply> {
-    bookclerk_db_exec::execute_typed_on_session(
+    let envelope = bookclerk_db_exec::stamp_adapter_execute(req.clone(), &SqlTypeEnv::new())
+        .map_err(LibraryError::from_db_err)?;
+    bookclerk_db_exec::execute_typed_envelope_on_connection(
         db,
-        req,
-        GuestReceiptPersist::default(),
-        timing_source,
+        &envelope,
         ExecCaps::from(max_result_rows),
         AtomicSession::default(),
     )

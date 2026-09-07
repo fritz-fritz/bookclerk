@@ -942,7 +942,11 @@ async fn load_binding_plugin_history(
     let select =
         plugin_journal_select_request(format!("binding-history-fence-{key}"), deadline_unix_ms);
     let reply = session
-        .db_execute_binding_request(key, select, Arc::clone(cancel))
+        .db_execute_binding_request(
+            key,
+            stamp_library_adapter_request(select, IsolationReq::AtomicBatch)?,
+            Arc::clone(cancel),
+        )
         .await?;
     history_from_execute_reply(&reply).map_err(|err| PluginError::message(err.to_string()))
 }
@@ -969,7 +973,11 @@ impl super::plugin_migration_apply::PluginMigrationApplyHost for BindingPluginMi
         );
         let reply = self
             .session
-            .db_execute_binding_request(self.key, select, cancel)
+            .db_execute_binding_request(
+                self.key,
+                stamp_library_adapter_request(select, IsolationReq::AtomicBatch)?,
+                cancel,
+            )
             .await?;
         history_from_execute_reply(&reply).map_err(|err| PluginError::message(err.to_string()))
     }
@@ -983,10 +991,13 @@ impl super::plugin_migration_apply::PluginMigrationApplyHost for BindingPluginMi
         self.session
             .db_execute_binding_request(
                 self.key,
-                super::plugin_migration_apply::plugin_migration_apply_request(
-                    operation_id,
-                    statements,
-                ),
+                stamp_library_adapter_request(
+                    super::plugin_migration_apply::plugin_migration_apply_request(
+                        operation_id,
+                        statements,
+                    ),
+                    IsolationReq::AtomicBatch,
+                )?,
                 cancel,
             )
             .await?;
@@ -1238,12 +1249,6 @@ impl ExternalDatabase {
         binding: &str,
         registered: &bookclerk_library::PluginMigrationSequence,
     ) -> PluginResult<()> {
-        let host = BindingPluginMigrationHost {
-            session: &self.session,
-            key,
-            owner,
-            binding,
-        };
         super::plugin_migration_apply::apply_registered_plugin_migrations(
             &host, owner, binding, registered,
         )
@@ -1262,7 +1267,11 @@ impl ExternalDatabase {
             plugin_journal_select_request(format!("binding-plugin-history-{owner}-{binding}"), 0);
         let reply = self
             .session
-            .db_execute_binding_request(key, select, cancel)
+            .db_execute_binding_request(
+                key,
+                stamp_library_adapter_request(select, IsolationReq::AtomicBatch)?,
+                cancel,
+            )
             .await?;
         history_from_execute_reply(&reply).map_err(|err| PluginError::message(err.to_string()))
     }

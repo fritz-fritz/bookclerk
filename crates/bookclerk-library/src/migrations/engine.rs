@@ -57,8 +57,7 @@ pub async fn apply_migration_plan(
     db: &DatabaseConnection,
     plan: &MigrationPlan,
 ) -> Result<SchemaState> {
-    let backend = db.get_database_backend();
-    ensure_schema_migrations(db, backend).await?;
+    ensure_schema_migrations(db).await?;
     lock_schema_slot(db, &plan.namespace).await?;
     let state = current_schema_state_in(db, HostSchemaKind::RowMarker, &plan.namespace).await?;
     let remaining = forward_steps(plan, &state)?;
@@ -87,8 +86,7 @@ pub async fn downgrade_migration_plan(
             "cannot downgrade to a negative schema version".into(),
         ));
     }
-    let backend = db.get_database_backend();
-    ensure_schema_migrations(db, backend).await?;
+    ensure_schema_migrations(db).await?;
     lock_schema_slot(db, &plan.namespace).await?;
     let state = current_schema_state_in(db, HostSchemaKind::RowMarker, &plan.namespace).await?;
     let downs = reverse_steps(plan, &state, to_version)?;
@@ -376,30 +374,40 @@ fn slot_lock_sql(namespace: &str) -> Vec<String> {
 
 /// Takes the `schema:{namespace}` serialization slot before walking steps.
 async fn lock_schema_slot(db: &DatabaseConnection, namespace: &str) -> Result<()> {
-    match run_atomic_ddl(
-        db,
-        &format!("schema-lock-{namespace}"),
-        slot_lock_sql(namespace),
-    )
-    .await
-    {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let msg = err.to_string().to_ascii_lowercase();
-            if msg.contains("db_serialization_slots")
-                && (msg.contains("no such table")
-                    || msg.contains("does not exist")
-                    || msg.contains("no such relation"))
-            {
-                Err(LibraryError::Schema(format!(
-                    "schema apply for namespace `{namespace}` requires db_serialization_slots \
-                     (apply binding bootstrap first): {err}"
-                )))
-            } else {
-                Err(err)
+    let mut delay_ms = 20u64;
+    for attempt in 0..8 {
+        match run_atomic_ddl(
+            db,
+            &format!("schema-lock-{namespace}"),
+            slot_lock_sql(namespace),
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                let msg = err.to_string().to_ascii_lowercase();
+                if msg.contains("db_serialization_slots")
+                    && (msg.contains("no such table")
+                        || msg.contains("does not exist")
+                        || msg.contains("no such relation"))
+                {
+                    return Err(LibraryError::Schema(format!(
+                        "schema apply for namespace `{namespace}` requires db_serialization_slots \
+                         (apply binding bootstrap first): {err}"
+                    )));
+                }
+                if err.is_schema_apply_retryable() && attempt + 1 < 8 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2).min(250);
+                    continue;
+                }
+                return Err(err);
             }
         }
     }
+    Err(LibraryError::Schema(format!(
+        "schema apply for namespace `{namespace}` exhausted slot-lock retries"
+    )))
 }
 
 /// Runs `stmts` as one typed atomic on the binding catalog (no host type env).

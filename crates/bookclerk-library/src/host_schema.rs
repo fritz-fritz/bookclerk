@@ -386,7 +386,7 @@ where
 {
     let rows = conn
         .query_all_raw(bookclerk_db_exec::canonical_statement(
-            &schema_migrations_select_sql(namespace),
+            schema_migrations_select_sql(namespace),
             std::iter::empty::<sea_orm::Value>(),
         ))
         .await
@@ -411,9 +411,10 @@ async fn query_schema_migration_rows(
     db: &DatabaseConnection,
     namespace: &str,
 ) -> std::result::Result<Vec<QueryResult>, sea_orm::DbErr> {
+    let sql = schema_migrations_select_sql(namespace);
     bookclerk_db_exec::query_canonical(
         db,
-        &schema_migrations_select_sql(namespace),
+        &sql,
         std::iter::empty::<sea_orm::Value>(),
     )
     .await
@@ -885,7 +886,7 @@ where
     }
     let rows = conn
         .query_all_raw(bookclerk_db_exec::canonical_statement(
-            &schema_migrations_select_sql(BOOKCLERK_SCHEMA_NAMESPACE),
+            schema_migrations_select_sql(BOOKCLERK_SCHEMA_NAMESPACE),
             std::iter::empty::<sea_orm::Value>(),
         ))
         .await
