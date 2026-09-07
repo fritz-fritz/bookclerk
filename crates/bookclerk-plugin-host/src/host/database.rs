@@ -38,7 +38,9 @@ use crate::jail::plugin_data_dir;
 use crate::rpc_session::{PluginSession, OPERATOR_ACCOUNT};
 use crate::{PluginError, Result as PluginResult};
 use bookclerk_library::{
-    atomic_status, binding_bootstrap_plan, DbAtomicParams, SchemaState, SCHEMA_MIGRATIONS_DDL,
+    atomic_status, binding_bootstrap_plan, remaining_upgrade_batches, schema_session_matches,
+    sql_string_literal, DbAtomicParams, MigrationPlan, SchemaState, BOOKCLERK_SCHEMA_NAMESPACE,
+    SCHEMA_MIGRATIONS_DDL,
 };
 
 /// External database backend spawned for `[database].plugin`.
@@ -436,6 +438,10 @@ struct BindingGuestDatabase {
     cancel: Arc<AtomicBool>,
     /// Host lease deadline (`deadlineUnixMs`); `0` means unlimited.
     host_deadline_unix_ms: u64,
+    /// Plugin ledger namespace (plugin id).
+    plugin_namespace: String,
+    /// Plugin schema observed when this session was opened.
+    expected_plugin_schema: SchemaState,
 }
 
 #[async_trait(?Send)]
@@ -449,6 +455,17 @@ impl GuestDatabase for BindingGuestDatabase {
         }
         request.deadline_unix_ms =
             capped_binding_deadline(request.deadline_unix_ms, self.host_deadline_unix_ms);
+        let observed = load_binding_plugin_schema_state(
+            &self.session,
+            &self.key,
+            &self.plugin_namespace,
+            &self.cancel,
+            request.deadline_unix_ms,
+        )
+        .await
+        .map_err(host_err_to_abi)?;
+        schema_session_matches(&self.expected_plugin_schema, &observed)
+            .map_err(|err| AbiPluginError::internal(err.to_string()))?;
         let env = load_binding_sql_type_env(
             &self.session,
             &self.key,
@@ -779,7 +796,12 @@ fn binding_schema_state_from_reply(reply: &ExecuteReply) -> PluginResult<SchemaS
                 }
                 unreleased = Some((version, checksum));
             }
-            "frozen" => frozen = Some((version, checksum)),
+            "frozen" => {
+                frozen = match frozen {
+                    Some((v, _)) if v >= version => frozen,
+                    _ => Some((version, checksum)),
+                };
+            }
             other => {
                 return Err(PluginError::message(format!(
                     "unrecognized binding schema_migrations.state `{other}`"
@@ -797,6 +819,59 @@ fn binding_schema_state_from_reply(reply: &ExecuteReply) -> PluginResult<SchemaS
         return Ok(SchemaState::Frozen { version, checksum });
     }
     Ok(SchemaState::Uninitialized)
+}
+
+/// Proven plugin plan from the installed artifact, or an empty plan.
+fn installed_plugin_plan(config: &Config, owner_plugin_id: &str) -> PluginResult<MigrationPlan> {
+    if owner_plugin_id == BOOKCLERK_SCHEMA_NAMESPACE {
+        return Err(PluginError::message(format!(
+            "plugin id `{BOOKCLERK_SCHEMA_NAMESPACE}` is reserved for host schema namespace"
+        )));
+    }
+    let discovered = crate::discover_plugins(config)?;
+    if let Some(plugin) = discovered
+        .into_iter()
+        .find(|p| p.manifest.id == owner_plugin_id)
+    {
+        if let Some(plan) = plugin.migration_plan {
+            return Ok(plan);
+        }
+    }
+    MigrationPlan::try_new(owner_plugin_id, Vec::new())
+        .map_err(|err| PluginError::message(err.to_string()))
+}
+
+/// Re-reads plugin-namespace schema state for stale-session fencing.
+async fn load_binding_plugin_schema_state(
+    session: &PluginSession,
+    key: &str,
+    namespace: &str,
+    cancel: &Arc<AtomicBool>,
+    deadline_unix_ms: u64,
+) -> PluginResult<SchemaState> {
+    if cancel.load(Ordering::SeqCst) {
+        return Err(PluginError::message("fence lost"));
+    }
+    let select = ExecuteRequest {
+        operation_id: format!("binding-schema-fence-{key}"),
+        request_hash: String::new(),
+        deadline_unix_ms,
+        statements: vec![TypedDbStatement {
+            sql: format!(
+                "SELECT version, state, checksum FROM schema_migrations \
+                 WHERE namespace = {}",
+                sql_string_literal(namespace)
+            ),
+            parameters: Vec::new(),
+            kind: DbPlanStatementKind::Select,
+            max_rows: 64,
+            result_selection: DbResultSelection::Rows,
+        }],
+    };
+    let reply = session
+        .db_execute_binding_request(key, select, Arc::clone(cancel))
+        .await?;
+    binding_schema_state_from_reply(&reply)
 }
 
 impl ExternalDatabase {
@@ -877,8 +952,15 @@ impl ExternalDatabase {
             }
             self.ensure_binding_host_schema(&key, owner_plugin_id, binding)
                 .await?;
+            let plan = installed_plugin_plan(config, owner_plugin_id)?;
+            self.ensure_plugin_migration_plan(&key, owner_plugin_id, binding, &plan)
+                .await?;
+            let expected_plugin_schema = self
+                .binding_namespace_state(&key, owner_plugin_id, binding, &plan.namespace)
+                .await?;
             let session = Arc::clone(&self.session);
             let factory_key = key.clone();
+            let plugin_namespace = plan.namespace.clone();
             let factory: crate::rpc_session::GuestDatabaseFactory =
                 Arc::new(move |cancel, host_deadline_unix_ms| {
                     Arc::new(BindingGuestDatabase {
@@ -887,6 +969,8 @@ impl ExternalDatabase {
                         caps: binding_caps.clone(),
                         cancel,
                         host_deadline_unix_ms,
+                        plugin_namespace: plugin_namespace.clone(),
+                        expected_plugin_schema: expected_plugin_schema.clone(),
                     })
                 });
             out.push((binding.clone(), factory));
@@ -969,7 +1053,11 @@ impl ExternalDatabase {
             request_hash: String::new(),
             deadline_unix_ms: 0,
             statements: vec![TypedDbStatement {
-                sql: "SELECT version, state, checksum FROM schema_migrations".into(),
+                sql: format!(
+                    "SELECT version, state, checksum FROM schema_migrations \
+                     WHERE namespace = {}",
+                    sql_string_literal(BOOKCLERK_SCHEMA_NAMESPACE)
+                ),
                 parameters: Vec::new(),
                 kind: DbPlanStatementKind::Select,
                 max_rows: 64,
@@ -994,6 +1082,67 @@ impl ExternalDatabase {
             )
             .await?;
         Ok(())
+    }
+
+    /// Applies remaining plugin-owned frozen steps after host bootstrap.
+    ///
+    /// Restore uses [`Self::open_binding_seaorm`] with `provision` and does
+    /// **not** call this; the next ordinary open walks forward.
+    async fn ensure_plugin_migration_plan(
+        &self,
+        key: &str,
+        owner: &str,
+        binding: &str,
+        plan: &MigrationPlan,
+    ) -> PluginResult<()> {
+        let state = self
+            .binding_namespace_state(key, owner, binding, &plan.namespace)
+            .await?;
+        let batches = remaining_upgrade_batches(plan, &state)
+            .map_err(|err| PluginError::message(err.to_string()))?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        for (i, stmts) in batches.into_iter().enumerate() {
+            self.session
+                .db_execute_binding_request(
+                    key,
+                    binding_sql_request(format!("plugin-migrate-{owner}-{binding}-{i}"), stmts),
+                    Arc::clone(&cancel),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Reads namespaced [`SchemaState`] from the binding ledger.
+    async fn binding_namespace_state(
+        &self,
+        key: &str,
+        owner: &str,
+        binding: &str,
+        namespace: &str,
+    ) -> PluginResult<SchemaState> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let select = ExecuteRequest {
+            operation_id: format!("binding-schema-state-{namespace}-{owner}-{binding}"),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![TypedDbStatement {
+                sql: format!(
+                    "SELECT version, state, checksum FROM schema_migrations \
+                     WHERE namespace = {}",
+                    sql_string_literal(namespace)
+                ),
+                parameters: Vec::new(),
+                kind: DbPlanStatementKind::Select,
+                max_rows: 64,
+                result_selection: DbResultSelection::Rows,
+            }],
+        };
+        let reply = self
+            .session
+            .db_execute_binding_request(key, select, cancel)
+            .await?;
+        binding_schema_state_from_reply(&reply)
     }
 
     /// Backend-native default unit for one `(plugin, binding)` pair.

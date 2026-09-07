@@ -52,4 +52,10 @@ pub(super) const BINDING_BOOTSTRAP_OPS: &[MigrationOp] = &[
         PRIMARY KEY (kind, name)
     )",
     ),
+    MigrationOp::Schema(
+        r"CREATE TABLE IF NOT EXISTS db_serialization_slots (
+        slot_key TEXT PRIMARY KEY NOT NULL,
+        bump INTEGER NOT NULL DEFAULT 0
+    )",
+    ),
 ];

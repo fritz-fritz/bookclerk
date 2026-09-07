@@ -19,8 +19,9 @@ use crate::error::{LibraryError, Result};
 #[cfg(test)]
 use crate::migrations::MigrationOp;
 use crate::migrations::{
-    host_migration_plan, unreleased_checksum, unreleased_ops, unreleased_state_marker_sql,
-    HostMigrationStep, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
+    frozen_marker_delete_sql, frozen_marker_sql, host_migration_plan, sql_string_literal,
+    unreleased_checksum, unreleased_ops, unreleased_state_marker_sql, HostMigrationStep,
+    BOOKCLERK_SCHEMA_NAMESPACE, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
 };
 use crate::schema_state::{SchemaState, SCHEMA_STATE_FROZEN, SCHEMA_STATE_UNRELEASED};
 use crate::schema_walk::SchemaWalk;
@@ -321,7 +322,7 @@ where
     }
 }
 
-/// Reads explicit [`SchemaState`]. Never treats pragma `0` as applied.
+/// Reads explicit [`SchemaState`] in the Bookclerk host/bootstrap namespace.
 ///
 /// # Errors
 ///
@@ -330,15 +331,34 @@ pub async fn current_schema_state(
     db: &DatabaseConnection,
     kind: HostSchemaKind,
 ) -> Result<SchemaState> {
+    current_schema_state_in(db, kind, BOOKCLERK_SCHEMA_NAMESPACE).await
+}
+
+/// Reads explicit [`SchemaState`] for one ledger `namespace`.
+///
+/// Host library and binding bootstrap use [`BOOKCLERK_SCHEMA_NAMESPACE`].
+/// Plugin-owned plans use the plugin id. Frozen checksums are verified against
+/// [`host_migration_plan`] only for the Bookclerk namespace; plugin callers
+/// verify against their installed plan.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Schema`] on malformed, partial, or contradictory markers.
+pub async fn current_schema_state_in(
+    db: &DatabaseConnection,
+    kind: HostSchemaKind,
+    namespace: &str,
+) -> Result<SchemaState> {
     let backend = db.get_database_backend();
-    let rows = match query_schema_migration_rows(db, backend).await {
+    let host_ns = namespace == BOOKCLERK_SCHEMA_NAMESPACE;
+    let rows = match query_schema_migration_rows(db, backend, namespace).await {
         Ok(rows) => rows,
         Err(_) => {
-            if host_tables_present(db, backend).await? {
+            if host_ns && host_tables_present(db, backend).await? {
                 // A peer may hold a schema lock, or have just committed. Re-read
                 // before treating "tables without a readable marker" as durable.
-                if let Ok(rows) = query_schema_migration_rows(db, backend).await {
-                    if let Some(state) = schema_state_from_migration_rows(rows)? {
+                if let Ok(rows) = query_schema_migration_rows(db, backend, namespace).await {
+                    if let Some(state) = schema_state_from_migration_rows(rows, host_ns)? {
                         return Ok(state);
                     }
                 }
@@ -348,7 +368,7 @@ pub async fn current_schema_state(
                         .into(),
                 ));
             }
-            if kind == HostSchemaKind::PragmaMarker {
+            if host_ns && kind == HostSchemaKind::PragmaMarker {
                 let pragma = sqlite_user_version(db).await?;
                 if pragma > 0 {
                     return Err(LibraryError::Schema(format!(
@@ -361,15 +381,15 @@ pub async fn current_schema_state(
         }
     };
 
-    if let Some(state) = schema_state_from_migration_rows(rows)? {
+    if let Some(state) = schema_state_from_migration_rows(rows, host_ns)? {
         return Ok(state);
     }
-    if host_tables_present(db, backend).await? {
+    if host_ns && host_tables_present(db, backend).await? {
         // Concurrent apply: the empty SELECT can lose to a peer COMMIT that
         // writes host tables and the marker together. Re-read the marker
         // before fail-closed.
-        if let Ok(rows) = query_schema_migration_rows(db, backend).await {
-            if let Some(state) = schema_state_from_migration_rows(rows)? {
+        if let Ok(rows) = query_schema_migration_rows(db, backend, namespace).await {
+            if let Some(state) = schema_state_from_migration_rows(rows, host_ns)? {
                 return Ok(state);
             }
         }
@@ -378,7 +398,7 @@ pub async fn current_schema_state(
                 .into(),
         ));
     }
-    if kind == HostSchemaKind::PragmaMarker {
+    if host_ns && kind == HostSchemaKind::PragmaMarker {
         let pragma = sqlite_user_version(db).await?;
         if pragma > 0 {
             return Err(LibraryError::Schema(format!(
@@ -400,11 +420,23 @@ pub(crate) async fn schema_state_from_conn<C>(conn: &C) -> Result<SchemaState>
 where
     C: ConnectionTrait,
 {
+    schema_state_from_conn_in(conn, BOOKCLERK_SCHEMA_NAMESPACE).await
+}
+
+/// Reads [`SchemaState`] for `namespace` on an already-open connection.
+///
+/// # Errors
+///
+/// Returns when the marker table is missing, unreadable, or has no state row.
+pub(crate) async fn schema_state_from_conn_in<C>(conn: &C, namespace: &str) -> Result<SchemaState>
+where
+    C: ConnectionTrait,
+{
     let backend = conn.get_database_backend();
     let rows = conn
         .query_all_raw(Statement::from_string(
             backend,
-            "SELECT version, state, checksum FROM schema_migrations",
+            schema_migrations_select_sql(namespace),
         ))
         .await
         .map_err(|err| {
@@ -412,26 +444,48 @@ where
                 "backup cannot re-read schema_migrations inside the capture transaction: {err}"
             ))
         })?;
-    schema_state_from_migration_rows(rows)?.ok_or_else(|| {
-        LibraryError::Schema("backup capture found schema_migrations without a state marker".into())
-    })
+    match schema_state_from_migration_rows(rows, namespace == BOOKCLERK_SCHEMA_NAMESPACE)? {
+        Some(state) => Ok(state),
+        None if namespace == BOOKCLERK_SCHEMA_NAMESPACE => Err(LibraryError::Schema(
+            "backup capture found schema_migrations without a state marker \
+             for namespace `bookclerk`"
+                .into(),
+        )),
+        None => Ok(SchemaState::Uninitialized),
+    }
 }
 
-/// Loads `schema_migrations` version/state/checksum rows.
+/// Loads namespaced `schema_migrations` version/state/checksum rows.
 async fn query_schema_migration_rows(
     db: &DatabaseConnection,
     backend: DbBackend,
+    namespace: &str,
 ) -> std::result::Result<Vec<QueryResult>, sea_orm::DbErr> {
     db.query_all_raw(Statement::from_string(
         backend,
-        "SELECT version, state, checksum FROM schema_migrations",
+        schema_migrations_select_sql(namespace),
     ))
     .await
 }
 
+/// `SELECT` for one ledger namespace.
+fn schema_migrations_select_sql(namespace: &str) -> String {
+    format!(
+        "SELECT version, state, checksum FROM schema_migrations WHERE namespace = {}",
+        sql_string_literal(namespace)
+    )
+}
+
 /// Interprets `schema_migrations` rows. `Ok(None)` means the table exists but
 /// has no unreleased or frozen marker.
-fn schema_state_from_migration_rows(rows: Vec<QueryResult>) -> Result<Option<SchemaState>> {
+///
+/// When `verify_host_plan` is true, frozen checksums are checked against
+/// [`host_migration_plan`]. Plugin namespaces skip that check; the shared
+/// engine verifies the installed plugin plan.
+fn schema_state_from_migration_rows(
+    rows: Vec<QueryResult>,
+    verify_host_plan: bool,
+) -> Result<Option<SchemaState>> {
     let mut unreleased = None;
     let mut frozen: Vec<(i64, String)> = Vec::new();
     for row in rows {
@@ -505,7 +559,9 @@ fn schema_state_from_migration_rows(rows: Vec<QueryResult>) -> Result<Option<Sch
             _ => {}
         }
         let found: HashMap<i64, String> = frozen.into_iter().collect();
-        verify_frozen_checksums(&host_migration_plan(), &found, base_version)?;
+        if verify_host_plan {
+            verify_frozen_checksums(&host_migration_plan(), &found, base_version)?;
+        }
         return Ok(Some(SchemaState::Unreleased {
             base_version,
             checksum,
@@ -518,7 +574,9 @@ fn schema_state_from_migration_rows(rows: Vec<QueryResult>) -> Result<Option<Sch
             )));
         }
         let found: HashMap<i64, String> = frozen.into_iter().collect();
-        verify_frozen_checksums(&host_migration_plan(), &found, version)?;
+        if verify_host_plan {
+            verify_frozen_checksums(&host_migration_plan(), &found, version)?;
+        }
         return Ok(Some(SchemaState::Frozen { version, checksum }));
     }
     Ok(None)
@@ -690,7 +748,9 @@ where
         match run_batch(stmts.clone()).await {
             Ok(()) => return Ok(()),
             Err(err) => match current_schema_state(db, kind).await {
-                Ok(SchemaState::Unreleased { .. }) => return Ok(()),
+                Ok(SchemaState::Unreleased {
+                    checksum: applied, ..
+                }) if applied == checksum => return Ok(()),
                 Err(state_err) if is_schema_marker_visibility_race(&state_err) => {
                     if attempt + 1 < 8 {
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -874,9 +934,9 @@ fn down_statements(kind: HostSchemaKind, step: &HostMigrationStep) -> Vec<String
     if let Some(down) = step.down {
         stmts.extend(down.iter().map(|op| op.sql().to_string()));
     }
-    stmts.push(format!(
-        "DELETE FROM schema_migrations WHERE version = {}",
-        step.version
+    stmts.push(frozen_marker_delete_sql(
+        BOOKCLERK_SCHEMA_NAMESPACE,
+        step.version,
     ));
     if kind == HostSchemaKind::PragmaMarker {
         stmts.push(format!(
@@ -889,14 +949,7 @@ fn down_statements(kind: HostSchemaKind, step: &HostMigrationStep) -> Vec<String
 
 /// `INSERT` for `schema_migrations` including checksum, app version, and timestamp.
 fn schema_migrations_insert(step: &HostMigrationStep) -> String {
-    let checksum = step.checksum();
-    let app = env!("CARGO_PKG_VERSION").replace('\'', "''");
-    let at = chrono::Utc::now().to_rfc3339().replace('\'', "''");
-    format!(
-        "INSERT INTO schema_migrations (version, state, checksum, app_version, applied_at) \
-         VALUES ({}, '{SCHEMA_STATE_FROZEN}', '{checksum}', '{app}', '{at}')",
-        step.version
-    )
+    frozen_marker_sql(BOOKCLERK_SCHEMA_NAMESPACE, step.version, &step.checksum())
 }
 
 /// Refuses when a stored checksum is missing, unreadable, or does not match
@@ -916,7 +969,7 @@ where
     let rows = conn
         .query_all_raw(Statement::from_string(
             backend,
-            "SELECT version, state, checksum FROM schema_migrations",
+            schema_migrations_select_sql(BOOKCLERK_SCHEMA_NAMESPACE),
         ))
         .await
         .map_err(|err| {
@@ -1207,7 +1260,10 @@ async fn schema_versions_applied(
     let rows = db
         .query_all_raw(Statement::from_string(
             backend,
-            "SELECT version FROM schema_migrations",
+            format!(
+                "SELECT version FROM schema_migrations WHERE namespace = {}",
+                sql_string_literal(BOOKCLERK_SCHEMA_NAMESPACE)
+            ),
         ))
         .await
         .map_err(LibraryError::Orm)?;
@@ -1721,8 +1777,8 @@ mod tests {
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "INSERT INTO schema_migrations (version, state, checksum, app_version, applied_at) \
-             VALUES (99, 'frozen', 'abc', 'test', 't')",
+            "INSERT INTO schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
+             VALUES ('bookclerk', 99, 'frozen', 'abc', 'test', 't')",
         )
         .await
         .expect("fake frozen");
@@ -1756,8 +1812,8 @@ mod tests {
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "INSERT INTO schema_migrations (version, state, checksum, app_version, applied_at) \
-             VALUES (1, 'frozen', 'f1', 'test', 't')",
+            "INSERT INTO schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
+             VALUES ('bookclerk', 1, 'frozen', 'f1', 'test', 't')",
         )
         .await
         .expect("frozen v1");
@@ -1839,8 +1895,8 @@ mod tests {
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "INSERT INTO schema_migrations (version, state, checksum, app_version, applied_at) \
-             VALUES (1, 'unreleased', 'other', 'test', 't')",
+            "INSERT INTO schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
+             VALUES ('bookclerk', 1, 'unreleased', 'other', 'test', 't')",
         )
         .await
         .expect("second unreleased");

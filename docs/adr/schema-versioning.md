@@ -48,11 +48,13 @@ Malformed / missing checksum / contradictory markers are a failure class,
 not a state to continue from. Do not infer uninitialized or unreleased from
 integer `0` alone.
 
-On disk, `schema_migrations` stores `state` (`unreleased` | `frozen`),
-`version`, `checksum`, `app_version`, and `applied_at`. For unreleased rows,
-`version` **is** the frozen base (`0` before any freeze). Host logic keys
-off `state` plus that base. `PRAGMA user_version` is a frozen-version cache
-only.
+On disk, `schema_migrations` stores `namespace`, `state` (`unreleased` |
+`frozen`), `version`, `checksum`, `app_version`, and `applied_at`. Primary
+key is `(namespace, state, version)`. Host library and Bookclerk-owned
+binding bootstrap use namespace `bookclerk`. Plugin-owned evolution in a
+binding uses the plugin id. For unreleased rows, `version` **is** the frozen
+base (`0` before any freeze). Host logic keys off `state` plus that base.
+`PRAGMA user_version` is a frozen-version cache only.
 
 `bookclerk db version` prints `uninitialized`,
 `unreleased@base<n>+<checksum>`, or `frozen@<version>+<checksum>`.
@@ -176,9 +178,11 @@ change journal until that design lands.
 ### Host-mediated plugin schema (not a plugin migration framework)
 
 Plugin bindings may change schema only as **admitted BookclerkSQL** inside the
-plugin’s binding namespace (`GuestSqlPolicy::binding_owned`). The host
-authorizes, typechecks, and records binding `SchemaState` in that binding’s
-own `schema_migrations` table (same row shape as the library).
+plugin’s binding namespace. Ordinary `execute` uses
+`GuestSqlPolicy::binding_owned` (DML/query). Frozen plan apply uses
+`GuestSqlPolicy::binding_migration` (bounded `CREATE`/`DROP IF [NOT] EXISTS`).
+The host authorizes, typechecks, and records binding `SchemaState` in that
+binding’s own `schema_migrations` table (same row shape as the library).
 
 Host-owned binding bootstrap is [`binding_bootstrap_ops`](../../crates/bookclerk-library/src/migrations.rs)
 (`Schema` ops: receipts + SQL catalog). `BINDING_SCHEMA_VERSION = 0` until a
@@ -191,15 +195,26 @@ binding freeze. Connect:
 | Mismatched checksum / unexpected frozen | **Fail closed** (restore or drop the binding) |
 
 There is **no** backend-native escape hatch (`pg_dump`, `VACUUM INTO`, D1 REST
-migrate, sqlite `.dump`). Plugin-owned `CREATE TABLE` / DML is host-mediated
-BookclerkSQL and does **not** bump this host-owned binding `SchemaState`.
-Restore writes captured rows (including `schema_migrations`) and does **not**
-run plugin migrations or re-apply bootstrap when the restored marker matches.
+migrate, sqlite `.dump`). Plugin-owned schema evolution uses the **same**
+migration engine as host library and binding bootstrap: an ordered
+[`MigrationPlan`](../../crates/bookclerk-library/src/migrations/plan.rs) of
+proven BookclerkSQL `up` / optional `down` ops. Plugin plans ship as
+immutable package metadata (`plugin.toml` `migration_plan = "migrations.toml"`;
+SHA-256 of the raw installed file). Namespace in the binding ledger is always
+the plugin id — never `BINDING_SCHEMA_VERSION` and never a TOML override to
+`bookclerk`. Ordinary binding `execute` is query/DML;
+`CREATE`/`ALTER`/`DROP` is admitted only in a migration execution context.
+
+Restore writes captured logical schema/data/migration ledger **exactly** and
+does **not** run migrations inside the destructive restore transaction. After
+restore completes, ordinary binding open may walk the installed plan forward;
+if the installed plugin cannot understand restored state, open fails closed.
 
 Host schema and plugin schema are separate apply units. Each frozen/unreleased
-**apply unit** is one atomic `ExecuteRequest`. If an adapter cannot perform a
-schema transition atomically, it must not advertise the capability (D1 already
-uses HTTP batch; backup flags stay off).
+**apply unit** is one atomic `ExecuteRequest` (serialization slot + ops +
+marker). If an adapter cannot perform a schema transition atomically, it must
+not advertise the capability (D1 already uses HTTP batch; backup flags stay
+off).
 
 ### Migration ops (still unreleased)
 
@@ -226,15 +241,20 @@ Invariants (locked with synthetic plans, not a v1 freeze):
 
 - Integer version order; host vs plugin namespaces; fail closed on
   contradictory `schema_migrations` rows.
-- Retry uniqueness / duplicate-object / unavailable after re-read; FK / CHECK /
-  NOT NULL are not races.
+- Retry uniqueness / duplicate-object / unavailable after re-read; matching
+  version+checksum is success; FK / CHECK / NOT NULL are not races.
 - Crash: marker not visible ⇒ retry the same unit.
-- Forward-only on library open; rolling binaries fail closed on unknown newer
-  frozen or mismatched unreleased checksums.
-- Multi-node: portable `db_serialization_slots` (no `pg_advisory_xact_lock`
-  in host).
-- Backup capture is the recorded `SchemaState` statement list; restore into a
-  newer app stays fail-closed until walk/migrate is an explicit operator action.
+- Forward-only on library/binding open; rolling binaries fail closed on
+  unknown newer frozen or mismatched checksums.
+- Multi-node: portable `db_serialization_slots` keyed `schema:{namespace}`
+  (no `pg_advisory_xact_lock` in host). Stale sessions re-check plugin
+  schema at execute boundaries.
+- Backup capture records plugin namespace identity/version/checksum; restore
+  into a newer app stays fail-closed until walk/migrate is an ordinary open
+  (not inside the restore transaction).
+- Oldest frozen host revision is derived from `host_migration_plan()`
+  (`None` while the plan is empty). There is no independent
+  `MIN_SUPPORTED_SCHEMA_VERSION` constant.
 
 ### Last-reversible CLI
 
@@ -251,31 +271,29 @@ With an empty frozen plan, schema-version downgrade is a no-op. Time-based
 - Transactional atomicity across library DB + independent plugin DBs
 - Using semver as `schema_migrations.version`
 
-### Deferred: plugin-owned schema migration framework
+### Shared plugin migration engine
 
-Host-owned **binding bootstrap** (`binding_bootstrap_ops`,
-`BINDING_SCHEMA_VERSION = 0`, binding `SchemaState`) is implemented.
-Plugin-owned schema evolution **beyond** that bootstrap is **not** a
-shipping framework yet. Plugins still speak only BookclerkSQL; there is
-no backend-native migration escape hatch.
+Host library frozen steps, Bookclerk-owned binding bootstrap, and plugin-owned
+binding evolution share one apply engine (`MigrationPlan` / `MigrationStep` /
+`PlanOp::{Schema,Data}`). Plugin plans are frozen steps starting at version 1;
+they never use Unreleased and never reuse `BINDING_SCHEMA_VERSION`.
 
-Until a dedicated plugin migration ABI exists, these invariants stay
-explicit rather than implied:
-
-| Concern | Status |
+| Concern | Rule |
 | --- | --- |
-| Per-plugin / per-binding schema version | Host bootstrap only (`SchemaState` in the binding’s `schema_migrations`). Plugin-owned revision numbers are **not** a host API. |
-| Ordered progression | Host bootstrap is one atomic apply unit. Plugin-owned ordered steps are **deferred**. |
-| Multi-node concurrency | Host uses portable `db_serialization_slots`. Plugin-owned migrators must not invent engine advisory locks. |
-| Retries / interrupted recovery | Host: uniqueness / unavailable after re-read; marker not visible ⇒ retry the same unit. Plugin-owned: **deferred** (must follow the same fail-closed marker rule). |
-| Idempotence | Host bootstrap uses `IF NOT EXISTS` / `INSERT OR IGNORE`. Plugin-owned steps must be idempotent the same way when the framework lands. |
-| Upgrade | Mismatched unreleased checksum or unexpected frozen binding ⇒ **fail closed**. |
-| Downgrade / unsupported old plugin | **Fail closed**; restore a recovery point. No automatic down-migration of plugin-owned schema. |
-| Restore | Restore captured logical rows (including binding `schema_migrations`). **Do not** run plugin migrations or re-apply bootstrap when the restored marker matches. |
+| Per-plugin / per-binding schema version | Namespaced `schema_migrations` (`bookclerk` vs plugin id). |
+| Ordered progression | Immutable companion `migrations.toml`; host proves BookclerkSQL. |
+| DDL outside a plan | Fail closed. Ordinary binding execute is DML/query only. |
+| Multi-node concurrency | `lock_serialization_slot("schema:{namespace}")`; re-read under the fence. |
+| Retries / interrupted recovery | Uniqueness / unavailable after re-read; matching version+checksum ⇒ success; absent marker ⇒ retry same step; contradictory checksum/version ⇒ fail closed. |
+| Upgrade | Installed plan newer than stored state walks forward. Stored state newer than the installed plan ⇒ fail closed. |
+| Downgrade | Never automatic. Explicit only when every traversed step has a validated `down`; otherwise restore a recovery point. |
+| Restore | Restore captured ledger exactly. Do not migrate inside the restore transaction. Next ordinary open may forward-walk. |
+| Stale session | Binding execute re-checks expected plugin schema revision/checksum. |
 
-Do not treat guest `CREATE TABLE` inside a binding as an implicit host
-schema version bump. That remains `GuestSqlPolicy::binding_owned` SQL,
-not a migration plan.
+Acceptance includes crash/retry, two nodes racing the same upgrade, old-session
+fencing, newer-schema/older-plugin rejection, reversible and irreversible
+downgrade, and backup → cross-adapter restore → forward-migrate (SQLite /
+Postgres; D1 does not advertise backup flags).
 
 ## Consequences
 

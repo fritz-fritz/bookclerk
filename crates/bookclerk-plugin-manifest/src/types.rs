@@ -465,6 +465,12 @@ pub struct PluginManifest {
     /// Optional Bookclerk-as-IdP client templates (`[[oidc.clients]]`).
     #[serde(default, skip_serializing_if = "OidcManifest::is_empty")]
     pub oidc: OidcManifest,
+    /// Relative path to a companion `migrations.toml` under the plugin root.
+    ///
+    /// Bytes of that file are digested at discovery. SQL is proven by the
+    /// host migration engine; this crate only records the path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_plan: Option<String>,
 }
 
 impl Eq for PluginManifest {}
@@ -717,6 +723,14 @@ impl PluginManifest {
                         "plugin.toml: capabilities.bindings.databases entry `{name}` is duplicated"
                     )));
                 }
+            }
+        }
+        if let Some(plan) = &self.migration_plan {
+            crate::validate_migration_plan_path(plan)?;
+            if self.capabilities.bindings.databases.is_empty() {
+                return Err(Error::message(
+                    "plugin.toml: migration_plan requires capabilities.bindings.databases",
+                ));
             }
         }
         if !self.capabilities.events.subscriptions.is_empty() {
@@ -1149,6 +1163,58 @@ databases = {list}
         let many = manifest(r#"["A1","A2","A3","A4","A5","A6","A7","A8","A9"]"#)
             .expect_err("over max bindings");
         assert!(many.to_string().contains("max is"), "{many}");
+    }
+
+    #[test]
+    fn migration_plan_requires_databases_and_relative_path() {
+        let err = PluginManifest::parse(
+            r#"
+api_version = 2
+id = "demo"
+kind = "integration"
+runtime = "native"
+command = "./demo"
+migration_plan = "migrations.toml"
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .expect_err("plan without databases");
+        assert!(err.to_string().contains("databases"), "{err}");
+
+        let err = PluginManifest::parse(
+            r#"
+api_version = 2
+id = "demo"
+kind = "integration"
+runtime = "native"
+command = "./demo"
+migration_plan = "../escape.toml"
+[capabilities.network]
+mode = "deny"
+[capabilities.bindings]
+databases = ["DB"]
+"#,
+        )
+        .expect_err("parent path");
+        assert!(err.to_string().contains(".."), "{err}");
+
+        let ok = PluginManifest::parse(
+            r#"
+api_version = 2
+id = "demo"
+kind = "integration"
+runtime = "native"
+command = "./demo"
+migration_plan = "migrations.toml"
+[capabilities.network]
+mode = "deny"
+[capabilities.bindings]
+databases = ["DB"]
+"#,
+        )
+        .expect("valid companion path");
+        assert_eq!(ok.migration_plan.as_deref(), Some("migrations.toml"));
     }
 
     #[test]

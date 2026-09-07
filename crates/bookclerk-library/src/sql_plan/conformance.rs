@@ -1490,7 +1490,7 @@ async fn run_postgres_binding(
     let env = bookclerk_db_exec::load_sql_type_env(db)
         .await
         .expect("load binding catalog");
-    let policy = bookclerk_plugin_abi::GuestSqlPolicy::binding_owned().with_sql_types(env);
+    let policy = bookclerk_plugin_abi::GuestSqlPolicy::binding_migration().with_sql_types(env);
     let exec_caps = caps.clone();
     super::execute_guest_atomic_with(request, &caps, &policy, |envelope| async move {
         let deadline =

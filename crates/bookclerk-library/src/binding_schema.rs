@@ -11,10 +11,11 @@
 //! unavailable after re-read of durable state. Concurrent openers that miss
 //! the marker retry the same unit.
 //!
-//! Plugin-owned tables are admitted BookclerkSQL in the binding namespace and
-//! do **not** bump this host-owned [`SchemaState`]. Restore writes captured
-//! rows (including `schema_migrations`) and does **not** run plugin
-//! migrations.
+//! Plugin-owned tables are admitted BookclerkSQL in the plugin ledger
+//! namespace via the shared [`crate::migrations::apply_migration_plan`]
+//! engine and do **not** bump host-owned bootstrap [`SchemaState`]. Restore
+//! writes captured rows (including `schema_migrations`) and does **not**
+//! run plugin migrations inside the restore transaction.
 
 use std::time::Duration;
 
@@ -31,7 +32,7 @@ use crate::migrations::{
     SCHEMA_MIGRATIONS_DDL,
 };
 use crate::schema_state::SchemaState;
-use crate::sql_plan::execute_typed_on;
+use crate::sql_plan::execute_typed_on_binding;
 
 /// Statements to apply for `state`, or `None` when the binding already matches.
 ///
@@ -139,7 +140,7 @@ async fn run_binding_batch(db: &DatabaseConnection, stmts: Vec<String>) -> Resul
             })
             .collect(),
     };
-    execute_typed_on(db, &req, "schema_txn", 0).await?;
+    execute_typed_on_binding(db, &req, "schema_txn", 0).await?;
     Ok(())
 }
 

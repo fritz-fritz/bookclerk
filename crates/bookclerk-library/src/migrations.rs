@@ -41,9 +41,6 @@ pub fn latest_schema_sqlite() -> &'static str {
 /// [`crate::SchemaState`].
 pub const SCHEMA_VERSION: i64 = 0;
 
-/// Oldest frozen schema version this binary can run. Unused while the plan is empty.
-pub const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 1;
-
 /// Live development DDL derived from [`unreleased_ops`] (joined with `;\n`).
 ///
 /// Apply, checksum, and backup use the op list. This script is diagnostics,
@@ -55,13 +52,17 @@ pub fn unreleased_sql() -> &'static str {
 }
 
 /// Host bookkeeping table created before applying plan versions.
+///
+/// `namespace` separates Bookclerk-owned ledger rows (`bookclerk`) from
+/// plugin-owned frozen plans (plugin id) in the same binding database.
 pub const SCHEMA_MIGRATIONS_DDL: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
+        namespace TEXT NOT NULL,
         version INTEGER NOT NULL,
         state TEXT NOT NULL,
         checksum TEXT NOT NULL,
         app_version TEXT NOT NULL,
         applied_at TEXT NOT NULL,
-        PRIMARY KEY (state, version)
+        PRIMARY KEY (namespace, state, version)
     )";
 
 /// One admitted BookclerkSQL statement in a host migration apply unit.
@@ -96,7 +97,19 @@ impl MigrationOp {
 }
 
 mod binding_ops;
+mod engine;
+mod plan;
 mod unreleased_ops;
+
+pub use engine::{
+    apply_migration_plan, downgrade_migration_plan, remaining_upgrade_batches,
+    schema_session_matches, ApplyDirection,
+};
+pub use plan::{
+    frozen_marker_delete_sql, frozen_marker_sql, schema_slot_key, sql_string_literal,
+    unreleased_marker_sql_in, validate_schema_namespace, MigrationPlan, MigrationStep, PlanOp,
+    BOOKCLERK_SCHEMA_NAMESPACE,
+};
 
 /// One host-owned schema version in the canonical Bookclerk migration plan.
 ///
@@ -138,6 +151,22 @@ impl HostMigrationStep {
             .collect::<Vec<_>>()
             .join(";\n")
     }
+}
+
+/// Oldest frozen schema version this binary can run.
+///
+/// Derived from [`host_migration_plan`]: `None` while the plan is empty
+/// (no frozen schema versions exist). Once frozen steps exist this is the
+/// first retained step, not a separately synchronized constant.
+#[must_use]
+pub fn min_supported_schema_version() -> Option<i64> {
+    host_migration_plan().first().map(|step| step.version)
+}
+
+/// Oldest frozen version in `plan` (`None` when `plan` is empty).
+#[must_use]
+pub fn min_supported_schema_version_in(plan: &[HostMigrationStep]) -> Option<i64> {
+    plan.first().map(|step| step.version)
 }
 
 /// SHA-256 of length-prefixed migration ops (not a joined script).
@@ -308,17 +337,10 @@ pub fn unreleased_checksum() -> String {
     migration_ops_checksum(unreleased_ops(), None)
 }
 
-/// `INSERT` for an unreleased `schema_migrations` row.
+/// `INSERT` for an unreleased `schema_migrations` row in the Bookclerk namespace.
 #[must_use]
 pub fn unreleased_state_marker_sql(checksum: &str, base_version: i64) -> String {
-    let app = env!("CARGO_PKG_VERSION").replace('\'', "''");
-    let at = chrono::Utc::now().to_rfc3339().replace('\'', "''");
-    let checksum = checksum.replace('\'', "''");
-    format!(
-        "INSERT INTO schema_migrations (version, state, checksum, app_version, applied_at) \
-         VALUES ({base_version}, '{}', '{checksum}', '{app}', '{at}')",
-        crate::schema_state::SCHEMA_STATE_UNRELEASED
-    )
+    unreleased_marker_sql_in(BOOKCLERK_SCHEMA_NAMESPACE, checksum, base_version)
 }
 
 /// Proves each op is exactly one BookclerkSQL statement of the declared kind.
@@ -359,7 +381,16 @@ pub fn require_single_migration_statement(sql: &str) -> Result<String> {
 
 /// Proves one op: single packed statement, Schema/Data kind, SQL-v1 typecheck.
 fn prove_migration_op(index: usize, op: MigrationOp, env: &mut SqlTypeEnv) -> Result<()> {
-    let sql = op.sql();
+    prove_plan_sql_op(index, op.sql(), op.is_schema(), env)
+}
+
+/// Proves one op: single packed statement, Schema/Data kind, SQL-v1 typecheck.
+pub(crate) fn prove_plan_sql_op(
+    index: usize,
+    sql: &str,
+    is_schema: bool,
+    env: &mut SqlTypeEnv,
+) -> Result<()> {
     let packed = require_single_migration_statement(sql)
         .map_err(|err| LibraryError::Schema(format!("migration op {index}: {err}")))?;
     if packed != sql.trim() {
@@ -368,18 +399,15 @@ fn prove_migration_op(index: usize, op: MigrationOp, env: &mut SqlTypeEnv) -> Re
         )));
     }
     let is_ddl = statement_is_ddl(sql);
-    match op {
-        MigrationOp::Schema(_) if !is_ddl => {
-            return Err(LibraryError::Schema(format!(
-                "migration op {index} Schema variant is not admitted DDL"
-            )));
-        }
-        MigrationOp::Data(_) if is_ddl => {
-            return Err(LibraryError::Schema(format!(
-                "migration op {index} Data variant is admitted DDL"
-            )));
-        }
-        _ => {}
+    if is_schema && !is_ddl {
+        return Err(LibraryError::Schema(format!(
+            "migration op {index} Schema variant is not admitted DDL"
+        )));
+    }
+    if !is_schema && is_ddl {
+        return Err(LibraryError::Schema(format!(
+            "migration op {index} Data variant is admitted DDL"
+        )));
     }
     let req = ExecuteRequest {
         operation_id: format!("prove-migration-op-{index}"),
@@ -396,7 +424,7 @@ fn prove_migration_op(index: usize, op: MigrationOp, env: &mut SqlTypeEnv) -> Re
     typecheck_execute_request(&req, env).map_err(|err| {
         LibraryError::Schema(format!("migration op {index} failed typecheck: {err}"))
     })?;
-    if op.is_schema() {
+    if is_schema {
         apply_schema_sql_to_env(env, sql);
     }
     Ok(())
@@ -600,6 +628,7 @@ mod tests {
     fn host_migration_plan_is_empty_until_a_release_cut() {
         assert!(host_migration_plan().is_empty());
         assert_eq!(SCHEMA_VERSION, 0);
+        assert_eq!(min_supported_schema_version(), None);
         assert!(!unreleased_sql().trim().is_empty());
         assert!(unreleased_sql().contains("plugin_databases"));
         assert!(unreleased_sql().contains("dispatch_snapshot_json"));

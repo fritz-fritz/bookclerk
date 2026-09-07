@@ -752,9 +752,12 @@ mod tests {
                 },
                 cli: None,
                 oidc: Default::default(),
+                migration_plan: None,
             },
             root: root.to_path_buf(),
             command,
+            migration_plan: None,
+            migration_plan_digest: None,
         }
     }
 

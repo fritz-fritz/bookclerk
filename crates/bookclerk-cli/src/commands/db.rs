@@ -6,10 +6,10 @@ use bookclerk_config::Config;
 use bookclerk_library::migrations::host_migration_plan;
 use bookclerk_library::{
     archive_backup, backup_library, current_schema_state, ensure_restore_target_is_replaceable,
-    extract_backup_archive, list_backups, prune_automatic_backups, resolve_backup_spec,
-    restore_backup, restore_backup_in_repo, verify_recovery_point, BackupReason, BackupRepository,
-    BackupRequest, BackupResolve, CanonicalRestoreOpts, HostSchemaKind, SchemaApplyOptions,
-    SchemaBackupOpts, SchemaState, SCHEMA_VERSION,
+    extract_backup_archive, list_backups, min_supported_schema_version, prune_automatic_backups,
+    resolve_backup_spec, restore_backup, restore_backup_in_repo, verify_recovery_point,
+    BackupReason, BackupRepository, BackupRequest, BackupResolve, CanonicalRestoreOpts,
+    HostSchemaKind, SchemaApplyOptions, SchemaBackupOpts, SchemaState, SCHEMA_VERSION,
 };
 use clap::Subcommand;
 use sea_orm::DatabaseConnection;
@@ -175,6 +175,7 @@ async fn run_version(config: &Config, format: OutputFormat) -> anyhow::Result<()
     let step = frozen.and_then(|v| plan.iter().find(|s| s.version == v));
     let payload = json!({
         "binary_frozen_plan_version": SCHEMA_VERSION,
+        "min_supported_schema_version": min_supported_schema_version(),
         "database_schema_state": state.display(),
         "database_frozen_version": frozen,
         "checksum": state.checksum(),

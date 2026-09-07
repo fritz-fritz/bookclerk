@@ -2312,7 +2312,7 @@ mod tests {
         let env = bookclerk_db_exec::load_sql_type_env(db)
             .await
             .expect("load binding catalog");
-        let policy = bookclerk_library::GuestSqlPolicy::binding_owned().with_sql_types(env);
+        let policy = bookclerk_library::GuestSqlPolicy::binding_migration().with_sql_types(env);
         bookclerk_library::execute_guest_atomic_with(req, &caps, &policy, |envelope| {
             let proxy = proxy.clone();
             async move {
@@ -3097,7 +3097,7 @@ mod tests {
         .expect("host schema for concurrent claim");
 
         let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
-        let policy = GuestSqlPolicy::binding_owned();
+        let policy = GuestSqlPolicy::binding_migration();
         let req_alpha = ExecuteRequest {
             operation_id: "d1-claim-race".into(),
             request_hash: String::new(),
@@ -3223,7 +3223,7 @@ mod tests {
         .expect("host schema for claimed resume");
 
         let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
-        let policy = GuestSqlPolicy::binding_owned();
+        let policy = GuestSqlPolicy::binding_migration();
         let req = ExecuteRequest {
             operation_id: "d1-claim-resume".into(),
             request_hash: String::new(),
@@ -3321,7 +3321,7 @@ mod tests {
         .expect("host schema for mixed batch");
 
         let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
-        let policy = GuestSqlPolicy::binding_owned();
+        let policy = GuestSqlPolicy::binding_migration();
         let mixed = || ExecuteRequest {
             operation_id: "d1-mixed-once".into(),
             request_hash: String::new(),
@@ -3418,7 +3418,7 @@ mod tests {
         .expect("host schema for mixed gate batch");
 
         let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
-        let policy = GuestSqlPolicy::binding_owned();
+        let policy = GuestSqlPolicy::binding_migration();
         let mixed = || ExecuteRequest {
             operation_id: "d1-mixed-gate-lit".into(),
             request_hash: String::new(),

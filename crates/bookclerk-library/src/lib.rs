@@ -67,8 +67,8 @@ pub use email::{gravatar_hash, is_valid_user_email, normalize_user_email};
 pub use error::{LibraryError, Result};
 pub use host_schema::{
     apply_host_schema, apply_host_schema_with_batch, apply_host_schema_with_batch_opts,
-    apply_host_schema_with_options, current_schema_state, current_schema_version,
-    ensure_restore_target_is_replaceable, migrate_host_schema_to,
+    apply_host_schema_with_options, current_schema_state, current_schema_state_in,
+    current_schema_version, ensure_restore_target_is_replaceable, migrate_host_schema_to,
     migrate_host_schema_to_with_batch, HostSchemaKind, SchemaApplyOptions, SchemaBatch,
 };
 pub use in_process_atomic::InProcessSqliteAtomic;
@@ -79,10 +79,13 @@ pub use master_key::{
     AUTH_PASSWORD_ENV as MASTER_KEY_AUTH_PASSWORD_ENV, MASTER_KEY_FILE_NAME,
 };
 pub use migrations::{
-    binding_bootstrap_sql, binding_bootstrap_statements, current_canonical_schema,
-    current_canonical_table_names, host_migration_plan, latest_schema_postgres,
-    latest_schema_sqlite, unreleased_checksum, unreleased_ops, unreleased_sql, HostMigrationStep,
-    MigrationOp, MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
+    apply_migration_plan, binding_bootstrap_sql, binding_bootstrap_statements,
+    current_canonical_schema, current_canonical_table_names, downgrade_migration_plan,
+    host_migration_plan, latest_schema_postgres, latest_schema_sqlite,
+    min_supported_schema_version, remaining_upgrade_batches, schema_session_matches,
+    schema_slot_key, sql_string_literal, unreleased_checksum, unreleased_ops, unreleased_sql,
+    HostMigrationStep, MigrationOp, MigrationPlan, MigrationStep, PlanOp,
+    BOOKCLERK_SCHEMA_NAMESPACE, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
 };
 pub use models::{
     catalog_subscribers_for_event, collapse_live_subscriber_nodes, content_kind_from_classic,

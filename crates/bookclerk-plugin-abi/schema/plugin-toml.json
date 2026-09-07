@@ -42,7 +42,12 @@
     },
     "capabilities": { "$ref": "#/$defs/Capabilities" },
     "cli": { "$ref": "#/$defs/CliSchema" },
-    "oidc": { "$ref": "#/$defs/OidcManifest" }
+    "oidc": { "$ref": "#/$defs/OidcManifest" },
+    "migration_plan": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Relative path to a companion migrations.toml under the plugin install root. Bytes of that file are SHA-256 digested at discovery. SQL is proven by the host migration engine. Requires capabilities.bindings.databases. Must not contain '..' or be absolute."
+    }
   },
   "allOf": [
     {

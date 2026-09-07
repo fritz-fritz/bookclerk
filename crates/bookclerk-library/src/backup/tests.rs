@@ -459,6 +459,10 @@ fn gc_waits_for_publication_lock_and_keeps_live_objects() {
         schema_object: digest.clone(),
         identity_object: digest.clone(),
         tables: Vec::new(),
+        plugin_schema_namespace: None,
+        plugin_schema_state: None,
+        plugin_schema_version: None,
+        plugin_schema_checksum: None,
     };
     let manifest = BackupManifest {
         format_version: BACKUP_FORMAT_VERSION,
@@ -1086,8 +1090,8 @@ async fn restore_fails_closed_when_target_frozen_history_is_newer() {
     .unwrap();
     db.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
-        "INSERT INTO schema_migrations (version, state, checksum, app_version, applied_at) \
-         VALUES (1, 'frozen', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '0', 't')",
+        "INSERT INTO schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
+         VALUES ('bookclerk', 1, 'frozen', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '0', 't')",
     ))
     .await
     .unwrap();

@@ -538,6 +538,7 @@ fn host_adapter_private_sql(sql: &str) -> bool {
     let t = sql.trim();
     let u = t.to_ascii_uppercase();
     crate::is_host_schema_version_marker(t)
+        || serialization_slot_sql(&u)
         || u.starts_with("PRAGMA ")
         || u.contains(" FROM PRAGMA_")
         || u.starts_with("SET LOCAL ")
@@ -548,6 +549,12 @@ fn host_adapter_private_sql(sql: &str) -> bool {
         || u.starts_with("DROP TRIGGER")
         || u.starts_with("ALTER TABLE")
         || u.starts_with("DO $")
+}
+
+/// Host-authored `schema:{namespace}` fencing DML (not guest SQL).
+fn serialization_slot_sql(upper: &str) -> bool {
+    (upper.starts_with("INSERT ") || upper.starts_with("UPDATE "))
+        && upper.contains("DB_SERIALIZATION_SLOTS")
 }
 
 fn type_env_with_bookkeeping(catalog: &SqlTypeEnv) -> SqlTypeEnv {

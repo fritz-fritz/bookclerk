@@ -278,6 +278,18 @@ pub struct BackupUnit {
     pub identity_object: String,
     /// User-visible tables (not catalog/identity companions).
     pub tables: Vec<BackupTable>,
+    /// Plugin ledger namespace when [`DatabaseUnitKind::PluginBinding`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_schema_namespace: Option<String>,
+    /// [`SchemaState::display`] for the plugin namespace at capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_schema_state: Option<String>,
+    /// Frozen plugin schema version when the captured namespace was frozen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_schema_version: Option<i64>,
+    /// Checksum recorded on the plugin namespace marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_schema_checksum: Option<String>,
 }
 
 impl BackupUnit {

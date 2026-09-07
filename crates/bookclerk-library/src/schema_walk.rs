@@ -1,7 +1,7 @@
 //! Plan walking for host schema upgrades and last-reversible CLI downgrades.
 
 use crate::error::{LibraryError, Result};
-use crate::migrations::{HostMigrationStep, MIN_SUPPORTED_SCHEMA_VERSION, SCHEMA_VERSION};
+use crate::migrations::{min_supported_schema_version_in, HostMigrationStep, SCHEMA_VERSION};
 use crate::schema_state::SchemaState;
 
 /// Result of walking a host migration plan from one version to another.
@@ -34,17 +34,17 @@ impl SchemaWalk {
 ///
 /// Downgrades walk newest-first and stop at the last reversible version when
 /// the next step has `down: None`. Versions newer than the compiled plan
-/// cannot be reversed by this binary. Versions older than
-/// [`MIN_SUPPORTED_SCHEMA_VERSION`] (except empty `from == 0`) cannot be
-/// upgraded by this binary.
+/// cannot be reversed by this binary. Versions older than the first frozen
+/// step in `plan` (except empty `from == 0`) cannot be upgraded by this
+/// binary. An empty plan means no frozen schema versions exist.
 ///
 /// # Errors
 ///
 /// Returns [`LibraryError::Schema`] when `to` is below zero, `from` is ahead
-/// of every compiled step (unknown newer schema), or `from` is below
-/// [`MIN_SUPPORTED_SCHEMA_VERSION`].
+/// of every compiled step (unknown newer schema), or `from` is below the
+/// plan's first retained frozen version.
 pub fn plan_schema_walk(plan: &[HostMigrationStep], from: i64, to: i64) -> Result<SchemaWalk> {
-    plan_schema_walk_bounded(plan, from, to, MIN_SUPPORTED_SCHEMA_VERSION)
+    plan_schema_walk_bounded(plan, from, to, min_supported_schema_version_in(plan))
 }
 
 /// Same as [`plan_schema_walk`] with an explicit support floor (for tests).
@@ -52,18 +52,20 @@ fn plan_schema_walk_bounded(
     plan: &[HostMigrationStep],
     from: i64,
     to: i64,
-    min_supported: i64,
+    min_supported: Option<i64>,
 ) -> Result<SchemaWalk> {
     if to < 0 {
         return Err(LibraryError::Schema(
             "cannot migrate to a negative schema version".into(),
         ));
     }
-    if from > 0 && from < min_supported {
-        return Err(LibraryError::Schema(format!(
-            "database schema version {from} is older than this binary supports \
-             ({min_supported}); restore a backup"
-        )));
+    if let Some(min_supported) = min_supported {
+        if from > 0 && from < min_supported {
+            return Err(LibraryError::Schema(format!(
+                "database schema version {from} is older than this binary supports \
+                 ({min_supported}); restore a backup"
+            )));
+        }
     }
     let max_plan = plan.iter().map(|s| s.version).max().unwrap_or(0);
     if from > max_plan {
@@ -243,9 +245,19 @@ mod tests {
     }
 
     #[test]
+    fn empty_plan_means_no_frozen_versions() {
+        assert_eq!(min_supported_schema_version_in(&[]), None);
+        let walk = plan_schema_walk(&[], 0, 0).unwrap();
+        assert!(walk.is_noop());
+        let err = plan_schema_walk(&[], 1, 1).unwrap_err();
+        assert!(err.to_string().contains("newer than this binary"), "{err}");
+    }
+
+    #[test]
     fn empty_database_is_allowed_when_min_supported_is_one() {
         let plan = [step(1, false)];
-        let walk = plan_schema_walk_bounded(&plan, 0, 1, 1).unwrap();
+        assert_eq!(min_supported_schema_version_in(&plan), Some(1));
+        let walk = plan_schema_walk_bounded(&plan, 0, 1, Some(1)).unwrap();
         assert_eq!(walk.ups.len(), 1);
         assert_eq!(walk.stopped_at, 1);
     }
@@ -312,7 +324,7 @@ mod tests {
     #[test]
     fn below_min_supported_fails_closed() {
         let plan = [step(1, false), step(2, true), step(3, true)];
-        let err = plan_schema_walk_bounded(&plan, 1, 3, 2).unwrap_err();
+        let err = plan_schema_walk_bounded(&plan, 1, 3, Some(2)).unwrap_err();
         assert!(
             err.to_string().contains("older than this binary supports"),
             "{err}"
