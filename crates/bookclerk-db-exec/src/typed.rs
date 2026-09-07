@@ -548,12 +548,18 @@ pub fn stamp_host_proofs(
 ///
 /// # Errors
 ///
-/// Returns [`DbErr::Custom`] when typecheck fails or proofs do not bind.
+/// Returns [`DbErr::Custom`] when typecheck fails, proofs do not bind, or a
+/// TEXT SQL/bind contains U+0000.
 pub fn stamp_adapter_execute(
     request: ExecuteRequest,
     catalog: &SqlTypeEnv,
 ) -> Result<AdapterExecuteRequest, DbErr> {
     let canonical = bookclerk_plugin_abi::UnresolvedExecuteRequest::new(request).canonicalize();
+    for stmt in &canonical.request.statements {
+        require_portable_text(&stmt.sql).map_err(|err| DbErr::Custom(err.to_string()))?;
+        require_portable_text_binds(&stmt.parameters)
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
+    }
     let proofs = stamp_host_proofs(&canonical.request, catalog)?;
     canonical
         .bind_proofs(proofs)
