@@ -1500,8 +1500,8 @@ pub async fn execute_typed_envelope(
 ///
 /// In-process sqlite/postgres tests call this instead of naming
 /// [`PhysicalEngine`] in host/library code. Production RPC paths send the
-/// envelope to [`crate::`]`AdapterDatabaseSession.execute` and must not call
-/// this on the sqlite-shaped proxy.
+/// envelope to adapter `execute` and must not call this on the sqlite-shaped
+/// proxy.
 ///
 /// # Errors
 ///
