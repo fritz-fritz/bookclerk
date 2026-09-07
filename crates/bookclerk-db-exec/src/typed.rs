@@ -1010,6 +1010,10 @@ fn reject_statement_result_bytes(
 }
 
 /// Rejects BookclerkSQL TEXT that contains U+0000 (BYTES may contain 0x00).
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when `stmt.sql` or a TEXT bind contains U+0000.
 fn reject_nonportable_statement(index: usize, stmt: &TypedDbStatement) -> Result<(), DbErr> {
     require_portable_text(&stmt.sql)
         .map_err(|err| DbErr::Custom(format!("statement {index}: {err}")))?;
@@ -1018,6 +1022,12 @@ fn reject_nonportable_statement(index: usize, stmt: &TypedDbStatement) -> Result
     Ok(())
 }
 
+/// Rejects U+0000 in every statement SQL string and TEXT bind of `req`.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when any statement SQL or TEXT bind contains
+/// U+0000.
 fn reject_nonportable_text(req: &ExecuteRequest) -> Result<(), DbErr> {
     for (i, stmt) in req.statements.iter().enumerate() {
         reject_nonportable_statement(i, stmt)?;
