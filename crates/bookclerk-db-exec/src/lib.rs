@@ -99,10 +99,10 @@ pub use schema_postgres::{
     realize_binding_ddl, realize_host_ddl, schema_sql_for_backend,
 };
 pub use typed::{
-    db_value_from_sea, db_value_to_sea, execute_typed_envelope,
+    db_value_from_sea, db_value_to_sea, execute_canonical_stamped, execute_typed_envelope,
     execute_typed_envelope_on_connection, execute_typed_on_open_connection,
     execute_typed_on_open_envelope, execute_typed_on_session, execute_typed_on_session_then,
     execute_typed_on_txn, execute_typed_on_txn_envelope, load_physical_sql_type_env,
-    load_sql_type_env, load_sql_type_env_capped, proofs_for_host_plan, stamp_adapter_execute,
-    stamp_host_proofs,
+    load_sql_type_env, load_sql_type_env_capped, proofs_for_host_plan, query_canonical_stamped,
+    stamp_adapter_execute, stamp_host_proofs,
 };

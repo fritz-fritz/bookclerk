@@ -560,6 +560,107 @@ pub fn stamp_adapter_execute(
         .map_err(|err| DbErr::Custom(err.to_string()))
 }
 
+fn leftover_adapter_request(
+    sql: &str,
+    values: impl IntoIterator<Item = SeaValue>,
+    type_env: &SqlTypeEnv,
+    kind: DbPlanStatementKind,
+    selection: DbResultSelection,
+    max_rows: u32,
+) -> Result<AdapterExecuteRequest, DbErr> {
+    let values: Vec<SeaValue> = values.into_iter().collect();
+    let parameters = values
+        .iter()
+        .map(db_value_from_sea)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DbErr::Custom)?;
+    let req = ExecuteRequest {
+        operation_id: "leftover-sql".into(),
+        request_hash: String::new(),
+        deadline_unix_ms: 0,
+        statements: vec![TypedDbStatement {
+            sql: sql.to_string(),
+            parameters,
+            kind,
+            max_rows,
+            result_selection: selection,
+        }],
+    };
+    stamp_adapter_execute(req, type_env)
+}
+
+fn leftover_stamped_sql(envelope: &AdapterExecuteRequest) -> Result<(&str, Vec<SeaValue>), DbErr> {
+    let stmt =
+        envelope.request.statements.first().ok_or_else(|| {
+            DbErr::Custom("leftover AdapterExecuteRequest has no statements".into())
+        })?;
+    Ok((
+        stmt.sql.as_str(),
+        stmt.parameters.iter().map(db_value_to_sea).collect(),
+    ))
+}
+
+/// Stamp leftover canonical SQL, then execute it with sqlite-shaped transport.
+///
+/// Production leftover goes through SeaORM `execute_raw` on the sqlite-shaped
+/// proxy, which stamps with [`bookclerk_plugin_abi::CanonicalExecuteRequest::from_desugared`]
+/// (no second desugar). Host leftover must therefore desugar `ORDER BY NULLS`
+/// / `NULLIF` **before** transport. Does not start a nested transaction.
+///
+/// # Errors
+///
+/// Returns when typecheck fails or the connection rejects the statement.
+pub async fn execute_canonical_stamped<C>(
+    conn: &C,
+    sql: &str,
+    values: impl IntoIterator<Item = SeaValue>,
+    type_env: &SqlTypeEnv,
+) -> Result<u64, DbErr>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    let envelope = leftover_adapter_request(
+        sql,
+        values,
+        type_env,
+        DbPlanStatementKind::Execute,
+        DbResultSelection::AffectedRows,
+        0,
+    )?;
+    let (sql, values) = leftover_stamped_sql(&envelope)?;
+    let res = crate::execute_canonical(conn, sql, values).await?;
+    Ok(res.rows_affected())
+}
+
+/// Stamp leftover canonical SQL, then query it with sqlite-shaped transport.
+///
+/// Same desugar-before-transport rule as [`execute_canonical_stamped`]. Does
+/// not start a nested transaction.
+///
+/// # Errors
+///
+/// Returns when typecheck fails or the connection rejects the statement.
+pub async fn query_canonical_stamped<C>(
+    conn: &C,
+    sql: &str,
+    values: impl IntoIterator<Item = SeaValue>,
+    type_env: &SqlTypeEnv,
+) -> Result<Vec<QueryResult>, DbErr>
+where
+    C: ConnectionTrait + StreamTrait,
+{
+    let envelope = leftover_adapter_request(
+        sql,
+        values,
+        type_env,
+        DbPlanStatementKind::Select,
+        DbResultSelection::Rows,
+        0,
+    )?;
+    let (sql, values) = leftover_stamped_sql(&envelope)?;
+    crate::query_canonical(conn, sql, values).await
+}
+
 /// Host plans may include already-lowered schema companions (`PRAGMA`,
 /// `CREATE FUNCTION`, …) and greenfield DDL. Those get a hash-bound empty
 /// proof. Canonical DML is typed against the merged schema in statement order.
@@ -2492,5 +2593,56 @@ mod tests {
         let err = proofs_for_request(&SqlTypeEnv::new(), &req, &[proof], true)
             .expect_err("hash mismatch must fail closed");
         assert!(err.to_string().contains("not bound"), "{err}");
+    }
+
+    #[test]
+    fn leftover_canonical_stamp_desugars_before_transport() {
+        let env = SqlTypeEnv::new();
+        let req = ExecuteRequest {
+            operation_id: "leftover-sql".into(),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 1 / 2 AS n ORDER BY n".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 8,
+                result_selection: DbResultSelection::Rows,
+            }],
+        };
+        let envelope = stamp_adapter_execute(req, &env).expect("stamp leftover");
+        let sql = &envelope.request.statements[0].sql;
+        assert!(
+            sql.contains("NULLIF"),
+            "leftover must desugar division: {sql}"
+        );
+        assert!(
+            sql.contains("NULLS"),
+            "leftover must desugar ORDER BY: {sql}"
+        );
+    }
+
+    #[test]
+    fn leftover_canonical_query_stamp_desugars_before_transport() {
+        let env = SqlTypeEnv::new();
+        let req = ExecuteRequest {
+            operation_id: "leftover-sql".into(),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![TypedDbStatement {
+                sql: "SELECT 1 AS n ORDER BY n".into(),
+                parameters: vec![],
+                kind: DbPlanStatementKind::Select,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+        };
+        let envelope = stamp_adapter_execute(req, &env).expect("stamp leftover query");
+        let sql = &envelope.request.statements[0].sql;
+        assert!(
+            sql.contains("NULLS"),
+            "leftover query must desugar ORDER BY: {sql}"
+        );
+        assert!(sql.contains('?'), "canonical leftover keeps ?: {sql}");
     }
 }

@@ -150,9 +150,14 @@ where
             })
             .collect());
     }
-    let rows = bookclerk_db_exec::query_canonical(db, sql, values)
-        .await
-        .map_err(LibraryError::Orm)?;
+    let rows = bookclerk_db_exec::query_canonical_stamped(
+        db,
+        sql,
+        values,
+        &crate::migrations::host_sql_type_env(),
+    )
+    .await
+    .map_err(LibraryError::Orm)?;
     let mut ids = Vec::new();
     for row in rows {
         if let Ok(id) = row.try_get_by_index::<String>(0) {
