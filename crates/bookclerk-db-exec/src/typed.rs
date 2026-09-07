@@ -2640,9 +2640,12 @@ mod tests {
         let envelope = stamp_adapter_execute(req, &env).expect("stamp leftover query");
         let sql = &envelope.request.statements[0].sql;
         assert!(
-            sql.contains("NULLS"),
+            sql.contains("NULLS FIRST"),
             "leftover query must desugar ORDER BY: {sql}"
         );
-        assert!(sql.contains('?'), "canonical leftover keeps ?: {sql}");
+        assert!(
+            !sql.contains('$'),
+            "canonical leftover must not postgres-lower: {sql}"
+        );
     }
 }
