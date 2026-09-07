@@ -451,6 +451,21 @@ jobs:
             exit 1
           fi
           export PATH="${{ github.workspace }}/target/debug:$PATH"
+          NEED_SQLITE_GUEST=0
+          if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
+            NEED_SQLITE_GUEST=1
+          else
+            case " ${{ needs.plan.outputs.rust_packages }} " in
+              *" bookclerk-plugin-host "*) NEED_SQLITE_GUEST=1 ;;
+            esac
+          fi
+          if [ "$NEED_SQLITE_GUEST" = 1 ]; then
+            # Production Cap'n leftover LIKE needs a guest binary compiled in
+            # this job. `cargo test -p bookclerk-plugin-host` does not rebuild
+            # dependency bins, so a stale snapshot binary advertises
+            # maxFunctionArgs=0 and fails host minimums.
+            cargo build -p bookclerk-plugin-database-sqlite
+          fi
           if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
             # `--lib --bins --tests` keeps unit + integration tests and skips
             # doctests (already run in "Explicit doctests"). `--tests` alone

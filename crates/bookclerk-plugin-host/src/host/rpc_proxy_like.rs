@@ -213,7 +213,17 @@ async fn assert_like_through_production_proxy(config: &Config, plugin: &Discover
     let (db, _caps) = ext
         .connect_without_migrate(config)
         .await
-        .unwrap_or_else(|err| panic!("connect {}: {err}", plugin.manifest.id));
+        .unwrap_or_else(|err| {
+            let err = err.to_string();
+            if err.contains("maxFunctionArgs 0") {
+                panic!(
+                    "connect {}: {err} (rebuild bookclerk-plugin-database-{} — \
+                     cargo test -p bookclerk-plugin-host does not rebuild guest bins)",
+                    plugin.manifest.id, plugin.manifest.id
+                );
+            }
+            panic!("connect {}: {err}", plugin.manifest.id)
+        });
 
     let (query, sqls) = capture_outbound_adapter_sql(|| async {
         ConnectionTrait::query_all_raw(
