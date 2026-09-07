@@ -1054,7 +1054,7 @@ struct ExecuteRequest {
   deadlineUnixMs @3 :UInt64;
 }
 
-# Host → adapter execute (abiMinor 20). GuestDatabase stays ExecuteRequest-only.
+# Host → adapter execute. GuestDatabase stays ExecuteRequest-only.
 enum IsolationReq {
   atomicBatch @0;
   nestedSavepoint @1;
@@ -1320,12 +1320,12 @@ struct UserRelationsReply {
 # Host ↔ database adapter plugin. Capability negotiation + typed execute only.
 interface AdapterDatabaseSession {
   capabilities @0 () -> (result :DbCapabilitiesReply);
-  # abiMinor 20: canonical SQL + required structured proofs (not JSON).
+  # Canonical SQL + required structured proofs (not JSON).
   execute @1 (request :AdapterExecuteRequest) -> (result :ExecuteResultReply);
   close @2 () -> (result :EmptyReply);
   # Bootstrap-only SeaORM proxy metadata (not part of DbCapabilities).
   bootstrap @3 () -> (result :DbBootstrapReply);
-  # abiMinor 21: snapshot/identity/restore primitives (not a SQL dialect API).
+  # Snapshot/identity/restore primitives (not a SQL dialect API).
   exportIdentity @4 () -> (result :IdentityExportReply);
   importIdentity @5 (rows :List(IdentityHighWater)) -> (result :EmptyReply);
   listUserRelations @6 () -> (result :UserRelationsReply);

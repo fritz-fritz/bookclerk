@@ -344,7 +344,7 @@ pub struct ExecuteRequest {
     pub deadline_unix_ms: u64,
 }
 
-/// Transaction isolation the adapter must realize (abiMinor 20).
+/// Transaction isolation the adapter must realize.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum IsolationReq {

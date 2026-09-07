@@ -17,9 +17,9 @@ interface AdapterTransaction {
   execute @0 (request :Plugin.AdapterExecuteRequest) -> (result :Plugin.ExecuteResultReply);
   commit @1 () -> (result :Plugin.EmptyReply);
   rollback @2 () -> (result :Plugin.EmptyReply);
-  # Same payload as `execute` (abiMinor 20). Ordinal kept; do not reuse.
+  # Same payload as `execute`. Ordinal kept; do not reuse.
   executeEnvelope @3 (request :Plugin.AdapterExecuteRequest) -> (result :Plugin.ExecuteResultReply);
-  # abiMinor 21: same primitives as AdapterDatabaseSession, on the open txn.
+  # Same primitives as AdapterDatabaseSession, on the open txn.
   exportIdentity @4 () -> (result :Plugin.IdentityExportReply);
   importIdentity @5 (rows :List(Plugin.IdentityHighWater)) -> (result :Plugin.EmptyReply);
   listUserRelations @6 () -> (result :Plugin.UserRelationsReply);
