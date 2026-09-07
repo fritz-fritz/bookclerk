@@ -2389,12 +2389,12 @@ impl host_adapter_database_session_capnp::Server for AdapterDatabaseSessionServe
         Ok(())
     }
 
-    async fn execute_envelope(
+    async fn execute(
         self: Rc<Self>,
-        params: host_adapter_database_session_capnp::ExecuteEnvelopeParams,
-        mut results: host_adapter_database_session_capnp::ExecuteEnvelopeResults,
+        params: host_adapter_database_session_capnp::ExecuteParams,
+        mut results: host_adapter_database_session_capnp::ExecuteResults,
     ) -> capnp::Result<()> {
-        let envelope = params
+        let request = params
             .get()?
             .get_request()
             .map_err(|err| capnp::Error::failed(err.to_string()))
@@ -2405,10 +2405,8 @@ impl host_adapter_database_session_capnp::Server for AdapterDatabaseSessionServe
         crate::db_rpc::write_execute_result_reply(
             results.get().init_result(),
             match &self.host {
-                Some(host) => host.execute_envelope(envelope).await,
-                None => Err(PluginError::unsupported(
-                    "host executeEnvelope not implemented",
-                )),
+                Some(host) => host.execute(request).await,
+                None => Err(PluginError::unsupported("host execute not implemented")),
             },
         );
         Ok(())

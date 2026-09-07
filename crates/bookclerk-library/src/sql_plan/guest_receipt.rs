@@ -403,7 +403,7 @@ mod replay_finalize {
         assert_eq!(status, "ok");
         assert!(
             !payload.is_empty(),
-            "nested executeEnvelope must persist replay payload before outer commit"
+            "nested host execute must persist replay payload before outer commit"
         );
 
         let replay_req = ExecuteRequest {

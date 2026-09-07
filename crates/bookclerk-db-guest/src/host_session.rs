@@ -26,8 +26,8 @@ impl HostAdapterDatabaseSession for GuestHostAdapterSession {
         Ok(Box::new(GuestHostAdapterTransaction { txn_id }))
     }
 
-    async fn execute_envelope(&self, envelope: AdapterExecuteRequest) -> Result<ExecuteReply> {
-        guest_execute_atomic(envelope)
+    async fn execute(&self, request: AdapterExecuteRequest) -> Result<ExecuteReply> {
+        guest_execute_atomic(request)
             .await
             .map_err(plugin_error_from_engine)
     }
@@ -123,8 +123,8 @@ impl HostAdapterDatabaseSession for BoundGuestHostAdapterSession {
         Ok(Box::new(GuestHostAdapterTransaction { txn_id }))
     }
 
-    async fn execute_envelope(&self, envelope: AdapterExecuteRequest) -> Result<ExecuteReply> {
-        guest_execute_atomic_on(&self.conn, envelope).await
+    async fn execute(&self, request: AdapterExecuteRequest) -> Result<ExecuteReply> {
+        guest_execute_atomic_on(&self.conn, request).await
     }
 }
 

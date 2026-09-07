@@ -1141,10 +1141,10 @@ interactive SeaORM transaction and returns an `AdapterTransaction`
 when `begin` fails so later statements cannot fall back to autocommit, and a
 failed `commit` is surfaced to `LibraryStore` (SeaORM's proxy hook is
 infallible). `AdapterDatabaseSession.execute` and
-`HostAdapterDatabaseSession.executeEnvelope` carry the same
+`HostAdapterDatabaseSession.execute` carry the same
 `AdapterExecuteRequest` (canonical SQL, structured proofs, optional
 receipt-persist hint). D1 keeps `begin` unsupported and routes
-`executeEnvelope` through its native batch proxy.
+host `execute` through its native batch proxy.
 
 Built-in ids: `sqlite`, `d1`, `postgres` (match `[database].plugin`).
 

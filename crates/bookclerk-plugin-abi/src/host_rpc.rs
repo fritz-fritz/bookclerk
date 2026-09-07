@@ -66,26 +66,6 @@ impl adapter_transaction_capnp::Server for AdapterTransactionServer {
         Ok(())
     }
 
-    async fn execute_envelope(
-        self: Rc<Self>,
-        params: adapter_transaction_capnp::ExecuteEnvelopeParams,
-        mut results: adapter_transaction_capnp::ExecuteEnvelopeResults,
-    ) -> capnp::Result<()> {
-        let envelope = params
-            .get()?
-            .get_request()
-            .map_err(|err| capnp::Error::failed(err.to_string()))
-            .and_then(|r| {
-                crate::db_rpc::read_adapter_execute_request(r)
-                    .map_err(|err| capnp::Error::failed(err.to_string()))
-            })?;
-        crate::db_rpc::write_execute_result_reply(
-            results.get().init_result(),
-            self.inner.execute_envelope(envelope).await,
-        );
-        Ok(())
-    }
-
     async fn commit(
         self: Rc<Self>,
         _params: adapter_transaction_capnp::CommitParams,
@@ -218,22 +198,6 @@ impl AdapterTransaction for HostAdapterTransactionClient {
     ) -> Result<crate::ExecuteReply> {
         let mut req = self.client.execute_request();
         crate::db_rpc::write_adapter_execute_request(req.get().init_request(), &request)?;
-        let reply = req.send().promise.await.map_err(from_capnp)?;
-        crate::db_rpc::read_execute_result_reply(
-            reply
-                .get()
-                .map_err(from_capnp)?
-                .get_result()
-                .map_err(from_capnp)?,
-        )
-    }
-
-    async fn execute_envelope(
-        &self,
-        envelope: crate::host_envelope::AdapterExecuteRequest,
-    ) -> Result<crate::ExecuteReply> {
-        let mut req = self.client.execute_envelope_request();
-        crate::db_rpc::write_adapter_execute_request(req.get().init_request(), &envelope)?;
         let reply = req.send().promise.await.map_err(from_capnp)?;
         crate::db_rpc::read_execute_result_reply(
             reply
@@ -387,12 +351,12 @@ impl HostAdapterDatabaseSession for HostAdapterDatabaseSessionClient {
         }
     }
 
-    async fn execute_envelope(
+    async fn execute(
         &self,
-        envelope: crate::host_envelope::AdapterExecuteRequest,
+        request: crate::host_envelope::AdapterExecuteRequest,
     ) -> Result<crate::ExecuteReply> {
-        let mut req = self.client.execute_envelope_request();
-        crate::db_rpc::write_adapter_execute_request(req.get().init_request(), &envelope)?;
+        let mut req = self.client.execute_request();
+        crate::db_rpc::write_adapter_execute_request(req.get().init_request(), &request)?;
         let reply = req.send().promise.await.map_err(from_capnp)?;
         crate::db_rpc::read_execute_result_reply(
             reply
