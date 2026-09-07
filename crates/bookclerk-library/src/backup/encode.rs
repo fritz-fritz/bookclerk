@@ -20,7 +20,10 @@ use crate::error::{LibraryError, Result};
 /// Magic prefix for stored backup objects (`BCKO`).
 pub const OBJECT_MAGIC: &[u8; 4] = b"BCKO";
 /// Stored object envelope version (`uncompressed_len` after the digest).
-pub const OBJECT_STORE_VERSION: u8 = 2;
+///
+/// Squashed to `1` before any production backup shipped. Independent from
+/// [`crate::backup::BACKUP_FORMAT_VERSION`].
+pub const OBJECT_STORE_VERSION: u8 = 1;
 /// Stored payload is uncompressed canonical JSON.
 pub const CODEC_RAW: u8 = 0;
 /// Stored payload is gzip of canonical JSON.
