@@ -617,16 +617,15 @@ fn rusqlite_db_err(err: rusqlite::Error) -> DbErr {
     DbErr::Custom(format_rusqlite_error(&err))
 }
 
-/// Collapses whitespace and truncates SQL to 180 characters for slow-query logs.
+/// Collapses whitespace and truncates SQL to 180 UTF-8 bytes for slow-query logs.
 fn summarize_sql(raw: &str) -> String {
     let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     const MAX_LEN: usize = 180;
     if compact.len() <= MAX_LEN {
         compact
     } else {
-        let mut out = compact[..MAX_LEN].to_string();
-        out.push_str("...");
-        out
+        let end = compact.floor_char_boundary(MAX_LEN);
+        format!("{}...", &compact[..end])
     }
 }
 
@@ -682,5 +681,31 @@ fn rusqlite_to_sea(v: rusqlite::types::Value, decl_type: Option<&str>, column: &
         rusqlite::types::Value::Real(n) => Value::Double(Some(n)),
         rusqlite::types::Value::Text(s) => Value::String(Some(s)),
         rusqlite::types::Value::Blob(b) => Value::Bytes(Some(b)),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
+mod tests {
+    use super::summarize_sql;
+
+    #[test]
+    fn summarize_sql_truncates_ascii() {
+        let sql = "SELECT ".to_string() + &"x".repeat(200);
+        let summary = summarize_sql(&sql);
+        assert!(summary.ends_with("..."));
+        assert_eq!(summary.len(), 183);
+    }
+
+    #[test]
+    fn summarize_sql_truncates_on_utf8_char_boundary() {
+        // Thai vowel U+0E35 is 3 UTF-8 bytes; a 180-byte slice lands inside it.
+        let sql = format!("SELECT {}", "สวัสดี".repeat(40));
+        let summary = summarize_sql(&sql);
+        assert!(summary.ends_with("..."));
+        let body = &summary[..summary.len() - 3];
+        assert!(body.len() <= 180);
+        assert!(summary.is_char_boundary(body.len()));
+        assert!(!body.is_empty());
     }
 }
