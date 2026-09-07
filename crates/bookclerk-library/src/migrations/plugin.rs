@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use bookclerk_plugin_abi::{
-    authorize_guest_sql_policy, canonical_statements_checksum,
+    apply_schema_sql_to_env, authorize_guest_sql_policy, canonical_statements_checksum,
     require_plugin_migration_registration, validate_guest_execute_request_for_policy,
     DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, ExecuteRequest, GuestSqlPolicy,
     PluginMigration, PluginMigrationOp, SqlTypeEnv, TypedDbStatement, MAX_LIST_PAGE,
@@ -165,6 +165,25 @@ pub fn prove_plugin_migration_sequence(
         });
     }
     Ok(PluginMigrationSequence { migrations: proven })
+}
+
+/// Binding catalog after host bootstrap plus schema ops from the first `applied`
+/// registered migrations.
+///
+/// Plugin apply stamps journal DML and suffix data ops against this evolving
+/// environment. `applied` is the durable prefix length (host-private ordinal
+/// count), not a plugin version.
+#[must_use]
+pub fn plugin_binding_type_env(registered: &PluginMigrationSequence, applied: usize) -> SqlTypeEnv {
+    let mut env = super::binding_bootstrap_type_env();
+    for migration in registered.migrations.iter().take(applied) {
+        for op in &migration.operations {
+            if op.is_schema() {
+                apply_schema_sql_to_env(&mut env, op.sql());
+            }
+        }
+    }
+    env
 }
 
 /// Proves one registered op: packing, kind, evolving type env, guest grammar,
@@ -548,12 +567,12 @@ pub async fn apply_plugin_migrations(
 ) -> Result<PluginMigrationHistory> {
     loop {
         let history = load_plugin_migration_history(db).await?;
-        let Some((ordinal, migration)) = next_pending_plugin_migration(&history, registered)?
-        else {
+        let Some((ordinal, migration)) = next_pending_plugin_migration(&history, registered)? else {
             return Ok(history);
         };
-        let ordinal = i64::try_from(ordinal).unwrap_or(i64::MAX);
-        apply_one_plugin_migration(db, ordinal, migration, registered).await?;
+        let catalog = plugin_binding_type_env(registered, ordinal);
+        let ordinal_i64 = i64::try_from(ordinal).unwrap_or(i64::MAX);
+        apply_one_plugin_migration(db, ordinal_i64, migration, registered, &catalog).await?;
     }
 }
 
@@ -568,6 +587,7 @@ async fn apply_one_plugin_migration(
     ordinal: i64,
     migration: &ProvenPluginMigration,
     registered: &PluginMigrationSequence,
+    catalog: &SqlTypeEnv,
 ) -> Result<()> {
     let mut delay_ms = 20u64;
     for attempt in 0..MAX_PLUGIN_MIGRATION_APPLY_ATTEMPTS {
@@ -582,7 +602,7 @@ async fn apply_one_plugin_migration(
         }
         let stmts = plugin_apply_statements(ordinal, migration);
         let operation_id = format!("plugin-migrate-ord{ordinal}-try{attempt}");
-        match run_plugin_atomic(db, &operation_id, stmts).await {
+        match run_plugin_atomic(db, &operation_id, stmts, catalog).await {
             Ok(()) => return Ok(()),
             Err(err) => {
                 let history = load_plugin_migration_history(db).await;
@@ -660,6 +680,7 @@ async fn run_plugin_atomic(
     db: &DatabaseConnection,
     operation_id: &str,
     stmts: Vec<String>,
+    catalog: &SqlTypeEnv,
 ) -> Result<()> {
     let req = ExecuteRequest {
         operation_id: operation_id.into(),
@@ -676,7 +697,7 @@ async fn run_plugin_atomic(
             })
             .collect(),
     };
-    execute_typed_on_binding(db, &req, PLUGIN_TXN_TIMING, 0).await?;
+    execute_typed_on_binding(db, &req, PLUGIN_TXN_TIMING, 0, catalog).await?;
     Ok(())
 }
 
@@ -805,6 +826,26 @@ mod tests {
                 )],
             ),
         ]);
+    }
+
+    #[test]
+    fn plugin_binding_type_env_keeps_bootstrap_and_prefix_schema() {
+        let registered = seq(vec![
+            mig("a", vec![notes_create()]),
+            mig(
+                "b",
+                vec![data("INSERT INTO notes (id, body) VALUES (1, 'seed')")],
+            ),
+        ]);
+        let before = plugin_binding_type_env(&registered, 0);
+        assert!(before.has_table(PLUGIN_MIGRATIONS_TABLE));
+        assert!(!before.has_table("notes"));
+        let after_create = plugin_binding_type_env(&registered, 1);
+        assert!(after_create.has_table("notes"));
+        assert_eq!(
+            after_create.column_type("notes", "body"),
+            Some(bookclerk_plugin_abi::SqlType::Text)
+        );
     }
 
     #[test]
@@ -1143,9 +1184,14 @@ mod tests {
                 .into_iter()
                 .next()
                 .expect("one suffix");
-        run_plugin_atomic(&db, "lost-reply", batch)
-            .await
-            .expect("durable apply whose reply the caller never saw");
+        run_plugin_atomic(
+            &db,
+            "lost-reply",
+            batch,
+            &plugin_binding_type_env(&registered, 0),
+        )
+        .await
+        .expect("durable apply whose reply the caller never saw");
         let after = apply_plugin_migrations(&db, &registered).await.unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after.entries[0].migration_id, "create-notes");

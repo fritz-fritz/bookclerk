@@ -39,10 +39,10 @@ use crate::jail::plugin_data_dir;
 use crate::rpc_session::{PluginSession, OPERATOR_ACCOUNT};
 use crate::{PluginError, Result as PluginResult};
 use bookclerk_library::{
-    atomic_status, binding_bootstrap_plan, history_from_execute_reply,
-    plugin_history_session_matches, plugin_journal_select_request, prove_plugin_migration_sequence,
-    sql_string_literal, DbAtomicParams, PluginMigrationHistory, SchemaState,
-    BOOKCLERK_SCHEMA_NAMESPACE, SCHEMA_MIGRATIONS_DDL,
+    atomic_status, binding_bootstrap_plan, binding_bootstrap_type_env, history_from_execute_reply,
+    plugin_binding_type_env, plugin_history_session_matches, plugin_journal_select_request,
+    prove_plugin_migration_sequence, sql_string_literal, DbAtomicParams, PluginMigrationHistory,
+    PluginMigrationSequence, SchemaState, BOOKCLERK_SCHEMA_NAMESPACE, SCHEMA_MIGRATIONS_DDL,
 };
 
 #[cfg(test)]
@@ -944,7 +944,11 @@ async fn load_binding_plugin_history(
     let reply = session
         .db_execute_binding_request(
             key,
-            stamp_library_adapter_request(select, IsolationReq::AtomicBatch)?,
+            stamp_adapter_request(
+                select,
+                &binding_bootstrap_type_env(),
+                IsolationReq::AtomicBatch,
+            )?,
             Arc::clone(cancel),
         )
         .await?;
@@ -961,6 +965,7 @@ struct BindingPluginMigrationHost<'a> {
     owner: &'a str,
     /// Binding name inside that plugin.
     binding: &'a str,
+    registered: &'a PluginMigrationSequence,
 }
 
 #[async_trait]
@@ -975,7 +980,11 @@ impl super::plugin_migration_apply::PluginMigrationApplyHost for BindingPluginMi
             .session
             .db_execute_binding_request(
                 self.key,
-                stamp_library_adapter_request(select, IsolationReq::AtomicBatch)?,
+                stamp_adapter_request(
+                    select,
+                    &binding_bootstrap_type_env(),
+                    IsolationReq::AtomicBatch,
+                )?,
                 cancel,
             )
             .await?;
@@ -986,16 +995,18 @@ impl super::plugin_migration_apply::PluginMigrationApplyHost for BindingPluginMi
         &self,
         operation_id: String,
         statements: Vec<String>,
+        applied_prefix: usize,
     ) -> PluginResult<()> {
         let cancel = Arc::new(AtomicBool::new(false));
         self.session
             .db_execute_binding_request(
                 self.key,
-                stamp_library_adapter_request(
+                stamp_adapter_request(
                     super::plugin_migration_apply::plugin_migration_apply_request(
                         operation_id,
                         statements,
                     ),
+                    &plugin_binding_type_env(self.registered, applied_prefix),
                     IsolationReq::AtomicBatch,
                 )?,
                 cancel,
@@ -1249,6 +1260,13 @@ impl ExternalDatabase {
         binding: &str,
         registered: &bookclerk_library::PluginMigrationSequence,
     ) -> PluginResult<()> {
+        let host = BindingPluginMigrationHost {
+            session: &self.session,
+            key,
+            owner,
+            binding,
+            registered,
+        };
         super::plugin_migration_apply::apply_registered_plugin_migrations(
             &host, owner, binding, registered,
         )
@@ -1269,7 +1287,11 @@ impl ExternalDatabase {
             .session
             .db_execute_binding_request(
                 key,
-                stamp_library_adapter_request(select, IsolationReq::AtomicBatch)?,
+                stamp_adapter_request(
+                    select,
+                    &binding_bootstrap_type_env(),
+                    IsolationReq::AtomicBatch,
+                )?,
                 cancel,
             )
             .await?;
