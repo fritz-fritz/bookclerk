@@ -116,6 +116,8 @@ fn stage_first_party_guest(id: &str) -> Option<StagedGuest> {
             manifest,
             root: install.path().to_path_buf(),
             command: dest_bin,
+            migration_plan: None,
+            migration_plan_digest: None,
         },
         _install: install,
     })

@@ -58,6 +58,7 @@ async fn run_binding(
         let deadline =
             (envelope.request.deadline_unix_ms > 0).then_some(envelope.request.deadline_unix_ms);
         bookclerk_db_exec::execute_typed_envelope(
+            bookclerk_db_exec::PhysicalEngine::sqlite(),
             db,
             &envelope,
             "sqlite_txn",
