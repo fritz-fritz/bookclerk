@@ -164,6 +164,7 @@ pub fn validate_migration_plan_path(raw: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
 
