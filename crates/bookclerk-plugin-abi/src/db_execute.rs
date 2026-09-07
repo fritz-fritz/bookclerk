@@ -142,6 +142,12 @@ pub fn d1_physical_sql_preflight_len_proven(
 }
 
 /// Apply overflow wraps when `proof` has INTEGER sites, then the mechanical bound.
+///
+/// # Errors
+///
+/// Returns [`crate::PluginError::internal`] when overflow wrapping fails, or
+/// [`crate::PluginError::invalid_params`] when the pack lexer rejects the
+/// post-overflow SQL.
 fn d1_physical_preflight(
     sql: &str,
     bind_count: usize,

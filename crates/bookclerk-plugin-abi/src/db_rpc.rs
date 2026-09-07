@@ -51,6 +51,10 @@ pub(super) fn read_db_type(ty: CapnpDbType) -> Result<DbType> {
 }
 
 /// BookclerkSQL `TEXT` forbids U+0000; `BYTES` may contain 0x00.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a TEXT cell contains U+0000.
 fn require_portable_value(v: &DbValue) -> Result<()> {
     if let DbValue::Text(text) = v {
         crate::sql_text::require_portable_text(text)?;
@@ -58,6 +62,11 @@ fn require_portable_value(v: &DbValue) -> Result<()> {
     Ok(())
 }
 
+/// Rejects U+0000 in every TEXT cell of a statement result.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a TEXT cell contains U+0000.
 fn require_portable_statement_result(stmt: &StatementResult) -> Result<()> {
     for row in &stmt.rows {
         for value in &row.values {
@@ -67,6 +76,11 @@ fn require_portable_statement_result(stmt: &StatementResult) -> Result<()> {
     Ok(())
 }
 
+/// Rejects U+0000 in every TEXT cell of an execute reply.
+///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when a TEXT cell contains U+0000.
 fn require_portable_execute_reply(reply: &ExecuteReply) -> Result<()> {
     for stmt in &reply.statements {
         require_portable_statement_result(stmt)?;
