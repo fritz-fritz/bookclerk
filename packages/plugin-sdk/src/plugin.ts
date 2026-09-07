@@ -65,12 +65,22 @@ export interface PluginMigration {
   operations: PluginMigrationOp[];
 }
 
-/** Schema DDL convenience for {@link PluginMigration.operations}. */
+/**
+ * Schema DDL convenience for {@link PluginMigration.operations}.
+ *
+ * @param sql - Already-separated BookclerkSQL schema statement.
+ * @returns Schema operation tagged for host registration.
+ */
 export function schemaMigrationOp(sql: string): PluginMigrationOp {
   return { schema: sql };
 }
 
-/** Data DML convenience for {@link PluginMigration.operations}. */
+/**
+ * Data DML convenience for {@link PluginMigration.operations}.
+ *
+ * @param sql - Already-separated BookclerkSQL data statement.
+ * @returns Data operation tagged for host registration.
+ */
 export function dataMigrationOp(sql: string): PluginMigrationOp {
   return { data: sql };
 }
