@@ -97,7 +97,6 @@ impl PluginRoot for D1Root {
             scalar_limits: ScalarLimits::default().into(),
             supported_roles: vec!["database".into()],
             metadata_json: describe_metadata()?,
-            ..PluginDescribe::default()
         })
     }
 

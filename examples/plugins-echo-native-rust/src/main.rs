@@ -72,7 +72,6 @@ impl PluginRoot for EchoRoot {
             scalar_limits: ScalarLimits::default().into(),
             supported_roles: vec!["integration".into()],
             metadata_json: describe_metadata()?,
-            ..PluginDescribe::default()
         })
     }
 

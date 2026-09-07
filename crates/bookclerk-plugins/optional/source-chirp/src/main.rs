@@ -82,7 +82,6 @@ impl PluginRoot for ChirpRoot {
             scalar_limits: ScalarLimits::default().into(),
             supported_roles: vec!["contentSource".into()],
             metadata_json: describe_metadata()?,
-            ..PluginDescribe::default()
         })
     }
 
