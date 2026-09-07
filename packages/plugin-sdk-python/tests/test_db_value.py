@@ -65,9 +65,15 @@ class DbValueGoldens(unittest.TestCase):
                 {"kind": "int64", "value": n},
             )
 
-    def test_utf8_and_embedded_nul(self) -> None:
-        text = parse_db_value({"kind": "text", "value": "héllo\x00world"})
-        self.assertEqual(text["value"], "héllo\x00world")
+    def test_text_rejects_embedded_nul(self) -> None:
+        with self.assertRaisesRegex(ValueError, "TEXT cannot contain U\\+0000"):
+            parse_db_value({"kind": "text", "value": "héllo\x00world"})
+        with self.assertRaisesRegex(ValueError, "TEXT cannot contain U\\+0000"):
+            encode_db_value({"kind": "text", "value": "a\x00b"})
+        self.assertEqual(
+            decode_db_value(encode_db_value({"kind": "bytes", "value": b"\x00"}))["value"],
+            b"\x00",
+        )
 
     def test_multilingual_utf8_round_trip_is_not_normalized(self) -> None:
         samples = [

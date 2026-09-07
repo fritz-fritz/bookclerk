@@ -64,9 +64,16 @@ assert.deepEqual(parseDbValue({ kind: "int64", value: I64_MAX }), {
   value: I64_MAX,
 });
 
-const text = parseDbValue({ kind: "text", value: "héllo\u0000world" });
-assert.equal(text.kind, "text");
-assert.equal(text.value, "héllo\u0000world");
+const textNul = () => parseDbValue({ kind: "text", value: "héllo\u0000world" });
+assert.throws(textNul, /TEXT cannot contain U\+0000/);
+assert.throws(
+  () => encodeDbValue({ kind: "text", value: "a\u0000b" }),
+  /TEXT cannot contain U\+0000/,
+);
+assert.deepEqual(
+  Array.from(decodeDbValue(encodeDbValue({ kind: "bytes", value: Uint8Array.of(0) })).value),
+  [0],
+);
 
 const multilingual = [
   "汉语",

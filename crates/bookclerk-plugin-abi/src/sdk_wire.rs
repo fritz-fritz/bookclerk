@@ -193,7 +193,7 @@ fn selection_ord(sel: DbResultSelection) -> u16 {
 ///
 /// # Errors
 ///
-/// Returns when a float64 bind is not finite.
+/// Returns when a float64 bind is not finite, or TEXT contains U+0000.
 fn write_db_value(msg: &mut CapnpMessage, word: usize, value: &DbValue) -> Result<()> {
     match value {
         DbValue::Null(ty) => {
@@ -216,6 +216,7 @@ fn write_db_value(msg: &mut CapnpMessage, word: usize, value: &DbValue) -> Resul
             msg.set_u16(word, 1, 3);
         }
         DbValue::Text(s) => {
+            crate::sql_text::require_portable_text(s)?;
             msg.set_u16(word, 1, 4);
             msg.set_text(msg.pointer_word(word, 2, 0), s);
         }
@@ -234,6 +235,7 @@ fn write_db_value(msg: &mut CapnpMessage, word: usize, value: &DbValue) -> Resul
 /// Returns when a parameter bind cannot be encoded.
 fn write_statement(msg: &mut CapnpMessage, word: usize, stmt: &TypedDbStatement) -> Result<()> {
     const DATA_WORDS: usize = 1;
+    crate::sql_text::require_portable_text(&stmt.sql)?;
     msg.set_text(msg.pointer_word(word, DATA_WORDS, 0), &stmt.sql);
     msg.set_u16(word, 0, kind_ord(stmt.kind));
     msg.set_u16(word, 1, selection_ord(stmt.result_selection));

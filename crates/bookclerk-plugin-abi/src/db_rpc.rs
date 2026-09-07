@@ -50,6 +50,30 @@ pub(super) fn read_db_type(ty: CapnpDbType) -> Result<DbType> {
     }
 }
 
+/// BookclerkSQL `TEXT` forbids U+0000; `BYTES` may contain 0x00.
+fn require_portable_value(v: &DbValue) -> Result<()> {
+    if let DbValue::Text(text) = v {
+        crate::sql_text::require_portable_text(text)?;
+    }
+    Ok(())
+}
+
+fn require_portable_statement_result(stmt: &StatementResult) -> Result<()> {
+    for row in &stmt.rows {
+        for value in &row.values {
+            require_portable_value(value)?;
+        }
+    }
+    Ok(())
+}
+
+fn require_portable_execute_reply(reply: &ExecuteReply) -> Result<()> {
+    for stmt in &reply.statements {
+        require_portable_statement_result(stmt)?;
+    }
+    Ok(())
+}
+
 pub(super) fn write_db_value(mut b: db_value_capnp::Builder<'_>, v: &DbValue) {
     match v {
         DbValue::Null(ty) => b.set_null(write_db_type(*ty)),
@@ -166,10 +190,20 @@ fn read_db_statement(r: db_statement_capnp::Reader<'_>) -> Result<TypedDbStateme
     })
 }
 
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when SQL text or a TEXT bind
+/// contains U+0000.
 pub(super) fn write_execute_request(
     mut b: execute_request_capnp::Builder<'_>,
     req: &ExecuteRequest,
-) {
+) -> Result<()> {
+    for stmt in &req.statements {
+        crate::sql_text::require_portable_text(&stmt.sql)?;
+        for param in &stmt.parameters {
+            require_portable_value(param)?;
+        }
+    }
     b.set_operation_id(&req.operation_id);
     b.set_request_hash(&req.request_hash);
     b.set_deadline_unix_ms(req.deadline_unix_ms);
@@ -177,6 +211,7 @@ pub(super) fn write_execute_request(
     for (i, s) in req.statements.iter().enumerate() {
         write_db_statement(stmts.reborrow().get(i as u32), s);
     }
+    Ok(())
 }
 
 /// # Errors
@@ -331,7 +366,10 @@ pub(super) fn write_execute_result_reply(
     outcome: Result<ExecuteReply>,
 ) {
     match outcome {
-        Ok(reply) => fill_execute_reply(result.init_ok(), &reply),
+        Ok(reply) => match require_portable_execute_reply(&reply) {
+            Ok(()) => fill_execute_reply(result.init_ok(), &reply),
+            Err(err) => write_error(result.init_err(), &err),
+        },
         Err(err) => write_error(result.init_err(), &err),
     }
 }
@@ -483,8 +521,10 @@ fn write_message_bytes(
 ///
 /// # Errors
 ///
-/// Returns [`PluginError::internal`] when the message cannot be serialized.
+/// Returns [`PluginError::invalid_params`] when a [`DbValue::Text`] contains
+/// U+0000, or [`PluginError::internal`] when the message cannot be serialized.
 pub fn encoded_db_value_bytes(v: &DbValue) -> Result<Vec<u8>> {
+    require_portable_value(v)?;
     let mut message = capnp::message::Builder::new_default();
     write_db_value(message.init_root(), v);
     write_message_bytes(&message)
@@ -494,10 +534,11 @@ pub fn encoded_db_value_bytes(v: &DbValue) -> Result<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// Returns [`PluginError::internal`] when the message cannot be serialized.
+/// Returns [`PluginError::invalid_params`] when SQL or TEXT binds contain
+/// U+0000, or [`PluginError::internal`] when the message cannot be serialized.
 pub fn encoded_execute_request_bytes(req: &ExecuteRequest) -> Result<Vec<u8>> {
     let mut message = capnp::message::Builder::new_default();
-    write_execute_request(message.init_root(), req);
+    write_execute_request(message.init_root(), req)?;
     write_message_bytes(&message)
 }
 
@@ -525,8 +566,10 @@ pub fn canonical_execute_request_hash(req: &ExecuteRequest) -> Result<String> {
 ///
 /// # Errors
 ///
-/// Returns [`PluginError::internal`] when the message cannot be serialized.
+/// Returns [`PluginError::invalid_params`] when a TEXT cell contains U+0000,
+/// or [`PluginError::internal`] when the message cannot be serialized.
 pub fn encoded_execute_reply_bytes(reply: &ExecuteReply) -> Result<Vec<u8>> {
+    require_portable_execute_reply(reply)?;
     let mut message = capnp::message::Builder::new_default();
     fill_execute_reply(message.init_root(), reply);
     write_message_bytes(&message)
@@ -595,8 +638,10 @@ pub fn decode_execute_result_reply_bytes(bytes: &[u8]) -> Result<ExecuteReply> {
 ///
 /// # Errors
 ///
-/// Returns [`PluginError::internal`] when the message cannot be serialized.
+/// Returns [`PluginError::invalid_params`] when a TEXT cell contains U+0000,
+/// or [`PluginError::internal`] when the message cannot be serialized.
 pub fn encoded_statement_result_bytes(stmt: &StatementResult) -> Result<Vec<u8>> {
+    require_portable_statement_result(stmt)?;
     let mut message = capnp::message::Builder::new_default();
     write_statement_result(message.init_root(), stmt);
     write_message_bytes(&message)
@@ -646,6 +691,11 @@ fn read_guest_receipt_persist(
 
 /// Writes a host-private execute envelope, including stamped proofs.
 ///
+/// # Errors
+///
+/// Returns [`PluginError::invalid_params`] when the nested request has U+0000
+/// in SQL or TEXT binds.
+///
 /// # Panics
 ///
 /// Panics when `envelope.proofs` cannot be serialized. Proof types are
@@ -655,12 +705,13 @@ fn read_guest_receipt_persist(
 pub(super) fn write_host_execute_envelope(
     mut b: host_execute_envelope_capnp::Builder<'_>,
     envelope: &HostExecuteEnvelope,
-) {
-    write_execute_request(b.reborrow().init_request(), &envelope.request);
+) -> Result<()> {
+    write_execute_request(b.reborrow().init_request(), &envelope.request)?;
     write_guest_receipt_persist(b.reborrow().init_guest_receipt(), &envelope.guest_receipt);
     let proofs_json = serde_json::to_string(&envelope.proofs)
         .expect("ResolvedStatement proofs are serde-serializable");
     b.set_proofs_json(&proofs_json);
+    Ok(())
 }
 
 /// # Errors

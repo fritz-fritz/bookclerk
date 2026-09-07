@@ -1,7 +1,8 @@
 """Universal Cap'n database value domain (``DbValue``) and unpacked codec.
 
 Baseline cells are typed null, bool, int64 (``int``), finite float64, UTF-8
-text, and bytes (``bytes``). Unknown ``kind`` values fail closed. JSON
+text, and bytes (``bytes``). U+0000 is forbidden in TEXT and allowed in
+BYTES. Unknown ``kind`` values fail closed. JSON
 :func:`parse_db_value` still accepts a ``b64:`` string for bytes; the codec
 always uses the domain types.
 """
@@ -23,6 +24,15 @@ TYPES = frozenset(DB_COLUMN_TYPES)
 
 I64_MIN = -(2**63)
 I64_MAX = 2**63 - 1
+
+
+def _require_portable_text(text: str) -> str:
+    """Reject U+0000 in BookclerkSQL TEXT (allowed only in BYTES)."""
+    if "\x00" in text:
+        raise ValueError(
+            "BookclerkSQL TEXT cannot contain U+0000 (use BYTES/BLOB for binary)"
+        )
+    return text
 
 # Ordinal tables come from the generated ``_abi`` projection of
 # ``schema/plugin.capnp`` (index = Cap'n Proto ordinal).
@@ -66,7 +76,7 @@ class Float64Value(TypedDict):
 
 
 class TextValue(TypedDict):
-    """UTF-8 text cell (embedded NUL allowed)."""
+    """UTF-8 text cell (U+0000 forbidden; allowed only in ``bytes``)."""
 
     kind: Literal["text"]
     value: str
@@ -164,6 +174,7 @@ def parse_db_value(raw: Any) -> DbValue:
     if kind == "text":
         if not isinstance(value, str):
             raise ValueError("text DbValue requires a string")
+        _require_portable_text(value)
         return {"kind": "text", "value": value}
     if kind == "bytes":
         return {"kind": "bytes", "value": _parse_bytes(value)}
@@ -1094,6 +1105,7 @@ def _write_db_value(root: _CapnpStruct, value: DbValue) -> None:
         root.set_u16(1, 3)
         return
     if kind == "text":
+        _require_portable_text(value["value"])
         root.set_u16(1, 4)
         root.set_text(0, value["value"])
         return
@@ -1119,7 +1131,7 @@ def _read_db_value(root: _StructReader) -> DbValue:
             raise ValueError("float64 value is not finite")
         return {"kind": "float64", "value": n}
     if disc == 4:
-        return {"kind": "text", "value": root.get_text(0)}
+        return {"kind": "text", "value": _require_portable_text(root.get_text(0))}
     if disc == 5:
         return {"kind": "bytes", "value": root.get_data(0)}
     raise ValueError(f"unknown DbValue union member: {disc}")

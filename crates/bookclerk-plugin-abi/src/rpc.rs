@@ -3131,7 +3131,7 @@ impl AdapterDatabaseSession for AdapterDatabaseSessionClient {
 
     async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
         let mut req = self.client.execute_request();
-        crate::db_rpc::write_execute_request(req.get().init_request(), &request);
+        crate::db_rpc::write_execute_request(req.get().init_request(), &request)?;
         let reply = req.send().promise.await.map_err(from_capnp)?;
         crate::db_rpc::read_execute_result_reply(
             reply
@@ -3175,7 +3175,7 @@ struct GuestDatabaseClient {
 impl GuestDatabase for GuestDatabaseClient {
     async fn execute(&self, request: crate::ExecuteRequest) -> Result<crate::ExecuteReply> {
         let mut req = self.client.execute_request();
-        crate::db_rpc::write_execute_request(req.get().init_request(), &request);
+        crate::db_rpc::write_execute_request(req.get().init_request(), &request)?;
         let reply = req.send().promise.await.map_err(from_capnp)?;
         crate::db_rpc::read_execute_result_reply(
             reply

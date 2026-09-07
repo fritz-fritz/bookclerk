@@ -1220,6 +1220,28 @@ mod tests {
             let back = decode_db_value_bytes(&bytes).unwrap();
             assert_eq!(back, v);
         }
+        for sample in [
+            "汉语",
+            "日本語",
+            "한국어",
+            "𠀀",
+            "مرحبا",
+            "שלום",
+            "नमस्ते",
+            "สวัสดี",
+            "γειά",
+            "привет",
+            "🎵🦀",
+            "café",
+            "cafe\u{0301}",
+        ] {
+            let v = DbValue::Text(sample.into());
+            let back = decode_db_value_bytes(&encoded_db_value_bytes(&v).unwrap()).unwrap();
+            assert_eq!(back, v, "{sample}");
+        }
+        assert_ne!("café".as_bytes(), "cafe\u{0301}".as_bytes());
+        encoded_db_value_bytes(&DbValue::Text("a\0b".into())).expect_err("TEXT NUL");
+        encoded_db_value_bytes(&DbValue::Bytes(vec![0])).expect("BLOB NUL");
         let text = encoded_db_value_bytes(&DbValue::Text("b64:AAAA".into())).unwrap();
         let blob = encoded_db_value_bytes(&DbValue::Bytes(vec![0, 1, 2])).unwrap();
         assert_ne!(text, blob);
