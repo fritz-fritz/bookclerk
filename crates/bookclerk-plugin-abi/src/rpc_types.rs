@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::limits::{ScalarLimits, ABI_MAJOR, ABI_MINOR, PRODUCT_API_VERSION};
+use crate::limits::{ScalarLimits, PRODUCT_API_VERSION};
 
 /// Guest identity returned by `BookclerkPlugin.describe`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,12 +22,6 @@ pub struct PluginDescribe {
     pub rpc_features: Vec<String>,
     /// Effective numeric limits.
     pub scalar_limits: ScalarLimitsDto,
-    /// Major ABI number (`apiVersion`). Spawn rejects a mismatch.
-    #[serde(default)]
-    pub abi_major: u32,
-    /// Minor ABI number. Hosts ignore unknown optional fields.
-    #[serde(default)]
-    pub abi_minor: u32,
     /// Advertised factories. Host intersects with the signed manifest allowlist.
     #[serde(default)]
     pub supported_roles: Vec<String>,
@@ -45,8 +39,6 @@ impl Default for PluginDescribe {
             display_name: None,
             rpc_features: Vec::new(),
             scalar_limits: ScalarLimits::default().into(),
-            abi_major: ABI_MAJOR,
-            abi_minor: ABI_MINOR,
             supported_roles: Vec::new(),
             metadata_json: String::new(),
         }
@@ -82,7 +74,7 @@ pub struct DomainEvent {
     /// Tenant / account id.
     #[serde(default)]
     pub account_id: String,
-    /// Producer plugin id; empty when unknown (`abiMinor` ≥ 6).
+    /// Producer plugin id; empty when unknown.
     #[serde(default)]
     pub source: String,
     /// Trace correlation id.
@@ -151,10 +143,10 @@ pub enum EventResult {
         checkpoint_schema_version: u32,
         /// UTC unix-ms wake hint.
         wake_at_unix_ms: u64,
-        /// Event type that can wake this sleep; empty = timestamp-only (`abiMinor` ≥ 6).
+        /// Event type that can wake this sleep; empty = timestamp-only.
         #[serde(default)]
         wake_on_event_type: String,
-        /// Host-owned payload object filter JSON; empty = type only (`abiMinor` ≥ 6).
+        /// Host-owned payload object filter JSON; empty = type only.
         #[serde(default)]
         wake_on_filter_json: String,
     },
@@ -295,9 +287,6 @@ pub struct WorkerContext {
     pub json: String,
 }
 
-/// Current envelope schema version for [`JobInvocation`].
-pub const ENVELOPE_VERSION: u32 = crate::plugin_capnp::ENVELOPE_VERSION;
-
 /// Maximum checkpoint payload size (bytes).
 pub const MAX_CHECKPOINT_BYTES: u32 = crate::plugin_capnp::MAX_CHECKPOINT_BYTES;
 
@@ -307,11 +296,12 @@ pub const MAX_CHECKPOINT_BYTES: u32 = crate::plugin_capnp::MAX_CHECKPOINT_BYTES;
 /// terminal fenced outcome is committed. They are not reusable across accounts.
 /// `deadline_unix_ms` is a guest hint; the host fence/lease is authoritative
 /// and must not be outlived (clock skew across VPS nodes).
+/// The envelope is not independently persisted as opaque bytes across ABI
+/// majors; command `payload_schema_version` and checkpoint schema versions
+/// version the stored pieces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobInvocation {
-    /// Envelope schema version (must equal [`ENVELOPE_VERSION`]).
-    pub envelope_version: u32,
     /// Command payload schema version for [`Self::command_type`].
     pub payload_schema_version: u32,
     /// Unique id for this attempt envelope.
@@ -411,7 +401,6 @@ impl JobInvocation {
     ) -> Self {
         let attempt = lease.attempt.max(1);
         Self {
-            envelope_version: ENVELOPE_VERSION,
             payload_schema_version: 1,
             invocation_id: format!("{}:{attempt}:{}", lease.job_id, lease.generation),
             command_type: "stream_copy".into(),

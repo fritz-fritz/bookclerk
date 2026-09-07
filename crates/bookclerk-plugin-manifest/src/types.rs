@@ -416,7 +416,7 @@ fn default_module_type() -> String {
 ///
 /// # Validation highlights
 ///
-/// - `api_version` must be `2` (object-capability ABI)
+/// - `api_version` must equal [`bookclerk_plugin_abi::PRODUCT_API_VERSION`]
 /// - `id` must pass [`crate::validate_plugin_id`]
 /// - native requires `command`; workerd requires `[workerd]` with date + main
 /// - `domains` forbidden on native; required for workerd + outbound
@@ -424,7 +424,7 @@ fn default_module_type() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
-    /// ABI / schema version. Must be `2` (object-capability Cap'n Proto).
+    /// ABI / schema version. Must equal [`bookclerk_plugin_abi::PRODUCT_API_VERSION`].
     pub api_version: u32,
     /// Globally unique plugin id (`[a-z0-9_]{2,32}` grammar).
     pub id: String,
@@ -614,8 +614,11 @@ impl PluginManifest {
         // Validate the raw id (non-lossy): do not trim before grammar checks.
         crate::validate_plugin_id(&self.id)
             .map_err(|e| Error::message(format!("plugin.toml: {e}")))?;
-        if self.api_version != 2 {
-            return Err(Error::message("plugin.toml: `api_version` must be 2"));
+        if self.api_version != bookclerk_plugin_abi::PRODUCT_API_VERSION {
+            return Err(Error::message(format!(
+                "plugin.toml: `api_version` must be {}",
+                bookclerk_plugin_abi::PRODUCT_API_VERSION
+            )));
         }
         if let Some(logo) = self.logo.as_deref() {
             let _ = crate::validate_logo(logo)?;

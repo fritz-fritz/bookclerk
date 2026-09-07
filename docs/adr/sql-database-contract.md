@@ -43,8 +43,8 @@ repository interface.
 
 ### Capability negotiation
 
-After `openSession` the host calls typed `DatabaseSession.capabilities`
-(`abiMinor` ≥ 7). `DbCapabilities` advertises the SQL contract version,
+After `openSession` the host calls typed `DatabaseSession.capabilities`.
+`DbCapabilities` advertises the SQL contract version,
 execution semantics (`atomicBatch`, `returning`, `affectedRows`,
 `cancellation`, `timing`), schema versioning (`pragmaUserVersion` /
 `schemaMigrations` / `atomicSchemaBatch`), and all numeric limits
@@ -54,7 +54,7 @@ execution semantics (`atomicBatch`, `returning`, `affectedRows`,
 (exactly one of `pragmaUserVersion` or `schemaMigrations`;
 `atomicSchemaBatch` requires `schemaMigrations`). Bootstrap metadata
 (`sqlFamily`, SeaORM `dialect`) is **not** on typed `DbCapabilities`
-(`abiMinor` 13 tombstones ordinals @17/@18); it travels on the separate
+(ordinals `@17`/`@18` are tombstoned); it travels on the separate
 typed `DbBootstrap` / the host connect path after semantic negotiation
 succeeds.
 
@@ -110,7 +110,7 @@ proof-directed authorization when a type env exists.
 
 `sqlFamily` and SeaORM `dialect` are bootstrap-only (typed `DbBootstrap` on
 the plugin-host connect path). Typed `DbCapabilities` does not carry them
-(`abiMinor` 13). An architecture lint (`scripts/check-db-plugin-isolation.py`)
+(ordinals `@17`/`@18` are tombstoned). An architecture lint (`scripts/check-db-plugin-isolation.py`)
 forbids `bookclerk-library` production sources from reading bootstrap fields
 (or defining planner-side `SqlFamily`). SeaORM proxy open maps bootstrap in
 `bookclerk-plugin-host` after typed capability negotiation succeeds.
@@ -131,8 +131,9 @@ ExecuteReply`. Every request is an ordered non-empty statement list
 Cap'n `DbValue` (`null(expectedType)`, `bool`, `int64`, `float64`, `text`,
 `bytes`). Unknown union members fail closed as `unsupported`. Cursor is
 result transport, not a second mutation primitive. Interactive
-`begin`/`query`/`execute` remain for older `abiMinor` guests. Nested first-party
-SeaORM work uses `Transaction.executeAtomic` (`abiMinor` ≥ 9) on the open
+`begin`/`query`/`execute` remain for guests that still implement those
+methods. Nested first-party
+SeaORM work uses `Transaction.executeAtomic` on the open
 txn so it stays on the typed data plane without a second `BEGIN`.
 
 The guest runs the statements as **one SQL transaction** (D1 HTTP

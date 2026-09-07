@@ -118,11 +118,6 @@ impl PluginRoot for WorkerdRoot {
                         as u32,
                 }
             },
-            abi_major: v
-                .get("abiMajor")
-                .and_then(|x| x.as_u64())
-                .unwrap_or(u64::from(api_version)) as u32,
-            abi_minor: v.get("abiMinor").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
             supported_roles: v
                 .get("supportedRoles")
                 .and_then(|x| x.as_array())

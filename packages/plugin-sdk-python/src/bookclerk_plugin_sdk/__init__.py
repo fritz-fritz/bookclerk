@@ -15,7 +15,7 @@ constants in :mod:`bookclerk_plugin_sdk._abi` are generated from
 truth.
 """
 
-from ._abi import ABI_MAJOR, ABI_MINOR, PRODUCT_API_VERSION
+from ._abi import PRODUCT_API_VERSION
 from .abi import (
     PLUGIN_ERROR_CODES,
     Brand,
@@ -50,8 +50,6 @@ from .db_value import (
 )
 
 __all__ = [
-    "ABI_MAJOR",
-    "ABI_MINOR",
     "PLUGIN_ERROR_CODES",
     "PRODUCT_API_VERSION",
     "Brand",

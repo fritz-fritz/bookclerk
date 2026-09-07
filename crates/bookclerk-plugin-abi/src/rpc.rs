@@ -45,7 +45,7 @@ use crate::rpc_types::{
     CopyResult, DestinationContext, DomainEvent, EventResult, HealthOk, JobCheckpoint,
     JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo, ObjectMetadata,
     OidcClientTemplate, PluginDescribe, PutResult, SourceContext, WorkerContext, WriteOptions,
-    ENVELOPE_VERSION, MAX_CHECKPOINT_BYTES,
+    MAX_CHECKPOINT_BYTES,
 };
 use crate::{PluginError, Result};
 
@@ -217,12 +217,6 @@ fn fill_describe(mut b: plugin_describe::Builder<'_>, d: &PluginDescribe) -> cap
     lim.set_max_scalar_bytes(d.scalar_limits.max_scalar_bytes);
     lim.set_max_stream_window_bytes(d.scalar_limits.max_stream_window_bytes);
     lim.set_max_list_page(d.scalar_limits.max_list_page);
-    b.set_abi_major(if d.abi_major == 0 {
-        d.api_version
-    } else {
-        d.abi_major
-    });
-    b.set_abi_minor(d.abi_minor);
     {
         let mut roles = b
             .reborrow()
@@ -344,7 +338,6 @@ fn fill_invocation(
     mut b: job_invocation::Builder<'_>,
     invocation: &JobInvocation,
 ) -> capnp::Result<()> {
-    b.set_envelope_version(invocation.envelope_version);
     b.set_payload_schema_version(invocation.payload_schema_version);
     b.set_invocation_id(&invocation.invocation_id);
     b.set_command_type(&invocation.command_type);
@@ -373,12 +366,6 @@ fn fill_invocation(
 ///
 /// Returns [`PluginError`] when a required field cannot be read.
 fn read_invocation(r: job_invocation::Reader<'_>) -> Result<JobInvocation> {
-    let envelope_version = r.get_envelope_version();
-    if envelope_version != 0 && envelope_version != ENVELOPE_VERSION {
-        return Err(PluginError::unsupported(format!(
-            "unsupported job envelope version {envelope_version}"
-        )));
-    }
     let checkpoint_json = text_of(r.get_checkpoint_json().map_err(from_capnp)?);
     if checkpoint_json.len() > MAX_CHECKPOINT_BYTES as usize {
         return Err(PluginError::payload_too_large(format!(
@@ -396,11 +383,6 @@ fn read_invocation(r: job_invocation::Reader<'_>) -> Result<JobInvocation> {
     };
     let causation = text_of(r.get_causation_id().map_err(from_capnp)?);
     Ok(JobInvocation {
-        envelope_version: if envelope_version == 0 {
-            ENVELOPE_VERSION
-        } else {
-            envelope_version
-        },
         payload_schema_version: r.get_payload_schema_version().max(1),
         invocation_id: text_of(r.get_invocation_id().map_err(from_capnp)?),
         command_type: text_of(r.get_command_type().map_err(from_capnp)?),
@@ -2322,7 +2304,8 @@ impl PluginClient {
     ///
     /// # Errors
     ///
-    /// Returns a plugin error when the RPC fails or the version is not 2.
+    /// Returns a plugin error when the RPC fails or `apiVersion` is not
+    /// [`crate::limits::PRODUCT_API_VERSION`].
     pub async fn describe(&self) -> Result<PluginDescribe> {
         let req = self.client.describe_request();
         let reply = req.send().promise.await.map_err(from_capnp)?;
@@ -2365,15 +2348,6 @@ impl PluginClient {
                 max_stream_window_bytes: lim.get_max_stream_window_bytes(),
                 max_list_page: lim.get_max_list_page(),
             },
-            abi_major: {
-                let n = m.get_abi_major();
-                if n == 0 {
-                    m.get_api_version()
-                } else {
-                    n
-                }
-            },
-            abi_minor: m.get_abi_minor(),
             supported_roles: {
                 let roles = m.get_supported_roles().map_err(from_capnp)?;
                 let mut out = Vec::new();

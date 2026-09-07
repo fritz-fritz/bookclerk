@@ -8,15 +8,6 @@
 /** Product ABI version (`apiVersion` / `plugin.toml` `api_version`). */
 export const PRODUCT_API_VERSION = 2 as const;
 
-/** Major ABI number advertised on `describe().abiMajor`. */
-export const ABI_MAJOR = 2 as const;
-
-/** Minor ABI number. Hosts ignore unknown optional fields. */
-export const ABI_MINOR = 23 as const;
-
-/** Current envelope schema version for `JobInvocation`. */
-export const ENVELOPE_VERSION = 1 as const;
-
 /** Maximum decoded size of an ordinary RPC scalar value (not a stream window). */
 export const MAX_SCALAR_BYTES = 262144 as const;
 

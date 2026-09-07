@@ -19,8 +19,10 @@ contract must be **identical** across runtimes.
    streams, and **invocation-scoped** stub lifetime (create, invoke, dispose in
    one request). RPC carries bounded values and **stream/stub capabilities**.
    Cap'n Proto field/union ordinals are append-only; unknown members fail
-   closed or return typed `unsupported`. `describe()` advertises `abiMajor` /
-   `abiMinor` and `supportedRoles`; the signed manifest is the host allowlist.
+   closed or return typed `unsupported`. `describe()` advertises `apiVersion`
+   and `supportedRoles`; the signed manifest is the host allowlist. Manifest
+   `api_version` and `describe().apiVersion` must match
+   `PRODUCT_API_VERSION`. Optional facilities use named `rpcFeatures`.
 2. **Workerd is the control-plane front door; native jail is a backend.**
    - **Control plane:** invocation, policy, binding, lifecycle, and outcome
      always pass through the workerd entrypoint (or a generated backend-proxy

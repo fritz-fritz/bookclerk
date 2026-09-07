@@ -92,17 +92,10 @@ pub enum DbConnectParams {
 #[cfg(feature = "host")]
 pub const DATABASE_CONTEXT_MEDIA_TYPE: &str = "application/vnd.bookclerk.db-connect+json";
 
-/// Schema version for [`crate::DatabaseContext::config`] connect payloads.
-#[cfg(feature = "host")]
-pub const DATABASE_CONTEXT_SCHEMA_VERSION: u32 = 1;
-
 /// Media type for the public [`crate::DatabaseAdapterConfig`] payload carried
 /// in [`crate::DatabaseContext::config`] for third-party adapters.
 pub const DATABASE_ADAPTER_CONFIG_MEDIA_TYPE: &str =
     "application/vnd.bookclerk.db-adapter-config+json";
-
-/// Schema version for [`crate::DatabaseAdapterConfig`] payloads.
-pub const DATABASE_ADAPTER_CONFIG_SCHEMA_VERSION: u32 = 1;
 
 /// Builds a [`crate::DatabaseContext`] carrying the public author-facing
 /// [`crate::DatabaseAdapterConfig`] (granted settings + data dir).
@@ -119,7 +112,7 @@ pub fn database_context_from_adapter_config(
     Ok(crate::DatabaseContext {
         json: String::new(),
         config: crate::ExtensibleConfig {
-            schema_version: DATABASE_ADAPTER_CONFIG_SCHEMA_VERSION,
+            schema_version: 0,
             media_type: DATABASE_ADAPTER_CONFIG_MEDIA_TYPE.into(),
             payload,
         },
@@ -162,7 +155,7 @@ pub fn database_context_from_params(
     Ok(crate::DatabaseContext {
         json: String::new(),
         config: crate::ExtensibleConfig {
-            schema_version: DATABASE_CONTEXT_SCHEMA_VERSION,
+            schema_version: 0,
             media_type: DATABASE_CONTEXT_MEDIA_TYPE.into(),
             payload,
         },
@@ -228,7 +221,7 @@ mod host_tests {
         };
         let ctx = database_context_from_params(&params).unwrap();
         assert_eq!(ctx.config.media_type, DATABASE_CONTEXT_MEDIA_TYPE);
-        assert_eq!(ctx.config.schema_version, DATABASE_CONTEXT_SCHEMA_VERSION);
+        assert_eq!(ctx.config.schema_version, 0);
         assert_eq!(connect_params_from_context(&ctx).unwrap(), params);
     }
 
@@ -282,10 +275,7 @@ mod tests {
         };
         let ctx = database_context_from_adapter_config(&cfg).unwrap();
         assert_eq!(ctx.config.media_type, DATABASE_ADAPTER_CONFIG_MEDIA_TYPE);
-        assert_eq!(
-            ctx.config.schema_version,
-            DATABASE_ADAPTER_CONFIG_SCHEMA_VERSION
-        );
+        assert_eq!(ctx.config.schema_version, 0);
         let back = database_adapter_config_from_context(&ctx).unwrap();
         assert_eq!(back, cfg);
         assert_eq!(back.config["url"], "custom://host/db");

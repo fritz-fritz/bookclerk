@@ -213,9 +213,6 @@ def _screaming(camel: str) -> str:
 # Presentation docs for the generated constants (values come from the schema).
 _CONST_DOCS = {
     "PRODUCT_API_VERSION": "Product ABI version (`apiVersion` / `plugin.toml` `api_version`).",
-    "ABI_MAJOR": "Major ABI number advertised on `describe().abiMajor`.",
-    "ABI_MINOR": "Minor ABI number. Hosts ignore unknown optional fields.",
-    "ENVELOPE_VERSION": "Current envelope schema version for `JobInvocation`.",
     "MAX_SCALAR_BYTES": "Maximum decoded size of an ordinary RPC scalar value (not a stream window).",
     "MAX_STREAM_WINDOW_BYTES": "Maximum bytes returned by one `ByteSource.pull` (flow-control window).",
     "MAX_LIST_PAGE": "Maximum objects in one `Destination.list` page.",

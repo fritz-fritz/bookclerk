@@ -57,7 +57,6 @@ def js(value):
 # Product constants come from the generated ``_abi`` projection of
 # ``schema/plugin.capnp`` — re-exported here for guest convenience.
 from ._abi import (  # noqa: E402  (re-export)
-    ENVELOPE_VERSION,
     FEATURE_SCALAR_LIMITS,
     FEATURE_STORAGE_COPY,
     FEATURE_STREAMS,

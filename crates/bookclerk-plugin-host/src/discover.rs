@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use bookclerk_config::Config;
+use bookclerk_plugin_abi::PRODUCT_API_VERSION;
 
 use crate::manifest::PluginManifest;
 use crate::{PluginError, Result};
@@ -118,11 +119,11 @@ fn push_manifest(
 ) -> Result<()> {
     let text = std::fs::read_to_string(manifest_path)?;
     let manifest = PluginManifest::parse(&text)?;
-    if manifest.api_version > crate::HOST_MANIFEST_API_VERSION_MAX {
+    if manifest.api_version > PRODUCT_API_VERSION {
         tracing::warn!(
             id = %manifest.id,
             plugin_api = manifest.api_version,
-            host_api = crate::HOST_MANIFEST_API_VERSION_MAX,
+            host_api = PRODUCT_API_VERSION,
             "plugin api_version newer than host; skipping"
         );
         return Ok(());

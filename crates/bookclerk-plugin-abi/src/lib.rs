@@ -204,7 +204,7 @@ pub use features::{
 };
 pub use jobs::{read_all, stream_copy_keys, StreamCopyHandler, StreamCopySpec};
 pub use limits::{
-    ScalarLimits, ABI_MAJOR, ABI_MINOR, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
+    ScalarLimits, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
     MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 pub use roles::{
@@ -223,8 +223,7 @@ pub use rpc_types::{
     CopyResult, DestinationContext, DomainEvent, EventResult, ExtensibleConfig, HealthOk,
     JobCheckpoint, JobInvocation, JobInvocationLease, JobOutcome, ListOptions, ListPage,
     ObjectInfo, ObjectMetadata, OidcClientTemplate, PluginDescribe, PutResult, QueryPage,
-    ScalarLimitsDto, SourceContext, WorkerContext, WriteOptions, ENVELOPE_VERSION,
-    MAX_CHECKPOINT_BYTES,
+    ScalarLimitsDto, SourceContext, WorkerContext, WriteOptions, MAX_CHECKPOINT_BYTES,
 };
 
 /// Embedded JSON Schema for install `plugin.toml` files (shared with language

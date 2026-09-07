@@ -108,10 +108,9 @@ pub struct JobHandlerContext {
     pub progress: Box<dyn ProgressSink>,
     /// Unused in production. Jobs never inject the host library as guest SQL;
     /// durable plugin state uses [`Self::databases`]. Kept so older guests
-    /// that still read this field see `None` instead of a library session
-    /// (`abiMinor` ≥ 11).
+    /// that still read this field see `None` instead of a library session.
     pub database: Option<Box<dyn GuestDatabase>>,
-    /// Named plugin-owned database bindings (`abiMinor` ≥ 18): isolated
+    /// Named plugin-owned database bindings: isolated
     /// databases from `plugin.toml` `capabilities.bindings.databases`,
     /// separate from the Bookclerk library and from every other plugin.
     pub databases: Vec<(String, Box<dyn GuestDatabase>)>,

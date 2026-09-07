@@ -42,7 +42,10 @@ pub const PROTOCOL_NAME: &str = "workers-rpc";
 pub const MAX_RPC_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Highest `plugin.toml` `api_version` this host/SDK generation understands.
-pub const HOST_MANIFEST_API_VERSION_MAX: u32 = 2;
+///
+/// Aliased to [`bookclerk_plugin_abi::PRODUCT_API_VERSION`] so manifest max
+/// cannot drift from the product ABI.
+pub const HOST_MANIFEST_API_VERSION_MAX: u32 = bookclerk_plugin_abi::PRODUCT_API_VERSION;
 
 /// Role capability method name constants (camelCase wire strings).
 ///

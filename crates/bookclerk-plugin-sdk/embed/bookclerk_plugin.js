@@ -53,7 +53,6 @@ export const MAX_LIST_PAGE = 256;
 export const FEATURE_SCALAR_LIMITS = "rpc.scalarLimits";
 export const FEATURE_STREAMS = "rpc.streams";
 export const FEATURE_STORAGE_COPY = "storage.copy";
-export const ENVELOPE_VERSION = 1;
 export const MAX_CHECKPOINT_BYTES = 65536;
 
 /** Destination capability — subclass and override methods. Abort is stream cancel. */

@@ -15,7 +15,6 @@ import type { ExecuteReply, ExecuteRequest } from "./db-execute.js";
 // Product constants come from the generated `abi.ts` projection of
 // `schema/plugin.capnp` — re-exported here for guest convenience.
 export {
-  ENVELOPE_VERSION,
   FEATURE_SCALAR_LIMITS,
   FEATURE_STORAGE_COPY,
   FEATURE_STREAMS,
@@ -42,8 +41,6 @@ export interface PluginDescribe {
   displayName?: string;
   rpcFeatures: string[];
   scalarLimits: ScalarLimits;
-  abiMajor?: number;
-  abiMinor?: number;
   supportedRoles?: string[];
   metadataJson?: string;
 }
@@ -89,7 +86,6 @@ export interface JobCheckpoint {
  * host fence/lease is authoritative.
  */
 export interface JobInvocation {
-  envelopeVersion: number;
   payloadSchemaVersion: number;
   invocationId: string;
   commandType: string;
@@ -121,14 +117,14 @@ export interface DomainEvent {
   schemaVersion: number;
   occurredAtUnixMs: number;
   accountId?: string;
-  /** Producer plugin id; empty/omitted when unknown (`abiMinor` ≥ 6). */
+  /** Producer plugin id; empty/omitted when unknown. */
   source?: string;
   correlationId?: string;
   causationId?: string;
   deduplicationKey?: string;
   deliveryAttempt: number;
   payload?: Uint8Array;
-  /** Checkpoint JSON from a prior `suspended` result (`abiMinor` ≥ 5). */
+  /** Checkpoint JSON from a prior `suspended` result. */
   checkpointJson?: string;
   checkpointSchemaVersion?: number;
   invocationSequence?: number;
@@ -147,9 +143,9 @@ export type EventResult =
       checkpointJson?: string;
       checkpointSchemaVersion?: number;
       wakeAtUnixMs: number;
-      /** Event type that can wake this sleep; empty = timestamp-only (`abiMinor` ≥ 6). */
+      /** Event type that can wake this sleep; empty = timestamp-only. */
       wakeOnEventType?: string;
-      /** Host-owned payload object filter JSON; empty = type only (`abiMinor` ≥ 6). */
+      /** Host-owned payload object filter JSON; empty = type only. */
       wakeOnFilterJson?: string;
     };
 
@@ -686,7 +682,7 @@ export class Database extends RpcTarget {
 /** Host ↔ database adapter session (`capabilities` + typed `execute`). */
 export class AdapterDatabaseSession extends RpcTarget {
   /**
-   * Typed SQL-contract advertisement (`abiMinor` ≥ 7).
+   * Typed SQL-contract advertisement.
    *
    * @returns Guest `DbCapabilities`.
    */

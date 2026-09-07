@@ -9,15 +9,6 @@ from __future__ import annotations
 PRODUCT_API_VERSION: int = 2
 """Product ABI version (`apiVersion` / `plugin.toml` `api_version`)."""
 
-ABI_MAJOR: int = 2
-"""Major ABI number advertised on `describe().abiMajor`."""
-
-ABI_MINOR: int = 23
-"""Minor ABI number. Hosts ignore unknown optional fields."""
-
-ENVELOPE_VERSION: int = 1
-"""Current envelope schema version for `JobInvocation`."""
-
 MAX_SCALAR_BYTES: int = 262144
 """Maximum decoded size of an ordinary RPC scalar value (not a stream window)."""
 
@@ -59,9 +50,6 @@ DB_COLUMN_TYPES: tuple[str, ...] = ("unspecified", "bool", "int64", "float64", "
 
 __all__ = [
     "PRODUCT_API_VERSION",
-    "ABI_MAJOR",
-    "ABI_MINOR",
-    "ENVELOPE_VERSION",
     "MAX_SCALAR_BYTES",
     "MAX_STREAM_WINDOW_BYTES",
     "MAX_LIST_PAGE",

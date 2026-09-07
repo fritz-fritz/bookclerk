@@ -4,10 +4,11 @@
 # - Never reuse field, method, or union ordinals.
 # - Unknown enum/union members: preserve the wire code and fail closed or
 #   return typed `unsupported`. Never collapse unknown codes to `internal`.
-# - `describe().abiMajor` must match `apiVersion`. `abiMinor` may increase
-#   within a major; hosts ignore unknown optional fields.
-# - Feature bits (`rpcFeatures`) negotiate optional facilities inside a major.
-#   Required features are rejected at spawn when missing.
+# - `apiVersion` / `plugin.toml` `api_version` is the single incompatible ABI
+#   version. Manifest `api_version` and `describe().apiVersion` must match.
+# - Cap'n Proto ordinals are append-only. Named `rpcFeatures` negotiate
+#   optional facilities inside a major. Required features are rejected at
+#   spawn when missing.
 # - Every variable-length field is bounded by the constants below.
 # - Identifiers are non-empty `[a-z][a-z0-9_]{0,63}`. Timestamps are UTC
 #   unix milliseconds (UInt64); zero means omitted.
@@ -24,9 +25,6 @@
 @0x816df58cae22db0c;
 
 const apiVersion :UInt32 = 2;
-const abiMajor :UInt32 = 2;
-const abiMinor :UInt32 = 23;
-const envelopeVersion :UInt32 = 1;
 const maxScalarBytes :UInt32 = 262144;
 const maxStreamWindowBytes :UInt32 = 1048576;
 const maxListPage :UInt32 = 256;
@@ -115,8 +113,10 @@ struct PluginDescribe {
   displayName @3 :Text;
   rpcFeatures @4 :List(Text);
   scalarLimits @5 :ScalarLimits;
-  abiMajor @6 :UInt32;
-  abiMinor @7 :UInt32;
+  # Obsolete: duplicated `apiVersion`. Do not reuse ordinal 6.
+  abiMajor @6 :Void;
+  # Obsolete: optional evolution is `rpcFeatures` + append-only ordinals. Do not reuse ordinal 7.
+  abiMinor @7 :Void;
   # Advertised factories (`destination`, `source`, `worker`, `contentSource`,
   # `integration`, `database`). Host still intersects with the manifest allowlist.
   supportedRoles @8 :List(Text);
@@ -189,11 +189,14 @@ struct DatabaseContext {
   config @1 :ExtensibleConfig;
 }
 
-# Durable command envelope (not a domain event). Envelope version and command
-# payload schema version are independent. Idempotency keys are scoped to
-# (account, plugin, commandType) until a terminal fenced outcome is committed.
+# Durable command envelope (not a domain event). Command payload schema
+# version and checkpoint schema versions are independent of the plugin ABI.
+# The envelope itself is not persisted as opaque bytes across ABI majors.
+# Idempotency keys are scoped to (account, plugin, commandType) until a
+# terminal fenced outcome is committed.
 struct JobInvocation {
-  envelopeVersion @0 :UInt32;
+  # Obsolete: envelope is not independently versioned. Do not reuse ordinal 0.
+  envelopeVersion @0 :Void;
   payloadSchemaVersion @1 :UInt32;
   invocationId @2 :Text;
   commandType @3 :Text;
@@ -258,12 +261,12 @@ struct DomainEvent {
   deduplicationKey @7 :Text;
   deliveryAttempt @8 :UInt32;
   payload @9 :Data;
-  # Append-only (abiMinor 5). Resume a prior EventResult.suspended.
+  # Append-only. Resume a prior EventResult.suspended.
   checkpointJson @10 :Text;
   checkpointSchemaVersion @11 :UInt32;
   invocationSequence @12 :UInt32;
   resumePending @13 :Bool;
-  # Append-only (abiMinor 6). Producer plugin id; empty when unknown.
+  # Append-only. Producer plugin id; empty when unknown.
   source @14 :Text;
 }
 
@@ -284,9 +287,9 @@ struct EventDeadLetter {
   reason @0 :Text;
 }
 
-# Append-only (abiMinor 4). Mirrors job SuspendedOutcome; event handlers
-# persist a bounded checkpoint and release the process until wakeAtUnixMs.
-# abiMinor 6 adds optional wake-on-matching-event fields (empty = timestamp-only).
+# Append-only. Mirrors job SuspendedOutcome; event handlers persist a
+# bounded checkpoint and release the process until wakeAtUnixMs. Optional
+# wake-on-matching-event fields (empty = timestamp-only).
 struct EventSuspended {
   checkpointJson @0 :Text;
   checkpointSchemaVersion @1 :UInt32;
@@ -526,9 +529,9 @@ interface JobHandler {
       output :Destination,
       progress :ProgressSink,
       cancel :Cancellation,
-      # Append-only (abiMinor 8). Host-mediated typed SQL session.
+      # Append-only. Host-mediated typed SQL session.
       database :GuestDatabase,
-      # Append-only (abiMinor 18). Named plugin-owned database bindings
+      # Append-only. Named plugin-owned database bindings
       # (Workers-style): each entry is an isolated database provisioned by
       # the active adapter, separate from the Bookclerk library and from
       # every other plugin. Empty when the manifest declares none.
@@ -1086,7 +1089,7 @@ struct DbCapabilities {
   maxCellBytes @14 :UInt32;
   maxRequestBytes @15 :UInt32;
   maxAtomicResultBytes @16 :UInt32;
-  # Append-only (abiMinor 18). Adapter can open additional isolated sessions
+  # Append-only. Adapter can open additional isolated sessions
   # for plugin-owned database bindings (per-binding file / schema / database).
   pluginDatabases @17 :Bool;
   # Maximum arguments in one physical function call after adapter hiding
@@ -1154,6 +1157,6 @@ interface BookclerkPlugin {
   cliDescribe @8 () -> (result :JsonReply);
   cliInvoke @9 (paramsJson :Text) -> (result :JsonReply);
   # Plugin-provided OIDC AS client templates. Empty list when unused.
-  # Hosts ignore `unsupported` from older abiMinor guests.
+  # Hosts ignore `unsupported` from older guests.
   oidcClients @10 () -> (result :OidcClientsReply);
 }

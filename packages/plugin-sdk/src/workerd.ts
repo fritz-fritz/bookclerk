@@ -39,7 +39,6 @@ export {
   FEATURE_SCALAR_LIMITS,
   FEATURE_STREAMS,
   FEATURE_STORAGE_COPY,
-  ENVELOPE_VERSION,
 } from "./plugin.js";
 export type {
   AdapterEnv,

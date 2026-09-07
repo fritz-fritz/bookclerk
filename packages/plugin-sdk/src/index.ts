@@ -36,7 +36,6 @@ export {
   FEATURE_SCALAR_LIMITS,
   FEATURE_STREAMS,
   FEATURE_STORAGE_COPY,
-  ENVELOPE_VERSION,
 } from "./plugin.js";
 export { decodeDbValue, encodeDbValue, parseDbValue } from "./db-value.js";
 export type { DbType, DbValue } from "./db-value.js";
@@ -96,5 +95,5 @@ export type {
 // JSON payload contracts generated from `schema/plugin.capnp` — the single
 // source of truth. Star-exported so new payload types appear automatically.
 export * from "./generated.js";
-export { ABI_MAJOR, ABI_MINOR, MAX_CHECKPOINT_BYTES } from "./abi.js";
+export { MAX_CHECKPOINT_BYTES } from "./abi.js";
 export type { BookclerkEnv, HostBinding } from "./env.js";

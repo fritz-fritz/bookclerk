@@ -7,12 +7,6 @@
 /// Product ABI version (`apiVersion` / `plugin.toml` `api_version`).
 pub const PRODUCT_API_VERSION: u32 = crate::plugin_capnp::API_VERSION;
 
-/// Major ABI number advertised on `describe().abiMajor`.
-pub const ABI_MAJOR: u32 = crate::plugin_capnp::ABI_MAJOR;
-
-/// Minor ABI number. Hosts ignore unknown optional fields.
-pub const ABI_MINOR: u32 = crate::plugin_capnp::ABI_MINOR;
-
 /// Maximum decoded size of a domain-event scalar payload (not a stream).
 pub const MAX_EVENT_PAYLOAD_BYTES: u32 = crate::plugin_capnp::MAX_EVENT_PAYLOAD_BYTES;
 
