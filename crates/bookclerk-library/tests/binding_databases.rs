@@ -185,6 +185,21 @@ async fn binding_denies_reserved_tables_and_qualified_names() {
     let err = run_binding(
         &db,
         req(
+            "plugin-journal",
+            vec![stmt("SELECT ordinal FROM plugin_migrations", vec![])],
+        ),
+    )
+    .await
+    .expect_err("plugin migration journal must stay host-owned");
+    assert!(
+        err.to_string().contains("plugin_migrations")
+            || err.to_string().contains("reserved")
+            || err.to_string().contains("unauthorized"),
+        "{err}"
+    );
+    let err = run_binding(
+        &db,
+        req(
             "qualified",
             vec![stmt("SELECT id FROM main.sqlite_master", vec![])],
         ),

@@ -1088,8 +1088,12 @@ mod tests {
 
     #[tokio::test]
     async fn binding_owned_rejects_schema_and_journal() {
+        let db = binding_db().await;
         let caps = bookclerk_plugin_abi::DbCapabilities::advertised_sqlite();
-        let policy = GuestSqlPolicy::binding_owned();
+        let env = bookclerk_db_exec::load_sql_type_env(&db)
+            .await
+            .expect("binding catalog");
+        let policy = GuestSqlPolicy::binding_owned().with_sql_types(env);
         let ddl = ExecuteRequest {
             operation_id: "ddl".into(),
             request_hash: String::new(),
