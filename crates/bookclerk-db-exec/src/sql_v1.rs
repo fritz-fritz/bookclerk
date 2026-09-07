@@ -698,6 +698,23 @@ pub const PORTABLE_TEXT_OPS: &str = "SELECT \
      lower('Ab') AS c4, \
      upper('Ab') AS c5";
 
+/// Full Unicode scalar TEXT (UTF-8), including supplementary-plane Han, RTL,
+/// combining sequences, and NFC vs NFD that must not be silently normalized.
+pub const PORTABLE_TEXT_MULTILINGUAL: &str = "SELECT \
+     '汉语' AS cjk, \
+     '日本語' AS ja, \
+     '한국어' AS ko, \
+     '𠀀' AS han_ext, \
+     'مرحبا' AS ar, \
+     'שלום' AS he, \
+     'नमस्ते' AS hi, \
+     'สวัสดี' AS th, \
+     'γειά' AS el, \
+     'привет' AS ru, \
+     '🎵🦀' AS emoji, \
+     'café' AS nfc, \
+     'cafe\u{0301}' AS nfd";
+
 /// Identity omit after rollback of an explicit id (same atomic request fails).
 pub const PORTABLE_IDENTITY_INSERT_BAD_TYPE: &str = "INSERT INTO ident (id, n) VALUES (100, 'x')";
 
@@ -741,6 +758,26 @@ pub fn portable_text_ops_expects() -> &'static [PortableExpect] {
         PortableExpect::Text("a"),
         PortableExpect::Text("ab"),
         PortableExpect::Text("AB"),
+    ]
+}
+
+/// Expected [`PORTABLE_TEXT_MULTILINGUAL`] cells (exact UTF-8, no NFC/NFD fold).
+#[must_use]
+pub fn portable_text_multilingual_expects() -> &'static [PortableExpect] {
+    &[
+        PortableExpect::Text("汉语"),
+        PortableExpect::Text("日本語"),
+        PortableExpect::Text("한국어"),
+        PortableExpect::Text("𠀀"),
+        PortableExpect::Text("مرحبا"),
+        PortableExpect::Text("שלום"),
+        PortableExpect::Text("नमस्ते"),
+        PortableExpect::Text("สวัสดี"),
+        PortableExpect::Text("γειά"),
+        PortableExpect::Text("привет"),
+        PortableExpect::Text("🎵🦀"),
+        PortableExpect::Text("café"),
+        PortableExpect::Text("cafe\u{0301}"),
     ]
 }
 

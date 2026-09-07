@@ -1034,6 +1034,21 @@ async fn binding_sql_v1_p1_vectors() {
     ) {
         panic!("{err}");
     }
+    let mut multi = stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_TEXT_MULTILINGUAL,
+        vec![],
+    );
+    multi.max_rows = 8;
+    let mrows = run_binding(&db, req("text-multi", vec![multi]))
+        .await
+        .expect("text multilingual");
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_statement_mismatch(
+        &mrows.statements[0],
+        bookclerk_db_exec::sql_v1::portable_text_multilingual_expects(),
+        "text multilingual",
+    ) {
+        panic!("{err}");
+    }
 
     // Identity rollback: explicit 100 + unique conflict rolls back; omit-id is 1.
     run_binding(

@@ -2491,6 +2491,21 @@ async fn postgres_binding_sql_v1_p1_vectors() {
     ) {
         panic!("{err}");
     }
+    let mut multi = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_TEXT_MULTILINGUAL,
+        vec![],
+    );
+    multi.max_rows = 8;
+    let mrows = run_postgres_binding(&db, binding_req("pg-text-multi", vec![multi]))
+        .await
+        .expect("text multilingual");
+    if let Some(err) = bookclerk_db_exec::sql_v1::portable_statement_mismatch(
+        &mrows.statements[0],
+        bookclerk_db_exec::sql_v1::portable_text_multilingual_expects(),
+        "text multilingual",
+    ) {
+        panic!("{err}");
+    }
 
     run_postgres_binding(
         &db,

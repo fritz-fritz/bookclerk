@@ -69,6 +69,35 @@ class DbValueGoldens(unittest.TestCase):
         text = parse_db_value({"kind": "text", "value": "héllo\x00world"})
         self.assertEqual(text["value"], "héllo\x00world")
 
+    def test_multilingual_utf8_round_trip_is_not_normalized(self) -> None:
+        samples = [
+            "汉语",
+            "日本語",
+            "한국어",
+            "𠀀",
+            "مرحبا",
+            "שלום",
+            "नमस्ते",
+            "สวัสดี",
+            "γειά",
+            "привет",
+            "🎵🦀",
+            "café",
+            "cafe\u0301",
+        ]
+        for sample in samples:
+            parsed = parse_db_value({"kind": "text", "value": sample})
+            self.assertEqual(parsed["value"], sample)
+            self.assertEqual(
+                decode_db_value(encode_db_value({"kind": "text", "value": sample}))["value"],
+                sample,
+            )
+        self.assertNotEqual("café", "cafe\u0301")
+        self.assertNotEqual(
+            encode_db_value({"kind": "text", "value": "café"}),
+            encode_db_value({"kind": "text", "value": "cafe\u0301"}),
+        )
+
     def test_embedded_zero_bytes(self) -> None:
         blob = parse_db_value({"kind": "bytes", "value": "b64:AAEC"})
         self.assertEqual(blob["kind"], "bytes")

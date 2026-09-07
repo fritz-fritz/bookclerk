@@ -70,6 +70,7 @@ mod roles;
 mod rpc;
 mod rpc_types;
 mod sdk_wire;
+mod sql_overflow;
 mod sql_proof;
 mod sql_text;
 pub mod sql_types;
@@ -119,13 +120,15 @@ mod wire_fixtures;
 pub use db::{connect_params_from_context, database_context_from_params, DbConnectParams};
 pub use db::{
     database_adapter_config_from_context, database_context_from_adapter_config,
-    DATABASE_ADAPTER_CONFIG_MEDIA_TYPE, DATABASE_ADAPTER_CONFIG_SCHEMA_VERSION,
+    DATABASE_ADAPTER_CONFIG_MEDIA_TYPE,
 };
+#[cfg(feature = "host")]
+pub use db_execute::d1_physical_sql_preflight_len_proven;
 pub use db_execute::{
-    d1_physical_sql_preflight_len, d1_physical_sql_upper_bound_len, sql_payload_bytes,
-    sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn, DbPlanStatementKind,
-    DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest, StatementResult,
-    TypedDbStatement, D1_MAX_BINDS, D1_MAX_FUNCTION_ARGS, D1_MAX_PAYLOAD_BYTES,
+    d1_physical_sql_preflight_len, d1_physical_sql_upper_bound_len, implied_physical_sql_ceiling,
+    sql_payload_bytes, sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn,
+    DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest,
+    StatementResult, TypedDbStatement, D1_MAX_BINDS, D1_MAX_FUNCTION_ARGS, D1_MAX_PAYLOAD_BYTES,
     D1_MAX_SCHEMA_COLUMNS, D1_MAX_SQL_STATEMENT_BYTES, FIRST_PARTY_MAX_RESULT_BYTES,
     FIRST_PARTY_MAX_RESULT_ROWS, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
     HOST_MIN_FUNCTION_ARGS, HOST_MIN_PATTERN_BYTES, HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES,
@@ -146,6 +149,8 @@ pub use guest_sql::{
 pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
+#[cfg(feature = "host")]
+pub use sql_overflow::{apply_integer_overflow, OverflowDialect};
 #[cfg(feature = "host")]
 pub use sql_proof::{
     assert_proof_matches_sql, IntegerArithKind, IntegerArithSite, PhysicalAccess,

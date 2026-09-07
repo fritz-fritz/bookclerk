@@ -68,6 +68,32 @@ const text = parseDbValue({ kind: "text", value: "héllo\u0000world" });
 assert.equal(text.kind, "text");
 assert.equal(text.value, "héllo\u0000world");
 
+const multilingual = [
+  "汉语",
+  "日本語",
+  "한국어",
+  "𠀀",
+  "مرحبا",
+  "שלום",
+  "नमस्ते",
+  "สวัสดี",
+  "γειά",
+  "привет",
+  "🎵🦀",
+  "café",
+  "cafe\u0301",
+];
+for (const sample of multilingual) {
+  const parsed = parseDbValue({ kind: "text", value: sample });
+  assert.equal(parsed.value, sample);
+  assert.equal(decodeDbValue(encodeDbValue({ kind: "text", value: sample })).value, sample);
+}
+assert.notEqual("café", "cafe\u0301");
+assert.notEqual(
+  hex(encodeDbValue({ kind: "text", value: "café" })),
+  hex(encodeDbValue({ kind: "text", value: "cafe\u0301" })),
+);
+
 const blob = parseDbValue({ kind: "bytes", value: "b64:AAEC" });
 assert.equal(blob.kind, "bytes");
 assert.deepEqual(Array.from(blob.value), [0, 1, 2]);

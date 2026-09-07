@@ -85,9 +85,9 @@ pub const SQLITE_FAMILY_INSERT_OR_IGNORE_MAX_EXTRA: usize = 256;
 /// after packing as many `LIKE` keywords as possible are charged as `/` `%`
 /// NULLIF wraps (1-byte operators).
 ///
-/// Proof-directed INTEGER overflow CASE wraps are applied by the adapter from
-/// typed proofs and fail closed against the engine's physical statement limit
-/// after lowering; they are not a function of payload length alone.
+/// Proof-directed INTEGER overflow CASE wraps are applied from typed proofs
+/// before this mechanical bound; they are not a function of payload length
+/// alone.
 #[must_use]
 pub const fn sqlite_family_like_divmod_insert_upper_bound(canonical_len: usize) -> usize {
     const {
@@ -111,7 +111,8 @@ pub const fn sqlite_family_like_divmod_insert_upper_bound(canonical_len: usize) 
 /// Always `<=` [`sqlite_family_like_divmod_insert_upper_bound`]`(sql.len())`
 /// for well-formed packs: the length formula packs the densest rewrite into
 /// every 4-byte window, while this preflight charges only constructs that
-/// lowering actually rewrites.
+/// lowering actually rewrites. INTEGER overflow wraps are applied from typed
+/// proofs *before* this mechanical bound.
 ///
 /// # Errors
 ///
@@ -876,9 +877,28 @@ mod tests {
 
     #[test]
     fn portable_text_accepts_unicode_and_rejects_nul() {
-        for sample in ["", "ascii", "café", "a\u{0301}", "🎵", "\u{1F980}", "שלום"] {
+        for sample in [
+            "",
+            "ascii",
+            "café",
+            "cafe\u{0301}",
+            "汉语",
+            "日本語",
+            "한국어",
+            "𠀀",
+            "مرحبا",
+            "שלום",
+            "नमस्ते",
+            "สวัสดี",
+            "γειά",
+            "привет",
+            "🎵",
+            "\u{1F980}",
+            "a\u{0301}",
+        ] {
             require_portable_text(sample).expect(sample);
         }
+        assert_ne!("café".as_bytes(), "cafe\u{0301}".as_bytes());
         assert!(require_portable_text("a\0b").is_err());
         require_portable_text_binds(&[crate::DbValue::Bytes(vec![0])]).expect("BLOB NUL");
         assert!(require_portable_text_binds(&[crate::DbValue::Text("a\0".into())]).is_err());

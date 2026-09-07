@@ -9,8 +9,9 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use bookclerk_plugin_abi::{
-    assert_proof_matches_sql, IntegerArithKind, IntegerArithSite, PluginError, ResolvedStatement,
-    SqlSpan, INSERT_SELECT_WRAP_ALIAS, LIKE_GLOB_WRAP_PREFIX, LIKE_GLOB_WRAP_SUFFIX,
+    apply_integer_overflow, assert_proof_matches_sql, IntegerArithSite, OverflowDialect,
+    PluginError, ResolvedStatement, SqlSpan, INSERT_SELECT_WRAP_ALIAS, LIKE_GLOB_WRAP_PREFIX,
+    LIKE_GLOB_WRAP_SUFFIX,
 };
 use sea_orm::DatabaseBackend;
 
@@ -55,7 +56,7 @@ pub fn lower_canonical_sql_typed(
         if backend == DatabaseBackend::Postgres {
             sql = apply_text_collate_spans(&sql, &collate, &mut arith)?;
         }
-        sql = apply_integer_overflow_from_proof(backend, &sql, &arith)?;
+        sql = apply_integer_overflow(overflow_dialect(backend), &sql, &arith)?;
     }
     Ok(lower_mechanical(backend, sql))
 }
@@ -371,67 +372,6 @@ fn apply_text_collate_spans(
     Ok(out)
 }
 
-/// i64::MAX as a portable SQL integer.
-const I64_MAX_SQL: &str = "9223372036854775807";
-
-/// i64::MIN without evaluating an overflowing BIGINT subtraction.
-fn i64_min_sql(backend: DatabaseBackend) -> &'static str {
-    if backend == DatabaseBackend::Postgres {
-        "CAST('-9223372036854775808' AS BIGINT)"
-    } else {
-        "CAST('-9223372036854775808' AS INTEGER)"
-    }
-}
-
-/// Wrap each INTEGER `+`/`-`/`*`/`abs` site in a portable overflow CASE.
-///
-/// Sites are applied **innermost-first** (`full.end`, then reverse `full.start`)
-/// so right-nested `1 + abs(n)` rewrites the `abs` call before the outer add.
-/// After each wrap, remaining (outer) sites shift by the inserted byte count.
-///
-/// # Errors
-///
-/// Returns when a site is empty, past `sql`, not on a UTF-8 boundary, or cannot
-/// be wrapped as the recorded operator.
-fn apply_integer_overflow_from_proof(
-    backend: DatabaseBackend,
-    sql: &str,
-    sites: &[IntegerArithSite],
-) -> Result<String, PluginError> {
-    let mut sites = sites.to_vec();
-    sites.sort_by_key(|s| (s.full.end, std::cmp::Reverse(s.full.start)));
-    let mut out = sql.to_string();
-    for i in 0..sites.len() {
-        let site = sites[i];
-        if site.full.start >= site.full.end || site.full.end > out.len() {
-            return Err(PluginError::internal(
-                "INTEGER overflow site is empty or past end of SQL",
-            ));
-        }
-        if !out.is_char_boundary(site.full.start) || !out.is_char_boundary(site.full.end) {
-            return Err(PluginError::internal(
-                "INTEGER overflow site is not on a UTF-8 boundary",
-            ));
-        }
-        let wrapped = wrap_integer_arith(backend, &out, &site)?;
-        let old_len = site.full.end - site.full.start;
-        if wrapped.len() < old_len {
-            return Err(PluginError::internal(
-                "INTEGER overflow wrap shrank the site",
-            ));
-        }
-        let delta = wrapped.len() - old_len;
-        let repl_end = site.full.end;
-        out.replace_range(site.full.start..site.full.end, &wrapped);
-        for later in sites.iter_mut().skip(i + 1) {
-            later.full = shift_span(later.full, repl_end, delta);
-            later.lhs = shift_span(later.lhs, repl_end, delta);
-            later.rhs = shift_span(later.rhs, repl_end, delta);
-        }
-    }
-    Ok(out)
-}
-
 fn shift_span(span: SqlSpan, repl_end: usize, delta: usize) -> SqlSpan {
     SqlSpan {
         start: if span.start >= repl_end {
@@ -447,104 +387,12 @@ fn shift_span(span: SqlSpan, repl_end: usize, delta: usize) -> SqlSpan {
     }
 }
 
-/// Derived-table source that evaluates overflow operands once.
-///
-/// Postgres `FROM (SELECT col …)` is not correlated with an outer `UPDATE`/`SELECT`,
-/// so `LATERAL` is required for column refs such as `attempt_count + 1`. SQLite
-/// FROM-subqueries already correlate and do not accept `LATERAL`.
-fn overflow_row_source(backend: DatabaseBackend, cols: &str) -> String {
+fn overflow_dialect(backend: DatabaseBackend) -> OverflowDialect {
     if backend == DatabaseBackend::Postgres {
-        format!("LATERAL (SELECT {cols}) _bc_ov")
+        OverflowDialect::Postgres
     } else {
-        format!("(SELECT {cols}) _bc_ov")
+        OverflowDialect::SqliteFamily
     }
-}
-
-/// Renders one INTEGER overflow CASE wrap for `site`.
-///
-/// # Errors
-///
-/// Returns when `site` is not a valid UTF-8 range in `sql`, or an `abs` site
-/// is not a call.
-fn wrap_integer_arith(
-    backend: DatabaseBackend,
-    sql: &str,
-    site: &IntegerArithSite,
-) -> Result<String, PluginError> {
-    if site.full.end > sql.len()
-        || site.lhs.end > sql.len()
-        || site.rhs.end > sql.len()
-        || site.lhs.start >= site.lhs.end
-        || site.full.start >= site.full.end
-        || !sql.is_char_boundary(site.full.start)
-        || !sql.is_char_boundary(site.full.end)
-        || !sql.is_char_boundary(site.lhs.start)
-        || !sql.is_char_boundary(site.lhs.end)
-        || !sql.is_char_boundary(site.rhs.start)
-        || !sql.is_char_boundary(site.rhs.end)
-    {
-        return Err(PluginError::internal(
-            "INTEGER overflow site is not a valid UTF-8 range in the statement",
-        ));
-    }
-    let min = i64_min_sql(backend);
-    match site.kind {
-        IntegerArithKind::Abs => {
-            let full = &sql[site.full.start..site.full.end];
-            let arg = abs_call_arg(full)
-                .ok_or_else(|| PluginError::internal("INTEGER overflow abs site is not a call"))?;
-            let src = overflow_row_source(backend, &format!("({arg}) AS a"));
-            Ok(format!(
-                "(SELECT CASE WHEN a IS NULL THEN NULL WHEN a = {min} THEN NULL ELSE abs(a) END \
-                 FROM {src})"
-            ))
-        }
-        IntegerArithKind::Add => {
-            let a = &sql[site.lhs.start..site.lhs.end];
-            let b = &sql[site.rhs.start..site.rhs.end];
-            let src = overflow_row_source(backend, &format!("({a}) AS a, ({b}) AS b"));
-            Ok(format!(
-                "(SELECT CASE WHEN a IS NULL OR b IS NULL THEN a + b \
-                 WHEN a > 0 AND b > 0 AND a > {I64_MAX_SQL} - b THEN NULL \
-                 WHEN a < 0 AND b < 0 AND a < {min} - b THEN NULL \
-                 ELSE a + b END FROM {src})"
-            ))
-        }
-        IntegerArithKind::Sub => {
-            let a = &sql[site.lhs.start..site.lhs.end];
-            let b = &sql[site.rhs.start..site.rhs.end];
-            let src = overflow_row_source(backend, &format!("({a}) AS a, ({b}) AS b"));
-            Ok(format!(
-                "(SELECT CASE WHEN a IS NULL OR b IS NULL THEN a - b \
-                 WHEN b < 0 AND a > {I64_MAX_SQL} + b THEN NULL \
-                 WHEN b > 0 AND a < {min} + b THEN NULL \
-                 ELSE a - b END FROM {src})"
-            ))
-        }
-        IntegerArithKind::Mul => {
-            let a = &sql[site.lhs.start..site.lhs.end];
-            let b = &sql[site.rhs.start..site.rhs.end];
-            let src = overflow_row_source(backend, &format!("({a}) AS a, ({b}) AS b"));
-            Ok(format!(
-                "(SELECT CASE WHEN a IS NULL OR b IS NULL THEN a * b \
-                 WHEN a = 0 OR b = 0 THEN 0 \
-                 WHEN (a = {min} AND b = -1) OR (b = {min} AND a = -1) THEN NULL \
-                 WHEN b = -1 THEN (0 - a) \
-                 WHEN b > 0 AND (a > {I64_MAX_SQL} / b OR a < {min} / b) THEN NULL \
-                 WHEN b < 0 AND (a < {I64_MAX_SQL} / b OR a > {min} / b) THEN NULL \
-                 ELSE a * b END FROM {src})"
-            ))
-        }
-    }
-}
-
-fn abs_call_arg(full: &str) -> Option<&str> {
-    let open = full.as_bytes().iter().position(|b| *b == b'(')?;
-    let close = full.as_bytes().iter().rposition(|b| *b == b')')?;
-    if close <= open {
-        return None;
-    }
-    Some(full[open + 1..close].trim())
 }
 
 /// Portable `/` and `%` by zero: `NULL` (SQLite/D1 already; Postgres `NULLIF`).
@@ -2534,6 +2382,72 @@ mod tests {
         assert!(
             !d1_host_accepts(&over_sql, &over_params),
             "N+1 LIKE placeholders must fail host admission"
+        );
+    }
+
+    fn dense_add_sql(adds: usize) -> String {
+        let mut sql = String::from("SELECT 1");
+        for _ in 0..adds {
+            sql.push_str("+1");
+        }
+        sql
+    }
+
+    #[test]
+    fn d1_overflow_n_plus_one_is_rejected_before_lowering() {
+        use bookclerk_plugin_abi::{
+            d1_physical_sql_preflight_len, d1_physical_sql_preflight_len_proven,
+            D1_MAX_SQL_STATEMENT_BYTES,
+        };
+        let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
+        let mut lo = 0usize;
+        let mut hi = 1usize;
+        while hi < 800 {
+            let sql = dense_add_sql(hi);
+            if d1_host_accepts(&sql, &[]) {
+                lo = hi;
+                hi = (hi.saturating_mul(2)).min(800);
+            } else {
+                break;
+            }
+        }
+        while lo + 1 < hi {
+            let mid = lo + (hi - lo) / 2;
+            if d1_host_accepts(&dense_add_sql(mid), &[]) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let n_ok = lo;
+        assert!(n_ok >= 1, "expected an admitted add chain");
+        let sql = dense_add_sql(n_ok);
+        let proof = proof_of(&sql, &SqlTypeEnv::new());
+        let pre = d1_physical_sql_preflight_len_proven(&sql, 0, Some(&proof)).expect("preflight");
+        let lowered =
+            lower_canonical_sql_typed(DatabaseBackend::Sqlite, &sql, Some(&proof)).expect("lower");
+        let physical =
+            crate::cap_query_sql(&lowered, bookclerk_plugin_abi::FIRST_PARTY_MAX_RESULT_ROWS).len();
+        assert!(physical <= pre, "physical={physical} pre={pre}");
+        assert!(
+            physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
+            "physical={physical}"
+        );
+        let over = dense_add_sql(n_ok + 1);
+        assert!(
+            !d1_host_accepts(&over, &[]),
+            "N+1 add chain must fail portable admission"
+        );
+        let mechanical = d1_physical_sql_preflight_len(&over, 0).expect("mechanical");
+        assert!(
+            mechanical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
+            "N+1 still fits mechanical-only ({mechanical})"
+        );
+        let proof = proof_of(&over, &SqlTypeEnv::new());
+        let pre = d1_physical_sql_preflight_len_proven(&over, 0, Some(&proof)).expect("pre N+1");
+        assert!(
+            pre > D1_MAX_SQL_STATEMENT_BYTES as usize || caps.admit_statement(&over, &[]).is_err(),
+            "N+1 proven preflight {pre} must miss the physical ceiling"
         );
     }
 }

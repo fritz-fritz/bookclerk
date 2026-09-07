@@ -10,10 +10,13 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::db_value::{DbType, DbValue};
+use crate::sql_overflow::{apply_integer_overflow, OverflowDialect};
+use crate::sql_proof::ResolvedStatement;
 use crate::sql_text::{
     require_function_args_within, require_like_patterns_within, require_portable_text,
     require_portable_text_binds, D1_PORTABLE_LIKE_PATTERN_BYTES,
 };
+use crate::sql_types::SqlTypeEnv;
 use crate::MAX_SCALAR_BYTES;
 
 /// SQLite family bind cap advertised by the platform sqlite guest.
@@ -91,8 +94,12 @@ const D1_QUERY_CAP_WRAP_MAX_EXTRA: usize =
 /// `canonical_len` after sqlite-family mechanical lowering, the query LIMIT
 /// wrap, and `unhex(?)` for every advertised bind.
 ///
-/// Proof-directed INTEGER overflow wraps are fail-closed at the adapter after
-/// typed lowering; they are not a function of payload length alone.
+/// This length-only formula does **not** include proof-directed INTEGER
+/// overflow CASE wraps: a worst-case `1+1+…` payload of
+/// [`HOST_MIN_PAYLOAD_BYTES`] already exceeds [`D1_MAX_SQL_STATEMENT_BYTES`]
+/// after wrapping. Overflow is charged by proven preflight from
+/// `integer_arith_sites` (or a typecheck of literal-only SQL in
+/// [`DbCapabilities::admit_statement`]).
 #[must_use]
 pub const fn d1_physical_sql_upper_bound_len(canonical_len: usize) -> usize {
     crate::sql_text::sqlite_family_like_divmod_insert_upper_bound(canonical_len)
@@ -100,24 +107,69 @@ pub const fn d1_physical_sql_upper_bound_len(canonical_len: usize) -> usize {
         .saturating_add((D1_MAX_BINDS as usize).saturating_mul(D1_UNHEX_PLACEHOLDER_EXTRA))
 }
 
-/// Deterministic D1 physical-length preflight for one admitted statement.
+/// Deterministic D1 physical-length preflight without a typed proof.
 ///
-/// Uses the counted mechanical lowering bound (actual `LIKE` / `/` `%` /
-/// `INSERT OR IGNORE` occurrences) plus the query LIMIT wrap and `unhex(?)`
-/// for each bind. Always `<=` [`d1_physical_sql_upper_bound_len`]`(sql.len())`
-/// when `bind_count <= `[`D1_MAX_BINDS`].
+/// Mechanical sqlite-family lowering plus the query LIMIT wrap and `unhex(?)`
+/// for each bind. INTEGER overflow wraps are omitted unless the caller uses
+/// proven preflight with `integer_arith_sites`.
 ///
 /// # Errors
 ///
 /// Returns [`crate::PluginError::invalid_params`] when the pack lexer rejects
 /// `sql`.
 pub fn d1_physical_sql_preflight_len(sql: &str, bind_count: usize) -> crate::Result<usize> {
+    d1_physical_preflight(sql, bind_count, None)
+}
+
+/// [`d1_physical_sql_preflight_len`] after applying sqlite-family INTEGER
+/// overflow wraps from `proof` (innermost-first, then mechanical `/` `%`
+/// NULLIF / LIKE→GLOB / `INSERT OR IGNORE`).
+///
+/// # Errors
+///
+/// Returns when `proof` does not validate against `sql`, overflow wrapping
+/// fails, or the pack lexer rejects the post-overflow SQL.
+#[cfg(feature = "host")]
+pub fn d1_physical_sql_preflight_len_proven(
+    sql: &str,
+    bind_count: usize,
+    proof: Option<&crate::ResolvedStatement>,
+) -> crate::Result<usize> {
+    if let Some(proof) = proof {
+        proof.validate_for(sql)?;
+    }
+    d1_physical_preflight(sql, bind_count, proof)
+}
+
+/// Apply overflow wraps when `proof` has INTEGER sites, then the mechanical bound.
+fn d1_physical_preflight(
+    sql: &str,
+    bind_count: usize,
+    proof: Option<&ResolvedStatement>,
+) -> crate::Result<usize> {
+    let after_overflow = match proof {
+        Some(proof) if !proof.integer_arith_sites.is_empty() => apply_integer_overflow(
+            OverflowDialect::SqliteFamily,
+            sql,
+            &proof.integer_arith_sites,
+        )?,
+        _ => sql.to_string(),
+    };
     let binds = bind_count.min(D1_MAX_BINDS as usize);
     Ok(
-        crate::sql_text::sqlite_family_mechanical_len_upper_bound(sql)?
+        crate::sql_text::sqlite_family_mechanical_len_upper_bound(&after_overflow)?
             .saturating_add(D1_QUERY_CAP_WRAP_MAX_EXTRA)
             .saturating_add(binds.saturating_mul(D1_UNHEX_PLACEHOLDER_EXTRA)),
     )
+}
+
+/// Implied physical SQL ceiling from an advertised `maxPayloadBytes`.
+///
+/// Guests that advertise D1's portable payload cap must realize sqlite-family
+/// lowering (including overflow wraps) inside [`D1_MAX_SQL_STATEMENT_BYTES`].
+#[must_use]
+pub fn implied_physical_sql_ceiling(max_payload_bytes: u32) -> usize {
+    d1_physical_sql_upper_bound_len(max_payload_bytes as usize)
 }
 
 /// Largest canonical payload that [`d1_physical_sql_upper_bound_len`] still
@@ -156,12 +208,13 @@ pub const FIRST_PARTY_MAX_RESULT_BYTES: u32 = MAX_SCALAR_BYTES;
 
 /// Bookclerk SQL contract version advertised by first-party adapters.
 ///
-/// Contract versions are **monotonic supersets** (see `docs/sql-contract/v1.md`):
-/// every guarantee in version *N* remains valid in *N+1*. Guests advertise the
-/// highest version they implement; hosts require
-/// `sqlContractVersion >= SQL_CONTRACT_VERSION`. A non-superset change must bump
-/// this constant and document a new major contract — do not weaken `>=` into a
-/// negotiated range until then.
+/// This integer is a **monotonic backward-compatible language/semantic level**.
+/// Every guarantee in version *N* remains valid in *N+1*; guests advertise the
+/// highest version they implement and hosts require
+/// `sqlContractVersion >= SQL_CONTRACT_VERSION`. That `>=` check is only sound
+/// while each successor is a superset. A non-superset redesign needs a **new
+/// contract identity** and a plugin ABI break (`apiVersion`), not merely
+/// incrementing this scalar.
 pub const SQL_CONTRACT_VERSION: u32 = 1;
 
 /// Bootstrap-only SeaORM proxy metadata returned by `AdapterDatabaseSession.bootstrap`.
@@ -485,14 +538,14 @@ pub struct DbCapabilities {
     /// database bindings (per-binding file / schema / database).
     #[serde(default)]
     pub plugin_databases: bool,
-    /// Maximum arguments in one physical function call after adapter hiding
-    /// (abiMinor 23). `0` is unspecified.
+    /// Maximum arguments in one physical function call after adapter hiding.
+    /// `0` is unspecified.
     #[serde(default)]
     pub max_function_args: u32,
-    /// Maximum columns in one `CREATE TABLE` (abiMinor 23). `0` is unspecified.
+    /// Maximum columns in one `CREATE TABLE`. `0` is unspecified.
     #[serde(default)]
     pub max_schema_columns: u32,
-    /// Maximum UTF-8 bytes of a BookclerkSQL `LIKE` pattern value (abiMinor 23).
+    /// Maximum UTF-8 bytes of a BookclerkSQL `LIKE` pattern value.
     /// `0` is unspecified.
     #[serde(default)]
     pub max_pattern_bytes: u32,
@@ -676,10 +729,16 @@ impl DbCapabilities {
 
     /// Rejects BookclerkSQL that exceeds this advertisement before dispatch.
     ///
+    /// Physical realizability uses sqlite-family overflow wraps from a
+    /// literal-only typecheck when the statement typechecks against an empty
+    /// catalog, then the mechanical bound, compared to
+    /// [`implied_physical_sql_ceiling`]`(max_payload_bytes)`. Adapters with a
+    /// schema-bound proof must preflight overflow wraps before lowering.
+    ///
     /// # Errors
     ///
     /// Returns [`crate::PluginError::invalid_params`] when a statement exceeds
-    /// schema-column, LIKE-pattern, or TEXT-domain limits.
+    /// schema-column, LIKE-pattern, TEXT-domain, or implied physical-SQL limits.
     pub fn admit_statement(&self, sql: &str, parameters: &[crate::DbValue]) -> crate::Result<()> {
         require_portable_text(sql)?;
         require_portable_text_binds(parameters)?;
@@ -694,8 +753,38 @@ impl DbCapabilities {
                 )));
             }
         }
+        let proof = admit_literal_proof(sql, parameters);
+        let pre = d1_physical_preflight(sql, parameters.len(), proof.as_ref())?;
+        let ceiling = implied_physical_sql_ceiling(self.max_payload_bytes);
+        if pre > ceiling {
+            return Err(crate::PluginError::invalid_params(format!(
+                "physical SQL preflight is {pre} bytes; advertised maxPayloadBytes {} implies a {ceiling}-byte ceiling",
+                self.max_payload_bytes
+            )));
+        }
         Ok(())
     }
+}
+
+/// Typecheck `sql` against an empty catalog so literal INTEGER arithmetic
+/// (dense `1+1+…`) contributes overflow wrap cost at admission.
+fn admit_literal_proof(sql: &str, parameters: &[crate::DbValue]) -> Option<ResolvedStatement> {
+    let req = ExecuteRequest {
+        operation_id: "admit".into(),
+        request_hash: String::new(),
+        statements: vec![TypedDbStatement {
+            sql: sql.to_string(),
+            parameters: parameters.to_vec(),
+            kind: DbPlanStatementKind::Execute,
+            max_rows: 0,
+            result_selection: DbResultSelection::Discard,
+        }],
+        deadline_unix_ms: 0,
+    };
+    crate::sql_types::typecheck_execute_request_resolved(&req, &SqlTypeEnv::new())
+        .ok()?
+        .into_iter()
+        .next()
 }
 
 /// UTF-8 bytes of SQL text plus JSON binds (ordinary query/execute payload).
@@ -911,6 +1000,152 @@ mod tests {
         let pre = d1_physical_sql_preflight_len(sql, 0).expect("preflight");
         assert!(pre <= d1_physical_sql_upper_bound_len(sql.len()), "{pre}");
         assert!(pre <= D1_MAX_SQL_STATEMENT_BYTES as usize, "{pre}");
+    }
+
+    fn dense_add_sql(adds: usize) -> String {
+        let mut sql = String::from("SELECT 1");
+        for _ in 0..adds {
+            sql.push_str("+1");
+        }
+        sql
+    }
+
+    fn dense_sub_sql(ops: usize) -> String {
+        let mut sql = String::from("SELECT 1");
+        for _ in 0..ops {
+            sql.push_str("-1");
+        }
+        sql
+    }
+
+    fn dense_mul_sql(ops: usize) -> String {
+        let mut sql = String::from("SELECT 1");
+        for _ in 0..ops {
+            sql.push_str("*1");
+        }
+        sql
+    }
+
+    fn nested_abs_add_sql(depth: usize) -> String {
+        let mut expr = String::from("1");
+        for _ in 0..depth {
+            expr = format!("abs({expr}+1)");
+        }
+        format!("SELECT {expr}")
+    }
+
+    fn mixed_like_json_add_sql(adds: usize) -> String {
+        let mut sql = String::from("SELECT json_extract('{}', '$.k'), 1");
+        for _ in 0..adds {
+            sql.push_str("+1");
+        }
+        sql.push_str(" WHERE 'x' LIKE 'x'");
+        sql
+    }
+
+    fn max_d1_admitted(build: impl Fn(usize) -> String, params: &[DbValue], cap: usize) -> usize {
+        let caps = DbCapabilities::advertised_d1();
+        let mut lo = 0usize;
+        let mut hi = 1usize;
+        while hi < cap {
+            let sql = build(hi);
+            if sql.len() > caps.max_payload_bytes as usize
+                || caps.admit_statement(&sql, params).is_err()
+            {
+                break;
+            }
+            lo = hi;
+            hi = (hi.saturating_mul(2)).min(cap);
+        }
+        while lo + 1 < hi {
+            let mid = lo + (hi - lo) / 2;
+            let sql = build(mid);
+            if sql.len() <= caps.max_payload_bytes as usize
+                && caps.admit_statement(&sql, params).is_ok()
+            {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    fn assert_overflow_n_plus_one(
+        label: &str,
+        build: impl Fn(usize) -> String,
+        params: &[DbValue],
+        cap: usize,
+    ) {
+        let caps = DbCapabilities::advertised_d1();
+        let n_ok = max_d1_admitted(&build, params, cap);
+        assert!(n_ok >= 1, "{label}: expected at least one admitted chain");
+        let sql_ok = build(n_ok);
+        let proof = admit_literal_proof(&sql_ok, params);
+        assert!(
+            proof
+                .as_ref()
+                .is_some_and(|p| !p.integer_arith_sites.is_empty()),
+            "{label}: admitted SQL must typecheck with arith sites"
+        );
+        let pre_ok = d1_physical_preflight(&sql_ok, params.len(), proof.as_ref()).expect("pre N");
+        let ceiling = implied_physical_sql_ceiling(caps.max_payload_bytes);
+        assert!(
+            pre_ok <= ceiling,
+            "{label} N preflight {pre_ok} > {ceiling}"
+        );
+        assert!(
+            pre_ok <= D1_MAX_SQL_STATEMENT_BYTES as usize,
+            "{label} N preflight {pre_ok}"
+        );
+
+        let sql_over = build(n_ok + 1);
+        let mechanical = d1_physical_sql_preflight_len(&sql_over, params.len()).expect("mech");
+        assert!(
+            mechanical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
+            "{label}: N+1 must still fit the mechanical-only bound ({mechanical})"
+        );
+        let err = caps.admit_statement(&sql_over, params).unwrap_err();
+        assert!(
+            err.to_string().contains("physical SQL preflight"),
+            "{label}: first over-limit case must be admission/preflight, got {err}"
+        );
+    }
+
+    #[test]
+    fn d1_overflow_chains_fail_closed_at_portable_admission() {
+        assert_overflow_n_plus_one("add", dense_add_sql, &[], 800);
+        assert_overflow_n_plus_one("sub", dense_sub_sql, &[], 800);
+        assert_overflow_n_plus_one("mul", dense_mul_sql, &[], 800);
+        assert_overflow_n_plus_one("like+json+add", mixed_like_json_add_sql, &[], 800);
+        let blob = [DbValue::Bytes(vec![0, 1, 2])];
+        assert_overflow_n_plus_one(
+            "add+blob",
+            |n| format!("{}, ?", dense_add_sql(n)),
+            &blob,
+            800,
+        );
+    }
+
+    #[test]
+    fn d1_nested_overflow_sites_are_charged_before_mechanical() {
+        let caps = DbCapabilities::advertised_d1();
+        let sql = nested_abs_add_sql(6);
+        caps.admit_statement(&sql, &[])
+            .expect("shallow nested abs/add must admit");
+        let proof = admit_literal_proof(&sql, &[]).expect("typecheck");
+        assert!(
+            proof.integer_arith_sites.len() >= 12,
+            "each abs(+1) records abs and add: {:?}",
+            proof.integer_arith_sites.len()
+        );
+        let mechanical = d1_physical_sql_preflight_len(&sql, 0).expect("mech");
+        let proven = d1_physical_preflight(&sql, 0, Some(&proof)).expect("proven");
+        assert!(
+            proven > mechanical,
+            "nested overflow wraps must exceed mechanical-only ({proven} vs {mechanical})"
+        );
+        assert!(proven <= implied_physical_sql_ceiling(caps.max_payload_bytes));
     }
 
     #[test]

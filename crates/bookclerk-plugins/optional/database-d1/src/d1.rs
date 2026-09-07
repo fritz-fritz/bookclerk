@@ -4118,6 +4118,19 @@ mod tests {
         ) {
             panic!("{err}");
         }
+        let multi = sel(
+            "d1-text-multi",
+            bookclerk_db_exec::sql_v1::PORTABLE_TEXT_MULTILINGUAL,
+        )
+        .await
+        .expect("text multilingual");
+        if let Some(err) = bookclerk_db_exec::sql_v1::portable_statement_mismatch(
+            &multi.statements[0],
+            bookclerk_db_exec::sql_v1::portable_text_multilingual_expects(),
+            "text multilingual",
+        ) {
+            panic!("{err}");
+        }
 
         exec(
             "d1-ident-drop",
