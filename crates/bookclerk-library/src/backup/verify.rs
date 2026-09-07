@@ -6,7 +6,7 @@ use bookclerk_plugin_abi::{DbValue, SQL_CONTRACT_VERSION};
 
 use super::encode::CanonicalObject;
 use super::repository::BackupRepository;
-use super::schema::admit_canonical_schema;
+use super::schema::admit_canonical_statements;
 use super::util::validate_cell;
 use super::{
     BackupUnit, CanonicalDatabaseSchema, DatabaseUnitKind, IdentityHighWater, ValidatedBackup,
@@ -300,25 +300,22 @@ pub fn load_admitted_schema(
             "backup schema object sql_contract_version does not match the unit".into(),
         ));
     }
-    let sql = statements.join(";\n");
-    let admitted = admit_canonical_schema(sql_contract_version, &sql)?;
-    if admitted.schema_sql() != statements {
-        // Formatting may differ only if a statement failed to round-trip; fail closed.
-        if admitted.tables.len()
-            != statements
-                .iter()
-                .filter(|s| bookclerk_plugin_abi::parse_create_table_schema(s).is_some())
-                .count()
-            || admitted.indexes.len()
-                != statements
-                    .iter()
-                    .filter(|s| bookclerk_plugin_abi::parse_create_index_sql(s).is_some())
-                    .count()
-        {
-            return Err(LibraryError::Schema(
-                "backup schema object is not fully admitted Bookclerk SQL".into(),
-            ));
-        }
+    // The schema object already stores an ordered statement list. Admit that
+    // list directly — do not join with `;\n` and rediscover boundaries.
+    let refs: Vec<&str> = statements.iter().map(String::as_str).collect();
+    let admitted = admit_canonical_statements(sql_contract_version, &refs)?;
+    let expected_tables = statements
+        .iter()
+        .filter(|s| bookclerk_plugin_abi::parse_create_table_schema(s).is_some())
+        .count();
+    let expected_indexes = statements
+        .iter()
+        .filter(|s| bookclerk_plugin_abi::parse_create_index_sql(s).is_some())
+        .count();
+    if admitted.tables.len() != expected_tables || admitted.indexes.len() != expected_indexes {
+        return Err(LibraryError::Schema(
+            "backup schema object is not fully admitted Bookclerk SQL".into(),
+        ));
     }
     Ok(admitted)
 }

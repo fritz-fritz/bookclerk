@@ -21,15 +21,15 @@ use crate::schema_state::SchemaState;
 
 use super::{CanonicalDatabaseSchema, CanonicalTableSchema};
 
-/// Parses and fully admits canonical `CREATE TABLE` / `CREATE INDEX`.
+/// Parses and fully admits a diagnostic/imported canonical SQL script.
 ///
-/// Every non-empty statement must parse. Unparseable SQL is rejected rather
-/// than skipped. Tables are returned in declaration order; callers that need
-/// FK-safe order should call [`sort_tables_by_foreign_keys`].
+/// Production capture, checksum, apply, and restore paths use already-separated
+/// statement lists ([`admit_canonical_statements`]). This helper exists for
+/// tests and imported scripts that still arrive as one packable string.
 ///
 /// # Errors
 ///
-/// Returns when any statement is not admitted Bookclerk SQL.
+/// Returns when the packer rejects `sql` or any statement is not admitted.
 pub fn admit_canonical_schema(
     sql_contract_version: u32,
     sql: &str,

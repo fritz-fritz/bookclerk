@@ -18,7 +18,7 @@ use sea_orm::{
 use super::encode::{chunk_would_overflow, CanonicalObject};
 use super::repository::BackupRepository;
 use super::schema::{
-    admit_canonical_schema, canonical_order_by_sql, library_canonical_schema_for_state,
+    admit_canonical_statements, canonical_order_by_sql, library_canonical_schema_for_state,
     order_key_columns, sort_schema, sql_type_to_db_type,
 };
 use super::util::{cell_text, cell_to_db_value, ident_ok, int_cell};
@@ -621,7 +621,7 @@ where
             )));
         }
     };
-    let mut sql = String::new();
+    let mut statements = Vec::new();
     let mut table_names = BTreeSet::new();
     for row in rows {
         let kind = cell_text(&row, "kind")?.to_ascii_lowercase();
@@ -635,8 +635,7 @@ where
                     ))
                 })?;
                 table_names.insert(parsed.table.clone());
-                sql.push_str(&trimmed);
-                sql.push_str(";\n");
+                statements.push(trimmed);
             }
             "index" => {
                 let _ = parse_create_index_sql(&trimmed).ok_or_else(|| {
@@ -644,8 +643,7 @@ where
                         "plugin `{SQL_DDL_TABLE}` row is not admitted CREATE INDEX SQL"
                     ))
                 })?;
-                sql.push_str(&trimmed);
-                sql.push_str(";\n");
+                statements.push(trimmed);
             }
             other => {
                 return Err(LibraryError::Schema(format!(
@@ -674,7 +672,8 @@ where
             )));
         }
     }
-    sort_schema(admit_canonical_schema(SQL_CONTRACT_VERSION, &sql)?)
+    let refs: Vec<&str> = statements.iter().map(String::as_str).collect();
+    sort_schema(admit_canonical_statements(SQL_CONTRACT_VERSION, &refs)?)
 }
 
 /// Type environment for reserved catalog companion tables.

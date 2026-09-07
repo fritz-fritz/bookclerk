@@ -11,8 +11,9 @@ use crate::backup::encode::{
 use crate::backup::repository::BackupRepository;
 use crate::backup::restore::{apply_admitted_sql, restore_backup_unit};
 use crate::backup::schema::{
-    admit_canonical_schema, canonical_order_by_sql, filter_library_pack_ddl,
-    library_ddl_for_schema_state_with, order_key_columns, sort_tables_by_foreign_keys,
+    admit_canonical_schema, admit_canonical_statements, canonical_order_by_sql,
+    filter_library_pack_ddl, library_ddl_for_schema_state_with, order_key_columns,
+    sort_tables_by_foreign_keys,
 };
 use crate::backup::util::validate_cell;
 use crate::backup::verify::{verify_recovery_point, verify_unit};
@@ -589,6 +590,22 @@ fn library_current_schema_admits_after_filtering_seed_dml() {
     .unwrap();
     assert!(filtered.to_ascii_uppercase().contains("CREATE TABLE"));
     assert!(!filtered.to_ascii_uppercase().contains("INSERT"));
+}
+
+#[test]
+fn backup_schema_admits_statement_list_without_join_reparse() {
+    // Semicolons inside a DEFAULT literal must stay in the same statement.
+    // Joining then splitting on ';' would mis-parse this list.
+    let statements = [
+        "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT DEFAULT ';not-a-split')",
+        "CREATE INDEX idx_notes_body ON notes (body)",
+    ];
+    let admitted = admit_canonical_statements(SQL_CONTRACT_VERSION, &statements).unwrap();
+    assert_eq!(admitted.tables.len(), 1);
+    assert_eq!(admitted.indexes.len(), 1);
+    assert!(admitted.tables[0]
+        .create_sql
+        .contains("DEFAULT ';not-a-split'"));
 }
 
 #[test]
