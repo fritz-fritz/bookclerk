@@ -1538,6 +1538,12 @@ fn read_oidc_client_template(r: oidc_client_template::Reader<'_>) -> Result<Oidc
     })
 }
 
+/// Encode plugin-owned migrations into a Cap'n Proto `databaseMigrations` ok payload.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when the `migrations` list cannot be initialized
+/// or a nested migration cannot be encoded.
 fn fill_plugin_migrations(
     mut ok: crate::plugin_capnp::plugin_migrations_ok::Builder<'_>,
     migrations: &[PluginMigration],
@@ -1549,6 +1555,11 @@ fn fill_plugin_migrations(
     Ok(())
 }
 
+/// Encode one [`PluginMigration`] onto a Cap'n Proto builder.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when the `operations` list cannot be initialized.
 fn fill_plugin_migration(
     mut b: plugin_migration::Builder<'_>,
     migration: &PluginMigration,
@@ -1567,6 +1578,11 @@ fn fill_plugin_migration(
     Ok(())
 }
 
+/// Decode plugin-owned migrations from a Cap'n Proto `databaseMigrations` ok payload.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the `migrations` list or a nested entry cannot be read.
 fn read_plugin_migrations(
     r: crate::plugin_capnp::plugin_migrations_ok::Reader<'_>,
 ) -> Result<Vec<PluginMigration>> {
@@ -1578,6 +1594,11 @@ fn read_plugin_migrations(
     Ok(out)
 }
 
+/// Decode one plugin-owned migration from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the id or `operations` list cannot be read.
 fn read_plugin_migration(r: plugin_migration::Reader<'_>) -> Result<PluginMigration> {
     let ops = r.get_operations().map_err(from_capnp)?;
     let mut operations = Vec::new();
@@ -1590,6 +1611,11 @@ fn read_plugin_migration(r: plugin_migration::Reader<'_>) -> Result<PluginMigrat
     })
 }
 
+/// Decode one already-separated plugin migration operation from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when the operation union or SQL text cannot be read.
 fn read_plugin_migration_op(r: plugin_migration_op::Reader<'_>) -> Result<PluginMigrationOp> {
     match r.which().map_err(from_capnp)? {
         plugin_migration_op::Schema(sql) => {
