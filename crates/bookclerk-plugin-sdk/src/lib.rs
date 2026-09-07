@@ -88,7 +88,7 @@ pub use protocol::{
     PluginMetadata, PurchaseHintDto, PurchaseHintParams, PutFileParams, PutParams,
     S3CredentialsDto, ScanBookDto, ScanLibraryParams, ScanParams, ScanSummaryDto,
     SearchCatalogParams, SourceAccountDto, SourceFetchDto, SyncListeningResultDto, TouchFileParams,
-    HOST_MANIFEST_API_VERSION_MAX, MAX_RPC_LINE_BYTES, PROTOCOL_NAME,
+    MAX_RPC_LINE_BYTES, PROTOCOL_NAME,
 };
 
 pub use bookclerk_plugin_abi::{

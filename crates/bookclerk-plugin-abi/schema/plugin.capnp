@@ -1,14 +1,15 @@
 # Bookclerk plugin ABI — object-capability Workers RPC (`api_version = 2`).
 #
-# Evolution (append-only):
-# - Never reuse field, method, or union ordinals.
-# - Unknown enum/union members: preserve the wire code and fail closed or
-#   return typed `unsupported`. Never collapse unknown codes to `internal`.
+# This file is the first supported plugin contract. Discarded development
+# compatibility fields were removed and ordinals compacted. From this contract
+# forward:
 # - `apiVersion` / `plugin.toml` `api_version` is the single incompatible ABI
 #   version. Manifest `api_version` and `describe().apiVersion` must match.
-# - Cap'n Proto ordinals are append-only. Named `rpcFeatures` negotiate
-#   optional facilities inside a major. Required features are rejected at
-#   spawn when missing.
+# - Named `rpcFeatures` negotiate optional facilities. Required features are
+#   rejected at spawn when missing.
+# - Do not reuse field, method, or union ordinals.
+# - Unknown enum/union members: preserve the wire code and fail closed or
+#   return typed `unsupported`. Never collapse unknown codes to `internal`.
 # - Every variable-length field is bounded by the constants below.
 # - Identifiers are non-empty `[a-z][a-z0-9_]{0,63}`. Timestamps are UTC
 #   unix milliseconds (UInt64); zero means omitted.
@@ -113,16 +114,12 @@ struct PluginDescribe {
   displayName @3 :Text;
   rpcFeatures @4 :List(Text);
   scalarLimits @5 :ScalarLimits;
-  # Obsolete: duplicated `apiVersion`. Do not reuse ordinal 6.
-  abiMajor @6 :Void;
-  # Obsolete: optional evolution is `rpcFeatures` + append-only ordinals. Do not reuse ordinal 7.
-  abiMinor @7 :Void;
   # Advertised factories (`destination`, `source`, `worker`, `contentSource`,
   # `integration`, `database`). Host still intersects with the manifest allowlist.
-  supportedRoles @8 :List(Text);
+  supportedRoles @6 :List(Text);
   # Identity extras (brand, cli schema, method names, aliases).
   # Versioned JSON escape hatch; not a substitute for typed fields.
-  metadataJson @9 :Text;
+  metadataJson @7 :Text;
 }
 
 # Bookclerk-as-IdP relying-party template. Plugins declare callback path and
@@ -195,24 +192,22 @@ struct DatabaseContext {
 # Idempotency keys are scoped to (account, plugin, commandType) until a
 # terminal fenced outcome is committed.
 struct JobInvocation {
-  # Obsolete: envelope is not independently versioned. Do not reuse ordinal 0.
-  envelopeVersion @0 :Void;
-  payloadSchemaVersion @1 :UInt32;
-  invocationId @2 :Text;
-  commandType @3 :Text;
-  payloadJson @4 :Text;
-  idempotencyKey @5 :Text;
-  attempt @6 :UInt32;
-  correlationId @7 :Text;
-  causationId @8 :Text;
+  payloadSchemaVersion @0 :UInt32;
+  invocationId @1 :Text;
+  commandType @2 :Text;
+  payloadJson @3 :Text;
+  idempotencyKey @4 :Text;
+  attempt @5 :UInt32;
+  correlationId @6 :Text;
+  causationId @7 :Text;
   # UTC Unix milliseconds. Host fence/lease is authoritative; this hint must
   # not outlive the fence (clock skew across VPS nodes).
-  deadlineUnixMs @9 :UInt64;
-  checkpointJson @10 :Text;
-  checkpointSchemaVersion @11 :UInt32;
+  deadlineUnixMs @8 :UInt64;
+  checkpointJson @9 :Text;
+  checkpointSchemaVersion @10 :UInt32;
   # Resume ordinal; distinct from failure `attempt`.
-  invocationSequence @12 :UInt32;
-  stepId @13 :Text;
+  invocationSequence @11 :UInt32;
+  stepId @12 :Text;
 }
 
 struct CompletedOutcome {

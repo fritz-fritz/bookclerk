@@ -55,7 +55,7 @@ pub use bookclerk_plugin_sdk::{
     LoginParams, LoginResultDto, LoginStartResultDto, PlainPartDto, PluginMetadata,
     PurchaseHintDto, PurchaseHintParams, ScanBookDto, ScanParams, ScanSummaryDto,
     SearchCatalogParams, SourceAccountDto, SourceFetchDto, SyncListeningResultDto,
-    HOST_MANIFEST_API_VERSION_MAX, PROTOCOL_NAME,
+    PRODUCT_API_VERSION, PROTOCOL_NAME,
 };
 
 pub use bookclerk_plugin_sdk::{JobCheckpoint, JobInvocationLease, JobOutcome};

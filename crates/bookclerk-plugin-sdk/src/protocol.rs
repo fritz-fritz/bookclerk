@@ -41,12 +41,6 @@ pub const PROTOCOL_NAME: &str = "workers-rpc";
 /// Used by JSON payload helpers and workerd bridge framing. Currently 16 MiB.
 pub const MAX_RPC_LINE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Highest `plugin.toml` `api_version` this host/SDK generation understands.
-///
-/// Aliased to [`bookclerk_plugin_abi::PRODUCT_API_VERSION`] so manifest max
-/// cannot drift from the product ABI.
-pub const HOST_MANIFEST_API_VERSION_MAX: u32 = bookclerk_plugin_abi::PRODUCT_API_VERSION;
-
 /// Role capability method name constants (camelCase wire strings).
 ///
 /// Re-exports `bookclerk_plugin_abi::methods::names` so guests can reference

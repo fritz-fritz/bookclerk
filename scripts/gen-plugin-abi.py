@@ -305,6 +305,9 @@ LEGACY_TOKENS = (
     "HandshakeResult",
     "RpcRequest",
     "RpcResponse",
+    "abiMajor",
+    "abiMinor",
+    "envelopeVersion",
 )
 
 
