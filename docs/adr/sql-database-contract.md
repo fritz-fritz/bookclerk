@@ -124,7 +124,7 @@ env exists.
 `sqlFamily` and SeaORM `dialect` are bootstrap-only (typed `DbBootstrap` on
 the plugin-host connect path). Typed `DbCapabilities` does not carry them
 (`@17` is `pluginDatabases`; `@18`–`@21` are numeric caps including
-`maxLoweredStatementBytes`). An architecture lint (`scripts/check-db-plugin-isolation.py`)
+`maxLoweredStatementBytes`; `@22`/`@23` are backup flags). An architecture lint (`scripts/check-db-plugin-isolation.py`)
 forbids `bookclerk-library` production sources from reading bootstrap fields
 (or defining planner-side `SqlFamily`). SeaORM proxy open maps bootstrap in
 `bookclerk-plugin-host` after typed capability negotiation succeeds.
