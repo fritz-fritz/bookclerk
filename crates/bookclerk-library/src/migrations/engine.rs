@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use bookclerk_plugin_abi::{
-    DbPlanStatementKind, DbResultSelection, ExecuteRequest, TypedDbStatement,
+    DbPlanStatementKind, DbResultSelection, ExecuteRequest, SqlTypeEnv, TypedDbStatement,
 };
 use sea_orm::DatabaseConnection;
 
@@ -434,7 +434,7 @@ async fn run_atomic_ddl(
             })
             .collect(),
     };
-    execute_typed_on_binding(db, &req, SCHEMA_TXN_TIMING, 0).await?;
+    execute_typed_on_binding(db, &req, SCHEMA_TXN_TIMING, 0, &SqlTypeEnv::new()).await?;
     Ok(())
 }
 

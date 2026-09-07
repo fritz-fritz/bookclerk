@@ -192,8 +192,8 @@ pub async fn execute_typed_on(
 
 /// Typed execute against an isolated plugin binding.
 ///
-/// Leaves the session type environment empty so typing uses the binding
-/// catalog, not host library tables.
+/// `catalog` is the binding type environment (bootstrap plus already-applied
+/// plugin schema). It must not be the host library catalog.
 ///
 /// # Errors
 ///
@@ -203,8 +203,9 @@ pub async fn execute_typed_on_binding(
     req: &ExecuteRequest,
     _timing_source: &str,
     max_result_rows: u32,
+    catalog: &SqlTypeEnv,
 ) -> Result<bookclerk_plugin_abi::ExecuteReply> {
-    let envelope = bookclerk_db_exec::stamp_adapter_execute(req.clone(), &SqlTypeEnv::new())
+    let envelope = bookclerk_db_exec::stamp_adapter_execute(req.clone(), catalog)
         .map_err(LibraryError::from_db_err)?;
     bookclerk_db_exec::execute_typed_envelope_on_connection(
         db,

@@ -115,11 +115,11 @@ pub use plan::{
 pub use plugin::{
     apply_plugin_migrations, history_from_execute_reply, load_plugin_migration_history,
     load_plugin_migration_history_on, next_pending_plugin_migration, pending_plugin_suffix,
-    plugin_apply_statements, plugin_history_digest, plugin_history_session_matches,
-    plugin_journal_has_entry, plugin_journal_select_request, plugin_migration_checksum,
-    prove_plugin_migration_sequence, remaining_plugin_suffix_batches, require_history_prefix,
-    PluginJournalEntry, PluginMigrationHistory, PluginMigrationSequence, ProvenPluginMigration,
-    MAX_PLUGIN_MIGRATION_APPLY_ATTEMPTS, PLUGIN_MIGRATION_SLOT_KEY,
+    plugin_apply_statements, plugin_binding_type_env, plugin_history_digest,
+    plugin_history_session_matches, plugin_journal_has_entry, plugin_journal_select_request,
+    plugin_migration_checksum, prove_plugin_migration_sequence, remaining_plugin_suffix_batches,
+    require_history_prefix, PluginJournalEntry, PluginMigrationHistory, PluginMigrationSequence,
+    ProvenPluginMigration, MAX_PLUGIN_MIGRATION_APPLY_ATTEMPTS, PLUGIN_MIGRATION_SLOT_KEY,
 };
 
 /// One host-owned schema version in the canonical Bookclerk migration plan.
@@ -279,6 +279,21 @@ pub fn binding_bootstrap_statements() -> &'static [String] {
     STMTS
         .get_or_init(|| ops_to_statements(binding_bootstrap_ops()))
         .as_slice()
+}
+
+/// Type environment implied by [`binding_bootstrap_ops`] (journal, slots, catalog).
+///
+/// Host-private binding bookkeeping lives here so plugin apply can typecheck
+/// journal DML without using the host library catalog.
+#[must_use]
+pub fn binding_bootstrap_type_env() -> SqlTypeEnv {
+    let mut env = SqlTypeEnv::new();
+    for op in binding_bootstrap_ops() {
+        if op.is_schema() {
+            apply_schema_sql_to_env(&mut env, op.sql());
+        }
+    }
+    env
 }
 
 /// SHA-256 of [`binding_bootstrap_ops`] (length-prefixed statement list).
