@@ -48,8 +48,8 @@ pub fn validate_execute_reply(
 
     if let Some(cap) = atomic_result_cap_bytes(caps) {
         let bytes = encoded_execute_reply_bytes(reply)
-            .map(|b| b.len())
-            .unwrap_or(usize::MAX);
+            .map_err(|err| LibraryError::Unavailable(err.to_string()))?
+            .len();
         if bytes > cap {
             return Err(LibraryError::Unavailable(format!(
                 "execute reply is {bytes} bytes; guest maxAtomicResultBytes is {cap}"
@@ -125,8 +125,8 @@ fn validate_statement_result(
 
     if caps.max_result_bytes > 0 {
         let bytes = encoded_statement_result_bytes(stmt)
-            .map(|b| b.len())
-            .unwrap_or(usize::MAX);
+            .map_err(|err| LibraryError::Unavailable(err.to_string()))?
+            .len();
         let cap = usize::try_from(caps.max_result_bytes).unwrap_or(usize::MAX);
         if bytes > cap {
             return Err(LibraryError::Unavailable(format!(

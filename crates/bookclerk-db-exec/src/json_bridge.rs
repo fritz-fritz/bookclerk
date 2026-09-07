@@ -11,7 +11,8 @@ use crate::host_ir::{sea_null, sea_null_kind};
 ///
 /// # Errors
 ///
-/// Returns a static reason when the JSON value is outside the universal domain.
+/// Returns a static reason when the JSON value is outside the universal
+/// domain, or TEXT contains U+0000.
 pub fn db_value_from_json(v: &serde_json::Value) -> Result<DbValue, String> {
     if let Some(kind) = sea_null_kind(v) {
         let ty = match kind {
@@ -51,6 +52,7 @@ pub fn db_value_from_json(v: &serde_json::Value) -> Result<DbValue, String> {
                     .map_err(|err| format!("invalid b64: payload: {err}"))?;
                 return Ok(DbValue::Bytes(bytes));
             }
+            bookclerk_plugin_abi::require_portable_text(s).map_err(|err| err.to_string())?;
             Ok(DbValue::Text(s.clone()))
         }
         serde_json::Value::Array(_) => Err("arrays are not a baseline DbValue".into()),
@@ -91,5 +93,11 @@ mod tests {
     fn arrays_are_rejected() {
         let err = db_value_from_json(&json!([1, 2])).unwrap_err();
         assert!(err.contains("arrays"), "{err}");
+    }
+
+    #[test]
+    fn text_nul_is_rejected() {
+        let err = db_value_from_json(&json!("a\u{0000}b")).unwrap_err();
+        assert!(err.contains("U+0000"), "{err}");
     }
 }

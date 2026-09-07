@@ -177,8 +177,10 @@ pub fn validate_execute_request(
             for param in &stmt.parameters {
                 binds_len = binds_len.saturating_add(
                     bookclerk_plugin_abi::encoded_db_value_bytes(param)
-                        .map(|b| b.len())
-                        .unwrap_or(usize::MAX),
+                        .map_err(|err| {
+                            crate::LibraryError::Other(anyhow::anyhow!(err.to_string()))
+                        })?
+                        .len(),
                 );
             }
             let payload = stmt.sql.len().saturating_add(binds_len);
@@ -198,8 +200,8 @@ pub fn validate_execute_request(
         return Ok(());
     }
     let bytes = encoded_execute_request_bytes(req)
-        .map(|b| b.len())
-        .unwrap_or(usize::MAX);
+        .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!(err.to_string())))?
+        .len();
     if bytes > cap {
         return Err(crate::LibraryError::Other(anyhow::anyhow!(
             "atomic request is {bytes} bytes; guest maxRequestBytes is {cap}"

@@ -10,7 +10,8 @@ use sea_orm::{ProxyRow, Value};
 ///
 /// # Errors
 ///
-/// Returns a static reason when the SeaORM value is outside the universal domain.
+/// Returns a static reason when the SeaORM value is outside the universal
+/// domain, or TEXT contains U+0000.
 #[allow(dead_code)] // public cross-crate bridge (database plugin integration tests)
 pub fn db_value_from_sea(v: &Value) -> Result<bookclerk_plugin_abi::DbValue, String> {
     use bookclerk_plugin_abi::{DbType, DbValue};
@@ -39,8 +40,15 @@ pub fn db_value_from_sea(v: &Value) -> Result<bookclerk_plugin_abi::DbValue, Str
             }
             Ok(DbValue::Float64(*n))
         }
-        Value::String(Some(s)) => Ok(DbValue::Text(s.to_string())),
-        Value::Char(Some(c)) => Ok(DbValue::Text(c.to_string())),
+        Value::String(Some(s)) => {
+            bookclerk_plugin_abi::require_portable_text(s).map_err(|err| err.to_string())?;
+            Ok(DbValue::Text(s.to_string()))
+        }
+        Value::Char(Some(c)) => {
+            let s = c.to_string();
+            bookclerk_plugin_abi::require_portable_text(&s).map_err(|err| err.to_string())?;
+            Ok(DbValue::Text(s))
+        }
         Value::Bytes(Some(b)) => Ok(DbValue::Bytes(b.to_vec())),
         Value::ChronoDateTimeUtc(Some(dt)) => Ok(DbValue::Text(dt.to_rfc3339())),
         Value::ChronoDateTime(Some(dt)) => Ok(DbValue::Text(dt.and_utc().to_rfc3339())),

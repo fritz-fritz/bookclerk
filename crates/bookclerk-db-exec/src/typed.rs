@@ -13,8 +13,9 @@ use std::time::Instant;
 use bookclerk_plugin_abi::{
     apply_schema_action_to_env, apply_schema_sql_to_env, assert_proof_matches_sql,
     catalog_companions_for_action, encoded_execute_reply_bytes, encoded_statement_result_bytes,
-    parse_create_table_schema, sql_host_bookkeeping_type_env, typecheck_execute_request_proofs,
-    ResolvedStatement, SchemaAction,
+    parse_create_table_schema, require_portable_text, require_portable_text_binds,
+    sql_host_bookkeeping_type_env, typecheck_execute_request_proofs, ResolvedStatement,
+    SchemaAction,
 };
 use bookclerk_plugin_abi::{
     sql_catalog_page_rows, DbColumn, DbPlanStatementKind, DbResultSelection, DbRow, DbTiming,
@@ -732,7 +733,8 @@ pub fn db_value_to_sea(value: &DbValue) -> SeaValue {
 ///
 /// # Errors
 ///
-/// Returns when the SeaORM value is outside the universal domain.
+/// Returns when the SeaORM value is outside the universal domain, or TEXT
+/// contains U+0000.
 pub fn db_value_from_sea(v: &SeaValue) -> Result<DbValue, String> {
     match v {
         SeaValue::Bool(Some(b)) => Ok(DbValue::Boolean(*b)),
@@ -759,8 +761,15 @@ pub fn db_value_from_sea(v: &SeaValue) -> Result<DbValue, String> {
             }
             Ok(DbValue::Float64(*n))
         }
-        SeaValue::String(Some(s)) => Ok(DbValue::Text(s.to_string())),
-        SeaValue::Char(Some(c)) => Ok(DbValue::Text(c.to_string())),
+        SeaValue::String(Some(s)) => {
+            require_portable_text(s).map_err(|err| err.to_string())?;
+            Ok(DbValue::Text(s.to_string()))
+        }
+        SeaValue::Char(Some(c)) => {
+            let s = c.to_string();
+            require_portable_text(&s).map_err(|err| err.to_string())?;
+            Ok(DbValue::Text(s))
+        }
         SeaValue::Bytes(Some(b)) => Ok(DbValue::Bytes(b.to_vec())),
         SeaValue::ChronoDateTimeUtc(Some(dt)) => Ok(DbValue::Text(dt.to_rfc3339())),
         SeaValue::ChronoDateTime(Some(dt)) => Ok(DbValue::Text(dt.and_utc().to_rfc3339())),
@@ -979,7 +988,8 @@ fn reject_duplicate_column_names(columns: &[DbColumn]) -> Result<(), DbErr> {
 ///
 /// # Errors
 ///
-/// Returns [`DbErr::Custom`] when the encoded result exceeds `max_result_bytes`.
+/// Returns when the encoded result cannot be serialized (including TEXT
+/// U+0000) or exceeds `max_result_bytes`.
 fn reject_statement_result_bytes(
     result: &StatementResult,
     max_result_bytes: u32,
@@ -988,8 +998,8 @@ fn reject_statement_result_bytes(
         return Ok(());
     }
     let used = encoded_statement_result_bytes(result)
-        .map(|b| b.len())
-        .unwrap_or(usize::MAX);
+        .map_err(|err| DbErr::Custom(err.to_string()))?
+        .len();
     let cap = usize::try_from(max_result_bytes).unwrap_or(usize::MAX);
     if used > cap {
         return Err(DbErr::Custom(format!(
@@ -1168,7 +1178,8 @@ fn sea_value_from_index(row: &QueryResult, idx: usize, prefer: DbType) -> Result
 /// # Errors
 ///
 /// Returns [`DbErr`] when a statement fails, the encoded reply exceeds
-/// `max_atomic_result_bytes`, or the session is interrupted.
+/// `max_atomic_result_bytes`, TEXT contains U+0000, or the session is
+/// interrupted.
 pub async fn execute_typed_on_session(
     db: &DatabaseConnection,
     req: &ExecuteRequest,
@@ -1242,6 +1253,11 @@ async fn execute_typed_on_session_proofs(
     session: AtomicSession,
     require_stamped: bool,
 ) -> Result<ExecuteReply, DbErr> {
+    for stmt in &req.statements {
+        require_portable_text(&stmt.sql).map_err(|err| DbErr::Custom(err.to_string()))?;
+        require_portable_text_binds(&stmt.parameters)
+            .map_err(|err| DbErr::Custom(err.to_string()))?;
+    }
     if guest_receipt.is_absent() {
         let caps = caps.into();
         session.check(AtomicInterruptPhase::BeforeBegin)?;

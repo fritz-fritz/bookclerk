@@ -1531,8 +1531,8 @@ fn parse_typed_batch(
         };
         if caps.max_result_bytes > 0 {
             let used = encoded_statement_result_bytes(&stmt_result)
-                .map(|b| b.len())
-                .unwrap_or(usize::MAX);
+                .map_err(ambiguous_d1)?
+                .len();
             let cap = usize::try_from(caps.max_result_bytes).unwrap_or(usize::MAX);
             if used > cap {
                 return Err(ambiguous_d1(format!(

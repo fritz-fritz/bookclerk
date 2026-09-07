@@ -182,15 +182,28 @@ mod typed_value_matrix {
     }
 
     #[tokio::test]
-    async fn text_utf8_and_embedded_nul_roundtrip() {
+    async fn text_utf8_roundtrip_rejects_embedded_nul() {
         let db = mem_db().await;
         let utf8 = DbValue::Text("café 日本語".into());
         let got = roundtrip(&db, &select_param("utf8", "SELECT ? AS v", utf8.clone())).await;
         assert_eq!(got, utf8);
 
         let nul = DbValue::Text("before\u{0}after".into());
-        let got = roundtrip(&db, &select_param("nul", "SELECT ? AS v", nul.clone())).await;
-        assert_eq!(got, nul, "sqlite allows embedded NUL in text binds");
+        let err = bookclerk_db_exec::execute_typed_on_session(
+            &db,
+            &select_param("nul", "SELECT ? AS v", nul),
+            bookclerk_db_exec::GuestReceiptPersist::default(),
+            "sqlite_txn",
+            sqlite_caps(),
+            AtomicSession::from_deadline(None)
+                .with_type_env(crate::migrations::host_sql_type_env()),
+        )
+        .await
+        .expect_err("TEXT U+0000 must fail closed");
+        assert!(
+            err.to_string().contains("U+0000"),
+            "expected portable TEXT reject, got {err}"
+        );
     }
 
     #[tokio::test]
