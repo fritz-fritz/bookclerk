@@ -316,4 +316,20 @@ mod tests {
         assert!(matches!(err, LibraryError::Unavailable(_)), "{err}");
         assert!(err.to_string().contains("maxResultBytes"), "{err}");
     }
+
+    #[test]
+    fn validate_execute_reply_rejects_text_nul_without_fake_size() {
+        let req = rows_request(1);
+        let mut reply = rows_reply("op-1", 1);
+        reply.statements[0].columns[0].db_type = DbType::Text;
+        reply.statements[0].rows[0].values[0] = DbValue::Text("a\0b".into());
+        let err = validate_execute_reply(&req, &reply, &tiny_caps()).unwrap_err();
+        assert!(matches!(err, LibraryError::Unavailable(_)), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("U+0000"), "{msg}");
+        assert!(
+            !msg.contains("18446744073709551615"),
+            "encode failure must not look like usize::MAX oversized: {msg}"
+        );
+    }
 }

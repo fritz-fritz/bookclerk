@@ -994,17 +994,33 @@ fn reject_statement_result_bytes(
     result: &StatementResult,
     max_result_bytes: u32,
 ) -> Result<(), DbErr> {
-    if max_result_bytes == 0 {
-        return Ok(());
-    }
     let used = encoded_statement_result_bytes(result)
         .map_err(|err| DbErr::Custom(err.to_string()))?
         .len();
+    if max_result_bytes == 0 {
+        return Ok(());
+    }
     let cap = usize::try_from(max_result_bytes).unwrap_or(usize::MAX);
     if used > cap {
         return Err(DbErr::Custom(format!(
             "query result is {used} bytes; maxResultBytes is {max_result_bytes}"
         )));
+    }
+    Ok(())
+}
+
+/// Rejects BookclerkSQL TEXT that contains U+0000 (BYTES may contain 0x00).
+fn reject_nonportable_statement(index: usize, stmt: &TypedDbStatement) -> Result<(), DbErr> {
+    require_portable_text(&stmt.sql)
+        .map_err(|err| DbErr::Custom(format!("statement {index}: {err}")))?;
+    require_portable_text_binds(&stmt.parameters)
+        .map_err(|err| DbErr::Custom(format!("statement {index}: {err}")))?;
+    Ok(())
+}
+
+fn reject_nonportable_text(req: &ExecuteRequest) -> Result<(), DbErr> {
+    for (i, stmt) in req.statements.iter().enumerate() {
+        reject_nonportable_statement(i, stmt)?;
     }
     Ok(())
 }
@@ -1253,11 +1269,7 @@ async fn execute_typed_on_session_proofs(
     session: AtomicSession,
     require_stamped: bool,
 ) -> Result<ExecuteReply, DbErr> {
-    for stmt in &req.statements {
-        require_portable_text(&stmt.sql).map_err(|err| DbErr::Custom(err.to_string()))?;
-        require_portable_text_binds(&stmt.parameters)
-            .map_err(|err| DbErr::Custom(err.to_string()))?;
-    }
+    reject_nonportable_text(req)?;
     if guest_receipt.is_absent() {
         let caps = caps.into();
         session.check(AtomicInterruptPhase::BeforeBegin)?;
@@ -1562,6 +1574,7 @@ async fn execute_typed_join_body(
     guest_receipt: GuestReceiptPersist,
     stamped: &[ResolvedStatement],
 ) -> Result<ExecuteReply, DbErr> {
+    reject_nonportable_text(req)?;
     let started = Instant::now();
     let backend = ConnectionTrait::get_database_backend(txn);
     let sql_started = Instant::now();
@@ -1644,12 +1657,16 @@ async fn execute_typed_join_body(
             },
         };
         let guest_len = usize::try_from(guest_receipt.guest_statement_len).unwrap_or(usize::MAX);
-        for stmt in crate::guest_receipt::guest_receipt_finalize_stmts(
+        for (i, stmt) in crate::guest_receipt::guest_receipt_finalize_stmts(
             &partial,
             guest_len,
             &guest_receipt.guest_request_hash,
-        )? {
+        )?
+        .into_iter()
+        .enumerate()
+        {
             session.check(AtomicInterruptPhase::BetweenStatements)?;
+            reject_nonportable_statement(i, &stmt)?;
             let values: Vec<SeaValue> = stmt.parameters.iter().map(db_value_to_sea).collect();
             let sql = if bookclerk_plugin_abi::statement_is_ddl(&stmt.sql) {
                 stmt.sql.clone()
@@ -1720,6 +1737,7 @@ where
             "executeAtomic statements must be non-empty".into(),
         ));
     }
+    reject_nonportable_text(req)?;
     let started = Instant::now();
     let backend = ConnectionTrait::get_database_backend(db);
     // Host schema batches travel canonical; this adapter edge lowers/splits
@@ -1921,7 +1939,12 @@ where
                 db_timing_source: timing_source.to_string(),
             },
         };
-        for stmt in then(partial)? {
+        for (i, stmt) in then(partial)?.into_iter().enumerate() {
+            if let Err(err) = reject_nonportable_statement(i, &stmt) {
+                let _ = txn.rollback().await;
+                let _ = take_txn_fault();
+                return Err(err);
+            }
             if let Err(err) = session.check(AtomicInterruptPhase::BetweenStatements) {
                 let _ = txn.rollback().await;
                 let _ = take_txn_fault();

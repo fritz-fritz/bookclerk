@@ -204,6 +204,23 @@ mod typed_value_matrix {
             err.to_string().contains("U+0000"),
             "expected portable TEXT reject, got {err}"
         );
+
+        let blob = DbValue::Bytes(b"before\0after".to_vec());
+        let got = roundtrip(&db, &select_param("blob", "SELECT ? AS v", blob.clone())).await;
+        assert_eq!(got, blob, "BYTES may contain 0x00");
+    }
+
+    #[test]
+    fn text_nul_rejected_by_typed_decoder() {
+        use bookclerk_db_exec::{db_value_from_sea, db_value_to_sea};
+        use sea_orm::Value as SeaValue;
+        let err = db_value_from_sea(&SeaValue::String(Some("a\0b".into()))).unwrap_err();
+        assert!(
+            err.contains("U+0000"),
+            "expected TEXT NUL rejection, got {err}"
+        );
+        let blob = db_value_from_sea(&db_value_to_sea(&DbValue::Bytes(vec![0, 1]))).unwrap();
+        assert_eq!(blob, DbValue::Bytes(vec![0, 1]));
     }
 
     #[tokio::test]
