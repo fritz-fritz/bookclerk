@@ -1046,6 +1046,7 @@ async fn run_atomic_ddl(
     if stmts.is_empty() {
         return Ok(());
     }
+    // Canonical pack + marker; `execute_typed_on` expands companions once.
     let req = ExecuteRequest {
         operation_id: operation_id.to_string(),
         request_hash: String::new(),
@@ -1092,7 +1093,7 @@ async fn exec_sql(db: &DatabaseConnection, backend: DbBackend, sql: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::migrations::{current_canonical_schema, unreleased_checksum};
+    use crate::migrations::unreleased_checksum;
     use bookclerk_plugin_abi::DbCapabilities;
 
     #[test]
@@ -1296,7 +1297,7 @@ mod tests {
             .expect("table_info");
         assert!(
             !cols.is_empty(),
-            "canonical SQLITE_SCHEMA must create books"
+            "canonical unreleased host schema must create books"
         );
     }
 
@@ -1344,9 +1345,7 @@ mod tests {
         let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
             .await
             .expect("unmigrated sqlite");
-        let ddl = bookclerk_plugin_abi::sql_v1_pack_statements(current_canonical_schema())
-            .expect("pack")
-            .len() as u32;
+        let ddl = crate::migrations::current_canonical_statements().len() as u32;
         crate::inject_atomic_interrupt_after(
             crate::AtomicInterruptPhase::BetweenStatements,
             crate::AtomicInterruptKind::Cancel,
@@ -1437,17 +1436,15 @@ mod tests {
             None => format!("{}/{db_name}", &trimmed[..slash]),
         };
         let db = sea_orm::Database::connect(&db_url).await.expect("connect");
-        let canonical = current_canonical_schema();
-        let ddl = bookclerk_db_exec::expand_host_schema_batch(
-            DbBackend::Postgres,
-            &[
-                canonical.to_string(),
-                unreleased_marker_sql(&unreleased_checksum(), SCHEMA_VERSION),
-            ],
-        )
-        .expect("postgres schema batch")
-        .len()
-        .saturating_sub(1) as u32;
+        let mut batch: Vec<String> = crate::migrations::current_canonical_statements().to_vec();
+        batch.push(unreleased_marker_sql(
+            &unreleased_checksum(),
+            SCHEMA_VERSION,
+        ));
+        let ddl = bookclerk_db_exec::expand_host_schema_batch(DbBackend::Postgres, &batch)
+            .expect("postgres schema batch")
+            .len()
+            .saturating_sub(1) as u32;
         crate::inject_atomic_interrupt_after(
             crate::AtomicInterruptPhase::BetweenStatements,
             crate::AtomicInterruptKind::Cancel,

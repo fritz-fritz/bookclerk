@@ -198,9 +198,8 @@ BOOKCLERK_DATABASE_POSTGRES_URL_FILE=/run/secrets/postgres_url
 
 **Schema migrations**: Fresh databases apply
 [`current_canonical_schema`](../crates/bookclerk-library/src/migrations.rs)
-(today: derived from `unreleased_ops`; Postgres is that pack lowered mechanically in
-[`schema_postgres.rs`](../crates/bookclerk-db-exec/src/schema_postgres.rs)
-to `BIGSERIAL` / `BIGINT` / `BYTEA`) and persist
+(today: derived from `unreleased_ops`; Postgres adapters lower each statement at execute to
+`BIGINT` identity + `BYTEA`, never `BIGSERIAL`) and persist
 `SchemaState::Unreleased { checksum }`. There is no production frozen v1
 pack (`host_migration_plan()` is empty). A frozen database newer than this
 binary **fails closed**; see [schema versioning](adr/schema-versioning.md)

@@ -98,6 +98,7 @@ impl LibraryStore {
     ///
     /// The SDK infers sqlite vs postgres from the opened connection. Production
     /// plugin-host must not call this — leftover SQL stays canonical on the proxy.
+    #[cfg(test)]
     #[must_use]
     pub fn with_in_process_sql(mut self) -> Self {
         self.sql_exec = bookclerk_db_exec::SqlExecTarget::InProcess;

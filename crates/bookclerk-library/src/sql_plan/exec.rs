@@ -90,10 +90,9 @@ where
             .map(|stmt| stmt.rows_affected)
             .unwrap_or(0));
     }
-    let res = bookclerk_db_exec::execute_canonical(conn, sql, values)
+    bookclerk_db_exec::execute_canonical_stamped(conn, sql, values, &type_env)
         .await
-        .map_err(LibraryError::from_db_err)?;
-    Ok(res.rows_affected())
+        .map_err(LibraryError::from_db_err)
 }
 
 /// Query leftover SQL on a real in-process engine (one physical lowering pass).
