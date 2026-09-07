@@ -304,7 +304,7 @@ def iter_library_sources() -> list[Path]:
     files: list[Path] = []
     for glob in LIBRARY_BOOTSTRAP_GLOBS:
         files.extend(ROOT.glob(glob))
-    skip_names = {"tests.rs", "conformance.rs"}
+    skip_names = {"tests.rs", "conformance.rs", "differential.rs"}
     return sorted(
         {
             p.resolve()
@@ -502,7 +502,7 @@ def main() -> int:
     host_files = iter_plugin_host_sources()
     for path in host_files:
         hits.extend(check_plugin_host_isolation(path))
-    skip_tests = {"tests.rs", "conformance.rs"}
+    skip_tests = {"tests.rs", "conformance.rs", "differential.rs"}
     for path in iter_glob_sources(SCHEMA_SPLIT_GLOBS, skip_tests):
         hits.extend(check_no_schema_split(path))
     for path in iter_glob_sources(SQLITE_FALLBACK_GLOBS, skip_tests):
