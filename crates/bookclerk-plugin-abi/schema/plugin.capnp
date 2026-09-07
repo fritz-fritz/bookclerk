@@ -778,7 +778,7 @@ struct DatabaseAdapterConfig {
   # library open. Third-party adapters must key isolated databases on this
   # value rather than `binding` alone (two plugins may both declare `DB`).
   instanceId @3 :Text;
-  # Append-only (abiMinor 19). When false, open an existing binding unit and
+  # Append-only. When false, open an existing binding unit and
   # do not provision a missing one (read-only backup capture). Omitted/true
   # on older hosts means the adapter may create the unit.
   provision @4 :Bool;
