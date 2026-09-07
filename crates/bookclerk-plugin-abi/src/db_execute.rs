@@ -90,24 +90,26 @@ const D1_UNHEX_PLACEHOLDER_EXTRA: usize = 7;
 const D1_QUERY_CAP_WRAP_MAX_EXTRA: usize =
     "SELECT * FROM (".len() + ") AS _bc_cap LIMIT ".len() + 10;
 
-/// Upper bound on D1 physical SQL bytes for a canonical statement of
-/// `canonical_len` after sqlite-family mechanical lowering, the query LIMIT
-/// wrap, and `unhex(?)` for every advertised bind.
+/// Standardized Bookclerk sqlite-family lowering upper bound for a canonical
+/// statement of `canonical_len` bytes: mechanical LIKE / `NULLIF` /
+/// `INSERT OR IGNORE`, the query LIMIT wrap, and `unhex(?)` for every
+/// advertised sqlite-family bind slot.
 ///
 /// This length-only formula does **not** include proof-directed INTEGER
 /// overflow CASE wraps: a worst-case `1+1+…` payload of
 /// [`HOST_MIN_PAYLOAD_BYTES`] already exceeds [`D1_MAX_SQL_STATEMENT_BYTES`]
 /// after wrapping. Overflow is charged by proven preflight from
 /// `integer_arith_sites` (or a typecheck of literal-only SQL in
-/// [`DbCapabilities::admit_statement`]).
+/// [`DbCapabilities::admit_statement`]). Hosts compare the proven bound to
+/// [`DbCapabilities::max_lowered_statement_bytes`], not engine identity.
 #[must_use]
-pub const fn d1_physical_sql_upper_bound_len(canonical_len: usize) -> usize {
+pub const fn lowered_statement_upper_bound_len(canonical_len: usize) -> usize {
     crate::sql_text::sqlite_family_like_divmod_insert_upper_bound(canonical_len)
         .saturating_add(D1_QUERY_CAP_WRAP_MAX_EXTRA)
         .saturating_add((D1_MAX_BINDS as usize).saturating_mul(D1_UNHEX_PLACEHOLDER_EXTRA))
 }
 
-/// Deterministic D1 physical-length preflight without a typed proof.
+/// Deterministic lowered-statement preflight without a typed proof.
 ///
 /// Mechanical sqlite-family lowering plus the query LIMIT wrap and `unhex(?)`
 /// for each bind. INTEGER overflow wraps are omitted unless the caller uses
@@ -117,11 +119,11 @@ pub const fn d1_physical_sql_upper_bound_len(canonical_len: usize) -> usize {
 ///
 /// Returns [`crate::PluginError::invalid_params`] when the pack lexer rejects
 /// `sql`.
-pub fn d1_physical_sql_preflight_len(sql: &str, bind_count: usize) -> crate::Result<usize> {
-    d1_physical_preflight(sql, bind_count, None)
+pub fn lowered_statement_preflight_len(sql: &str, bind_count: usize) -> crate::Result<usize> {
+    lowered_statement_preflight(sql, bind_count, None)
 }
 
-/// [`d1_physical_sql_preflight_len`] after applying sqlite-family INTEGER
+/// [`lowered_statement_preflight_len`] after applying sqlite-family INTEGER
 /// overflow wraps from `proof` (innermost-first, then mechanical `/` `%`
 /// NULLIF / LIKE→GLOB / `INSERT OR IGNORE`).
 ///
@@ -130,7 +132,7 @@ pub fn d1_physical_sql_preflight_len(sql: &str, bind_count: usize) -> crate::Res
 /// Returns when `proof` does not validate against `sql`, overflow wrapping
 /// fails, or the pack lexer rejects the post-overflow SQL.
 #[cfg(feature = "host")]
-pub fn d1_physical_sql_preflight_len_proven(
+pub fn lowered_statement_preflight_len_proven(
     sql: &str,
     bind_count: usize,
     proof: Option<&crate::ResolvedStatement>,
@@ -138,7 +140,7 @@ pub fn d1_physical_sql_preflight_len_proven(
     if let Some(proof) = proof {
         proof.validate_for(sql)?;
     }
-    d1_physical_preflight(sql, bind_count, proof)
+    lowered_statement_preflight(sql, bind_count, proof)
 }
 
 /// Apply overflow wraps when `proof` has INTEGER sites, then the mechanical bound.
@@ -148,7 +150,7 @@ pub fn d1_physical_sql_preflight_len_proven(
 /// Returns [`crate::PluginError::internal`] when overflow wrapping fails, or
 /// [`crate::PluginError::invalid_params`] when the pack lexer rejects the
 /// post-overflow SQL.
-fn d1_physical_preflight(
+fn lowered_statement_preflight(
     sql: &str,
     bind_count: usize,
     proof: Option<&ResolvedStatement>,
@@ -169,23 +171,14 @@ fn d1_physical_preflight(
     )
 }
 
-/// Implied physical SQL ceiling from an advertised `maxPayloadBytes`.
-///
-/// Guests that advertise D1's portable payload cap must realize sqlite-family
-/// lowering (including overflow wraps) inside [`D1_MAX_SQL_STATEMENT_BYTES`].
-#[must_use]
-pub fn implied_physical_sql_ceiling(max_payload_bytes: u32) -> usize {
-    d1_physical_sql_upper_bound_len(max_payload_bytes as usize)
-}
-
-/// Largest canonical payload that [`d1_physical_sql_upper_bound_len`] still
+/// Largest canonical payload that [`lowered_statement_upper_bound_len`] still
 /// proves against [`D1_MAX_SQL_STATEMENT_BYTES`].
 const fn proven_d1_max_payload_bytes() -> u32 {
     let physical = D1_MAX_SQL_STATEMENT_BYTES as usize;
     let mut n = HOST_MIN_PAYLOAD_BYTES as usize;
     let mut best = n;
     while n <= physical {
-        if d1_physical_sql_upper_bound_len(n) <= physical {
+        if lowered_statement_upper_bound_len(n) <= physical {
             best = n;
             n += 1;
         } else {
@@ -198,8 +191,9 @@ const fn proven_d1_max_payload_bytes() -> u32 {
 /// Canonical SQL+binds cap advertised for D1.
 ///
 /// Largest `n >= `[`HOST_MIN_PAYLOAD_BYTES`] such that
-/// [`d1_physical_sql_upper_bound_len`]`(n) <= `[`D1_MAX_SQL_STATEMENT_BYTES`].
-/// Host admission stays provider-neutral (`maxPayloadBytes` only).
+/// [`lowered_statement_upper_bound_len`]`(n) <= `[`D1_MAX_SQL_STATEMENT_BYTES`].
+/// Host admission uses generic [`DbCapabilities::max_payload_bytes`] plus
+/// [`DbCapabilities::max_lowered_statement_bytes`]; it does not name D1.
 pub const D1_MAX_PAYLOAD_BYTES: u32 = proven_d1_max_payload_bytes();
 
 /// Host refuses guests that do not bound JSON bytes of one statement's rows.
@@ -555,6 +549,10 @@ pub struct DbCapabilities {
     /// `0` is unspecified.
     #[serde(default)]
     pub max_pattern_bytes: u32,
+    /// Maximum UTF-8 bytes of sqlite-family lowered SQL for one statement.
+    /// `0` is unspecified (host does not enforce a lowered-size ceiling).
+    #[serde(default)]
+    pub max_lowered_statement_bytes: u32,
 }
 
 impl DbCapabilities {
@@ -699,6 +697,7 @@ impl DbCapabilities {
             max_function_args: SQLITE_MAX_FUNCTION_ARGS,
             max_schema_columns: SQLITE_MAX_SCHEMA_COLUMNS,
             max_pattern_bytes: SQLITE_MAX_PATTERN_BYTES,
+            max_lowered_statement_bytes: 0,
         }
     }
 
@@ -715,6 +714,7 @@ impl DbCapabilities {
             max_function_args: D1_MAX_FUNCTION_ARGS,
             max_schema_columns: D1_MAX_SCHEMA_COLUMNS,
             max_pattern_bytes: D1_PORTABLE_LIKE_PATTERN_BYTES,
+            max_lowered_statement_bytes: D1_MAX_SQL_STATEMENT_BYTES,
             ..Self::advertised_sqlite()
         }
     }
@@ -735,17 +735,37 @@ impl DbCapabilities {
 
     /// Rejects BookclerkSQL that exceeds this advertisement before dispatch.
     ///
-    /// Physical realizability uses sqlite-family overflow wraps from a
-    /// literal-only typecheck when the statement typechecks against an empty
-    /// catalog, then the mechanical bound, compared to
-    /// [`implied_physical_sql_ceiling`]`(max_payload_bytes)`. Adapters with a
-    /// schema-bound proof must preflight overflow wraps before lowering.
+    /// Literal INTEGER arithmetic typechecks against an empty catalog so dense
+    /// `1+1+…` contributes overflow wrap cost. Statements that need a real
+    /// catalog must use [`Self::admit_statement_proven`] / [`Self::admit_proven_execute`]
+    /// after the host has a [`ResolvedStatement`].
+    ///
+    /// Lowered-size admission compares the standardized Bookclerk lowering
+    /// upper bound to [`Self::max_lowered_statement_bytes`] (`0` skips that
+    /// check). Canonical `maxPayloadBytes` is unchanged.
     ///
     /// # Errors
     ///
     /// Returns [`crate::PluginError::invalid_params`] when a statement exceeds
-    /// schema-column, LIKE-pattern, TEXT-domain, or implied physical-SQL limits.
+    /// schema-column, LIKE-pattern, TEXT-domain, or lowered-statement limits.
     pub fn admit_statement(&self, sql: &str, parameters: &[crate::DbValue]) -> crate::Result<()> {
+        let proof = admit_literal_proof(sql, parameters);
+        self.admit_statement_proven(sql, parameters, proof.as_ref())
+    }
+
+    /// [`Self::admit_statement`] using a host-resolved proof when present.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::PluginError::invalid_params`] when a statement exceeds
+    /// negotiated limits, or [`crate::PluginError::internal`] when overflow
+    /// wrapping fails.
+    pub fn admit_statement_proven(
+        &self,
+        sql: &str,
+        parameters: &[crate::DbValue],
+        proof: Option<&ResolvedStatement>,
+    ) -> crate::Result<()> {
         require_portable_text(sql)?;
         require_portable_text_binds(parameters)?;
         require_like_patterns_within(sql, parameters, self.max_pattern_bytes)?;
@@ -759,14 +779,42 @@ impl DbCapabilities {
                 )));
             }
         }
-        let proof = admit_literal_proof(sql, parameters);
-        let pre = d1_physical_preflight(sql, parameters.len(), proof.as_ref())?;
-        let ceiling = implied_physical_sql_ceiling(self.max_payload_bytes);
-        if pre > ceiling {
+        let pre = lowered_statement_preflight(sql, parameters.len(), proof)?;
+        if self.max_lowered_statement_bytes > 0 {
+            let cap = self.max_lowered_statement_bytes as usize;
+            if pre > cap {
+                return Err(crate::PluginError::invalid_params(format!(
+                    "lowered SQL preflight is {pre} bytes; advertised maxLoweredStatementBytes is {cap}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Rejects a resolved batch whose proven lowered size exceeds this advertisement.
+    ///
+    /// Call after the host has 1:1 [`ResolvedStatement`] proofs and before
+    /// adapter dispatch. Does not inspect engine identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns when `proofs` is the wrong length, a proof does not bind, or a
+    /// statement fails [`Self::admit_statement_proven`].
+    pub fn admit_proven_execute(
+        &self,
+        req: &ExecuteRequest,
+        proofs: &[ResolvedStatement],
+    ) -> crate::Result<()> {
+        if proofs.len() != req.statements.len() {
             return Err(crate::PluginError::invalid_params(format!(
-                "physical SQL preflight is {pre} bytes; advertised maxPayloadBytes {} implies a {ceiling}-byte ceiling",
-                self.max_payload_bytes
+                "resolved proofs must match statement count ({} proofs, {} statements)",
+                proofs.len(),
+                req.statements.len()
             )));
+        }
+        for (stmt, proof) in req.statements.iter().zip(proofs.iter()) {
+            proof.validate_for(&stmt.sql)?;
+            self.admit_statement_proven(&stmt.sql, &stmt.parameters, Some(proof))?;
         }
         Ok(())
     }
@@ -990,22 +1038,32 @@ mod tests {
         const { assert!(D1_MAX_PAYLOAD_BYTES >= HOST_MIN_PAYLOAD_BYTES) };
         const {
             assert!(
-                d1_physical_sql_upper_bound_len(D1_MAX_PAYLOAD_BYTES as usize)
+                lowered_statement_upper_bound_len(D1_MAX_PAYLOAD_BYTES as usize)
                     <= D1_MAX_SQL_STATEMENT_BYTES as usize
             )
         };
         const {
             assert!(
-                d1_physical_sql_upper_bound_len(D1_MAX_PAYLOAD_BYTES as usize + 1)
+                lowered_statement_upper_bound_len(D1_MAX_PAYLOAD_BYTES as usize + 1)
                     > D1_MAX_SQL_STATEMENT_BYTES as usize
             )
         };
-        const { assert!(d1_physical_sql_upper_bound_len(25_000) > D1_MAX_SQL_STATEMENT_BYTES as usize) };
+        const {
+            assert!(lowered_statement_upper_bound_len(25_000) > D1_MAX_SQL_STATEMENT_BYTES as usize)
+        };
         let sql =
             "SELECT json_extract(ifnull(body, '{}'), '$.k') FROM t WHERE x LIKE '[%]_?*' AND 1/2";
-        let pre = d1_physical_sql_preflight_len(sql, 0).expect("preflight");
-        assert!(pre <= d1_physical_sql_upper_bound_len(sql.len()), "{pre}");
+        let pre = lowered_statement_preflight_len(sql, 0).expect("preflight");
+        assert!(pre <= lowered_statement_upper_bound_len(sql.len()), "{pre}");
         assert!(pre <= D1_MAX_SQL_STATEMENT_BYTES as usize, "{pre}");
+        assert_eq!(
+            DbCapabilities::advertised_d1().max_lowered_statement_bytes,
+            D1_MAX_SQL_STATEMENT_BYTES
+        );
+        assert_eq!(
+            DbCapabilities::advertised_sqlite().max_lowered_statement_bytes,
+            0
+        );
     }
 
     fn dense_add_sql(adds: usize) -> String {
@@ -1094,8 +1152,9 @@ mod tests {
                 .is_some_and(|p| !p.integer_arith_sites.is_empty()),
             "{label}: admitted SQL must typecheck with arith sites"
         );
-        let pre_ok = d1_physical_preflight(&sql_ok, params.len(), proof.as_ref()).expect("pre N");
-        let ceiling = implied_physical_sql_ceiling(caps.max_payload_bytes);
+        let pre_ok =
+            lowered_statement_preflight(&sql_ok, params.len(), proof.as_ref()).expect("pre N");
+        let ceiling = caps.max_lowered_statement_bytes as usize;
         assert!(
             pre_ok <= ceiling,
             "{label} N preflight {pre_ok} > {ceiling}"
@@ -1106,14 +1165,14 @@ mod tests {
         );
 
         let sql_over = build(n_ok + 1);
-        let mechanical = d1_physical_sql_preflight_len(&sql_over, params.len()).expect("mech");
+        let mechanical = lowered_statement_preflight_len(&sql_over, params.len()).expect("mech");
         assert!(
             mechanical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
             "{label}: N+1 must still fit the mechanical-only bound ({mechanical})"
         );
         let err = caps.admit_statement(&sql_over, params).unwrap_err();
         assert!(
-            err.to_string().contains("physical SQL preflight"),
+            err.to_string().contains("maxLoweredStatementBytes"),
             "{label}: first over-limit case must be admission/preflight, got {err}"
         );
     }
@@ -1145,13 +1204,120 @@ mod tests {
             "each abs(+1) records abs and add: {:?}",
             proof.integer_arith_sites.len()
         );
-        let mechanical = d1_physical_sql_preflight_len(&sql, 0).expect("mech");
-        let proven = d1_physical_preflight(&sql, 0, Some(&proof)).expect("proven");
+        let mechanical = lowered_statement_preflight_len(&sql, 0).expect("mech");
+        let proven = lowered_statement_preflight(&sql, 0, Some(&proof)).expect("proven");
         assert!(
             proven > mechanical,
             "nested overflow wraps must exceed mechanical-only ({proven} vs {mechanical})"
         );
-        assert!(proven <= implied_physical_sql_ceiling(caps.max_payload_bytes));
+        assert!(proven <= caps.max_lowered_statement_bytes as usize);
+    }
+
+    fn integer_column_env() -> SqlTypeEnv {
+        let mut env = SqlTypeEnv::new();
+        env.insert_table("t", vec![("n".into(), crate::sql_types::SqlType::Integer)]);
+        env
+    }
+
+    fn dense_column_add_sql(adds: usize) -> String {
+        let mut sql = String::from("SELECT n");
+        for _ in 0..adds {
+            sql.push_str("+n");
+        }
+        sql.push_str(" FROM t");
+        sql
+    }
+
+    fn column_add_request(sql: &str) -> ExecuteRequest {
+        ExecuteRequest {
+            operation_id: "col".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: sql.to_string(),
+                parameters: Vec::new(),
+                kind: DbPlanStatementKind::Select,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        }
+    }
+
+    #[test]
+    fn lowered_size_n_plus_one_uses_integer_column_proofs() {
+        let mut caps = DbCapabilities::advertised_sqlite();
+        caps.max_lowered_statement_bytes = D1_MAX_SQL_STATEMENT_BYTES;
+        let env = integer_column_env();
+        let mut lo = 0usize;
+        let mut hi = 1usize;
+        while hi < 800 {
+            let sql = dense_column_add_sql(hi);
+            let req = column_add_request(&sql);
+            let Ok(proofs) = crate::sql_types::typecheck_execute_request_resolved(&req, &env)
+            else {
+                break;
+            };
+            if sql.len() > caps.max_payload_bytes as usize
+                || caps.admit_proven_execute(&req, &proofs).is_err()
+            {
+                break;
+            }
+            lo = hi;
+            hi = (hi.saturating_mul(2)).min(800);
+        }
+        while lo + 1 < hi {
+            let mid = lo + (hi - lo) / 2;
+            let sql = dense_column_add_sql(mid);
+            let req = column_add_request(&sql);
+            let ok = sql.len() <= caps.max_payload_bytes as usize
+                && crate::sql_types::typecheck_execute_request_resolved(&req, &env)
+                    .ok()
+                    .and_then(|proofs| caps.admit_proven_execute(&req, &proofs).ok())
+                    .is_some();
+            if ok {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        assert!(lo >= 1, "expected an admitted INTEGER column chain");
+
+        let sql_ok = dense_column_add_sql(lo);
+        let req_ok = column_add_request(&sql_ok);
+        let proofs_ok = crate::sql_types::typecheck_execute_request_resolved(&req_ok, &env)
+            .expect("typecheck N");
+        assert!(
+            !proofs_ok[0].integer_arith_sites.is_empty(),
+            "column arithmetic must produce overflow sites"
+        );
+        caps.admit_statement(&sql_ok, &[])
+            .expect("canonical empty-catalog admit still succeeds (no column types)");
+        caps.admit_proven_execute(&req_ok, &proofs_ok)
+            .expect("N proven lowered size");
+
+        let sql_over = dense_column_add_sql(lo + 1);
+        let req_over = column_add_request(&sql_over);
+        let proofs_over = crate::sql_types::typecheck_execute_request_resolved(&req_over, &env)
+            .expect("typecheck N+1");
+        assert!(
+            sql_over.len() <= caps.max_payload_bytes as usize,
+            "N+1 canonical SQL must still fit maxPayloadBytes ({})",
+            sql_over.len()
+        );
+        caps.admit_statement(&sql_over, &[])
+            .expect("empty-catalog admit must not charge column INTEGER overflow");
+        let err = caps
+            .admit_proven_execute(&req_over, &proofs_over)
+            .expect_err("N+1 proven lowered size");
+        assert!(
+            err.to_string().contains("maxLoweredStatementBytes"),
+            "host proven admission must reject without engine identity, got {err}"
+        );
+        let mechanical = lowered_statement_preflight_len(&sql_over, 0).expect("mech");
+        assert!(
+            mechanical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
+            "N+1 mechanical-only still fits ({mechanical})"
+        );
     }
 
     #[test]

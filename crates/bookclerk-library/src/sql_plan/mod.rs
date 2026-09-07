@@ -210,6 +210,26 @@ pub fn validate_execute_request(
     Ok(())
 }
 
+/// After host typecheck, reject a resolved batch whose proven lowered size
+/// exceeds negotiated `maxLoweredStatementBytes`.
+///
+/// Call this with the real [`bookclerk_plugin_abi::ResolvedStatement`] proofs
+/// before adapter dispatch. [`validate_execute_request`] only has an empty
+/// catalog, so INTEGER column arithmetic is charged here.
+///
+/// # Errors
+///
+/// Returns [`crate::LibraryError::Other`] when proofs are missing/mismatched
+/// or the standardized lowering upper bound exceeds the advertised ceiling.
+pub fn validate_proven_execute_request(
+    req: &ExecuteRequest,
+    proofs: &[bookclerk_plugin_abi::ResolvedStatement],
+    caps: &DbCapabilities,
+) -> crate::error::Result<()> {
+    caps.admit_proven_execute(req, proofs)
+        .map_err(|err| crate::LibraryError::Other(anyhow::anyhow!("{err}")))
+}
+
 /// Host-authorizes a guest typed batch: overwrite statement kinds, enforce
 /// negotiated caps, and stamp the canonical Cap'n request hash.
 ///
@@ -292,6 +312,8 @@ where
         .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
     let guest_req = req.clone();
     let envelope = wrap_guest_typed_request(req, policy.sql_types())?;
+    caps.admit_proven_execute(&envelope.request, &envelope.proofs)
+        .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
     let reply = exec(envelope.clone()).await?;
     crate::validate_execute_reply(&envelope.request, &reply, caps)
         .map_err(|err| bookclerk_plugin_abi::PluginError::unavailable(err.to_string()))?;
@@ -819,6 +841,88 @@ mod limits_tests {
         assert_eq!(
             super::host_statement_kind("WITH seed AS (SELECT 1) DELETE FROM t RETURNING id"),
             DbPlanStatementKind::Returning
+        );
+    }
+
+    fn integer_column_add_sql(adds: usize) -> String {
+        let mut sql = String::from("SELECT n");
+        for _ in 0..adds {
+            sql.push_str("+n");
+        }
+        sql.push_str(" FROM t");
+        sql
+    }
+
+    fn integer_column_request(sql: &str) -> bookclerk_plugin_abi::ExecuteRequest {
+        use bookclerk_plugin_abi::{
+            DbPlanStatementKind, DbResultSelection, DbValue, ExecuteRequest, TypedDbStatement,
+        };
+        ExecuteRequest {
+            operation_id: "col".into(),
+            request_hash: String::new(),
+            statements: vec![TypedDbStatement {
+                sql: sql.to_string(),
+                parameters: Vec::<DbValue>::new(),
+                kind: DbPlanStatementKind::Select,
+                max_rows: 0,
+                result_selection: DbResultSelection::Rows,
+            }],
+            deadline_unix_ms: 0,
+        }
+    }
+
+    #[test]
+    fn proven_execute_rejects_integer_column_overflow_without_engine_identity() {
+        use bookclerk_plugin_abi::{typecheck_execute_request_proofs, SqlType, SqlTypeEnv};
+        let mut caps = DbCapabilities::advertised_sqlite();
+        caps.max_lowered_statement_bytes = 100_000;
+        let mut env = SqlTypeEnv::new();
+        env.insert_table("t", vec![("n".into(), SqlType::Integer)]);
+        let proven_ok = |adds: usize| {
+            let sql = integer_column_add_sql(adds);
+            let req = integer_column_request(&sql);
+            if super::validate_execute_request(&req, &caps).is_err() {
+                return false;
+            }
+            let Ok(proofs) = typecheck_execute_request_proofs(&req, &env) else {
+                return false;
+            };
+            super::validate_proven_execute_request(&req, &proofs, &caps).is_ok()
+        };
+        let mut lo = 0usize;
+        let mut hi = 1usize;
+        while hi < 800 && proven_ok(hi) {
+            lo = hi;
+            hi = (hi.saturating_mul(2)).min(800);
+        }
+        while lo + 1 < hi {
+            let mid = lo + (hi - lo) / 2;
+            if proven_ok(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        assert!(lo >= 1, "expected an admitted INTEGER column chain");
+
+        let sql_ok = integer_column_add_sql(lo);
+        let req_ok = integer_column_request(&sql_ok);
+        super::validate_execute_request(&req_ok, &caps).expect("canonical N");
+        let proofs_ok = typecheck_execute_request_proofs(&req_ok, &env).expect("typecheck N");
+        assert!(!proofs_ok[0].integer_arith_sites.is_empty());
+        super::validate_proven_execute_request(&req_ok, &proofs_ok, &caps)
+            .expect("host proven path must accept N");
+
+        let sql_over = integer_column_add_sql(lo + 1);
+        let req_over = integer_column_request(&sql_over);
+        super::validate_execute_request(&req_over, &caps)
+            .expect("canonical N+1 must still admit against an empty catalog");
+        let proofs_over = typecheck_execute_request_proofs(&req_over, &env).expect("typecheck N+1");
+        let err = super::validate_proven_execute_request(&req_over, &proofs_over, &caps)
+            .expect_err("host proven path must reject N+1");
+        assert!(
+            err.to_string().contains("maxLoweredStatementBytes"),
+            "host proven path must reject without consulting an engine: {err}"
         );
     }
 }

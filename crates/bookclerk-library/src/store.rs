@@ -190,6 +190,9 @@ impl LibraryStore {
         type_env.merge(&crate::migrations::host_sql_type_env());
         type_env.merge(policy.sql_types());
         let envelope = crate::sql_plan::wrap_guest_typed_request(req, &type_env)?;
+        self.db_capabilities()
+            .admit_proven_execute(&envelope.request, &envelope.proofs)
+            .map_err(|err| bookclerk_plugin_abi::PluginError::invalid_params(err.to_string()))?;
         let reply = if let Some(exec) = &self.typed_exec {
             let reply = exec.execute_typed(envelope.clone()).await?;
             crate::validate_execute_reply(&envelope.request, &reply, self.db_capabilities())

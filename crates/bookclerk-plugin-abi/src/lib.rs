@@ -123,12 +123,12 @@ pub use db::{
     DATABASE_ADAPTER_CONFIG_MEDIA_TYPE,
 };
 #[cfg(feature = "host")]
-pub use db_execute::d1_physical_sql_preflight_len_proven;
+pub use db_execute::lowered_statement_preflight_len_proven;
 pub use db_execute::{
-    d1_physical_sql_preflight_len, d1_physical_sql_upper_bound_len, implied_physical_sql_ceiling,
-    sql_payload_bytes, sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn,
-    DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest,
-    StatementResult, TypedDbStatement, D1_MAX_BINDS, D1_MAX_FUNCTION_ARGS, D1_MAX_PAYLOAD_BYTES,
+    lowered_statement_preflight_len, lowered_statement_upper_bound_len, sql_payload_bytes,
+    sql_payload_exceeds, DbBootstrap, DbCapabilities, DbColumn, DbPlanStatementKind,
+    DbResultSelection, DbRow, DbTiming, ExecuteReply, ExecuteRequest, StatementResult,
+    TypedDbStatement, D1_MAX_BINDS, D1_MAX_FUNCTION_ARGS, D1_MAX_PAYLOAD_BYTES,
     D1_MAX_SCHEMA_COLUMNS, D1_MAX_SQL_STATEMENT_BYTES, FIRST_PARTY_MAX_RESULT_BYTES,
     FIRST_PARTY_MAX_RESULT_ROWS, FIRST_PARTY_MAX_STATEMENTS, HOST_MIN_BINDS, HOST_MIN_CELL_BYTES,
     HOST_MIN_FUNCTION_ARGS, HOST_MIN_PATTERN_BYTES, HOST_MIN_PAYLOAD_BYTES, HOST_MIN_RESULT_BYTES,

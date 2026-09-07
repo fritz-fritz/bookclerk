@@ -1397,6 +1397,9 @@ impl bookclerk_library::TypedAtomicExec for RpcAtomicBackend {
         let proofs = envelope.proofs.clone();
         bookclerk_library::authorize_typed_request(&mut request, &self.caps)
             .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
+        self.caps
+            .admit_proven_execute(&request, &proofs)
+            .map_err(|err| AbiPluginError::invalid_params(err.to_string()))?;
         let validate_req = request.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let reply = self

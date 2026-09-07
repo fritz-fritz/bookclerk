@@ -2259,7 +2259,7 @@ mod tests {
     #[test]
     fn d1_accepted_short_likes_fit_physical_statement_limit() {
         use bookclerk_plugin_abi::{
-            d1_physical_sql_preflight_len, d1_physical_sql_upper_bound_len, DbValue,
+            lowered_statement_preflight_len, lowered_statement_upper_bound_len, DbValue,
             D1_MAX_PAYLOAD_BYTES, D1_MAX_SQL_STATEMENT_BYTES,
         };
 
@@ -2270,7 +2270,7 @@ mod tests {
             let sql = dense_like_json_placeholder_sql(n);
             if d1_host_accepts(&sql, &bind) {
                 let physical = d1_physical_after_adapter(&sql);
-                let pre = d1_physical_sql_preflight_len(&sql, bind.len()).expect("preflight");
+                let pre = lowered_statement_preflight_len(&sql, bind.len()).expect("preflight");
                 assert!(
                     physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
                     "n={n} canonical={} physical={physical} cap={D1_MAX_PAYLOAD_BYTES}",
@@ -2278,14 +2278,14 @@ mod tests {
                 );
                 assert!(physical <= pre, "n={n} physical={physical} preflight={pre}");
                 assert!(
-                    pre <= d1_physical_sql_upper_bound_len(sql.len()),
+                    pre <= lowered_statement_upper_bound_len(sql.len()),
                     "n={n} preflight={pre} formula={}",
-                    d1_physical_sql_upper_bound_len(sql.len())
+                    lowered_statement_upper_bound_len(sql.len())
                 );
                 assert!(
-                    physical <= d1_physical_sql_upper_bound_len(sql.len()),
+                    physical <= lowered_statement_upper_bound_len(sql.len()),
                     "n={n} physical={physical} formula={}",
-                    d1_physical_sql_upper_bound_len(sql.len())
+                    lowered_statement_upper_bound_len(sql.len())
                 );
                 n_ok = n;
                 n += 1;
@@ -2307,7 +2307,7 @@ mod tests {
             let params: Vec<DbValue> = (0..n).map(|_| DbValue::Text("[%]_?*".into())).collect();
             if d1_host_accepts(&sql, &params) {
                 let physical = d1_physical_after_adapter(&sql);
-                let pre = d1_physical_sql_preflight_len(&sql, params.len()).expect("preflight");
+                let pre = lowered_statement_preflight_len(&sql, params.len()).expect("preflight");
                 assert!(
                     physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
                     "nested n={n}"
@@ -2338,7 +2338,7 @@ mod tests {
             let sql = insert_or_ignore_like_sql(n);
             if d1_host_accepts(&sql, &[]) {
                 let physical = d1_physical_after_adapter(&sql);
-                let pre = d1_physical_sql_preflight_len(&sql, 0).expect("preflight");
+                let pre = lowered_statement_preflight_len(&sql, 0).expect("preflight");
                 assert!(
                     physical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
                     "insert n={n}"
@@ -2396,7 +2396,7 @@ mod tests {
     #[test]
     fn d1_overflow_n_plus_one_is_rejected_before_lowering() {
         use bookclerk_plugin_abi::{
-            d1_physical_sql_preflight_len, d1_physical_sql_preflight_len_proven,
+            lowered_statement_preflight_len, lowered_statement_preflight_len_proven,
             D1_MAX_SQL_STATEMENT_BYTES,
         };
         let caps = bookclerk_plugin_abi::DbCapabilities::advertised_d1();
@@ -2423,7 +2423,7 @@ mod tests {
         assert!(n_ok >= 1, "expected an admitted add chain");
         let sql = dense_add_sql(n_ok);
         let proof = proof_of(&sql, &SqlTypeEnv::new());
-        let pre = d1_physical_sql_preflight_len_proven(&sql, 0, Some(&proof)).expect("preflight");
+        let pre = lowered_statement_preflight_len_proven(&sql, 0, Some(&proof)).expect("preflight");
         let lowered =
             lower_canonical_sql_typed(DatabaseBackend::Sqlite, &sql, Some(&proof)).expect("lower");
         let physical =
@@ -2438,13 +2438,13 @@ mod tests {
             !d1_host_accepts(&over, &[]),
             "N+1 add chain must fail portable admission"
         );
-        let mechanical = d1_physical_sql_preflight_len(&over, 0).expect("mechanical");
+        let mechanical = lowered_statement_preflight_len(&over, 0).expect("mechanical");
         assert!(
             mechanical <= D1_MAX_SQL_STATEMENT_BYTES as usize,
             "N+1 still fits mechanical-only ({mechanical})"
         );
         let proof = proof_of(&over, &SqlTypeEnv::new());
-        let pre = d1_physical_sql_preflight_len_proven(&over, 0, Some(&proof)).expect("pre N+1");
+        let pre = lowered_statement_preflight_len_proven(&over, 0, Some(&proof)).expect("pre N+1");
         assert!(
             pre > D1_MAX_SQL_STATEMENT_BYTES as usize || caps.admit_statement(&over, &[]).is_err(),
             "N+1 proven preflight {pre} must miss the physical ceiling"

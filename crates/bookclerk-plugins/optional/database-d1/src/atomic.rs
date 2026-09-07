@@ -23,7 +23,7 @@ fn collapse_d1_wire(
     )
 }
 use bookclerk_plugin_abi::{
-    d1_physical_sql_preflight_len_proven, DbCapabilities, D1_MAX_SQL_STATEMENT_BYTES,
+    lowered_statement_preflight_len_proven, DbCapabilities, D1_MAX_SQL_STATEMENT_BYTES,
 };
 use bookclerk_plugin_sdk::{
     encoded_execute_reply_bytes, encoded_statement_result_bytes, DbColumn, DbResultSelection,
@@ -887,7 +887,7 @@ pub(crate) fn d1_typed_statement(
     params: &[DbValue],
     proof: Option<&bookclerk_plugin_abi::ResolvedStatement>,
 ) -> Result<SqlStmt, DbErr> {
-    let pre = d1_physical_sql_preflight_len_proven(sql, params.len(), proof)
+    let pre = lowered_statement_preflight_len_proven(sql, params.len(), proof)
         .map_err(|err| DbErr::Custom(format!("D1 physical SQL preflight: {err}")))?;
     if pre > D1_MAX_SQL_STATEMENT_BYTES as usize {
         return Err(DbErr::Custom(format!(
@@ -1991,6 +1991,42 @@ mod tests {
         assert!(
             !msg.contains("lowered SQL is"),
             "must not be the post-lower 100KiB check: {msg}"
+        );
+    }
+
+    #[test]
+    fn d1_typed_statement_rejects_column_overflow_when_host_is_bypassed() {
+        let mut sql = String::from("SELECT n");
+        for _ in 0..400 {
+            sql.push_str("+n");
+        }
+        sql.push_str(" FROM t");
+        let mut env = bookclerk_plugin_abi::SqlTypeEnv::new();
+        env.insert_table(
+            "t",
+            vec![("n".into(), bookclerk_plugin_abi::SqlType::Integer)],
+        );
+        let req = bookclerk_plugin_abi::ExecuteRequest {
+            operation_id: "t".into(),
+            request_hash: String::new(),
+            deadline_unix_ms: 0,
+            statements: vec![bookclerk_plugin_abi::TypedDbStatement {
+                sql: sql.clone(),
+                parameters: vec![],
+                kind: bookclerk_plugin_abi::DbPlanStatementKind::Select,
+                max_rows: 0,
+                result_selection: bookclerk_plugin_abi::DbResultSelection::Rows,
+            }],
+        };
+        let proof = bookclerk_plugin_abi::typecheck_execute_request_proofs(&req, &env)
+            .expect("column typecheck")
+            .remove(0);
+        assert!(!proof.integer_arith_sites.is_empty());
+        let err = d1_typed_statement(&sql, &[], Some(&proof)).expect_err("adapter preflight");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("D1 physical SQL preflight"),
+            "adapter must reject oversized column arithmetic independently: {msg}"
         );
     }
 

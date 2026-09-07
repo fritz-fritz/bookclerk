@@ -1102,6 +1102,13 @@ struct DbCapabilities {
   # conservative value that still fits the physical pattern cap. `0` is
   # unspecified.
   maxPatternBytes @20 :UInt32;
+  # Maximum UTF-8 bytes of sqlite-family lowered SQL the adapter can realize
+  # for one statement (INTEGER overflow wraps, LIKE→GLOB, NULLIF, INSERT OR
+  # IGNORE, query LIMIT wrap, bytes-placeholder expansion). `0` is
+  # unspecified: the host does not enforce a lowered-size ceiling. First-party
+  # D1 advertises 100000. Hosts compare a standardized Bookclerk lowering
+  # upper bound against this number and must not branch on engine identity.
+  maxLoweredStatementBytes @21 :UInt32;
 }
 
 struct DbBootstrapReply {

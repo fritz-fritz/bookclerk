@@ -50,13 +50,14 @@ execution semantics (`atomicBatch`, `returning`, `affectedRows`,
 `schemaMigrations` / `atomicSchemaBatch`), and all numeric limits
 (`maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`,
 `maxResultBytes`, `maxCellBytes`, `maxRequestBytes`,
-`maxAtomicResultBytes`). Schema kind is chosen from the schema flags
+`maxAtomicResultBytes`, `maxFunctionArgs`, `maxSchemaColumns`,
+`maxPatternBytes`, `maxLoweredStatementBytes`). Schema kind is chosen from the schema flags
 (exactly one of `pragmaUserVersion` or `schemaMigrations`;
 `atomicSchemaBatch` requires `schemaMigrations`). Bootstrap metadata
-(`sqlFamily`, SeaORM `dialect`) is **not** on typed `DbCapabilities`
-(ordinals `@17`/`@18` are tombstoned); it travels on the separate
-typed `DbBootstrap` / the host connect path after semantic negotiation
-succeeds.
+(`sqlFamily`, SeaORM `dialect`) is **not** on typed `DbCapabilities`;
+it travels on the separate typed `DbBootstrap` / the host connect path after
+semantic negotiation succeeds. `DbCapabilities` `@17` is `pluginDatabases`
+and `@21` is `maxLoweredStatementBytes`.
 
 The host must not invent capabilities from the plugin id. Missing required
 fields, `atomicBatch: false`, `returning: false`, unspecified (`0`) limits,
@@ -65,11 +66,16 @@ limits below the host's compiled minimums, `maxPayloadBytes` /
 bootstrap `dialect` that does not match `sqlFamily` are a hard error. Wake
 page size and `IN (…)` chunking are derived from `maxBinds`.
 `maxPayloadBytes` bounds request SQL plus binds per statement and must not
-exceed the scalar ceiling. D1 advertises the largest canonical payload whose
-sqlite-family mechanical lowering (LIKE→GLOB wraps, `div`/`mod` NULLIF,
-`INSERT OR IGNORE`, query LIMIT wrap, `unhex(?)`) is proven to stay within
-the engine's 100 KiB physical statement limit; host planners still only see
-the generic cap. `maxRequestBytes` / `maxAtomicResultBytes` bound
+exceed the scalar ceiling. `maxLoweredStatementBytes` (`0` = unspecified) is
+the adapter's physical statement ceiling after standardized Bookclerk
+sqlite-family lowering (overflow wraps, LIKE→GLOB, NULLIF, `INSERT OR IGNORE`,
+query LIMIT wrap, bytes-placeholder expansion). After the host has a real
+`ResolvedStatement`, and before adapter dispatch, it compares that proven
+upper bound to the advertised ceiling. The host must not branch on engine
+identity. D1 advertises `100000` and still validates the same bound as
+defense in depth. D1 `maxPayloadBytes` remains the largest canonical payload
+whose mechanical-only lowering is proven to stay within that 100 KiB
+ceiling. `maxRequestBytes` / `maxAtomicResultBytes` bound
 the whole encoded `ExecuteRequest` / `ExecuteReply`. Guests track encoded
 result bytes incrementally as statement results are built and keep one
 exact pre-commit check.
@@ -110,7 +116,8 @@ proof-directed authorization when a type env exists.
 
 `sqlFamily` and SeaORM `dialect` are bootstrap-only (typed `DbBootstrap` on
 the plugin-host connect path). Typed `DbCapabilities` does not carry them
-(ordinals `@17`/`@18` are tombstoned). An architecture lint (`scripts/check-db-plugin-isolation.py`)
+(`@17` is `pluginDatabases`; `@18`–`@21` are numeric caps including
+`maxLoweredStatementBytes`). An architecture lint (`scripts/check-db-plugin-isolation.py`)
 forbids `bookclerk-library` production sources from reading bootstrap fields
 (or defining planner-side `SqlFamily`). SeaORM proxy open maps bootstrap in
 `bookclerk-plugin-host` after typed capability negotiation succeeds.

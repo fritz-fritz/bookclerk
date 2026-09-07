@@ -105,8 +105,8 @@ pub use sql_plan::{
     execute_request_from_atomic, execute_statements_on, execute_statements_on_session,
     interpret_exec, interpret_plan, plan_exec_from_execute_reply, proxy_read_kind,
     proxy_write_kind, validate_atomic_request, validate_exec_result, validate_execute_reply,
-    validate_execute_request, validate_plan, wake_page_for_max_binds, AtomicSession,
-    CompiledAtomic,
+    validate_execute_request, validate_plan, validate_proven_execute_request,
+    wake_page_for_max_binds, AtomicSession, CompiledAtomic,
 };
 pub use store::{
     event_outbox::prepare_publish_domain_event, fallback_work_key, inject_dispatch_page_failures,
