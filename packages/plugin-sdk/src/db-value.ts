@@ -31,7 +31,13 @@ export type DbValue =
 const KINDS = new Set(["null", "boolean", "int64", "float64", "text", "bytes"]);
 const TYPES = new Set<string>(DB_COLUMN_TYPES);
 
-/** Reject U+0000 in BookclerkSQL TEXT (allowed only in BYTES). */
+/**
+ * Reject U+0000 in BookclerkSQL TEXT (allowed only in BYTES).
+ *
+ * @param text Candidate TEXT cell.
+ * @returns `text` when it contains no NUL.
+ * @throws When `text` contains U+0000.
+ */
 function requirePortableText(text: string): string {
   if (text.includes("\u0000")) {
     throw new Error(
