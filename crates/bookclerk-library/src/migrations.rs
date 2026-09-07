@@ -292,7 +292,7 @@ pub fn binding_unreleased_checksum() -> String {
 /// While the production plan is empty this is exactly [`unreleased_sql`]. After
 /// a release cut it is frozen step SQL plus whatever is again unreleased — do
 /// not assume it equals [`unreleased_sql`] forever. Test plan overrides must
-/// not feed this `OnceLock` ([`production_host_migration_plan`] only).
+/// not feed this `OnceLock` (`production_host_migration_plan` only).
 #[must_use]
 pub fn current_canonical_schema() -> &'static str {
     if production_host_migration_plan().is_empty() {
