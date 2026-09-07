@@ -412,12 +412,7 @@ async fn query_schema_migration_rows(
     namespace: &str,
 ) -> std::result::Result<Vec<QueryResult>, sea_orm::DbErr> {
     let sql = schema_migrations_select_sql(namespace);
-    bookclerk_db_exec::query_canonical(
-        db,
-        &sql,
-        std::iter::empty::<sea_orm::Value>(),
-    )
-    .await
+    bookclerk_db_exec::query_canonical(db, &sql, std::iter::empty::<sea_orm::Value>()).await
 }
 
 /// `SELECT` for one ledger namespace.
