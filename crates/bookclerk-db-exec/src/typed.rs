@@ -560,6 +560,11 @@ pub fn stamp_adapter_execute(
         .map_err(|err| DbErr::Custom(err.to_string()))
 }
 
+/// Stamp leftover SQL as a one-statement [`AdapterExecuteRequest`].
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when bind conversion or typecheck fails.
 fn leftover_adapter_request(
     sql: &str,
     values: impl IntoIterator<Item = SeaValue>,
@@ -589,6 +594,11 @@ fn leftover_adapter_request(
     stamp_adapter_execute(req, type_env)
 }
 
+/// Canonical SQL and SeaORM binds from a leftover stamped envelope.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when the envelope has no statements.
 fn leftover_stamped_sql(envelope: &AdapterExecuteRequest) -> Result<(&str, Vec<SeaValue>), DbErr> {
     let stmt =
         envelope.request.statements.first().ok_or_else(|| {
