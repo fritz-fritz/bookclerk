@@ -15,12 +15,12 @@ use bookclerk_plugin_abi::{
     PluginMigration, PluginMigrationOp, SqlTypeEnv, TypedDbStatement, MAX_LIST_PAGE,
     MAX_PLUGIN_MIGRATION_ID_BYTES, PLUGIN_MIGRATIONS_TABLE,
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, DatabaseConnection, StreamTrait};
 
 use super::plan::sql_string_literal;
 use super::prove_plan_sql_op;
 use crate::error::{LibraryError, Result};
-use crate::sql_plan::execute_typed_on_binding;
+use crate::sql_plan::{execute_typed_on_binding, execute_typed_on_open};
 
 /// Timing label for plugin journal apply (not an adapter identity).
 const PLUGIN_TXN_TIMING: &str = "plugin_migrate_txn";
@@ -381,54 +381,18 @@ pub async fn load_plugin_migration_history(
 /// Returns when the journal cannot be read or ordinals are not contiguous.
 pub async fn load_plugin_migration_history_on<C>(conn: &C) -> Result<PluginMigrationHistory>
 where
-    C: ConnectionTrait,
+    C: ConnectionTrait + StreamTrait,
 {
-    let backend = conn.get_database_backend();
-    let rows = conn
-        .query_all_raw(Statement::from_string(
-            backend,
-            format!(
-                "SELECT ordinal, migration_id, checksum FROM {PLUGIN_MIGRATIONS_TABLE} ORDER BY ordinal"
-            ),
-        ))
-        .await
-        .map_err(|err| LibraryError::Schema(format!("cannot read plugin_migrations: {err}")))?;
-    let mut entries = Vec::with_capacity(rows.len());
-    for (i, row) in rows.iter().enumerate() {
-        let ordinal = row
-            .try_get::<i64>("", "ordinal")
-            .ok()
-            .or_else(|| row.try_get_by_index::<i64>(0).ok())
-            .ok_or_else(|| {
-                LibraryError::Schema("plugin_migrations row is missing ordinal".into())
-            })?;
-        let migration_id = row
-            .try_get::<String>("", "migration_id")
-            .ok()
-            .or_else(|| row.try_get_by_index::<String>(1).ok())
-            .ok_or_else(|| {
-                LibraryError::Schema("plugin_migrations row is missing migration_id".into())
-            })?;
-        let checksum = row
-            .try_get::<String>("", "checksum")
-            .ok()
-            .or_else(|| row.try_get_by_index::<String>(2).ok())
-            .ok_or_else(|| {
-                LibraryError::Schema("plugin_migrations row is missing checksum".into())
-            })?;
-        let expect = i64::try_from(i).unwrap_or(i64::MAX);
-        if ordinal != expect {
-            return Err(LibraryError::Schema(format!(
-                "plugin_migrations ordinal {ordinal} is not contiguous (expected {expect})"
-            )));
-        }
-        entries.push(PluginJournalEntry {
-            ordinal,
-            migration_id,
-            checksum,
-        });
-    }
-    Ok(PluginMigrationHistory { entries })
+    let req = plugin_journal_select_request("plugin-journal-select", 0);
+    let reply = execute_typed_on_open(
+        conn,
+        &req,
+        super::binding_bootstrap_type_env(),
+        MAX_LIST_PAGE,
+    )
+    .await
+    .map_err(|err| LibraryError::Schema(format!("cannot read plugin_migrations: {err}")))?;
+    history_from_execute_reply(&reply)
 }
 
 /// Parses journal rows from a typed select reply.
