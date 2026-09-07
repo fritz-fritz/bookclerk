@@ -514,14 +514,20 @@ pub async fn apply_plugin_migrations(
     lock_plugin_migration_slot(db).await?;
     let history = load_plugin_migration_history(db).await?;
     let suffix = pending_plugin_suffix(&history, registered)?.to_vec();
-    let mut ordinal = i64::try_from(history.len()).unwrap_or(i64::MAX);
-    for migration in suffix {
+    let start = i64::try_from(history.len()).unwrap_or(i64::MAX);
+    for (offset, migration) in suffix.into_iter().enumerate() {
+        let ordinal = start.saturating_add(i64::try_from(offset).unwrap_or(0));
         apply_one_plugin_migration(db, ordinal, &migration).await?;
-        ordinal += 1;
     }
     load_plugin_migration_history(db).await
 }
 
+/// Takes [`PLUGIN_MIGRATION_SLOT_KEY`] before walking the registered suffix.
+///
+/// # Errors
+///
+/// Returns when the slot table is missing (bootstrap not applied) or the
+/// portable slot lock itself fails.
 async fn lock_plugin_migration_slot(db: &DatabaseConnection) -> Result<()> {
     match lock_serialization_slot(db, PLUGIN_MIGRATION_SLOT_KEY).await {
         Ok(()) => Ok(()),
@@ -543,6 +549,12 @@ async fn lock_plugin_migration_slot(db: &DatabaseConnection) -> Result<()> {
     }
 }
 
+/// Applies one pending journal row (ops + marker) with lost-completion retry.
+///
+/// # Errors
+///
+/// Returns when the journal is contradictory, apply is not retryable, or
+/// retries are exhausted.
 async fn apply_one_plugin_migration(
     db: &DatabaseConnection,
     ordinal: i64,
@@ -602,6 +614,7 @@ async fn apply_one_plugin_migration(
     )))
 }
 
+/// True when `history` already contains this `(ordinal, id, checksum)` row.
 fn journal_has_entry(
     history: &PluginMigrationHistory,
     ordinal: i64,
@@ -614,6 +627,12 @@ fn journal_has_entry(
         .any(|e| e.ordinal == ordinal && e.migration_id == id && e.checksum == checksum)
 }
 
+/// Runs `stmts` as one typed binding execute (ops + journal row).
+///
+/// # Errors
+///
+/// Returns when typed apply fails (uniqueness/unavailable are retryable at
+/// the caller).
 async fn run_plugin_atomic(
     db: &DatabaseConnection,
     operation_id: &str,
