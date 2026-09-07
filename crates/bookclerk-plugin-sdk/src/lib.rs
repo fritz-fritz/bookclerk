@@ -106,11 +106,11 @@ pub use bookclerk_plugin_abi::{
     GuestDatabase, HealthOk, Integration, IntegrationClient, IntegrationContext, JobCheckpoint,
     JobHandler, JobHandlerContext, JobInvocation, JobInvocationLease, JobOutcome, ListOptions,
     ListPage, NeverCancel, ObjectInfo, ObjectMetadata, OidcClientTemplate, PluginClient,
-    PluginDescribe, PluginError, PluginErrorCode, PluginRoot, PluginServer, ProgressSink,
-    PutResult, QueryPage, ReadResult, ScalarLimits, Source, SourceClient, SourceContext,
-    SourceServer, StatementResult, StreamCopyHandler, StreamCopySpec, TypedDbStatement,
-    WorkerContext, WriteOptions, DATABASE_ADAPTER_CONFIG_MEDIA_TYPE, FEATURE_SCALAR_LIMITS,
-    FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
+    PluginDescribe, PluginError, PluginErrorCode, PluginMigration, PluginMigrationOp, PluginRoot,
+    PluginServer, ProgressSink, PutResult, QueryPage, ReadResult, ScalarLimits, Source,
+    SourceClient, SourceContext, SourceServer, StatementResult, StreamCopyHandler, StreamCopySpec,
+    TypedDbStatement, WorkerContext, WriteOptions, DATABASE_ADAPTER_CONFIG_MEDIA_TYPE,
+    FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
     MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION, SQL_CONTRACT_VERSION,
 };
 

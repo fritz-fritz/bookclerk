@@ -52,7 +52,6 @@ pub mod error;
 pub mod fmt;
 pub mod id;
 pub mod logo;
-pub mod migration_plan;
 pub mod types;
 
 pub use egress::{
@@ -66,10 +65,6 @@ pub use id::validate_plugin_id;
 pub use logo::{
     embedded_logo_api_path, logo_content_type, validate_logo, LogoKind, LOGO_EXTENSIONS,
     MAX_EMBEDDED_LOGO_BYTES,
-};
-pub use migration_plan::{
-    validate_migration_plan_path, PluginMigrationOpToml, PluginMigrationPlanFile,
-    PluginMigrationStepToml,
 };
 pub use types::*;
 

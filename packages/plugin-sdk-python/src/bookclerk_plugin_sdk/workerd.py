@@ -223,6 +223,17 @@ class BookclerkPlugin(WorkerEntrypoint):
         """
         return js([])
 
+    async def databaseMigrations(self, _binding=""):
+        """Complete ordered plugin-owned migration sequence for one binding.
+
+        Args:
+            _binding: Binding name from ``capabilities.bindings.databases``.
+
+        Returns:
+            Empty list when the binding has no plugin-owned migrations.
+        """
+        return js([])
+
     async def shutdown(self):
         """Release guest resources.
 

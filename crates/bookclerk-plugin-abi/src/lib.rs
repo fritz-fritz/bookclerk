@@ -66,6 +66,7 @@ mod jobs;
 pub mod kind;
 mod limits;
 pub mod methods;
+mod plugin_migration;
 mod roles;
 mod rpc;
 mod rpc_types;
@@ -149,6 +150,9 @@ pub use guest_sql::{
 pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
+pub use plugin_migration::{
+    PluginMigration, PluginMigrationOp, MAX_PLUGIN_MIGRATION_ID_BYTES, PLUGIN_MIGRATIONS_TABLE,
+};
 #[cfg(feature = "host")]
 pub use sql_overflow::{apply_integer_overflow, OverflowDialect};
 #[cfg(feature = "host")]

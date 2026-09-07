@@ -7,10 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use bookclerk_config::Config;
-use bookclerk_library::{MigrationPlan, MigrationStep, PlanOp, BOOKCLERK_SCHEMA_NAMESPACE};
+use bookclerk_library::BOOKCLERK_SCHEMA_NAMESPACE;
 use bookclerk_plugin_abi::PRODUCT_API_VERSION;
-use bookclerk_plugin_manifest::PluginMigrationPlanFile;
-use sha2::{Digest, Sha256};
 
 use crate::manifest::PluginManifest;
 use crate::{PluginError, Result};
@@ -24,10 +22,6 @@ pub struct DiscoveredPlugin {
     pub root: PathBuf,
     /// Absolute path to the plugin executable.
     pub command: PathBuf,
-    /// Proven plugin-owned binding migration plan, when a companion file exists.
-    pub migration_plan: Option<MigrationPlan>,
-    /// SHA-256 hex of the raw companion plan file bytes.
-    pub migration_plan_digest: Option<String>,
 }
 
 /// Resolve search roots: `BOOKCLERK_PLUGIN_DIRS` then `$FILES_DIR/plugins`.
@@ -162,88 +156,12 @@ fn push_manifest(
             command.display()
         )));
     }
-    let (migration_plan, migration_plan_digest) = load_installed_migration_plan(root, &manifest)?;
     out.push(DiscoveredPlugin {
         manifest,
         root: root.to_path_buf(),
         command,
-        migration_plan,
-        migration_plan_digest,
     });
     Ok(())
-}
-
-/// Loads and proves a companion migration plan from the plugin install root.
-fn load_installed_migration_plan(
-    root: &Path,
-    manifest: &PluginManifest,
-) -> Result<(Option<MigrationPlan>, Option<String>)> {
-    let Some(rel) = manifest.migration_plan.as_deref() else {
-        return Ok((None, None));
-    };
-    let path = root.join(rel);
-    let bytes = std::fs::read(&path).map_err(|err| {
-        PluginError::message(format!(
-            "plugin `{}`: migration_plan `{}` could not be read: {err}",
-            manifest.id,
-            path.display()
-        ))
-    })?;
-    let digest = hex::encode(Sha256::digest(&bytes));
-    let text = std::str::from_utf8(&bytes).map_err(|err| {
-        PluginError::message(format!(
-            "plugin `{}`: migration_plan `{}` is not UTF-8: {err}",
-            manifest.id,
-            path.display()
-        ))
-    })?;
-    let file = PluginMigrationPlanFile::parse(text).map_err(|err| {
-        PluginError::message(format!(
-            "plugin `{}`: migration_plan `{}`: {err}",
-            manifest.id,
-            path.display()
-        ))
-    })?;
-    let plan = migration_plan_from_toml(&manifest.id, file)?;
-    Ok((Some(plan), Some(digest)))
-}
-
-/// Converts a parsed companion file into a proven [`MigrationPlan`].
-fn migration_plan_from_toml(
-    plugin_id: &str,
-    file: PluginMigrationPlanFile,
-) -> Result<MigrationPlan> {
-    let steps = file
-        .steps
-        .into_iter()
-        .map(|step| MigrationStep {
-            version: step.version,
-            up: step
-                .up
-                .into_iter()
-                .map(|op| {
-                    if op.is_schema() {
-                        PlanOp::Schema(op.sql().to_string())
-                    } else {
-                        PlanOp::Data(op.sql().to_string())
-                    }
-                })
-                .collect(),
-            down: step.down.map(|ops| {
-                ops.into_iter()
-                    .map(|op| {
-                        if op.is_schema() {
-                            PlanOp::Schema(op.sql().to_string())
-                        } else {
-                            PlanOp::Data(op.sql().to_string())
-                        }
-                    })
-                    .collect()
-            }),
-            introduced_in: step.introduced_in,
-        })
-        .collect();
-    MigrationPlan::try_new(plugin_id, steps).map_err(|err| PluginError::message(err.to_string()))
 }
 
 /// Resolves the native guest binary or the host `bookclerk-workerd` helper.
@@ -535,7 +453,7 @@ mode = "deny"
     }
 
     #[test]
-    fn companion_migration_plan_is_proven_at_discover() {
+    fn leftover_migration_plan_toml_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");
         let nested = plugins.join("echo_sql");
@@ -557,33 +475,16 @@ databases = ["DB"]
 "#,
         )
         .unwrap();
-        fs::write(
-            nested.join("migrations.toml"),
-            r#"
-[[steps]]
-version = 1
-introduced_in = "0.1.0"
-up = [
-  { schema = "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)" },
-]
-"#,
-        )
-        .unwrap();
         let cfg = Config {
             paths: Some(bookclerk_config::Paths::from_files_dir(
                 tmp.path().to_path_buf(),
             )),
             ..Config::default()
         };
-        let found = discover_plugins(&cfg).unwrap();
-        assert_eq!(found.len(), 1);
-        let plan = found[0].migration_plan.as_ref().expect("plan");
-        assert_eq!(plan.namespace, "echo_sql");
-        assert_eq!(plan.min_version(), Some(1));
-        assert_eq!(plan.max_version(), 1);
-        assert!(found[0]
-            .migration_plan_digest
-            .as_deref()
-            .is_some_and(|d| d.len() == 64));
+        let err = discover_plugins(&cfg).unwrap_err().to_string();
+        assert!(
+            err.contains("migration_plan") || err.to_lowercase().contains("unknown"),
+            "{err}"
+        );
     }
 }

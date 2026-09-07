@@ -137,9 +137,9 @@ provisioned by the active adapter (SQLite file / PostgreSQL **database** /
 Cloudflare D1 database by name) and recorded in the host
 `plugin_databases` registry. Bindings are consented per name
 (`database:<NAME>` grant entries), carry their own `db_atomic_receipts` for
-retry-token replay, and own schema through a host-mediated migration plan
-(full DML on ordinary execute; durable `CREATE`/`DROP` only as frozen steps
-in `plugin.toml` `migration_plan`). Jobs never receive
+retry-token replay, and own schema through startup migration registration
+(full DML on ordinary execute; durable `CREATE`/`DROP` only through the
+host-controlled `databaseMigrations` sequence). Jobs never receive
 the host library as guest SQL. Operator lifecycle:
 `bookclerk plugins db list` / `bookclerk plugins db drop <plugin> [binding]`
 (physical delete of the SQLite file / `DROP DATABASE` / D1 delete, then the

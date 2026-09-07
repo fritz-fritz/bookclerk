@@ -56,6 +56,25 @@ export interface OidcClientTemplate {
   originConfigKey: string;
 }
 
+/** One already-separated BookclerkSQL operation in a plugin-owned migration. */
+export type PluginMigrationOp = { schema: string } | { data: string };
+
+/** One plugin-owned migration application. `id` is opaque plugin-chosen identity. */
+export interface PluginMigration {
+  id: string;
+  operations: PluginMigrationOp[];
+}
+
+/** Schema DDL convenience for {@link PluginMigration.operations}. */
+export function schemaMigrationOp(sql: string): PluginMigrationOp {
+  return { schema: sql };
+}
+
+/** Data DML convenience for {@link PluginMigration.operations}. */
+export function dataMigrationOp(sql: string): PluginMigrationOp {
+  return { data: sql };
+}
+
 /** Injected destination knobs. Opaque JSON only — no OS paths. */
 export interface DestinationContext {
   json?: string;
@@ -1036,6 +1055,20 @@ export abstract class BookclerkPlugin extends WorkerEntrypoint<BookclerkPluginEn
     return [];
   }
 
+  /**
+   * Complete ordered plugin-owned migration sequence for one named binding.
+   *
+   * The host calls this at binding initialization, before ordinary execute.
+   * `id` is an opaque plugin-chosen identity. Registration order is the
+   * forward sequence. Empty means the binding has no plugin-owned migrations.
+   *
+   * @param _binding - Binding name from `capabilities.bindings.databases`.
+   * @returns Ordered migrations (`[]` when unused).
+   */
+  async databaseMigrations(_binding: string): Promise<PluginMigration[]> {
+    return [];
+  }
+
   /** Releases guest resources. */
   async shutdown(): Promise<void> {}
 }
@@ -1487,6 +1520,15 @@ function createInvocationAdapter() {
       }
       const clients = await fn.call(this.#plugin());
       return Array.isArray(clients) ? clients : [];
+    }
+
+    async databaseMigrations(binding: string): Promise<PluginMigration[]> {
+      const fn = this.#plugin().databaseMigrations;
+      if (typeof fn !== "function") {
+        return [];
+      }
+      const migrations = await fn.call(this.#plugin(), binding);
+      return Array.isArray(migrations) ? migrations : [];
     }
 
     async shutdown(): Promise<void> {

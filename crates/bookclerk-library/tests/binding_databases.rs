@@ -5,10 +5,10 @@
 //! connections, proving plugin-owned DDL, cross-binding isolation, reserved
 //! table denial, and retry-token replay inside the binding.
 
-use bookclerk_library::{apply_migration_plan, MigrationPlan, MigrationStep, PlanOp};
+use bookclerk_library::{apply_plugin_migrations, prove_plugin_migration_sequence};
 use bookclerk_plugin_abi::{
     DbCapabilities, DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, ExecuteRequest,
-    GuestSqlPolicy, PluginError, TypedDbStatement,
+    GuestSqlPolicy, PluginError, PluginMigration, PluginMigrationOp, TypedDbStatement,
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use std::sync::atomic::AtomicBool;
@@ -25,22 +25,20 @@ async fn binding_db() -> DatabaseConnection {
     db
 }
 
-/// Applies plugin-owned CREATE TABLE statements through the shared migration engine.
+/// Applies plugin-owned CREATE TABLE statements through startup registration.
 async fn apply_plugin_tables(db: &DatabaseConnection, creates: &[&str]) {
-    let steps: Vec<MigrationStep> = creates
+    let migrations: Vec<PluginMigration> = creates
         .iter()
         .enumerate()
-        .map(|(i, sql)| MigrationStep {
-            version: i64::try_from(i + 1).expect("step"),
-            up: vec![PlanOp::Schema((*sql).to_string())],
-            down: None,
-            introduced_in: "0.0.0".into(),
+        .map(|(i, sql)| PluginMigration {
+            id: format!("create-{i}"),
+            operations: vec![PluginMigrationOp::Schema((*sql).to_string())],
         })
         .collect();
-    let plan = MigrationPlan::try_new("echo_sql", steps).expect("plugin plan");
-    apply_migration_plan(db, &plan)
+    let sequence = prove_plugin_migration_sequence(migrations).expect("plugin sequence");
+    apply_plugin_migrations(db, &sequence)
         .await
-        .expect("apply plugin plan");
+        .expect("apply plugin migrations");
 }
 
 /// Executes one guest request through the binding authorization + receipt path.

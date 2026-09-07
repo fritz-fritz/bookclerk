@@ -11,11 +11,12 @@
 //! unavailable after re-read of durable state. Concurrent openers that miss
 //! the marker retry the same unit.
 //!
-//! Plugin-owned tables are admitted BookclerkSQL in the plugin ledger
-//! namespace via the shared [`crate::migrations::apply_migration_plan`]
-//! engine and do **not** bump host-owned bootstrap [`SchemaState`]. Restore
-//! writes captured rows (including `schema_migrations`) and does **not**
-//! run plugin migrations inside the restore transaction.
+//! Plugin-owned tables are admitted BookclerkSQL through startup
+//! [`crate::migrations::prove_plugin_migration_sequence`] /
+//! [`crate::migrations::apply_plugin_migrations`] and do **not** bump
+//! host-owned bootstrap [`SchemaState`]. Restore writes captured rows
+//! (including `plugin_migrations`) and does **not** run plugin migrations
+//! inside the restore transaction.
 
 use std::time::Duration;
 

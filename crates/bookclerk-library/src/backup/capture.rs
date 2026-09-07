@@ -285,23 +285,18 @@ where
         });
     }
     let identity_object = repo.put_object(&CanonicalObject::Identity { entries: identity })?;
-    let (
-        plugin_schema_namespace,
-        plugin_schema_state,
-        plugin_schema_version,
-        plugin_schema_checksum,
-    ) = match (kind, plugin_id.as_deref()) {
-        (DatabaseUnitKind::PluginBinding, Some(id)) => {
-            let state = crate::host_schema::schema_state_from_conn_in(conn, id).await?;
-            (
-                Some(id.to_string()),
-                Some(state.display()),
-                state.frozen_version(),
-                state.checksum().map(str::to_string),
-            )
-        }
-        _ => (None, None, None, None),
-    };
+    let (plugin_schema_namespace, plugin_schema_state, plugin_schema_checksum) =
+        match (kind, plugin_id.as_deref()) {
+            (DatabaseUnitKind::PluginBinding, Some(id)) => {
+                let history = crate::migrations::load_plugin_migration_history_on(conn).await?;
+                (
+                    Some(id.to_string()),
+                    Some(history.display()),
+                    Some(history.digest()),
+                )
+            }
+            _ => (None, None, None),
+        };
     Ok(BackupUnit {
         kind,
         plugin_id,
@@ -313,7 +308,6 @@ where
         tables: tables_meta,
         plugin_schema_namespace,
         plugin_schema_state,
-        plugin_schema_version,
         plugin_schema_checksum,
     })
 }

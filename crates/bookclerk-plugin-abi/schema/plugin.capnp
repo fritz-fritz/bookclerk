@@ -1157,6 +1157,36 @@ interface GuestDatabase {
   close @1 () -> (result :EmptyReply);
 }
 
+# One already-separated BookclerkSQL operation in a plugin-owned migration.
+# `schema` is admitted DDL; `data` is admitted DML. There is no native SQL
+# escape hatch.
+struct PluginMigrationOp {
+  union {
+    schema @0 :Text;
+    data @1 :Text;
+  }
+}
+
+# One plugin-owned migration application. `id` is an opaque plugin-chosen
+# stable identity (name, UUID, timestamp-like string, or digits-as-text).
+# Bookclerk assigns no order, version, or predecessor meaning to `id`.
+# Registration order is the forward sequence.
+struct PluginMigration {
+  id @0 :Text;
+  operations @1 :List(PluginMigrationOp);
+}
+
+struct PluginMigrationsOk {
+  migrations @0 :List(PluginMigration);
+}
+
+struct PluginMigrationsReply {
+  union {
+    ok @0 :PluginMigrationsOk;
+    err @1 :PluginError;
+  }
+}
+
 interface BookclerkPlugin {
   describe @0 () -> (result :DescribeReply);
   destination @1 (context :DestinationContext) -> (result :DestinationReply);
@@ -1169,6 +1199,9 @@ interface BookclerkPlugin {
   cliDescribe @8 () -> (result :JsonReply);
   cliInvoke @9 (paramsJson :Text) -> (result :JsonReply);
   # Plugin-provided OIDC AS client templates. Empty list when unused.
-  # Hosts ignore `unsupported` from older guests.
   oidcClients @10 () -> (result :OidcClientsReply);
+  # Complete ordered plugin-owned migration sequence for one named binding.
+  # Host calls this at binding initialization, before ordinary execute.
+  # Empty list means the binding has no plugin-owned migrations.
+  databaseMigrations @11 (binding :Text) -> (result :PluginMigrationsReply);
 }

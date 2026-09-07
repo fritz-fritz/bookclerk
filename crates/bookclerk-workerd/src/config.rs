@@ -1183,7 +1183,6 @@ mod tests {
             },
             cli: None,
             oidc: Default::default(),
-            migration_plan: None,
         };
         let generated = materialize(
             dir.path(),
@@ -1336,7 +1335,6 @@ mod tests {
             },
             cli: None,
             oidc: Default::default(),
-            migration_plan: None,
         };
         let generated = materialize(
             dir.path(),
@@ -1435,7 +1433,6 @@ mod tests {
             },
             cli: None,
             oidc: Default::default(),
-            migration_plan: None,
         };
         let generated = materialize(
             dir.path(),

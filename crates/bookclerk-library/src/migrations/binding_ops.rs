@@ -58,4 +58,12 @@ pub(super) const BINDING_BOOTSTRAP_OPS: &[MigrationOp] = &[
         bump INTEGER NOT NULL DEFAULT 0
     )",
     ),
+    MigrationOp::Schema(
+        r"CREATE TABLE IF NOT EXISTS plugin_migrations (
+        ordinal INTEGER PRIMARY KEY NOT NULL,
+        migration_id TEXT NOT NULL UNIQUE,
+        checksum TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+    )",
+    ),
 ];

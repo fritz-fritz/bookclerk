@@ -31,8 +31,9 @@ use crate::plugin_capnp::{
     guest_database as guest_database_capnp, handle_reply, head_reply, health_reply,
     integration as integration_capnp, integration_reply, job_handler, job_invocation, job_outcome,
     json_reply, list_reply, object_metadata, oidc_client_template, oidc_clients_reply, open_reply,
-    plugin_describe, plugin_error, progress_sink, pull_reply, put_reply, source as source_capnp,
-    source_reply, worker_reply, write_options,
+    plugin_describe, plugin_error, plugin_migration, plugin_migration_op, plugin_migrations_reply,
+    progress_sink, pull_reply, put_reply, source as source_capnp, source_reply, worker_reply,
+    write_options,
 };
 #[cfg(feature = "host")]
 use crate::plugin_host_capnp::host_adapter_database_session as host_adapter_database_session_capnp;
@@ -47,7 +48,7 @@ use crate::rpc_types::{
     OidcClientTemplate, PluginDescribe, PutResult, SourceContext, WorkerContext, WriteOptions,
     MAX_CHECKPOINT_BYTES,
 };
-use crate::{PluginError, Result};
+use crate::{PluginError, PluginMigration, PluginMigrationOp, Result};
 
 pub(super) fn from_capnp(err: impl std::fmt::Display) -> PluginError {
     PluginError::unavailable(err.to_string())
@@ -1460,6 +1461,25 @@ impl bookclerk_plugin::Server for PluginServer {
         }
         Ok(())
     }
+
+    async fn database_migrations(
+        self: Rc<Self>,
+        params: bookclerk_plugin::DatabaseMigrationsParams,
+        mut results: bookclerk_plugin::DatabaseMigrationsResults,
+    ) -> capnp::Result<()> {
+        let binding = params
+            .get()?
+            .get_binding()
+            .ok()
+            .map(text_of)
+            .unwrap_or_default();
+        let result = results.get().init_result();
+        match self.inner.database_migrations(&binding).await {
+            Ok(migrations) => fill_plugin_migrations(result.init_ok(), &migrations)?,
+            Err(err) => write_error(result.init_err(), &err),
+        }
+        Ok(())
+    }
 }
 
 /// Encode plugin OIDC client templates into a Cap'n Proto `oidcClients` ok payload.
@@ -1516,6 +1536,69 @@ fn read_oidc_client_template(r: oidc_client_template::Reader<'_>) -> Result<Oidc
         issue_refresh_token: r.get_issue_refresh_token(),
         origin_config_key: text_of(r.get_origin_config_key().map_err(from_capnp)?),
     })
+}
+
+fn fill_plugin_migrations(
+    mut ok: crate::plugin_capnp::plugin_migrations_ok::Builder<'_>,
+    migrations: &[PluginMigration],
+) -> capnp::Result<()> {
+    let mut list = ok.reborrow().init_migrations(migrations.len() as u32);
+    for (i, migration) in migrations.iter().enumerate() {
+        fill_plugin_migration(list.reborrow().get(i as u32), migration)?;
+    }
+    Ok(())
+}
+
+fn fill_plugin_migration(
+    mut b: plugin_migration::Builder<'_>,
+    migration: &PluginMigration,
+) -> capnp::Result<()> {
+    b.set_id(&migration.id);
+    let mut ops = b
+        .reborrow()
+        .init_operations(migration.operations.len() as u32);
+    for (i, op) in migration.operations.iter().enumerate() {
+        let mut slot = ops.reborrow().get(i as u32);
+        match op {
+            PluginMigrationOp::Schema(sql) => slot.set_schema(sql),
+            PluginMigrationOp::Data(sql) => slot.set_data(sql),
+        }
+    }
+    Ok(())
+}
+
+fn read_plugin_migrations(
+    r: crate::plugin_capnp::plugin_migrations_ok::Reader<'_>,
+) -> Result<Vec<PluginMigration>> {
+    let list = r.get_migrations().map_err(from_capnp)?;
+    let mut out = Vec::new();
+    for item in list.iter() {
+        out.push(read_plugin_migration(item)?);
+    }
+    Ok(out)
+}
+
+fn read_plugin_migration(r: plugin_migration::Reader<'_>) -> Result<PluginMigration> {
+    let ops = r.get_operations().map_err(from_capnp)?;
+    let mut operations = Vec::new();
+    for op in ops.iter() {
+        operations.push(read_plugin_migration_op(op)?);
+    }
+    Ok(PluginMigration {
+        id: text_of(r.get_id().map_err(from_capnp)?),
+        operations,
+    })
+}
+
+fn read_plugin_migration_op(r: plugin_migration_op::Reader<'_>) -> Result<PluginMigrationOp> {
+    match r.which().map_err(from_capnp)? {
+        plugin_migration_op::Schema(sql) => {
+            Ok(PluginMigrationOp::Schema(text_of(sql.map_err(from_capnp)?)))
+        }
+        plugin_migration_op::Data(sql) => {
+            Ok(PluginMigrationOp::Data(text_of(sql.map_err(from_capnp)?)))
+        }
+    }
 }
 
 fn write_json_reply(result: json_reply::Builder<'_>, outcome: Result<String>) {
@@ -2654,6 +2737,26 @@ impl PluginClient {
             oidc_clients_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
         }
     }
+
+    /// Complete ordered plugin-owned migration sequence for one named binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the RPC fails.
+    pub async fn database_migrations(&self, binding: &str) -> Result<Vec<PluginMigration>> {
+        let mut req = self.client.database_migrations_request();
+        req.get().set_binding(binding);
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        let result = reply
+            .get()
+            .map_err(from_capnp)?
+            .get_result()
+            .map_err(from_capnp)?;
+        match result.which().map_err(from_capnp)? {
+            plugin_migrations_reply::Ok(ok) => read_plugin_migrations(ok.map_err(from_capnp)?),
+            plugin_migrations_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
+        }
+    }
 }
 
 /// Decode a JSON success/error union.
@@ -3279,7 +3382,9 @@ mod tests {
         FEATURE_STREAMS, MAX_CHECKPOINT_BYTES, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE,
         PRODUCT_API_VERSION,
     };
-    use crate::{ExecuteRequest, PluginError, PluginErrorCode, Result};
+    use crate::{
+        ExecuteRequest, PluginError, PluginErrorCode, PluginMigration, PluginMigrationOp, Result,
+    };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
@@ -3442,6 +3547,19 @@ mod tests {
                 default_scopes: vec!["openid".into(), "profile".into()],
                 issue_refresh_token: true,
                 origin_config_key: "integrations.audiobookshelf.base_url".into(),
+            }])
+        }
+
+        async fn database_migrations(&self, binding: &str) -> Result<Vec<PluginMigration>> {
+            if binding != "DB" {
+                return Ok(Vec::new());
+            }
+            Ok(vec![PluginMigration {
+                id: "create-notes".into(),
+                operations: vec![PluginMigrationOp::Schema(
+                    "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)"
+                        .into(),
+                )],
             }])
         }
     }
@@ -3813,6 +3931,43 @@ mod tests {
                     "integrations.audiobookshelf.base_url"
                 );
                 assert_eq!(clients[0].scopes_or_default(), vec!["openid", "profile"]);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn database_migrations_roundtrip() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client_end, server_end) = duplex(64 * 1024);
+                let (server_r, server_w) = tokio::io::split(server_end);
+                let (client_r, client_w) = tokio::io::split(client_end);
+                let plugin = Arc::new(TestPlugin {
+                    dest: Arc::new(MemDest {
+                        store: Mutex::new(HashMap::new()),
+                    }),
+                });
+                tokio::task::spawn_local(async move {
+                    let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;
+                });
+                let (client, rpc) = connect_plugin(client_r, client_w, 64 * 1024);
+                tokio::task::spawn_local(rpc);
+                let empty = client
+                    .database_migrations("CACHE")
+                    .await
+                    .expect("databaseMigrations");
+                assert!(empty.is_empty());
+                let migrations = client
+                    .database_migrations("DB")
+                    .await
+                    .expect("databaseMigrations");
+                assert_eq!(migrations.len(), 1);
+                assert_eq!(migrations[0].id, "create-notes");
+                assert!(matches!(
+                    migrations[0].operations.first(),
+                    Some(PluginMigrationOp::Schema(sql)) if sql.contains("notes")
+                ));
             })
             .await;
     }

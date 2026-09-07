@@ -1,4 +1,4 @@
-//! Shared migration plan types (host library, binding bootstrap, plugin plans).
+//! Shared migration plan types (host library and Bookclerk-owned binding bootstrap).
 
 use bookclerk_plugin_abi::SqlTypeEnv;
 
@@ -97,7 +97,7 @@ impl MigrationStep {
 /// Ordered frozen plan for one ledger namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationPlan {
-    /// `schema_migrations.namespace` (`bookclerk` or a plugin id).
+    /// `schema_migrations.namespace` (`bookclerk` for host-owned plans).
     pub namespace: String,
     /// Frozen steps in increasing version order.
     pub steps: Vec<MigrationStep>,

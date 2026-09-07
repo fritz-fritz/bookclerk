@@ -38,9 +38,10 @@ use crate::jail::plugin_data_dir;
 use crate::rpc_session::{PluginSession, OPERATOR_ACCOUNT};
 use crate::{PluginError, Result as PluginResult};
 use bookclerk_library::{
-    atomic_status, binding_bootstrap_plan, remaining_upgrade_batches, schema_session_matches,
-    sql_string_literal, DbAtomicParams, MigrationPlan, SchemaState, BOOKCLERK_SCHEMA_NAMESPACE,
-    SCHEMA_MIGRATIONS_DDL,
+    atomic_status, binding_bootstrap_plan, history_from_execute_reply,
+    plugin_history_session_matches, plugin_journal_select_request, prove_plugin_migration_sequence,
+    remaining_plugin_suffix_batches, sql_string_literal, DbAtomicParams, PluginMigrationHistory,
+    SchemaState, BOOKCLERK_SCHEMA_NAMESPACE, SCHEMA_MIGRATIONS_DDL,
 };
 
 /// External database backend spawned for `[database].plugin`.
@@ -438,10 +439,8 @@ struct BindingGuestDatabase {
     cancel: Arc<AtomicBool>,
     /// Host lease deadline (`deadlineUnixMs`); `0` means unlimited.
     host_deadline_unix_ms: u64,
-    /// Plugin ledger namespace (plugin id).
-    plugin_namespace: String,
-    /// Plugin schema observed when this session was opened.
-    expected_plugin_schema: SchemaState,
+    /// History digest captured when this session was opened.
+    expected_plugin_history_digest: String,
 }
 
 #[async_trait(?Send)]
@@ -455,16 +454,15 @@ impl GuestDatabase for BindingGuestDatabase {
         }
         request.deadline_unix_ms =
             capped_binding_deadline(request.deadline_unix_ms, self.host_deadline_unix_ms);
-        let observed = load_binding_plugin_schema_state(
+        let observed = load_binding_plugin_history(
             &self.session,
             &self.key,
-            &self.plugin_namespace,
             &self.cancel,
             request.deadline_unix_ms,
         )
         .await
         .map_err(host_err_to_abi)?;
-        schema_session_matches(&self.expected_plugin_schema, &observed)
+        plugin_history_session_matches(&self.expected_plugin_history_digest, &observed)
             .map_err(|err| AbiPluginError::internal(err.to_string()))?;
         let env = load_binding_sql_type_env(
             &self.session,
@@ -832,57 +830,22 @@ fn binding_schema_state_from_reply(reply: &ExecuteReply) -> PluginResult<SchemaS
     Ok(SchemaState::Uninitialized)
 }
 
-/// Proven plugin plan from the installed artifact, or an empty plan.
-fn installed_plugin_plan(config: &Config, owner_plugin_id: &str) -> PluginResult<MigrationPlan> {
-    if owner_plugin_id == BOOKCLERK_SCHEMA_NAMESPACE {
-        return Err(PluginError::message(format!(
-            "plugin id `{BOOKCLERK_SCHEMA_NAMESPACE}` is reserved for host schema namespace"
-        )));
-    }
-    let discovered = crate::discover_plugins(config)?;
-    if let Some(plugin) = discovered
-        .into_iter()
-        .find(|p| p.manifest.id == owner_plugin_id)
-    {
-        if let Some(plan) = plugin.migration_plan {
-            return Ok(plan);
-        }
-    }
-    MigrationPlan::try_new(owner_plugin_id, Vec::new())
-        .map_err(|err| PluginError::message(err.to_string()))
-}
-
-/// Re-reads plugin-namespace schema state for stale-session fencing.
-async fn load_binding_plugin_schema_state(
+/// Re-reads the host-private plugin migration journal for stale-session fencing.
+async fn load_binding_plugin_history(
     session: &PluginSession,
     key: &str,
-    namespace: &str,
     cancel: &Arc<AtomicBool>,
     deadline_unix_ms: u64,
-) -> PluginResult<SchemaState> {
+) -> PluginResult<PluginMigrationHistory> {
     if cancel.load(Ordering::SeqCst) {
         return Err(PluginError::message("fence lost"));
     }
-    let select = ExecuteRequest {
-        operation_id: format!("binding-schema-fence-{key}"),
-        request_hash: String::new(),
-        deadline_unix_ms,
-        statements: vec![TypedDbStatement {
-            sql: format!(
-                "SELECT version, state, checksum FROM schema_migrations \
-                 WHERE namespace = {}",
-                sql_string_literal(namespace)
-            ),
-            parameters: Vec::new(),
-            kind: DbPlanStatementKind::Select,
-            max_rows: 64,
-            result_selection: DbResultSelection::Rows,
-        }],
-    };
+    let select =
+        plugin_journal_select_request(format!("binding-history-fence-{key}"), deadline_unix_ms);
     let reply = session
         .db_execute_binding_request(key, select, Arc::clone(cancel))
         .await?;
-    binding_schema_state_from_reply(&reply)
+    history_from_execute_reply(&reply).map_err(|err| PluginError::message(err.to_string()))
 }
 
 impl ExternalDatabase {
@@ -910,9 +873,15 @@ impl ExternalDatabase {
         store: &bookclerk_library::LibraryStore,
         owner_plugin_id: &str,
         bindings: &[String],
+        owner: &PluginSession,
     ) -> PluginResult<Vec<(String, crate::rpc_session::GuestDatabaseFactory)>> {
         if bindings.is_empty() {
             return Ok(Vec::new());
+        }
+        if owner_plugin_id == BOOKCLERK_SCHEMA_NAMESPACE {
+            return Err(PluginError::message(format!(
+                "plugin id `{BOOKCLERK_SCHEMA_NAMESPACE}` is reserved for host schema namespace"
+            )));
         }
         let caps = self.session.db_capabilities().await?;
         if !caps.plugin_databases {
@@ -963,15 +932,20 @@ impl ExternalDatabase {
             }
             self.ensure_binding_host_schema(&key, owner_plugin_id, binding)
                 .await?;
-            let plan = installed_plugin_plan(config, owner_plugin_id)?;
-            self.ensure_plugin_migration_plan(&key, owner_plugin_id, binding, &plan)
+            let registered = owner
+                .database_migrations(binding)
+                .await
+                .map_err(|err| PluginError::message(err.to_string()))?;
+            let sequence = prove_plugin_migration_sequence(registered)
+                .map_err(|err| PluginError::message(err.to_string()))?;
+            self.ensure_plugin_migrations(&key, owner_plugin_id, binding, &sequence)
                 .await?;
-            let expected_plugin_schema = self
-                .binding_namespace_state(&key, owner_plugin_id, binding, &plan.namespace)
+            let expected_history = self
+                .binding_plugin_history(&key, owner_plugin_id, binding)
                 .await?;
             let session = Arc::clone(&self.session);
             let factory_key = key.clone();
-            let plugin_namespace = plan.namespace.clone();
+            let expected_plugin_history_digest = expected_history.digest();
             let factory: crate::rpc_session::GuestDatabaseFactory =
                 Arc::new(move |cancel, host_deadline_unix_ms| {
                     Arc::new(BindingGuestDatabase {
@@ -980,8 +954,7 @@ impl ExternalDatabase {
                         caps: binding_caps.clone(),
                         cancel,
                         host_deadline_unix_ms,
-                        plugin_namespace: plugin_namespace.clone(),
-                        expected_plugin_schema: expected_plugin_schema.clone(),
+                        expected_plugin_history_digest: expected_plugin_history_digest.clone(),
                     })
                 });
             out.push((binding.clone(), factory));
@@ -1095,26 +1068,25 @@ impl ExternalDatabase {
         Ok(())
     }
 
-    /// Applies remaining plugin-owned frozen steps after host bootstrap.
+    /// Applies the pending registered plugin-migration suffix after host bootstrap.
     ///
     /// Restore uses [`Self::open_binding_seaorm`] with `provision` and does
-    /// **not** call this; the next ordinary open walks forward.
+    /// **not** call this; the next ordinary open registers and walks the suffix.
     ///
     /// Each remaining batch is retried after uniqueness / unavailable: re-read
-    /// the namespaced marker and treat matching version+checksum as success.
-    async fn ensure_plugin_migration_plan(
+    /// the journal and treat matching `(id, checksum)` at the expected ordinal
+    /// as success.
+    async fn ensure_plugin_migrations(
         &self,
         key: &str,
         owner: &str,
         binding: &str,
-        plan: &MigrationPlan,
+        registered: &bookclerk_library::PluginMigrationSequence,
     ) -> PluginResult<()> {
         let mut delay_ms = 20u64;
         for attempt in 0..8 {
-            let state = self
-                .binding_namespace_state(key, owner, binding, &plan.namespace)
-                .await?;
-            let mut batches = remaining_upgrade_batches(plan, &state)
+            let history = self.binding_plugin_history(key, owner, binding).await?;
+            let mut batches = remaining_plugin_suffix_batches(&history, registered)
                 .map_err(|err| PluginError::message(err.to_string()))?;
             if batches.is_empty() {
                 return Ok(());
@@ -1140,10 +1112,12 @@ impl ExternalDatabase {
                 }
                 Err(err) => {
                     let remaining_after = self
-                        .binding_namespace_state(key, owner, binding, &plan.namespace)
+                        .binding_plugin_history(key, owner, binding)
                         .await
                         .ok()
-                        .and_then(|observed| remaining_upgrade_batches(plan, &observed).ok())
+                        .and_then(|observed| {
+                            remaining_plugin_suffix_batches(&observed, registered).ok()
+                        })
                         .map(|left| left.len());
                     if remaining_after == Some(0) {
                         return Ok(());
@@ -1161,52 +1135,35 @@ impl ExternalDatabase {
                 }
             }
         }
-        let state = self
-            .binding_namespace_state(key, owner, binding, &plan.namespace)
-            .await?;
-        let leftover = remaining_upgrade_batches(plan, &state)
+        let history = self.binding_plugin_history(key, owner, binding).await?;
+        let leftover = remaining_plugin_suffix_batches(&history, registered)
             .map_err(|err| PluginError::message(err.to_string()))?;
         if leftover.is_empty() {
             Ok(())
         } else {
             Err(PluginError::message(format!(
                 "plugin schema apply for `{owner}/{binding}` exhausted retries with {} \
-                 remaining upgrade batches",
+                 remaining suffix batches",
                 leftover.len()
             )))
         }
     }
 
-    /// Reads namespaced [`SchemaState`] from the binding ledger.
-    async fn binding_namespace_state(
+    /// Reads the host-private plugin migration journal from the binding.
+    async fn binding_plugin_history(
         &self,
         key: &str,
         owner: &str,
         binding: &str,
-        namespace: &str,
-    ) -> PluginResult<SchemaState> {
+    ) -> PluginResult<PluginMigrationHistory> {
         let cancel = Arc::new(AtomicBool::new(false));
-        let select = ExecuteRequest {
-            operation_id: format!("binding-schema-state-{namespace}-{owner}-{binding}"),
-            request_hash: String::new(),
-            deadline_unix_ms: 0,
-            statements: vec![TypedDbStatement {
-                sql: format!(
-                    "SELECT version, state, checksum FROM schema_migrations \
-                     WHERE namespace = {}",
-                    sql_string_literal(namespace)
-                ),
-                parameters: Vec::new(),
-                kind: DbPlanStatementKind::Select,
-                max_rows: 64,
-                result_selection: DbResultSelection::Rows,
-            }],
-        };
+        let select =
+            plugin_journal_select_request(format!("binding-plugin-history-{owner}-{binding}"), 0);
         let reply = self
             .session
             .db_execute_binding_request(key, select, cancel)
             .await?;
-        binding_schema_state_from_reply(&reply)
+        history_from_execute_reply(&reply).map_err(|err| PluginError::message(err.to_string()))
     }
 
     /// Backend-native default unit for one `(plugin, binding)` pair.

@@ -311,6 +311,9 @@ export class BookclerkPlugin extends WorkerEntrypoint {
   async oidcClients() {
     return [];
   }
+  async databaseMigrations(_binding) {
+    return [];
+  }
   async shutdown() {}
 }
 
@@ -610,6 +613,14 @@ function createInvocationAdapter() {
       }
       const clients = await plugin.oidcClients();
       return Array.isArray(clients) ? clients : [];
+    }
+    async databaseMigrations(binding) {
+      const plugin = this.plugin();
+      if (typeof plugin.databaseMigrations !== "function") {
+        return [];
+      }
+      const migrations = await plugin.databaseMigrations(binding);
+      return Array.isArray(migrations) ? migrations : [];
     }
     async shutdown() {
       await this.plugin().shutdown();

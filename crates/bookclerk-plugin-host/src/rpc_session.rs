@@ -148,6 +148,10 @@ enum Work {
     OidcClients {
         reply: oneshot::Sender<Result<Vec<OidcClientTemplate>>>,
     },
+    DatabaseMigrations {
+        binding: String,
+        reply: oneshot::Sender<Result<Vec<bookclerk_plugin_sdk::PluginMigration>>>,
+    },
     DbOpen {
         ctx: bookclerk_plugin_sdk::DatabaseContext,
         reply: oneshot::Sender<Result<()>>,
@@ -777,6 +781,20 @@ impl PluginSession {
         self.call(|reply| Work::OidcClients { reply }).await
     }
 
+    /// Complete ordered plugin-owned migration sequence for one named binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the RPC fails.
+    pub async fn database_migrations(
+        &self,
+        binding: &str,
+    ) -> Result<Vec<bookclerk_plugin_sdk::PluginMigration>> {
+        let binding = binding.to_string();
+        self.call(|reply| Work::DatabaseMigrations { binding, reply })
+            .await
+    }
+
     /// Opens a database session (held on the vat until drop).
     ///
     /// # Errors
@@ -1357,6 +1375,14 @@ fn vat_thread(
                         }
                         Work::OidcClients { reply } => {
                             let _ = reply.send(client.oidc_clients().await.map_err(map_abi));
+                        }
+                        Work::DatabaseMigrations { binding, reply } => {
+                            let _ = reply.send(
+                                client
+                                    .database_migrations(&binding)
+                                    .await
+                                    .map_err(map_abi),
+                            );
                         }
                         Work::DbOpen { ctx, reply } => {
                             let out = async {

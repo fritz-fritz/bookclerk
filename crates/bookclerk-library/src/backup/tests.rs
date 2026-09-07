@@ -461,7 +461,6 @@ fn gc_waits_for_publication_lock_and_keeps_live_objects() {
         tables: Vec::new(),
         plugin_schema_namespace: None,
         plugin_schema_state: None,
-        plugin_schema_version: None,
         plugin_schema_checksum: None,
     };
     let manifest = BackupManifest {

@@ -79,13 +79,18 @@ pub use master_key::{
     AUTH_PASSWORD_ENV as MASTER_KEY_AUTH_PASSWORD_ENV, MASTER_KEY_FILE_NAME,
 };
 pub use migrations::{
-    apply_migration_plan, binding_bootstrap_sql, binding_bootstrap_statements,
-    current_canonical_schema, current_canonical_table_names, downgrade_migration_plan,
-    host_migration_plan, latest_schema_postgres, latest_schema_sqlite,
-    min_supported_schema_version, remaining_upgrade_batches, schema_session_matches,
-    schema_slot_key, sql_string_literal, unreleased_checksum, unreleased_ops, unreleased_sql,
-    HostMigrationStep, MigrationOp, MigrationPlan, MigrationStep, PlanOp,
-    BOOKCLERK_SCHEMA_NAMESPACE, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
+    apply_migration_plan, apply_plugin_migrations, binding_bootstrap_sql,
+    binding_bootstrap_statements, current_canonical_schema, current_canonical_table_names,
+    downgrade_migration_plan, history_from_execute_reply, host_migration_plan,
+    latest_schema_postgres, latest_schema_sqlite, load_plugin_migration_history,
+    min_supported_schema_version, pending_plugin_suffix, plugin_apply_statements,
+    plugin_history_digest, plugin_history_session_matches, plugin_journal_select_request,
+    plugin_migration_checksum, prove_plugin_migration_sequence, remaining_plugin_suffix_batches,
+    remaining_upgrade_batches, require_history_prefix, schema_session_matches, schema_slot_key,
+    sql_string_literal, unreleased_checksum, unreleased_ops, unreleased_sql, HostMigrationStep,
+    MigrationOp, MigrationPlan, MigrationStep, PlanOp, PluginJournalEntry, PluginMigrationHistory,
+    PluginMigrationSequence, ProvenPluginMigration, BOOKCLERK_SCHEMA_NAMESPACE,
+    PLUGIN_MIGRATION_SLOT_KEY, SCHEMA_MIGRATIONS_DDL, SCHEMA_VERSION,
 };
 pub use models::{
     catalog_subscribers_for_event, collapse_live_subscriber_nodes, content_kind_from_classic,

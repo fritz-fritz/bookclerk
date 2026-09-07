@@ -146,8 +146,9 @@ impl GuestSqlPolicy {
     /// Ordinary binding execute is query/DML only. Durable `CREATE`/`DROP` is
     /// admitted only via [`Self::binding_migration`] (host migration engine).
     /// Any table may be named except reserved host bookkeeping
-    /// (`db_atomic_receipts`, `schema_migrations`, `plugin_databases`),
-    /// catalog identifiers, and schema-qualified names. Grammar and size
+    /// (`db_atomic_receipts`, `schema_migrations`, `plugin_migrations`,
+    /// `plugin_databases`, `db_serialization_slots`), catalog identifiers,
+    /// and schema-qualified names. Grammar and size
     /// checks still run. Functions are the Bookclerk SQL v1 portable set.
     #[must_use]
     pub fn binding_owned() -> Self {
@@ -351,7 +352,9 @@ impl GuestSqlPolicy {
 const BINDING_RESERVED_TABLES: &[&str] = &[
     "db_atomic_receipts",
     "schema_migrations",
+    "plugin_migrations",
     "plugin_databases",
+    "db_serialization_slots",
     SQL_CATALOG_TABLE,
     SQL_IDENTITY_TABLE,
     SQL_SCHEMA_TABLE,

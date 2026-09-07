@@ -370,6 +370,23 @@ async function handleRoleInvoke(request, env, url) {
     }
   }
 
+  if (request.method === "POST" && url.pathname === "/databaseMigrations") {
+    try {
+      const body = await request.json().catch(() => ({}));
+      const binding = typeof body.binding === "string" ? body.binding : "";
+      const migrations =
+        typeof plugin.databaseMigrations === "function"
+          ? await plugin.databaseMigrations(binding)
+          : [];
+      return Response.json({
+        migrations: Array.isArray(migrations) ? migrations : [],
+      });
+    } catch (err) {
+      const { code, message } = catchErr(err);
+      return errJson(null, code, message);
+    }
+  }
+
   const roleMatch = url.pathname.match(/^\/(contentSource|integration)\/([^/]+)$/);
   if (roleMatch && request.method === "POST") {
     try {

@@ -1151,9 +1151,6 @@ Plugins may declare Workers-style **named database bindings** in the manifest:
 ```toml
 [capabilities.bindings]
 databases = ["DB", "CACHE"]   # [A-Z][A-Z0-9_]*, unique, max 8
-
-# Optional companion plan (required only when the plugin owns tables).
-migration_plan = "migrations.toml"
 ```
 
 Named bindings are **plugin-private state**, not a place to put host tables.
@@ -1190,15 +1187,19 @@ re-opens never re-target a binding); inspect and remove them with
 Cloudflare D1 database, then removes the registry row; it fails closed if
 physical delete cannot be proven).
 
-Inside a binding the plugin **owns its schema** through the shared host
-migration engine. Declare an ordered plan in a companion `migrations.toml`
-referenced from `plugin.toml` (`migration_plan`). Each step is proven
-BookclerkSQL (`{ schema = "..." }` / `{ data = "..." }`) with a monotonic
-version, checksum, `up`, and optional `down`. Ordinary binding `execute` is
-query/DML only; durable `CREATE`/`DROP` is admitted only while the host
-applies that plan. `ALTER` and `CREATE TABLE AS` stay refused.
+Inside a binding the plugin **owns its schema** by registering a complete
+ordered history at startup (`databaseMigrations(binding)`): opaque
+plugin-chosen IDs plus already-separated BookclerkSQL `schema`/`data`
+operations. Bookclerk assigns no version meaning to those IDs; registration
+order is the forward sequence. The host proves the sequence with one evolving
+type environment, verifies durable `plugin_migrations` history is an exact
+prefix of the registration, and applies only the pending suffix. Ordinary
+binding `execute` is query/DML only; durable `CREATE`/`DROP` is admitted only
+while the host applies that registration. `ALTER` and `CREATE TABLE AS` stay
+refused.
 `REFERENCES` targets use the same reserved-name rules as `CREATE`/`DROP`
-(no `db_atomic_receipts` / `schema_migrations` / `plugin_databases`, no
+(no `db_atomic_receipts` / `schema_migrations` / `plugin_migrations` /
+`plugin_databases` / `db_serialization_slots`, no
 schema-qualified names). The guest grammar still applies —
 single statement, no `ATTACH`/`PRAGMA`/session verbs, no schema-qualified
 names — and functions are Bookclerk SQL v1 portable helpers (not a wider
@@ -1217,12 +1218,12 @@ EXISTS` does not rewrite catalog or identity: the first admitted CREATE
 must persist complete canonical DDL, and a binding missing that catalog
 fails closed (reset/recreate).
 See [`docs/sql-contract/v1.md`](sql-contract/v1.md).
-Plugin schema apply is one atomic receipt per frozen step (slot lock, ops,
-marker). Mixed guest `CREATE` + `INSERT` is not a product path: apply the
-plan, then DML. Same-token DML replay must not double-insert. The
-binding's own `db_atomic_receipts` bookkeeping table stays
-host-owned so retry tokens replay inside the binding, never against the
-library.
+Plugin schema apply is one atomic receipt per registered migration (slot
+lock, ops, journal append). Mixed guest `CREATE` + `INSERT` is not a product
+path: register/apply, then DML. Same-token DML replay must not double-insert.
+The binding's own `db_atomic_receipts` and `plugin_migrations` tables stay
+host-owned so retry tokens replay inside the binding and plugins cannot
+edit the journal.
 
 Delivery: `JobHandler.handle` receives the bindings as the append-only
 `databases :List(NamedDatabase)` argument. Rust guests call

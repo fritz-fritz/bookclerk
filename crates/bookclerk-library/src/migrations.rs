@@ -53,8 +53,9 @@ pub fn unreleased_sql() -> &'static str {
 
 /// Host bookkeeping table created before applying plan versions.
 ///
-/// `namespace` separates Bookclerk-owned ledger rows (`bookclerk`) from
-/// plugin-owned frozen plans (plugin id) in the same binding database.
+/// `namespace` separates Bookclerk-owned ledger rows (`bookclerk`) from any
+/// leftover rows. Plugin-owned history uses the separate `plugin_migrations`
+/// journal, not this table.
 pub const SCHEMA_MIGRATIONS_DDL: &str = "CREATE TABLE IF NOT EXISTS schema_migrations (
         namespace TEXT NOT NULL,
         version INTEGER NOT NULL,
@@ -99,6 +100,7 @@ impl MigrationOp {
 mod binding_ops;
 mod engine;
 mod plan;
+mod plugin;
 mod unreleased_ops;
 
 pub use engine::{
@@ -109,6 +111,14 @@ pub use plan::{
     frozen_marker_delete_sql, frozen_marker_sql, schema_slot_key, sql_string_literal,
     unreleased_marker_sql_in, validate_schema_namespace, MigrationPlan, MigrationStep, PlanOp,
     BOOKCLERK_SCHEMA_NAMESPACE,
+};
+pub use plugin::{
+    apply_plugin_migrations, history_from_execute_reply, load_plugin_migration_history,
+    load_plugin_migration_history_on, pending_plugin_suffix, plugin_apply_statements,
+    plugin_history_digest, plugin_history_session_matches, plugin_journal_select_request,
+    plugin_migration_checksum, prove_plugin_migration_sequence, remaining_plugin_suffix_batches,
+    require_history_prefix, PluginJournalEntry, PluginMigrationHistory, PluginMigrationSequence,
+    ProvenPluginMigration, PLUGIN_MIGRATION_SLOT_KEY,
 };
 
 /// One host-owned schema version in the canonical Bookclerk migration plan.

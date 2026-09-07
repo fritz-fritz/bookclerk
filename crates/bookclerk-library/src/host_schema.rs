@@ -337,9 +337,9 @@ pub async fn current_schema_state(
 /// Reads explicit [`SchemaState`] for one ledger `namespace`.
 ///
 /// Host library and binding bootstrap use [`BOOKCLERK_SCHEMA_NAMESPACE`].
-/// Plugin-owned plans use the plugin id. Frozen checksums are verified against
-/// [`host_migration_plan`] only for the Bookclerk namespace; plugin callers
-/// verify against their installed plan.
+/// Frozen checksums are verified against [`host_migration_plan`] only for
+/// the Bookclerk namespace. Plugin-owned history uses `plugin_migrations`,
+/// not this ledger.
 ///
 /// # Errors
 ///
@@ -480,7 +480,8 @@ fn schema_migrations_select_sql(namespace: &str) -> String {
 /// has no unreleased or frozen marker.
 ///
 /// When `verify_host_plan` is true, frozen checksums are checked against
-/// [`host_migration_plan`]. Plugin namespaces skip that check; the shared
+/// [`host_migration_plan`]. Non-bookclerk namespaces skip that host-plan
+/// check (legacy rows only; plugin history is `plugin_migrations`).
 /// engine verifies the installed plugin plan.
 fn schema_state_from_migration_rows(
     rows: Vec<QueryResult>,

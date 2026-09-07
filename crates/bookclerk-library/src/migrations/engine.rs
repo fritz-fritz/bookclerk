@@ -1,9 +1,9 @@
-//! Shared apply engine for namespaced [`super::MigrationPlan`]s.
+//! Shared apply engine for namespaced host-owned [`super::MigrationPlan`]s.
 //!
-//! Host library frozen steps, Bookclerk binding bootstrap (unreleased), and
-//! plugin-owned binding evolution all persist [`crate::SchemaState`] in
-//! `schema_migrations` keyed by namespace. Plugin plans are frozen steps; they
-//! never reuse [`super::BINDING_SCHEMA_VERSION`].
+//! Host library frozen steps and Bookclerk binding bootstrap persist
+//! [`crate::SchemaState`] in `schema_migrations` keyed by namespace.
+//! Plugin-owned binding evolution uses [`super::plugin`] (opaque IDs and
+//! `plugin_migrations`), not this numeric engine.
 
 use std::time::Duration;
 
@@ -98,7 +98,7 @@ pub async fn downgrade_migration_plan(
     current_schema_state_in(db, HostSchemaKind::RowMarker, &plan.namespace).await
 }
 
-/// True when a binding session's expected plugin schema still matches durable state.
+/// True when a binding session's expected host schema still matches durable state.
 ///
 /// # Errors
 ///
@@ -200,7 +200,7 @@ fn reverse_steps<'a>(
 ) -> Result<Vec<&'a MigrationStep>> {
     let SchemaState::Frozen { version, checksum } = state else {
         return Err(LibraryError::Schema(format!(
-            "namespace `{}` is {}; explicit downgrade requires frozen plugin schema",
+            "namespace `{}` is {}; explicit downgrade requires frozen host schema",
             plan.namespace,
             state.display()
         )));
@@ -853,112 +853,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(tags.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn backup_restore_then_forward_migrate_on_sqlite() {
-        use crate::backup::capture::capture_plugin_unit;
-        use crate::backup::repository::BackupRepository;
-        use crate::backup::restore::restore_backup_unit;
-        use crate::backup::{CanonicalExportOpts, CanonicalRestoreKind, CanonicalRestoreOpts};
-
-        let src = binding_with_bootstrap().await;
-        let v1 = notes_plan("echo_sql", true);
-        apply_migration_plan(&src, &v1).await.unwrap();
-        sea_orm::ConnectionTrait::execute_raw(
-            &src,
-            sea_orm::Statement::from_string(
-                sea_orm::DbBackend::Sqlite,
-                "INSERT INTO notes (id, body) VALUES (1, 'kept')",
-            ),
-        )
-        .await
-        .unwrap();
-        let files = tempfile::tempdir().unwrap();
-        let repo = BackupRepository::open(files.path()).unwrap();
-        let unit = capture_plugin_unit(
-            &src,
-            &repo,
-            &CanonicalExportOpts::default(),
-            "echo_sql",
-            "notes",
-            "sqlite",
-        )
-        .await
-        .unwrap();
-        assert_eq!(unit.plugin_schema_namespace.as_deref(), Some("echo_sql"));
-        assert_eq!(unit.plugin_schema_version, Some(1));
-        assert_eq!(
-            unit.plugin_schema_checksum.as_deref(),
-            Some(v1.steps[0].checksum().as_str())
-        );
-
-        let dest = binding_with_bootstrap().await;
-        restore_backup_unit(
-            &dest,
-            &repo,
-            &unit,
-            CanonicalRestoreKind::PluginBinding,
-            &CanonicalRestoreOpts::default(),
-            false,
-        )
-        .await
-        .unwrap();
-        let restored = current_schema_state_in(&dest, HostSchemaKind::RowMarker, "echo_sql")
-            .await
-            .unwrap();
-        assert_eq!(restored.frozen_version(), Some(1));
-        let kept = sea_orm::ConnectionTrait::query_all_raw(
-            &dest,
-            sea_orm::Statement::from_string(
-                sea_orm::DbBackend::Sqlite,
-                "SELECT body FROM notes WHERE id = 1",
-            ),
-        )
-        .await
-        .unwrap();
-        assert_eq!(kept.len(), 1, "restore must replay captured rows");
-        let tags_before = sea_orm::ConnectionTrait::query_all_raw(
-            &dest,
-            sea_orm::Statement::from_string(
-                sea_orm::DbBackend::Sqlite,
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tags'",
-            ),
-        )
-        .await
-        .unwrap();
-        assert!(
-            tags_before.is_empty(),
-            "restore must not walk the installed plan"
-        );
-
-        let v2 = two_step_plan("echo_sql");
-        let after = apply_migration_plan(&dest, &v2).await.unwrap();
-        assert_eq!(after.frozen_version(), Some(2));
-        let tags_after = sea_orm::ConnectionTrait::query_all_raw(
-            &dest,
-            sea_orm::Statement::from_string(
-                sea_orm::DbBackend::Sqlite,
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tags'",
-            ),
-        )
-        .await
-        .unwrap();
-        assert_eq!(tags_after.len(), 1);
-        let kept_after = sea_orm::ConnectionTrait::query_all_raw(
-            &dest,
-            sea_orm::Statement::from_string(
-                sea_orm::DbBackend::Sqlite,
-                "SELECT body FROM notes WHERE id = 1",
-            ),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            kept_after.len(),
-            1,
-            "forward migrate must keep restored rows"
-        );
     }
 
     #[tokio::test]
