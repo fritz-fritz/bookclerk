@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
@@ -740,6 +740,17 @@ fn catalog_cell_i64(v: Option<&DbValue>) -> Option<i64> {
     }
 }
 
+/// True when a binding migration batch may be retried after re-reading the ledger.
+fn plugin_schema_apply_retryable(err: &PluginError) -> bool {
+    if err.is_ambiguous_transport() {
+        return true;
+    }
+    matches!(
+        bookclerk_db_exec::classify_db_err_message(&err.to_string()),
+        bookclerk_db_exec::DbErrorClass::Unavailable | bookclerk_db_exec::DbErrorClass::Conflict
+    )
+}
+
 /// Host-authored statements for one binding bootstrap apply unit.
 fn binding_sql_request(operation_id: String, sqls: Vec<String>) -> ExecuteRequest {
     ExecuteRequest {
@@ -1088,6 +1099,9 @@ impl ExternalDatabase {
     ///
     /// Restore uses [`Self::open_binding_seaorm`] with `provision` and does
     /// **not** call this; the next ordinary open walks forward.
+    ///
+    /// Each remaining batch is retried after uniqueness / unavailable: re-read
+    /// the namespaced marker and treat matching version+checksum as success.
     async fn ensure_plugin_migration_plan(
         &self,
         key: &str,
@@ -1095,22 +1109,72 @@ impl ExternalDatabase {
         binding: &str,
         plan: &MigrationPlan,
     ) -> PluginResult<()> {
+        let mut delay_ms = 20u64;
+        for attempt in 0..8 {
+            let state = self
+                .binding_namespace_state(key, owner, binding, &plan.namespace)
+                .await?;
+            let mut batches = remaining_upgrade_batches(plan, &state)
+                .map_err(|err| PluginError::message(err.to_string()))?;
+            if batches.is_empty() {
+                return Ok(());
+            }
+            let remaining_before = batches.len();
+            let stmts = batches.remove(0);
+            let cancel = Arc::new(AtomicBool::new(false));
+            match self
+                .session
+                .db_execute_binding_request(
+                    key,
+                    binding_sql_request(
+                        format!("plugin-migrate-{owner}-{binding}-{attempt}"),
+                        stmts,
+                    ),
+                    cancel,
+                )
+                .await
+            {
+                Ok(_) => {
+                    delay_ms = 20;
+                    continue;
+                }
+                Err(err) => {
+                    let remaining_after = self
+                        .binding_namespace_state(key, owner, binding, &plan.namespace)
+                        .await
+                        .ok()
+                        .and_then(|observed| remaining_upgrade_batches(plan, &observed).ok())
+                        .map(|left| left.len());
+                    if remaining_after == Some(0) {
+                        return Ok(());
+                    }
+                    if remaining_after.is_some_and(|n| n < remaining_before) {
+                        delay_ms = 20;
+                        continue;
+                    }
+                    if plugin_schema_apply_retryable(&err) && attempt + 1 < 8 {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        delay_ms = delay_ms.saturating_mul(2).min(250);
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
         let state = self
             .binding_namespace_state(key, owner, binding, &plan.namespace)
             .await?;
-        let batches = remaining_upgrade_batches(plan, &state)
+        let leftover = remaining_upgrade_batches(plan, &state)
             .map_err(|err| PluginError::message(err.to_string()))?;
-        let cancel = Arc::new(AtomicBool::new(false));
-        for (i, stmts) in batches.into_iter().enumerate() {
-            self.session
-                .db_execute_binding_request(
-                    key,
-                    binding_sql_request(format!("plugin-migrate-{owner}-{binding}-{i}"), stmts),
-                    Arc::clone(&cancel),
-                )
-                .await?;
+        if leftover.is_empty() {
+            Ok(())
+        } else {
+            Err(PluginError::message(format!(
+                "plugin schema apply for `{owner}/{binding}` exhausted retries with {} \
+                 remaining upgrade batches",
+                leftover.len()
+            )))
         }
-        Ok(())
     }
 
     /// Reads namespaced [`SchemaState`] from the binding ledger.

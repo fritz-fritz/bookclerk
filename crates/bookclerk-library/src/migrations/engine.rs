@@ -219,24 +219,20 @@ fn reverse_steps<'a>(
             applied.checksum()
         )));
     }
-    let mut downs = Vec::new();
-    let mut current = *version;
-    while current > to_version {
-        let Some(step) = plan.step(current) else {
-            return Err(LibraryError::Schema(format!(
-                "namespace `{}` version {current} is not in this plan; restore a backup",
-                plan.namespace
-            )));
-        };
+    let mut downs: Vec<&'a MigrationStep> = plan
+        .steps
+        .iter()
+        .filter(|step| step.version > to_version && step.version <= *version)
+        .collect();
+    downs.reverse();
+    for step in &downs {
         if step.down.is_none() {
             return Err(LibraryError::Schema(format!(
-                "namespace `{}` version {current} has no validated down; restore a \
+                "namespace `{}` version {} has no validated down; restore a \
                  compatible recovery point instead of downgrading",
-                plan.namespace
+                plan.namespace, step.version
             )));
         }
-        downs.push(step);
-        current -= 1;
     }
     Ok(downs)
 }
@@ -588,6 +584,71 @@ mod tests {
         assert!(err.to_string().contains("recovery point"), "{err}");
     }
 
+    fn skipped_version_plan() -> MigrationPlan {
+        MigrationPlan::try_new(
+            "echo_sql",
+            vec![
+                MigrationStep {
+                    version: 1,
+                    up: vec![PlanOp::Schema(
+                        "CREATE TABLE IF NOT EXISTS notes (\
+                            id INTEGER PRIMARY KEY, \
+                            body TEXT NOT NULL\
+                        )"
+                        .into(),
+                    )],
+                    down: Some(vec![PlanOp::Schema("DROP TABLE IF EXISTS notes".into())]),
+                    introduced_in: "0.1.0".into(),
+                },
+                MigrationStep {
+                    version: 3,
+                    up: vec![PlanOp::Schema(
+                        "CREATE TABLE IF NOT EXISTS tags (\
+                            id INTEGER PRIMARY KEY, \
+                            label TEXT NOT NULL\
+                        )"
+                        .into(),
+                    )],
+                    down: Some(vec![PlanOp::Schema("DROP TABLE IF EXISTS tags".into())]),
+                    introduced_in: "0.3.0".into(),
+                },
+            ],
+        )
+        .expect("skipped-version plan")
+    }
+
+    #[test]
+    fn reverse_walks_nonconsecutive_versions() {
+        let plan = skipped_version_plan();
+        let checksum = plan.step(3).expect("v3").checksum();
+        let to_zero = reverse_steps(
+            &plan,
+            &SchemaState::Frozen {
+                version: 3,
+                checksum: checksum.clone(),
+            },
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            to_zero.iter().map(|s| s.version).collect::<Vec<_>>(),
+            vec![3, 1]
+        );
+        let to_one = reverse_steps(
+            &plan,
+            &SchemaState::Frozen {
+                version: 3,
+                checksum,
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            to_one.iter().map(|s| s.version).collect::<Vec<_>>(),
+            vec![3]
+        );
+    }
+
     #[test]
     fn session_mismatch_fails_closed() {
         let err = schema_session_matches(
@@ -792,6 +853,112 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(tags.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn backup_restore_then_forward_migrate_on_sqlite() {
+        use crate::backup::capture::capture_plugin_unit;
+        use crate::backup::repository::BackupRepository;
+        use crate::backup::restore::restore_backup_unit;
+        use crate::backup::{CanonicalExportOpts, CanonicalRestoreKind, CanonicalRestoreOpts};
+
+        let src = binding_with_bootstrap().await;
+        let v1 = notes_plan("echo_sql", true);
+        apply_migration_plan(&src, &v1).await.unwrap();
+        sea_orm::ConnectionTrait::execute_raw(
+            &src,
+            sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                "INSERT INTO notes (id, body) VALUES (1, 'kept')",
+            ),
+        )
+        .await
+        .unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let repo = BackupRepository::open(files.path()).unwrap();
+        let unit = capture_plugin_unit(
+            &src,
+            &repo,
+            &CanonicalExportOpts::default(),
+            "echo_sql",
+            "notes",
+            "sqlite",
+        )
+        .await
+        .unwrap();
+        assert_eq!(unit.plugin_schema_namespace.as_deref(), Some("echo_sql"));
+        assert_eq!(unit.plugin_schema_version, Some(1));
+        assert_eq!(
+            unit.plugin_schema_checksum.as_deref(),
+            Some(v1.steps[0].checksum().as_str())
+        );
+
+        let dest = binding_with_bootstrap().await;
+        restore_backup_unit(
+            &dest,
+            &repo,
+            &unit,
+            CanonicalRestoreKind::PluginBinding,
+            &CanonicalRestoreOpts::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        let restored = current_schema_state_in(&dest, HostSchemaKind::RowMarker, "echo_sql")
+            .await
+            .unwrap();
+        assert_eq!(restored.frozen_version(), Some(1));
+        let kept = sea_orm::ConnectionTrait::query_all_raw(
+            &dest,
+            sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                "SELECT body FROM notes WHERE id = 1",
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(kept.len(), 1, "restore must replay captured rows");
+        let tags_before = sea_orm::ConnectionTrait::query_all_raw(
+            &dest,
+            sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tags'",
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(
+            tags_before.is_empty(),
+            "restore must not walk the installed plan"
+        );
+
+        let v2 = two_step_plan("echo_sql");
+        let after = apply_migration_plan(&dest, &v2).await.unwrap();
+        assert_eq!(after.frozen_version(), Some(2));
+        let tags_after = sea_orm::ConnectionTrait::query_all_raw(
+            &dest,
+            sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tags'",
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(tags_after.len(), 1);
+        let kept_after = sea_orm::ConnectionTrait::query_all_raw(
+            &dest,
+            sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                "SELECT body FROM notes WHERE id = 1",
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            kept_after.len(),
+            1,
+            "forward migrate must keep restored rows"
+        );
     }
 
     #[tokio::test]
