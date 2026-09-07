@@ -1268,14 +1268,21 @@ fn select_list_column_names(sql: &str) -> Vec<String> {
     names
 }
 
-/// Text between the main `SELECT` and `FROM` (depth-0).
+/// True when `bytes[i..]` is keyword `kw` not continued as an identifier.
+fn starts_keyword(bytes: &[u8], i: usize, kw: &[u8]) -> bool {
+    bytes[i..].starts_with(kw) && !ident_cont_at(bytes, i + kw.len())
+}
+
+/// Text of the main SELECT list (depth-0): through `FROM`, or through
+/// `WHERE`/`GROUP`/`HAVING`/`ORDER`/`LIMIT`/`UNION`/`EXCEPT`/`INTERSECT`/
+/// `WINDOW` when there is no `FROM` (literal `SELECT …` rows).
 fn select_list_slice(sql: &str) -> Option<&str> {
     let upper = sql.to_ascii_uppercase();
     let mut depth = 0i32;
     let bytes = upper.as_bytes();
     let mut i = 0usize;
     let mut select_at = None;
-    while i + 6 <= bytes.len() {
+    while i < bytes.len() {
         match bytes[i] {
             b'(' => {
                 depth += 1;
@@ -1285,24 +1292,44 @@ fn select_list_slice(sql: &str) -> Option<&str> {
                 depth = depth.saturating_sub(1);
                 i += 1;
             }
-            b'S' if depth == 0
-                && bytes[i..].starts_with(b"SELECT")
-                && !ident_cont_at(bytes, i + 6) =>
-            {
+            b'S' if depth == 0 && starts_keyword(bytes, i, b"SELECT") => {
                 select_at = Some(i + 6);
                 i += 6;
             }
-            b'F' if depth == 0
+            b'F' if depth == 0 && select_at.is_some() && starts_keyword(bytes, i, b"FROM") => {
+                return Some(sql[select_at?..i].trim());
+            }
+            b'W' if depth == 0
                 && select_at.is_some()
-                && bytes[i..].starts_with(b"FROM")
-                && !ident_cont_at(bytes, i + 4) =>
+                && (starts_keyword(bytes, i, b"WHERE") || starts_keyword(bytes, i, b"WINDOW")) =>
             {
+                return Some(sql[select_at?..i].trim());
+            }
+            b'G' if depth == 0 && select_at.is_some() && starts_keyword(bytes, i, b"GROUP") => {
+                return Some(sql[select_at?..i].trim());
+            }
+            b'H' if depth == 0 && select_at.is_some() && starts_keyword(bytes, i, b"HAVING") => {
+                return Some(sql[select_at?..i].trim());
+            }
+            b'O' if depth == 0 && select_at.is_some() && starts_keyword(bytes, i, b"ORDER") => {
+                return Some(sql[select_at?..i].trim());
+            }
+            b'L' if depth == 0 && select_at.is_some() && starts_keyword(bytes, i, b"LIMIT") => {
+                return Some(sql[select_at?..i].trim());
+            }
+            b'U' if depth == 0 && select_at.is_some() && starts_keyword(bytes, i, b"UNION") => {
+                return Some(sql[select_at?..i].trim());
+            }
+            b'E' if depth == 0 && select_at.is_some() && starts_keyword(bytes, i, b"EXCEPT") => {
+                return Some(sql[select_at?..i].trim());
+            }
+            b'I' if depth == 0 && select_at.is_some() && starts_keyword(bytes, i, b"INTERSECT") => {
                 return Some(sql[select_at?..i].trim());
             }
             _ => i += 1,
         }
     }
-    None
+    select_at.map(|at| sql[at..].trim())
 }
 
 /// True when `bytes[i]` continues an identifier (`[A-Za-z0-9_]`).
@@ -2121,6 +2148,29 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["id", "title"]);
         assert!(reply.statements[0].rows.is_empty());
+    }
+
+    #[test]
+    fn select_without_from_keeps_select_list_order() {
+        let req = typed_select("SELECT '汉语' AS cjk, 'مرحبا' AS ar");
+        let value = json!({
+            "result": [{
+                "success": true,
+                "results": [{ "ar": "مرحبا", "cjk": "汉语" }],
+                "meta": { "changes": 0 }
+            }]
+        });
+        let reply = parse_typed_batch(&req, &value, std::time::Instant::now()).unwrap();
+        let names: Vec<&str> = reply.statements[0]
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["cjk", "ar"]);
+        assert_eq!(
+            reply.statements[0].rows[0].values,
+            vec![DbValue::Text("汉语".into()), DbValue::Text("مرحبا".into())]
+        );
     }
 
     #[test]
