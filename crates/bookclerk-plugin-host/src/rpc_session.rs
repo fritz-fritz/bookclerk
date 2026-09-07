@@ -928,7 +928,7 @@ impl PluginSession {
         .await
     }
 
-    /// Typed `HostAdapterDatabaseSession.executeEnvelope`.
+    /// Typed `HostAdapterDatabaseSession.execute`.
     ///
     /// # Errors
     ///
@@ -1777,7 +1777,7 @@ fn vat_thread(
                                     let host = db_host_session.as_ref().ok_or_else(|| {
                                         PluginError::message("database session not open")
                                     })?;
-                                    host.execute_envelope(envelope).await.map_err(map_abi)
+                                    host.execute(envelope).await.map_err(map_abi)
                                 } => out,
                             };
                             let _ = reply.send(out);
@@ -1863,7 +1863,7 @@ fn vat_thread(
                                             "database binding `{name}` session not open",
                                         ))
                                     })?;
-                                    host.host.execute_envelope(envelope).await.map_err(map_abi)
+                                    host.host.execute(envelope).await.map_err(map_abi)
                                 } => out,
                             };
                             let _ = reply.send(out);

@@ -2466,7 +2466,7 @@ mod tests {
             .unwrap_or("");
         assert!(
             !payload.is_empty(),
-            "nested executeEnvelope must persist replay payload before outer commit, got {payload:?}"
+            "nested host execute must persist replay payload before outer commit, got {payload:?}"
         );
     }
 

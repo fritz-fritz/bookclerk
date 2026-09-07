@@ -13,14 +13,6 @@ pub trait AdapterTransaction {
         request: crate::host_envelope::AdapterExecuteRequest,
     ) -> Result<crate::ExecuteReply>;
 
-    /// Same payload as [`Self::execute`]; kept for the Cap'n `executeEnvelope` ordinal.
-    async fn execute_envelope(
-        &self,
-        envelope: crate::host_envelope::AdapterExecuteRequest,
-    ) -> Result<crate::ExecuteReply> {
-        self.execute(envelope).await
-    }
-
     /// Commit.
     async fn commit(&self) -> Result<()>;
 
@@ -76,14 +68,14 @@ pub trait HostAdapterDatabaseSession {
     /// Opens a host-internal interactive transaction (SeaORM proxy).
     async fn begin(&self, isolation: crate::IsolationReq) -> Result<Box<dyn AdapterTransaction>>;
 
-    /// Same payload as [`crate::AdapterDatabaseSession::execute`].
-    async fn execute_envelope(
+    /// Typed atomic execute on this host-private session.
+    async fn execute(
         &self,
-        envelope: crate::host_envelope::AdapterExecuteRequest,
+        request: crate::host_envelope::AdapterExecuteRequest,
     ) -> Result<crate::ExecuteReply> {
-        let _ = envelope;
+        let _ = request;
         Err(crate::PluginError::unsupported(
-            "host executeEnvelope not implemented",
+            "host execute not implemented",
         ))
     }
 }

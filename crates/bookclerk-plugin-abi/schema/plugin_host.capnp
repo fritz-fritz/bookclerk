@@ -17,19 +17,16 @@ interface AdapterTransaction {
   execute @0 (request :Plugin.AdapterExecuteRequest) -> (result :Plugin.ExecuteResultReply);
   commit @1 () -> (result :Plugin.EmptyReply);
   rollback @2 () -> (result :Plugin.EmptyReply);
-  # Same payload as `execute`. Ordinal kept; do not reuse.
-  executeEnvelope @3 (request :Plugin.AdapterExecuteRequest) -> (result :Plugin.ExecuteResultReply);
-  # Same primitives as AdapterDatabaseSession, on the open txn.
-  exportIdentity @4 () -> (result :Plugin.IdentityExportReply);
-  importIdentity @5 (rows :List(Plugin.IdentityHighWater)) -> (result :Plugin.EmptyReply);
-  listUserRelations @6 () -> (result :Plugin.UserRelationsReply);
-  prepareUnitRestore @7 () -> (result :Plugin.EmptyReply);
-  dropUserRelations @8 (names :List(Text)) -> (result :Plugin.EmptyReply);
-  assertRestoreConstraints @9 () -> (result :Plugin.EmptyReply);
+  exportIdentity @3 () -> (result :Plugin.IdentityExportReply);
+  importIdentity @4 (rows :List(Plugin.IdentityHighWater)) -> (result :Plugin.EmptyReply);
+  listUserRelations @5 () -> (result :Plugin.UserRelationsReply);
+  prepareUnitRestore @6 () -> (result :Plugin.EmptyReply);
+  dropUserRelations @7 (names :List(Text)) -> (result :Plugin.EmptyReply);
+  assertRestoreConstraints @8 () -> (result :Plugin.EmptyReply);
 }
 
 interface HostAdapterDatabaseSession {
   # isolation defaults to atomicBatch when omitted (Cap'n zero).
   begin @0 (isolation :Plugin.IsolationReq) -> (result :AdapterTransactionReply);
-  executeEnvelope @1 (request :Plugin.AdapterExecuteRequest) -> (result :Plugin.ExecuteResultReply);
+  execute @1 (request :Plugin.AdapterExecuteRequest) -> (result :Plugin.ExecuteResultReply);
 }

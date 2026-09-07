@@ -156,18 +156,15 @@ impl HostAdapterDatabaseSession for D1DedicatedHostSession {
         ))
     }
 
-    async fn execute_envelope(
-        &self,
-        envelope: AdapterExecuteRequest,
-    ) -> Result<ExecuteReply, PluginError> {
-        envelope.require_proofs()?;
-        if !matches!(envelope.isolation, IsolationReq::AtomicBatch) {
+    async fn execute(&self, request: AdapterExecuteRequest) -> Result<ExecuteReply, PluginError> {
+        request.require_proofs()?;
+        if !matches!(request.isolation, IsolationReq::AtomicBatch) {
             return Err(PluginError::unsupported(
                 "D1 supports AtomicBatch isolation only",
             ));
         }
         self.proxy
-            .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
+            .run_typed_atomic(&request.request, request.guest_receipt, &request.proofs)
             .await
             .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
     }
@@ -186,12 +183,9 @@ impl HostAdapterDatabaseSession for D1HostSession {
         ))
     }
 
-    async fn execute_envelope(
-        &self,
-        envelope: AdapterExecuteRequest,
-    ) -> Result<ExecuteReply, PluginError> {
-        envelope.require_proofs()?;
-        if !matches!(envelope.isolation, IsolationReq::AtomicBatch) {
+    async fn execute(&self, request: AdapterExecuteRequest) -> Result<ExecuteReply, PluginError> {
+        request.require_proofs()?;
+        if !matches!(request.isolation, IsolationReq::AtomicBatch) {
             return Err(PluginError::unsupported(
                 "D1 supports AtomicBatch isolation only",
             ));
@@ -199,7 +193,7 @@ impl HostAdapterDatabaseSession for D1HostSession {
         let proxy = bookclerk_plugin_database_d1::shared_proxy()
             .ok_or_else(|| PluginError::internal("d1 guest is not connected"))?;
         proxy
-            .run_typed_atomic(&envelope.request, envelope.guest_receipt, &envelope.proofs)
+            .run_typed_atomic(&request.request, request.guest_receipt, &request.proofs)
             .await
             .map_err(bookclerk_plugin_database_d1::atomic::plugin_error_from_d1)
     }
