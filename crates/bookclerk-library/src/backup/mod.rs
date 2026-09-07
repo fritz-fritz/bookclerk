@@ -281,7 +281,7 @@ pub struct BackupUnit {
     /// Plugin id when [`DatabaseUnitKind::PluginBinding`] (owner identity).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_schema_namespace: Option<String>,
-    /// [`PluginMigrationHistory::display`] at capture (`history@{n}+{digest}`).
+    /// [`crate::PluginMigrationHistory::display`] at capture (`history@{n}+{digest}`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_schema_state: Option<String>,
     /// Digest of the complete ordered `(migration_id, checksum)` journal.
