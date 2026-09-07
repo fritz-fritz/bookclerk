@@ -31,6 +31,10 @@ pub enum PhysicalEngine {
 }
 
 /// Fail closed on SeaORM backends that are not BookclerkSQL engines.
+///
+/// # Panics
+///
+/// Always panics: MySQL and unknown SeaORM backends are not BookclerkSQL engines.
 #[inline]
 pub(crate) fn reject_unknown_seaorm_backend(backend: sea_orm::DatabaseBackend) -> ! {
     panic!("BookclerkSQL adapters do not support SeaORM backend {backend:?}")
