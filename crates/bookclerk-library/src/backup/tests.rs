@@ -2325,6 +2325,7 @@ async fn postgres_capture_orders_nulls_first_with_declared_tiebreakers() {
     let Some((db, _)) = postgres_throwaway().await else {
         return;
     };
+    apply_bootstrap(&db).await;
     apply_admitted_sql(
         &db,
         &["CREATE TABLE items (k TEXT UNIQUE, extra TEXT)"],
@@ -2378,6 +2379,7 @@ async fn postgres_capture_text_order_matches_utf8_binary() {
     let Some((db, _)) = postgres_throwaway().await else {
         return;
     };
+    apply_bootstrap(&db).await;
     apply_admitted_sql(
         &db,
         &["CREATE TABLE items (k TEXT PRIMARY KEY)"],
