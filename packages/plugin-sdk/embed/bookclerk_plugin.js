@@ -41,6 +41,62 @@ export class PluginError extends Error {
   }
 }
 
+function utf8Bytes(value) {
+  return new TextEncoder().encode(String(value ?? "")).byteLength;
+}
+
+function migrationOpSql(op) {
+  if (op && typeof op === "object") {
+    if (typeof op.schema === "string") return op.schema;
+    if (typeof op.data === "string") return op.data;
+  }
+  return "";
+}
+
+function requirePluginMigrationRegistration(migrations) {
+  const list = Array.isArray(migrations) ? migrations : [];
+  if (list.length > MAX_LIST_PAGE) {
+    throw PluginError.fromWire(
+      "payload_too_large",
+      `plugin migration count ${list.length} exceeds maxListPage (${MAX_LIST_PAGE})`,
+    );
+  }
+  let total = 0;
+  for (const migration of list) {
+    const ops = Array.isArray(migration?.operations) ? migration.operations : [];
+    if (ops.length > MAX_PLUGIN_MIGRATION_OPS) {
+      throw PluginError.fromWire(
+        "payload_too_large",
+        `plugin migration \`${migration?.id}\` has ${ops.length} operations; exceeds maxPluginMigrationOps (${MAX_PLUGIN_MIGRATION_OPS})`,
+      );
+    }
+    total += utf8Bytes(migration?.id);
+    if (total > MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES) {
+      throw PluginError.fromWire(
+        "payload_too_large",
+        `plugin migration registration is ${total} bytes; exceeds maxPluginMigrationRegistrationBytes (${MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES})`,
+      );
+    }
+    for (const op of ops) {
+      const n = utf8Bytes(migrationOpSql(op));
+      if (n > MAX_SCALAR_BYTES) {
+        throw PluginError.fromWire(
+          "payload_too_large",
+          `plugin migration \`${migration?.id}\` SQL is ${n} bytes; exceeds maxScalarBytes (${MAX_SCALAR_BYTES})`,
+        );
+      }
+      total += n;
+      if (total > MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES) {
+        throw PluginError.fromWire(
+          "payload_too_large",
+          `plugin migration registration is ${total} bytes; exceeds maxPluginMigrationRegistrationBytes (${MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES})`,
+        );
+      }
+    }
+  }
+  return list;
+}
+
 function unsupportedMethod(method) {
   return PluginError.fromWire("unsupported", `${method} not implemented`);
 }
@@ -50,6 +106,8 @@ export const PRODUCT_API_VERSION = 2;
 export const MAX_SCALAR_BYTES = 262144;
 export const MAX_STREAM_WINDOW_BYTES = 1048576;
 export const MAX_LIST_PAGE = 256;
+export const MAX_PLUGIN_MIGRATION_OPS = 256;
+export const MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES = 262144;
 export const FEATURE_SCALAR_LIMITS = "rpc.scalarLimits";
 export const FEATURE_STREAMS = "rpc.streams";
 export const FEATURE_STORAGE_COPY = "storage.copy";
@@ -620,7 +678,7 @@ function createInvocationAdapter() {
         return [];
       }
       const migrations = await plugin.databaseMigrations(binding);
-      return Array.isArray(migrations) ? migrations : [];
+      return requirePluginMigrationRegistration(Array.isArray(migrations) ? migrations : []);
     }
     async shutdown() {
       await this.plugin().shutdown();

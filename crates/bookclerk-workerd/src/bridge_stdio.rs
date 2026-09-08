@@ -12,6 +12,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_plugin_abi::{
+    require_plugin_migration_registration, GuestSqlPolicy, PluginError, Result as AbiResult,
+};
+use bookclerk_plugin_abi::{
     serve_plugin_stdio, ByteRange, CopyResult, Destination, DestinationContext, DomainEvent,
     EventResult, GuestDatabase, HealthOk, Integration, IntegrationContext, JobHandler,
     JobHandlerContext, JobInvocation, JobOutcome, ListOptions, ListPage, ObjectInfo,
@@ -19,7 +22,6 @@ use bookclerk_plugin_abi::{
     ReadResult, ScalarLimitsDto, Source, SourceContext, WorkerContext, WriteOptions, MAX_LIST_PAGE,
     MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
-use bookclerk_plugin_abi::{GuestSqlPolicy, PluginError, Result as AbiResult};
 use tokio::io::AsyncRead;
 
 use crate::bridge_http::BridgeHttp;
@@ -217,7 +219,18 @@ impl PluginRoot for WorkerdRoot {
             .get("migrations")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([]));
-        serde_json::from_value(migrations).map_err(|err| PluginError::internal(err.to_string()))
+        if let Some(arr) = migrations.as_array() {
+            if arr.len() > usize::try_from(MAX_LIST_PAGE).unwrap_or(0) {
+                return Err(PluginError::payload_too_large(format!(
+                    "plugin migration count {} exceeds maxListPage ({MAX_LIST_PAGE})",
+                    arr.len()
+                )));
+            }
+        }
+        let parsed: Vec<PluginMigration> = serde_json::from_value(migrations)
+            .map_err(|err| PluginError::internal(err.to_string()))?;
+        require_plugin_migration_registration(&parsed)?;
+        Ok(parsed)
     }
 }
 

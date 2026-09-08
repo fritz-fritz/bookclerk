@@ -11,6 +11,7 @@ import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
 import { MAX_LIST_PAGE, MAX_SCALAR_BYTES, PRODUCT_API_VERSION } from "./abi.js";
 import { createDatabaseBinding, decodeExecuteResultReply, encodeExecuteRequest } from "./db-execute.js";
 import type { ExecuteReply, ExecuteRequest } from "./db-execute.js";
+import { requirePluginMigrationRegistration } from "./plugin-migrations.js";
 
 // Product constants come from the generated `abi.ts` projection of
 // `schema/plugin.capnp` — re-exported here for guest convenience.
@@ -21,10 +22,13 @@ export {
   MAX_CHECKPOINT_BYTES,
   MAX_EVENT_PAYLOAD_BYTES,
   MAX_LIST_PAGE,
+  MAX_PLUGIN_MIGRATION_OPS,
+  MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES,
   MAX_SCALAR_BYTES,
   MAX_STREAM_WINDOW_BYTES,
   PRODUCT_API_VERSION,
 } from "./abi.js";
+export { requirePluginMigrationRegistration } from "./plugin-migrations.js";
 
 /** Negotiated numeric limits advertised at {@link PluginDescribe}. */
 export interface ScalarLimits {
@@ -1538,7 +1542,13 @@ function createInvocationAdapter() {
         return [];
       }
       const migrations = await fn.call(this.#plugin(), binding);
-      return Array.isArray(migrations) ? migrations : [];
+      const list = Array.isArray(migrations) ? migrations : [];
+      try {
+        return requirePluginMigrationRegistration(list);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw PluginError.fromWire("payload_too_large", message);
+      }
     }
 
     async shutdown(): Promise<void> {

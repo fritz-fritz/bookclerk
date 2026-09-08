@@ -20,7 +20,8 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 #[cfg(feature = "host")]
 use crate::host_roles::HostAdapterDatabaseSession;
 use crate::limits::{
-    ScalarLimits, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_STREAM_WINDOW_BYTES,
+    ScalarLimits, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_PLUGIN_MIGRATION_OPS,
+    MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES,
 };
 use crate::plugin_capnp::{
     adapter_database_session as adapter_database_session_capnp, adapter_session_reply,
@@ -31,9 +32,9 @@ use crate::plugin_capnp::{
     guest_database as guest_database_capnp, handle_reply, head_reply, health_reply,
     integration as integration_capnp, integration_reply, job_handler, job_invocation, job_outcome,
     json_reply, list_reply, object_metadata, oidc_client_template, oidc_clients_reply, open_reply,
-    plugin_describe, plugin_error, plugin_migration, plugin_migration_op, plugin_migrations_reply,
-    progress_sink, pull_reply, put_reply, source as source_capnp, source_reply, worker_reply,
-    write_options,
+    plugin_describe, plugin_error, plugin_migration, plugin_migration_op, plugin_migrations_ok,
+    plugin_migrations_reply, progress_sink, pull_reply, put_reply, source as source_capnp,
+    source_reply, worker_reply, write_options,
 };
 #[cfg(feature = "host")]
 use crate::plugin_host_capnp::host_adapter_database_session as host_adapter_database_session_capnp;
@@ -48,7 +49,10 @@ use crate::rpc_types::{
     OidcClientTemplate, PluginDescribe, PutResult, SourceContext, WorkerContext, WriteOptions,
     MAX_CHECKPOINT_BYTES,
 };
-use crate::{PluginError, PluginMigration, PluginMigrationOp, Result};
+use crate::{
+    capnp_u32_len, require_plugin_migration_registration, PluginError, PluginMigration,
+    PluginMigrationOp, Result, MAX_PLUGIN_MIGRATION_ID_BYTES,
+};
 
 pub(super) fn from_capnp(err: impl std::fmt::Display) -> PluginError {
     PluginError::unavailable(err.to_string())
@@ -1475,7 +1479,14 @@ impl bookclerk_plugin::Server for PluginServer {
             .unwrap_or_default();
         let result = results.get().init_result();
         match self.inner.database_migrations(&binding).await {
-            Ok(migrations) => fill_plugin_migrations(result.init_ok(), &migrations)?,
+            Ok(migrations) => match require_plugin_migration_registration(&migrations) {
+                Ok(()) => {
+                    if let Err(err) = fill_plugin_migrations(result.init_ok(), &migrations) {
+                        return Err(capnp::Error::failed(err.to_string()));
+                    }
+                }
+                Err(err) => write_error(result.init_err(), &err),
+            },
             Err(err) => write_error(result.init_err(), &err),
         }
         Ok(())
@@ -1540,17 +1551,22 @@ fn read_oidc_client_template(r: oidc_client_template::Reader<'_>) -> Result<Oidc
 
 /// Encode plugin-owned migrations into a Cap'n Proto `databaseMigrations` ok payload.
 ///
+/// Callers must already have passed [`require_plugin_migration_registration`].
+/// List lengths use checked `u32` conversion.
+///
 /// # Errors
 ///
-/// Returns a Cap'n Proto error when the `migrations` list cannot be initialized
-/// or a nested migration cannot be encoded.
+/// Returns [`PluginError::payload_too_large`] when a list length cannot fit in
+/// Cap'n Proto `UInt32`.
 fn fill_plugin_migrations(
-    mut ok: crate::plugin_capnp::plugin_migrations_ok::Builder<'_>,
+    mut ok: plugin_migrations_ok::Builder<'_>,
     migrations: &[PluginMigration],
-) -> capnp::Result<()> {
-    let mut list = ok.reborrow().init_migrations(migrations.len() as u32);
+) -> Result<()> {
+    let n = capnp_u32_len(migrations.len(), "plugin migrations")?;
+    let mut list = ok.reborrow().init_migrations(n);
     for (i, migration) in migrations.iter().enumerate() {
-        fill_plugin_migration(list.reborrow().get(i as u32), migration)?;
+        let idx = capnp_u32_len(i, "plugin migration index")?;
+        fill_plugin_migration(list.reborrow().get(idx), migration)?;
     }
     Ok(())
 }
@@ -1559,17 +1575,18 @@ fn fill_plugin_migrations(
 ///
 /// # Errors
 ///
-/// Returns a Cap'n Proto error when the `operations` list cannot be initialized.
+/// Returns [`PluginError::payload_too_large`] when the operations list length
+/// cannot fit in Cap'n Proto `UInt32`.
 fn fill_plugin_migration(
     mut b: plugin_migration::Builder<'_>,
     migration: &PluginMigration,
-) -> capnp::Result<()> {
+) -> Result<()> {
     b.set_id(&migration.id);
-    let mut ops = b
-        .reborrow()
-        .init_operations(migration.operations.len() as u32);
+    let n = capnp_u32_len(migration.operations.len(), "plugin migration operations")?;
+    let mut ops = b.reborrow().init_operations(n);
     for (i, op) in migration.operations.iter().enumerate() {
-        let mut slot = ops.reborrow().get(i as u32);
+        let idx = capnp_u32_len(i, "plugin migration operation index")?;
+        let mut slot = ops.reborrow().get(idx);
         match op {
             PluginMigrationOp::Schema(sql) => slot.set_schema(sql),
             PluginMigrationOp::Data(sql) => slot.set_data(sql),
@@ -1580,17 +1597,29 @@ fn fill_plugin_migration(
 
 /// Decode plugin-owned migrations from a Cap'n Proto `databaseMigrations` ok payload.
 ///
+/// Rejects oversize lists and SQL text before allocating the corresponding
+/// `String` / completing the `Vec`.
+///
 /// # Errors
 ///
-/// Returns [`PluginError`] when the `migrations` list or a nested entry cannot be read.
-fn read_plugin_migrations(
-    r: crate::plugin_capnp::plugin_migrations_ok::Reader<'_>,
-) -> Result<Vec<PluginMigration>> {
+/// Returns [`PluginError::payload_too_large`] when a list, SQL text, or the
+/// aggregate registration exceeds the ABI limits.
+fn read_plugin_migrations(r: plugin_migrations_ok::Reader<'_>) -> Result<Vec<PluginMigration>> {
     let list = r.get_migrations().map_err(from_capnp)?;
-    let mut out = Vec::new();
-    for item in list.iter() {
-        out.push(read_plugin_migration(item)?);
+    if list.len() > MAX_LIST_PAGE {
+        return Err(PluginError::payload_too_large(format!(
+            "plugin migration count {} exceeds maxListPage ({MAX_LIST_PAGE})",
+            list.len()
+        )));
     }
+    let cap = usize::try_from(list.len()).unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
+    let mut total = 0usize;
+    let max_reg = usize::try_from(MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES).unwrap_or(0);
+    for item in list.iter() {
+        out.push(read_plugin_migration(item, &mut total, max_reg)?);
+    }
+    require_plugin_migration_registration(&out)?;
     Ok(out)
 }
 
@@ -1598,32 +1627,79 @@ fn read_plugin_migrations(
 ///
 /// # Errors
 ///
-/// Returns [`PluginError`] when the id or `operations` list cannot be read.
-fn read_plugin_migration(r: plugin_migration::Reader<'_>) -> Result<PluginMigration> {
-    let ops = r.get_operations().map_err(from_capnp)?;
-    let mut operations = Vec::new();
-    for op in ops.iter() {
-        operations.push(read_plugin_migration_op(op)?);
+/// Returns [`PluginError`] when the id or `operations` list cannot be read, or
+/// a size limit is exceeded.
+fn read_plugin_migration(
+    r: plugin_migration::Reader<'_>,
+    total: &mut usize,
+    max_reg: usize,
+) -> Result<PluginMigration> {
+    let id_text = r.get_id().map_err(from_capnp)?;
+    let id_len = id_text.as_bytes().len();
+    if id_len > MAX_PLUGIN_MIGRATION_ID_BYTES {
+        return Err(PluginError::payload_too_large(format!(
+            "plugin migration id is {id_len} bytes; maximum is {MAX_PLUGIN_MIGRATION_ID_BYTES}"
+        )));
     }
-    Ok(PluginMigration {
-        id: text_of(r.get_id().map_err(from_capnp)?),
-        operations,
-    })
+    *total = total.saturating_add(id_len);
+    if *total > max_reg {
+        return Err(PluginError::payload_too_large(format!(
+            "plugin migration registration is {total} bytes; exceeds \
+             maxPluginMigrationRegistrationBytes ({max_reg})"
+        )));
+    }
+    let id = text_of(id_text);
+    let ops = r.get_operations().map_err(from_capnp)?;
+    if ops.len() > MAX_PLUGIN_MIGRATION_OPS {
+        return Err(PluginError::payload_too_large(format!(
+            "plugin migration `{id}` has {} operations; exceeds maxPluginMigrationOps ({MAX_PLUGIN_MIGRATION_OPS})",
+            ops.len()
+        )));
+    }
+    let cap = usize::try_from(ops.len()).unwrap_or(0);
+    let mut operations = Vec::with_capacity(cap);
+    let max_sql = usize::try_from(MAX_SCALAR_BYTES).unwrap_or(0);
+    for op in ops.iter() {
+        operations.push(read_plugin_migration_op(op, &id, total, max_sql, max_reg)?);
+    }
+    Ok(PluginMigration { id, operations })
 }
 
 /// Decode one already-separated plugin migration operation from a Cap'n Proto reader.
 ///
 /// # Errors
 ///
-/// Returns [`PluginError`] when the operation union or SQL text cannot be read.
-fn read_plugin_migration_op(r: plugin_migration_op::Reader<'_>) -> Result<PluginMigrationOp> {
-    match r.which().map_err(from_capnp)? {
-        plugin_migration_op::Schema(sql) => {
-            Ok(PluginMigrationOp::Schema(text_of(sql.map_err(from_capnp)?)))
-        }
-        plugin_migration_op::Data(sql) => {
-            Ok(PluginMigrationOp::Data(text_of(sql.map_err(from_capnp)?)))
-        }
+/// Returns [`PluginError`] when the operation union or SQL text cannot be read,
+/// or the SQL / aggregate size limit is exceeded.
+fn read_plugin_migration_op(
+    r: plugin_migration_op::Reader<'_>,
+    id: &str,
+    total: &mut usize,
+    max_sql: usize,
+    max_reg: usize,
+) -> Result<PluginMigrationOp> {
+    let (is_schema, sql_text) = match r.which().map_err(from_capnp)? {
+        plugin_migration_op::Schema(sql) => (true, sql.map_err(from_capnp)?),
+        plugin_migration_op::Data(sql) => (false, sql.map_err(from_capnp)?),
+    };
+    let n = sql_text.as_bytes().len();
+    if n > max_sql {
+        return Err(PluginError::payload_too_large(format!(
+            "plugin migration `{id}` SQL is {n} bytes; exceeds maxScalarBytes ({max_sql})"
+        )));
+    }
+    *total = total.saturating_add(n);
+    if *total > max_reg {
+        return Err(PluginError::payload_too_large(format!(
+            "plugin migration registration is {total} bytes; exceeds \
+             maxPluginMigrationRegistrationBytes ({max_reg})"
+        )));
+    }
+    let sql = text_of(sql_text);
+    if is_schema {
+        Ok(PluginMigrationOp::Schema(sql))
+    } else {
+        Ok(PluginMigrationOp::Data(sql))
     }
 }
 
@@ -3396,7 +3472,7 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::missing_panics_doc)]
+#[allow(clippy::missing_panics_doc, clippy::missing_errors_doc)]
 mod tests {
     use super::*;
     use crate::{
@@ -3406,6 +3482,7 @@ mod tests {
         ObjectMetadata, PluginDescribe, PluginRoot, ProgressSink, PutResult, ReadResult,
         ScalarLimits, Source, SourceContext, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS,
         FEATURE_STREAMS, MAX_CHECKPOINT_BYTES, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE,
+        MAX_PLUGIN_MIGRATION_OPS, MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES, MAX_SCALAR_BYTES,
         PRODUCT_API_VERSION,
     };
     use crate::{
@@ -3536,6 +3613,7 @@ mod tests {
 
     struct TestPlugin {
         dest: Arc<MemDest>,
+        migrations: Option<Vec<PluginMigration>>,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -3577,6 +3655,9 @@ mod tests {
         }
 
         async fn database_migrations(&self, binding: &str) -> Result<Vec<PluginMigration>> {
+            if let Some(migrations) = &self.migrations {
+                return Ok(migrations.clone());
+            }
             if binding != "DB" {
                 return Ok(Vec::new());
             }
@@ -3942,6 +4023,7 @@ mod tests {
                     dest: Arc::new(MemDest {
                         store: Mutex::new(HashMap::new()),
                     }),
+                    migrations: None,
                 });
                 tokio::task::spawn_local(async move {
                     let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;
@@ -3973,6 +4055,7 @@ mod tests {
                     dest: Arc::new(MemDest {
                         store: Mutex::new(HashMap::new()),
                     }),
+                    migrations: None,
                 });
                 tokio::task::spawn_local(async move {
                     let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;
@@ -3994,6 +4077,211 @@ mod tests {
                     migrations[0].operations.first(),
                     Some(PluginMigrationOp::Schema(sql)) if sql.contains("notes")
                 ));
+            })
+            .await;
+    }
+
+    fn schema_mig(id: &str, sql: impl Into<String>) -> PluginMigration {
+        PluginMigration {
+            id: id.into(),
+            operations: vec![PluginMigrationOp::Schema(sql.into())],
+        }
+    }
+
+    fn n_migrations(n: usize) -> Vec<PluginMigration> {
+        (0..n)
+            .map(|i| schema_mig(&format!("m{i:03}"), "x"))
+            .collect()
+    }
+
+    fn n_ops(n: usize) -> PluginMigration {
+        PluginMigration {
+            id: "ops".into(),
+            operations: (0..n)
+                .map(|_| PluginMigrationOp::Schema("x".into()))
+                .collect(),
+        }
+    }
+
+    fn encode_then_decode(migrations: &[PluginMigration]) -> Result<Vec<PluginMigration>> {
+        require_plugin_migration_registration(migrations)?;
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let ok = message.init_root::<plugin_migrations_ok::Builder>();
+            fill_plugin_migrations(ok, migrations)?;
+        }
+        let reader = message
+            .get_root_as_reader::<plugin_migrations_ok::Reader<'_>>()
+            .map_err(from_capnp)?;
+        read_plugin_migrations(reader)
+    }
+
+    fn decode_unbounded(
+        fill: impl FnOnce(plugin_migrations_ok::Builder<'_>),
+    ) -> Result<Vec<PluginMigration>> {
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let ok = message.init_root::<plugin_migrations_ok::Builder>();
+            fill(ok);
+        }
+        let reader = message
+            .get_root_as_reader::<plugin_migrations_ok::Reader<'_>>()
+            .map_err(from_capnp)?;
+        read_plugin_migrations(reader)
+    }
+
+    #[test]
+    fn plugin_migrations_roundtrip_at_count_limit() {
+        let migrations = n_migrations(MAX_LIST_PAGE as usize);
+        let back = encode_then_decode(&migrations).expect("count N");
+        assert_eq!(back, migrations);
+    }
+
+    #[test]
+    fn plugin_migrations_decode_count_plus_one_is_payload_too_large() {
+        let n = MAX_LIST_PAGE + 1;
+        let err = decode_unbounded(|mut ok| {
+            let mut list = ok.reborrow().init_migrations(n);
+            for i in 0..n {
+                let mut m = list.reborrow().get(i);
+                m.set_id(format!("m{i:03}"));
+                m.reborrow().init_operations(1).get(0).set_schema("x");
+            }
+        })
+        .expect_err("count N+1");
+        assert_eq!(err.code, PluginErrorCode::PayloadTooLarge);
+        assert!(err.message.contains("maxListPage"), "{err}");
+    }
+
+    #[test]
+    fn plugin_migrations_roundtrip_at_ops_limit() {
+        let migrations = vec![n_ops(MAX_PLUGIN_MIGRATION_OPS as usize)];
+        let back = encode_then_decode(&migrations).expect("ops N");
+        assert_eq!(back, migrations);
+    }
+
+    #[test]
+    fn plugin_migrations_decode_ops_plus_one_is_payload_too_large() {
+        let n = MAX_PLUGIN_MIGRATION_OPS + 1;
+        let err = decode_unbounded(|mut ok| {
+            let mut list = ok.reborrow().init_migrations(1);
+            let mut m = list.reborrow().get(0);
+            m.set_id("ops");
+            let mut ops = m.reborrow().init_operations(n);
+            for i in 0..n {
+                ops.reborrow().get(i).set_schema("x");
+            }
+        })
+        .expect_err("ops N+1");
+        assert_eq!(err.code, PluginErrorCode::PayloadTooLarge);
+        assert!(err.message.contains("maxPluginMigrationOps"), "{err}");
+    }
+
+    #[test]
+    fn plugin_migrations_roundtrip_at_sql_limit() {
+        let sql = "x".repeat(MAX_SCALAR_BYTES as usize);
+        let migrations = vec![schema_mig("", sql)];
+        let back = encode_then_decode(&migrations).expect("sql N");
+        assert_eq!(back, migrations);
+    }
+
+    #[test]
+    fn plugin_migrations_decode_sql_plus_one_is_payload_too_large() {
+        let sql = "x".repeat(MAX_SCALAR_BYTES as usize + 1);
+        let err = decode_unbounded(|mut ok| {
+            let mut list = ok.reborrow().init_migrations(1);
+            let mut m = list.reborrow().get(0);
+            m.set_id("sql");
+            m.reborrow().init_operations(1).get(0).set_schema(&sql);
+        })
+        .expect_err("sql N+1");
+        assert_eq!(err.code, PluginErrorCode::PayloadTooLarge);
+        assert!(err.message.contains("maxScalarBytes"), "{err}");
+    }
+
+    #[test]
+    fn plugin_migrations_roundtrip_at_aggregate_limit() {
+        let max_reg = MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES as usize;
+        let id = "a";
+        let sql = "x".repeat(max_reg - id.len());
+        let migrations = vec![schema_mig(id, sql)];
+        let back = encode_then_decode(&migrations).expect("aggregate N");
+        assert_eq!(back, migrations);
+    }
+
+    #[test]
+    fn plugin_migrations_decode_aggregate_plus_one_is_payload_too_large() {
+        let half = (MAX_SCALAR_BYTES as usize) / 2 + 1;
+        let sql = "x".repeat(half);
+        let err = decode_unbounded(|mut ok| {
+            let mut list = ok.reborrow().init_migrations(2);
+            for (i, id) in ["a", "b"].iter().enumerate() {
+                let mut m = list.reborrow().get(u32::try_from(i).expect("index"));
+                m.set_id(id);
+                m.reborrow().init_operations(1).get(0).set_schema(&sql);
+            }
+        })
+        .expect_err("aggregate N+1");
+        assert_eq!(err.code, PluginErrorCode::PayloadTooLarge);
+        assert!(
+            err.message.contains("maxPluginMigrationRegistrationBytes"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn database_migrations_rpc_rejects_count_plus_one() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client_end, server_end) = duplex(256 * 1024);
+                let (server_r, server_w) = tokio::io::split(server_end);
+                let (client_r, client_w) = tokio::io::split(client_end);
+                let plugin = Arc::new(TestPlugin {
+                    dest: Arc::new(MemDest {
+                        store: Mutex::new(HashMap::new()),
+                    }),
+                    migrations: Some(n_migrations(MAX_LIST_PAGE as usize + 1)),
+                });
+                tokio::task::spawn_local(async move {
+                    let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;
+                });
+                let (client, rpc) = connect_plugin(client_r, client_w, 64 * 1024);
+                tokio::task::spawn_local(rpc);
+                let err = client
+                    .database_migrations("DB")
+                    .await
+                    .expect_err("oversize registration");
+                assert_eq!(err.code, PluginErrorCode::PayloadTooLarge);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn database_migrations_rpc_roundtrip_at_count_limit() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client_end, server_end) = duplex(256 * 1024);
+                let (server_r, server_w) = tokio::io::split(server_end);
+                let (client_r, client_w) = tokio::io::split(client_end);
+                let registered = n_migrations(MAX_LIST_PAGE as usize);
+                let plugin = Arc::new(TestPlugin {
+                    dest: Arc::new(MemDest {
+                        store: Mutex::new(HashMap::new()),
+                    }),
+                    migrations: Some(registered.clone()),
+                });
+                tokio::task::spawn_local(async move {
+                    let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;
+                });
+                let (client, rpc) = connect_plugin(client_r, client_w, 64 * 1024);
+                tokio::task::spawn_local(rpc);
+                let back = client
+                    .database_migrations("DB")
+                    .await
+                    .expect("count N roundtrip");
+                assert_eq!(back, registered);
             })
             .await;
     }
@@ -4063,6 +4351,7 @@ mod tests {
                     dest: Arc::new(MemDest {
                         store: Mutex::new(HashMap::new()),
                     }),
+                    migrations: None,
                 });
                 tokio::task::spawn_local(async move {
                     let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;
@@ -4095,6 +4384,7 @@ mod tests {
                     dest: Arc::new(MemDest {
                         store: Mutex::new(HashMap::new()),
                     }),
+                    migrations: None,
                 });
                 tokio::task::spawn_local(async move {
                     let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;
@@ -4126,6 +4416,7 @@ mod tests {
                     dest: Arc::new(MemDest {
                         store: Mutex::new(HashMap::new()),
                     }),
+                    migrations: None,
                 });
                 tokio::task::spawn_local(async move {
                     let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;

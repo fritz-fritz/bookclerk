@@ -33,6 +33,12 @@ const maxCheckpointBytes :UInt32 = 65536;
 const maxIdentifierBytes :UInt32 = 64;
 const maxConfigPayloadBytes :UInt32 = 65536;
 const maxEventPayloadBytes :UInt32 = 65536;
+# Plugin `databaseMigrations` is a startup-time scalar (not a stream). Count is
+# `maxListPage`. Each SQL text is `maxScalarBytes`. Ops-per-migration and the
+# aggregate UTF-8 bytes of ids + SQL have dedicated caps so a jailed guest
+# cannot force unbounded host allocation before semantic proof.
+const maxPluginMigrationOps :UInt32 = 256;
+const maxPluginMigrationRegistrationBytes :UInt32 = 262144;
 
 # Negotiable `rpcFeatures` wire names (see `PluginDescribe.rpcFeatures`).
 const featureScalarLimits :Text = "rpc.scalarLimits";
@@ -1173,10 +1179,12 @@ struct PluginMigrationOp {
 # Registration order is the forward sequence.
 struct PluginMigration {
   id @0 :Text;
-  operations @1 :List(PluginMigrationOp);
+  operations @1 :List(PluginMigrationOp); # at most `maxPluginMigrationOps`
 }
 
 struct PluginMigrationsOk {
+  # At most `maxListPage` entries; aggregate id+SQL bytes at most
+  # `maxPluginMigrationRegistrationBytes`.
   migrations @0 :List(PluginMigration);
 }
 
@@ -1203,5 +1211,7 @@ interface BookclerkPlugin {
   # Complete ordered plugin-owned migration sequence for one named binding.
   # Host calls this at binding initialization, before ordinary execute.
   # Empty list means the binding has no plugin-owned migrations.
+  # Bounded by `maxListPage` / `maxPluginMigrationOps` / `maxScalarBytes` /
+  # `maxPluginMigrationRegistrationBytes`.
   databaseMigrations @11 (binding :Text) -> (result :PluginMigrationsReply);
 }
