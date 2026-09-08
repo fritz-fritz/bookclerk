@@ -222,13 +222,16 @@ is not a plugin migration version. Journal, serialization slots, atomic
 receipts, and catalog tables are reserved; ordinary plugin SQL cannot name
 them. There is no native SQL escape hatch.
 
-Each pending suffix migration is one atomic unit (serialization slot + ops +
-journal append). Concurrent Bookclerk instances registering the same sequence
-converge: serialize per binding, re-read after the lock, treat matching
-`(id, checksum)` at the expected ordinal as success, fail closed on
-contradictory history, retry transient/unavailable under the existing bounded
-retry rules. On an ambiguous transport/commit outcome, re-read durable
-history; if the expected row is present, treat the application as successful.
+Each pending suffix migration is one atomic unit (serialization-slot
+mutation + ops + journal append) in a short transaction. Concurrent
+Bookclerk instances registering the same sequence converge without a
+process-spanning or walk-spanning lock: each host re-reads durable history
+before applying the next suffix item; uniqueness/conflict or an ambiguous
+commit reply causes another journal read; matching `(id, checksum)` at the
+expected ordinal is success; contradictory history fails closed; transient
+failures retry under the existing bounded policy. The serialization-slot
+SQL runs only inside that same atomic unit — it does not hold a lock
+across later independent migration transactions.
 
 There is no host-managed plugin downgrade. A plugin that wants to undo an
 earlier change registers a new forward migration. Operational rollback uses a
@@ -336,7 +339,7 @@ storage order only.
 | Ordered progression | Registration order. Host proves BookclerkSQL with one evolving `SqlTypeEnv`. |
 | Durable vs registered | `durable history == prefix(current registered history)`; anything else fails closed. |
 | DDL outside registration | Fail closed. Ordinary binding execute is DML/query only. |
-| Multi-node concurrency | `lock_serialization_slot("plugin_migrations")`; re-read under the fence. |
+| Multi-node concurrency | Each apply unit includes serialization-slot mutation + ops + journal append; re-read durable history on conflict or ambiguous result. No lock spans later independent transactions. |
 | Retries / interrupted recovery | Uniqueness / unavailable after re-read; matching `(id, checksum)` at expected ordinal ⇒ success; absent row ⇒ retry same migration; contradictory history ⇒ fail closed. |
 | Upgrade | Only a new suffix is pending. Stored history longer than registration ⇒ older plugin, fail closed. |
 | Downgrade | Never. New forward migration or restore a recovery point. |

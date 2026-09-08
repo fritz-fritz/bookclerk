@@ -10,16 +10,17 @@ use std::time::Duration;
 
 use bookclerk_plugin_abi::{
     authorize_guest_sql_policy, canonical_statements_checksum,
-    validate_guest_execute_request_for_policy, DbPlanStatementKind, DbResultSelection, DbValue,
-    ExecuteReply, ExecuteRequest, GuestSqlPolicy, PluginMigration, PluginMigrationOp, SqlTypeEnv,
-    TypedDbStatement, MAX_LIST_PAGE, MAX_PLUGIN_MIGRATION_ID_BYTES, PLUGIN_MIGRATIONS_TABLE,
+    require_plugin_migration_registration, validate_guest_execute_request_for_policy,
+    DbPlanStatementKind, DbResultSelection, DbValue, ExecuteReply, ExecuteRequest, GuestSqlPolicy,
+    PluginMigration, PluginMigrationOp, SqlTypeEnv, TypedDbStatement, MAX_LIST_PAGE,
+    MAX_PLUGIN_MIGRATION_ID_BYTES, PLUGIN_MIGRATIONS_TABLE,
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 
 use super::plan::sql_string_literal;
 use super::prove_plan_sql_op;
 use crate::error::{LibraryError, Result};
-use crate::sql_plan::{execute_typed_on_binding, lock_serialization_slot};
+use crate::sql_plan::execute_typed_on_binding;
 
 /// Timing label for plugin journal apply (not an adapter identity).
 const PLUGIN_TXN_TIMING: &str = "plugin_migrate_txn";
@@ -119,17 +120,16 @@ pub fn plugin_migration_checksum(id: &str, operations: &[PluginMigrationOp]) -> 
 ///
 /// # Errors
 ///
-/// Returns when an id is invalid, ids repeat, the list exceeds [`MAX_LIST_PAGE`],
+/// Returns when resource limits are exceeded, an id is invalid, ids repeat,
 /// an operation is empty/malformed, or BookclerkSQL proof fails.
+/// Transport/resource validation is
+/// [`bookclerk_plugin_abi::require_plugin_migration_registration`];
+/// this function is the authoritative semantic proof afterward.
 pub fn prove_plugin_migration_sequence(
     migrations: Vec<PluginMigration>,
 ) -> Result<PluginMigrationSequence> {
-    if migrations.len() > MAX_LIST_PAGE as usize {
-        return Err(LibraryError::Schema(format!(
-            "plugin migration registration has {} entries; maxListPage is {MAX_LIST_PAGE}",
-            migrations.len()
-        )));
-    }
+    require_plugin_migration_registration(&migrations)
+        .map_err(|err| LibraryError::Schema(err.to_string()))?;
     let mut seen = HashSet::new();
     let mut env = SqlTypeEnv::new();
     let mut proven = Vec::with_capacity(migrations.len());
@@ -453,6 +453,10 @@ pub fn plugin_journal_insert_sql(ordinal: i64, id: &str, checksum: &str) -> Stri
 }
 
 /// Portable insert-or-ignore + bump for [`PLUGIN_MIGRATION_SLOT_KEY`].
+///
+/// These statements run inside the same atomic apply unit as the migration
+/// operations and journal append. They do not hold a lock across later
+/// independent transactions.
 #[must_use]
 pub fn plugin_slot_lock_sql() -> Vec<String> {
     let key = sql_string_literal(PLUGIN_MIGRATION_SLOT_KEY);
@@ -498,10 +502,12 @@ pub fn remaining_plugin_suffix_batches(
 
 /// Applies the pending registered suffix. Idempotent when history already matches.
 ///
-/// Serializes on [`PLUGIN_MIGRATION_SLOT_KEY`], re-reads the journal, then applies
-/// each pending migration as one atomic unit (ops + journal row). Ambiguous
-/// completion re-reads: matching `(id, checksum)` at the expected ordinal is
-/// success. Contradictory history fails closed.
+/// Each pending migration is one short atomic unit: serialization-slot
+/// mutation + plugin operations + journal append. There is no lock held
+/// across those independent transactions. Concurrent hosts re-read durable
+/// history before applying; uniqueness / conflict / an ambiguous reply
+/// causes another journal read. Matching `(id, checksum)` at the expected
+/// ordinal is success. Contradictory history fails closed.
 ///
 /// # Errors
 ///
@@ -511,7 +517,6 @@ pub async fn apply_plugin_migrations(
     db: &DatabaseConnection,
     registered: &PluginMigrationSequence,
 ) -> Result<PluginMigrationHistory> {
-    lock_plugin_migration_slot(db).await?;
     let history = load_plugin_migration_history(db).await?;
     let suffix = pending_plugin_suffix(&history, registered)?.to_vec();
     let start = i64::try_from(history.len()).unwrap_or(i64::MAX);
@@ -520,33 +525,6 @@ pub async fn apply_plugin_migrations(
         apply_one_plugin_migration(db, ordinal, &migration).await?;
     }
     load_plugin_migration_history(db).await
-}
-
-/// Takes [`PLUGIN_MIGRATION_SLOT_KEY`] before walking the registered suffix.
-///
-/// # Errors
-///
-/// Returns when the slot table is missing (bootstrap not applied) or the
-/// portable slot lock itself fails.
-async fn lock_plugin_migration_slot(db: &DatabaseConnection) -> Result<()> {
-    match lock_serialization_slot(db, PLUGIN_MIGRATION_SLOT_KEY).await {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let msg = err.to_string().to_ascii_lowercase();
-            if msg.contains("db_serialization_slots")
-                && (msg.contains("no such table")
-                    || msg.contains("does not exist")
-                    || msg.contains("no such relation"))
-            {
-                Err(LibraryError::Schema(format!(
-                    "plugin migration apply requires db_serialization_slots \
-                     (apply binding bootstrap first): {err}"
-                )))
-            } else {
-                Err(err)
-            }
-        }
-    }
 }
 
 /// Applies one pending journal row (ops + marker) with lost-completion retry.
@@ -662,7 +640,7 @@ async fn run_plugin_atomic(
 mod tests {
     use super::*;
     use crate::apply_binding_bootstrap;
-    use bookclerk_plugin_abi::GuestSqlPolicy;
+    use bookclerk_plugin_abi::{GuestSqlPolicy, MAX_PLUGIN_MIGRATION_OPS};
 
     fn schema(sql: &str) -> PluginMigrationOp {
         PluginMigrationOp::Schema(sql.to_string())
@@ -690,6 +668,58 @@ mod tests {
 
     fn seq(migrations: Vec<PluginMigration>) -> PluginMigrationSequence {
         prove_plugin_migration_sequence(migrations).expect("prove")
+    }
+
+    #[test]
+    fn prove_rejects_count_plus_one_before_semantic_sql() {
+        let migrations: Vec<_> = (0..MAX_LIST_PAGE as usize + 1)
+            .map(|i| mig(&format!("m{i:03}"), vec![schema("x")]))
+            .collect();
+        let err = prove_plugin_migration_sequence(migrations).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("payload_too_large") || msg.contains("maxListPage"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn prove_runs_at_ops_limit() {
+        let extra = MAX_PLUGIN_MIGRATION_OPS as usize - 1;
+        let mut ops = vec![notes_create()];
+        for i in 0..extra {
+            ops.push(data(&format!(
+                "INSERT INTO notes (id, body) VALUES ({i}, 'x')"
+            )));
+        }
+        seq(vec![mig("bulk", ops)]);
+    }
+
+    #[test]
+    fn each_apply_batch_is_slot_ops_journal() {
+        let registered = seq(vec![mig("create-notes", vec![notes_create()])]);
+        let batches =
+            remaining_plugin_suffix_batches(&PluginMigrationHistory::default(), &registered)
+                .unwrap();
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert!(batch.len() >= 4, "{batch:?}");
+        assert!(
+            batch[0].contains("db_serialization_slots") && batch[0].contains("INSERT OR IGNORE"),
+            "{}",
+            batch[0]
+        );
+        assert!(
+            batch[1].contains("db_serialization_slots") && batch[1].contains("UPDATE"),
+            "{}",
+            batch[1]
+        );
+        assert!(batch[2].to_ascii_uppercase().contains("CREATE TABLE"));
+        assert!(
+            batch.last().unwrap().contains(PLUGIN_MIGRATIONS_TABLE),
+            "{}",
+            batch.last().unwrap()
+        );
     }
 
     async fn binding_db() -> DatabaseConnection {
