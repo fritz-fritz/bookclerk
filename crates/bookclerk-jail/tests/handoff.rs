@@ -154,8 +154,8 @@ exit 0
 /// unjailed half of this test is what makes the jailed half mean anything: it
 /// shows the probe really does leak one. Fd 9 is used instead of 3 so a runner
 /// that already has a diagnostic fd 3 does not make `exec 3<` a no-op. The
-/// guest is re-entered with `/bin/sh` so a missing execute bit cannot swallow
-/// the unjailed probe (empty stdout, nothing to compare).
+/// guest is re-entered with `/bin/sh` on both halves so a missing execute bit
+/// cannot swallow the unjailed probe (empty stdout, nothing to compare).
 #[test]
 fn an_inherited_descriptor_does_not_survive_the_handoff() {
     if !confinement_available() {
@@ -182,17 +182,22 @@ fi
     );
 
     // `exec 9<` opens without CLOEXEC, which is what a host that leaked a
-    // descriptor across the spawn would look like.
+    // descriptor across the spawn would look like. `$@` is either
+    // `/bin/sh guest` (unjailed probe) or `bookclerk-jail /bin/sh guest`.
     let opener = jail.path().join("leak-fd-9.sh");
     script(
         &opener,
         r#"
 exec 9< "$SECRET" || exit 2
-exec /bin/sh "$1"
+exec "$@"
 "#,
     );
 
-    let unjailed = run_script(&opener, &[guest.as_path()], &[("SECRET", secret.as_path())]);
+    let unjailed = run_script(
+        &opener,
+        &[Path::new("/bin/sh"), guest.as_path()],
+        &[("SECRET", secret.as_path())],
+    );
     assert!(
         unjailed.status.success(),
         "unjailed probe failed: {}\nstdout: {}\nstderr: {}",
