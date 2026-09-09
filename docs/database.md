@@ -340,10 +340,10 @@ a database is “at schema zero.”
 - **`Frozen`** — verify checksums, apply remaining frozen steps, then the current unreleased bucket if any
 - **Frozen newer than this binary** — fail closed (never auto-downgrade). Restore a backup.
 
-`bookclerk db version|backup|restore|migrate|downgrade` inspects
+`bookclerk db version|backup|restore|migrate` inspects
 state and walks frozen revisions without applying on connect. Version display
 is `uninitialized` / `unreleased@base<n>+<checksum>` / `frozen@<version>+<checksum>`.
-With an empty frozen plan, `downgrade` is a no-op; restore is time travel.
+With an empty frozen plan, `migrate --to` is a no-op; restore is time travel.
 
 A Bookclerk **recovery point** is one complete logical database state. The
 backup **repository** may physically reuse immutable canonical objects from
