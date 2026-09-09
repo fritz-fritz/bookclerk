@@ -2541,13 +2541,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host D1 schema");
         let now = "2024-06-01T00:00:00Z";
@@ -2621,13 +2618,10 @@ mod tests {
         .unwrap();
         interrupt.store(2, std::sync::atomic::Ordering::SeqCst);
         let proxy_for_batch = proxy.clone();
-        let err = bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        let err = bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect_err("interrupt mid-version");
         assert!(
@@ -2635,13 +2629,10 @@ mod tests {
             "{err}"
         );
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("retry after crash");
     }
@@ -2656,13 +2647,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host D1 schema");
         let mut catalog = bookclerk_library::migrations::host_sql_type_env();
@@ -2779,20 +2767,14 @@ mod tests {
         let p1 = proxy1.clone();
         let p2 = proxy2.clone();
         let (a, b) = tokio::join!(
-            bookclerk_library::apply_host_schema_with_batch(
-                &db1,
-                move |stmts| {
-                    let proxy = p1.clone();
-                    async move { run_schema_batch(proxy, stmts).await }
-                },
-            ),
-            bookclerk_library::apply_host_schema_with_batch(
-                &db2,
-                move |stmts| {
-                    let proxy = p2.clone();
-                    async move { run_schema_batch(proxy, stmts).await }
-                },
-            ),
+            bookclerk_library::apply_host_schema_with_batch(&db1, move |stmts| {
+                let proxy = p1.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },),
+            bookclerk_library::apply_host_schema_with_batch(&db2, move |stmts| {
+                let proxy = p2.clone();
+                async move { run_schema_batch(proxy, stmts).await }
+            },),
         );
         a.expect("independent proxy 1 schema");
         b.expect("independent proxy 2 schema");
@@ -2864,13 +2846,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("reload after committed-but-lost HTTP reply");
     }
@@ -2912,13 +2891,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema for guest typed replay");
 
@@ -2976,13 +2952,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema for lost-reply guest typed");
 
@@ -3042,13 +3015,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema for pragma-fail guest typed");
 
@@ -3133,13 +3103,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy1.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema for concurrent claim");
 
@@ -3258,13 +3225,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema for claimed resume");
 
@@ -3355,13 +3319,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema for mixed batch");
 
@@ -3451,13 +3412,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema for mixed gate batch");
 
@@ -3549,13 +3507,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema for portable fns");
 
@@ -3649,13 +3604,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema for boolean");
 
@@ -3728,13 +3680,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema for lowercase");
 
@@ -3821,13 +3770,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema for semantic vectors");
 
@@ -4507,13 +4453,10 @@ mod tests {
         .await
         .unwrap();
         let proxy_for_batch = proxy.clone();
-        bookclerk_library::apply_host_schema_with_batch(
-            &db,
-            move |stmts| {
-                let proxy = proxy_for_batch.clone();
-                async move { run_schema_batch(proxy, stmts).await }
-            },
-        )
+        bookclerk_library::apply_host_schema_with_batch(&db, move |stmts| {
+            let proxy = proxy_for_batch.clone();
+            async move { run_schema_batch(proxy, stmts).await }
+        })
         .await
         .expect("host schema");
         proxy
