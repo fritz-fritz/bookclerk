@@ -133,9 +133,7 @@ pub use proxy_txn::{
     with_exec_budget, AtomicInterruptKind, AtomicInterruptPhase, ExecBudget,
 };
 pub use schema_state::{SchemaState, SCHEMA_STATE_FROZEN, SCHEMA_STATE_UNRELEASED};
-pub use schema_walk::{
-    plan_downgrade_to_binary, plan_schema_walk, plan_schema_walk_from_state, SchemaWalk,
-};
+pub use schema_walk::{plan_schema_walk, plan_schema_walk_from_state, SchemaWalk};
 pub use scope::SourceScope;
 pub use secrets::{
     b64_string_to_bytes, build_sealed_record, bytes_to_b64_string, clear_unseal_cache,

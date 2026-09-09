@@ -293,8 +293,9 @@ migration SQL fails closed (never checksumed as one opaque statement).
 
 `host_migration_plan()` stays **empty**. Live schema is [`unreleased_ops`](../../crates/bookclerk-library/src/migrations.rs)
 (mostly `Schema`, plus seed `Data` inserts). Checksums hash the
-**length-prefixed ordered statement list**, not a joined script. CLI downgrade
-applies `down` only when every step has it; otherwise restore a backup.
+**length-prefixed ordered statement list**, not a joined script. `db migrate
+--to <older>` applies `down` only when every step has it; otherwise restore a
+backup.
 
 Invariants (locked with synthetic plans, not a v1 freeze):
 
@@ -319,10 +320,10 @@ Invariants (locked with synthetic plans, not a v1 freeze):
 
 ### Last-reversible CLI
 
-`bookclerk db version|backup|restore|migrate|downgrade` uses
+`bookclerk db version|backup|restore|migrate` uses
 `connect_without_migrate`.
 
-With an empty frozen plan, schema-version downgrade is a no-op. Time-based
+With an empty frozen plan, `migrate --to` is a no-op. Time-based
 **restore** is how operators move independently of schema revision.
 
 ### Out of scope

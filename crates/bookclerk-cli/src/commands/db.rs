@@ -1,4 +1,4 @@
-//! `bookclerk db` — schema state, backups, migrate, and last-reversible downgrade.
+//! `bookclerk db` — schema state, backups, and explicit migrate.
 
 use std::path::{Path, PathBuf};
 
@@ -18,7 +18,7 @@ use serde_json::json;
 use crate::format_out::{emit, OutputFormat};
 
 #[derive(Debug, Subcommand)]
-/// Host schema versioning, backups, and explicit ups/downs.
+/// Host schema versioning, backups, and explicit ups/downs (`migrate --to`).
 pub enum DbCommand {
     /// Show this binary's frozen plan and the database's explicit schema state.
     Version,
@@ -42,12 +42,6 @@ pub enum DbCommand {
         /// Target frozen schema version (defaults to this binary's [`SCHEMA_VERSION`]).
         #[arg(long)]
         to: Option<i64>,
-        /// Include plugin-owned database bindings in the pre-migrate backup.
-        #[arg(long)]
-        include_plugin_databases: bool,
-    },
-    /// Roll back toward this binary's frozen plan, stopping at the last reversible step.
-    Downgrade {
         /// Include plugin-owned database bindings in the pre-migrate backup.
         #[arg(long)]
         include_plugin_databases: bool,
@@ -109,9 +103,6 @@ pub async fn run(command: DbCommand, config: &Config, format: OutputFormat) -> a
             )
             .await
         }
-        DbCommand::Downgrade {
-            include_plugin_databases,
-        } => run_migrate(config, format, SCHEMA_VERSION, include_plugin_databases).await,
     }
 }
 
@@ -128,7 +119,7 @@ async fn open_unmigrated(
     Ok((db, caps))
 }
 
-/// Backup options used before explicit CLI migrate / downgrade.
+/// Backup options used before an explicit CLI migrate.
 async fn apply_opts(
     config: &Config,
     db: &DatabaseConnection,
