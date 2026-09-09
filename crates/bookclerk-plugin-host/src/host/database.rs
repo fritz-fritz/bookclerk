@@ -839,9 +839,13 @@ async fn load_binding_plugin_history(
 
 /// RPC-host adapter for [`super::plugin_migration_apply::apply_registered_plugin_migrations`].
 struct BindingPluginMigrationHost<'a> {
+    /// Live plugin session used to execute binding-scoped typed requests.
     session: &'a PluginSession,
+    /// Session key for this binding's database handle.
     key: &'a str,
+    /// Plugin id that owns the binding.
     owner: &'a str,
+    /// Binding name inside that plugin.
     binding: &'a str,
 }
 
