@@ -1,7 +1,7 @@
 //! Shared SQL-plan conformance vectors (SQLite in-process).
 //!
 //! **Admission (#178):** database plugins must pass
-//! [`super::typed_vectors::run_typed_request_vectors`] with a callback that
+//! [`super::vectors_typed::run_typed_request_vectors`] with a callback that
 //! executes native [`ExecuteRequest`] / [`ExecuteReply`] (Cap'n Proto on the wire).
 
 use crate::atomic_ops::{atomic_status, DbAtomicParams};
@@ -102,7 +102,7 @@ fn typed_req(
 #[tokio::test]
 async fn typed_shared_vectors_on_sqlite() {
     let db = mem_db().await;
-    super::typed_vectors::run_typed_conn_vectors(&db, DbCapabilities::advertised_sqlite()).await;
+    super::vectors_typed::run_typed_conn_vectors(&db, DbCapabilities::advertised_sqlite()).await;
 }
 
 #[tokio::test]
@@ -112,7 +112,7 @@ async fn typed_shared_vectors_on_postgres() {
         return;
     }
     let db = postgres_migrated_db().await;
-    super::typed_vectors::run_typed_conn_vectors(&db, DbCapabilities::advertised_postgres()).await;
+    super::vectors_typed::run_typed_conn_vectors(&db, DbCapabilities::advertised_postgres()).await;
 }
 
 #[tokio::test]
