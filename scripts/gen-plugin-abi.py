@@ -36,10 +36,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+import capnp_schema
 import sdk_emitters
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,12 +55,15 @@ CAPNP_SCHEMAS = (
     ROOT / "crates/bookclerk-plugin-abi/schema/plugin.capnp",
     ROOT / "crates/bookclerk-plugin-abi/schema/plugin_host.capnp",
 )
+LAYOUT_JSON = ROOT / "crates/bookclerk-plugin-abi/schema/plugin.layout.json"
 TS_GENERATED = ROOT / "packages/plugin-sdk/src/generated.ts"
+TS_WIRE = ROOT / "packages/plugin-sdk/src/generated-wire.ts"
 TS_ABI = ROOT / "packages/plugin-sdk/src/abi.ts"
 TS_DB_EXECUTE = ROOT / "packages/plugin-sdk/src/db-execute.ts"
 TS_EMBED = ROOT / "packages/plugin-sdk/embed/bookclerk_plugin.js"
 RS_EMBED = ROOT / "crates/bookclerk-plugin-sdk/embed/bookclerk_plugin.js"
 PY_ABI = ROOT / "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/abi.py"
+PY_WIRE = ROOT / "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/_wire.py"
 PY_PRODUCT_ABI = ROOT / "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/_abi.py"
 PY_DB_VALUE = ROOT / "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/db_value.py"
 PLUGIN_TOML_SCHEMA = ROOT / "crates/bookclerk-plugin-abi/schema/plugin-toml.json"
@@ -74,16 +79,59 @@ REQUIRED_WIRE_FIXTURES = (
 )
 
 
-def generated_targets() -> dict[Path, str]:
+def layout_json(refresh: bool) -> str:
+    """Contents of ``plugin.layout.json``.
+
+    With ``refresh`` the Cap'n Proto compiler is consulted through
+    ``tools/abi-layout`` (requires ``capnp`` and a warm ``cargo``); otherwise
+    the committed document is used and cross-checked against the parsed
+    schema by ``sdk_emitters.layout_errors``.
+    """
+    if not refresh:
+        if not LAYOUT_JSON.is_file():
+            raise SystemExit(
+                f"missing {LAYOUT_JSON.relative_to(ROOT)}; run with --refresh-layout"
+            )
+        return LAYOUT_JSON.read_text(encoding="utf-8")
+    proc = subprocess.run(
+        ["cargo", "run", "-q", "-p", "abi-layout", "--", "--schema-dir", str(LAYOUT_JSON.parent)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise SystemExit(f"abi-layout failed:\n{proc.stderr}")
+    return proc.stdout
+
+
+def check_schema_docs() -> list[str]:
+    """Every declaration in plugin.capnp carries a doc comment."""
+    schema = capnp_schema.parse_schema(CAPNP_SCHEMAS[0].read_text(encoding="utf-8"))
+    return [f"plugin.capnp:{m}: missing doc comment" for m in capnp_schema.missing_docs(schema)]
+
+
+def check_layout(layout_text: str) -> list[str]:
+    """The layout document describes exactly the parsed schema."""
+    capnp_text = CAPNP_SCHEMAS[0].read_text(encoding="utf-8")
+    layout = sdk_emitters.Layout(json.loads(layout_text))
+    return sdk_emitters.layout_errors(capnp_schema.parse_schema(capnp_text), layout)
+
+
+def generated_targets(layout_text: str) -> dict[Path, str]:
     """Expected contents for every generated SDK artifact, keyed by path."""
     capnp_text = CAPNP_SCHEMAS[0].read_text(encoding="utf-8")
     embed_text = TS_EMBED.read_text(encoding="utf-8")
     synced_embed = sdk_emitters.sync_embed_constants(embed_text, capnp_text)
+    layout = sdk_emitters.Layout(json.loads(layout_text))
     return {
+        LAYOUT_JSON: layout_text,
         TS_ABI: sdk_emitters.emit_ts_abi(capnp_text),
         TS_GENERATED: sdk_emitters.emit_ts_generated(capnp_text),
+        TS_WIRE: sdk_emitters.emit_ts_wire(capnp_text, layout),
         PY_PRODUCT_ABI: sdk_emitters.emit_py_product_abi(capnp_text),
         PY_ABI: sdk_emitters.emit_py_abi(capnp_text),
+        PY_WIRE: sdk_emitters.emit_py_wire(capnp_text, layout),
         TS_EMBED: synced_embed,
         # The Rust SDK ships a byte-identical embed mirror via include_str!.
         RS_EMBED: synced_embed,
@@ -206,13 +254,19 @@ def rust_struct_wire_fields(name: str) -> list[str] | None:
     return None
 
 
+def json_payload_decls(schema: capnp_schema.Schema) -> list[capnp_schema.Decl]:
+    """Declarations inside the schema's JSON payload contracts section."""
+    names = sdk_emitters.json_payload_names(CAPNP_SCHEMAS[0].read_text(encoding="utf-8"))
+    return [d for d in schema.decls if d.name in names]
+
+
 def check_rust_dto_drift() -> list[str]:
     """Rust serde DTOs must match the schema's JSON payload structs."""
     capnp_text = CAPNP_SCHEMAS[0].read_text(encoding="utf-8")
-    section = sdk_emitters.parse_json_section(capnp_text)
+    schema = capnp_schema.parse_schema(capnp_text)
     errors: list[str] = []
-    for decl in section.decls:
-        if isinstance(decl, sdk_emitters.CapnpAlias):
+    for decl in json_payload_decls(schema):
+        if isinstance(decl, capnp_schema.Alias):
             found = False
             for path in (TYPES_RS, KIND_RS):
                 if re.search(
@@ -225,7 +279,7 @@ def check_rust_dto_drift() -> list[str]:
                     f"missing Rust alias `pub type {decl.name} = {decl.target};`"
                 )
             continue
-        if not isinstance(decl, sdk_emitters.CapnpStruct):
+        if not isinstance(decl, capnp_schema.Struct):
             continue
         rust_fields = rust_struct_wire_fields(decl.name)
         if rust_fields is None:
@@ -342,12 +396,30 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write", action="store_true")
     parser.add_argument("--check", action="store_true")
+    parser.add_argument(
+        "--refresh-layout",
+        action="store_true",
+        help="re-derive plugin.layout.json via `cargo run -p abi-layout` (needs capnp)",
+    )
     args = parser.parse_args()
     if not args.write:
         args.check = True
 
+    layout_text = layout_json(refresh=args.refresh_layout)
+    layout_problems = check_layout(layout_text)
+    if layout_problems:
+        for err in layout_problems:
+            print(f"layout: {err}", file=sys.stderr)
+        print(
+            "plugin.layout.json does not match plugin.capnp "
+            "(run scripts/gen-plugin-abi.py --write --refresh-layout)",
+            file=sys.stderr,
+        )
+        return 1
+
     drift = False
-    for path, expected in generated_targets().items():
+    targets = generated_targets(layout_text)
+    for path, expected in targets.items():
         current = path.read_text(encoding="utf-8") if path.is_file() else ""
         if current == expected:
             continue
@@ -365,6 +437,7 @@ def main() -> int:
     # The remaining checks are not auto-fixable; fail even under `--write`.
     check_errors: list[str] = []
     for label, check in (
+        ("schema docs", check_schema_docs),
         ("wire fixtures", check_wire_fixtures),
         ("abi exports", check_abi_lib_exports),
         ("statement kinds", check_statement_kinds),
@@ -382,9 +455,10 @@ def main() -> int:
     if drift and args.check and not args.write:
         return 1
     capnp_text = CAPNP_SCHEMAS[0].read_text(encoding="utf-8")
-    section = sdk_emitters.parse_json_section(capnp_text)
+    schema = capnp_schema.parse_schema(capnp_text)
     print(
-        f"ok generated={len(generated_targets())} json_dtos={len(section.decls)} "
+        f"ok generated={len(targets)} structs={len(schema.structs)} "
+        f"interfaces={len(schema.interfaces)} json_dtos={len(json_payload_decls(schema))} "
         f"wire_fixtures={len(REQUIRED_WIRE_FIXTURES)} "
         f"abi_export_guard={len(FORBIDDEN_ABI_LIB_EXPORTS)} "
         f"statement_kinds={len(statement_kinds_rust())} "
