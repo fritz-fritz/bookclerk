@@ -21,7 +21,8 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::host_roles::HostAdapterDatabaseSession;
 use crate::limits::{
     ScalarLimits, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_PLUGIN_MIGRATION_OPS,
-    MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES,
+    MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES, MAX_PLUGIN_MIGRATION_TOTAL_OPS, MAX_SCALAR_BYTES,
+    MAX_STREAM_WINDOW_BYTES,
 };
 use crate::plugin_capnp::{
     adapter_database_session as adapter_database_session_capnp, adapter_session_reply,
@@ -1615,9 +1616,15 @@ fn read_plugin_migrations(r: plugin_migrations_ok::Reader<'_>) -> Result<Vec<Plu
     let cap = usize::try_from(list.len()).unwrap_or(0);
     let mut out = Vec::with_capacity(cap);
     let mut total = 0usize;
+    let mut total_ops = 0usize;
     let max_reg = usize::try_from(MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES).unwrap_or(0);
     for item in list.iter() {
-        out.push(read_plugin_migration(item, &mut total, max_reg)?);
+        out.push(read_plugin_migration(
+            item,
+            &mut total,
+            &mut total_ops,
+            max_reg,
+        )?);
     }
     require_plugin_migration_registration(&out)?;
     Ok(out)
@@ -1632,6 +1639,7 @@ fn read_plugin_migrations(r: plugin_migrations_ok::Reader<'_>) -> Result<Vec<Plu
 fn read_plugin_migration(
     r: plugin_migration::Reader<'_>,
     total: &mut usize,
+    total_ops: &mut usize,
     max_reg: usize,
 ) -> Result<PluginMigration> {
     let id_text = r.get_id().map_err(from_capnp)?;
@@ -1656,8 +1664,15 @@ fn read_plugin_migration(
             ops.len()
         )));
     }
-    let cap = usize::try_from(ops.len()).unwrap_or(0);
-    let mut operations = Vec::with_capacity(cap);
+    let n_ops = usize::try_from(ops.len()).unwrap_or(0);
+    *total_ops = total_ops.saturating_add(n_ops);
+    if *total_ops > usize::try_from(MAX_PLUGIN_MIGRATION_TOTAL_OPS).unwrap_or(0) {
+        return Err(PluginError::payload_too_large(format!(
+            "plugin migration registration has {total_ops} operations; exceeds \
+             maxPluginMigrationTotalOps ({MAX_PLUGIN_MIGRATION_TOTAL_OPS})"
+        )));
+    }
+    let mut operations = Vec::with_capacity(n_ops);
     let max_sql = usize::try_from(MAX_SCALAR_BYTES).unwrap_or(0);
     for op in ops.iter() {
         operations.push(read_plugin_migration_op(op, &id, total, max_sql, max_reg)?);
@@ -3482,8 +3497,8 @@ mod tests {
         ObjectMetadata, PluginDescribe, PluginRoot, ProgressSink, PutResult, ReadResult,
         ScalarLimits, Source, SourceContext, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS,
         FEATURE_STREAMS, MAX_CHECKPOINT_BYTES, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE,
-        MAX_PLUGIN_MIGRATION_OPS, MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES, MAX_SCALAR_BYTES,
-        PRODUCT_API_VERSION,
+        MAX_PLUGIN_MIGRATION_OPS, MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES,
+        MAX_PLUGIN_MIGRATION_TOTAL_OPS, MAX_SCALAR_BYTES, PRODUCT_API_VERSION,
     };
     use crate::{
         ExecuteRequest, PluginError, PluginErrorCode, PluginMigration, PluginMigrationOp, Result,
@@ -4177,6 +4192,52 @@ mod tests {
         assert!(err.message.contains("maxPluginMigrationOps"), "{err}");
     }
 
+    fn n_ops_spread(total: usize, per_migration: usize) -> Vec<PluginMigration> {
+        assert!(per_migration > 0);
+        let full = total / per_migration;
+        let rem = total % per_migration;
+        let mut out = Vec::new();
+        for i in 0..full {
+            let mut m = n_ops(per_migration);
+            m.id = format!("t{i:03}");
+            out.push(m);
+        }
+        if rem > 0 {
+            let mut m = n_ops(rem);
+            m.id = format!("t{full:03}");
+            out.push(m);
+        }
+        out
+    }
+
+    #[test]
+    fn plugin_migrations_roundtrip_at_total_ops_limit() {
+        let per = MAX_PLUGIN_MIGRATION_OPS as usize / 2;
+        let migrations = n_ops_spread(MAX_PLUGIN_MIGRATION_TOTAL_OPS as usize, per);
+        let back = encode_then_decode(&migrations).expect("total ops N");
+        assert_eq!(back, migrations);
+    }
+
+    #[test]
+    fn plugin_migrations_decode_total_ops_plus_one_is_payload_too_large() {
+        let per = MAX_PLUGIN_MIGRATION_OPS;
+        let n = (MAX_PLUGIN_MIGRATION_TOTAL_OPS / per) + 1;
+        let err = decode_unbounded(|mut ok| {
+            let mut list = ok.reborrow().init_migrations(n);
+            for i in 0..n {
+                let mut m = list.reborrow().get(i);
+                m.set_id(format!("m{i:03}"));
+                let mut ops = m.reborrow().init_operations(per);
+                for j in 0..per {
+                    ops.reborrow().get(j).set_schema("x");
+                }
+            }
+        })
+        .expect_err("total ops N+1");
+        assert_eq!(err.code, PluginErrorCode::PayloadTooLarge);
+        assert!(err.message.contains("maxPluginMigrationTotalOps"), "{err}");
+    }
+
     #[test]
     fn plugin_migrations_roundtrip_at_sql_limit() {
         let sql = "x".repeat(MAX_SCALAR_BYTES as usize);
@@ -4282,6 +4343,39 @@ mod tests {
                     .await
                     .expect("count N roundtrip");
                 assert_eq!(back, registered);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn database_migrations_rpc_rejects_total_ops_plus_one() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client_end, server_end) = duplex(256 * 1024);
+                let (server_r, server_w) = tokio::io::split(server_end);
+                let (client_r, client_w) = tokio::io::split(client_end);
+                let per = MAX_PLUGIN_MIGRATION_OPS as usize / 2;
+                let plugin = Arc::new(TestPlugin {
+                    dest: Arc::new(MemDest {
+                        store: Mutex::new(HashMap::new()),
+                    }),
+                    migrations: Some(n_ops_spread(
+                        MAX_PLUGIN_MIGRATION_TOTAL_OPS as usize + 1,
+                        per,
+                    )),
+                });
+                tokio::task::spawn_local(async move {
+                    let _ = serve_plugin(plugin, server_r, server_w, 64 * 1024).await;
+                });
+                let (client, rpc) = connect_plugin(client_r, client_w, 64 * 1024);
+                tokio::task::spawn_local(rpc);
+                let err = client
+                    .database_migrations("DB")
+                    .await
+                    .expect_err("oversize total ops");
+                assert_eq!(err.code, PluginErrorCode::PayloadTooLarge);
+                assert!(err.message.contains("maxPluginMigrationTotalOps"), "{err}");
             })
             .await;
     }

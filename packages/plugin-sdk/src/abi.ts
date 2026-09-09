@@ -32,6 +32,9 @@ export const MAX_EVENT_PAYLOAD_BYTES = 65536 as const;
 /** Maximum already-separated operations in one plugin-owned migration. */
 export const MAX_PLUGIN_MIGRATION_OPS = 256 as const;
 
+/** Maximum already-separated operations across one `databaseMigrations` registration. */
+export const MAX_PLUGIN_MIGRATION_TOTAL_OPS = 2048 as const;
+
 /** Maximum aggregate UTF-8 bytes of plugin migration ids plus SQL in one `databaseMigrations` registration. */
 export const MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES = 262144 as const;
 

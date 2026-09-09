@@ -33,6 +33,9 @@ MAX_EVENT_PAYLOAD_BYTES: int = 65536
 MAX_PLUGIN_MIGRATION_OPS: int = 256
 """Maximum already-separated operations in one plugin-owned migration."""
 
+MAX_PLUGIN_MIGRATION_TOTAL_OPS: int = 2048
+"""Maximum already-separated operations across one `databaseMigrations` registration."""
+
 MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES: int = 262144
 """Maximum aggregate UTF-8 bytes of plugin migration ids plus SQL in one `databaseMigrations` registration."""
 
@@ -64,6 +67,7 @@ __all__ = [
     "MAX_CONFIG_PAYLOAD_BYTES",
     "MAX_EVENT_PAYLOAD_BYTES",
     "MAX_PLUGIN_MIGRATION_OPS",
+    "MAX_PLUGIN_MIGRATION_TOTAL_OPS",
     "MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES",
     "FEATURE_SCALAR_LIMITS",
     "FEATURE_STREAMS",

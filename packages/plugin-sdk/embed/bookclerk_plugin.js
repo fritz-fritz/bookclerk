@@ -62,12 +62,20 @@ function requirePluginMigrationRegistration(migrations) {
     );
   }
   let total = 0;
+  let totalOps = 0;
   for (const migration of list) {
     const ops = Array.isArray(migration?.operations) ? migration.operations : [];
     if (ops.length > MAX_PLUGIN_MIGRATION_OPS) {
       throw PluginError.fromWire(
         "payload_too_large",
         `plugin migration \`${migration?.id}\` has ${ops.length} operations; exceeds maxPluginMigrationOps (${MAX_PLUGIN_MIGRATION_OPS})`,
+      );
+    }
+    totalOps += ops.length;
+    if (totalOps > MAX_PLUGIN_MIGRATION_TOTAL_OPS) {
+      throw PluginError.fromWire(
+        "payload_too_large",
+        `plugin migration registration has ${totalOps} operations; exceeds maxPluginMigrationTotalOps (${MAX_PLUGIN_MIGRATION_TOTAL_OPS})`,
       );
     }
     total += utf8Bytes(migration?.id);
@@ -107,6 +115,7 @@ export const MAX_SCALAR_BYTES = 262144;
 export const MAX_STREAM_WINDOW_BYTES = 1048576;
 export const MAX_LIST_PAGE = 256;
 export const MAX_PLUGIN_MIGRATION_OPS = 256;
+export const MAX_PLUGIN_MIGRATION_TOTAL_OPS = 2048;
 export const MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES = 262144;
 export const FEATURE_SCALAR_LIMITS = "rpc.scalarLimits";
 export const FEATURE_STREAMS = "rpc.streams";

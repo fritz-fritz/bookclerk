@@ -151,8 +151,9 @@ pub use host_envelope::{GuestReceiptPersist, HostExecuteEnvelope};
 pub use kind::*;
 pub use methods::METHOD_NAMES;
 pub use plugin_migration::{
-    capnp_u32_len, plugin_migration_registration_bytes, require_plugin_migration_registration,
-    PluginMigration, PluginMigrationOp, MAX_PLUGIN_MIGRATION_ID_BYTES, PLUGIN_MIGRATIONS_TABLE,
+    capnp_u32_len, plugin_migration_registration_bytes, require_plugin_migration_json_lists,
+    require_plugin_migration_registration, PluginMigration, PluginMigrationOp,
+    MAX_PLUGIN_MIGRATION_ID_BYTES, PLUGIN_MIGRATIONS_TABLE,
 };
 #[cfg(feature = "host")]
 pub use sql_overflow::{apply_integer_overflow, OverflowDialect};
@@ -210,8 +211,8 @@ pub use features::{
 pub use jobs::{read_all, stream_copy_keys, StreamCopyHandler, StreamCopySpec};
 pub use limits::{
     ScalarLimits, MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_PLUGIN_MIGRATION_OPS,
-    MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES,
-    PRODUCT_API_VERSION,
+    MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES, MAX_PLUGIN_MIGRATION_TOTAL_OPS, MAX_SCALAR_BYTES,
+    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 pub use roles::{
     AdapterDatabaseSession, ByteRange, Cancellation, ContentSource, ContentSourceContext, Database,

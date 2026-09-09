@@ -6,6 +6,7 @@ from bookclerk_plugin_sdk._abi import (
     MAX_LIST_PAGE,
     MAX_PLUGIN_MIGRATION_OPS,
     MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES,
+    MAX_PLUGIN_MIGRATION_TOTAL_OPS,
     MAX_SCALAR_BYTES,
 )
 from bookclerk_plugin_sdk.plugin_migration import require_plugin_migration_registration
@@ -45,6 +46,25 @@ def test_ops_plus_one_payload_too_large():
         )
     assert exc.value.code == "payload_too_large"
     assert "maxPluginMigrationOps" in str(exc.value)
+
+
+def test_max_total_ops_ok():
+    per = MAX_PLUGIN_MIGRATION_OPS // 2
+    n = MAX_PLUGIN_MIGRATION_TOTAL_OPS // per
+    require_plugin_migration_registration(
+        [_mig(f"t{i:03}", ops=per) for i in range(n)]
+    )
+
+
+def test_total_ops_plus_one_payload_too_large():
+    per = MAX_PLUGIN_MIGRATION_OPS // 2
+    n = MAX_PLUGIN_MIGRATION_TOTAL_OPS // per
+    migrations = [_mig(f"t{i:03}", ops=per) for i in range(n)]
+    migrations.append(_mig("extra", ops=1))
+    with pytest.raises(PluginError) as exc:
+        require_plugin_migration_registration(migrations)
+    assert exc.value.code == "payload_too_large"
+    assert "maxPluginMigrationTotalOps" in str(exc.value)
 
 
 def test_max_sql_ok():

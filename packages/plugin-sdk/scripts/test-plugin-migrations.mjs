@@ -9,6 +9,7 @@ const {
   MAX_LIST_PAGE,
   MAX_PLUGIN_MIGRATION_OPS,
   MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES,
+  MAX_PLUGIN_MIGRATION_TOTAL_OPS,
   MAX_SCALAR_BYTES,
 } = await import(join(dist, "abi.js"));
 const { requirePluginMigrationRegistration } = await import(
@@ -54,6 +55,25 @@ requirePluginMigrationRegistration([mig("ops", "x", MAX_PLUGIN_MIGRATION_OPS)]);
     requirePluginMigrationRegistration([mig("ops", "x", MAX_PLUGIN_MIGRATION_OPS + 1)]),
   );
   assert.match(err.message, /maxPluginMigrationOps/);
+}
+
+{
+  const per = Math.floor(MAX_PLUGIN_MIGRATION_OPS / 2);
+  const n = MAX_PLUGIN_MIGRATION_TOTAL_OPS / per;
+  requirePluginMigrationRegistration(
+    Array.from({ length: n }, (_, i) => mig(`t${String(i).padStart(3, "0")}`, "x", per)),
+  );
+}
+
+{
+  const per = Math.floor(MAX_PLUGIN_MIGRATION_OPS / 2);
+  const n = MAX_PLUGIN_MIGRATION_TOTAL_OPS / per;
+  const migrations = Array.from({ length: n }, (_, i) =>
+    mig(`t${String(i).padStart(3, "0")}`, "x", per),
+  );
+  migrations.push(mig("extra", "x", 1));
+  const err = tooLarge(() => requirePluginMigrationRegistration(migrations));
+  assert.match(err.message, /maxPluginMigrationTotalOps/);
 }
 
 requirePluginMigrationRegistration([mig("", "x".repeat(MAX_SCALAR_BYTES))]);

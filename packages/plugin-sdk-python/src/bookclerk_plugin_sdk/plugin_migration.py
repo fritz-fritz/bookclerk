@@ -12,6 +12,7 @@ from ._abi import (
     MAX_LIST_PAGE,
     MAX_PLUGIN_MIGRATION_OPS,
     MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES,
+    MAX_PLUGIN_MIGRATION_TOTAL_OPS,
     MAX_SCALAR_BYTES,
 )
 
@@ -71,6 +72,7 @@ def require_plugin_migration_registration(migrations: Any) -> list[Any]:
             f"plugin migration count {len(migrations)} exceeds maxListPage ({MAX_LIST_PAGE})",
         )
     total = 0
+    total_ops = 0
     for migration in migrations:
         ops = migration.get("operations") if isinstance(migration, dict) else None
         if not isinstance(ops, list):
@@ -86,6 +88,12 @@ def require_plugin_migration_registration(migrations: Any) -> list[Any]:
             raise _too_large(
                 f"plugin migration `{ident}` has {len(ops)} operations; "
                 f"exceeds maxPluginMigrationOps ({MAX_PLUGIN_MIGRATION_OPS})",
+            )
+        total_ops += len(ops)
+        if total_ops > MAX_PLUGIN_MIGRATION_TOTAL_OPS:
+            raise _too_large(
+                f"plugin migration registration has {total_ops} operations; exceeds "
+                f"maxPluginMigrationTotalOps ({MAX_PLUGIN_MIGRATION_TOTAL_OPS})",
             )
         total += _utf8_len(ident)
         if total > MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES:

@@ -9,6 +9,7 @@ import {
   MAX_LIST_PAGE,
   MAX_PLUGIN_MIGRATION_OPS,
   MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES,
+  MAX_PLUGIN_MIGRATION_TOTAL_OPS,
   MAX_SCALAR_BYTES,
 } from "./abi.js";
 import type { PluginMigration, PluginMigrationOp } from "./plugin.js";
@@ -50,11 +51,18 @@ export function requirePluginMigrationRegistration(
     );
   }
   let total = 0;
+  let totalOps = 0;
   for (const migration of migrations) {
     const ops = Array.isArray(migration.operations) ? migration.operations : [];
     if (ops.length > MAX_PLUGIN_MIGRATION_OPS) {
       throw migrationTooLarge(
         `plugin migration \`${migration.id}\` has ${ops.length} operations; exceeds maxPluginMigrationOps (${MAX_PLUGIN_MIGRATION_OPS})`,
+      );
+    }
+    totalOps += ops.length;
+    if (totalOps > MAX_PLUGIN_MIGRATION_TOTAL_OPS) {
+      throw migrationTooLarge(
+        `plugin migration registration has ${totalOps} operations; exceeds maxPluginMigrationTotalOps (${MAX_PLUGIN_MIGRATION_TOTAL_OPS})`,
       );
     }
     total += utf8Bytes(String(migration.id ?? ""));

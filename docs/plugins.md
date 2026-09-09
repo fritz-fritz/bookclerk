@@ -1191,7 +1191,11 @@ Inside a binding the plugin **owns its schema** by registering a complete
 ordered history at startup (`databaseMigrations(binding)`): opaque
 plugin-chosen IDs plus already-separated BookclerkSQL `schema`/`data`
 operations. Bookclerk assigns no version meaning to those IDs; registration
-order is the forward sequence. The host proves the sequence with one evolving
+order is the forward sequence. Registration is a bounded startup scalar: at
+most `maxListPage` migrations, `maxPluginMigrationOps` operations per
+migration, `maxPluginMigrationTotalOps` operations across the registration,
+each SQL at most `maxScalarBytes`, and aggregate id+SQL UTF-8 at most
+`maxPluginMigrationRegistrationBytes`. The host proves the sequence with one evolving
 type environment, verifies durable `plugin_migrations` history is an exact
 prefix of the registration, and applies only the pending suffix. Ordinary
 binding `execute` is query/DML only; durable `CREATE`/`DROP` is admitted only

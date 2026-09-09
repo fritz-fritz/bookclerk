@@ -197,7 +197,11 @@ Registration (`BookclerkPlugin.databaseMigrations(binding)`):
 
 1. Occurs at binding initialization, before ordinary execute.
 2. The plugin presents the complete ordered sequence (opaque `id` + already
-   separated `schema`/`data` BookclerkSQL operations).
+   separated `schema`/`data` BookclerkSQL operations). Resource limits are
+   independent: migration count (`maxListPage`), operations per migration
+   (`maxPluginMigrationOps`), total operations
+   (`maxPluginMigrationTotalOps`), per-SQL bytes (`maxScalarBytes`), and
+   aggregate id+SQL UTF-8 (`maxPluginMigrationRegistrationBytes`).
 3. Empty list means no plugin-owned migrations.
 4. The host proves the **entire** sequence with one evolving `SqlTypeEnv`
    (migration B typechecks against the schema produced by A).

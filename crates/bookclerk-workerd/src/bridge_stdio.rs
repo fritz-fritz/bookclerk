@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_plugin_abi::{
-    require_plugin_migration_registration, GuestSqlPolicy, PluginError, Result as AbiResult,
+    require_plugin_migration_json_lists, require_plugin_migration_registration, GuestSqlPolicy,
+    PluginError, Result as AbiResult,
 };
 use bookclerk_plugin_abi::{
     serve_plugin_stdio, ByteRange, CopyResult, Destination, DestinationContext, DomainEvent,
@@ -219,14 +220,7 @@ impl PluginRoot for WorkerdRoot {
             .get("migrations")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([]));
-        if let Some(arr) = migrations.as_array() {
-            if arr.len() > usize::try_from(MAX_LIST_PAGE).unwrap_or(0) {
-                return Err(PluginError::payload_too_large(format!(
-                    "plugin migration count {} exceeds maxListPage ({MAX_LIST_PAGE})",
-                    arr.len()
-                )));
-            }
-        }
+        require_plugin_migration_json_lists(&migrations)?;
         let parsed: Vec<PluginMigration> = serde_json::from_value(migrations)
             .map_err(|err| PluginError::internal(err.to_string()))?;
         require_plugin_migration_registration(&parsed)?;

@@ -59,6 +59,7 @@ function catchErr(err) {
 
 const MAX_LIST_PAGE = 256;
 const MAX_PLUGIN_MIGRATION_OPS = 256;
+const MAX_PLUGIN_MIGRATION_TOTAL_OPS = 2048;
 const MAX_SCALAR_BYTES = 262144;
 const MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES = 262144;
 
@@ -85,11 +86,21 @@ function requirePluginMigrationRegistration(migrations) {
     throw err;
   }
   let total = 0;
+  let totalOps = 0;
   for (const migration of list) {
     const ops = Array.isArray(migration?.operations) ? migration.operations : [];
     if (ops.length > MAX_PLUGIN_MIGRATION_OPS) {
       const err = new Error(
         `plugin migration \`${migration?.id}\` has ${ops.length} operations; exceeds maxPluginMigrationOps (${MAX_PLUGIN_MIGRATION_OPS})`,
+      );
+      err.code = "payload_too_large";
+      err.wireCode = "payload_too_large";
+      throw err;
+    }
+    totalOps += ops.length;
+    if (totalOps > MAX_PLUGIN_MIGRATION_TOTAL_OPS) {
+      const err = new Error(
+        `plugin migration registration has ${totalOps} operations; exceeds maxPluginMigrationTotalOps (${MAX_PLUGIN_MIGRATION_TOTAL_OPS})`,
       );
       err.code = "payload_too_large";
       err.wireCode = "payload_too_large";

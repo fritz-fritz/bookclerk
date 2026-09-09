@@ -34,10 +34,15 @@ const maxIdentifierBytes :UInt32 = 64;
 const maxConfigPayloadBytes :UInt32 = 65536;
 const maxEventPayloadBytes :UInt32 = 65536;
 # Plugin `databaseMigrations` is a startup-time scalar (not a stream). Count is
-# `maxListPage`. Each SQL text is `maxScalarBytes`. Ops-per-migration and the
-# aggregate UTF-8 bytes of ids + SQL have dedicated caps so a jailed guest
-# cannot force unbounded host allocation before semantic proof.
+# `maxListPage`. Each SQL text is `maxScalarBytes`. Ops-per-migration, total
+# operations across the registration, and the aggregate UTF-8 bytes of ids +
+# SQL have dedicated caps so a jailed guest cannot force unbounded host
+# allocation before semantic proof. `maxPluginMigrationRegistrationBytes` is
+# id+SQL text only; `maxPluginMigrationTotalOps` bounds the structural object
+# graph (2048: enough for realistic histories, including 256 migrations of ~8
+# ops or 8 migrations at the per-migration cap, and far below 256×256).
 const maxPluginMigrationOps :UInt32 = 256;
+const maxPluginMigrationTotalOps :UInt32 = 2048;
 const maxPluginMigrationRegistrationBytes :UInt32 = 262144;
 
 # Negotiable `rpcFeatures` wire names (see `PluginDescribe.rpcFeatures`).
@@ -1184,7 +1189,8 @@ struct PluginMigration {
 
 struct PluginMigrationsOk {
   # At most `maxListPage` entries; aggregate id+SQL bytes at most
-  # `maxPluginMigrationRegistrationBytes`.
+  # `maxPluginMigrationRegistrationBytes`; total operations at most
+  # `maxPluginMigrationTotalOps`.
   migrations @0 :List(PluginMigration);
 }
 
@@ -1211,7 +1217,8 @@ interface BookclerkPlugin {
   # Complete ordered plugin-owned migration sequence for one named binding.
   # Host calls this at binding initialization, before ordinary execute.
   # Empty list means the binding has no plugin-owned migrations.
-  # Bounded by `maxListPage` / `maxPluginMigrationOps` / `maxScalarBytes` /
+  # Bounded by `maxListPage` / `maxPluginMigrationOps` /
+  # `maxPluginMigrationTotalOps` / `maxScalarBytes` /
   # `maxPluginMigrationRegistrationBytes`.
   databaseMigrations @11 (binding :Text) -> (result :PluginMigrationsReply);
 }
