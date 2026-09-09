@@ -965,6 +965,7 @@ struct BindingPluginMigrationHost<'a> {
     owner: &'a str,
     /// Binding name inside that plugin.
     binding: &'a str,
+    /// Proven registration used to stamp `plugin_binding_type_env`.
     registered: &'a PluginMigrationSequence,
 }
 
