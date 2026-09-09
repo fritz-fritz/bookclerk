@@ -1416,7 +1416,6 @@ pub fn sql_host_bookkeeping_type_env() -> SqlTypeEnv {
          operation_id TEXT PRIMARY KEY NOT NULL, operation_kind TEXT NOT NULL, \
          request_hash TEXT NOT NULL, status TEXT NOT NULL, payload TEXT, \
          created_at TEXT NOT NULL, expires_at TEXT NOT NULL, consume_key TEXT UNIQUE)",
-        "CREATE TABLE pragma_user_version (user_version INTEGER NOT NULL)",
         "CREATE TABLE pragma_table_info (\
          cid INTEGER NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, \
          notnull INTEGER NOT NULL, dflt_value TEXT, pk INTEGER NOT NULL)",

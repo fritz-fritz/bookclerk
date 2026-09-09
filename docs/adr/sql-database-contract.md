@@ -57,14 +57,15 @@ policy ignores `timing`), and all
 numeric limits (`maxBinds`, `maxStatements`, `maxResultRows`, `maxPayloadBytes`,
 `maxResultBytes`, `maxCellBytes`, `maxRequestBytes`,
 `maxAtomicResultBytes`, `maxFunctionArgs`, `maxSchemaColumns`,
-`maxPatternBytes`, `maxLoweredStatementBytes`). Schema kind is chosen from the schema flags
-(exactly one of `pragmaUserVersion` or `schemaMigrations`;
-`atomicSchemaBatch` requires `schemaMigrations`). Bootstrap metadata
+`maxPatternBytes`, `maxLoweredStatementBytes`). `schemaMigrations` is the
+only schema flag: every adapter must keep the host's
+`bookclerk_schema_migrations` journal (there is no `PRAGMA user_version`
+alternative and no separate atomic-schema-batch flag). Bootstrap metadata
 (`sqlFamily`, SeaORM `dialect`) is **not** on typed `DbCapabilities`;
 it travels on the separate typed `DbBootstrap` / the host connect path after
-semantic negotiation succeeds. `DbCapabilities` `@17` is `pluginDatabases`,
-not a leftover `sqlFamily` tombstone. `@21` is `maxLoweredStatementBytes`.
-`@22` `consistentBackupRead` and `@23` `atomicUnitRestore` split consistent
+semantic negotiation succeeds. `DbCapabilities` `@15` is `pluginDatabases`,
+not a leftover `sqlFamily` tombstone. `@19` is `maxLoweredStatementBytes`.
+`@20` `consistentBackupRead` and `@21` `atomicUnitRestore` split consistent
 capture from complete per-unit replacement. Backup orchestration must not
 branch on sqlite/postgres/d1 plugin identity. First-party D1 advertises
 neither flag (sequential HTTP is not a consistent image and is not complete
@@ -137,8 +138,8 @@ env exists.
 
 `sqlFamily` and SeaORM `dialect` are bootstrap-only (typed `DbBootstrap` on
 the plugin-host connect path). Typed `DbCapabilities` does not carry them
-(`@17` is `pluginDatabases`; `@18`–`@21` are numeric caps including
-`maxLoweredStatementBytes`; `@22`/`@23` are backup flags). `DbBootstrap.engine`
+(`@15` is `pluginDatabases`; `@16`–`@19` are numeric caps including
+`maxLoweredStatementBytes`; `@20`/`@21` are backup flags). `DbBootstrap.engine`
 is a diagnostic physical-engine name. The host never admits, rejects, or
 generates SQL from `engine` — any string is valid. An architecture lint
 (`scripts/check-db-plugin-isolation.py`) forbids `bookclerk-library` production

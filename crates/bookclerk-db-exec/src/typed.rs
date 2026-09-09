@@ -2590,7 +2590,7 @@ mod tests {
             request_hash: String::new(),
             deadline_unix_ms: 0,
             statements: vec![TypedDbStatement {
-                sql: "SELECT user_version FROM pragma_user_version".into(),
+                sql: "SELECT name, type FROM pragma_table_info('books')".into(),
                 parameters: Vec::new(),
                 kind: DbPlanStatementKind::Select,
                 max_rows: 0,
