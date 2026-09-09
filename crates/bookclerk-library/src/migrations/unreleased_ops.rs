@@ -598,12 +598,6 @@ pub(super) const UNRELEASED_OPS: &[MigrationOp] = &[
         ON job_temp_paths(job_id, path)",
     ),
     MigrationOp::Schema(
-        r"CREATE TABLE IF NOT EXISTS job_queue_control (
-        id INTEGER PRIMARY KEY CHECK (id = 1)
-    )",
-    ),
-    MigrationOp::Data(r"INSERT OR IGNORE INTO job_queue_control (id) VALUES (1)"),
-    MigrationOp::Schema(
         r"CREATE TABLE IF NOT EXISTS domain_events (
         id TEXT PRIMARY KEY NOT NULL,
         event_type TEXT NOT NULL,

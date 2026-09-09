@@ -656,7 +656,7 @@ mod tests {
         assert!(
             unreleased_ops()
                 .iter()
-                .any(|op| op.is_data() && op.sql().contains("job_queue_control")),
+                .any(|op| op.is_data() && op.sql().contains("event_outbox_stats")),
             "seed INSERT must be MigrationOp::Data"
         );
         prove_migration_ops(unreleased_ops()).expect("unreleased ops must typecheck");

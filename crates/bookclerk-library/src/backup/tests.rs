@@ -601,7 +601,7 @@ fn library_current_schema_admits_after_filtering_seed_dml() {
         "seed DML must not live in the schema object"
     );
     let filtered = filter_library_pack_ddl(
-        "INSERT OR IGNORE INTO job_queue_control (id) VALUES (1);\n\
+        "INSERT OR IGNORE INTO bookclerk_slots (slot_key, bump) VALUES ('x', 0);\n\
          CREATE TABLE t (id INTEGER PRIMARY KEY)",
     )
     .unwrap();
