@@ -4004,7 +4004,7 @@ mod tests {
         }
         for sql in [
             "CREATE TABLE IF NOT EXISTS bookclerk_anything (id TEXT PRIMARY KEY)",
-            "CREATE TABLE IF NOT EXISTS \"BOOKCLERK_Anything\" (id TEXT PRIMARY KEY)",
+            "CREATE TABLE IF NOT EXISTS BOOKCLERK_Anything (id TEXT PRIMARY KEY)",
             "CREATE INDEX IF NOT EXISTS bookclerk_idx ON notes (id)",
             "DROP TABLE IF EXISTS bookclerk_plugin_migrations",
             "DROP TABLE IF EXISTS bookclerk_slots",
@@ -4020,7 +4020,7 @@ mod tests {
             );
         }
         assert!(is_reserved_binding_name("bookclerk_receipts"));
-        assert!(is_reserved_binding_name("\"Bookclerk_x\""));
+        assert!(is_reserved_binding_name("Bookclerk_x"));
         assert!(!is_reserved_binding_name("bookclerkish"));
         assert!(!is_reserved_binding_name("schema_migrations"));
     }
@@ -4033,7 +4033,7 @@ mod tests {
             "DELETE FROM bookclerk_schema_migrations",
             "SELECT * FROM bookclerk_anything",
             "DROP TABLE IF EXISTS bookclerk_receipts",
-            "DROP TABLE IF EXISTS \"Bookclerk_Future\"",
+            "DROP TABLE IF EXISTS Bookclerk_Future",
             "CREATE TABLE IF NOT EXISTS bookclerk_schema_migrations (v INTEGER)",
             "CREATE INDEX IF NOT EXISTS i ON bookclerk_receipts(expires_at)",
         ] {
