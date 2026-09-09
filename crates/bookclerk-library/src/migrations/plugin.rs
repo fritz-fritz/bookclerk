@@ -25,6 +25,13 @@ use crate::sql_plan::execute_typed_on_binding;
 /// Timing label for plugin journal apply (not an adapter identity).
 const PLUGIN_TXN_TIMING: &str = "plugin_migrate_txn";
 
+/// Bounded retries for **one** expected plugin migration apply unit.
+///
+/// Independent of how many migrations are registered. A fresh binding may
+/// apply the complete registration; this only caps retries of a single
+/// expected `(ordinal, id, checksum)` while durable history is unchanged.
+pub const MAX_PLUGIN_MIGRATION_APPLY_ATTEMPTS: usize = 8;
+
 /// Per-binding serialization slot for plugin migration apply.
 pub const PLUGIN_MIGRATION_SLOT_KEY: &str = "plugin_migrations";
 
@@ -275,6 +282,26 @@ pub fn pending_plugin_suffix<'a>(
     Ok(&registered.migrations[history.len()..])
 }
 
+/// Next registered migration after a verified durable prefix, if any.
+///
+/// Uses [`require_history_prefix`] then indexes `registered[history.len()]`
+/// rather than rebuilding the pending suffix vector.
+///
+/// # Errors
+///
+/// Returns [`require_history_prefix`] errors.
+pub fn next_pending_plugin_migration<'a>(
+    history: &PluginMigrationHistory,
+    registered: &'a PluginMigrationSequence,
+) -> Result<Option<(usize, &'a ProvenPluginMigration)>> {
+    require_history_prefix(history, registered)?;
+    let ordinal = history.len();
+    Ok(registered
+        .migrations
+        .get(ordinal)
+        .map(|migration| (ordinal, migration)))
+}
+
 /// True when a binding session's captured history digest still matches durable history.
 ///
 /// # Errors
@@ -502,12 +529,14 @@ pub fn remaining_plugin_suffix_batches(
 
 /// Applies the pending registered suffix. Idempotent when history already matches.
 ///
-/// Each pending migration is one short atomic unit: serialization-slot
-/// mutation + plugin operations + journal append. There is no lock held
-/// across those independent transactions. Concurrent hosts re-read durable
-/// history before applying; uniqueness / conflict / an ambiguous reply
-/// causes another journal read. Matching `(id, checksum)` at the expected
-/// ordinal is success. Contradictory history fails closed.
+/// Outer loop walks durable history (exact-prefix). Each pending migration is
+/// one short atomic unit: serialization-slot mutation + plugin operations +
+/// journal append, with a bounded inner retry loop that does **not** consume
+/// later migration capacity. There is no lock held across those independent
+/// transactions. Concurrent hosts re-read durable history before applying;
+/// uniqueness / conflict / an ambiguous reply causes another journal read.
+/// Matching `(id, checksum)` at the expected ordinal is success.
+/// Contradictory history fails closed.
 ///
 /// # Errors
 ///
@@ -517,14 +546,15 @@ pub async fn apply_plugin_migrations(
     db: &DatabaseConnection,
     registered: &PluginMigrationSequence,
 ) -> Result<PluginMigrationHistory> {
-    let history = load_plugin_migration_history(db).await?;
-    let suffix = pending_plugin_suffix(&history, registered)?.to_vec();
-    let start = i64::try_from(history.len()).unwrap_or(i64::MAX);
-    for (offset, migration) in suffix.into_iter().enumerate() {
-        let ordinal = start.saturating_add(i64::try_from(offset).unwrap_or(0));
-        apply_one_plugin_migration(db, ordinal, &migration).await?;
+    loop {
+        let history = load_plugin_migration_history(db).await?;
+        let Some((ordinal, migration)) = next_pending_plugin_migration(&history, registered)?
+        else {
+            return Ok(history);
+        };
+        let ordinal = i64::try_from(ordinal).unwrap_or(i64::MAX);
+        apply_one_plugin_migration(db, ordinal, migration, registered).await?;
     }
-    load_plugin_migration_history(db).await
 }
 
 /// Applies one pending journal row (ops + marker) with lost-completion retry.
@@ -537,28 +567,28 @@ async fn apply_one_plugin_migration(
     db: &DatabaseConnection,
     ordinal: i64,
     migration: &ProvenPluginMigration,
+    registered: &PluginMigrationSequence,
 ) -> Result<()> {
     let mut delay_ms = 20u64;
-    for attempt in 0..8 {
+    for attempt in 0..MAX_PLUGIN_MIGRATION_APPLY_ATTEMPTS {
         let history = load_plugin_migration_history(db).await?;
-        if journal_has_entry(&history, ordinal, &migration.id, &migration.checksum) {
+        if plugin_journal_has_entry(&history, ordinal, &migration.id, &migration.checksum) {
             return Ok(());
         }
-        if history.len() > ordinal as usize {
-            return Err(LibraryError::Schema(format!(
-                "plugin migration journal is contradictory at ordinal {ordinal} \
-                 while applying `{}`",
-                migration.id
-            )));
+        require_history_prefix(&history, registered)?;
+        let expected_len = usize::try_from(ordinal).unwrap_or(usize::MAX);
+        if history.len() != expected_len {
+            return Ok(());
         }
         let stmts = plugin_apply_statements(ordinal, migration);
-        match run_plugin_atomic(db, &format!("plugin-migrate-{ordinal}"), stmts).await {
+        let operation_id = format!("plugin-migrate-ord{ordinal}-try{attempt}");
+        match run_plugin_atomic(db, &operation_id, stmts).await {
             Ok(()) => return Ok(()),
             Err(err) => {
                 let history = load_plugin_migration_history(db).await;
                 match history {
                     Ok(observed)
-                        if journal_has_entry(
+                        if plugin_journal_has_entry(
                             &observed,
                             ordinal,
                             &migration.id,
@@ -567,19 +597,33 @@ async fn apply_one_plugin_migration(
                     {
                         return Ok(());
                     }
-                    Ok(_) | Err(_) if attempt + 1 < 8 && err.is_schema_apply_retryable() => {
+                    Ok(observed) => {
+                        require_history_prefix(&observed, registered)?;
+                        if observed.len() != expected_len {
+                            return Ok(());
+                        }
+                        if err.is_schema_apply_retryable()
+                            && attempt + 1 < MAX_PLUGIN_MIGRATION_APPLY_ATTEMPTS
+                        {
+                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                            delay_ms = delay_ms.saturating_mul(2).min(250);
+                            continue;
+                        }
+                        if err.is_schema_apply_retryable() {
+                            return Err(LibraryError::Schema(format!(
+                                "plugin migration `{}` exhausted retries at ordinal {ordinal}",
+                                migration.id
+                            )));
+                        }
+                        return Err(err);
+                    }
+                    Err(_)
+                        if err.is_schema_apply_retryable()
+                            && attempt + 1 < MAX_PLUGIN_MIGRATION_APPLY_ATTEMPTS =>
+                    {
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                         delay_ms = delay_ms.saturating_mul(2).min(250);
                         continue;
-                    }
-                    Ok(observed) => {
-                        return Err(LibraryError::Schema(format!(
-                            "plugin migration `{id}` left contradictory journal {found} \
-                             (wanted ordinal {ordinal} id `{id}` checksum {checksum}); {err}",
-                            id = migration.id,
-                            checksum = migration.checksum,
-                            found = observed.display(),
-                        )));
                     }
                     Err(_) => return Err(err),
                 }
@@ -593,7 +637,8 @@ async fn apply_one_plugin_migration(
 }
 
 /// True when `history` already contains this `(ordinal, id, checksum)` row.
-fn journal_has_entry(
+#[must_use]
+pub fn plugin_journal_has_entry(
     history: &PluginMigrationHistory,
     ordinal: i64,
     id: &str,
@@ -834,6 +879,57 @@ mod tests {
         ]);
     }
 
+    fn n_table_migs(n: usize) -> Vec<PluginMigration> {
+        (0..n)
+            .map(|i| {
+                mig(
+                    &format!("m{i:03}"),
+                    vec![schema(&format!(
+                        "CREATE TABLE IF NOT EXISTS t{i} (id INTEGER PRIMARY KEY NOT NULL)"
+                    ))],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn next_pending_indexes_registration_after_prefix() {
+        let registered = seq(n_table_migs(3));
+        let empty = PluginMigrationHistory::default();
+        let (ordinal, migration) = next_pending_plugin_migration(&empty, &registered)
+            .unwrap()
+            .expect("first");
+        assert_eq!(ordinal, 0);
+        assert_eq!(migration.id, "m000");
+        let history = PluginMigrationHistory {
+            entries: vec![PluginJournalEntry {
+                ordinal: 0,
+                migration_id: registered.migrations[0].id.clone(),
+                checksum: registered.migrations[0].checksum.clone(),
+            }],
+        };
+        let (ordinal, migration) = next_pending_plugin_migration(&history, &registered)
+            .unwrap()
+            .expect("second");
+        assert_eq!(ordinal, 1);
+        assert_eq!(migration.id, "m001");
+        let done = PluginMigrationHistory {
+            entries: registered
+                .migrations
+                .iter()
+                .enumerate()
+                .map(|(i, m)| PluginJournalEntry {
+                    ordinal: i64::try_from(i).unwrap(),
+                    migration_id: m.id.clone(),
+                    checksum: m.checksum.clone(),
+                })
+                .collect(),
+        };
+        assert!(next_pending_plugin_migration(&done, &registered)
+            .unwrap()
+            .is_none());
+    }
+
     #[test]
     fn second_migration_without_prior_table_fails() {
         let err = prove_plugin_migration_sequence(vec![mig(
@@ -859,6 +955,21 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first.entries[0].migration_id, "create-notes");
         assert_eq!(first.digest(), second.digest());
+    }
+
+    #[tokio::test]
+    async fn sixteen_migrations_apply_from_empty_beyond_retry_cap() {
+        let db = binding_db().await;
+        let n = MAX_PLUGIN_MIGRATION_APPLY_ATTEMPTS * 2;
+        assert!(n > MAX_PLUGIN_MIGRATION_APPLY_ATTEMPTS);
+        let registered = seq(n_table_migs(n));
+        let history = apply_plugin_migrations(&db, &registered).await.unwrap();
+        assert_eq!(history.len(), n);
+        for (i, entry) in history.entries.iter().enumerate() {
+            assert_eq!(entry.ordinal, i64::try_from(i).unwrap());
+            assert_eq!(entry.migration_id, registered.migrations[i].id);
+            assert_eq!(entry.checksum, registered.migrations[i].checksum);
+        }
     }
 
     #[tokio::test]

@@ -114,11 +114,12 @@ pub use plan::{
 };
 pub use plugin::{
     apply_plugin_migrations, history_from_execute_reply, load_plugin_migration_history,
-    load_plugin_migration_history_on, pending_plugin_suffix, plugin_apply_statements,
-    plugin_history_digest, plugin_history_session_matches, plugin_journal_select_request,
-    plugin_migration_checksum, prove_plugin_migration_sequence, remaining_plugin_suffix_batches,
-    require_history_prefix, PluginJournalEntry, PluginMigrationHistory, PluginMigrationSequence,
-    ProvenPluginMigration, PLUGIN_MIGRATION_SLOT_KEY,
+    load_plugin_migration_history_on, next_pending_plugin_migration, pending_plugin_suffix,
+    plugin_apply_statements, plugin_history_digest, plugin_history_session_matches,
+    plugin_journal_has_entry, plugin_journal_select_request, plugin_migration_checksum,
+    prove_plugin_migration_sequence, remaining_plugin_suffix_batches, require_history_prefix,
+    PluginJournalEntry, PluginMigrationHistory, PluginMigrationSequence, ProvenPluginMigration,
+    MAX_PLUGIN_MIGRATION_APPLY_ATTEMPTS, PLUGIN_MIGRATION_SLOT_KEY,
 };
 
 /// One host-owned schema version in the canonical Bookclerk migration plan.

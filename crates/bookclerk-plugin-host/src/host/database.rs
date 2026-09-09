@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
@@ -40,8 +40,8 @@ use crate::{PluginError, Result as PluginResult};
 use bookclerk_library::{
     atomic_status, binding_bootstrap_plan, history_from_execute_reply,
     plugin_history_session_matches, plugin_journal_select_request, prove_plugin_migration_sequence,
-    remaining_plugin_suffix_batches, sql_string_literal, DbAtomicParams, PluginMigrationHistory,
-    SchemaState, BOOKCLERK_SCHEMA_NAMESPACE, SCHEMA_MIGRATIONS_DDL,
+    sql_string_literal, DbAtomicParams, PluginMigrationHistory, SchemaState,
+    BOOKCLERK_SCHEMA_NAMESPACE, SCHEMA_MIGRATIONS_DDL,
 };
 
 /// External database backend spawned for `[database].plugin`.
@@ -738,17 +738,6 @@ fn catalog_cell_i64(v: Option<&DbValue>) -> Option<i64> {
     }
 }
 
-/// True when a binding migration batch may be retried after re-reading the ledger.
-fn plugin_schema_apply_retryable(err: &PluginError) -> bool {
-    if err.is_ambiguous_transport() {
-        return true;
-    }
-    matches!(
-        bookclerk_db_exec::classify_db_err_message(&err.to_string()),
-        bookclerk_db_exec::DbErrorClass::Unavailable | bookclerk_db_exec::DbErrorClass::Conflict
-    )
-}
-
 /// Host-authored statements for one binding bootstrap apply unit.
 fn binding_sql_request(operation_id: String, sqls: Vec<String>) -> ExecuteRequest {
     ExecuteRequest {
@@ -846,6 +835,49 @@ async fn load_binding_plugin_history(
         .db_execute_binding_request(key, select, Arc::clone(cancel))
         .await?;
     history_from_execute_reply(&reply).map_err(|err| PluginError::message(err.to_string()))
+}
+
+/// RPC-host adapter for [`super::plugin_migration_apply::apply_registered_plugin_migrations`].
+struct BindingPluginMigrationHost<'a> {
+    session: &'a PluginSession,
+    key: &'a str,
+    owner: &'a str,
+    binding: &'a str,
+}
+
+#[async_trait]
+impl super::plugin_migration_apply::PluginMigrationApplyHost for BindingPluginMigrationHost<'_> {
+    async fn load_plugin_migration_history(&self) -> PluginResult<PluginMigrationHistory> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let select = plugin_journal_select_request(
+            format!("binding-plugin-history-{}-{}", self.owner, self.binding),
+            0,
+        );
+        let reply = self
+            .session
+            .db_execute_binding_request(self.key, select, cancel)
+            .await?;
+        history_from_execute_reply(&reply).map_err(|err| PluginError::message(err.to_string()))
+    }
+
+    async fn execute_plugin_migration_apply(
+        &self,
+        operation_id: String,
+        statements: Vec<String>,
+    ) -> PluginResult<()> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.session
+            .db_execute_binding_request(
+                self.key,
+                super::plugin_migration_apply::plugin_migration_apply_request(
+                    operation_id,
+                    statements,
+                ),
+                cancel,
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 impl ExternalDatabase {
@@ -1073,9 +1105,9 @@ impl ExternalDatabase {
     /// Restore uses [`Self::open_binding_seaorm`] with `provision` and does
     /// **not** call this; the next ordinary open registers and walks the suffix.
     ///
-    /// Each remaining batch is retried after uniqueness / unavailable: re-read
-    /// the journal and treat matching `(id, checksum)` at the expected ordinal
-    /// as success.
+    /// Durable history is the outer progress loop. Each expected migration has
+    /// its own bounded retry loop. A matching `(id, checksum)` at the expected
+    /// ordinal after an ambiguous reply is success.
     async fn ensure_plugin_migrations(
         &self,
         key: &str,
@@ -1083,70 +1115,16 @@ impl ExternalDatabase {
         binding: &str,
         registered: &bookclerk_library::PluginMigrationSequence,
     ) -> PluginResult<()> {
-        let mut delay_ms = 20u64;
-        for attempt in 0..8 {
-            let history = self.binding_plugin_history(key, owner, binding).await?;
-            let mut batches = remaining_plugin_suffix_batches(&history, registered)
-                .map_err(|err| PluginError::message(err.to_string()))?;
-            if batches.is_empty() {
-                return Ok(());
-            }
-            let remaining_before = batches.len();
-            let stmts = batches.remove(0);
-            let cancel = Arc::new(AtomicBool::new(false));
-            match self
-                .session
-                .db_execute_binding_request(
-                    key,
-                    binding_sql_request(
-                        format!("plugin-migrate-{owner}-{binding}-{attempt}"),
-                        stmts,
-                    ),
-                    cancel,
-                )
-                .await
-            {
-                Ok(_) => {
-                    delay_ms = 20;
-                    continue;
-                }
-                Err(err) => {
-                    let remaining_after = self
-                        .binding_plugin_history(key, owner, binding)
-                        .await
-                        .ok()
-                        .and_then(|observed| {
-                            remaining_plugin_suffix_batches(&observed, registered).ok()
-                        })
-                        .map(|left| left.len());
-                    if remaining_after == Some(0) {
-                        return Ok(());
-                    }
-                    if remaining_after.is_some_and(|n| n < remaining_before) {
-                        delay_ms = 20;
-                        continue;
-                    }
-                    if plugin_schema_apply_retryable(&err) && attempt + 1 < 8 {
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                        delay_ms = delay_ms.saturating_mul(2).min(250);
-                        continue;
-                    }
-                    return Err(err);
-                }
-            }
-        }
-        let history = self.binding_plugin_history(key, owner, binding).await?;
-        let leftover = remaining_plugin_suffix_batches(&history, registered)
-            .map_err(|err| PluginError::message(err.to_string()))?;
-        if leftover.is_empty() {
-            Ok(())
-        } else {
-            Err(PluginError::message(format!(
-                "plugin schema apply for `{owner}/{binding}` exhausted retries with {} \
-                 remaining suffix batches",
-                leftover.len()
-            )))
-        }
+        let host = BindingPluginMigrationHost {
+            session: &self.session,
+            key,
+            owner,
+            binding,
+        };
+        super::plugin_migration_apply::apply_registered_plugin_migrations(
+            &host, owner, binding, registered,
+        )
+        .await
     }
 
     /// Reads the host-private plugin migration journal from the binding.
