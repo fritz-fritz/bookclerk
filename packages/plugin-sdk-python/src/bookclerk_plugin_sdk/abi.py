@@ -46,28 +46,29 @@ unsigned integers, and JSON text sentinels are not baseline ABI values.
 """
 
 DbStatementKind = Literal["execute", "select", "returning"]
-"""``DbStatementKind`` wire names."""
+"""How the host classifies a statement for result handling."""
 
 DbResultSelection = Literal["discard", "affectedRows", "rows"]
-"""``DbResultSelection`` wire names."""
+"""Which part of a statement's outcome the caller wants back."""
 
 IsolationReq = Literal["atomicBatch", "nestedSavepoint", "consistentSnapshot"]
 """Host → adapter execute. GuestDatabase stays ExecuteRequest-only."""
 
 ResolvedSqlType = Literal["integer", "real", "text", "blob", "boolean", "null"]
-"""``ResolvedSqlType`` wire names."""
+"""Resolved BookclerkSQL column type after type checking."""
 
 IntegerArithKind = Literal["add", "sub", "mul", "abs"]
-"""``IntegerArithKind`` wire names."""
+"""INTEGER `+` `-` `*` `abs` site lowered to overflow -> NULL."""
 
 
 class ScalarLimits(TypedDict):
-    """(undocumented)
+    """Guest-advertised caps for `rpc.scalarLimits`; never above the file constants.
 
     Attributes:
-        maxScalarBytes: maxScalarBytes
-        maxStreamWindowBytes: maxStreamWindowBytes
-        maxListPage: maxListPage
+        maxScalarBytes: Largest scalar the guest accepts; at most `maxScalarBytes`.
+        maxStreamWindowBytes: Largest `ByteSource.pull` window; at most
+            `maxStreamWindowBytes`.
+        maxListPage: Largest list page; at most `maxListPage`.
     """
 
     maxScalarBytes: int
@@ -81,8 +82,8 @@ class PluginError(TypedDict):
     while retaining the raw wire code.
 
     Attributes:
-        code: code
-        message: message
+        code: Stable snake_case error code (see `PluginErrorCode`).
+        message: Human-readable detail; never contains secrets.
     """
 
     code: str
@@ -90,14 +91,14 @@ class PluginError(TypedDict):
 
 
 class ObjectMetadata(TypedDict):
-    """(undocumented)
+    """Full metadata of one stored object.
 
     Attributes:
-        key: key
-        size: size
-        contentType: contentType
-        etag: etag
-        sha256: sha256
+        key: Object key.
+        size: Object size in bytes.
+        contentType: MIME type; empty when unknown.
+        etag: Backend entity tag; empty when unsupported.
+        sha256: Raw SHA-256 digest (32 bytes) or empty when unknown.
     """
 
     key: str
@@ -108,11 +109,11 @@ class ObjectMetadata(TypedDict):
 
 
 class ObjectInfo(TypedDict):
-    """(undocumented)
+    """Compact object entry in a list page.
 
     Attributes:
-        key: key
-        size: size
+        key: Object key.
+        size: Object size in bytes.
     """
 
     key: str
@@ -120,12 +121,12 @@ class ObjectInfo(TypedDict):
 
 
 class ListOptions(TypedDict):
-    """(undocumented)
+    """Paging options for `Destination.list`.
 
     Attributes:
-        prefix: prefix
-        cursor: cursor
-        limit: limit
+        prefix: Only keys starting with this prefix; empty lists everything.
+        cursor: Opaque cursor from a previous `ListPage.nextCursor`; empty starts over.
+        limit: Requested page size; clamped to `maxListPage`. `0` means guest default.
     """
 
     prefix: str
@@ -134,11 +135,11 @@ class ListOptions(TypedDict):
 
 
 class ListPage(TypedDict):
-    """(undocumented)
+    """One page of `Destination.list` results.
 
     Attributes:
-        objects: objects
-        nextCursor: nextCursor
+        objects: Objects in this page, in backend order.
+        nextCursor: Cursor for the next page; empty when exhausted.
     """
 
     objects: list[ObjectInfo]
@@ -146,11 +147,11 @@ class ListPage(TypedDict):
 
 
 class ByteRange(TypedDict):
-    """(undocumented)
+    """Half-open byte window `[offset, offset + length)`.
 
     Attributes:
-        offset: offset
-        length: length
+        offset: First byte offset.
+        length: Number of bytes; `0` reads to the end.
     """
 
     offset: int
@@ -158,22 +159,22 @@ class ByteRange(TypedDict):
 
 
 class ReadOptions(TypedDict):
-    """(undocumented)
+    """Options for `Destination.get`.
 
     Attributes:
-        range: range
+        range: Byte range to read; an all-zero range reads the whole object.
     """
 
     range: ByteRange
 
 
 class WriteOptions(TypedDict):
-    """(undocumented)
+    """Options for `Destination.put`.
 
     Attributes:
-        contentType: contentType
-        contentLength: contentLength
-        sha256: sha256
+        contentType: MIME type to record; empty when unknown.
+        contentLength: Expected body length in bytes; `0` when unknown (chunked).
+        sha256: Expected raw SHA-256 digest; empty skips verification.
         commitToken: Destination-side stage-and-publish. Empty means a one-shot put.
         stageOnly: When true, `put` stages remotely and does not publish until `commit`.
     """
@@ -186,13 +187,13 @@ class WriteOptions(TypedDict):
 
 
 class PutResult(TypedDict):
-    """(undocumented)
+    """Summary of a stored (or committed) object.
 
     Attributes:
-        key: key
-        bytesWritten: bytesWritten
-        etag: etag
-        sha256: sha256
+        key: Object key written.
+        bytesWritten: Bytes persisted.
+        etag: Backend entity tag; empty when unsupported.
+        sha256: Raw SHA-256 digest of the stored bytes; empty when not computed.
     """
 
     key: str
@@ -202,25 +203,26 @@ class PutResult(TypedDict):
 
 
 class CopyResult(TypedDict):
-    """(undocumented)
+    """Summary of a server-side copy.
 
     Attributes:
-        bytesCopied: bytesCopied
+        bytesCopied: Bytes copied.
     """
 
     bytesCopied: int
 
 
 class PluginDescribe(TypedDict):
-    """(undocumented)
+    """Guest identity and negotiation surface returned by `describe()`.
 
     Attributes:
-        apiVersion: apiVersion
-        id: id
-        kind: kind
-        displayName: displayName
-        rpcFeatures: rpcFeatures
-        scalarLimits: scalarLimits
+        apiVersion: ABI version the guest speaks; must equal `apiVersion`.
+        id: Stable plugin id (`[a-z][a-z0-9_]{0,63}`).
+        kind: Manifest kind (`source`, `integration`, `output`, `database`).
+        displayName: Human-readable name for UI lists.
+        rpcFeatures: Negotiable feature names the guest supports (see `feature*`
+            constants).
+        scalarLimits: Guest caps when `rpc.scalarLimits` is advertised.
         supportedRoles: Advertised factories (`destination`, `source`, `worker`,
             `contentSource`, `integration`, `database`). Host still intersects with the
             manifest allowlist.
@@ -244,13 +246,13 @@ class OidcClientTemplate(TypedDict):
     `originConfigKey` is a dotted config path (e.g. integrations.audiobookshelf.base_url).
 
     Attributes:
-        clientId: clientId
-        displayName: displayName
-        callbackPath: callbackPath
-        publicClient: publicClient
-        defaultScopes: defaultScopes
-        issueRefreshToken: issueRefreshToken
-        originConfigKey: originConfigKey
+        clientId: OIDC client id the host materializes.
+        displayName: Name shown on consent / admin screens.
+        callbackPath: Redirect URI path relative to the integration origin.
+        publicClient: When true, the client uses PKCE without a client secret.
+        defaultScopes: Scopes granted by default.
+        issueRefreshToken: When true, the AS issues refresh tokens to this client.
+        originConfigKey: Dotted config path holding the client's origin URL.
     """
 
     clientId: str
@@ -263,10 +265,10 @@ class OidcClientTemplate(TypedDict):
 
 
 class OidcClientsOk(TypedDict):
-    """(undocumented)
+    """Success payload of `BookclerkPlugin.oidcClients`.
 
     Attributes:
-        clients: clients
+        clients: Client templates; empty when the plugin is not a relying party.
     """
 
     clients: list[OidcClientTemplate]
@@ -275,9 +277,11 @@ class OidcClientsOk(TypedDict):
 class OidcClientsReplyOk(TypedDict):
     """``OidcClientsReply`` member ``ok``.
 
+    Success: OIDC client templates.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``OidcClientsOk`` payload.
+        value: Success: OIDC client templates.
     """
 
     kind: Literal["ok"]
@@ -287,9 +291,11 @@ class OidcClientsReplyOk(TypedDict):
 class OidcClientsReplyErr(TypedDict):
     """``OidcClientsReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -300,16 +306,16 @@ OidcClientsReply = Union[
     OidcClientsReplyOk,
     OidcClientsReplyErr,
 ]
-"""``OidcClientsReply`` union."""
+"""Result union of `BookclerkPlugin.oidcClients`."""
 
 
 class ExtensibleConfig(TypedDict):
     """Plugin-specific extensible config. Not a substitute for typed ABI fields.
 
     Attributes:
-        schemaVersion: schemaVersion
-        mediaType: mediaType
-        payload: payload
+        schemaVersion: Version of `payload`'s schema, owned by the plugin.
+        mediaType: Media type of `payload` (e.g. `application/json`).
+        payload: Bounded encoded payload; at most `maxConfigPayloadBytes`.
     """
 
     schemaVersion: int
@@ -322,8 +328,8 @@ class DestinationContext(TypedDict):
     OS paths, FDs, and sockets are transport-private.
 
     Attributes:
-        json: json
-        config: config
+        json: Legacy opaque JSON knobs (migration bridge).
+        config: Granted extensible configuration.
     """
 
     json: str
@@ -331,11 +337,11 @@ class DestinationContext(TypedDict):
 
 
 class SourceContext(TypedDict):
-    """(undocumented)
+    """Granted configuration for `BookclerkPlugin.source`.
 
     Attributes:
-        json: json
-        config: config
+        json: Legacy opaque JSON knobs (migration bridge).
+        config: Granted extensible configuration.
     """
 
     json: str
@@ -343,12 +349,12 @@ class SourceContext(TypedDict):
 
 
 class WorkerContext(TypedDict):
-    """(undocumented)
+    """Granted configuration for `BookclerkPlugin.worker`.
 
     Attributes:
-        jobId: jobId
-        json: json
-        config: config
+        jobId: Host job id this handler serves.
+        json: Legacy opaque JSON knobs (migration bridge).
+        config: Granted extensible configuration.
     """
 
     jobId: str
@@ -357,11 +363,11 @@ class WorkerContext(TypedDict):
 
 
 class ContentSourceContext(TypedDict):
-    """(undocumented)
+    """Granted configuration for `BookclerkPlugin.contentSource`.
 
     Attributes:
-        json: json
-        config: config
+        json: Legacy opaque JSON knobs (migration bridge).
+        config: Granted extensible configuration.
     """
 
     json: str
@@ -369,11 +375,11 @@ class ContentSourceContext(TypedDict):
 
 
 class IntegrationContext(TypedDict):
-    """(undocumented)
+    """Granted configuration for `BookclerkPlugin.integration`.
 
     Attributes:
-        json: json
-        config: config
+        json: Legacy opaque JSON knobs (migration bridge).
+        config: Granted extensible configuration.
     """
 
     json: str
@@ -381,11 +387,11 @@ class IntegrationContext(TypedDict):
 
 
 class DatabaseContext(TypedDict):
-    """(undocumented)
+    """Granted configuration for `BookclerkPlugin.database` (see `DatabaseAdapterConfig`).
 
     Attributes:
-        json: json
-        config: config
+        json: Legacy opaque JSON knobs (migration bridge).
+        config: Granted extensible configuration.
     """
 
     json: str
@@ -400,20 +406,22 @@ class JobInvocation(TypedDict):
     terminal fenced outcome is committed.
 
     Attributes:
-        payloadSchemaVersion: payloadSchemaVersion
-        invocationId: invocationId
-        commandType: commandType
-        payloadJson: payloadJson
-        idempotencyKey: idempotencyKey
-        attempt: attempt
-        correlationId: correlationId
-        causationId: causationId
+        payloadSchemaVersion: Schema version of `payloadJson`, owned by the command
+            type.
+        invocationId: Unique id of this invocation attempt.
+        commandType: Command type the handler dispatches on.
+        payloadJson: Command payload (JSON); at most `maxScalarBytes`.
+        idempotencyKey: Caller idempotency key scoped to (account, plugin, commandType).
+        attempt: Failure retry counter, starting at 1.
+        correlationId: Trace correlation id; empty when none.
+        causationId: Id of the event or command that caused this one; empty when none.
         deadlineUnixMs: UTC Unix milliseconds. Host fence/lease is authoritative; this
             hint must not outlive the fence (clock skew across VPS nodes).
-        checkpointJson: checkpointJson
-        checkpointSchemaVersion: checkpointSchemaVersion
+        checkpointJson: Checkpoint persisted by a prior `SuspendedOutcome`; empty on
+            first run.
+        checkpointSchemaVersion: Schema version of `checkpointJson`.
         invocationSequence: Resume ordinal; distinct from failure `attempt`.
-        stepId: stepId
+        stepId: Optional step identifier for multi-step commands.
     """
 
     payloadSchemaVersion: int
@@ -432,11 +440,11 @@ class JobInvocation(TypedDict):
 
 
 class CompletedOutcome(TypedDict):
-    """(undocumented)
+    """Job finished successfully.
 
     Attributes:
-        message: message
-        bytesCopied: bytesCopied
+        message: Short human summary.
+        bytesCopied: Bytes produced, when meaningful.
     """
 
     message: str
@@ -444,11 +452,11 @@ class CompletedOutcome(TypedDict):
 
 
 class RetryableOutcome(TypedDict):
-    """(undocumented)
+    """Job failed transiently; the host reschedules it.
 
     Attributes:
-        message: message
-        retryAfterUnixMs: retryAfterUnixMs
+        message: Short human reason.
+        retryAfterUnixMs: Earliest retry time; `0` lets the host choose.
     """
 
     message: str
@@ -456,32 +464,33 @@ class RetryableOutcome(TypedDict):
 
 
 class RejectedOutcome(TypedDict):
-    """(undocumented)
+    """Job failed permanently; no retry.
 
     Attributes:
-        message: message
+        message: Short human reason.
     """
 
     message: str
 
 
 class CancelledOutcome(TypedDict):
-    """(undocumented)
+    """Job observed cancellation and stopped.
 
     Attributes:
-        message: message
+        message: Short human note.
     """
 
     message: str
 
 
 class SuspendedOutcome(TypedDict):
-    """(undocumented)
+    """Job released the process and asks to be resumed later.
 
     Attributes:
-        checkpointJson: checkpointJson
-        checkpointSchemaVersion: checkpointSchemaVersion
-        wakeAtUnixMs: wakeAtUnixMs
+        checkpointJson: Bounded checkpoint to replay on resume; at most
+            `maxCheckpointBytes`.
+        checkpointSchemaVersion: Schema version of `checkpointJson`.
+        wakeAtUnixMs: Earliest resume time.
     """
 
     checkpointJson: str
@@ -492,9 +501,11 @@ class SuspendedOutcome(TypedDict):
 class JobOutcomeCompleted(TypedDict):
     """``JobOutcome`` member ``completed``.
 
+    Finished successfully.
+
     Attributes:
         kind: Always ``"completed"``.
-        value: ``CompletedOutcome`` payload.
+        value: Finished successfully.
     """
 
     kind: Literal["completed"]
@@ -504,9 +515,11 @@ class JobOutcomeCompleted(TypedDict):
 class JobOutcomeRetryable(TypedDict):
     """``JobOutcome`` member ``retryable``.
 
+    Transient failure; retry later.
+
     Attributes:
         kind: Always ``"retryable"``.
-        value: ``RetryableOutcome`` payload.
+        value: Transient failure; retry later.
     """
 
     kind: Literal["retryable"]
@@ -516,9 +529,11 @@ class JobOutcomeRetryable(TypedDict):
 class JobOutcomeRejected(TypedDict):
     """``JobOutcome`` member ``rejected``.
 
+    Permanent failure.
+
     Attributes:
         kind: Always ``"rejected"``.
-        value: ``RejectedOutcome`` payload.
+        value: Permanent failure.
     """
 
     kind: Literal["rejected"]
@@ -528,9 +543,11 @@ class JobOutcomeRejected(TypedDict):
 class JobOutcomeCancelled(TypedDict):
     """``JobOutcome`` member ``cancelled``.
 
+    Stopped on cancellation.
+
     Attributes:
         kind: Always ``"cancelled"``.
-        value: ``CancelledOutcome`` payload.
+        value: Stopped on cancellation.
     """
 
     kind: Literal["cancelled"]
@@ -540,9 +557,11 @@ class JobOutcomeCancelled(TypedDict):
 class JobOutcomeSuspended(TypedDict):
     """``JobOutcome`` member ``suspended``.
 
+    Released with a checkpoint.
+
     Attributes:
         kind: Always ``"suspended"``.
-        value: ``SuspendedOutcome`` payload.
+        value: Released with a checkpoint.
     """
 
     kind: Literal["suspended"]
@@ -556,27 +575,27 @@ JobOutcome = Union[
     JobOutcomeCancelled,
     JobOutcomeSuspended,
 ]
-"""``JobOutcome`` union."""
+"""Terminal or suspended result of `JobHandler.handle`."""
 
 
 class DomainEvent(TypedDict):
     """Domain event (not a job). Outbox-produced, at-least-once, idempotent consume.
 
     Attributes:
-        eventId: eventId
-        eventType: eventType
-        schemaVersion: schemaVersion
-        occurredAtUnixMs: occurredAtUnixMs
-        accountId: accountId
-        correlationId: correlationId
-        causationId: causationId
-        deduplicationKey: deduplicationKey
-        deliveryAttempt: deliveryAttempt
-        payload: payload
+        eventId: Unique event id (outbox row identity).
+        eventType: Dotted event type (e.g. `library.title.added`).
+        schemaVersion: Schema version of `payload`, owned by the event type.
+        occurredAtUnixMs: When the producer observed the fact.
+        accountId: Account scope; empty for host-wide events.
+        correlationId: Trace correlation id; empty when none.
+        causationId: Id of the command or event that caused this one; empty when none.
+        deduplicationKey: Consumer-side idempotency key; stable across redeliveries.
+        deliveryAttempt: Delivery counter, starting at 1.
+        payload: Encoded event payload; at most `maxEventPayloadBytes`.
         checkpointJson: Append-only. Resume a prior EventResult.suspended.
-        checkpointSchemaVersion: checkpointSchemaVersion
-        invocationSequence: invocationSequence
-        resumePending: resumePending
+        checkpointSchemaVersion: Schema version of `checkpointJson`.
+        invocationSequence: Resume ordinal; distinct from `deliveryAttempt`.
+        resumePending: True when this delivery resumes a prior suspension.
         source: Append-only. Producer plugin id; empty when unknown.
     """
 
@@ -598,21 +617,21 @@ class DomainEvent(TypedDict):
 
 
 class EventAck(TypedDict):
-    """(undocumented)
+    """Event handled; the host marks it delivered.
 
     Attributes:
-        dummy: dummy
+        dummy: Placeholder; the struct carries no data.
     """
 
     dummy: None
 
 
 class EventRetry(TypedDict):
-    """(undocumented)
+    """Redeliver later.
 
     Attributes:
-        retryAtUnixMs: retryAtUnixMs
-        reason: reason
+        retryAtUnixMs: Earliest redelivery time; `0` lets the host choose.
+        reason: Short human reason.
     """
 
     retryAtUnixMs: int
@@ -620,20 +639,20 @@ class EventRetry(TypedDict):
 
 
 class EventReject(TypedDict):
-    """(undocumented)
+    """Event rejected; the host records the reason and stops delivering.
 
     Attributes:
-        reason: reason
+        reason: Short human reason.
     """
 
     reason: str
 
 
 class EventDeadLetter(TypedDict):
-    """(undocumented)
+    """Event moved to the dead-letter queue for operator review.
 
     Attributes:
-        reason: reason
+        reason: Short human reason.
     """
 
     reason: str
@@ -645,11 +664,13 @@ class EventSuspended(TypedDict):
     wake-on-matching-event fields (empty = timestamp-only).
 
     Attributes:
-        checkpointJson: checkpointJson
-        checkpointSchemaVersion: checkpointSchemaVersion
-        wakeAtUnixMs: wakeAtUnixMs
-        wakeOnEventType: wakeOnEventType
-        wakeOnFilterJson: wakeOnFilterJson
+        checkpointJson: Bounded checkpoint to replay on resume; at most
+            `maxCheckpointBytes`.
+        checkpointSchemaVersion: Schema version of `checkpointJson`.
+        wakeAtUnixMs: Earliest resume time.
+        wakeOnEventType: Also wake when an event of this type arrives; empty disables.
+        wakeOnFilterJson: JSON filter applied to matching wake events; empty matches
+            all.
     """
 
     checkpointJson: str
@@ -662,9 +683,11 @@ class EventSuspended(TypedDict):
 class EventResultAck(TypedDict):
     """``EventResult`` member ``ack``.
 
+    Handled.
+
     Attributes:
         kind: Always ``"ack"``.
-        value: ``EventAck`` payload.
+        value: Handled.
     """
 
     kind: Literal["ack"]
@@ -674,9 +697,11 @@ class EventResultAck(TypedDict):
 class EventResultRetry(TypedDict):
     """``EventResult`` member ``retry``.
 
+    Redeliver later.
+
     Attributes:
         kind: Always ``"retry"``.
-        value: ``EventRetry`` payload.
+        value: Redeliver later.
     """
 
     kind: Literal["retry"]
@@ -686,9 +711,11 @@ class EventResultRetry(TypedDict):
 class EventResultReject(TypedDict):
     """``EventResult`` member ``reject``.
 
+    Stop delivering.
+
     Attributes:
         kind: Always ``"reject"``.
-        value: ``EventReject`` payload.
+        value: Stop delivering.
     """
 
     kind: Literal["reject"]
@@ -698,9 +725,11 @@ class EventResultReject(TypedDict):
 class EventResultDeadLetter(TypedDict):
     """``EventResult`` member ``deadLetter``.
 
+    Park for operator review.
+
     Attributes:
         kind: Always ``"deadLetter"``.
-        value: ``EventDeadLetter`` payload.
+        value: Park for operator review.
     """
 
     kind: Literal["deadLetter"]
@@ -710,9 +739,11 @@ class EventResultDeadLetter(TypedDict):
 class EventResultSuspended(TypedDict):
     """``EventResult`` member ``suspended``.
 
+    Released with a checkpoint.
+
     Attributes:
         kind: Always ``"suspended"``.
-        value: ``EventSuspended`` payload.
+        value: Released with a checkpoint.
     """
 
     kind: Literal["suspended"]
@@ -726,15 +757,15 @@ EventResult = Union[
     EventResultDeadLetter,
     EventResultSuspended,
 ]
-"""``EventResult`` union."""
+"""Outcome of `Integration.onEvent`."""
 
 
 class HeadOk(TypedDict):
-    """(undocumented)
+    """Success payload of `Destination.head`.
 
     Attributes:
-        found: found
-        meta: meta
+        found: Whether the object exists.
+        meta: Object metadata; meaningful only when `found`.
     """
 
     found: bool
@@ -744,9 +775,11 @@ class HeadOk(TypedDict):
 class HeadReplyOk(TypedDict):
     """``HeadReply`` member ``ok``.
 
+    Success: head probe outcome.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``HeadOk`` payload.
+        value: Success: head probe outcome.
     """
 
     kind: Literal["ok"]
@@ -756,9 +789,11 @@ class HeadReplyOk(TypedDict):
 class HeadReplyErr(TypedDict):
     """``HeadReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -769,15 +804,17 @@ HeadReply = Union[
     HeadReplyOk,
     HeadReplyErr,
 ]
-"""``HeadReply`` union."""
+"""Result union of `Destination.head`."""
 
 
 class ListReplyOk(TypedDict):
     """``ListReply`` member ``ok``.
 
+    Success: one list page.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``ListPage`` payload.
+        value: Success: one list page.
     """
 
     kind: Literal["ok"]
@@ -787,9 +824,11 @@ class ListReplyOk(TypedDict):
 class ListReplyErr(TypedDict):
     """``ListReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -800,15 +839,15 @@ ListReply = Union[
     ListReplyOk,
     ListReplyErr,
 ]
-"""``ListReply`` union."""
+"""Result union of `Destination.list`."""
 
 
 class GetOk(TypedDict):
-    """(undocumented)
+    """Success payload of `Destination.get`.
 
     Attributes:
-        meta: meta
-        body: body
+        meta: Object metadata.
+        body: Streamed object bytes.
     """
 
     meta: ObjectMetadata
@@ -818,9 +857,11 @@ class GetOk(TypedDict):
 class GetReplyOk(TypedDict):
     """``GetReply`` member ``ok``.
 
+    Success: object metadata and body stream.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``GetOk`` payload.
+        value: Success: object metadata and body stream.
     """
 
     kind: Literal["ok"]
@@ -830,9 +871,11 @@ class GetReplyOk(TypedDict):
 class GetReplyErr(TypedDict):
     """``GetReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -843,15 +886,17 @@ GetReply = Union[
     GetReplyOk,
     GetReplyErr,
 ]
-"""``GetReply`` union."""
+"""Result union of `Destination.get`."""
 
 
 class PutReplyOk(TypedDict):
     """``PutReply`` member ``ok``.
 
+    Success: stored object summary.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``PutResult`` payload.
+        value: Success: stored object summary.
     """
 
     kind: Literal["ok"]
@@ -861,9 +906,11 @@ class PutReplyOk(TypedDict):
 class PutReplyErr(TypedDict):
     """``PutReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -874,15 +921,17 @@ PutReply = Union[
     PutReplyOk,
     PutReplyErr,
 ]
-"""``PutReply`` union."""
+"""Result union of `Destination.put` / `Destination.commit`."""
 
 
 class CopyReplyOk(TypedDict):
     """``CopyReply`` member ``ok``.
 
+    Success: copy summary.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``CopyResult`` payload.
+        value: Success: copy summary.
     """
 
     kind: Literal["ok"]
@@ -892,9 +941,11 @@ class CopyReplyOk(TypedDict):
 class CopyReplyErr(TypedDict):
     """``CopyReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -905,11 +956,13 @@ CopyReply = Union[
     CopyReplyOk,
     CopyReplyErr,
 ]
-"""``CopyReply`` union."""
+"""Result union of `Destination.copy`."""
 
 
 class EmptyReplyOk(TypedDict):
     """``EmptyReply`` member ``ok``.
+
+    Success: no payload.
 
     Attributes:
         kind: Always ``"ok"``.
@@ -921,9 +974,11 @@ class EmptyReplyOk(TypedDict):
 class EmptyReplyErr(TypedDict):
     """``EmptyReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -934,15 +989,15 @@ EmptyReply = Union[
     EmptyReplyOk,
     EmptyReplyErr,
 ]
-"""``EmptyReply`` union."""
+"""Result union of `methods without a success payload`."""
 
 
 class PullOk(TypedDict):
-    """(undocumented)
+    """Success payload of `ByteSource.pull`.
 
     Attributes:
-        chunk: chunk
-        done: done
+        chunk: Next bytes; may be shorter than requested.
+        done: True when the stream is exhausted after `chunk`.
     """
 
     chunk: bytes
@@ -952,9 +1007,11 @@ class PullOk(TypedDict):
 class PullReplyOk(TypedDict):
     """``PullReply`` member ``ok``.
 
+    Success: one stream window.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``PullOk`` payload.
+        value: Success: one stream window.
     """
 
     kind: Literal["ok"]
@@ -964,9 +1021,11 @@ class PullReplyOk(TypedDict):
 class PullReplyErr(TypedDict):
     """``PullReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -977,15 +1036,15 @@ PullReply = Union[
     PullReplyOk,
     PullReplyErr,
 ]
-"""``PullReply`` union."""
+"""Result union of `ByteSource.pull`."""
 
 
 class OpenOk(TypedDict):
-    """(undocumented)
+    """Success payload of `Source.open`.
 
     Attributes:
-        meta: meta
-        body: body
+        meta: Object metadata.
+        body: Streamed object bytes.
     """
 
     meta: ObjectMetadata
@@ -995,9 +1054,11 @@ class OpenOk(TypedDict):
 class OpenReplyOk(TypedDict):
     """``OpenReply`` member ``ok``.
 
+    Success: object metadata and body stream.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``OpenOk`` payload.
+        value: Success: object metadata and body stream.
     """
 
     kind: Literal["ok"]
@@ -1007,9 +1068,11 @@ class OpenReplyOk(TypedDict):
 class OpenReplyErr(TypedDict):
     """``OpenReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1020,15 +1083,17 @@ OpenReply = Union[
     OpenReplyOk,
     OpenReplyErr,
 ]
-"""``OpenReply`` union."""
+"""Result union of `Source.open`."""
 
 
 class DescribeReplyOk(TypedDict):
     """``DescribeReply`` member ``ok``.
 
+    Success: plugin identity.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``PluginDescribe`` payload.
+        value: Success: plugin identity.
     """
 
     kind: Literal["ok"]
@@ -1038,9 +1103,11 @@ class DescribeReplyOk(TypedDict):
 class DescribeReplyErr(TypedDict):
     """``DescribeReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1051,15 +1118,17 @@ DescribeReply = Union[
     DescribeReplyOk,
     DescribeReplyErr,
 ]
-"""``DescribeReply`` union."""
+"""Result union of `BookclerkPlugin.describe`."""
 
 
 class DestinationReplyOk(TypedDict):
     """``DestinationReply`` member ``ok``.
 
+    Success: opened `Destination` capability.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``Destination`` payload.
+        value: Success: opened `Destination` capability.
     """
 
     kind: Literal["ok"]
@@ -1069,9 +1138,11 @@ class DestinationReplyOk(TypedDict):
 class DestinationReplyErr(TypedDict):
     """``DestinationReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1082,15 +1153,17 @@ DestinationReply = Union[
     DestinationReplyOk,
     DestinationReplyErr,
 ]
-"""``DestinationReply`` union."""
+"""Result union of `BookclerkPlugin.destination`."""
 
 
 class SourceReplyOk(TypedDict):
     """``SourceReply`` member ``ok``.
 
+    Success: opened `Source` capability.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``Source`` payload.
+        value: Success: opened `Source` capability.
     """
 
     kind: Literal["ok"]
@@ -1100,9 +1173,11 @@ class SourceReplyOk(TypedDict):
 class SourceReplyErr(TypedDict):
     """``SourceReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1113,15 +1188,17 @@ SourceReply = Union[
     SourceReplyOk,
     SourceReplyErr,
 ]
-"""``SourceReply`` union."""
+"""Result union of `BookclerkPlugin.source`."""
 
 
 class WorkerReplyOk(TypedDict):
     """``WorkerReply`` member ``ok``.
 
+    Success: opened `JobHandler` capability.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``JobHandler`` payload.
+        value: Success: opened `JobHandler` capability.
     """
 
     kind: Literal["ok"]
@@ -1131,9 +1208,11 @@ class WorkerReplyOk(TypedDict):
 class WorkerReplyErr(TypedDict):
     """``WorkerReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1144,15 +1223,17 @@ WorkerReply = Union[
     WorkerReplyOk,
     WorkerReplyErr,
 ]
-"""``WorkerReply`` union."""
+"""Result union of `BookclerkPlugin.worker`."""
 
 
 class HandleReplyOk(TypedDict):
     """``HandleReply`` member ``ok``.
 
+    Success: job outcome.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``JobOutcome`` payload.
+        value: Success: job outcome.
     """
 
     kind: Literal["ok"]
@@ -1162,9 +1243,11 @@ class HandleReplyOk(TypedDict):
 class HandleReplyErr(TypedDict):
     """``HandleReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1175,15 +1258,17 @@ HandleReply = Union[
     HandleReplyOk,
     HandleReplyErr,
 ]
-"""``HandleReply`` union."""
+"""Result union of `JobHandler.handle`."""
 
 
 class ContentSourceReplyOk(TypedDict):
     """``ContentSourceReply`` member ``ok``.
 
+    Success: opened `ContentSource` capability.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``ContentSource`` payload.
+        value: Success: opened `ContentSource` capability.
     """
 
     kind: Literal["ok"]
@@ -1193,9 +1278,11 @@ class ContentSourceReplyOk(TypedDict):
 class ContentSourceReplyErr(TypedDict):
     """``ContentSourceReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1206,15 +1293,17 @@ ContentSourceReply = Union[
     ContentSourceReplyOk,
     ContentSourceReplyErr,
 ]
-"""``ContentSourceReply`` union."""
+"""Result union of `BookclerkPlugin.contentSource`."""
 
 
 class IntegrationReplyOk(TypedDict):
     """``IntegrationReply`` member ``ok``.
 
+    Success: opened `Integration` capability.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``Integration`` payload.
+        value: Success: opened `Integration` capability.
     """
 
     kind: Literal["ok"]
@@ -1224,9 +1313,11 @@ class IntegrationReplyOk(TypedDict):
 class IntegrationReplyErr(TypedDict):
     """``IntegrationReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1237,15 +1328,17 @@ IntegrationReply = Union[
     IntegrationReplyOk,
     IntegrationReplyErr,
 ]
-"""``IntegrationReply`` union."""
+"""Result union of `BookclerkPlugin.integration`."""
 
 
 class DatabaseReplyOk(TypedDict):
     """``DatabaseReply`` member ``ok``.
 
+    Success: opened `Database` capability.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``Database`` payload.
+        value: Success: opened `Database` capability.
     """
 
     kind: Literal["ok"]
@@ -1255,9 +1348,11 @@ class DatabaseReplyOk(TypedDict):
 class DatabaseReplyErr(TypedDict):
     """``DatabaseReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1268,15 +1363,17 @@ DatabaseReply = Union[
     DatabaseReplyOk,
     DatabaseReplyErr,
 ]
-"""``DatabaseReply`` union."""
+"""Result union of `BookclerkPlugin.database`."""
 
 
 class EventResultReplyOk(TypedDict):
     """``EventResultReply`` member ``ok``.
 
+    Success: event handling outcome.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``EventResult`` payload.
+        value: Success: event handling outcome.
     """
 
     kind: Literal["ok"]
@@ -1286,9 +1383,11 @@ class EventResultReplyOk(TypedDict):
 class EventResultReplyErr(TypedDict):
     """``EventResultReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1299,7 +1398,7 @@ EventResultReply = Union[
     EventResultReplyOk,
     EventResultReplyErr,
 ]
-"""``EventResultReply`` union."""
+"""Result union of `Integration.onEvent`."""
 
 
 class JsonOk(TypedDict):
@@ -1308,7 +1407,7 @@ class JsonOk(TypedDict):
     via ExtensibleConfig, not as unbounded serde dumps.
 
     Attributes:
-        json: json
+        json: JSON text; at most `maxScalarBytes`.
     """
 
     json: str
@@ -1317,9 +1416,11 @@ class JsonOk(TypedDict):
 class JsonReplyOk(TypedDict):
     """``JsonReply`` member ``ok``.
 
+    Success: JSON text payload.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``JsonOk`` payload.
+        value: Success: JSON text payload.
     """
 
     kind: Literal["ok"]
@@ -1329,9 +1430,11 @@ class JsonReplyOk(TypedDict):
 class JsonReplyErr(TypedDict):
     """``JsonReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1342,15 +1445,15 @@ JsonReply = Union[
     JsonReplyOk,
     JsonReplyErr,
 ]
-"""``JsonReply`` union."""
+"""Result union of `JSON-bridge methods`."""
 
 
 class HealthOk(TypedDict):
-    """(undocumented)
+    """Typed liveness report.
 
     Attributes:
-        ok: ok
-        detail: detail
+        ok: True when the guest is healthy enough for traffic.
+        detail: Short human status line; empty when none.
     """
 
     ok: bool
@@ -1360,9 +1463,11 @@ class HealthOk(TypedDict):
 class HealthReplyOk(TypedDict):
     """``HealthReply`` member ``ok``.
 
+    Success: health status.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``HealthOk`` payload.
+        value: Success: health status.
     """
 
     kind: Literal["ok"]
@@ -1372,9 +1477,11 @@ class HealthReplyOk(TypedDict):
 class HealthReplyErr(TypedDict):
     """``HealthReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1385,15 +1492,17 @@ HealthReply = Union[
     HealthReplyOk,
     HealthReplyErr,
 ]
-"""``HealthReply`` union."""
+"""Result union of `health`."""
 
 
 class AdapterSessionReplyOk(TypedDict):
     """``AdapterSessionReply`` member ``ok``.
 
+    Success: opened `AdapterDatabaseSession` capability.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``AdapterDatabaseSession`` payload.
+        value: Success: opened `AdapterDatabaseSession` capability.
     """
 
     kind: Literal["ok"]
@@ -1403,9 +1512,11 @@ class AdapterSessionReplyOk(TypedDict):
 class AdapterSessionReplyErr(TypedDict):
     """``AdapterSessionReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1416,15 +1527,17 @@ AdapterSessionReply = Union[
     AdapterSessionReplyOk,
     AdapterSessionReplyErr,
 ]
-"""``AdapterSessionReply`` union."""
+"""Result union of `Database.openSession`."""
 
 
 class GuestDatabaseReplyOk(TypedDict):
     """``GuestDatabaseReply`` member ``ok``.
 
+    Success: opened `GuestDatabase` capability.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``GuestDatabase`` payload.
+        value: Success: opened `GuestDatabase` capability.
     """
 
     kind: Literal["ok"]
@@ -1434,9 +1547,11 @@ class GuestDatabaseReplyOk(TypedDict):
 class GuestDatabaseReplyErr(TypedDict):
     """``GuestDatabaseReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -1447,7 +1562,7 @@ GuestDatabaseReply = Union[
     GuestDatabaseReplyOk,
     GuestDatabaseReplyErr,
 ]
-"""``GuestDatabaseReply`` union."""
+"""Result union of `guest database opens`."""
 
 
 class ByteSource(Protocol):
@@ -1457,87 +1572,89 @@ class ByteSource(Protocol):
     """
 
     async def pull(self, max_bytes: int) -> PullReply:
-        """``ByteSource.pull``.
+        """Pull the next window of bytes. `done = true` on the final chunk.
 
         Args:
-            max_bytes: max_bytes
+            max_bytes: Upper bound for this window; at most `maxStreamWindowBytes`.
 
         Returns:
-            result
+            ``PullReply``
         """
         ...
 
 
 class Destination(Protocol):
-    """``Destination`` capability."""
+    """Object store the host writes acquired media into (`output.*` plugins).
+    Keys are relative object paths; the plugin owns the physical layout.
+    """
 
     async def head(self, key: str) -> HeadReply:
-        """``Destination.head``.
+        """Metadata probe. `found = false` is a success, not `not_found`.
 
         Args:
-            key: key
+            key: Object key to probe.
 
         Returns:
-            result
+            ``HeadReply``
         """
         ...
 
     async def list(self, options: ListOptions) -> ListReply:
-        """``Destination.list``.
+        """Page through objects under a prefix; at most `maxListPage` per page.
 
         Args:
-            options: options
+            options: Prefix, cursor, and page size.
 
         Returns:
-            result
+            ``ListReply``
         """
         ...
 
     async def get(self, key: str, options: ReadOptions) -> GetReply:
-        """``Destination.get``.
+        """Open an object (or a byte range of it) for reading.
 
         Args:
-            key: key
-            options: options
+            key: Object key to read.
+            options: Optional byte range.
 
         Returns:
-            result
+            ``GetReply``
         """
         ...
 
     async def put(self, key: str, body: ByteSource, options: WriteOptions) -> PutReply:
-        """``Destination.put``.
+        """Store an object from a transferred byte stream.
 
         Args:
-            key: key
-            body: body
-            options: options
+            key: Object key to write.
+            body: Streamed object bytes.
+            options: Content type, length, digest, staging.
 
         Returns:
-            result
+            ``PutReply``
         """
         ...
 
     async def copy(self, from_: str, to: str) -> CopyReply:
-        """``Destination.copy``.
+        """Server-side copy (requires `storage.copy`).
 
         Args:
-            from_: from_
-            to: to
+            from_: Source object key.
+            to: Destination object key.
 
         Returns:
-            result
+            ``CopyReply``
         """
         ...
 
     async def delete(self, key: str) -> EmptyReply:
-        """``Destination.delete``.
+        """Remove an object; deleting a missing key is a success.
 
         Args:
-            key: key
+            key: Object key to remove.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
@@ -1547,54 +1664,54 @@ class Destination(Protocol):
         storage, never a complete local spool on host/adapter/broker/guest.
 
         Args:
-            key: key
-            commit_token: commit_token
+            key: Object key that was staged.
+            commit_token: Token from `WriteOptions.commitToken`.
 
         Returns:
-            result
+            ``PutReply``
         """
         ...
 
     async def abort_stage(self, key: str, commit_token: str) -> EmptyReply:
-        """``Destination.abortStage``.
+        """Discard a staged object without publishing it.
 
         Args:
-            key: key
-            commit_token: commit_token
+            key: Object key that was staged.
+            commit_token: Token from `WriteOptions.commitToken`.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
 
 class Source(Protocol):
-    """``Source`` capability."""
+    """Read-only byte source for job inputs (not a storefront)."""
 
     async def open(self, key: str) -> OpenReply:
-        """``Source.open``.
+        """Open an object for streaming reads.
 
         Args:
-            key: key
+            key: Object key to open.
 
         Returns:
-            result
+            ``OpenReply``
         """
         ...
 
 
 class ProgressSink(Protocol):
-    """``ProgressSink`` capability."""
+    """Host-side progress reporter handed to job handlers."""
 
     async def report(self, percent: float, message: str) -> EmptyReply:
-        """``ProgressSink.report``.
+        """Report progress; the host coalesces frequent updates.
 
         Args:
-            percent: percent
-            message: message
+            percent: Completion in `[0, 100]`.
+            message: Short human-readable status line.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
@@ -1605,26 +1722,26 @@ class Cancellation(Protocol):
     """
 
     async def poll(self) -> bool:
-        """``Cancellation.poll``.
+        """Non-blocking check; `true` once the host has fenced the invocation.
 
         Returns:
-            cancelled
+            ``bool``
         """
         ...
 
 
 class JobHandler(Protocol):
-    """``JobHandler`` capability."""
+    """Job handler returned by `BookclerkPlugin.worker`; runs one durable command."""
 
     async def handle(self, invocation: JobInvocation, input: Source, output: Destination, progress: ProgressSink, cancel: Cancellation, database: GuestDatabase, databases: list[NamedDatabase]) -> HandleReply:
-        """``JobHandler.handle``.
+        """Run one command invocation to a terminal or suspended outcome.
 
         Args:
-            invocation: invocation
-            input: input
-            output: output
-            progress: progress
-            cancel: cancel
+            invocation: Durable command envelope.
+            input: Job input objects.
+            output: Job output object store.
+            progress: Progress reporter.
+            cancel: Host cancellation probe.
             database: Append-only. Host-mediated typed SQL session.
             databases: Append-only. Named plugin-owned database bindings (Workers-
                 style): each entry is an isolated database provisioned by the active
@@ -1632,7 +1749,7 @@ class JobHandler(Protocol):
                 plugin. Empty when the manifest declares none.
 
         Returns:
-            result
+            ``HandleReply``
         """
         ...
 
@@ -1655,221 +1772,221 @@ class ContentSource(Protocol):
     """
 
     async def login(self, params_json: str) -> JsonReply:
-        """``ContentSource.login``.
+        """Connect an account (password or one-shot OAuth).
 
         Args:
-            params_json: params_json
+            params_json: `LoginParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def scan(self, params_json: str) -> JsonReply:
-        """``ContentSource.scan``.
+        """Sync library rows for one or more accounts.
 
         Args:
-            params_json: params_json
+            params_json: `ScanParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def fetch_title(self, params_json: str) -> JsonReply:
-        """``ContentSource.fetchTitle``.
+        """Download and decrypt one title into `cacheDir`.
 
         Args:
-            params_json: params_json
+            params_json: `FetchTitleParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def list_accounts(self) -> JsonReply:
-        """``ContentSource.listAccounts``.
+        """Enumerate accounts the guest knows about.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def login_start(self, params_json: str) -> JsonReply:
-        """``ContentSource.loginStart``.
+        """Begin an interactive OAuth login; returns a session id.
 
         Args:
-            params_json: params_json
+            params_json: `LoginStartParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def login_complete(self, params_json: str) -> JsonReply:
-        """``ContentSource.loginComplete``.
+        """Finish an interactive OAuth login started by `loginStart`.
 
         Args:
-            params_json: params_json
+            params_json: `LoginCompleteParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def search_catalog(self, params_json: str) -> JsonReply:
-        """``ContentSource.searchCatalog``.
+        """Free-text storefront catalog search.
 
         Args:
-            params_json: params_json
+            params_json: `SearchCatalogParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def expand_candidates(self, params_json: str) -> JsonReply:
-        """``ContentSource.expandCandidates``.
+        """Related-title expansion from a seed title.
 
         Args:
-            params_json: params_json
+            params_json: `ExpandCandidatesParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def purchase_hint(self, params_json: str) -> JsonReply:
-        """``ContentSource.purchaseHint``.
+        """Purchase link / price hint for one title.
 
         Args:
-            params_json: params_json
+            params_json: `PurchaseHintParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def list_deals(self, params_json: str) -> JsonReply:
-        """``ContentSource.listDeals``.
+        """Current storefront deals.
 
         Args:
-            params_json: params_json
+            params_json: `ListDealsParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def health(self) -> HealthReply:
-        """``ContentSource.health``.
+        """Liveness / readiness probe.
 
         Returns:
-            result
+            ``HealthReply``
         """
         ...
 
     async def diagnose(self) -> JsonReply:
-        """``ContentSource.diagnose``.
+        """Human-readable diagnostic lines (`DiagnoseResult` JSON).
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def catalog_detail(self, params_json: str) -> JsonReply:
-        """``ContentSource.catalogDetail``.
+        """Full catalog record for one product.
 
         Args:
-            params_json: params_json
+            params_json: `CatalogDetailParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
 
 class Integration(Protocol):
-    """``Integration`` capability."""
+    """Long-running integration (remote library, listening sync, IdP bridge)."""
 
     async def health(self) -> HealthReply:
-        """``Integration.health``.
+        """Liveness / readiness probe.
 
         Returns:
-            result
+            ``HealthReply``
         """
         ...
 
     async def on_event(self, event: DomainEvent) -> EventResultReply:
-        """``Integration.onEvent``.
+        """Deliver one domain event (at-least-once; must be idempotent).
 
         Args:
-            event: event
+            event: Event envelope.
 
         Returns:
-            result
+            ``EventResultReply``
         """
         ...
 
     async def start(self) -> EmptyReply:
-        """``Integration.start``.
+        """Start background work after the host has granted bindings.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
     async def stop(self) -> EmptyReply:
-        """``Integration.stop``.
+        """Stop background work; the host may drop the capability afterwards.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
     async def diagnose(self) -> JsonReply:
-        """``Integration.diagnose``.
+        """Human-readable diagnostic lines (`DiagnoseResult` JSON).
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def scan_library(self, params_json: str) -> EmptyReply:
-        """``Integration.scanLibrary``.
+        """Re-sync the remote library.
 
         Args:
-            params_json: params_json
+            params_json: `ScanLibraryParams` JSON.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
     async def sync_listening(self) -> JsonReply:
-        """``Integration.syncListening``.
+        """Push / pull listening progress.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def authenticate_user(self, params_json: str) -> JsonReply:
-        """``Integration.authenticateUser``.
+        """Verify remote credentials on behalf of the host.
 
         Args:
-            params_json: params_json
+            params_json: `AuthenticateUserParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def poll_events(self) -> JsonReply:
-        """``Integration.pollEvents``.
+        """Drain events the remote side produced since the last poll.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
@@ -2325,9 +2442,11 @@ class AuthenticateUserParams(TypedDict):
 class DbValueNull(TypedDict):
     """``DbValue`` member ``null``.
 
+    SQL NULL with its declared type.
+
     Attributes:
         kind: Always ``"null"``.
-        value: ``DbType`` payload.
+        value: SQL NULL with its declared type.
     """
 
     kind: Literal["null"]
@@ -2337,9 +2456,11 @@ class DbValueNull(TypedDict):
 class DbValueBoolean(TypedDict):
     """``DbValue`` member ``boolean``.
 
+    Boolean.
+
     Attributes:
         kind: Always ``"boolean"``.
-        value: ``Bool`` payload.
+        value: Boolean.
     """
 
     kind: Literal["boolean"]
@@ -2349,9 +2470,11 @@ class DbValueBoolean(TypedDict):
 class DbValueInt64(TypedDict):
     """``DbValue`` member ``int64``.
 
+    Signed 64-bit integer.
+
     Attributes:
         kind: Always ``"int64"``.
-        value: ``Int64`` payload.
+        value: Signed 64-bit integer.
     """
 
     kind: Literal["int64"]
@@ -2361,9 +2484,11 @@ class DbValueInt64(TypedDict):
 class DbValueFloat64(TypedDict):
     """``DbValue`` member ``float64``.
 
+    IEEE-754 double.
+
     Attributes:
         kind: Always ``"float64"``.
-        value: ``Float64`` payload.
+        value: IEEE-754 double.
     """
 
     kind: Literal["float64"]
@@ -2373,9 +2498,11 @@ class DbValueFloat64(TypedDict):
 class DbValueText(TypedDict):
     """``DbValue`` member ``text``.
 
+    UTF-8 text.
+
     Attributes:
         kind: Always ``"text"``.
-        value: ``Text`` payload.
+        value: UTF-8 text.
     """
 
     kind: Literal["text"]
@@ -2385,9 +2512,11 @@ class DbValueText(TypedDict):
 class DbValueBytes(TypedDict):
     """``DbValue`` member ``bytes``.
 
+    Raw bytes.
+
     Attributes:
         kind: Always ``"bytes"``.
-        value: ``Data`` payload.
+        value: Raw bytes.
     """
 
     kind: Literal["bytes"]
@@ -2402,15 +2531,15 @@ DbValue = Union[
     DbValueText,
     DbValueBytes,
 ]
-"""``DbValue`` union."""
+"""One typed SQL cell or bind parameter."""
 
 
 class DbColumn(TypedDict):
-    """(undocumented)
+    """Result column descriptor.
 
     Attributes:
-        name: name
-        dbType: dbType
+        name: Column name as projected.
+        dbType: Declared or inferred column type.
     """
 
     name: str
@@ -2418,24 +2547,24 @@ class DbColumn(TypedDict):
 
 
 class DbRow(TypedDict):
-    """(undocumented)
+    """One result row.
 
     Attributes:
-        values: values
+        values: Cells in `columns` order.
     """
 
     values: list[DbValue]
 
 
 class DbStatement(TypedDict):
-    """(undocumented)
+    """One guest statement in an `ExecuteRequest`.
 
     Attributes:
-        sql: sql
-        parameters: parameters
-        kind: kind
-        maxRows: maxRows
-        resultSelection: resultSelection
+        sql: BookclerkSQL text; at most `maxScalarBytes`.
+        parameters: Positional bind values.
+        kind: Statement classification.
+        maxRows: Row cap for queries; `0` means adapter default.
+        resultSelection: Which outcome parts to return.
     """
 
     sql: str
@@ -2446,13 +2575,14 @@ class DbStatement(TypedDict):
 
 
 class ExecuteRequest(TypedDict):
-    """(undocumented)
+    """Guest statement batch for `GuestDatabase.execute`; runs atomically.
 
     Attributes:
-        operationId: operationId
-        requestHash: requestHash
-        statements: statements
-        deadlineUnixMs: deadlineUnixMs
+        operationId: Caller-chosen idempotency key.
+        requestHash: SHA-256 hex of the idempotency-relevant request; empty when
+            omitted.
+        statements: Statements in execution order; at most `maxStatements`.
+        deadlineUnixMs: Deadline hint; `0` means none.
     """
 
     operationId: str
@@ -2462,11 +2592,11 @@ class ExecuteRequest(TypedDict):
 
 
 class SqlSpan(TypedDict):
-    """(undocumented)
+    """Byte span in the exact canonical SQL string a proof is bound to.
 
     Attributes:
-        start: start
-        end: end
+        start: Inclusive start byte offset.
+        end: Exclusive end byte offset.
     """
 
     start: int
@@ -2474,23 +2604,23 @@ class SqlSpan(TypedDict):
 
 
 class TextCollateSite(TypedDict):
-    """(undocumented)
+    """One TEXT expression the adapter must collate bytewise (`COLLATE "C"`).
 
     Attributes:
-        span: span
+        span: Identifier or string-literal span in canonical SQL.
     """
 
     span: SqlSpan
 
 
 class IntegerArithSite(TypedDict):
-    """(undocumented)
+    """One INTEGER arithmetic expression that must not wrap or error on overflow.
 
     Attributes:
-        full: full
-        lhs: lhs
-        rhs: rhs
-        kind: kind
+        full: Full expression span (`a + b` or `abs(n)`).
+        lhs: Left operand (or `abs` argument).
+        rhs: Right operand (`abs` repeats `lhs`).
+        kind: Operator.
     """
 
     full: SqlSpan
@@ -2500,10 +2630,10 @@ class IntegerArithSite(TypedDict):
 
 
 class PhysicalAccess(TypedDict):
-    """(undocumented)
+    """Physical table/column access used for authorization.
 
     Attributes:
-        table: table
+        table: Physical table name.
         column: Empty = table presence only; "*" = projection wildcard.
     """
 
@@ -2512,13 +2642,13 @@ class PhysicalAccess(TypedDict):
 
 
 class ResolvedAssignment(TypedDict):
-    """(undocumented)
+    """Destination assignment `lhs = rhs` (INSERT, UPDATE, ...).
 
     Attributes:
-        table: table
-        column: column
-        dest: dest
-        source: source
+        table: Target table.
+        column: Target column.
+        dest: Declared column type.
+        source: Resolved type of the assigned expression.
     """
 
     table: str
@@ -2528,11 +2658,11 @@ class ResolvedAssignment(TypedDict):
 
 
 class NamedSqlType(TypedDict):
-    """(undocumented)
+    """Column name paired with its resolved type.
 
     Attributes:
-        name: name
-        sqlType: sqlType
+        name: Column name.
+        sqlType: Resolved type.
     """
 
     name: str
@@ -2540,11 +2670,11 @@ class NamedSqlType(TypedDict):
 
 
 class ColumnReference(TypedDict):
-    """(undocumented)
+    """`REFERENCES` target of one column.
 
     Attributes:
-        refTable: refTable
-        refColumns: refColumns
+        refTable: Referenced table.
+        refColumns: Referenced columns.
     """
 
     refTable: str
@@ -2553,6 +2683,8 @@ class ColumnReference(TypedDict):
 
 class OptionalColumnReferenceNone(TypedDict):
     """``OptionalColumnReference`` member ``none``.
+
+    Column has no reference.
 
     Attributes:
         kind: Always ``"none"``.
@@ -2564,9 +2696,11 @@ class OptionalColumnReferenceNone(TypedDict):
 class OptionalColumnReferenceSome(TypedDict):
     """``OptionalColumnReference`` member ``some``.
 
+    Column references another table.
+
     Attributes:
         kind: Always ``"some"``.
-        value: ``ColumnReference`` payload.
+        value: Column references another table.
     """
 
     kind: Literal["some"]
@@ -2577,16 +2711,16 @@ OptionalColumnReference = Union[
     OptionalColumnReferenceNone,
     OptionalColumnReferenceSome,
 ]
-"""``OptionalColumnReference`` union."""
+"""Per-column `REFERENCES` slot in `CreateTableSchema`."""
 
 
 class ForeignKeyConstraint(TypedDict):
-    """(undocumented)
+    """Table-level `FOREIGN KEY` constraint.
 
     Attributes:
-        columns: columns
-        refTable: refTable
-        refColumns: refColumns
+        columns: Local columns.
+        refTable: Referenced table.
+        refColumns: Referenced columns.
     """
 
     columns: list[str]
@@ -2597,9 +2731,11 @@ class ForeignKeyConstraint(TypedDict):
 class TableConstraintPrimaryKey(TypedDict):
     """``TableConstraint`` member ``primaryKey``.
 
+    `PRIMARY KEY (...)` columns.
+
     Attributes:
         kind: Always ``"primaryKey"``.
-        value: ``List(Text)`` payload.
+        value: `PRIMARY KEY (...)` columns.
     """
 
     kind: Literal["primaryKey"]
@@ -2609,9 +2745,11 @@ class TableConstraintPrimaryKey(TypedDict):
 class TableConstraintUnique(TypedDict):
     """``TableConstraint`` member ``unique``.
 
+    `UNIQUE (...)` columns.
+
     Attributes:
         kind: Always ``"unique"``.
-        value: ``List(Text)`` payload.
+        value: `UNIQUE (...)` columns.
     """
 
     kind: Literal["unique"]
@@ -2621,9 +2759,11 @@ class TableConstraintUnique(TypedDict):
 class TableConstraintCheck(TypedDict):
     """``TableConstraint`` member ``check``.
 
+    `CHECK (...)` expression text.
+
     Attributes:
         kind: Always ``"check"``.
-        value: ``Text`` payload.
+        value: `CHECK (...)` expression text.
     """
 
     kind: Literal["check"]
@@ -2633,9 +2773,11 @@ class TableConstraintCheck(TypedDict):
 class TableConstraintForeignKey(TypedDict):
     """``TableConstraint`` member ``foreignKey``.
 
+    `FOREIGN KEY (...) REFERENCES ...`.
+
     Attributes:
         kind: Always ``"foreignKey"``.
-        value: ``ForeignKeyConstraint`` payload.
+        value: `FOREIGN KEY (...) REFERENCES ...`.
     """
 
     kind: Literal["foreignKey"]
@@ -2648,23 +2790,23 @@ TableConstraint = Union[
     TableConstraintCheck,
     TableConstraintForeignKey,
 ]
-"""``TableConstraint`` union."""
+"""One table-level constraint."""
 
 
 class CreateTableSchema(TypedDict):
-    """(undocumented)
+    """Parsed `CREATE TABLE` (canonical SQL v1). Per-column lists align with `columns`.
 
     Attributes:
-        table: table
-        columns: columns
-        identityColumn: identityColumn
-        columnNotNull: columnNotNull
-        columnUnique: columnUnique
-        columnPrimaryKey: columnPrimaryKey
-        columnDefaults: columnDefaults
-        columnChecks: columnChecks
-        columnReferences: columnReferences
-        tableConstraints: tableConstraints
+        table: Table name.
+        columns: Columns with resolved types, in order.
+        identityColumn: `INTEGER PRIMARY KEY AUTOINCREMENT` column; empty when none.
+        columnNotNull: Per-column NOT NULL flags.
+        columnUnique: Per-column UNIQUE flags.
+        columnPrimaryKey: Per-column PRIMARY KEY flags.
+        columnDefaults: Per-column DEFAULT expression text; empty when none.
+        columnChecks: Per-column CHECK expression text; empty when none.
+        columnReferences: Per-column REFERENCES targets.
+        tableConstraints: Table-level constraints, in order.
     """
 
     table: str
@@ -2680,12 +2822,12 @@ class CreateTableSchema(TypedDict):
 
 
 class SchemaCreate(TypedDict):
-    """(undocumented)
+    """`CREATE TABLE` action with its durable fingerprint.
 
     Attributes:
-        schema: schema
-        fingerprint: fingerprint
-        noop: noop
+        schema: Parsed table schema.
+        fingerprint: Structured schema fingerprint (hex SHA-256).
+        noop: True when the catalog already holds this exact fingerprint.
     """
 
     schema: CreateTableSchema
@@ -2695,6 +2837,8 @@ class SchemaCreate(TypedDict):
 
 class SchemaActionNone(TypedDict):
     """``SchemaAction`` member ``none``.
+
+    Not DDL.
 
     Attributes:
         kind: Always ``"none"``.
@@ -2706,9 +2850,11 @@ class SchemaActionNone(TypedDict):
 class SchemaActionCreate(TypedDict):
     """``SchemaAction`` member ``create``.
 
+    `CREATE TABLE`.
+
     Attributes:
         kind: Always ``"create"``.
-        value: ``SchemaCreate`` payload.
+        value: `CREATE TABLE`.
     """
 
     kind: Literal["create"]
@@ -2718,9 +2864,11 @@ class SchemaActionCreate(TypedDict):
 class SchemaActionDrop(TypedDict):
     """``SchemaAction`` member ``drop``.
 
+    `DROP TABLE` of the named table.
+
     Attributes:
         kind: Always ``"drop"``.
-        value: ``Text`` payload.
+        value: `DROP TABLE` of the named table.
     """
 
     kind: Literal["drop"]
@@ -2732,21 +2880,21 @@ SchemaAction = Union[
     SchemaActionCreate,
     SchemaActionDrop,
 ]
-"""``SchemaAction`` union."""
+"""CREATE/DROP action recorded on a proof."""
 
 
 class ResolvedStatement(TypedDict):
-    """(undocumented)
+    """Host-produced typed proof bound to one exact canonical statement.
 
     Attributes:
-        statementHash: statementHash
-        outputColumns: outputColumns
-        physicalAccesses: physicalAccesses
-        assignments: assignments
-        textCollateSites: textCollateSites
-        integerArithSites: integerArithSites
-        functions: functions
-        schemaAction: schemaAction
+        statementHash: SHA-256 hex of the exact canonical SQL this proof claims.
+        outputColumns: SELECT / RETURNING / VALUES output columns in order.
+        physicalAccesses: Physical tables/columns referenced (authorization).
+        assignments: Mutation destination assignments.
+        textCollateSites: TEXT expression spans needing bytewise collation.
+        integerArithSites: INTEGER overflow sites (`+` `-` `*` `abs`).
+        functions: Function names invoked (folded), for authorization.
+        schemaAction: DDL action + fingerprint.
     """
 
     statementHash: str
@@ -2760,11 +2908,12 @@ class ResolvedStatement(TypedDict):
 
 
 class AdapterReceipt(TypedDict):
-    """(undocumented)
+    """Replay receipt the host asks the adapter to persist with the batch.
 
     Attributes:
-        guestLen: guestLen
-        guestHash: guestHash
+        guestLen: Guest statement count inside the receipt wrap (excluding host
+            prune/select).
+        guestHash: Guest `requestHash` compared on replay.
     """
 
     guestLen: int
@@ -2772,15 +2921,15 @@ class AdapterReceipt(TypedDict):
 
 
 class AdapterStatement(TypedDict):
-    """(undocumented)
+    """One host-lowered statement with its proof.
 
     Attributes:
-        sql: sql
-        parameters: parameters
-        kind: kind
-        maxRows: maxRows
-        resultSelection: resultSelection
-        proof: proof
+        sql: Canonical SQL text.
+        parameters: Positional bind values.
+        kind: Statement classification.
+        maxRows: Row cap for queries; `0` means adapter default.
+        resultSelection: Which outcome parts to return.
+        proof: Typed proof bound to `sql`.
     """
 
     sql: str
@@ -2792,15 +2941,15 @@ class AdapterStatement(TypedDict):
 
 
 class AdapterExecuteRequest(TypedDict):
-    """(undocumented)
+    """Host -> adapter batch: proven statements plus isolation and receipt.
 
     Attributes:
-        operationId: operationId
-        requestHash: requestHash
-        statements: statements
-        deadlineUnixMs: deadlineUnixMs
-        isolation: isolation
-        receipt: receipt
+        operationId: Host-chosen idempotency key.
+        requestHash: SHA-256 hex of the idempotency-relevant request.
+        statements: Statements in execution order.
+        deadlineUnixMs: Deadline hint; `0` means none.
+        isolation: Transaction isolation the adapter must realize.
+        receipt: Replay receipt to persist; zero/empty when not required.
     """
 
     operationId: str
@@ -2812,12 +2961,12 @@ class AdapterExecuteRequest(TypedDict):
 
 
 class StatementResult(TypedDict):
-    """(undocumented)
+    """Outcome of one statement.
 
     Attributes:
-        rows: rows
-        columns: columns
-        rowsAffected: rowsAffected
+        rows: Result rows (empty unless `rows` selected).
+        columns: Result column descriptors.
+        rowsAffected: Rows changed by a mutation.
     """
 
     rows: list[DbRow]
@@ -2826,12 +2975,13 @@ class StatementResult(TypedDict):
 
 
 class DbTiming(TypedDict):
-    """(undocumented)
+    """Engine timing on `ExecuteReply`.
 
     Attributes:
-        attemptElapsedUs: attemptElapsedUs
-        dbExecutionUs: dbExecutionUs
-        dbTimingSource: dbTimingSource
+        attemptElapsedUs: Monotonic duration of this handler attempt (microseconds).
+        dbExecutionUs: Engine-reported SQL/transaction time when available (`0` =
+            omitted).
+        dbTimingSource: How `dbExecutionUs` was measured.
     """
 
     attemptElapsedUs: int
@@ -2840,12 +2990,12 @@ class DbTiming(TypedDict):
 
 
 class ExecuteReply(TypedDict):
-    """(undocumented)
+    """Success payload of `execute`.
 
     Attributes:
-        operationId: operationId
-        statements: statements
-        timing: timing
+        operationId: Echo of the request `operationId`.
+        statements: Per-statement results in request order.
+        timing: Engine timing.
     """
 
     operationId: str
@@ -2856,9 +3006,11 @@ class ExecuteReply(TypedDict):
 class ExecuteResultReplyOk(TypedDict):
     """``ExecuteResultReply`` member ``ok``.
 
+    Success: statement results.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``ExecuteReply`` payload.
+        value: Success: statement results.
     """
 
     kind: Literal["ok"]
@@ -2868,9 +3020,11 @@ class ExecuteResultReplyOk(TypedDict):
 class ExecuteResultReplyErr(TypedDict):
     """``ExecuteResultReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -2881,7 +3035,7 @@ ExecuteResultReply = Union[
     ExecuteResultReplyOk,
     ExecuteResultReplyErr,
 ]
-"""``ExecuteResultReply`` union."""
+"""Result union of `execute`."""
 
 
 class DbCapabilities(TypedDict):
@@ -2889,21 +3043,22 @@ class DbCapabilities(TypedDict):
     part of the capability plane — see `DbBootstrap`.
 
     Attributes:
-        sqlContractVersion: sqlContractVersion
-        atomicBatch: atomicBatch
-        returning: returning
-        affectedRows: affectedRows
-        schemaMigrations: schemaMigrations
-        cancellation: cancellation
-        timing: timing
-        maxBinds: maxBinds
-        maxStatements: maxStatements
-        maxResultRows: maxResultRows
-        maxPayloadBytes: maxPayloadBytes
-        maxResultBytes: maxResultBytes
-        maxCellBytes: maxCellBytes
-        maxRequestBytes: maxRequestBytes
-        maxAtomicResultBytes: maxAtomicResultBytes
+        sqlContractVersion: Bookclerk SQL contract version.
+        atomicBatch: Guest can run a bounded statement list as one SQL transaction.
+        returning: Guest SQL supports `RETURNING`.
+        affectedRows: Guest reports `rowsAffected`.
+        schemaMigrations: Guest versions schema with a `bookclerk_schema_migrations`
+            table.
+        cancellation: Guest honors RPC/session cancellation.
+        timing: Guest can fill `DbTiming.dbExecutionUs`. Not a host connect minimum.
+        maxBinds: Maximum bound parameters per statement.
+        maxStatements: Maximum statements in one atomic batch.
+        maxResultRows: Maximum rows a query statement may return.
+        maxPayloadBytes: Maximum UTF-8 bytes of SQL plus binds per statement.
+        maxResultBytes: Maximum encoded bytes of one statement's result rows.
+        maxCellBytes: Maximum UTF-8 / blob bytes of one result cell.
+        maxRequestBytes: Maximum encoded bytes of one `ExecuteRequest`.
+        maxAtomicResultBytes: Maximum encoded bytes of one `ExecuteReply`.
         pluginDatabases: Append-only. Adapter can open additional isolated sessions for
             plugin-owned database bindings (per-binding file / schema / database).
         maxFunctionArgs: Maximum arguments in one physical function call after adapter
@@ -2953,9 +3108,11 @@ class DbCapabilities(TypedDict):
 class DbBootstrapReplyOk(TypedDict):
     """``DbBootstrapReply`` member ``ok``.
 
+    Success: bootstrap metadata.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``DbBootstrap`` payload.
+        value: Success: bootstrap metadata.
     """
 
     kind: Literal["ok"]
@@ -2965,9 +3122,11 @@ class DbBootstrapReplyOk(TypedDict):
 class DbBootstrapReplyErr(TypedDict):
     """``DbBootstrapReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -2978,11 +3137,11 @@ DbBootstrapReply = Union[
     DbBootstrapReplyOk,
     DbBootstrapReplyErr,
 ]
-"""``DbBootstrapReply`` union."""
+"""Result union of `AdapterDatabaseSession.bootstrap`."""
 
 
 class DbBootstrap(TypedDict):
-    """(undocumented)
+    """Bootstrap-only diagnostic metadata (not a capability).
 
     Attributes:
         engine: Diagnostic physical engine name. Hosts must not admit or generate SQL
@@ -2995,9 +3154,11 @@ class DbBootstrap(TypedDict):
 class DbCapabilitiesReplyOk(TypedDict):
     """``DbCapabilitiesReply`` member ``ok``.
 
+    Success: capability advertisement.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``DbCapabilities`` payload.
+        value: Success: capability advertisement.
     """
 
     kind: Literal["ok"]
@@ -3007,9 +3168,11 @@ class DbCapabilitiesReplyOk(TypedDict):
 class DbCapabilitiesReplyErr(TypedDict):
     """``DbCapabilitiesReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -3020,17 +3183,17 @@ DbCapabilitiesReply = Union[
     DbCapabilitiesReplyOk,
     DbCapabilitiesReplyErr,
 ]
-"""``DbCapabilitiesReply`` union."""
+"""Result union of `AdapterDatabaseSession.capabilities`."""
 
 
 class Database(Protocol):
-    """``Database`` capability."""
+    """Database adapter returned by `BookclerkPlugin.database`."""
 
     async def open_session(self) -> AdapterSessionReply:
-        """``Database.openSession``.
+        """Open one adapter session (capability negotiation + typed execute).
 
         Returns:
-            result
+            ``AdapterSessionReply``
         """
         ...
 
@@ -3040,8 +3203,8 @@ class IdentityHighWater(TypedDict):
     Column names live in the canonical backup schema, not this catalog.
 
     Attributes:
-        table: table
-        last: last
+        table: Table whose identity column the mark belongs to.
+        last: Highest generated or stored value that must not be reused.
     """
 
     table: str
@@ -3051,9 +3214,11 @@ class IdentityHighWater(TypedDict):
 class IdentityExportReplyOk(TypedDict):
     """``IdentityExportReply`` member ``ok``.
 
+    Success: identity high-water rows.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``List(IdentityHighWater)`` payload.
+        value: Success: identity high-water rows.
     """
 
     kind: Literal["ok"]
@@ -3063,9 +3228,11 @@ class IdentityExportReplyOk(TypedDict):
 class IdentityExportReplyErr(TypedDict):
     """``IdentityExportReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -3076,15 +3243,17 @@ IdentityExportReply = Union[
     IdentityExportReplyOk,
     IdentityExportReplyErr,
 ]
-"""``IdentityExportReply`` union."""
+"""Result union of `AdapterDatabaseSession.exportIdentity`."""
 
 
 class UserRelationsReplyOk(TypedDict):
     """``UserRelationsReply`` member ``ok``.
 
+    Success: user relation names.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``List(Text)`` payload.
+        value: Success: user relation names.
     """
 
     kind: Literal["ok"]
@@ -3094,9 +3263,11 @@ class UserRelationsReplyOk(TypedDict):
 class UserRelationsReplyErr(TypedDict):
     """``UserRelationsReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -3107,17 +3278,17 @@ UserRelationsReply = Union[
     UserRelationsReplyOk,
     UserRelationsReplyErr,
 ]
-"""``UserRelationsReply`` union."""
+"""Result union of `AdapterDatabaseSession.listUserRelations`."""
 
 
 class AdapterDatabaseSession(Protocol):
     """Host ↔ database adapter plugin. Capability negotiation + typed execute only."""
 
     async def capabilities(self) -> DbCapabilitiesReply:
-        """``AdapterDatabaseSession.capabilities``.
+        """Semantic SQL-contract advertisement for this session.
 
         Returns:
-            result
+            ``DbCapabilitiesReply``
         """
         ...
 
@@ -3125,18 +3296,18 @@ class AdapterDatabaseSession(Protocol):
         """Canonical SQL + required structured proofs (not JSON).
 
         Args:
-            request: request
+            request: Proven statements plus isolation and receipt.
 
         Returns:
-            result
+            ``ExecuteResultReply``
         """
         ...
 
     async def close(self) -> EmptyReply:
-        """``AdapterDatabaseSession.close``.
+        """Release the session; further calls fail.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
@@ -3144,7 +3315,7 @@ class AdapterDatabaseSession(Protocol):
         """Bootstrap-only SeaORM proxy metadata (not part of DbCapabilities).
 
         Returns:
-            result
+            ``DbBootstrapReply``
         """
         ...
 
@@ -3152,53 +3323,53 @@ class AdapterDatabaseSession(Protocol):
         """Snapshot/identity/restore primitives (not a SQL dialect API).
 
         Returns:
-            result
+            ``IdentityExportReply``
         """
         ...
 
     async def import_identity(self, rows: list[IdentityHighWater]) -> EmptyReply:
-        """``AdapterDatabaseSession.importIdentity``.
+        """Restore identity high-water marks captured by `exportIdentity`.
 
         Args:
-            rows: rows
+            rows: High-water rows to apply.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
     async def list_user_relations(self) -> UserRelationsReply:
-        """``AdapterDatabaseSession.listUserRelations``.
+        """Names of user relations present in the logical database unit.
 
         Returns:
-            result
+            ``UserRelationsReply``
         """
         ...
 
     async def prepare_unit_restore(self) -> EmptyReply:
-        """``AdapterDatabaseSession.prepareUnitRestore``.
+        """Enter restore mode for one logical unit (`atomicUnitRestore`).
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
     async def drop_user_relations(self, names: list[str]) -> EmptyReply:
-        """``AdapterDatabaseSession.dropUserRelations``.
+        """Drop the named user relations during restore.
 
         Args:
-            names: names
+            names: Relation names from `listUserRelations`.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
     async def assert_restore_constraints(self) -> EmptyReply:
-        """``AdapterDatabaseSession.assertRestoreConstraints``.
+        """Verify constraints hold after restore rows were written.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
@@ -3211,21 +3382,21 @@ class GuestDatabase(Protocol):
     """
 
     async def execute(self, request: ExecuteRequest) -> ExecuteResultReply:
-        """``GuestDatabase.execute``.
+        """Run one typed statement batch.
 
         Args:
-            request: request
+            request: Statements, binds, and deadline.
 
         Returns:
-            result
+            ``ExecuteResultReply``
         """
         ...
 
     async def close(self) -> EmptyReply:
-        """``GuestDatabase.close``.
+        """Release the session; further calls fail.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
@@ -3233,9 +3404,11 @@ class GuestDatabase(Protocol):
 class PluginMigrationOpSchema(TypedDict):
     """``PluginMigrationOp`` member ``schema``.
 
+    Admitted DDL statement text.
+
     Attributes:
         kind: Always ``"schema"``.
-        value: ``Text`` payload.
+        value: Admitted DDL statement text.
     """
 
     kind: Literal["schema"]
@@ -3245,9 +3418,11 @@ class PluginMigrationOpSchema(TypedDict):
 class PluginMigrationOpData(TypedDict):
     """``PluginMigrationOp`` member ``data``.
 
+    Admitted DML statement text.
+
     Attributes:
         kind: Always ``"data"``.
-        value: ``Text`` payload.
+        value: Admitted DML statement text.
     """
 
     kind: Literal["data"]
@@ -3271,8 +3446,8 @@ class PluginMigration(TypedDict):
     Registration order is the forward sequence.
 
     Attributes:
-        id: id
-        operations: at most `maxPluginMigrationOps`
+        id: Opaque plugin-chosen stable identity.
+        operations: Operations in forward order; at most `maxPluginMigrationOps`.
     """
 
     id: str
@@ -3280,7 +3455,7 @@ class PluginMigration(TypedDict):
 
 
 class PluginMigrationsOk(TypedDict):
-    """(undocumented)
+    """Success payload of `BookclerkPlugin.databaseMigrations`.
 
     Attributes:
         migrations: At most `maxListPage` entries; aggregate id+SQL bytes at most
@@ -3294,9 +3469,11 @@ class PluginMigrationsOk(TypedDict):
 class PluginMigrationsReplyOk(TypedDict):
     """``PluginMigrationsReply`` member ``ok``.
 
+    Success: ordered migration sequence.
+
     Attributes:
         kind: Always ``"ok"``.
-        value: ``PluginMigrationsOk`` payload.
+        value: Success: ordered migration sequence.
     """
 
     kind: Literal["ok"]
@@ -3306,9 +3483,11 @@ class PluginMigrationsReplyOk(TypedDict):
 class PluginMigrationsReplyErr(TypedDict):
     """``PluginMigrationsReply`` member ``err``.
 
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
     Attributes:
         kind: Always ``"err"``.
-        value: ``PluginError`` payload.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
     """
 
     kind: Literal["err"]
@@ -3319,110 +3498,110 @@ PluginMigrationsReply = Union[
     PluginMigrationsReplyOk,
     PluginMigrationsReplyErr,
 ]
-"""``PluginMigrationsReply`` union."""
+"""Result union of `BookclerkPlugin.databaseMigrations`."""
 
 
 class BookclerkPlugin(Protocol):
-    """``BookclerkPlugin`` capability."""
+    """Plugin bootstrap capability: the guest's root object."""
 
     async def describe(self) -> DescribeReply:
-        """``BookclerkPlugin.describe``.
+        """Identity, ABI version, negotiated features, and advertised roles.
 
         Returns:
-            result
+            ``DescribeReply``
         """
         ...
 
     async def destination(self, context: DestinationContext) -> DestinationReply:
-        """``BookclerkPlugin.destination``.
+        """Open the object-store destination role.
 
         Args:
-            context: context
+            context: Granted destination configuration.
 
         Returns:
-            result
+            ``DestinationReply``
         """
         ...
 
     async def source(self, context: SourceContext) -> SourceReply:
-        """``BookclerkPlugin.source``.
+        """Open the byte-source role.
 
         Args:
-            context: context
+            context: Granted source configuration.
 
         Returns:
-            result
+            ``SourceReply``
         """
         ...
 
     async def worker(self, context: WorkerContext) -> WorkerReply:
-        """``BookclerkPlugin.worker``.
+        """Open a job handler for one durable command.
 
         Args:
-            context: context
+            context: Job id and granted configuration.
 
         Returns:
-            result
+            ``WorkerReply``
         """
         ...
 
     async def shutdown(self) -> EmptyReply:
-        """``BookclerkPlugin.shutdown``.
+        """Flush and release resources before the process exits.
 
         Returns:
-            result
+            ``EmptyReply``
         """
         ...
 
     async def content_source(self, context: ContentSourceContext) -> ContentSourceReply:
-        """``BookclerkPlugin.contentSource``.
+        """Open the storefront content-source role.
 
         Args:
-            context: context
+            context: Granted storefront configuration.
 
         Returns:
-            result
+            ``ContentSourceReply``
         """
         ...
 
     async def integration(self, context: IntegrationContext) -> IntegrationReply:
-        """``BookclerkPlugin.integration``.
+        """Open the integration role.
 
         Args:
-            context: context
+            context: Granted integration configuration.
 
         Returns:
-            result
+            ``IntegrationReply``
         """
         ...
 
     async def database(self, context: DatabaseContext) -> DatabaseReply:
-        """``BookclerkPlugin.database``.
+        """Open the database adapter role.
 
         Args:
-            context: context
+            context: Granted adapter configuration.
 
         Returns:
-            result
+            ``DatabaseReply``
         """
         ...
 
     async def cli_describe(self) -> JsonReply:
-        """``BookclerkPlugin.cliDescribe``.
+        """Declared CLI surface (`CliSchema` JSON).
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
     async def cli_invoke(self, params_json: str) -> JsonReply:
-        """``BookclerkPlugin.cliInvoke``.
+        """Run one plugin CLI command (`CliInvokeParams` -> `CliInvokeResult` JSON).
 
         Args:
-            params_json: params_json
+            params_json: `CliInvokeParams` JSON.
 
         Returns:
-            result
+            ``JsonReply``
         """
         ...
 
@@ -3430,7 +3609,7 @@ class BookclerkPlugin(Protocol):
         """Plugin-provided OIDC AS client templates. Empty list when unused.
 
         Returns:
-            result
+            ``OidcClientsReply``
         """
         ...
 
@@ -3443,10 +3622,10 @@ class BookclerkPlugin(Protocol):
         `maxPluginMigrationRegistrationBytes`.
 
         Args:
-            binding: binding
+            binding: Binding name from `plugin.toml`.
 
         Returns:
-            result
+            ``PluginMigrationsReply``
         """
         ...
 

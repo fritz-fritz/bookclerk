@@ -41,9 +41,13 @@ export type JsonValue = unknown;
 /** JSON object carried inside a `$jsonValue` `Text` field. */
 export type JsonObject = Record<string, unknown>;
 
+/** Guest-advertised caps for `rpc.scalarLimits`; never above the file constants. */
 export interface ScalarLimits {
+  /** Largest scalar the guest accepts; at most `maxScalarBytes`. */
   maxScalarBytes: number;
+  /** Largest `ByteSource.pull` window; at most `maxStreamWindowBytes`. */
   maxStreamWindowBytes: number;
+  /** Largest list page; at most `maxListPage`. */
   maxListPage: number;
 }
 
@@ -53,46 +57,73 @@ export interface ScalarLimits {
  * while retaining the raw wire code.
  */
 export interface PluginError {
+  /** Stable snake_case error code (see `PluginErrorCode`). */
   code: string;
+  /** Human-readable detail; never contains secrets. */
   message: string;
 }
 
+/** Full metadata of one stored object. */
 export interface ObjectMetadata {
+  /** Object key. */
   key: string;
+  /** Object size in bytes. */
   size: number;
+  /** MIME type; empty when unknown. */
   contentType: string;
+  /** Backend entity tag; empty when unsupported. */
   etag: string;
+  /** Raw SHA-256 digest (32 bytes) or empty when unknown. */
   sha256: Uint8Array;
 }
 
+/** Compact object entry in a list page. */
 export interface ObjectInfo {
+  /** Object key. */
   key: string;
+  /** Object size in bytes. */
   size: number;
 }
 
+/** Paging options for `Destination.list`. */
 export interface ListOptions {
+  /** Only keys starting with this prefix; empty lists everything. */
   prefix: string;
+  /** Opaque cursor from a previous `ListPage.nextCursor`; empty starts over. */
   cursor: string;
+  /** Requested page size; clamped to `maxListPage`. `0` means guest default. */
   limit: number;
 }
 
+/** One page of `Destination.list` results. */
 export interface ListPage {
+  /** Objects in this page, in backend order. */
   objects: ObjectInfo[];
+  /** Cursor for the next page; empty when exhausted. */
   nextCursor: string;
 }
 
+/** Half-open byte window `[offset, offset + length)`. */
 export interface ByteRange {
+  /** First byte offset. */
   offset: number;
+  /** Number of bytes; `0` reads to the end. */
   length: number;
 }
 
+/** Options for `Destination.get`. */
 export interface ReadOptions {
+  /** Byte range to read; an all-zero range reads the whole object. */
   range: ByteRange;
 }
 
+/** Options for `Destination.put`. */
 export interface WriteOptions {
+  /** MIME type to record; empty when unknown. */
   contentType: string;
+  /** Expected body length in bytes; `0` when unknown (chunked). */
   contentLength: number;
+  /** Expected raw SHA-256 digest; empty skips verification. */
   sha256: Uint8Array;
   /** Destination-side stage-and-publish. Empty means a one-shot put. */
   commitToken: string;
@@ -100,23 +131,37 @@ export interface WriteOptions {
   stageOnly: boolean;
 }
 
+/** Summary of a stored (or committed) object. */
 export interface PutResult {
+  /** Object key written. */
   key: string;
+  /** Bytes persisted. */
   bytesWritten: number;
+  /** Backend entity tag; empty when unsupported. */
   etag: string;
+  /** Raw SHA-256 digest of the stored bytes; empty when not computed. */
   sha256: Uint8Array;
 }
 
+/** Summary of a server-side copy. */
 export interface CopyResult {
+  /** Bytes copied. */
   bytesCopied: number;
 }
 
+/** Guest identity and negotiation surface returned by `describe()`. */
 export interface PluginDescribe {
+  /** ABI version the guest speaks; must equal `apiVersion`. */
   apiVersion: number;
+  /** Stable plugin id (`[a-z][a-z0-9_]{0,63}`). */
   id: string;
+  /** Manifest kind (`source`, `integration`, `output`, `database`). */
   kind: string;
+  /** Human-readable name for UI lists. */
   displayName: string;
+  /** Negotiable feature names the guest supports (see `feature*` constants). */
   rpcFeatures: string[];
+  /** Guest caps when `rpc.scalarLimits` is advertised. */
   scalarLimits: ScalarLimits;
   /**
    * Advertised factories (`destination`, `source`, `worker`, `contentSource`,
@@ -136,27 +181,40 @@ export interface PluginDescribe {
  * `originConfigKey` is a dotted config path (e.g. integrations.audiobookshelf.base_url).
  */
 export interface OidcClientTemplate {
+  /** OIDC client id the host materializes. */
   clientId: string;
+  /** Name shown on consent / admin screens. */
   displayName: string;
+  /** Redirect URI path relative to the integration origin. */
   callbackPath: string;
+  /** When true, the client uses PKCE without a client secret. */
   publicClient: boolean;
+  /** Scopes granted by default. */
   defaultScopes: string[];
+  /** When true, the AS issues refresh tokens to this client. */
   issueRefreshToken: boolean;
+  /** Dotted config path holding the client's origin URL. */
   originConfigKey: string;
 }
 
+/** Success payload of `BookclerkPlugin.oidcClients`. */
 export interface OidcClientsOk {
+  /** Client templates; empty when the plugin is not a relying party. */
   clients: OidcClientTemplate[];
 }
 
+/** Result union of `BookclerkPlugin.oidcClients`. */
 export type OidcClientsReply =
-  | { kind: "ok"; value: OidcClientsOk }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: OidcClientsOk } // Success: OIDC client templates.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
 /** Plugin-specific extensible config. Not a substitute for typed ABI fields. */
 export interface ExtensibleConfig {
+  /** Version of `payload`'s schema, owned by the plugin. */
   schemaVersion: number;
+  /** Media type of `payload` (e.g. `application/json`). */
   mediaType: string;
+  /** Bounded encoded payload; at most `maxConfigPayloadBytes`. */
   payload: Uint8Array;
 }
 
@@ -165,33 +223,51 @@ export interface ExtensibleConfig {
  * OS paths, FDs, and sockets are transport-private.
  */
 export interface DestinationContext {
+  /** Legacy opaque JSON knobs (migration bridge). */
   json: string;
+  /** Granted extensible configuration. */
   config: ExtensibleConfig;
 }
 
+/** Granted configuration for `BookclerkPlugin.source`. */
 export interface SourceContext {
+  /** Legacy opaque JSON knobs (migration bridge). */
   json: string;
+  /** Granted extensible configuration. */
   config: ExtensibleConfig;
 }
 
+/** Granted configuration for `BookclerkPlugin.worker`. */
 export interface WorkerContext {
+  /** Host job id this handler serves. */
   jobId: string;
+  /** Legacy opaque JSON knobs (migration bridge). */
   json: string;
+  /** Granted extensible configuration. */
   config: ExtensibleConfig;
 }
 
+/** Granted configuration for `BookclerkPlugin.contentSource`. */
 export interface ContentSourceContext {
+  /** Legacy opaque JSON knobs (migration bridge). */
   json: string;
+  /** Granted extensible configuration. */
   config: ExtensibleConfig;
 }
 
+/** Granted configuration for `BookclerkPlugin.integration`. */
 export interface IntegrationContext {
+  /** Legacy opaque JSON knobs (migration bridge). */
   json: string;
+  /** Granted extensible configuration. */
   config: ExtensibleConfig;
 }
 
+/** Granted configuration for `BookclerkPlugin.database` (see `DatabaseAdapterConfig`). */
 export interface DatabaseContext {
+  /** Legacy opaque JSON knobs (migration bridge). */
   json: string;
+  /** Granted extensible configuration. */
   config: ExtensibleConfig;
 }
 
@@ -203,92 +279,140 @@ export interface DatabaseContext {
  * terminal fenced outcome is committed.
  */
 export interface JobInvocation {
+  /** Schema version of `payloadJson`, owned by the command type. */
   payloadSchemaVersion: number;
+  /** Unique id of this invocation attempt. */
   invocationId: string;
+  /** Command type the handler dispatches on. */
   commandType: string;
+  /** Command payload (JSON); at most `maxScalarBytes`. */
   payloadJson: string;
+  /** Caller idempotency key scoped to (account, plugin, commandType). */
   idempotencyKey: string;
+  /** Failure retry counter, starting at 1. */
   attempt: number;
+  /** Trace correlation id; empty when none. */
   correlationId: string;
+  /** Id of the event or command that caused this one; empty when none. */
   causationId: string;
   /**
    * UTC Unix milliseconds. Host fence/lease is authoritative; this hint must
    * not outlive the fence (clock skew across VPS nodes).
    */
   deadlineUnixMs: number;
+  /** Checkpoint persisted by a prior `SuspendedOutcome`; empty on first run. */
   checkpointJson: string;
+  /** Schema version of `checkpointJson`. */
   checkpointSchemaVersion: number;
   /** Resume ordinal; distinct from failure `attempt`. */
   invocationSequence: number;
+  /** Optional step identifier for multi-step commands. */
   stepId: string;
 }
 
+/** Job finished successfully. */
 export interface CompletedOutcome {
+  /** Short human summary. */
   message: string;
+  /** Bytes produced, when meaningful. */
   bytesCopied: number;
 }
 
+/** Job failed transiently; the host reschedules it. */
 export interface RetryableOutcome {
+  /** Short human reason. */
   message: string;
+  /** Earliest retry time; `0` lets the host choose. */
   retryAfterUnixMs: number;
 }
 
+/** Job failed permanently; no retry. */
 export interface RejectedOutcome {
+  /** Short human reason. */
   message: string;
 }
 
+/** Job observed cancellation and stopped. */
 export interface CancelledOutcome {
+  /** Short human note. */
   message: string;
 }
 
+/** Job released the process and asks to be resumed later. */
 export interface SuspendedOutcome {
+  /** Bounded checkpoint to replay on resume; at most `maxCheckpointBytes`. */
   checkpointJson: string;
+  /** Schema version of `checkpointJson`. */
   checkpointSchemaVersion: number;
+  /** Earliest resume time. */
   wakeAtUnixMs: number;
 }
 
+/** Terminal or suspended result of `JobHandler.handle`. */
 export type JobOutcome =
-  | { kind: "completed"; value: CompletedOutcome }
-  | { kind: "retryable"; value: RetryableOutcome }
-  | { kind: "rejected"; value: RejectedOutcome }
-  | { kind: "cancelled"; value: CancelledOutcome }
-  | { kind: "suspended"; value: SuspendedOutcome };
+  | { kind: "completed"; value: CompletedOutcome } // Finished successfully.
+  | { kind: "retryable"; value: RetryableOutcome } // Transient failure; retry later.
+  | { kind: "rejected"; value: RejectedOutcome } // Permanent failure.
+  | { kind: "cancelled"; value: CancelledOutcome } // Stopped on cancellation.
+  | { kind: "suspended"; value: SuspendedOutcome }; // Released with a checkpoint.
 
 /** Domain event (not a job). Outbox-produced, at-least-once, idempotent consume. */
 export interface DomainEvent {
+  /** Unique event id (outbox row identity). */
   eventId: string;
+  /** Dotted event type (e.g. `library.title.added`). */
   eventType: string;
+  /** Schema version of `payload`, owned by the event type. */
   schemaVersion: number;
+  /** When the producer observed the fact. */
   occurredAtUnixMs: number;
+  /** Account scope; empty for host-wide events. */
   accountId: string;
+  /** Trace correlation id; empty when none. */
   correlationId: string;
+  /** Id of the command or event that caused this one; empty when none. */
   causationId: string;
+  /** Consumer-side idempotency key; stable across redeliveries. */
   deduplicationKey: string;
+  /** Delivery counter, starting at 1. */
   deliveryAttempt: number;
+  /** Encoded event payload; at most `maxEventPayloadBytes`. */
   payload: Uint8Array;
   /** Append-only. Resume a prior EventResult.suspended. */
   checkpointJson: string;
+  /** Schema version of `checkpointJson`. */
   checkpointSchemaVersion: number;
+  /** Resume ordinal; distinct from `deliveryAttempt`. */
   invocationSequence: number;
+  /** True when this delivery resumes a prior suspension. */
   resumePending: boolean;
   /** Append-only. Producer plugin id; empty when unknown. */
   source: string;
 }
 
+/** Event handled; the host marks it delivered. */
 export interface EventAck {
+  /** Placeholder; the struct carries no data. */
   dummy: void;
 }
 
+/** Redeliver later. */
 export interface EventRetry {
+  /** Earliest redelivery time; `0` lets the host choose. */
   retryAtUnixMs: number;
+  /** Short human reason. */
   reason: string;
 }
 
+/** Event rejected; the host records the reason and stops delivering. */
 export interface EventReject {
+  /** Short human reason. */
   reason: string;
 }
 
+/** Event moved to the dead-letter queue for operator review. */
 export interface EventDeadLetter {
+  /** Short human reason. */
   reason: string;
 }
 
@@ -298,107 +422,142 @@ export interface EventDeadLetter {
  * wake-on-matching-event fields (empty = timestamp-only).
  */
 export interface EventSuspended {
+  /** Bounded checkpoint to replay on resume; at most `maxCheckpointBytes`. */
   checkpointJson: string;
+  /** Schema version of `checkpointJson`. */
   checkpointSchemaVersion: number;
+  /** Earliest resume time. */
   wakeAtUnixMs: number;
+  /** Also wake when an event of this type arrives; empty disables. */
   wakeOnEventType: string;
+  /** JSON filter applied to matching wake events; empty matches all. */
   wakeOnFilterJson: string;
 }
 
+/** Outcome of `Integration.onEvent`. */
 export type EventResult =
-  | { kind: "ack"; value: EventAck }
-  | { kind: "retry"; value: EventRetry }
-  | { kind: "reject"; value: EventReject }
-  | { kind: "deadLetter"; value: EventDeadLetter }
-  | { kind: "suspended"; value: EventSuspended };
+  | { kind: "ack"; value: EventAck } // Handled.
+  | { kind: "retry"; value: EventRetry } // Redeliver later.
+  | { kind: "reject"; value: EventReject } // Stop delivering.
+  | { kind: "deadLetter"; value: EventDeadLetter } // Park for operator review.
+  | { kind: "suspended"; value: EventSuspended }; // Released with a checkpoint.
 
+/** Success payload of `Destination.head`. */
 export interface HeadOk {
+  /** Whether the object exists. */
   found: boolean;
+  /** Object metadata; meaningful only when `found`. */
   meta: ObjectMetadata;
 }
 
+/** Result union of `Destination.head`. */
 export type HeadReply =
-  | { kind: "ok"; value: HeadOk }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: HeadOk } // Success: head probe outcome.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `Destination.list`. */
 export type ListReply =
-  | { kind: "ok"; value: ListPage }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: ListPage } // Success: one list page.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Success payload of `Destination.get`. */
 export interface GetOk {
+  /** Object metadata. */
   meta: ObjectMetadata;
+  /** Streamed object bytes. */
   body: ByteSource;
 }
 
+/** Result union of `Destination.get`. */
 export type GetReply =
-  | { kind: "ok"; value: GetOk }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: GetOk } // Success: object metadata and body stream.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `Destination.put` / `Destination.commit`. */
 export type PutReply =
-  | { kind: "ok"; value: PutResult }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: PutResult } // Success: stored object summary.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `Destination.copy`. */
 export type CopyReply =
-  | { kind: "ok"; value: CopyResult }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: CopyResult } // Success: copy summary.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `methods without a success payload`. */
 export type EmptyReply =
-  | { kind: "ok" }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok" } // Success: no payload.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Success payload of `ByteSource.pull`. */
 export interface PullOk {
+  /** Next bytes; may be shorter than requested. */
   chunk: Uint8Array;
+  /** True when the stream is exhausted after `chunk`. */
   done: boolean;
 }
 
+/** Result union of `ByteSource.pull`. */
 export type PullReply =
-  | { kind: "ok"; value: PullOk }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: PullOk } // Success: one stream window.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Success payload of `Source.open`. */
 export interface OpenOk {
+  /** Object metadata. */
   meta: ObjectMetadata;
+  /** Streamed object bytes. */
   body: ByteSource;
 }
 
+/** Result union of `Source.open`. */
 export type OpenReply =
-  | { kind: "ok"; value: OpenOk }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: OpenOk } // Success: object metadata and body stream.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `BookclerkPlugin.describe`. */
 export type DescribeReply =
-  | { kind: "ok"; value: PluginDescribe }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: PluginDescribe } // Success: plugin identity.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `BookclerkPlugin.destination`. */
 export type DestinationReply =
-  | { kind: "ok"; value: Destination }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: Destination } // Success: opened `Destination` capability.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `BookclerkPlugin.source`. */
 export type SourceReply =
-  | { kind: "ok"; value: Source }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: Source } // Success: opened `Source` capability.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `BookclerkPlugin.worker`. */
 export type WorkerReply =
-  | { kind: "ok"; value: JobHandler }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: JobHandler } // Success: opened `JobHandler` capability.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `JobHandler.handle`. */
 export type HandleReply =
-  | { kind: "ok"; value: JobOutcome }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: JobOutcome } // Success: job outcome.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `BookclerkPlugin.contentSource`. */
 export type ContentSourceReply =
-  | { kind: "ok"; value: ContentSource }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: ContentSource } // Success: opened `ContentSource` capability.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `BookclerkPlugin.integration`. */
 export type IntegrationReply =
-  | { kind: "ok"; value: Integration }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: Integration } // Success: opened `Integration` capability.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `BookclerkPlugin.database`. */
 export type DatabaseReply =
-  | { kind: "ok"; value: Database }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: Database } // Success: opened `Database` capability.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `Integration.onEvent`. */
 export type EventResultReply =
-  | { kind: "ok"; value: EventResult }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: EventResult } // Success: event handling outcome.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
 /**
  * Migration-bridge JSON result. Frozen methods should prefer typed structs;
@@ -406,29 +565,37 @@ export type EventResultReply =
  * via ExtensibleConfig, not as unbounded serde dumps.
  */
 export interface JsonOk {
+  /** JSON text; at most `maxScalarBytes`. */
   json: string;
 }
 
+/** Result union of `JSON-bridge methods`. */
 export type JsonReply =
-  | { kind: "ok"; value: JsonOk }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: JsonOk } // Success: JSON text payload.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Typed liveness report. */
 export interface HealthOk {
+  /** True when the guest is healthy enough for traffic. */
   ok: boolean;
+  /** Short human status line; empty when none. */
   detail: string;
 }
 
+/** Result union of `health`. */
 export type HealthReply =
-  | { kind: "ok"; value: HealthOk }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: HealthOk } // Success: health status.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `Database.openSession`. */
 export type AdapterSessionReply =
-  | { kind: "ok"; value: AdapterDatabaseSession }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: AdapterDatabaseSession } // Success: opened `AdapterDatabaseSession` capability.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `guest database opens`. */
 export type GuestDatabaseReply =
-  | { kind: "ok"; value: GuestDatabase }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: GuestDatabase } // Success: opened `GuestDatabase` capability.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
 /**
  * Transferred readable byte stream. The capability *is* the stream; callers
@@ -437,45 +604,63 @@ export type GuestDatabaseReply =
  */
 export interface ByteSource {
   /**
-   * @param maxBytes - maxBytes
-   * @returns result
+   * Pull the next window of bytes. `done = true` on the final chunk.
+   *
+   * @param maxBytes - Upper bound for this window; at most `maxStreamWindowBytes`.
+   * @returns {@link PullReply}
    */
   pull(maxBytes: number): Promise<PullReply>;
 }
 
+/**
+ * Object store the host writes acquired media into (`output.*` plugins).
+ * Keys are relative object paths; the plugin owns the physical layout.
+ */
 export interface Destination {
   /**
-   * @param key - key
-   * @returns result
+   * Metadata probe. `found = false` is a success, not `not_found`.
+   *
+   * @param key - Object key to probe.
+   * @returns {@link HeadReply}
    */
   head(key: string): Promise<HeadReply>;
   /**
-   * @param options - options
-   * @returns result
+   * Page through objects under a prefix; at most `maxListPage` per page.
+   *
+   * @param options - Prefix, cursor, and page size.
+   * @returns {@link ListReply}
    */
   list(options: ListOptions): Promise<ListReply>;
   /**
-   * @param key - key
-   * @param options - options
-   * @returns result
+   * Open an object (or a byte range of it) for reading.
+   *
+   * @param key - Object key to read.
+   * @param options - Optional byte range.
+   * @returns {@link GetReply}
    */
   get(key: string, options: ReadOptions): Promise<GetReply>;
   /**
-   * @param key - key
-   * @param body - body
-   * @param options - options
-   * @returns result
+   * Store an object from a transferred byte stream.
+   *
+   * @param key - Object key to write.
+   * @param body - Streamed object bytes.
+   * @param options - Content type, length, digest, staging.
+   * @returns {@link PutReply}
    */
   put(key: string, body: ByteSource, options: WriteOptions): Promise<PutReply>;
   /**
-   * @param from - from
-   * @param to - to
-   * @returns result
+   * Server-side copy (requires `storage.copy`).
+   *
+   * @param from - Source object key.
+   * @param to - Destination object key.
+   * @returns {@link CopyReply}
    */
   copy(from: string, to: string): Promise<CopyReply>;
   /**
-   * @param key - key
-   * @returns result
+   * Remove an object; deleting a missing key is a success.
+   *
+   * @param key - Object key to remove.
+   * @returns {@link EmptyReply}
    */
   delete(key: string): Promise<EmptyReply>;
   /**
@@ -483,32 +668,40 @@ export interface Destination {
    * `stageOnly = true`; bytes must stream into destination-managed temp/multipart
    * storage, never a complete local spool on host/adapter/broker/guest.
    *
-   * @param key - key
-   * @param commitToken - commitToken
-   * @returns result
+   * @param key - Object key that was staged.
+   * @param commitToken - Token from `WriteOptions.commitToken`.
+   * @returns {@link PutReply}
    */
   commit(key: string, commitToken: string): Promise<PutReply>;
   /**
-   * @param key - key
-   * @param commitToken - commitToken
-   * @returns result
+   * Discard a staged object without publishing it.
+   *
+   * @param key - Object key that was staged.
+   * @param commitToken - Token from `WriteOptions.commitToken`.
+   * @returns {@link EmptyReply}
    */
   abortStage(key: string, commitToken: string): Promise<EmptyReply>;
 }
 
+/** Read-only byte source for job inputs (not a storefront). */
 export interface Source {
   /**
-   * @param key - key
-   * @returns result
+   * Open an object for streaming reads.
+   *
+   * @param key - Object key to open.
+   * @returns {@link OpenReply}
    */
   open(key: string): Promise<OpenReply>;
 }
 
+/** Host-side progress reporter handed to job handlers. */
 export interface ProgressSink {
   /**
-   * @param percent - percent
-   * @param message - message
-   * @returns result
+   * Report progress; the host coalesces frequent updates.
+   *
+   * @param percent - Completion in `[0, 100]`.
+   * @param message - Short human-readable status line.
+   * @returns {@link EmptyReply}
    */
   report(percent: number, message: string): Promise<EmptyReply>;
 }
@@ -519,21 +712,26 @@ export interface ProgressSink {
  */
 export interface Cancellation {
   /**
-   * @returns cancelled
+   * Non-blocking check; `true` once the host has fenced the invocation.
+   *
+   * @returns `cancelled` (boolean)
    */
   poll(): Promise<boolean>;
 }
 
+/** Job handler returned by `BookclerkPlugin.worker`; runs one durable command. */
 export interface JobHandler {
   /**
-   * @param invocation - invocation
-   * @param input - input
-   * @param output - output
-   * @param progress - progress
-   * @param cancel - cancel
+   * Run one command invocation to a terminal or suspended outcome.
+   *
+   * @param invocation - Durable command envelope.
+   * @param input - Job input objects.
+   * @param output - Job output object store.
+   * @param progress - Progress reporter.
+   * @param cancel - Host cancellation probe.
    * @param database - Append-only. Host-mediated typed SQL session.
    * @param databases - Append-only. Named plugin-owned database bindings (Workers-style): each entry is an isolated database provisioned by the active adapter, separate from the Bookclerk library and from every other plugin. Empty when the manifest declares none.
-   * @returns result
+   * @returns {@link HandleReply}
    */
   handle(invocation: JobInvocation, input: Source, output: Destination, progress: ProgressSink, cancel: Cancellation, database: GuestDatabase, databases: NamedDatabase[]): Promise<HandleReply>;
 }
@@ -552,107 +750,152 @@ export interface NamedDatabase {
  */
 export interface ContentSource {
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Connect an account (password or one-shot OAuth).
+   *
+   * @param paramsJson - `LoginParams` JSON.
+   * @returns {@link JsonReply}
    */
   login(paramsJson: string): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Sync library rows for one or more accounts.
+   *
+   * @param paramsJson - `ScanParams` JSON.
+   * @returns {@link JsonReply}
    */
   scan(paramsJson: string): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Download and decrypt one title into `cacheDir`.
+   *
+   * @param paramsJson - `FetchTitleParams` JSON.
+   * @returns {@link JsonReply}
    */
   fetchTitle(paramsJson: string): Promise<JsonReply>;
   /**
-   * @returns result
+   * Enumerate accounts the guest knows about.
+   *
+   * @returns {@link JsonReply}
    */
   listAccounts(): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Begin an interactive OAuth login; returns a session id.
+   *
+   * @param paramsJson - `LoginStartParams` JSON.
+   * @returns {@link JsonReply}
    */
   loginStart(paramsJson: string): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Finish an interactive OAuth login started by `loginStart`.
+   *
+   * @param paramsJson - `LoginCompleteParams` JSON.
+   * @returns {@link JsonReply}
    */
   loginComplete(paramsJson: string): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Free-text storefront catalog search.
+   *
+   * @param paramsJson - `SearchCatalogParams` JSON.
+   * @returns {@link JsonReply}
    */
   searchCatalog(paramsJson: string): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Related-title expansion from a seed title.
+   *
+   * @param paramsJson - `ExpandCandidatesParams` JSON.
+   * @returns {@link JsonReply}
    */
   expandCandidates(paramsJson: string): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Purchase link / price hint for one title.
+   *
+   * @param paramsJson - `PurchaseHintParams` JSON.
+   * @returns {@link JsonReply}
    */
   purchaseHint(paramsJson: string): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Current storefront deals.
+   *
+   * @param paramsJson - `ListDealsParams` JSON.
+   * @returns {@link JsonReply}
    */
   listDeals(paramsJson: string): Promise<JsonReply>;
   /**
-   * @returns result
+   * Liveness / readiness probe.
+   *
+   * @returns {@link HealthReply}
    */
   health(): Promise<HealthReply>;
   /**
-   * @returns result
+   * Human-readable diagnostic lines (`DiagnoseResult` JSON).
+   *
+   * @returns {@link JsonReply}
    */
   diagnose(): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Full catalog record for one product.
+   *
+   * @param paramsJson - `CatalogDetailParams` JSON.
+   * @returns {@link JsonReply}
    */
   catalogDetail(paramsJson: string): Promise<JsonReply>;
 }
 
+/** Long-running integration (remote library, listening sync, IdP bridge). */
 export interface Integration {
   /**
-   * @returns result
+   * Liveness / readiness probe.
+   *
+   * @returns {@link HealthReply}
    */
   health(): Promise<HealthReply>;
   /**
-   * @param event - event
-   * @returns result
+   * Deliver one domain event (at-least-once; must be idempotent).
+   *
+   * @param event - Event envelope.
+   * @returns {@link EventResultReply}
    */
   onEvent(event: DomainEvent): Promise<EventResultReply>;
   /**
-   * @returns result
+   * Start background work after the host has granted bindings.
+   *
+   * @returns {@link EmptyReply}
    */
   start(): Promise<EmptyReply>;
   /**
-   * @returns result
+   * Stop background work; the host may drop the capability afterwards.
+   *
+   * @returns {@link EmptyReply}
    */
   stop(): Promise<EmptyReply>;
   /**
-   * @returns result
+   * Human-readable diagnostic lines (`DiagnoseResult` JSON).
+   *
+   * @returns {@link JsonReply}
    */
   diagnose(): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Re-sync the remote library.
+   *
+   * @param paramsJson - `ScanLibraryParams` JSON.
+   * @returns {@link EmptyReply}
    */
   scanLibrary(paramsJson: string): Promise<EmptyReply>;
   /**
-   * @returns result
+   * Push / pull listening progress.
+   *
+   * @returns {@link JsonReply}
    */
   syncListening(): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Verify remote credentials on behalf of the host.
+   *
+   * @param paramsJson - `AuthenticateUserParams` JSON.
+   * @returns {@link JsonReply}
    */
   authenticateUser(paramsJson: string): Promise<JsonReply>;
   /**
-   * @returns result
+   * Drain events the remote side produced since the last poll.
+   *
+   * @returns {@link JsonReply}
    */
   pollEvents(): Promise<JsonReply>;
 }
@@ -1043,192 +1286,308 @@ export interface AuthenticateUserParams {
   password: string;
 }
 
+/** One typed SQL cell or bind parameter. */
 export type DbValue =
-  | { kind: "null"; value: DbType }
-  | { kind: "boolean"; value: boolean }
-  | { kind: "int64"; value: bigint }
-  | { kind: "float64"; value: number }
-  | { kind: "text"; value: string }
-  | { kind: "bytes"; value: Uint8Array };
+  | { kind: "null"; value: DbType } // SQL NULL with its declared type.
+  | { kind: "boolean"; value: boolean } // Boolean.
+  | { kind: "int64"; value: bigint } // Signed 64-bit integer.
+  | { kind: "float64"; value: number } // IEEE-754 double.
+  | { kind: "text"; value: string } // UTF-8 text.
+  | { kind: "bytes"; value: Uint8Array }; // Raw bytes.
 
+/** Result column descriptor. */
 export interface DbColumn {
+  /** Column name as projected. */
   name: string;
+  /** Declared or inferred column type. */
   dbType: DbType;
 }
 
+/** One result row. */
 export interface DbRow {
+  /** Cells in `columns` order. */
   values: DbValue[];
 }
 
+/** One guest statement in an `ExecuteRequest`. */
 export interface DbStatement {
+  /** BookclerkSQL text; at most `maxScalarBytes`. */
   sql: string;
+  /** Positional bind values. */
   parameters: DbValue[];
+  /** Statement classification. */
   kind: DbStatementKind;
+  /** Row cap for queries; `0` means adapter default. */
   maxRows: number;
+  /** Which outcome parts to return. */
   resultSelection: DbResultSelection;
 }
 
+/** Guest statement batch for `GuestDatabase.execute`; runs atomically. */
 export interface ExecuteRequest {
+  /** Caller-chosen idempotency key. */
   operationId: string;
+  /** SHA-256 hex of the idempotency-relevant request; empty when omitted. */
   requestHash: string;
+  /** Statements in execution order; at most `maxStatements`. */
   statements: DbStatement[];
+  /** Deadline hint; `0` means none. */
   deadlineUnixMs: number;
 }
 
+/** Byte span in the exact canonical SQL string a proof is bound to. */
 export interface SqlSpan {
+  /** Inclusive start byte offset. */
   start: number;
+  /** Exclusive end byte offset. */
   end: number;
 }
 
+/** One TEXT expression the adapter must collate bytewise (`COLLATE "C"`). */
 export interface TextCollateSite {
+  /** Identifier or string-literal span in canonical SQL. */
   span: SqlSpan;
 }
 
+/** One INTEGER arithmetic expression that must not wrap or error on overflow. */
 export interface IntegerArithSite {
+  /** Full expression span (`a + b` or `abs(n)`). */
   full: SqlSpan;
+  /** Left operand (or `abs` argument). */
   lhs: SqlSpan;
+  /** Right operand (`abs` repeats `lhs`). */
   rhs: SqlSpan;
+  /** Operator. */
   kind: IntegerArithKind;
 }
 
+/** Physical table/column access used for authorization. */
 export interface PhysicalAccess {
+  /** Physical table name. */
   table: string;
   /** Empty = table presence only; "*" = projection wildcard. */
   column: string;
 }
 
+/** Destination assignment `lhs = rhs` (INSERT, UPDATE, ...). */
 export interface ResolvedAssignment {
+  /** Target table. */
   table: string;
+  /** Target column. */
   column: string;
+  /** Declared column type. */
   dest: ResolvedSqlType;
+  /** Resolved type of the assigned expression. */
   source: ResolvedSqlType;
 }
 
+/** Column name paired with its resolved type. */
 export interface NamedSqlType {
+  /** Column name. */
   name: string;
+  /** Resolved type. */
   sqlType: ResolvedSqlType;
 }
 
+/** `REFERENCES` target of one column. */
 export interface ColumnReference {
+  /** Referenced table. */
   refTable: string;
+  /** Referenced columns. */
   refColumns: string[];
 }
 
+/** Per-column `REFERENCES` slot in `CreateTableSchema`. */
 export type OptionalColumnReference =
-  | { kind: "none" }
-  | { kind: "some"; value: ColumnReference };
+  | { kind: "none" } // Column has no reference.
+  | { kind: "some"; value: ColumnReference }; // Column references another table.
 
+/** Table-level `FOREIGN KEY` constraint. */
 export interface ForeignKeyConstraint {
+  /** Local columns. */
   columns: string[];
+  /** Referenced table. */
   refTable: string;
+  /** Referenced columns. */
   refColumns: string[];
 }
 
+/** One table-level constraint. */
 export type TableConstraint =
-  | { kind: "primaryKey"; value: string[] }
-  | { kind: "unique"; value: string[] }
-  | { kind: "check"; value: string }
-  | { kind: "foreignKey"; value: ForeignKeyConstraint };
+  | { kind: "primaryKey"; value: string[] } // `PRIMARY KEY (...)` columns.
+  | { kind: "unique"; value: string[] } // `UNIQUE (...)` columns.
+  | { kind: "check"; value: string } // `CHECK (...)` expression text.
+  | { kind: "foreignKey"; value: ForeignKeyConstraint }; // `FOREIGN KEY (...) REFERENCES ...`.
 
+/** Parsed `CREATE TABLE` (canonical SQL v1). Per-column lists align with `columns`. */
 export interface CreateTableSchema {
+  /** Table name. */
   table: string;
+  /** Columns with resolved types, in order. */
   columns: NamedSqlType[];
+  /** `INTEGER PRIMARY KEY AUTOINCREMENT` column; empty when none. */
   identityColumn: string;
+  /** Per-column NOT NULL flags. */
   columnNotNull: boolean[];
+  /** Per-column UNIQUE flags. */
   columnUnique: boolean[];
+  /** Per-column PRIMARY KEY flags. */
   columnPrimaryKey: boolean[];
+  /** Per-column DEFAULT expression text; empty when none. */
   columnDefaults: string[];
+  /** Per-column CHECK expression text; empty when none. */
   columnChecks: string[];
+  /** Per-column REFERENCES targets. */
   columnReferences: OptionalColumnReference[];
+  /** Table-level constraints, in order. */
   tableConstraints: TableConstraint[];
 }
 
+/** `CREATE TABLE` action with its durable fingerprint. */
 export interface SchemaCreate {
+  /** Parsed table schema. */
   schema: CreateTableSchema;
+  /** Structured schema fingerprint (hex SHA-256). */
   fingerprint: string;
+  /** True when the catalog already holds this exact fingerprint. */
   noop: boolean;
 }
 
+/** CREATE/DROP action recorded on a proof. */
 export type SchemaAction =
-  | { kind: "none" }
-  | { kind: "create"; value: SchemaCreate }
-  | { kind: "drop"; value: string };
+  | { kind: "none" } // Not DDL.
+  | { kind: "create"; value: SchemaCreate } // `CREATE TABLE`.
+  | { kind: "drop"; value: string }; // `DROP TABLE` of the named table.
 
+/** Host-produced typed proof bound to one exact canonical statement. */
 export interface ResolvedStatement {
+  /** SHA-256 hex of the exact canonical SQL this proof claims. */
   statementHash: string;
+  /** SELECT / RETURNING / VALUES output columns in order. */
   outputColumns: NamedSqlType[];
+  /** Physical tables/columns referenced (authorization). */
   physicalAccesses: PhysicalAccess[];
+  /** Mutation destination assignments. */
   assignments: ResolvedAssignment[];
+  /** TEXT expression spans needing bytewise collation. */
   textCollateSites: TextCollateSite[];
+  /** INTEGER overflow sites (`+` `-` `*` `abs`). */
   integerArithSites: IntegerArithSite[];
+  /** Function names invoked (folded), for authorization. */
   functions: string[];
+  /** DDL action + fingerprint. */
   schemaAction: SchemaAction;
 }
 
+/** Replay receipt the host asks the adapter to persist with the batch. */
 export interface AdapterReceipt {
+  /** Guest statement count inside the receipt wrap (excluding host prune/select). */
   guestLen: number;
+  /** Guest `requestHash` compared on replay. */
   guestHash: string;
 }
 
+/** One host-lowered statement with its proof. */
 export interface AdapterStatement {
+  /** Canonical SQL text. */
   sql: string;
+  /** Positional bind values. */
   parameters: DbValue[];
+  /** Statement classification. */
   kind: DbStatementKind;
+  /** Row cap for queries; `0` means adapter default. */
   maxRows: number;
+  /** Which outcome parts to return. */
   resultSelection: DbResultSelection;
+  /** Typed proof bound to `sql`. */
   proof: ResolvedStatement;
 }
 
+/** Host -> adapter batch: proven statements plus isolation and receipt. */
 export interface AdapterExecuteRequest {
+  /** Host-chosen idempotency key. */
   operationId: string;
+  /** SHA-256 hex of the idempotency-relevant request. */
   requestHash: string;
+  /** Statements in execution order. */
   statements: AdapterStatement[];
+  /** Deadline hint; `0` means none. */
   deadlineUnixMs: number;
+  /** Transaction isolation the adapter must realize. */
   isolation: IsolationReq;
+  /** Replay receipt to persist; zero/empty when not required. */
   receipt: AdapterReceipt;
 }
 
+/** Outcome of one statement. */
 export interface StatementResult {
+  /** Result rows (empty unless `rows` selected). */
   rows: DbRow[];
+  /** Result column descriptors. */
   columns: DbColumn[];
+  /** Rows changed by a mutation. */
   rowsAffected: number;
 }
 
+/** Engine timing on `ExecuteReply`. */
 export interface DbTiming {
+  /** Monotonic duration of this handler attempt (microseconds). */
   attemptElapsedUs: number;
+  /** Engine-reported SQL/transaction time when available (`0` = omitted). */
   dbExecutionUs: number;
+  /** How `dbExecutionUs` was measured. */
   dbTimingSource: string;
 }
 
+/** Success payload of `execute`. */
 export interface ExecuteReply {
+  /** Echo of the request `operationId`. */
   operationId: string;
+  /** Per-statement results in request order. */
   statements: StatementResult[];
+  /** Engine timing. */
   timing: DbTiming;
 }
 
+/** Result union of `execute`. */
 export type ExecuteResultReply =
-  | { kind: "ok"; value: ExecuteReply }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: ExecuteReply } // Success: statement results.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
 /**
  * Semantic SQL-contract advertisement. Diagnostic engine identity is not
  * part of the capability plane — see `DbBootstrap`.
  */
 export interface DbCapabilities {
+  /** Bookclerk SQL contract version. */
   sqlContractVersion: number;
+  /** Guest can run a bounded statement list as one SQL transaction. */
   atomicBatch: boolean;
+  /** Guest SQL supports `RETURNING`. */
   returning: boolean;
+  /** Guest reports `rowsAffected`. */
   affectedRows: boolean;
+  /** Guest versions schema with a `bookclerk_schema_migrations` table. */
   schemaMigrations: boolean;
+  /** Guest honors RPC/session cancellation. */
   cancellation: boolean;
+  /** Guest can fill `DbTiming.dbExecutionUs`. Not a host connect minimum. */
   timing: boolean;
+  /** Maximum bound parameters per statement. */
   maxBinds: number;
+  /** Maximum statements in one atomic batch. */
   maxStatements: number;
+  /** Maximum rows a query statement may return. */
   maxResultRows: number;
+  /** Maximum UTF-8 bytes of SQL plus binds per statement. */
   maxPayloadBytes: number;
+  /** Maximum encoded bytes of one statement's result rows. */
   maxResultBytes: number;
+  /** Maximum UTF-8 / blob bytes of one result cell. */
   maxCellBytes: number;
+  /** Maximum encoded bytes of one `ExecuteRequest`. */
   maxRequestBytes: number;
+  /** Maximum encoded bytes of one `ExecuteReply`. */
   maxAtomicResultBytes: number;
   /**
    * Append-only. Adapter can open additional isolated sessions
@@ -1270,10 +1629,12 @@ export interface DbCapabilities {
   atomicUnitRestore: boolean;
 }
 
+/** Result union of `AdapterDatabaseSession.bootstrap`. */
 export type DbBootstrapReply =
-  | { kind: "ok"; value: DbBootstrap }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: DbBootstrap } // Success: bootstrap metadata.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Bootstrap-only diagnostic metadata (not a capability). */
 export interface DbBootstrap {
   /**
    * Diagnostic physical engine name. Hosts must not admit or generate SQL
@@ -1282,13 +1643,17 @@ export interface DbBootstrap {
   engine: string;
 }
 
+/** Result union of `AdapterDatabaseSession.capabilities`. */
 export type DbCapabilitiesReply =
-  | { kind: "ok"; value: DbCapabilities }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: DbCapabilities } // Success: capability advertisement.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Database adapter returned by `BookclerkPlugin.database`. */
 export interface Database {
   /**
-   * @returns result
+   * Open one adapter session (capability negotiation + typed execute).
+   *
+   * @returns {@link AdapterSessionReply}
    */
   openSession(): Promise<AdapterSessionReply>;
 }
@@ -1298,67 +1663,85 @@ export interface Database {
  * Column names live in the canonical backup schema, not this catalog.
  */
 export interface IdentityHighWater {
+  /** Table whose identity column the mark belongs to. */
   table: string;
+  /** Highest generated or stored value that must not be reused. */
   last: bigint;
 }
 
+/** Result union of `AdapterDatabaseSession.exportIdentity`. */
 export type IdentityExportReply =
-  | { kind: "ok"; value: IdentityHighWater[] }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: IdentityHighWater[] } // Success: identity high-water rows.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Result union of `AdapterDatabaseSession.listUserRelations`. */
 export type UserRelationsReply =
-  | { kind: "ok"; value: string[] }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: string[] } // Success: user relation names.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
 /** Host ↔ database adapter plugin. Capability negotiation + typed execute only. */
 export interface AdapterDatabaseSession {
   /**
-   * @returns result
+   * Semantic SQL-contract advertisement for this session.
+   *
+   * @returns {@link DbCapabilitiesReply}
    */
   capabilities(): Promise<DbCapabilitiesReply>;
   /**
    * Canonical SQL + required structured proofs (not JSON).
    *
-   * @param request - request
-   * @returns result
+   * @param request - Proven statements plus isolation and receipt.
+   * @returns {@link ExecuteResultReply}
    */
   execute(request: AdapterExecuteRequest): Promise<ExecuteResultReply>;
   /**
-   * @returns result
+   * Release the session; further calls fail.
+   *
+   * @returns {@link EmptyReply}
    */
   close(): Promise<EmptyReply>;
   /**
    * Bootstrap-only SeaORM proxy metadata (not part of DbCapabilities).
    *
-   * @returns result
+   * @returns {@link DbBootstrapReply}
    */
   bootstrap(): Promise<DbBootstrapReply>;
   /**
    * Snapshot/identity/restore primitives (not a SQL dialect API).
    *
-   * @returns result
+   * @returns {@link IdentityExportReply}
    */
   exportIdentity(): Promise<IdentityExportReply>;
   /**
-   * @param rows - rows
-   * @returns result
+   * Restore identity high-water marks captured by `exportIdentity`.
+   *
+   * @param rows - High-water rows to apply.
+   * @returns {@link EmptyReply}
    */
   importIdentity(rows: IdentityHighWater[]): Promise<EmptyReply>;
   /**
-   * @returns result
+   * Names of user relations present in the logical database unit.
+   *
+   * @returns {@link UserRelationsReply}
    */
   listUserRelations(): Promise<UserRelationsReply>;
   /**
-   * @returns result
+   * Enter restore mode for one logical unit (`atomicUnitRestore`).
+   *
+   * @returns {@link EmptyReply}
    */
   prepareUnitRestore(): Promise<EmptyReply>;
   /**
-   * @param names - names
-   * @returns result
+   * Drop the named user relations during restore.
+   *
+   * @param names - Relation names from `listUserRelations`.
+   * @returns {@link EmptyReply}
    */
   dropUserRelations(names: string[]): Promise<EmptyReply>;
   /**
-   * @returns result
+   * Verify constraints hold after restore rows were written.
+   *
+   * @returns {@link EmptyReply}
    */
   assertRestoreConstraints(): Promise<EmptyReply>;
 }
@@ -1371,12 +1754,16 @@ export interface AdapterDatabaseSession {
  */
 export interface GuestDatabase {
   /**
-   * @param request - request
-   * @returns result
+   * Run one typed statement batch.
+   *
+   * @param request - Statements, binds, and deadline.
+   * @returns {@link ExecuteResultReply}
    */
   execute(request: ExecuteRequest): Promise<ExecuteResultReply>;
   /**
-   * @returns result
+   * Release the session; further calls fail.
+   *
+   * @returns {@link EmptyReply}
    */
   close(): Promise<EmptyReply>;
 }
@@ -1387,8 +1774,8 @@ export interface GuestDatabase {
  * escape hatch.
  */
 export type PluginMigrationOp =
-  | { kind: "schema"; value: string }
-  | { kind: "data"; value: string };
+  | { kind: "schema"; value: string } // Admitted DDL statement text.
+  | { kind: "data"; value: string }; // Admitted DML statement text.
 
 /**
  * One plugin-owned migration application. `id` is an opaque plugin-chosen
@@ -1397,11 +1784,13 @@ export type PluginMigrationOp =
  * Registration order is the forward sequence.
  */
 export interface PluginMigration {
+  /** Opaque plugin-chosen stable identity. */
   id: string;
-  /** at most `maxPluginMigrationOps` */
+  /** Operations in forward order; at most `maxPluginMigrationOps`. */
   operations: PluginMigrationOp[];
 }
 
+/** Success payload of `BookclerkPlugin.databaseMigrations`. */
 export interface PluginMigrationsOk {
   /**
    * At most `maxListPage` entries; aggregate id+SQL bytes at most
@@ -1411,62 +1800,84 @@ export interface PluginMigrationsOk {
   migrations: PluginMigration[];
 }
 
+/** Result union of `BookclerkPlugin.databaseMigrations`. */
 export type PluginMigrationsReply =
-  | { kind: "ok"; value: PluginMigrationsOk }
-  | { kind: "err"; value: PluginError };
+  | { kind: "ok"; value: PluginMigrationsOk } // Success: ordered migration sequence.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
+/** Plugin bootstrap capability: the guest's root object. */
 export interface BookclerkPlugin {
   /**
-   * @returns result
+   * Identity, ABI version, negotiated features, and advertised roles.
+   *
+   * @returns {@link DescribeReply}
    */
   describe(): Promise<DescribeReply>;
   /**
-   * @param context - context
-   * @returns result
+   * Open the object-store destination role.
+   *
+   * @param context - Granted destination configuration.
+   * @returns {@link DestinationReply}
    */
   destination(context: DestinationContext): Promise<DestinationReply>;
   /**
-   * @param context - context
-   * @returns result
+   * Open the byte-source role.
+   *
+   * @param context - Granted source configuration.
+   * @returns {@link SourceReply}
    */
   source(context: SourceContext): Promise<SourceReply>;
   /**
-   * @param context - context
-   * @returns result
+   * Open a job handler for one durable command.
+   *
+   * @param context - Job id and granted configuration.
+   * @returns {@link WorkerReply}
    */
   worker(context: WorkerContext): Promise<WorkerReply>;
   /**
-   * @returns result
+   * Flush and release resources before the process exits.
+   *
+   * @returns {@link EmptyReply}
    */
   shutdown(): Promise<EmptyReply>;
   /**
-   * @param context - context
-   * @returns result
+   * Open the storefront content-source role.
+   *
+   * @param context - Granted storefront configuration.
+   * @returns {@link ContentSourceReply}
    */
   contentSource(context: ContentSourceContext): Promise<ContentSourceReply>;
   /**
-   * @param context - context
-   * @returns result
+   * Open the integration role.
+   *
+   * @param context - Granted integration configuration.
+   * @returns {@link IntegrationReply}
    */
   integration(context: IntegrationContext): Promise<IntegrationReply>;
   /**
-   * @param context - context
-   * @returns result
+   * Open the database adapter role.
+   *
+   * @param context - Granted adapter configuration.
+   * @returns {@link DatabaseReply}
    */
   database(context: DatabaseContext): Promise<DatabaseReply>;
   /**
-   * @returns result
+   * Declared CLI surface (`CliSchema` JSON).
+   *
+   * @returns {@link JsonReply}
    */
   cliDescribe(): Promise<JsonReply>;
   /**
-   * @param paramsJson - paramsJson
-   * @returns result
+   * Run one plugin CLI command (`CliInvokeParams` -> `CliInvokeResult` JSON).
+   *
+   * @param paramsJson - `CliInvokeParams` JSON.
+   * @returns {@link JsonReply}
    */
   cliInvoke(paramsJson: string): Promise<JsonReply>;
   /**
    * Plugin-provided OIDC AS client templates. Empty list when unused.
    *
-   * @returns result
+   * @returns {@link OidcClientsReply}
    */
   oidcClients(): Promise<OidcClientsReply>;
   /**
@@ -1477,8 +1888,8 @@ export interface BookclerkPlugin {
    * `maxPluginMigrationTotalOps` / `maxScalarBytes` /
    * `maxPluginMigrationRegistrationBytes`.
    *
-   * @param binding - binding
-   * @returns result
+   * @param binding - Binding name from `plugin.toml`.
+   * @returns {@link PluginMigrationsReply}
    */
   databaseMigrations(binding: string): Promise<PluginMigrationsReply>;
 }

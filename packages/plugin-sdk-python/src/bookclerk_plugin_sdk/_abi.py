@@ -7,54 +7,46 @@ declared in ``crates/bookclerk-plugin-abi/schema/plugin.capnp``.
 from __future__ import annotations
 
 PRODUCT_API_VERSION: int = 2
-"""apiVersion"""
+"""Product ABI version (`plugin.toml` `api_version` / `describe().apiVersion`)."""
 
 MAX_SCALAR_BYTES: int = 262144
-"""maxScalarBytes"""
+"""Maximum decoded size of an ordinary RPC scalar value (not a stream window)."""
 
 MAX_STREAM_WINDOW_BYTES: int = 1048576
-"""maxStreamWindowBytes"""
+"""Maximum bytes returned by one `ByteSource.pull` (flow-control window)."""
 
 MAX_LIST_PAGE: int = 256
-"""maxListPage"""
+"""Maximum objects in one `Destination.list` page."""
 
 MAX_CHECKPOINT_BYTES: int = 65536
-"""maxCheckpointBytes"""
+"""Maximum job / event checkpoint payload size (bytes)."""
 
 MAX_IDENTIFIER_BYTES: int = 64
-"""maxIdentifierBytes"""
+"""Maximum plugin / account identifier length (bytes)."""
 
 MAX_CONFIG_PAYLOAD_BYTES: int = 65536
-"""maxConfigPayloadBytes"""
+"""Maximum granted config payload size (bytes)."""
 
 MAX_EVENT_PAYLOAD_BYTES: int = 65536
-"""maxEventPayloadBytes"""
+"""Maximum decoded size of a domain-event scalar payload (not a stream)."""
 
 MAX_PLUGIN_MIGRATION_OPS: int = 256
-"""Plugin `databaseMigrations` is a startup-time scalar (not a stream). Count is
-`maxListPage`. Each SQL text is `maxScalarBytes`. Ops-per-migration, total
-operations across the registration, and the aggregate UTF-8 bytes of ids +
-SQL have dedicated caps so a jailed guest cannot force unbounded host
-allocation before semantic proof. `maxPluginMigrationRegistrationBytes` is
-id+SQL text only; `maxPluginMigrationTotalOps` bounds the structural object
-graph (2048: enough for realistic histories, including 256 migrations of ~8
-ops or 8 migrations at the per-migration cap, and far below 256×256).
-"""
+"""Maximum already-separated operations in one plugin-owned migration."""
 
 MAX_PLUGIN_MIGRATION_TOTAL_OPS: int = 2048
-"""maxPluginMigrationTotalOps"""
+"""Maximum already-separated operations across one `databaseMigrations` registration."""
 
 MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES: int = 262144
-"""maxPluginMigrationRegistrationBytes"""
+"""Maximum aggregate UTF-8 bytes of plugin migration ids plus SQL in one `databaseMigrations` registration."""
 
 FEATURE_SCALAR_LIMITS: str = "rpc.scalarLimits"
-"""Negotiable `rpcFeatures` wire names (see `PluginDescribe.rpcFeatures`)."""
+"""Guest honors scalar / stream-window / list-page caps (`rpc.scalarLimits`)."""
 
 FEATURE_STREAMS: str = "rpc.streams"
-"""featureStreams"""
+"""Media moves through transferred `ByteRange` / `ByteSource` streams (`rpc.streams`)."""
 
 FEATURE_STORAGE_COPY: str = "storage.copy"
-"""featureStorageCopy"""
+"""Guest implements server-side `Destination.copy` (`storage.copy`)."""
 
 PLUGIN_ERROR_CODES: tuple[str, ...] = ("invalid_params", "unauthorized", "forbidden", "not_found", "unavailable", "unsupported", "internal", "payload_too_large", "deadline_exceeded", "invalid_cursor", "cancelled", "conflict")
 """Stable `PluginError.code` strings. Unknown future codes are forwarded
@@ -78,10 +70,16 @@ Ordinal-ordered ``DbType`` wire names (index = Cap'n Proto ordinal).
 """
 
 DB_STATEMENT_KINDS: tuple[str, ...] = ("execute", "select", "returning")
-"""Ordinal-ordered ``DbStatementKind`` wire names (index = Cap'n Proto ordinal)."""
+"""How the host classifies a statement for result handling.
+
+Ordinal-ordered ``DbStatementKind`` wire names (index = Cap'n Proto ordinal).
+"""
 
 DB_RESULT_SELECTIONS: tuple[str, ...] = ("discard", "affectedRows", "rows")
-"""Ordinal-ordered ``DbResultSelection`` wire names (index = Cap'n Proto ordinal)."""
+"""Which part of a statement's outcome the caller wants back.
+
+Ordinal-ordered ``DbResultSelection`` wire names (index = Cap'n Proto ordinal).
+"""
 
 ISOLATION_REQS: tuple[str, ...] = ("atomicBatch", "nestedSavepoint", "consistentSnapshot")
 """Host → adapter execute. GuestDatabase stays ExecuteRequest-only.
@@ -90,10 +88,16 @@ Ordinal-ordered ``IsolationReq`` wire names (index = Cap'n Proto ordinal).
 """
 
 RESOLVED_SQL_TYPES: tuple[str, ...] = ("integer", "real", "text", "blob", "boolean", "null")
-"""Ordinal-ordered ``ResolvedSqlType`` wire names (index = Cap'n Proto ordinal)."""
+"""Resolved BookclerkSQL column type after type checking.
+
+Ordinal-ordered ``ResolvedSqlType`` wire names (index = Cap'n Proto ordinal).
+"""
 
 INTEGER_ARITH_KINDS: tuple[str, ...] = ("add", "sub", "mul", "abs")
-"""Ordinal-ordered ``IntegerArithKind`` wire names (index = Cap'n Proto ordinal)."""
+"""INTEGER `+` `-` `*` `abs` site lowered to overflow -> NULL.
+
+Ordinal-ordered ``IntegerArithKind`` wire names (index = Cap'n Proto ordinal).
+"""
 
 __all__ = [
     "PRODUCT_API_VERSION",

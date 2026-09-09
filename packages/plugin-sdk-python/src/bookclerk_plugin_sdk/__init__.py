@@ -9,10 +9,10 @@ Typical import:
 
 - Workerd: ``from bookclerk_plugin_sdk.workerd import BookclerkPlugin, js``
 
-The JSON payload contracts in :mod:`bookclerk_plugin_sdk.abi` and the product
-constants in :mod:`bookclerk_plugin_sdk._abi` are generated from
-``crates/bookclerk-plugin-abi/schema/plugin.capnp`` — the single ABI source of
-truth.
+Every ABI struct, union, enum, and interface in :mod:`bookclerk_plugin_sdk.abi`
+and the product constants in :mod:`bookclerk_plugin_sdk._abi` are generated
+from ``crates/bookclerk-plugin-abi/schema/plugin.capnp`` — the single ABI
+source of truth.
 """
 
 from ._abi import PLUGIN_ERROR_CODES, PRODUCT_API_VERSION

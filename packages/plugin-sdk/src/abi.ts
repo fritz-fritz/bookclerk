@@ -5,55 +5,48 @@
  * tables declared in `crates/bookclerk-plugin-abi/schema/plugin.capnp`.
  */
 
-/** apiVersion */
+/** Product ABI version (`plugin.toml` `api_version` / `describe().apiVersion`). */
 export const PRODUCT_API_VERSION = 2 as const;
 
-/** maxScalarBytes */
+/** Maximum decoded size of an ordinary RPC scalar value (not a stream window). */
 export const MAX_SCALAR_BYTES = 262144 as const;
 
-/** maxStreamWindowBytes */
+/** Maximum bytes returned by one `ByteSource.pull` (flow-control window). */
 export const MAX_STREAM_WINDOW_BYTES = 1048576 as const;
 
-/** maxListPage */
+/** Maximum objects in one `Destination.list` page. */
 export const MAX_LIST_PAGE = 256 as const;
 
-/** maxCheckpointBytes */
+/** Maximum job / event checkpoint payload size (bytes). */
 export const MAX_CHECKPOINT_BYTES = 65536 as const;
 
-/** maxIdentifierBytes */
+/** Maximum plugin / account identifier length (bytes). */
 export const MAX_IDENTIFIER_BYTES = 64 as const;
 
-/** maxConfigPayloadBytes */
+/** Maximum granted config payload size (bytes). */
 export const MAX_CONFIG_PAYLOAD_BYTES = 65536 as const;
 
-/** maxEventPayloadBytes */
+/** Maximum decoded size of a domain-event scalar payload (not a stream). */
 export const MAX_EVENT_PAYLOAD_BYTES = 65536 as const;
 
-/**
- * Plugin `databaseMigrations` is a startup-time scalar (not a stream). Count is
- * `maxListPage`. Each SQL text is `maxScalarBytes`. Ops-per-migration, total
- * operations across the registration, and the aggregate UTF-8 bytes of ids +
- * SQL have dedicated caps so a jailed guest cannot force unbounded host
- * allocation before semantic proof. `maxPluginMigrationRegistrationBytes` is
- * id+SQL text only; `maxPluginMigrationTotalOps` bounds the structural object
- * graph (2048: enough for realistic histories, including 256 migrations of ~8
- * ops or 8 migrations at the per-migration cap, and far below 256×256).
- */
+/** Maximum already-separated operations in one plugin-owned migration. */
 export const MAX_PLUGIN_MIGRATION_OPS = 256 as const;
 
-/** maxPluginMigrationTotalOps */
+/** Maximum already-separated operations across one `databaseMigrations` registration. */
 export const MAX_PLUGIN_MIGRATION_TOTAL_OPS = 2048 as const;
 
-/** maxPluginMigrationRegistrationBytes */
+/**
+ * Maximum aggregate UTF-8 bytes of plugin migration ids plus SQL in one `databaseMigrations` registration.
+ */
 export const MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES = 262144 as const;
 
-/** Negotiable `rpcFeatures` wire names (see `PluginDescribe.rpcFeatures`). */
+/** Guest honors scalar / stream-window / list-page caps (`rpc.scalarLimits`). */
 export const FEATURE_SCALAR_LIMITS = "rpc.scalarLimits" as const;
 
-/** featureStreams */
+/** Media moves through transferred `ByteRange` / `ByteSource` streams (`rpc.streams`). */
 export const FEATURE_STREAMS = "rpc.streams" as const;
 
-/** featureStorageCopy */
+/** Guest implements server-side `Destination.copy` (`storage.copy`). */
 export const FEATURE_STORAGE_COPY = "storage.copy" as const;
 
 /**
@@ -90,6 +83,8 @@ export const DB_TYPES = ["unspecified", "bool", "int64", "float64", "text", "byt
 export type DbType = (typeof DB_TYPES)[number];
 
 /**
+ * How the host classifies a statement for result handling.
+ *
  * Ordinal-ordered `DbStatementKind` wire names (index = Cap'n Proto ordinal).
  */
 export const DB_STATEMENT_KINDS = ["execute", "select", "returning"] as const;
@@ -98,6 +93,8 @@ export const DB_STATEMENT_KINDS = ["execute", "select", "returning"] as const;
 export type DbStatementKind = (typeof DB_STATEMENT_KINDS)[number];
 
 /**
+ * Which part of a statement's outcome the caller wants back.
+ *
  * Ordinal-ordered `DbResultSelection` wire names (index = Cap'n Proto ordinal).
  */
 export const DB_RESULT_SELECTIONS = ["discard", "affectedRows", "rows"] as const;
@@ -116,6 +113,8 @@ export const ISOLATION_REQS = ["atomicBatch", "nestedSavepoint", "consistentSnap
 export type IsolationReq = (typeof ISOLATION_REQS)[number];
 
 /**
+ * Resolved BookclerkSQL column type after type checking.
+ *
  * Ordinal-ordered `ResolvedSqlType` wire names (index = Cap'n Proto ordinal).
  */
 export const RESOLVED_SQL_TYPES = ["integer", "real", "text", "blob", "boolean", "null"] as const;
@@ -124,6 +123,8 @@ export const RESOLVED_SQL_TYPES = ["integer", "real", "text", "blob", "boolean",
 export type ResolvedSqlType = (typeof RESOLVED_SQL_TYPES)[number];
 
 /**
+ * INTEGER `+` `-` `*` `abs` site lowered to overflow -> NULL.
+ *
  * Ordinal-ordered `IntegerArithKind` wire names (index = Cap'n Proto ordinal).
  */
 export const INTEGER_ARITH_KINDS = ["add", "sub", "mul", "abs"] as const;

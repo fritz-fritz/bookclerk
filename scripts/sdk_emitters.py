@@ -599,6 +599,28 @@ def _method_result_ts(m: cs.Method, res: Resolver) -> str:
     return f"{{ {inner} }}"
 
 
+def _ts_returns_doc(m: cs.Method, res: Resolver) -> str:
+    """TSDoc `@returns` text: the schema comment, else a link to the result type."""
+    if len(m.results) == 1:
+        r = m.results[0]
+        if r.doc:
+            return " ".join(r.doc)
+        if r.type.inner is None and r.type.name not in _TS_SCALAR:
+            return f"{{@link {r.type.name}}}"
+        return f"`{r.name}` ({ts_type(r.type, res)})"
+    return ", ".join(f"`{r.name}`" for r in m.results)
+
+
+def _py_returns_doc(m: cs.Method, res: Resolver) -> str:
+    """Docstring ``Returns:`` text: the schema comment, else the result type."""
+    if len(m.results) == 1:
+        r = m.results[0]
+        if r.doc:
+            return " ".join(r.doc)
+        return f"``{py_type(r.type, res)}``"
+    return ", ".join(f"``{r.name}``" for r in m.results)
+
+
 def emit_ts_generated(capnp_text: str) -> str:
     """`packages/plugin-sdk/src/generated.ts` — explicit ABI types with TSDoc."""
     schema = cs.parse_schema(capnp_text)
@@ -681,8 +703,7 @@ def emit_ts_generated(capnp_text: str) -> str:
             for m in sorted(decl.methods, key=lambda m: m.ordinal):
                 extra = [f"@param {p.name} - {' '.join(p.doc) or p.name}" for p in m.params]
                 if m.results:
-                    rdoc = " ".join(m.results[0].doc) if len(m.results) == 1 else ""
-                    extra.append(f"@returns {rdoc or m.results[0].name}".rstrip())
+                    extra.append(f"@returns {_ts_returns_doc(m, res)}")
                 lines.extend(_ts_doc(m.doc, "  ", extra))
                 params = ", ".join(f"{p.name}: {ts_type(p.type, res)}" for p in m.params)
                 lines.append(f"  {m.name}({params}): Promise<{_method_result_ts(m, res)}>;")
@@ -845,7 +866,7 @@ def emit_py_abi(capnp_text: str) -> str:
                 if m.results:
                     dlines.append("")
                     dlines.append("        Returns:")
-                    rdoc = " ".join(m.results[0].doc) or m.results[0].name
+                    rdoc = _py_returns_doc(m, res)
                     dlines.extend(
                         textwrap.wrap(
                             rdoc, width=88, initial_indent="            ", subsequent_indent="            "
