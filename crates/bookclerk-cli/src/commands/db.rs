@@ -9,7 +9,7 @@ use bookclerk_library::{
     extract_backup_archive, list_backups, min_supported_schema_version, prune_automatic_backups,
     resolve_backup_spec, restore_backup, restore_backup_in_repo, verify_recovery_point,
     BackupReason, BackupRepository, BackupRequest, BackupResolve, CanonicalRestoreOpts,
-    HostSchemaKind, SchemaApplyOptions, SchemaBackupOpts, SchemaState, SCHEMA_VERSION,
+    SchemaApplyOptions, SchemaBackupOpts, SchemaState, SCHEMA_VERSION,
 };
 use clap::Subcommand;
 use sea_orm::DatabaseConnection;
@@ -118,18 +118,14 @@ pub async fn run(command: DbCommand, config: &Config, format: OutputFormat) -> a
 /// Opens the library guest without applying host schema (CLI migrate / version).
 async fn open_unmigrated(
     config: &Config,
-) -> anyhow::Result<(
-    DatabaseConnection,
-    HostSchemaKind,
-    bookclerk_plugin_abi::DbCapabilities,
-)> {
+) -> anyhow::Result<(DatabaseConnection, bookclerk_plugin_abi::DbCapabilities)> {
     let registry = bookclerk_plugin_host::load_external_database(config).await?;
     let ext = registry.active().ok_or_else(|| {
         anyhow::anyhow!("no active database plugin — stage and enable [database].plugin")
     })?;
     let (db, caps) = ext.connect_without_migrate(config).await?;
-    let kind = HostSchemaKind::from_db_capabilities(&caps)?;
-    Ok((db, kind, caps))
+    bookclerk_library::require_schema_migrations(&caps)?;
+    Ok((db, caps))
 }
 
 /// Backup options used before explicit CLI migrate / downgrade.
@@ -169,8 +165,8 @@ async fn apply_opts(
 
 /// Prints this binary's frozen plan and the database's [`SchemaState`].
 async fn run_version(config: &Config, format: OutputFormat) -> anyhow::Result<()> {
-    let (db, kind, _) = open_unmigrated(config).await?;
-    let state = current_schema_state(&db, kind).await?;
+    let (db, _) = open_unmigrated(config).await?;
+    let state = current_schema_state(&db).await?;
     let plan = host_migration_plan();
     let frozen = state.frozen_version();
     let step = frozen.and_then(|v| plan.iter().find(|s| s.version == v));
@@ -201,13 +197,13 @@ async fn run_backup_create(
     path: Option<PathBuf>,
     include_plugin_databases: bool,
 ) -> anyhow::Result<()> {
-    let (db, kind, caps) = open_unmigrated(config).await?;
+    let (db, caps) = open_unmigrated(config).await?;
     if !caps.supports_consistent_backup_read() {
         anyhow::bail!(
             "database adapter does not advertise consistentBackupRead; backup is unsupported"
         );
     }
-    let state = current_schema_state(&db, kind).await?;
+    let state = current_schema_state(&db).await?;
     let backend_at_capture = bookclerk_plugin_host::backup_adapter_id(&config.database.plugin);
     let registry = bookclerk_plugin_host::load_external_database(config).await?;
     let ext = registry.active().ok_or_else(|| {
@@ -326,13 +322,13 @@ async fn run_restore(config: &Config, format: OutputFormat, from: String) -> any
     let files_dir = config.paths().files_dir.clone();
     let (repo_root, id, is_archive, _unpack) = resolve_for_use(&files_dir, &from)?;
 
-    let (db, kind, caps) = open_unmigrated(config).await?;
+    let (db, caps) = open_unmigrated(config).await?;
     if !caps.supports_atomic_unit_restore() {
         anyhow::bail!(
             "database adapter does not advertise atomicUnitRestore; restore is unsupported"
         );
     }
-    ensure_restore_target_is_replaceable(&db, kind)
+    ensure_restore_target_is_replaceable(&db)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     let registry = bookclerk_plugin_host::load_external_database(config).await?;
@@ -340,7 +336,6 @@ async fn run_restore(config: &Config, format: OutputFormat, from: String) -> any
         anyhow::anyhow!("no active database plugin — stage and enable [database].plugin")
     })?;
     let opts = CanonicalRestoreOpts {
-        host_schema_kind: kind,
         adapter: Some(ext.library_backup_ops()),
         ..CanonicalRestoreOpts::from_caps(&caps)?
     };
@@ -424,16 +419,16 @@ async fn run_migrate(
     target: i64,
     include_plugin_databases: bool,
 ) -> anyhow::Result<()> {
-    let (db, kind, caps) = open_unmigrated(config).await?;
-    let state = current_schema_state(&db, kind).await?;
+    let (db, caps) = open_unmigrated(config).await?;
+    let state = current_schema_state(&db).await?;
     let walk = bookclerk_plugin_host::migrate_library_schema(
         config,
         target,
         apply_opts(config, &db, &state, include_plugin_databases, &caps).await?,
     )
     .await?;
-    let (db, kind, _) = open_unmigrated(config).await?;
-    let after = current_schema_state(&db, kind).await?;
+    let (db, _) = open_unmigrated(config).await?;
+    let after = current_schema_state(&db).await?;
     let payload = json!({
         "from": walk.from,
         "requested_to": walk.requested_to,

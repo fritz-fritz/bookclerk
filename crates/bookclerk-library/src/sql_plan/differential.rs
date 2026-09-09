@@ -114,9 +114,7 @@ mod tests {
         let db = bookclerk_plugin_database_sqlite::open_memory()
             .await
             .expect("sqlite");
-        crate::apply_host_schema(&db, crate::HostSchemaKind::RowMarker)
-            .await
-            .expect("sqlite schema");
+        crate::apply_host_schema(&db).await.expect("sqlite schema");
         db
     }
 
@@ -161,7 +159,7 @@ mod tests {
             None => format!("{}/{db_name}", &trimmed[..slash]),
         };
         let db = sea_orm::Database::connect(&db_url).await.expect("connect");
-        crate::apply_host_schema(&db, crate::HostSchemaKind::RowMarker)
+        crate::apply_host_schema(&db)
             .await
             .expect("postgres schema");
         db

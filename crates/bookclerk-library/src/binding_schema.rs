@@ -26,7 +26,7 @@ use bookclerk_plugin_abi::{
 use sea_orm::DatabaseConnection;
 
 use crate::error::{LibraryError, Result};
-use crate::host_schema::{current_schema_state, ensure_schema_migrations, HostSchemaKind};
+use crate::host_schema::{current_schema_state, ensure_schema_migrations};
 use crate::migrations::{
     binding_bootstrap_ops, binding_bootstrap_statements, binding_unreleased_checksum,
     prove_migration_ops, unreleased_state_marker_sql, BINDING_SCHEMA_VERSION,
@@ -89,7 +89,7 @@ pub fn binding_bootstrap_plan(state: &SchemaState) -> Result<Option<Vec<String>>
 /// Returns when schema apply or the binding state machine fails closed.
 pub async fn apply_binding_bootstrap(db: &DatabaseConnection) -> Result<()> {
     ensure_schema_migrations(db).await?;
-    let state = current_schema_state(db, HostSchemaKind::RowMarker).await?;
+    let state = current_schema_state(db).await?;
     let Some(stmts) = binding_bootstrap_plan(&state)? else {
         return Ok(());
     };
@@ -98,7 +98,7 @@ pub async fn apply_binding_bootstrap(db: &DatabaseConnection) -> Result<()> {
     for attempt in 0..8 {
         match run_binding_batch(db, stmts.clone()).await {
             Ok(()) => return Ok(()),
-            Err(err) => match current_schema_state(db, HostSchemaKind::RowMarker).await {
+            Err(err) => match current_schema_state(db).await {
                 Ok(SchemaState::Unreleased { checksum, .. })
                     if checksum == binding_unreleased_checksum() =>
                 {
@@ -192,13 +192,9 @@ mod tests {
             .await
             .unwrap();
         apply_binding_bootstrap(&db).await.unwrap();
-        let first = current_schema_state(&db, HostSchemaKind::RowMarker)
-            .await
-            .unwrap();
+        let first = current_schema_state(&db).await.unwrap();
         apply_binding_bootstrap(&db).await.unwrap();
-        let second = current_schema_state(&db, HostSchemaKind::RowMarker)
-            .await
-            .unwrap();
+        let second = current_schema_state(&db).await.unwrap();
         assert_eq!(first, second);
         match first {
             SchemaState::Unreleased {
