@@ -12,12 +12,6 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, Protocol, TypedDict, Union
 
-JsonValue = Any
-"""Arbitrary JSON value carried inside a ``$jsonValue`` ``Text`` field."""
-
-JsonObject = dict[str, Any]
-"""JSON object carried inside a ``$jsonValue`` ``Text`` field."""
-
 PluginErrorCode = Literal[
     "invalid_params",
     "unauthorized",
@@ -37,8 +31,20 @@ as-is; SDKs surface them as a local `unknown` while keeping the raw wire
 code.
 """
 
+PortalAuthMode = Literal["unspecified", "password", "oauth"]
+"""Portal Accounts connect mode for storefronts."""
+
 CliArgKind = Literal["string", "bool", "int", "path"]
-"""Value kind for a `CliArgSpec` (wire lowercase: "string" / "bool" / ...)."""
+"""Value kind for a `CliArgSpec`."""
+
+CatalogSort = Literal["relevance", "popularity", "rating", "title", "author"]
+"""Catalog search ordering."""
+
+CatalogField = Literal["any", "author", "narrator", "series", "genre"]
+"""Catalog search facet restricting which field the query matches."""
+
+Abridgement = Literal["unknown", "unabridged", "abridged"]
+"""Whether an edition is abridged."""
 
 DbType = Literal["unspecified", "bool", "int64", "float64", "text", "bytes"]
 """Universal database cell/parameter domain. Engine-native arrays, enums,
@@ -226,8 +232,18 @@ class PluginDescribe(TypedDict):
         supportedRoles: Advertised factories (`destination`, `source`, `worker`,
             `contentSource`, `integration`, `database`). Host still intersects with the
             manifest allowlist.
-        metadataJson: Identity extras (brand, cli schema, method names, aliases).
-            Versioned JSON escape hatch; not a substitute for typed fields.
+        capabilities: Capability method names the guest implements (e.g. `health`,
+            `login`, `fetchTitle`). The host intersects these with the consent grant.
+        portalAuthMode: Portal Accounts connect mode for storefronts.
+        passwordEnvVar: Env var name operators may set for password helpers; never
+            required for Accounts UI connect. Empty when the guest accepts none. Omitted
+            when absent (wire zero value).
+        aliases: Alternate ids accepted for config / CLI targeting.
+        sortKey: UI sort weight among peers of the same kind; lower sorts first.
+        brand: Portal brand colors and icon URL; `brand.id` is empty when the guest has
+            no brand and the host renders a neutral fallback.
+        configOptions: Discoverable config option groups for source UIs.
+        cli: Embedded CLI schema (same shape as `cliDescribe`); empty when unused.
     """
 
     apiVersion: int
@@ -237,7 +253,14 @@ class PluginDescribe(TypedDict):
     rpcFeatures: list[str]
     scalarLimits: ScalarLimits
     supportedRoles: list[str]
-    metadataJson: str
+    capabilities: list[str]
+    portalAuthMode: PortalAuthMode
+    passwordEnvVar: NotRequired[str]
+    aliases: list[str]
+    sortKey: int
+    brand: Brand
+    configOptions: list[ConfigOption]
+    cli: CliSchema
 
 
 class OidcClientTemplate(TypedDict):
@@ -324,15 +347,14 @@ class ExtensibleConfig(TypedDict):
 
 
 class DestinationContext(TypedDict):
-    """Opaque JSON knobs only (migration bridge). Prefer `config` for new fields.
-    OS paths, FDs, and sockets are transport-private.
+    """Granted configuration for `BookclerkPlugin.destination`. OS paths, FDs,
+    and sockets are transport-private.
 
     Attributes:
-        json: Legacy opaque JSON knobs (migration bridge).
-        config: Granted extensible configuration.
+        config: Granted plugin settings (operator `[output.<id>]` table as
+            `application/json`).
     """
 
-    json: str
     config: ExtensibleConfig
 
 
@@ -340,11 +362,9 @@ class SourceContext(TypedDict):
     """Granted configuration for `BookclerkPlugin.source`.
 
     Attributes:
-        json: Legacy opaque JSON knobs (migration bridge).
-        config: Granted extensible configuration.
+        config: Granted plugin settings as `application/json`.
     """
 
-    json: str
     config: ExtensibleConfig
 
 
@@ -353,12 +373,10 @@ class WorkerContext(TypedDict):
 
     Attributes:
         jobId: Host job id this handler serves.
-        json: Legacy opaque JSON knobs (migration bridge).
-        config: Granted extensible configuration.
+        config: Granted plugin settings as `application/json`.
     """
 
     jobId: str
-    json: str
     config: ExtensibleConfig
 
 
@@ -366,11 +384,10 @@ class ContentSourceContext(TypedDict):
     """Granted configuration for `BookclerkPlugin.contentSource`.
 
     Attributes:
-        json: Legacy opaque JSON knobs (migration bridge).
-        config: Granted extensible configuration.
+        config: Granted plugin settings (operator `[sources.<id>]` table as
+            `application/json`).
     """
 
-    json: str
     config: ExtensibleConfig
 
 
@@ -378,24 +395,27 @@ class IntegrationContext(TypedDict):
     """Granted configuration for `BookclerkPlugin.integration`.
 
     Attributes:
-        json: Legacy opaque JSON knobs (migration bridge).
-        config: Granted extensible configuration.
+        config: Granted plugin settings (operator `[integrations.<id>]` table as
+            `application/json`).
     """
 
-    json: str
     config: ExtensibleConfig
 
 
 class DatabaseContext(TypedDict):
-    """Granted configuration for `BookclerkPlugin.database` (see `DatabaseAdapterConfig`).
+    """Granted configuration for `BookclerkPlugin.database`. First-party
+    host-managed adapters receive host-private connect params in `config`;
+    third-party adapters receive the typed `adapter` bootstrap instead.
 
     Attributes:
-        json: Legacy opaque JSON knobs (migration bridge).
-        config: Granted extensible configuration.
+        config: Host-private connect params for first-party adapters; empty payload for
+            third-party adapters.
+        adapter: Author-facing bootstrap for third-party adapters; `pluginDataDir` is
+            empty when `config` carries host-private params instead.
     """
 
-    json: str
     config: ExtensibleConfig
+    adapter: DatabaseAdapterConfig
 
 
 class JobInvocation(TypedDict):
@@ -1401,53 +1421,6 @@ EventResultReply = Union[
 """Result union of `Integration.onEvent`."""
 
 
-class JsonOk(TypedDict):
-    """Migration-bridge JSON result. Frozen methods should prefer typed structs;
-    plugin-specific DTOs travel as schemaVersion + mediaType + bounded payload
-    via ExtensibleConfig, not as unbounded serde dumps.
-
-    Attributes:
-        json: JSON text; at most `maxScalarBytes`.
-    """
-
-    json: str
-
-
-class JsonReplyOk(TypedDict):
-    """``JsonReply`` member ``ok``.
-
-    Success: JSON text payload.
-
-    Attributes:
-        kind: Always ``"ok"``.
-        value: Success: JSON text payload.
-    """
-
-    kind: Literal["ok"]
-    value: JsonOk
-
-
-class JsonReplyErr(TypedDict):
-    """``JsonReply`` member ``err``.
-
-    Typed failure; `code` is a `PluginErrorCode` wire string.
-
-    Attributes:
-        kind: Always ``"err"``.
-        value: Typed failure; `code` is a `PluginErrorCode` wire string.
-    """
-
-    kind: Literal["err"]
-    value: PluginError
-
-
-JsonReply = Union[
-    JsonReplyOk,
-    JsonReplyErr,
-]
-"""Result union of `JSON-bridge methods`."""
-
-
 class HealthOk(TypedDict):
     """Typed liveness report.
 
@@ -1767,114 +1740,114 @@ class NamedDatabase(TypedDict):
 
 
 class ContentSource(Protocol):
-    """Storefront content source (not byte Source). JSON params/results are a
-    migration bridge for existing storefront DTOs.
+    """Storefront content source (not byte Source). Every method takes and
+    returns typed structs from the "Typed method payloads" section.
     """
 
-    async def login(self, params_json: str) -> JsonReply:
+    async def login(self, params: LoginParams) -> LoginReply:
         """Connect an account (password or one-shot OAuth).
 
         Args:
-            params_json: `LoginParams` JSON.
+            params: Credentials, marketplace, callback wiring.
 
         Returns:
-            ``JsonReply``
+            ``LoginReply``
         """
         ...
 
-    async def scan(self, params_json: str) -> JsonReply:
+    async def scan(self, params: ScanParams) -> ScanReply:
         """Sync library rows for one or more accounts.
 
         Args:
-            params_json: `ScanParams` JSON.
+            params: Accounts, paging, and host-sealed credentials.
 
         Returns:
-            ``JsonReply``
+            ``ScanReply``
         """
         ...
 
-    async def fetch_title(self, params_json: str) -> JsonReply:
+    async def fetch_title(self, params: FetchTitleParams) -> FetchTitleReply:
         """Download and decrypt one title into `cacheDir`.
 
         Args:
-            params_json: `FetchTitleParams` JSON.
+            params: Title, credentials, and fetch options.
 
         Returns:
-            ``JsonReply``
+            ``FetchTitleReply``
         """
         ...
 
-    async def list_accounts(self) -> JsonReply:
+    async def list_accounts(self) -> SourceAccountsReply:
         """Enumerate accounts the guest knows about.
 
         Returns:
-            ``JsonReply``
+            ``SourceAccountsReply``
         """
         ...
 
-    async def login_start(self, params_json: str) -> JsonReply:
+    async def login_start(self, params: LoginParams) -> LoginStartReply:
         """Begin an interactive OAuth login; returns a session id.
 
         Args:
-            params_json: `LoginStartParams` JSON.
+            params: Same shape as `login`; host fills callback IPC.
 
         Returns:
-            ``JsonReply``
+            ``LoginStartReply``
         """
         ...
 
-    async def login_complete(self, params_json: str) -> JsonReply:
+    async def login_complete(self, params: LoginCompleteParams) -> LoginReply:
         """Finish an interactive OAuth login started by `loginStart`.
 
         Args:
-            params_json: `LoginCompleteParams` JSON.
+            params: Session id from `loginStart`.
 
         Returns:
-            ``JsonReply``
+            ``LoginReply``
         """
         ...
 
-    async def search_catalog(self, params_json: str) -> JsonReply:
+    async def search_catalog(self, params: SearchCatalogParams) -> CatalogHitsReply:
         """Free-text storefront catalog search.
 
         Args:
-            params_json: `SearchCatalogParams` JSON.
+            params: Query, region, paging, sort, facet.
 
         Returns:
-            ``JsonReply``
+            ``CatalogHitsReply``
         """
         ...
 
-    async def expand_candidates(self, params_json: str) -> JsonReply:
+    async def expand_candidates(self, params: ExpandCandidatesParams) -> CatalogHitsReply:
         """Related-title expansion from a seed title.
 
         Args:
-            params_json: `ExpandCandidatesParams` JSON.
+            params: Seed identity fields and limit.
 
         Returns:
-            ``JsonReply``
+            ``CatalogHitsReply``
         """
         ...
 
-    async def purchase_hint(self, params_json: str) -> JsonReply:
+    async def purchase_hint(self, params: PurchaseHintParams) -> PurchaseHintReply:
         """Purchase link / price hint for one title.
 
         Args:
-            params_json: `PurchaseHintParams` JSON.
+            params: Identity fields and price flag.
 
         Returns:
-            ``JsonReply``
+            ``PurchaseHintReply``
         """
         ...
 
-    async def list_deals(self, params_json: str) -> JsonReply:
+    async def list_deals(self, params: ListDealsParams) -> CatalogHitsReply:
         """Current storefront deals.
 
         Args:
-            params_json: `ListDealsParams` JSON.
+            params: Optional result cap.
 
         Returns:
-            ``JsonReply``
+            ``CatalogHitsReply``
         """
         ...
 
@@ -1886,22 +1859,22 @@ class ContentSource(Protocol):
         """
         ...
 
-    async def diagnose(self) -> JsonReply:
-        """Human-readable diagnostic lines (`DiagnoseResult` JSON).
+    async def diagnose(self) -> DiagnoseReply:
+        """Human-readable diagnostic lines.
 
         Returns:
-            ``JsonReply``
+            ``DiagnoseReply``
         """
         ...
 
-    async def catalog_detail(self, params_json: str) -> JsonReply:
+    async def catalog_detail(self, params: CatalogDetailParams) -> CatalogDetailReply:
         """Full catalog record for one product.
 
         Args:
-            params_json: `CatalogDetailParams` JSON.
+            params: Product id and optional ISBN.
 
         Returns:
-            ``JsonReply``
+            ``CatalogDetailReply``
         """
         ...
 
@@ -1944,86 +1917,51 @@ class Integration(Protocol):
         """
         ...
 
-    async def diagnose(self) -> JsonReply:
-        """Human-readable diagnostic lines (`DiagnoseResult` JSON).
+    async def diagnose(self) -> DiagnoseReply:
+        """Human-readable diagnostic lines.
 
         Returns:
-            ``JsonReply``
+            ``DiagnoseReply``
         """
         ...
 
-    async def scan_library(self, params_json: str) -> EmptyReply:
+    async def scan_library(self, params: ScanLibraryParams) -> EmptyReply:
         """Re-sync the remote library.
 
         Args:
-            params_json: `ScanLibraryParams` JSON.
+            params: Full-rescan flag.
 
         Returns:
             ``EmptyReply``
         """
         ...
 
-    async def sync_listening(self) -> JsonReply:
+    async def sync_listening(self) -> SyncListeningReply:
         """Push / pull listening progress.
 
         Returns:
-            ``JsonReply``
+            ``SyncListeningReply``
         """
         ...
 
-    async def authenticate_user(self, params_json: str) -> JsonReply:
+    async def authenticate_user(self, params: AuthenticateUserParams) -> ExternalUserReply:
         """Verify remote credentials on behalf of the host.
 
         Args:
-            params_json: `AuthenticateUserParams` JSON.
+            params: Username and password.
 
         Returns:
-            ``JsonReply``
+            ``ExternalUserReply``
         """
         ...
 
-    async def poll_events(self) -> JsonReply:
+    async def poll_events(self) -> EventPollReply:
         """Drain events the remote side produced since the last poll.
 
         Returns:
-            ``JsonReply``
+            ``EventPollReply``
         """
         ...
-
-
-class PluginMetadata(TypedDict):
-    """Identity extras carried as JSON in `describe().metadataJson`: portal auth,
-    brand colors, config option discovery, and an embedded CLI schema.
-
-    Attributes:
-        apiVersion: ABI version the guest speaks; must equal `apiVersion`.
-        id: Stable plugin id matching `plugin.toml` / install directory name.
-        kind: Plugin kind: "source", "integration", "output", or "database".
-        displayName: Human-readable name for UI lists; omitted when absent.
-        capabilities: Declared capability method names the guest implements (e.g.
-            "health", "login", "fetchTitle").
-        portalAuthMode: Portal Accounts connect mode: "oauth" or "password".
-        passwordEnvVar: Optional env var name operators may set for password helpers;
-            never required for Accounts UI connect.
-        aliases: Alternate ids accepted for config / CLI targeting; omitted when empty.
-        sortKey: Optional UI sort weight among peers of the same kind.
-        brand: Portal brand colors and icon URL for Accounts / library chrome.
-        configOptions: Discoverable config option groups for source UIs.
-        cli: Optional embedded CLI schema (same shape as `cliDescribe`).
-    """
-
-    apiVersion: int
-    id: str
-    kind: str
-    displayName: NotRequired[str]
-    capabilities: NotRequired[list[str]]
-    portalAuthMode: NotRequired[str]
-    passwordEnvVar: NotRequired[str]
-    aliases: NotRequired[list[str]]
-    sortKey: NotRequired[int]
-    brand: NotRequired[Brand]
-    configOptions: NotRequired[list[ConfigOption]]
-    cli: NotRequired[CliSchema]
 
 
 class Brand(TypedDict):
@@ -2031,12 +1969,13 @@ class Brand(TypedDict):
     `logo`: `iconUrl` is the live URL or data URI the SPA renders.
 
     Attributes:
-        id: Brand id (often matches the plugin id).
+        id: Brand id (often matches the plugin id); empty means "no brand".
         name: Display name shown next to the brand swatch.
         bg: Background CSS color (hex or named).
         fg: Foreground CSS color for text on `bg`.
         accent: Accent CSS color for highlights / CTAs.
-        iconUrl: Icon URL or data URI for the portal.
+        iconUrl: Icon URL or data URI for the portal. Omitted when absent (wire zero
+            value).
     """
 
     id: str
@@ -2044,7 +1983,7 @@ class Brand(TypedDict):
     bg: str
     fg: str
     accent: str
-    iconUrl: str
+    iconUrl: NotRequired[str]
 
 
 class ConfigOption(TypedDict):
@@ -2074,7 +2013,7 @@ class ConfigOptionValue(TypedDict):
 
 
 class CliSchema(TypedDict):
-    """Declared plugin CLI surface (`cliDescribe` / metadata `cli` / `plugin.toml`).
+    """Declared plugin CLI surface (`cliDescribe` / `describe().cli`).
 
     Attributes:
         commands: Commands exposed as `bookclerk plugins <id> <command> ...`.
@@ -2088,179 +2027,332 @@ class CliCommandSpec(TypedDict):
 
     Attributes:
         name: Command verb after the plugin id (for example "ping").
-        about: Short help text for `--help`; omitted when absent.
-        args: Argument / flag specs for this command (default empty).
+        about: Short help text for `--help`. Omitted when absent (wire zero value).
+        args: Argument / flag specs for this command.
     """
 
     name: str
     about: NotRequired[str]
-    args: NotRequired[list[CliArgSpec]]
+    args: list[CliArgSpec]
 
 
 class CliArgSpec(TypedDict):
     """One CLI argument or flag under a `CliCommandSpec`.
 
     Attributes:
-        name: Internal arg name used as the key in `CliInvokeParams.args`.
-        long: Long flag without leading dashes (e.g. "message" -> `--message`).
-        short: Optional short flag character (e.g. "m" -> `-m`).
-        kind: Parsed value kind (default "string").
+        name: Internal arg name used as `CliArg.name` on invoke.
+        long: Long flag without leading dashes (e.g. "message" -> `--message`). Omitted
+            when absent (wire zero value).
+        short: Short flag character (e.g. "m" -> `-m`). Omitted when absent (wire zero
+            value).
+        kind: Parsed value kind.
         required: When true, the host rejects invoke if the arg is missing.
-        default: Default string form when the operator omits the arg.
-        about: Help text for this arg; omitted when absent.
+        default: Default string form when the operator omits the arg. Omitted when
+            absent (wire zero value).
+        about: Help text for this arg. Omitted when absent (wire zero value).
         positional: When true, the arg is positional rather than a flagged option.
     """
 
     name: str
     long: NotRequired[str]
     short: NotRequired[str]
-    kind: NotRequired[CliArgKind]
-    required: NotRequired[bool]
+    kind: CliArgKind
+    required: bool
     default: NotRequired[str]
     about: NotRequired[str]
-    positional: NotRequired[bool]
+    positional: bool
+
+
+class CliArg(TypedDict):
+    """One named argument value passed to `cliInvoke`.
+
+    Attributes:
+        name: Arg name matching a `CliArgSpec.name`.
+        value: String form of the value (the guest parses per `CliArgSpec.kind`).
+    """
+
+    name: str
+    value: str
 
 
 class CliInvokeParams(TypedDict):
-    """Params JSON for `cliInvoke`.
+    """Params of `BookclerkPlugin.cliInvoke`.
 
     Attributes:
         command: Command name matching a `CliCommandSpec.name`.
-        args: Named argument values (keys match `CliArgSpec.name`; default `{}`).
+        args: Named argument values.
     """
 
     command: str
-    args: NotRequired[JsonValue]
+    args: list[CliArg]
 
 
 class CliInvokeResult(TypedDict):
-    """Result JSON for `cliInvoke`.
+    """Result of `BookclerkPlugin.cliInvoke`.
 
     Attributes:
         exitCode: Process-style exit code (0 = success).
         stdout: Captured standard output text.
         stderr: Captured standard error text.
-        json: Optional structured payload for machine consumers; omitted when absent.
+        payload: Structured payload for machine consumers; empty `mediaType` when
+            absent.
     """
 
     exitCode: int
     stdout: str
     stderr: str
-    json: JsonValue
+    payload: ExtensibleConfig
+
+
+class CliSchemaReplyOk(TypedDict):
+    """``CliSchemaReply`` member ``ok``.
+
+    Success: declared CLI surface.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: declared CLI surface.
+    """
+
+    kind: Literal["ok"]
+    value: CliSchema
+
+
+class CliSchemaReplyErr(TypedDict):
+    """``CliSchemaReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+CliSchemaReply = Union[
+    CliSchemaReplyOk,
+    CliSchemaReplyErr,
+]
+"""Result union of `BookclerkPlugin.cliDescribe`."""
+
+
+class CliInvokeReplyOk(TypedDict):
+    """``CliInvokeReply`` member ``ok``.
+
+    Success: command output.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: command output.
+    """
+
+    kind: Literal["ok"]
+    value: CliInvokeResult
+
+
+class CliInvokeReplyErr(TypedDict):
+    """``CliInvokeReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+CliInvokeReply = Union[
+    CliInvokeReplyOk,
+    CliInvokeReplyErr,
+]
+"""Result union of `BookclerkPlugin.cliInvoke`."""
 
 
 class DatabaseAdapterConfig(TypedDict):
     """Author-facing database adapter configuration carried in
-    `DatabaseContext.config` (mediaType
-    `application/vnd.bookclerk.db-adapter-config+json`). This is the generic
-    bootstrap mechanism for third-party adapters: the operator's granted
-    `[database.<id>]` table plus the scoped writable data dir. First-party
-    host-managed adapters receive host-private connect params instead.
+    `DatabaseContext.adapter`. This is the generic bootstrap mechanism for
+    third-party adapters: the operator's granted `[database.<id>]` table plus
+    the scoped writable data dir. First-party host-managed adapters receive
+    host-private connect params in `DatabaseContext.config` instead.
 
     Attributes:
         pluginDataDir: Scoped writable directory for this plugin
             (`.../plugins/<id>/data`).
-        config: Granted plugin settings (operator `[database.<id>]` table) as a JSON
-            object; `{}` when the operator configured nothing.
-        binding: Named plugin database binding this open serves; omitted for the primary
+        settings: Granted plugin settings (operator `[database.<id>]` table) as
+            `application/json`; `{}` when the operator configured nothing.
+        binding: Named plugin database binding this open serves; empty for the primary
             library open. Adapters advertising `DbCapabilities.pluginDatabases` must
-            serve each binding from its own isolated database.
+            serve each binding from its own isolated database. Omitted when absent (wire
+            zero value).
         instanceId: Host-issued opaque instance id for this (owner plugin, binding)
-            pair. Collision-resistant and stable across re-opens. Omitted for the
-            primary library open. Third-party adapters must key isolated databases on
-            this value rather than `binding` alone (two plugins may both declare `DB`).
-        provision: Append-only. When false, open an existing binding unit and do not
-            provision a missing one (read-only backup capture). Omitted/true on older
-            hosts means the adapter may create the unit.
+            pair. Collision-resistant and stable across re-opens. Empty for the primary
+            library open. Third-party adapters must key isolated databases on this value
+            rather than `binding` alone (two plugins may both declare `DB`). Omitted
+            when absent (wire zero value).
+        openExisting: When true, open an existing binding unit and do not provision a
+            missing one (read-only backup capture). False lets the adapter create the
+            unit.
     """
 
     pluginDataDir: str
-    config: NotRequired[JsonValue]
+    settings: ExtensibleConfig
     binding: NotRequired[str]
     instanceId: NotRequired[str]
-    provision: NotRequired[bool]
-
-
-class HealthResult(TypedDict):
-    """JSON health payload for guests that report identity alongside liveness.
-    Role-level `health` RPCs return the typed `HealthOk` instead.
-
-    Attributes:
-        ok: When true, the guest considers itself healthy enough for traffic.
-        id: Plugin id echo; omitted when the guest does not duplicate identity.
-        enabled: Whether the guest believes it is enabled in config; omitted when
-            unknown.
-        detail: Short human detail for CLI / UI status lines; omitted when absent.
-    """
-
-    ok: bool
-    id: str
-    enabled: bool
-    detail: str
+    openExisting: bool
 
 
 class DiagnoseResult(TypedDict):
-    """JSON result of `diagnose`. Each line is printed by
-    `bookclerk plugins diagnose` / the control plane.
+    """Operator-facing diagnostic lines printed by `bookclerk plugins diagnose`.
 
     Attributes:
-        lines: Human-readable probe lines (default empty).
+        lines: Human-readable probe lines.
     """
 
     lines: list[str]
 
 
+class DiagnoseReplyOk(TypedDict):
+    """``DiagnoseReply`` member ``ok``.
+
+    Success: diagnostic lines.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: diagnostic lines.
+    """
+
+    kind: Literal["ok"]
+    value: DiagnoseResult
+
+
+class DiagnoseReplyErr(TypedDict):
+    """``DiagnoseReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+DiagnoseReply = Union[
+    DiagnoseReplyOk,
+    DiagnoseReplyErr,
+]
+"""Result union of `diagnose`."""
+
+
+class SourceAccount(TypedDict):
+    """Source account metadata returned from login and stored by the host.
+
+    Attributes:
+        accountId: Stable account id within this source plugin.
+        source: Source plugin id (the host forces this to the guest's install id).
+        marketplace: Storefront marketplace / region code (for example `us`, `uk`).
+        label: Operator-facing label. Omitted when absent (wire zero value).
+        scanEnabled: When true, bare / scheduled scans include this account. Explicit
+            CLI `--account` bypasses this flag.
+    """
+
+    accountId: str
+    source: str
+    marketplace: str
+    label: NotRequired[str]
+    scanEnabled: bool
+
+
 class LoginParams(TypedDict):
-    """Params JSON for `ContentSource.login`. Password sources fill
-    email/password; OAuth sources use callback / external fields. There is no
-    files-dir root or library DB path -- only `pluginDataDir`.
+    """Params of `ContentSource.login` and `ContentSource.loginStart`. Password
+    sources fill email/password; OAuth sources use callback / external fields.
+    There is no files-dir root or library DB path -- only `pluginDataDir`.
 
     Attributes:
         pluginDataDir: Scoped writable directory for this plugin only
             (`.../plugins/<id>/data`).
-        marketplace: Marketplace / locale for the storefront (default empty -> guest
-            default).
-        label: Optional operator label stored on the account row.
-        email: Account email / username for password logins; omitted for pure OAuth.
-        password: Account password for password logins; never logged; omitted for OAuth.
+        marketplace: Marketplace / locale for the storefront; empty means the guest
+            default.
+        label: Operator label stored on the account row. Omitted when absent (wire zero
+            value).
+        email: Account email / username for password logins; empty for pure OAuth.
+            Omitted when absent (wire zero value).
+        password: Account password for password logins; never logged; empty for OAuth.
+            Omitted when absent (wire zero value).
         force: When true, overwrite an existing sealed credential for this account.
-        callbackBind: Optional bind address for OAuth callback servers (`host:port`).
-            Ignored when `callbackIpc` is set (host owns the TCP listener).
+        callbackBind: Bind address for OAuth callback servers (`host:port`). Ignored
+            when `callbackIpc` is set (host owns the TCP listener). Omitted when absent
+            (wire zero value).
         callbackIpc: Host-owned callback IPC endpoint the guest must connect to. When
             set (with `callbackPublicBase`), the guest must not bind a TCP listener.
+            Omitted when absent (wire zero value).
         callbackPublicBase: Public base URL for the host TCP listener, e.g.
-            `http://127.0.0.1:12345`.
+            `http://127.0.0.1:12345`. Omitted when absent (wire zero value).
         external: When true, use external / paste-redirect OAuth instead of a local
             callback server.
-        responseUrl: Pre-supplied OAuth redirect URL (paste flow); omitted otherwise.
+        responseUrl: Pre-supplied OAuth redirect URL (paste flow). Omitted when absent
+            (wire zero value).
         showQr: Prefer QR output when the guest supports it.
-        timeoutSecs: Seconds to wait for OAuth callback capture; guest default when
-            omitted.
-        extra: Store-specific knobs as a JSON object; guests may ignore unknowns.
+        timeoutSecs: Seconds to wait for OAuth callback capture; guest default when 0.
+            Omitted when absent (wire zero value).
+        extra: Store-specific knobs as `application/json`; guests may ignore unknowns.
     """
 
     pluginDataDir: str
-    marketplace: NotRequired[str]
+    marketplace: str
     label: NotRequired[str]
     email: NotRequired[str]
     password: NotRequired[str]
-    force: NotRequired[bool]
+    force: bool
     callbackBind: NotRequired[str]
     callbackIpc: NotRequired[str]
     callbackPublicBase: NotRequired[str]
-    external: NotRequired[bool]
+    external: bool
     responseUrl: NotRequired[str]
-    showQr: NotRequired[bool]
+    showQr: bool
     timeoutSecs: NotRequired[int]
-    extra: NotRequired[JsonValue]
+    extra: ExtensibleConfig
 
 
-LoginStartParams = LoginParams
-"""Params JSON for `ContentSource.loginStart` -- same shape as `LoginParams`."""
+class LoginResult(TypedDict):
+    """Result of `ContentSource.login` / `loginComplete`: account metadata plus
+    opaque credentials for the host to seal into `encrypted_secrets`
+    (`provider = plugin id`). Guests never write secrets into the library DB.
+
+    Attributes:
+        account: Account row fields for the host to upsert.
+        credentials: Opaque credential blob the host seals; empty when login only
+            refreshed metadata. Guests choose the encoding (typically JSON bytes).
+            Omitted when absent (wire zero value).
+    """
+
+    account: SourceAccount
+    credentials: NotRequired[bytes]
+
+
+class LoginStartResult(TypedDict):
+    """Result of `ContentSource.loginStart` (interactive OAuth). The operator
+    opens `url`; `loginComplete` later uses `sessionId`.
+
+    Attributes:
+        sessionId: Opaque session id for `loginComplete`.
+        url: Browser URL the operator should open to complete OAuth.
+    """
+
+    sessionId: str
+    url: str
 
 
 class LoginCompleteParams(TypedDict):
-    """Params JSON for `ContentSource.loginComplete`.
+    """Params of `ContentSource.loginComplete`.
 
     Attributes:
         sessionId: Session id previously returned by `loginStart`.
@@ -2269,155 +2361,748 @@ class LoginCompleteParams(TypedDict):
     sessionId: str
 
 
+class LoginReplyOk(TypedDict):
+    """``LoginReply`` member ``ok``.
+
+    Success: account plus credentials to seal.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: account plus credentials to seal.
+    """
+
+    kind: Literal["ok"]
+    value: LoginResult
+
+
+class LoginReplyErr(TypedDict):
+    """``LoginReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+LoginReply = Union[
+    LoginReplyOk,
+    LoginReplyErr,
+]
+"""Result union of `ContentSource.login` / `loginComplete`."""
+
+
+class LoginStartReplyOk(TypedDict):
+    """``LoginStartReply`` member ``ok``.
+
+    Success: session id and browser URL.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: session id and browser URL.
+    """
+
+    kind: Literal["ok"]
+    value: LoginStartResult
+
+
+class LoginStartReplyErr(TypedDict):
+    """``LoginStartReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+LoginStartReply = Union[
+    LoginStartReplyOk,
+    LoginStartReplyErr,
+]
+"""Result union of `ContentSource.loginStart`."""
+
+
+class AccountCredential(TypedDict):
+    """Host-sealed credentials for one account, delivered on `scan`.
+
+    Attributes:
+        accountId: Account id the blob belongs to.
+        credentials: Opaque credential bytes exactly as the guest returned them at
+            login.
+    """
+
+    accountId: str
+    credentials: bytes
+
+
 class ScanParams(TypedDict):
-    """Params JSON for `ContentSource.scan`. Host injects sealed credentials so
-    the plugin does not need a private credential store under `pluginDataDir`.
+    """Params of `ContentSource.scan`. The host injects sealed credentials so the
+    plugin does not need a private credential store under `pluginDataDir`.
 
     Attributes:
         pluginDataDir: Scoped plugin data directory.
         accounts: Account ids to scan; empty means all scan-enabled accounts.
-        pageSize: Storefront page size (default 50).
-        importEpisodes: When true, import podcast/episode-style rows (default true).
-        importPlusTitles: When true, import Plus/catalog entitlement titles (default
-            true).
-        credentials: Host-loaded credential blobs keyed by account id (JSON object).
+        pageSize: Storefront page size; the host always sends an explicit value.
+        importEpisodes: When true, import podcast/episode-style rows.
+        importPlusTitles: When true, import Plus/catalog entitlement titles.
+        credentials: Host-loaded credential blobs for the requested accounts.
     """
 
     pluginDataDir: str
-    accounts: NotRequired[list[str]]
-    pageSize: NotRequired[int]
-    importEpisodes: NotRequired[bool]
-    importPlusTitles: NotRequired[bool]
-    credentials: NotRequired[JsonValue]
+    accounts: list[str]
+    pageSize: int
+    importEpisodes: bool
+    importPlusTitles: bool
+    credentials: list[AccountCredential]
+
+
+class ScanBook(TypedDict):
+    """One library title returned by `ContentSource.scan`. The host upserts these
+    rows and forces `source` to the plugin id.
+
+    Attributes:
+        accountId: Account that owns this library entry.
+        productId: Storefront product / SKU id.
+        title: Primary title string.
+        marketplace: Marketplace / region when known. Omitted when absent (wire zero
+            value).
+        asin: Amazon ASIN when the storefront exposes one. Omitted when absent (wire
+            zero value).
+        isbn: ISBN when the storefront exposes one. Omitted when absent (wire zero
+            value).
+        authors: Comma- or guest-formatted author list. Omitted when absent (wire zero
+            value).
+        narrators: Comma- or guest-formatted narrator list. Omitted when absent (wire
+            zero value).
+        series: Series name when applicable. Omitted when absent (wire zero value).
+        seriesIndex: Series index / sequence label. Omitted when absent (wire zero
+            value).
+        contentKind: Content classification (e.g. `book` vs `episode`). Omitted when
+            absent (wire zero value).
+        publisher: Publisher name when known. Omitted when absent (wire zero value).
+        lengthMinutes: Runtime in whole minutes when known. Omitted when absent (wire
+            zero value).
+        subtitle: Subtitle when distinct from `title`. Omitted when absent (wire zero
+            value).
+    """
+
+    accountId: str
+    productId: str
+    title: str
+    marketplace: NotRequired[str]
+    asin: NotRequired[str]
+    isbn: NotRequired[str]
+    authors: NotRequired[str]
+    narrators: NotRequired[str]
+    series: NotRequired[str]
+    seriesIndex: NotRequired[str]
+    contentKind: NotRequired[str]
+    publisher: NotRequired[str]
+    lengthMinutes: NotRequired[int]
+    subtitle: NotRequired[str]
+
+
+class ScanSummary(TypedDict):
+    """Summary result of `ContentSource.scan`.
+
+    Attributes:
+        accounts: Number of accounts touched during the scan.
+        booksUpserted: Count of titles the guest expects the host to upsert; may mirror
+            `books.length`.
+        pages: Number of storefront pages fetched.
+        skippedDisabled: Accounts skipped because `scanEnabled` was false.
+        books: Titles for the host to upsert. Prefer this over plugin-side DB writes.
+    """
+
+    accounts: int
+    booksUpserted: int
+    pages: int
+    skippedDisabled: int
+    books: list[ScanBook]
+
+
+class ScanReplyOk(TypedDict):
+    """``ScanReply`` member ``ok``.
+
+    Success: scan summary and titles to upsert.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: scan summary and titles to upsert.
+    """
+
+    kind: Literal["ok"]
+    value: ScanSummary
+
+
+class ScanReplyErr(TypedDict):
+    """``ScanReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+ScanReply = Union[
+    ScanReplyOk,
+    ScanReplyErr,
+]
+"""Result union of `ContentSource.scan`."""
+
+
+class FetchOptions(TypedDict):
+    """Fetch-relevant acquire knobs the host forwards so external load matches
+    in-process. Packaging / naming knobs stay host-side.
+
+    Attributes:
+        widevine: Prefer Widevine/CENC download when the store offers it.
+        xheAac: Prefer xHE-AAC on the Widevine path when offered.
+        widevineCdmPath: Local Widevine `.wvd` path granted to the guest. Omitted when
+            absent (wire zero value).
+        widevineCdmProvider: Remote L3 CDM provider URL; empty means the classic
+            default, `off` disables remote provisioning. Omitted when absent (wire zero
+            value).
+        downloadCover: When true, download a cover image alongside audio.
+        downloadPdf: When true, download a companion PDF when the store exposes one.
+        coverSize: Cover image size request (`500`, `1215`, or `native`).
+        chapterLayout: Preferred chapter API layout when fetching (`tree` or `flat`).
+        stripAudibleBrandAudio: When true, trim Audible brand intro/outro from the remux
+            window.
+        downloadClipsBookmarks: When true, download clips/bookmarks sidecars when
+            offered.
+        retainAaxFile: When true, keep the encrypted download in storage.
+        downloadSpeedLimitKbps: Fetch speed cap in KB/s (`0` = unlimited).
+        saveMetadataJson: When true, persist raw catalog API JSON as `metadata.json`.
+    """
+
+    widevine: bool
+    xheAac: bool
+    widevineCdmPath: NotRequired[str]
+    widevineCdmProvider: NotRequired[str]
+    downloadCover: bool
+    downloadPdf: bool
+    coverSize: str
+    chapterLayout: str
+    stripAudibleBrandAudio: bool
+    downloadClipsBookmarks: bool
+    retainAaxFile: bool
+    downloadSpeedLimitKbps: int
+    saveMetadataJson: bool
 
 
 class FetchTitleParams(TypedDict):
-    """Params JSON for `ContentSource.fetchTitle`. Plugin writes media under
-    `cacheDir` and returns plain (DRM-free) paths. Host injects credentials;
-    guests must not open `library.db` or `master.key`.
+    """Params of `ContentSource.fetchTitle`. The plugin writes media under
+    `cacheDir` and returns plain (DRM-free) paths. The host injects
+    credentials; guests must not open `library.db` or `master.key`.
 
     Attributes:
         pluginDataDir: Scoped plugin data directory.
         accountId: Account whose credentials apply.
         titleId: Library / storefront title id to download.
         cacheDir: Absolute path the guest should write media into (jail-granted TMPDIR).
-        credentials: Host-loaded credential blob for this account; omitted when
-            unavailable.
-        sourceConfig: Opaque plugin table from `[sources.<id>]`.
-        download: Host acquire/download options (JSON object matching host
-            DownloadOptions).
+        credentials: Host-loaded credential blob for this account; empty when
+            unavailable. Omitted when absent (wire zero value).
+        sourceConfig: Granted `[sources.<id>]` table as `application/json`.
+        fetch: Fetch-relevant acquire options.
     """
 
     pluginDataDir: str
     accountId: str
     titleId: str
     cacheDir: str
-    credentials: NotRequired[JsonValue]
-    sourceConfig: NotRequired[JsonValue]
-    download: NotRequired[JsonValue]
+    credentials: NotRequired[bytes]
+    sourceConfig: ExtensibleConfig
+    fetch: FetchOptions
+
+
+class PlainPart(TypedDict):
+    """One plain audio part written under the cache directory.
+
+    Attributes:
+        path: Absolute path to the part file under `cacheDir`.
+        title: Part title (disc / chapter label). Omitted when absent (wire zero value).
+        durationMs: Duration of this part in milliseconds when known. Omitted when
+            absent (wire zero value).
+    """
+
+    path: str
+    title: NotRequired[str]
+    durationMs: NotRequired[int]
+
+
+class ChapterMarker(TypedDict):
+    """One chapter marker of a fetched title.
+
+    Attributes:
+        title: Chapter title.
+        startMs: Chapter start offset in milliseconds from the beginning of the title.
+    """
+
+    title: str
+    startMs: int
+
+
+class PlainFetch(TypedDict):
+    """Plain (DRM-free) fetch result. Sources always return decrypted media; DRM
+    guests decrypt before responding.
+
+    Attributes:
+        parts: Ordered audio part files written under the cache directory.
+        m4bPath: Single M4B path when the guest assembled one. Omitted when absent (wire
+            zero value).
+        coverPath: Cover image path under the cache directory. Omitted when absent (wire
+            zero value).
+        chapters: Chapter markers; empty when unknown.
+        pdfUrl: Companion PDF download URL when the store exposes one. Omitted when
+            absent (wire zero value).
+    """
+
+    parts: list[PlainPart]
+    m4bPath: NotRequired[str]
+    coverPath: NotRequired[str]
+    chapters: list[ChapterMarker]
+    pdfUrl: NotRequired[str]
+
+
+class FetchTitleReplyOk(TypedDict):
+    """``FetchTitleReply`` member ``ok``.
+
+    Success: plain media paths.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: plain media paths.
+    """
+
+    kind: Literal["ok"]
+    value: PlainFetch
+
+
+class FetchTitleReplyErr(TypedDict):
+    """``FetchTitleReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+FetchTitleReply = Union[
+    FetchTitleReplyOk,
+    FetchTitleReplyErr,
+]
+"""Result union of `ContentSource.fetchTitle`."""
+
+
+class SourceAccounts(TypedDict):
+    """Success payload of `ContentSource.listAccounts`.
+
+    Attributes:
+        accounts: Accounts the guest knows about.
+    """
+
+    accounts: list[SourceAccount]
+
+
+class SourceAccountsReplyOk(TypedDict):
+    """``SourceAccountsReply`` member ``ok``.
+
+    Success: account list.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: account list.
+    """
+
+    kind: Literal["ok"]
+    value: SourceAccounts
+
+
+class SourceAccountsReplyErr(TypedDict):
+    """``SourceAccountsReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+SourceAccountsReply = Union[
+    SourceAccountsReplyOk,
+    SourceAccountsReplyErr,
+]
+"""Result union of `ContentSource.listAccounts`."""
 
 
 class SearchCatalogParams(TypedDict):
-    """Params JSON for `ContentSource.searchCatalog`.
+    """Params of `ContentSource.searchCatalog`.
 
     Attributes:
         query: Free-text search query.
-        region: Storefront region / marketplace code (default empty -> guest default).
-        limit: Maximum hits to return (default 20).
-        page: 1-based page for storefronts that page (default 1).
-        sort: Sort key: "relevance" / "popularity" / "rating" / "title" / "author".
-        field: Optional facet ("author" / "narrator" / "series" / "genre").
-        language: Preferred content language (soft-prioritize; e.g. "en").
+        region: Storefront region / marketplace code; empty means the guest default.
+        limit: Maximum hits to return; the host always sends an explicit value.
+        page: 1-based page for storefronts that page.
+        sort: Sort order.
+        field: Facet restriction.
+        language: Preferred content language (soft-prioritize; e.g. `en`). Omitted when
+            absent (wire zero value).
     """
 
     query: str
-    region: NotRequired[str]
-    limit: NotRequired[int]
-    page: NotRequired[int]
-    sort: NotRequired[str]
-    field: NotRequired[str]
+    region: str
+    limit: int
+    page: int
+    sort: CatalogSort
+    field: CatalogField
     language: NotRequired[str]
 
 
 class ExpandCandidatesParams(TypedDict):
-    """Params JSON for `ContentSource.expandCandidates`. Seed fields identify a
-    known title; the guest returns related catalog hits.
+    """Params of `ContentSource.expandCandidates`. Seed fields identify a known
+    title; the guest returns related catalog hits.
 
     Attributes:
         source: Source plugin id hint when expanding across storefronts.
         productId: Seed storefront product id.
         title: Seed title text.
-        authors: Seed authors string.
-        narrators: Seed narrators string.
-        series: Seed series name.
-        seriesAsin: Seed series ASIN when known.
-        asin: Seed Amazon ASIN.
-        isbn: Seed ISBN.
+        authors: Seed authors string. Omitted when absent (wire zero value).
+        narrators: Seed narrators string. Omitted when absent (wire zero value).
+        series: Seed series name. Omitted when absent (wire zero value).
+        seriesAsin: Seed series ASIN when known. Omitted when absent (wire zero value).
+        asin: Seed Amazon ASIN. Omitted when absent (wire zero value).
+        isbn: Seed ISBN. Omitted when absent (wire zero value).
         region: Storefront region / marketplace code.
-        limit: Maximum candidates to return (default 20).
+        limit: Maximum candidates to return; the host always sends an explicit value.
     """
 
     source: str
     productId: str
     title: str
-    authors: str
-    narrators: str
-    series: str
-    seriesAsin: str
-    asin: str
-    isbn: str
+    authors: NotRequired[str]
+    narrators: NotRequired[str]
+    series: NotRequired[str]
+    seriesAsin: NotRequired[str]
+    asin: NotRequired[str]
+    isbn: NotRequired[str]
     region: str
     limit: int
 
 
 class PurchaseHintParams(TypedDict):
-    """Params JSON for `ContentSource.purchaseHint`. At least one identity field
+    """Params of `ContentSource.purchaseHint`. At least one identity field
     (`productId` / `asin` / `isbn` / title+authors) should be set; guests may
     return `invalid_params` when none are usable.
 
     Attributes:
-        productId: Storefront product id when known.
-        title: Title text for fuzzy lookup.
-        authors: Authors string for fuzzy lookup.
-        asin: Amazon ASIN when known.
-        isbn: ISBN when known.
+        productId: Storefront product id when known. Omitted when absent (wire zero
+            value).
+        title: Title text for fuzzy lookup. Omitted when absent (wire zero value).
+        authors: Authors string for fuzzy lookup. Omitted when absent (wire zero value).
+        asin: Amazon ASIN when known. Omitted when absent (wire zero value).
+        isbn: ISBN when known. Omitted when absent (wire zero value).
         region: Storefront region / marketplace code.
         withPrice: When true, guests should include live price fields when available.
     """
 
-    productId: str
-    title: str
-    authors: str
-    asin: str
-    isbn: str
+    productId: NotRequired[str]
+    title: NotRequired[str]
+    authors: NotRequired[str]
+    asin: NotRequired[str]
+    isbn: NotRequired[str]
     region: str
     withPrice: bool
 
 
 class ListDealsParams(TypedDict):
-    """Params JSON for `ContentSource.listDeals`.
+    """Params of `ContentSource.listDeals`.
 
     Attributes:
-        limit: Optional maximum number of deals to return; guest default when omitted.
+        limit: Maximum number of deals to return; guest default when 0. Omitted when
+            absent (wire zero value).
     """
 
-    limit: int
+    limit: NotRequired[int]
 
 
 class CatalogDetailParams(TypedDict):
-    """Params JSON for `ContentSource.catalogDetail`.
+    """Params of `ContentSource.catalogDetail`.
 
     Attributes:
         productId: Store product id (Libro ISBN or ISBN-slug).
-        isbn: Optional ISBN when it differs from `productId`.
+        isbn: ISBN when it differs from `productId`. Omitted when absent (wire zero
+            value).
     """
 
     productId: str
     isbn: NotRequired[str]
 
 
+class CatalogHit(TypedDict):
+    """One catalog / candidate hit returned by `searchCatalog`,
+    `expandCandidates`, `listDeals`, and `catalogDetail`.
+
+    Attributes:
+        productId: Storefront product / SKU id.
+        title: Primary title.
+        authors: Authors string when known. Omitted when absent (wire zero value).
+        narrators: Narrators string when known. Omitted when absent (wire zero value).
+        series: Series name when applicable. Omitted when absent (wire zero value).
+        seriesIndex: Series index / sequence label. Omitted when absent (wire zero
+            value).
+        asin: Amazon ASIN when known. Omitted when absent (wire zero value).
+        isbn: ISBN when known. Omitted when absent (wire zero value).
+        url: Storefront product page URL. Omitted when absent (wire zero value).
+        coverUrl: Cover image URL. Omitted when absent (wire zero value).
+        origin: Hit origin label (plugin id or storefront name).
+        subtitle: Subtitle when distinct from `title`. Omitted when absent (wire zero
+            value).
+        description: Long description / blurb when fetched. Omitted when absent (wire
+            zero value).
+        publisher: Publisher name when known. Omitted when absent (wire zero value).
+        lengthMinutes: Runtime in whole minutes. Omitted when absent (wire zero value).
+        publishedAt: Publication date string as provided by the storefront. Omitted when
+            absent (wire zero value).
+        categories: Category / genre labels as a single string when known. Omitted when
+            absent (wire zero value).
+        language: Content language code when known. Omitted when absent (wire zero
+            value).
+        priceCents: Current price in minor units (cents). Omitted when absent (wire zero
+            value).
+        currency: ISO currency code for `priceCents`. Omitted when absent (wire zero
+            value).
+        priceLabel: Pre-formatted price for display. Omitted when absent (wire zero
+            value).
+        ratingOverall: Aggregate rating when known. Omitted when absent (wire zero
+            value).
+        ratingCount: Number of ratings when known. Omitted when absent (wire zero
+            value).
+        abridgement: Whether the edition is abridged when the storefront says so.
+    """
+
+    productId: str
+    title: str
+    authors: NotRequired[str]
+    narrators: NotRequired[str]
+    series: NotRequired[str]
+    seriesIndex: NotRequired[str]
+    asin: NotRequired[str]
+    isbn: NotRequired[str]
+    url: NotRequired[str]
+    coverUrl: NotRequired[str]
+    origin: str
+    subtitle: NotRequired[str]
+    description: NotRequired[str]
+    publisher: NotRequired[str]
+    lengthMinutes: NotRequired[int]
+    publishedAt: NotRequired[str]
+    categories: NotRequired[str]
+    language: NotRequired[str]
+    priceCents: NotRequired[int]
+    currency: NotRequired[str]
+    priceLabel: NotRequired[str]
+    ratingOverall: NotRequired[float]
+    ratingCount: NotRequired[int]
+    abridgement: Abridgement
+
+
+class CatalogHits(TypedDict):
+    """Success payload of the catalog list methods.
+
+    Attributes:
+        hits: Hits in storefront order.
+    """
+
+    hits: list[CatalogHit]
+
+
+class CatalogHitsReplyOk(TypedDict):
+    """``CatalogHitsReply`` member ``ok``.
+
+    Success: catalog hits.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: catalog hits.
+    """
+
+    kind: Literal["ok"]
+    value: CatalogHits
+
+
+class CatalogHitsReplyErr(TypedDict):
+    """``CatalogHitsReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+CatalogHitsReply = Union[
+    CatalogHitsReplyOk,
+    CatalogHitsReplyErr,
+]
+"""Result union of `searchCatalog` / `expandCandidates` / `listDeals`."""
+
+
+class CatalogDetail(TypedDict):
+    """Success payload of `ContentSource.catalogDetail`.
+
+    Attributes:
+        found: False when the product is unknown to the storefront (`hit` is empty).
+        hit: Full catalog record when `found`.
+    """
+
+    found: bool
+    hit: CatalogHit
+
+
+class CatalogDetailReplyOk(TypedDict):
+    """``CatalogDetailReply`` member ``ok``.
+
+    Success: detail record or not-found marker.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: detail record or not-found marker.
+    """
+
+    kind: Literal["ok"]
+    value: CatalogDetail
+
+
+class CatalogDetailReplyErr(TypedDict):
+    """``CatalogDetailReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+CatalogDetailReply = Union[
+    CatalogDetailReplyOk,
+    CatalogDetailReplyErr,
+]
+"""Result union of `ContentSource.catalogDetail`."""
+
+
+class PurchaseHint(TypedDict):
+    """Purchase hint for SPA / CLI purchase deep-links.
+
+    Attributes:
+        productId: Storefront product id.
+        title: Title when resolved. Omitted when absent (wire zero value).
+        url: Purchase or product-page URL. Omitted when absent (wire zero value).
+        priceCents: Current price in minor units. Omitted when absent (wire zero value).
+        currency: ISO currency code for price fields. Omitted when absent (wire zero
+            value).
+        priceLabel: Pre-formatted current price. Omitted when absent (wire zero value).
+        listPriceCents: List / MSRP price in minor units. Omitted when absent (wire zero
+            value).
+        listPriceLabel: Pre-formatted list price. Omitted when absent (wire zero value).
+        memberPriceCents: Member / Plus price in minor units. Omitted when absent (wire
+            zero value).
+        memberPriceLabel: Pre-formatted member price. Omitted when absent (wire zero
+            value).
+    """
+
+    productId: str
+    title: NotRequired[str]
+    url: NotRequired[str]
+    priceCents: NotRequired[int]
+    currency: NotRequired[str]
+    priceLabel: NotRequired[str]
+    listPriceCents: NotRequired[int]
+    listPriceLabel: NotRequired[str]
+    memberPriceCents: NotRequired[int]
+    memberPriceLabel: NotRequired[str]
+
+
+class PurchaseHintResult(TypedDict):
+    """Success payload of `ContentSource.purchaseHint`.
+
+    Attributes:
+        found: False when the guest could not resolve the title (`hint` is empty).
+        hint: Purchase hint when `found`.
+    """
+
+    found: bool
+    hint: PurchaseHint
+
+
+class PurchaseHintReplyOk(TypedDict):
+    """``PurchaseHintReply`` member ``ok``.
+
+    Success: hint or not-found marker.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: hint or not-found marker.
+    """
+
+    kind: Literal["ok"]
+    value: PurchaseHintResult
+
+
+class PurchaseHintReplyErr(TypedDict):
+    """``PurchaseHintReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+PurchaseHintReply = Union[
+    PurchaseHintReplyOk,
+    PurchaseHintReplyErr,
+]
+"""Result union of `ContentSource.purchaseHint`."""
+
+
 class ScanLibraryParams(TypedDict):
-    """Params JSON for `Integration.scanLibrary` (remote library sync).
+    """Params of `Integration.scanLibrary` (remote library sync).
 
     Attributes:
         force: When true, force a full rescan even if the guest would otherwise
@@ -2428,7 +3113,7 @@ class ScanLibraryParams(TypedDict):
 
 
 class AuthenticateUserParams(TypedDict):
-    """Params JSON for `Integration.authenticateUser`.
+    """Params of `Integration.authenticateUser`.
 
     Attributes:
         username: Integration username / login id.
@@ -2437,6 +3122,188 @@ class AuthenticateUserParams(TypedDict):
 
     username: str
     password: str
+
+
+class ExternalUser(TypedDict):
+    """One external user observed by an integration. The host may mint claim
+    tickets without exposing portal details to the guest.
+
+    Attributes:
+        provider: Integration provider id (often the plugin id).
+        externalUserId: Provider-scoped user id.
+        displayName: Display name for UI. Omitted when absent (wire zero value).
+        accessToken: Ephemeral remote token (e.g. ABS JWT). Guest-to-host only; never
+            persisted. Omitted when absent (wire zero value).
+    """
+
+    provider: str
+    externalUserId: str
+    displayName: NotRequired[str]
+    accessToken: NotRequired[str]
+
+
+class ExternalUserReplyOk(TypedDict):
+    """``ExternalUserReply`` member ``ok``.
+
+    Success: verified external user.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: verified external user.
+    """
+
+    kind: Literal["ok"]
+    value: ExternalUser
+
+
+class ExternalUserReplyErr(TypedDict):
+    """``ExternalUserReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+ExternalUserReply = Union[
+    ExternalUserReplyOk,
+    ExternalUserReplyErr,
+]
+"""Result union of `Integration.authenticateUser`."""
+
+
+class EventPollResult(TypedDict):
+    """Success payload of `Integration.pollEvents`: signals for the host to kick
+    off workflows.
+
+    Attributes:
+        users: Newly observed external users since the last poll.
+    """
+
+    users: list[ExternalUser]
+
+
+class EventPollReplyOk(TypedDict):
+    """``EventPollReply`` member ``ok``.
+
+    Success: observed users.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: observed users.
+    """
+
+    kind: Literal["ok"]
+    value: EventPollResult
+
+
+class EventPollReplyErr(TypedDict):
+    """``EventPollReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+EventPollReply = Union[
+    EventPollReplyOk,
+    EventPollReplyErr,
+]
+"""Result union of `Integration.pollEvents`."""
+
+
+class ListeningProgress(TypedDict):
+    """One listening-progress row. The host upserts into `listening_progress`
+    tagged with the plugin id; plugins never open the library DB.
+
+    Attributes:
+        externalUserId: Provider-scoped user id.
+        externalItemId: Provider-scoped item / library id.
+        identityId: Bookclerk identity row id when already linked. Omitted when absent
+            (wire zero value).
+        title: Title text when known. Omitted when absent (wire zero value).
+        authors: Authors string when known. Omitted when absent (wire zero value).
+        asin: Amazon ASIN when known. Omitted when absent (wire zero value).
+        isbn: ISBN when known. Omitted when absent (wire zero value).
+        progress: Fractional progress in `0.0..=1.0` when the provider reports it.
+            Omitted when absent (wire zero value).
+        currentTimeSeconds: Current playback position in seconds. Omitted when absent
+            (wire zero value).
+        durationSeconds: Total duration in seconds when known. Omitted when absent (wire
+            zero value).
+        isFinished: When true, the provider marks the item finished.
+        lastListenedAtUnixMs: Last listen timestamp as unix milliseconds (UTC). Omitted
+            when absent (wire zero value).
+    """
+
+    externalUserId: str
+    externalItemId: str
+    identityId: NotRequired[int]
+    title: NotRequired[str]
+    authors: NotRequired[str]
+    asin: NotRequired[str]
+    isbn: NotRequired[str]
+    progress: NotRequired[float]
+    currentTimeSeconds: NotRequired[float]
+    durationSeconds: NotRequired[float]
+    isFinished: bool
+    lastListenedAtUnixMs: NotRequired[int]
+
+
+class SyncListeningResult(TypedDict):
+    """Success payload of `Integration.syncListening`.
+
+    Attributes:
+        items: Progress snapshots to upsert.
+    """
+
+    items: list[ListeningProgress]
+
+
+class SyncListeningReplyOk(TypedDict):
+    """``SyncListeningReply`` member ``ok``.
+
+    Success: progress snapshots.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: progress snapshots.
+    """
+
+    kind: Literal["ok"]
+    value: SyncListeningResult
+
+
+class SyncListeningReplyErr(TypedDict):
+    """``SyncListeningReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+SyncListeningReply = Union[
+    SyncListeningReplyOk,
+    SyncListeningReplyErr,
+]
+"""Result union of `Integration.syncListening`."""
 
 
 class DbValueNull(TypedDict):
@@ -3586,22 +4453,22 @@ class BookclerkPlugin(Protocol):
         """
         ...
 
-    async def cli_describe(self) -> JsonReply:
-        """Declared CLI surface (`CliSchema` JSON).
+    async def cli_describe(self) -> CliSchemaReply:
+        """Declared CLI surface.
 
         Returns:
-            ``JsonReply``
+            ``CliSchemaReply``
         """
         ...
 
-    async def cli_invoke(self, params_json: str) -> JsonReply:
-        """Run one plugin CLI command (`CliInvokeParams` -> `CliInvokeResult` JSON).
+    async def cli_invoke(self, params: CliInvokeParams) -> CliInvokeReply:
+        """Run one plugin CLI command.
 
         Args:
-            params_json: `CliInvokeParams` JSON.
+            params: Command name and argument values.
 
         Returns:
-            ``JsonReply``
+            ``CliInvokeReply``
         """
         ...
 
@@ -3631,10 +4498,12 @@ class BookclerkPlugin(Protocol):
 
 
 __all__ = [
-    "JsonValue",
-    "JsonObject",
     "PluginErrorCode",
+    "PortalAuthMode",
     "CliArgKind",
+    "CatalogSort",
+    "CatalogField",
+    "Abridgement",
     "DbType",
     "DbStatementKind",
     "DbResultSelection",
@@ -3744,10 +4613,6 @@ __all__ = [
     "EventResultReplyOk",
     "EventResultReplyErr",
     "EventResultReply",
-    "JsonOk",
-    "JsonReplyOk",
-    "JsonReplyErr",
-    "JsonReply",
     "HealthOk",
     "HealthReplyOk",
     "HealthReplyErr",
@@ -3767,30 +4632,90 @@ __all__ = [
     "NamedDatabase",
     "ContentSource",
     "Integration",
-    "PluginMetadata",
     "Brand",
     "ConfigOption",
     "ConfigOptionValue",
     "CliSchema",
     "CliCommandSpec",
     "CliArgSpec",
+    "CliArg",
     "CliInvokeParams",
     "CliInvokeResult",
+    "CliSchemaReplyOk",
+    "CliSchemaReplyErr",
+    "CliSchemaReply",
+    "CliInvokeReplyOk",
+    "CliInvokeReplyErr",
+    "CliInvokeReply",
     "DatabaseAdapterConfig",
-    "HealthResult",
     "DiagnoseResult",
+    "DiagnoseReplyOk",
+    "DiagnoseReplyErr",
+    "DiagnoseReply",
+    "SourceAccount",
     "LoginParams",
-    "LoginStartParams",
+    "LoginResult",
+    "LoginStartResult",
     "LoginCompleteParams",
+    "LoginReplyOk",
+    "LoginReplyErr",
+    "LoginReply",
+    "LoginStartReplyOk",
+    "LoginStartReplyErr",
+    "LoginStartReply",
+    "AccountCredential",
     "ScanParams",
+    "ScanBook",
+    "ScanSummary",
+    "ScanReplyOk",
+    "ScanReplyErr",
+    "ScanReply",
+    "FetchOptions",
     "FetchTitleParams",
+    "PlainPart",
+    "ChapterMarker",
+    "PlainFetch",
+    "FetchTitleReplyOk",
+    "FetchTitleReplyErr",
+    "FetchTitleReply",
+    "SourceAccounts",
+    "SourceAccountsReplyOk",
+    "SourceAccountsReplyErr",
+    "SourceAccountsReply",
     "SearchCatalogParams",
     "ExpandCandidatesParams",
     "PurchaseHintParams",
     "ListDealsParams",
     "CatalogDetailParams",
+    "CatalogHit",
+    "CatalogHits",
+    "CatalogHitsReplyOk",
+    "CatalogHitsReplyErr",
+    "CatalogHitsReply",
+    "CatalogDetail",
+    "CatalogDetailReplyOk",
+    "CatalogDetailReplyErr",
+    "CatalogDetailReply",
+    "PurchaseHint",
+    "PurchaseHintResult",
+    "PurchaseHintReplyOk",
+    "PurchaseHintReplyErr",
+    "PurchaseHintReply",
     "ScanLibraryParams",
     "AuthenticateUserParams",
+    "ExternalUser",
+    "ExternalUserReplyOk",
+    "ExternalUserReplyErr",
+    "ExternalUserReply",
+    "EventPollResult",
+    "EventPollReplyOk",
+    "EventPollReplyErr",
+    "EventPollReply",
+    "ListeningProgress",
+    "SyncListeningResult",
+    "SyncListeningReplyOk",
+    "SyncListeningReplyErr",
+    "SyncListeningReply",
     "DbValueNull",
     "DbValueBoolean",
     "DbValueInt64",

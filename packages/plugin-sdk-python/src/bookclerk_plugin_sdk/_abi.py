@@ -56,10 +56,34 @@ code.
 Wire strings of ``PluginErrorCode`` in ordinal order (snake_case ``Text`` codes).
 """
 
-CLI_ARG_KINDS: tuple[str, ...] = ("string", "bool", "int", "path")
-"""Value kind for a `CliArgSpec` (wire lowercase: "string" / "bool" / ...).
+PORTAL_AUTH_MODES: tuple[str, ...] = ("unspecified", "password", "oauth")
+"""Portal Accounts connect mode for storefronts.
 
-Wire strings of ``CliArgKind`` in ordinal order (snake_case ``Text`` codes).
+Ordinal-ordered ``PortalAuthMode`` wire names (index = Cap'n Proto ordinal).
+"""
+
+CLI_ARG_KINDS: tuple[str, ...] = ("string", "bool", "int", "path")
+"""Value kind for a `CliArgSpec`.
+
+Ordinal-ordered ``CliArgKind`` wire names (index = Cap'n Proto ordinal).
+"""
+
+CATALOG_SORTS: tuple[str, ...] = ("relevance", "popularity", "rating", "title", "author")
+"""Catalog search ordering.
+
+Ordinal-ordered ``CatalogSort`` wire names (index = Cap'n Proto ordinal).
+"""
+
+CATALOG_FIELDS: tuple[str, ...] = ("any", "author", "narrator", "series", "genre")
+"""Catalog search facet restricting which field the query matches.
+
+Ordinal-ordered ``CatalogField`` wire names (index = Cap'n Proto ordinal).
+"""
+
+ABRIDGEMENTS: tuple[str, ...] = ("unknown", "unabridged", "abridged")
+"""Whether an edition is abridged.
+
+Ordinal-ordered ``Abridgement`` wire names (index = Cap'n Proto ordinal).
 """
 
 DB_TYPES: tuple[str, ...] = ("unspecified", "bool", "int64", "float64", "text", "bytes")
@@ -115,7 +139,11 @@ __all__ = [
     "FEATURE_STREAMS",
     "FEATURE_STORAGE_COPY",
     "PLUGIN_ERROR_CODES",
+    "PORTAL_AUTH_MODES",
     "CLI_ARG_KINDS",
+    "CATALOG_SORTS",
+    "CATALOG_FIELDS",
+    "ABRIDGEMENTS",
     "DB_TYPES",
     "DB_STATEMENT_KINDS",
     "DB_RESULT_SELECTIONS",
