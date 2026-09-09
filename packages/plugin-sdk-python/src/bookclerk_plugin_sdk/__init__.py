@@ -15,9 +15,8 @@ constants in :mod:`bookclerk_plugin_sdk._abi` are generated from
 truth.
 """
 
-from ._abi import PRODUCT_API_VERSION
+from ._abi import PLUGIN_ERROR_CODES, PRODUCT_API_VERSION
 from .abi import (
-    PLUGIN_ERROR_CODES,
     Brand,
     CliInvokeParams,
     CliInvokeResult,
