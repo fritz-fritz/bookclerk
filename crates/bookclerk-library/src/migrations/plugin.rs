@@ -531,7 +531,8 @@ pub async fn apply_plugin_migrations(
 ) -> Result<PluginMigrationHistory> {
     loop {
         let history = load_plugin_migration_history(db).await?;
-        let Some((ordinal, migration)) = next_pending_plugin_migration(&history, registered)? else {
+        let Some((ordinal, migration)) = next_pending_plugin_migration(&history, registered)?
+        else {
             return Ok(history);
         };
         let catalog = plugin_binding_type_env(registered, ordinal);
