@@ -2129,7 +2129,7 @@ mod tests {
         use bookclerk_plugin_abi::PluginErrorCode;
         let _lock = SESSION_LOCK.lock().await;
         let db = postgres_test_pool().await;
-        bookclerk_library::apply_host_schema(&db, bookclerk_library::HostSchemaKind::RowMarker)
+        bookclerk_library::apply_host_schema(&db)
             .await
             .expect("host postgres schema");
         set_connection(db).await;

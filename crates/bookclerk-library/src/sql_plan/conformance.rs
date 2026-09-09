@@ -558,7 +558,7 @@ async fn postgres_migrated_db() -> sea_orm::DatabaseConnection {
     let db = sea_orm::Database::connect(&db_url)
         .await
         .expect("connect to disposable postgres database");
-    crate::apply_host_schema(&db, crate::HostSchemaKind::RowMarker)
+    crate::apply_host_schema(&db)
         .await
         .expect("host-applied postgres schema");
     db
@@ -809,9 +809,7 @@ async fn host_applies_schema_to_unmigrated_sqlite() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .expect("unmigrated sqlite");
-    crate::apply_host_schema(&db, crate::HostSchemaKind::RowMarker)
-        .await
-        .expect("host schema");
+    crate::apply_host_schema(&db).await.expect("host schema");
     let rows = sea_orm::ConnectionTrait::query_all_raw(
         &db,
         sea_orm::Statement::from_string(

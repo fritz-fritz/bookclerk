@@ -201,7 +201,7 @@ impl ExternalDatabase {
         if !caps.meets_host_minimums() {
             return Err(DbErr::Custom(caps.capability_failure_reason()));
         }
-        let _kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps)
+        bookclerk_library::require_schema_migrations(&caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         // Fail closed: transport/internal/deadline failures must not be
         // silently replaced with plugin-id-derived metadata. Only a typed
@@ -247,7 +247,7 @@ impl ExternalDatabase {
         db: &DatabaseConnection,
         caps: &DbCapabilities,
     ) -> Result<(), DbErr> {
-        let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(caps)
+        bookclerk_library::require_schema_migrations(caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         let session = self.session.clone();
         let caps = caps.clone();
@@ -265,7 +265,7 @@ impl ExternalDatabase {
                 adapter: Some(self.library_backup_ops()),
             }),
         };
-        bookclerk_library::apply_host_schema_with_batch_opts(db, kind, opts, move |stmts| {
+        bookclerk_library::apply_host_schema_with_batch_opts(db, opts, move |stmts| {
             let session = session.clone();
             let caps = caps.clone();
             async move { exec_host_ddl_batch(&session, &caps, stmts).await }
@@ -286,11 +286,11 @@ impl ExternalDatabase {
         target: i64,
         opts: bookclerk_library::SchemaApplyOptions,
     ) -> Result<bookclerk_library::SchemaWalk, DbErr> {
-        let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(caps)
+        bookclerk_library::require_schema_migrations(caps)
             .map_err(|err| DbErr::Custom(err.to_string()))?;
         let session = self.session.clone();
         let caps = caps.clone();
-        bookclerk_library::migrate_host_schema_to_with_batch(db, kind, target, opts, move |stmts| {
+        bookclerk_library::migrate_host_schema_to_with_batch(db, target, opts, move |stmts| {
             let session = session.clone();
             let caps = caps.clone();
             async move { exec_host_ddl_batch(&session, &caps, stmts).await }
@@ -2758,19 +2758,17 @@ mod tests {
         assert_eq!(reported.engine, "foundationdb-sql");
         let caps = DbCapabilities::advertised_sqlite();
         assert!(caps.meets_host_minimums());
-        let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps).unwrap();
-        assert_eq!(kind, bookclerk_library::HostSchemaKind::RowMarker);
+        bookclerk_library::require_schema_migrations(&caps).unwrap();
         assert_eq!(canonical_seaorm_backend(), DbBackend::Sqlite);
     }
 
     #[test]
-    fn row_migrations_kind_is_independent_of_sqlite_bootstrap() {
+    fn row_migrations_requirement_is_independent_of_sqlite_bootstrap() {
         let caps = DbCapabilities::advertised_sqlite();
-        let kind = bookclerk_library::HostSchemaKind::from_db_capabilities(&caps).unwrap();
-        assert_eq!(kind, bookclerk_library::HostSchemaKind::RowMarker);
+        bookclerk_library::require_schema_migrations(&caps).unwrap();
         let mut none = caps;
         none.schema_migrations = false;
-        assert!(bookclerk_library::HostSchemaKind::from_db_capabilities(&none).is_err());
+        assert!(bookclerk_library::require_schema_migrations(&none).is_err());
         assert_eq!(canonical_seaorm_backend(), DbBackend::Sqlite);
     }
 

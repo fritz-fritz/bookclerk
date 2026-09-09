@@ -124,8 +124,8 @@ pub use plugin::{
 
 /// One host-owned schema version in the canonical Bookclerk migration plan.
 ///
-/// Marker capabilities ([`crate::HostSchemaKind`]) choose only how each version
-/// is recorded (`bookclerk_schema_migrations` row). The live connection backend lowers
+/// Each version is recorded as a `bookclerk_schema_migrations` row (adapters
+/// must advertise `schemaMigrations`). The live connection backend lowers
 /// each [`MigrationOp`] at the adapter boundary (Postgres) or applies it
 /// verbatim (SQLite / D1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

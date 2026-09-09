@@ -70,7 +70,7 @@ pub use host_schema::{
     apply_host_schema, apply_host_schema_with_batch, apply_host_schema_with_batch_opts,
     apply_host_schema_with_options, current_schema_state, current_schema_state_in,
     current_schema_version, ensure_restore_target_is_replaceable, migrate_host_schema_to,
-    migrate_host_schema_to_with_batch, HostSchemaKind, SchemaApplyOptions, SchemaBatch,
+    migrate_host_schema_to_with_batch, require_schema_migrations, SchemaApplyOptions, SchemaBatch,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use in_process_atomic::InProcessSqliteAtomic;
