@@ -532,7 +532,7 @@ pub(super) const UNRELEASED_OPS: &[MigrationOp] = &[
         r"CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at)",
     ),
     MigrationOp::Schema(
-        r"CREATE TABLE IF NOT EXISTS db_atomic_receipts (
+        r"CREATE TABLE IF NOT EXISTS bookclerk_receipts (
         operation_id TEXT PRIMARY KEY NOT NULL,
         operation_kind TEXT NOT NULL,
         request_hash TEXT NOT NULL,
@@ -544,7 +544,7 @@ pub(super) const UNRELEASED_OPS: &[MigrationOp] = &[
     )",
     ),
     MigrationOp::Schema(
-        r"CREATE INDEX IF NOT EXISTS idx_db_atomic_receipts_expires ON db_atomic_receipts(expires_at)",
+        r"CREATE INDEX IF NOT EXISTS idx_bookclerk_receipts_expires ON bookclerk_receipts(expires_at)",
     ),
     MigrationOp::Schema(
         r"CREATE TABLE IF NOT EXISTS jobs (
@@ -715,7 +715,7 @@ pub(super) const UNRELEASED_OPS: &[MigrationOp] = &[
     ) VALUES (1, 0, 0, 0, 0, 0, 0, 0)",
     ),
     MigrationOp::Schema(
-        r"CREATE TABLE IF NOT EXISTS db_serialization_slots (
+        r"CREATE TABLE IF NOT EXISTS bookclerk_slots (
         slot_key TEXT PRIMARY KEY NOT NULL,
         bump INTEGER NOT NULL DEFAULT 0
     )",

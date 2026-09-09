@@ -348,18 +348,16 @@ mod typed_value_matrix {
             request_hash: String::new(),
             statements: vec![
                 TypedDbStatement {
-                    sql:
-                        "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('typed-rb', 0)"
-                            .into(),
+                    sql: "INSERT INTO bookclerk_slots (slot_key, bump) VALUES ('typed-rb', 0)"
+                        .into(),
                     parameters: vec![],
                     kind: DbPlanStatementKind::Execute,
                     max_rows: 0,
                     result_selection: DbResultSelection::AffectedRows,
                 },
                 TypedDbStatement {
-                    sql:
-                        "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('typed-rb', 1)"
-                            .into(),
+                    sql: "INSERT INTO bookclerk_slots (slot_key, bump) VALUES ('typed-rb', 1)"
+                        .into(),
                     parameters: vec![],
                     kind: DbPlanStatementKind::Execute,
                     max_rows: 0,
@@ -389,8 +387,7 @@ mod typed_value_matrix {
             operation_id: "typed-rb-check".into(),
             request_hash: String::new(),
             statements: vec![TypedDbStatement {
-                sql: "SELECT slot_key FROM db_serialization_slots WHERE slot_key = 'typed-rb'"
-                    .into(),
+                sql: "SELECT slot_key FROM bookclerk_slots WHERE slot_key = 'typed-rb'".into(),
                 parameters: vec![],
                 kind: DbPlanStatementKind::Select,
                 max_rows: 0,

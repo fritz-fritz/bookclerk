@@ -137,8 +137,11 @@ Workers-style **named database bindings**: one isolated database per binding,
 provisioned by the active adapter (SQLite file / PostgreSQL **database** /
 Cloudflare D1 database by name) and recorded in the host
 `plugin_databases` registry. Bindings are consented per name
-(`database:<NAME>` grant entries), carry their own `db_atomic_receipts` for
-retry-token replay, and own schema through startup migration registration
+(`database:<NAME>` grant entries), carry their own `bookclerk_receipts` for
+retry-token replay (host bookkeeping inside a binding is always
+`bookclerk_`-prefixed and that prefix is the only reserved name space; a
+plugin may create its own `schema_migrations`), and own schema through
+startup migration registration
 (full DML on ordinary execute; durable `CREATE`/`DROP` only through the
 host-controlled `databaseMigrations` sequence). Jobs never receive
 the host library as guest SQL. Operator lifecycle:
@@ -398,10 +401,10 @@ Base statements use `CREATE TABLE/INDEX IF NOT EXISTS`. Tables include
 `title_requests`, `title_request_sources`, `embeddings`, `user_preferences`,
 `encrypted_secrets`, `jobs`, `job_temp_paths`, `job_queue_control`,
 `domain_events`, `event_deliveries`, `event_subscriber_nodes`,
-`event_outbox_stats`, `db_serialization_slots`, `plugin_databases`, and
-`schema_migrations`. The `jobs` table is the durable daemon queue (see
+`event_outbox_stats`, `bookclerk_slots`, `plugin_databases`, and
+`bookclerk_schema_migrations`. The `jobs` table is the durable daemon queue (see
 [jobs.md](jobs.md)). Domain events use a durable outbox with fenced
-deliveries, per-node catalogs, and portable `db_serialization_slots` (no
+deliveries, per-node catalogs, and portable `bookclerk_slots` (no
 PostgreSQL advisory locks). Isolated plugin binding databases are
 registered in `plugin_databases`; plugins own their own DDL inside those
 units. Wake registration (`wake_event_type` / `wake_filter_json` /

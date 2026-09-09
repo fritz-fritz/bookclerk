@@ -60,8 +60,8 @@ FORBIDDEN_TABLES = (
     "portal_sessions",
     "operator_sessions",
     "encrypted_secrets",
-    "db_atomic_receipts",
-    "db_serialization_slots",
+    "bookclerk_receipts",
+    "bookclerk_slots",
 )
 
 TABLE_RE = re.compile(

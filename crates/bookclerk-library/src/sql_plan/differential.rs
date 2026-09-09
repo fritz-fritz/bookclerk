@@ -185,11 +185,11 @@ mod tests {
             ),
             ("SELECT ? AS v".into(), vec![DbValue::Text("z".into())]),
             (
-                "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('dup-diff', 0)".into(),
+                "INSERT INTO bookclerk_slots (slot_key, bump) VALUES ('dup-diff', 0)".into(),
                 Vec::new(),
             ),
             (
-                "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('dup-diff', 1)".into(),
+                "INSERT INTO bookclerk_slots (slot_key, bump) VALUES ('dup-diff', 1)".into(),
                 Vec::new(),
             ),
             (
