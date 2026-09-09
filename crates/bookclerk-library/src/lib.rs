@@ -19,6 +19,7 @@ pub mod email;
 pub mod entities;
 mod error;
 mod host_schema;
+#[cfg(any(test, feature = "test-support"))]
 mod in_process_atomic;
 pub mod master_key;
 pub mod migrations;
@@ -71,6 +72,7 @@ pub use host_schema::{
     current_schema_version, ensure_restore_target_is_replaceable, migrate_host_schema_to,
     migrate_host_schema_to_with_batch, HostSchemaKind, SchemaApplyOptions, SchemaBatch,
 };
+#[cfg(any(test, feature = "test-support"))]
 pub use in_process_atomic::InProcessSqliteAtomic;
 pub use master_key::{
     configure_master_key, configure_master_key_with, inspect_master_key, master_key_path,
