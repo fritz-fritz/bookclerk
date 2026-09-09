@@ -50,7 +50,6 @@ FORBIDDEN_TABLES = (
     "users",
     "jobs",
     "job_temp_paths",
-    "job_queue_control",
     "books",
     "accounts",
     "claim_tickets",

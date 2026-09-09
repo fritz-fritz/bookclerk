@@ -201,8 +201,9 @@ before `BEGIN`/HTTP or between statements is `cancelled` /
 Domain/store code must not branch on a concrete database type for
 correctness. Serialization uses schema-based slot rows
 (`bookclerk_slots`): `INSERT` the key, then `UPDATE bump = bump + 1`
-to take a write lock. PostgreSQL advisory locks and SQLite-only
-`job_queue_control` dual-paths are not used for new atomic work.
+to take a write lock. There are no PostgreSQL advisory locks or
+engine-specific singleton-row dual paths; the job queue takes the same
+slot lock as every other atomic unit.
 
 JSON filter / catalog matching for event claim is evaluated in the host.
 The atomic mutation is a compare-and-set on a concrete delivery id.

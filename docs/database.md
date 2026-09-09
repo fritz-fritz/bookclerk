@@ -399,7 +399,7 @@ Base statements use `CREATE TABLE/INDEX IF NOT EXISTS`. Tables include
 `portal_identities`, `claim_tickets`, `portal_sessions`, `operator_sessions`,
 `account_links`, `works`, `work_editions`, `listening_progress`,
 `title_requests`, `title_request_sources`, `embeddings`, `user_preferences`,
-`encrypted_secrets`, `jobs`, `job_temp_paths`, `job_queue_control`,
+`encrypted_secrets`, `jobs`, `job_temp_paths`,
 `domain_events`, `event_deliveries`, `event_subscriber_nodes`,
 `event_outbox_stats`, `bookclerk_slots`, `plugin_databases`, and
 `bookclerk_schema_migrations`. The `jobs` table is the durable daemon queue (see
