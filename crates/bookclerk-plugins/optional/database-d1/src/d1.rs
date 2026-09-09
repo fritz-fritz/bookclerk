@@ -1311,7 +1311,7 @@ mod tests {
             .iter()
             .map(|stmt| {
                 let sql = stmt.get("sql").and_then(JsonValue::as_str).unwrap_or("");
-                let is_receipt_select = sql.contains("FROM db_atomic_receipts")
+                let is_receipt_select = sql.contains("FROM bookclerk_receipts")
                     && sql.trim_start().starts_with("SELECT");
                 if is_receipt_select {
                     json!({
@@ -1343,7 +1343,7 @@ mod tests {
     fn receipt_echo_from_batch(batch: &[JsonValue]) -> (String, String) {
         for stmt in batch {
             let sql = stmt.get("sql").and_then(JsonValue::as_str).unwrap_or("");
-            if sql.contains("INTO db_atomic_receipts") {
+            if sql.contains("INTO bookclerk_receipts") {
                 let params = stmt.get("params").and_then(JsonValue::as_array);
                 if let Some(params) = params {
                     let op = params
@@ -1447,7 +1447,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(sql.contains("claim_tickets"), "{sql}");
-        assert!(sql.contains("db_atomic_receipts"), "{sql}");
+        assert!(sql.contains("bookclerk_receipts"), "{sql}");
     }
 
     #[tokio::test]
@@ -1508,7 +1508,7 @@ mod tests {
             .join("\n");
         assert!(sql.contains("encrypted_secrets"), "{sql}");
         assert!(sql.contains("totp_enabled"), "{sql}");
-        assert!(sql.contains("db_atomic_receipts"), "{sql}");
+        assert!(sql.contains("bookclerk_receipts"), "{sql}");
         let body = serde_json::to_string(atomic[0]).unwrap();
         assert!(
             !body.contains("$sea_null"),
@@ -1559,7 +1559,7 @@ mod tests {
             .join("\n");
         assert!(sql.contains("DELETE FROM oidc_rp_states"), "{sql}");
         assert!(sql.contains("consume_key"), "{sql}");
-        assert!(sql.contains("db_atomic_receipts"), "{sql}");
+        assert!(sql.contains("bookclerk_receipts"), "{sql}");
     }
 
     #[tokio::test]
@@ -2112,7 +2112,7 @@ mod tests {
                     .and_then(JsonValue::as_str)
                     .unwrap_or("")
                     .to_ascii_lowercase();
-                sql.contains("db_atomic_receipts")
+                sql.contains("bookclerk_receipts")
                     && sql.contains("select ")
                     && !sql.contains("insert ")
             })
@@ -2935,15 +2935,14 @@ mod tests {
             .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
                 proxy: proxy.clone(),
             }));
-        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"])
+        let policy = GuestSqlPolicy::allow_tables(["bookclerk_slots", "bookclerk_receipts"])
             .with_sql_types(bookclerk_library::migrations::host_sql_type_env());
         let guest_hash = String::new();
         let req = ExecuteRequest {
             operation_id: "d1-guest-replay".into(),
             request_hash: guest_hash,
             statements: vec![TypedDbStatement {
-                sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('d1-guest', 1)"
-                    .into(),
+                sql: "INSERT INTO bookclerk_slots (slot_key, bump) VALUES ('d1-guest', 1)".into(),
                 parameters: vec![],
                 kind: DbPlanStatementKind::Execute,
                 max_rows: 0,
@@ -3001,15 +3000,14 @@ mod tests {
             .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
                 proxy: proxy.clone(),
             }));
-        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"])
+        let policy = GuestSqlPolicy::allow_tables(["bookclerk_slots", "bookclerk_receipts"])
             .with_sql_types(bookclerk_library::migrations::host_sql_type_env());
         drop_reply.store(true, std::sync::atomic::Ordering::SeqCst);
         let req = ExecuteRequest {
             operation_id: "d1-guest-lost-reply".into(),
             request_hash: String::new(),
             statements: vec![TypedDbStatement {
-                sql: "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('lost-reply', 1)"
-                    .into(),
+                sql: "INSERT INTO bookclerk_slots (slot_key, bump) VALUES ('lost-reply', 1)".into(),
                 parameters: vec![],
                 kind: DbPlanStatementKind::Execute,
                 max_rows: 0,
@@ -3026,7 +3024,7 @@ mod tests {
             .lock()
             .expect("sqlite")
             .query_row(
-                "SELECT COUNT(*) FROM db_serialization_slots WHERE slot_key = 'lost-reply'",
+                "SELECT COUNT(*) FROM bookclerk_slots WHERE slot_key = 'lost-reply'",
                 [],
                 |row| row.get(0),
             )
@@ -3069,16 +3067,15 @@ mod tests {
             .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
                 proxy: proxy.clone(),
             }));
-        let policy = GuestSqlPolicy::allow_tables(["db_serialization_slots", "db_atomic_receipts"])
+        let policy = GuestSqlPolicy::allow_tables(["bookclerk_slots", "bookclerk_receipts"])
             .with_sql_types(bookclerk_library::migrations::host_sql_type_env());
         fail_pragma.store(true, std::sync::atomic::Ordering::SeqCst);
         let req = ExecuteRequest {
             operation_id: "d1-guest-pragma-fail".into(),
             request_hash: String::new(),
             statements: vec![TypedDbStatement {
-                sql:
-                    "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('pragma-fail', 1)"
-                        .into(),
+                sql: "INSERT INTO bookclerk_slots (slot_key, bump) VALUES ('pragma-fail', 1)"
+                    .into(),
                 parameters: vec![],
                 kind: DbPlanStatementKind::Execute,
                 max_rows: 0,
@@ -3095,7 +3092,7 @@ mod tests {
             .lock()
             .expect("sqlite")
             .query_row(
-                "SELECT COUNT(*) FROM db_serialization_slots WHERE slot_key = 'pragma-fail'",
+                "SELECT COUNT(*) FROM bookclerk_slots WHERE slot_key = 'pragma-fail'",
                 [],
                 |row| row.get(0),
             )
@@ -3115,7 +3112,7 @@ mod tests {
             .lock()
             .expect("sqlite")
             .query_row(
-                "SELECT COUNT(*) FROM db_serialization_slots WHERE slot_key = 'pragma-fail'",
+                "SELECT COUNT(*) FROM bookclerk_slots WHERE slot_key = 'pragma-fail'",
                 [],
                 |row| row.get(0),
             )
@@ -4557,7 +4554,7 @@ mod tests {
             .with_typed_exec(std::sync::Arc::new(ProxyTypedExec {
                 proxy: proxy.clone(),
             }));
-        let policy = GuestSqlPolicy::allow_tables(["claims", "db_atomic_receipts"]);
+        let policy = GuestSqlPolicy::allow_tables(["claims", "bookclerk_receipts"]);
         let before = server.received_requests().await.unwrap().len();
         let req = ExecuteRequest {
             operation_id: "claimed-bound".into(),

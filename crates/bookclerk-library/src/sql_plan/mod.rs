@@ -238,7 +238,7 @@ pub fn authorize_typed_request(
 /// for callers that execute on something other than the library connection —
 /// e.g. an isolated plugin database binding session. `exec` receives the
 /// receipt-wrapped envelope and must run it atomically on the target
-/// database (which needs its own `db_atomic_receipts` table — see
+/// database (which needs its own `bookclerk_receipts` table — see
 /// [`crate::migrations::binding_bootstrap_ops`]).
 ///
 /// # Errors

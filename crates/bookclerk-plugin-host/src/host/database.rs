@@ -497,7 +497,7 @@ fn capped_binding_deadline(guest_unix_ms: u64, host_unix_ms: u64) -> u64 {
 ///
 /// The adapter holds an isolated session (own file / database / D1 database);
 /// guest SQL is authorized with [`bookclerk_library::GuestSqlPolicy::binding_owned`]
-/// and receipt-wrapped against the binding's own `db_atomic_receipts` table.
+/// and receipt-wrapped against the binding's own `bookclerk_receipts` table.
 /// Execute uses the host-private envelope path so receipts finalize, and
 /// forwards the job cancel flag plus a capped host lease deadline.
 struct BindingGuestDatabase {
@@ -867,7 +867,7 @@ fn binding_sql_request(operation_id: String, sqls: Vec<String>) -> ExecuteReques
     }
 }
 
-/// Reads binding `schema_migrations` rows into [`SchemaState`].
+/// Reads binding `bookclerk_schema_migrations` rows into [`SchemaState`].
 fn binding_schema_state_from_reply(reply: &ExecuteReply) -> PluginResult<SchemaState> {
     let Some(stmt) = reply.statements.first() else {
         return Ok(SchemaState::Uninitialized);
@@ -883,7 +883,7 @@ fn binding_schema_state_from_reply(reply: &ExecuteReply) -> PluginResult<SchemaS
             Some(DbValue::Text(s)) => s.parse::<i64>().unwrap_or(0),
             _ => {
                 return Err(PluginError::message(
-                    "binding schema_migrations row is missing version",
+                    "binding bookclerk_schema_migrations row is missing version",
                 ));
             }
         };
@@ -899,7 +899,7 @@ fn binding_schema_state_from_reply(reply: &ExecuteReply) -> PluginResult<SchemaS
             "unreleased" => {
                 if unreleased.is_some() {
                     return Err(PluginError::message(
-                        "binding schema_migrations has multiple unreleased rows",
+                        "binding bookclerk_schema_migrations has multiple unreleased rows",
                     ));
                 }
                 unreleased = Some((version, checksum));
@@ -912,7 +912,7 @@ fn binding_schema_state_from_reply(reply: &ExecuteReply) -> PluginResult<SchemaS
             }
             other => {
                 return Err(PluginError::message(format!(
-                    "unrecognized binding schema_migrations.state `{other}`"
+                    "unrecognized binding bookclerk_schema_migrations.state `{other}`"
                 )));
             }
         }
@@ -1209,7 +1209,7 @@ impl ExternalDatabase {
             deadline_unix_ms: 0,
             statements: vec![TypedDbStatement {
                 sql: format!(
-                    "SELECT version, state, checksum FROM schema_migrations \
+                    "SELECT version, state, checksum FROM bookclerk_schema_migrations \
                      WHERE namespace = {}",
                     sql_string_literal(BOOKCLERK_SCHEMA_NAMESPACE)
                 ),

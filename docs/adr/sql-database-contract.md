@@ -177,7 +177,7 @@ unless the host-IR `maxRows` is `1`, the SQL string is a single statement
 (no top-level `;`), and any `VALUES` list is exactly one tuple. Overflow
 or an oversized HTTP body after a committed batch is `unavailable` (replay
 the same `operationId`); only a definitive non-retryable 4xx is permanent.
-Receipt rows live in host-authored SQL against `db_atomic_receipts`.
+Receipt rows live in host-authored SQL against `bookclerk_receipts`.
 Guests must not parse Bookclerk operation names or interpret receipts.
 `rowsAffected` is uniform by kind: `select` is `0`; `returning` is the
 number of returned rows; `execute` is the engine change count.
@@ -200,7 +200,7 @@ before `BEGIN`/HTTP or between statements is `cancelled` /
 
 Domain/store code must not branch on a concrete database type for
 correctness. Serialization uses schema-based slot rows
-(`db_serialization_slots`): `INSERT` the key, then `UPDATE bump = bump + 1`
+(`bookclerk_slots`): `INSERT` the key, then `UPDATE bump = bump + 1`
 to take a write lock. PostgreSQL advisory locks and SQLite-only
 `job_queue_control` dual-paths are not used for new atomic work.
 
@@ -217,7 +217,7 @@ limits is not loaded.
 ## Consequences
 
 - First-party database plugins connect, advertise caps, and call the shared
-  adapter SDK. The host selects and applies `schema_migrations` after
+  adapter SDK. The host selects and applies `bookclerk_schema_migrations` after
   capability negotiation (generic execute / one atomic batch; D1 schema
   apply is still one host-compiled HTTP batch).
 - An architecture lint forbids plugin and `bookclerk-db-guest` production

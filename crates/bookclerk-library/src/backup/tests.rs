@@ -645,7 +645,8 @@ fn schema_state_unreleased_includes_matching_pack() {
     .unwrap();
     assert!(sql.contains("extra"), "{sql}");
     assert!(
-        sql.to_ascii_lowercase().contains("schema_migrations"),
+        sql.to_ascii_lowercase()
+            .contains("bookclerk_schema_migrations"),
         "{sql}"
     );
 }
@@ -1099,13 +1100,13 @@ async fn restore_fails_closed_when_target_frozen_history_is_newer() {
         .unwrap();
     db.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
-        "DELETE FROM schema_migrations",
+        "DELETE FROM bookclerk_schema_migrations",
     ))
     .await
     .unwrap();
     db.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
-        "INSERT INTO schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
+        "INSERT INTO bookclerk_schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
          VALUES ('bookclerk', 1, 'frozen', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '0', 't')",
     ))
     .await
@@ -1162,7 +1163,7 @@ async fn backup_fails_closed_when_frozen_checksum_is_tampered() {
     }
     db.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
-        "UPDATE schema_migrations SET checksum = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef' \
+        "UPDATE bookclerk_schema_migrations SET checksum = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef' \
          WHERE state = 'frozen'",
     ))
     .await
@@ -1693,7 +1694,7 @@ async fn capture_fails_closed_when_schema_state_changes_inside_txn() {
         .unwrap();
     db.execute_raw(Statement::from_string(
         DbBackend::Sqlite,
-        "UPDATE schema_migrations SET checksum = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+        "UPDATE bookclerk_schema_migrations SET checksum = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
          WHERE state = 'unreleased'",
     ))
     .await

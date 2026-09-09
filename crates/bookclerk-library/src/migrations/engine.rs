@@ -1,9 +1,9 @@
 //! Shared apply engine for namespaced host-owned [`super::MigrationPlan`]s.
 //!
 //! Host library frozen steps and Bookclerk binding bootstrap persist
-//! [`crate::SchemaState`] in `schema_migrations` keyed by namespace.
+//! [`crate::SchemaState`] in `bookclerk_schema_migrations` keyed by namespace.
 //! Plugin-owned binding evolution uses [`super::plugin`] (opaque IDs and
-//! `plugin_migrations`), not this numeric engine.
+//! `bookclerk_plugin_migrations`), not this numeric engine.
 
 use std::time::Duration;
 
@@ -365,10 +365,10 @@ fn slot_lock_sql(namespace: &str) -> Vec<String> {
     let key = sql_string_literal(&schema_slot_key(namespace));
     vec![
         format!(
-            "INSERT OR IGNORE INTO db_serialization_slots (slot_key, bump) \
+            "INSERT OR IGNORE INTO bookclerk_slots (slot_key, bump) \
              VALUES ({key}, 0)"
         ),
-        format!("UPDATE db_serialization_slots SET bump = bump + 1 WHERE slot_key = {key}"),
+        format!("UPDATE bookclerk_slots SET bump = bump + 1 WHERE slot_key = {key}"),
     ]
 }
 
@@ -386,13 +386,13 @@ async fn lock_schema_slot(db: &DatabaseConnection, namespace: &str) -> Result<()
             Ok(()) => return Ok(()),
             Err(err) => {
                 let msg = err.to_string().to_ascii_lowercase();
-                if msg.contains("db_serialization_slots")
+                if msg.contains("bookclerk_slots")
                     && (msg.contains("no such table")
                         || msg.contains("does not exist")
                         || msg.contains("no such relation"))
                 {
                     return Err(LibraryError::Schema(format!(
-                        "schema apply for namespace `{namespace}` requires db_serialization_slots \
+                        "schema apply for namespace `{namespace}` requires bookclerk_slots \
                          (apply binding bootstrap first): {err}"
                     )));
                 }
@@ -831,7 +831,7 @@ mod tests {
             sea_orm::Statement::from_string(
                 sea_orm::DbBackend::Sqlite,
                 format!(
-                    "INSERT INTO schema_migrations \
+                    "INSERT INTO bookclerk_schema_migrations \
                      (namespace, version, state, checksum, app_version, applied_at) \
                      VALUES ('echo_sql', 1, 'frozen', {}, 'test', 't')",
                     crate::migrations::sql_string_literal(&v1.steps[0].checksum())

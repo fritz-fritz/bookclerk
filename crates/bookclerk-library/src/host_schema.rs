@@ -50,7 +50,7 @@ impl SchemaBatch {
         Self { statements }
     }
 
-    /// Unreleased development pack plus `schema_migrations` unreleased row.
+    /// Unreleased development pack plus `bookclerk_schema_migrations` unreleased row.
     #[must_use]
     pub fn unreleased(stmts: impl IntoIterator<Item = impl Into<String>>, checksum: &str) -> Self {
         Self::from_statements_and_marker(
@@ -69,12 +69,12 @@ pub struct SchemaApplyOptions {
 
 /// Which versioning mechanic the host should use.
 ///
-/// The host always records versions in canonical `schema_migrations` rows.
+/// The host always records versions in canonical `bookclerk_schema_migrations` rows.
 /// Canonical Bookclerk SQL is [`crate::migrations::current_canonical_schema`].
 /// Adapters lower canonical DDL for the live connection backend at execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HostSchemaKind {
-    /// Canonical `schema_migrations` rows.
+    /// Canonical `bookclerk_schema_migrations` rows.
     #[default]
     RowMarker,
 }
@@ -291,7 +291,7 @@ where
 
 /// Reads explicit [`SchemaState`] in the Bookclerk host/bootstrap namespace.
 ///
-/// An empty `schema_migrations` table is uninitialized; leftover SQLite
+/// An empty `bookclerk_schema_migrations` table is uninitialized; leftover SQLite
 /// `PRAGMA user_version` is ignored.
 ///
 /// # Errors
@@ -308,7 +308,7 @@ pub async fn current_schema_state(
 ///
 /// Host library and binding bootstrap use [`BOOKCLERK_SCHEMA_NAMESPACE`].
 /// Frozen checksums are verified against [`host_migration_plan`] only for
-/// the Bookclerk namespace. Plugin-owned history uses `plugin_migrations`,
+/// the Bookclerk namespace. Plugin-owned history uses `bookclerk_plugin_migrations`,
 /// not this ledger.
 ///
 /// # Errors
@@ -333,7 +333,7 @@ pub async fn current_schema_state_in(
                     }
                 }
                 return Err(LibraryError::Schema(
-                    "database has host tables but no readable schema_migrations state; \
+                    "database has host tables but no readable bookclerk_schema_migrations state; \
                      recreate the database (`cargo reset --yes`)"
                         .into(),
                 ));
@@ -362,7 +362,7 @@ pub async fn current_schema_state_in(
     Ok(SchemaState::Uninitialized)
 }
 
-/// Reads [`SchemaState`] from `schema_migrations` on an already-open connection
+/// Reads [`SchemaState`] from `bookclerk_schema_migrations` on an already-open connection
 /// (including a backup capture transaction).
 ///
 /// # Errors
@@ -392,13 +392,13 @@ where
         .await
         .map_err(|err| {
             LibraryError::Schema(format!(
-                "backup cannot re-read schema_migrations inside the capture transaction: {err}"
+                "backup cannot re-read bookclerk_schema_migrations inside the capture transaction: {err}"
             ))
         })?;
     match schema_state_from_migration_rows(rows, namespace == BOOKCLERK_SCHEMA_NAMESPACE)? {
         Some(state) => Ok(state),
         None if namespace == BOOKCLERK_SCHEMA_NAMESPACE => Err(LibraryError::Schema(
-            "backup capture found schema_migrations without a state marker \
+            "backup capture found bookclerk_schema_migrations without a state marker \
              for namespace `bookclerk`"
                 .into(),
         )),
@@ -406,7 +406,7 @@ where
     }
 }
 
-/// Loads namespaced `schema_migrations` version/state/checksum rows.
+/// Loads namespaced `bookclerk_schema_migrations` version/state/checksum rows.
 async fn query_schema_migration_rows(
     db: &DatabaseConnection,
     namespace: &str,
@@ -418,7 +418,7 @@ async fn query_schema_migration_rows(
 /// `SELECT` for one ledger namespace.
 fn schema_migrations_select_sql(namespace: &str) -> String {
     format!(
-        "SELECT version, state, checksum FROM schema_migrations WHERE namespace = {}",
+        "SELECT version, state, checksum FROM bookclerk_schema_migrations WHERE namespace = {}",
         sql_string_literal(namespace)
     )
 }
@@ -432,12 +432,12 @@ fn schema_migration_version(row: &QueryResult) -> Option<i64> {
         .or_else(|| row.try_get_by_index::<i32>(0).ok().map(i64::from))
 }
 
-/// Interprets `schema_migrations` rows. `Ok(None)` means the table exists but
+/// Interprets `bookclerk_schema_migrations` rows. `Ok(None)` means the table exists but
 /// has no unreleased or frozen marker.
 ///
 /// When `verify_host_plan` is true, frozen checksums are checked against
 /// [`host_migration_plan`]. Non-bookclerk namespaces skip that host-plan
-/// check (legacy rows only; plugin history is `plugin_migrations`).
+/// check (legacy rows only; plugin history is `bookclerk_plugin_migrations`).
 /// engine verifies the installed plugin plan.
 fn schema_state_from_migration_rows(
     rows: Vec<QueryResult>,
@@ -447,7 +447,7 @@ fn schema_state_from_migration_rows(
     let mut frozen: Vec<(i64, String)> = Vec::new();
     for row in rows {
         let version = schema_migration_version(&row).ok_or_else(|| {
-            LibraryError::Schema("schema_migrations row is missing version".into())
+            LibraryError::Schema("bookclerk_schema_migrations row is missing version".into())
         })?;
         let state = row
             .try_get::<String>("", "state")
@@ -461,14 +461,14 @@ fn schema_state_from_migration_rows(
             .unwrap_or_default();
         if checksum.is_empty() {
             return Err(LibraryError::Schema(
-                "schema_migrations row is missing a checksum".into(),
+                "bookclerk_schema_migrations row is missing a checksum".into(),
             ));
         }
         match state.as_str() {
             SCHEMA_STATE_UNRELEASED => {
                 if unreleased.is_some() {
                     return Err(LibraryError::Schema(
-                        "schema_migrations has multiple unreleased rows".into(),
+                        "bookclerk_schema_migrations has multiple unreleased rows".into(),
                     ));
                 }
                 unreleased = Some((version, checksum));
@@ -476,14 +476,14 @@ fn schema_state_from_migration_rows(
             SCHEMA_STATE_FROZEN => frozen.push((version, checksum)),
             "" => {
                 return Err(LibraryError::Schema(
-                    "schema_migrations row is missing state; unsupported old metadata — \
+                    "bookclerk_schema_migrations row is missing state; unsupported old metadata — \
                      recreate (`cargo reset --yes`)"
                         .into(),
                 ));
             }
             other => {
                 return Err(LibraryError::Schema(format!(
-                    "unrecognized schema_migrations.state `{other}`"
+                    "unrecognized bookclerk_schema_migrations.state `{other}`"
                 )));
             }
         }
@@ -540,7 +540,7 @@ fn is_schema_marker_visibility_race(err: &LibraryError) -> bool {
     match err {
         LibraryError::Schema(msg) => {
             msg.contains("without a schema state marker")
-                || msg.contains("no readable schema_migrations state")
+                || msg.contains("no readable bookclerk_schema_migrations state")
         }
         _ => false,
     }
@@ -551,10 +551,10 @@ async fn host_tables_present(db: &DatabaseConnection) -> Result<bool> {
     crate::backup::util::table_exists(db, "books").await
 }
 
-/// `INSERT` for the unreleased `schema_migrations` row (no `PRAGMA user_version`).
+/// `INSERT` for the unreleased `bookclerk_schema_migrations` row (no `PRAGMA user_version`).
 ///
 /// `base_version` is the highest frozen revision this pack sits on (`0` before
-/// any freeze). It is stored in `schema_migrations.version` and is not an
+/// any freeze). It is stored in `bookclerk_schema_migrations.version` and is not an
 /// identity for uninitialized databases.
 fn unreleased_marker_sql(checksum: &str, base_version: i64) -> String {
     unreleased_state_marker_sql(checksum, base_version)
@@ -841,14 +841,14 @@ pub async fn ensure_restore_target_is_replaceable(
     }
 }
 
-/// Canonical DDL plus the `schema_migrations` insert.
+/// Canonical DDL plus the `bookclerk_schema_migrations` insert.
 fn version_marker_statements(step: &HostMigrationStep) -> Vec<String> {
     let mut stmts: Vec<String> = step.steps.iter().map(|op| op.sql().to_string()).collect();
     stmts.push(schema_migrations_insert(step));
     stmts
 }
 
-/// Reverse DDL plus deletion of this step's `schema_migrations` row.
+/// Reverse DDL plus deletion of this step's `bookclerk_schema_migrations` row.
 fn down_statements(step: &HostMigrationStep) -> Vec<String> {
     let mut stmts = Vec::new();
     if let Some(down) = step.down {
@@ -861,7 +861,7 @@ fn down_statements(step: &HostMigrationStep) -> Vec<String> {
     stmts
 }
 
-/// `INSERT` for `schema_migrations` including checksum, app version, and timestamp.
+/// `INSERT` for `bookclerk_schema_migrations` including checksum, app version, and timestamp.
 fn schema_migrations_insert(step: &HostMigrationStep) -> String {
     frozen_marker_sql(BOOKCLERK_SCHEMA_NAMESPACE, step.version, &step.checksum())
 }
@@ -911,7 +911,7 @@ where
     verify_frozen_checksums(plan, &found_by_version, current)
 }
 
-/// Refuses when frozen `schema_migrations` rows through `through_version` are
+/// Refuses when frozen `bookclerk_schema_migrations` rows through `through_version` are
 /// missing or do not match this binary's plan.
 pub(crate) fn verify_frozen_checksums(
     plan: &[HostMigrationStep],
@@ -945,7 +945,7 @@ pub(crate) fn verify_frozen_checksums(
     Ok(())
 }
 
-/// Applies one `schema_migrations` step via `run_batch`.
+/// Applies one `bookclerk_schema_migrations` step via `run_batch`.
 async fn apply_one_schema_migration_with_batch<F, Fut>(
     db: &DatabaseConnection,
     step: &HostMigrationStep,
@@ -993,10 +993,10 @@ where
     if schema_versions_applied(db).await?.contains(&version) {
         return Ok(());
     }
-    Err(last_err.expect("schema_migrations version retry"))
+    Err(last_err.expect("bookclerk_schema_migrations version retry"))
 }
 
-/// `CREATE TABLE IF NOT EXISTS schema_migrations`.
+/// `CREATE TABLE IF NOT EXISTS bookclerk_schema_migrations`.
 pub(crate) async fn ensure_schema_migrations(db: &DatabaseConnection) -> Result<()> {
     let mut delay_ms = 20u64;
     let mut last_err = None;
@@ -1062,12 +1062,12 @@ async fn run_atomic_ddl(
     Ok(())
 }
 
-/// Loads `schema_migrations.version` rows.
+/// Loads `bookclerk_schema_migrations.version` rows.
 async fn schema_versions_applied(db: &DatabaseConnection) -> Result<HashSet<i64>> {
     let rows = bookclerk_db_exec::query_canonical(
         db,
         &format!(
-            "SELECT version FROM schema_migrations WHERE namespace = {}",
+            "SELECT version FROM bookclerk_schema_migrations WHERE namespace = {}",
             sql_string_literal(BOOKCLERK_SCHEMA_NAMESPACE)
         ),
         std::iter::empty::<sea_orm::Value>(),
@@ -1099,7 +1099,7 @@ mod tests {
                 .into()
         )));
         assert!(is_schema_marker_visibility_race(&LibraryError::Schema(
-            "database has host tables but no readable schema_migrations state; \
+            "database has host tables but no readable bookclerk_schema_migrations state; \
              recreate the database (`cargo reset --yes`)"
                 .into()
         )));
@@ -1257,7 +1257,7 @@ mod tests {
         let rows = db
             .query_all_raw(Statement::from_string(
                 DbBackend::Sqlite,
-                "SELECT version, state, checksum FROM schema_migrations ORDER BY state, version",
+                "SELECT version, state, checksum FROM bookclerk_schema_migrations ORDER BY state, version",
             ))
             .await
             .expect("rows");
@@ -1330,7 +1330,7 @@ mod tests {
         );
         db.query_all_raw(Statement::from_string(
             DbBackend::Sqlite,
-            "SELECT slot_key FROM db_serialization_slots LIMIT 1",
+            "SELECT slot_key FROM bookclerk_slots LIMIT 1",
         ))
         .await
         .expect("serialization slots table");
@@ -1541,7 +1541,7 @@ mod tests {
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "UPDATE schema_migrations SET checksum = 'deadbeef' WHERE state = 'unreleased'",
+            "UPDATE bookclerk_schema_migrations SET checksum = 'deadbeef' WHERE state = 'unreleased'",
         )
         .await
         .expect("tamper");
@@ -1566,14 +1566,14 @@ mod tests {
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "DELETE FROM schema_migrations WHERE state = 'unreleased'",
+            "DELETE FROM bookclerk_schema_migrations WHERE state = 'unreleased'",
         )
         .await
         .expect("drop unreleased");
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "INSERT INTO schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
+            "INSERT INTO bookclerk_schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
              VALUES ('bookclerk', 99, 'frozen', 'abc', 'test', 't')",
         )
         .await
@@ -1596,7 +1596,7 @@ mod tests {
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "UPDATE schema_migrations SET version = 1 WHERE state = 'unreleased'",
+            "UPDATE bookclerk_schema_migrations SET version = 1 WHERE state = 'unreleased'",
         )
         .await
         .expect("bump base");
@@ -1608,7 +1608,7 @@ mod tests {
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "INSERT INTO schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
+            "INSERT INTO bookclerk_schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
              VALUES ('bookclerk', 1, 'frozen', 'f1', 'test', 't')",
         )
         .await
@@ -1627,7 +1627,7 @@ mod tests {
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "UPDATE schema_migrations SET version = 0 WHERE state = 'unreleased'",
+            "UPDATE bookclerk_schema_migrations SET version = 0 WHERE state = 'unreleased'",
         )
         .await
         .expect("reset base 0");
@@ -1669,7 +1669,7 @@ mod tests {
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "UPDATE schema_migrations SET checksum = '' WHERE state = 'unreleased'",
+            "UPDATE bookclerk_schema_migrations SET checksum = '' WHERE state = 'unreleased'",
         )
         .await
         .expect("empty checksum");
@@ -1682,7 +1682,7 @@ mod tests {
             &db,
             DbBackend::Sqlite,
             &format!(
-                "UPDATE schema_migrations SET checksum = '{}' WHERE state = 'unreleased'",
+                "UPDATE bookclerk_schema_migrations SET checksum = '{}' WHERE state = 'unreleased'",
                 unreleased_checksum()
             ),
         )
@@ -1691,7 +1691,7 @@ mod tests {
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "INSERT INTO schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
+            "INSERT INTO bookclerk_schema_migrations (namespace, version, state, checksum, app_version, applied_at) \
              VALUES ('bookclerk', 1, 'unreleased', 'other', 'test', 't')",
         )
         .await
@@ -1704,14 +1704,14 @@ mod tests {
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "DELETE FROM schema_migrations WHERE checksum = 'other'",
+            "DELETE FROM bookclerk_schema_migrations WHERE checksum = 'other'",
         )
         .await
         .expect("drop extra");
         exec_sql(
             &db,
             DbBackend::Sqlite,
-            "UPDATE schema_migrations SET state = 'weird' WHERE state = 'unreleased'",
+            "UPDATE bookclerk_schema_migrations SET state = 'weird' WHERE state = 'unreleased'",
         )
         .await
         .expect("unknown state");
@@ -1748,9 +1748,13 @@ mod tests {
         apply_host_schema(&db, HostSchemaKind::RowMarker)
             .await
             .expect("apply");
-        exec_sql(&db, DbBackend::Sqlite, "DELETE FROM schema_migrations")
-            .await
-            .expect("drop marker");
+        exec_sql(
+            &db,
+            DbBackend::Sqlite,
+            "DELETE FROM bookclerk_schema_migrations",
+        )
+        .await
+        .expect("drop marker");
         let err = apply_host_schema(&db, HostSchemaKind::RowMarker)
             .await
             .expect_err("malformed");

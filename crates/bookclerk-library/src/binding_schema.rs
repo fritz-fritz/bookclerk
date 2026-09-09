@@ -1,7 +1,7 @@
 //! Host-mediated plugin binding schema lifecycle.
 //!
 //! Each isolated binding database records durable [`SchemaState`] in
-//! `schema_migrations` (same table shape as the library). Host bootstrap
+//! `bookclerk_schema_migrations` (same table shape as the library). Host bootstrap
 //! ([`crate::migrations::binding_bootstrap_ops`]) is the unreleased binding
 //! schema. Progression is ordered, host-mediated BookclerkSQL only — no
 //! `pg_dump`, `VACUUM INTO`, D1 REST migrate, or other backend-native escape
@@ -15,7 +15,7 @@
 //! [`crate::migrations::prove_plugin_migration_sequence`] /
 //! [`crate::migrations::apply_plugin_migrations`] and do **not** bump
 //! host-owned bootstrap [`SchemaState`]. Restore writes captured rows
-//! (including `plugin_migrations`) and does **not** run plugin migrations
+//! (including `bookclerk_plugin_migrations`) and does **not** run plugin migrations
 //! inside the restore transaction.
 
 use std::time::Duration;
@@ -81,7 +81,7 @@ pub fn binding_bootstrap_plan(state: &SchemaState) -> Result<Option<Vec<String>>
 /// Applies host-owned binding bootstrap when the binding is uninitialized.
 ///
 /// Matching [`SchemaState::Unreleased`] is a no-op. Restore that rewrites
-/// `schema_migrations` as ordinary rows will take this no-op path and will not
+/// `bookclerk_schema_migrations` as ordinary rows will take this no-op path and will not
 /// re-run plugin-owned DDL.
 ///
 /// # Errors
@@ -174,11 +174,13 @@ mod tests {
         let stmts = binding_bootstrap_plan(&SchemaState::Uninitialized)
             .unwrap()
             .expect("apply");
-        assert!(stmts.iter().any(|s| s.contains("db_atomic_receipts")));
-        assert!(stmts.iter().any(|s| s.contains("schema_migrations")));
+        assert!(stmts.iter().any(|s| s.contains("bookclerk_receipts")));
         assert!(stmts
             .iter()
-            .any(|s| s.contains("INSERT INTO schema_migrations")));
+            .any(|s| s.contains("bookclerk_schema_migrations")));
+        assert!(stmts
+            .iter()
+            .any(|s| s.contains("INSERT INTO bookclerk_schema_migrations")));
         assert!(!stmts
             .iter()
             .any(|s| s.contains("VACUUM") || s.contains("pg_dump")));

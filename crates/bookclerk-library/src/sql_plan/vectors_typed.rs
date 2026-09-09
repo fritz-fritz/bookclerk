@@ -394,7 +394,7 @@ where
     let check = run(
         typed_request(
             "vec-rb-check",
-            select_plan("SELECT slot_key FROM db_serialization_slots WHERE slot_key = 'rb-vec'"),
+            select_plan("SELECT slot_key FROM bookclerk_slots WHERE slot_key = 'rb-vec'"),
         ),
         0,
     )
@@ -875,15 +875,15 @@ fn exec_plan_owned(sqls: Vec<String>) -> Vec<TypedDbStatement> {
         .collect()
 }
 
-/// Two inserts of the same `db_serialization_slots` key.
+/// Two inserts of the same `bookclerk_slots` key.
 fn dup_slot_plan(key: &str) -> Vec<TypedDbStatement> {
     vec![
         typed_stmt(
-            format!("INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{key}', 0)"),
+            format!("INSERT INTO bookclerk_slots (slot_key, bump) VALUES ('{key}', 0)"),
             DbPlanStatementKind::Execute,
         ),
         typed_stmt(
-            format!("INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('{key}', 1)"),
+            format!("INSERT INTO bookclerk_slots (slot_key, bump) VALUES ('{key}', 1)"),
             DbPlanStatementKind::Execute,
         ),
     ]
