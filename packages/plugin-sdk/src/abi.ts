@@ -62,14 +62,54 @@ export const PLUGIN_ERROR_CODES = ["invalid_params", "unauthorized", "forbidden"
 export type PluginErrorCode = (typeof PLUGIN_ERROR_CODES)[number];
 
 /**
- * Value kind for a `CliArgSpec` (wire lowercase: "string" / "bool" / ...).
+ * Portal Accounts connect mode for storefronts.
  *
- * Wire strings of `CliArgKind` in ordinal order (snake_case `Text` codes).
+ * Ordinal-ordered `PortalAuthMode` wire names (index = Cap'n Proto ordinal).
+ */
+export const PORTAL_AUTH_MODES = ["unspecified", "password", "oauth"] as const;
+
+/** Union of `PORTAL_AUTH_MODES` wire names. */
+export type PortalAuthMode = (typeof PORTAL_AUTH_MODES)[number];
+
+/**
+ * Value kind for a `CliArgSpec`.
+ *
+ * Ordinal-ordered `CliArgKind` wire names (index = Cap'n Proto ordinal).
  */
 export const CLI_ARG_KINDS = ["string", "bool", "int", "path"] as const;
 
 /** Union of `CLI_ARG_KINDS` wire names. */
 export type CliArgKind = (typeof CLI_ARG_KINDS)[number];
+
+/**
+ * Catalog search ordering.
+ *
+ * Ordinal-ordered `CatalogSort` wire names (index = Cap'n Proto ordinal).
+ */
+export const CATALOG_SORTS = ["relevance", "popularity", "rating", "title", "author"] as const;
+
+/** Union of `CATALOG_SORTS` wire names. */
+export type CatalogSort = (typeof CATALOG_SORTS)[number];
+
+/**
+ * Catalog search facet restricting which field the query matches.
+ *
+ * Ordinal-ordered `CatalogField` wire names (index = Cap'n Proto ordinal).
+ */
+export const CATALOG_FIELDS = ["any", "author", "narrator", "series", "genre"] as const;
+
+/** Union of `CATALOG_FIELDS` wire names. */
+export type CatalogField = (typeof CATALOG_FIELDS)[number];
+
+/**
+ * Whether an edition is abridged.
+ *
+ * Ordinal-ordered `Abridgement` wire names (index = Cap'n Proto ordinal).
+ */
+export const ABRIDGEMENTS = ["unknown", "unabridged", "abridged"] as const;
+
+/** Union of `ABRIDGEMENTS` wire names. */
+export type Abridgement = (typeof ABRIDGEMENTS)[number];
 
 /**
  * Universal database cell/parameter domain. Engine-native arrays, enums,

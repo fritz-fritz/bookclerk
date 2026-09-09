@@ -2085,6 +2085,7 @@ dependencies = [
  "async-trait",
  "bookclerk-config",
  "bookclerk-library",
+ "bookclerk-plugin-abi",
  "infer",
  "mime_guess",
  "serde",

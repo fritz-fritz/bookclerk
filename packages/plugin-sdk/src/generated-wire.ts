@@ -339,7 +339,7 @@ export interface JobHandlerHandleResults {
  * @internal
  */
 export interface ContentSourceLoginParams {
-  paramsJson: string;
+  params: T.LoginParams;
 }
 
 /**
@@ -348,7 +348,7 @@ export interface ContentSourceLoginParams {
  * @internal
  */
 export interface ContentSourceLoginResults {
-  result: T.JsonReply;
+  result: T.LoginReply;
 }
 
 /**
@@ -357,7 +357,7 @@ export interface ContentSourceLoginResults {
  * @internal
  */
 export interface ContentSourceScanParams {
-  paramsJson: string;
+  params: T.ScanParams;
 }
 
 /**
@@ -366,7 +366,7 @@ export interface ContentSourceScanParams {
  * @internal
  */
 export interface ContentSourceScanResults {
-  result: T.JsonReply;
+  result: T.ScanReply;
 }
 
 /**
@@ -375,7 +375,7 @@ export interface ContentSourceScanResults {
  * @internal
  */
 export interface ContentSourceFetchTitleParams {
-  paramsJson: string;
+  params: T.FetchTitleParams;
 }
 
 /**
@@ -384,7 +384,7 @@ export interface ContentSourceFetchTitleParams {
  * @internal
  */
 export interface ContentSourceFetchTitleResults {
-  result: T.JsonReply;
+  result: T.FetchTitleReply;
 }
 
 /**
@@ -401,7 +401,7 @@ export interface ContentSourceListAccountsParams {
  * @internal
  */
 export interface ContentSourceListAccountsResults {
-  result: T.JsonReply;
+  result: T.SourceAccountsReply;
 }
 
 /**
@@ -410,7 +410,7 @@ export interface ContentSourceListAccountsResults {
  * @internal
  */
 export interface ContentSourceLoginStartParams {
-  paramsJson: string;
+  params: T.LoginParams;
 }
 
 /**
@@ -419,7 +419,7 @@ export interface ContentSourceLoginStartParams {
  * @internal
  */
 export interface ContentSourceLoginStartResults {
-  result: T.JsonReply;
+  result: T.LoginStartReply;
 }
 
 /**
@@ -428,7 +428,7 @@ export interface ContentSourceLoginStartResults {
  * @internal
  */
 export interface ContentSourceLoginCompleteParams {
-  paramsJson: string;
+  params: T.LoginCompleteParams;
 }
 
 /**
@@ -437,7 +437,7 @@ export interface ContentSourceLoginCompleteParams {
  * @internal
  */
 export interface ContentSourceLoginCompleteResults {
-  result: T.JsonReply;
+  result: T.LoginReply;
 }
 
 /**
@@ -446,7 +446,7 @@ export interface ContentSourceLoginCompleteResults {
  * @internal
  */
 export interface ContentSourceSearchCatalogParams {
-  paramsJson: string;
+  params: T.SearchCatalogParams;
 }
 
 /**
@@ -455,7 +455,7 @@ export interface ContentSourceSearchCatalogParams {
  * @internal
  */
 export interface ContentSourceSearchCatalogResults {
-  result: T.JsonReply;
+  result: T.CatalogHitsReply;
 }
 
 /**
@@ -464,7 +464,7 @@ export interface ContentSourceSearchCatalogResults {
  * @internal
  */
 export interface ContentSourceExpandCandidatesParams {
-  paramsJson: string;
+  params: T.ExpandCandidatesParams;
 }
 
 /**
@@ -473,7 +473,7 @@ export interface ContentSourceExpandCandidatesParams {
  * @internal
  */
 export interface ContentSourceExpandCandidatesResults {
-  result: T.JsonReply;
+  result: T.CatalogHitsReply;
 }
 
 /**
@@ -482,7 +482,7 @@ export interface ContentSourceExpandCandidatesResults {
  * @internal
  */
 export interface ContentSourcePurchaseHintParams {
-  paramsJson: string;
+  params: T.PurchaseHintParams;
 }
 
 /**
@@ -491,7 +491,7 @@ export interface ContentSourcePurchaseHintParams {
  * @internal
  */
 export interface ContentSourcePurchaseHintResults {
-  result: T.JsonReply;
+  result: T.PurchaseHintReply;
 }
 
 /**
@@ -500,7 +500,7 @@ export interface ContentSourcePurchaseHintResults {
  * @internal
  */
 export interface ContentSourceListDealsParams {
-  paramsJson: string;
+  params: T.ListDealsParams;
 }
 
 /**
@@ -509,7 +509,7 @@ export interface ContentSourceListDealsParams {
  * @internal
  */
 export interface ContentSourceListDealsResults {
-  result: T.JsonReply;
+  result: T.CatalogHitsReply;
 }
 
 /**
@@ -543,7 +543,7 @@ export interface ContentSourceDiagnoseParams {
  * @internal
  */
 export interface ContentSourceDiagnoseResults {
-  result: T.JsonReply;
+  result: T.DiagnoseReply;
 }
 
 /**
@@ -552,7 +552,7 @@ export interface ContentSourceDiagnoseResults {
  * @internal
  */
 export interface ContentSourceCatalogDetailParams {
-  paramsJson: string;
+  params: T.CatalogDetailParams;
 }
 
 /**
@@ -561,7 +561,7 @@ export interface ContentSourceCatalogDetailParams {
  * @internal
  */
 export interface ContentSourceCatalogDetailResults {
-  result: T.JsonReply;
+  result: T.CatalogDetailReply;
 }
 
 /**
@@ -647,7 +647,7 @@ export interface IntegrationDiagnoseParams {
  * @internal
  */
 export interface IntegrationDiagnoseResults {
-  result: T.JsonReply;
+  result: T.DiagnoseReply;
 }
 
 /**
@@ -656,7 +656,7 @@ export interface IntegrationDiagnoseResults {
  * @internal
  */
 export interface IntegrationScanLibraryParams {
-  paramsJson: string;
+  params: T.ScanLibraryParams;
 }
 
 /**
@@ -682,7 +682,7 @@ export interface IntegrationSyncListeningParams {
  * @internal
  */
 export interface IntegrationSyncListeningResults {
-  result: T.JsonReply;
+  result: T.SyncListeningReply;
 }
 
 /**
@@ -691,7 +691,7 @@ export interface IntegrationSyncListeningResults {
  * @internal
  */
 export interface IntegrationAuthenticateUserParams {
-  paramsJson: string;
+  params: T.AuthenticateUserParams;
 }
 
 /**
@@ -700,7 +700,7 @@ export interface IntegrationAuthenticateUserParams {
  * @internal
  */
 export interface IntegrationAuthenticateUserResults {
-  result: T.JsonReply;
+  result: T.ExternalUserReply;
 }
 
 /**
@@ -717,7 +717,7 @@ export interface IntegrationPollEventsParams {
  * @internal
  */
 export interface IntegrationPollEventsResults {
-  result: T.JsonReply;
+  result: T.EventPollReply;
 }
 
 /**
@@ -1101,7 +1101,7 @@ export interface BookclerkPluginCliDescribeParams {
  * @internal
  */
 export interface BookclerkPluginCliDescribeResults {
-  result: T.JsonReply;
+  result: T.CliSchemaReply;
 }
 
 /**
@@ -1110,7 +1110,7 @@ export interface BookclerkPluginCliDescribeResults {
  * @internal
  */
 export interface BookclerkPluginCliInvokeParams {
-  paramsJson: string;
+  params: T.CliInvokeParams;
 }
 
 /**
@@ -1119,7 +1119,7 @@ export interface BookclerkPluginCliInvokeParams {
  * @internal
  */
 export interface BookclerkPluginCliInvokeResults {
-  result: T.JsonReply;
+  result: T.CliInvokeReply;
 }
 
 /**
@@ -1417,13 +1417,13 @@ export const CopyResultCodec: StructCodec<T.CopyResult> = {
 };
 
 /**
- * Wire codec for `PluginDescribe` (1 data words, 7 pointers).
+ * Wire codec for `PluginDescribe` (2 data words, 12 pointers).
  *
  * @internal
  */
 export const PluginDescribeCodec: StructCodec<T.PluginDescribe> = {
-  dataWords: 1,
-  pointerCount: 7,
+  dataWords: 2,
+  pointerCount: 12,
   write(s, v, caps) {
     s.setUint32(0, v.apiVersion);
     s.setText(0, v.id);
@@ -1432,10 +1432,24 @@ export const PluginDescribeCodec: StructCodec<T.PluginDescribe> = {
     s.setTextList(3, v.rpcFeatures);
     ScalarLimitsCodec.write(s.initStruct(4, 2, 0), v.scalarLimits, caps);
     s.setTextList(5, v.supportedRoles);
-    s.setText(6, v.metadataJson);
+    s.setTextList(6, v.capabilities);
+    s.setUint16(2, ord(A.PORTAL_AUTH_MODES, v.portalAuthMode, "PortalAuthMode"));
+    if (v.passwordEnvVar !== undefined) {
+      s.setText(7, v.passwordEnvVar);
+    }
+    s.setTextList(8, v.aliases);
+    s.setUint32(2, v.sortKey);
+    BrandCodec.write(s.initStruct(9, 0, 6), v.brand, caps);
+    {
+      const items = s.initStructList(10, v.configOptions.length, 0, 3);
+      for (let i = 0; i < items.length; i++) {
+        ConfigOptionCodec.write(items[i]!, v.configOptions[i]!, caps);
+      }
+    }
+    CliSchemaCodec.write(s.initStruct(11, 0, 1), v.cli, caps);
   },
   read(s, caps) {
-    return {
+    const out: T.PluginDescribe = {
       apiVersion: s.getUint32(0),
       id: s.getText(0),
       kind: s.getText(1),
@@ -1443,8 +1457,19 @@ export const PluginDescribeCodec: StructCodec<T.PluginDescribe> = {
       rpcFeatures: s.getTextList(3),
       scalarLimits: ScalarLimitsCodec.read(s.getStruct(4, 2, 0), caps),
       supportedRoles: s.getTextList(5),
-      metadataJson: s.getText(6),
+      capabilities: s.getTextList(6),
+      portalAuthMode: fromOrd(A.PORTAL_AUTH_MODES, s.getUint16(2), "PortalAuthMode"),
+      aliases: s.getTextList(8),
+      sortKey: s.getUint32(2),
+      brand: BrandCodec.read(s.getStruct(9, 0, 6), caps),
+      configOptions: s.getStructList(10, 0, 3).map((item) => ConfigOptionCodec.read(item, caps)),
+      cli: CliSchemaCodec.read(s.getStruct(11, 0, 1), caps),
     };
+    const passwordEnvVar = s.getText(7);
+    if (!(passwordEnvVar === "")) {
+      out.passwordEnvVar = passwordEnvVar;
+    }
+    return out;
   },
 };
 
@@ -1563,103 +1588,93 @@ export const ExtensibleConfigCodec: StructCodec<T.ExtensibleConfig> = {
 };
 
 /**
- * Wire codec for `DestinationContext` (0 data words, 2 pointers).
+ * Wire codec for `DestinationContext` (0 data words, 1 pointers).
  *
  * @internal
  */
 export const DestinationContextCodec: StructCodec<T.DestinationContext> = {
   dataWords: 0,
-  pointerCount: 2,
+  pointerCount: 1,
   write(s, v, caps) {
-    s.setText(0, v.json);
-    ExtensibleConfigCodec.write(s.initStruct(1, 1, 2), v.config, caps);
+    ExtensibleConfigCodec.write(s.initStruct(0, 1, 2), v.config, caps);
   },
   read(s, caps) {
     return {
-      json: s.getText(0),
-      config: ExtensibleConfigCodec.read(s.getStruct(1, 1, 2), caps),
+      config: ExtensibleConfigCodec.read(s.getStruct(0, 1, 2), caps),
     };
   },
 };
 
 /**
- * Wire codec for `SourceContext` (0 data words, 2 pointers).
+ * Wire codec for `SourceContext` (0 data words, 1 pointers).
  *
  * @internal
  */
 export const SourceContextCodec: StructCodec<T.SourceContext> = {
   dataWords: 0,
-  pointerCount: 2,
+  pointerCount: 1,
   write(s, v, caps) {
-    s.setText(0, v.json);
-    ExtensibleConfigCodec.write(s.initStruct(1, 1, 2), v.config, caps);
+    ExtensibleConfigCodec.write(s.initStruct(0, 1, 2), v.config, caps);
   },
   read(s, caps) {
     return {
-      json: s.getText(0),
-      config: ExtensibleConfigCodec.read(s.getStruct(1, 1, 2), caps),
+      config: ExtensibleConfigCodec.read(s.getStruct(0, 1, 2), caps),
     };
   },
 };
 
 /**
- * Wire codec for `WorkerContext` (0 data words, 3 pointers).
+ * Wire codec for `WorkerContext` (0 data words, 2 pointers).
  *
  * @internal
  */
 export const WorkerContextCodec: StructCodec<T.WorkerContext> = {
   dataWords: 0,
-  pointerCount: 3,
+  pointerCount: 2,
   write(s, v, caps) {
     s.setText(0, v.jobId);
-    s.setText(1, v.json);
-    ExtensibleConfigCodec.write(s.initStruct(2, 1, 2), v.config, caps);
+    ExtensibleConfigCodec.write(s.initStruct(1, 1, 2), v.config, caps);
   },
   read(s, caps) {
     return {
       jobId: s.getText(0),
-      json: s.getText(1),
-      config: ExtensibleConfigCodec.read(s.getStruct(2, 1, 2), caps),
+      config: ExtensibleConfigCodec.read(s.getStruct(1, 1, 2), caps),
     };
   },
 };
 
 /**
- * Wire codec for `ContentSourceContext` (0 data words, 2 pointers).
+ * Wire codec for `ContentSourceContext` (0 data words, 1 pointers).
  *
  * @internal
  */
 export const ContentSourceContextCodec: StructCodec<T.ContentSourceContext> = {
   dataWords: 0,
-  pointerCount: 2,
+  pointerCount: 1,
   write(s, v, caps) {
-    s.setText(0, v.json);
-    ExtensibleConfigCodec.write(s.initStruct(1, 1, 2), v.config, caps);
+    ExtensibleConfigCodec.write(s.initStruct(0, 1, 2), v.config, caps);
   },
   read(s, caps) {
     return {
-      json: s.getText(0),
-      config: ExtensibleConfigCodec.read(s.getStruct(1, 1, 2), caps),
+      config: ExtensibleConfigCodec.read(s.getStruct(0, 1, 2), caps),
     };
   },
 };
 
 /**
- * Wire codec for `IntegrationContext` (0 data words, 2 pointers).
+ * Wire codec for `IntegrationContext` (0 data words, 1 pointers).
  *
  * @internal
  */
 export const IntegrationContextCodec: StructCodec<T.IntegrationContext> = {
   dataWords: 0,
-  pointerCount: 2,
+  pointerCount: 1,
   write(s, v, caps) {
-    s.setText(0, v.json);
-    ExtensibleConfigCodec.write(s.initStruct(1, 1, 2), v.config, caps);
+    ExtensibleConfigCodec.write(s.initStruct(0, 1, 2), v.config, caps);
   },
   read(s, caps) {
     return {
-      json: s.getText(0),
-      config: ExtensibleConfigCodec.read(s.getStruct(1, 1, 2), caps),
+      config: ExtensibleConfigCodec.read(s.getStruct(0, 1, 2), caps),
     };
   },
 };
@@ -1673,13 +1688,13 @@ export const DatabaseContextCodec: StructCodec<T.DatabaseContext> = {
   dataWords: 0,
   pointerCount: 2,
   write(s, v, caps) {
-    s.setText(0, v.json);
-    ExtensibleConfigCodec.write(s.initStruct(1, 1, 2), v.config, caps);
+    ExtensibleConfigCodec.write(s.initStruct(0, 1, 2), v.config, caps);
+    DatabaseAdapterConfigCodec.write(s.initStruct(1, 1, 4), v.adapter, caps);
   },
   read(s, caps) {
     return {
-      json: s.getText(0),
-      config: ExtensibleConfigCodec.read(s.getStruct(1, 1, 2), caps),
+      config: ExtensibleConfigCodec.read(s.getStruct(0, 1, 2), caps),
+      adapter: DatabaseAdapterConfigCodec.read(s.getStruct(1, 1, 4), caps),
     };
   },
 };
@@ -2474,7 +2489,7 @@ export const DescribeReplyCodec: StructCodec<T.DescribeReply> = {
     switch (v.kind) {
       case "ok":
         s.setUint16(0, 0);
-        PluginDescribeCodec.write(s.initStruct(0, 1, 7), v.value, caps);
+        PluginDescribeCodec.write(s.initStruct(0, 2, 12), v.value, caps);
         break;
       case "err":
         s.setUint16(0, 1);
@@ -2488,7 +2503,7 @@ export const DescribeReplyCodec: StructCodec<T.DescribeReply> = {
     const disc = s.getUint16(0);
     switch (disc) {
       case 0:
-        return { kind: "ok", value: PluginDescribeCodec.read(s.getStruct(0, 1, 7), caps) };
+        return { kind: "ok", value: PluginDescribeCodec.read(s.getStruct(0, 2, 12), caps) };
       case 1:
         return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
       default:
@@ -2778,61 +2793,6 @@ export const EventResultReplyCodec: StructCodec<T.EventResultReply> = {
 };
 
 /**
- * Wire codec for `JsonOk` (0 data words, 1 pointers).
- *
- * @internal
- */
-export const JsonOkCodec: StructCodec<T.JsonOk> = {
-  dataWords: 0,
-  pointerCount: 1,
-  write(s, v, caps) {
-    void caps;
-    s.setText(0, v.json);
-  },
-  read(s, caps) {
-    void caps;
-    return {
-      json: s.getText(0),
-    };
-  },
-};
-
-/**
- * Wire codec for `JsonReply` (1 data words, 1 pointers).
- *
- * @internal
- */
-export const JsonReplyCodec: StructCodec<T.JsonReply> = {
-  dataWords: 1,
-  pointerCount: 1,
-  write(s, v, caps) {
-    switch (v.kind) {
-      case "ok":
-        s.setUint16(0, 0);
-        JsonOkCodec.write(s.initStruct(0, 0, 1), v.value, caps);
-        break;
-      case "err":
-        s.setUint16(0, 1);
-        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
-        break;
-      default:
-        throw unknownUnion("JsonReply", (v as { kind: string }).kind);
-    }
-  },
-  read(s, caps) {
-    const disc = s.getUint16(0);
-    switch (disc) {
-      case 0:
-        return { kind: "ok", value: JsonOkCodec.read(s.getStruct(0, 0, 1), caps) };
-      case 1:
-        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
-      default:
-        throw unknownUnion("JsonReply", disc);
-    }
-  },
-};
-
-/**
  * Wire codec for `HealthOk` (1 data words, 1 pointers).
  *
  * @internal
@@ -2976,6 +2936,2166 @@ export const NamedDatabaseCodec: StructCodec<T.NamedDatabase> = {
       name: s.getText(0),
       database: caps.importCap(s.getCapIndex(1)) as T.GuestDatabase,
     };
+  },
+};
+
+/**
+ * Wire codec for `Brand` (0 data words, 6 pointers).
+ *
+ * @internal
+ */
+export const BrandCodec: StructCodec<T.Brand> = {
+  dataWords: 0,
+  pointerCount: 6,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.id);
+    s.setText(1, v.name);
+    s.setText(2, v.bg);
+    s.setText(3, v.fg);
+    s.setText(4, v.accent);
+    if (v.iconUrl !== undefined) {
+      s.setText(5, v.iconUrl);
+    }
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.Brand = {
+      id: s.getText(0),
+      name: s.getText(1),
+      bg: s.getText(2),
+      fg: s.getText(3),
+      accent: s.getText(4),
+    };
+    const iconUrl = s.getText(5);
+    if (!(iconUrl === "")) {
+      out.iconUrl = iconUrl;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `ConfigOption` (0 data words, 3 pointers).
+ *
+ * @internal
+ */
+export const ConfigOptionCodec: StructCodec<T.ConfigOption> = {
+  dataWords: 0,
+  pointerCount: 3,
+  write(s, v, caps) {
+    s.setText(0, v.key);
+    s.setText(1, v.label);
+    {
+      const items = s.initStructList(2, v.values.length, 0, 2);
+      for (let i = 0; i < items.length; i++) {
+        ConfigOptionValueCodec.write(items[i]!, v.values[i]!, caps);
+      }
+    }
+  },
+  read(s, caps) {
+    return {
+      key: s.getText(0),
+      label: s.getText(1),
+      values: s.getStructList(2, 0, 2).map((item) => ConfigOptionValueCodec.read(item, caps)),
+    };
+  },
+};
+
+/**
+ * Wire codec for `ConfigOptionValue` (0 data words, 2 pointers).
+ *
+ * @internal
+ */
+export const ConfigOptionValueCodec: StructCodec<T.ConfigOptionValue> = {
+  dataWords: 0,
+  pointerCount: 2,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.id);
+    s.setText(1, v.label);
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      id: s.getText(0),
+      label: s.getText(1),
+    };
+  },
+};
+
+/**
+ * Wire codec for `CliSchema` (0 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const CliSchemaCodec: StructCodec<T.CliSchema> = {
+  dataWords: 0,
+  pointerCount: 1,
+  write(s, v, caps) {
+    {
+      const items = s.initStructList(0, v.commands.length, 0, 3);
+      for (let i = 0; i < items.length; i++) {
+        CliCommandSpecCodec.write(items[i]!, v.commands[i]!, caps);
+      }
+    }
+  },
+  read(s, caps) {
+    return {
+      commands: s.getStructList(0, 0, 3).map((item) => CliCommandSpecCodec.read(item, caps)),
+    };
+  },
+};
+
+/**
+ * Wire codec for `CliCommandSpec` (0 data words, 3 pointers).
+ *
+ * @internal
+ */
+export const CliCommandSpecCodec: StructCodec<T.CliCommandSpec> = {
+  dataWords: 0,
+  pointerCount: 3,
+  write(s, v, caps) {
+    s.setText(0, v.name);
+    if (v.about !== undefined) {
+      s.setText(1, v.about);
+    }
+    {
+      const items = s.initStructList(2, v.args.length, 1, 5);
+      for (let i = 0; i < items.length; i++) {
+        CliArgSpecCodec.write(items[i]!, v.args[i]!, caps);
+      }
+    }
+  },
+  read(s, caps) {
+    const out: T.CliCommandSpec = {
+      name: s.getText(0),
+      args: s.getStructList(2, 1, 5).map((item) => CliArgSpecCodec.read(item, caps)),
+    };
+    const about = s.getText(1);
+    if (!(about === "")) {
+      out.about = about;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `CliArgSpec` (1 data words, 5 pointers).
+ *
+ * @internal
+ */
+export const CliArgSpecCodec: StructCodec<T.CliArgSpec> = {
+  dataWords: 1,
+  pointerCount: 5,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.name);
+    if (v.long !== undefined) {
+      s.setText(1, v.long);
+    }
+    if (v.short !== undefined) {
+      s.setText(2, v.short);
+    }
+    s.setUint16(0, ord(A.CLI_ARG_KINDS, v.kind, "CliArgKind"));
+    s.setBool(16, v.required);
+    if (v.default !== undefined) {
+      s.setText(3, v.default);
+    }
+    if (v.about !== undefined) {
+      s.setText(4, v.about);
+    }
+    s.setBool(17, v.positional);
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.CliArgSpec = {
+      name: s.getText(0),
+      kind: fromOrd(A.CLI_ARG_KINDS, s.getUint16(0), "CliArgKind"),
+      required: s.getBool(16),
+      positional: s.getBool(17),
+    };
+    const long = s.getText(1);
+    if (!(long === "")) {
+      out.long = long;
+    }
+    const short = s.getText(2);
+    if (!(short === "")) {
+      out.short = short;
+    }
+    const default = s.getText(3);
+    if (!(default === "")) {
+      out.default = default;
+    }
+    const about = s.getText(4);
+    if (!(about === "")) {
+      out.about = about;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `CliArg` (0 data words, 2 pointers).
+ *
+ * @internal
+ */
+export const CliArgCodec: StructCodec<T.CliArg> = {
+  dataWords: 0,
+  pointerCount: 2,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.name);
+    s.setText(1, v.value);
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      name: s.getText(0),
+      value: s.getText(1),
+    };
+  },
+};
+
+/**
+ * Wire codec for `CliInvokeParams` (0 data words, 2 pointers).
+ *
+ * @internal
+ */
+export const CliInvokeParamsCodec: StructCodec<T.CliInvokeParams> = {
+  dataWords: 0,
+  pointerCount: 2,
+  write(s, v, caps) {
+    s.setText(0, v.command);
+    {
+      const items = s.initStructList(1, v.args.length, 0, 2);
+      for (let i = 0; i < items.length; i++) {
+        CliArgCodec.write(items[i]!, v.args[i]!, caps);
+      }
+    }
+  },
+  read(s, caps) {
+    return {
+      command: s.getText(0),
+      args: s.getStructList(1, 0, 2).map((item) => CliArgCodec.read(item, caps)),
+    };
+  },
+};
+
+/**
+ * Wire codec for `CliInvokeResult` (1 data words, 3 pointers).
+ *
+ * @internal
+ */
+export const CliInvokeResultCodec: StructCodec<T.CliInvokeResult> = {
+  dataWords: 1,
+  pointerCount: 3,
+  write(s, v, caps) {
+    s.setInt32(0, v.exitCode);
+    s.setText(0, v.stdout);
+    s.setText(1, v.stderr);
+    ExtensibleConfigCodec.write(s.initStruct(2, 1, 2), v.payload, caps);
+  },
+  read(s, caps) {
+    return {
+      exitCode: s.getInt32(0),
+      stdout: s.getText(0),
+      stderr: s.getText(1),
+      payload: ExtensibleConfigCodec.read(s.getStruct(2, 1, 2), caps),
+    };
+  },
+};
+
+/**
+ * Wire codec for `CliSchemaReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const CliSchemaReplyCodec: StructCodec<T.CliSchemaReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        CliSchemaCodec.write(s.initStruct(0, 0, 1), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("CliSchemaReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: CliSchemaCodec.read(s.getStruct(0, 0, 1), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("CliSchemaReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `CliInvokeReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const CliInvokeReplyCodec: StructCodec<T.CliInvokeReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        CliInvokeResultCodec.write(s.initStruct(0, 1, 3), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("CliInvokeReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: CliInvokeResultCodec.read(s.getStruct(0, 1, 3), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("CliInvokeReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `DatabaseAdapterConfig` (1 data words, 4 pointers).
+ *
+ * @internal
+ */
+export const DatabaseAdapterConfigCodec: StructCodec<T.DatabaseAdapterConfig> = {
+  dataWords: 1,
+  pointerCount: 4,
+  write(s, v, caps) {
+    s.setText(0, v.pluginDataDir);
+    ExtensibleConfigCodec.write(s.initStruct(1, 1, 2), v.settings, caps);
+    if (v.binding !== undefined) {
+      s.setText(2, v.binding);
+    }
+    if (v.instanceId !== undefined) {
+      s.setText(3, v.instanceId);
+    }
+    s.setBool(0, v.openExisting);
+  },
+  read(s, caps) {
+    const out: T.DatabaseAdapterConfig = {
+      pluginDataDir: s.getText(0),
+      settings: ExtensibleConfigCodec.read(s.getStruct(1, 1, 2), caps),
+      openExisting: s.getBool(0),
+    };
+    const binding = s.getText(2);
+    if (!(binding === "")) {
+      out.binding = binding;
+    }
+    const instanceId = s.getText(3);
+    if (!(instanceId === "")) {
+      out.instanceId = instanceId;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `DiagnoseResult` (0 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const DiagnoseResultCodec: StructCodec<T.DiagnoseResult> = {
+  dataWords: 0,
+  pointerCount: 1,
+  write(s, v, caps) {
+    void caps;
+    s.setTextList(0, v.lines);
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      lines: s.getTextList(0),
+    };
+  },
+};
+
+/**
+ * Wire codec for `DiagnoseReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const DiagnoseReplyCodec: StructCodec<T.DiagnoseReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        DiagnoseResultCodec.write(s.initStruct(0, 0, 1), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("DiagnoseReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: DiagnoseResultCodec.read(s.getStruct(0, 0, 1), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("DiagnoseReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `SourceAccount` (1 data words, 4 pointers).
+ *
+ * @internal
+ */
+export const SourceAccountCodec: StructCodec<T.SourceAccount> = {
+  dataWords: 1,
+  pointerCount: 4,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.accountId);
+    s.setText(1, v.source);
+    s.setText(2, v.marketplace);
+    if (v.label !== undefined) {
+      s.setText(3, v.label);
+    }
+    s.setBool(0, v.scanEnabled);
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.SourceAccount = {
+      accountId: s.getText(0),
+      source: s.getText(1),
+      marketplace: s.getText(2),
+      scanEnabled: s.getBool(0),
+    };
+    const label = s.getText(3);
+    if (!(label === "")) {
+      out.label = label;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `LoginParams` (2 data words, 10 pointers).
+ *
+ * @internal
+ */
+export const LoginParamsCodec: StructCodec<T.LoginParams> = {
+  dataWords: 2,
+  pointerCount: 10,
+  write(s, v, caps) {
+    s.setText(0, v.pluginDataDir);
+    s.setText(1, v.marketplace);
+    if (v.label !== undefined) {
+      s.setText(2, v.label);
+    }
+    if (v.email !== undefined) {
+      s.setText(3, v.email);
+    }
+    if (v.password !== undefined) {
+      s.setText(4, v.password);
+    }
+    s.setBool(0, v.force);
+    if (v.callbackBind !== undefined) {
+      s.setText(5, v.callbackBind);
+    }
+    if (v.callbackIpc !== undefined) {
+      s.setText(6, v.callbackIpc);
+    }
+    if (v.callbackPublicBase !== undefined) {
+      s.setText(7, v.callbackPublicBase);
+    }
+    s.setBool(1, v.external);
+    if (v.responseUrl !== undefined) {
+      s.setText(8, v.responseUrl);
+    }
+    s.setBool(2, v.showQr);
+    if (v.timeoutSecs !== undefined) {
+      s.setUint64(1, BigInt(v.timeoutSecs));
+    }
+    ExtensibleConfigCodec.write(s.initStruct(9, 1, 2), v.extra, caps);
+  },
+  read(s, caps) {
+    const out: T.LoginParams = {
+      pluginDataDir: s.getText(0),
+      marketplace: s.getText(1),
+      force: s.getBool(0),
+      external: s.getBool(1),
+      showQr: s.getBool(2),
+      extra: ExtensibleConfigCodec.read(s.getStruct(9, 1, 2), caps),
+    };
+    const label = s.getText(2);
+    if (!(label === "")) {
+      out.label = label;
+    }
+    const email = s.getText(3);
+    if (!(email === "")) {
+      out.email = email;
+    }
+    const password = s.getText(4);
+    if (!(password === "")) {
+      out.password = password;
+    }
+    const callbackBind = s.getText(5);
+    if (!(callbackBind === "")) {
+      out.callbackBind = callbackBind;
+    }
+    const callbackIpc = s.getText(6);
+    if (!(callbackIpc === "")) {
+      out.callbackIpc = callbackIpc;
+    }
+    const callbackPublicBase = s.getText(7);
+    if (!(callbackPublicBase === "")) {
+      out.callbackPublicBase = callbackPublicBase;
+    }
+    const responseUrl = s.getText(8);
+    if (!(responseUrl === "")) {
+      out.responseUrl = responseUrl;
+    }
+    const timeoutSecs = Number(s.getUint64(1));
+    if (!(timeoutSecs === 0)) {
+      out.timeoutSecs = timeoutSecs;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `LoginResult` (0 data words, 2 pointers).
+ *
+ * @internal
+ */
+export const LoginResultCodec: StructCodec<T.LoginResult> = {
+  dataWords: 0,
+  pointerCount: 2,
+  write(s, v, caps) {
+    SourceAccountCodec.write(s.initStruct(0, 1, 4), v.account, caps);
+    if (v.credentials !== undefined) {
+      s.setData(1, v.credentials);
+    }
+  },
+  read(s, caps) {
+    const out: T.LoginResult = {
+      account: SourceAccountCodec.read(s.getStruct(0, 1, 4), caps),
+    };
+    const credentials = s.getData(1);
+    if (!(credentials.length === 0)) {
+      out.credentials = credentials;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `LoginStartResult` (0 data words, 2 pointers).
+ *
+ * @internal
+ */
+export const LoginStartResultCodec: StructCodec<T.LoginStartResult> = {
+  dataWords: 0,
+  pointerCount: 2,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.sessionId);
+    s.setText(1, v.url);
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      sessionId: s.getText(0),
+      url: s.getText(1),
+    };
+  },
+};
+
+/**
+ * Wire codec for `LoginCompleteParams` (0 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const LoginCompleteParamsCodec: StructCodec<T.LoginCompleteParams> = {
+  dataWords: 0,
+  pointerCount: 1,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.sessionId);
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      sessionId: s.getText(0),
+    };
+  },
+};
+
+/**
+ * Wire codec for `LoginReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const LoginReplyCodec: StructCodec<T.LoginReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        LoginResultCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("LoginReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: LoginResultCodec.read(s.getStruct(0, 0, 2), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("LoginReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `LoginStartReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const LoginStartReplyCodec: StructCodec<T.LoginStartReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        LoginStartResultCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("LoginStartReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: LoginStartResultCodec.read(s.getStruct(0, 0, 2), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("LoginStartReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `AccountCredential` (0 data words, 2 pointers).
+ *
+ * @internal
+ */
+export const AccountCredentialCodec: StructCodec<T.AccountCredential> = {
+  dataWords: 0,
+  pointerCount: 2,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.accountId);
+    s.setData(1, v.credentials);
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      accountId: s.getText(0),
+      credentials: s.getData(1),
+    };
+  },
+};
+
+/**
+ * Wire codec for `ScanParams` (1 data words, 3 pointers).
+ *
+ * @internal
+ */
+export const ScanParamsCodec: StructCodec<T.ScanParams> = {
+  dataWords: 1,
+  pointerCount: 3,
+  write(s, v, caps) {
+    s.setText(0, v.pluginDataDir);
+    s.setTextList(1, v.accounts);
+    s.setUint32(0, v.pageSize);
+    s.setBool(32, v.importEpisodes);
+    s.setBool(33, v.importPlusTitles);
+    {
+      const items = s.initStructList(2, v.credentials.length, 0, 2);
+      for (let i = 0; i < items.length; i++) {
+        AccountCredentialCodec.write(items[i]!, v.credentials[i]!, caps);
+      }
+    }
+  },
+  read(s, caps) {
+    return {
+      pluginDataDir: s.getText(0),
+      accounts: s.getTextList(1),
+      pageSize: s.getUint32(0),
+      importEpisodes: s.getBool(32),
+      importPlusTitles: s.getBool(33),
+      credentials: s.getStructList(2, 0, 2).map((item) => AccountCredentialCodec.read(item, caps)),
+    };
+  },
+};
+
+/**
+ * Wire codec for `ScanBook` (1 data words, 13 pointers).
+ *
+ * @internal
+ */
+export const ScanBookCodec: StructCodec<T.ScanBook> = {
+  dataWords: 1,
+  pointerCount: 13,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.accountId);
+    s.setText(1, v.productId);
+    s.setText(2, v.title);
+    if (v.marketplace !== undefined) {
+      s.setText(3, v.marketplace);
+    }
+    if (v.asin !== undefined) {
+      s.setText(4, v.asin);
+    }
+    if (v.isbn !== undefined) {
+      s.setText(5, v.isbn);
+    }
+    if (v.authors !== undefined) {
+      s.setText(6, v.authors);
+    }
+    if (v.narrators !== undefined) {
+      s.setText(7, v.narrators);
+    }
+    if (v.series !== undefined) {
+      s.setText(8, v.series);
+    }
+    if (v.seriesIndex !== undefined) {
+      s.setText(9, v.seriesIndex);
+    }
+    if (v.contentKind !== undefined) {
+      s.setText(10, v.contentKind);
+    }
+    if (v.publisher !== undefined) {
+      s.setText(11, v.publisher);
+    }
+    if (v.lengthMinutes !== undefined) {
+      s.setInt64(0, v.lengthMinutes);
+    }
+    if (v.subtitle !== undefined) {
+      s.setText(12, v.subtitle);
+    }
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.ScanBook = {
+      accountId: s.getText(0),
+      productId: s.getText(1),
+      title: s.getText(2),
+    };
+    const marketplace = s.getText(3);
+    if (!(marketplace === "")) {
+      out.marketplace = marketplace;
+    }
+    const asin = s.getText(4);
+    if (!(asin === "")) {
+      out.asin = asin;
+    }
+    const isbn = s.getText(5);
+    if (!(isbn === "")) {
+      out.isbn = isbn;
+    }
+    const authors = s.getText(6);
+    if (!(authors === "")) {
+      out.authors = authors;
+    }
+    const narrators = s.getText(7);
+    if (!(narrators === "")) {
+      out.narrators = narrators;
+    }
+    const series = s.getText(8);
+    if (!(series === "")) {
+      out.series = series;
+    }
+    const seriesIndex = s.getText(9);
+    if (!(seriesIndex === "")) {
+      out.seriesIndex = seriesIndex;
+    }
+    const contentKind = s.getText(10);
+    if (!(contentKind === "")) {
+      out.contentKind = contentKind;
+    }
+    const publisher = s.getText(11);
+    if (!(publisher === "")) {
+      out.publisher = publisher;
+    }
+    const lengthMinutes = s.getInt64(0);
+    if (!(lengthMinutes === 0n)) {
+      out.lengthMinutes = lengthMinutes;
+    }
+    const subtitle = s.getText(12);
+    if (!(subtitle === "")) {
+      out.subtitle = subtitle;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `ScanSummary` (2 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const ScanSummaryCodec: StructCodec<T.ScanSummary> = {
+  dataWords: 2,
+  pointerCount: 1,
+  write(s, v, caps) {
+    s.setUint32(0, v.accounts);
+    s.setUint32(1, v.booksUpserted);
+    s.setUint32(2, v.pages);
+    s.setUint32(3, v.skippedDisabled);
+    {
+      const items = s.initStructList(0, v.books.length, 1, 13);
+      for (let i = 0; i < items.length; i++) {
+        ScanBookCodec.write(items[i]!, v.books[i]!, caps);
+      }
+    }
+  },
+  read(s, caps) {
+    return {
+      accounts: s.getUint32(0),
+      booksUpserted: s.getUint32(1),
+      pages: s.getUint32(2),
+      skippedDisabled: s.getUint32(3),
+      books: s.getStructList(0, 1, 13).map((item) => ScanBookCodec.read(item, caps)),
+    };
+  },
+};
+
+/**
+ * Wire codec for `ScanReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const ScanReplyCodec: StructCodec<T.ScanReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        ScanSummaryCodec.write(s.initStruct(0, 2, 1), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("ScanReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: ScanSummaryCodec.read(s.getStruct(0, 2, 1), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("ScanReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `FetchOptions` (1 data words, 4 pointers).
+ *
+ * @internal
+ */
+export const FetchOptionsCodec: StructCodec<T.FetchOptions> = {
+  dataWords: 1,
+  pointerCount: 4,
+  write(s, v, caps) {
+    void caps;
+    s.setBool(0, v.widevine);
+    s.setBool(1, v.xheAac);
+    if (v.widevineCdmPath !== undefined) {
+      s.setText(0, v.widevineCdmPath);
+    }
+    if (v.widevineCdmProvider !== undefined) {
+      s.setText(1, v.widevineCdmProvider);
+    }
+    s.setBool(2, v.downloadCover);
+    s.setBool(3, v.downloadPdf);
+    s.setText(2, v.coverSize);
+    s.setText(3, v.chapterLayout);
+    s.setBool(4, v.stripAudibleBrandAudio);
+    s.setBool(5, v.downloadClipsBookmarks);
+    s.setBool(6, v.retainAaxFile);
+    s.setUint32(1, v.downloadSpeedLimitKbps);
+    s.setBool(7, v.saveMetadataJson);
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.FetchOptions = {
+      widevine: s.getBool(0),
+      xheAac: s.getBool(1),
+      downloadCover: s.getBool(2),
+      downloadPdf: s.getBool(3),
+      coverSize: s.getText(2),
+      chapterLayout: s.getText(3),
+      stripAudibleBrandAudio: s.getBool(4),
+      downloadClipsBookmarks: s.getBool(5),
+      retainAaxFile: s.getBool(6),
+      downloadSpeedLimitKbps: s.getUint32(1),
+      saveMetadataJson: s.getBool(7),
+    };
+    const widevineCdmPath = s.getText(0);
+    if (!(widevineCdmPath === "")) {
+      out.widevineCdmPath = widevineCdmPath;
+    }
+    const widevineCdmProvider = s.getText(1);
+    if (!(widevineCdmProvider === "")) {
+      out.widevineCdmProvider = widevineCdmProvider;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `FetchTitleParams` (0 data words, 7 pointers).
+ *
+ * @internal
+ */
+export const FetchTitleParamsCodec: StructCodec<T.FetchTitleParams> = {
+  dataWords: 0,
+  pointerCount: 7,
+  write(s, v, caps) {
+    s.setText(0, v.pluginDataDir);
+    s.setText(1, v.accountId);
+    s.setText(2, v.titleId);
+    s.setText(3, v.cacheDir);
+    if (v.credentials !== undefined) {
+      s.setData(4, v.credentials);
+    }
+    ExtensibleConfigCodec.write(s.initStruct(5, 1, 2), v.sourceConfig, caps);
+    FetchOptionsCodec.write(s.initStruct(6, 1, 4), v.fetch, caps);
+  },
+  read(s, caps) {
+    const out: T.FetchTitleParams = {
+      pluginDataDir: s.getText(0),
+      accountId: s.getText(1),
+      titleId: s.getText(2),
+      cacheDir: s.getText(3),
+      sourceConfig: ExtensibleConfigCodec.read(s.getStruct(5, 1, 2), caps),
+      fetch: FetchOptionsCodec.read(s.getStruct(6, 1, 4), caps),
+    };
+    const credentials = s.getData(4);
+    if (!(credentials.length === 0)) {
+      out.credentials = credentials;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `PlainPart` (1 data words, 2 pointers).
+ *
+ * @internal
+ */
+export const PlainPartCodec: StructCodec<T.PlainPart> = {
+  dataWords: 1,
+  pointerCount: 2,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.path);
+    if (v.title !== undefined) {
+      s.setText(1, v.title);
+    }
+    if (v.durationMs !== undefined) {
+      s.setUint64(0, BigInt(v.durationMs));
+    }
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.PlainPart = {
+      path: s.getText(0),
+    };
+    const title = s.getText(1);
+    if (!(title === "")) {
+      out.title = title;
+    }
+    const durationMs = Number(s.getUint64(0));
+    if (!(durationMs === 0)) {
+      out.durationMs = durationMs;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `ChapterMarker` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const ChapterMarkerCodec: StructCodec<T.ChapterMarker> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.title);
+    s.setUint64(0, BigInt(v.startMs));
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      title: s.getText(0),
+      startMs: Number(s.getUint64(0)),
+    };
+  },
+};
+
+/**
+ * Wire codec for `PlainFetch` (0 data words, 5 pointers).
+ *
+ * @internal
+ */
+export const PlainFetchCodec: StructCodec<T.PlainFetch> = {
+  dataWords: 0,
+  pointerCount: 5,
+  write(s, v, caps) {
+    {
+      const items = s.initStructList(0, v.parts.length, 1, 2);
+      for (let i = 0; i < items.length; i++) {
+        PlainPartCodec.write(items[i]!, v.parts[i]!, caps);
+      }
+    }
+    if (v.m4bPath !== undefined) {
+      s.setText(1, v.m4bPath);
+    }
+    if (v.coverPath !== undefined) {
+      s.setText(2, v.coverPath);
+    }
+    {
+      const items = s.initStructList(3, v.chapters.length, 1, 1);
+      for (let i = 0; i < items.length; i++) {
+        ChapterMarkerCodec.write(items[i]!, v.chapters[i]!, caps);
+      }
+    }
+    if (v.pdfUrl !== undefined) {
+      s.setText(4, v.pdfUrl);
+    }
+  },
+  read(s, caps) {
+    const out: T.PlainFetch = {
+      parts: s.getStructList(0, 1, 2).map((item) => PlainPartCodec.read(item, caps)),
+      chapters: s.getStructList(3, 1, 1).map((item) => ChapterMarkerCodec.read(item, caps)),
+    };
+    const m4bPath = s.getText(1);
+    if (!(m4bPath === "")) {
+      out.m4bPath = m4bPath;
+    }
+    const coverPath = s.getText(2);
+    if (!(coverPath === "")) {
+      out.coverPath = coverPath;
+    }
+    const pdfUrl = s.getText(4);
+    if (!(pdfUrl === "")) {
+      out.pdfUrl = pdfUrl;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `FetchTitleReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const FetchTitleReplyCodec: StructCodec<T.FetchTitleReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        PlainFetchCodec.write(s.initStruct(0, 0, 5), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("FetchTitleReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: PlainFetchCodec.read(s.getStruct(0, 0, 5), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("FetchTitleReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `SourceAccounts` (0 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const SourceAccountsCodec: StructCodec<T.SourceAccounts> = {
+  dataWords: 0,
+  pointerCount: 1,
+  write(s, v, caps) {
+    {
+      const items = s.initStructList(0, v.accounts.length, 1, 4);
+      for (let i = 0; i < items.length; i++) {
+        SourceAccountCodec.write(items[i]!, v.accounts[i]!, caps);
+      }
+    }
+  },
+  read(s, caps) {
+    return {
+      accounts: s.getStructList(0, 1, 4).map((item) => SourceAccountCodec.read(item, caps)),
+    };
+  },
+};
+
+/**
+ * Wire codec for `SourceAccountsReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const SourceAccountsReplyCodec: StructCodec<T.SourceAccountsReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        SourceAccountsCodec.write(s.initStruct(0, 0, 1), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("SourceAccountsReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: SourceAccountsCodec.read(s.getStruct(0, 0, 1), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("SourceAccountsReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `SearchCatalogParams` (2 data words, 3 pointers).
+ *
+ * @internal
+ */
+export const SearchCatalogParamsCodec: StructCodec<T.SearchCatalogParams> = {
+  dataWords: 2,
+  pointerCount: 3,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.query);
+    s.setText(1, v.region);
+    s.setUint32(0, v.limit);
+    s.setUint32(1, v.page);
+    s.setUint16(4, ord(A.CATALOG_SORTS, v.sort, "CatalogSort"));
+    s.setUint16(5, ord(A.CATALOG_FIELDS, v.field, "CatalogField"));
+    if (v.language !== undefined) {
+      s.setText(2, v.language);
+    }
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.SearchCatalogParams = {
+      query: s.getText(0),
+      region: s.getText(1),
+      limit: s.getUint32(0),
+      page: s.getUint32(1),
+      sort: fromOrd(A.CATALOG_SORTS, s.getUint16(4), "CatalogSort"),
+      field: fromOrd(A.CATALOG_FIELDS, s.getUint16(5), "CatalogField"),
+    };
+    const language = s.getText(2);
+    if (!(language === "")) {
+      out.language = language;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `ExpandCandidatesParams` (1 data words, 10 pointers).
+ *
+ * @internal
+ */
+export const ExpandCandidatesParamsCodec: StructCodec<T.ExpandCandidatesParams> = {
+  dataWords: 1,
+  pointerCount: 10,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.source);
+    s.setText(1, v.productId);
+    s.setText(2, v.title);
+    if (v.authors !== undefined) {
+      s.setText(3, v.authors);
+    }
+    if (v.narrators !== undefined) {
+      s.setText(4, v.narrators);
+    }
+    if (v.series !== undefined) {
+      s.setText(5, v.series);
+    }
+    if (v.seriesAsin !== undefined) {
+      s.setText(6, v.seriesAsin);
+    }
+    if (v.asin !== undefined) {
+      s.setText(7, v.asin);
+    }
+    if (v.isbn !== undefined) {
+      s.setText(8, v.isbn);
+    }
+    s.setText(9, v.region);
+    s.setUint32(0, v.limit);
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.ExpandCandidatesParams = {
+      source: s.getText(0),
+      productId: s.getText(1),
+      title: s.getText(2),
+      region: s.getText(9),
+      limit: s.getUint32(0),
+    };
+    const authors = s.getText(3);
+    if (!(authors === "")) {
+      out.authors = authors;
+    }
+    const narrators = s.getText(4);
+    if (!(narrators === "")) {
+      out.narrators = narrators;
+    }
+    const series = s.getText(5);
+    if (!(series === "")) {
+      out.series = series;
+    }
+    const seriesAsin = s.getText(6);
+    if (!(seriesAsin === "")) {
+      out.seriesAsin = seriesAsin;
+    }
+    const asin = s.getText(7);
+    if (!(asin === "")) {
+      out.asin = asin;
+    }
+    const isbn = s.getText(8);
+    if (!(isbn === "")) {
+      out.isbn = isbn;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `PurchaseHintParams` (1 data words, 6 pointers).
+ *
+ * @internal
+ */
+export const PurchaseHintParamsCodec: StructCodec<T.PurchaseHintParams> = {
+  dataWords: 1,
+  pointerCount: 6,
+  write(s, v, caps) {
+    void caps;
+    if (v.productId !== undefined) {
+      s.setText(0, v.productId);
+    }
+    if (v.title !== undefined) {
+      s.setText(1, v.title);
+    }
+    if (v.authors !== undefined) {
+      s.setText(2, v.authors);
+    }
+    if (v.asin !== undefined) {
+      s.setText(3, v.asin);
+    }
+    if (v.isbn !== undefined) {
+      s.setText(4, v.isbn);
+    }
+    s.setText(5, v.region);
+    s.setBool(0, v.withPrice);
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.PurchaseHintParams = {
+      region: s.getText(5),
+      withPrice: s.getBool(0),
+    };
+    const productId = s.getText(0);
+    if (!(productId === "")) {
+      out.productId = productId;
+    }
+    const title = s.getText(1);
+    if (!(title === "")) {
+      out.title = title;
+    }
+    const authors = s.getText(2);
+    if (!(authors === "")) {
+      out.authors = authors;
+    }
+    const asin = s.getText(3);
+    if (!(asin === "")) {
+      out.asin = asin;
+    }
+    const isbn = s.getText(4);
+    if (!(isbn === "")) {
+      out.isbn = isbn;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `ListDealsParams` (1 data words, 0 pointers).
+ *
+ * @internal
+ */
+export const ListDealsParamsCodec: StructCodec<T.ListDealsParams> = {
+  dataWords: 1,
+  pointerCount: 0,
+  write(s, v, caps) {
+    void caps;
+    if (v.limit !== undefined) {
+      s.setUint32(0, v.limit);
+    }
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.ListDealsParams = {
+    };
+    const limit = s.getUint32(0);
+    if (!(limit === 0)) {
+      out.limit = limit;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `CatalogDetailParams` (0 data words, 2 pointers).
+ *
+ * @internal
+ */
+export const CatalogDetailParamsCodec: StructCodec<T.CatalogDetailParams> = {
+  dataWords: 0,
+  pointerCount: 2,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.productId);
+    if (v.isbn !== undefined) {
+      s.setText(1, v.isbn);
+    }
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.CatalogDetailParams = {
+      productId: s.getText(0),
+    };
+    const isbn = s.getText(1);
+    if (!(isbn === "")) {
+      out.isbn = isbn;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `CatalogHit` (5 data words, 19 pointers).
+ *
+ * @internal
+ */
+export const CatalogHitCodec: StructCodec<T.CatalogHit> = {
+  dataWords: 5,
+  pointerCount: 19,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.productId);
+    s.setText(1, v.title);
+    if (v.authors !== undefined) {
+      s.setText(2, v.authors);
+    }
+    if (v.narrators !== undefined) {
+      s.setText(3, v.narrators);
+    }
+    if (v.series !== undefined) {
+      s.setText(4, v.series);
+    }
+    if (v.seriesIndex !== undefined) {
+      s.setText(5, v.seriesIndex);
+    }
+    if (v.asin !== undefined) {
+      s.setText(6, v.asin);
+    }
+    if (v.isbn !== undefined) {
+      s.setText(7, v.isbn);
+    }
+    if (v.url !== undefined) {
+      s.setText(8, v.url);
+    }
+    if (v.coverUrl !== undefined) {
+      s.setText(9, v.coverUrl);
+    }
+    s.setText(10, v.origin);
+    if (v.subtitle !== undefined) {
+      s.setText(11, v.subtitle);
+    }
+    if (v.description !== undefined) {
+      s.setText(12, v.description);
+    }
+    if (v.publisher !== undefined) {
+      s.setText(13, v.publisher);
+    }
+    if (v.lengthMinutes !== undefined) {
+      s.setInt64(0, v.lengthMinutes);
+    }
+    if (v.publishedAt !== undefined) {
+      s.setText(14, v.publishedAt);
+    }
+    if (v.categories !== undefined) {
+      s.setText(15, v.categories);
+    }
+    if (v.language !== undefined) {
+      s.setText(16, v.language);
+    }
+    if (v.priceCents !== undefined) {
+      s.setInt64(1, v.priceCents);
+    }
+    if (v.currency !== undefined) {
+      s.setText(17, v.currency);
+    }
+    if (v.priceLabel !== undefined) {
+      s.setText(18, v.priceLabel);
+    }
+    if (v.ratingOverall !== undefined) {
+      s.setFloat64(2, v.ratingOverall);
+    }
+    if (v.ratingCount !== undefined) {
+      s.setInt64(3, v.ratingCount);
+    }
+    s.setUint16(16, ord(A.ABRIDGEMENTS, v.abridgement, "Abridgement"));
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.CatalogHit = {
+      productId: s.getText(0),
+      title: s.getText(1),
+      origin: s.getText(10),
+      abridgement: fromOrd(A.ABRIDGEMENTS, s.getUint16(16), "Abridgement"),
+    };
+    const authors = s.getText(2);
+    if (!(authors === "")) {
+      out.authors = authors;
+    }
+    const narrators = s.getText(3);
+    if (!(narrators === "")) {
+      out.narrators = narrators;
+    }
+    const series = s.getText(4);
+    if (!(series === "")) {
+      out.series = series;
+    }
+    const seriesIndex = s.getText(5);
+    if (!(seriesIndex === "")) {
+      out.seriesIndex = seriesIndex;
+    }
+    const asin = s.getText(6);
+    if (!(asin === "")) {
+      out.asin = asin;
+    }
+    const isbn = s.getText(7);
+    if (!(isbn === "")) {
+      out.isbn = isbn;
+    }
+    const url = s.getText(8);
+    if (!(url === "")) {
+      out.url = url;
+    }
+    const coverUrl = s.getText(9);
+    if (!(coverUrl === "")) {
+      out.coverUrl = coverUrl;
+    }
+    const subtitle = s.getText(11);
+    if (!(subtitle === "")) {
+      out.subtitle = subtitle;
+    }
+    const description = s.getText(12);
+    if (!(description === "")) {
+      out.description = description;
+    }
+    const publisher = s.getText(13);
+    if (!(publisher === "")) {
+      out.publisher = publisher;
+    }
+    const lengthMinutes = s.getInt64(0);
+    if (!(lengthMinutes === 0n)) {
+      out.lengthMinutes = lengthMinutes;
+    }
+    const publishedAt = s.getText(14);
+    if (!(publishedAt === "")) {
+      out.publishedAt = publishedAt;
+    }
+    const categories = s.getText(15);
+    if (!(categories === "")) {
+      out.categories = categories;
+    }
+    const language = s.getText(16);
+    if (!(language === "")) {
+      out.language = language;
+    }
+    const priceCents = s.getInt64(1);
+    if (!(priceCents === 0n)) {
+      out.priceCents = priceCents;
+    }
+    const currency = s.getText(17);
+    if (!(currency === "")) {
+      out.currency = currency;
+    }
+    const priceLabel = s.getText(18);
+    if (!(priceLabel === "")) {
+      out.priceLabel = priceLabel;
+    }
+    const ratingOverall = s.getFloat64(2);
+    if (!(ratingOverall === 0)) {
+      out.ratingOverall = ratingOverall;
+    }
+    const ratingCount = s.getInt64(3);
+    if (!(ratingCount === 0n)) {
+      out.ratingCount = ratingCount;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `CatalogHits` (0 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const CatalogHitsCodec: StructCodec<T.CatalogHits> = {
+  dataWords: 0,
+  pointerCount: 1,
+  write(s, v, caps) {
+    {
+      const items = s.initStructList(0, v.hits.length, 5, 19);
+      for (let i = 0; i < items.length; i++) {
+        CatalogHitCodec.write(items[i]!, v.hits[i]!, caps);
+      }
+    }
+  },
+  read(s, caps) {
+    return {
+      hits: s.getStructList(0, 5, 19).map((item) => CatalogHitCodec.read(item, caps)),
+    };
+  },
+};
+
+/**
+ * Wire codec for `CatalogHitsReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const CatalogHitsReplyCodec: StructCodec<T.CatalogHitsReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        CatalogHitsCodec.write(s.initStruct(0, 0, 1), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("CatalogHitsReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: CatalogHitsCodec.read(s.getStruct(0, 0, 1), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("CatalogHitsReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `CatalogDetail` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const CatalogDetailCodec: StructCodec<T.CatalogDetail> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    s.setBool(0, v.found);
+    CatalogHitCodec.write(s.initStruct(0, 5, 19), v.hit, caps);
+  },
+  read(s, caps) {
+    return {
+      found: s.getBool(0),
+      hit: CatalogHitCodec.read(s.getStruct(0, 5, 19), caps),
+    };
+  },
+};
+
+/**
+ * Wire codec for `CatalogDetailReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const CatalogDetailReplyCodec: StructCodec<T.CatalogDetailReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        CatalogDetailCodec.write(s.initStruct(0, 1, 1), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("CatalogDetailReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: CatalogDetailCodec.read(s.getStruct(0, 1, 1), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("CatalogDetailReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `PurchaseHint` (3 data words, 7 pointers).
+ *
+ * @internal
+ */
+export const PurchaseHintCodec: StructCodec<T.PurchaseHint> = {
+  dataWords: 3,
+  pointerCount: 7,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.productId);
+    if (v.title !== undefined) {
+      s.setText(1, v.title);
+    }
+    if (v.url !== undefined) {
+      s.setText(2, v.url);
+    }
+    if (v.priceCents !== undefined) {
+      s.setInt64(0, v.priceCents);
+    }
+    if (v.currency !== undefined) {
+      s.setText(3, v.currency);
+    }
+    if (v.priceLabel !== undefined) {
+      s.setText(4, v.priceLabel);
+    }
+    if (v.listPriceCents !== undefined) {
+      s.setInt64(1, v.listPriceCents);
+    }
+    if (v.listPriceLabel !== undefined) {
+      s.setText(5, v.listPriceLabel);
+    }
+    if (v.memberPriceCents !== undefined) {
+      s.setInt64(2, v.memberPriceCents);
+    }
+    if (v.memberPriceLabel !== undefined) {
+      s.setText(6, v.memberPriceLabel);
+    }
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.PurchaseHint = {
+      productId: s.getText(0),
+    };
+    const title = s.getText(1);
+    if (!(title === "")) {
+      out.title = title;
+    }
+    const url = s.getText(2);
+    if (!(url === "")) {
+      out.url = url;
+    }
+    const priceCents = s.getInt64(0);
+    if (!(priceCents === 0n)) {
+      out.priceCents = priceCents;
+    }
+    const currency = s.getText(3);
+    if (!(currency === "")) {
+      out.currency = currency;
+    }
+    const priceLabel = s.getText(4);
+    if (!(priceLabel === "")) {
+      out.priceLabel = priceLabel;
+    }
+    const listPriceCents = s.getInt64(1);
+    if (!(listPriceCents === 0n)) {
+      out.listPriceCents = listPriceCents;
+    }
+    const listPriceLabel = s.getText(5);
+    if (!(listPriceLabel === "")) {
+      out.listPriceLabel = listPriceLabel;
+    }
+    const memberPriceCents = s.getInt64(2);
+    if (!(memberPriceCents === 0n)) {
+      out.memberPriceCents = memberPriceCents;
+    }
+    const memberPriceLabel = s.getText(6);
+    if (!(memberPriceLabel === "")) {
+      out.memberPriceLabel = memberPriceLabel;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `PurchaseHintResult` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const PurchaseHintResultCodec: StructCodec<T.PurchaseHintResult> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    s.setBool(0, v.found);
+    PurchaseHintCodec.write(s.initStruct(0, 3, 7), v.hint, caps);
+  },
+  read(s, caps) {
+    return {
+      found: s.getBool(0),
+      hint: PurchaseHintCodec.read(s.getStruct(0, 3, 7), caps),
+    };
+  },
+};
+
+/**
+ * Wire codec for `PurchaseHintReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const PurchaseHintReplyCodec: StructCodec<T.PurchaseHintReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        PurchaseHintResultCodec.write(s.initStruct(0, 1, 1), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("PurchaseHintReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: PurchaseHintResultCodec.read(s.getStruct(0, 1, 1), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("PurchaseHintReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `ScanLibraryParams` (1 data words, 0 pointers).
+ *
+ * @internal
+ */
+export const ScanLibraryParamsCodec: StructCodec<T.ScanLibraryParams> = {
+  dataWords: 1,
+  pointerCount: 0,
+  write(s, v, caps) {
+    void caps;
+    s.setBool(0, v.force);
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      force: s.getBool(0),
+    };
+  },
+};
+
+/**
+ * Wire codec for `AuthenticateUserParams` (0 data words, 2 pointers).
+ *
+ * @internal
+ */
+export const AuthenticateUserParamsCodec: StructCodec<T.AuthenticateUserParams> = {
+  dataWords: 0,
+  pointerCount: 2,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.username);
+    s.setText(1, v.password);
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      username: s.getText(0),
+      password: s.getText(1),
+    };
+  },
+};
+
+/**
+ * Wire codec for `ExternalUser` (0 data words, 4 pointers).
+ *
+ * @internal
+ */
+export const ExternalUserCodec: StructCodec<T.ExternalUser> = {
+  dataWords: 0,
+  pointerCount: 4,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.provider);
+    s.setText(1, v.externalUserId);
+    if (v.displayName !== undefined) {
+      s.setText(2, v.displayName);
+    }
+    if (v.accessToken !== undefined) {
+      s.setText(3, v.accessToken);
+    }
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.ExternalUser = {
+      provider: s.getText(0),
+      externalUserId: s.getText(1),
+    };
+    const displayName = s.getText(2);
+    if (!(displayName === "")) {
+      out.displayName = displayName;
+    }
+    const accessToken = s.getText(3);
+    if (!(accessToken === "")) {
+      out.accessToken = accessToken;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `ExternalUserReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const ExternalUserReplyCodec: StructCodec<T.ExternalUserReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        ExternalUserCodec.write(s.initStruct(0, 0, 4), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("ExternalUserReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: ExternalUserCodec.read(s.getStruct(0, 0, 4), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("ExternalUserReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `EventPollResult` (0 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const EventPollResultCodec: StructCodec<T.EventPollResult> = {
+  dataWords: 0,
+  pointerCount: 1,
+  write(s, v, caps) {
+    {
+      const items = s.initStructList(0, v.users.length, 0, 4);
+      for (let i = 0; i < items.length; i++) {
+        ExternalUserCodec.write(items[i]!, v.users[i]!, caps);
+      }
+    }
+  },
+  read(s, caps) {
+    return {
+      users: s.getStructList(0, 0, 4).map((item) => ExternalUserCodec.read(item, caps)),
+    };
+  },
+};
+
+/**
+ * Wire codec for `EventPollReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const EventPollReplyCodec: StructCodec<T.EventPollReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        EventPollResultCodec.write(s.initStruct(0, 0, 1), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("EventPollReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: EventPollResultCodec.read(s.getStruct(0, 0, 1), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("EventPollReply", disc);
+    }
+  },
+};
+
+/**
+ * Wire codec for `ListeningProgress` (6 data words, 6 pointers).
+ *
+ * @internal
+ */
+export const ListeningProgressCodec: StructCodec<T.ListeningProgress> = {
+  dataWords: 6,
+  pointerCount: 6,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.externalUserId);
+    s.setText(1, v.externalItemId);
+    if (v.identityId !== undefined) {
+      s.setInt64(0, v.identityId);
+    }
+    if (v.title !== undefined) {
+      s.setText(2, v.title);
+    }
+    if (v.authors !== undefined) {
+      s.setText(3, v.authors);
+    }
+    if (v.asin !== undefined) {
+      s.setText(4, v.asin);
+    }
+    if (v.isbn !== undefined) {
+      s.setText(5, v.isbn);
+    }
+    if (v.progress !== undefined) {
+      s.setFloat64(1, v.progress);
+    }
+    if (v.currentTimeSeconds !== undefined) {
+      s.setFloat64(2, v.currentTimeSeconds);
+    }
+    if (v.durationSeconds !== undefined) {
+      s.setFloat64(3, v.durationSeconds);
+    }
+    s.setBool(256, v.isFinished);
+    if (v.lastListenedAtUnixMs !== undefined) {
+      s.setUint64(5, BigInt(v.lastListenedAtUnixMs));
+    }
+  },
+  read(s, caps) {
+    void caps;
+    const out: T.ListeningProgress = {
+      externalUserId: s.getText(0),
+      externalItemId: s.getText(1),
+      isFinished: s.getBool(256),
+    };
+    const identityId = s.getInt64(0);
+    if (!(identityId === 0n)) {
+      out.identityId = identityId;
+    }
+    const title = s.getText(2);
+    if (!(title === "")) {
+      out.title = title;
+    }
+    const authors = s.getText(3);
+    if (!(authors === "")) {
+      out.authors = authors;
+    }
+    const asin = s.getText(4);
+    if (!(asin === "")) {
+      out.asin = asin;
+    }
+    const isbn = s.getText(5);
+    if (!(isbn === "")) {
+      out.isbn = isbn;
+    }
+    const progress = s.getFloat64(1);
+    if (!(progress === 0)) {
+      out.progress = progress;
+    }
+    const currentTimeSeconds = s.getFloat64(2);
+    if (!(currentTimeSeconds === 0)) {
+      out.currentTimeSeconds = currentTimeSeconds;
+    }
+    const durationSeconds = s.getFloat64(3);
+    if (!(durationSeconds === 0)) {
+      out.durationSeconds = durationSeconds;
+    }
+    const lastListenedAtUnixMs = Number(s.getUint64(5));
+    if (!(lastListenedAtUnixMs === 0)) {
+      out.lastListenedAtUnixMs = lastListenedAtUnixMs;
+    }
+    return out;
+  },
+};
+
+/**
+ * Wire codec for `SyncListeningResult` (0 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const SyncListeningResultCodec: StructCodec<T.SyncListeningResult> = {
+  dataWords: 0,
+  pointerCount: 1,
+  write(s, v, caps) {
+    {
+      const items = s.initStructList(0, v.items.length, 6, 6);
+      for (let i = 0; i < items.length; i++) {
+        ListeningProgressCodec.write(items[i]!, v.items[i]!, caps);
+      }
+    }
+  },
+  read(s, caps) {
+    return {
+      items: s.getStructList(0, 6, 6).map((item) => ListeningProgressCodec.read(item, caps)),
+    };
+  },
+};
+
+/**
+ * Wire codec for `SyncListeningReply` (1 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const SyncListeningReplyCodec: StructCodec<T.SyncListeningReply> = {
+  dataWords: 1,
+  pointerCount: 1,
+  write(s, v, caps) {
+    switch (v.kind) {
+      case "ok":
+        s.setUint16(0, 0);
+        SyncListeningResultCodec.write(s.initStruct(0, 0, 1), v.value, caps);
+        break;
+      case "err":
+        s.setUint16(0, 1);
+        PluginErrorCodec.write(s.initStruct(0, 0, 2), v.value, caps);
+        break;
+      default:
+        throw unknownUnion("SyncListeningReply", (v as { kind: string }).kind);
+    }
+  },
+  read(s, caps) {
+    const disc = s.getUint16(0);
+    switch (disc) {
+      case 0:
+        return { kind: "ok", value: SyncListeningResultCodec.read(s.getStruct(0, 0, 1), caps) };
+      case 1:
+        return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
+      default:
+        throw unknownUnion("SyncListeningReply", disc);
+    }
   },
 };
 
@@ -4679,13 +6799,11 @@ export const ContentSourceLoginParamsCodec: StructCodec<ContentSourceLoginParams
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    LoginParamsCodec.write(s.initStruct(0, 2, 10), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: LoginParamsCodec.read(s.getStruct(0, 2, 10), caps),
     };
   },
 };
@@ -4699,11 +6817,11 @@ export const ContentSourceLoginResultsCodec: StructCodec<ContentSourceLoginResul
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    LoginReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: LoginReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -4717,13 +6835,11 @@ export const ContentSourceScanParamsCodec: StructCodec<ContentSourceScanParams> 
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    ScanParamsCodec.write(s.initStruct(0, 1, 3), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: ScanParamsCodec.read(s.getStruct(0, 1, 3), caps),
     };
   },
 };
@@ -4737,11 +6853,11 @@ export const ContentSourceScanResultsCodec: StructCodec<ContentSourceScanResults
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    ScanReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: ScanReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -4755,13 +6871,11 @@ export const ContentSourceFetchTitleParamsCodec: StructCodec<ContentSourceFetchT
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    FetchTitleParamsCodec.write(s.initStruct(0, 0, 7), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: FetchTitleParamsCodec.read(s.getStruct(0, 0, 7), caps),
     };
   },
 };
@@ -4775,11 +6889,11 @@ export const ContentSourceFetchTitleResultsCodec: StructCodec<ContentSourceFetch
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    FetchTitleReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: FetchTitleReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -4813,11 +6927,11 @@ export const ContentSourceListAccountsResultsCodec: StructCodec<ContentSourceLis
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    SourceAccountsReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: SourceAccountsReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -4831,13 +6945,11 @@ export const ContentSourceLoginStartParamsCodec: StructCodec<ContentSourceLoginS
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    LoginParamsCodec.write(s.initStruct(0, 2, 10), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: LoginParamsCodec.read(s.getStruct(0, 2, 10), caps),
     };
   },
 };
@@ -4851,11 +6963,11 @@ export const ContentSourceLoginStartResultsCodec: StructCodec<ContentSourceLogin
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    LoginStartReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: LoginStartReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -4869,13 +6981,11 @@ export const ContentSourceLoginCompleteParamsCodec: StructCodec<ContentSourceLog
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    LoginCompleteParamsCodec.write(s.initStruct(0, 0, 1), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: LoginCompleteParamsCodec.read(s.getStruct(0, 0, 1), caps),
     };
   },
 };
@@ -4889,11 +6999,11 @@ export const ContentSourceLoginCompleteResultsCodec: StructCodec<ContentSourceLo
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    LoginReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: LoginReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -4907,13 +7017,11 @@ export const ContentSourceSearchCatalogParamsCodec: StructCodec<ContentSourceSea
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    SearchCatalogParamsCodec.write(s.initStruct(0, 2, 3), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: SearchCatalogParamsCodec.read(s.getStruct(0, 2, 3), caps),
     };
   },
 };
@@ -4927,11 +7035,11 @@ export const ContentSourceSearchCatalogResultsCodec: StructCodec<ContentSourceSe
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    CatalogHitsReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: CatalogHitsReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -4945,13 +7053,11 @@ export const ContentSourceExpandCandidatesParamsCodec: StructCodec<ContentSource
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    ExpandCandidatesParamsCodec.write(s.initStruct(0, 1, 10), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: ExpandCandidatesParamsCodec.read(s.getStruct(0, 1, 10), caps),
     };
   },
 };
@@ -4965,11 +7071,11 @@ export const ContentSourceExpandCandidatesResultsCodec: StructCodec<ContentSourc
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    CatalogHitsReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: CatalogHitsReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -4983,13 +7089,11 @@ export const ContentSourcePurchaseHintParamsCodec: StructCodec<ContentSourcePurc
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    PurchaseHintParamsCodec.write(s.initStruct(0, 1, 6), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: PurchaseHintParamsCodec.read(s.getStruct(0, 1, 6), caps),
     };
   },
 };
@@ -5003,11 +7107,11 @@ export const ContentSourcePurchaseHintResultsCodec: StructCodec<ContentSourcePur
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    PurchaseHintReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: PurchaseHintReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -5021,13 +7125,11 @@ export const ContentSourceListDealsParamsCodec: StructCodec<ContentSourceListDea
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    ListDealsParamsCodec.write(s.initStruct(0, 1, 0), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: ListDealsParamsCodec.read(s.getStruct(0, 1, 0), caps),
     };
   },
 };
@@ -5041,11 +7143,11 @@ export const ContentSourceListDealsResultsCodec: StructCodec<ContentSourceListDe
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    CatalogHitsReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: CatalogHitsReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -5117,11 +7219,11 @@ export const ContentSourceDiagnoseResultsCodec: StructCodec<ContentSourceDiagnos
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    DiagnoseReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: DiagnoseReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -5135,13 +7237,11 @@ export const ContentSourceCatalogDetailParamsCodec: StructCodec<ContentSourceCat
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    CatalogDetailParamsCodec.write(s.initStruct(0, 0, 2), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: CatalogDetailParamsCodec.read(s.getStruct(0, 0, 2), caps),
     };
   },
 };
@@ -5155,11 +7255,11 @@ export const ContentSourceCatalogDetailResultsCodec: StructCodec<ContentSourceCa
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    CatalogDetailReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: CatalogDetailReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -5343,11 +7443,11 @@ export const IntegrationDiagnoseResultsCodec: StructCodec<IntegrationDiagnoseRes
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    DiagnoseReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: DiagnoseReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -5361,13 +7461,11 @@ export const IntegrationScanLibraryParamsCodec: StructCodec<IntegrationScanLibra
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    ScanLibraryParamsCodec.write(s.initStruct(0, 1, 0), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: ScanLibraryParamsCodec.read(s.getStruct(0, 1, 0), caps),
     };
   },
 };
@@ -5419,11 +7517,11 @@ export const IntegrationSyncListeningResultsCodec: StructCodec<IntegrationSyncLi
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    SyncListeningReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: SyncListeningReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -5437,13 +7535,11 @@ export const IntegrationAuthenticateUserParamsCodec: StructCodec<IntegrationAuth
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    AuthenticateUserParamsCodec.write(s.initStruct(0, 0, 2), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: AuthenticateUserParamsCodec.read(s.getStruct(0, 0, 2), caps),
     };
   },
 };
@@ -5457,11 +7553,11 @@ export const IntegrationAuthenticateUserResultsCodec: StructCodec<IntegrationAut
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    ExternalUserReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: ExternalUserReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -5495,11 +7591,11 @@ export const IntegrationPollEventsResultsCodec: StructCodec<IntegrationPollEvent
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    EventPollReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: EventPollReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -6044,11 +8140,11 @@ export const BookclerkPluginDestinationParamsCodec: StructCodec<BookclerkPluginD
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    DestinationContextCodec.write(s.initStruct(0, 0, 2), v.context, caps);
+    DestinationContextCodec.write(s.initStruct(0, 0, 1), v.context, caps);
   },
   read(s, caps) {
     return {
-      context: DestinationContextCodec.read(s.getStruct(0, 0, 2), caps),
+      context: DestinationContextCodec.read(s.getStruct(0, 0, 1), caps),
     };
   },
 };
@@ -6080,11 +8176,11 @@ export const BookclerkPluginSourceParamsCodec: StructCodec<BookclerkPluginSource
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    SourceContextCodec.write(s.initStruct(0, 0, 2), v.context, caps);
+    SourceContextCodec.write(s.initStruct(0, 0, 1), v.context, caps);
   },
   read(s, caps) {
     return {
-      context: SourceContextCodec.read(s.getStruct(0, 0, 2), caps),
+      context: SourceContextCodec.read(s.getStruct(0, 0, 1), caps),
     };
   },
 };
@@ -6116,11 +8212,11 @@ export const BookclerkPluginWorkerParamsCodec: StructCodec<BookclerkPluginWorker
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    WorkerContextCodec.write(s.initStruct(0, 0, 3), v.context, caps);
+    WorkerContextCodec.write(s.initStruct(0, 0, 2), v.context, caps);
   },
   read(s, caps) {
     return {
-      context: WorkerContextCodec.read(s.getStruct(0, 0, 3), caps),
+      context: WorkerContextCodec.read(s.getStruct(0, 0, 2), caps),
     };
   },
 };
@@ -6190,11 +8286,11 @@ export const BookclerkPluginContentSourceParamsCodec: StructCodec<BookclerkPlugi
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    ContentSourceContextCodec.write(s.initStruct(0, 0, 2), v.context, caps);
+    ContentSourceContextCodec.write(s.initStruct(0, 0, 1), v.context, caps);
   },
   read(s, caps) {
     return {
-      context: ContentSourceContextCodec.read(s.getStruct(0, 0, 2), caps),
+      context: ContentSourceContextCodec.read(s.getStruct(0, 0, 1), caps),
     };
   },
 };
@@ -6226,11 +8322,11 @@ export const BookclerkPluginIntegrationParamsCodec: StructCodec<BookclerkPluginI
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    IntegrationContextCodec.write(s.initStruct(0, 0, 2), v.context, caps);
+    IntegrationContextCodec.write(s.initStruct(0, 0, 1), v.context, caps);
   },
   read(s, caps) {
     return {
-      context: IntegrationContextCodec.read(s.getStruct(0, 0, 2), caps),
+      context: IntegrationContextCodec.read(s.getStruct(0, 0, 1), caps),
     };
   },
 };
@@ -6318,11 +8414,11 @@ export const BookclerkPluginCliDescribeResultsCodec: StructCodec<BookclerkPlugin
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    CliSchemaReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: CliSchemaReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
@@ -6336,13 +8432,11 @@ export const BookclerkPluginCliInvokeParamsCodec: StructCodec<BookclerkPluginCli
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    void caps;
-    s.setText(0, v.paramsJson);
+    CliInvokeParamsCodec.write(s.initStruct(0, 0, 2), v.params, caps);
   },
   read(s, caps) {
-    void caps;
     return {
-      paramsJson: s.getText(0),
+      params: CliInvokeParamsCodec.read(s.getStruct(0, 0, 2), caps),
     };
   },
 };
@@ -6356,11 +8450,11 @@ export const BookclerkPluginCliInvokeResultsCodec: StructCodec<BookclerkPluginCl
   dataWords: 0,
   pointerCount: 1,
   write(s, v, caps) {
-    JsonReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    CliInvokeReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
   },
   read(s, caps) {
     return {
-      result: JsonReplyCodec.read(s.getStruct(0, 1, 1), caps),
+      result: CliInvokeReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };

@@ -260,11 +260,21 @@ def _write_plugin_describe(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
     s.set_text_list(3, v["rpcFeatures"])
     _scalar_limits_codec.write(s.init_struct(4, 2, 0), v["scalarLimits"], caps)
     s.set_text_list(5, v["supportedRoles"])
-    s.set_text(6, v["metadataJson"])
+    s.set_text_list(6, v["capabilities"])
+    s.set_u16(2, _ord(A.PORTAL_AUTH_MODES, v["portalAuthMode"], "PortalAuthMode"))
+    if v.get("passwordEnvVar") is not None:
+        s.set_text(7, v["passwordEnvVar"])
+    s.set_text_list(8, v["aliases"])
+    s.set_u32(2, v["sortKey"])
+    _brand_codec.write(s.init_struct(9, 0, 6), v["brand"], caps)
+    items = s.init_struct_list(10, len(v["configOptions"]), 0, 3)
+    for item, elem in zip(items, v["configOptions"], strict=True):
+        _config_option_codec.write(item, elem, caps)
+    _cli_schema_codec.write(s.init_struct(11, 0, 1), v["cli"], caps)
 
 
 def _read_plugin_describe(s: _StructReader, caps: _CapTable) -> Any:
-    return {
+    out: dict[str, Any] = {
         "apiVersion": s.get_u32(0),
         "id": s.get_text(0),
         "kind": s.get_text(1),
@@ -272,12 +282,22 @@ def _read_plugin_describe(s: _StructReader, caps: _CapTable) -> Any:
         "rpcFeatures": s.get_text_list(3),
         "scalarLimits": _scalar_limits_codec.read(s.get_struct(4, 2, 0), caps),
         "supportedRoles": s.get_text_list(5),
-        "metadataJson": s.get_text(6),
+        "capabilities": s.get_text_list(6),
+        "portalAuthMode": _from_ord(A.PORTAL_AUTH_MODES, s.get_u16(2), "PortalAuthMode"),
+        "aliases": s.get_text_list(8),
+        "sortKey": s.get_u32(2),
+        "brand": _brand_codec.read(s.get_struct(9, 0, 6), caps),
+        "configOptions": [_config_option_codec.read(item, caps) for item in s.get_struct_list(10, 0, 3)],
+        "cli": _cli_schema_codec.read(s.get_struct(11, 0, 1), caps),
     }
+    password_env_var = s.get_text(7)
+    if not (password_env_var == ""):
+        out["passwordEnvVar"] = password_env_var
+    return out
 
 
-_plugin_describe_codec = _Codec(1, 7, _write_plugin_describe, _read_plugin_describe)
-"""Wire codec for ``PluginDescribe`` (1 data words, 7 pointers)."""
+_plugin_describe_codec = _Codec(2, 12, _write_plugin_describe, _read_plugin_describe)
+"""Wire codec for ``PluginDescribe`` (2 data words, 12 pointers)."""
 
 
 def _write_oidc_client_template(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
@@ -366,96 +386,86 @@ _extensible_config_codec = _Codec(1, 2, _write_extensible_config, _read_extensib
 
 
 def _write_destination_context(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["json"])
-    _extensible_config_codec.write(s.init_struct(1, 1, 2), v["config"], caps)
+    _extensible_config_codec.write(s.init_struct(0, 1, 2), v["config"], caps)
 
 
 def _read_destination_context(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "json": s.get_text(0),
-        "config": _extensible_config_codec.read(s.get_struct(1, 1, 2), caps),
+        "config": _extensible_config_codec.read(s.get_struct(0, 1, 2), caps),
     }
 
 
-_destination_context_codec = _Codec(0, 2, _write_destination_context, _read_destination_context)
-"""Wire codec for ``DestinationContext`` (0 data words, 2 pointers)."""
+_destination_context_codec = _Codec(0, 1, _write_destination_context, _read_destination_context)
+"""Wire codec for ``DestinationContext`` (0 data words, 1 pointers)."""
 
 
 def _write_source_context(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["json"])
-    _extensible_config_codec.write(s.init_struct(1, 1, 2), v["config"], caps)
+    _extensible_config_codec.write(s.init_struct(0, 1, 2), v["config"], caps)
 
 
 def _read_source_context(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "json": s.get_text(0),
-        "config": _extensible_config_codec.read(s.get_struct(1, 1, 2), caps),
+        "config": _extensible_config_codec.read(s.get_struct(0, 1, 2), caps),
     }
 
 
-_source_context_codec = _Codec(0, 2, _write_source_context, _read_source_context)
-"""Wire codec for ``SourceContext`` (0 data words, 2 pointers)."""
+_source_context_codec = _Codec(0, 1, _write_source_context, _read_source_context)
+"""Wire codec for ``SourceContext`` (0 data words, 1 pointers)."""
 
 
 def _write_worker_context(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
     s.set_text(0, v["jobId"])
-    s.set_text(1, v["json"])
-    _extensible_config_codec.write(s.init_struct(2, 1, 2), v["config"], caps)
+    _extensible_config_codec.write(s.init_struct(1, 1, 2), v["config"], caps)
 
 
 def _read_worker_context(s: _StructReader, caps: _CapTable) -> Any:
     return {
         "jobId": s.get_text(0),
-        "json": s.get_text(1),
-        "config": _extensible_config_codec.read(s.get_struct(2, 1, 2), caps),
+        "config": _extensible_config_codec.read(s.get_struct(1, 1, 2), caps),
     }
 
 
-_worker_context_codec = _Codec(0, 3, _write_worker_context, _read_worker_context)
-"""Wire codec for ``WorkerContext`` (0 data words, 3 pointers)."""
+_worker_context_codec = _Codec(0, 2, _write_worker_context, _read_worker_context)
+"""Wire codec for ``WorkerContext`` (0 data words, 2 pointers)."""
 
 
 def _write_content_source_context(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["json"])
-    _extensible_config_codec.write(s.init_struct(1, 1, 2), v["config"], caps)
+    _extensible_config_codec.write(s.init_struct(0, 1, 2), v["config"], caps)
 
 
 def _read_content_source_context(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "json": s.get_text(0),
-        "config": _extensible_config_codec.read(s.get_struct(1, 1, 2), caps),
+        "config": _extensible_config_codec.read(s.get_struct(0, 1, 2), caps),
     }
 
 
-_content_source_context_codec = _Codec(0, 2, _write_content_source_context, _read_content_source_context)
-"""Wire codec for ``ContentSourceContext`` (0 data words, 2 pointers)."""
+_content_source_context_codec = _Codec(0, 1, _write_content_source_context, _read_content_source_context)
+"""Wire codec for ``ContentSourceContext`` (0 data words, 1 pointers)."""
 
 
 def _write_integration_context(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["json"])
-    _extensible_config_codec.write(s.init_struct(1, 1, 2), v["config"], caps)
+    _extensible_config_codec.write(s.init_struct(0, 1, 2), v["config"], caps)
 
 
 def _read_integration_context(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "json": s.get_text(0),
-        "config": _extensible_config_codec.read(s.get_struct(1, 1, 2), caps),
+        "config": _extensible_config_codec.read(s.get_struct(0, 1, 2), caps),
     }
 
 
-_integration_context_codec = _Codec(0, 2, _write_integration_context, _read_integration_context)
-"""Wire codec for ``IntegrationContext`` (0 data words, 2 pointers)."""
+_integration_context_codec = _Codec(0, 1, _write_integration_context, _read_integration_context)
+"""Wire codec for ``IntegrationContext`` (0 data words, 1 pointers)."""
 
 
 def _write_database_context(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["json"])
-    _extensible_config_codec.write(s.init_struct(1, 1, 2), v["config"], caps)
+    _extensible_config_codec.write(s.init_struct(0, 1, 2), v["config"], caps)
+    _database_adapter_config_codec.write(s.init_struct(1, 1, 4), v["adapter"], caps)
 
 
 def _read_database_context(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "json": s.get_text(0),
-        "config": _extensible_config_codec.read(s.get_struct(1, 1, 2), caps),
+        "config": _extensible_config_codec.read(s.get_struct(0, 1, 2), caps),
+        "adapter": _database_adapter_config_codec.read(s.get_struct(1, 1, 4), caps),
     }
 
 
@@ -1048,7 +1058,7 @@ def _write_describe_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
     kind = v["kind"]
     if kind == "ok":
         s.set_u16(0, 0)
-        _plugin_describe_codec.write(s.init_struct(0, 1, 7), v["value"], caps)
+        _plugin_describe_codec.write(s.init_struct(0, 2, 12), v["value"], caps)
     elif kind == "err":
         s.set_u16(0, 1)
         _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
@@ -1059,7 +1069,7 @@ def _write_describe_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
 def _read_describe_reply(s: _StructReader, caps: _CapTable) -> Any:
     disc = s.get_u16(0)
     if disc == 0:
-        return {"kind": "ok", "value": _plugin_describe_codec.read(s.get_struct(0, 1, 7), caps)}
+        return {"kind": "ok", "value": _plugin_describe_codec.read(s.get_struct(0, 2, 12), caps)}
     elif disc == 1:
         return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
     raise ValueError(f"unknown DescribeReply union member: {disc}")
@@ -1269,45 +1279,6 @@ _event_result_reply_codec = _Codec(1, 1, _write_event_result_reply, _read_event_
 """Wire codec for ``EventResultReply`` (1 data words, 1 pointers)."""
 
 
-def _write_json_ok(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["json"])
-
-
-def _read_json_ok(s: _StructReader, caps: _CapTable) -> Any:
-    return {
-        "json": s.get_text(0),
-    }
-
-
-_json_ok_codec = _Codec(0, 1, _write_json_ok, _read_json_ok)
-"""Wire codec for ``JsonOk`` (0 data words, 1 pointers)."""
-
-
-def _write_json_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    kind = v["kind"]
-    if kind == "ok":
-        s.set_u16(0, 0)
-        _json_ok_codec.write(s.init_struct(0, 0, 1), v["value"], caps)
-    elif kind == "err":
-        s.set_u16(0, 1)
-        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
-    else:
-        raise ValueError(f"unknown JsonReply union member: {kind}")
-
-
-def _read_json_reply(s: _StructReader, caps: _CapTable) -> Any:
-    disc = s.get_u16(0)
-    if disc == 0:
-        return {"kind": "ok", "value": _json_ok_codec.read(s.get_struct(0, 0, 1), caps)}
-    elif disc == 1:
-        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
-    raise ValueError(f"unknown JsonReply union member: {disc}")
-
-
-_json_reply_codec = _Codec(1, 1, _write_json_reply, _read_json_reply)
-"""Wire codec for ``JsonReply`` (1 data words, 1 pointers)."""
-
-
 def _write_health_ok(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
     s.set_bool(0, v["ok"])
     s.set_text(0, v["detail"])
@@ -1413,6 +1384,1592 @@ def _read_named_database(s: _StructReader, caps: _CapTable) -> Any:
 
 _named_database_codec = _Codec(0, 2, _write_named_database, _read_named_database)
 """Wire codec for ``NamedDatabase`` (0 data words, 2 pointers)."""
+
+
+def _write_brand(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["id"])
+    s.set_text(1, v["name"])
+    s.set_text(2, v["bg"])
+    s.set_text(3, v["fg"])
+    s.set_text(4, v["accent"])
+    if v.get("iconUrl") is not None:
+        s.set_text(5, v["iconUrl"])
+
+
+def _read_brand(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "id": s.get_text(0),
+        "name": s.get_text(1),
+        "bg": s.get_text(2),
+        "fg": s.get_text(3),
+        "accent": s.get_text(4),
+    }
+    icon_url = s.get_text(5)
+    if not (icon_url == ""):
+        out["iconUrl"] = icon_url
+    return out
+
+
+_brand_codec = _Codec(0, 6, _write_brand, _read_brand)
+"""Wire codec for ``Brand`` (0 data words, 6 pointers)."""
+
+
+def _write_config_option(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["key"])
+    s.set_text(1, v["label"])
+    items = s.init_struct_list(2, len(v["values"]), 0, 2)
+    for item, elem in zip(items, v["values"], strict=True):
+        _config_option_value_codec.write(item, elem, caps)
+
+
+def _read_config_option(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "key": s.get_text(0),
+        "label": s.get_text(1),
+        "values": [_config_option_value_codec.read(item, caps) for item in s.get_struct_list(2, 0, 2)],
+    }
+
+
+_config_option_codec = _Codec(0, 3, _write_config_option, _read_config_option)
+"""Wire codec for ``ConfigOption`` (0 data words, 3 pointers)."""
+
+
+def _write_config_option_value(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["id"])
+    s.set_text(1, v["label"])
+
+
+def _read_config_option_value(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "id": s.get_text(0),
+        "label": s.get_text(1),
+    }
+
+
+_config_option_value_codec = _Codec(0, 2, _write_config_option_value, _read_config_option_value)
+"""Wire codec for ``ConfigOptionValue`` (0 data words, 2 pointers)."""
+
+
+def _write_cli_schema(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    items = s.init_struct_list(0, len(v["commands"]), 0, 3)
+    for item, elem in zip(items, v["commands"], strict=True):
+        _cli_command_spec_codec.write(item, elem, caps)
+
+
+def _read_cli_schema(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "commands": [_cli_command_spec_codec.read(item, caps) for item in s.get_struct_list(0, 0, 3)],
+    }
+
+
+_cli_schema_codec = _Codec(0, 1, _write_cli_schema, _read_cli_schema)
+"""Wire codec for ``CliSchema`` (0 data words, 1 pointers)."""
+
+
+def _write_cli_command_spec(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["name"])
+    if v.get("about") is not None:
+        s.set_text(1, v["about"])
+    items = s.init_struct_list(2, len(v["args"]), 1, 5)
+    for item, elem in zip(items, v["args"], strict=True):
+        _cli_arg_spec_codec.write(item, elem, caps)
+
+
+def _read_cli_command_spec(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "name": s.get_text(0),
+        "args": [_cli_arg_spec_codec.read(item, caps) for item in s.get_struct_list(2, 1, 5)],
+    }
+    about = s.get_text(1)
+    if not (about == ""):
+        out["about"] = about
+    return out
+
+
+_cli_command_spec_codec = _Codec(0, 3, _write_cli_command_spec, _read_cli_command_spec)
+"""Wire codec for ``CliCommandSpec`` (0 data words, 3 pointers)."""
+
+
+def _write_cli_arg_spec(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["name"])
+    if v.get("long") is not None:
+        s.set_text(1, v["long"])
+    if v.get("short") is not None:
+        s.set_text(2, v["short"])
+    s.set_u16(0, _ord(A.CLI_ARG_KINDS, v["kind"], "CliArgKind"))
+    s.set_bool(16, v["required"])
+    if v.get("default") is not None:
+        s.set_text(3, v["default"])
+    if v.get("about") is not None:
+        s.set_text(4, v["about"])
+    s.set_bool(17, v["positional"])
+
+
+def _read_cli_arg_spec(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "name": s.get_text(0),
+        "kind": _from_ord(A.CLI_ARG_KINDS, s.get_u16(0), "CliArgKind"),
+        "required": s.get_bool(16),
+        "positional": s.get_bool(17),
+    }
+    long = s.get_text(1)
+    if not (long == ""):
+        out["long"] = long
+    short = s.get_text(2)
+    if not (short == ""):
+        out["short"] = short
+    default = s.get_text(3)
+    if not (default == ""):
+        out["default"] = default
+    about = s.get_text(4)
+    if not (about == ""):
+        out["about"] = about
+    return out
+
+
+_cli_arg_spec_codec = _Codec(1, 5, _write_cli_arg_spec, _read_cli_arg_spec)
+"""Wire codec for ``CliArgSpec`` (1 data words, 5 pointers)."""
+
+
+def _write_cli_arg(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["name"])
+    s.set_text(1, v["value"])
+
+
+def _read_cli_arg(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "name": s.get_text(0),
+        "value": s.get_text(1),
+    }
+
+
+_cli_arg_codec = _Codec(0, 2, _write_cli_arg, _read_cli_arg)
+"""Wire codec for ``CliArg`` (0 data words, 2 pointers)."""
+
+
+def _write_cli_invoke_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["command"])
+    items = s.init_struct_list(1, len(v["args"]), 0, 2)
+    for item, elem in zip(items, v["args"], strict=True):
+        _cli_arg_codec.write(item, elem, caps)
+
+
+def _read_cli_invoke_params(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "command": s.get_text(0),
+        "args": [_cli_arg_codec.read(item, caps) for item in s.get_struct_list(1, 0, 2)],
+    }
+
+
+_cli_invoke_params_codec = _Codec(0, 2, _write_cli_invoke_params, _read_cli_invoke_params)
+"""Wire codec for ``CliInvokeParams`` (0 data words, 2 pointers)."""
+
+
+def _write_cli_invoke_result(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_i32(0, v["exitCode"])
+    s.set_text(0, v["stdout"])
+    s.set_text(1, v["stderr"])
+    _extensible_config_codec.write(s.init_struct(2, 1, 2), v["payload"], caps)
+
+
+def _read_cli_invoke_result(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "exitCode": s.get_i32(0),
+        "stdout": s.get_text(0),
+        "stderr": s.get_text(1),
+        "payload": _extensible_config_codec.read(s.get_struct(2, 1, 2), caps),
+    }
+
+
+_cli_invoke_result_codec = _Codec(1, 3, _write_cli_invoke_result, _read_cli_invoke_result)
+"""Wire codec for ``CliInvokeResult`` (1 data words, 3 pointers)."""
+
+
+def _write_cli_schema_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _cli_schema_codec.write(s.init_struct(0, 0, 1), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown CliSchemaReply union member: {kind}")
+
+
+def _read_cli_schema_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _cli_schema_codec.read(s.get_struct(0, 0, 1), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown CliSchemaReply union member: {disc}")
+
+
+_cli_schema_reply_codec = _Codec(1, 1, _write_cli_schema_reply, _read_cli_schema_reply)
+"""Wire codec for ``CliSchemaReply`` (1 data words, 1 pointers)."""
+
+
+def _write_cli_invoke_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _cli_invoke_result_codec.write(s.init_struct(0, 1, 3), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown CliInvokeReply union member: {kind}")
+
+
+def _read_cli_invoke_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _cli_invoke_result_codec.read(s.get_struct(0, 1, 3), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown CliInvokeReply union member: {disc}")
+
+
+_cli_invoke_reply_codec = _Codec(1, 1, _write_cli_invoke_reply, _read_cli_invoke_reply)
+"""Wire codec for ``CliInvokeReply`` (1 data words, 1 pointers)."""
+
+
+def _write_database_adapter_config(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["pluginDataDir"])
+    _extensible_config_codec.write(s.init_struct(1, 1, 2), v["settings"], caps)
+    if v.get("binding") is not None:
+        s.set_text(2, v["binding"])
+    if v.get("instanceId") is not None:
+        s.set_text(3, v["instanceId"])
+    s.set_bool(0, v["openExisting"])
+
+
+def _read_database_adapter_config(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "pluginDataDir": s.get_text(0),
+        "settings": _extensible_config_codec.read(s.get_struct(1, 1, 2), caps),
+        "openExisting": s.get_bool(0),
+    }
+    binding = s.get_text(2)
+    if not (binding == ""):
+        out["binding"] = binding
+    instance_id = s.get_text(3)
+    if not (instance_id == ""):
+        out["instanceId"] = instance_id
+    return out
+
+
+_database_adapter_config_codec = _Codec(1, 4, _write_database_adapter_config, _read_database_adapter_config)
+"""Wire codec for ``DatabaseAdapterConfig`` (1 data words, 4 pointers)."""
+
+
+def _write_diagnose_result(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text_list(0, v["lines"])
+
+
+def _read_diagnose_result(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "lines": s.get_text_list(0),
+    }
+
+
+_diagnose_result_codec = _Codec(0, 1, _write_diagnose_result, _read_diagnose_result)
+"""Wire codec for ``DiagnoseResult`` (0 data words, 1 pointers)."""
+
+
+def _write_diagnose_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _diagnose_result_codec.write(s.init_struct(0, 0, 1), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown DiagnoseReply union member: {kind}")
+
+
+def _read_diagnose_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _diagnose_result_codec.read(s.get_struct(0, 0, 1), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown DiagnoseReply union member: {disc}")
+
+
+_diagnose_reply_codec = _Codec(1, 1, _write_diagnose_reply, _read_diagnose_reply)
+"""Wire codec for ``DiagnoseReply`` (1 data words, 1 pointers)."""
+
+
+def _write_source_account(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["accountId"])
+    s.set_text(1, v["source"])
+    s.set_text(2, v["marketplace"])
+    if v.get("label") is not None:
+        s.set_text(3, v["label"])
+    s.set_bool(0, v["scanEnabled"])
+
+
+def _read_source_account(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "accountId": s.get_text(0),
+        "source": s.get_text(1),
+        "marketplace": s.get_text(2),
+        "scanEnabled": s.get_bool(0),
+    }
+    label = s.get_text(3)
+    if not (label == ""):
+        out["label"] = label
+    return out
+
+
+_source_account_codec = _Codec(1, 4, _write_source_account, _read_source_account)
+"""Wire codec for ``SourceAccount`` (1 data words, 4 pointers)."""
+
+
+def _write_login_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["pluginDataDir"])
+    s.set_text(1, v["marketplace"])
+    if v.get("label") is not None:
+        s.set_text(2, v["label"])
+    if v.get("email") is not None:
+        s.set_text(3, v["email"])
+    if v.get("password") is not None:
+        s.set_text(4, v["password"])
+    s.set_bool(0, v["force"])
+    if v.get("callbackBind") is not None:
+        s.set_text(5, v["callbackBind"])
+    if v.get("callbackIpc") is not None:
+        s.set_text(6, v["callbackIpc"])
+    if v.get("callbackPublicBase") is not None:
+        s.set_text(7, v["callbackPublicBase"])
+    s.set_bool(1, v["external"])
+    if v.get("responseUrl") is not None:
+        s.set_text(8, v["responseUrl"])
+    s.set_bool(2, v["showQr"])
+    if v.get("timeoutSecs") is not None:
+        s.set_u64(1, v["timeoutSecs"])
+    _extensible_config_codec.write(s.init_struct(9, 1, 2), v["extra"], caps)
+
+
+def _read_login_params(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "pluginDataDir": s.get_text(0),
+        "marketplace": s.get_text(1),
+        "force": s.get_bool(0),
+        "external": s.get_bool(1),
+        "showQr": s.get_bool(2),
+        "extra": _extensible_config_codec.read(s.get_struct(9, 1, 2), caps),
+    }
+    label = s.get_text(2)
+    if not (label == ""):
+        out["label"] = label
+    email = s.get_text(3)
+    if not (email == ""):
+        out["email"] = email
+    password = s.get_text(4)
+    if not (password == ""):
+        out["password"] = password
+    callback_bind = s.get_text(5)
+    if not (callback_bind == ""):
+        out["callbackBind"] = callback_bind
+    callback_ipc = s.get_text(6)
+    if not (callback_ipc == ""):
+        out["callbackIpc"] = callback_ipc
+    callback_public_base = s.get_text(7)
+    if not (callback_public_base == ""):
+        out["callbackPublicBase"] = callback_public_base
+    response_url = s.get_text(8)
+    if not (response_url == ""):
+        out["responseUrl"] = response_url
+    timeout_secs = s.get_u64(1)
+    if not (timeout_secs == 0):
+        out["timeoutSecs"] = timeout_secs
+    return out
+
+
+_login_params_codec = _Codec(2, 10, _write_login_params, _read_login_params)
+"""Wire codec for ``LoginParams`` (2 data words, 10 pointers)."""
+
+
+def _write_login_result(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    _source_account_codec.write(s.init_struct(0, 1, 4), v["account"], caps)
+    if v.get("credentials") is not None:
+        s.set_data(1, v["credentials"])
+
+
+def _read_login_result(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "account": _source_account_codec.read(s.get_struct(0, 1, 4), caps),
+    }
+    credentials = s.get_data(1)
+    if not (len(credentials) == 0):
+        out["credentials"] = credentials
+    return out
+
+
+_login_result_codec = _Codec(0, 2, _write_login_result, _read_login_result)
+"""Wire codec for ``LoginResult`` (0 data words, 2 pointers)."""
+
+
+def _write_login_start_result(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["sessionId"])
+    s.set_text(1, v["url"])
+
+
+def _read_login_start_result(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "sessionId": s.get_text(0),
+        "url": s.get_text(1),
+    }
+
+
+_login_start_result_codec = _Codec(0, 2, _write_login_start_result, _read_login_start_result)
+"""Wire codec for ``LoginStartResult`` (0 data words, 2 pointers)."""
+
+
+def _write_login_complete_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["sessionId"])
+
+
+def _read_login_complete_params(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "sessionId": s.get_text(0),
+    }
+
+
+_login_complete_params_codec = _Codec(0, 1, _write_login_complete_params, _read_login_complete_params)
+"""Wire codec for ``LoginCompleteParams`` (0 data words, 1 pointers)."""
+
+
+def _write_login_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _login_result_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown LoginReply union member: {kind}")
+
+
+def _read_login_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _login_result_codec.read(s.get_struct(0, 0, 2), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown LoginReply union member: {disc}")
+
+
+_login_reply_codec = _Codec(1, 1, _write_login_reply, _read_login_reply)
+"""Wire codec for ``LoginReply`` (1 data words, 1 pointers)."""
+
+
+def _write_login_start_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _login_start_result_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown LoginStartReply union member: {kind}")
+
+
+def _read_login_start_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _login_start_result_codec.read(s.get_struct(0, 0, 2), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown LoginStartReply union member: {disc}")
+
+
+_login_start_reply_codec = _Codec(1, 1, _write_login_start_reply, _read_login_start_reply)
+"""Wire codec for ``LoginStartReply`` (1 data words, 1 pointers)."""
+
+
+def _write_account_credential(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["accountId"])
+    s.set_data(1, v["credentials"])
+
+
+def _read_account_credential(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "accountId": s.get_text(0),
+        "credentials": s.get_data(1),
+    }
+
+
+_account_credential_codec = _Codec(0, 2, _write_account_credential, _read_account_credential)
+"""Wire codec for ``AccountCredential`` (0 data words, 2 pointers)."""
+
+
+def _write_scan_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["pluginDataDir"])
+    s.set_text_list(1, v["accounts"])
+    s.set_u32(0, v["pageSize"])
+    s.set_bool(32, v["importEpisodes"])
+    s.set_bool(33, v["importPlusTitles"])
+    items = s.init_struct_list(2, len(v["credentials"]), 0, 2)
+    for item, elem in zip(items, v["credentials"], strict=True):
+        _account_credential_codec.write(item, elem, caps)
+
+
+def _read_scan_params(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "pluginDataDir": s.get_text(0),
+        "accounts": s.get_text_list(1),
+        "pageSize": s.get_u32(0),
+        "importEpisodes": s.get_bool(32),
+        "importPlusTitles": s.get_bool(33),
+        "credentials": [_account_credential_codec.read(item, caps) for item in s.get_struct_list(2, 0, 2)],
+    }
+
+
+_scan_params_codec = _Codec(1, 3, _write_scan_params, _read_scan_params)
+"""Wire codec for ``ScanParams`` (1 data words, 3 pointers)."""
+
+
+def _write_scan_book(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["accountId"])
+    s.set_text(1, v["productId"])
+    s.set_text(2, v["title"])
+    if v.get("marketplace") is not None:
+        s.set_text(3, v["marketplace"])
+    if v.get("asin") is not None:
+        s.set_text(4, v["asin"])
+    if v.get("isbn") is not None:
+        s.set_text(5, v["isbn"])
+    if v.get("authors") is not None:
+        s.set_text(6, v["authors"])
+    if v.get("narrators") is not None:
+        s.set_text(7, v["narrators"])
+    if v.get("series") is not None:
+        s.set_text(8, v["series"])
+    if v.get("seriesIndex") is not None:
+        s.set_text(9, v["seriesIndex"])
+    if v.get("contentKind") is not None:
+        s.set_text(10, v["contentKind"])
+    if v.get("publisher") is not None:
+        s.set_text(11, v["publisher"])
+    if v.get("lengthMinutes") is not None:
+        s.set_i64(0, v["lengthMinutes"])
+    if v.get("subtitle") is not None:
+        s.set_text(12, v["subtitle"])
+
+
+def _read_scan_book(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "accountId": s.get_text(0),
+        "productId": s.get_text(1),
+        "title": s.get_text(2),
+    }
+    marketplace = s.get_text(3)
+    if not (marketplace == ""):
+        out["marketplace"] = marketplace
+    asin = s.get_text(4)
+    if not (asin == ""):
+        out["asin"] = asin
+    isbn = s.get_text(5)
+    if not (isbn == ""):
+        out["isbn"] = isbn
+    authors = s.get_text(6)
+    if not (authors == ""):
+        out["authors"] = authors
+    narrators = s.get_text(7)
+    if not (narrators == ""):
+        out["narrators"] = narrators
+    series = s.get_text(8)
+    if not (series == ""):
+        out["series"] = series
+    series_index = s.get_text(9)
+    if not (series_index == ""):
+        out["seriesIndex"] = series_index
+    content_kind = s.get_text(10)
+    if not (content_kind == ""):
+        out["contentKind"] = content_kind
+    publisher = s.get_text(11)
+    if not (publisher == ""):
+        out["publisher"] = publisher
+    length_minutes = s.get_i64(0)
+    if not (length_minutes == 0):
+        out["lengthMinutes"] = length_minutes
+    subtitle = s.get_text(12)
+    if not (subtitle == ""):
+        out["subtitle"] = subtitle
+    return out
+
+
+_scan_book_codec = _Codec(1, 13, _write_scan_book, _read_scan_book)
+"""Wire codec for ``ScanBook`` (1 data words, 13 pointers)."""
+
+
+def _write_scan_summary(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_u32(0, v["accounts"])
+    s.set_u32(1, v["booksUpserted"])
+    s.set_u32(2, v["pages"])
+    s.set_u32(3, v["skippedDisabled"])
+    items = s.init_struct_list(0, len(v["books"]), 1, 13)
+    for item, elem in zip(items, v["books"], strict=True):
+        _scan_book_codec.write(item, elem, caps)
+
+
+def _read_scan_summary(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "accounts": s.get_u32(0),
+        "booksUpserted": s.get_u32(1),
+        "pages": s.get_u32(2),
+        "skippedDisabled": s.get_u32(3),
+        "books": [_scan_book_codec.read(item, caps) for item in s.get_struct_list(0, 1, 13)],
+    }
+
+
+_scan_summary_codec = _Codec(2, 1, _write_scan_summary, _read_scan_summary)
+"""Wire codec for ``ScanSummary`` (2 data words, 1 pointers)."""
+
+
+def _write_scan_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _scan_summary_codec.write(s.init_struct(0, 2, 1), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown ScanReply union member: {kind}")
+
+
+def _read_scan_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _scan_summary_codec.read(s.get_struct(0, 2, 1), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown ScanReply union member: {disc}")
+
+
+_scan_reply_codec = _Codec(1, 1, _write_scan_reply, _read_scan_reply)
+"""Wire codec for ``ScanReply`` (1 data words, 1 pointers)."""
+
+
+def _write_fetch_options(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_bool(0, v["widevine"])
+    s.set_bool(1, v["xheAac"])
+    if v.get("widevineCdmPath") is not None:
+        s.set_text(0, v["widevineCdmPath"])
+    if v.get("widevineCdmProvider") is not None:
+        s.set_text(1, v["widevineCdmProvider"])
+    s.set_bool(2, v["downloadCover"])
+    s.set_bool(3, v["downloadPdf"])
+    s.set_text(2, v["coverSize"])
+    s.set_text(3, v["chapterLayout"])
+    s.set_bool(4, v["stripAudibleBrandAudio"])
+    s.set_bool(5, v["downloadClipsBookmarks"])
+    s.set_bool(6, v["retainAaxFile"])
+    s.set_u32(1, v["downloadSpeedLimitKbps"])
+    s.set_bool(7, v["saveMetadataJson"])
+
+
+def _read_fetch_options(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "widevine": s.get_bool(0),
+        "xheAac": s.get_bool(1),
+        "downloadCover": s.get_bool(2),
+        "downloadPdf": s.get_bool(3),
+        "coverSize": s.get_text(2),
+        "chapterLayout": s.get_text(3),
+        "stripAudibleBrandAudio": s.get_bool(4),
+        "downloadClipsBookmarks": s.get_bool(5),
+        "retainAaxFile": s.get_bool(6),
+        "downloadSpeedLimitKbps": s.get_u32(1),
+        "saveMetadataJson": s.get_bool(7),
+    }
+    widevine_cdm_path = s.get_text(0)
+    if not (widevine_cdm_path == ""):
+        out["widevineCdmPath"] = widevine_cdm_path
+    widevine_cdm_provider = s.get_text(1)
+    if not (widevine_cdm_provider == ""):
+        out["widevineCdmProvider"] = widevine_cdm_provider
+    return out
+
+
+_fetch_options_codec = _Codec(1, 4, _write_fetch_options, _read_fetch_options)
+"""Wire codec for ``FetchOptions`` (1 data words, 4 pointers)."""
+
+
+def _write_fetch_title_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["pluginDataDir"])
+    s.set_text(1, v["accountId"])
+    s.set_text(2, v["titleId"])
+    s.set_text(3, v["cacheDir"])
+    if v.get("credentials") is not None:
+        s.set_data(4, v["credentials"])
+    _extensible_config_codec.write(s.init_struct(5, 1, 2), v["sourceConfig"], caps)
+    _fetch_options_codec.write(s.init_struct(6, 1, 4), v["fetch"], caps)
+
+
+def _read_fetch_title_params(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "pluginDataDir": s.get_text(0),
+        "accountId": s.get_text(1),
+        "titleId": s.get_text(2),
+        "cacheDir": s.get_text(3),
+        "sourceConfig": _extensible_config_codec.read(s.get_struct(5, 1, 2), caps),
+        "fetch": _fetch_options_codec.read(s.get_struct(6, 1, 4), caps),
+    }
+    credentials = s.get_data(4)
+    if not (len(credentials) == 0):
+        out["credentials"] = credentials
+    return out
+
+
+_fetch_title_params_codec = _Codec(0, 7, _write_fetch_title_params, _read_fetch_title_params)
+"""Wire codec for ``FetchTitleParams`` (0 data words, 7 pointers)."""
+
+
+def _write_plain_part(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["path"])
+    if v.get("title") is not None:
+        s.set_text(1, v["title"])
+    if v.get("durationMs") is not None:
+        s.set_u64(0, v["durationMs"])
+
+
+def _read_plain_part(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "path": s.get_text(0),
+    }
+    title = s.get_text(1)
+    if not (title == ""):
+        out["title"] = title
+    duration_ms = s.get_u64(0)
+    if not (duration_ms == 0):
+        out["durationMs"] = duration_ms
+    return out
+
+
+_plain_part_codec = _Codec(1, 2, _write_plain_part, _read_plain_part)
+"""Wire codec for ``PlainPart`` (1 data words, 2 pointers)."""
+
+
+def _write_chapter_marker(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["title"])
+    s.set_u64(0, v["startMs"])
+
+
+def _read_chapter_marker(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "title": s.get_text(0),
+        "startMs": s.get_u64(0),
+    }
+
+
+_chapter_marker_codec = _Codec(1, 1, _write_chapter_marker, _read_chapter_marker)
+"""Wire codec for ``ChapterMarker`` (1 data words, 1 pointers)."""
+
+
+def _write_plain_fetch(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    items = s.init_struct_list(0, len(v["parts"]), 1, 2)
+    for item, elem in zip(items, v["parts"], strict=True):
+        _plain_part_codec.write(item, elem, caps)
+    if v.get("m4bPath") is not None:
+        s.set_text(1, v["m4bPath"])
+    if v.get("coverPath") is not None:
+        s.set_text(2, v["coverPath"])
+    items = s.init_struct_list(3, len(v["chapters"]), 1, 1)
+    for item, elem in zip(items, v["chapters"], strict=True):
+        _chapter_marker_codec.write(item, elem, caps)
+    if v.get("pdfUrl") is not None:
+        s.set_text(4, v["pdfUrl"])
+
+
+def _read_plain_fetch(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "parts": [_plain_part_codec.read(item, caps) for item in s.get_struct_list(0, 1, 2)],
+        "chapters": [_chapter_marker_codec.read(item, caps) for item in s.get_struct_list(3, 1, 1)],
+    }
+    m4b_path = s.get_text(1)
+    if not (m4b_path == ""):
+        out["m4bPath"] = m4b_path
+    cover_path = s.get_text(2)
+    if not (cover_path == ""):
+        out["coverPath"] = cover_path
+    pdf_url = s.get_text(4)
+    if not (pdf_url == ""):
+        out["pdfUrl"] = pdf_url
+    return out
+
+
+_plain_fetch_codec = _Codec(0, 5, _write_plain_fetch, _read_plain_fetch)
+"""Wire codec for ``PlainFetch`` (0 data words, 5 pointers)."""
+
+
+def _write_fetch_title_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _plain_fetch_codec.write(s.init_struct(0, 0, 5), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown FetchTitleReply union member: {kind}")
+
+
+def _read_fetch_title_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _plain_fetch_codec.read(s.get_struct(0, 0, 5), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown FetchTitleReply union member: {disc}")
+
+
+_fetch_title_reply_codec = _Codec(1, 1, _write_fetch_title_reply, _read_fetch_title_reply)
+"""Wire codec for ``FetchTitleReply`` (1 data words, 1 pointers)."""
+
+
+def _write_source_accounts(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    items = s.init_struct_list(0, len(v["accounts"]), 1, 4)
+    for item, elem in zip(items, v["accounts"], strict=True):
+        _source_account_codec.write(item, elem, caps)
+
+
+def _read_source_accounts(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "accounts": [_source_account_codec.read(item, caps) for item in s.get_struct_list(0, 1, 4)],
+    }
+
+
+_source_accounts_codec = _Codec(0, 1, _write_source_accounts, _read_source_accounts)
+"""Wire codec for ``SourceAccounts`` (0 data words, 1 pointers)."""
+
+
+def _write_source_accounts_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _source_accounts_codec.write(s.init_struct(0, 0, 1), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown SourceAccountsReply union member: {kind}")
+
+
+def _read_source_accounts_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _source_accounts_codec.read(s.get_struct(0, 0, 1), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown SourceAccountsReply union member: {disc}")
+
+
+_source_accounts_reply_codec = _Codec(1, 1, _write_source_accounts_reply, _read_source_accounts_reply)
+"""Wire codec for ``SourceAccountsReply`` (1 data words, 1 pointers)."""
+
+
+def _write_search_catalog_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["query"])
+    s.set_text(1, v["region"])
+    s.set_u32(0, v["limit"])
+    s.set_u32(1, v["page"])
+    s.set_u16(4, _ord(A.CATALOG_SORTS, v["sort"], "CatalogSort"))
+    s.set_u16(5, _ord(A.CATALOG_FIELDS, v["field"], "CatalogField"))
+    if v.get("language") is not None:
+        s.set_text(2, v["language"])
+
+
+def _read_search_catalog_params(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "query": s.get_text(0),
+        "region": s.get_text(1),
+        "limit": s.get_u32(0),
+        "page": s.get_u32(1),
+        "sort": _from_ord(A.CATALOG_SORTS, s.get_u16(4), "CatalogSort"),
+        "field": _from_ord(A.CATALOG_FIELDS, s.get_u16(5), "CatalogField"),
+    }
+    language = s.get_text(2)
+    if not (language == ""):
+        out["language"] = language
+    return out
+
+
+_search_catalog_params_codec = _Codec(2, 3, _write_search_catalog_params, _read_search_catalog_params)
+"""Wire codec for ``SearchCatalogParams`` (2 data words, 3 pointers)."""
+
+
+def _write_expand_candidates_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["source"])
+    s.set_text(1, v["productId"])
+    s.set_text(2, v["title"])
+    if v.get("authors") is not None:
+        s.set_text(3, v["authors"])
+    if v.get("narrators") is not None:
+        s.set_text(4, v["narrators"])
+    if v.get("series") is not None:
+        s.set_text(5, v["series"])
+    if v.get("seriesAsin") is not None:
+        s.set_text(6, v["seriesAsin"])
+    if v.get("asin") is not None:
+        s.set_text(7, v["asin"])
+    if v.get("isbn") is not None:
+        s.set_text(8, v["isbn"])
+    s.set_text(9, v["region"])
+    s.set_u32(0, v["limit"])
+
+
+def _read_expand_candidates_params(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "source": s.get_text(0),
+        "productId": s.get_text(1),
+        "title": s.get_text(2),
+        "region": s.get_text(9),
+        "limit": s.get_u32(0),
+    }
+    authors = s.get_text(3)
+    if not (authors == ""):
+        out["authors"] = authors
+    narrators = s.get_text(4)
+    if not (narrators == ""):
+        out["narrators"] = narrators
+    series = s.get_text(5)
+    if not (series == ""):
+        out["series"] = series
+    series_asin = s.get_text(6)
+    if not (series_asin == ""):
+        out["seriesAsin"] = series_asin
+    asin = s.get_text(7)
+    if not (asin == ""):
+        out["asin"] = asin
+    isbn = s.get_text(8)
+    if not (isbn == ""):
+        out["isbn"] = isbn
+    return out
+
+
+_expand_candidates_params_codec = _Codec(1, 10, _write_expand_candidates_params, _read_expand_candidates_params)
+"""Wire codec for ``ExpandCandidatesParams`` (1 data words, 10 pointers)."""
+
+
+def _write_purchase_hint_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    if v.get("productId") is not None:
+        s.set_text(0, v["productId"])
+    if v.get("title") is not None:
+        s.set_text(1, v["title"])
+    if v.get("authors") is not None:
+        s.set_text(2, v["authors"])
+    if v.get("asin") is not None:
+        s.set_text(3, v["asin"])
+    if v.get("isbn") is not None:
+        s.set_text(4, v["isbn"])
+    s.set_text(5, v["region"])
+    s.set_bool(0, v["withPrice"])
+
+
+def _read_purchase_hint_params(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "region": s.get_text(5),
+        "withPrice": s.get_bool(0),
+    }
+    product_id = s.get_text(0)
+    if not (product_id == ""):
+        out["productId"] = product_id
+    title = s.get_text(1)
+    if not (title == ""):
+        out["title"] = title
+    authors = s.get_text(2)
+    if not (authors == ""):
+        out["authors"] = authors
+    asin = s.get_text(3)
+    if not (asin == ""):
+        out["asin"] = asin
+    isbn = s.get_text(4)
+    if not (isbn == ""):
+        out["isbn"] = isbn
+    return out
+
+
+_purchase_hint_params_codec = _Codec(1, 6, _write_purchase_hint_params, _read_purchase_hint_params)
+"""Wire codec for ``PurchaseHintParams`` (1 data words, 6 pointers)."""
+
+
+def _write_list_deals_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    if v.get("limit") is not None:
+        s.set_u32(0, v["limit"])
+
+
+def _read_list_deals_params(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+    }
+    limit = s.get_u32(0)
+    if not (limit == 0):
+        out["limit"] = limit
+    return out
+
+
+_list_deals_params_codec = _Codec(1, 0, _write_list_deals_params, _read_list_deals_params)
+"""Wire codec for ``ListDealsParams`` (1 data words, 0 pointers)."""
+
+
+def _write_catalog_detail_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["productId"])
+    if v.get("isbn") is not None:
+        s.set_text(1, v["isbn"])
+
+
+def _read_catalog_detail_params(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "productId": s.get_text(0),
+    }
+    isbn = s.get_text(1)
+    if not (isbn == ""):
+        out["isbn"] = isbn
+    return out
+
+
+_catalog_detail_params_codec = _Codec(0, 2, _write_catalog_detail_params, _read_catalog_detail_params)
+"""Wire codec for ``CatalogDetailParams`` (0 data words, 2 pointers)."""
+
+
+def _write_catalog_hit(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["productId"])
+    s.set_text(1, v["title"])
+    if v.get("authors") is not None:
+        s.set_text(2, v["authors"])
+    if v.get("narrators") is not None:
+        s.set_text(3, v["narrators"])
+    if v.get("series") is not None:
+        s.set_text(4, v["series"])
+    if v.get("seriesIndex") is not None:
+        s.set_text(5, v["seriesIndex"])
+    if v.get("asin") is not None:
+        s.set_text(6, v["asin"])
+    if v.get("isbn") is not None:
+        s.set_text(7, v["isbn"])
+    if v.get("url") is not None:
+        s.set_text(8, v["url"])
+    if v.get("coverUrl") is not None:
+        s.set_text(9, v["coverUrl"])
+    s.set_text(10, v["origin"])
+    if v.get("subtitle") is not None:
+        s.set_text(11, v["subtitle"])
+    if v.get("description") is not None:
+        s.set_text(12, v["description"])
+    if v.get("publisher") is not None:
+        s.set_text(13, v["publisher"])
+    if v.get("lengthMinutes") is not None:
+        s.set_i64(0, v["lengthMinutes"])
+    if v.get("publishedAt") is not None:
+        s.set_text(14, v["publishedAt"])
+    if v.get("categories") is not None:
+        s.set_text(15, v["categories"])
+    if v.get("language") is not None:
+        s.set_text(16, v["language"])
+    if v.get("priceCents") is not None:
+        s.set_i64(1, v["priceCents"])
+    if v.get("currency") is not None:
+        s.set_text(17, v["currency"])
+    if v.get("priceLabel") is not None:
+        s.set_text(18, v["priceLabel"])
+    if v.get("ratingOverall") is not None:
+        s.set_f64(2, v["ratingOverall"])
+    if v.get("ratingCount") is not None:
+        s.set_i64(3, v["ratingCount"])
+    s.set_u16(16, _ord(A.ABRIDGEMENTS, v["abridgement"], "Abridgement"))
+
+
+def _read_catalog_hit(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "productId": s.get_text(0),
+        "title": s.get_text(1),
+        "origin": s.get_text(10),
+        "abridgement": _from_ord(A.ABRIDGEMENTS, s.get_u16(16), "Abridgement"),
+    }
+    authors = s.get_text(2)
+    if not (authors == ""):
+        out["authors"] = authors
+    narrators = s.get_text(3)
+    if not (narrators == ""):
+        out["narrators"] = narrators
+    series = s.get_text(4)
+    if not (series == ""):
+        out["series"] = series
+    series_index = s.get_text(5)
+    if not (series_index == ""):
+        out["seriesIndex"] = series_index
+    asin = s.get_text(6)
+    if not (asin == ""):
+        out["asin"] = asin
+    isbn = s.get_text(7)
+    if not (isbn == ""):
+        out["isbn"] = isbn
+    url = s.get_text(8)
+    if not (url == ""):
+        out["url"] = url
+    cover_url = s.get_text(9)
+    if not (cover_url == ""):
+        out["coverUrl"] = cover_url
+    subtitle = s.get_text(11)
+    if not (subtitle == ""):
+        out["subtitle"] = subtitle
+    description = s.get_text(12)
+    if not (description == ""):
+        out["description"] = description
+    publisher = s.get_text(13)
+    if not (publisher == ""):
+        out["publisher"] = publisher
+    length_minutes = s.get_i64(0)
+    if not (length_minutes == 0):
+        out["lengthMinutes"] = length_minutes
+    published_at = s.get_text(14)
+    if not (published_at == ""):
+        out["publishedAt"] = published_at
+    categories = s.get_text(15)
+    if not (categories == ""):
+        out["categories"] = categories
+    language = s.get_text(16)
+    if not (language == ""):
+        out["language"] = language
+    price_cents = s.get_i64(1)
+    if not (price_cents == 0):
+        out["priceCents"] = price_cents
+    currency = s.get_text(17)
+    if not (currency == ""):
+        out["currency"] = currency
+    price_label = s.get_text(18)
+    if not (price_label == ""):
+        out["priceLabel"] = price_label
+    rating_overall = s.get_f64(2)
+    if not (rating_overall == 0):
+        out["ratingOverall"] = rating_overall
+    rating_count = s.get_i64(3)
+    if not (rating_count == 0):
+        out["ratingCount"] = rating_count
+    return out
+
+
+_catalog_hit_codec = _Codec(5, 19, _write_catalog_hit, _read_catalog_hit)
+"""Wire codec for ``CatalogHit`` (5 data words, 19 pointers)."""
+
+
+def _write_catalog_hits(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    items = s.init_struct_list(0, len(v["hits"]), 5, 19)
+    for item, elem in zip(items, v["hits"], strict=True):
+        _catalog_hit_codec.write(item, elem, caps)
+
+
+def _read_catalog_hits(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "hits": [_catalog_hit_codec.read(item, caps) for item in s.get_struct_list(0, 5, 19)],
+    }
+
+
+_catalog_hits_codec = _Codec(0, 1, _write_catalog_hits, _read_catalog_hits)
+"""Wire codec for ``CatalogHits`` (0 data words, 1 pointers)."""
+
+
+def _write_catalog_hits_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _catalog_hits_codec.write(s.init_struct(0, 0, 1), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown CatalogHitsReply union member: {kind}")
+
+
+def _read_catalog_hits_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _catalog_hits_codec.read(s.get_struct(0, 0, 1), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown CatalogHitsReply union member: {disc}")
+
+
+_catalog_hits_reply_codec = _Codec(1, 1, _write_catalog_hits_reply, _read_catalog_hits_reply)
+"""Wire codec for ``CatalogHitsReply`` (1 data words, 1 pointers)."""
+
+
+def _write_catalog_detail(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_bool(0, v["found"])
+    _catalog_hit_codec.write(s.init_struct(0, 5, 19), v["hit"], caps)
+
+
+def _read_catalog_detail(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "found": s.get_bool(0),
+        "hit": _catalog_hit_codec.read(s.get_struct(0, 5, 19), caps),
+    }
+
+
+_catalog_detail_codec = _Codec(1, 1, _write_catalog_detail, _read_catalog_detail)
+"""Wire codec for ``CatalogDetail`` (1 data words, 1 pointers)."""
+
+
+def _write_catalog_detail_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _catalog_detail_codec.write(s.init_struct(0, 1, 1), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown CatalogDetailReply union member: {kind}")
+
+
+def _read_catalog_detail_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _catalog_detail_codec.read(s.get_struct(0, 1, 1), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown CatalogDetailReply union member: {disc}")
+
+
+_catalog_detail_reply_codec = _Codec(1, 1, _write_catalog_detail_reply, _read_catalog_detail_reply)
+"""Wire codec for ``CatalogDetailReply`` (1 data words, 1 pointers)."""
+
+
+def _write_purchase_hint(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["productId"])
+    if v.get("title") is not None:
+        s.set_text(1, v["title"])
+    if v.get("url") is not None:
+        s.set_text(2, v["url"])
+    if v.get("priceCents") is not None:
+        s.set_i64(0, v["priceCents"])
+    if v.get("currency") is not None:
+        s.set_text(3, v["currency"])
+    if v.get("priceLabel") is not None:
+        s.set_text(4, v["priceLabel"])
+    if v.get("listPriceCents") is not None:
+        s.set_i64(1, v["listPriceCents"])
+    if v.get("listPriceLabel") is not None:
+        s.set_text(5, v["listPriceLabel"])
+    if v.get("memberPriceCents") is not None:
+        s.set_i64(2, v["memberPriceCents"])
+    if v.get("memberPriceLabel") is not None:
+        s.set_text(6, v["memberPriceLabel"])
+
+
+def _read_purchase_hint(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "productId": s.get_text(0),
+    }
+    title = s.get_text(1)
+    if not (title == ""):
+        out["title"] = title
+    url = s.get_text(2)
+    if not (url == ""):
+        out["url"] = url
+    price_cents = s.get_i64(0)
+    if not (price_cents == 0):
+        out["priceCents"] = price_cents
+    currency = s.get_text(3)
+    if not (currency == ""):
+        out["currency"] = currency
+    price_label = s.get_text(4)
+    if not (price_label == ""):
+        out["priceLabel"] = price_label
+    list_price_cents = s.get_i64(1)
+    if not (list_price_cents == 0):
+        out["listPriceCents"] = list_price_cents
+    list_price_label = s.get_text(5)
+    if not (list_price_label == ""):
+        out["listPriceLabel"] = list_price_label
+    member_price_cents = s.get_i64(2)
+    if not (member_price_cents == 0):
+        out["memberPriceCents"] = member_price_cents
+    member_price_label = s.get_text(6)
+    if not (member_price_label == ""):
+        out["memberPriceLabel"] = member_price_label
+    return out
+
+
+_purchase_hint_codec = _Codec(3, 7, _write_purchase_hint, _read_purchase_hint)
+"""Wire codec for ``PurchaseHint`` (3 data words, 7 pointers)."""
+
+
+def _write_purchase_hint_result(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_bool(0, v["found"])
+    _purchase_hint_codec.write(s.init_struct(0, 3, 7), v["hint"], caps)
+
+
+def _read_purchase_hint_result(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "found": s.get_bool(0),
+        "hint": _purchase_hint_codec.read(s.get_struct(0, 3, 7), caps),
+    }
+
+
+_purchase_hint_result_codec = _Codec(1, 1, _write_purchase_hint_result, _read_purchase_hint_result)
+"""Wire codec for ``PurchaseHintResult`` (1 data words, 1 pointers)."""
+
+
+def _write_purchase_hint_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _purchase_hint_result_codec.write(s.init_struct(0, 1, 1), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown PurchaseHintReply union member: {kind}")
+
+
+def _read_purchase_hint_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _purchase_hint_result_codec.read(s.get_struct(0, 1, 1), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown PurchaseHintReply union member: {disc}")
+
+
+_purchase_hint_reply_codec = _Codec(1, 1, _write_purchase_hint_reply, _read_purchase_hint_reply)
+"""Wire codec for ``PurchaseHintReply`` (1 data words, 1 pointers)."""
+
+
+def _write_scan_library_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_bool(0, v["force"])
+
+
+def _read_scan_library_params(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "force": s.get_bool(0),
+    }
+
+
+_scan_library_params_codec = _Codec(1, 0, _write_scan_library_params, _read_scan_library_params)
+"""Wire codec for ``ScanLibraryParams`` (1 data words, 0 pointers)."""
+
+
+def _write_authenticate_user_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["username"])
+    s.set_text(1, v["password"])
+
+
+def _read_authenticate_user_params(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "username": s.get_text(0),
+        "password": s.get_text(1),
+    }
+
+
+_authenticate_user_params_codec = _Codec(0, 2, _write_authenticate_user_params, _read_authenticate_user_params)
+"""Wire codec for ``AuthenticateUserParams`` (0 data words, 2 pointers)."""
+
+
+def _write_external_user(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["provider"])
+    s.set_text(1, v["externalUserId"])
+    if v.get("displayName") is not None:
+        s.set_text(2, v["displayName"])
+    if v.get("accessToken") is not None:
+        s.set_text(3, v["accessToken"])
+
+
+def _read_external_user(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "provider": s.get_text(0),
+        "externalUserId": s.get_text(1),
+    }
+    display_name = s.get_text(2)
+    if not (display_name == ""):
+        out["displayName"] = display_name
+    access_token = s.get_text(3)
+    if not (access_token == ""):
+        out["accessToken"] = access_token
+    return out
+
+
+_external_user_codec = _Codec(0, 4, _write_external_user, _read_external_user)
+"""Wire codec for ``ExternalUser`` (0 data words, 4 pointers)."""
+
+
+def _write_external_user_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _external_user_codec.write(s.init_struct(0, 0, 4), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown ExternalUserReply union member: {kind}")
+
+
+def _read_external_user_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _external_user_codec.read(s.get_struct(0, 0, 4), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown ExternalUserReply union member: {disc}")
+
+
+_external_user_reply_codec = _Codec(1, 1, _write_external_user_reply, _read_external_user_reply)
+"""Wire codec for ``ExternalUserReply`` (1 data words, 1 pointers)."""
+
+
+def _write_event_poll_result(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    items = s.init_struct_list(0, len(v["users"]), 0, 4)
+    for item, elem in zip(items, v["users"], strict=True):
+        _external_user_codec.write(item, elem, caps)
+
+
+def _read_event_poll_result(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "users": [_external_user_codec.read(item, caps) for item in s.get_struct_list(0, 0, 4)],
+    }
+
+
+_event_poll_result_codec = _Codec(0, 1, _write_event_poll_result, _read_event_poll_result)
+"""Wire codec for ``EventPollResult`` (0 data words, 1 pointers)."""
+
+
+def _write_event_poll_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _event_poll_result_codec.write(s.init_struct(0, 0, 1), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown EventPollReply union member: {kind}")
+
+
+def _read_event_poll_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _event_poll_result_codec.read(s.get_struct(0, 0, 1), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown EventPollReply union member: {disc}")
+
+
+_event_poll_reply_codec = _Codec(1, 1, _write_event_poll_reply, _read_event_poll_reply)
+"""Wire codec for ``EventPollReply`` (1 data words, 1 pointers)."""
+
+
+def _write_listening_progress(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["externalUserId"])
+    s.set_text(1, v["externalItemId"])
+    if v.get("identityId") is not None:
+        s.set_i64(0, v["identityId"])
+    if v.get("title") is not None:
+        s.set_text(2, v["title"])
+    if v.get("authors") is not None:
+        s.set_text(3, v["authors"])
+    if v.get("asin") is not None:
+        s.set_text(4, v["asin"])
+    if v.get("isbn") is not None:
+        s.set_text(5, v["isbn"])
+    if v.get("progress") is not None:
+        s.set_f64(1, v["progress"])
+    if v.get("currentTimeSeconds") is not None:
+        s.set_f64(2, v["currentTimeSeconds"])
+    if v.get("durationSeconds") is not None:
+        s.set_f64(3, v["durationSeconds"])
+    s.set_bool(256, v["isFinished"])
+    if v.get("lastListenedAtUnixMs") is not None:
+        s.set_u64(5, v["lastListenedAtUnixMs"])
+
+
+def _read_listening_progress(s: _StructReader, caps: _CapTable) -> Any:
+    out: dict[str, Any] = {
+        "externalUserId": s.get_text(0),
+        "externalItemId": s.get_text(1),
+        "isFinished": s.get_bool(256),
+    }
+    identity_id = s.get_i64(0)
+    if not (identity_id == 0):
+        out["identityId"] = identity_id
+    title = s.get_text(2)
+    if not (title == ""):
+        out["title"] = title
+    authors = s.get_text(3)
+    if not (authors == ""):
+        out["authors"] = authors
+    asin = s.get_text(4)
+    if not (asin == ""):
+        out["asin"] = asin
+    isbn = s.get_text(5)
+    if not (isbn == ""):
+        out["isbn"] = isbn
+    progress = s.get_f64(1)
+    if not (progress == 0):
+        out["progress"] = progress
+    current_time_seconds = s.get_f64(2)
+    if not (current_time_seconds == 0):
+        out["currentTimeSeconds"] = current_time_seconds
+    duration_seconds = s.get_f64(3)
+    if not (duration_seconds == 0):
+        out["durationSeconds"] = duration_seconds
+    last_listened_at_unix_ms = s.get_u64(5)
+    if not (last_listened_at_unix_ms == 0):
+        out["lastListenedAtUnixMs"] = last_listened_at_unix_ms
+    return out
+
+
+_listening_progress_codec = _Codec(6, 6, _write_listening_progress, _read_listening_progress)
+"""Wire codec for ``ListeningProgress`` (6 data words, 6 pointers)."""
+
+
+def _write_sync_listening_result(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    items = s.init_struct_list(0, len(v["items"]), 6, 6)
+    for item, elem in zip(items, v["items"], strict=True):
+        _listening_progress_codec.write(item, elem, caps)
+
+
+def _read_sync_listening_result(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "items": [_listening_progress_codec.read(item, caps) for item in s.get_struct_list(0, 6, 6)],
+    }
+
+
+_sync_listening_result_codec = _Codec(0, 1, _write_sync_listening_result, _read_sync_listening_result)
+"""Wire codec for ``SyncListeningResult`` (0 data words, 1 pointers)."""
+
+
+def _write_sync_listening_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    kind = v["kind"]
+    if kind == "ok":
+        s.set_u16(0, 0)
+        _sync_listening_result_codec.write(s.init_struct(0, 0, 1), v["value"], caps)
+    elif kind == "err":
+        s.set_u16(0, 1)
+        _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
+    else:
+        raise ValueError(f"unknown SyncListeningReply union member: {kind}")
+
+
+def _read_sync_listening_reply(s: _StructReader, caps: _CapTable) -> Any:
+    disc = s.get_u16(0)
+    if disc == 0:
+        return {"kind": "ok", "value": _sync_listening_result_codec.read(s.get_struct(0, 0, 1), caps)}
+    elif disc == 1:
+        return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
+    raise ValueError(f"unknown SyncListeningReply union member: {disc}")
+
+
+_sync_listening_reply_codec = _Codec(1, 1, _write_sync_listening_reply, _read_sync_listening_reply)
+"""Wire codec for ``SyncListeningReply`` (1 data words, 1 pointers)."""
 
 
 def _write_db_value(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
@@ -2672,12 +4229,12 @@ _job_handler_handle_results_codec = _Codec(0, 1, _write_job_handler_handle_resul
 
 
 def _write_content_source_login_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _login_params_codec.write(s.init_struct(0, 2, 10), v["params"], caps)
 
 
 def _read_content_source_login_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _login_params_codec.read(s.get_struct(0, 2, 10), caps),
     }
 
 
@@ -2686,12 +4243,12 @@ _content_source_login_params_codec = _Codec(0, 1, _write_content_source_login_pa
 
 
 def _write_content_source_login_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _login_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_login_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _login_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -2700,12 +4257,12 @@ _content_source_login_results_codec = _Codec(0, 1, _write_content_source_login_r
 
 
 def _write_content_source_scan_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _scan_params_codec.write(s.init_struct(0, 1, 3), v["params"], caps)
 
 
 def _read_content_source_scan_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _scan_params_codec.read(s.get_struct(0, 1, 3), caps),
     }
 
 
@@ -2714,12 +4271,12 @@ _content_source_scan_params_codec = _Codec(0, 1, _write_content_source_scan_para
 
 
 def _write_content_source_scan_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _scan_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_scan_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _scan_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -2728,12 +4285,12 @@ _content_source_scan_results_codec = _Codec(0, 1, _write_content_source_scan_res
 
 
 def _write_content_source_fetch_title_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _fetch_title_params_codec.write(s.init_struct(0, 0, 7), v["params"], caps)
 
 
 def _read_content_source_fetch_title_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _fetch_title_params_codec.read(s.get_struct(0, 0, 7), caps),
     }
 
 
@@ -2742,12 +4299,12 @@ _content_source_fetch_title_params_codec = _Codec(0, 1, _write_content_source_fe
 
 
 def _write_content_source_fetch_title_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _fetch_title_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_fetch_title_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _fetch_title_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -2768,12 +4325,12 @@ _content_source_list_accounts_params_codec = _Codec(0, 0, _write_content_source_
 
 
 def _write_content_source_list_accounts_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _source_accounts_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_list_accounts_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _source_accounts_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -2782,12 +4339,12 @@ _content_source_list_accounts_results_codec = _Codec(0, 1, _write_content_source
 
 
 def _write_content_source_login_start_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _login_params_codec.write(s.init_struct(0, 2, 10), v["params"], caps)
 
 
 def _read_content_source_login_start_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _login_params_codec.read(s.get_struct(0, 2, 10), caps),
     }
 
 
@@ -2796,12 +4353,12 @@ _content_source_login_start_params_codec = _Codec(0, 1, _write_content_source_lo
 
 
 def _write_content_source_login_start_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _login_start_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_login_start_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _login_start_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -2810,12 +4367,12 @@ _content_source_login_start_results_codec = _Codec(0, 1, _write_content_source_l
 
 
 def _write_content_source_login_complete_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _login_complete_params_codec.write(s.init_struct(0, 0, 1), v["params"], caps)
 
 
 def _read_content_source_login_complete_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _login_complete_params_codec.read(s.get_struct(0, 0, 1), caps),
     }
 
 
@@ -2824,12 +4381,12 @@ _content_source_login_complete_params_codec = _Codec(0, 1, _write_content_source
 
 
 def _write_content_source_login_complete_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _login_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_login_complete_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _login_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -2838,12 +4395,12 @@ _content_source_login_complete_results_codec = _Codec(0, 1, _write_content_sourc
 
 
 def _write_content_source_search_catalog_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _search_catalog_params_codec.write(s.init_struct(0, 2, 3), v["params"], caps)
 
 
 def _read_content_source_search_catalog_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _search_catalog_params_codec.read(s.get_struct(0, 2, 3), caps),
     }
 
 
@@ -2852,12 +4409,12 @@ _content_source_search_catalog_params_codec = _Codec(0, 1, _write_content_source
 
 
 def _write_content_source_search_catalog_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _catalog_hits_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_search_catalog_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _catalog_hits_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -2866,12 +4423,12 @@ _content_source_search_catalog_results_codec = _Codec(0, 1, _write_content_sourc
 
 
 def _write_content_source_expand_candidates_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _expand_candidates_params_codec.write(s.init_struct(0, 1, 10), v["params"], caps)
 
 
 def _read_content_source_expand_candidates_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _expand_candidates_params_codec.read(s.get_struct(0, 1, 10), caps),
     }
 
 
@@ -2880,12 +4437,12 @@ _content_source_expand_candidates_params_codec = _Codec(0, 1, _write_content_sou
 
 
 def _write_content_source_expand_candidates_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _catalog_hits_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_expand_candidates_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _catalog_hits_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -2894,12 +4451,12 @@ _content_source_expand_candidates_results_codec = _Codec(0, 1, _write_content_so
 
 
 def _write_content_source_purchase_hint_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _purchase_hint_params_codec.write(s.init_struct(0, 1, 6), v["params"], caps)
 
 
 def _read_content_source_purchase_hint_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _purchase_hint_params_codec.read(s.get_struct(0, 1, 6), caps),
     }
 
 
@@ -2908,12 +4465,12 @@ _content_source_purchase_hint_params_codec = _Codec(0, 1, _write_content_source_
 
 
 def _write_content_source_purchase_hint_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _purchase_hint_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_purchase_hint_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _purchase_hint_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -2922,12 +4479,12 @@ _content_source_purchase_hint_results_codec = _Codec(0, 1, _write_content_source
 
 
 def _write_content_source_list_deals_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _list_deals_params_codec.write(s.init_struct(0, 1, 0), v["params"], caps)
 
 
 def _read_content_source_list_deals_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _list_deals_params_codec.read(s.get_struct(0, 1, 0), caps),
     }
 
 
@@ -2936,12 +4493,12 @@ _content_source_list_deals_params_codec = _Codec(0, 1, _write_content_source_lis
 
 
 def _write_content_source_list_deals_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _catalog_hits_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_list_deals_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _catalog_hits_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -2988,12 +4545,12 @@ _content_source_diagnose_params_codec = _Codec(0, 0, _write_content_source_diagn
 
 
 def _write_content_source_diagnose_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _diagnose_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_diagnose_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _diagnose_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -3002,12 +4559,12 @@ _content_source_diagnose_results_codec = _Codec(0, 1, _write_content_source_diag
 
 
 def _write_content_source_catalog_detail_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _catalog_detail_params_codec.write(s.init_struct(0, 0, 2), v["params"], caps)
 
 
 def _read_content_source_catalog_detail_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _catalog_detail_params_codec.read(s.get_struct(0, 0, 2), caps),
     }
 
 
@@ -3016,12 +4573,12 @@ _content_source_catalog_detail_params_codec = _Codec(0, 1, _write_content_source
 
 
 def _write_content_source_catalog_detail_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _catalog_detail_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_content_source_catalog_detail_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _catalog_detail_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -3148,12 +4705,12 @@ _integration_diagnose_params_codec = _Codec(0, 0, _write_integration_diagnose_pa
 
 
 def _write_integration_diagnose_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _diagnose_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_integration_diagnose_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _diagnose_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -3162,12 +4719,12 @@ _integration_diagnose_results_codec = _Codec(0, 1, _write_integration_diagnose_r
 
 
 def _write_integration_scan_library_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _scan_library_params_codec.write(s.init_struct(0, 1, 0), v["params"], caps)
 
 
 def _read_integration_scan_library_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _scan_library_params_codec.read(s.get_struct(0, 1, 0), caps),
     }
 
 
@@ -3202,12 +4759,12 @@ _integration_sync_listening_params_codec = _Codec(0, 0, _write_integration_sync_
 
 
 def _write_integration_sync_listening_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _sync_listening_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_integration_sync_listening_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _sync_listening_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -3216,12 +4773,12 @@ _integration_sync_listening_results_codec = _Codec(0, 1, _write_integration_sync
 
 
 def _write_integration_authenticate_user_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _authenticate_user_params_codec.write(s.init_struct(0, 0, 2), v["params"], caps)
 
 
 def _read_integration_authenticate_user_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _authenticate_user_params_codec.read(s.get_struct(0, 0, 2), caps),
     }
 
 
@@ -3230,12 +4787,12 @@ _integration_authenticate_user_params_codec = _Codec(0, 1, _write_integration_au
 
 
 def _write_integration_authenticate_user_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _external_user_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_integration_authenticate_user_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _external_user_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -3256,12 +4813,12 @@ _integration_poll_events_params_codec = _Codec(0, 0, _write_integration_poll_eve
 
 
 def _write_integration_poll_events_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _event_poll_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_integration_poll_events_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _event_poll_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -3644,12 +5201,12 @@ _bookclerk_plugin_describe_results_codec = _Codec(0, 1, _write_bookclerk_plugin_
 
 
 def _write_bookclerk_plugin_destination_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _destination_context_codec.write(s.init_struct(0, 0, 2), v["context"], caps)
+    _destination_context_codec.write(s.init_struct(0, 0, 1), v["context"], caps)
 
 
 def _read_bookclerk_plugin_destination_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "context": _destination_context_codec.read(s.get_struct(0, 0, 2), caps),
+        "context": _destination_context_codec.read(s.get_struct(0, 0, 1), caps),
     }
 
 
@@ -3672,12 +5229,12 @@ _bookclerk_plugin_destination_results_codec = _Codec(0, 1, _write_bookclerk_plug
 
 
 def _write_bookclerk_plugin_source_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _source_context_codec.write(s.init_struct(0, 0, 2), v["context"], caps)
+    _source_context_codec.write(s.init_struct(0, 0, 1), v["context"], caps)
 
 
 def _read_bookclerk_plugin_source_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "context": _source_context_codec.read(s.get_struct(0, 0, 2), caps),
+        "context": _source_context_codec.read(s.get_struct(0, 0, 1), caps),
     }
 
 
@@ -3700,12 +5257,12 @@ _bookclerk_plugin_source_results_codec = _Codec(0, 1, _write_bookclerk_plugin_so
 
 
 def _write_bookclerk_plugin_worker_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _worker_context_codec.write(s.init_struct(0, 0, 3), v["context"], caps)
+    _worker_context_codec.write(s.init_struct(0, 0, 2), v["context"], caps)
 
 
 def _read_bookclerk_plugin_worker_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "context": _worker_context_codec.read(s.get_struct(0, 0, 3), caps),
+        "context": _worker_context_codec.read(s.get_struct(0, 0, 2), caps),
     }
 
 
@@ -3754,12 +5311,12 @@ _bookclerk_plugin_shutdown_results_codec = _Codec(0, 1, _write_bookclerk_plugin_
 
 
 def _write_bookclerk_plugin_content_source_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _content_source_context_codec.write(s.init_struct(0, 0, 2), v["context"], caps)
+    _content_source_context_codec.write(s.init_struct(0, 0, 1), v["context"], caps)
 
 
 def _read_bookclerk_plugin_content_source_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "context": _content_source_context_codec.read(s.get_struct(0, 0, 2), caps),
+        "context": _content_source_context_codec.read(s.get_struct(0, 0, 1), caps),
     }
 
 
@@ -3782,12 +5339,12 @@ _bookclerk_plugin_content_source_results_codec = _Codec(0, 1, _write_bookclerk_p
 
 
 def _write_bookclerk_plugin_integration_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _integration_context_codec.write(s.init_struct(0, 0, 2), v["context"], caps)
+    _integration_context_codec.write(s.init_struct(0, 0, 1), v["context"], caps)
 
 
 def _read_bookclerk_plugin_integration_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "context": _integration_context_codec.read(s.get_struct(0, 0, 2), caps),
+        "context": _integration_context_codec.read(s.get_struct(0, 0, 1), caps),
     }
 
 
@@ -3850,12 +5407,12 @@ _bookclerk_plugin_cli_describe_params_codec = _Codec(0, 0, _write_bookclerk_plug
 
 
 def _write_bookclerk_plugin_cli_describe_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _cli_schema_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_bookclerk_plugin_cli_describe_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _cli_schema_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 
@@ -3864,12 +5421,12 @@ _bookclerk_plugin_cli_describe_results_codec = _Codec(0, 1, _write_bookclerk_plu
 
 
 def _write_bookclerk_plugin_cli_invoke_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    s.set_text(0, v["paramsJson"])
+    _cli_invoke_params_codec.write(s.init_struct(0, 0, 2), v["params"], caps)
 
 
 def _read_bookclerk_plugin_cli_invoke_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "paramsJson": s.get_text(0),
+        "params": _cli_invoke_params_codec.read(s.get_struct(0, 0, 2), caps),
     }
 
 
@@ -3878,12 +5435,12 @@ _bookclerk_plugin_cli_invoke_params_codec = _Codec(0, 1, _write_bookclerk_plugin
 
 
 def _write_bookclerk_plugin_cli_invoke_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
-    _json_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+    _cli_invoke_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
 
 
 def _read_bookclerk_plugin_cli_invoke_results(s: _StructReader, caps: _CapTable) -> Any:
     return {
-        "result": _json_reply_codec.read(s.get_struct(0, 1, 1), caps),
+        "result": _cli_invoke_reply_codec.read(s.get_struct(0, 1, 1), caps),
     }
 
 

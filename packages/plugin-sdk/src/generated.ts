@@ -15,7 +15,11 @@
 
 import type {
   PluginErrorCode,
+  PortalAuthMode,
   CliArgKind,
+  CatalogSort,
+  CatalogField,
+  Abridgement,
   DbType,
   DbStatementKind,
   DbResultSelection,
@@ -26,7 +30,11 @@ import type {
 
 export type {
   PluginErrorCode,
+  PortalAuthMode,
   CliArgKind,
+  CatalogSort,
+  CatalogField,
+  Abridgement,
   DbType,
   DbStatementKind,
   DbResultSelection,
@@ -34,12 +42,6 @@ export type {
   ResolvedSqlType,
   IntegerArithKind,
 };
-
-/** Arbitrary JSON value carried inside a `$jsonValue` `Text` field. */
-export type JsonValue = unknown;
-
-/** JSON object carried inside a `$jsonValue` `Text` field. */
-export type JsonObject = Record<string, unknown>;
 
 /** Guest-advertised caps for `rpc.scalarLimits`; never above the file constants. */
 export interface ScalarLimits {
@@ -169,10 +171,31 @@ export interface PluginDescribe {
    */
   supportedRoles: string[];
   /**
-   * Identity extras (brand, cli schema, method names, aliases).
-   * Versioned JSON escape hatch; not a substitute for typed fields.
+   * Capability method names the guest implements (e.g. `health`, `login`,
+   * `fetchTitle`). The host intersects these with the consent grant.
    */
-  metadataJson: string;
+  capabilities: string[];
+  /** Portal Accounts connect mode for storefronts. */
+  portalAuthMode: PortalAuthMode;
+  /**
+   * Env var name operators may set for password helpers; never required for
+   * Accounts UI connect. Empty when the guest accepts none.
+   * Omitted when absent (wire zero value).
+   */
+  passwordEnvVar?: string;
+  /** Alternate ids accepted for config / CLI targeting. */
+  aliases: string[];
+  /** UI sort weight among peers of the same kind; lower sorts first. */
+  sortKey: number;
+  /**
+   * Portal brand colors and icon URL; `brand.id` is empty when the guest has
+   * no brand and the host renders a neutral fallback.
+   */
+  brand: Brand;
+  /** Discoverable config option groups for source UIs. */
+  configOptions: ConfigOption[];
+  /** Embedded CLI schema (same shape as `cliDescribe`); empty when unused. */
+  cli: CliSchema;
 }
 
 /**
@@ -219,21 +242,20 @@ export interface ExtensibleConfig {
 }
 
 /**
- * Opaque JSON knobs only (migration bridge). Prefer `config` for new fields.
- * OS paths, FDs, and sockets are transport-private.
+ * Granted configuration for `BookclerkPlugin.destination`. OS paths, FDs,
+ * and sockets are transport-private.
  */
 export interface DestinationContext {
-  /** Legacy opaque JSON knobs (migration bridge). */
-  json: string;
-  /** Granted extensible configuration. */
+  /**
+   * Granted plugin settings (operator `[output.<id>]` table as
+   * `application/json`).
+   */
   config: ExtensibleConfig;
 }
 
 /** Granted configuration for `BookclerkPlugin.source`. */
 export interface SourceContext {
-  /** Legacy opaque JSON knobs (migration bridge). */
-  json: string;
-  /** Granted extensible configuration. */
+  /** Granted plugin settings as `application/json`. */
   config: ExtensibleConfig;
 }
 
@@ -241,34 +263,44 @@ export interface SourceContext {
 export interface WorkerContext {
   /** Host job id this handler serves. */
   jobId: string;
-  /** Legacy opaque JSON knobs (migration bridge). */
-  json: string;
-  /** Granted extensible configuration. */
+  /** Granted plugin settings as `application/json`. */
   config: ExtensibleConfig;
 }
 
 /** Granted configuration for `BookclerkPlugin.contentSource`. */
 export interface ContentSourceContext {
-  /** Legacy opaque JSON knobs (migration bridge). */
-  json: string;
-  /** Granted extensible configuration. */
+  /**
+   * Granted plugin settings (operator `[sources.<id>]` table as
+   * `application/json`).
+   */
   config: ExtensibleConfig;
 }
 
 /** Granted configuration for `BookclerkPlugin.integration`. */
 export interface IntegrationContext {
-  /** Legacy opaque JSON knobs (migration bridge). */
-  json: string;
-  /** Granted extensible configuration. */
+  /**
+   * Granted plugin settings (operator `[integrations.<id>]` table as
+   * `application/json`).
+   */
   config: ExtensibleConfig;
 }
 
-/** Granted configuration for `BookclerkPlugin.database` (see `DatabaseAdapterConfig`). */
+/**
+ * Granted configuration for `BookclerkPlugin.database`. First-party
+ * host-managed adapters receive host-private connect params in `config`;
+ * third-party adapters receive the typed `adapter` bootstrap instead.
+ */
 export interface DatabaseContext {
-  /** Legacy opaque JSON knobs (migration bridge). */
-  json: string;
-  /** Granted extensible configuration. */
+  /**
+   * Host-private connect params for first-party adapters; empty payload for
+   * third-party adapters.
+   */
   config: ExtensibleConfig;
+  /**
+   * Author-facing bootstrap for third-party adapters; `pluginDataDir` is
+   * empty when `config` carries host-private params instead.
+   */
+  adapter: DatabaseAdapterConfig;
 }
 
 /**
@@ -559,21 +591,6 @@ export type EventResultReply =
   | { kind: "ok"; value: EventResult } // Success: event handling outcome.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
-/**
- * Migration-bridge JSON result. Frozen methods should prefer typed structs;
- * plugin-specific DTOs travel as schemaVersion + mediaType + bounded payload
- * via ExtensibleConfig, not as unbounded serde dumps.
- */
-export interface JsonOk {
-  /** JSON text; at most `maxScalarBytes`. */
-  json: string;
-}
-
-/** Result union of `JSON-bridge methods`. */
-export type JsonReply =
-  | { kind: "ok"; value: JsonOk } // Success: JSON text payload.
-  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
-
 /** Typed liveness report. */
 export interface HealthOk {
   /** True when the guest is healthy enough for traffic. */
@@ -745,79 +762,79 @@ export interface NamedDatabase {
 }
 
 /**
- * Storefront content source (not byte Source). JSON params/results are a
- * migration bridge for existing storefront DTOs.
+ * Storefront content source (not byte Source). Every method takes and
+ * returns typed structs from the "Typed method payloads" section.
  */
 export interface ContentSource {
   /**
    * Connect an account (password or one-shot OAuth).
    *
-   * @param paramsJson - `LoginParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Credentials, marketplace, callback wiring.
+   * @returns {@link LoginReply}
    */
-  login(paramsJson: string): Promise<JsonReply>;
+  login(params: LoginParams): Promise<LoginReply>;
   /**
    * Sync library rows for one or more accounts.
    *
-   * @param paramsJson - `ScanParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Accounts, paging, and host-sealed credentials.
+   * @returns {@link ScanReply}
    */
-  scan(paramsJson: string): Promise<JsonReply>;
+  scan(params: ScanParams): Promise<ScanReply>;
   /**
    * Download and decrypt one title into `cacheDir`.
    *
-   * @param paramsJson - `FetchTitleParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Title, credentials, and fetch options.
+   * @returns {@link FetchTitleReply}
    */
-  fetchTitle(paramsJson: string): Promise<JsonReply>;
+  fetchTitle(params: FetchTitleParams): Promise<FetchTitleReply>;
   /**
    * Enumerate accounts the guest knows about.
    *
-   * @returns {@link JsonReply}
+   * @returns {@link SourceAccountsReply}
    */
-  listAccounts(): Promise<JsonReply>;
+  listAccounts(): Promise<SourceAccountsReply>;
   /**
    * Begin an interactive OAuth login; returns a session id.
    *
-   * @param paramsJson - `LoginStartParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Same shape as `login`; host fills callback IPC.
+   * @returns {@link LoginStartReply}
    */
-  loginStart(paramsJson: string): Promise<JsonReply>;
+  loginStart(params: LoginParams): Promise<LoginStartReply>;
   /**
    * Finish an interactive OAuth login started by `loginStart`.
    *
-   * @param paramsJson - `LoginCompleteParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Session id from `loginStart`.
+   * @returns {@link LoginReply}
    */
-  loginComplete(paramsJson: string): Promise<JsonReply>;
+  loginComplete(params: LoginCompleteParams): Promise<LoginReply>;
   /**
    * Free-text storefront catalog search.
    *
-   * @param paramsJson - `SearchCatalogParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Query, region, paging, sort, facet.
+   * @returns {@link CatalogHitsReply}
    */
-  searchCatalog(paramsJson: string): Promise<JsonReply>;
+  searchCatalog(params: SearchCatalogParams): Promise<CatalogHitsReply>;
   /**
    * Related-title expansion from a seed title.
    *
-   * @param paramsJson - `ExpandCandidatesParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Seed identity fields and limit.
+   * @returns {@link CatalogHitsReply}
    */
-  expandCandidates(paramsJson: string): Promise<JsonReply>;
+  expandCandidates(params: ExpandCandidatesParams): Promise<CatalogHitsReply>;
   /**
    * Purchase link / price hint for one title.
    *
-   * @param paramsJson - `PurchaseHintParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Identity fields and price flag.
+   * @returns {@link PurchaseHintReply}
    */
-  purchaseHint(paramsJson: string): Promise<JsonReply>;
+  purchaseHint(params: PurchaseHintParams): Promise<PurchaseHintReply>;
   /**
    * Current storefront deals.
    *
-   * @param paramsJson - `ListDealsParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Optional result cap.
+   * @returns {@link CatalogHitsReply}
    */
-  listDeals(paramsJson: string): Promise<JsonReply>;
+  listDeals(params: ListDealsParams): Promise<CatalogHitsReply>;
   /**
    * Liveness / readiness probe.
    *
@@ -825,18 +842,18 @@ export interface ContentSource {
    */
   health(): Promise<HealthReply>;
   /**
-   * Human-readable diagnostic lines (`DiagnoseResult` JSON).
+   * Human-readable diagnostic lines.
    *
-   * @returns {@link JsonReply}
+   * @returns {@link DiagnoseReply}
    */
-  diagnose(): Promise<JsonReply>;
+  diagnose(): Promise<DiagnoseReply>;
   /**
    * Full catalog record for one product.
    *
-   * @param paramsJson - `CatalogDetailParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Product id and optional ISBN.
+   * @returns {@link CatalogDetailReply}
    */
-  catalogDetail(paramsJson: string): Promise<JsonReply>;
+  catalogDetail(params: CatalogDetailParams): Promise<CatalogDetailReply>;
 }
 
 /** Long-running integration (remote library, listening sync, IdP bridge). */
@@ -867,74 +884,37 @@ export interface Integration {
    */
   stop(): Promise<EmptyReply>;
   /**
-   * Human-readable diagnostic lines (`DiagnoseResult` JSON).
+   * Human-readable diagnostic lines.
    *
-   * @returns {@link JsonReply}
+   * @returns {@link DiagnoseReply}
    */
-  diagnose(): Promise<JsonReply>;
+  diagnose(): Promise<DiagnoseReply>;
   /**
    * Re-sync the remote library.
    *
-   * @param paramsJson - `ScanLibraryParams` JSON.
+   * @param params - Full-rescan flag.
    * @returns {@link EmptyReply}
    */
-  scanLibrary(paramsJson: string): Promise<EmptyReply>;
+  scanLibrary(params: ScanLibraryParams): Promise<EmptyReply>;
   /**
    * Push / pull listening progress.
    *
-   * @returns {@link JsonReply}
+   * @returns {@link SyncListeningReply}
    */
-  syncListening(): Promise<JsonReply>;
+  syncListening(): Promise<SyncListeningReply>;
   /**
    * Verify remote credentials on behalf of the host.
    *
-   * @param paramsJson - `AuthenticateUserParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Username and password.
+   * @returns {@link ExternalUserReply}
    */
-  authenticateUser(paramsJson: string): Promise<JsonReply>;
+  authenticateUser(params: AuthenticateUserParams): Promise<ExternalUserReply>;
   /**
    * Drain events the remote side produced since the last poll.
    *
-   * @returns {@link JsonReply}
+   * @returns {@link EventPollReply}
    */
-  pollEvents(): Promise<JsonReply>;
-}
-
-/**
- * Identity extras carried as JSON in `describe().metadataJson`: portal auth,
- * brand colors, config option discovery, and an embedded CLI schema.
- */
-export interface PluginMetadata {
-  /** ABI version the guest speaks; must equal `apiVersion`. */
-  apiVersion: number;
-  /** Stable plugin id matching `plugin.toml` / install directory name. */
-  id: string;
-  /** Plugin kind: "source", "integration", "output", or "database". */
-  kind: string;
-  /** Human-readable name for UI lists; omitted when absent. */
-  displayName?: string;
-  /**
-   * Declared capability method names the guest implements (e.g. "health",
-   * "login", "fetchTitle").
-   */
-  capabilities?: string[];
-  /** Portal Accounts connect mode: "oauth" or "password". */
-  portalAuthMode?: string;
-  /**
-   * Optional env var name operators may set for password helpers; never
-   * required for Accounts UI connect.
-   */
-  passwordEnvVar?: string;
-  /** Alternate ids accepted for config / CLI targeting; omitted when empty. */
-  aliases?: string[];
-  /** Optional UI sort weight among peers of the same kind. */
-  sortKey?: number;
-  /** Portal brand colors and icon URL for Accounts / library chrome. */
-  brand?: Brand;
-  /** Discoverable config option groups for source UIs. */
-  configOptions?: ConfigOption[];
-  /** Optional embedded CLI schema (same shape as `cliDescribe`). */
-  cli?: CliSchema;
+  pollEvents(): Promise<EventPollReply>;
 }
 
 /**
@@ -942,7 +922,7 @@ export interface PluginMetadata {
  * `logo`: `iconUrl` is the live URL or data URI the SPA renders.
  */
 export interface Brand {
-  /** Brand id (often matches the plugin id). */
+  /** Brand id (often matches the plugin id); empty means "no brand". */
   id: string;
   /** Display name shown next to the brand swatch. */
   name: string;
@@ -952,8 +932,11 @@ export interface Brand {
   fg: string;
   /** Accent CSS color for highlights / CTAs. */
   accent: string;
-  /** Icon URL or data URI for the portal. */
-  iconUrl: string;
+  /**
+   * Icon URL or data URI for the portal.
+   * Omitted when absent (wire zero value).
+   */
+  iconUrl?: string;
 }
 
 /** One discoverable config option group advertised for sources. */
@@ -974,7 +957,7 @@ export interface ConfigOptionValue {
   label: string;
 }
 
-/** Declared plugin CLI surface (`cliDescribe` / metadata `cli` / `plugin.toml`). */
+/** Declared plugin CLI surface (`cliDescribe` / `describe().cli`). */
 export interface CliSchema {
   /** Commands exposed as `bookclerk plugins <id> <command> ...`. */
   commands: CliCommandSpec[];
@@ -984,41 +967,64 @@ export interface CliSchema {
 export interface CliCommandSpec {
   /** Command verb after the plugin id (for example "ping"). */
   name: string;
-  /** Short help text for `--help`; omitted when absent. */
+  /**
+   * Short help text for `--help`.
+   * Omitted when absent (wire zero value).
+   */
   about?: string;
-  /** Argument / flag specs for this command (default empty). */
-  args?: CliArgSpec[];
+  /** Argument / flag specs for this command. */
+  args: CliArgSpec[];
 }
 
 /** One CLI argument or flag under a `CliCommandSpec`. */
 export interface CliArgSpec {
-  /** Internal arg name used as the key in `CliInvokeParams.args`. */
+  /** Internal arg name used as `CliArg.name` on invoke. */
   name: string;
-  /** Long flag without leading dashes (e.g. "message" -> `--message`). */
+  /**
+   * Long flag without leading dashes (e.g. "message" -> `--message`).
+   * Omitted when absent (wire zero value).
+   */
   long?: string;
-  /** Optional short flag character (e.g. "m" -> `-m`). */
+  /**
+   * Short flag character (e.g. "m" -> `-m`).
+   * Omitted when absent (wire zero value).
+   */
   short?: string;
-  /** Parsed value kind (default "string"). */
-  kind?: CliArgKind;
+  /** Parsed value kind. */
+  kind: CliArgKind;
   /** When true, the host rejects invoke if the arg is missing. */
-  required?: boolean;
-  /** Default string form when the operator omits the arg. */
+  required: boolean;
+  /**
+   * Default string form when the operator omits the arg.
+   * Omitted when absent (wire zero value).
+   */
   default?: string;
-  /** Help text for this arg; omitted when absent. */
+  /**
+   * Help text for this arg.
+   * Omitted when absent (wire zero value).
+   */
   about?: string;
   /** When true, the arg is positional rather than a flagged option. */
-  positional?: boolean;
+  positional: boolean;
 }
 
-/** Params JSON for `cliInvoke`. */
+/** One named argument value passed to `cliInvoke`. */
+export interface CliArg {
+  /** Arg name matching a `CliArgSpec.name`. */
+  name: string;
+  /** String form of the value (the guest parses per `CliArgSpec.kind`). */
+  value: string;
+}
+
+/** Params of `BookclerkPlugin.cliInvoke`. */
 export interface CliInvokeParams {
   /** Command name matching a `CliCommandSpec.name`. */
   command: string;
-  /** Named argument values (keys match `CliArgSpec.name`; default `{}`). */
-  args?: JsonValue;
+  /** Named argument values. */
+  args: CliArg[];
 }
 
-/** Result JSON for `cliInvoke`. */
+/** Result of `BookclerkPlugin.cliInvoke`. */
 export interface CliInvokeResult {
   /** Process-style exit code (0 = success). */
   exitCode: number;
@@ -1026,148 +1032,357 @@ export interface CliInvokeResult {
   stdout: string;
   /** Captured standard error text. */
   stderr: string;
-  /** Optional structured payload for machine consumers; omitted when absent. */
-  json: JsonValue;
+  /** Structured payload for machine consumers; empty `mediaType` when absent. */
+  payload: ExtensibleConfig;
 }
+
+/** Result union of `BookclerkPlugin.cliDescribe`. */
+export type CliSchemaReply =
+  | { kind: "ok"; value: CliSchema } // Success: declared CLI surface.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/** Result union of `BookclerkPlugin.cliInvoke`. */
+export type CliInvokeReply =
+  | { kind: "ok"; value: CliInvokeResult } // Success: command output.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
 /**
  * Author-facing database adapter configuration carried in
- * `DatabaseContext.config` (mediaType
- * `application/vnd.bookclerk.db-adapter-config+json`). This is the generic
- * bootstrap mechanism for third-party adapters: the operator's granted
- * `[database.<id>]` table plus the scoped writable data dir. First-party
- * host-managed adapters receive host-private connect params instead.
+ * `DatabaseContext.adapter`. This is the generic bootstrap mechanism for
+ * third-party adapters: the operator's granted `[database.<id>]` table plus
+ * the scoped writable data dir. First-party host-managed adapters receive
+ * host-private connect params in `DatabaseContext.config` instead.
  */
 export interface DatabaseAdapterConfig {
   /** Scoped writable directory for this plugin (`.../plugins/<id>/data`). */
   pluginDataDir: string;
   /**
-   * Granted plugin settings (operator `[database.<id>]` table) as a JSON
-   * object; `{}` when the operator configured nothing.
+   * Granted plugin settings (operator `[database.<id>]` table) as
+   * `application/json`; `{}` when the operator configured nothing.
    */
-  config?: JsonValue;
+  settings: ExtensibleConfig;
   /**
-   * Named plugin database binding this open serves; omitted for the primary
+   * Named plugin database binding this open serves; empty for the primary
    * library open. Adapters advertising `DbCapabilities.pluginDatabases` must
    * serve each binding from its own isolated database.
+   * Omitted when absent (wire zero value).
    */
   binding?: string;
   /**
    * Host-issued opaque instance id for this (owner plugin, binding) pair.
-   * Collision-resistant and stable across re-opens. Omitted for the primary
+   * Collision-resistant and stable across re-opens. Empty for the primary
    * library open. Third-party adapters must key isolated databases on this
    * value rather than `binding` alone (two plugins may both declare `DB`).
+   * Omitted when absent (wire zero value).
    */
   instanceId?: string;
   /**
-   * Append-only. When false, open an existing binding unit and
-   * do not provision a missing one (read-only backup capture). Omitted/true
-   * on older hosts means the adapter may create the unit.
+   * When true, open an existing binding unit and do not provision a missing
+   * one (read-only backup capture). False lets the adapter create the unit.
    */
-  provision?: boolean;
+  openExisting: boolean;
 }
 
-/**
- * JSON health payload for guests that report identity alongside liveness.
- * Role-level `health` RPCs return the typed `HealthOk` instead.
- */
-export interface HealthResult {
-  /** When true, the guest considers itself healthy enough for traffic. */
-  ok: boolean;
-  /** Plugin id echo; omitted when the guest does not duplicate identity. */
-  id: string;
-  /** Whether the guest believes it is enabled in config; omitted when unknown. */
-  enabled: boolean;
-  /** Short human detail for CLI / UI status lines; omitted when absent. */
-  detail: string;
-}
-
-/**
- * JSON result of `diagnose`. Each line is printed by
- * `bookclerk plugins diagnose` / the control plane.
- */
+/** Operator-facing diagnostic lines printed by `bookclerk plugins diagnose`. */
 export interface DiagnoseResult {
-  /** Human-readable probe lines (default empty). */
+  /** Human-readable probe lines. */
   lines: string[];
 }
 
+/** Result union of `diagnose`. */
+export type DiagnoseReply =
+  | { kind: "ok"; value: DiagnoseResult } // Success: diagnostic lines.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/** Source account metadata returned from login and stored by the host. */
+export interface SourceAccount {
+  /** Stable account id within this source plugin. */
+  accountId: string;
+  /** Source plugin id (the host forces this to the guest's install id). */
+  source: string;
+  /** Storefront marketplace / region code (for example `us`, `uk`). */
+  marketplace: string;
+  /**
+   * Operator-facing label.
+   * Omitted when absent (wire zero value).
+   */
+  label?: string;
+  /**
+   * When true, bare / scheduled scans include this account. Explicit CLI
+   * `--account` bypasses this flag.
+   */
+  scanEnabled: boolean;
+}
+
 /**
- * Params JSON for `ContentSource.login`. Password sources fill
- * email/password; OAuth sources use callback / external fields. There is no
- * files-dir root or library DB path -- only `pluginDataDir`.
+ * Params of `ContentSource.login` and `ContentSource.loginStart`. Password
+ * sources fill email/password; OAuth sources use callback / external fields.
+ * There is no files-dir root or library DB path -- only `pluginDataDir`.
  */
 export interface LoginParams {
   /** Scoped writable directory for this plugin only (`.../plugins/<id>/data`). */
   pluginDataDir: string;
-  /** Marketplace / locale for the storefront (default empty -> guest default). */
-  marketplace?: string;
-  /** Optional operator label stored on the account row. */
+  /** Marketplace / locale for the storefront; empty means the guest default. */
+  marketplace: string;
+  /**
+   * Operator label stored on the account row.
+   * Omitted when absent (wire zero value).
+   */
   label?: string;
-  /** Account email / username for password logins; omitted for pure OAuth. */
+  /**
+   * Account email / username for password logins; empty for pure OAuth.
+   * Omitted when absent (wire zero value).
+   */
   email?: string;
-  /** Account password for password logins; never logged; omitted for OAuth. */
+  /**
+   * Account password for password logins; never logged; empty for OAuth.
+   * Omitted when absent (wire zero value).
+   */
   password?: string;
   /** When true, overwrite an existing sealed credential for this account. */
-  force?: boolean;
+  force: boolean;
   /**
-   * Optional bind address for OAuth callback servers (`host:port`). Ignored
-   * when `callbackIpc` is set (host owns the TCP listener).
+   * Bind address for OAuth callback servers (`host:port`). Ignored when
+   * `callbackIpc` is set (host owns the TCP listener).
+   * Omitted when absent (wire zero value).
    */
   callbackBind?: string;
   /**
    * Host-owned callback IPC endpoint the guest must connect to. When set
    * (with `callbackPublicBase`), the guest must not bind a TCP listener.
+   * Omitted when absent (wire zero value).
    */
   callbackIpc?: string;
-  /** Public base URL for the host TCP listener, e.g. `http://127.0.0.1:12345`. */
+  /**
+   * Public base URL for the host TCP listener, e.g. `http://127.0.0.1:12345`.
+   * Omitted when absent (wire zero value).
+   */
   callbackPublicBase?: string;
   /**
    * When true, use external / paste-redirect OAuth instead of a local
    * callback server.
    */
-  external?: boolean;
-  /** Pre-supplied OAuth redirect URL (paste flow); omitted otherwise. */
+  external: boolean;
+  /**
+   * Pre-supplied OAuth redirect URL (paste flow).
+   * Omitted when absent (wire zero value).
+   */
   responseUrl?: string;
   /** Prefer QR output when the guest supports it. */
-  showQr?: boolean;
-  /** Seconds to wait for OAuth callback capture; guest default when omitted. */
+  showQr: boolean;
+  /**
+   * Seconds to wait for OAuth callback capture; guest default when 0.
+   * Omitted when absent (wire zero value).
+   */
   timeoutSecs?: number;
-  /** Store-specific knobs as a JSON object; guests may ignore unknowns. */
-  extra?: JsonValue;
+  /** Store-specific knobs as `application/json`; guests may ignore unknowns. */
+  extra: ExtensibleConfig;
 }
 
-/** Params JSON for `ContentSource.loginStart` -- same shape as `LoginParams`. */
-export type LoginStartParams = LoginParams;
+/**
+ * Result of `ContentSource.login` / `loginComplete`: account metadata plus
+ * opaque credentials for the host to seal into `encrypted_secrets`
+ * (`provider = plugin id`). Guests never write secrets into the library DB.
+ */
+export interface LoginResult {
+  /** Account row fields for the host to upsert. */
+  account: SourceAccount;
+  /**
+   * Opaque credential blob the host seals; empty when login only refreshed
+   * metadata. Guests choose the encoding (typically JSON bytes).
+   * Omitted when absent (wire zero value).
+   */
+  credentials?: Uint8Array;
+}
 
-/** Params JSON for `ContentSource.loginComplete`. */
+/**
+ * Result of `ContentSource.loginStart` (interactive OAuth). The operator
+ * opens `url`; `loginComplete` later uses `sessionId`.
+ */
+export interface LoginStartResult {
+  /** Opaque session id for `loginComplete`. */
+  sessionId: string;
+  /** Browser URL the operator should open to complete OAuth. */
+  url: string;
+}
+
+/** Params of `ContentSource.loginComplete`. */
 export interface LoginCompleteParams {
   /** Session id previously returned by `loginStart`. */
   sessionId: string;
 }
 
+/** Result union of `ContentSource.login` / `loginComplete`. */
+export type LoginReply =
+  | { kind: "ok"; value: LoginResult } // Success: account plus credentials to seal.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/** Result union of `ContentSource.loginStart`. */
+export type LoginStartReply =
+  | { kind: "ok"; value: LoginStartResult } // Success: session id and browser URL.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/** Host-sealed credentials for one account, delivered on `scan`. */
+export interface AccountCredential {
+  /** Account id the blob belongs to. */
+  accountId: string;
+  /** Opaque credential bytes exactly as the guest returned them at login. */
+  credentials: Uint8Array;
+}
+
 /**
- * Params JSON for `ContentSource.scan`. Host injects sealed credentials so
- * the plugin does not need a private credential store under `pluginDataDir`.
+ * Params of `ContentSource.scan`. The host injects sealed credentials so the
+ * plugin does not need a private credential store under `pluginDataDir`.
  */
 export interface ScanParams {
   /** Scoped plugin data directory. */
   pluginDataDir: string;
   /** Account ids to scan; empty means all scan-enabled accounts. */
-  accounts?: string[];
-  /** Storefront page size (default 50). */
-  pageSize?: number;
-  /** When true, import podcast/episode-style rows (default true). */
-  importEpisodes?: boolean;
-  /** When true, import Plus/catalog entitlement titles (default true). */
-  importPlusTitles?: boolean;
-  /** Host-loaded credential blobs keyed by account id (JSON object). */
-  credentials?: JsonValue;
+  accounts: string[];
+  /** Storefront page size; the host always sends an explicit value. */
+  pageSize: number;
+  /** When true, import podcast/episode-style rows. */
+  importEpisodes: boolean;
+  /** When true, import Plus/catalog entitlement titles. */
+  importPlusTitles: boolean;
+  /** Host-loaded credential blobs for the requested accounts. */
+  credentials: AccountCredential[];
 }
 
 /**
- * Params JSON for `ContentSource.fetchTitle`. Plugin writes media under
- * `cacheDir` and returns plain (DRM-free) paths. Host injects credentials;
- * guests must not open `library.db` or `master.key`.
+ * One library title returned by `ContentSource.scan`. The host upserts these
+ * rows and forces `source` to the plugin id.
+ */
+export interface ScanBook {
+  /** Account that owns this library entry. */
+  accountId: string;
+  /** Storefront product / SKU id. */
+  productId: string;
+  /** Primary title string. */
+  title: string;
+  /**
+   * Marketplace / region when known.
+   * Omitted when absent (wire zero value).
+   */
+  marketplace?: string;
+  /**
+   * Amazon ASIN when the storefront exposes one.
+   * Omitted when absent (wire zero value).
+   */
+  asin?: string;
+  /**
+   * ISBN when the storefront exposes one.
+   * Omitted when absent (wire zero value).
+   */
+  isbn?: string;
+  /**
+   * Comma- or guest-formatted author list.
+   * Omitted when absent (wire zero value).
+   */
+  authors?: string;
+  /**
+   * Comma- or guest-formatted narrator list.
+   * Omitted when absent (wire zero value).
+   */
+  narrators?: string;
+  /**
+   * Series name when applicable.
+   * Omitted when absent (wire zero value).
+   */
+  series?: string;
+  /**
+   * Series index / sequence label.
+   * Omitted when absent (wire zero value).
+   */
+  seriesIndex?: string;
+  /**
+   * Content classification (e.g. `book` vs `episode`).
+   * Omitted when absent (wire zero value).
+   */
+  contentKind?: string;
+  /**
+   * Publisher name when known.
+   * Omitted when absent (wire zero value).
+   */
+  publisher?: string;
+  /**
+   * Runtime in whole minutes when known.
+   * Omitted when absent (wire zero value).
+   */
+  lengthMinutes?: bigint;
+  /**
+   * Subtitle when distinct from `title`.
+   * Omitted when absent (wire zero value).
+   */
+  subtitle?: string;
+}
+
+/** Summary result of `ContentSource.scan`. */
+export interface ScanSummary {
+  /** Number of accounts touched during the scan. */
+  accounts: number;
+  /**
+   * Count of titles the guest expects the host to upsert; may mirror
+   * `books.length`.
+   */
+  booksUpserted: number;
+  /** Number of storefront pages fetched. */
+  pages: number;
+  /** Accounts skipped because `scanEnabled` was false. */
+  skippedDisabled: number;
+  /** Titles for the host to upsert. Prefer this over plugin-side DB writes. */
+  books: ScanBook[];
+}
+
+/** Result union of `ContentSource.scan`. */
+export type ScanReply =
+  | { kind: "ok"; value: ScanSummary } // Success: scan summary and titles to upsert.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/**
+ * Fetch-relevant acquire knobs the host forwards so external load matches
+ * in-process. Packaging / naming knobs stay host-side.
+ */
+export interface FetchOptions {
+  /** Prefer Widevine/CENC download when the store offers it. */
+  widevine: boolean;
+  /** Prefer xHE-AAC on the Widevine path when offered. */
+  xheAac: boolean;
+  /**
+   * Local Widevine `.wvd` path granted to the guest.
+   * Omitted when absent (wire zero value).
+   */
+  widevineCdmPath?: string;
+  /**
+   * Remote L3 CDM provider URL; empty means the classic default, `off`
+   * disables remote provisioning.
+   * Omitted when absent (wire zero value).
+   */
+  widevineCdmProvider?: string;
+  /** When true, download a cover image alongside audio. */
+  downloadCover: boolean;
+  /** When true, download a companion PDF when the store exposes one. */
+  downloadPdf: boolean;
+  /** Cover image size request (`500`, `1215`, or `native`). */
+  coverSize: string;
+  /** Preferred chapter API layout when fetching (`tree` or `flat`). */
+  chapterLayout: string;
+  /** When true, trim Audible brand intro/outro from the remux window. */
+  stripAudibleBrandAudio: boolean;
+  /** When true, download clips/bookmarks sidecars when offered. */
+  downloadClipsBookmarks: boolean;
+  /** When true, keep the encrypted download in storage. */
+  retainAaxFile: boolean;
+  /** Fetch speed cap in KB/s (`0` = unlimited). */
+  downloadSpeedLimitKbps: number;
+  /** When true, persist raw catalog API JSON as `metadata.json`. */
+  saveMetadataJson: boolean;
+}
+
+/**
+ * Params of `ContentSource.fetchTitle`. The plugin writes media under
+ * `cacheDir` and returns plain (DRM-free) paths. The host injects
+ * credentials; guests must not open `library.db` or `master.key`.
  */
 export interface FetchTitleParams {
   /** Scoped plugin data directory. */
@@ -1178,35 +1393,107 @@ export interface FetchTitleParams {
   titleId: string;
   /** Absolute path the guest should write media into (jail-granted TMPDIR). */
   cacheDir: string;
-  /** Host-loaded credential blob for this account; omitted when unavailable. */
-  credentials?: JsonValue;
-  /** Opaque plugin table from `[sources.<id>]`. */
-  sourceConfig?: JsonValue;
-  /** Host acquire/download options (JSON object matching host DownloadOptions). */
-  download?: JsonValue;
+  /**
+   * Host-loaded credential blob for this account; empty when unavailable.
+   * Omitted when absent (wire zero value).
+   */
+  credentials?: Uint8Array;
+  /** Granted `[sources.<id>]` table as `application/json`. */
+  sourceConfig: ExtensibleConfig;
+  /** Fetch-relevant acquire options. */
+  fetch: FetchOptions;
 }
 
-/** Params JSON for `ContentSource.searchCatalog`. */
+/** One plain audio part written under the cache directory. */
+export interface PlainPart {
+  /** Absolute path to the part file under `cacheDir`. */
+  path: string;
+  /**
+   * Part title (disc / chapter label).
+   * Omitted when absent (wire zero value).
+   */
+  title?: string;
+  /**
+   * Duration of this part in milliseconds when known.
+   * Omitted when absent (wire zero value).
+   */
+  durationMs?: number;
+}
+
+/** One chapter marker of a fetched title. */
+export interface ChapterMarker {
+  /** Chapter title. */
+  title: string;
+  /** Chapter start offset in milliseconds from the beginning of the title. */
+  startMs: number;
+}
+
+/**
+ * Plain (DRM-free) fetch result. Sources always return decrypted media; DRM
+ * guests decrypt before responding.
+ */
+export interface PlainFetch {
+  /** Ordered audio part files written under the cache directory. */
+  parts: PlainPart[];
+  /**
+   * Single M4B path when the guest assembled one.
+   * Omitted when absent (wire zero value).
+   */
+  m4bPath?: string;
+  /**
+   * Cover image path under the cache directory.
+   * Omitted when absent (wire zero value).
+   */
+  coverPath?: string;
+  /** Chapter markers; empty when unknown. */
+  chapters: ChapterMarker[];
+  /**
+   * Companion PDF download URL when the store exposes one.
+   * Omitted when absent (wire zero value).
+   */
+  pdfUrl?: string;
+}
+
+/** Result union of `ContentSource.fetchTitle`. */
+export type FetchTitleReply =
+  | { kind: "ok"; value: PlainFetch } // Success: plain media paths.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/** Success payload of `ContentSource.listAccounts`. */
+export interface SourceAccounts {
+  /** Accounts the guest knows about. */
+  accounts: SourceAccount[];
+}
+
+/** Result union of `ContentSource.listAccounts`. */
+export type SourceAccountsReply =
+  | { kind: "ok"; value: SourceAccounts } // Success: account list.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/** Params of `ContentSource.searchCatalog`. */
 export interface SearchCatalogParams {
   /** Free-text search query. */
   query: string;
-  /** Storefront region / marketplace code (default empty -> guest default). */
-  region?: string;
-  /** Maximum hits to return (default 20). */
-  limit?: number;
-  /** 1-based page for storefronts that page (default 1). */
-  page?: number;
-  /** Sort key: "relevance" / "popularity" / "rating" / "title" / "author". */
-  sort?: string;
-  /** Optional facet ("author" / "narrator" / "series" / "genre"). */
-  field?: string;
-  /** Preferred content language (soft-prioritize; e.g. "en"). */
+  /** Storefront region / marketplace code; empty means the guest default. */
+  region: string;
+  /** Maximum hits to return; the host always sends an explicit value. */
+  limit: number;
+  /** 1-based page for storefronts that page. */
+  page: number;
+  /** Sort order. */
+  sort: CatalogSort;
+  /** Facet restriction. */
+  field: CatalogField;
+  /**
+   * Preferred content language (soft-prioritize; e.g. `en`).
+   * Omitted when absent (wire zero value).
+   */
   language?: string;
 }
 
 /**
- * Params JSON for `ContentSource.expandCandidates`. Seed fields identify a
- * known title; the guest returns related catalog hits.
+ * Params of `ContentSource.expandCandidates`. Seed fields identify a known
+ * title; the guest returns related catalog hits.
  */
 export interface ExpandCandidatesParams {
   /** Source plugin id hint when expanding across storefronts. */
@@ -1215,61 +1502,303 @@ export interface ExpandCandidatesParams {
   productId: string;
   /** Seed title text. */
   title: string;
-  /** Seed authors string. */
-  authors: string;
-  /** Seed narrators string. */
-  narrators: string;
-  /** Seed series name. */
-  series: string;
-  /** Seed series ASIN when known. */
-  seriesAsin: string;
-  /** Seed Amazon ASIN. */
-  asin: string;
-  /** Seed ISBN. */
-  isbn: string;
+  /**
+   * Seed authors string.
+   * Omitted when absent (wire zero value).
+   */
+  authors?: string;
+  /**
+   * Seed narrators string.
+   * Omitted when absent (wire zero value).
+   */
+  narrators?: string;
+  /**
+   * Seed series name.
+   * Omitted when absent (wire zero value).
+   */
+  series?: string;
+  /**
+   * Seed series ASIN when known.
+   * Omitted when absent (wire zero value).
+   */
+  seriesAsin?: string;
+  /**
+   * Seed Amazon ASIN.
+   * Omitted when absent (wire zero value).
+   */
+  asin?: string;
+  /**
+   * Seed ISBN.
+   * Omitted when absent (wire zero value).
+   */
+  isbn?: string;
   /** Storefront region / marketplace code. */
   region: string;
-  /** Maximum candidates to return (default 20). */
+  /** Maximum candidates to return; the host always sends an explicit value. */
   limit: number;
 }
 
 /**
- * Params JSON for `ContentSource.purchaseHint`. At least one identity field
+ * Params of `ContentSource.purchaseHint`. At least one identity field
  * (`productId` / `asin` / `isbn` / title+authors) should be set; guests may
  * return `invalid_params` when none are usable.
  */
 export interface PurchaseHintParams {
-  /** Storefront product id when known. */
-  productId: string;
-  /** Title text for fuzzy lookup. */
-  title: string;
-  /** Authors string for fuzzy lookup. */
-  authors: string;
-  /** Amazon ASIN when known. */
-  asin: string;
-  /** ISBN when known. */
-  isbn: string;
+  /**
+   * Storefront product id when known.
+   * Omitted when absent (wire zero value).
+   */
+  productId?: string;
+  /**
+   * Title text for fuzzy lookup.
+   * Omitted when absent (wire zero value).
+   */
+  title?: string;
+  /**
+   * Authors string for fuzzy lookup.
+   * Omitted when absent (wire zero value).
+   */
+  authors?: string;
+  /**
+   * Amazon ASIN when known.
+   * Omitted when absent (wire zero value).
+   */
+  asin?: string;
+  /**
+   * ISBN when known.
+   * Omitted when absent (wire zero value).
+   */
+  isbn?: string;
   /** Storefront region / marketplace code. */
   region: string;
   /** When true, guests should include live price fields when available. */
   withPrice: boolean;
 }
 
-/** Params JSON for `ContentSource.listDeals`. */
+/** Params of `ContentSource.listDeals`. */
 export interface ListDealsParams {
-  /** Optional maximum number of deals to return; guest default when omitted. */
-  limit: number;
+  /**
+   * Maximum number of deals to return; guest default when 0.
+   * Omitted when absent (wire zero value).
+   */
+  limit?: number;
 }
 
-/** Params JSON for `ContentSource.catalogDetail`. */
+/** Params of `ContentSource.catalogDetail`. */
 export interface CatalogDetailParams {
   /** Store product id (Libro ISBN or ISBN-slug). */
   productId: string;
-  /** Optional ISBN when it differs from `productId`. */
+  /**
+   * ISBN when it differs from `productId`.
+   * Omitted when absent (wire zero value).
+   */
   isbn?: string;
 }
 
-/** Params JSON for `Integration.scanLibrary` (remote library sync). */
+/**
+ * One catalog / candidate hit returned by `searchCatalog`,
+ * `expandCandidates`, `listDeals`, and `catalogDetail`.
+ */
+export interface CatalogHit {
+  /** Storefront product / SKU id. */
+  productId: string;
+  /** Primary title. */
+  title: string;
+  /**
+   * Authors string when known.
+   * Omitted when absent (wire zero value).
+   */
+  authors?: string;
+  /**
+   * Narrators string when known.
+   * Omitted when absent (wire zero value).
+   */
+  narrators?: string;
+  /**
+   * Series name when applicable.
+   * Omitted when absent (wire zero value).
+   */
+  series?: string;
+  /**
+   * Series index / sequence label.
+   * Omitted when absent (wire zero value).
+   */
+  seriesIndex?: string;
+  /**
+   * Amazon ASIN when known.
+   * Omitted when absent (wire zero value).
+   */
+  asin?: string;
+  /**
+   * ISBN when known.
+   * Omitted when absent (wire zero value).
+   */
+  isbn?: string;
+  /**
+   * Storefront product page URL.
+   * Omitted when absent (wire zero value).
+   */
+  url?: string;
+  /**
+   * Cover image URL.
+   * Omitted when absent (wire zero value).
+   */
+  coverUrl?: string;
+  /** Hit origin label (plugin id or storefront name). */
+  origin: string;
+  /**
+   * Subtitle when distinct from `title`.
+   * Omitted when absent (wire zero value).
+   */
+  subtitle?: string;
+  /**
+   * Long description / blurb when fetched.
+   * Omitted when absent (wire zero value).
+   */
+  description?: string;
+  /**
+   * Publisher name when known.
+   * Omitted when absent (wire zero value).
+   */
+  publisher?: string;
+  /**
+   * Runtime in whole minutes.
+   * Omitted when absent (wire zero value).
+   */
+  lengthMinutes?: bigint;
+  /**
+   * Publication date string as provided by the storefront.
+   * Omitted when absent (wire zero value).
+   */
+  publishedAt?: string;
+  /**
+   * Category / genre labels as a single string when known.
+   * Omitted when absent (wire zero value).
+   */
+  categories?: string;
+  /**
+   * Content language code when known.
+   * Omitted when absent (wire zero value).
+   */
+  language?: string;
+  /**
+   * Current price in minor units (cents).
+   * Omitted when absent (wire zero value).
+   */
+  priceCents?: bigint;
+  /**
+   * ISO currency code for `priceCents`.
+   * Omitted when absent (wire zero value).
+   */
+  currency?: string;
+  /**
+   * Pre-formatted price for display.
+   * Omitted when absent (wire zero value).
+   */
+  priceLabel?: string;
+  /**
+   * Aggregate rating when known.
+   * Omitted when absent (wire zero value).
+   */
+  ratingOverall?: number;
+  /**
+   * Number of ratings when known.
+   * Omitted when absent (wire zero value).
+   */
+  ratingCount?: bigint;
+  /** Whether the edition is abridged when the storefront says so. */
+  abridgement: Abridgement;
+}
+
+/** Success payload of the catalog list methods. */
+export interface CatalogHits {
+  /** Hits in storefront order. */
+  hits: CatalogHit[];
+}
+
+/** Result union of `searchCatalog` / `expandCandidates` / `listDeals`. */
+export type CatalogHitsReply =
+  | { kind: "ok"; value: CatalogHits } // Success: catalog hits.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/** Success payload of `ContentSource.catalogDetail`. */
+export interface CatalogDetail {
+  /** False when the product is unknown to the storefront (`hit` is empty). */
+  found: boolean;
+  /** Full catalog record when `found`. */
+  hit: CatalogHit;
+}
+
+/** Result union of `ContentSource.catalogDetail`. */
+export type CatalogDetailReply =
+  | { kind: "ok"; value: CatalogDetail } // Success: detail record or not-found marker.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/** Purchase hint for SPA / CLI purchase deep-links. */
+export interface PurchaseHint {
+  /** Storefront product id. */
+  productId: string;
+  /**
+   * Title when resolved.
+   * Omitted when absent (wire zero value).
+   */
+  title?: string;
+  /**
+   * Purchase or product-page URL.
+   * Omitted when absent (wire zero value).
+   */
+  url?: string;
+  /**
+   * Current price in minor units.
+   * Omitted when absent (wire zero value).
+   */
+  priceCents?: bigint;
+  /**
+   * ISO currency code for price fields.
+   * Omitted when absent (wire zero value).
+   */
+  currency?: string;
+  /**
+   * Pre-formatted current price.
+   * Omitted when absent (wire zero value).
+   */
+  priceLabel?: string;
+  /**
+   * List / MSRP price in minor units.
+   * Omitted when absent (wire zero value).
+   */
+  listPriceCents?: bigint;
+  /**
+   * Pre-formatted list price.
+   * Omitted when absent (wire zero value).
+   */
+  listPriceLabel?: string;
+  /**
+   * Member / Plus price in minor units.
+   * Omitted when absent (wire zero value).
+   */
+  memberPriceCents?: bigint;
+  /**
+   * Pre-formatted member price.
+   * Omitted when absent (wire zero value).
+   */
+  memberPriceLabel?: string;
+}
+
+/** Success payload of `ContentSource.purchaseHint`. */
+export interface PurchaseHintResult {
+  /** False when the guest could not resolve the title (`hint` is empty). */
+  found: boolean;
+  /** Purchase hint when `found`. */
+  hint: PurchaseHint;
+}
+
+/** Result union of `ContentSource.purchaseHint`. */
+export type PurchaseHintReply =
+  | { kind: "ok"; value: PurchaseHintResult } // Success: hint or not-found marker.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/** Params of `Integration.scanLibrary` (remote library sync). */
 export interface ScanLibraryParams {
   /**
    * When true, force a full rescan even if the guest would otherwise
@@ -1278,13 +1807,123 @@ export interface ScanLibraryParams {
   force: boolean;
 }
 
-/** Params JSON for `Integration.authenticateUser`. */
+/** Params of `Integration.authenticateUser`. */
 export interface AuthenticateUserParams {
   /** Integration username / login id. */
   username: string;
   /** Integration password; never logged by the host. */
   password: string;
 }
+
+/**
+ * One external user observed by an integration. The host may mint claim
+ * tickets without exposing portal details to the guest.
+ */
+export interface ExternalUser {
+  /** Integration provider id (often the plugin id). */
+  provider: string;
+  /** Provider-scoped user id. */
+  externalUserId: string;
+  /**
+   * Display name for UI.
+   * Omitted when absent (wire zero value).
+   */
+  displayName?: string;
+  /**
+   * Ephemeral remote token (e.g. ABS JWT). Guest-to-host only; never
+   * persisted.
+   * Omitted when absent (wire zero value).
+   */
+  accessToken?: string;
+}
+
+/** Result union of `Integration.authenticateUser`. */
+export type ExternalUserReply =
+  | { kind: "ok"; value: ExternalUser } // Success: verified external user.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/**
+ * Success payload of `Integration.pollEvents`: signals for the host to kick
+ * off workflows.
+ */
+export interface EventPollResult {
+  /** Newly observed external users since the last poll. */
+  users: ExternalUser[];
+}
+
+/** Result union of `Integration.pollEvents`. */
+export type EventPollReply =
+  | { kind: "ok"; value: EventPollResult } // Success: observed users.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/**
+ * One listening-progress row. The host upserts into `listening_progress`
+ * tagged with the plugin id; plugins never open the library DB.
+ */
+export interface ListeningProgress {
+  /** Provider-scoped user id. */
+  externalUserId: string;
+  /** Provider-scoped item / library id. */
+  externalItemId: string;
+  /**
+   * Bookclerk identity row id when already linked.
+   * Omitted when absent (wire zero value).
+   */
+  identityId?: bigint;
+  /**
+   * Title text when known.
+   * Omitted when absent (wire zero value).
+   */
+  title?: string;
+  /**
+   * Authors string when known.
+   * Omitted when absent (wire zero value).
+   */
+  authors?: string;
+  /**
+   * Amazon ASIN when known.
+   * Omitted when absent (wire zero value).
+   */
+  asin?: string;
+  /**
+   * ISBN when known.
+   * Omitted when absent (wire zero value).
+   */
+  isbn?: string;
+  /**
+   * Fractional progress in `0.0..=1.0` when the provider reports it.
+   * Omitted when absent (wire zero value).
+   */
+  progress?: number;
+  /**
+   * Current playback position in seconds.
+   * Omitted when absent (wire zero value).
+   */
+  currentTimeSeconds?: number;
+  /**
+   * Total duration in seconds when known.
+   * Omitted when absent (wire zero value).
+   */
+  durationSeconds?: number;
+  /** When true, the provider marks the item finished. */
+  isFinished: boolean;
+  /**
+   * Last listen timestamp as unix milliseconds (UTC).
+   * Omitted when absent (wire zero value).
+   */
+  lastListenedAtUnixMs?: number;
+}
+
+/** Success payload of `Integration.syncListening`. */
+export interface SyncListeningResult {
+  /** Progress snapshots to upsert. */
+  items: ListeningProgress[];
+}
+
+/** Result union of `Integration.syncListening`. */
+export type SyncListeningReply =
+  | { kind: "ok"; value: SyncListeningResult } // Success: progress snapshots.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
 /** One typed SQL cell or bind parameter. */
 export type DbValue =
@@ -1862,18 +2501,18 @@ export interface BookclerkPlugin {
    */
   database(context: DatabaseContext): Promise<DatabaseReply>;
   /**
-   * Declared CLI surface (`CliSchema` JSON).
+   * Declared CLI surface.
    *
-   * @returns {@link JsonReply}
+   * @returns {@link CliSchemaReply}
    */
-  cliDescribe(): Promise<JsonReply>;
+  cliDescribe(): Promise<CliSchemaReply>;
   /**
-   * Run one plugin CLI command (`CliInvokeParams` -> `CliInvokeResult` JSON).
+   * Run one plugin CLI command.
    *
-   * @param paramsJson - `CliInvokeParams` JSON.
-   * @returns {@link JsonReply}
+   * @param params - Command name and argument values.
+   * @returns {@link CliInvokeReply}
    */
-  cliInvoke(paramsJson: string): Promise<JsonReply>;
+  cliInvoke(params: CliInvokeParams): Promise<CliInvokeReply>;
   /**
    * Plugin-provided OIDC AS client templates. Empty list when unused.
    *

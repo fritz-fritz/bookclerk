@@ -536,47 +536,56 @@ def py_type(ty: cs.TypeRef, res: Resolver) -> str:
     return ty.name
 
 
-# Field annotations of the JSON payload contracts: `$jsonValue` marks a `Text`
-# field whose JSON value is projected loosely; `$required` opts a struct into
-# presence semantics (unannotated siblings become optional).
-JSON_VALUE_ANNOTATION = "jsonValue"
-REQUIRED_ANNOTATION = "required"
+# `$optional` marks a scalar field whose zero value (empty `Text` / `Data`,
+# numeric `0`) means "absent". Author-facing projections surface it as
+# optional and the codecs map the zero value both ways.
+OPTIONAL_ANNOTATION = "optional"
+
+# Scalar kinds that may carry `$optional` (bool, enum, struct, list, and
+# interface fields have no zero-means-absent convention).
+_OPTIONAL_KINDS = frozenset(
+    {"text", "data", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64"}
+)
 
 
-def declares_json_values(schema: cs.Schema) -> bool:
-    return any(isinstance(d, cs.Annotation) and d.name == JSON_VALUE_ANNOTATION for d in schema.decls)
+def field_is_optional(f: cs.Field) -> bool:
+    return OPTIONAL_ANNOTATION in f.annotations
 
 
-def field_ts_type(f: cs.Field, res: Resolver) -> str:
-    return "JsonValue" if JSON_VALUE_ANNOTATION in f.annotations else ts_type(f.type, res)
+def check_optional_fields(schema: cs.Schema) -> list[str]:
+    """`$optional` is only meaningful on zero-defaulting scalars."""
+    errors: list[str] = []
+    for st in schema.structs:
+        for f in st.fields:
+            if not field_is_optional(f):
+                continue
+            kind = _LAYOUT_SCALAR.get(f.type.name)
+            if f.type.inner is not None or kind not in _OPTIONAL_KINDS:
+                errors.append(f"{st.name}.{f.name}: $optional requires a Text, Data, or numeric field")
+            if f in st.union_fields:
+                errors.append(f"{st.name}.{f.name}: $optional is not allowed on union members")
+    return errors
 
 
-def field_py_type(f: cs.Field, res: Resolver) -> str:
-    return "JsonValue" if JSON_VALUE_ANNOTATION in f.annotations else py_type(f.type, res)
+RUST_SECTION_START = "# --- rust-generated: begin ---"
+RUST_SECTION_END = "# --- rust-generated: end ---"
 
 
-def field_is_optional(st: cs.Struct, f: cs.Field) -> bool:
-    uses_presence = any(REQUIRED_ANNOTATION in g.annotations for g in st.fields)
-    return uses_presence and REQUIRED_ANNOTATION not in f.annotations
+def rust_generated_decls(capnp_text: str) -> list[cs.Decl]:
+    """Structs and enums declared between the ``rust-generated`` markers.
 
-
-JSON_SECTION_START = "# JSON payload contracts"
-JSON_SECTION_END = "# End of JSON payload contracts"
-
-
-def json_payload_names(capnp_text: str) -> set[str]:
-    """Names declared inside the schema's JSON payload contracts section.
-
-    Those structs are schemas for JSON carried in ``Text`` fields; they get
-    author-facing types but never Cap'n wire codecs.
+    Rust DTOs and Cap'n codecs for these are emitted into
+    ``crates/bookclerk-plugin-abi/src/generated.rs``; everything else in the
+    schema keeps its hand-written Rust projection in ``rpc_types.rs`` /
+    ``rpc.rs``.
     """
     lines = capnp_text.splitlines()
-    start = next((i for i, l in enumerate(lines, 1) if l.strip() == JSON_SECTION_START), None)
-    end = next((i for i, l in enumerate(lines, 1) if l.strip() == JSON_SECTION_END), None)
+    start = next((i for i, l in enumerate(lines, 1) if l.strip() == RUST_SECTION_START), None)
+    end = next((i for i, l in enumerate(lines, 1) if l.strip() == RUST_SECTION_END), None)
     if start is None or end is None:
-        return set()
+        raise SystemExit("plugin.capnp is missing the rust-generated section markers")
     schema = cs.parse_schema(capnp_text)
-    return {d.name for d in schema.decls if start < d.line < end}
+    return [d for d in schema.decls if start < d.line < end and isinstance(d, (cs.Struct, cs.Enum))]
 
 
 # ---------------------------------------------------------------------------
@@ -653,17 +662,6 @@ def emit_ts_generated(capnp_text: str) -> str:
         lines.append(f"  {name},")
     lines.append("};")
     lines.append("")
-    if declares_json_values(schema):
-        lines.extend(
-            [
-                "/** Arbitrary JSON value carried inside a `$jsonValue` `Text` field. */",
-                "export type JsonValue = unknown;",
-                "",
-                "/** JSON object carried inside a `$jsonValue` `Text` field. */",
-                "export type JsonObject = Record<string, unknown>;",
-                "",
-            ]
-        )
 
     for decl in schema.decls:
         if isinstance(decl, cs.Alias) and not decl.is_import:
@@ -692,9 +690,12 @@ def emit_ts_generated(capnp_text: str) -> str:
                 lines.extend(_ts_doc(decl.doc))
                 lines.append(f"export interface {decl.name} {{")
                 for f in decl.fields:
-                    lines.extend(_ts_doc(f.doc, "  "))
-                    opt = "?" if field_is_optional(decl, f) else ""
-                    lines.append(f"  {f.name}{opt}: {field_ts_type(f, res)};")
+                    fdoc = list(f.doc)
+                    if field_is_optional(f):
+                        fdoc.append("Omitted when absent (wire zero value).")
+                    lines.extend(_ts_doc(fdoc, "  "))
+                    opt = "?" if field_is_optional(f) else ""
+                    lines.append(f"  {f.name}{opt}: {ts_type(f.type, res)};")
                 lines.append("}")
                 lines.append("")
         elif isinstance(decl, cs.Interface):
@@ -751,18 +752,6 @@ def emit_py_abi(capnp_text: str) -> str:
         "",
     ]
     exported: list[str] = []
-    if declares_json_values(schema):
-        lines.extend(
-            [
-                "JsonValue = Any",
-                '"""Arbitrary JSON value carried inside a ``$jsonValue`` ``Text`` field."""',
-                "",
-                "JsonObject = dict[str, Any]",
-                '"""JSON object carried inside a ``$jsonValue`` ``Text`` field."""',
-                "",
-            ]
-        )
-        exported.extend(["JsonValue", "JsonObject"])
     for en in schema.enums:
         values = enum_wire_values(en)
         rendered = ", ".join(f'"{v}"' for v in values)
@@ -824,15 +813,22 @@ def emit_py_abi(capnp_text: str) -> str:
                 exported.append(decl.name)
             else:
                 lines.append(f"class {decl.name}(TypedDict):")
-                lines.extend(
-                    _py_docstring(decl.doc, "    ", [(f.name, f.doc) for f in decl.fields])
-                )
+                attr_docs = [
+                    (
+                        f.name,
+                        [*f.doc, "Omitted when absent (wire zero value)."]
+                        if field_is_optional(f)
+                        else f.doc,
+                    )
+                    for f in decl.fields
+                ]
+                lines.extend(_py_docstring(decl.doc, "    ", attr_docs))
                 lines.append("")
                 if not decl.fields:
                     lines.append("    pass")
                 for f in decl.fields:
-                    fty = field_py_type(f, res)
-                    if field_is_optional(decl, f):
+                    fty = py_type(f.type, res)
+                    if field_is_optional(f):
                         fty = f"NotRequired[{fty}]"
                     lines.append(f"    {f.name}: {fty}")
                 lines.append("")
@@ -909,7 +905,13 @@ class _Ctx:
     schema: cs.Schema
     layout: Layout
     res: Resolver
-    json_only: set[str]
+
+    def is_optional(self, layout_name: str, field: str) -> bool:
+        """True when the schema marks ``layout_name.field`` with ``$optional``."""
+        if "$" in layout_name:
+            return False
+        st = self.schema.struct(layout_name)
+        return any(f.name == field and field_is_optional(f) for f in st.fields)
 
     def codec_name_ts(self, struct: str) -> str:
         return f"{self.type_name(struct)}Codec"
@@ -1020,8 +1022,30 @@ def _field_uses_caps(ty: dict[str, Any]) -> bool:
     return kind == "list" and _field_uses_caps(ty["element"])
 
 
+def _ts_absent_check(ty: dict[str, Any], expr: str) -> str:
+    """TS expression that is true when a `$optional` wire value means absent."""
+    kind = ty["kind"]
+    if kind == "text":
+        return f'{expr} === ""'
+    if kind == "data":
+        return f"{expr}.length === 0"
+    if kind == "int64":
+        return f"{expr} === 0n"
+    return f"{expr} === 0"
+
+
+def _py_absent_check(ty: dict[str, Any], expr: str) -> str:
+    """Python expression that is true when a `$optional` wire value means absent."""
+    kind = ty["kind"]
+    if kind == "text":
+        return f'{expr} == ""'
+    if kind == "data":
+        return f"len({expr}) == 0"
+    return f"{expr} == 0"
+
+
 def _struct_names_for_codecs(ctx: _Ctx, file: str = "plugin.capnp") -> list[str]:
-    names = [s.name for s in ctx.schema.structs if s.name not in ctx.json_only]
+    names = [s.name for s in ctx.schema.structs]
     for iface in ctx.schema.interfaces:
         for m in sorted(iface.methods, key=lambda m: m.ordinal):
             names.append(envelope_name(iface.name, m.name, "Params"))
@@ -1086,7 +1110,12 @@ def _ts_struct_codec(ctx: _Ctx, layout_name: str) -> list[str]:
         out.append("  write(s, v, caps) {")
         body: list[str] = []
         for f in plain:
-            body.extend(_ts_write_expr(ctx, f["type"], f["offset"], f"v.{f['name']}", "    "))
+            if ctx.is_optional(layout_name, f["name"]):
+                body.append(f"    if (v.{f['name']} !== undefined) {{")
+                body.extend(_ts_write_expr(ctx, f["type"], f["offset"], f"v.{f['name']}", "      "))
+                body.append("    }")
+            else:
+                body.extend(_ts_write_expr(ctx, f["type"], f["offset"], f"v.{f['name']}", "    "))
         if not body:
             out.append("    void s;")
             out.append("    void v;")
@@ -1095,11 +1124,24 @@ def _ts_struct_codec(ctx: _Ctx, layout_name: str) -> list[str]:
         out.append("  },")
         out.append("  read(s, caps) {")
         out.extend(caps_sink)
+        optional = [f for f in plain if ctx.is_optional(layout_name, f["name"])]
         if plain:
-            out.append("    return {")
+            if optional:
+                out.append(f"    const out: T.{tname} = {{")
+            else:
+                out.append("    return {")
             for f in plain:
+                if f in optional:
+                    continue
                 out.append(f"      {f['name']}: {_ts_read_expr(ctx, f['type'], f['offset'])},")
             out.append("    };")
+            for f in optional:
+                out.append(f"    const {f['name']} = {_ts_read_expr(ctx, f['type'], f['offset'])};")
+                out.append(f"    if (!({_ts_absent_check(f['type'], f['name'])})) {{")
+                out.append(f"      out.{f['name']} = {f['name']};")
+                out.append("    }")
+            if optional:
+                out.append("    return out;")
         else:
             out.append("    void s;")
             out.append("    return {};")
@@ -1145,7 +1187,7 @@ def _ts_type_from_layout(ctx: _Ctx, ty: dict[str, Any]) -> str:
 def emit_ts_wire(capnp_text: str, layout: Layout) -> str:
     """`packages/plugin-sdk/src/generated-wire.ts` — `@internal` Cap'n codecs."""
     schema = cs.parse_schema(capnp_text)
-    ctx = _Ctx(schema, layout, Resolver(schema), json_payload_names(capnp_text))
+    ctx = _Ctx(schema, layout, Resolver(schema))
     lines = [
         "/**",
         f" * {GENERATED_NOTE}",
@@ -1352,7 +1394,15 @@ def _py_struct_codec(ctx: _Ctx, layout_name: str) -> list[str]:
     else:
         body: list[str] = []
         for f in plain:
-            body.extend(_py_write_expr(ctx, f["type"], f["offset"], f'v["{f["name"]}"]', "    "))
+            if ctx.is_optional(layout_name, f["name"]):
+                body.append(f'    if v.get("{f["name"]}") is not None:')
+                body.extend(
+                    _py_write_expr(ctx, f["type"], f["offset"], f'v["{f["name"]}"]', "        ")
+                )
+            else:
+                body.extend(
+                    _py_write_expr(ctx, f["type"], f["offset"], f'v["{f["name"]}"]', "    ")
+                )
         out.extend(body or ["    pass"])
     out.append("")
     out.append("")
@@ -1373,13 +1423,22 @@ def _py_struct_codec(ctx: _Ctx, layout_name: str) -> list[str]:
                 )
         out.append(f'    raise ValueError(f"unknown {tname} union member: {{disc}}")')
     else:
+        optional = [f for f in plain if ctx.is_optional(layout_name, f["name"])]
         if not plain:
             out.append("    return {}")
         else:
-            out.append("    return {")
+            out.append("    out: dict[str, Any] = {" if optional else "    return {")
             for f in plain:
+                if f in optional:
+                    continue
                 out.append(f'        "{f["name"]}": {_py_read_expr(ctx, f["type"], f["offset"])},')
             out.append("    }")
+            for f in optional:
+                out.append(f"    {_snake(f['name'])} = {_py_read_expr(ctx, f['type'], f['offset'])}")
+                out.append(f"    if not ({_py_absent_check(f['type'], _snake(f['name']))}):")
+                out.append(f'        out["{f["name"]}"] = {_snake(f["name"])}')
+            if optional:
+                out.append("    return out")
     out.append("")
     out.append("")
     out.append(f"{cname} = _Codec({dw}, {pc}, {wname}, {rname})")
@@ -1392,7 +1451,7 @@ def _py_struct_codec(ctx: _Ctx, layout_name: str) -> list[str]:
 def emit_py_wire(capnp_text: str, layout: Layout) -> str:
     """`packages/plugin-sdk-python/.../_wire.py` — private Cap'n codecs."""
     schema = cs.parse_schema(capnp_text)
-    ctx = _Ctx(schema, layout, Resolver(schema), json_payload_names(capnp_text))
+    ctx = _Ctx(schema, layout, Resolver(schema))
     lines = [
         f'"""{GENERATED_NOTE}',
         "",
@@ -1459,3 +1518,599 @@ def emit_py_wire(capnp_text: str, layout: Layout) -> str:
         lines.extend(_py_struct_codec(ctx, name))
     body = "\n".join(lines).rstrip() + "\n"
     return re.sub(r"\n{4,}", "\n\n\n", body)
+
+
+# ---------------------------------------------------------------------------
+# Rust: crates/bookclerk-plugin-abi/src/generated.rs (DTOs + Cap'n codecs)
+# ---------------------------------------------------------------------------
+
+_RS_SCALAR = {
+    "Bool": "bool",
+    "Int8": "i8",
+    "Int16": "i16",
+    "Int32": "i32",
+    "Int64": "i64",
+    "UInt8": "u8",
+    "UInt16": "u16",
+    "UInt32": "u32",
+    "UInt64": "u64",
+    "Float32": "f32",
+    "Float64": "f64",
+    "Text": "String",
+    "Data": "Vec<u8>",
+}
+
+_RS_FLOATS = frozenset({"Float32", "Float64"})
+
+# Hand-written Rust projections the generated section may reference:
+# name -> (Rust type, writer fn, reader fn). Writers take `(Builder, &T)` and
+# return `()`; readers take a `Reader` and return `T` infallibly.
+_RS_EXTERNAL = {
+    "PluginError": ("crate::PluginError", "crate::rpc::write_error", "crate::rpc::read_error"),
+    "ExtensibleConfig": (
+        "crate::ExtensibleConfig",
+        "crate::rpc::write_extensible_config",
+        "crate::rpc::read_extensible_config",
+    ),
+}
+
+_RS_KEYWORDS = frozenset(
+    "as break const continue crate else enum extern false fn for if impl in let loop match mod "
+    "move mut pub ref return self Self static struct super trait true type unsafe use where while "
+    "async await dyn abstract become box do final macro override priv typeof unsized virtual yield "
+    "try gen".split()
+)
+
+
+def _rs_field(name: str) -> str:
+    """Rust field identifier for a Cap'n field (raw identifier for keywords)."""
+    snake = _snake(name)
+    return f"r#{snake}" if snake in _RS_KEYWORDS else snake
+
+
+def _rs_accessor(name: str) -> str:
+    """Suffix capnpc-rust uses for `get_`/`set_`/`init_` accessors of a field."""
+    out: list[str] = []
+    for i, ch in enumerate(name):
+        if ch.isupper() and i > 0:
+            out.append("_")
+        out.append(ch.lower())
+    return "".join(out)
+
+
+def _rs_module(struct: str) -> str:
+    """capnpc-rust module name of a struct (`LoginParams` -> `login_params`)."""
+    name = _rs_accessor(struct)
+    return f"{name}_" if name in _RS_KEYWORDS else name
+
+
+def _rs_doc(doc: list[str], indent: str = "") -> list[str]:
+    """Rustdoc lines; square brackets are escaped so config-table names such as
+    `[sources.<id>]` are not parsed as intra-doc links."""
+    out: list[str] = []
+    for line in doc:
+        escaped = line.replace("[", "\\[").replace("]", "\\]")
+        out.append(f"{indent}/// {escaped}".rstrip())
+    return out
+
+
+class _RsCtx:
+    """Resolution state for the Rust emitter."""
+
+    def __init__(self, schema: cs.Schema, decls: list[cs.Decl]) -> None:
+        self.schema = schema
+        self.res = Resolver(schema)
+        self.structs = {d.name: d for d in decls if isinstance(d, cs.Struct)}
+        self.enums = {d.name: d for d in decls if isinstance(d, cs.Enum)}
+        self._eq_memo: dict[str, bool] = {}
+
+    def is_result_union(self, st: cs.Struct) -> bool:
+        """`{ ok :T; err :PluginError }` unions project to `Result<T, PluginError>`."""
+        if not st.has_union or st.plain_fields or len(st.union_fields) != 2:
+            return False
+        ok, err = st.union_fields
+        return ok.name == "ok" and err.name == "err" and err.type.name == "PluginError"
+
+    def rust_type(self, ty: cs.TypeRef) -> str:
+        if ty.inner is not None:
+            return f"Vec<{self.rust_type(ty.inner)}>"
+        if ty.name in _RS_SCALAR:
+            return _RS_SCALAR[ty.name]
+        name = self.res.canonical(ty.name)
+        if name in _RS_EXTERNAL:
+            return _RS_EXTERNAL[name][0]
+        if name in self.structs:
+            st = self.structs[name]
+            if self.is_result_union(st):
+                ok = st.union_fields[0]
+                return f"Result<{self.rust_type(ok.type)}, crate::PluginError>"
+            return name
+        if name in self.enums:
+            return name
+        raise SystemExit(
+            f"rust emitter: `{ty.name}` is referenced from the rust-generated section but is "
+            "neither declared there nor listed in _RS_EXTERNAL"
+        )
+
+    def field_type(self, f: cs.Field) -> str:
+        inner = self.rust_type(f.type)
+        return f"Option<{inner}>" if field_is_optional(f) else inner
+
+    def is_eq(self, name: str) -> bool:
+        """True when the Rust projection can derive `Eq` (no floats reachable)."""
+        if name in self._eq_memo:
+            return self._eq_memo[name]
+        self._eq_memo[name] = True  # cycles are impossible in Cap'n structs by value
+        if name in self.enums or name in _RS_EXTERNAL:
+            return True
+        st = self.structs[name]
+        ok = all(self._type_eq(f.type) for f in st.fields)
+        self._eq_memo[name] = ok
+        return ok
+
+    def _type_eq(self, ty: cs.TypeRef) -> bool:
+        if ty.inner is not None:
+            return self._type_eq(ty.inner)
+        if ty.name in _RS_FLOATS:
+            return False
+        if ty.name in _RS_SCALAR:
+            return True
+        return self.is_eq(self.res.canonical(ty.name))
+
+
+def _rs_write_field(ctx: _RsCtx, ty: cs.TypeRef, acc: str, value: str, indent: str) -> list[str]:
+    """Statements writing `value` (an expression of the field's Rust type) into `b`."""
+    kind = ctx.res.kind_of(ty)
+    if ty.inner is not None:
+        el = ty.inner
+        ek = ctx.res.kind_of(el)
+        lines = [
+            f"{indent}{{",
+            f"{indent}    let mut items = b.reborrow().init_{acc}(list_len({value}.len())?);",
+            f"{indent}    for (i, item) in {value}.iter().enumerate() {{",
+        ]
+        if ek in ("Text", "Data"):
+            lines.append(f"{indent}        items.set(list_len(i)?, item);")
+        elif ek == "struct":
+            lines.append(
+                f"{indent}        {_rs_write_call(ctx, el, 'items.reborrow().get(list_len(i)?)', 'item')}"
+            )
+        else:
+            raise SystemExit(f"rust emitter: unsupported list element {el.render()}")
+        lines.extend([f"{indent}    }}", f"{indent}}}"])
+        return lines
+    if kind in ("Text", "Data"):
+        return [f"{indent}b.set_{acc}({value});"]
+    if kind in _RS_SCALAR:
+        return [f"{indent}b.set_{acc}({value});"]
+    if kind == "enum":
+        return [f"{indent}b.set_{acc}((*{value}).into());"]
+    if kind == "struct":
+        return [f"{indent}{_rs_write_call(ctx, ty, f'b.reborrow().init_{acc}()', value)}"]
+    raise SystemExit(f"rust emitter: unsupported field type {ty.render()}")
+
+
+def _rs_write_call(ctx: _RsCtx, ty: cs.TypeRef, builder: str, value: str) -> str:
+    """Statement encoding struct `value` into `builder` (external writers are infallible)."""
+    name = ctx.res.canonical(ty.name)
+    if name in _RS_EXTERNAL:
+        return f"{_RS_EXTERNAL[name][1]}({builder}, {value});"
+    return f"write_{_snake(name)}({builder}, {value})?;"
+
+
+def _rs_read_call(ctx: _RsCtx, ty: cs.TypeRef, reader: str) -> str:
+    """Expression decoding a struct from `reader` (a `capnp::Result<Reader>`)."""
+    name = ctx.res.canonical(ty.name)
+    if name in _RS_EXTERNAL:
+        return f"{_RS_EXTERNAL[name][2]}({reader}?)"
+    return f"read_{_snake(name)}({reader}?)?"
+
+
+def _rs_read_map(ctx: _RsCtx, ty: cs.TypeRef) -> str:
+    """Closure mapping struct-list items (plain `Reader`s) to `capnp::Result<T>`."""
+    name = ctx.res.canonical(ty.name)
+    if name in _RS_EXTERNAL:
+        return f"|item| Ok({_RS_EXTERNAL[name][2]}(item))"
+    return f"|item| read_{_snake(name)}(item)"
+
+
+def _rs_read_expr(ctx: _RsCtx, f: cs.Field) -> str:
+    """Expression producing the field's Rust value from reader `r`."""
+    ty = f.type
+    acc = _rs_accessor(f.name)
+    optional = field_is_optional(f)
+    if ty.inner is not None:
+        el = ty.inner
+        ek = ctx.res.kind_of(el)
+        if ek == "Text":
+            return f"read_text_list(r.get_{acc}()?)?"
+        if ek == "Data":
+            return f"r.get_{acc}()?.iter().map(|d| d.map(<[u8]>::to_vec)).collect::<capnp::Result<Vec<_>>>()?"
+        if ek == "struct":
+            return f"r.get_{acc}()?.iter().map({_rs_read_map(ctx, el)}).collect::<capnp::Result<Vec<_>>>()?"
+        raise SystemExit(f"rust emitter: unsupported list element {el.render()}")
+    kind = ctx.res.kind_of(ty)
+    if kind == "Text":
+        return f"opt_text(r.get_{acc}()?)?" if optional else f"r.get_{acc}()?.to_string()?"
+    if kind == "Data":
+        return f"opt_data(r.get_{acc}()?)" if optional else f"r.get_{acc}()?.to_vec()"
+    if kind in _RS_SCALAR:
+        return f"opt_num(r.get_{acc}())" if optional else f"r.get_{acc}()"
+    if kind == "enum":
+        return f"r.get_{acc}()?.into()"
+    if kind == "struct":
+        return _rs_read_call(ctx, ty, f"r.get_{acc}()")
+    raise SystemExit(f"rust emitter: unsupported field type {ty.render()}")
+
+
+def _rs_enum(ctx: _RsCtx, en: cs.Enum) -> list[str]:
+    names = en.wire_names()
+    variants = [_pascal(n) for n in names]
+    rename = "snake_case" if is_text_enum(en) else "camelCase"
+    out = _rs_doc(en.doc)
+    out.append("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]")
+    out.append(f'#[serde(rename_all = "{rename}")]')
+    out.append(f"pub enum {en.name} {{")
+    members = sorted(en.enumerants, key=lambda e: e.ordinal)
+    for i, (m, v) in enumerate(zip(members, variants, strict=True)):
+        out.extend(_rs_doc(m.doc, "    "))
+        if i == 0:
+            out.append("    #[default]")
+        out.append(f"    {v},")
+    out.append("}")
+    out.append("")
+    wire = enum_wire_values(en)
+    out.append(f"impl {en.name} {{")
+    out.append("    /// Wire name of this enumerant (matches the TypeScript / Python SDK literal).")
+    out.append("    #[must_use]")
+    out.append("    pub fn wire_name(self) -> &'static str {")
+    out.append("        match self {")
+    for v, w in zip(variants, wire, strict=True):
+        out.append(f'            Self::{v} => "{w}",')
+    out.append("        }")
+    out.append("    }")
+    out.append("")
+    out.append("    /// Parse a wire name; `None` for unknown strings.")
+    out.append("    #[must_use]")
+    out.append("    pub fn from_wire_name(name: &str) -> Option<Self> {")
+    out.append("        match name {")
+    for v, w in zip(variants, wire, strict=True):
+        out.append(f'            "{w}" => Some(Self::{v}),')
+    out.append("            _ => None,")
+    out.append("        }")
+    out.append("    }")
+    out.append("}")
+    out.append("")
+    out.append(f"impl From<{en.name}> for plugin_capnp::{en.name} {{")
+    out.append(f"    fn from(value: {en.name}) -> Self {{")
+    out.append("        match value {")
+    for v in variants:
+        out.append(f"            {en.name}::{v} => Self::{v},")
+    out.append("        }")
+    out.append("    }")
+    out.append("}")
+    out.append("")
+    out.append(f"impl From<plugin_capnp::{en.name}> for {en.name} {{")
+    out.append(f"    fn from(value: plugin_capnp::{en.name}) -> Self {{")
+    out.append("        match value {")
+    for v in variants:
+        out.append(f"            plugin_capnp::{en.name}::{v} => Self::{v},")
+    out.append("        }")
+    out.append("    }")
+    out.append("}")
+    out.append("")
+    return out
+
+
+def _rs_struct_type(ctx: _RsCtx, st: cs.Struct) -> list[str]:
+    derives = ["Debug", "Clone", "PartialEq"]
+    if ctx.is_eq(st.name):
+        derives.append("Eq")
+    derives.extend(["Default", "Serialize", "Deserialize"])
+    out = _rs_doc(st.doc)
+    out.append(f"#[derive({', '.join(derives)})]")
+    out.append('#[serde(rename_all = "camelCase")]')
+    out.append(f"pub struct {st.name} {{")
+    for f in st.fields:
+        fdoc = list(f.doc)
+        if field_is_optional(f):
+            fdoc.append("`None` when absent (wire zero value).")
+        out.extend(_rs_doc(fdoc, "    "))
+        if field_is_optional(f):
+            out.append('    #[serde(default, skip_serializing_if = "Option::is_none")]')
+        else:
+            out.append("    #[serde(default)]")
+        out.append(f"    pub {_rs_field(f.name)}: {ctx.field_type(f)},")
+    out.append("}")
+    out.append("")
+    return out
+
+
+def _rs_union_type(ctx: _RsCtx, st: cs.Struct) -> list[str]:
+    out = _rs_doc(st.doc)
+    derives = ["Debug", "Clone", "PartialEq"]
+    if ctx.is_eq(st.name):
+        derives.append("Eq")
+    derives.extend(["Serialize", "Deserialize"])
+    out.append(f"#[derive({', '.join(derives)})]")
+    out.append('#[serde(tag = "kind", content = "value", rename_all = "camelCase")]')
+    out.append(f"pub enum {st.name} {{")
+    for f in st.union_fields:
+        out.extend(_rs_doc(f.doc, "    "))
+        if f.type.name == "Void" and f.type.inner is None:
+            out.append(f"    {_pascal(f.name)},")
+        else:
+            out.append(f"    {_pascal(f.name)}({ctx.rust_type(f.type)}),")
+    out.append("}")
+    out.append("")
+    return out
+
+
+def _rs_struct_codec(ctx: _RsCtx, st: cs.Struct) -> list[str]:
+    module = _rs_module(st.name)
+    snake = _snake(st.name)
+    out: list[str] = []
+    if ctx.is_result_union(st):
+        ok = st.union_fields[0]
+        ok_ty = ctx.rust_type(ok.type)
+        rs_ty = f"Result<{ok_ty}, crate::PluginError>"
+        out.append(f"/// Encode a `{st.name}` union from a typed result.")
+        out.append("///")
+        out.append("/// # Errors")
+        out.append("///")
+        out.append("/// Returns a Cap'n Proto error when a nested field cannot be encoded.")
+        out.append(
+            f"pub fn write_{snake}(b: plugin_capnp::{module}::Builder<'_>, v: &{rs_ty}) -> capnp::Result<()> {{"
+        )
+        out.append("    match v {")
+        ok_kind = ctx.res.kind_of(ok.type)
+        if ok_kind == "struct":
+            out.append(f"        Ok(ok) => write_{_snake(ctx.res.canonical(ok.type.name))}(b.init_ok(), ok),")
+        else:
+            raise SystemExit(f"rust emitter: result union {st.name} needs a struct `ok` member")
+        out.append("        Err(err) => {")
+        out.append("            crate::rpc::write_error(b.init_err(), err);")
+        out.append("            Ok(())")
+        out.append("        }")
+        out.append("    }")
+        out.append("}")
+        out.append("")
+        out.append(f"/// Decode a `{st.name}` union into a typed result.")
+        out.append("///")
+        out.append("/// # Errors")
+        out.append("///")
+        out.append("/// Returns a Cap'n Proto error when the union is unset or a field is malformed.")
+        out.append(
+            f"pub fn read_{snake}(r: plugin_capnp::{module}::Reader<'_>) -> capnp::Result<{rs_ty}> {{"
+        )
+        out.append("    match r.which()? {")
+        out.append(f"        plugin_capnp::{module}::Ok(ok) => Ok(Ok({_rs_read_call(ctx, ok.type, 'ok')})),")
+        out.append(f"        plugin_capnp::{module}::Err(err) => Ok(Err(crate::rpc::read_error(err?))),")
+        out.append("    }")
+        out.append("}")
+        out.append("")
+        return out
+    if st.has_union:
+        out.append(f"/// Encode a `{st.name}` union.")
+        out.append("///")
+        out.append("/// # Errors")
+        out.append("///")
+        out.append("/// Returns a Cap'n Proto error when a nested field cannot be encoded.")
+        out.append(
+            f"pub fn write_{snake}(mut b: plugin_capnp::{module}::Builder<'_>, v: &{st.name}) -> capnp::Result<()> {{"
+        )
+        out.append("    match v {")
+        for f in st.union_fields:
+            acc = _rs_accessor(f.name)
+            variant = _pascal(f.name)
+            if f.type.name == "Void" and f.type.inner is None:
+                out.append(f"        {st.name}::{variant} => b.set_{acc}(()),")
+                continue
+            kind = ctx.res.kind_of(f.type)
+            if kind == "struct":
+                out.append(f"        {st.name}::{variant}(value) => {{")
+                out.append(f"            {_rs_write_call(ctx, f.type, f'b.init_{acc}()', 'value')}")
+                out.append("        }")
+            else:
+                out.append(f"        {st.name}::{variant}(value) => {{")
+                out.extend(_rs_write_field(ctx, f.type, acc, "value", "            "))
+                out.append("        }")
+        out.append("    }")
+        out.append("    Ok(())")
+        out.append("}")
+        out.append("")
+        out.append(f"/// Decode a `{st.name}` union.")
+        out.append("///")
+        out.append("/// # Errors")
+        out.append("///")
+        out.append("/// Returns a Cap'n Proto error when the union is unset or a field is malformed.")
+        out.append(
+            f"pub fn read_{snake}(r: plugin_capnp::{module}::Reader<'_>) -> capnp::Result<{st.name}> {{"
+        )
+        out.append("    Ok(match r.which()? {")
+        for f in st.union_fields:
+            variant = _pascal(f.name)
+            if f.type.name == "Void" and f.type.inner is None:
+                out.append(f"        plugin_capnp::{module}::{variant}(()) => {st.name}::{variant},")
+                continue
+            kind = ctx.res.kind_of(f.type)
+            if kind == "struct":
+                out.append(
+                    f"        plugin_capnp::{module}::{variant}(value) => {st.name}::{variant}({_rs_read_call(ctx, f.type, 'value')}),"
+                )
+            elif kind == "Text":
+                out.append(
+                    f"        plugin_capnp::{module}::{variant}(value) => {st.name}::{variant}(value?.to_string()?),"
+                )
+            elif kind == "Data":
+                out.append(
+                    f"        plugin_capnp::{module}::{variant}(value) => {st.name}::{variant}(value?.to_vec()),"
+                )
+            elif kind == "enum":
+                out.append(
+                    f"        plugin_capnp::{module}::{variant}(value) => {st.name}::{variant}(value?.into()),"
+                )
+            elif kind in _RS_SCALAR:
+                out.append(f"        plugin_capnp::{module}::{variant}(value) => {st.name}::{variant}(value),")
+            else:
+                raise SystemExit(f"rust emitter: unsupported union member {st.name}.{f.name}")
+        out.append("    })")
+        out.append("}")
+        out.append("")
+        return out
+    out.append(f"/// Encode a [`{st.name}`] onto a Cap'n Proto builder.")
+    out.append("///")
+    out.append("/// # Errors")
+    out.append("///")
+    out.append("/// Returns a Cap'n Proto error when a list is too long or a nested field cannot be encoded.")
+    out.append(
+        f"pub fn write_{snake}(mut b: plugin_capnp::{module}::Builder<'_>, v: &{st.name}) -> capnp::Result<()> {{"
+    )
+    for f in st.fields:
+        acc = _rs_accessor(f.name)
+        field = f"v.{_rs_field(f.name)}"
+        if field_is_optional(f):
+            kind = ctx.res.kind_of(f.type)
+            if kind in ("Text", "Data"):
+                out.append(f"    if let Some(value) = &{field} {{")
+                out.append(f"        b.set_{acc}(value);")
+            else:
+                out.append(f"    if let Some(value) = {field} {{")
+                out.append(f"        b.set_{acc}(value);")
+            out.append("    }")
+            continue
+        kind = ctx.res.kind_of(f.type)
+        if kind in _RS_SCALAR and f.type.inner is None and kind not in ("Text", "Data"):
+            out.append(f"    b.set_{acc}({field});")
+        elif kind in ("Text", "Data"):
+            out.append(f"    b.set_{acc}(&{field});")
+        elif kind == "enum":
+            out.append(f"    b.set_{acc}({field}.into());")
+        elif kind == "struct":
+            out.append(f"    {_rs_write_call(ctx, f.type, f'b.reborrow().init_{acc}()', f'&{field}')}")
+        else:
+            out.extend(_rs_write_field(ctx, f.type, acc, field, "    "))
+    out.append("    Ok(())")
+    out.append("}")
+    out.append("")
+    out.append(f"/// Decode a [`{st.name}`] from a Cap'n Proto reader.")
+    out.append("///")
+    out.append("/// # Errors")
+    out.append("///")
+    out.append("/// Returns a Cap'n Proto error when a text field is not UTF-8 or a pointer is malformed.")
+    out.append(
+        f"pub fn read_{snake}(r: plugin_capnp::{module}::Reader<'_>) -> capnp::Result<{st.name}> {{"
+    )
+    out.append(f"    Ok({st.name} {{")
+    for f in st.fields:
+        out.append(f"        {_rs_field(f.name)}: {_rs_read_expr(ctx, f)},")
+    out.append("    })")
+    out.append("}")
+    out.append("")
+    return out
+
+
+def emit_rust_generated(capnp_text: str) -> str:
+    """`crates/bookclerk-plugin-abi/src/generated.rs` — typed DTOs and Cap'n codecs.
+
+    Covers every struct and enum between the ``rust-generated`` markers in
+    ``plugin.capnp``. Plain structs become owned Rust structs (``$optional``
+    scalars are ``Option<T>``); ``{ ok, err :PluginError }`` unions become
+    ``Result<T, PluginError>`` codec pairs; other unions become Rust enums.
+    Serde derives keep the JSON bridge to the workerd isolate typed on both
+    ends until that transport is Cap'n bytes.
+    """
+    schema = cs.parse_schema(capnp_text)
+    decls = rust_generated_decls(capnp_text)
+    ctx = _RsCtx(schema, decls)
+    lines = [
+        f"//! {GENERATED_NOTE}",
+        "//!",
+        "//! Rust projection of the `rust-generated` section of `plugin.capnp`: owned",
+        "//! DTOs for every typed method payload plus `write_*` / `read_*` codecs over",
+        "//! the capnpc builders and readers. `$optional` scalars are `Option<T>`",
+        "//! (wire zero value = `None`); `{ ok, err }` reply unions are",
+        "//! `Result<T, PluginError>`.",
+        "",
+        "#![allow(clippy::too_many_lines)]",
+        "",
+        "use serde::{Deserialize, Serialize};",
+        "",
+        "use crate::plugin_capnp;",
+        "",
+        "/// Cap'n Proto list lengths are `u32`.",
+        "fn list_len(len: usize) -> capnp::Result<u32> {",
+        "    u32::try_from(len).map_err(|_| capnp::Error::failed(format!(\"list length {len} exceeds UInt32\")))",
+        "}",
+        "",
+        "/// `$optional` text: empty means absent.",
+        "fn opt_text(t: capnp::text::Reader<'_>) -> capnp::Result<Option<String>> {",
+        "    let s = t.to_str()?;",
+        "    Ok(if s.is_empty() { None } else { Some(s.to_owned()) })",
+        "}",
+        "",
+        "/// `$optional` data: empty means absent.",
+        "fn opt_data(d: &[u8]) -> Option<Vec<u8>> {",
+        "    if d.is_empty() {",
+        "        None",
+        "    } else {",
+        "        Some(d.to_vec())",
+        "    }",
+        "}",
+        "",
+        "/// `$optional` number: zero means absent.",
+        "fn opt_num<T: Default + PartialEq>(v: T) -> Option<T> {",
+        "    if v == T::default() {",
+        "        None",
+        "    } else {",
+        "        Some(v)",
+        "    }",
+        "}",
+        "",
+        "/// Owned strings of a `List(Text)`.",
+        "fn read_text_list(list: capnp::text_list::Reader<'_>) -> capnp::Result<Vec<String>> {",
+        "    list.iter().map(|t| Ok(t?.to_string()?)).collect()",
+        "}",
+        "",
+    ]
+    for d in decls:
+        if isinstance(d, cs.Enum):
+            lines.extend(_rs_enum(ctx, d))
+    for d in decls:
+        if isinstance(d, cs.Struct):
+            if ctx.is_result_union(d):
+                continue
+            if d.has_union:
+                if d.plain_fields:
+                    raise SystemExit(f"struct {d.name} mixes union and plain fields")
+                lines.extend(_rs_union_type(ctx, d))
+            else:
+                lines.extend(_rs_struct_type(ctx, d))
+    for d in decls:
+        if isinstance(d, cs.Struct):
+            lines.extend(_rs_struct_codec(ctx, d))
+    return _rustfmt("\n".join(lines).rstrip() + "\n")
+
+
+def _rustfmt(source: str) -> str:
+    """Format generated Rust with the pinned toolchain's ``rustfmt``.
+
+    The drift check compares byte-for-byte, so the checked-in file must be
+    exactly what ``cargo fmt`` would accept. ``rust-toolchain.toml`` pins the
+    channel, which keeps the output deterministic across machines.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["rustfmt", "--edition", "2021", "--emit", "stdout"],
+            input=source,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit("rustfmt is required to generate generated.rs") from exc
+    if proc.returncode != 0:
+        raise SystemExit(f"rustfmt failed on generated Rust:\n{proc.stderr}")
+    return proc.stdout
