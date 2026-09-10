@@ -2,8 +2,9 @@
 //!
 //! The library compiles Bookclerk domain operations into a typed
 //! [`bookclerk_plugin_abi::ExecuteRequest`] plus host-only
-//! [`AtomicSelection`] indexes. Database guests execute the statements as
-//! one transaction and return a typed [`bookclerk_plugin_abi::ExecuteReply`].
+//! [`crate::sql_plan::host_ir::AtomicSelection`] indexes. Database guests
+//! execute the statements as one transaction and return a typed
+//! [`bookclerk_plugin_abi::ExecuteReply`].
 
 #[cfg(test)]
 mod conformance;
