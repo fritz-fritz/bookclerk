@@ -235,7 +235,8 @@ pub mod get {
 
 /// Test whether an object key exists in an output destination.
 ///
-/// Typed Cap'n Proto `Destination.exists` ([`crate::Destination::exists`]).
+/// Wire name kept for consent grants; guests implement existence via
+/// [`crate::Destination::head`] (`None` means the key is missing).
 pub mod exists {
     /// Wire method name `"exists"`.
     pub const NAME: &str = "exists";

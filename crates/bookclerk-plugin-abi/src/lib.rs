@@ -43,7 +43,7 @@
 //! | Module | Contents |
 //! | --- | --- |
 //! | [`methods`] | Capability / consent method name constants (`login`, `onEvent`, …) |
-//! | [`types`] | Shared DTOs (identity metadata, health, CLI) |
+//! | Crate-root DTOs | [`PluginDescribe`], health, CLI, destination objects |
 //! | [`kind`] | Kind-specific DTOs (source / integration / output) |
 //! | [`db`] | Host-private database connect params (feature `host`) |
 //! | [`error`] | [`PluginError`] / [`PluginErrorCode`] |
