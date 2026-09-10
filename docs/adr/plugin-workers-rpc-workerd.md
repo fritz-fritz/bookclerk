@@ -130,10 +130,18 @@ Every guest is an **external** (jailed) subprocess, including platform sqlite/lo
 
 ## Follow-ups (deferred)
 
-Production native-behind-workerd executor, deny-direct-native-egress / HTTP
-proxy, OAuth/listen broker, container executor, and VPS benchmarks are
-**out of this ABI freeze**. Direct native Cap'n Proto stays as a host-selected
-fallback.
+The native-behind-workerd executor is now the production path: the host spawns
+every plugin through `bookclerk-workerd` (`SpawnPlan` in
+`bookclerk-plugin-host`), `runtime = "native"` only selects the backend behind
+the isolate, and a missing `bookclerk-workerd` / pinned `workerd` is a hard
+spawn error in every `[plugins].isolation` mode. Direct host↔native Cap'n
+Proto survives only as `SpawnTransport::DirectNativeDiagnostic` for tests and
+diagnostics; no product binary selects it.
+
+Still deferred: deny-direct-native-egress / HTTP proxy (a native backend behind
+the front door shares the launcher's `OutboundListen` jail, so a deny-network
+native manifest is no longer OS-denied `connect`), OAuth/listen broker,
+container executor, and VPS benchmarks.
 
 Instances are keyed by `(plugin_id, account_id)`. Shared-isolate concurrent
 principals are not a proven isolation boundary (stubs are transferable).
