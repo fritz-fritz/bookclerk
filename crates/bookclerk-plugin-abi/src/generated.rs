@@ -654,7 +654,11 @@ pub struct LoginResult {
     /// Opaque credential blob the host seals; empty when login only refreshed
     /// metadata. Guests choose the encoding (typically JSON bytes).
     /// `None` when absent (wire zero value).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::json_bytes::opt_b64"
+    )]
     pub credentials: Option<Vec<u8>>,
 }
 
@@ -688,7 +692,7 @@ pub struct AccountCredential {
     #[serde(default)]
     pub account_id: String,
     /// Opaque credential bytes exactly as the guest returned them at login.
-    #[serde(default)]
+    #[serde(default, with = "crate::json_bytes::b64")]
     pub credentials: Vec<u8>,
 }
 
@@ -868,7 +872,11 @@ pub struct FetchTitleParams {
     pub cache_dir: String,
     /// Host-loaded credential blob for this account; empty when unavailable.
     /// `None` when absent (wire zero value).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::json_bytes::opt_b64"
+    )]
     pub credentials: Option<Vec<u8>>,
     /// Granted `\[sources.<id>\]` table as `application/json`.
     #[serde(default)]

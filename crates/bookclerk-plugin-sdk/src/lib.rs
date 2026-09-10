@@ -99,17 +99,17 @@ pub use bookclerk_plugin_abi::{
     DatabaseContext, DbBootstrap, DbCapabilities, DbColumn, DbIdentityHighWater,
     DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue, Destination,
     DestinationClient, DestinationContext, DestinationServer, DiagnoseResult, DomainEvent,
-    EventResult, ExecuteReply, ExtensibleConfig, ExecuteRequest, GuestDatabase, HealthOk, Integration,
-    IntegrationClient, IntegrationContext, IsolationReq, JobCheckpoint, JobHandler,
+    EventResult, ExecuteReply, ExecuteRequest, ExtensibleConfig, GuestDatabase, HealthOk,
+    Integration, IntegrationClient, IntegrationContext, IsolationReq, JobCheckpoint, JobHandler,
     JobHandlerContext, JobInvocation, JobInvocationLease, JobOutcome, ListOptions, ListPage,
     NeverCancel, ObjectInfo, ObjectMetadata, OidcClientTemplate, PluginClient, PluginDescribe,
     PluginError, PluginErrorCode, PluginMigration, PluginMigrationOp, PluginRoot, PluginServer,
     ProgressSink, PutResult, QueryPage, ReadResult, ScalarLimits, Source, SourceClient,
     SourceContext, SourceServer, StatementResult, StreamCopyHandler, StreamCopySpec,
-    TypedDbStatement, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_LIST_PAGE,
-    MAX_PLUGIN_MIGRATION_OPS, MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES,
-    MAX_PLUGIN_MIGRATION_TOTAL_OPS, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
-    SQL_CONTRACT_VERSION,
+    TypedDbStatement, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STORAGE_COPY,
+    FEATURE_STREAMS, MAX_LIST_PAGE, MAX_PLUGIN_MIGRATION_OPS,
+    MAX_PLUGIN_MIGRATION_REGISTRATION_BYTES, MAX_PLUGIN_MIGRATION_TOTAL_OPS, MAX_SCALAR_BYTES,
+    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION, SQL_CONTRACT_VERSION,
 };
 
 /// Serves a [`PluginRoot`] on stdin/stdout (Cap'n Proto RPC).

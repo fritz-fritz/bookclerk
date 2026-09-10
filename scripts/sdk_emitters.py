@@ -1816,10 +1816,18 @@ def _rs_struct_type(ctx: _RsCtx, st: cs.Struct) -> list[str]:
         if field_is_optional(f):
             fdoc.append("`None` when absent (wire zero value).")
         out.extend(_rs_doc(fdoc, "    "))
+        # JSON projections carry Cap'n `Data` as base64 text (never number
+        # arrays) so the transport-private JSON bridges stay compact.
+        is_data = f.type.inner is None and f.type.name == "Data"
         if field_is_optional(f):
-            out.append('    #[serde(default, skip_serializing_if = "Option::is_none")]')
+            attrs = ["default", 'skip_serializing_if = "Option::is_none"']
+            if is_data:
+                attrs.append('with = "crate::json_bytes::opt_b64"')
         else:
-            out.append("    #[serde(default)]")
+            attrs = ["default"]
+            if is_data:
+                attrs.append('with = "crate::json_bytes::b64"')
+        out.append(f"    #[serde({', '.join(attrs)})]")
         out.append(f"    pub {_rs_field(f.name)}: {ctx.field_type(f)},")
     out.append("}")
     out.append("")

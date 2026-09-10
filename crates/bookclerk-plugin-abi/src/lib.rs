@@ -66,6 +66,7 @@ mod host_roles;
 #[cfg(feature = "host")]
 mod host_rpc;
 mod jobs;
+pub mod json_bytes;
 pub mod kind;
 mod limits;
 pub mod methods;

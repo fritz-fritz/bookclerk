@@ -51,9 +51,7 @@ impl PluginRoot for LibroRoot {
                 bg: "#1F4E3D".into(),
                 fg: "#F4F1EA".into(),
                 accent: "#2F6B53".into(),
-                icon_url: Some(
-                    "https://www.google.com/s2/favicons?domain=libro.fm&sz=128".into(),
-                ),
+                icon_url: Some("https://www.google.com/s2/favicons?domain=libro.fm&sz=128".into()),
             }),
             config_options: vec![ConfigOption {
                 key: "container".into(),

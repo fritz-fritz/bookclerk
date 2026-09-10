@@ -140,8 +140,8 @@ impl ContentSourceRole for AudibleContentSource {
             .credentials
             .as_deref()
             .ok_or_else(|| PluginError::invalid_params("fetchTitle requires host credentials"))?;
-        let creds =
-            credentials_from_bytes(creds).map_err(|e| PluginError::invalid_params(e.to_string()))?;
+        let creds = credentials_from_bytes(creds)
+            .map_err(|e| PluginError::invalid_params(e.to_string()))?;
         let source_config = params.source_config.json_value().unwrap_or(Value::Null);
         bookclerk_plugin_source_audible::guest_fetch_title(
             &creds,

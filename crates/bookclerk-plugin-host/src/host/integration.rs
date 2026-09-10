@@ -11,8 +11,8 @@ use bookclerk_integrations::{
     IntegrationHealth, IntegrationRegistry, ProvidedOidcClient,
 };
 use bookclerk_plugin_sdk::{
-    AuthenticateUserParams, DomainEvent, EventResult, ExtensibleConfig, IntegrationContext as AbiIntegrationContext,
-    ScanLibraryParams, PRODUCT_API_VERSION,
+    AuthenticateUserParams, DomainEvent, EventResult, ExtensibleConfig,
+    IntegrationContext as AbiIntegrationContext, ScanLibraryParams, PRODUCT_API_VERSION,
 };
 use serde_json::Value;
 use tracing::warn;
@@ -219,9 +219,10 @@ impl Integration for ExternalIntegration {
                             break;
                         }
                         match session
-                            .integration(ctx.clone(), |stub| async move {
-                                stub.poll_events().await
-                            })
+                            .integration(
+                                ctx.clone(),
+                                |stub| async move { stub.poll_events().await },
+                            )
                             .await
                         {
                             Ok(users) => {
@@ -253,9 +254,7 @@ impl Integration for ExternalIntegration {
         self.poll_epoch.fetch_add(1, Ordering::SeqCst);
         self.poll_cancel.store(true, Ordering::SeqCst);
         if self.session.has_capability("shutdown") || self.session.has_capability("stop") {
-            let _ = self
-                .int_call(|stub| async move { stub.stop().await })
-                .await;
+            let _ = self.int_call(|stub| async move { stub.stop().await }).await;
         }
         Ok(())
     }
@@ -325,9 +324,9 @@ impl Integration for ExternalIntegration {
     }
 
     async fn scan_library(&self, force: bool) -> bookclerk_integrations::Result<()> {
-        self.int_call(move |stub| async move {
-            stub.scan_library(ScanLibraryParams { force }).await
-        })
+        self.int_call(
+            move |stub| async move { stub.scan_library(ScanLibraryParams { force }).await },
+        )
         .await
     }
 

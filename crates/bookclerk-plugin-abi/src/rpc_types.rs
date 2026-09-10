@@ -101,7 +101,7 @@ pub struct ExtensibleConfig {
     #[serde(default)]
     pub media_type: String,
     /// Bounded payload bytes.
-    #[serde(default)]
+    #[serde(default, with = "crate::json_bytes::b64")]
     pub payload: Vec<u8>,
 }
 
@@ -218,7 +218,7 @@ pub struct DomainEvent {
     /// 1-based delivery attempt.
     pub delivery_attempt: u32,
     /// Bounded payload.
-    #[serde(default)]
+    #[serde(default, with = "crate::json_bytes::b64")]
     pub payload: Vec<u8>,
     /// Checkpoint JSON from a prior [`EventResult::Suspended`] (≤ [`MAX_CHECKPOINT_BYTES`]).
     #[serde(default)]
@@ -632,7 +632,11 @@ pub struct ObjectMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
     /// SHA-256 digest when computed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::json_bytes::opt_b64"
+    )]
     pub sha256: Option<Vec<u8>>,
 }
 
@@ -677,7 +681,11 @@ pub struct WriteOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_length: Option<u64>,
     /// Expected SHA-256 of the body.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::json_bytes::opt_b64"
+    )]
     pub sha256: Option<Vec<u8>>,
     /// Destination-side stage-and-publish token. Empty means a one-shot put.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -699,7 +707,11 @@ pub struct PutResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
     /// Digest of the written body when computed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::json_bytes::opt_b64"
+    )]
     pub sha256: Option<Vec<u8>>,
 }
 
