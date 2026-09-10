@@ -2024,8 +2024,9 @@ export interface PluginEvent {
   /** Schema version of `payload`, owned by the event type. */
   schemaVersion: number;
   /**
-   * Producer idempotency key; a repeat within the outbox dedup window returns
-   * `PublishOk.duplicate = true`. Empty publishes unconditionally.
+   * Producer idempotency key, unique per (account, source, eventType) in the
+   * outbox; a repeat returns `PublishOk.duplicate = true` with the earlier id.
+   * Empty publishes unconditionally.
    */
   deduplicationKey: string;
   /** Encoded event payload; at most `maxEventPayloadBytes`. */

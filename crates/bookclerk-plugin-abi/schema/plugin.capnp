@@ -1842,8 +1842,9 @@ struct PluginEvent {
   eventType @0 :Text;
   # Schema version of `payload`, owned by the event type.
   schemaVersion @1 :UInt32;
-  # Producer idempotency key; a repeat within the outbox dedup window returns
-  # `PublishOk.duplicate = true`. Empty publishes unconditionally.
+  # Producer idempotency key, unique per (account, source, eventType) in the
+  # outbox; a repeat returns `PublishOk.duplicate = true` with the earlier id.
+  # Empty publishes unconditionally.
   deduplicationKey @2 :Text;
   # Encoded event payload; at most `maxEventPayloadBytes`.
   payload @3 :Data;

@@ -3261,9 +3261,9 @@ class PluginEvent(TypedDict):
     Attributes:
         eventType: Snake_case event type; must be listed in `[[events.producers]]`.
         schemaVersion: Schema version of `payload`, owned by the event type.
-        deduplicationKey: Producer idempotency key; a repeat within the outbox dedup
-            window returns `PublishOk.duplicate = true`. Empty publishes
-            unconditionally.
+        deduplicationKey: Producer idempotency key, unique per (account, source,
+            eventType) in the outbox; a repeat returns `PublishOk.duplicate = true` with
+            the earlier id. Empty publishes unconditionally.
         payload: Encoded event payload; at most `maxEventPayloadBytes`.
         occurredAtUnixMs: When the producer observed the fact; zero means "now" on the
             host clock.
