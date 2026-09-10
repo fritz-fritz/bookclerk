@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bookclerk_config::Config;
-use bookclerk_library::{NewBook, SourceScope};
+use bookclerk_library::SourceScope;
 use bookclerk_plugin_sdk::{ContentSourceContext, ExtensibleConfig, PRODUCT_API_VERSION};
 use bookclerk_source::abi::{
     self as source_abi, account_credentials, credentials_from_bytes, credentials_to_bytes,
@@ -89,7 +89,7 @@ impl ExternalSource {
             .await?,
         );
         let source_config = crate::spawn_config_for_grant(session.grant(), config_json);
-        let describe = session.describe_info();
+        let describe = session.describe_snapshot();
         let display_name = describe
             .display_name
             .clone()
