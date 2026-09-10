@@ -14,8 +14,8 @@ use bookclerk_db_guest::{
 };
 use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
 use bookclerk_plugin_abi::HostAdapterDatabaseSession;
-use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::database_adapter::plugin_error_from_engine;
+use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::{
     serve, AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot,
     ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
