@@ -18,7 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_library::SourceScope;
-use bookclerk_plugin_sdk::{ContentSourceContext, ExtensibleConfig, PRODUCT_API_VERSION};
+use bookclerk_plugin_sdk::{BindingValues, ExtensibleConfig, PRODUCT_API_VERSION};
 use bookclerk_source::abi::{
     self as source_abi, account_credentials, credentials_from_bytes, credentials_to_bytes,
     expand_candidates_params, scan_book_to_new, scan_summary_from_abi, DEFAULT_EXTERNAL_SORT_KEY,
@@ -42,10 +42,9 @@ use crate::Result;
 
 /// External content source backed by a discovered plugin binary.
 pub struct ExternalSource {
-    /// Cap'n Proto session (never given `library.db`).
+    /// Cap'n Proto session (never given `library.db`); opened once with the
+    /// granted plugin config table as the `CONFIG` binding.
     session: Arc<PluginSession>,
-    /// Granted factory context (plugin config table as JSON config).
-    ctx: ContentSourceContext,
     /// Operator-facing storefront name from `describe()` or the manifest.
     display_name: String,
     /// UI brand colors and icon from `describe()`, or a slate fallback.
@@ -112,12 +111,13 @@ impl ExternalSource {
             describe.sort_key
         };
         let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
-        let ctx = ContentSourceContext {
-            config: ExtensibleConfig::json(&source_config),
-        };
+        session
+            .open(BindingValues::config(ExtensibleConfig::json(
+                &source_config,
+            )))
+            .await?;
         Ok(Self {
             session,
-            ctx,
             display_name,
             brand,
             auth_mode,
@@ -142,7 +142,7 @@ impl ExternalSource {
             + 'static,
     {
         self.session
-            .content_source(self.ctx.clone(), call)
+            .storefront(call)
             .await
             .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))
     }

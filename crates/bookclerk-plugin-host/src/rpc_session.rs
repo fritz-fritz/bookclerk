@@ -17,10 +17,11 @@ use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_plugin_abi::HostAdapterDatabaseSession;
 use bookclerk_plugin_sdk::{
-    connect_plugin, negotiate_rpc_features, ByteRange as AbiByteRange, Cancellation, CopyResult,
-    Destination, DestinationContext, JobInvocation, JobInvocationLease, ListOptions,
-    ObjectMetadata, OidcClientTemplate, PluginClient, PluginDescribe, PutResult, ReadResult,
-    ScalarLimits, Source, StreamCopySpec, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS,
+    connect_plugin, negotiate_rpc_features, BindingValues, ByteRange as AbiByteRange, Cancellation,
+    CopyResult, Destination, DomainEvent, EventConsumer, EventResult, HostBindings, Invocation,
+    JobInvocation, JobInvocationLease, ListOptions, ObjectMetadata, Oidc, OidcClientTemplate,
+    OpenedEntrypoints, PluginCli, PluginClient, PluginDescribe, PutResult, ReadResult,
+    ScalarLimits, Source, StreamCopySpec, WriteOptions, FEATURE_SCALAR_LIMITS,
     FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES,
     PRODUCT_API_VERSION,
 };
@@ -41,14 +42,14 @@ use crate::{PluginError, Result};
 ///
 /// `GuestDatabase` trait objects are `?Send`, so named plugin database
 /// bindings cross into the vat task as factories and are constructed on the
-/// vat thread just before `JobHandler.handle`. The factory receives the job
-/// cancel flag and the host lease deadline so binding execute can abort and
-/// cap `deadlineUnixMs`.
+/// vat thread just before the per-job `PluginWorker.open`. The factory
+/// receives the job cancel flag and the host lease deadline so binding
+/// execute can abort and cap `deadlineUnixMs`.
 pub type GuestDatabaseFactory =
     Arc<dyn Fn(Arc<AtomicBool>, u64) -> Arc<dyn bookclerk_plugin_sdk::GuestDatabase> + Send + Sync>;
 
-/// Type-erased typed storefront call executed on the vat thread against a
-/// freshly created `ContentSource` stub (or its factory error).
+/// Type-erased typed storefront call executed on the vat thread against the
+/// opened `storefront` entrypoint (or the open / missing-entrypoint error).
 type ContentSourceCall = Box<
     dyn FnOnce(
             std::result::Result<
@@ -59,12 +60,12 @@ type ContentSourceCall = Box<
         + Send,
 >;
 
-/// Type-erased typed integration call executed on the vat thread against a
-/// freshly created `Integration` stub (or its factory error).
-type IntegrationCall = Box<
+/// Type-erased typed remote-library call executed on the vat thread against
+/// the opened `remoteLibrary` entrypoint (or the open / missing error).
+type RemoteLibraryCall = Box<
     dyn FnOnce(
             std::result::Result<
-                Box<dyn bookclerk_plugin_sdk::Integration>,
+                Box<dyn bookclerk_plugin_sdk::RemoteLibrary>,
                 bookclerk_plugin_sdk::PluginError,
             >,
         ) -> LocalBoxFuture<'static, ()>
@@ -76,15 +77,16 @@ type LocalBoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
 
 /// Work item executed on the plugin vat thread.
 enum Work {
-    /// `BookclerkPlugin.describe`.
+    /// `PluginWorker.describe`.
     Describe {
         /// Reply channel.
         reply: oneshot::Sender<Result<PluginDescribe>>,
     },
-    /// Ensure a destination stub exists for `ctx`.
-    EnsureDest {
-        /// Destination factory context.
-        ctx: DestinationContext,
+    /// `PluginWorker.open` for the session's primary entrypoints with the
+    /// granted binding values (re-opens when the values change).
+    Open {
+        /// `CONFIG` / `SECRETS` values.
+        values: BindingValues,
         /// Reply channel.
         reply: oneshot::Sender<Result<()>>,
     },
@@ -138,7 +140,7 @@ enum Work {
         /// Reply channel.
         reply: oneshot::Sender<Result<()>>,
     },
-    /// JobHandler stream-copy vertical slice.
+    /// `JobRunner.job` stream-copy vertical slice (one `open` per job).
     StreamCopy {
         /// Claimed-lease invocation envelope.
         lease: bookclerk_plugin_sdk::JobInvocationLease,
@@ -153,21 +155,26 @@ enum Work {
         /// Reply channel.
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::JobOutcome>>,
     },
-    /// One typed `ContentSource` method (create stub → invoke → dispose).
-    ContentSource {
-        /// Granted storefront config.
-        ctx: bookclerk_plugin_sdk::ContentSourceContext,
+    /// One typed `storefront` method on the opened primary entrypoints.
+    Storefront {
         /// Typed call; replies through the sender it captured.
         call: ContentSourceCall,
     },
-    /// One typed `Integration` method (create stub → invoke → dispose).
-    Integration {
-        /// Granted integration config.
-        ctx: bookclerk_plugin_sdk::IntegrationContext,
+    /// One typed `remoteLibrary` method on the opened primary entrypoints.
+    RemoteLibrary {
         /// Typed call; replies through the sender it captured.
-        call: IntegrationCall,
+        call: RemoteLibraryCall,
+        /// Abort flag (fence loss).
+        cancel: Arc<AtomicBool>,
+    },
+    /// `EventConsumer.event` batch delivery on the opened primary entrypoints.
+    DeliverEvents {
+        /// Ordered batch (at most `MAX_LIST_PAGE`).
+        batch: Vec<DomainEvent>,
         /// Abort flag (delivery fence loss).
         cancel: Arc<AtomicBool>,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<Vec<EventResult>>>,
     },
     CliDescribe {
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::CliSchema>>,
@@ -179,12 +186,19 @@ enum Work {
     OidcClients {
         reply: oneshot::Sender<Result<Vec<OidcClientTemplate>>>,
     },
+    /// `Oidc.authenticateUser` on the opened primary entrypoints.
+    OidcAuthenticate {
+        params: bookclerk_plugin_sdk::AuthenticateUserParams,
+        reply: oneshot::Sender<Result<bookclerk_plugin_sdk::ExternalUser>>,
+    },
     DatabaseMigrations {
         binding: String,
         reply: oneshot::Sender<Result<Vec<bookclerk_plugin_sdk::PluginMigration>>>,
     },
+    /// Opens the library adapter session: its own `PluginWorker.open` with
+    /// host-private connect params, taking the `databaseAdapter` entrypoint.
     DbOpen {
-        ctx: bookclerk_plugin_sdk::DatabaseContext,
+        values: BindingValues,
         reply: oneshot::Sender<Result<()>>,
     },
     DbBegin {
@@ -220,10 +234,10 @@ enum Work {
     },
     /// Opens an isolated adapter session for one named plugin database binding.
     DbOpenBinding {
-        /// Binding name (`plugin.toml` `capabilities.bindings.databases`).
+        /// Binding name (`plugin.toml` `[[databases]]`).
         name: String,
-        /// Per-binding factory context (host-private connect params).
-        ctx: bookclerk_plugin_sdk::DatabaseContext,
+        /// Per-binding open values (host-private connect params).
+        values: BindingValues,
         reply: oneshot::Sender<Result<bookclerk_plugin_sdk::DbCapabilities>>,
     },
     /// Typed execute on a named plugin database binding session.
@@ -387,6 +401,8 @@ pub struct PluginSession {
     data: std::path::PathBuf,
     /// Instance key `(plugin_id, account_id)`.
     instance_key: String,
+    /// Account scope carried on every `Invocation`.
+    account_id: String,
     /// Expanded executor identity (not a PID).
     session_key: String,
     /// Guest child PID, when the OS still reports one after spawn.
@@ -485,9 +501,10 @@ impl PluginSession {
         let (tx, rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) =
             oneshot::channel::<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>();
+        let vat_account = account_id.to_string();
         thread::Builder::new()
             .name(format!("plugin-vat-{}", id))
-            .spawn(move || vat_thread(spawned, manifest, rx, ready_tx))
+            .spawn(move || vat_thread(spawned, manifest, vat_account, rx, ready_tx))
             .map_err(|err| PluginError::message(format!("plugin vat thread: {err}")))?;
         let (desc, limits, features) = ready_rx
             .await
@@ -503,6 +520,7 @@ impl PluginSession {
             id,
             data,
             instance_key,
+            account_id: account_id.to_string(),
             session_key,
             guest_pid,
             limits,
@@ -520,6 +538,12 @@ impl PluginSession {
     #[must_use]
     pub fn instance_key(&self) -> &str {
         &self.instance_key
+    }
+
+    /// Account scope carried on every `PluginWorker.open` invocation.
+    #[must_use]
+    pub fn account_id(&self) -> &str {
+        &self.account_id
     }
 
     /// Expanded executor session key (artifact, role, grant revision, …).
@@ -568,16 +592,20 @@ impl PluginSession {
             .map_err(|_| PluginError::unavailable("plugin vat thread dropped reply"))?
     }
 
-    /// Instantiates the destination stub with `ctx`.
+    /// Opens the session's primary entrypoints with the granted binding
+    /// values (`CONFIG` / `SECRETS`).
+    ///
+    /// Idempotent for equal values; different values re-open. Entrypoint
+    /// calls that run before `open` use empty bindings.
     ///
     /// # Errors
     ///
-    /// Returns a plugin error when the factory call fails.
-    pub async fn ensure_destination(&self, ctx: DestinationContext) -> Result<()> {
-        self.call(|reply| Work::EnsureDest { ctx, reply }).await
+    /// Returns a plugin error when `PluginWorker.open` fails.
+    pub async fn open(&self, values: BindingValues) -> Result<()> {
+        self.call(|reply| Work::Open { values, reply }).await
     }
 
-    /// Calls `BookclerkPlugin.describe`.
+    /// Calls `PluginWorker.describe`.
     ///
     /// # Errors
     ///
@@ -639,7 +667,7 @@ impl PluginSession {
     /// [`Self::stream_copy_with_cancel`] with named plugin database bindings.
     ///
     /// Each `(name, factory)` pair becomes an isolated `GuestDatabase` on the
-    /// `JobHandler.handle` invocation; factories run on the vat thread.
+    /// per-job `PluginWorker.open` bindings; factories run on the vat thread.
     ///
     /// # Errors
     ///
@@ -732,19 +760,16 @@ impl PluginSession {
         !self.describe.capabilities.consumes.is_empty()
     }
 
-    /// One typed content-source method (create stub → invoke → dispose).
+    /// One typed `storefront` method on the opened primary entrypoints.
     ///
-    /// `call` runs on the vat thread with the freshly created stub; its
-    /// output crosses back to the caller's runtime.
+    /// `call` runs on the vat thread; its output crosses back to the caller's
+    /// runtime.
     ///
     /// # Errors
     ///
-    /// Returns a plugin error when the factory or method fails.
-    pub async fn content_source<T, F, Fut>(
-        &self,
-        ctx: bookclerk_plugin_sdk::ContentSourceContext,
-        call: F,
-    ) -> Result<T>
+    /// Returns a plugin error when the guest did not export `storefront` or
+    /// the method fails.
+    pub async fn storefront<T, F, Fut>(&self, call: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(Box<dyn bookclerk_plugin_sdk::ContentSource>) -> Fut + Send + 'static,
@@ -762,51 +787,47 @@ impl PluginSession {
             })
         });
         self.tx
-            .send(Work::ContentSource { ctx, call: erased })
+            .send(Work::Storefront { call: erased })
             .map_err(|_| PluginError::unavailable("plugin vat thread closed"))?;
         rx.await
             .map_err(|_| PluginError::unavailable("plugin vat thread dropped reply"))?
     }
 
-    /// One typed integration method (create stub → invoke → dispose).
+    /// One typed `remoteLibrary` method on the opened primary entrypoints.
     ///
     /// # Errors
     ///
-    /// Returns a plugin error when the factory or method fails.
-    pub async fn integration<T, F, Fut>(
-        &self,
-        ctx: bookclerk_plugin_sdk::IntegrationContext,
-        call: F,
-    ) -> Result<T>
+    /// Returns a plugin error when the guest did not export `remoteLibrary`
+    /// or the method fails.
+    pub async fn remote_library<T, F, Fut>(&self, call: F) -> Result<T>
     where
         T: Send + 'static,
-        F: FnOnce(Box<dyn bookclerk_plugin_sdk::Integration>) -> Fut + Send + 'static,
+        F: FnOnce(Box<dyn bookclerk_plugin_sdk::RemoteLibrary>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = std::result::Result<T, bookclerk_plugin_sdk::PluginError>>
             + 'static,
     {
-        self.integration_cancelable(ctx, Arc::new(AtomicBool::new(false)), call)
+        self.remote_library_cancelable(Arc::new(AtomicBool::new(false)), call)
             .await
     }
 
-    /// Typed integration method aborted when `cancel` is set (delivery fence loss).
+    /// Typed `remoteLibrary` method aborted when `cancel` is set.
     ///
     /// # Errors
     ///
     /// Returns a plugin error when the RPC fails or is cancelled.
-    pub async fn integration_cancelable<T, F, Fut>(
+    pub async fn remote_library_cancelable<T, F, Fut>(
         &self,
-        ctx: bookclerk_plugin_sdk::IntegrationContext,
         cancel: Arc<AtomicBool>,
         call: F,
     ) -> Result<T>
     where
         T: Send + 'static,
-        F: FnOnce(Box<dyn bookclerk_plugin_sdk::Integration>) -> Fut + Send + 'static,
+        F: FnOnce(Box<dyn bookclerk_plugin_sdk::RemoteLibrary>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = std::result::Result<T, bookclerk_plugin_sdk::PluginError>>
             + 'static,
     {
         let (reply, rx) = oneshot::channel::<Result<T>>();
-        let erased: IntegrationCall = Box::new(move |stub| {
+        let erased: RemoteLibraryCall = Box::new(move |stub| {
             Box::pin(async move {
                 let out = match stub {
                     Ok(stub) => call(stub).await.map_err(map_abi),
@@ -816,14 +837,35 @@ impl PluginSession {
             })
         });
         self.tx
-            .send(Work::Integration {
-                ctx,
+            .send(Work::RemoteLibrary {
                 call: erased,
                 cancel,
             })
             .map_err(|_| PluginError::unavailable("plugin vat thread closed"))?;
         rx.await
             .map_err(|_| PluginError::unavailable("plugin vat thread dropped reply"))?
+    }
+
+    /// Delivers one ordered event batch to the guest `eventConsumer` trigger
+    /// (`EventConsumer.event`), aborted when `cancel` is set (fence loss).
+    ///
+    /// Returns exactly one [`EventResult`] per input event.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the guest did not export an event
+    /// consumer, the RPC fails, or the delivery is cancelled.
+    pub async fn deliver_events(
+        &self,
+        batch: Vec<DomainEvent>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Vec<EventResult>> {
+        self.call(|reply| Work::DeliverEvents {
+            batch,
+            cancel,
+            reply,
+        })
+        .await
     }
 
     /// Guest CLI schema.
@@ -847,14 +889,29 @@ impl PluginSession {
         self.call(|reply| Work::CliInvoke { params, reply }).await
     }
 
-    /// Plugin-provided OIDC authorization-server client templates.
+    /// Plugin-provided OIDC authorization-server client templates
+    /// (`Oidc.clients`); empty when the guest exports no `oidc` entrypoint.
     ///
     /// # Errors
     ///
-    /// Returns a plugin error when the RPC fails. Older guests that lack
-    /// `oidcClients` returns templates, or an empty list when unused.
+    /// Returns a plugin error when the RPC fails.
     pub async fn oidc_clients(&self) -> Result<Vec<OidcClientTemplate>> {
         self.call(|reply| Work::OidcClients { reply }).await
+    }
+
+    /// Verifies remote credentials through the guest `oidc` entrypoint
+    /// (`Oidc.authenticateUser`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the guest exports no `oidc` entrypoint or
+    /// the RPC fails.
+    pub async fn oidc_authenticate_user(
+        &self,
+        params: bookclerk_plugin_sdk::AuthenticateUserParams,
+    ) -> Result<bookclerk_plugin_sdk::ExternalUser> {
+        self.call(|reply| Work::OidcAuthenticate { params, reply })
+            .await
     }
 
     /// Complete ordered plugin-owned migration sequence for one named binding.
@@ -871,13 +928,18 @@ impl PluginSession {
             .await
     }
 
-    /// Opens a database session (held on the vat until drop).
+    /// Opens the library adapter session (held on the vat until drop).
+    ///
+    /// Performs a dedicated `PluginWorker.open` whose bindings carry the
+    /// host-private connect params in `values`, then `openSession` on the
+    /// returned `databaseAdapter` entrypoint.
     ///
     /// # Errors
     ///
-    /// Returns a plugin error when `database` / `openSession` fails.
-    pub async fn db_open(&self, ctx: bookclerk_plugin_sdk::DatabaseContext) -> Result<()> {
-        self.call(|reply| Work::DbOpen { ctx, reply }).await
+    /// Returns a plugin error when `open` / `openSession` fails or the guest
+    /// exports no `databaseAdapter`.
+    pub async fn db_open(&self, values: BindingValues) -> Result<()> {
+        self.call(|reply| Work::DbOpen { values, reply }).await
     }
 
     /// Opens an isolated adapter session for one named plugin database binding.
@@ -892,11 +954,15 @@ impl PluginSession {
     pub async fn db_open_binding(
         &self,
         name: &str,
-        ctx: bookclerk_plugin_sdk::DatabaseContext,
+        values: BindingValues,
     ) -> Result<bookclerk_plugin_sdk::DbCapabilities> {
         let name = name.to_string();
-        self.call(|reply| Work::DbOpenBinding { name, ctx, reply })
-            .await
+        self.call(|reply| Work::DbOpenBinding {
+            name,
+            values,
+            reply,
+        })
+        .await
     }
 
     /// Typed execute on a named plugin database binding session.
@@ -1446,9 +1512,80 @@ fn negotiate_describe(
     Ok((limits, features))
 }
 
+/// Primary entrypoints opened for the session plus the values they were
+/// opened with (re-open when values change).
+struct PrimaryOpen {
+    values: BindingValues,
+    entrypoints: OpenedEntrypoints,
+}
+
+/// Host-issued invocation identity for one `PluginWorker.open`.
+fn new_invocation(account_id: &str, id: impl Into<String>, deadline_unix_ms: u64) -> Invocation {
+    Invocation {
+        id: id.into(),
+        account_id: account_id.to_string(),
+        deadline_unix_ms,
+        ..Invocation::default()
+    }
+}
+
+/// Opens (or reuses) the primary entrypoints for `values`.
+async fn primary_entrypoints<'a>(
+    client: &PluginClient,
+    account_id: &str,
+    primary: &'a mut Option<PrimaryOpen>,
+    values: Option<BindingValues>,
+) -> Result<&'a OpenedEntrypoints> {
+    let reuse = match (&*primary, &values) {
+        (Some(_), None) => true,
+        (Some(open), Some(values)) => open.values == *values,
+        (None, _) => false,
+    };
+    if !reuse {
+        let want = values.unwrap_or_default();
+        let entrypoints = client
+            .open(
+                &new_invocation(account_id, uuid::Uuid::new_v4().to_string(), 0),
+                HostBindings::from_values(want.clone()),
+            )
+            .await
+            .map_err(map_abi)?;
+        *primary = Some(PrimaryOpen {
+            values: want,
+            entrypoints,
+        });
+    }
+    Ok(&primary.as_ref().expect("primary is open").entrypoints)
+}
+
+/// Fails closed when the guest did not export `name`.
+fn missing_entrypoint(name: &str) -> PluginError {
+    PluginError::message(format!("plugin exported no `{name}` entrypoint"))
+}
+
+/// Dedicated `open` for a database adapter: returns the `databaseAdapter`
+/// entrypoint or fails closed.
+async fn open_database_adapter(
+    client: &PluginClient,
+    account_id: &str,
+    values: BindingValues,
+) -> Result<bookclerk_plugin_sdk::DatabaseClient> {
+    let opened = client
+        .open(
+            &new_invocation(account_id, uuid::Uuid::new_v4().to_string(), 0),
+            HostBindings::from_values(values),
+        )
+        .await
+        .map_err(map_abi)?;
+    opened
+        .database_adapter
+        .ok_or_else(|| missing_entrypoint("databaseAdapter"))
+}
+
 fn vat_thread(
     spawned: crate::spawn_stdio::SpawnedStdio,
     manifest: PluginManifest,
+    account_id: String,
     mut rx: mpsc::UnboundedReceiver<Work>,
     ready: oneshot::Sender<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>,
 ) {
@@ -1486,7 +1623,7 @@ fn vat_thread(
                         return;
                     }
                 };
-                let mut dest: Option<bookclerk_plugin_sdk::DestinationClient> = None;
+                let mut primary: Option<PrimaryOpen> = None;
                 struct BindingOpen {
                     session: Box<dyn bookclerk_plugin_sdk::AdapterDatabaseSession>,
                     host: bookclerk_plugin_abi::HostAdapterDatabaseSessionClient,
@@ -1509,36 +1646,35 @@ fn vat_thread(
                         Work::Describe { reply } => {
                             let _ = reply.send(client.describe().await.map_err(map_abi));
                         }
-                        Work::EnsureDest { ctx, reply } => {
-                            let out = client.destination(ctx).await.map_err(map_abi);
-                            match out {
-                                Ok(d) => {
-                                    dest = Some(d);
-                                    let _ = reply.send(Ok(()));
-                                }
-                                Err(err) => {
-                                    let _ = reply.send(Err(err));
-                                }
-                            }
+                        Work::Open { values, reply } => {
+                            let out = primary_entrypoints(
+                                &client,
+                                &account_id,
+                                &mut primary,
+                                Some(values),
+                            )
+                            .await
+                            .map(|_| ());
+                            let _ = reply.send(out);
                         }
                         Work::Head { key, reply } => {
-                            let out = match dest.as_ref() {
-                                Some(d) => d.head(&key).await.map_err(map_abi),
-                                None => Err(PluginError::message("destination not created")),
+                            let out = match storage(&client, &account_id, &mut primary).await {
+                                Ok(d) => d.head(&key).await.map_err(map_abi),
+                                Err(err) => Err(err),
                             };
                             let _ = reply.send(out);
                         }
                         Work::List { options, reply } => {
-                            let out = match dest.as_ref() {
-                                Some(d) => d.list(options).await.map_err(map_abi),
-                                None => Err(PluginError::message("destination not created")),
+                            let out = match storage(&client, &account_id, &mut primary).await {
+                                Ok(d) => d.list(options).await.map_err(map_abi),
+                                Err(err) => Err(err),
                             };
                             let _ = reply.send(out);
                         }
                         Work::GetStream { key, range, reply } => {
-                            let out = match dest.as_ref() {
-                                Some(d) => d.get(&key, range).await.map_err(map_abi),
-                                None => Err(PluginError::message("destination not created")),
+                            let out = match storage(&client, &account_id, &mut primary).await {
+                                Ok(d) => d.get(&key, range).await.map_err(map_abi),
+                                Err(err) => Err(err),
                             };
                             let _ = reply.send(out);
                         }
@@ -1548,27 +1684,27 @@ fn vat_thread(
                             options,
                             reply,
                         } => {
-                            let out = match dest.as_ref() {
-                                Some(d) => d.put(&key, body, options).await.map_err(map_abi),
-                                None => Err(PluginError::message("destination not created")),
+                            let out = match storage(&client, &account_id, &mut primary).await {
+                                Ok(d) => d.put(&key, body, options).await.map_err(map_abi),
+                                Err(err) => Err(err),
                             };
                             let _ = reply.send(out);
                         }
                         Work::Copy { from, to, reply } => {
-                            let out = match dest.as_ref() {
-                                Some(d) => d
+                            let out = match storage(&client, &account_id, &mut primary).await {
+                                Ok(d) => d
                                     .copy(&from, &to)
                                     .await
                                     .map(|r| r.bytes_copied)
                                     .map_err(map_abi),
-                                None => Err(PluginError::message("destination not created")),
+                                Err(err) => Err(err),
                             };
                             let _ = reply.send(out);
                         }
                         Work::Delete { key, reply } => {
-                            let out = match dest.as_ref() {
-                                Some(d) => d.delete(&key).await.map_err(map_abi),
-                                None => Err(PluginError::message("destination not created")),
+                            let out = match storage(&client, &account_id, &mut primary).await {
+                                Ok(d) => d.delete(&key).await.map_err(map_abi),
+                                Err(err) => Err(err),
                             };
                             let _ = reply.send(out);
                         }
@@ -1582,13 +1718,26 @@ fn vat_thread(
                         } => {
                             let host_deadline = lease.deadline_unix_ms;
                             let job_cancel = Arc::clone(&cancel);
+                            let dest = match storage(&client, &account_id, &mut primary).await {
+                                Ok(d) => d.clone(),
+                                Err(err) => {
+                                    let _ = reply.send(Err(err));
+                                    continue;
+                                }
+                            };
+                            let values = primary
+                                .as_ref()
+                                .map(|p| p.values.clone())
+                                .unwrap_or_default();
                             let out = tokio::select! {
                                 () = wait_flag(Arc::clone(&cancel)) => {
                                     Err(PluginError::from_abi(Some("cancelled"), "fence lost"))
                                 }
                                 out = run_stream_copy(
                                     &client,
-                                    dest.as_ref(),
+                                    &account_id,
+                                    values,
+                                    dest,
                                     lease,
                                     spec,
                                     cancel,
@@ -1603,33 +1752,148 @@ fn vat_thread(
                             };
                             let _ = reply.send(out);
                         }
-                        Work::ContentSource { ctx, call } => {
-                            let stub = client.content_source(ctx).await.map(|stub| {
+                        Work::Storefront { call } => {
+                            let stub = primary_entrypoints(
+                                &client,
+                                &account_id,
+                                &mut primary,
+                                None,
+                            )
+                            .await
+                            .and_then(|eps| {
+                                eps.storefront
+                                    .clone()
+                                    .ok_or_else(|| missing_entrypoint("storefront"))
+                            })
+                            .map(|stub| {
                                 Box::new(stub) as Box<dyn bookclerk_plugin_sdk::ContentSource>
-                            });
+                            })
+                            .map_err(host_err_to_abi);
                             call(stub).await;
                         }
-                        Work::Integration { ctx, call, cancel } => {
-                            let stub = client.integration(ctx).await.map(|stub| {
-                                Box::new(stub) as Box<dyn bookclerk_plugin_sdk::Integration>
-                            });
+                        Work::RemoteLibrary { call, cancel } => {
+                            let stub = primary_entrypoints(
+                                &client,
+                                &account_id,
+                                &mut primary,
+                                None,
+                            )
+                            .await
+                            .and_then(|eps| {
+                                eps.remote_library
+                                    .clone()
+                                    .ok_or_else(|| missing_entrypoint("remoteLibrary"))
+                            })
+                            .map(|stub| {
+                                Box::new(stub) as Box<dyn bookclerk_plugin_sdk::RemoteLibrary>
+                            })
+                            .map_err(host_err_to_abi);
                             tokio::select! {
                                 () = wait_flag(Arc::clone(&cancel)) => {
                                     // The captured reply sender drops with the
                                     // future, surfacing "fence lost" to the caller.
-                                    tracing::debug!("integration call aborted: fence lost");
+                                    tracing::debug!("remoteLibrary call aborted: fence lost");
                                 }
                                 () = call(stub) => {}
                             }
                         }
+                        Work::DeliverEvents {
+                            batch,
+                            cancel,
+                            reply,
+                        } => {
+                            let consumer = primary_entrypoints(
+                                &client,
+                                &account_id,
+                                &mut primary,
+                                None,
+                            )
+                            .await
+                            .and_then(|eps| {
+                                eps.event_consumer
+                                    .clone()
+                                    .ok_or_else(|| missing_entrypoint("eventConsumer"))
+                            });
+                            let out = match consumer {
+                                Err(err) => Err(err),
+                                Ok(consumer) => tokio::select! {
+                                    () = wait_flag(Arc::clone(&cancel)) => {
+                                        Err(PluginError::from_abi(Some("cancelled"), "fence lost"))
+                                    }
+                                    out = consumer.event(batch) => out.map_err(map_abi),
+                                },
+                            };
+                            let _ = reply.send(out);
+                        }
                         Work::CliDescribe { reply } => {
-                            let _ = reply.send(client.cli_describe().await.map_err(map_abi));
+                            let out = match primary_entrypoints(
+                                &client,
+                                &account_id,
+                                &mut primary,
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(eps) => match eps.cli.as_ref() {
+                                    Some(cli) => cli.describe().await.map_err(map_abi),
+                                    None => Ok(bookclerk_plugin_sdk::CliSchema::default()),
+                                },
+                                Err(err) => Err(err),
+                            };
+                            let _ = reply.send(out);
                         }
                         Work::CliInvoke { params, reply } => {
-                            let _ = reply.send(client.cli_invoke(params).await.map_err(map_abi));
+                            let out = match primary_entrypoints(
+                                &client,
+                                &account_id,
+                                &mut primary,
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(eps) => match eps.cli.as_ref() {
+                                    Some(cli) => cli.invoke(params).await.map_err(map_abi),
+                                    None => Err(missing_entrypoint("cli")),
+                                },
+                                Err(err) => Err(err),
+                            };
+                            let _ = reply.send(out);
                         }
                         Work::OidcClients { reply } => {
-                            let _ = reply.send(client.oidc_clients().await.map_err(map_abi));
+                            let out = match primary_entrypoints(
+                                &client,
+                                &account_id,
+                                &mut primary,
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(eps) => match eps.oidc.as_ref() {
+                                    Some(oidc) => oidc.clients().await.map_err(map_abi),
+                                    None => Ok(Vec::new()),
+                                },
+                                Err(err) => Err(err),
+                            };
+                            let _ = reply.send(out);
+                        }
+                        Work::OidcAuthenticate { params, reply } => {
+                            let out = match primary_entrypoints(
+                                &client,
+                                &account_id,
+                                &mut primary,
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(eps) => match eps.oidc.as_ref() {
+                                    Some(oidc) => {
+                                        oidc.authenticate_user(params).await.map_err(map_abi)
+                                    }
+                                    None => Err(missing_entrypoint("oidc")),
+                                },
+                                Err(err) => Err(err),
+                            };
+                            let _ = reply.send(out);
                         }
                         Work::DatabaseMigrations { binding, reply } => {
                             let _ = reply.send(
@@ -1639,9 +1903,9 @@ fn vat_thread(
                                     .map_err(map_abi),
                             );
                         }
-                        Work::DbOpen { ctx, reply } => {
+                        Work::DbOpen { values, reply } => {
                             let out = async {
-                                let db = client.database(ctx).await.map_err(map_abi)?;
+                                let db = open_database_adapter(&client, &account_id, values).await?;
                                 let handle = db.open_session_handle().await.map_err(map_abi)?;
                                 db_session = Some(handle.session);
                                 db_host_session = Some(handle.host);
@@ -1762,9 +2026,13 @@ fn vat_thread(
                             };
                             let _ = reply.send(out);
                         }
-                        Work::DbOpenBinding { name, ctx, reply } => {
+                        Work::DbOpenBinding {
+                            name,
+                            values,
+                            reply,
+                        } => {
                             let out = async {
-                                let db = client.database(ctx).await.map_err(map_abi)?;
+                                let db = open_database_adapter(&client, &account_id, values).await?;
                                 let handle = db.open_session_handle().await.map_err(map_abi)?;
                                 let caps = handle.session.capabilities().await.map_err(map_abi)?;
                                 if !caps.meets_host_minimums() {
@@ -1925,32 +2193,54 @@ fn vat_thread(
     });
 }
 
+/// `storage` entrypoint of the primary open, failing closed when absent.
+async fn storage<'a>(
+    client: &PluginClient,
+    account_id: &str,
+    primary: &'a mut Option<PrimaryOpen>,
+) -> Result<&'a bookclerk_plugin_sdk::DestinationClient> {
+    primary_entrypoints(client, account_id, primary, None)
+        .await?
+        .storage
+        .as_ref()
+        .ok_or_else(|| missing_entrypoint("storage"))
+}
+
+/// One job: a dedicated `PluginWorker.open` carrying the job's named database
+/// bindings and cancel, then `JobRunner.job` with host-served input / output.
+#[allow(clippy::too_many_arguments)]
 async fn run_stream_copy(
     client: &PluginClient,
-    dest: Option<&bookclerk_plugin_sdk::DestinationClient>,
+    account_id: &str,
+    values: BindingValues,
+    dest: bookclerk_plugin_sdk::DestinationClient,
     lease: JobInvocationLease,
     spec: StreamCopySpec,
     cancel: Arc<AtomicBool>,
     progress: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
     databases: Vec<(String, Arc<dyn bookclerk_plugin_sdk::GuestDatabase>)>,
 ) -> Result<bookclerk_plugin_sdk::JobOutcome> {
-    let Some(dest) = dest else {
-        return Err(PluginError::message("destination not created"));
-    };
-    let handler = client
-        .worker(WorkerContext {
-            job_id: lease.job_id.clone(),
-            config: bookclerk_plugin_sdk::ExtensibleConfig::default(),
-        })
+    // Plugins never receive the host library on `Bindings`. Durable plugin
+    // state uses consented named `[[databases]]` bindings on physically
+    // separate units.
+    let opened = client
+        .open(
+            &new_invocation(account_id, lease.job_id.clone(), lease.deadline_unix_ms),
+            HostBindings {
+                values,
+                events: None,
+                databases,
+                cancel: Arc::new(FlagCancel(Arc::clone(&cancel))),
+            },
+        )
         .await
         .map_err(map_abi)?;
+    let runner = opened
+        .job_runner
+        .ok_or_else(|| missing_entrypoint("jobRunner"))?;
     let payload =
         serde_json::to_string(&spec).map_err(|err| PluginError::message(err.to_string()))?;
     let invocation = JobInvocation::stream_copy_from_lease(lease, payload);
-    // Plugins never receive the host library as `context.database`. Durable
-    // plugin state uses consented named bindings (`context.databases`) on
-    // physically separate units.
-    let database = None;
     let input: Arc<dyn Source> = Arc::new(DestAsSource { dest: dest.clone() });
     let output: Arc<dyn Destination> = Arc::new(FencedDestination {
         inner: Arc::new(dest.clone()),
@@ -1963,10 +2253,8 @@ async fn run_stream_copy(
         library: progress,
     });
     let cancel: Arc<dyn Cancellation> = Arc::new(FlagCancel(cancel));
-    client
-        .handle_job_with_cancel(
-            handler, invocation, input, output, progress, cancel, database, databases,
-        )
+    runner
+        .job(&invocation, input, output, progress, cancel)
         .await
         .map_err(map_abi)
 }
