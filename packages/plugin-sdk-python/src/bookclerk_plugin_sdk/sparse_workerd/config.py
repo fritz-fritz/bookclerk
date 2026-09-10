@@ -256,7 +256,6 @@ def materialize_config(
     manifest: dict[str, Any],
     *,
     listen_port: int,
-    notify_addr: str | None = None,
     bridge_token: str,
     sdk_root: Path | None = None,
     config_name: str = ".bookclerk-workerd-config.capnp",
@@ -268,7 +267,6 @@ def materialize_config(
             ``.bookclerk/`` plus the config file.
         manifest: Parsed ``plugin.toml`` mapping (must include ``[workerd]``).
         listen_port: Loopback TCP port for the bridge RPC socket.
-        notify_addr: Optional host notify address for callback bindings.
         bridge_token: Bearer token required by the bridge HTTP surface.
         sdk_root: SDK package root for bridge/SDK embeds (defaults to this package).
         config_name: Output Cap'n Proto filename under ``plugin_root``.
@@ -295,7 +293,7 @@ def materialize_config(
     bookclerk_dir = plugin_root / ".bookclerk"
     bookclerk_dir.mkdir(parents=True, exist_ok=True)
     bridge_src = sdk_root / "bridge"
-    for name in ("bridge.js", "egress.js", "host_stub.js"):
+    for name in ("bridge.js", "egress.js"):
         src = bridge_src / name
         if not src.is_file():
             raise FileNotFoundError(f"missing vendored bridge {src}")
@@ -437,17 +435,6 @@ def materialize_config(
         f'(name = "BRIDGE_TOKEN", text = "{escape_capnp(bridge_token)}")'
     )
 
-    notify_service = ""
-    host_bindings = bridge_token_binding
-    if notify_addr:
-        notify_service = (
-            f'    (name = "hostNotify", external = '
-            f'(address = "{escape_capnp(notify_addr)}", http = ())),'
-        )
-        host_bindings = (
-            f"{bridge_token_binding},\n    (name = \"NOTIFY\", service = \"hostNotify\")"
-        )
-
     compat_date = escape_capnp(str(workerd["compatibility_date"]))
     modules_joined = ",\n    ".join(module_embeds)
     adapter_modules_joined = ",\n    ".join(adapter_modules)
@@ -460,28 +447,14 @@ const bookclerkPlugin :Workerd.Config = (
   services = [
     (name = "internet", network = (allow = ["public"])),
     (name = "blocked", network = (allow = [])),
-    (name = "host", worker = .hostWorker),
     (name = "egress", worker = .egressWorker),
     (name = "plugin", worker = .pluginWorker),
     (name = "adapter", worker = .adapterWorker),
     (name = "bridge", worker = .bridgeWorker),
-{notify_service}
   ],
   sockets = [
     (name = "rpc", address = "{listen_addr}", http = (), service = "bridge")
   ]
-);
-
-const hostWorker :Workerd.Worker = (
-  modules = [
-    (name = "host_stub.js", esModule = embed ".bookclerk/host_stub.js")
-  ],
-  compatibilityDate = "{compat_date}",
-  
-  bindings = [
-    {host_bindings}
-  ],
-  globalOutbound = "blocked",
 );
 
 const egressWorker :Workerd.Worker = (
@@ -502,9 +475,7 @@ const pluginWorker :Workerd.Worker = (
   ],
   compatibilityDate = "{compat_date}",
   {flags_line}
-  bindings = [
-    (name = "HOST", service = "host"),
-  ],
+  bindings = [],
   globalOutbound = "{plugin_outbound}",
 );
 

@@ -16,7 +16,7 @@ use bookclerk_plugin_manifest::{parse, PluginRuntimeKind};
 use bookclerk_workerd::config::{self, ListenSpec};
 use bookclerk_workerd::egress::EgressProxy;
 use bookclerk_workerd::ensure_workerd;
-use bookclerk_workerd::notify::generate_bridge_token;
+use bookclerk_workerd::generate_bridge_token;
 use serde_json::{json, Value};
 
 /// Smokes a `runtime = "workerd"` plugin: ensure pin → materialize → describe + health.
@@ -72,7 +72,6 @@ pub fn smoke_plugin(plugin_dir: &Path) -> Result<String, String> {
         &egress,
         limits,
         listen,
-        None,
         None,
         &bridge_token,
         None,

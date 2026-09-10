@@ -116,7 +116,6 @@ def run_smoke(plugin_dir: Path) -> str:
         root,
         manifest,
         listen_port=port,
-        notify_addr=None,
         bridge_token=bridge_token,
     )
     base = f"http://{listen_addr}"
