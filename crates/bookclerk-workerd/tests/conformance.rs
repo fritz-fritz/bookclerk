@@ -1,7 +1,7 @@
 //! Identical contract vectors against three backends.
 //!
 //! 1. Workerd author class (fixture `stream`)
-//! 2. Workerd → native broker → Cap'n Proto guest (`local`)
+//! 2. Workerd control plane → typed Cap'n Proto passthrough to a native guest (`local`)
 //! 3. Direct Cap'n Proto fallback (`local`)
 //!
 //! Never set `BOOKCLERK_SKIP_WORKERD`. CI must ship `target/debug/workerd`.
@@ -13,10 +13,12 @@ use std::time::Duration;
 use std::sync::{Arc, Mutex};
 
 use bookclerk_plugin_abi::{
-    connect_plugin, Destination, DestinationClient, DomainEvent, EventConsumer,
-    EventConsumerClient, EventPublisher, EventResult, HostBindings, Invocation, PluginClient,
-    PluginError, PluginEvent, PublishOk, WriteOptions, MAX_EVENT_PAYLOAD_BYTES,
-    PRODUCT_API_VERSION,
+    connect_plugin, AdapterExecuteRequest, Database, DbCapabilities, DbPlanStatementKind,
+    DbResultSelection, DbValue, Destination, DestinationClient, DomainEvent, Entrypoint,
+    EventConsumer, EventConsumerClient, EventPublisher, EventResult, ExecuteRequest,
+    GuestReceiptPersist, HostBindings, Invocation, PluginClient, PluginError, PluginEvent,
+    PublishOk, ResolvedStatement, StatementResult, TypedDbStatement, WriteOptions,
+    MAX_EVENT_PAYLOAD_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_workerd::pin::binary_name;
 use tokio::io::AsyncReadExt;
@@ -567,6 +569,255 @@ supports_suspend = true
                 .expect("describe");
             assert_eq!(desc.api_version, PRODUCT_API_VERSION);
             event_result_vectors(&client).await;
+            let _ = child.kill().await;
+        })
+        .await;
+}
+
+fn find_sqlite_guest() -> Option<PathBuf> {
+    let launcher = PathBuf::from(env!("CARGO_BIN_EXE_bookclerk-workerd"));
+    let dir = launcher.parent()?;
+    let candidate = dir.join("bookclerk-plugin-database-sqlite");
+    candidate.is_file().then_some(candidate)
+}
+
+/// Spawns `bookclerk-workerd` in native mode over `guest` with the manifest
+/// at `root`, plus extra guest environment.
+fn spawn_native_behind_workerd(
+    workerd: &Path,
+    root: &Path,
+    guest: &Path,
+    tmp: &Path,
+    extra_env: &[(&str, &Path)],
+) -> tokio::process::Child {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bookclerk-workerd"));
+    cmd.env("BOOKCLERK_PLUGIN_ROOT", root)
+        .env("BOOKCLERK_WORKERD_BIN", workerd)
+        .env("BOOKCLERK_NATIVE_BACKEND", guest)
+        .env("TMPDIR", tmp)
+        .env("HOME", tmp)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    cmd.spawn().expect("spawn native-behind-workerd")
+}
+
+/// One typed `SELECT 1` batch with a hash-bound proof, as the host would send.
+fn select_one_request() -> AdapterExecuteRequest {
+    let sql = "SELECT 1";
+    let request = ExecuteRequest {
+        operation_id: "conformance-select-one".into(),
+        request_hash: String::new(),
+        statements: vec![TypedDbStatement {
+            sql: sql.into(),
+            parameters: Vec::new(),
+            kind: DbPlanStatementKind::Select,
+            max_rows: 1,
+            result_selection: DbResultSelection::Rows,
+        }],
+        deadline_unix_ms: 0,
+    };
+    let envelope = AdapterExecuteRequest::new(request, GuestReceiptPersist::default())
+        .with_proofs(vec![ResolvedStatement::bound_empty(sql)]);
+    envelope.require_proofs().expect("proof bound to SELECT 1");
+    envelope
+}
+
+/// Opens the guest's database adapter, runs `SELECT 1`, and returns the
+/// capabilities plus the single statement result.
+async fn database_select_one(client: &PluginClient) -> (DbCapabilities, StatementResult) {
+    let opened = client
+        .open(
+            &Invocation {
+                id: "database".into(),
+                ..Default::default()
+            },
+            HostBindings::default(),
+        )
+        .await
+        .expect("open");
+    let adapter = opened
+        .database_adapter
+        .expect("guest exports `databaseAdapter`");
+    let session = adapter.open_session().await.expect("open_session");
+    let capabilities = session.capabilities().await.expect("capabilities");
+    let reply = session
+        .execute(select_one_request())
+        .await
+        .expect("execute SELECT 1");
+    assert_eq!(reply.operation_id, "conformance-select-one");
+    assert_eq!(reply.statements.len(), 1, "one statement result");
+    let result = reply.statements.into_iter().next().expect("one result");
+    assert_eq!(result.rows.len(), 1, "SELECT 1 yields one row");
+    assert_eq!(result.rows[0].values, vec![DbValue::Int64(1)]);
+    session.close().await.expect("close");
+    (capabilities, result)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_behind_workerd_sqlite_database_vectors() {
+    let Some(workerd) = find_workerd() else {
+        panic!(
+            "pinned workerd binary missing; run `cargo ensure-workerd`. Do not set BOOKCLERK_SKIP_WORKERD."
+        );
+    };
+    let Some(guest) = find_sqlite_guest() else {
+        panic!(
+            "bookclerk-plugin-database-sqlite missing; run `cargo build -p bookclerk-plugin-database-sqlite`"
+        );
+    };
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let root = tmp.path().join("plugin");
+    std::fs::create_dir_all(&root).expect("plugin root");
+    std::fs::write(
+        root.join("plugin.toml"),
+        r#"api_version = 3
+id = "sqlite"
+runtime = "native"
+command = "./bookclerk-plugin-database-sqlite"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "deny"
+"#,
+    )
+    .expect("plugin.toml");
+    let direct_db = tmp.path().join("direct.sqlite");
+    let workerd_db = tmp.path().join("workerd.sqlite");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut direct = Command::new(&guest)
+                .env("BOOKCLERK_SQLITE_PATH", &direct_db)
+                .env("TMPDIR", tmp.path())
+                .env("HOME", tmp.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn sqlite guest");
+            let stdin = direct.stdin.take().expect("stdin");
+            let stdout = direct.stdout.take().expect("stdout");
+            let (direct_client, rpc) = connect_plugin(stdout, stdin, 64 * 1024);
+            tokio::task::spawn_local(rpc);
+            let direct_desc =
+                tokio::time::timeout(Duration::from_secs(30), direct_client.describe())
+                    .await
+                    .expect("direct describe timed out")
+                    .expect("direct describe");
+            let (direct_caps, direct_result) = database_select_one(&direct_client).await;
+            let _ = direct.kill().await;
+
+            let mut child = spawn_native_behind_workerd(
+                &workerd,
+                &root,
+                &guest,
+                tmp.path(),
+                &[("BOOKCLERK_SQLITE_PATH", workerd_db.as_path())],
+            );
+            let stdin = child.stdin.take().expect("stdin");
+            let stdout = child.stdout.take().expect("stdout");
+            let (client, rpc) = connect_plugin(stdout, stdin, 64 * 1024);
+            tokio::task::spawn_local(rpc);
+            let desc = tokio::time::timeout(Duration::from_secs(90), client.describe())
+                .await
+                .expect("describe timed out — native-behind-workerd sqlite failed to start")
+                .expect("describe");
+            assert_eq!(desc.api_version, PRODUCT_API_VERSION);
+            assert_eq!(desc.id, "sqlite");
+            assert_eq!(desc.id, direct_desc.id, "manifest and guest agree on id");
+            let (caps, result) = database_select_one(&client).await;
+            assert_eq!(caps, direct_caps, "capabilities identical on both paths");
+            assert_eq!(
+                result.rows, direct_result.rows,
+                "rows identical on both paths"
+            );
+            assert_eq!(
+                result.columns, direct_result.columns,
+                "columns identical on both paths"
+            );
+            let _ = child.kill().await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_behind_workerd_open_nulls_undeclared_entrypoints() {
+    let Some(workerd) = find_workerd() else {
+        panic!(
+            "pinned workerd binary missing; run `cargo ensure-workerd`. Do not set BOOKCLERK_SKIP_WORKERD."
+        );
+    };
+    let Some(guest) = find_local_guest() else {
+        panic!(
+            "bookclerk-plugin-destination-local missing; run `cargo build -p bookclerk-plugin-destination-local`"
+        );
+    };
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let root = tmp.path().join("plugin");
+    std::fs::create_dir_all(&root).expect("plugin root");
+    std::fs::write(
+        root.join("plugin.toml"),
+        r#"api_version = 3
+id = "local"
+runtime = "native"
+command = "./bookclerk-plugin-destination-local"
+entrypoints = ["cli"]
+
+[capabilities.network]
+mode = "deny"
+"#,
+    )
+    .expect("plugin.toml");
+    let out = tmp.path().join("out");
+    std::fs::create_dir_all(&out).expect("out");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut child = spawn_native_behind_workerd(
+                &workerd,
+                &root,
+                &guest,
+                tmp.path(),
+                &[("BOOKCLERK_OUTPUT_LOCAL_ROOT", out.as_path())],
+            );
+            let stdin = child.stdin.take().expect("stdin");
+            let stdout = child.stdout.take().expect("stdout");
+            let (client, rpc) = connect_plugin(stdout, stdin, 64 * 1024);
+            tokio::task::spawn_local(rpc);
+            let desc = tokio::time::timeout(Duration::from_secs(90), client.describe())
+                .await
+                .expect("describe timed out — native-behind-workerd failed to start")
+                .expect("describe");
+            assert_eq!(
+                desc.capabilities.entrypoints,
+                vec![Entrypoint::Cli],
+                "manifest is authoritative on entrypoints"
+            );
+            let opened = client
+                .open(
+                    &Invocation {
+                        id: "undeclared".into(),
+                        ..Default::default()
+                    },
+                    HostBindings::default(),
+                )
+                .await
+                .expect("open");
+            assert!(
+                opened.storage.is_none(),
+                "storage is nulled when the manifest does not declare it"
+            );
+            assert!(
+                opened.job_runner.is_none(),
+                "jobRunner is nulled without jobs or storage in the manifest"
+            );
+            assert!(opened.cli.is_none(), "guest exports no cli");
             let _ = child.kill().await;
         })
         .await;

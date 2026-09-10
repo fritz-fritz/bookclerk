@@ -2959,6 +2959,23 @@ impl PluginClient {
             plugin_migrations_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
         }
     }
+
+    /// Asks the guest to release its resources (`PluginWorker.shutdown`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when the RPC fails or the guest reports one.
+    pub async fn shutdown(&self) -> Result<()> {
+        let req = self.client.shutdown_request();
+        let reply = req.send().promise.await.map_err(from_capnp)?;
+        read_empty(
+            reply
+                .get()
+                .map_err(from_capnp)?
+                .get_result()
+                .map_err(from_capnp)?,
+        )
+    }
 }
 
 /// Decode a health success/error union.
@@ -3297,6 +3314,28 @@ impl JobRunnerClient {
             handle_reply::Ok(o) => read_job_outcome(o.map_err(from_capnp)?),
             handle_reply::Err(err) => Err(read_error(err.map_err(from_capnp)?)),
         }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl JobRunner for JobRunnerClient {
+    async fn job(&self, controller: JobController) -> Result<JobOutcome> {
+        let JobController {
+            invocation,
+            input,
+            output,
+            progress,
+            cancel,
+        } = controller;
+        JobRunnerClient::job(
+            self,
+            &invocation,
+            Arc::from(input),
+            Arc::from(output),
+            Arc::from(progress),
+            Arc::from(cancel),
+        )
+        .await
     }
 }
 

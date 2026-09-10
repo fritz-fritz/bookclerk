@@ -34,9 +34,10 @@ exported class with the matching name extending its base (`Storefront`,
 implement Rust `PluginWorker` (`describe` / `open(invocation, bindings) ->
 Entrypoints`) and call `serve`. The trusted adapter isolate installs the
 granted bindings on `env` per invocation (`CONFIG`, `SECRETS`, `EVENTS`,
-`WORK_FS`, named databases) and never exposes `PLUGIN_BACKEND`, HTTP
-endpoints, PIDs, credentials, or Cap'n Proto to authors. `PLUGIN_BACKEND`
-may exist as private workerd config only. Byte `Source` is the job input
+`WORK_FS`, named databases) and never exposes HTTP endpoints, PIDs,
+credentials, or Cap'n Proto to authors. Native guests behind workerd are
+reached as typed Cap'n Proto by the launcher, never through an isolate
+binding. Byte `Source` is the job input
 opener; storefronts are the separately named `storefront` entrypoint. JSON is
 allowed only for plugin-specific extensible config (`schemaVersion` +
 `mediaType`/`schemaId` + bounded payload).
@@ -889,7 +890,7 @@ resolves each `Entrypoints` capability to the matching exported class through
 its `PLUGIN_<ENTRYPOINT>` service binding and merges `Bindings` (`config`,
 `secrets`, `events`, `databases`, `storage`) onto the author's `env` before
 every call. Authors never subclass bare `WorkerEntrypoint`; adapter-private
-`GRANTED` / `BRIDGE_TOKEN` / `PLUGIN_BACKEND` live only on the wrapper
+`GRANTED` / `BRIDGE_TOKEN` / `PLUGIN_DESCRIBE` live only on the wrapper
 (`AdapterEnv`).
 
 `event(batch)` mirrors Workers `queue(batch)`: each `EventMessage` records one
@@ -920,10 +921,14 @@ completion, retry class, and cancellation stay job state — not chunk messages.
 
 Workerd is the **control-plane** front door (invocation / policy / binding /
 lifecycle / outcome). Isolate vs native-jail vs future container are backends
-behind `PLUGIN_BACKEND`. Large streams may take a broker → destination **media
-fast path** without entering JavaScript; Cap'n Proto remains the broker↔native
-protocol. Direct native Cap'n Proto is host-selected fallback, not
-plugin-selectable policy bypass. The OS jail is still required.
+the `bookclerk-workerd` launcher selects. For a native guest the launcher
+speaks typed Cap'n Proto to it directly and forwards every `Entrypoints`
+family (event consumer, job runner, storefront, storage, database adapter,
+remote library, CLI, OIDC) without entering JavaScript; the adapter isolate
+only decides `describe` (merged against `PLUGIN_DESCRIBE`) and `open` policy
+(`POST /open` → `openInvocation`) and receives `shutdown`. Direct native Cap'n
+Proto is host-selected fallback, not plugin-selectable policy bypass. The OS
+jail is still required.
 
 List pagination is **opaque and bounded**. Missing/stale cursors return
 `invalid_cursor` (never silently restart at page one). Concurrent mutation is

@@ -8,6 +8,13 @@
  * `invokeHandle`, …). No role stubs or dest-id tables are retained across
  * requests.
  *
+ * Control-plane routes shared with native-behind-workerd (where the launcher
+ * forwards every entrypoint call to the native guest as typed Cap'n Proto and
+ * only policy passes through here): `/describe` with an optional
+ * `{ native }` body (the guest's describe, merged against `PLUGIN_DESCRIBE`),
+ * `/open` (`{ context, entrypoints }` → the authorized subset), and
+ * `/shutdown`.
+ *
  * Envelopes are the camelCase JSON projection of the typed Cap'n Proto ABI
  * structs (`PluginDescribe`, `CliSchema`, `LoginParams`, …) with `Data`
  * fields as base64 text; `fromBridgeJson` / `toBridgeJson` convert them to
@@ -267,8 +274,40 @@ async function handleRoleInvoke(request, env, url) {
 
   if (request.method === "POST" && url.pathname === "/describe") {
     try {
-      const result = await plugin.describe();
+      const body = await request.json().catch(() => ({}));
+      const native =
+        body && typeof body === "object" && body.native && typeof body.native === "object"
+          ? fromBridgeJson(body.native)
+          : undefined;
+      const result = native === undefined ? await plugin.describe() : await plugin.describe(native);
       return bridgeJson(result);
+    } catch (err) {
+      const { code, message } = catchErr(err);
+      return errJson(null, code, message);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/open") {
+    try {
+      const body = await request.json();
+      const ctx = contextFrom(request, body);
+      const requested = Array.isArray(body.entrypoints)
+        ? body.entrypoints.filter((name) => typeof name === "string")
+        : [];
+      const allowed = await adapterMethod(plugin, "openInvocation")(ctx, requested);
+      return Response.json({ entrypoints: Array.isArray(allowed) ? allowed : [] });
+    } catch (err) {
+      const { code, message } = catchErr(err);
+      return errJson(null, code, message);
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/shutdown") {
+    try {
+      if (typeof plugin.shutdown === "function") {
+        await plugin.shutdown();
+      }
+      return Response.json({ ok: true });
     } catch (err) {
       const { code, message } = catchErr(err);
       return errJson(null, code, message);

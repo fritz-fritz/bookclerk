@@ -49,6 +49,7 @@ import type {
   LoginStartResult,
   OidcClientTemplate,
   PlainFetch,
+  PluginCapabilities as WirePluginCapabilities,
   PluginDescribe as WirePluginDescribe,
   PluginMigration,
   PurchaseHint,
@@ -1695,7 +1696,7 @@ export class OidcEntrypoint<Env extends BookclerkEnv = BookclerkEnv> extends Nam
 }
 
 // ---------------------------------------------------------------------------
-// Adapter isolate (trusted; owns GRANTED / BRIDGE_TOKEN / PLUGIN_BACKEND)
+// Adapter isolate (trusted; owns GRANTED / BRIDGE_TOKEN / PLUGIN_DESCRIBE)
 // ---------------------------------------------------------------------------
 
 /** Wire name of each named entrypoint (`plugin.toml` `entrypoints`). */
@@ -1763,11 +1764,6 @@ export interface AdapterEnv {
   PLUGIN_OIDC?: NamedStub;
   /** Manifest `PluginDescribe` projection (JSON binding). */
   PLUGIN_DESCRIBE?: string | WirePluginDescribe;
-  /** Native jail / workerd backend handle (native-behind-workerd). */
-  PLUGIN_BACKEND?: {
-    /** Broker HTTP surface reached through the service binding. */
-    fetch: typeof fetch;
-  };
   /** Per-invocation grant reverse channel. */
   GRANTED?: GrantedFetcher;
   /** Isolate-to-host bridge bearer. */
@@ -1935,19 +1931,6 @@ function grantedJobCapabilities(
   };
 }
 
-type NativeErrorEnvelope = { error?: { code: string; message: string } };
-
-async function readNativeJson<T>(resp: Response): Promise<T> {
-  const value = (await resp.json().catch(() => ({}))) as T & NativeErrorEnvelope;
-  if (value && value.error) {
-    throw PluginError.fromWire(value.error.code || "internal", value.error.message || "");
-  }
-  if (!resp.ok) {
-    throw PluginError.fromWire("internal", `native broker HTTP ${resp.status}`);
-  }
-  return value;
-}
-
 function bytesToBase64(bytes: Uint8Array): string {
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
@@ -1955,8 +1938,8 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /**
- * Typed ABI value → native-broker JSON: Cap'n `Data` fields (`Uint8Array`)
- * travel as base64 text; `bookclerk-workerd` decodes with the same convention.
+ * Typed ABI value → bridge JSON: Cap'n `Data` fields (`Uint8Array`) travel as
+ * base64 text; `bookclerk-workerd` decodes with the same convention.
  *
  * @param value - Plain typed struct value.
  * @returns JSON-safe projection.
@@ -1972,146 +1955,6 @@ export function toBridgeJson(value: unknown): unknown {
     out[key] = toBridgeJson(inner);
   }
   return out;
-}
-
-/**
- * Native-behind-workerd backend (`PLUGIN_BACKEND` is the trusted broker's
- * HTTP surface). Entrypoint methods map onto the broker's role routes.
- */
-class HttpNativeRoot {
-  #fetcher: { fetch: typeof fetch };
-
-  constructor(fetcher: { fetch: typeof fetch }) {
-    this.#fetcher = fetcher;
-  }
-
-  #headers(ctx: GrantedContext | undefined): Record<string, string> {
-    return {
-      "content-type": "application/json",
-      "x-bookclerk-context": JSON.stringify(toBridgeJson(ctx ?? {})),
-    };
-  }
-
-  async #json<T>(path: string, ctx: GrantedContext | undefined, body?: Record<string, unknown>): Promise<T> {
-    const resp = await this.#fetcher.fetch(`http://backend${path}`, {
-      method: "POST",
-      headers: this.#headers(ctx),
-      body: JSON.stringify(toBridgeJson({ ...(body ?? {}), context: ctx ?? {} })),
-    });
-    return readNativeJson<T>(resp);
-  }
-
-  async describe(): Promise<WirePluginDescribe> {
-    const resp = await this.#fetcher.fetch("http://backend/describe", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{}",
-    });
-    return readNativeJson<WirePluginDescribe>(resp);
-  }
-
-  async storage(ctx: GrantedContext | undefined, method: string, args: unknown[]): Promise<unknown> {
-    const [a, b, c] = args as [unknown, unknown, WriteOptions | undefined];
-    switch (method) {
-      case "head": {
-        const v = await this.#json<{ found?: boolean; meta?: ObjectMetadata }>(
-          "/destination/head",
-          ctx,
-          { key: String(a ?? "") },
-        );
-        return v.found ? (v.meta ?? null) : null;
-      }
-      case "list":
-        return this.#json<ListPage>("/destination/list", ctx, { options: a ?? {} });
-      case "get": {
-        let path = `/destination/get?key=${encodeURIComponent(String(a ?? ""))}`;
-        const range = (b as ReadOptions | undefined)?.range;
-        if (range) {
-          path += `&offset=${range.offset}`;
-          if (range.length != null) path += `&length=${range.length}`;
-        }
-        const resp = await this.#fetcher.fetch(`http://backend${path}`, {
-          headers: this.#headers(ctx),
-        });
-        if (!resp.ok) {
-          throw PluginError.fromWire("internal", await resp.text());
-        }
-        return streamedRead(resp, String(a ?? ""));
-      }
-      case "put": {
-        const headers = this.#headers(ctx);
-        if (c?.contentType) headers["content-type"] = c.contentType;
-        if (c?.contentLength != null) headers["content-length"] = String(c.contentLength);
-        if (c?.commitToken) headers["x-bookclerk-commit-token"] = c.commitToken;
-        if (c?.stageOnly) headers["x-bookclerk-stage-only"] = "1";
-        const resp = await this.#fetcher.fetch(
-          `http://backend/destination/put?key=${encodeURIComponent(String(a ?? ""))}`,
-          { method: "PUT", headers, body: b as ReadableStream<Uint8Array> },
-        );
-        return readNativeJson<PutResult>(resp);
-      }
-      case "copy":
-        return this.#json<CopyResult>("/destination/copy", ctx, { from: a, to: b });
-      case "delete":
-        await this.#json<unknown>("/destination/delete", ctx, { key: String(a ?? "") });
-        return undefined;
-      case "commit":
-        return this.#json<PutResult>("/destination/commit", ctx, { key: a, commitToken: b });
-      case "abortStage":
-        await this.#json<unknown>("/destination/abortStage", ctx, { key: a, commitToken: b });
-        return undefined;
-      default:
-        throw unsupported(`storage.${method}`);
-    }
-  }
-
-  async remoteLibrary(ctx: GrantedContext | undefined, method: string, args: unknown[]): Promise<unknown> {
-    if (!REMOTE_LIBRARY_METHODS.includes(method)) {
-      throw unsupported(`remoteLibrary.${method}`);
-    }
-    const v = await this.#json<unknown>(
-      `/integration/${method}`,
-      ctx,
-      args[0] != null ? { params: args[0] } : {},
-    );
-    if (method === "diagnose") {
-      const lines = (v as { lines?: string[] } | string[] | undefined);
-      return Array.isArray(lines) ? lines : Array.isArray(lines?.lines) ? lines.lines : [];
-    }
-    if (method === "pollEvents") {
-      const users = (v as { users?: ExternalUser[] } | ExternalUser[] | undefined);
-      return Array.isArray(users) ? users : Array.isArray(users?.users) ? users.users : [];
-    }
-    return v;
-  }
-
-  async event(ctx: GrantedContext | undefined, event: Partial<DomainEvent>): Promise<EventOutcome> {
-    return this.#json<EventOutcome>("/integration/onEvent", ctx, { event });
-  }
-
-  async invoke(name: EntrypointName, ctx: GrantedContext | undefined, method: string, args: unknown[]): Promise<unknown> {
-    switch (name) {
-      case "storage":
-        return this.storage(ctx, method, args);
-      case "remoteLibrary":
-        return this.remoteLibrary(ctx, method, args);
-      case "oidc":
-        if (method === "authenticateUser") {
-          return this.#json<ExternalUser>("/integration/authenticateUser", ctx, { params: args[0] });
-        }
-        throw unsupported(`oidc.${method}`);
-      default:
-        throw unsupported(`${name}.${method} via native broker`);
-    }
-  }
-}
-
-function nativeRoot(env: AdapterEnv): HttpNativeRoot {
-  const backend = env.PLUGIN_BACKEND;
-  if (!backend) {
-    throw PluginError.fromWire("unavailable", "PLUGIN_BACKEND binding missing");
-  }
-  return new HttpNativeRoot(backend);
 }
 
 function parseJsonBinding(value: unknown): WirePluginDescribe | null {
@@ -2139,8 +1982,11 @@ export function wrapPluginFromBinding() {
 }
 
 /**
- * Native-behind-workerd generated adapter. Forwards through `PLUGIN_BACKEND`,
- * which stays private workerd config.
+ * Native-behind-workerd generated adapter: control plane only. The launcher
+ * forwards every entrypoint call to the native guest as typed Cap'n Proto;
+ * this isolate decides `describe` (merged against `PLUGIN_DESCRIBE`) and
+ * `open` policy (`openInvocation`) and receives `shutdown`. There is no
+ * author `PLUGIN` binding.
  *
  * @returns Adapter entrypoint class bound to {@link AdapterEnv}.
  */
@@ -2148,10 +1994,80 @@ export function wrapPluginFromNative() {
   return createInvocationAdapter();
 }
 
+/** Wire names of the trigger families the launcher may ask `openInvocation` about. */
+export const TRIGGER_FAMILIES: Readonly<Record<"eventConsumer" | "jobRunner", string>> =
+  Object.freeze({
+    eventConsumer: "eventConsumer",
+    jobRunner: "jobRunner",
+  });
+
+/**
+ * Filters requested entrypoint / trigger family names against the manifest
+ * capabilities: named entrypoints must be declared in `entrypoints`,
+ * `eventConsumer` needs a non-empty `consumes`, and `jobRunner` needs
+ * `jobs` or the `storage` entrypoint (storage guests run the host
+ * `stream_copy` job). Unknown names and a missing manifest fail closed.
+ *
+ * @param capabilities - Manifest capabilities from `PLUGIN_DESCRIBE`.
+ * @param requested - Family names the launcher wants to export.
+ * @returns The authorized subset in request order.
+ */
+export function allowedEntrypointFamilies(
+  capabilities: Partial<WirePluginCapabilities> | null | undefined,
+  requested: readonly string[],
+): string[] {
+  if (!capabilities || typeof capabilities !== "object") return [];
+  const entrypoints = Array.isArray(capabilities.entrypoints) ? capabilities.entrypoints : [];
+  const consumes = Array.isArray(capabilities.consumes) ? capabilities.consumes : [];
+  const jobs = Array.isArray(capabilities.jobs) ? capabilities.jobs : [];
+  const exportsStorage = entrypoints.includes("storage");
+  const out: string[] = [];
+  for (const name of requested) {
+    if (typeof name !== "string" || out.includes(name)) continue;
+    if (name === TRIGGER_FAMILIES.eventConsumer) {
+      if (consumes.length > 0) out.push(name);
+    } else if (name === TRIGGER_FAMILIES.jobRunner) {
+      if (jobs.length > 0 || exportsStorage) out.push(name);
+    } else if (name in ENTRYPOINT_BINDINGS && entrypoints.includes(name as EntrypointName)) {
+      out.push(name);
+    }
+  }
+  return out;
+}
+
+/**
+ * Merges a guest's `describe()` under the manifest projection: identity,
+ * `apiVersion`, and `capabilities` always come from the manifest; the guest's
+ * presentation fields, features, and limits are kept. The guest's `cli`
+ * schema wins only when it declares commands.
+ *
+ * @param base - Manifest projection (`PLUGIN_DESCRIBE`).
+ * @param guest - Guest-reported describe (author refinement or native).
+ * @returns Wire describe.
+ */
+function mergeDescribe(
+  base: Partial<WirePluginDescribe>,
+  guest: Partial<WirePluginDescribe>,
+): WirePluginDescribe {
+  const guestCli = guest.cli;
+  const cli =
+    guestCli && Array.isArray(guestCli.commands) && guestCli.commands.length > 0
+      ? guestCli
+      : base.cli ?? guestCli;
+  return {
+    ...base,
+    ...guest,
+    apiVersion: base.apiVersion ?? guest.apiVersion ?? 3,
+    id: base.id ?? guest.id,
+    capabilities: base.capabilities ?? guest.capabilities,
+    ...(cli === undefined ? {} : { cli }),
+  } as WirePluginDescribe;
+}
+
 function createInvocationAdapter() {
   return class InvocationAdapter extends WorkerEntrypoint<AdapterEnv> {
-    #native(): HttpNativeRoot | null {
-      return this.env.PLUGIN_BACKEND && !this.env.PLUGIN ? nativeRoot(this.env) : null;
+    #manifest(): Partial<WirePluginDescribe> {
+      return parseJsonBinding(this.env.PLUGIN_DESCRIBE) ?? ({} as Partial<WirePluginDescribe>);
     }
 
     #author(): AuthorStub {
@@ -2174,23 +2090,46 @@ function createInvocationAdapter() {
 
     /**
      * `PluginDescribe`: the manifest projection the launcher binds as
-     * `PLUGIN_DESCRIBE`, refined by the author's optional `describe()`.
-     * Identity and capabilities always come from the manifest.
+     * `PLUGIN_DESCRIBE`, refined by the guest's describe. Author mode calls
+     * the author's optional `describe()`; native-behind-workerd passes the
+     * native guest's typed describe as `native`. Identity and capabilities
+     * always come from the manifest.
      *
+     * @param native - Native guest describe (native-behind-workerd only).
      * @returns Wire describe.
      */
-    async describe(): Promise<WirePluginDescribe> {
-      const native = this.#native();
-      if (native) return native.describe();
-      const base = parseJsonBinding(this.env.PLUGIN_DESCRIBE) ?? ({} as Partial<WirePluginDescribe>);
+    async describe(native?: Partial<WirePluginDescribe>): Promise<WirePluginDescribe> {
+      const base = this.#manifest();
+      if (native !== undefined) {
+        if (native === null || typeof native !== "object") {
+          throw PluginError.fromWire("invalid_params", "native describe must be an object");
+        }
+        return mergeDescribe(base, native);
+      }
       const author = (await this.#author().bookclerkDescribe()) ?? {};
-      return {
-        ...base,
-        ...author,
-        apiVersion: base.apiVersion ?? author.apiVersion ?? 3,
-        id: base.id ?? author.id,
-        capabilities: base.capabilities ?? author.capabilities,
-      } as WirePluginDescribe;
+      return mergeDescribe(base, author);
+    }
+
+    /**
+     * `/open` policy for native-behind-workerd: validates the invocation
+     * envelope and returns the requested entrypoint / trigger families the
+     * manifest (`PLUGIN_DESCRIBE`) lets this plugin export. The launcher
+     * nulls every family that is not returned.
+     *
+     * @param ctx - Open context (`invocation`, `config`, `secrets`).
+     * @param requested - Family names the launcher wants to export.
+     * @returns Authorized subset of `requested`.
+     */
+    async openInvocation(
+      ctx: GrantedContext | undefined,
+      requested: readonly string[] = [],
+    ): Promise<string[]> {
+      const invocation = ctx && typeof ctx === "object" ? ctx.invocation : undefined;
+      if (!invocation || typeof invocation.id !== "string" || !invocation.id) {
+        throw PluginError.fromWire("invalid_params", "open requires a non-empty invocation id");
+      }
+      const list = Array.isArray(requested) ? requested : [];
+      return allowedEntrypointFamilies(this.#manifest().capabilities, list);
     }
 
     /**
@@ -2209,8 +2148,6 @@ function createInvocationAdapter() {
       args: unknown[] = [],
     ): Promise<unknown> {
       const list = Array.isArray(args) ? args : [];
-      const native = this.#native();
-      if (native) return native.invoke(name, ctx ?? {}, method, list);
       return this.#named(name).bookclerkInvoke(ctx ?? {}, method, ...list);
     }
 
@@ -2222,8 +2159,6 @@ function createInvocationAdapter() {
      * @returns Recorded outcome.
      */
     async invokeEvent(ctx: GrantedContext | undefined, event: Partial<DomainEvent>): Promise<EventOutcome> {
-      const native = this.#native();
-      if (native) return native.event(ctx ?? {}, event);
       const results = await this.#author().bookclerkEvent(ctx ?? {}, { events: [event] });
       const first = Array.isArray(results) ? results[0] : undefined;
       if (!first || typeof first.kind !== "string") {
@@ -2309,9 +2244,6 @@ function createInvocationAdapter() {
       grantToken: string,
       _databases?: Record<string, string>,
     ): Promise<JobOutcomeRecord> {
-      if (this.#native()) {
-        throw PluginError.fromWire("unsupported", "native job runner via broker not bound");
-      }
       const controller = new AbortController();
       try {
         const granted = grantedJobCapabilities(this.env, grantToken, controller);
@@ -2357,17 +2289,18 @@ function createInvocationAdapter() {
      * @returns Bounded registration.
      */
     async databaseMigrations(binding: string): Promise<PluginMigration[]> {
-      if (this.#native()) return [];
       return this.#author().bookclerkDatabaseMigrations(String(binding ?? ""));
     }
 
     /**
-     * Shutdown hook → default entrypoint `shutdown`.
+     * `/shutdown` route → default entrypoint `shutdown`. Without an author
+     * `PLUGIN` binding (native-behind-workerd) there is nothing to run here:
+     * the launcher shuts the native guest down over Cap'n Proto.
      *
      * @returns Resolves when the author hook has run.
      */
     async shutdown(): Promise<void> {
-      if (this.#native()) return;
+      if (!this.env.PLUGIN) return;
       await this.#author().bookclerkShutdown();
     }
   };
