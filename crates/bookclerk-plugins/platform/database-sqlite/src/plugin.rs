@@ -21,8 +21,8 @@ use bookclerk_plugin_abi::HostAdapterDatabaseSession;
 use bookclerk_plugin_sdk::database_adapter::plugin_error_from_engine;
 use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::{
-    AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
-    FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    AdapterDatabaseSession, BindingValues, Bindings, Database, Entrypoints, Invocation,
+    PluginDescribe, PluginWorker, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
     AdapterExecuteRequest, DbBootstrap, DbCapabilities, DbIdentityHighWater, ExecuteReply,
@@ -38,7 +38,7 @@ type Result<T> = std::result::Result<T, PluginError>;
 pub struct SqliteRoot;
 
 #[async_trait(?Send)]
-impl PluginRoot for SqliteRoot {
+impl PluginWorker for SqliteRoot {
     async fn describe(&self) -> Result<PluginDescribe> {
         Ok(PluginDescribe {
             api_version: PRODUCT_API_VERSION,
@@ -51,15 +51,21 @@ impl PluginRoot for SqliteRoot {
         })
     }
 
-    async fn database(&self, context: DatabaseContext) -> Result<Box<dyn Database>> {
-        if let Some(binding) = binding_open(&context) {
+    async fn open(&self, _invocation: Invocation, bindings: Bindings) -> Result<Entrypoints> {
+        let values = bindings.values();
+        let database: Box<dyn Database> = if let Some(binding) = binding_open(&values) {
             let conn = open_binding_connection(&binding).await?;
-            return Ok(Box::new(SqliteDatabase {
+            Box::new(SqliteDatabase {
                 dedicated: Some(conn),
-            }));
-        }
-        connect_from_context(&context).await?;
-        Ok(Box::new(SqliteDatabase { dedicated: None }))
+            })
+        } else {
+            connect_from_bindings(&values).await?;
+            Box::new(SqliteDatabase { dedicated: None })
+        };
+        Ok(Entrypoints {
+            database_adapter: Some(database),
+            ..Entrypoints::default()
+        })
     }
 }
 
@@ -73,15 +79,15 @@ struct BindingOpen {
     provision: bool,
 }
 
-/// Returns the binding-open parameters when the context targets a named
+/// Returns the binding-open parameters when the bindings target a named
 /// plugin database binding.
-fn binding_open(ctx: &DatabaseContext) -> Option<BindingOpen> {
+fn binding_open(values: &BindingValues) -> Option<BindingOpen> {
     let DbConnectParams::Sqlite {
         sqlite_path,
         binding: Some(binding),
         provision,
         ..
-    } = connect_params_from_bindings(ctx).ok()?
+    } = connect_params_from_bindings(values).ok()?
     else {
         return None;
     };
@@ -125,22 +131,24 @@ async fn open_binding_connection(open: &BindingOpen) -> Result<DatabaseConnectio
         .map_err(|e| PluginError::internal(format!("database binding `{}`: {e}", open.binding)))
 }
 
-async fn connect_from_context(ctx: &DatabaseContext) -> Result<()> {
+async fn connect_from_bindings(values: &BindingValues) -> Result<()> {
     let path = std::env::var("BOOKCLERK_SQLITE_PATH")
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| {
-            connect_params_from_bindings(ctx).ok().and_then(|params| {
-                let DbConnectParams::Sqlite { sqlite_path, .. } = params else {
-                    return None;
-                };
-                sqlite_path
-            })
+            connect_params_from_bindings(values)
+                .ok()
+                .and_then(|params| {
+                    let DbConnectParams::Sqlite { sqlite_path, .. } = params else {
+                        return None;
+                    };
+                    sqlite_path
+                })
         })
         .unwrap_or_default();
     if path.is_empty() {
         return Err(PluginError::internal(
-            "sqlite database path missing (BOOKCLERK_SQLITE_PATH or context sqlitePath)",
+            "sqlite database path missing (BOOKCLERK_SQLITE_PATH or bindings sqlitePath)",
         ));
     }
     let db = crate::open(std::path::Path::new(&path))
