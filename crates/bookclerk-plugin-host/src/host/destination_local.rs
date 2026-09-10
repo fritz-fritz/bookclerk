@@ -1,6 +1,6 @@
 //! [`StorageBackend`] adapter over the local filesystem output plugin process.
 //!
-//! Local output speaks Cap'n Proto `api_version = 2` only. When
+//! Local output speaks Cap'n Proto `api_version = 3` only. When
 //! `bookclerk-workerd` is available the host wraps the native guest
 //! (native-behind-workerd); otherwise it falls back to direct Cap'n Proto.
 

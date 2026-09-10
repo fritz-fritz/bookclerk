@@ -12,7 +12,7 @@
 //!    `cargo run` works without staging binaries.
 //! 2. **External guests** — separate executables (or `bookclerk-workerd` +
 //!    modules) discovered from install directories (`plugin.toml`) over
-//!    Cap'n Proto `api_version = 2` on stdio.
+//!    Cap'n Proto `api_version = 3` on stdio.
 //!
 //! External plugins are **untrusted** relative to the host: the host never
 //! passes `library.db` / `master.key` / the files-dir root, clears
@@ -79,7 +79,9 @@ pub use consent::{
 };
 pub use crates_io::search_crates_io;
 pub use destinations::{build_acquire_destinations, build_storage_backend};
-pub use discover::{discover_plugins, plugin_search_dirs, settings_table, DiscoveredPlugin};
+pub use discover::{
+    discover_plugins, plugin_search_dirs, settings_table, settings_table_for, DiscoveredPlugin,
+};
 pub use error::{PluginError, Result};
 pub use host::{
     backup_adapter_id, database_connect_context, export_registered_plugin_units,
@@ -90,13 +92,15 @@ pub use host::{
 };
 pub use jail::plugin_data_dir;
 pub use manifest::{
-    embedded_logo_api_path, logo_content_type, validate_logo, BindingCapabilities,
-    CapabilitiesManifest, JailNetworkNeed, LogoKind, MethodCapabilities, ModuleSpec,
-    NetworkCapabilities, NetworkMode, PluginKind, PluginManifest, PluginRuntimeKind, WorkerdLimits,
-    WorkerdRuntimeManifest, MAX_EMBEDDED_LOGO_BYTES,
+    embedded_logo_api_path, entrypoint_family, logo_content_type, validate_logo,
+    BindingCapabilities, CapabilitiesManifest, DatabaseBindingManifest, Entrypoint, EventConsumer,
+    EventProducer, EventsManifest, JailNetworkNeed, LogoKind, ModuleSpec, NamedBinding,
+    NetworkCapabilities, NetworkMode, PluginFamily, PluginManifest, PluginRuntimeKind,
+    TriggersManifest, WorkerdLimits, WorkerdRuntimeManifest, ALL_ENTRYPOINTS,
+    MAX_EMBEDDED_LOGO_BYTES,
 };
 pub use registry::{
-    host_target_triple, kind_keyword, validate_plugin_id, BookclerkPackageMetadata,
+    family_keyword, host_target_triple, validate_plugin_id, BookclerkPackageMetadata,
     PluginCatalogEntry, PluginCrateName, CRATE_NAME_PREFIX, PRODUCT_KEYWORD, REGISTRY_KEYWORD,
 };
 pub use rpc_session::{
@@ -116,104 +120,106 @@ pub async fn register_discovered(
 ) -> Result<()> {
     let plugins = discover_plugins(config)?;
     for plugin in plugins {
-        match plugin.manifest.kind {
-            PluginKind::Source => {
-                if !config.sources.is_enabled(&plugin.manifest.id) {
-                    tracing::debug!(
-                        id = %plugin.manifest.id,
-                        "external source plugin disabled in config; skipping"
-                    );
-                    continue;
-                }
-                if sources.get(&plugin.manifest.id).is_some() {
-                    tracing::debug!(
-                        id = %plugin.manifest.id,
-                        path = %plugin.root.join("plugin.toml").display(),
-                        "skipping external source — already registered in-process"
-                    );
-                    continue;
-                }
-                match ExternalSource::spawn(&plugin, config).await {
-                    Ok(source) => {
-                        tracing::info!(
+        for family in plugin.manifest.families() {
+            match family {
+                PluginFamily::Source => {
+                    if !config.sources.is_enabled(&plugin.manifest.id) {
+                        tracing::debug!(
                             id = %plugin.manifest.id,
-                            path = %plugin.command.display(),
-                            "registered external source plugin"
+                            "external source plugin disabled in config; skipping"
                         );
-                        sources.register(std::sync::Arc::new(source));
+                        continue;
                     }
-                    Err(err) => {
-                        tracing::warn!(
+                    if sources.get(&plugin.manifest.id).is_some() {
+                        tracing::debug!(
                             id = %plugin.manifest.id,
-                            %err,
-                            "failed to start external source plugin; skipping"
+                            path = %plugin.root.join("plugin.toml").display(),
+                            "skipping external source — already registered in-process"
                         );
+                        continue;
                     }
-                }
-            }
-            PluginKind::Integration => {
-                if !config.integrations.is_enabled(&plugin.manifest.id) {
-                    tracing::debug!(
-                        id = %plugin.manifest.id,
-                        "external integration plugin disabled in config; skipping"
-                    );
-                    continue;
-                }
-                if integrations.get(&plugin.manifest.id).is_some() {
-                    tracing::debug!(
-                        id = %plugin.manifest.id,
-                        path = %plugin.root.join("plugin.toml").display(),
-                        "skipping external integration — already registered in-process"
-                    );
-                    continue;
-                }
-                match ExternalIntegration::spawn(&plugin, config).await {
-                    Ok(integration) => {
-                        tracing::info!(
-                            id = %plugin.manifest.id,
-                            path = %plugin.command.display(),
-                            "registered external integration plugin"
-                        );
-                        integrations.register(std::sync::Arc::new(integration));
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            id = %plugin.manifest.id,
-                            %err,
-                            "failed to start external integration plugin; skipping"
-                        );
+                    match ExternalSource::spawn(&plugin, config).await {
+                        Ok(source) => {
+                            tracing::info!(
+                                id = %plugin.manifest.id,
+                                path = %plugin.command.display(),
+                                "registered external source plugin"
+                            );
+                            sources.register(std::sync::Arc::new(source));
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                id = %plugin.manifest.id,
+                                %err,
+                                "failed to start external source plugin; skipping"
+                            );
+                        }
                     }
                 }
-            }
-            PluginKind::Output => {
-                if !config.output.s3.enabled || plugin.manifest.id != "s3" {
-                    tracing::debug!(
-                        id = %plugin.manifest.id,
-                        "external output plugin skipped (enable [output.s3] for id=s3)"
-                    );
-                    continue;
+                PluginFamily::Integration => {
+                    if !config.integrations.is_enabled(&plugin.manifest.id) {
+                        tracing::debug!(
+                            id = %plugin.manifest.id,
+                            "external integration plugin disabled in config; skipping"
+                        );
+                        continue;
+                    }
+                    if integrations.get(&plugin.manifest.id).is_some() {
+                        tracing::debug!(
+                            id = %plugin.manifest.id,
+                            path = %plugin.root.join("plugin.toml").display(),
+                            "skipping external integration — already registered in-process"
+                        );
+                        continue;
+                    }
+                    match ExternalIntegration::spawn(&plugin, config).await {
+                        Ok(integration) => {
+                            tracing::info!(
+                                id = %plugin.manifest.id,
+                                path = %plugin.command.display(),
+                                "registered external integration plugin"
+                            );
+                            integrations.register(std::sync::Arc::new(integration));
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                id = %plugin.manifest.id,
+                                %err,
+                                "failed to start external integration plugin; skipping"
+                            );
+                        }
+                    }
                 }
-                tracing::info!(
-                    id = %plugin.manifest.id,
-                    "discovered output plugin (loaded via load_external_destinations at startup)"
-                );
-            }
-            PluginKind::Database => {
-                if plugin
-                    .manifest
-                    .id
-                    .eq_ignore_ascii_case(&config.database.plugin)
-                {
+                PluginFamily::Output => {
+                    if !config.output.s3.enabled || plugin.manifest.id != "s3" {
+                        tracing::debug!(
+                            id = %plugin.manifest.id,
+                            "external output plugin skipped (enable [output.s3] for id=s3)"
+                        );
+                        continue;
+                    }
                     tracing::info!(
                         id = %plugin.manifest.id,
-                        "discovered database plugin (loaded via load_external_database at startup)"
+                        "discovered output plugin (loaded via load_external_destinations at startup)"
                     );
-                } else {
-                    tracing::debug!(
-                        id = %plugin.manifest.id,
-                        active = %config.database.plugin,
-                        "external database plugin skipped (not [database].plugin)"
-                    );
+                }
+                PluginFamily::Database => {
+                    if plugin
+                        .manifest
+                        .id
+                        .eq_ignore_ascii_case(&config.database.plugin)
+                    {
+                        tracing::info!(
+                            id = %plugin.manifest.id,
+                            "discovered database plugin (loaded via load_external_database at startup)"
+                        );
+                    } else {
+                        tracing::debug!(
+                            id = %plugin.manifest.id,
+                            active = %config.database.plugin,
+                            "external database plugin skipped (not [database].plugin)"
+                        );
+                    }
                 }
             }
         }

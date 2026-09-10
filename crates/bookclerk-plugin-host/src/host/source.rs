@@ -147,11 +147,10 @@ impl ExternalSource {
             .map_err(|e| bookclerk_source::SourceError::api(e.to_string()))
     }
 
-    /// True when the guest advertised OAuth plus `loginStart`/`loginComplete`.
+    /// True when the guest advertised OAuth connect (`loginStart` /
+    /// `loginComplete`); the `oauth` binding was verified at spawn.
     fn supports_oauth_rpc(&self) -> bool {
         self.auth_mode == PortalAuthMode::Oauth
-            && self.session.has_capability("loginStart")
-            && self.session.has_capability("loginComplete")
     }
 
     /// Password login RPC; requires the `secrets` binding when a password is sent.
@@ -231,7 +230,10 @@ impl ExternalSource {
 /// Returns an error when the operation fails.
 pub async fn load_external_sources(config: &Config, registry: &mut SourceRegistry) -> Result<()> {
     for plugin in crate::discover_plugins(config)? {
-        if plugin.manifest.kind != crate::PluginKind::Source {
+        if !plugin
+            .manifest
+            .has_entrypoint(crate::Entrypoint::Storefront)
+        {
             continue;
         }
         if !config.sources.is_enabled(&plugin.manifest.id) {
@@ -405,9 +407,6 @@ impl ContentSource for ExternalSource {
         &self,
         opts: &CatalogSearchOpts,
     ) -> bookclerk_source::Result<Vec<CatalogHit>> {
-        if !self.session.has_capability("searchCatalog") {
-            return Ok(Vec::new());
-        }
         let params = SearchCatalogParams::from(opts);
         match self
             .cs_call(move |src| async move { src.search_catalog(params).await })
@@ -429,9 +428,6 @@ impl ContentSource for ExternalSource {
         &self,
         product_id: &str,
     ) -> bookclerk_source::Result<Option<CatalogHit>> {
-        if !self.session.has_capability("catalogDetail") {
-            return Ok(None);
-        }
         let params = CatalogDetailParams {
             product_id: product_id.to_string(),
             isbn: None,
@@ -457,9 +453,6 @@ impl ContentSource for ExternalSource {
         seed: &ExpandSeed,
         limit: usize,
     ) -> bookclerk_source::Result<Vec<CatalogHit>> {
-        if !self.session.has_capability("expandCandidates") {
-            return Ok(Vec::new());
-        }
         let params = expand_candidates_params(seed, limit);
         match self
             .cs_call(move |src| async move { src.expand_candidates(params).await })
@@ -481,9 +474,6 @@ impl ContentSource for ExternalSource {
         &self,
         opts: &PurchaseHintOpts,
     ) -> bookclerk_source::Result<Option<SourcePurchaseHint>> {
-        if !self.session.has_capability("purchaseHint") {
-            return Ok(None);
-        }
         let params = bookclerk_plugin_sdk::PurchaseHintParams::from(opts);
         match self
             .cs_call(move |src| async move { src.purchase_hint(params).await })
@@ -502,9 +492,6 @@ impl ContentSource for ExternalSource {
     }
 
     async fn list_deals(&self, limit: usize) -> bookclerk_source::Result<Vec<CatalogHit>> {
-        if !self.session.has_capability("listDeals") {
-            return Ok(Vec::new());
-        }
         let params = ListDealsParams {
             limit: Some(u32::try_from(limit).unwrap_or(DEFAULT_LIST_DEALS_LIMIT)),
         };

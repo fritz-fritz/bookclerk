@@ -86,9 +86,8 @@ impl ExternalIntegration {
         let brand = brand_from_abi(describe.brand.as_ref());
         let event_subscriptions = plugin
             .manifest
-            .capabilities
             .events
-            .subscriptions
+            .consumers
             .iter()
             .map(|s| EventSubscription {
                 event_type: s.event_type.clone(),
@@ -147,7 +146,11 @@ pub async fn load_external_integrations(
     registry: &mut IntegrationRegistry,
 ) -> Result<()> {
     for plugin in crate::discover_plugins(config)? {
-        if plugin.manifest.kind != crate::PluginKind::Integration {
+        if !plugin
+            .manifest
+            .families()
+            .contains(&crate::PluginFamily::Integration)
+        {
             continue;
         }
         if !config.integrations.is_enabled(&plugin.manifest.id) {
@@ -189,14 +192,17 @@ impl Integration for ExternalIntegration {
     }
 
     async fn start(&self, ctx: IntegrationContext) -> bookclerk_integrations::Result<()> {
-        if self.session.has_capability("start") {
+        let remote_library = self
+            .session
+            .has_entrypoint(crate::Entrypoint::RemoteLibrary);
+        if remote_library {
             let _ = self
                 .int_call(|stub| async move { stub.start().await })
                 .await;
         }
         // Host polls `event_poll` and kicks off core workflows (e.g. claim tickets).
         // The plugin remains oblivious to what the host does with the signal.
-        if self.session.has_capability("pollEvents") {
+        if remote_library {
             if let Some(on_user) = ctx.on_external_user {
                 let epoch = self.poll_epoch.fetch_add(1, Ordering::SeqCst) + 1;
                 self.poll_cancel.store(false, Ordering::SeqCst);
@@ -253,7 +259,10 @@ impl Integration for ExternalIntegration {
     async fn stop(&self) -> bookclerk_integrations::Result<()> {
         self.poll_epoch.fetch_add(1, Ordering::SeqCst);
         self.poll_cancel.store(true, Ordering::SeqCst);
-        if self.session.has_capability("shutdown") || self.session.has_capability("stop") {
+        if self
+            .session
+            .has_entrypoint(crate::Entrypoint::RemoteLibrary)
+        {
             let _ = self.int_call(|stub| async move { stub.stop().await }).await;
         }
         Ok(())
@@ -277,10 +286,10 @@ impl Integration for ExternalIntegration {
         event: DomainEvent,
         cancel: Arc<AtomicBool>,
     ) -> bookclerk_integrations::Result<EventResult> {
-        if !self.session.has_capability("onEvent") {
+        if !self.session.consumes_events() {
             return Ok(EventResult::Retry {
                 retry_at_unix_ms: 0,
-                reason: "onEvent capability not granted".into(),
+                reason: "plugin declares no [[events.consumers]]".into(),
             });
         }
         Ok(self
@@ -296,14 +305,6 @@ impl Integration for ExternalIntegration {
     }
 
     async fn health(&self) -> bookclerk_integrations::Result<IntegrationHealth> {
-        if !self.session.has_capability("health") {
-            return Ok(IntegrationHealth {
-                id: self.id().to_string(),
-                enabled: self.enabled,
-                ok: true,
-                detail: Some("external plugin (no health method)".into()),
-            });
-        }
         let dto = self
             .int_call(|stub| async move { stub.health().await })
             .await?;
@@ -320,7 +321,8 @@ impl Integration for ExternalIntegration {
     }
 
     fn supports_library_scan(&self) -> bool {
-        self.session.has_capability("scanLibrary")
+        self.session
+            .has_entrypoint(crate::Entrypoint::RemoteLibrary)
     }
 
     async fn scan_library(&self, force: bool) -> bookclerk_integrations::Result<()> {
@@ -331,7 +333,8 @@ impl Integration for ExternalIntegration {
     }
 
     fn supports_listening_sync(&self) -> bool {
-        self.session.has_capability("syncListening")
+        self.session
+            .has_entrypoint(crate::Entrypoint::RemoteLibrary)
     }
 
     async fn sync_listening_progress(
@@ -365,22 +368,24 @@ impl Integration for ExternalIntegration {
     }
 
     async fn diagnose(&self) -> bookclerk_integrations::Result<Vec<String>> {
-        if !self.session.has_capability("diagnose") {
-            let h = self.health().await?;
-            return Ok(vec![format!(
-                "{} enabled={} ok={} {}",
-                h.id,
-                h.enabled,
-                h.ok,
-                h.detail.unwrap_or_default()
-            )]);
+        let lines = self
+            .int_call(|stub| async move { stub.diagnose().await })
+            .await?;
+        if !lines.is_empty() {
+            return Ok(lines);
         }
-        self.int_call(|stub| async move { stub.diagnose().await })
-            .await
+        let h = self.health().await?;
+        Ok(vec![format!(
+            "{} enabled={} ok={} {}",
+            h.id,
+            h.enabled,
+            h.ok,
+            h.detail.unwrap_or_default()
+        )])
     }
 
     fn supports_credential_login(&self) -> bool {
-        self.allow_credential_login && self.session.has_capability("authenticateUser")
+        self.allow_credential_login && self.session.has_entrypoint(crate::Entrypoint::Oidc)
     }
 
     async fn authenticate_user(

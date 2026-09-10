@@ -174,11 +174,11 @@ async fn native_behind_workerd_local_conformance_vectors() {
     std::fs::create_dir_all(&root).expect("plugin root");
     std::fs::write(
         root.join("plugin.toml"),
-        r#"api_version = 2
+        r#"api_version = 3
 id = "local"
-kind = "output"
 runtime = "native"
 command = "./bookclerk-plugin-destination-local"
+entrypoints = ["storage"]
 
 [capabilities.network]
 mode = "deny"
@@ -389,22 +389,18 @@ async fn native_behind_workerd_echo_event_vectors() {
     std::fs::create_dir_all(&root).expect("plugin root");
     std::fs::write(
         root.join("plugin.toml"),
-        r#"api_version = 2
+        r#"api_version = 3
 id = "echo_native_rust"
-kind = "integration"
 runtime = "native"
 command = "./bookclerk-plugin-echo-native-rust"
 
 [capabilities.network]
 mode = "deny"
 
-[capabilities.methods]
-list = ["describe", "integration", "health", "onEvent"]
-
-[capabilities.events]
-subscriptions = [
-  { type = "book_acquired", schema_versions = [1], supports_suspend = true },
-]
+[[events.consumers]]
+type = "book_acquired"
+schema_versions = [1]
+supports_suspend = true
 "#,
     )
     .expect("plugin.toml");

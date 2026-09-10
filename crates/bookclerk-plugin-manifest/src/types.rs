@@ -7,8 +7,8 @@
 
 use std::path::PathBuf;
 
-pub use bookclerk_plugin_abi::{Entrypoint, EventConsumerSpec, PluginCapabilities};
 use bookclerk_plugin_abi::CliSchema;
+pub use bookclerk_plugin_abi::{Entrypoint, EventConsumerSpec, PluginCapabilities};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -60,7 +60,12 @@ pub enum PluginFamily {
 
 impl PluginFamily {
     /// Every family in settings-prefix priority order.
-    pub const ALL: [Self; 4] = [Self::Database, Self::Source, Self::Output, Self::Integration];
+    pub const ALL: [Self; 4] = [
+        Self::Database,
+        Self::Source,
+        Self::Output,
+        Self::Integration,
+    ];
 
     /// Returns the lowercase wire name used in API paths and config prefixes.
     ///
@@ -1499,11 +1504,13 @@ origin_config_key = "integrations.echo.base_url"
     fn api_version_2_is_rejected() {
         let err = PluginManifest::parse(
             r#"
-api_version = 2
+api_version = 3
 id = "echo"
 runtime = "native"
 command = "./echo"
 entrypoints = ["cli"]
+entrypoints = ["cli"]
+
 [capabilities.network]
 mode = "deny"
 "#,

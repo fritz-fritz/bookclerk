@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use bookclerk_config::{Config, Paths};
 use bookclerk_plugin_host::{
-    consent_request, discover_plugins, CliInvokeParams, PluginGrantStore, PluginKind,
+    consent_request, discover_plugins, CliInvokeParams, Entrypoint, PluginFamily, PluginGrantStore,
     PluginSession, SearchCatalogParams, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
 use bookclerk_plugin_sdk::{
@@ -93,13 +93,17 @@ async fn staged_first_party_plugins_describe() {
 
     for plugin in &plugins {
         assert_eq!(
-            plugin.manifest.api_version, 2,
-            "plugin `{}` must be api_version 2",
+            plugin.manifest.api_version, 3,
+            "plugin `{}` must be api_version 3",
             plugin.manifest.id
         );
-        let account = match plugin.manifest.kind {
-            PluginKind::Source | PluginKind::Integration => HOST_SHARED_ACCOUNT,
-            _ => OPERATOR_ACCOUNT,
+        let families = plugin.manifest.families();
+        let account = if families.contains(&PluginFamily::Source)
+            || families.contains(&PluginFamily::Integration)
+        {
+            HOST_SHARED_ACCOUNT
+        } else {
+            OPERATOR_ACCOUNT
         };
         let session =
             PluginSession::spawn_for_account(plugin, &config, serde_json::json!({}), account)
@@ -110,30 +114,32 @@ async fn staged_first_party_plugins_describe() {
             .describe()
             .await
             .unwrap_or_else(|e| panic!("describe {}: {e}", plugin.manifest.id));
-        assert_eq!(desc.api_version, 2);
+        assert_eq!(desc.api_version, 3);
         assert_eq!(desc.id, plugin.manifest.id);
-        match plugin.manifest.kind {
-            PluginKind::Source => assert_eq!(desc.kind, "source"),
-            PluginKind::Integration => assert_eq!(desc.kind, "integration"),
-            PluginKind::Output => assert_eq!(desc.kind, "output"),
-            PluginKind::Database => assert_eq!(desc.kind, "database"),
-        }
+        assert_eq!(
+            desc.capabilities,
+            plugin.manifest.capabilities(),
+            "{} describe() capabilities must equal plugin.toml",
+            plugin.manifest.id
+        );
 
-        if session.has_capability("health") {
-            let health = match plugin.manifest.kind {
-                PluginKind::Source => session
+        {
+            let health = if session.has_entrypoint(Entrypoint::Storefront) {
+                session
                     .content_source(ContentSourceContext::default(), |stub| async move {
                         stub.health().await
                     })
                     .await
-                    .ok(),
-                PluginKind::Integration => session
+                    .ok()
+            } else if families.contains(&PluginFamily::Integration) {
+                session
                     .integration(IntegrationContext::default(), |stub| async move {
                         stub.health().await
                     })
                     .await
-                    .ok(),
-                _ => None,
+                    .ok()
+            } else {
+                None
             };
             if let Some(health) = health {
                 if plugin.manifest.id != "audiobookshelf" {
@@ -164,7 +170,7 @@ async fn staged_first_party_plugins_describe() {
             }
         }
 
-        if plugin.manifest.id == "echo_workerd_fetch" && session.has_capability("cli") {
+        if plugin.manifest.id == "echo_workerd_fetch" && session.has_entrypoint(Entrypoint::Cli) {
             let params = CliInvokeParams {
                 command: "fetch-example".into(),
                 args: Default::default(),
@@ -197,7 +203,7 @@ async fn staged_first_party_plugins_describe() {
             }
         }
 
-        if plugin.manifest.kind == PluginKind::Source && session.has_capability("searchCatalog") {
+        if session.has_entrypoint(Entrypoint::Storefront) {
             let params = SearchCatalogParams {
                 query: "test".into(),
                 region: "us".into(),
@@ -234,7 +240,7 @@ async fn staged_first_party_plugins_describe() {
             );
         }
 
-        if plugin.manifest.id == "chirp" && session.has_capability("listDeals") {
+        if plugin.manifest.id == "chirp" {
             let deals = match session
                 .content_source(ContentSourceContext::default(), |stub| async move {
                     stub.list_deals(ListDealsParams { limit: Some(1) }).await
