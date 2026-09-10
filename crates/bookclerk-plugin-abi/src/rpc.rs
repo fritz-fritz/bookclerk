@@ -244,7 +244,6 @@ fn read_metadata(r: object_metadata::Reader<'_>) -> Result<ObjectMetadata> {
 fn fill_describe(mut b: plugin_describe::Builder<'_>, d: &PluginDescribe) -> capnp::Result<()> {
     b.set_api_version(d.api_version);
     b.set_id(&d.id);
-    b.set_kind(&d.kind);
     if let Some(name) = &d.display_name {
         b.set_display_name(name);
     }
@@ -258,16 +257,7 @@ fn fill_describe(mut b: plugin_describe::Builder<'_>, d: &PluginDescribe) -> cap
     lim.set_max_scalar_bytes(d.scalar_limits.max_scalar_bytes);
     lim.set_max_stream_window_bytes(d.scalar_limits.max_stream_window_bytes);
     lim.set_max_list_page(d.scalar_limits.max_list_page);
-    fill_text_list(
-        b.reborrow()
-            .init_supported_roles(u32_len(d.supported_roles.len())?),
-        &d.supported_roles,
-    );
-    fill_text_list(
-        b.reborrow()
-            .init_capabilities(u32_len(d.capabilities.len())?),
-        &d.capabilities,
-    );
+    crate::generated::write_plugin_capabilities(b.reborrow().init_capabilities(), &d.capabilities)?;
     b.set_portal_auth_mode(d.portal_auth_mode.into());
     if let Some(env) = &d.password_env_var {
         b.set_password_env_var(env);
@@ -355,7 +345,6 @@ fn read_describe(m: plugin_describe::Reader<'_>) -> Result<PluginDescribe> {
     Ok(PluginDescribe {
         api_version: m.get_api_version(),
         id: text_of(m.get_id().map_err(from_capnp)?),
-        kind: text_of(m.get_kind().map_err(from_capnp)?),
         display_name: {
             let n = text_of(m.get_display_name().map_err(from_capnp)?);
             if n.is_empty() {
@@ -370,8 +359,10 @@ fn read_describe(m: plugin_describe::Reader<'_>) -> Result<PluginDescribe> {
             max_stream_window_bytes: lim.get_max_stream_window_bytes(),
             max_list_page: lim.get_max_list_page(),
         },
-        supported_roles: read_text_list(m.get_supported_roles().map_err(from_capnp)?)?,
-        capabilities: read_text_list(m.get_capabilities().map_err(from_capnp)?)?,
+        capabilities: crate::generated::read_plugin_capabilities(
+            m.get_capabilities().map_err(from_capnp)?,
+        )
+        .map_err(from_capnp)?,
         portal_auth_mode: m.get_portal_auth_mode().map(Into::into).unwrap_or_default(),
         password_env_var: {
             let v = text_of(m.get_password_env_var().map_err(from_capnp)?);
@@ -3625,9 +3616,9 @@ mod tests {
     use super::*;
     use crate::{
         ByteRange, Cancellation, CopyResult, Database, DatabaseContext, Destination,
-        DestinationContext, DomainEvent, EventResult, ExtensibleConfig, GuestDatabase, HealthOk,
+        DestinationContext, DomainEvent, Entrypoint, EventConsumerSpec, EventResult, ExtensibleConfig, GuestDatabase, HealthOk,
         Integration, IntegrationContext, JobHandler, JobHandlerContext, JobInvocation, JobOutcome,
-        ListOptions, ListPage, ObjectInfo, ObjectMetadata, PluginDescribe, PluginRoot,
+        ListOptions, ListPage, ObjectInfo, ObjectMetadata, PluginCapabilities, PluginDescribe, PluginRoot,
         ProgressSink, PutResult, ReadResult, ScalarLimits, Source, SourceContext, WorkerContext,
         WriteOptions, FEATURE_SCALAR_LIMITS, FEATURE_STREAMS, MAX_CHECKPOINT_BYTES,
         MAX_EVENT_PAYLOAD_BYTES, MAX_LIST_PAGE, MAX_PLUGIN_MIGRATION_OPS,
@@ -3771,7 +3762,10 @@ mod tests {
             Ok(PluginDescribe {
                 api_version: PRODUCT_API_VERSION,
                 id: "native_test".into(),
-                kind: "output".into(),
+                capabilities: PluginCapabilities {
+                    entrypoints: vec![Entrypoint::Storage],
+                    ..PluginCapabilities::default()
+                },
                 display_name: None,
                 rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
                 scalar_limits: ScalarLimits::default().into(),
@@ -3830,11 +3824,13 @@ mod tests {
             Ok(PluginDescribe {
                 api_version: PRODUCT_API_VERSION,
                 id: "db_ctx".into(),
-                kind: "database".into(),
+                capabilities: PluginCapabilities {
+                    entrypoints: vec![Entrypoint::DatabaseAdapter],
+                    ..PluginCapabilities::default()
+                },
                 display_name: None,
                 rpc_features: vec![FEATURE_SCALAR_LIMITS.into()],
                 scalar_limits: ScalarLimits::default().into(),
-                supported_roles: vec!["database".into()],
                 ..PluginDescribe::default()
             })
         }
@@ -3946,7 +3942,10 @@ mod tests {
             Ok(PluginDescribe {
                 api_version: PRODUCT_API_VERSION,
                 id: "db_probe".into(),
-                kind: "output".into(),
+                capabilities: PluginCapabilities {
+                    entrypoints: vec![Entrypoint::Storage],
+                    ..PluginCapabilities::default()
+                },
                 display_name: None,
                 rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
                 scalar_limits: ScalarLimits::default().into(),
@@ -4009,7 +4008,10 @@ mod tests {
             Ok(PluginDescribe {
                 api_version: PRODUCT_API_VERSION,
                 id: "native_test".into(),
-                kind: "output".into(),
+                capabilities: PluginCapabilities {
+                    entrypoints: vec![Entrypoint::Storage],
+                    ..PluginCapabilities::default()
+                },
                 display_name: None,
                 rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
                 scalar_limits: ScalarLimits::default().into(),
@@ -4038,10 +4040,16 @@ mod tests {
             Ok(PluginDescribe {
                 api_version: PRODUCT_API_VERSION,
                 id: "event_test".into(),
-                kind: "integration".into(),
+                capabilities: PluginCapabilities {
+                    consumes: vec![EventConsumerSpec {
+                        event_type: "book_acquired".into(),
+                        schema_versions: vec![1],
+                        supports_suspend: false,
+                    }],
+                    ..PluginCapabilities::default()
+                },
                 rpc_features: vec![FEATURE_SCALAR_LIMITS.into()],
                 scalar_limits: ScalarLimits::default().into(),
-                supported_roles: vec!["integration".into()],
                 ..PluginDescribe::default()
             })
         }

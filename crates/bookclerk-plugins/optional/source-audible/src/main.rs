@@ -3,6 +3,7 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use async_trait::async_trait;
+use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::{
     serve, Brand, CatalogHit, ConfigOption, ConfigOptionValue, ContentSource as ContentSourceRole,
     ContentSourceContext, ExpandCandidatesParams, FetchTitleParams, HealthOk, ListDealsParams,
@@ -26,23 +27,10 @@ impl PluginRoot for AudibleRoot {
         Ok(PluginDescribe {
             api_version: PRODUCT_API_VERSION,
             id: "audible".into(),
-            kind: "source".into(),
             display_name: Some("Audible".into()),
             rpc_features: vec![FEATURE_SCALAR_LIMITS.into()],
             scalar_limits: ScalarLimits::default().into(),
-            supported_roles: vec!["contentSource".into()],
-            capabilities: vec![
-                "health".into(),
-                "diagnose".into(),
-                "loginStart".into(),
-                "loginComplete".into(),
-                "scan".into(),
-                "fetchTitle".into(),
-                "searchCatalog".into(),
-                "expandCandidates".into(),
-                "purchaseHint".into(),
-                "listDeals".into(),
-            ],
+            capabilities: manifest_capabilities(include_str!("../plugin.toml"))?,
             portal_auth_mode: PortalAuthMode::Oauth,
             sort_key: 0,
             brand: Some(Brand {

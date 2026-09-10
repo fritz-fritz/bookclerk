@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 
 use async_trait::async_trait;
+use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::{
     ByteRange, CopyResult, Destination, DestinationContext, JobHandler, ListOptions, ListPage,
     ObjectInfo, ObjectMetadata, PluginDescribe, PluginRoot, PutResult, ReadResult, ScalarLimits,
@@ -242,7 +243,6 @@ impl PluginRoot for LocalRoot {
         Ok(PluginDescribe {
             api_version: PRODUCT_API_VERSION,
             id: ID.into(),
-            kind: "output".into(),
             display_name: Some("Local filesystem".into()),
             rpc_features: vec![
                 FEATURE_SCALAR_LIMITS.into(),
@@ -250,7 +250,7 @@ impl PluginRoot for LocalRoot {
                 FEATURE_STORAGE_COPY.into(),
             ],
             scalar_limits: ScalarLimits::default().into(),
-            supported_roles: vec!["destination".into(), "source".into(), "worker".into()],
+            capabilities: manifest_capabilities(include_str!("../plugin.toml"))?,
             ..PluginDescribe::default()
         })
     }

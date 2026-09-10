@@ -15,6 +15,7 @@
 
 import type {
   PluginErrorCode,
+  Entrypoint,
   PortalAuthMode,
   CliArgKind,
   CatalogSort,
@@ -30,6 +31,7 @@ import type {
 
 export type {
   PluginErrorCode,
+  Entrypoint,
   PortalAuthMode,
   CliArgKind,
   CatalogSort,
@@ -157,8 +159,6 @@ export interface PluginDescribe {
   apiVersion: number;
   /** Stable plugin id (`[a-z][a-z0-9_]{0,63}`). */
   id: string;
-  /** Manifest kind (`source`, `integration`, `output`, `database`). */
-  kind: string;
   /** Human-readable name for UI lists. */
   displayName: string;
   /** Negotiable feature names the guest supports (see `feature*` constants). */
@@ -166,15 +166,10 @@ export interface PluginDescribe {
   /** Guest caps when `rpc.scalarLimits` is advertised. */
   scalarLimits: ScalarLimits;
   /**
-   * Advertised factories (`destination`, `source`, `worker`, `contentSource`,
-   * `integration`, `database`). Host still intersects with the manifest allowlist.
+   * Exported entrypoints, triggers, and bindings the guest implements. The
+   * host rejects anything wider than the manifest and the operator grant.
    */
-  supportedRoles: string[];
-  /**
-   * Capability method names the guest implements (e.g. `health`, `login`,
-   * `fetchTitle`). The host intersects these with the consent grant.
-   */
-  capabilities: string[];
+  capabilities: PluginCapabilities;
   /** Portal Accounts connect mode for storefronts. */
   portalAuthMode: PortalAuthMode;
   /**
@@ -185,7 +180,7 @@ export interface PluginDescribe {
   passwordEnvVar?: string;
   /** Alternate ids accepted for config / CLI targeting. */
   aliases: string[];
-  /** UI sort weight among peers of the same kind; lower sorts first. */
+  /** UI sort weight among peers of the same family; lower sorts first. */
   sortKey: number;
   /**
    * Portal brand colors and icon URL; `brand.id` is empty when the guest has
@@ -915,6 +910,41 @@ export interface Integration {
    * @returns {@link EventPollReply}
    */
   pollEvents(): Promise<EventPollReply>;
+}
+
+/**
+ * One declared event consumer: a `[[events.consumers]]` row the default
+ * entrypoint's `event(batch)` handler accepts.
+ */
+export interface EventConsumerSpec {
+  /** Versioned event type (snake_case, e.g. `book_acquired`). */
+  eventType: string;
+  /** Schema versions the guest can consume; never empty. */
+  schemaVersions: number[];
+  /** Whether `EventResult.suspended` is supported for this type. */
+  supportsSuspend: boolean;
+}
+
+/**
+ * Typed capability declaration returned by `describe()`. The host compares
+ * it with `plugin.toml` and the operator grant; widening is rejected at spawn.
+ */
+export interface PluginCapabilities {
+  /** Named entrypoints the guest exports. */
+  entrypoints: Entrypoint[];
+  /** Event types the default entrypoint consumes (`event(batch)` trigger). */
+  consumes: EventConsumerSpec[];
+  /** Event types the guest may publish through its `EVENTS` binding. */
+  produces: string[];
+  /** Command types the default entrypoint runs (`job(controller)` trigger). */
+  jobs: string[];
+  /** Plugin-owned database binding names (`[[databases]]`). */
+  databases: string[];
+  /**
+   * Other named bindings the guest expects on `env` (`CONFIG`, `SECRETS`,
+   * `WORK_FS`, `OAUTH`, `KV`, `EVENTS`, ...).
+   */
+  bindings: string[];
 }
 
 /**

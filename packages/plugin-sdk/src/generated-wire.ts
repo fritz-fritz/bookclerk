@@ -1417,55 +1417,51 @@ export const CopyResultCodec: StructCodec<T.CopyResult> = {
 };
 
 /**
- * Wire codec for `PluginDescribe` (2 data words, 12 pointers).
+ * Wire codec for `PluginDescribe` (2 data words, 10 pointers).
  *
  * @internal
  */
 export const PluginDescribeCodec: StructCodec<T.PluginDescribe> = {
   dataWords: 2,
-  pointerCount: 12,
+  pointerCount: 10,
   write(s, v, caps) {
     s.setUint32(0, v.apiVersion);
     s.setText(0, v.id);
-    s.setText(1, v.kind);
-    s.setText(2, v.displayName);
-    s.setTextList(3, v.rpcFeatures);
-    ScalarLimitsCodec.write(s.initStruct(4, 2, 0), v.scalarLimits, caps);
-    s.setTextList(5, v.supportedRoles);
-    s.setTextList(6, v.capabilities);
+    s.setText(1, v.displayName);
+    s.setTextList(2, v.rpcFeatures);
+    ScalarLimitsCodec.write(s.initStruct(3, 2, 0), v.scalarLimits, caps);
+    PluginCapabilitiesCodec.write(s.initStruct(4, 0, 6), v.capabilities, caps);
     s.setUint16(2, ord(A.PORTAL_AUTH_MODES, v.portalAuthMode, "PortalAuthMode"));
     if (v.passwordEnvVar !== undefined) {
-      s.setText(7, v.passwordEnvVar);
+      s.setText(5, v.passwordEnvVar);
     }
-    s.setTextList(8, v.aliases);
+    s.setTextList(6, v.aliases);
     s.setUint32(2, v.sortKey);
-    BrandCodec.write(s.initStruct(9, 0, 6), v.brand, caps);
+    BrandCodec.write(s.initStruct(7, 0, 6), v.brand, caps);
     {
-      const items = s.initStructList(10, v.configOptions.length, 0, 3);
+      const items = s.initStructList(8, v.configOptions.length, 0, 3);
       for (let i = 0; i < items.length; i++) {
         ConfigOptionCodec.write(items[i]!, v.configOptions[i]!, caps);
       }
     }
-    CliSchemaCodec.write(s.initStruct(11, 0, 1), v.cli, caps);
+    CliSchemaCodec.write(s.initStruct(9, 0, 1), v.cli, caps);
   },
   read(s, caps) {
     const out: T.PluginDescribe = {
       apiVersion: s.getUint32(0),
       id: s.getText(0),
-      kind: s.getText(1),
-      displayName: s.getText(2),
-      rpcFeatures: s.getTextList(3),
-      scalarLimits: ScalarLimitsCodec.read(s.getStruct(4, 2, 0), caps),
-      supportedRoles: s.getTextList(5),
-      capabilities: s.getTextList(6),
+      displayName: s.getText(1),
+      rpcFeatures: s.getTextList(2),
+      scalarLimits: ScalarLimitsCodec.read(s.getStruct(3, 2, 0), caps),
+      capabilities: PluginCapabilitiesCodec.read(s.getStruct(4, 0, 6), caps),
       portalAuthMode: fromOrd(A.PORTAL_AUTH_MODES, s.getUint16(2), "PortalAuthMode"),
-      aliases: s.getTextList(8),
+      aliases: s.getTextList(6),
       sortKey: s.getUint32(2),
-      brand: BrandCodec.read(s.getStruct(9, 0, 6), caps),
-      configOptions: s.getStructList(10, 0, 3).map((item) => ConfigOptionCodec.read(item, caps)),
-      cli: CliSchemaCodec.read(s.getStruct(11, 0, 1), caps),
+      brand: BrandCodec.read(s.getStruct(7, 0, 6), caps),
+      configOptions: s.getStructList(8, 0, 3).map((item) => ConfigOptionCodec.read(item, caps)),
+      cli: CliSchemaCodec.read(s.getStruct(9, 0, 1), caps),
     };
-    const passwordEnvVarValue = s.getText(7);
+    const passwordEnvVarValue = s.getText(5);
     if (!(passwordEnvVarValue === "")) {
       out.passwordEnvVar = passwordEnvVarValue;
     }
@@ -2489,7 +2485,7 @@ export const DescribeReplyCodec: StructCodec<T.DescribeReply> = {
     switch (v.kind) {
       case "ok":
         s.setUint16(0, 0);
-        PluginDescribeCodec.write(s.initStruct(0, 2, 12), v.value, caps);
+        PluginDescribeCodec.write(s.initStruct(0, 2, 10), v.value, caps);
         break;
       case "err":
         s.setUint16(0, 1);
@@ -2503,7 +2499,7 @@ export const DescribeReplyCodec: StructCodec<T.DescribeReply> = {
     const disc = s.getUint16(0);
     switch (disc) {
       case 0:
-        return { kind: "ok", value: PluginDescribeCodec.read(s.getStruct(0, 2, 12), caps) };
+        return { kind: "ok", value: PluginDescribeCodec.read(s.getStruct(0, 2, 10), caps) };
       case 1:
         return { kind: "err", value: PluginErrorCodec.read(s.getStruct(0, 0, 2), caps) };
       default:
@@ -2935,6 +2931,63 @@ export const NamedDatabaseCodec: StructCodec<T.NamedDatabase> = {
     return {
       name: s.getText(0),
       database: caps.importCap(s.getCapIndex(1)) as T.GuestDatabase,
+    };
+  },
+};
+
+/**
+ * Wire codec for `EventConsumerSpec` (1 data words, 2 pointers).
+ *
+ * @internal
+ */
+export const EventConsumerSpecCodec: StructCodec<T.EventConsumerSpec> = {
+  dataWords: 1,
+  pointerCount: 2,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.eventType);
+    s.setUint32List(1, v.schemaVersions);
+    s.setBool(0, v.supportsSuspend);
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      eventType: s.getText(0),
+      schemaVersions: s.getUint32List(1),
+      supportsSuspend: s.getBool(0),
+    };
+  },
+};
+
+/**
+ * Wire codec for `PluginCapabilities` (0 data words, 6 pointers).
+ *
+ * @internal
+ */
+export const PluginCapabilitiesCodec: StructCodec<T.PluginCapabilities> = {
+  dataWords: 0,
+  pointerCount: 6,
+  write(s, v, caps) {
+    s.setUint16List(0, v.entrypoints.map((v) => ord(A.ENTRYPOINTS, v, "Entrypoint")));
+    {
+      const items = s.initStructList(1, v.consumes.length, 1, 2);
+      for (let i = 0; i < items.length; i++) {
+        EventConsumerSpecCodec.write(items[i]!, v.consumes[i]!, caps);
+      }
+    }
+    s.setTextList(2, v.produces);
+    s.setTextList(3, v.jobs);
+    s.setTextList(4, v.databases);
+    s.setTextList(5, v.bindings);
+  },
+  read(s, caps) {
+    return {
+      entrypoints: s.getUint16List(0).map((v) => fromOrd(A.ENTRYPOINTS, v, "Entrypoint")),
+      consumes: s.getStructList(1, 1, 2).map((item) => EventConsumerSpecCodec.read(item, caps)),
+      produces: s.getTextList(2),
+      jobs: s.getTextList(3),
+      databases: s.getTextList(4),
+      bindings: s.getTextList(5),
     };
   },
 };

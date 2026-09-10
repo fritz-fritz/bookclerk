@@ -4423,6 +4423,46 @@
         }
       ]
     },
+    "EventConsumerSpec": {
+      "name": "EventConsumerSpec",
+      "file": "plugin.capnp",
+      "dataWords": 1,
+      "pointerCount": 2,
+      "discriminantCount": 0,
+      "discriminantOffset": 0,
+      "fields": [
+        {
+          "name": "eventType",
+          "codeOrder": 0,
+          "discriminantValue": null,
+          "type": {
+            "kind": "text"
+          },
+          "offset": 0
+        },
+        {
+          "name": "schemaVersions",
+          "codeOrder": 1,
+          "discriminantValue": null,
+          "type": {
+            "kind": "list",
+            "element": {
+              "kind": "uint32"
+            }
+          },
+          "offset": 1
+        },
+        {
+          "name": "supportsSuspend",
+          "codeOrder": 2,
+          "discriminantValue": null,
+          "type": {
+            "kind": "bool"
+          },
+          "offset": 0
+        }
+      ]
+    },
     "EventDeadLetter": {
       "name": "EventDeadLetter",
       "file": "plugin.capnp",
@@ -7433,11 +7473,95 @@
         }
       ]
     },
+    "PluginCapabilities": {
+      "name": "PluginCapabilities",
+      "file": "plugin.capnp",
+      "dataWords": 0,
+      "pointerCount": 6,
+      "discriminantCount": 0,
+      "discriminantOffset": 0,
+      "fields": [
+        {
+          "name": "entrypoints",
+          "codeOrder": 0,
+          "discriminantValue": null,
+          "type": {
+            "kind": "list",
+            "element": {
+              "kind": "enum",
+              "name": "Entrypoint"
+            }
+          },
+          "offset": 0
+        },
+        {
+          "name": "consumes",
+          "codeOrder": 1,
+          "discriminantValue": null,
+          "type": {
+            "kind": "list",
+            "element": {
+              "kind": "struct",
+              "name": "EventConsumerSpec"
+            }
+          },
+          "offset": 1
+        },
+        {
+          "name": "produces",
+          "codeOrder": 2,
+          "discriminantValue": null,
+          "type": {
+            "kind": "list",
+            "element": {
+              "kind": "text"
+            }
+          },
+          "offset": 2
+        },
+        {
+          "name": "jobs",
+          "codeOrder": 3,
+          "discriminantValue": null,
+          "type": {
+            "kind": "list",
+            "element": {
+              "kind": "text"
+            }
+          },
+          "offset": 3
+        },
+        {
+          "name": "databases",
+          "codeOrder": 4,
+          "discriminantValue": null,
+          "type": {
+            "kind": "list",
+            "element": {
+              "kind": "text"
+            }
+          },
+          "offset": 4
+        },
+        {
+          "name": "bindings",
+          "codeOrder": 5,
+          "discriminantValue": null,
+          "type": {
+            "kind": "list",
+            "element": {
+              "kind": "text"
+            }
+          },
+          "offset": 5
+        }
+      ]
+    },
     "PluginDescribe": {
       "name": "PluginDescribe",
       "file": "plugin.capnp",
       "dataWords": 2,
-      "pointerCount": 12,
+      "pointerCount": 10,
       "discriminantCount": 0,
       "discriminantOffset": 0,
       "fields": [
@@ -7460,7 +7584,7 @@
           "offset": 0
         },
         {
-          "name": "kind",
+          "name": "displayName",
           "codeOrder": 2,
           "discriminantValue": null,
           "type": {
@@ -7469,17 +7593,8 @@
           "offset": 1
         },
         {
-          "name": "displayName",
-          "codeOrder": 3,
-          "discriminantValue": null,
-          "type": {
-            "kind": "text"
-          },
-          "offset": 2
-        },
-        {
           "name": "rpcFeatures",
-          "codeOrder": 4,
+          "codeOrder": 3,
           "discriminantValue": null,
           "type": {
             "kind": "list",
@@ -7487,33 +7602,50 @@
               "kind": "text"
             }
           },
-          "offset": 3
+          "offset": 2
         },
         {
           "name": "scalarLimits",
-          "codeOrder": 5,
+          "codeOrder": 4,
           "discriminantValue": null,
           "type": {
             "kind": "struct",
             "name": "ScalarLimits"
           },
+          "offset": 3
+        },
+        {
+          "name": "capabilities",
+          "codeOrder": 5,
+          "discriminantValue": null,
+          "type": {
+            "kind": "struct",
+            "name": "PluginCapabilities"
+          },
           "offset": 4
         },
         {
-          "name": "supportedRoles",
+          "name": "portalAuthMode",
           "codeOrder": 6,
           "discriminantValue": null,
           "type": {
-            "kind": "list",
-            "element": {
-              "kind": "text"
-            }
+            "kind": "enum",
+            "name": "PortalAuthMode"
+          },
+          "offset": 2
+        },
+        {
+          "name": "passwordEnvVar",
+          "codeOrder": 7,
+          "discriminantValue": null,
+          "type": {
+            "kind": "text"
           },
           "offset": 5
         },
         {
-          "name": "capabilities",
-          "codeOrder": 7,
+          "name": "aliases",
+          "codeOrder": 8,
           "discriminantValue": null,
           "type": {
             "kind": "list",
@@ -7524,39 +7656,8 @@
           "offset": 6
         },
         {
-          "name": "portalAuthMode",
-          "codeOrder": 8,
-          "discriminantValue": null,
-          "type": {
-            "kind": "enum",
-            "name": "PortalAuthMode"
-          },
-          "offset": 2
-        },
-        {
-          "name": "passwordEnvVar",
-          "codeOrder": 9,
-          "discriminantValue": null,
-          "type": {
-            "kind": "text"
-          },
-          "offset": 7
-        },
-        {
-          "name": "aliases",
-          "codeOrder": 10,
-          "discriminantValue": null,
-          "type": {
-            "kind": "list",
-            "element": {
-              "kind": "text"
-            }
-          },
-          "offset": 8
-        },
-        {
           "name": "sortKey",
-          "codeOrder": 11,
+          "codeOrder": 9,
           "discriminantValue": null,
           "type": {
             "kind": "uint32"
@@ -7565,17 +7666,17 @@
         },
         {
           "name": "brand",
-          "codeOrder": 12,
+          "codeOrder": 10,
           "discriminantValue": null,
           "type": {
             "kind": "struct",
             "name": "Brand"
           },
-          "offset": 9
+          "offset": 7
         },
         {
           "name": "configOptions",
-          "codeOrder": 13,
+          "codeOrder": 11,
           "discriminantValue": null,
           "type": {
             "kind": "list",
@@ -7584,17 +7685,17 @@
               "name": "ConfigOption"
             }
           },
-          "offset": 10
+          "offset": 8
         },
         {
           "name": "cli",
-          "codeOrder": 14,
+          "codeOrder": 12,
           "discriminantValue": null,
           "type": {
             "kind": "struct",
             "name": "CliSchema"
           },
-          "offset": 11
+          "offset": 9
         }
       ]
     },
@@ -9529,6 +9630,18 @@
         "bytes"
       ]
     },
+    "Entrypoint": {
+      "name": "Entrypoint",
+      "file": "plugin.capnp",
+      "enumerants": [
+        "storefront",
+        "storage",
+        "databaseAdapter",
+        "remoteLibrary",
+        "cli",
+        "oidc"
+      ]
+    },
     "IntegerArithKind": {
       "name": "IntegerArithKind",
       "file": "plugin.capnp",
@@ -10104,7 +10217,7 @@
     "apiVersion": {
       "name": "apiVersion",
       "file": "plugin.capnp",
-      "value": 2
+      "value": 3
     },
     "featureScalarLimits": {
       "name": "featureScalarLimits",

@@ -255,49 +255,45 @@ _copy_result_codec = _Codec(1, 0, _write_copy_result, _read_copy_result)
 def _write_plugin_describe(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
     s.set_u32(0, v["apiVersion"])
     s.set_text(0, v["id"])
-    s.set_text(1, v["kind"])
-    s.set_text(2, v["displayName"])
-    s.set_text_list(3, v["rpcFeatures"])
-    _scalar_limits_codec.write(s.init_struct(4, 2, 0), v["scalarLimits"], caps)
-    s.set_text_list(5, v["supportedRoles"])
-    s.set_text_list(6, v["capabilities"])
+    s.set_text(1, v["displayName"])
+    s.set_text_list(2, v["rpcFeatures"])
+    _scalar_limits_codec.write(s.init_struct(3, 2, 0), v["scalarLimits"], caps)
+    _plugin_capabilities_codec.write(s.init_struct(4, 0, 6), v["capabilities"], caps)
     s.set_u16(2, _ord(A.PORTAL_AUTH_MODES, v["portalAuthMode"], "PortalAuthMode"))
     if v.get("passwordEnvVar") is not None:
-        s.set_text(7, v["passwordEnvVar"])
-    s.set_text_list(8, v["aliases"])
+        s.set_text(5, v["passwordEnvVar"])
+    s.set_text_list(6, v["aliases"])
     s.set_u32(2, v["sortKey"])
-    _brand_codec.write(s.init_struct(9, 0, 6), v["brand"], caps)
-    items = s.init_struct_list(10, len(v["configOptions"]), 0, 3)
+    _brand_codec.write(s.init_struct(7, 0, 6), v["brand"], caps)
+    items = s.init_struct_list(8, len(v["configOptions"]), 0, 3)
     for item, elem in zip(items, v["configOptions"], strict=True):
         _config_option_codec.write(item, elem, caps)
-    _cli_schema_codec.write(s.init_struct(11, 0, 1), v["cli"], caps)
+    _cli_schema_codec.write(s.init_struct(9, 0, 1), v["cli"], caps)
 
 
 def _read_plugin_describe(s: _StructReader, caps: _CapTable) -> Any:
     out: dict[str, Any] = {
         "apiVersion": s.get_u32(0),
         "id": s.get_text(0),
-        "kind": s.get_text(1),
-        "displayName": s.get_text(2),
-        "rpcFeatures": s.get_text_list(3),
-        "scalarLimits": _scalar_limits_codec.read(s.get_struct(4, 2, 0), caps),
-        "supportedRoles": s.get_text_list(5),
-        "capabilities": s.get_text_list(6),
+        "displayName": s.get_text(1),
+        "rpcFeatures": s.get_text_list(2),
+        "scalarLimits": _scalar_limits_codec.read(s.get_struct(3, 2, 0), caps),
+        "capabilities": _plugin_capabilities_codec.read(s.get_struct(4, 0, 6), caps),
         "portalAuthMode": _from_ord(A.PORTAL_AUTH_MODES, s.get_u16(2), "PortalAuthMode"),
-        "aliases": s.get_text_list(8),
+        "aliases": s.get_text_list(6),
         "sortKey": s.get_u32(2),
-        "brand": _brand_codec.read(s.get_struct(9, 0, 6), caps),
-        "configOptions": [_config_option_codec.read(item, caps) for item in s.get_struct_list(10, 0, 3)],
-        "cli": _cli_schema_codec.read(s.get_struct(11, 0, 1), caps),
+        "brand": _brand_codec.read(s.get_struct(7, 0, 6), caps),
+        "configOptions": [_config_option_codec.read(item, caps) for item in s.get_struct_list(8, 0, 3)],
+        "cli": _cli_schema_codec.read(s.get_struct(9, 0, 1), caps),
     }
-    password_env_var = s.get_text(7)
+    password_env_var = s.get_text(5)
     if not (password_env_var == ""):
         out["passwordEnvVar"] = password_env_var
     return out
 
 
-_plugin_describe_codec = _Codec(2, 12, _write_plugin_describe, _read_plugin_describe)
-"""Wire codec for ``PluginDescribe`` (2 data words, 12 pointers)."""
+_plugin_describe_codec = _Codec(2, 10, _write_plugin_describe, _read_plugin_describe)
+"""Wire codec for ``PluginDescribe`` (2 data words, 10 pointers)."""
 
 
 def _write_oidc_client_template(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
@@ -1058,7 +1054,7 @@ def _write_describe_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
     kind = v["kind"]
     if kind == "ok":
         s.set_u16(0, 0)
-        _plugin_describe_codec.write(s.init_struct(0, 2, 12), v["value"], caps)
+        _plugin_describe_codec.write(s.init_struct(0, 2, 10), v["value"], caps)
     elif kind == "err":
         s.set_u16(0, 1)
         _plugin_error_codec.write(s.init_struct(0, 0, 2), v["value"], caps)
@@ -1069,7 +1065,7 @@ def _write_describe_reply(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
 def _read_describe_reply(s: _StructReader, caps: _CapTable) -> Any:
     disc = s.get_u16(0)
     if disc == 0:
-        return {"kind": "ok", "value": _plugin_describe_codec.read(s.get_struct(0, 2, 12), caps)}
+        return {"kind": "ok", "value": _plugin_describe_codec.read(s.get_struct(0, 2, 10), caps)}
     elif disc == 1:
         return {"kind": "err", "value": _plugin_error_codec.read(s.get_struct(0, 0, 2), caps)}
     raise ValueError(f"unknown DescribeReply union member: {disc}")
@@ -1384,6 +1380,50 @@ def _read_named_database(s: _StructReader, caps: _CapTable) -> Any:
 
 _named_database_codec = _Codec(0, 2, _write_named_database, _read_named_database)
 """Wire codec for ``NamedDatabase`` (0 data words, 2 pointers)."""
+
+
+def _write_event_consumer_spec(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["eventType"])
+    s.set_u32_list(1, v["schemaVersions"])
+    s.set_bool(0, v["supportsSuspend"])
+
+
+def _read_event_consumer_spec(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "eventType": s.get_text(0),
+        "schemaVersions": s.get_u32_list(1),
+        "supportsSuspend": s.get_bool(0),
+    }
+
+
+_event_consumer_spec_codec = _Codec(1, 2, _write_event_consumer_spec, _read_event_consumer_spec)
+"""Wire codec for ``EventConsumerSpec`` (1 data words, 2 pointers)."""
+
+
+def _write_plugin_capabilities(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_u16_list(0, [_ord(A.ENTRYPOINTS, v, "Entrypoint") for v in v["entrypoints"]])
+    items = s.init_struct_list(1, len(v["consumes"]), 1, 2)
+    for item, elem in zip(items, v["consumes"], strict=True):
+        _event_consumer_spec_codec.write(item, elem, caps)
+    s.set_text_list(2, v["produces"])
+    s.set_text_list(3, v["jobs"])
+    s.set_text_list(4, v["databases"])
+    s.set_text_list(5, v["bindings"])
+
+
+def _read_plugin_capabilities(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "entrypoints": [_from_ord(A.ENTRYPOINTS, v, "Entrypoint") for v in s.get_u16_list(0)],
+        "consumes": [_event_consumer_spec_codec.read(item, caps) for item in s.get_struct_list(1, 1, 2)],
+        "produces": s.get_text_list(2),
+        "jobs": s.get_text_list(3),
+        "databases": s.get_text_list(4),
+        "bindings": s.get_text_list(5),
+    }
+
+
+_plugin_capabilities_codec = _Codec(0, 6, _write_plugin_capabilities, _read_plugin_capabilities)
+"""Wire codec for ``PluginCapabilities`` (0 data words, 6 pointers)."""
 
 
 def _write_brand(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:

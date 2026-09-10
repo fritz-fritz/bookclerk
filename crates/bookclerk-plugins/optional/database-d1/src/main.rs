@@ -7,6 +7,7 @@ use bookclerk_db_guest::set_connection;
 use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
 use bookclerk_plugin_abi::IsolationReq;
 use bookclerk_plugin_abi::{AdapterExecuteRequest, AdapterTransaction, HostAdapterDatabaseSession};
+use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::{serve, DbBootstrap, DbCapabilities, ExecuteReply, PluginError};
 use bookclerk_plugin_sdk::{
     AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot, ScalarLimits,
@@ -83,12 +84,10 @@ impl PluginRoot for D1Root {
         Ok(PluginDescribe {
             api_version: PRODUCT_API_VERSION,
             id: "d1".into(),
-            kind: "database".into(),
             display_name: Some("Cloudflare D1".into()),
             rpc_features: vec![FEATURE_SCALAR_LIMITS.into()],
             scalar_limits: ScalarLimits::default().into(),
-            supported_roles: vec!["database".into()],
-            capabilities: vec!["health".into(), "diagnose".into()],
+            capabilities: manifest_capabilities(include_str!("../plugin.toml"))?,
             sort_key: 5,
             ..PluginDescribe::default()
         })

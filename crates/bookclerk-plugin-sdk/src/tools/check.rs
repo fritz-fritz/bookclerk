@@ -106,9 +106,15 @@ pub fn check_plugin(plugin_dir: &Path) -> Result<String> {
     }
 
     Ok(format!(
-        "ok id={} kind={} runtime={:?}",
+        "ok id={} family={} entrypoints=[{}] runtime={:?}",
         manifest.id,
-        manifest.kind.as_str(),
+        manifest.primary_family().as_str(),
+        manifest
+            .entrypoints
+            .iter()
+            .map(|e| e.wire_name())
+            .collect::<Vec<_>>()
+            .join(","),
         manifest.runtime
     ))
 }

@@ -3,6 +3,7 @@
 #![allow(clippy::missing_docs_in_private_items)]
 
 use async_trait::async_trait;
+use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::{
     serve, Brand, CatalogDetailParams, CatalogHit, ConfigOption, ConfigOptionValue,
     ContentSource as ContentSourceRole, ContentSourceContext, ExpandCandidatesParams,
@@ -24,23 +25,10 @@ impl PluginRoot for LibroRoot {
         Ok(PluginDescribe {
             api_version: PRODUCT_API_VERSION,
             id: "libro".into(),
-            kind: "source".into(),
             display_name: Some("Libro.fm".into()),
             rpc_features: vec![FEATURE_SCALAR_LIMITS.into()],
             scalar_limits: ScalarLimits::default().into(),
-            supported_roles: vec!["contentSource".into()],
-            capabilities: vec![
-                "health".into(),
-                "diagnose".into(),
-                "login".into(),
-                "scan".into(),
-                "fetchTitle".into(),
-                "searchCatalog".into(),
-                "catalogDetail".into(),
-                "expandCandidates".into(),
-                "purchaseHint".into(),
-                "listDeals".into(),
-            ],
+            capabilities: manifest_capabilities(include_str!("../plugin.toml"))?,
             portal_auth_mode: PortalAuthMode::Password,
             password_env_var: Some(bookclerk_plugin_source_libro::PASSWORD_ENV.into()),
             aliases: vec!["libro.fm".into(), "librofm".into()],

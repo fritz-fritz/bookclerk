@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use bookclerk_plugin_abi::{
     CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams, CliInvokeResult, CliSchema,
 };
+use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::{serve, PluginError};
 use bookclerk_plugin_sdk::{
     DomainEvent, EventResult, HealthOk, Integration, IntegrationContext, PluginDescribe,
@@ -46,18 +47,10 @@ impl PluginRoot for EchoRoot {
         Ok(PluginDescribe {
             api_version: PRODUCT_API_VERSION,
             id: PLUGIN_ID.into(),
-            kind: "integration".into(),
             display_name: Some("Echo Integration (native Rust)".into()),
             rpc_features: vec![FEATURE_SCALAR_LIMITS.into()],
             scalar_limits: ScalarLimits::default().into(),
-            supported_roles: vec!["integration".into()],
-            capabilities: vec![
-                "health".into(),
-                "diagnose".into(),
-                "onEvent".into(),
-                "start".into(),
-                "cli".into(),
-            ],
+            capabilities: manifest_capabilities(include_str!("../plugin.toml"))?,
             cli: cli_schema(),
             ..PluginDescribe::default()
         })
