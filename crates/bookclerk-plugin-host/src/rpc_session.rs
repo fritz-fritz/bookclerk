@@ -2441,7 +2441,8 @@ pub struct PluginStorage {
 }
 
 impl PluginStorage {
-    /// Wraps a connected session after [`PluginSession::ensure_destination`].
+    /// Wraps a connected session after [`PluginSession::open`] granted the
+    /// `storage` entrypoint.
     #[must_use]
     pub fn new(session: Arc<PluginSession>) -> Self {
         Self { session }

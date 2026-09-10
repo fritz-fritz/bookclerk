@@ -243,7 +243,7 @@ pub struct DomainEvent {
     pub resume_pending: bool,
 }
 
-/// Result of [`crate::Integration::on_event`].
+/// Per-event result of [`crate::EventConsumer::event`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum EventResult {
@@ -524,7 +524,7 @@ impl JobInvocation {
     }
 }
 
-/// Outcome of [`crate::JobHandler::handle`].
+/// Outcome of [`crate::JobRunner::job`].
 ///
 /// Suspension is durable only after Bookclerk atomically commits the fenced
 /// outcome. Open streams and process memory do not survive.
