@@ -1,9 +1,9 @@
-"""check / fmt / package / sync-embed — mirrors Rust/TS author tools.
+"""check / fmt / types / package / sync-embed — mirrors Rust/TS author tools.
 
-Validates ``plugin.toml``, formats manifests, vendors workerd embeds, and packs
-release archives. Workerd authors:
+Validates ``plugin.toml``, formats manifests, generates the ``Env`` typing stub,
+vendors workerd embeds, and packs release archives. Workerd authors:
 
-- ``from bookclerk_plugin_sdk.workerd import BookclerkPlugin, js``
+- ``from bookclerk_plugin_sdk.workerd import BookclerkEntrypoint, js``
   (``bookclerk-workerd`` injects that module — no relative filepath embed)
 
 See ``docs/plugins.md`` for manifest fields and runtime requirements.
@@ -271,6 +271,77 @@ def _sdk_workerd_embed_src() -> Path:
     return Path(__file__).resolve().parent / "workerd.py"
 
 
+ENTRYPOINT_EXPORT_CLASSES: dict[str, str] = {
+    "storefront": "Storefront",
+    "storage": "Storage",
+    "databaseAdapter": "DatabaseAdapter",
+    "remoteLibrary": "RemoteLibrary",
+    "cli": "Cli",
+    "oidc": "Oidc",
+}
+"""Exported class name the launcher binds for each ``entrypoints`` wire name."""
+
+
+def check_main_module_source(
+    main_name: str, src: str, entrypoints: list[str], language: str
+) -> None:
+    """Check a workerd main module against the v3 author model.
+
+    Requires the SDK import and a ``BookclerkEntrypoint`` default class, rejects
+    the removed ``BookclerkPlugin`` base, and requires a class per manifest
+    entrypoint (``class Storage(StorageEntrypoint)`` for Python,
+    ``export class Storage`` for JavaScript).
+
+    Args:
+        main_name: Main module filename (for messages).
+        src: Main module source text.
+        entrypoints: Manifest ``entrypoints`` wire names.
+        language: ``"python"`` or ``"js"``.
+
+    Raises:
+        ValueError: When the module does not follow the author model.
+    """
+    base = "BookclerkEntrypoint"
+    if "BookclerkPlugin" in src:
+        raise ValueError(
+            f"{main_name}: `BookclerkPlugin` was removed in api_version 3; extend "
+            f"`{base}` (default class with event()/job() triggers) and define "
+            "named entrypoint classes (Storefront, Storage, RemoteLibrary, "
+            "DatabaseAdapter, Cli, Oidc)"
+        )
+    if language == "python":
+        if "bookclerk_plugin_sdk" not in src and base not in src:
+            raise ValueError(
+                f"{main_name}: import {base} from bookclerk_plugin_sdk.workerd "
+                f"(e.g. `from bookclerk_plugin_sdk.workerd import {base}, js`)"
+            )
+    else:
+        if "@bookclerk/plugin-sdk" not in src and base not in src:
+            raise ValueError(
+                f'{main_name}: import {base} from "@bookclerk/plugin-sdk/workerd"'
+            )
+    if "WorkerEntrypoint" in src and "Entrypoint" not in src.replace("WorkerEntrypoint", ""):
+        raise ValueError(f"{main_name}: subclass {base}, not bare WorkerEntrypoint")
+    for wire in entrypoints:
+        cls = ENTRYPOINT_EXPORT_CLASSES.get(wire)
+        if cls is None:
+            continue
+        if language == "python":
+            exported = re.search(rf"^class\s+{cls}\s*\(", src, re.MULTILINE) is not None
+            hint = f"class {cls}({cls}Entrypoint)"
+        else:
+            exported = (
+                re.search(rf"export\s+class\s+{cls}\b", src) is not None
+                or re.search(rf"export\s*\{{[^}}]*\b{cls}\b[^}}]*\}}", src) is not None
+            )
+            hint = f"export class {cls} extends {cls}Entrypoint"
+        if not exported:
+            raise ValueError(
+                f"{main_name}: entrypoint `{wire}` declared in plugin.toml but the main "
+                f"module does not define `{cls}` ({hint})"
+            )
+
+
 def check_plugin(plugin_dir: Path) -> str:
     """Validate a plugin directory and its ``plugin.toml``.
 
@@ -307,19 +378,14 @@ def check_plugin(plugin_dir: Path) -> str:
         main = modules_dir / w["main_module"]
         if not main.is_file():
             raise FileNotFoundError(f"workerd main_module missing: {main}")
+        entrypoints = [str(e) for e in (m.get("entrypoints") or [])]
+        main_lower = w["main_module"].lower()
+        if main_lower.endswith((".js", ".mjs")):
+            src = main.read_text(encoding="utf-8")
+            check_main_module_source(main.name, src, entrypoints, "js")
         if _is_python_workerd(m):
             src = main.read_text(encoding="utf-8")
-            if "bookclerk_plugin_sdk.workerd" not in src and "BookclerkPlugin" not in src:
-                raise ValueError(
-                    f"{main.name}: import BookclerkPlugin from "
-                    "bookclerk_plugin_sdk.workerd "
-                    '(e.g. `from bookclerk_plugin_sdk.workerd import BookclerkPlugin, js`)'
-                )
-            if "WorkerEntrypoint" in src and "BookclerkPlugin" not in src:
-                raise ValueError(
-                    f"{main.name}: subclass BookclerkPlugin from "
-                    "bookclerk_plugin_sdk.workerd, not bare WorkerEntrypoint"
-                )
+            check_main_module_source(main.name, src, entrypoints, "python")
             flags = list(w.get("compatibility_flags") or [])
             missing = [f for f in PYTHON_WORKERD_FLAGS if f not in flags]
             if missing:
@@ -762,3 +828,145 @@ def package_plugin(plugin_dir: Path, out_dir: Path) -> Path:
     lines.append(f"{digest}  {archive_name}")
     sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return archive_path
+
+
+TYPES_OUTPUT_FILE = "bookclerk_configuration.py"
+"""Default ``types`` output filename next to ``plugin.toml``."""
+
+_RESERVED_BINDINGS = frozenset({"CONFIG", "SECRETS", "EVENTS", "WORK_FS", "KV", "OAUTH"})
+
+
+def _var_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, list):
+        return "list[Any]"
+    if isinstance(value, dict):
+        return "dict[str, Any]"
+    return "Any"
+
+
+def env_properties_for(m: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """Compute the ``Env`` protocol members for a validated manifest.
+
+    Args:
+        m: Validated manifest dict.
+
+    Returns:
+        ``(binding, python_type, doc)`` tuples in stable emission order.
+
+    Raises:
+        ValueError: When a ``[[databases]]`` binding collides with a reserved name
+            or a binding is declared twice.
+    """
+    props: list[tuple[str, str, str]] = []
+    vars_table = m.get("vars")
+    if isinstance(vars_table, dict) and vars_table:
+        fields = ", ".join(f'"{k}": {_var_type(vars_table[k])}' for k in sorted(vars_table))
+        config_type = f"dict[str, Any]  # {{{fields}}}"
+    else:
+        config_type = "dict[str, Any]"
+    props.append(("CONFIG", config_type, "`[vars]` plus operator settings from the granted config payload."))
+    secrets = m.get("secrets")
+    if isinstance(secrets, dict):
+        props.append(
+            (
+                str(secrets.get("binding") or "SECRETS"),
+                "dict[str, str]",
+                "`[secrets]` values sealed by the operator (present only when granted).",
+            )
+        )
+    producers = (m.get("events") or {}).get("producers") or []
+    if producers:
+        types = ", ".join(str(p.get("type")) for p in producers)
+        props.append(("EVENTS", "Any", f"`[[events.producers]]` outbox publisher ({types})."))
+    work_fs = m.get("work_fs")
+    if isinstance(work_fs, dict):
+        props.append((str(work_fs.get("binding") or "WORK_FS"), "Any", "`[work_fs]` host-granted object storage."))
+    for kv in m.get("kv_namespaces") or []:
+        props.append((str(kv.get("binding") or "KV"), "Any", "`[[kv_namespaces]]` store (surface reserved)."))
+    oauth = m.get("oauth")
+    if isinstance(oauth, dict):
+        props.append((str(oauth.get("binding") or "OAUTH"), "Any", "`[oauth]` loopback helper (surface reserved)."))
+    for db in m.get("databases") or []:
+        name = str(db.get("binding"))
+        if name in _RESERVED_BINDINGS:
+            raise ValueError(
+                f"plugin.toml: [[databases]] binding `{name}` collides with a Bookclerk binding"
+            )
+        props.append((name, "DatabaseBinding", "`[[databases]]` plugin-owned database (D1-shaped prepare/batch/exec)."))
+    seen: set[str] = set()
+    for name, _, _ in props:
+        if name in seen:
+            raise ValueError(f"plugin.toml: binding `{name}` is declared twice")
+        seen.add(name)
+    return props
+
+
+def render_env_types(m: dict[str, Any]) -> str:
+    """Render the ``bookclerk_configuration.py`` typing stub for a validated manifest.
+
+    The stub declares an ``Env`` :class:`typing.Protocol` naming every binding
+    the manifest grants so editors and type checkers can follow
+    ``self.env.<BINDING>`` inside ``BookclerkEntrypoint`` subclasses.
+
+    Args:
+        m: Validated manifest dict.
+
+    Returns:
+        Python source text (ends with a newline).
+
+    Raises:
+        ValueError: When binding names collide.
+    """
+    props = env_properties_for(m)
+    lines = [
+        f"# Generated by `bookclerk-plugin types` from plugin.toml (id={m['id']}). Do not edit.",
+        "# Regenerate after changing [vars], [secrets], [[events.producers]], [[databases]],",
+        "# [work_fs], [[kv_namespaces]], or [oauth].",
+        "from __future__ import annotations",
+        "",
+        "from typing import Any, Protocol",
+    ]
+    if any(t == "DatabaseBinding" for _, t, _ in props):
+        lines.append("")
+        lines.append("from bookclerk_plugin_sdk.db_value import DatabaseBinding")
+    lines += [
+        "",
+        "",
+        "class Env(Protocol):",
+        f'    """Bindings the host grants to `{m["id"]}` (``self.env`` in the entrypoints)."""',
+        "",
+    ]
+    for name, type_, doc in props:
+        lines.append(f"    {name}: {type_}")
+        lines.append(f'    """{doc}"""')
+    lines.append("")
+    return "\n".join(lines)
+
+
+def generate_types(plugin_dir: Path, out_file: Path | None = None) -> str:
+    """Write ``bookclerk_configuration.py`` beside a plugin's ``plugin.toml``.
+
+    Args:
+        plugin_dir: Plugin root containing ``plugin.toml``.
+        out_file: Optional output path (default ``<plugin_dir>/bookclerk_configuration.py``).
+
+    Returns:
+        Status string naming the written file.
+
+    Raises:
+        ValueError: When the manifest is invalid or bindings collide.
+        OSError: If files cannot be read or written.
+    """
+    m = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
+    validate_manifest(m)
+    dest = out_file or (plugin_dir / TYPES_OUTPUT_FILE)
+    dest.write_text(render_env_types(m), encoding="utf-8")
+    return f"wrote {dest}"

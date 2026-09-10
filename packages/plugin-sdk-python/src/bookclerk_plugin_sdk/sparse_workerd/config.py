@@ -1,6 +1,6 @@
 """Materialize Cap'n Proto workerd config + bridge (mirrors config.rs).
 
-Writes ``.bookclerk/`` bridge assets and a Cap'n Proto config that embeds plugin
+Writes ``.bookclerk/`` bridge + adapter assets and a Cap'n Proto config that embeds plugin
 modules plus the injected Python/JS SDK. Used by the sparse smoke launcher and
 authoring tools that do not ship the Rust ``bookclerk-workerd`` binary.
 """
@@ -16,7 +16,7 @@ from .ensure import package_root
 SDK_JS_MODULE_NAMES = ("@bookclerk/plugin-sdk/workerd", "@bookclerk/plugin-sdk")
 """Module names used when embedding the TypeScript workerd SDK."""
 SDK_PY_WORKERD_MODULE = "bookclerk_plugin_sdk/workerd.py"
-"""Isolate module path for the Python workerd BookclerkPlugin base."""
+"""Isolate module path for the Python workerd ``BookclerkEntrypoint`` base."""
 SDK_PY_INIT_MODULE = "bookclerk_plugin_sdk/__init__.py"
 """Isolate module path for the package ``__init__`` stub."""
 PYODIDE_EGRESS_HOSTS = ("cdn.jsdelivr.net", "pypi.org", "files.pythonhosted.org")
@@ -24,12 +24,95 @@ PYODIDE_EGRESS_HOSTS = ("cdn.jsdelivr.net", "pypi.org", "files.pythonhosted.org"
 
 SDK_PY_INIT = '''"""Bookclerk plugin SDK (workerd isolate).
 
-Use: from bookclerk_plugin_sdk.workerd import BookclerkPlugin, js
+Use: from bookclerk_plugin_sdk.workerd import BookclerkEntrypoint, js
 
-Native guests use Rust serve() / PluginRoot instead.
+Native guests use Rust serve() / PluginWorker instead.
 """
 '''
 """Source text embedded as ``bookclerk_plugin_sdk/__init__.py`` in the isolate."""
+
+ADAPTER_JS = '''import { wrapPluginFromBinding } from "@bookclerk/plugin-sdk/workerd";
+export default wrapPluginFromBinding();
+'''
+"""First-party adapter isolate module (mirrors ``ADAPTER_JS`` in ``config.rs``)."""
+
+ENTRYPOINT_SERVICE_BINDINGS: dict[str, tuple[str, str]] = {
+    "storefront": ("PLUGIN_STOREFRONT", "Storefront"),
+    "storage": ("PLUGIN_STORAGE", "Storage"),
+    "databaseAdapter": ("PLUGIN_DATABASE_ADAPTER", "DatabaseAdapter"),
+    "remoteLibrary": ("PLUGIN_REMOTE_LIBRARY", "RemoteLibrary"),
+    "cli": ("PLUGIN_CLI", "Cli"),
+    "oidc": ("PLUGIN_OIDC", "Oidc"),
+}
+"""``(binding, exported class)`` the adapter receives per manifest entrypoint."""
+
+
+def manifest_capabilities(m: dict[str, Any]) -> dict[str, Any]:
+    """Typed capability declaration a manifest implies (mirrors Rust ``capabilities()``).
+
+    Args:
+        m: Validated manifest dict.
+
+    Returns:
+        Wire-shaped ``PluginCapabilities`` object.
+    """
+    bindings: list[str] = []
+    if m.get("vars") is not None:
+        bindings.append("CONFIG")
+    secrets = m.get("secrets")
+    if isinstance(secrets, dict):
+        bindings.append(str(secrets.get("binding") or "SECRETS"))
+    work_fs = m.get("work_fs")
+    if isinstance(work_fs, dict):
+        bindings.append(str(work_fs.get("binding") or "WORK_FS"))
+    oauth = m.get("oauth")
+    if isinstance(oauth, dict):
+        bindings.append(str(oauth.get("binding") or "OAUTH"))
+    for kv in m.get("kv_namespaces") or []:
+        bindings.append(str(kv.get("binding") or "KV"))
+    events = m.get("events") or {}
+    for producer in events.get("producers") or []:
+        name = str(producer.get("binding") or "EVENTS")
+        if name not in bindings:
+            bindings.append(name)
+    return {
+        "entrypoints": [str(e) for e in (m.get("entrypoints") or [])],
+        "consumes": [
+            {
+                "eventType": str(c.get("type")),
+                "schemaVersions": [int(v) for v in (c.get("schema_versions") or [1])],
+                "supportsSuspend": bool(c.get("supports_suspend", False)),
+            }
+            for c in events.get("consumers") or []
+        ],
+        "produces": [str(p.get("type")) for p in events.get("producers") or []],
+        "jobs": [str(j) for j in ((m.get("triggers") or {}).get("jobs") or [])],
+        "databases": [str(d.get("binding")) for d in m.get("databases") or []],
+        "bindings": bindings,
+    }
+
+
+def manifest_describe_json(m: dict[str, Any]) -> str:
+    """``PLUGIN_DESCRIBE`` JSON the adapter answers ``describe()`` from.
+
+    Args:
+        m: Validated manifest dict.
+
+    Returns:
+        Serialized wire-shaped ``PluginDescribe`` projection.
+    """
+    cli = m.get("cli") if isinstance(m.get("cli"), dict) else {}
+    return json.dumps(
+        {
+            "apiVersion": int(m.get("api_version", 3)),
+            "id": m["id"],
+            "displayName": str(m.get("name") or ""),
+            "rpcFeatures": ["rpc.scalarLimits", "rpc.streams"],
+            "capabilities": manifest_capabilities(m),
+            "cli": {"commands": cli.get("commands") or []},
+        },
+        separators=(",", ":"),
+    )
 
 
 def escape_capnp(s: str) -> str:
@@ -156,6 +239,7 @@ def egress_domains_for(needs_python: bool, mode: str, base: list[str]) -> list[s
 
 def _resolve_sdk_js(sdk_root: Path) -> Path:
     candidates = [
+        sdk_root / "bridge" / "bookclerk_plugin.js",
         sdk_root.parents[2] / "plugin-sdk" / "embed" / "bookclerk_plugin.js",
     ]
     for c in candidates:
@@ -216,6 +300,7 @@ def materialize_config(
         if not src.is_file():
             raise FileNotFoundError(f"missing vendored bridge {src}")
         (bookclerk_dir / name).write_bytes(src.read_bytes())
+    (bookclerk_dir / "adapter.js").write_text(ADAPTER_JS, encoding="utf-8")
 
     modules_dir = plugin_root / modules_dir_name
     if not modules_dir.is_dir():
@@ -247,11 +332,20 @@ def materialize_config(
             f'(name = "{escape_capnp(name)}", {field} = embed "{escape_capnp(rel)}")'
         )
 
+    # The adapter isolate always needs the JS SDK embed; the author isolate gets
+    # it when it has JS modules.
+    sdk_js = _resolve_sdk_js(sdk_root)
+    (bookclerk_dir / "sdk-workerd.js").write_text(
+        sdk_js.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    adapter_modules = [
+        '(name = "adapter.js", esModule = embed ".bookclerk/adapter.js")',
+        *(
+            f'(name = "{escape_capnp(mod_name)}", esModule = embed ".bookclerk/sdk-workerd.js")'
+            for mod_name in SDK_JS_MODULE_NAMES
+        ),
+    ]
     if needs_js:
-        sdk_js = _resolve_sdk_js(sdk_root)
-        (bookclerk_dir / "sdk-workerd.js").write_text(
-            sdk_js.read_text(encoding="utf-8"), encoding="utf-8"
-        )
         for mod_name in SDK_JS_MODULE_NAMES:
             if mod_name in seen_names:
                 continue
@@ -319,12 +413,21 @@ def materialize_config(
     policy_escaped = escape_capnp(policy_json)
 
     if entrypoint == "default":
-        entrypoint_binding = '(name = "PLUGIN", service = "plugin")'
+        author_binding = '(name = "PLUGIN", service = "plugin")'
     else:
-        entrypoint_binding = (
+        author_binding = (
             f'(name = "PLUGIN", service = (name = "plugin", '
             f'entrypoint = "{escape_capnp(entrypoint)}"))'
         )
+    named_entrypoint_bindings = [
+        f'(name = "{binding}", service = (name = "plugin", entrypoint = "{cls}"))'
+        for wire in (manifest.get("entrypoints") or [])
+        for binding, cls in [ENTRYPOINT_SERVICE_BINDINGS.get(str(wire), ("", ""))]
+        if binding
+    ]
+    describe_binding = (
+        f'(name = "PLUGIN_DESCRIBE", json = "{escape_capnp(manifest_describe_json(manifest))}")'
+    )
 
     listen_addr = f"127.0.0.1:{listen_port}"
     plugin_outbound = plugin_global_outbound(network_mode)
@@ -347,6 +450,10 @@ def materialize_config(
 
     compat_date = escape_capnp(str(workerd["compatibility_date"]))
     modules_joined = ",\n    ".join(module_embeds)
+    adapter_modules_joined = ",\n    ".join(adapter_modules)
+    adapter_bindings = ",\n    ".join(
+        [author_binding, *named_entrypoint_bindings, describe_binding, bridge_token_binding]
+    )
     config = f"""using Workerd = import "/workerd/workerd.capnp";
 
 const bookclerkPlugin :Workerd.Config = (
@@ -356,6 +463,7 @@ const bookclerkPlugin :Workerd.Config = (
     (name = "host", worker = .hostWorker),
     (name = "egress", worker = .egressWorker),
     (name = "plugin", worker = .pluginWorker),
+    (name = "adapter", worker = .adapterWorker),
     (name = "bridge", worker = .bridgeWorker),
 {notify_service}
   ],
@@ -400,6 +508,18 @@ const pluginWorker :Workerd.Worker = (
   globalOutbound = "{plugin_outbound}",
 );
 
+const adapterWorker :Workerd.Worker = (
+  modules = [
+    {adapter_modules_joined}
+  ],
+  compatibilityDate = "{compat_date}",
+  
+  bindings = [
+    {adapter_bindings}
+  ],
+  globalOutbound = "blocked",
+);
+
 const bridgeWorker :Workerd.Worker = (
   modules = [
     (name = "bridge.js", esModule = embed ".bookclerk/bridge.js")
@@ -407,7 +527,7 @@ const bridgeWorker :Workerd.Worker = (
   compatibilityDate = "{compat_date}",
   
   bindings = [
-    {entrypoint_binding},
+    (name = "PLUGIN", service = "adapter"),
     {bridge_token_binding}
   ],
   globalOutbound = "blocked",
