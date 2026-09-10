@@ -14,7 +14,6 @@ pub mod egress;
 pub mod ensure;
 pub mod grant;
 pub mod granted;
-pub mod native_broker;
 pub mod pin;
 
 pub use bridge_http::generate_bridge_token;

@@ -4,6 +4,11 @@
 //! [`PluginWorker`] entrypoint traits with streamed HTTP bodies. The exported
 //! [`Entrypoints`] follow the signed `plugin.toml` capabilities (the host
 //! allowlist), never a guest-declared widening.
+//!
+//! With a [`Backend::Native`] guest the isolate stays the control plane
+//! (`describe` merge, `open` policy, `shutdown`) while every entrypoint
+//! capability is the guest's own typed Cap'n Proto client, forwarded to the
+//! host without entering JavaScript memory.
 
 #![allow(clippy::missing_docs_in_private_items)]
 #![allow(clippy::arc_with_non_send_sync)]
@@ -19,16 +24,16 @@ use bookclerk_plugin_abi::{
 };
 use bookclerk_plugin_abi::{
     serve_plugin_stdio, AuthenticateUserParams, Bindings, ByteRange, CatalogDetailParams,
-    CatalogHit, CliInvokeParams, CliInvokeResult, CliSchema, ContentSource, CopyResult,
+    CatalogHit, CliInvokeParams, CliInvokeResult, CliSchema, ContentSource, CopyResult, Database,
     Destination, DomainEvent, Entrypoint, Entrypoints, EventConsumer, EventPollResult, EventResult,
     ExpandCandidatesParams, ExtensibleConfig, ExternalUser, FetchTitleParams, GuestDatabase,
-    HealthOk, Invocation, JobController, JobOutcome, JobRunner, ListDealsParams, ListOptions,
-    ListPage, ListeningProgress, LoginCompleteParams, LoginParams, LoginResult, LoginStartResult,
-    ObjectInfo, ObjectMetadata, Oidc, OidcClientTemplate, PlainFetch, PluginCapabilities,
-    PluginCli, PluginDescribe, PluginMigration, PluginWorker, PurchaseHint, PurchaseHintParams,
-    PutResult, ReadResult, RemoteLibrary, ScanLibraryParams, ScanParams, ScanSummary,
-    SearchCatalogParams, SourceAccount, WriteOptions, MAX_LIST_PAGE, MAX_SCALAR_BYTES,
-    MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
+    HealthOk, HostBindings, Invocation, JobController, JobOutcome, JobRunner, ListDealsParams,
+    ListOptions, ListPage, ListeningProgress, LoginCompleteParams, LoginParams, LoginResult,
+    LoginStartResult, ObjectInfo, ObjectMetadata, Oidc, OidcClientTemplate, OpenedEntrypoints,
+    PlainFetch, PluginCapabilities, PluginCli, PluginClient, PluginDescribe, PluginMigration,
+    PluginWorker, PurchaseHint, PurchaseHintParams, PutResult, ReadResult, RemoteLibrary,
+    ScanLibraryParams, ScanParams, ScanSummary, SearchCatalogParams, SourceAccount, WriteOptions,
+    MAX_LIST_PAGE, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES, PRODUCT_API_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -37,11 +42,23 @@ use tokio::io::AsyncRead;
 use crate::bridge_http::BridgeHttp;
 use crate::granted::{GrantedSlot, GrantedTable};
 
+/// Data plane behind the workerd control plane.
+pub enum Backend {
+    /// Author isolate (`runtime = "workerd"`): every entrypoint call is a
+    /// JSON / streamed HTTP route on the bridge worker.
+    Author,
+    /// Verified native guest (`BOOKCLERK_NATIVE_BACKEND`): entrypoint calls
+    /// are typed Cap'n Proto forwards to the guest's own capabilities. The
+    /// client must have been created with `connect_plugin` on this `LocalSet`
+    /// and its RPC future spawned locally.
+    Native(PluginClient),
+}
+
 /// Serves Bookclerk capnp on stdio while talking HTTP/JSRPC to the isolate.
 ///
 /// Must run inside a `LocalSet` (same thread as the granted HTTP server).
 /// `capabilities` come from the signed manifest and decide which
-/// [`Entrypoints`] `open` exports.
+/// [`Entrypoints`] `open` exports; `backend` selects the data plane.
 ///
 /// # Errors
 ///
@@ -50,11 +67,13 @@ pub async fn mediate_bridge_stdio(
     http: BridgeHttp,
     table: GrantedTable,
     capabilities: PluginCapabilities,
+    backend: Backend,
 ) -> anyhow::Result<()> {
     let plugin = WorkerdRoot {
         http,
         table,
         capabilities,
+        backend,
     };
     serve_plugin_stdio(Arc::new(plugin), MAX_STREAM_WINDOW_BYTES)
         .await
@@ -65,7 +84,13 @@ struct WorkerdRoot {
     http: BridgeHttp,
     table: GrantedTable,
     capabilities: PluginCapabilities,
+    backend: Backend,
 }
+
+/// Wire name of the `[[events.consumers]]` trigger family on `/open`.
+const FAMILY_EVENT_CONSUMER: &str = "eventConsumer";
+/// Wire name of the `[triggers] jobs` family on `/open`.
+const FAMILY_JOB_RUNNER: &str = "jobRunner";
 
 impl WorkerdRoot {
     fn exports(&self, entrypoint: Entrypoint) -> bool {
@@ -77,6 +102,149 @@ impl WorkerdRoot {
     fn runs_jobs(&self) -> bool {
         !self.capabilities.jobs.is_empty() || self.exports(Entrypoint::Storage)
     }
+
+    /// Entrypoint families the signed manifest lets this plugin export; the
+    /// adapter isolate filters the same list again against `PLUGIN_DESCRIBE`.
+    fn manifest_families(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if !self.capabilities.consumes.is_empty() {
+            out.push(FAMILY_EVENT_CONSUMER);
+        }
+        if self.runs_jobs() {
+            out.push(FAMILY_JOB_RUNNER);
+        }
+        for entrypoint in [
+            Entrypoint::Storefront,
+            Entrypoint::Storage,
+            Entrypoint::DatabaseAdapter,
+            Entrypoint::RemoteLibrary,
+            Entrypoint::Cli,
+            Entrypoint::Oidc,
+        ] {
+            if self.exports(entrypoint) {
+                out.push(entrypoint.wire_name());
+            }
+        }
+        out
+    }
+
+    /// Native `describe`: the guest's typed describe, merged by the adapter
+    /// isolate against the manifest projection (`PLUGIN_DESCRIBE`).
+    async fn describe_native(&self, client: &PluginClient) -> AbiResult<PluginDescribe> {
+        let native = client.describe().await?;
+        call(
+            &self.http,
+            "/describe",
+            &serde_json::json!({ "native": to_bridge_json(&native)? }),
+        )
+        .await
+    }
+
+    /// Native `open`: the adapter isolate authorizes the invocation and the
+    /// entrypoint families, then the guest's typed capabilities are forwarded
+    /// as the exported [`Entrypoints`] (anything not authorized is nulled).
+    async fn open_native(
+        &self,
+        client: &PluginClient,
+        invocation: Invocation,
+        bindings: Bindings,
+    ) -> AbiResult<Entrypoints> {
+        // The isolate only decides policy here; secrets stay on the typed
+        // Cap'n path to the native guest.
+        let ctx = BridgeContext {
+            invocation: invocation.clone(),
+            config: bindings.config.clone(),
+            secrets: ExtensibleConfig::default(),
+            events_token: None,
+            events_grant: None,
+        };
+        let requested = self.manifest_families();
+        let reply: OpenReply = call(
+            &self.http,
+            "/open",
+            &OpenCall {
+                context: &ctx,
+                entrypoints: &requested,
+            },
+        )
+        .await?;
+        let allowed: Vec<&str> = reply
+            .entrypoints
+            .iter()
+            .map(String::as_str)
+            .filter(|name| requested.contains(name))
+            .collect();
+        let host_bindings = HostBindings {
+            values: bindings.values(),
+            events: bindings.events.map(Arc::from),
+            databases: bindings
+                .databases
+                .into_iter()
+                .map(|(name, database)| (name, Arc::from(database)))
+                .collect(),
+            cancel: Arc::from(bindings.cancel),
+            storage: bindings.storage.map(Arc::from),
+        };
+        let opened = client.open(&invocation, host_bindings).await?;
+        Ok(native_entrypoints(opened, &allowed))
+    }
+}
+
+/// Boxes the guest's typed clients as the exported [`Entrypoints`], keeping
+/// only the families in `allowed`.
+fn native_entrypoints(opened: OpenedEntrypoints, allowed: &[&str]) -> Entrypoints {
+    let allow = |name: &str| allowed.contains(&name);
+    let OpenedEntrypoints {
+        event_consumer,
+        job_runner,
+        storefront,
+        storage,
+        database_adapter,
+        remote_library,
+        cli,
+        oidc,
+    } = opened;
+    Entrypoints {
+        event_consumer: event_consumer
+            .filter(|_| allow(FAMILY_EVENT_CONSUMER))
+            .map(|c| Box::new(c) as Box<dyn EventConsumer>),
+        job_runner: job_runner
+            .filter(|_| allow(FAMILY_JOB_RUNNER))
+            .map(|c| Box::new(c) as Box<dyn JobRunner>),
+        storefront: storefront
+            .filter(|_| allow(Entrypoint::Storefront.wire_name()))
+            .map(|c| Box::new(c) as Box<dyn ContentSource>),
+        storage: storage
+            .filter(|_| allow(Entrypoint::Storage.wire_name()))
+            .map(|c| Box::new(c) as Box<dyn Destination>),
+        database_adapter: database_adapter
+            .filter(|_| allow(Entrypoint::DatabaseAdapter.wire_name()))
+            .map(|c| Box::new(c) as Box<dyn Database>),
+        remote_library: remote_library
+            .filter(|_| allow(Entrypoint::RemoteLibrary.wire_name()))
+            .map(|c| Box::new(c) as Box<dyn RemoteLibrary>),
+        cli: cli
+            .filter(|_| allow(Entrypoint::Cli.wire_name()))
+            .map(|c| Box::new(c) as Box<dyn PluginCli>),
+        oidc: oidc
+            .filter(|_| allow(Entrypoint::Oidc.wire_name()))
+            .map(|c| Box::new(c) as Box<dyn Oidc>),
+    }
+}
+
+/// `POST /open` body: the open context plus the families the launcher asks
+/// the adapter isolate to authorize.
+#[derive(Serialize)]
+struct OpenCall<'a> {
+    context: &'a BridgeContext,
+    entrypoints: &'a [&'static str],
+}
+
+/// `POST /open` reply: the authorized subset of the requested families.
+#[derive(serde::Deserialize)]
+struct OpenReply {
+    #[serde(default)]
+    entrypoints: Vec<String>,
 }
 
 /// Bridge projection of one `PluginWorker.open`: the `Invocation` envelope
@@ -195,8 +363,10 @@ struct Ack {}
 #[async_trait(?Send)]
 impl PluginWorker for WorkerdRoot {
     async fn describe(&self) -> AbiResult<PluginDescribe> {
-        let describe: PluginDescribe =
-            call(&self.http, "/describe", &serde_json::json!({})).await?;
+        let describe: PluginDescribe = match &self.backend {
+            Backend::Author => call(&self.http, "/describe", &serde_json::json!({})).await?,
+            Backend::Native(client) => self.describe_native(client).await?,
+        };
         if describe.api_version != PRODUCT_API_VERSION {
             return Err(PluginError::unsupported(format!(
                 "unsupported apiVersion {}",
@@ -207,6 +377,9 @@ impl PluginWorker for WorkerdRoot {
     }
 
     async fn open(&self, invocation: Invocation, bindings: Bindings) -> AbiResult<Entrypoints> {
+        if let Backend::Native(client) = &self.backend {
+            return self.open_native(client, invocation, bindings).await;
+        }
         // The host's `EVENTS` publisher becomes an events-only grant token the
         // adapter isolate exchanges on `/events/publish`; it is revoked when
         // the last exported entrypoint of this `open` drops.
@@ -291,6 +464,11 @@ impl PluginWorker for WorkerdRoot {
     }
 
     async fn database_migrations(&self, binding: &str) -> AbiResult<Vec<PluginMigration>> {
+        if let Backend::Native(client) = &self.backend {
+            let migrations = client.database_migrations(binding).await?;
+            require_plugin_migration_registration(&migrations)?;
+            return Ok(migrations);
+        }
         let v = self
             .http
             .json_post(
@@ -308,6 +486,22 @@ impl PluginWorker for WorkerdRoot {
             .map_err(|err| PluginError::internal(err.to_string()))?;
         require_plugin_migration_registration(&parsed)?;
         Ok(parsed)
+    }
+
+    /// Fans `shutdown` out to the native guest (when present) and to the
+    /// adapter isolate's `shutdown` hook; both run even if one fails.
+    async fn shutdown(&self) -> AbiResult<()> {
+        let native = match &self.backend {
+            Backend::Native(client) => client.shutdown().await,
+            Backend::Author => Ok(()),
+        };
+        let bridge = self
+            .http
+            .json_post("/shutdown", &serde_json::json!({}))
+            .await
+            .map(|_| ())
+            .map_err(map_http);
+        native.and(bridge)
     }
 }
 

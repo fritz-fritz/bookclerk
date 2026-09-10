@@ -38,6 +38,7 @@ ureq.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+bookclerk-plugin-abi = { workspace = true, features = ["host"] }
 tempfile.workspace = true
 
 [lints]

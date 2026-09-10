@@ -42,6 +42,7 @@ export {
   jobOutcomeFor,
   wrapPluginFromBinding,
   wrapPluginFromNative,
+  allowedEntrypointFamilies,
   schemaMigrationOp,
   dataMigrationOp,
   requirePluginMigrationRegistration,
