@@ -25,6 +25,10 @@ enum BytesRepr {
 }
 
 /// Decodes either accepted representation.
+///
+/// # Errors
+///
+/// Returns when base64 text is not valid.
 fn decode(repr: BytesRepr) -> Result<Vec<u8>, String> {
     match repr {
         BytesRepr::Array(bytes) => Ok(bytes),
@@ -115,6 +119,7 @@ pub fn decode_text(text: &str) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
 
