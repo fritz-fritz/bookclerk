@@ -5,12 +5,11 @@
 use async_trait::async_trait;
 use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::{
-    serve, Brand, CatalogDetailParams, CatalogHit, ConfigOption, ConfigOptionValue,
-    ContentSource as ContentSourceRole, ContentSourceContext, ExpandCandidatesParams,
-    FetchTitleParams, HealthOk, ListDealsParams, LoginParams, LoginResult, PlainFetch,
-    PluginDescribe, PluginError, PluginRoot, PortalAuthMode, PurchaseHint, PurchaseHintParams,
-    ScalarLimits, ScanParams, ScanSummary, SearchCatalogParams, FEATURE_SCALAR_LIMITS,
-    PRODUCT_API_VERSION,
+    serve, Bindings, Brand, CatalogDetailParams, CatalogHit, ConfigOption, ConfigOptionValue,
+    ContentSource as ContentSourceRole, Entrypoints, ExpandCandidatesParams, FetchTitleParams,
+    HealthOk, Invocation, ListDealsParams, LoginParams, LoginResult, PlainFetch, PluginDescribe,
+    PluginError, PluginWorker, PortalAuthMode, PurchaseHint, PurchaseHintParams, ScalarLimits,
+    ScanParams, ScanSummary, SearchCatalogParams, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_source::abi::{expand_seed_from_params, DEFAULT_LIST_DEALS_LIMIT};
 use bookclerk_source::{CatalogSearchOpts, ContentSource, PurchaseHintOpts};
@@ -20,7 +19,7 @@ use serde_json::Value;
 struct LibroRoot;
 
 #[async_trait(?Send)]
-impl PluginRoot for LibroRoot {
+impl PluginWorker for LibroRoot {
     async fn describe(&self) -> Result<PluginDescribe, PluginError> {
         Ok(PluginDescribe {
             api_version: PRODUCT_API_VERSION,
@@ -59,11 +58,15 @@ impl PluginRoot for LibroRoot {
         })
     }
 
-    async fn content_source(
+    async fn open(
         &self,
-        _context: ContentSourceContext,
-    ) -> Result<Box<dyn ContentSourceRole>, PluginError> {
-        Ok(Box::new(LibroContentSource))
+        _invocation: Invocation,
+        _bindings: Bindings,
+    ) -> Result<Entrypoints, PluginError> {
+        Ok(Entrypoints {
+            storefront: Some(Box::new(LibroContentSource)),
+            ..Entrypoints::default()
+        })
     }
 }
 

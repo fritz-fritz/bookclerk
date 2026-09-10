@@ -17,19 +17,19 @@ use bookclerk_plugin_abi::HostAdapterDatabaseSession;
 use bookclerk_plugin_sdk::database_adapter::plugin_error_from_engine;
 use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::{
-    serve, AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot,
-    ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
+    serve, AdapterDatabaseSession, BindingValues, Bindings, Database, Entrypoints, Invocation,
+    PluginDescribe, PluginWorker, ScalarLimits, FEATURE_SCALAR_LIMITS, PRODUCT_API_VERSION,
 };
 use bookclerk_plugin_sdk::{
     AdapterExecuteRequest, DbBootstrap, DbCapabilities, DbIdentityHighWater, ExecuteReply,
     PluginError,
 };
 
-async fn connect_from_context(ctx: &DatabaseContext) -> Result<(), PluginError> {
-    let params = connect_params_from_bindings(ctx)?;
+async fn connect_from_bindings(values: &BindingValues) -> Result<(), PluginError> {
+    let params = connect_params_from_bindings(values)?;
     let DbConnectParams::Postgres { url, .. } = params else {
         return Err(PluginError::invalid_params(
-            "postgres guest received non-postgres database context",
+            "postgres guest received non-postgres database bindings",
         ));
     };
     let db = bookclerk_plugin_database_postgres::open(&url)
@@ -39,10 +39,10 @@ async fn connect_from_context(ctx: &DatabaseContext) -> Result<(), PluginError> 
     Ok(())
 }
 
-/// Opens a dedicated per-binding connection when the context targets a named
+/// Opens a dedicated per-binding connection when the bindings target a named
 /// plugin database binding.
-async fn binding_from_context(
-    ctx: &DatabaseContext,
+async fn binding_from_values(
+    values: &BindingValues,
 ) -> Result<Option<sea_orm::DatabaseConnection>, PluginError> {
     let Ok(DbConnectParams::Postgres {
         url,
@@ -50,7 +50,7 @@ async fn binding_from_context(
         database,
         provision,
         ..
-    }) = connect_params_from_bindings(ctx)
+    }) = connect_params_from_bindings(values)
     else {
         return Ok(None);
     };
@@ -72,7 +72,7 @@ async fn binding_from_context(
 struct PostgresRoot;
 
 #[async_trait(?Send)]
-impl PluginRoot for PostgresRoot {
+impl PluginWorker for PostgresRoot {
     async fn describe(&self) -> Result<PluginDescribe, PluginError> {
         Ok(PluginDescribe {
             api_version: PRODUCT_API_VERSION,
@@ -86,14 +86,24 @@ impl PluginRoot for PostgresRoot {
         })
     }
 
-    async fn database(&self, context: DatabaseContext) -> Result<Box<dyn Database>, PluginError> {
-        if let Some(conn) = binding_from_context(&context).await? {
-            return Ok(Box::new(PostgresDatabase {
+    async fn open(
+        &self,
+        _invocation: Invocation,
+        bindings: Bindings,
+    ) -> Result<Entrypoints, PluginError> {
+        let values = bindings.values();
+        let database: Box<dyn Database> = if let Some(conn) = binding_from_values(&values).await? {
+            Box::new(PostgresDatabase {
                 dedicated: Some(conn),
-            }));
-        }
-        connect_from_context(&context).await?;
-        Ok(Box::new(PostgresDatabase { dedicated: None }))
+            })
+        } else {
+            connect_from_bindings(&values).await?;
+            Box::new(PostgresDatabase { dedicated: None })
+        };
+        Ok(Entrypoints {
+            database_adapter: Some(database),
+            ..Entrypoints::default()
+        })
     }
 }
 
