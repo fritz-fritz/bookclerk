@@ -900,9 +900,7 @@ mod tests {
         let mut message = message::Builder::new_default();
         {
             let params = message.init_root::<login_params::Builder<'_>>();
-            params
-                .init_params()
-                .set_plugin_data_dir("x".repeat(40_000));
+            params.init_params().set_plugin_data_dir("x".repeat(40_000));
         }
         assert!(
             message.get_segments_for_output().len() > 1,
