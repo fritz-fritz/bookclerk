@@ -901,51 +901,62 @@ class _Ctx:
 
 
 def _ts_write_expr(ctx: _Ctx, ty: dict[str, Any], off: int, value: str, indent: str) -> list[str]:
+    # Absent (`undefined` / `null`) values encode as the Cap'n Proto default of
+    # the field type - what a reader sees for a missing pointer - so a partially
+    # populated author object never poisons the message.
     kind = ty["kind"]
     if kind == "void":
         return []
     if kind in _DATA_ACCESSORS:
         setter = _DATA_ACCESSORS[kind][0]
         if kind == "uint64":
-            return [f"{indent}s.{setter}({off}, BigInt({value}));"]
-        return [f"{indent}s.{setter}({off}, {value});"]
+            return [f"{indent}s.{setter}({off}, BigInt({value} ?? 0));"]
+        if kind == "bool":
+            return [f"{indent}s.{setter}({off}, {value} ?? false);"]
+        return [f"{indent}s.{setter}({off}, {value} ?? 0);"]
     if kind == "text":
-        return [f"{indent}s.setText({off}, {value});"]
+        return [f'{indent}s.setText({off}, {value} ?? "");']
     if kind == "data":
-        return [f"{indent}s.setData({off}, {value});"]
+        return [f"{indent}s.setData({off}, {value} ?? EMPTY_BYTES);"]
     if kind == "enum":
-        return [f'{indent}s.setUint16({off}, ord(A.{ctx.enum_table(ty["name"])}, {value}, "{ty["name"]}"));']
+        table = f"A.{ctx.enum_table(ty['name'])}"
+        return [f'{indent}s.setUint16({off}, ord({table}, {value} ?? {table}[0]!, "{ty["name"]}"));']
     if kind == "struct":
         dw, pc = ctx.struct_dims(ty["name"])
-        return [f"{indent}{ctx.codec_name_ts(ty['name'])}.write(s.initStruct({off}, {dw}, {pc}), {value}, caps);"]
+        return [
+            f"{indent}if ({value} != null) {{",
+            f"{indent}  {ctx.codec_name_ts(ty['name'])}.write(s.initStruct({off}, {dw}, {pc}), {value}, caps);",
+            f"{indent}}}",
+        ]
     if kind == "interface":
         return [f"{indent}s.setCap({off}, caps.exportCap({value}));"]
     if kind == "list":
         el = ty["element"]
         ek = el["kind"]
         if ek == "text":
-            return [f"{indent}s.setTextList({off}, {value});"]
+            return [f"{indent}s.setTextList({off}, {value} ?? []);"]
         if ek == "data":
-            return [f"{indent}s.setDataList({off}, {value});"]
+            return [f"{indent}s.setDataList({off}, {value} ?? []);"]
         if ek == "bool":
-            return [f"{indent}s.setBoolList({off}, {value});"]
+            return [f"{indent}s.setBoolList({off}, {value} ?? []);"]
         if ek == "uint16":
-            return [f"{indent}s.setUint16List({off}, {value});"]
+            return [f"{indent}s.setUint16List({off}, {value} ?? []);"]
         if ek == "uint32":
-            return [f"{indent}s.setUint32List({off}, {value});"]
+            return [f"{indent}s.setUint32List({off}, {value} ?? []);"]
         if ek == "enum":
             table = ctx.enum_table(el["name"])
             return [
-                f'{indent}s.setUint16List({off}, {value}.map((v) => ord(A.{table}, v, "{el["name"]}")));'
+                f'{indent}s.setUint16List({off}, ({value} ?? []).map((v) => ord(A.{table}, v, "{el["name"]}")));'
             ]
         if ek == "struct":
             dw, pc = ctx.struct_dims(el["name"])
             codec = ctx.codec_name_ts(el["name"])
             return [
                 f"{indent}{{",
-                f"{indent}  const items = s.initStructList({off}, {value}.length, {dw}, {pc});",
+                f"{indent}  const list = {value} ?? [];",
+                f"{indent}  const items = s.initStructList({off}, list.length, {dw}, {pc});",
                 f"{indent}  for (let i = 0; i < items.length; i++) {{",
-                f"{indent}    {codec}.write(items[i]!, {value}[i]!, caps);",
+                f"{indent}    {codec}.write(items[i]!, list[i]!, caps);",
                 f"{indent}  }}",
                 f"{indent}}}",
             ]
@@ -1262,6 +1273,9 @@ def emit_ts_wire(capnp_text: str, layout: Layout) -> str:
         "function unknownUnion(struct: string, member: string | number): Error {",
         "  return new Error(`unknown ${struct} union member: ${String(member)}`);",
         "}",
+        "",
+        "/** Default for absent `Data` fields (Cap'n Proto empty blob). */",
+        "const EMPTY_BYTES = new Uint8Array(0);",
         "",
     ]
     names = _struct_names_for_codecs(ctx)
