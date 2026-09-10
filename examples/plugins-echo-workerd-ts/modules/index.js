@@ -1,5 +1,5 @@
 /**
- * Echo workerd guest module (api_version = 2).
+ * Echo workerd guest module (api_version = 3).
  *
  * Extends package `BookclerkPlugin` from `@bookclerk/plugin-sdk/workerd`
  * (injected by bookclerk-workerd). Keep in sync with `src/index.ts`.

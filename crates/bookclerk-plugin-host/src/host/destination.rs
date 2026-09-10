@@ -1,6 +1,6 @@
 //! [`StorageBackend`] adapter over an external output plugin process.
 //!
-//! Destinations speak Cap'n Proto `api_version = 2` only. The host never grants
+//! Destinations speak Cap'n Proto `api_version = 3` only. The host never grants
 //! the guest filesystem access to acquire scratch or the output library.
 //! Credentials are injected as spawn env when the `secrets` binding is granted.
 
@@ -69,7 +69,7 @@ impl DestinationRegistry {
 /// # Errors
 ///
 /// Returns an error when discovery fails. Individual guests that are not
-/// `api_version = 2` or fail to start are skipped with a warning.
+/// `api_version = 3` or fail to start are skipped with a warning.
 pub async fn load_external_destinations(
     config: &Config,
     db: Option<&DatabaseConnection>,
