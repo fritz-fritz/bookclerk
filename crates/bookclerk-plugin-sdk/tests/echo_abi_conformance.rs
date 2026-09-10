@@ -27,8 +27,9 @@ fn core_methods_present() {
         methods::shutdown::NAME,
         methods::health::NAME,
         methods::diagnose::NAME,
-        methods::on_event::NAME,
-        methods::cli_invoke::NAME,
+        methods::event::NAME,
+        methods::publish::NAME,
+        methods::invoke::NAME,
     ] {
         assert!(
             METHOD_NAMES.contains(&name),

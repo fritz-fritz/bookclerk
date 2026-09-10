@@ -2976,6 +2976,7 @@ macro_rules! reply_result {
 }
 
 /// Cap'n Proto client for [`ContentSource`].
+#[derive(Clone)]
 pub struct ContentSourceClient {
     client: content_source_capnp::Client,
 }
@@ -3074,6 +3075,7 @@ impl ContentSource for ContentSourceClient {
 }
 
 /// Cap'n Proto client for [`RemoteLibrary`].
+#[derive(Clone)]
 pub struct RemoteLibraryClient {
     client: remote_library_capnp::Client,
 }
@@ -3125,6 +3127,7 @@ impl RemoteLibrary for RemoteLibraryClient {
 }
 
 /// Cap'n Proto client for [`Oidc`].
+#[derive(Clone)]
 pub struct OidcClient {
     client: oidc_capnp::Client,
 }
@@ -3157,6 +3160,7 @@ impl Oidc for OidcClient {
 }
 
 /// Cap'n Proto client for [`PluginCli`].
+#[derive(Clone)]
 pub struct PluginCliClient {
     client: plugin_cli_capnp::Client,
 }
@@ -3177,6 +3181,7 @@ impl PluginCli for PluginCliClient {
 }
 
 /// Cap'n Proto client for [`EventConsumer`] (host → guest delivery).
+#[derive(Clone)]
 pub struct EventConsumerClient {
     client: event_consumer_capnp::Client,
 }
@@ -3238,6 +3243,7 @@ impl EventConsumer for EventConsumerClient {
 }
 
 /// Cap'n Proto client for [`JobRunner`] (host → guest job dispatch).
+#[derive(Clone)]
 pub struct JobRunnerClient {
     client: job_runner_capnp::Client,
     window: u32,
@@ -3280,6 +3286,7 @@ impl JobRunnerClient {
 }
 
 /// Guest-side client for the host `EVENTS` binding ([`EventPublisher`]).
+#[derive(Clone)]
 pub struct EventPublisherClient {
     client: event_publisher_capnp::Client,
 }
@@ -3354,6 +3361,7 @@ fn read_event_result(r: event_result_capnp::Reader<'_>) -> Result<EventResult> {
 }
 
 /// Cap'n Proto client for [`Database`].
+#[derive(Clone)]
 pub struct DatabaseClient {
     client: database_capnp::Client,
 }
@@ -4131,34 +4139,32 @@ mod tests {
     }
 
     fn event_result_for(event: DomainEvent) -> EventResult {
-        {
-            match event.event_type.as_str() {
-                "test_retry" => EventResult::Retry {
-                    retry_at_unix_ms: 9,
-                    reason: "retry".into(),
-                },
-                "test_reject" => EventResult::Reject {
-                    reason: "reject".into(),
-                },
-                "test_dead_letter" => EventResult::DeadLetter {
-                    reason: "dead".into(),
-                },
-                "test_suspend" => EventResult::Suspended {
-                    checkpoint_json: r#"{"n":1}"#.into(),
-                    checkpoint_schema_version: 1,
-                    wake_at_unix_ms: 3,
-                    wake_on_event_type: String::new(),
-                    wake_on_filter_json: String::new(),
-                },
-                "test_suspend_huge" => EventResult::Suspended {
-                    checkpoint_json: "x".repeat(MAX_CHECKPOINT_BYTES as usize + 1),
-                    checkpoint_schema_version: 1,
-                    wake_at_unix_ms: 3,
-                    wake_on_event_type: String::new(),
-                    wake_on_filter_json: String::new(),
-                },
-                _ => EventResult::Ack,
-            }
+        match event.event_type.as_str() {
+            "test_retry" => EventResult::Retry {
+                retry_at_unix_ms: 9,
+                reason: "retry".into(),
+            },
+            "test_reject" => EventResult::Reject {
+                reason: "reject".into(),
+            },
+            "test_dead_letter" => EventResult::DeadLetter {
+                reason: "dead".into(),
+            },
+            "test_suspend" => EventResult::Suspended {
+                checkpoint_json: r#"{"n":1}"#.into(),
+                checkpoint_schema_version: 1,
+                wake_at_unix_ms: 3,
+                wake_on_event_type: String::new(),
+                wake_on_filter_json: String::new(),
+            },
+            "test_suspend_huge" => EventResult::Suspended {
+                checkpoint_json: "x".repeat(MAX_CHECKPOINT_BYTES as usize + 1),
+                checkpoint_schema_version: 1,
+                wake_at_unix_ms: 3,
+                wake_on_event_type: String::new(),
+                wake_on_filter_json: String::new(),
+            },
+            _ => EventResult::Ack,
         }
     }
 

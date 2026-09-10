@@ -28,7 +28,7 @@
 //! src/lib.rs                  ABI-typed `dispatch_json`
 //! ```
 
-pub use crate::PluginRoot;
+pub use crate::PluginWorker;
 
 /// Suggested main module filename for JS+Wasm workerd guests.
 ///
