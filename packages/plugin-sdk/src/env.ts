@@ -39,20 +39,53 @@ export interface EventPublisherBinding {
  * Same surface as the `storage` entrypoint the host calls on storage plugins.
  */
 export interface StorageBinding {
+  /**
+   * Object metadata without the body.
+   *
+   * @param key - Object key.
+   * @returns Metadata, or `null` when the key does not exist.
+   */
   head(key: string): Promise<{ key: string; size: number; contentType?: string; etag?: string } | null>;
+  /**
+   * One page of keys under `prefix`.
+   *
+   * @param options - Prefix, continuation cursor, and page size.
+   * @returns Objects plus the cursor for the next page, when any.
+   */
   list(options: { prefix?: string; cursor?: string; limit?: number }): Promise<{
     objects: Array<{ key: string; size: number }>;
     nextCursor?: string;
   }>;
+  /**
+   * Stream an object (optionally a byte range).
+   *
+   * @param key - Object key.
+   * @param options - Optional byte range.
+   * @returns Metadata and the body stream.
+   */
   get(
     key: string,
     options?: { range?: { offset: number; length?: number } },
   ): Promise<{ meta: { key: string; size: number }; body: ReadableStream<Uint8Array> }>;
+  /**
+   * Write an object from a stream.
+   *
+   * @param key - Object key.
+   * @param body - Body bytes.
+   * @param options - Content type and length hints.
+   * @returns Key and bytes written.
+   */
   put(
     key: string,
     body: ReadableStream<Uint8Array>,
     options?: { contentType?: string; contentLength?: number },
   ): Promise<{ key: string; bytesWritten: number }>;
+  /**
+   * Remove an object; missing keys are not an error.
+   *
+   * @param key - Object key.
+   * @returns Resolves when the delete is durable.
+   */
   delete(key: string): Promise<void>;
 }
 

@@ -1764,7 +1764,10 @@ export interface AdapterEnv {
   /** Manifest `PluginDescribe` projection (JSON binding). */
   PLUGIN_DESCRIBE?: string | WirePluginDescribe;
   /** Native jail / workerd backend handle (native-behind-workerd). */
-  PLUGIN_BACKEND?: { fetch: typeof fetch };
+  PLUGIN_BACKEND?: {
+    /** Broker HTTP surface reached through the service binding. */
+    fetch: typeof fetch;
+  };
   /** Per-invocation grant reverse channel. */
   GRANTED?: GrantedFetcher;
   /** Isolate-to-host bridge bearer. */
