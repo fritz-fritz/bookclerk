@@ -10,10 +10,13 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use std::sync::{Arc, Mutex};
+
 use bookclerk_plugin_abi::{
     connect_plugin, Destination, DestinationClient, DomainEvent, EventConsumer,
-    EventConsumerClient, EventResult, HostBindings, Invocation, PluginClient, WriteOptions,
-    MAX_EVENT_PAYLOAD_BYTES, PRODUCT_API_VERSION,
+    EventConsumerClient, EventPublisher, EventResult, HostBindings, Invocation, PluginClient,
+    PluginError, PluginEvent, PublishOk, WriteOptions, MAX_EVENT_PAYLOAD_BYTES,
+    PRODUCT_API_VERSION,
 };
 use bookclerk_workerd::pin::binary_name;
 use tokio::io::AsyncReadExt;
@@ -325,6 +328,112 @@ async fn event_result_vectors(client: &PluginClient) {
     );
 }
 
+/// Host-side `EVENTS` publisher for the contract: records what the guest
+/// published and fails closed on anything but the one granted producer.
+#[derive(Default)]
+struct RecordingPublisher {
+    published: Mutex<Vec<PluginEvent>>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl EventPublisher for RecordingPublisher {
+    async fn publish(&self, event: PluginEvent) -> bookclerk_plugin_abi::Result<PublishOk> {
+        if event.event_type != "fixture_pinged" {
+            return Err(PluginError::forbidden(format!(
+                "`{}` is not a granted producer",
+                event.event_type
+            )));
+        }
+        let mut published = self.published.lock().expect("recorder lock");
+        let n = published.len();
+        published.push(event);
+        Ok(PublishOk {
+            event_id: format!("evt-{n}"),
+            duplicate: n > 0,
+        })
+    }
+}
+
+/// `EVENTS` reaches the author only through the adapter's granted channel:
+/// the publish lands on the host publisher with the guest's fields intact,
+/// ungranted types fail closed, and an `open` without `Bindings.events`
+/// leaves the author without the binding.
+async fn events_binding_vectors(client: &PluginClient) {
+    let recorder = Arc::new(RecordingPublisher::default());
+    let publisher: Arc<dyn EventPublisher> = Arc::clone(&recorder) as Arc<dyn EventPublisher>;
+    let opened = client
+        .open(
+            &Invocation {
+                id: "events-granted".into(),
+                account_id: "acct".into(),
+                correlation_id: "corr-1".into(),
+                ..Default::default()
+            },
+            HostBindings {
+                events: Some(publisher),
+                ..HostBindings::default()
+            },
+        )
+        .await
+        .expect("open with EVENTS");
+    let consumer = opened.event_consumer.expect("event consumer");
+    let mut trigger = sample_event("test_publish");
+    trigger.event_id = "trigger-1".into();
+    trigger.payload = br#"{"n":7}"#.to_vec();
+    trigger.correlation_id = "corr-from-event".into();
+    let result = deliver(&consumer, trigger).await.expect("deliver");
+    let EventResult::Reject { reason } = result else {
+        panic!("fixture reports the publish outcome as a reject reason: {result:?}");
+    };
+    let ok: PublishOk = serde_json::from_str(&reason).unwrap_or_else(|err| {
+        panic!("publish outcome must be a PublishOk JSON, got `{reason}`: {err}")
+    });
+    assert_eq!(ok.event_id, "evt-0");
+    assert!(!ok.duplicate);
+    {
+        let published = recorder.published.lock().expect("recorder lock");
+        assert_eq!(published.len(), 1, "one publish reached the host");
+        let event = &published[0];
+        assert_eq!(event.event_type, "fixture_pinged");
+        assert_eq!(event.deduplication_key, "pinged:trigger-1");
+        assert_eq!(event.correlation_id, "corr-from-event");
+        assert_eq!(event.schema_version, 1);
+        let payload: serde_json::Value = serde_json::from_slice(&event.payload).expect("json");
+        assert_eq!(payload, serde_json::json!({ "from": "trigger-1", "n": 7 }));
+    }
+    let again = deliver(&consumer, sample_event("test_publish"))
+        .await
+        .expect("deliver");
+    let EventResult::Reject { reason } = again else {
+        panic!("unexpected {again:?}");
+    };
+    let ok: PublishOk = serde_json::from_str(&reason).expect("PublishOk");
+    assert!(ok.duplicate, "host duplicate flag reaches the author");
+
+    let forbidden = deliver(&consumer, sample_event("test_publish_forbidden"))
+        .await
+        .expect("deliver");
+    assert_eq!(
+        forbidden,
+        EventResult::Reject {
+            reason: "publish failed: forbidden".into(),
+        },
+        "ungranted producer fails closed with the host's wire code"
+    );
+    assert_eq!(recorder.published.lock().expect("recorder lock").len(), 2);
+
+    let plain = open_event_consumer(client).await;
+    assert_eq!(
+        deliver(&plain, sample_event("test_publish"))
+            .await
+            .expect("deliver"),
+        EventResult::Reject {
+            reason: "no EVENTS binding".into(),
+        },
+        "no Bindings.events → no EVENTS on the author env"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn workerd_author_event_vectors() {
     let Some(workerd) = find_workerd() else {
@@ -358,6 +467,7 @@ async fn workerd_author_event_vectors() {
             assert_eq!(desc.api_version, PRODUCT_API_VERSION);
             assert_eq!(desc.id, "events_fixture");
             event_result_vectors(&client).await;
+            events_binding_vectors(&client).await;
             let _ = child.kill().await;
         })
         .await;
