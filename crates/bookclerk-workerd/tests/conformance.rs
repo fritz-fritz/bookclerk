@@ -13,12 +13,15 @@ use std::time::Duration;
 use std::sync::{Arc, Mutex};
 
 use bookclerk_plugin_abi::{
-    connect_plugin, AdapterExecuteRequest, Database, DbCapabilities, DbPlanStatementKind,
+    connect_plugin, AdapterExecuteRequest, ByteRange, Cancellation, CatalogDetailParams, CliArg,
+    CliInvokeParams, ContentSource, CopyResult, Database, DbCapabilities, DbPlanStatementKind,
     DbResultSelection, DbValue, Destination, DestinationClient, DomainEvent, Entrypoint,
     EventConsumer, EventConsumerClient, EventPublisher, EventResult, ExecuteRequest,
-    GuestReceiptPersist, HostBindings, Invocation, PluginClient, PluginError, PluginEvent,
-    PublishOk, ResolvedStatement, StatementResult, TypedDbStatement, WriteOptions,
-    MAX_EVENT_PAYLOAD_BYTES, PRODUCT_API_VERSION,
+    GuestReceiptPersist, HostBindings, Invocation, JobInvocation, JobOutcome, ListOptions,
+    ListPage, LoginParams, ObjectMetadata, PluginCli, PluginClient, PluginError, PluginErrorCode,
+    PluginEvent, ProgressSink, PublishOk, PurchaseHintParams, PutResult, ReadResult,
+    ResolvedStatement, SearchCatalogParams, Source, StatementResult, TypedDbStatement,
+    WriteOptions, MAX_EVENT_PAYLOAD_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_workerd::pin::binary_name;
 use tokio::io::AsyncReadExt;
@@ -821,4 +824,545 @@ mode = "deny"
             let _ = child.kill().await;
         })
         .await;
+}
+
+/// Spawns the workerd author launcher over `fixture`, connects the Cap'n
+/// control plane, and pins `describe()` to the manifest id. Call inside a
+/// `LocalSet`.
+async fn spawn_author(
+    workerd: &Path,
+    fixture: &Path,
+    tmp: &Path,
+    expect_id: &str,
+) -> (tokio::process::Child, PluginClient) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bookclerk-workerd"))
+        .env("BOOKCLERK_PLUGIN_ROOT", fixture)
+        .env("BOOKCLERK_WORKERD_BIN", workerd)
+        .env("TMPDIR", tmp)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn bookclerk-workerd");
+    let stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let (client, rpc) = connect_plugin(stdout, stdin, 64 * 1024);
+    tokio::task::spawn_local(rpc);
+    let desc = tokio::time::timeout(Duration::from_secs(90), client.describe())
+        .await
+        .expect("describe timed out")
+        .expect("describe");
+    assert_eq!(desc.api_version, PRODUCT_API_VERSION);
+    assert_eq!(desc.id, expect_id);
+    (child, client)
+}
+
+fn require_workerd() -> PathBuf {
+    find_workerd().unwrap_or_else(|| {
+        panic!(
+            "pinned workerd binary missing; run `cargo ensure-workerd`. Do not set BOOKCLERK_SKIP_WORKERD."
+        )
+    })
+}
+
+/// Every `ContentSource` / `PluginCli` method travels as one typed `/invoke`
+/// round trip: partial author objects land as defaults, `null` optional
+/// results land as `None`, and thrown `PluginError`s keep their wire code.
+#[tokio::test(flavor = "current_thread")]
+async fn workerd_author_storefront_vectors() {
+    let workerd = require_workerd();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/storefront");
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (mut child, client) =
+                spawn_author(&workerd, &fixture, tmp.path(), "storefront_fixture").await;
+            let opened = client
+                .open(
+                    &Invocation {
+                        id: "storefront".into(),
+                        ..Default::default()
+                    },
+                    HostBindings::default(),
+                )
+                .await
+                .expect("open");
+            assert!(opened.storage.is_none(), "storage is not declared");
+            assert!(opened.event_consumer.is_none(), "no event consumer");
+            assert!(opened.job_runner.is_none(), "no job runner");
+            assert!(opened.database_adapter.is_none(), "no database adapter");
+            assert!(opened.remote_library.is_none(), "no remote library");
+            assert!(opened.oidc.is_none(), "no oidc");
+            let storefront = opened.storefront.expect("storefront entrypoint");
+            let cli = opened.cli.expect("cli entrypoint");
+
+            let health = storefront.health().await.expect("health");
+            assert!(health.ok);
+            assert!(
+                health.detail.starts_with("env="),
+                "author env reaches the named entrypoint: {}",
+                health.detail
+            );
+            assert_eq!(
+                storefront.diagnose().await.expect("diagnose"),
+                vec!["line one".to_string(), "line two".to_string()]
+            );
+
+            let accounts = storefront.list_accounts().await.expect("listAccounts");
+            assert_eq!(accounts.len(), 2);
+            assert_eq!(accounts[0].account_id, "acct-1");
+            assert_eq!(accounts[0].label.as_deref(), Some("One"));
+            assert!(accounts[0].scan_enabled);
+            assert_eq!(accounts[1].marketplace, "uk");
+            assert_eq!(accounts[1].label, None, "absent optional text is None");
+            assert!(!accounts[1].scan_enabled, "absent bool is the default");
+
+            let hits = storefront
+                .search_catalog(SearchCatalogParams {
+                    query: "dune".into(),
+                    limit: 5,
+                    page: 2,
+                    ..Default::default()
+                })
+                .await
+                .expect("searchCatalog");
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].product_id, "hit:dune:5:2");
+            assert_eq!(hits[0].title, "dune");
+            assert_eq!(hits[0].authors.as_deref(), Some("A. Author"));
+            assert_eq!(hits[0].narrators, None);
+
+            assert_eq!(
+                storefront
+                    .purchase_hint(PurchaseHintParams::default())
+                    .await
+                    .expect("purchaseHint"),
+                None,
+                "author `null` is `found = false`"
+            );
+            assert_eq!(
+                storefront
+                    .catalog_detail(CatalogDetailParams {
+                        product_id: "missing".into(),
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("catalogDetail missing"),
+                None
+            );
+            let detail = storefront
+                .catalog_detail(CatalogDetailParams {
+                    product_id: "p1".into(),
+                    ..Default::default()
+                })
+                .await
+                .expect("catalogDetail")
+                .expect("found");
+            assert_eq!(detail.product_id, "p1");
+            assert_eq!(detail.title, "Detail p1");
+
+            let err = storefront
+                .login(LoginParams {
+                    marketplace: "us".into(),
+                    ..Default::default()
+                })
+                .await
+                .expect_err("login fails");
+            assert_eq!(err.code, PluginErrorCode::Unauthorized);
+            assert_eq!(err.message, "no credentials for us");
+
+            let schema = cli.describe().await.expect("cli describe");
+            assert_eq!(schema.commands.len(), 1);
+            assert_eq!(schema.commands[0].name, "echo");
+            assert_eq!(
+                schema.commands[0].about.as_deref(),
+                Some("Echo the arguments")
+            );
+            let out = cli
+                .invoke(CliInvokeParams {
+                    command: "echo".into(),
+                    args: vec![
+                        CliArg {
+                            name: "a".into(),
+                            value: "1".into(),
+                        },
+                        CliArg {
+                            name: "b".into(),
+                            value: "2".into(),
+                        },
+                    ],
+                })
+                .await
+                .expect("cli invoke");
+            assert_eq!(out.exit_code, 3);
+            assert_eq!(out.stdout, "echo:a=1;b=2");
+            assert_eq!(out.stderr, "");
+            let _ = child.kill().await;
+        })
+        .await;
+}
+
+/// Host-side capabilities the job test grants to the author.
+#[derive(Default)]
+struct MemoryObjects {
+    objects: Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl Source for MemoryObjects {
+    async fn open(&self, key: &str) -> bookclerk_plugin_abi::Result<ReadResult> {
+        let bytes = self
+            .objects
+            .lock()
+            .expect("objects")
+            .get(key)
+            .cloned()
+            .ok_or_else(|| PluginError::not_found(format!("no object {key}")))?;
+        Ok(ReadResult {
+            meta: ObjectMetadata {
+                key: key.into(),
+                size: bytes.len() as u64,
+                content_type: Some("text/plain".into()),
+                ..ObjectMetadata::default()
+            },
+            body: Box::pin(std::io::Cursor::new(bytes)),
+        })
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl Destination for MemoryObjects {
+    async fn head(&self, key: &str) -> bookclerk_plugin_abi::Result<Option<ObjectMetadata>> {
+        Ok(self
+            .objects
+            .lock()
+            .expect("objects")
+            .get(key)
+            .map(|bytes| ObjectMetadata {
+                key: key.into(),
+                size: bytes.len() as u64,
+                ..ObjectMetadata::default()
+            }))
+    }
+
+    async fn list(&self, _options: ListOptions) -> bookclerk_plugin_abi::Result<ListPage> {
+        Err(PluginError::unsupported("list"))
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        _range: Option<ByteRange>,
+    ) -> bookclerk_plugin_abi::Result<ReadResult> {
+        Source::open(self, key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        mut body: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
+        _options: WriteOptions,
+    ) -> bookclerk_plugin_abi::Result<PutResult> {
+        let mut bytes = Vec::new();
+        body.read_to_end(&mut bytes)
+            .await
+            .map_err(|err| PluginError::internal(err.to_string()))?;
+        let n = bytes.len() as u64;
+        self.objects
+            .lock()
+            .expect("objects")
+            .insert(key.into(), bytes);
+        Ok(PutResult {
+            key: key.into(),
+            bytes_written: n,
+            ..PutResult::default()
+        })
+    }
+
+    async fn copy(&self, _from: &str, _to: &str) -> bookclerk_plugin_abi::Result<CopyResult> {
+        Err(PluginError::unsupported("copy"))
+    }
+
+    async fn delete(&self, key: &str) -> bookclerk_plugin_abi::Result<()> {
+        self.objects.lock().expect("objects").remove(key);
+        Ok(())
+    }
+}
+
+/// Records `(percent, message)` reports.
+#[derive(Default)]
+struct RecordingProgress {
+    reports: Mutex<Vec<(u32, String)>>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl ProgressSink for RecordingProgress {
+    async fn report(&self, percent: f32, message: &str) -> bookclerk_plugin_abi::Result<()> {
+        self.reports
+            .lock()
+            .expect("reports")
+            .push((percent.round() as u32, message.into()));
+        Ok(())
+    }
+}
+
+/// Cancellation flag the test flips while the author is waiting.
+#[derive(Default)]
+struct FlagCancel {
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait(?Send)]
+impl Cancellation for FlagCancel {
+    async fn poll(&self) -> bookclerk_plugin_abi::Result<bool> {
+        Ok(self.cancelled.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
+
+fn job_invocation(id: &str, payload: serde_json::Value) -> JobInvocation {
+    JobInvocation {
+        payload_schema_version: 1,
+        invocation_id: id.into(),
+        command_type: "stream_copy".into(),
+        payload_json: payload.to_string(),
+        idempotency_key: format!("idem-{id}"),
+        attempt: 1,
+        correlation_id: String::new(),
+        causation_id: None,
+        deadline_unix_ms: 0,
+        checkpoint: None,
+        invocation_sequence: 0,
+        step_id: None,
+    }
+}
+
+/// `JobRunner.job` carries the four granted capabilities in the Cap'n
+/// capability table; the author reads the source, writes the destination,
+/// reports progress, and observes host cancellation through `job.signal`.
+#[tokio::test(flavor = "current_thread")]
+async fn workerd_author_job_vectors() {
+    let workerd = require_workerd();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/stream");
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (mut child, client) =
+                spawn_author(&workerd, &fixture, tmp.path(), "stream_fixture").await;
+            let opened = client
+                .open(
+                    &Invocation {
+                        id: "job-1".into(),
+                        account_id: "acct".into(),
+                        ..Default::default()
+                    },
+                    HostBindings::default(),
+                )
+                .await
+                .expect("open");
+            let runner = opened.job_runner.expect("job runner");
+
+            let input = Arc::new(MemoryObjects::default());
+            input
+                .objects
+                .lock()
+                .expect("objects")
+                .insert("in/a".into(), b"abc".to_vec());
+            let output = Arc::new(MemoryObjects::default());
+            let progress = Arc::new(RecordingProgress::default());
+            let outcome = runner
+                .job(
+                    &job_invocation(
+                        "copy-1",
+                        serde_json::json!({ "from": "in/a", "to": "out/a" }),
+                    ),
+                    Arc::clone(&input) as Arc<dyn Source>,
+                    Arc::clone(&output) as Arc<dyn Destination>,
+                    Arc::clone(&progress) as Arc<dyn ProgressSink>,
+                    Arc::new(FlagCancel::default()) as Arc<dyn Cancellation>,
+                )
+                .await
+                .expect("job");
+            assert_eq!(
+                outcome,
+                JobOutcome::Completed {
+                    message: "copied in/a -> out/a".into(),
+                    bytes_copied: 3,
+                }
+            );
+            assert_eq!(
+                output.objects.lock().expect("objects").get("out/a"),
+                Some(&b"abc".to_vec()),
+                "bytes crossed source → author → destination"
+            );
+            assert_eq!(
+                *progress.reports.lock().expect("reports"),
+                vec![
+                    (0, "opening".to_string()),
+                    (10, "copying".to_string()),
+                    (100, "done".to_string()),
+                ]
+            );
+
+            let cancel = Arc::new(FlagCancel::default());
+            let progress = Arc::new(RecordingProgress::default());
+            let flip = {
+                let cancel = Arc::clone(&cancel);
+                let progress = Arc::clone(&progress);
+                async move {
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                    while progress.reports.lock().expect("reports").is_empty() {
+                        assert!(
+                            tokio::time::Instant::now() < deadline,
+                            "author never reported it was waiting"
+                        );
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    cancel
+                        .cancelled
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            };
+            let invocation = job_invocation("cancel-1", serde_json::json!({ "awaitCancel": true }));
+            let run = runner.job(
+                &invocation,
+                Arc::clone(&input) as Arc<dyn Source>,
+                Arc::clone(&output) as Arc<dyn Destination>,
+                Arc::clone(&progress) as Arc<dyn ProgressSink>,
+                Arc::clone(&cancel) as Arc<dyn Cancellation>,
+            );
+            let (outcome, ()) = tokio::join!(run, flip);
+            assert_eq!(
+                outcome.expect("cancelled run still yields an outcome"),
+                JobOutcome::Cancelled {
+                    message: "host cancelled the copy".into(),
+                },
+                "a thrown `cancelled` error is the cancelled outcome"
+            );
+            assert_eq!(
+                progress.reports.lock().expect("reports")[0],
+                (0, "waiting for cancel".to_string())
+            );
+            let _ = child.kill().await;
+        })
+        .await;
+}
+
+/// One `EventConsumer.event` call with a batch keeps one result per event in
+/// delivery order.
+#[tokio::test(flavor = "current_thread")]
+async fn workerd_author_event_batch_vectors() {
+    let workerd = require_workerd();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/events");
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (mut child, client) =
+                spawn_author(&workerd, &fixture, tmp.path(), "events_fixture").await;
+            let consumer = open_event_consumer(&client).await;
+            let mut first = sample_event("book_acquired");
+            first.event_id = "b1".into();
+            let mut second = sample_event("test_retry");
+            second.event_id = "b2".into();
+            let mut third = sample_event("test_reject");
+            third.event_id = "b3".into();
+            let results = consumer
+                .event(vec![first, second, third])
+                .await
+                .expect("batch");
+            assert_eq!(
+                results,
+                vec![
+                    EventResult::Ack,
+                    EventResult::Retry {
+                        retry_at_unix_ms: 1,
+                        reason: "echo retry".into(),
+                    },
+                    EventResult::Reject {
+                        reason: "echo reject".into(),
+                    },
+                ]
+            );
+            assert_eq!(
+                consumer.event(Vec::new()).await.expect("empty batch"),
+                Vec::<EventResult>::new(),
+                "an empty batch yields no results"
+            );
+            let _ = child.kill().await;
+        })
+        .await;
+}
+
+/// `Database.openSession` exports an isolate-held session the launcher
+/// addresses with `X-Bookclerk-Target`; sessions survive between `/invoke`
+/// calls and `close` releases them.
+#[tokio::test(flavor = "current_thread")]
+async fn workerd_author_database_adapter_vectors() {
+    let workerd = require_workerd();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dbadapter");
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (mut child, client) =
+                spawn_author(&workerd, &fixture, tmp.path(), "dbadapter_fixture").await;
+            let (caps, result) = database_select_one(&client).await;
+            assert!(caps.atomic_batch);
+            assert_eq!(caps.max_binds, 32);
+            assert_eq!(result.columns.len(), 1);
+            assert_eq!(result.columns[0].name, "1");
+
+            let opened = client
+                .open(
+                    &Invocation {
+                        id: "database-2".into(),
+                        ..Default::default()
+                    },
+                    HostBindings::default(),
+                )
+                .await
+                .expect("open");
+            let adapter = opened.database_adapter.expect("database adapter");
+            let session = adapter.open_session().await.expect("second session");
+            assert_eq!(
+                session.bootstrap().await.expect("bootstrap").engine,
+                "memory opened=2 closed=1",
+                "sessions are isolate objects with their own lifecycle"
+            );
+            let err = session
+                .execute(select_two_request())
+                .await
+                .expect_err("memory engine rejects anything but SELECT 1");
+            assert_eq!(err.code, PluginErrorCode::Unsupported);
+            session.close().await.expect("close");
+            let after = session.execute(select_one_request()).await;
+            assert!(
+                after.is_err(),
+                "a closed session is gone from the isolate: {after:?}"
+            );
+            let _ = child.kill().await;
+        })
+        .await;
+}
+
+/// A proven `SELECT 2` the memory fixture refuses.
+fn select_two_request() -> AdapterExecuteRequest {
+    let sql = "SELECT 2";
+    let request = ExecuteRequest {
+        operation_id: "conformance-select-two".into(),
+        request_hash: String::new(),
+        statements: vec![TypedDbStatement {
+            sql: sql.into(),
+            parameters: Vec::new(),
+            kind: DbPlanStatementKind::Select,
+            max_rows: 1,
+            result_selection: DbResultSelection::Rows,
+        }],
+        deadline_unix_ms: 0,
+    };
+    AdapterExecuteRequest::new(request, GuestReceiptPersist::default())
+        .with_proofs(vec![ResolvedStatement::bound_empty(sql)])
 }
