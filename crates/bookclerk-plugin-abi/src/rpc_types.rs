@@ -7,7 +7,7 @@ use crate::generated::{
 };
 use crate::limits::{ScalarLimits, PRODUCT_API_VERSION};
 
-/// Guest identity returned by `BookclerkPlugin.describe`.
+/// Guest identity returned by `PluginWorker.describe` (the adapter merges the manifest projection over the author `describe()`).
 ///
 /// Every field is a typed Cap'n Proto field of `PluginDescribe`; there is no
 /// side-channel JSON. Storefront UI extras (`brand`, `config_options`,
