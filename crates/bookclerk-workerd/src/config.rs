@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use bookclerk_plugin_abi::{Entrypoint, PluginDescribe};
 use bookclerk_plugin_manifest::{
     manifest_needs_python, with_python_runtime_hosts, EffectiveWorkerdLimits, NetworkMode,
     PluginManifest,
@@ -43,12 +44,12 @@ export default wrapPluginFromNative();
 /// Sparse `bookclerk_plugin_sdk/__init__.py` pointing authors at the workerd guest SDK.
 const SDK_PY_INIT: &str = concat!(
     "\"\"\"Bookclerk plugin SDK (workerd isolate).\n\n",
-    "Use: from bookclerk_plugin_sdk.workerd import BookclerkPlugin, js\n\n",
+    "Use: from bookclerk_plugin_sdk.workerd import BookclerkEntrypoint, js\n\n",
     "Native guests use Rust serve() / PluginWorker instead.\n",
     "\"\"\"\n"
 );
 
-/// Package import names authors use for the workerd BookclerkPlugin.
+/// Package import names authors use for the workerd `BookclerkEntrypoint` SDK.
 pub const SDK_JS_MODULE_NAMES: &[&str] =
     &["@bookclerk/plugin-sdk/workerd", "@bookclerk/plugin-sdk"];
 /// Python package path for `from bookclerk_plugin_sdk.workerd import …`.
@@ -384,6 +385,84 @@ pub fn adapter_binding_plan(granted: bool) -> Vec<BindingSpec> {
         });
     }
     out
+}
+
+/// Adapter binding name and author-exported class name for one named
+/// entrypoint (`storefront` → `PLUGIN_STOREFRONT` / `Storefront`).
+///
+/// # Arguments
+///
+/// * `entrypoint` - Named entrypoint from the manifest.
+///
+/// # Returns
+///
+/// `(binding, class)` pair the generated config binds on the adapter isolate.
+#[must_use]
+pub fn entrypoint_binding(entrypoint: Entrypoint) -> (String, String) {
+    let wire = entrypoint.wire_name();
+    let mut binding = String::from("PLUGIN_");
+    let mut class = String::new();
+    for (i, ch) in wire.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            binding.push('_');
+        }
+        binding.push(ch.to_ascii_uppercase());
+        if i == 0 {
+            class.push(ch.to_ascii_uppercase());
+        } else {
+            class.push(ch);
+        }
+    }
+    (binding, class)
+}
+
+/// `PLUGIN_<ENTRYPOINT>` service bindings the adapter isolate receives for
+/// every named entrypoint in `manifest.entrypoints`, in manifest order.
+///
+/// # Arguments
+///
+/// * `manifest` - Parsed plugin manifest.
+///
+/// # Returns
+///
+/// `(binding, class)` pairs; empty when the plugin exports no named entrypoint.
+#[must_use]
+pub fn adapter_entrypoint_bindings(manifest: &PluginManifest) -> Vec<(String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    manifest
+        .entrypoints
+        .iter()
+        .copied()
+        .filter(|e| seen.insert(*e))
+        .map(entrypoint_binding)
+        .collect()
+}
+
+/// Manifest-derived `PluginDescribe` bound on the adapter as `PLUGIN_DESCRIBE`.
+///
+/// The adapter answers `describe` from this projection and lets the author's
+/// optional `describe()` refine presentation fields only.
+///
+/// # Arguments
+///
+/// * `manifest` - Parsed plugin manifest.
+///
+/// # Errors
+///
+/// Returns an error when the describe struct cannot be serialized as JSON.
+pub fn manifest_describe_json(manifest: &PluginManifest) -> Result<String> {
+    let describe = PluginDescribe {
+        id: manifest.id.clone(),
+        display_name: manifest.name.clone(),
+        rpc_features: vec![
+            bookclerk_plugin_abi::FEATURE_SCALAR_LIMITS.to_string(),
+            bookclerk_plugin_abi::FEATURE_STREAMS.to_string(),
+        ],
+        capabilities: manifest.capabilities(),
+        cli: manifest.cli.clone().unwrap_or_default(),
+        ..PluginDescribe::default()
+    };
+    serde_json::to_string(&describe).context("serialize PLUGIN_DESCRIBE")
 }
 
 /// Entrypoint + bindings for a generated native-behind-workerd proxy.
@@ -824,11 +903,27 @@ pub fn materialize(
         r#"(name = "PLUGIN", service = "plugin")"#.to_string()
     } else {
         format!(
-            r#"(name = "PLUGIN", service = "plugin", entrypoint = "{}")"#,
+            r#"(name = "PLUGIN", service = (name = "plugin", entrypoint = "{}"))"#,
             escape_capnp(entrypoint)
         )
     };
     let adapter_service_binding = r#"(name = "PLUGIN", service = "adapter")"#;
+    // One `PLUGIN_<ENTRYPOINT>` service binding per named entrypoint the
+    // manifest exports, targeting the author's exported class of the same
+    // name (`Storefront`, `Storage`, …), plus the manifest `PluginDescribe`
+    // projection so authors need not implement `describe()`.
+    let mut named_entrypoint_bindings = String::new();
+    for (binding, class) in adapter_entrypoint_bindings(manifest) {
+        named_entrypoint_bindings.push_str(&format!(
+            ",\n    (name = \"{}\", service = (name = \"plugin\", entrypoint = \"{}\"))",
+            escape_capnp(&binding),
+            escape_capnp(&class)
+        ));
+    }
+    named_entrypoint_bindings.push_str(&format!(
+        ",\n    (name = \"PLUGIN_DESCRIBE\", json = \"{}\")",
+        escape_capnp(&manifest_describe_json(manifest)?)
+    ));
 
     let socket_line = listen.workerd_socket_line();
     // Never force unrestricted `internet` for Python under Deny. Outbound +
@@ -855,7 +950,8 @@ pub fn materialize(
     // Bridge talks to the adapter isolate. GRANTED / BRIDGE_TOKEN are adapter-private
     // (not author `pluginWorker` bindings). wrapPlugin stripping keys is hygiene.
     let bridge_bindings = format!("{adapter_service_binding},\n    {bridge_token_binding}");
-    let mut adapter_bindings = format!("{plugin_service_binding},\n    {bridge_token_binding}");
+    let mut adapter_bindings =
+        format!("{plugin_service_binding}{named_entrypoint_bindings},\n    {bridge_token_binding}");
     let plugin_bindings = String::from(r#"(name = "HOST", service = "host")"#);
     if let Some(addr) = granted_addr {
         extra_services.push_str(&format!(
@@ -1144,7 +1240,7 @@ mod tests {
         std::fs::create_dir_all(&modules).expect("modules dir");
         std::fs::write(
             modules.join("plugin.py"),
-            "from bookclerk_plugin_sdk.workerd import BookclerkPlugin\n",
+            "from bookclerk_plugin_sdk.workerd import BookclerkEntrypoint\n",
         )
         .expect("plugin.py");
         let manifest = PluginManifest::parse(
