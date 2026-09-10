@@ -46,3 +46,14 @@ schema_versions = [1]
 type = "test_suspend"
 schema_versions = [1]
 supports_suspend = true
+
+[[events.consumers]]
+type = "test_publish"
+schema_versions = [1]
+
+[[events.consumers]]
+type = "test_publish_forbidden"
+schema_versions = [1]
+
+[[events.producers]]
+type = "fixture_pinged"

@@ -25,6 +25,37 @@ export default class EventPlugin extends BookclerkEntrypoint {
         case "test_suspend":
           msg.suspend({ checkpoint: { n: 1 }, checkpointSchemaVersion: 1, wakeAt: 1 });
           break;
+        case "test_publish": {
+          // Publish through the granted `EVENTS` binding and report the
+          // host's `PublishOk` (or the failure) as the reject reason so the
+          // contract test can assert it end to end.
+          const events = this.env.EVENTS;
+          if (!events) {
+            msg.reject("no EVENTS binding");
+            break;
+          }
+          try {
+            const ok = await events.publish({
+              eventType: "fixture_pinged",
+              deduplicationKey: `pinged:${msg.id}`,
+              correlationId: msg.correlationId,
+              payload: { from: msg.id, n: msg.json().n ?? 0 },
+            });
+            msg.reject(JSON.stringify(ok));
+          } catch (err) {
+            msg.reject(`publish failed: ${err.code ?? "unknown"}: ${err.message}`);
+          }
+          break;
+        }
+        case "test_publish_forbidden": {
+          try {
+            await this.env.EVENTS.publish({ eventType: "not_granted", payload: {} });
+            msg.reject("unexpected success");
+          } catch (err) {
+            msg.reject(`publish failed: ${err.code ?? "unknown"}`);
+          }
+          break;
+        }
         default:
           msg.ack();
       }

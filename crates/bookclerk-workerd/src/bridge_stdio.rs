@@ -82,13 +82,20 @@ impl WorkerdRoot {
 /// Bridge projection of one `PluginWorker.open`: the `Invocation` envelope
 /// plus the granted `CONFIG` / `SECRETS` bindings, carried as the `context`
 /// field / `x-bookclerk-context` header the isolate-side SDK installs on the
-/// author's `env`.
+/// author's `env`. `eventsToken` is the granted-channel bearer the adapter
+/// isolate turns into the author's `EVENTS` binding; the author never sees it.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BridgeContext {
     invocation: Invocation,
     config: ExtensibleConfig,
     secrets: ExtensibleConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    events_token: Option<String>,
+    /// Keeps the events grant alive while any exported entrypoint holds it.
+    #[serde(skip)]
+    #[allow(dead_code)]
+    events_grant: Option<Rc<RevokeGrant>>,
 }
 
 /// Job-runner bridge context: the durable job id plus the open context.
@@ -99,6 +106,28 @@ struct WorkerBridgeContext {
     invocation: Invocation,
     config: ExtensibleConfig,
     secrets: ExtensibleConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    events_token: Option<String>,
+    /// Keeps the events grant alive while the job runner holds it.
+    #[serde(skip)]
+    #[allow(dead_code)]
+    events_grant: Option<Rc<RevokeGrant>>,
+}
+
+/// Grant expiry for an `open`: the invocation deadline when it has one,
+/// otherwise effectively the process lifetime (primary opens live as long as
+/// the session).
+fn grant_expiry(deadline_unix_ms: u64) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    if deadline_unix_ms == 0 {
+        return now + std::time::Duration::from_secs(10 * 365 * 24 * 3600);
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    now + std::time::Duration::from_millis(deadline_unix_ms.saturating_sub(now_ms))
+        + std::time::Duration::from_secs(60)
 }
 
 fn map_http(err: anyhow::Error) -> PluginError {
@@ -178,10 +207,35 @@ impl PluginWorker for WorkerdRoot {
     }
 
     async fn open(&self, invocation: Invocation, bindings: Bindings) -> AbiResult<Entrypoints> {
+        // The host's `EVENTS` publisher becomes an events-only grant token the
+        // adapter isolate exchanges on `/events/publish`; it is revoked when
+        // the last exported entrypoint of this `open` drops.
+        let (events_token, events_grant) = match bindings.events {
+            Some(publisher) => {
+                let token = format!("{:032x}", rand::random::<u128>());
+                self.table.borrow_mut().insert(
+                    token.clone(),
+                    GrantedSlot::events_only(
+                        Rc::from(publisher),
+                        grant_expiry(invocation.deadline_unix_ms),
+                    ),
+                );
+                (
+                    Some(token.clone()),
+                    Some(Rc::new(RevokeGrant {
+                        table: Rc::clone(&self.table),
+                        grant: token,
+                    })),
+                )
+            }
+            None => (None, None),
+        };
         let ctx = BridgeContext {
             invocation: invocation.clone(),
             config: bindings.config.clone(),
             secrets: bindings.secrets.clone(),
+            events_token: events_token.clone(),
+            events_grant: events_grant.clone(),
         };
         let integration = || HttpIntegration {
             http: self.http.clone(),
@@ -222,6 +276,8 @@ impl PluginWorker for WorkerdRoot {
                     invocation,
                     config: bindings.config,
                     secrets: bindings.secrets,
+                    events_token,
+                    events_grant,
                 },
                 databases: bindings
                     .databases
@@ -680,6 +736,7 @@ impl JobRunner for HttpJobRunner {
                 allow_database,
                 sql_policy: GuestSqlPolicy::host_authoritative(),
                 max_request_bytes,
+                events: None,
             },
         );
         let _revoke = RevokeGrant {
@@ -709,6 +766,7 @@ impl JobRunner for HttpJobRunner {
                     // scope; the broker defers to it.
                     sql_policy: GuestSqlPolicy::host_authoritative(),
                     max_request_bytes: MAX_SCALAR_BYTES,
+                    events: None,
                 },
             );
             binding_revokes.push(RevokeGrant {

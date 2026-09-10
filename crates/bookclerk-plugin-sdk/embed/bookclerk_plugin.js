@@ -160,6 +160,7 @@ export const FEATURE_SCALAR_LIMITS = "rpc.scalarLimits";
 export const FEATURE_STREAMS = "rpc.streams";
 export const FEATURE_STORAGE_COPY = "storage.copy";
 export const MAX_CHECKPOINT_BYTES = 65536;
+export const MAX_EVENT_PAYLOAD_BYTES = 65536;
 
 // ---------------------------------------------------------------------------
 // Capability shapes (host-served objects a handler receives on its controller
@@ -983,6 +984,62 @@ class GrantedProgress extends RpcTarget {
   }
 }
 
+/** Encode a `PublishEvent.payload` (bytes, string, or JSON value) as bytes. */
+function publishPayloadBytes(payload) {
+  if (payload === undefined || payload === null) return new Uint8Array(0);
+  if (payload instanceof Uint8Array) return payload;
+  if (payload instanceof ArrayBuffer) return new Uint8Array(payload);
+  if (typeof payload === "string") return new TextEncoder().encode(payload);
+  return new TextEncoder().encode(JSON.stringify(payload));
+}
+
+/**
+ * `EVENTS` binding handed to the author: the adapter exchanges the host's
+ * events grant token on the granted channel, so the author isolate never
+ * holds the bearer itself.
+ */
+class GrantedEvents extends RpcTarget {
+  constructor(granted, auth) {
+    super();
+    this.granted = granted;
+    this.auth = auth;
+  }
+  async publish(event) {
+    if (!event || typeof event.eventType !== "string" || !event.eventType) {
+      throw PluginError.fromWire("invalid_params", "publish requires eventType");
+    }
+    const payload = publishPayloadBytes(event.payload);
+    if (payload.byteLength > MAX_EVENT_PAYLOAD_BYTES) {
+      throw PluginError.fromWire(
+        "payload_too_large",
+        `event payload of ${payload.byteLength} bytes exceeds ${MAX_EVENT_PAYLOAD_BYTES}`,
+      );
+    }
+    const wire = toBridgeJson({
+      eventType: event.eventType,
+      schemaVersion: Number(event.schemaVersion ?? 1) || 1,
+      deduplicationKey: String(event.deduplicationKey ?? ""),
+      payload,
+      occurredAtUnixMs: Number(event.occurredAtUnixMs ?? 0) || 0,
+      correlationId: String(event.correlationId ?? ""),
+      causationId: String(event.causationId ?? ""),
+    });
+    const resp = await this.granted.fetch("http://granted/events/publish", {
+      method: "POST",
+      headers: { ...this.auth, "content-type": "application/json" },
+      body: JSON.stringify(wire),
+    });
+    const value = await resp.json().catch(() => ({}));
+    if (value && value.error) {
+      throw PluginError.fromWire(value.error.code || "internal", value.error.message || "");
+    }
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", `events publish HTTP ${resp.status}`);
+    }
+    return { eventId: String(value.eventId ?? ""), duplicate: Boolean(value.duplicate) };
+  }
+}
+
 /** Resolves `wait()` once the adapter observes host cancellation. */
 class CancelWatch extends RpcTarget {
   constructor(signal) {
@@ -1194,6 +1251,13 @@ function parseJsonBinding(value) {
   return typeof value === "object" ? value : null;
 }
 
+/** Bridge context without the adapter-private events grant token. */
+function stripEventsToken(ctx) {
+  const source = ctx && typeof ctx === "object" ? ctx : {};
+  const { eventsToken: _eventsToken, ...rest } = source;
+  return rest;
+}
+
 function createInvocationAdapter() {
   return class InvocationAdapter extends WorkerEntrypoint {
     #native() {
@@ -1212,6 +1276,21 @@ function createInvocationAdapter() {
         throw PluginError.fromWire("unsupported", `${name} entrypoint not exported`);
       }
       return stub;
+    }
+
+    /**
+     * Turn the bridge context into the author-facing one: the host's events
+     * grant token becomes an `EVENTS` stub and never reaches the author.
+     */
+    #bindContext(ctx) {
+      const source = ctx && typeof ctx === "object" ? ctx : {};
+      const { eventsToken, ...rest } = source;
+      if (typeof eventsToken === "string" && eventsToken && this.env.GRANTED) {
+        rest.events = new GrantedEvents(this.env.GRANTED, {
+          Authorization: `Bearer ${eventsToken}`,
+        });
+      }
+      return rest;
     }
 
     async fetch() {
@@ -1241,15 +1320,17 @@ function createInvocationAdapter() {
     async invokeEntrypoint(name, ctx, method, args = []) {
       const list = Array.isArray(args) ? args : [];
       const native = this.#native();
-      if (native) return native.invoke(name, ctx ?? {}, method, list);
-      return this.#named(name).bookclerkInvoke(ctx ?? {}, method, ...list);
+      if (native) return native.invoke(name, stripEventsToken(ctx), method, list);
+      return this.#named(name).bookclerkInvoke(this.#bindContext(ctx), method, ...list);
     }
 
     /** Deliver one domain event to the default entrypoint's `event(batch)`. */
     async invokeEvent(ctx, event) {
       const native = this.#native();
-      if (native) return native.event(ctx ?? {}, event);
-      const results = await this.#author().bookclerkEvent(ctx ?? {}, { events: [event] });
+      if (native) return native.event(stripEventsToken(ctx), event);
+      const results = await this.#author().bookclerkEvent(this.#bindContext(ctx), {
+        events: [event],
+      });
       const first = Array.isArray(results) ? results[0] : undefined;
       if (!first || typeof first.kind !== "string") {
         throw PluginError.fromWire("internal", "event handler returned no result");
@@ -1305,7 +1386,11 @@ function createInvocationAdapter() {
       const controller = new AbortController();
       try {
         const granted = grantedJobCapabilities(this.env, grantToken, controller);
-        return await this.#author().bookclerkJob(ctx ?? {}, invocation ?? {}, granted);
+        return await this.#author().bookclerkJob(
+          this.#bindContext(ctx),
+          invocation ?? {},
+          granted,
+        );
       } finally {
         controller.abort();
       }
