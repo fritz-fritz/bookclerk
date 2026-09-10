@@ -2,7 +2,9 @@
  * Materializes Cap'n Proto workerd config + bridge assets (mirrors `config.rs`).
  *
  * Writes `.bookclerk/` bridge scripts and a Cap'n Proto config that wires the
- * plugin worker, egress filter, host stub, and HTTP bridge socket.
+ * author plugin worker, the first-party adapter isolate (`PLUGIN`,
+ * `PLUGIN_<ENTRYPOINT>`, `PLUGIN_DESCRIBE`, `BRIDGE_TOKEN`), egress filter,
+ * host stub, and HTTP bridge socket. The bridge talks only to the adapter.
  */
 
 import fs from "node:fs";
@@ -24,11 +26,92 @@ const PYODIDE_EGRESS_HOSTS = [
 
 const SDK_PY_INIT = `"""Bookclerk plugin SDK (workerd isolate).
 
-Use: from bookclerk_plugin_sdk.workerd import BookclerkPlugin, js
+Use: from bookclerk_plugin_sdk.workerd import BookclerkEntrypoint, js
 
-Native guests use Rust serve() / PluginRoot instead.
+Native guests use Rust serve() / PluginWorker instead.
 """
 `;
+
+/** First-party adapter isolate module (mirrors `ADAPTER_JS` in `config.rs`). */
+const ADAPTER_JS = `import { wrapPluginFromBinding } from "@bookclerk/plugin-sdk/workerd";
+export default wrapPluginFromBinding();
+`;
+
+/**
+ * `(binding, exported class)` the adapter receives per manifest entrypoint
+ * (mirrors `entrypoint_binding` in `config.rs`).
+ */
+const ENTRYPOINT_SERVICE_BINDINGS: Readonly<Record<string, readonly [string, string]>> =
+  Object.freeze({
+    storefront: ["PLUGIN_STOREFRONT", "Storefront"],
+    storage: ["PLUGIN_STORAGE", "Storage"],
+    databaseAdapter: ["PLUGIN_DATABASE_ADAPTER", "DatabaseAdapter"],
+    remoteLibrary: ["PLUGIN_REMOTE_LIBRARY", "RemoteLibrary"],
+    cli: ["PLUGIN_CLI", "Cli"],
+    oidc: ["PLUGIN_OIDC", "Oidc"],
+  });
+
+/**
+ * Typed capability declaration a manifest implies (mirrors Rust
+ * `PluginManifest::capabilities`). The adapter's `describe()` returns it
+ * verbatim so the host's widening check is plain equality.
+ *
+ * @param m - Validated manifest.
+ * @returns Wire-shaped `PluginCapabilities` object.
+ */
+export function manifestCapabilities(m: Manifest): {
+  entrypoints: string[];
+  consumes: Array<{ eventType: string; schemaVersions: number[]; supportsSuspend: boolean }>;
+  produces: string[];
+  jobs: string[];
+  databases: string[];
+  bindings: string[];
+} {
+  const bindings: string[] = [];
+  if (m.vars !== undefined) bindings.push("CONFIG");
+  if (m.secrets) bindings.push(m.secrets.binding ?? "SECRETS");
+  if (m.work_fs) bindings.push(m.work_fs.binding ?? "WORK_FS");
+  if (m.oauth) bindings.push(m.oauth.binding ?? "OAUTH");
+  for (const kv of m.kv_namespaces ?? []) bindings.push(kv.binding ?? "KV");
+  for (const producer of m.events?.producers ?? []) {
+    const name = producer.binding || "EVENTS";
+    if (!bindings.includes(name)) bindings.push(name);
+  }
+  return {
+    entrypoints: [...(m.entrypoints ?? [])],
+    consumes: (m.events?.consumers ?? []).map((c) => ({
+      eventType: c.type,
+      schemaVersions: c.schema_versions ?? [1],
+      supportsSuspend: c.supports_suspend ?? false,
+    })),
+    produces: (m.events?.producers ?? []).map((p) => p.type),
+    jobs: [...(m.triggers?.jobs ?? [])],
+    databases: (m.databases ?? []).map((d) => d.binding),
+    bindings,
+  };
+}
+
+/**
+ * `PLUGIN_DESCRIBE` JSON the adapter answers `describe()` from (mirrors
+ * `manifest_describe_json` in `config.rs`).
+ *
+ * @param m - Validated manifest.
+ * @returns Serialized wire-shaped `PluginDescribe` projection.
+ */
+export function manifestDescribeJson(m: Manifest): string {
+  const cli =
+    m.cli && typeof m.cli === "object"
+      ? (m.cli as { commands?: unknown[] })
+      : { commands: [] };
+  return JSON.stringify({
+    apiVersion: m.api_version,
+    id: m.id,
+    displayName: m.name ?? "",
+    rpcFeatures: ["rpc.scalarLimits", "rpc.streams"],
+    capabilities: manifestCapabilities(m),
+    cli: { commands: cli.commands ?? [] },
+  });
+}
 
 /**
  * Options for {@link materializeConfig}.
@@ -195,6 +278,7 @@ export function materializeConfig(
     const src = path.join(sdkRoot, "bridge", name);
     fs.copyFileSync(src, path.join(bookclerkDir, name));
   }
+  fs.writeFileSync(path.join(bookclerkDir, "adapter.js"), ADAPTER_JS);
 
   const modulesDir = path.join(pluginRoot, modulesDirName);
   if (!fs.existsSync(modulesDir) || !fs.statSync(modulesDir).isDirectory()) {
@@ -233,12 +317,21 @@ export function materializeConfig(
     );
   }
 
+  // The adapter isolate always needs the SDK embed; the author isolate gets it
+  // when it has JS modules.
+  const sdkJs = fs.readFileSync(
+    path.join(sdkRoot, "embed", "bookclerk_plugin.js"),
+    "utf8",
+  );
+  fs.writeFileSync(path.join(bookclerkDir, "sdk-workerd.js"), sdkJs);
+  const adapterModules = [
+    `(name = "adapter.js", esModule = embed ".bookclerk/adapter.js")`,
+    ...SDK_JS_MODULE_NAMES.map(
+      (modName) =>
+        `(name = "${escapeCapnp(modName)}", esModule = embed ".bookclerk/sdk-workerd.js")`,
+    ),
+  ];
   if (needsJs) {
-    const sdkJs = fs.readFileSync(
-      path.join(sdkRoot, "embed", "bookclerk_plugin.js"),
-      "utf8",
-    );
-    fs.writeFileSync(path.join(bookclerkDir, "sdk-workerd.js"), sdkJs);
     for (const modName of SDK_JS_MODULE_NAMES) {
       if (seenNames.has(modName)) continue;
       moduleEmbeds.push(
@@ -316,10 +409,20 @@ export function materializeConfig(
   });
   const policyEscaped = escapeCapnp(policyJson);
 
-  const entrypointBinding =
+  const authorBinding =
     entrypoint === "default"
       ? `(name = "PLUGIN", service = "plugin")`
       : `(name = "PLUGIN", service = (name = "plugin", entrypoint = "${escapeCapnp(entrypoint)}"))`;
+  const namedEntrypointBindings = (manifest.entrypoints ?? [])
+    .map((wire) => ENTRYPOINT_SERVICE_BINDINGS[wire])
+    .filter((pair): pair is readonly [string, string] => pair !== undefined)
+    .map(
+      ([binding, cls]) =>
+        `(name = "${binding}", service = (name = "plugin", entrypoint = "${cls}"))`,
+    );
+  const describeBinding = `(name = "PLUGIN_DESCRIBE", json = "${escapeCapnp(
+    manifestDescribeJson(manifest),
+  )}")`;
 
   const listenAddr = `127.0.0.1:${options.listenPort}`;
   const pluginOutbound = pluginGlobalOutbound(networkMode);
@@ -346,6 +449,7 @@ const bookclerkPlugin :Workerd.Config = (
     (name = "host", worker = .hostWorker),
     (name = "egress", worker = .egressWorker),
     (name = "plugin", worker = .pluginWorker),
+    (name = "adapter", worker = .adapterWorker),
     (name = "bridge", worker = .bridgeWorker),
 ${notifyService}
   ],
@@ -390,6 +494,18 @@ const pluginWorker :Workerd.Worker = (
   globalOutbound = "${pluginOutbound}",
 );
 
+const adapterWorker :Workerd.Worker = (
+  modules = [
+    ${adapterModules.join(",\n    ")}
+  ],
+  compatibilityDate = "${compatDate}",
+  
+  bindings = [
+    ${[authorBinding, ...namedEntrypointBindings, describeBinding, bridgeTokenBinding].join(",\n    ")}
+  ],
+  globalOutbound = "blocked",
+);
+
 const bridgeWorker :Workerd.Worker = (
   modules = [
     (name = "bridge.js", esModule = embed ".bookclerk/bridge.js")
@@ -397,7 +513,7 @@ const bridgeWorker :Workerd.Worker = (
   compatibilityDate = "${compatDate}",
   
   bindings = [
-    ${entrypointBinding},
+    (name = "PLUGIN", service = "adapter"),
     ${bridgeTokenBinding}
   ],
   globalOutbound = "blocked",
