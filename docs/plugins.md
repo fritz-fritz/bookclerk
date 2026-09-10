@@ -26,8 +26,9 @@ Authoritative artifacts: Cap'n Proto
 
 Authors implement the branded guest base **`BookclerkPlugin`** (`describe` /
 `destination` / `source` / `worker` / `contentSource` / `integration` /
-`database` / `oidcClients`). Native guests implement Rust `PluginRoot` and call `serve` (alias
-`serve`). The trusted adapter constructs a frozen `BookclerkContext`
+`database` / `oidcClients`). Native guests implement Rust `PluginWorker`
+(`describe` / `open(invocation, bindings) -> Entrypoints`) and call `serve`.
+The trusted adapter constructs a frozen `BookclerkContext`
 (`bindings`, optional `native`, `invocation`). Authors never see
 `PLUGIN_BACKEND`, HTTP endpoints, PIDs, credentials, or Cap'n Proto.
 `PLUGIN_BACKEND` may exist as private workerd config only. Byte `Source` is
@@ -42,7 +43,7 @@ On native guests, `serve` is the stdin/stdout Cap'n Proto runner for
 | --- | --- | --- |
 | TypeScript | [`@bookclerk/plugin-sdk`](../packages/plugin-sdk/) | `/workerd` exports `BookclerkPlugin`; authors export the raw class |
 | Python | [`bookclerk-plugin-sdk`](../packages/plugin-sdk-python/) | `from bookclerk_plugin_sdk.workerd import BookclerkPlugin` |
-| Rust | [`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/) | `PluginRoot` + `serve`; workerd guests pair `BookclerkPlugin` JS glue with Wasm dispatch |
+| Rust | [`bookclerk-plugin-sdk`](../crates/bookclerk-plugin-sdk/) | `PluginWorker` + `serve`; workerd guests pair `BookclerkPlugin` JS glue with Wasm dispatch |
 
 Runtimes in `plugin.toml`:
 
@@ -70,7 +71,7 @@ standalone author repos: [plugin-registry.md](plugin-registry.md).
 | **Plugin package** | Rust crate under `crates/bookclerk-plugins/`, or a workerd archive (`plugin.toml` + `modules/`) |
 | **In-process fallback** | When a platform guest is missing or fails to start, hosts fall back to logic in `bookclerk-library` / `bookclerk-storage` |
 | **`bundled-plugins`** | Optional host feature linking storefronts in-process (dev only; omit for release packaging) |
-| **`BookclerkPlugin`** | Product `api_version = 2` guest base (`describe` / `destination` / `source` / `worker` / `contentSource` / `integration` / `database` / `oidcClients`); TS extends `WorkerEntrypoint`, Rust implements `PluginRoot` + `serve` |
+| **`BookclerkPlugin`** | Workerd guest base (`describe` / `destination` / `source` / `worker` / `contentSource` / `integration` / `database` / `oidcClients`); TS extends `WorkerEntrypoint`. Rust guests implement `PluginWorker` (`describe` / `open(invocation, bindings) -> Entrypoints`) + `serve` |
 
 ## Local development (external guests)
 
@@ -1237,9 +1238,9 @@ The binding's own `bookclerk_receipts` and `bookclerk_plugin_migrations` tables 
 host-owned so retry tokens replay inside the binding and plugins cannot
 edit the journal.
 
-Delivery: `JobHandler.handle` receives the bindings as the append-only
-`databases :List(NamedDatabase)` argument. Rust guests call
-`DatabaseBinding::take_named_from_job_context(&mut ctx, "DB")`; workerd guests
+Delivery: `PluginWorker.open` receives the bindings as the append-only
+`Bindings.databases :List(NamedDatabase)` field. Rust guests call
+`DatabaseBinding::take_named_from_bindings(&mut bindings, "DB")`; workerd guests
 get one grant token per binding on the invocation envelope — the TS SDK
 exposes `context.databases.get("DB")` and the Python SDK
 `context.databases["DB"]`, each a full `prepare`/`bind`/`run`/`all`/`first`/

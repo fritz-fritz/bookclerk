@@ -1504,11 +1504,10 @@ origin_config_key = "integrations.echo.base_url"
     fn api_version_2_is_rejected() {
         let err = PluginManifest::parse(
             r#"
-api_version = 3
+api_version = 2
 id = "echo"
 runtime = "native"
 command = "./echo"
-entrypoints = ["cli"]
 entrypoints = ["cli"]
 
 [capabilities.network]

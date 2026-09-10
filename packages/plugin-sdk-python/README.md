@@ -1,6 +1,6 @@
 # bookclerk-plugin-sdk (Python)
 
-Python guest SDK for Bookclerk workerd plugins (`api_version = 2`).
+Python guest SDK for Bookclerk workerd plugins (`api_version = 3`).
 
 | Import | Runtime |
 | --- | --- |
@@ -8,7 +8,7 @@ Python guest SDK for Bookclerk workerd plugins (`api_version = 2`).
 
 `bookclerk-workerd` injects `bookclerk_plugin_sdk.workerd` into the isolate —
 authors do not vendor a relative filepath. Native guests use the Rust SDK
-(`PluginRoot` / `serve`).
+(`PluginWorker` / `serve`).
 
 ```bash
 pip install -e packages/plugin-sdk-python
@@ -44,7 +44,7 @@ class Default(BookclerkPlugin):
 Declare Python Workers flags in `plugin.toml`:
 
 ```toml
-api_version = 2
+api_version = 3
 runtime = "workerd"
 [workerd]
 compatibility_flags = ["python_workers", "disable_python_external_sdk"]
