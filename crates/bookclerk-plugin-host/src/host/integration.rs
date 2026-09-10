@@ -2,13 +2,13 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bookclerk_config::Config;
 use bookclerk_integrations::{
-    Brand, EventSubscription, ExternalUser, Integration, IntegrationContext, IntegrationEvent,
-    IntegrationHealth, IntegrationRegistry, ProvidedOidcClient,
+    Brand, EventSubscription, ExternalUser, Integration, IntegrationContext, IntegrationHealth,
+    IntegrationRegistry, ProvidedOidcClient,
 };
 use bookclerk_plugin_sdk::{
     AuthenticateUserParams, BindingValues, DomainEvent, EventResult, ExtensibleConfig,
@@ -282,11 +282,6 @@ impl Integration for ExternalIntegration {
         Ok(())
     }
 
-    async fn on_event(&self, event: &IntegrationEvent) -> bookclerk_integrations::Result<()> {
-        let _ = self.deliver_domain_event(domain_event_from(event)).await?;
-        Ok(())
-    }
-
     async fn deliver_domain_event(
         &self,
         event: DomainEvent,
@@ -458,69 +453,6 @@ impl Integration for ExternalIntegration {
                 Ok(Vec::new())
             }
         }
-    }
-}
-
-/// Maps a host integration event onto a versioned [`DomainEvent`].
-fn domain_event_from(event: &IntegrationEvent) -> DomainEvent {
-    let (event_type, payload_val) = match event {
-        IntegrationEvent::BookAcquired {
-            book,
-            storage_key,
-            absolute_path: _,
-        } => {
-            let title_id = if !book.uuid.is_empty() {
-                book.uuid.clone()
-            } else {
-                book.product_id.clone()
-            };
-            (
-                "book_acquired",
-                serde_json::json!({
-                    "type": "book_acquired",
-                    "payload": {
-                        "titleId": title_id,
-                        "source": book.source.clone(),
-                        "asin": book.asin,
-                        "isbn": book.isbn,
-                        "pathKeys": vec![storage_key.clone()],
-                    }
-                }),
-            )
-        }
-        IntegrationEvent::ExternalUserObserved {
-            provider,
-            external_user_id,
-            display_name,
-        } => (
-            "config_changed",
-            serde_json::json!({
-                "type": "config_changed",
-                "payload": {
-                    "config": {
-                        "externalUserObserved": {
-                            "provider": provider,
-                            "externalUserId": external_user_id,
-                            "displayName": display_name,
-                        }
-                    }
-                }
-            }),
-        ),
-    };
-    let occurred_at_unix_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
-    DomainEvent {
-        event_id: format!("{event_type}-{occurred_at_unix_ms}"),
-        event_type: event_type.to_string(),
-        schema_version: 1,
-        occurred_at_unix_ms,
-        deduplication_key: event_type.to_string(),
-        delivery_attempt: 1,
-        payload: serde_json::to_vec(&payload_val).unwrap_or_default(),
-        ..DomainEvent::default()
     }
 }
 
