@@ -1515,8 +1515,9 @@ pub struct PluginEvent {
     /// Schema version of `payload`, owned by the event type.
     #[serde(default)]
     pub schema_version: u32,
-    /// Producer idempotency key; a repeat within the outbox dedup window returns
-    /// `PublishOk.duplicate = true`. Empty publishes unconditionally.
+    /// Producer idempotency key, unique per (account, source, eventType) in the
+    /// outbox; a repeat returns `PublishOk.duplicate = true` with the earlier id.
+    /// Empty publishes unconditionally.
     #[serde(default)]
     pub deduplication_key: String,
     /// Encoded event payload; at most `maxEventPayloadBytes`.
