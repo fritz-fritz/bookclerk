@@ -10,9 +10,8 @@ use bookclerk_plugin_catalog::{
 };
 use bookclerk_plugin_host::{
     consent_request, consent_summary, host_target_triple, require_grant, search_crates_io,
-    CliInvokeParams, CliInvokeResult, CliSchema, ContentSourceContext, DiscoveredPlugin,
-    Entrypoint, IntegrationContext, PluginFamily, PluginGrantStore, PluginSession,
-    CRATE_NAME_PREFIX, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
+    CliInvokeParams, CliInvokeResult, CliSchema, DiscoveredPlugin, Entrypoint, PluginFamily,
+    PluginGrantStore, PluginSession, CRATE_NAME_PREFIX, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
@@ -1033,21 +1032,13 @@ async fn health_check_installed(config: &Config, id: &str) -> anyhow::Result<Str
     let mut probed = false;
     if session.has_entrypoint(Entrypoint::Storefront) {
         let _ = session
-            .content_source(ContentSourceContext::default(), |src| async move {
-                src.health().await
-            })
+            .storefront(|src| async move { src.health().await })
             .await?;
         probed = true;
     }
-    if plugin
-        .manifest
-        .families()
-        .contains(&PluginFamily::Integration)
-    {
+    if session.has_entrypoint(Entrypoint::RemoteLibrary) {
         let _ = session
-            .integration(IntegrationContext::default(), |int| async move {
-                int.health().await
-            })
+            .remote_library(|lib| async move { lib.health().await })
             .await?;
         probed = true;
     }
@@ -1233,7 +1224,7 @@ async fn probe_database(
     config: &Config,
     plugin: &DiscoveredPlugin,
 ) -> anyhow::Result<()> {
-    let ctx = bookclerk_plugin_host::database_connect_context(config, plugin, session)?;
+    let ctx = bookclerk_plugin_host::database_connect_bindings(config, plugin, session)?;
     session.db_open(ctx).await?;
     let _ = session.db_capabilities().await?;
     Ok(())
@@ -1245,19 +1236,14 @@ async fn diagnose_plugin(
     plugin: &DiscoveredPlugin,
 ) -> anyhow::Result<Vec<String>> {
     let session = spawn_cli_session(config, plugin).await?;
-    let families = plugin.manifest.families();
     let lines: anyhow::Result<Vec<String>> = if session.has_entrypoint(Entrypoint::Storefront) {
         session
-            .content_source(ContentSourceContext::default(), |src| async move {
-                src.diagnose().await
-            })
+            .storefront(|src| async move { src.diagnose().await })
             .await
             .map_err(anyhow::Error::from)
-    } else if families.contains(&PluginFamily::Integration) {
+    } else if session.has_entrypoint(Entrypoint::RemoteLibrary) {
         session
-            .integration(IntegrationContext::default(), |int| async move {
-                int.diagnose().await
-            })
+            .remote_library(|lib| async move { lib.diagnose().await })
             .await
             .map_err(anyhow::Error::from)
     } else if session.has_entrypoint(Entrypoint::DatabaseAdapter) {
