@@ -296,6 +296,7 @@ async fn run_isolate(
         granted_unix,
         #[cfg(not(unix))]
         granted_tcp,
+        manifest.capabilities(),
     )
     .await;
     let _ = child.kill().await;
@@ -476,6 +477,7 @@ async fn run_native_behind_workerd(
         guest_stdin,
         broker_listener,
         policy,
+        manifest.capabilities(),
     )
     .await;
 
@@ -490,6 +492,7 @@ async fn run_native_behind_workerd(
 }
 
 /// Cap'n Proto stdio plus a native broker feeding `PLUGIN_BACKEND`.
+#[allow(clippy::too_many_arguments)]
 async fn mediate_native(
     port: u16,
     token: String,
@@ -499,6 +502,7 @@ async fn mediate_native(
     guest_stdin: tokio::process::ChildStdin,
     broker_listener: tokio::net::TcpListener,
     policy: bookclerk_workerd::native_broker::BrokerPolicy,
+    capabilities: bookclerk_plugin_abi::PluginCapabilities,
 ) -> Result<()> {
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -535,7 +539,7 @@ async fn mediate_native(
                 let listener = tokio::net::TcpListener::from_std(std_listener)?;
                 spawn_granted(listener, token, Rc::clone(&table));
             }
-            mediate_bridge_stdio(http, table).await
+            mediate_bridge_stdio(http, table, capabilities).await
         })
         .await
 }
@@ -546,6 +550,7 @@ async fn mediate_bridge(
     token: String,
     #[cfg(unix)] granted_unix: Option<std::os::unix::net::UnixListener>,
     #[cfg(not(unix))] granted_tcp: Option<std::net::TcpListener>,
+    capabilities: bookclerk_plugin_abi::PluginCapabilities,
 ) -> Result<()> {
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -577,7 +582,7 @@ async fn mediate_bridge(
                 let listener = tokio::net::TcpListener::from_std(std_listener)?;
                 spawn_granted(listener, token, Rc::clone(&table));
             }
-            mediate_bridge_stdio(http, table).await
+            mediate_bridge_stdio(http, table, capabilities).await
         })
         .await
 }
