@@ -25,8 +25,6 @@ Emitted artifacts (all carry a GENERATED header; edit the schema and re-run
 - ``packages/plugin-sdk-python/src/bookclerk_plugin_sdk/abi.py``
 - ``packages/plugin-sdk-python/src/bookclerk_plugin_sdk/_wire.py``
 
-Plus in-place constant / error-code rewrites for
-``packages/plugin-sdk/embed/bookclerk_plugin.js``.
 """
 
 from __future__ import annotations
@@ -442,38 +440,6 @@ def emit_py_product_abi(capnp_text: str) -> str:
     exported = ",\n".join(f'    "{n}"' for n in names)
     lines.append(f"__all__ = [\n{exported},\n]")
     return "\n".join(lines).rstrip() + "\n"
-
-
-# ---------------------------------------------------------------------------
-# Embed rewriting (packages/plugin-sdk/embed/bookclerk_plugin.js)
-# ---------------------------------------------------------------------------
-
-
-def sync_embed_constants(embed_text: str, capnp_text: str) -> str:
-    """Rewrite constants and the error-code set in the embed JS from the schema."""
-    schema = cs.parse_schema(capnp_text)
-    consts = {const_name(c.name): c.value for c in schema.consts}
-    out = embed_text
-    for match in re.finditer(r'^export const (\w+) = (?:\d+|"[^"]*");$', out, re.MULTILINE):
-        name = match.group(1)
-        if name not in consts:
-            raise SystemExit(
-                f"embed constant `{name}` is not declared in plugin.capnp; "
-                "declare it in the schema or rename it"
-            )
-        value = consts[name]
-        rendered = str(value) if isinstance(value, int) else f'"{value}"'
-        out = out.replace(match.group(0), f"export const {name} = {rendered};")
-    codes = enum_wire_values(schema.enum("PluginErrorCode"))
-    rendered_codes = "\n".join(f'  "{code}",' for code in codes)
-    out, n = re.subn(
-        r"const KNOWN_ERROR_CODES = new Set\(\[\n(?:  \"[a-z_]+\",\n)+\]\);",
-        f"const KNOWN_ERROR_CODES = new Set([\n{rendered_codes}\n]);",
-        out,
-    )
-    if n != 1:
-        raise SystemExit("KNOWN_ERROR_CODES set not found in embed bookclerk_plugin.js")
-    return out
 
 
 # ---------------------------------------------------------------------------
