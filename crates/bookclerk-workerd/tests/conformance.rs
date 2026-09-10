@@ -14,14 +14,14 @@ use std::sync::{Arc, Mutex};
 
 use bookclerk_plugin_abi::{
     connect_plugin, AdapterExecuteRequest, ByteRange, Cancellation, CatalogDetailParams, CliArg,
-    CliInvokeParams, ContentSource, CopyResult, Database, DbCapabilities, DbPlanStatementKind,
-    DbResultSelection, DbValue, Destination, DestinationClient, DomainEvent, Entrypoint,
-    EventConsumer, EventConsumerClient, EventPublisher, EventResult, ExecuteRequest,
-    GuestReceiptPersist, HostBindings, Invocation, JobInvocation, JobOutcome, ListOptions,
-    ListPage, LoginParams, ObjectMetadata, PluginCli, PluginClient, PluginError, PluginErrorCode,
-    PluginEvent, ProgressSink, PublishOk, PurchaseHintParams, PutResult, ReadResult,
-    ResolvedStatement, SearchCatalogParams, Source, StatementResult, TypedDbStatement,
-    WriteOptions, MAX_EVENT_PAYLOAD_BYTES, PRODUCT_API_VERSION,
+    CliInvokeParams, ContentSource, CopyResult, Database, DbCapabilities, DbColumn,
+    DbPlanStatementKind, DbResultSelection, DbRow, DbTiming, DbType, DbValue, Destination,
+    DestinationClient, DomainEvent, Entrypoint, EventConsumer, EventConsumerClient, EventPublisher,
+    EventResult, ExecuteReply, ExecuteRequest, GuestDatabase, GuestReceiptPersist, HostBindings,
+    Invocation, JobInvocation, JobOutcome, ListOptions, ListPage, LoginParams, ObjectMetadata,
+    PluginCli, PluginClient, PluginError, PluginErrorCode, PluginEvent, ProgressSink, PublishOk,
+    PurchaseHintParams, PutResult, ReadResult, ResolvedStatement, SearchCatalogParams, Source,
+    StatementResult, TypedDbStatement, WriteOptions, MAX_EVENT_PAYLOAD_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_workerd::pin::binary_name;
 use tokio::io::AsyncReadExt;
@@ -439,6 +439,101 @@ async fn events_binding_vectors(client: &PluginClient) {
     );
 }
 
+/// Host-side named `[[databases]]` binding for the contract: echoes the
+/// first bound parameter of every statement as one `int64` row and records
+/// what it was asked to run.
+#[derive(Default)]
+struct EchoDatabase {
+    requests: Mutex<Vec<ExecuteRequest>>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl GuestDatabase for EchoDatabase {
+    async fn execute(&self, request: ExecuteRequest) -> bookclerk_plugin_abi::Result<ExecuteReply> {
+        let statements = request
+            .statements
+            .iter()
+            .map(|stmt| StatementResult {
+                rows: vec![DbRow {
+                    values: vec![stmt
+                        .parameters
+                        .first()
+                        .cloned()
+                        .unwrap_or(DbValue::Int64(0))],
+                }],
+                columns: vec![DbColumn {
+                    name: "n".into(),
+                    db_type: DbType::Int64,
+                }],
+                rows_affected: 0,
+            })
+            .collect();
+        let operation_id = request.operation_id.clone();
+        self.requests.lock().expect("requests").push(request);
+        Ok(ExecuteReply {
+            operation_id,
+            statements,
+            timing: DbTiming::default(),
+        })
+    }
+}
+
+/// A named `[[databases]]` binding granted at `open` reaches the author as
+/// `env.DB` on every call of that `open`; the SQL and bound parameters cross
+/// the granted `/db/execute` channel typed, and an `open` without the
+/// binding leaves the author without it.
+async fn databases_binding_vectors(client: &PluginClient) {
+    let echo = Arc::new(EchoDatabase::default());
+    let opened = client
+        .open(
+            &Invocation {
+                id: "db-granted".into(),
+                ..Default::default()
+            },
+            HostBindings {
+                databases: vec![("DB".into(), Arc::clone(&echo) as Arc<dyn GuestDatabase>)],
+                ..HostBindings::default()
+            },
+        )
+        .await
+        .expect("open with DB");
+    let consumer = opened.event_consumer.expect("event consumer");
+    let result = deliver(&consumer, sample_event("test_database"))
+        .await
+        .expect("deliver");
+    let EventResult::Reject { reason } = result else {
+        panic!("fixture reports the first row as a reject reason: {result:?}");
+    };
+    let row: serde_json::Value = serde_json::from_str(&reason)
+        .unwrap_or_else(|err| panic!("first row must be JSON, got `{reason}`: {err}"));
+    assert_eq!(row["n"]["value"], serde_json::json!(41), "row: {row}");
+    {
+        let requests = echo.requests.lock().expect("requests");
+        assert_eq!(
+            requests.len(),
+            1,
+            "one typed batch reached the host binding"
+        );
+        assert_eq!(requests[0].statements.len(), 1);
+        assert_eq!(requests[0].statements[0].sql, "SELECT ? AS n");
+        assert_eq!(
+            requests[0].statements[0].parameters,
+            vec![DbValue::Int64(41)]
+        );
+    }
+
+    let plain = open_event_consumer(client).await;
+    assert_eq!(
+        deliver(&plain, sample_event("test_database"))
+            .await
+            .expect("deliver"),
+        EventResult::Reject {
+            reason: "no DB binding".into(),
+        },
+        "no Bindings.databases → no env.DB on the author"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn workerd_author_event_vectors() {
     let Some(workerd) = find_workerd() else {
@@ -473,6 +568,7 @@ async fn workerd_author_event_vectors() {
             assert_eq!(desc.id, "events_fixture");
             event_result_vectors(&client).await;
             events_binding_vectors(&client).await;
+            databases_binding_vectors(&client).await;
             let _ = child.kill().await;
         })
         .await;
