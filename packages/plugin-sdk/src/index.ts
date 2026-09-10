@@ -79,10 +79,11 @@ export type {
   BookclerkContext,
   BookclerkPluginEnv,
   CopyResult,
-  DestinationContext,
+  GrantedContext,
   JobContext,
   JobInvocation,
   JobOutcome,
+  JobRunnerContext,
   ListOptions,
   ListPage,
   ObjectInfo,
@@ -95,8 +96,6 @@ export type {
   ReadOptions,
   ReadResult,
   ScalarLimits,
-  SourceContext,
-  WorkerContext,
   WriteOptions,
 } from "./plugin.js";
 

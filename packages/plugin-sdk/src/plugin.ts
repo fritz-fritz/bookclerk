@@ -19,14 +19,11 @@ import type {
   CliInvokeParams,
   CliInvokeResult,
   CliSchema,
-  ContentSourceContext,
-  DatabaseContext,
-  DestinationContext,
   ExpandCandidatesParams,
+  ExtensibleConfig,
   ExternalUser,
   FetchTitleParams,
   HealthOk,
-  IntegrationContext,
   ListDealsParams,
   ListeningProgress,
   LoginCompleteParams,
@@ -42,8 +39,6 @@ import type {
   ScanSummary,
   SearchCatalogParams,
   SourceAccount,
-  SourceContext,
-  WorkerContext,
 } from "./generated.js";
 
 // Product constants come from the generated `abi.ts` projection of
@@ -64,23 +59,40 @@ export {
 } from "./abi.js";
 export { requirePluginMigrationRegistration } from "./plugin-migrations.js";
 
-// Typed factory contexts and method payloads are the generated projections of
+// Typed method payloads are the generated projections of
 // `schema/plugin.capnp`; re-exported so guests can import them beside the
 // role classes.
 export type {
   CliInvokeParams,
   CliInvokeResult,
   CliSchema,
-  ContentSourceContext,
-  DatabaseContext,
-  DestinationContext,
   ExtensibleConfig,
   HealthOk,
-  IntegrationContext,
   ScalarLimits,
-  SourceContext,
-  WorkerContext,
 } from "./generated.js";
+
+/**
+ * Granted `CONFIG` binding as the workerd bridge routes carry it: the
+ * `context` body field / `x-bookclerk-context` header decoded from
+ * `PluginWorker.open(invocation, bindings)`.
+ */
+export interface GrantedContext {
+  /** Operator settings for this plugin as `application/json`. */
+  config: ExtensibleConfig;
+}
+
+/** Job-runner bridge context: the durable job id plus {@link GrantedContext.config}. */
+export interface JobRunnerContext extends GrantedContext {
+  /** Durable job id (`Invocation.id` of the job open). */
+  jobId: string;
+}
+
+type DestinationContext = GrantedContext;
+type SourceContext = GrantedContext;
+type ContentSourceContext = GrantedContext;
+type IntegrationContext = GrantedContext;
+type DatabaseContext = GrantedContext;
+type WorkerContext = JobRunnerContext;
 
 /** Describe fields every guest must advertise. */
 type RequiredDescribe = Pick<
