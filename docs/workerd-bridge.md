@@ -66,9 +66,15 @@ Response:
 | `404` | Entrypoint not exported by this isolate (`{ "error": { "code": "unsupported", … } }`) |
 | `500` | Adapter binding missing / isolate failure (JSON error) |
 
-Non-200 bodies are transport failures the launcher maps to `PluginError`
-(`internal` unless the JSON carries a known code); they never masquerade as a
-plugin's own `err`.
+Non-200 replies are transport failures, never a plugin's own `err`. The
+launcher's hook (`crates/bookclerk-workerd/src/invoke.rs`) raises them as Cap'n
+RPC errors whose text is `<code>: <message>` (`404` / `unsupported` as
+`Unimplemented`, everything else as `Failed`), so the typed clients surface
+them exactly like a broken Cap'n connection: `PluginError::unavailable` with
+the bridge's wire code and message in the text. Request and reply bodies are
+capped at `MAX_INVOKE_BODY_BYTES` (2 × `maxScalarBytes`, the isolate codec's
+traversal budget); the launcher always emits a single segment (it re-copies
+the params when the heap builder spilled) and rejects multi-segment replies.
 
 ### Capability descriptors (`X-Bookclerk-Caps`)
 
