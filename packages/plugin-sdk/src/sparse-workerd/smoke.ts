@@ -2,8 +2,8 @@
  * Out-of-tree workerd plugin smoke: ensure → materialize → describe + health.
  *
  * Spawns the pinned `workerd` binary against a materialised Cap'n Proto config
- * and exercises the bridge `/health`, `describe()`, and (for content-source /
- * integration kinds) the role `health` route.
+ * and exercises the bridge `/health`, `describe()`, and (for `storefront` /
+ * `remoteLibrary` entrypoints) the entrypoint `health` route.
  */
 
 import fs from "node:fs";
@@ -165,12 +165,12 @@ export async function runSmoke(pluginDir: string): Promise<string> {
   try {
     await waitForHealth(base, bridgeToken);
     const describe = await postJson(`${base}/describe`, {}, bridgeToken);
-    // `health` is exposed by the storefront entrypoint and by event consumers.
+    // `health` is a method of the storefront and remoteLibrary entrypoints;
+    // the default entrypoint (event/job triggers) has no health probe.
     const entrypoints = manifest.entrypoints ?? [];
     const healthPath = entrypoints.includes("storefront")
       ? "/contentSource/health"
-      : (manifest.events?.consumers?.length ?? 0) > 0 ||
-          entrypoints.includes("remoteLibrary")
+      : entrypoints.includes("remoteLibrary")
         ? "/integration/health"
         : null;
     const health = healthPath
