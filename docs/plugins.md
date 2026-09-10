@@ -913,6 +913,16 @@ every call. Authors never subclass bare `WorkerEntrypoint`; adapter-private
 `GRANTED` / `BRIDGE_TOKEN` / `PLUGIN_DESCRIBE` live only on the wrapper
 (`AdapterEnv`).
 
+Between the launcher and the adapter isolate every ABI method call is one
+`POST /invoke` whose body is the `<Interface>.<method>$Params` struct as Cap'n
+Proto bytes and whose reply is the `$Results` struct — the launcher reuses the
+host's typed Cap'n clients over an HTTP hook, and the isolate decodes with the
+generated `generated-wire.ts` codecs. Only the control handshake
+(`describe` / `open` / `shutdown`) is JSON, and object bodies stream over
+dedicated routes; `JobController` capabilities travel as grant-token
+descriptors the isolate redeems on `GRANTED`. Maintainer reference:
+[`workerd-bridge.md`](workerd-bridge.md).
+
 `event(batch)` mirrors Workers `queue(batch)`: each `EventMessage` records one
 outcome — `ack()`, `retry({ retryAt | delaySeconds, reason })`, `reject(reason)`,
 `deadLetter(reason)`, or `suspend({ checkpoint, wakeAt, wakeOnEventType,
