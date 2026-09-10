@@ -90,7 +90,7 @@ pub use protocol::{
 
 pub use bookclerk_plugin_abi::{
     byte_source_from_async_read, canonical_execute_request_hash, connect_plugin,
-    database_adapter_config_from_context, decode_db_value_bytes, decode_execute_request_bytes,
+    database_adapter_config_from_bindings, decode_db_value_bytes, decode_execute_request_bytes,
     decode_execute_result_reply_bytes, encoded_db_value_bytes, encoded_execute_reply_bytes,
     encoded_execute_request_bytes, encoded_execute_result_reply_bytes,
     encoded_statement_result_bytes, negotiate_rpc_features, pull_byte_source_to_writer,

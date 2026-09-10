@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use bookclerk_db_guest::set_connection;
-use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
+use bookclerk_plugin_abi::db::{connect_params_from_bindings, DbConnectParams};
 use bookclerk_plugin_abi::IsolationReq;
 use bookclerk_plugin_abi::{AdapterExecuteRequest, AdapterTransaction, HostAdapterDatabaseSession};
 use bookclerk_plugin_sdk::manifest_capabilities;
@@ -15,7 +15,7 @@ use bookclerk_plugin_sdk::{
 };
 
 async fn connect_from_context(ctx: &DatabaseContext) -> Result<(), PluginError> {
-    let params = connect_params_from_context(ctx)?;
+    let params = connect_params_from_bindings(ctx)?;
     let DbConnectParams::D1 {
         account_id,
         database_id,
@@ -49,7 +49,7 @@ async fn binding_from_context(
         database_name,
         provision,
         ..
-    }) = connect_params_from_context(ctx)
+    }) = connect_params_from_bindings(ctx)
     else {
         return Ok(None);
     };

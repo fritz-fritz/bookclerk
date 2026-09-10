@@ -252,7 +252,8 @@ class PluginDescribe(TypedDict):
         brand: Portal brand colors and icon URL; `brand.id` is empty when the guest has
             no brand and the host renders a neutral fallback.
         configOptions: Discoverable config option groups for source UIs.
-        cli: Embedded CLI schema (same shape as `cliDescribe`); empty when unused.
+        cli: Embedded CLI schema (same shape as `PluginCli.describe`); empty when
+            unused.
     """
 
     apiVersion: int
@@ -295,7 +296,7 @@ class OidcClientTemplate(TypedDict):
 
 
 class OidcClientsOk(TypedDict):
-    """Success payload of `BookclerkPlugin.oidcClients`.
+    """Success payload of `Oidc.clients`.
 
     Attributes:
         clients: Client templates; empty when the plugin is not a relying party.
@@ -336,7 +337,7 @@ OidcClientsReply = Union[
     OidcClientsReplyOk,
     OidcClientsReplyErr,
 ]
-"""Result union of `BookclerkPlugin.oidcClients`."""
+"""Result union of `Oidc.clients`."""
 
 
 class ExtensibleConfig(TypedDict):
@@ -353,76 +354,96 @@ class ExtensibleConfig(TypedDict):
     payload: bytes
 
 
-class DestinationContext(TypedDict):
-    """Granted configuration for `BookclerkPlugin.destination`. OS paths, FDs,
-    and sockets are transport-private.
+class Bindings(TypedDict):
+    """Host-granted bindings for one `PluginWorker.open` (`env` in the Workers
+    idiom). OS paths, FDs, and sockets are transport-private. Capability fields
+    are null when the manifest does not declare (or the operator did not grant)
+    the binding.
 
     Attributes:
-        config: Granted plugin settings (operator `[output.<id>]` table as
-            `application/json`).
+        config: `CONFIG`: granted plugin settings (operator `[vars]` plus the family
+            settings table) as `application/json`; at most `maxConfigPayloadBytes`.
+        secrets: `SECRETS`: granted secret values as `application/json`; empty payload
+            when the manifest declares no `[secrets]`.
+        adapter: Database-adapter bootstrap for the `databaseAdapter` entrypoint. First-
+            party host-managed adapters receive host-private connect params in `config`;
+            third-party adapters receive this typed bootstrap (and an empty `config`).
+        events: `EVENTS`: outbox publisher; null unless `[[events.producers]]` is
+            granted.
+        databases: Named plugin-owned `[[databases]]` bindings: each entry is an
+            isolated database provisioned by the active adapter, separate from the
+            Bookclerk library and from every other plugin. Empty when the manifest
+            declares none.
+        cancel: Host cancellation for the whole invocation (fence / lease loss).
     """
 
     config: ExtensibleConfig
-
-
-class SourceContext(TypedDict):
-    """Granted configuration for `BookclerkPlugin.source`.
-
-    Attributes:
-        config: Granted plugin settings as `application/json`.
-    """
-
-    config: ExtensibleConfig
-
-
-class WorkerContext(TypedDict):
-    """Granted configuration for `BookclerkPlugin.worker`.
-
-    Attributes:
-        jobId: Host job id this handler serves.
-        config: Granted plugin settings as `application/json`.
-    """
-
-    jobId: str
-    config: ExtensibleConfig
-
-
-class ContentSourceContext(TypedDict):
-    """Granted configuration for `BookclerkPlugin.contentSource`.
-
-    Attributes:
-        config: Granted plugin settings (operator `[sources.<id>]` table as
-            `application/json`).
-    """
-
-    config: ExtensibleConfig
-
-
-class IntegrationContext(TypedDict):
-    """Granted configuration for `BookclerkPlugin.integration`.
-
-    Attributes:
-        config: Granted plugin settings (operator `[integrations.<id>]` table as
-            `application/json`).
-    """
-
-    config: ExtensibleConfig
-
-
-class DatabaseContext(TypedDict):
-    """Granted configuration for `BookclerkPlugin.database`. First-party
-    host-managed adapters receive host-private connect params in `config`;
-    third-party adapters receive the typed `adapter` bootstrap instead.
-
-    Attributes:
-        config: Host-private connect params for first-party adapters; empty payload for
-            third-party adapters.
-        adapter: Author-facing bootstrap for third-party adapters; `pluginDataDir` is
-            empty when `config` carries host-private params instead.
-    """
-
-    config: ExtensibleConfig
+    secrets: ExtensibleConfig
     adapter: DatabaseAdapterConfig
+    events: EventPublisher
+    databases: list[NamedDatabase]
+    cancel: Cancellation
+
+
+class Entrypoints(TypedDict):
+    """Exported entrypoints returned by `PluginWorker.open`. One capability per
+    `plugin.toml` `entrypoints` entry / trigger; null when not exported. The host
+    refuses an entrypoint the manifest or operator grant did not allow.
+
+    Attributes:
+        eventConsumer: `[[events.consumers]]` trigger: `event(batch)` handler.
+        jobRunner: `[triggers] jobs` trigger: `job(controller)` handler.
+        storefront: `storefront` entrypoint.
+        storage: `storage` entrypoint.
+        databaseAdapter: `databaseAdapter` entrypoint.
+        remoteLibrary: `remoteLibrary` entrypoint.
+        cli: `cli` entrypoint.
+        oidc: `oidc` entrypoint.
+    """
+
+    eventConsumer: EventConsumer
+    jobRunner: JobRunner
+    storefront: ContentSource
+    storage: Destination
+    databaseAdapter: Database
+    remoteLibrary: RemoteLibrary
+    cli: PluginCli
+    oidc: Oidc
+
+
+class EntrypointsReplyOk(TypedDict):
+    """``EntrypointsReply`` member ``ok``.
+
+    Success: exported entrypoint capabilities.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: exported entrypoint capabilities.
+    """
+
+    kind: Literal["ok"]
+    value: Entrypoints
+
+
+class EntrypointsReplyErr(TypedDict):
+    """``EntrypointsReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+EntrypointsReply = Union[
+    EntrypointsReplyOk,
+    EntrypointsReplyErr,
+]
+"""Result union of `PluginWorker.open`."""
 
 
 class JobInvocation(TypedDict):
@@ -602,7 +623,7 @@ JobOutcome = Union[
     JobOutcomeCancelled,
     JobOutcomeSuspended,
 ]
-"""Terminal or suspended result of `JobHandler.handle`."""
+"""Terminal or suspended result of `JobRunner.job`."""
 
 
 class DomainEvent(TypedDict):
@@ -784,7 +805,75 @@ EventResult = Union[
     EventResultDeadLetter,
     EventResultSuspended,
 ]
-"""Outcome of `Integration.onEvent`."""
+"""Per-event outcome inside an `EventConsumer.event` batch reply."""
+
+
+class EventBatch(TypedDict):
+    """One `EventConsumer.event` delivery: at most `maxListPage` events, each
+    bounded by `maxEventPayloadBytes` / `maxCheckpointBytes`.
+
+    Attributes:
+        events: Events in delivery order; the reply carries one `EventResult` per entry.
+    """
+
+    events: list[DomainEvent]
+
+
+class EventBatchReplyOk(TypedDict):
+    """``EventBatchReply`` member ``ok``.
+
+    Success: per-event outcomes.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: per-event outcomes.
+    """
+
+    kind: Literal["ok"]
+    value: list[EventResult]
+
+
+class EventBatchReplyErr(TypedDict):
+    """``EventBatchReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+EventBatchReply = Union[
+    EventBatchReplyOk,
+    EventBatchReplyErr,
+]
+"""Result union of `EventConsumer.event`. `ok` has exactly one entry per
+`EventBatch.events` entry, in order; a short list is a host-side error and
+the missing tail is retried.
+"""
+
+
+class JobController(TypedDict):
+    """Everything one `JobRunner.job` invocation may touch. Capabilities are
+    host-served; the guest never sees OS paths or sockets.
+
+    Attributes:
+        invocation: Durable command envelope.
+        input: Job input objects.
+        output: Job output object store.
+        progress: Progress reporter (host coalesces frequent updates).
+        cancel: Host cancellation probe for this job (fence / lease).
+    """
+
+    invocation: JobInvocation
+    input: Source
+    output: Destination
+    progress: ProgressSink
+    cancel: Cancellation
 
 
 class HeadOk(TypedDict):
@@ -1145,112 +1234,7 @@ DescribeReply = Union[
     DescribeReplyOk,
     DescribeReplyErr,
 ]
-"""Result union of `BookclerkPlugin.describe`."""
-
-
-class DestinationReplyOk(TypedDict):
-    """``DestinationReply`` member ``ok``.
-
-    Success: opened `Destination` capability.
-
-    Attributes:
-        kind: Always ``"ok"``.
-        value: Success: opened `Destination` capability.
-    """
-
-    kind: Literal["ok"]
-    value: Destination
-
-
-class DestinationReplyErr(TypedDict):
-    """``DestinationReply`` member ``err``.
-
-    Typed failure; `code` is a `PluginErrorCode` wire string.
-
-    Attributes:
-        kind: Always ``"err"``.
-        value: Typed failure; `code` is a `PluginErrorCode` wire string.
-    """
-
-    kind: Literal["err"]
-    value: PluginError
-
-
-DestinationReply = Union[
-    DestinationReplyOk,
-    DestinationReplyErr,
-]
-"""Result union of `BookclerkPlugin.destination`."""
-
-
-class SourceReplyOk(TypedDict):
-    """``SourceReply`` member ``ok``.
-
-    Success: opened `Source` capability.
-
-    Attributes:
-        kind: Always ``"ok"``.
-        value: Success: opened `Source` capability.
-    """
-
-    kind: Literal["ok"]
-    value: Source
-
-
-class SourceReplyErr(TypedDict):
-    """``SourceReply`` member ``err``.
-
-    Typed failure; `code` is a `PluginErrorCode` wire string.
-
-    Attributes:
-        kind: Always ``"err"``.
-        value: Typed failure; `code` is a `PluginErrorCode` wire string.
-    """
-
-    kind: Literal["err"]
-    value: PluginError
-
-
-SourceReply = Union[
-    SourceReplyOk,
-    SourceReplyErr,
-]
-"""Result union of `BookclerkPlugin.source`."""
-
-
-class WorkerReplyOk(TypedDict):
-    """``WorkerReply`` member ``ok``.
-
-    Success: opened `JobHandler` capability.
-
-    Attributes:
-        kind: Always ``"ok"``.
-        value: Success: opened `JobHandler` capability.
-    """
-
-    kind: Literal["ok"]
-    value: JobHandler
-
-
-class WorkerReplyErr(TypedDict):
-    """``WorkerReply`` member ``err``.
-
-    Typed failure; `code` is a `PluginErrorCode` wire string.
-
-    Attributes:
-        kind: Always ``"err"``.
-        value: Typed failure; `code` is a `PluginErrorCode` wire string.
-    """
-
-    kind: Literal["err"]
-    value: PluginError
-
-
-WorkerReply = Union[
-    WorkerReplyOk,
-    WorkerReplyErr,
-]
-"""Result union of `BookclerkPlugin.worker`."""
+"""Result union of `PluginWorker.describe`."""
 
 
 class HandleReplyOk(TypedDict):
@@ -1285,147 +1269,7 @@ HandleReply = Union[
     HandleReplyOk,
     HandleReplyErr,
 ]
-"""Result union of `JobHandler.handle`."""
-
-
-class ContentSourceReplyOk(TypedDict):
-    """``ContentSourceReply`` member ``ok``.
-
-    Success: opened `ContentSource` capability.
-
-    Attributes:
-        kind: Always ``"ok"``.
-        value: Success: opened `ContentSource` capability.
-    """
-
-    kind: Literal["ok"]
-    value: ContentSource
-
-
-class ContentSourceReplyErr(TypedDict):
-    """``ContentSourceReply`` member ``err``.
-
-    Typed failure; `code` is a `PluginErrorCode` wire string.
-
-    Attributes:
-        kind: Always ``"err"``.
-        value: Typed failure; `code` is a `PluginErrorCode` wire string.
-    """
-
-    kind: Literal["err"]
-    value: PluginError
-
-
-ContentSourceReply = Union[
-    ContentSourceReplyOk,
-    ContentSourceReplyErr,
-]
-"""Result union of `BookclerkPlugin.contentSource`."""
-
-
-class IntegrationReplyOk(TypedDict):
-    """``IntegrationReply`` member ``ok``.
-
-    Success: opened `Integration` capability.
-
-    Attributes:
-        kind: Always ``"ok"``.
-        value: Success: opened `Integration` capability.
-    """
-
-    kind: Literal["ok"]
-    value: Integration
-
-
-class IntegrationReplyErr(TypedDict):
-    """``IntegrationReply`` member ``err``.
-
-    Typed failure; `code` is a `PluginErrorCode` wire string.
-
-    Attributes:
-        kind: Always ``"err"``.
-        value: Typed failure; `code` is a `PluginErrorCode` wire string.
-    """
-
-    kind: Literal["err"]
-    value: PluginError
-
-
-IntegrationReply = Union[
-    IntegrationReplyOk,
-    IntegrationReplyErr,
-]
-"""Result union of `BookclerkPlugin.integration`."""
-
-
-class DatabaseReplyOk(TypedDict):
-    """``DatabaseReply`` member ``ok``.
-
-    Success: opened `Database` capability.
-
-    Attributes:
-        kind: Always ``"ok"``.
-        value: Success: opened `Database` capability.
-    """
-
-    kind: Literal["ok"]
-    value: Database
-
-
-class DatabaseReplyErr(TypedDict):
-    """``DatabaseReply`` member ``err``.
-
-    Typed failure; `code` is a `PluginErrorCode` wire string.
-
-    Attributes:
-        kind: Always ``"err"``.
-        value: Typed failure; `code` is a `PluginErrorCode` wire string.
-    """
-
-    kind: Literal["err"]
-    value: PluginError
-
-
-DatabaseReply = Union[
-    DatabaseReplyOk,
-    DatabaseReplyErr,
-]
-"""Result union of `BookclerkPlugin.database`."""
-
-
-class EventResultReplyOk(TypedDict):
-    """``EventResultReply`` member ``ok``.
-
-    Success: event handling outcome.
-
-    Attributes:
-        kind: Always ``"ok"``.
-        value: Success: event handling outcome.
-    """
-
-    kind: Literal["ok"]
-    value: EventResult
-
-
-class EventResultReplyErr(TypedDict):
-    """``EventResultReply`` member ``err``.
-
-    Typed failure; `code` is a `PluginErrorCode` wire string.
-
-    Attributes:
-        kind: Always ``"err"``.
-        value: Typed failure; `code` is a `PluginErrorCode` wire string.
-    """
-
-    kind: Literal["err"]
-    value: PluginError
-
-
-EventResultReply = Union[
-    EventResultReplyOk,
-    EventResultReplyErr,
-]
-"""Result union of `Integration.onEvent`."""
+"""Result union of `JobRunner.job`."""
 
 
 class HealthOk(TypedDict):
@@ -1710,23 +1554,15 @@ class Cancellation(Protocol):
         ...
 
 
-class JobHandler(Protocol):
-    """Job handler returned by `BookclerkPlugin.worker`; runs one durable command."""
+class JobRunner(Protocol):
+    """`[triggers] jobs` handler (`Entrypoints.jobRunner`); runs one durable command."""
 
-    async def handle(self, invocation: JobInvocation, input: Source, output: Destination, progress: ProgressSink, cancel: Cancellation, database: GuestDatabase, databases: list[NamedDatabase]) -> HandleReply:
-        """Run one command invocation to a terminal or suspended outcome.
+    async def job(self, controller: JobController) -> HandleReply:
+        """Run one command invocation to a terminal or suspended outcome. Named
+        database bindings come from `Bindings.databases` at `open`, not per job.
 
         Args:
-            invocation: Durable command envelope.
-            input: Job input objects.
-            output: Job output object store.
-            progress: Progress reporter.
-            cancel: Host cancellation probe.
-            database: Append-only. Host-mediated typed SQL session.
-            databases: Append-only. Named plugin-owned database bindings (Workers-
-                style): each entry is an isolated database provisioned by the active
-                adapter, separate from the Bookclerk library and from every other
-                plugin. Empty when the manifest declares none.
+            controller: Envelope plus host-served capabilities.
 
         Returns:
             ``HandleReply``
@@ -1734,11 +1570,45 @@ class JobHandler(Protocol):
         ...
 
 
+class EventConsumer(Protocol):
+    """`[[events.consumers]]` handler (`Entrypoints.eventConsumer`). Delivery is
+    at-least-once; consumers must be idempotent on `deduplicationKey`.
+    """
+
+    async def event(self, batch: EventBatch) -> EventBatchReply:
+        """Deliver one ordered batch of domain events.
+
+        Args:
+            batch: Events in delivery order.
+
+        Returns:
+            ``EventBatchReply``
+        """
+        ...
+
+
+class EventPublisher(Protocol):
+    """`EVENTS` binding: host-served outbox publisher granted through
+    `Bindings.events`. Event types must be listed in `[[events.producers]]`.
+    """
+
+    async def publish(self, event: PluginEvent) -> PublishReply:
+        """Append one event to the outbox (idempotent on `deduplicationKey`).
+
+        Args:
+            event: Event to publish.
+
+        Returns:
+            ``PublishReply``
+        """
+        ...
+
+
 class NamedDatabase(TypedDict):
-    """One named plugin-owned database binding delivered on `JobHandler.handle`.
+    """One named plugin-owned database binding delivered on `Bindings.databases`.
 
     Attributes:
-        name: Binding name from `plugin.toml` `capabilities.bindings.databases`.
+        name: Binding name from `plugin.toml` `[[databases]]`.
         database: Isolated typed SQL session for this binding (plugin-owned schema).
     """
 
@@ -1886,25 +1756,17 @@ class ContentSource(Protocol):
         ...
 
 
-class Integration(Protocol):
-    """Long-running integration (remote library, listening sync, IdP bridge)."""
+class RemoteLibrary(Protocol):
+    """`remoteLibrary` entrypoint: long-running remote-library lifecycle (start /
+    stop, library rescan, listening sync, external-user polling). Event delivery
+    is `EventConsumer`; credential verification is `Oidc`.
+    """
 
     async def health(self) -> HealthReply:
         """Liveness / readiness probe.
 
         Returns:
             ``HealthReply``
-        """
-        ...
-
-    async def on_event(self, event: DomainEvent) -> EventResultReply:
-        """Deliver one domain event (at-least-once; must be idempotent).
-
-        Args:
-            event: Event envelope.
-
-        Returns:
-            ``EventResultReply``
         """
         ...
 
@@ -1951,6 +1813,51 @@ class Integration(Protocol):
         """
         ...
 
+    async def poll_events(self) -> EventPollReply:
+        """Drain external users the remote side observed since the last poll.
+
+        Returns:
+            ``EventPollReply``
+        """
+        ...
+
+
+class PluginCli(Protocol):
+    """`cli` entrypoint: guest commands under `bookclerk plugins <id> <command>`."""
+
+    async def describe(self) -> CliSchemaReply:
+        """Declared CLI surface.
+
+        Returns:
+            ``CliSchemaReply``
+        """
+        ...
+
+    async def invoke(self, params: CliInvokeParams) -> CliInvokeReply:
+        """Run one plugin CLI command.
+
+        Args:
+            params: Command name and argument values.
+
+        Returns:
+            ``CliInvokeReply``
+        """
+        ...
+
+
+class Oidc(Protocol):
+    """`oidc` entrypoint: relying-party client templates and credential
+    verification on behalf of the host authorization server.
+    """
+
+    async def clients(self) -> OidcClientsReply:
+        """Plugin-provided OIDC AS client templates. Empty list when unused.
+
+        Returns:
+            ``OidcClientsReply``
+        """
+        ...
+
     async def authenticate_user(self, params: AuthenticateUserParams) -> ExternalUserReply:
         """Verify remote credentials on behalf of the host.
 
@@ -1959,14 +1866,6 @@ class Integration(Protocol):
 
         Returns:
             ``ExternalUserReply``
-        """
-        ...
-
-    async def poll_events(self) -> EventPollReply:
-        """Drain events the remote side produced since the last poll.
-
-        Returns:
-            ``EventPollReply``
         """
         ...
 
@@ -2057,7 +1956,7 @@ class ConfigOptionValue(TypedDict):
 
 
 class CliSchema(TypedDict):
-    """Declared plugin CLI surface (`cliDescribe` / `describe().cli`).
+    """Declared plugin CLI surface (`PluginCli.describe` / `describe().cli`).
 
     Attributes:
         commands: Commands exposed as `bookclerk plugins <id> <command> ...`.
@@ -2108,7 +2007,7 @@ class CliArgSpec(TypedDict):
 
 
 class CliArg(TypedDict):
-    """One named argument value passed to `cliInvoke`.
+    """One named argument value passed to `PluginCli.invoke`.
 
     Attributes:
         name: Arg name matching a `CliArgSpec.name`.
@@ -2120,7 +2019,7 @@ class CliArg(TypedDict):
 
 
 class CliInvokeParams(TypedDict):
-    """Params of `BookclerkPlugin.cliInvoke`.
+    """Params of `PluginCli.invoke`.
 
     Attributes:
         command: Command name matching a `CliCommandSpec.name`.
@@ -2132,7 +2031,7 @@ class CliInvokeParams(TypedDict):
 
 
 class CliInvokeResult(TypedDict):
-    """Result of `BookclerkPlugin.cliInvoke`.
+    """Result of `PluginCli.invoke`.
 
     Attributes:
         exitCode: Process-style exit code (0 = success).
@@ -2180,7 +2079,7 @@ CliSchemaReply = Union[
     CliSchemaReplyOk,
     CliSchemaReplyErr,
 ]
-"""Result union of `BookclerkPlugin.cliDescribe`."""
+"""Result union of `PluginCli.describe`."""
 
 
 class CliInvokeReplyOk(TypedDict):
@@ -2215,7 +2114,7 @@ CliInvokeReply = Union[
     CliInvokeReplyOk,
     CliInvokeReplyErr,
 ]
-"""Result union of `BookclerkPlugin.cliInvoke`."""
+"""Result union of `PluginCli.invoke`."""
 
 
 class DatabaseAdapterConfig(TypedDict):
@@ -3146,7 +3045,7 @@ PurchaseHintReply = Union[
 
 
 class ScanLibraryParams(TypedDict):
-    """Params of `Integration.scanLibrary` (remote library sync).
+    """Params of `RemoteLibrary.scanLibrary` (remote library sync).
 
     Attributes:
         force: When true, force a full rescan even if the guest would otherwise
@@ -3157,7 +3056,7 @@ class ScanLibraryParams(TypedDict):
 
 
 class AuthenticateUserParams(TypedDict):
-    """Params of `Integration.authenticateUser`.
+    """Params of `Oidc.authenticateUser`.
 
     Attributes:
         username: Integration username / login id.
@@ -3218,11 +3117,11 @@ ExternalUserReply = Union[
     ExternalUserReplyOk,
     ExternalUserReplyErr,
 ]
-"""Result union of `Integration.authenticateUser`."""
+"""Result union of `Oidc.authenticateUser`."""
 
 
 class EventPollResult(TypedDict):
-    """Success payload of `Integration.pollEvents`: signals for the host to kick
+    """Success payload of `RemoteLibrary.pollEvents`: signals for the host to kick
     off workflows.
 
     Attributes:
@@ -3264,7 +3163,7 @@ EventPollReply = Union[
     EventPollReplyOk,
     EventPollReplyErr,
 ]
-"""Result union of `Integration.pollEvents`."""
+"""Result union of `RemoteLibrary.pollEvents`."""
 
 
 class ListeningProgress(TypedDict):
@@ -3306,7 +3205,7 @@ class ListeningProgress(TypedDict):
 
 
 class SyncListeningResult(TypedDict):
-    """Success payload of `Integration.syncListening`.
+    """Success payload of `RemoteLibrary.syncListening`.
 
     Attributes:
         items: Progress snapshots to upsert.
@@ -3347,7 +3246,103 @@ SyncListeningReply = Union[
     SyncListeningReplyOk,
     SyncListeningReplyErr,
 ]
-"""Result union of `Integration.syncListening`."""
+"""Result union of `RemoteLibrary.syncListening`."""
+
+
+class PluginEvent(TypedDict):
+    """Guest-published domain event (`EventPublisher.publish`). The host stamps
+    `eventId`, `source` (the plugin id), and `accountId` from the invocation;
+    guests cannot forge either.
+
+    Attributes:
+        eventType: Snake_case event type; must be listed in `[[events.producers]]`.
+        schemaVersion: Schema version of `payload`, owned by the event type.
+        deduplicationKey: Producer idempotency key; a repeat within the outbox dedup
+            window returns `PublishOk.duplicate = true`. Empty publishes
+            unconditionally.
+        payload: Encoded event payload; at most `maxEventPayloadBytes`.
+        occurredAtUnixMs: When the producer observed the fact; zero means "now" on the
+            host clock.
+        correlationId: Trace correlation id; empty inherits `Invocation.correlationId`.
+        causationId: Id of the event or command that caused this one; empty inherits
+            `Invocation.causationId`.
+    """
+
+    eventType: str
+    schemaVersion: int
+    deduplicationKey: str
+    payload: bytes
+    occurredAtUnixMs: int
+    correlationId: str
+    causationId: str
+
+
+class PublishOk(TypedDict):
+    """Success payload of `EventPublisher.publish`.
+
+    Attributes:
+        eventId: Outbox event id (new or the earlier row when `duplicate`).
+        duplicate: True when `deduplicationKey` matched an existing outbox row.
+    """
+
+    eventId: str
+    duplicate: bool
+
+
+class PublishReplyOk(TypedDict):
+    """``PublishReply`` member ``ok``.
+
+    Success: outbox row identity.
+
+    Attributes:
+        kind: Always ``"ok"``.
+        value: Success: outbox row identity.
+    """
+
+    kind: Literal["ok"]
+    value: PublishOk
+
+
+class PublishReplyErr(TypedDict):
+    """``PublishReply`` member ``err``.
+
+    Typed failure; `code` is a `PluginErrorCode` wire string.
+
+    Attributes:
+        kind: Always ``"err"``.
+        value: Typed failure; `code` is a `PluginErrorCode` wire string.
+    """
+
+    kind: Literal["err"]
+    value: PluginError
+
+
+PublishReply = Union[
+    PublishReplyOk,
+    PublishReplyErr,
+]
+"""Result union of `EventPublisher.publish`."""
+
+
+class Invocation(TypedDict):
+    """Identity of one `PluginWorker.open` invocation. The host issues ids; guests
+    echo `correlationId` / `causationId` onto published events.
+
+    Attributes:
+        id: Unique host-issued invocation id.
+        accountId: Account scope; empty for operator / host-wide invocations.
+        deadlineUnixMs: UTC Unix milliseconds; zero when the invocation has no deadline.
+            The host fence is authoritative.
+        correlationId: Trace correlation id; empty when none.
+        causationId: Id of the event or command that caused this invocation; empty when
+            none.
+    """
+
+    id: str
+    accountId: str
+    deadlineUnixMs: int
+    correlationId: str
+    causationId: str
 
 
 class DbValueNull(TypedDict):
@@ -4099,7 +4094,7 @@ DbCapabilitiesReply = Union[
 
 
 class Database(Protocol):
-    """Database adapter returned by `BookclerkPlugin.database`."""
+    """`databaseAdapter` entrypoint (`Entrypoints.databaseAdapter`)."""
 
     async def open_session(self) -> AdapterSessionReply:
         """Open one adapter session (capability negotiation + typed execute).
@@ -4367,7 +4362,7 @@ class PluginMigration(TypedDict):
 
 
 class PluginMigrationsOk(TypedDict):
-    """Success payload of `BookclerkPlugin.databaseMigrations`.
+    """Success payload of `PluginWorker.databaseMigrations`.
 
     Attributes:
         migrations: At most `maxListPage` entries; aggregate id+SQL bytes at most
@@ -4410,50 +4405,32 @@ PluginMigrationsReply = Union[
     PluginMigrationsReplyOk,
     PluginMigrationsReplyErr,
 ]
-"""Result union of `BookclerkPlugin.databaseMigrations`."""
+"""Result union of `PluginWorker.databaseMigrations`."""
 
 
-class BookclerkPlugin(Protocol):
-    """Plugin bootstrap capability: the guest's root object."""
+class PluginWorker(Protocol):
+    """Plugin bootstrap capability: the guest's root object (Workers `default`
+    export analogue). `describe()` first; `open()` once per invocation.
+    """
 
     async def describe(self) -> DescribeReply:
-        """Identity, ABI version, negotiated features, and advertised roles.
+        """Identity, ABI version, negotiated features, and typed capabilities.
 
         Returns:
             ``DescribeReply``
         """
         ...
 
-    async def destination(self, context: DestinationContext) -> DestinationReply:
-        """Open the object-store destination role.
+    async def open(self, invocation: Invocation, bindings: Bindings) -> EntrypointsReply:
+        """Open the exported entrypoints for one invocation with host-granted
+        bindings. Entrypoints the manifest does not export are null.
 
         Args:
-            context: Granted destination configuration.
+            invocation: Host-issued invocation identity.
+            bindings: Granted `env` bindings.
 
         Returns:
-            ``DestinationReply``
-        """
-        ...
-
-    async def source(self, context: SourceContext) -> SourceReply:
-        """Open the byte-source role.
-
-        Args:
-            context: Granted source configuration.
-
-        Returns:
-            ``SourceReply``
-        """
-        ...
-
-    async def worker(self, context: WorkerContext) -> WorkerReply:
-        """Open a job handler for one durable command.
-
-        Args:
-            context: Job id and granted configuration.
-
-        Returns:
-            ``WorkerReply``
+            ``EntrypointsReply``
         """
         ...
 
@@ -4465,70 +4442,11 @@ class BookclerkPlugin(Protocol):
         """
         ...
 
-    async def content_source(self, context: ContentSourceContext) -> ContentSourceReply:
-        """Open the storefront content-source role.
-
-        Args:
-            context: Granted storefront configuration.
-
-        Returns:
-            ``ContentSourceReply``
-        """
-        ...
-
-    async def integration(self, context: IntegrationContext) -> IntegrationReply:
-        """Open the integration role.
-
-        Args:
-            context: Granted integration configuration.
-
-        Returns:
-            ``IntegrationReply``
-        """
-        ...
-
-    async def database(self, context: DatabaseContext) -> DatabaseReply:
-        """Open the database adapter role.
-
-        Args:
-            context: Granted adapter configuration.
-
-        Returns:
-            ``DatabaseReply``
-        """
-        ...
-
-    async def cli_describe(self) -> CliSchemaReply:
-        """Declared CLI surface.
-
-        Returns:
-            ``CliSchemaReply``
-        """
-        ...
-
-    async def cli_invoke(self, params: CliInvokeParams) -> CliInvokeReply:
-        """Run one plugin CLI command.
-
-        Args:
-            params: Command name and argument values.
-
-        Returns:
-            ``CliInvokeReply``
-        """
-        ...
-
-    async def oidc_clients(self) -> OidcClientsReply:
-        """Plugin-provided OIDC AS client templates. Empty list when unused.
-
-        Returns:
-            ``OidcClientsReply``
-        """
-        ...
-
     async def database_migrations(self, binding: str) -> PluginMigrationsReply:
         """Complete ordered plugin-owned migration sequence for one named binding.
-        Host calls this at binding initialization, before ordinary execute.
-        Empty list means the binding has no plugin-owned migrations.
+        The host calls this before `open` while provisioning `[[databases]]`
+        (a binding must be migrated before any `Bindings.databases` session is
+        handed out). Empty list means the binding has no plugin-owned migrations.
         Bounded by `maxListPage` / `maxPluginMigrationOps` /
         `maxPluginMigrationTotalOps` / `maxScalarBytes` /
         `maxPluginMigrationRegistrationBytes`.
@@ -4574,12 +4492,11 @@ __all__ = [
     "OidcClientsReplyErr",
     "OidcClientsReply",
     "ExtensibleConfig",
-    "DestinationContext",
-    "SourceContext",
-    "WorkerContext",
-    "ContentSourceContext",
-    "IntegrationContext",
-    "DatabaseContext",
+    "Bindings",
+    "Entrypoints",
+    "EntrypointsReplyOk",
+    "EntrypointsReplyErr",
+    "EntrypointsReply",
     "JobInvocation",
     "CompletedOutcome",
     "RetryableOutcome",
@@ -4604,6 +4521,11 @@ __all__ = [
     "EventResultDeadLetter",
     "EventResultSuspended",
     "EventResult",
+    "EventBatch",
+    "EventBatchReplyOk",
+    "EventBatchReplyErr",
+    "EventBatchReply",
+    "JobController",
     "HeadOk",
     "HeadReplyOk",
     "HeadReplyErr",
@@ -4635,30 +4557,9 @@ __all__ = [
     "DescribeReplyOk",
     "DescribeReplyErr",
     "DescribeReply",
-    "DestinationReplyOk",
-    "DestinationReplyErr",
-    "DestinationReply",
-    "SourceReplyOk",
-    "SourceReplyErr",
-    "SourceReply",
-    "WorkerReplyOk",
-    "WorkerReplyErr",
-    "WorkerReply",
     "HandleReplyOk",
     "HandleReplyErr",
     "HandleReply",
-    "ContentSourceReplyOk",
-    "ContentSourceReplyErr",
-    "ContentSourceReply",
-    "IntegrationReplyOk",
-    "IntegrationReplyErr",
-    "IntegrationReply",
-    "DatabaseReplyOk",
-    "DatabaseReplyErr",
-    "DatabaseReply",
-    "EventResultReplyOk",
-    "EventResultReplyErr",
-    "EventResultReply",
     "HealthOk",
     "HealthReplyOk",
     "HealthReplyErr",
@@ -4674,10 +4575,14 @@ __all__ = [
     "Source",
     "ProgressSink",
     "Cancellation",
-    "JobHandler",
+    "JobRunner",
+    "EventConsumer",
+    "EventPublisher",
     "NamedDatabase",
     "ContentSource",
-    "Integration",
+    "RemoteLibrary",
+    "PluginCli",
+    "Oidc",
     "EventConsumerSpec",
     "PluginCapabilities",
     "Brand",
@@ -4764,6 +4669,12 @@ __all__ = [
     "SyncListeningReplyOk",
     "SyncListeningReplyErr",
     "SyncListeningReply",
+    "PluginEvent",
+    "PublishOk",
+    "PublishReplyOk",
+    "PublishReplyErr",
+    "PublishReply",
+    "Invocation",
     "DbValueNull",
     "DbValueBoolean",
     "DbValueInt64",
@@ -4833,5 +4744,5 @@ __all__ = [
     "PluginMigrationsReplyOk",
     "PluginMigrationsReplyErr",
     "PluginMigrationsReply",
-    "BookclerkPlugin",
+    "PluginWorker",
 ]

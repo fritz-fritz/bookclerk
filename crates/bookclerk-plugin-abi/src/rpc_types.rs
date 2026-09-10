@@ -394,39 +394,6 @@ impl From<ScalarLimitsDto> for ScalarLimits {
     }
 }
 
-/// Granted destination configuration (`BookclerkPlugin.destination`).
-///
-/// Only plugin settings travel here (the operator `[output.<id>]` table as
-/// `application/json`); host-private jail layout stays off this struct.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DestinationContext {
-    /// Granted plugin settings.
-    #[serde(default)]
-    pub config: ExtensibleConfig,
-}
-
-/// Granted source configuration (`BookclerkPlugin.source`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceContext {
-    /// Granted plugin settings.
-    #[serde(default)]
-    pub config: ExtensibleConfig,
-}
-
-/// Granted job-handler configuration (`BookclerkPlugin.worker`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkerContext {
-    /// Durable job id.
-    #[serde(default)]
-    pub job_id: String,
-    /// Granted plugin settings.
-    #[serde(default)]
-    pub config: ExtensibleConfig,
-}
-
 /// Maximum checkpoint payload size (bytes).
 pub const MAX_CHECKPOINT_BYTES: u32 = crate::plugin_capnp::MAX_CHECKPOINT_BYTES;
 

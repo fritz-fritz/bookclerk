@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use bookclerk_config::{resolve_d1_api_token, resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_db_exec::db_value_from_sea;
 use bookclerk_plugin_abi::{
-    catalog_page_statement, database_context_from_params, reserved_catalog_relation_missing,
+    binding_values_from_params, catalog_page_statement, reserved_catalog_relation_missing,
     sql_catalog_page_rows, AdapterExecuteRequest, DbBootstrap, DbCapabilities, DbConnectParams,
     DbValue, IsolationReq, SqlType, SqlTypeEnv, SQL_CATALOG_TABLE, SQL_SCHEMA_TABLE,
 };
@@ -1359,12 +1359,12 @@ impl ExternalDatabase {
                     instance_id: Some(binding_instance_id(owner_plugin_id, binding)),
                     open_existing: !provision,
                 };
-                return Ok(bookclerk_plugin_abi::database_context_from_adapter_config(
+                return Ok(bookclerk_plugin_abi::binding_values_from_adapter_config(
                     &adapter_config,
                 ));
             }
         };
-        database_context_from_params(&params).map_err(|err| PluginError::message(err.to_string()))
+        binding_values_from_params(&params).map_err(|err| PluginError::message(err.to_string()))
     }
 
     /// Physically deletes a provisioned binding unit. The registry row is the
@@ -2624,7 +2624,7 @@ fn connect_context(
         }
         None => return adapter_config_context(&data_dir, settings_json),
     };
-    database_context_from_params(&params).map_err(|err| DbErr::Custom(err.to_string()))
+    binding_values_from_params(&params).map_err(|err| DbErr::Custom(err.to_string()))
 }
 
 /// Public third-party adapter factory context (granted settings + data dir).
@@ -2639,7 +2639,7 @@ fn adapter_config_context(
         instance_id: None,
         open_existing: false,
     };
-    Ok(bookclerk_plugin_abi::database_context_from_adapter_config(
+    Ok(bookclerk_plugin_abi::binding_values_from_adapter_config(
         &adapter_config,
     ))
 }
@@ -2791,11 +2791,11 @@ mod tests {
         let ctx = adapter_config_context("/tmp/plugins/sql-conformance/data", &settings)
             .expect("adapter context");
         // No host-private connect params travel to third-party adapters …
-        bookclerk_plugin_abi::db::connect_params_from_context(&ctx)
+        bookclerk_plugin_abi::db::connect_params_from_bindings(&ctx)
             .expect_err("public adapter config must not decode as host connect params");
         // … the public payload carries the granted settings, readable without
         // the abi `host` feature.
-        let cfg = bookclerk_plugin_abi::database_adapter_config_from_context(&ctx)
+        let cfg = bookclerk_plugin_abi::database_adapter_config_from_bindings(&ctx)
             .expect("public decode");
         assert_eq!(cfg.plugin_data_dir, "/tmp/plugins/sql-conformance/data");
         let settings = cfg.settings.json_value().expect("json settings");
@@ -2807,7 +2807,7 @@ mod tests {
     fn unknown_plugin_id_without_settings_gets_empty_config_object() {
         let ctx = adapter_config_context("/tmp/plugins/custom/data", &Value::Null)
             .expect("adapter context");
-        let cfg = bookclerk_plugin_abi::database_adapter_config_from_context(&ctx)
+        let cfg = bookclerk_plugin_abi::database_adapter_config_from_bindings(&ctx)
             .expect("public decode");
         let settings = cfg.settings.json_value().expect("json settings");
         assert!(settings.is_object(), "{settings:?}");

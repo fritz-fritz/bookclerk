@@ -12,7 +12,7 @@ use bookclerk_db_guest::{
     guest_list_user_relations_on, guest_prepare_unit_restore, guest_prepare_unit_restore_on,
     host_session, host_session_on, set_connection,
 };
-use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
+use bookclerk_plugin_abi::db::{connect_params_from_bindings, DbConnectParams};
 use bookclerk_plugin_abi::HostAdapterDatabaseSession;
 use bookclerk_plugin_sdk::database_adapter::plugin_error_from_engine;
 use bookclerk_plugin_sdk::manifest_capabilities;
@@ -26,7 +26,7 @@ use bookclerk_plugin_sdk::{
 };
 
 async fn connect_from_context(ctx: &DatabaseContext) -> Result<(), PluginError> {
-    let params = connect_params_from_context(ctx)?;
+    let params = connect_params_from_bindings(ctx)?;
     let DbConnectParams::Postgres { url, .. } = params else {
         return Err(PluginError::invalid_params(
             "postgres guest received non-postgres database context",
@@ -50,7 +50,7 @@ async fn binding_from_context(
         database,
         provision,
         ..
-    }) = connect_params_from_context(ctx)
+    }) = connect_params_from_bindings(ctx)
     else {
         return Ok(None);
     };
