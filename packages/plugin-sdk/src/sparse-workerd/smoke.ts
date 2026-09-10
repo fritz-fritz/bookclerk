@@ -165,13 +165,14 @@ export async function runSmoke(pluginDir: string): Promise<string> {
   try {
     await waitForHealth(base, bridgeToken);
     const describe = await postJson(`${base}/describe`, {}, bridgeToken);
-    // Role `health` exists for content-source / integration kinds only.
-    const healthPath =
-      manifest.kind === "source"
-        ? "/contentSource/health"
-        : manifest.kind === "integration"
-          ? "/integration/health"
-          : null;
+    // `health` is exposed by the storefront entrypoint and by event consumers.
+    const entrypoints = manifest.entrypoints ?? [];
+    const healthPath = entrypoints.includes("storefront")
+      ? "/contentSource/health"
+      : (manifest.events?.consumers?.length ?? 0) > 0 ||
+          entrypoints.includes("remoteLibrary")
+        ? "/integration/health"
+        : null;
     const health = healthPath
       ? await postJson(`${base}${healthPath}`, {}, bridgeToken)
       : null;

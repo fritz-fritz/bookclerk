@@ -6,10 +6,10 @@ runtime = "native"
 command = "./echo-tools"
 entrypoints = ["cli"]
 
+[vars]
+
 [capabilities.network]
 mode = "deny"
-
-[vars]
 
 [[cli.commands]]
 name = "ping"

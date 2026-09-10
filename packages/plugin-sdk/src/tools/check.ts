@@ -33,13 +33,13 @@ export function sdkEmbedSrc(): string {
  * `WorkerEntrypoint`.
  *
  * @param pluginDir - Plugin root containing `plugin.toml`.
- * @returns Human-readable success summary (`ok id=… kind=… runtime=…`).
+ * @returns Human-readable success summary (`ok id=… entrypoints=… runtime=…`).
  * @throws {Error} When the manifest or required assets are invalid / missing.
  *
  * @example
  * ```ts
  * console.log(checkPlugin("./my-plugin"));
- * // ok id=echo kind=source runtime=workerd
+ * // ok id=echo entrypoints=storefront runtime=workerd
  * ```
  */
 export function checkPlugin(pluginDir: string): string {
@@ -94,7 +94,7 @@ export function checkPlugin(pluginDir: string): string {
       throw new Error(`native command not found: ${resolved}`);
     }
   }
-  return `ok id=${m.id} kind=${m.kind} runtime=${runtime}`;
+  return `ok id=${m.id} entrypoints=${(m.entrypoints ?? []).join(",")} runtime=${runtime}`;
 }
 
 /**

@@ -113,7 +113,7 @@ def _validate_embedded_path(trimmed: str) -> tuple[str, str]:
 def validate_plugin_id(id: str) -> None:
     """Validate a plugin id against the strict ``[a-z0-9_]{2,32}`` grammar.
 
-    Mirrors Rust ``validate_plugin_id``. Ids are globally unique across kinds.
+    Mirrors Rust ``validate_plugin_id``. Ids are globally unique across plugins.
     Invalid characters are rejected — never rewritten — so ``a/b`` and ``a_b``
     cannot collide. Leading/trailing whitespace is rejected (non-lossy), not
     stripped.
@@ -159,13 +159,11 @@ def validate_manifest(m: dict[str, Any]) -> None:
         validate_plugin_id(str(m["id"]))
     except ValueError as exc:
         raise ValueError(f"plugin.toml: {exc}") from exc
-    if m.get("api_version") != 2:
-        raise ValueError("plugin.toml: `api_version` must be 2")
+    if m.get("api_version") != 3:
+        raise ValueError("plugin.toml: `api_version` must be 3")
     if m.get("logo") is not None:
         validate_logo(str(m["logo"]))
-    kind = m.get("kind")
-    if kind not in {"source", "integration", "output", "database"}:
-        raise ValueError(f"plugin.toml: invalid kind {kind}")
+    _validate_surface(m)
     runtime = m.get("runtime") or "native"
     net = (m.get("capabilities") or {}).get("network") or {}
     if runtime == "native":
@@ -192,6 +190,63 @@ def validate_manifest(m: dict[str, Any]) -> None:
             )
     else:
         raise ValueError(f"plugin.toml: unknown runtime {runtime}")
+
+
+ENTRYPOINT_NAMES: tuple[str, ...] = (
+    "storefront",
+    "storage",
+    "databaseAdapter",
+    "remoteLibrary",
+    "cli",
+    "oidc",
+)
+"""Entrypoint wire names accepted in ``entrypoints``."""
+
+_DATABASE_BINDING_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _validate_surface(m: dict[str, Any]) -> None:
+    """Validate ``entrypoints`` / triggers / bindings (mirrors Rust ``validate``)."""
+    entrypoints = [str(e) for e in (m.get("entrypoints") or [])]
+    seen: set[str] = set()
+    for entrypoint in entrypoints:
+        if entrypoint not in ENTRYPOINT_NAMES:
+            raise ValueError(
+                f"plugin.toml: unknown entrypoint `{entrypoint}` "
+                f"(expected one of {', '.join(ENTRYPOINT_NAMES)})"
+            )
+        if entrypoint in seen:
+            raise ValueError(f"plugin.toml: entrypoints entry `{entrypoint}` is duplicated")
+        seen.add(entrypoint)
+    events = m.get("events") or {}
+    consumers = list(events.get("consumers") or [])
+    jobs = list((m.get("triggers") or {}).get("jobs") or [])
+    if not entrypoints and not consumers and not jobs:
+        raise ValueError(
+            "plugin.toml: declare at least one of `entrypoints`, `[[events.consumers]]`, "
+            "or `[triggers].jobs`"
+        )
+    for consumer in consumers:
+        if not str(consumer.get("type") or "").strip():
+            raise ValueError("plugin.toml: [[events.consumers]] `type` is required")
+    for producer in events.get("producers") or []:
+        if not str(producer.get("type") or "").strip():
+            raise ValueError("plugin.toml: [[events.producers]] `type` is required")
+    if m.get("cli") is not None and "cli" not in seen:
+        raise ValueError('plugin.toml: `[cli]` requires `"cli"` in `entrypoints`')
+    if ((m.get("oidc") or {}).get("clients") or []) and "oidc" not in seen:
+        raise ValueError('plugin.toml: `[[oidc.clients]]` requires `"oidc"` in `entrypoints`')
+    bindings: set[str] = set()
+    for db in m.get("databases") or []:
+        name = str(db.get("binding") or "")
+        if not _DATABASE_BINDING_RE.match(name) or len(name) > 32:
+            raise ValueError(
+                f"plugin.toml: [[databases]] binding `{name}` must be `[A-Z][A-Z0-9_]*` "
+                "and at most 32 chars"
+            )
+        if name in bindings:
+            raise ValueError(f"plugin.toml: [[databases]] binding `{name}` is duplicated")
+        bindings.add(name)
 
 
 def _workerd_modules_dir(plugin_dir: Path, m: dict[str, Any]) -> Path:
@@ -223,7 +278,7 @@ def check_plugin(plugin_dir: Path) -> str:
         plugin_dir: Path to the plugin root containing ``plugin.toml``.
 
     Returns:
-        A short ``ok id=... kind=... runtime=...`` status string.
+        A short ``ok id=... entrypoints=... runtime=...`` status string.
 
     Raises:
         ValueError: If the manifest or Python workerd sources are invalid.
@@ -232,7 +287,7 @@ def check_plugin(plugin_dir: Path) -> str:
 
     Examples:
         >>> # print(check_plugin(Path("./my-plugin")))
-        >>> # ok id=echo kind=source runtime=workerd
+        >>> # ok id=echo entrypoints=storefront runtime=workerd
     """
     text = (plugin_dir / "plugin.toml").read_text(encoding="utf-8")
     m = tomllib.loads(text)
@@ -279,7 +334,8 @@ def check_plugin(plugin_dir: Path) -> str:
         resolved = cmd if cmd.is_absolute() else plugin_dir / cmd
         if not resolved.exists() and (plugin_dir / ".require-binary").exists():
             raise FileNotFoundError(f"native command not found: {resolved}")
-    return f"ok id={m['id']} kind={m['kind']} runtime={runtime}"
+    entrypoints = ",".join(str(e) for e in (m.get("entrypoints") or []))
+    return f"ok id={m['id']} entrypoints={entrypoints} runtime={runtime}"
 
 
 def sync_embed(plugin_dir: Path) -> str:
@@ -367,11 +423,55 @@ def _esc(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _string_array(values: list[str]) -> str:
+def _array(values: list[str]) -> str:
+    """Emit a TOML array like ``toml::to_string_pretty``: inline for one element."""
     if not values:
         return "[]"
-    inner = ",\n".join(f"    {_esc(v)}" for v in values)
+    if len(values) == 1:
+        return f"[{values[0]}]"
+    inner = ",\n".join(f"    {v}" for v in values)
     return f"[\n{inner},\n]"
+
+
+def _string_array(values: list[str]) -> str:
+    return _array([_esc(v) for v in values])
+
+
+def _number_array(values: list[Any]) -> str:
+    return _array([str(v) for v in values])
+
+
+def _bool(value: Any) -> str:
+    return "true" if value else "false"
+
+
+def _value(value: Any) -> str | None:
+    if isinstance(value, bool):
+        return _bool(value)
+    if isinstance(value, str):
+        return _esc(value)
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list) and all(isinstance(v, str) for v in value):
+        return _string_array(list(value))
+    return None
+
+
+def _table_rows(lines: list[str], table: dict[str, Any]) -> None:
+    for key in sorted(table):
+        rendered = _value(table[key])
+        if rendered is not None:
+            lines.append(f"{key} = {rendered}")
+
+
+def _named_binding(lines: list[str], header: str, binding: Any) -> None:
+    if binding is None:
+        return
+    lines.append("")
+    lines.append(header)
+    name = str((binding or {}).get("binding") or "") if isinstance(binding, dict) else ""
+    if name:
+        lines.append(f"binding = {_esc(name)}")
 
 
 def format_manifest(m: dict[str, Any]) -> str:
@@ -393,7 +493,6 @@ def format_manifest(m: dict[str, Any]) -> str:
     lines.append(f"id = {_esc(m['id'])}")
     if m.get("name") is not None:
         lines.append(f"name = {_esc(m['name'])}")
-    lines.append(f"kind = {_esc(m['kind'])}")
     if m.get("version") is not None:
         lines.append(f"version = {_esc(m['version'])}")
     if m.get("logo") is not None:
@@ -404,6 +503,8 @@ def format_manifest(m: dict[str, Any]) -> str:
         lines.append(f"command = {_esc(m['command'])}")
     if m.get("args"):
         lines.append(f"args = {_string_array(list(m['args']))}")
+    if m.get("entrypoints"):
+        lines.append(f"entrypoints = {_string_array([str(e) for e in m['entrypoints']])}")
 
     if m.get("workerd"):
         w = m["workerd"]
@@ -415,6 +516,64 @@ def format_manifest(m: dict[str, Any]) -> str:
         lines.append(f"main_module = {_esc(w['main_module'])}")
         lines.append(f"modules_dir = {_esc(w.get('modules_dir') or 'modules')}")
         lines.append(f"entrypoint = {_esc(w.get('entrypoint') or 'default')}")
+        limits = w.get("limits") or {}
+        if limits.get("cpu_ms") is not None or limits.get("subrequests") is not None:
+            lines.append("")
+            lines.append("[workerd.limits]")
+            if limits.get("cpu_ms") is not None:
+                lines.append(f"cpu_ms = {limits['cpu_ms']}")
+            if limits.get("subrequests") is not None:
+                lines.append(f"subrequests = {limits['subrequests']}")
+
+    for mod in m.get("modules") or []:
+        lines.append("")
+        lines.append("[[modules]]")
+        lines.append(f"name = {_esc(str(mod['name']))}")
+        lines.append(f"path = {_esc(str(mod['path']))}")
+        lines.append(f"type = {_esc(str(mod.get('type') or 'js'))}")
+
+    jobs = list((m.get("triggers") or {}).get("jobs") or [])
+    if jobs:
+        lines.append("")
+        lines.append("[triggers]")
+        lines.append(f"jobs = {_string_array([str(j) for j in jobs])}")
+
+    events = m.get("events") or {}
+    for consumer in events.get("consumers") or []:
+        lines.append("")
+        lines.append("[[events.consumers]]")
+        lines.append(f"type = {_esc(str(consumer['type']))}")
+        lines.append(f"schema_versions = {_number_array(list(consumer.get('schema_versions') or [1]))}")
+        lines.append(f"supports_suspend = {_bool(consumer.get('supports_suspend'))}")
+        lines.append(f"resource_class = {_esc(str(consumer.get('resource_class') or 'network'))}")
+        if consumer.get("max_retries") is not None:
+            lines.append(f"max_retries = {consumer['max_retries']}")
+        filt = consumer.get("filter")
+        if isinstance(filt, dict) and filt:
+            lines.append("")
+            lines.append("[events.consumers.filter]")
+            _table_rows(lines, filt)
+    for producer in events.get("producers") or []:
+        lines.append("")
+        lines.append("[[events.producers]]")
+        lines.append(f"type = {_esc(str(producer['type']))}")
+        if producer.get("binding"):
+            lines.append(f"binding = {_esc(str(producer['binding']))}")
+
+    for db in m.get("databases") or []:
+        lines.append("")
+        lines.append("[[databases]]")
+        lines.append(f"binding = {_esc(str(db['binding']))}")
+
+    if m.get("vars") is not None:
+        lines.append("")
+        lines.append("[vars]")
+        _table_rows(lines, dict(m["vars"]))
+    _named_binding(lines, "[secrets]", m.get("secrets"))
+    for kv in m.get("kv_namespaces") or []:
+        _named_binding(lines, "[[kv_namespaces]]", kv)
+    _named_binding(lines, "[work_fs]", m.get("work_fs"))
+    _named_binding(lines, "[oauth]", m.get("oauth"))
 
     caps = m.get("capabilities") or {}
     net = caps.get("network") or {}
@@ -424,20 +583,6 @@ def format_manifest(m: dict[str, Any]) -> str:
     if net.get("domains"):
         lines.append(f"domains = {_string_array(list(net['domains']))}")
 
-    bindings = caps.get("bindings") or {}
-    active = [k for k in ("config", "secrets", "plugin_kv", "work_fs", "oauth") if bindings.get(k)]
-    if active:
-        lines.append("")
-        lines.append("[capabilities.bindings]")
-        for k in active:
-            lines.append(f"{k} = true")
-
-    methods = (caps.get("methods") or {}).get("list") or []
-    if methods:
-        lines.append("")
-        lines.append("[capabilities.methods]")
-        lines.append(f"list = {_string_array(list(methods))}")
-
     cli = m.get("cli") or {}
     for cmd in cli.get("commands") or []:
         lines.append("")
@@ -445,6 +590,8 @@ def format_manifest(m: dict[str, Any]) -> str:
         lines.append(f"name = {_esc(cmd['name'])}")
         if cmd.get("about") is not None:
             lines.append(f"about = {_esc(cmd['about'])}")
+        if not cmd.get("args"):
+            lines.append("args = []")
         for arg in cmd.get("args") or []:
             lines.append("")
             lines.append("[[cli.commands.args]]")
@@ -454,12 +601,26 @@ def format_manifest(m: dict[str, Any]) -> str:
             if arg.get("short") is not None:
                 lines.append(f"short = {_esc(str(arg['short']))}")
             lines.append(f"kind = {_esc(str(arg.get('kind') or 'string'))}")
-            lines.append(f"required = {'true' if arg.get('required') else 'false'}")
+            lines.append(f"required = {_bool(arg.get('required'))}")
             if arg.get("default") is not None:
                 lines.append(f"default = {_esc(str(arg['default']))}")
             if arg.get("about") is not None:
                 lines.append(f"about = {_esc(str(arg['about']))}")
-            lines.append(f"positional = {'true' if arg.get('positional') else 'false'}")
+            lines.append(f"positional = {_bool(arg.get('positional'))}")
+
+    for client in (m.get("oidc") or {}).get("clients") or []:
+        lines.append("")
+        lines.append("[[oidc.clients]]")
+        lines.append(f"client_id = {_esc(str(client['client_id']))}")
+        if client.get("display_name"):
+            lines.append(f"display_name = {_esc(str(client['display_name']))}")
+        lines.append(f"callback_path = {_esc(str(client['callback_path']))}")
+        lines.append(f"public_client = {_bool(client.get('public_client', True))}")
+        scopes = list(client.get("default_scopes") or [])
+        if scopes:
+            lines.append(f"default_scopes = {_string_array([str(sc) for sc in scopes])}")
+        lines.append(f"issue_refresh_token = {_bool(client.get('issue_refresh_token', True))}")
+        lines.append(f"origin_config_key = {_esc(str(client['origin_config_key']))}")
 
     out = "\n".join(lines)
     if not out.endswith("\n"):

@@ -85,16 +85,17 @@ export type {
 /** Describe fields every guest must advertise. */
 type RequiredDescribe = Pick<
   WirePluginDescribe,
-  "apiVersion" | "id" | "kind" | "rpcFeatures" | "scalarLimits"
+  "apiVersion" | "id" | "rpcFeatures" | "scalarLimits"
 >;
 
 /**
  * Guest identity returned by `BookclerkPlugin.describe`.
  *
  * The wire struct is the generated `PluginDescribe` in `generated.ts`; every
- * field beyond `apiVersion`, `id`, `kind`, `rpcFeatures`, and `scalarLimits`
- * defaults to its zero value (empty list, `0`, empty `brand`, empty `cli`)
- * when omitted.
+ * field beyond `apiVersion`, `id`, `rpcFeatures`, and `scalarLimits`
+ * defaults to its zero value (empty list, `0`, empty `brand`, empty `cli`,
+ * empty `capabilities`) when omitted. `capabilities` is the typed
+ * declaration the host compares with `plugin.toml` and the operator grant.
  */
 export interface PluginDescribe
   extends RequiredDescribe,

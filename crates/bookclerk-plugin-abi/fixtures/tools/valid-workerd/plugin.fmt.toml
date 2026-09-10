@@ -10,7 +10,7 @@ main_module = "index.js"
 modules_dir = "modules"
 entrypoint = "default"
 
+[vars]
+
 [capabilities.network]
 mode = "deny"
-
-[vars]
