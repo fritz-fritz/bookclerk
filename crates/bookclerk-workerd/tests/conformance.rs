@@ -11,8 +11,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use bookclerk_plugin_abi::{
-    connect_plugin, Destination, DestinationContext, DomainEvent, EventResult, Integration,
-    IntegrationContext, PluginClient, WriteOptions, MAX_EVENT_PAYLOAD_BYTES, PRODUCT_API_VERSION,
+    connect_plugin, Destination, DestinationClient, DomainEvent, EventConsumer,
+    EventConsumerClient, EventResult, HostBindings, Invocation, PluginClient, WriteOptions,
+    MAX_EVENT_PAYLOAD_BYTES, PRODUCT_API_VERSION,
 };
 use bookclerk_workerd::pin::binary_name;
 use tokio::io::AsyncReadExt;
@@ -46,11 +47,50 @@ fn find_local_guest() -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-async fn destination_roundtrip(client: &PluginClient) {
-    let dest = client
-        .destination(DestinationContext::default())
+/// Opens the guest's `storage` entrypoint for one operator-wide invocation.
+async fn open_storage(client: &PluginClient, id: &str) -> DestinationClient {
+    client
+        .open(
+            &Invocation {
+                id: id.into(),
+                ..Default::default()
+            },
+            HostBindings::default(),
+        )
         .await
-        .expect("destination factory");
+        .expect("open")
+        .storage
+        .expect("guest exports `storage`")
+}
+
+/// Opens the guest's event consumer for one operator-wide invocation.
+async fn open_event_consumer(client: &PluginClient) -> EventConsumerClient {
+    client
+        .open(
+            &Invocation {
+                id: "events".into(),
+                ..Default::default()
+            },
+            HostBindings::default(),
+        )
+        .await
+        .expect("open")
+        .event_consumer
+        .expect("guest exports an event consumer")
+}
+
+/// Delivers one event and returns its single result.
+async fn deliver(
+    consumer: &EventConsumerClient,
+    event: DomainEvent,
+) -> bookclerk_plugin_abi::Result<EventResult> {
+    let mut results = consumer.event(vec![event]).await?;
+    assert_eq!(results.len(), 1, "one result per delivered event");
+    Ok(results.pop().expect("one result"))
+}
+
+async fn destination_roundtrip(client: &PluginClient) {
+    let dest = open_storage(client, "roundtrip").await;
     dest.put(
         "conformance/hello",
         Box::pin(std::io::Cursor::new(b"abc".to_vec())),
@@ -66,10 +106,7 @@ async fn destination_roundtrip(client: &PluginClient) {
     let head = dest.head("conformance/hello").await.expect("head");
     assert!(head.is_some(), "head after put");
     drop(dest);
-    let dest = client
-        .destination(DestinationContext::default())
-        .await
-        .expect("destination after dispose");
+    let dest = open_storage(client, "after-dispose").await;
     let got = dest
         .get("conformance/hello", None)
         .await
@@ -233,20 +270,15 @@ fn sample_event(event_type: &str) -> DomainEvent {
 }
 
 async fn event_result_vectors(client: &PluginClient) {
-    let integration = client
-        .integration(IntegrationContext::default())
-        .await
-        .expect("integration factory");
+    let consumer = open_event_consumer(client).await;
     assert_eq!(
-        integration
-            .on_event(sample_event("book_acquired"))
+        deliver(&consumer, sample_event("book_acquired"))
             .await
             .expect("ack"),
         EventResult::Ack
     );
     assert_eq!(
-        integration
-            .on_event(sample_event("test_retry"))
+        deliver(&consumer, sample_event("test_retry"))
             .await
             .expect("retry"),
         EventResult::Retry {
@@ -255,8 +287,7 @@ async fn event_result_vectors(client: &PluginClient) {
         }
     );
     assert_eq!(
-        integration
-            .on_event(sample_event("test_reject"))
+        deliver(&consumer, sample_event("test_reject"))
             .await
             .expect("reject"),
         EventResult::Reject {
@@ -264,8 +295,7 @@ async fn event_result_vectors(client: &PluginClient) {
         }
     );
     assert_eq!(
-        integration
-            .on_event(sample_event("test_dead_letter"))
+        deliver(&consumer, sample_event("test_dead_letter"))
             .await
             .expect("deadLetter"),
         EventResult::DeadLetter {
@@ -273,8 +303,7 @@ async fn event_result_vectors(client: &PluginClient) {
         }
     );
     assert_eq!(
-        integration
-            .on_event(sample_event("test_suspend"))
+        deliver(&consumer, sample_event("test_suspend"))
             .await
             .expect("suspend"),
         EventResult::Suspended {
@@ -287,8 +316,7 @@ async fn event_result_vectors(client: &PluginClient) {
     );
     let mut oversized = sample_event("book_acquired");
     oversized.payload = vec![0; MAX_EVENT_PAYLOAD_BYTES as usize + 1];
-    let err = integration
-        .on_event(oversized)
+    let err = deliver(&consumer, oversized)
         .await
         .expect_err("oversized payload");
     assert_eq!(
