@@ -46,7 +46,7 @@ Start here if you are new:
 | --- | --- |
 | [Migration](migration.md) | Moving from classic Libation Files |
 | [Libation parity](libation-parity.md) | Headless CLI/settings matrix vs Libation Chardonnay |
-| [ADR: Workers RPC + workerd](adr/plugin-workers-rpc-workerd.md) | Plugin ABI target state (object-capability Cap'n Proto / Workers RPC; not newline JSON as the product ABI) |
+| [ADR: Plugin capabilities v3](adr/plugin-capabilities-v3.md) | Plugin ABI target state (capability entrypoints, typed Cap'n Proto / Workers RPC; not newline JSON as the product ABI) |
 
 ## API reference (generated)
 
