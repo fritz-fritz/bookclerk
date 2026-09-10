@@ -24,7 +24,7 @@ use bookclerk_plugin_abi::{
 use bookclerk_plugin_abi::{
     encoded_execute_result_reply_bytes, Cancellation, Destination, EventPublisher, GuestDatabase,
     ObjectMetadata, PluginEvent, ProgressSink, PublishOk, Source, WriteOptions,
-    MAX_EVENT_PAYLOAD_BYTES,
+    MAX_EVENT_PAYLOAD_BYTES, MAX_SCALAR_BYTES,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -91,6 +91,28 @@ impl GrantedSlot {
             sql_policy: GuestSqlPolicy::host_authoritative(),
             max_request_bytes: 0,
             events: Some(events),
+        }
+    }
+
+    /// A grant that only reaches one named plugin database over
+    /// `/db/execute` (no streams, no events). The host-side binding session
+    /// enforces the binding-owned scope; the broker defers to it.
+    #[must_use]
+    pub fn database_only(database: Rc<dyn GuestDatabase>, expires: std::time::Instant) -> Self {
+        Self {
+            input: None,
+            output: None,
+            progress: None,
+            cancel: None,
+            expires,
+            allow_open: false,
+            allow_put: false,
+            allow_progress: false,
+            database: Some(database),
+            allow_database: true,
+            sql_policy: GuestSqlPolicy::host_authoritative(),
+            max_request_bytes: MAX_SCALAR_BYTES,
+            events: None,
         }
     }
 }

@@ -1337,11 +1337,14 @@ edit the journal.
 
 Delivery: `PluginWorker.open` receives the bindings as the append-only
 `Bindings.databases :List(NamedDatabase)` field. Rust guests call
-`DatabaseBinding::take_named_from_bindings(&mut bindings, "DB")`; workerd guests
-get one grant token per binding on the invocation envelope — the TS SDK
-exposes `context.databases.get("DB")` and the Python SDK
-`context.databases["DB"]`, each a full `prepare`/`bind`/`run`/`all`/`first`/
-`raw`/`batch` `DatabaseBinding`.
+`DatabaseBinding::take_named_from_bindings(&mut bindings, "DB")`. For workerd
+guests the launcher mints one database-only grant token per binding at `open`
+and carries it in the bridge context (`databases: { DB: <token> }`); the
+trusted adapter isolate turns each token into a granted-channel transport over
+`POST /db/execute` and installs the resulting `env.DB` — a full
+`prepare`/`bind`/`run`/`all`/`first`/`raw`/`batch` `DatabaseBinding` — on the
+author's `env` for every call of that `open` (events, storefront, jobs, …).
+Authors never see the token.
 
 ## Examples
 
