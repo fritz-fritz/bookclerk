@@ -79,20 +79,26 @@ impl WorkerdRoot {
     }
 }
 
-/// Bridge projection of the granted `CONFIG` binding: the `context` field /
-/// `x-bookclerk-context` header the isolate-side bridge decodes.
+/// Bridge projection of one `PluginWorker.open`: the `Invocation` envelope
+/// plus the granted `CONFIG` / `SECRETS` bindings, carried as the `context`
+/// field / `x-bookclerk-context` header the isolate-side SDK installs on the
+/// author's `env`.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BridgeContext {
+    invocation: Invocation,
     config: ExtensibleConfig,
+    secrets: ExtensibleConfig,
 }
 
-/// Job-runner bridge context: the durable job id plus `CONFIG`.
+/// Job-runner bridge context: the durable job id plus the open context.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkerBridgeContext {
     job_id: String,
+    invocation: Invocation,
     config: ExtensibleConfig,
+    secrets: ExtensibleConfig,
 }
 
 fn map_http(err: anyhow::Error) -> PluginError {
@@ -173,7 +179,9 @@ impl PluginWorker for WorkerdRoot {
 
     async fn open(&self, invocation: Invocation, bindings: Bindings) -> AbiResult<Entrypoints> {
         let ctx = BridgeContext {
+            invocation: invocation.clone(),
             config: bindings.config.clone(),
+            secrets: bindings.secrets.clone(),
         };
         let integration = || HttpIntegration {
             http: self.http.clone(),
@@ -210,8 +218,10 @@ impl PluginWorker for WorkerdRoot {
             exported.job_runner = Some(Box::new(HttpJobRunner {
                 http: self.http.clone(),
                 ctx: WorkerBridgeContext {
-                    job_id: invocation.id,
+                    job_id: invocation.id.clone(),
+                    invocation,
                     config: bindings.config,
+                    secrets: bindings.secrets,
                 },
                 databases: bindings
                     .databases
