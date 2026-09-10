@@ -1,4 +1,4 @@
-//! In-process adapters that speak Cap'n Proto `api_version = 2` to external plugin processes.
+//! In-process adapters that speak Cap'n Proto `api_version = 3` to external plugin processes.
 
 mod database;
 mod destination;

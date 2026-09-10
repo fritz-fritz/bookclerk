@@ -34,6 +34,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::discover::DiscoveredPlugin;
+use crate::PluginManifest;
 use crate::{PluginError, Result};
 
 /// Send-safe constructor for a per-binding [`bookclerk_plugin_sdk::GuestDatabase`].
@@ -332,7 +333,7 @@ impl ExecutorIdentity {
             plugin_id: plugin.manifest.id.clone(),
             artifact_digest: plugin.command.to_string_lossy().into_owned(),
             version: plugin.manifest.version.clone().unwrap_or_default(),
-            role: plugin.manifest.kind.as_str().to_string(),
+            role: plugin.manifest.primary_family().as_str().to_string(),
             account_id: account_id.to_string(),
             configuration_revision: String::new(),
             grant_revision: String::new(),
@@ -367,11 +368,13 @@ impl ExecutorIdentity {
 
 /// Sources and integrations must not share the operator isolate.
 #[must_use]
-fn account_bearing_requires_non_operator(kind: crate::PluginKind, account_id: &str) -> bool {
-    matches!(
-        kind,
-        crate::PluginKind::Source | crate::PluginKind::Integration
-    ) && (account_id.is_empty() || account_id == OPERATOR_ACCOUNT)
+fn account_bearing_requires_non_operator(manifest: &PluginManifest, account_id: &str) -> bool {
+    manifest.families().iter().any(|family| {
+        matches!(
+            family,
+            crate::PluginFamily::Source | crate::PluginFamily::Integration
+        )
+    }) && (account_id.is_empty() || account_id == OPERATOR_ACCOUNT)
 }
 
 /// Host-side plugin session (one jailed child + one vat thread).
@@ -452,7 +455,7 @@ impl PluginSession {
                 plugin.manifest.id, plugin.manifest.api_version
             )));
         }
-        if account_bearing_requires_non_operator(plugin.manifest.kind, account_id) {
+        if account_bearing_requires_non_operator(&plugin.manifest, account_id) {
             return Err(PluginError::message(format!(
                 "plugin `{}` is account-bearing and requires a non-operator account_id",
                 plugin.manifest.id
@@ -468,8 +471,7 @@ impl PluginSession {
         plugin: &DiscoveredPlugin,
         account_id: &str,
     ) -> Result<Self> {
-        let expected_id = plugin.manifest.id.clone();
-        let expected_kind = plugin.manifest.kind.as_str().to_string();
+        let manifest = plugin.manifest.clone();
         let id = spawned.id.clone();
         let data = spawned.data.clone();
         let scratch = spawned.scratch.clone();
@@ -485,7 +487,7 @@ impl PluginSession {
             oneshot::channel::<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>();
         thread::Builder::new()
             .name(format!("plugin-vat-{}", id))
-            .spawn(move || vat_thread(spawned, expected_id, expected_kind, rx, ready_tx))
+            .spawn(move || vat_thread(spawned, manifest, rx, ready_tx))
             .map_err(|err| PluginError::message(format!("plugin vat thread: {err}")))?;
         let (desc, limits, features) = ready_rx
             .await
@@ -712,11 +714,22 @@ impl PluginSession {
         &self.spawn_config
     }
 
-    /// True when the guest advertised capability method `cap` (or a factory
-    /// role of that name) in `describe()`.
+    /// True when the guest exported `entrypoint` in `describe()`.
     #[must_use]
-    pub fn has_capability(&self, cap: &str) -> bool {
-        self.describe.has_capability(cap)
+    pub fn has_entrypoint(&self, entrypoint: crate::Entrypoint) -> bool {
+        self.describe.has_entrypoint(entrypoint)
+    }
+
+    /// True when the guest's default entrypoint consumes `event_type`.
+    #[must_use]
+    pub fn consumes_event(&self, event_type: &str) -> bool {
+        self.describe.consumes_event(event_type)
+    }
+
+    /// True when the guest's default entrypoint consumes any event type.
+    #[must_use]
+    pub fn consumes_events(&self) -> bool {
+        !self.describe.capabilities.consumes.is_empty()
     }
 
     /// One typed content-source method (create stub → invoke → dispose).
@@ -1381,11 +1394,18 @@ async fn wait_flag(flag: Arc<AtomicBool>) {
     }
 }
 
+/// Validates `describe()` against the installed manifest and covering grant,
+/// then negotiates RPC features and scalar limits.
+///
+/// The typed capability block must not widen `plugin.toml` (see
+/// [`crate::validate_described_capabilities`]); a `storage` entrypoint also
+/// requires the streams feature.
 fn negotiate_describe(
     desc: &PluginDescribe,
-    expected_id: &str,
-    expected_kind: &str,
+    manifest: &PluginManifest,
+    grant: &crate::PluginGrant,
 ) -> Result<(ScalarLimits, Vec<String>)> {
+    let expected_id = manifest.id.as_str();
     if desc.api_version != PRODUCT_API_VERSION {
         return Err(PluginError::message(format!(
             "plugin `{}` describe apiVersion {} is not {PRODUCT_API_VERSION}",
@@ -1398,20 +1418,22 @@ fn negotiate_describe(
             desc.id
         )));
     }
-    if desc.kind != expected_kind {
-        return Err(PluginError::message(format!(
-            "plugin kind mismatch: described `{}`, expected `{expected_kind}`",
-            desc.kind
-        )));
-    }
+    crate::validate_described_capabilities(
+        manifest,
+        grant,
+        &desc.capabilities,
+        desc.portal_auth_mode,
+    )?;
     let features = negotiate_rpc_features(
         &[FEATURE_SCALAR_LIMITS, FEATURE_STREAMS, FEATURE_STORAGE_COPY],
         &desc.rpc_features,
     )
     .map_err(map_abi)?;
-    if matches!(expected_kind, "output") && !features.iter().any(|f| f == FEATURE_STREAMS) {
+    if desc.has_entrypoint(crate::Entrypoint::Storage)
+        && !features.iter().any(|f| f == FEATURE_STREAMS)
+    {
         return Err(PluginError::message(format!(
-            "plugin `{expected_id}` kind `{expected_kind}` requires `{FEATURE_STREAMS}`"
+            "plugin `{expected_id}` entrypoint `storage` requires `{FEATURE_STREAMS}`"
         )));
     }
     let guest_limits = ScalarLimits::from(desc.scalar_limits)
@@ -1426,8 +1448,7 @@ fn negotiate_describe(
 
 fn vat_thread(
     spawned: crate::spawn_stdio::SpawnedStdio,
-    expected_id: String,
-    expected_kind: String,
+    manifest: PluginManifest,
     mut rx: mpsc::UnboundedReceiver<Work>,
     ready: oneshot::Sender<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>,
 ) {
@@ -1449,7 +1470,7 @@ fn vat_thread(
                     connect_plugin(spawned.stdout, spawned.stdin, MAX_STREAM_WINDOW_BYTES);
                 tokio::task::spawn_local(rpc);
                 let client = match client.describe().await {
-                    Ok(desc) => match negotiate_describe(&desc, &expected_id, &expected_kind) {
+                    Ok(desc) => match negotiate_describe(&desc, &manifest, &spawned.grant) {
                         Ok((limits, features)) => {
                             let client = client.with_limits(limits);
                             let _ = ready.send(Ok((desc, limits, features)));
@@ -2382,73 +2403,108 @@ mod tests {
         );
     }
 
+    fn manifest_with(entrypoint: &str) -> PluginManifest {
+        PluginManifest::parse(&format!(
+            r#"
+api_version = 3
+id = "local"
+runtime = "native"
+command = "./guest"
+entrypoints = ["{entrypoint}"]
+
+[capabilities.network]
+mode = "deny"
+"#
+        ))
+        .expect("manifest")
+    }
+
+    fn output_describe() -> PluginDescribe {
+        PluginDescribe {
+            api_version: PRODUCT_API_VERSION,
+            id: "local".into(),
+            capabilities: bookclerk_plugin_abi::PluginCapabilities {
+                entrypoints: vec![crate::Entrypoint::Storage],
+                ..Default::default()
+            },
+            display_name: None,
+            rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
+            scalar_limits: ScalarLimits::default().into(),
+            ..PluginDescribe::default()
+        }
+    }
+
     #[test]
-    fn account_bearing_kinds_reject_operator_isolate() {
+    fn account_bearing_families_reject_operator_isolate() {
         assert!(account_bearing_requires_non_operator(
-            crate::PluginKind::Source,
+            &manifest_with("storefront"),
             OPERATOR_ACCOUNT
         ));
         assert!(account_bearing_requires_non_operator(
-            crate::PluginKind::Integration,
+            &manifest_with("remoteLibrary"),
             ""
         ));
         assert!(!account_bearing_requires_non_operator(
-            crate::PluginKind::Source,
+            &manifest_with("storefront"),
             "acct-a"
         ));
         assert!(!account_bearing_requires_non_operator(
-            crate::PluginKind::Output,
+            &manifest_with("storage"),
             OPERATOR_ACCOUNT
         ));
     }
 
     #[test]
-    fn negotiate_rejects_id_and_kind_mismatch() {
+    fn negotiate_rejects_id_mismatch_and_widened_entrypoints() {
+        let manifest = manifest_with("storage");
+        let grant = crate::consent_request(&manifest);
         let desc = PluginDescribe {
-            api_version: PRODUCT_API_VERSION,
             id: "other".into(),
-            kind: "output".into(),
-            display_name: None,
-            rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
-            scalar_limits: ScalarLimits::default().into(),
-            ..PluginDescribe::default()
+            ..output_describe()
         };
-        let err = negotiate_describe(&desc, "local", "output").unwrap_err();
+        let err = negotiate_describe(&desc, &manifest, &grant).unwrap_err();
         assert!(err.to_string().contains("id mismatch"));
 
         let desc = PluginDescribe {
-            id: "local".into(),
-            kind: "source".into(),
-            ..desc
+            capabilities: bookclerk_plugin_abi::PluginCapabilities {
+                entrypoints: vec![crate::Entrypoint::Storage, crate::Entrypoint::Storefront],
+                ..Default::default()
+            },
+            ..output_describe()
         };
-        let err = negotiate_describe(&desc, "local", "output").unwrap_err();
-        assert!(err.to_string().contains("kind mismatch"));
+        let err = negotiate_describe(&desc, &manifest, &grant).unwrap_err();
+        assert!(err.to_string().contains("storefront"), "{err}");
+
+        let narrower_grant = crate::PluginGrant {
+            entrypoints: Default::default(),
+            ..grant.clone()
+        };
+        let err = negotiate_describe(&output_describe(), &manifest, &narrower_grant).unwrap_err();
+        assert!(err.to_string().contains("grant lacks entrypoint"), "{err}");
+
+        assert!(negotiate_describe(&output_describe(), &manifest, &grant).is_ok());
     }
 
     #[test]
     fn negotiate_rejects_missing_features_and_zero_limits() {
+        let manifest = manifest_with("storage");
+        let grant = crate::consent_request(&manifest);
         let desc = PluginDescribe {
-            api_version: PRODUCT_API_VERSION,
-            id: "local".into(),
-            kind: "output".into(),
-            display_name: None,
             rpc_features: vec![FEATURE_STREAMS.into()],
-            scalar_limits: ScalarLimits::default().into(),
-            ..PluginDescribe::default()
+            ..output_describe()
         };
-        assert!(negotiate_describe(&desc, "local", "output").is_err());
+        assert!(negotiate_describe(&desc, &manifest, &grant).is_err());
 
         let desc = PluginDescribe {
-            rpc_features: vec![FEATURE_SCALAR_LIMITS.into(), FEATURE_STREAMS.into()],
             scalar_limits: ScalarLimits {
                 max_scalar_bytes: 0,
                 max_stream_window_bytes: 1024,
                 max_list_page: 10,
             }
             .into(),
-            ..desc
+            ..output_describe()
         };
-        assert!(negotiate_describe(&desc, "local", "output").is_err());
+        assert!(negotiate_describe(&desc, &manifest, &grant).is_err());
     }
 
     #[tokio::test]

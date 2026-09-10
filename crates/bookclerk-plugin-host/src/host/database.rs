@@ -327,7 +327,10 @@ pub async fn load_external_database(config: &Config) -> PluginResult<DatabaseReg
     let mut registry = DatabaseRegistry::default();
     let active = config.database.plugin.trim().to_ascii_lowercase();
     for plugin in crate::discover_plugins(config)? {
-        if plugin.manifest.kind != crate::PluginKind::Database {
+        if !plugin
+            .manifest
+            .has_entrypoint(crate::Entrypoint::DatabaseAdapter)
+        {
             continue;
         }
         if plugin.manifest.id.to_ascii_lowercase() != active {

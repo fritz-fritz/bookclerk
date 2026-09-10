@@ -76,7 +76,7 @@ pub async fn load_external_destinations(
 ) -> PluginResult<DestinationRegistry> {
     let mut registry = DestinationRegistry::default();
     for plugin in crate::discover_plugins(config)? {
-        if plugin.manifest.kind != crate::PluginKind::Output {
+        if !plugin.manifest.has_entrypoint(crate::Entrypoint::Storage) {
             continue;
         }
         if plugin.manifest.api_version != PRODUCT_API_VERSION {
