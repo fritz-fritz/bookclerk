@@ -18,10 +18,10 @@ use bookclerk_config::Config;
 use bookclerk_plugin_abi::HostAdapterDatabaseSession;
 use bookclerk_plugin_sdk::{
     connect_plugin, negotiate_rpc_features, BindingValues, ByteRange as AbiByteRange, Cancellation,
-    CopyResult, Destination, DomainEvent, EventConsumer, EventResult, HostBindings, Invocation,
-    JobInvocation, JobInvocationLease, ListOptions, ObjectMetadata, Oidc, OidcClientTemplate,
-    OpenedEntrypoints, PluginCli, PluginClient, PluginDescribe, PutResult, ReadResult,
-    ScalarLimits, Source, StreamCopySpec, WriteOptions, FEATURE_SCALAR_LIMITS,
+    CopyResult, Destination, DomainEvent, EventConsumer, EventPublisher, EventResult, HostBindings,
+    Invocation, JobInvocation, JobInvocationLease, ListOptions, ObjectMetadata, Oidc,
+    OidcClientTemplate, OpenedEntrypoints, PluginCli, PluginClient, PluginDescribe, PutResult,
+    ReadResult, ScalarLimits, Source, StreamCopySpec, WriteOptions, FEATURE_SCALAR_LIMITS,
     FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES,
     PRODUCT_API_VERSION,
 };
@@ -35,6 +35,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::discover::DiscoveredPlugin;
+use crate::event_publisher::EventOutbox;
 use crate::PluginManifest;
 use crate::{PluginError, Result};
 
@@ -391,6 +392,36 @@ fn account_bearing_requires_non_operator(manifest: &PluginManifest, account_id: 
     }) && (account_id.is_empty() || account_id == OPERATOR_ACCOUNT)
 }
 
+/// Host services a session hands its guest as `Bindings` on every
+/// `PluginWorker.open`.
+///
+/// Nothing here is guest-visible on its own: the session still gates each
+/// binding on the manifest declaration plus the covering consent grant.
+#[derive(Clone, Default)]
+pub struct SessionServices {
+    /// Library store whose outbox backs the `EVENTS` binding. `None` (the
+    /// default) never exposes `EVENTS`, even to a granted producer.
+    pub event_outbox: Option<bookclerk_library::LibraryStore>,
+}
+
+impl SessionServices {
+    /// Services with the library outbox attached.
+    #[must_use]
+    pub fn with_event_outbox(store: bookclerk_library::LibraryStore) -> Self {
+        Self {
+            event_outbox: Some(store),
+        }
+    }
+
+    /// Services with the library outbox attached when `store` is present.
+    #[must_use]
+    pub fn from_outbox(store: Option<&bookclerk_library::LibraryStore>) -> Self {
+        Self {
+            event_outbox: store.cloned(),
+        }
+    }
+}
+
 /// Host-side plugin session (one jailed child + one vat thread).
 pub struct PluginSession {
     /// Work queue into the vat thread.
@@ -465,6 +496,31 @@ impl PluginSession {
         account_id: &str,
         extra_env: &[(&str, std::ffi::OsString)],
     ) -> Result<Self> {
+        Self::spawn_with(
+            plugin,
+            config,
+            config_table,
+            account_id,
+            extra_env,
+            SessionServices::default(),
+        )
+        .await
+    }
+
+    /// [`Self::spawn_for_account_with_env`] plus the host services the guest
+    /// may receive as bindings (`EVENTS` outbox, …).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the child cannot start, describe fails, or negotiation fails.
+    pub async fn spawn_with(
+        plugin: &DiscoveredPlugin,
+        config: &Config,
+        config_table: Value,
+        account_id: &str,
+        extra_env: &[(&str, std::ffi::OsString)],
+        services: SessionServices,
+    ) -> Result<Self> {
         if plugin.manifest.api_version != PRODUCT_API_VERSION {
             return Err(PluginError::message(format!(
                 "plugin `{}` api_version {} is not supported",
@@ -479,19 +535,25 @@ impl PluginSession {
         }
         let spawned =
             crate::spawn_stdio::spawn_stdio_guest(plugin, config, config_table, extra_env).await?;
-        Self::connect_spawned(spawned, plugin, account_id).await
+        Self::connect_spawned(spawned, plugin, account_id, services).await
     }
 
     async fn connect_spawned(
         spawned: crate::spawn_stdio::SpawnedStdio,
         plugin: &DiscoveredPlugin,
         account_id: &str,
+        services: SessionServices,
     ) -> Result<Self> {
         let manifest = plugin.manifest.clone();
         let id = spawned.id.clone();
         let data = spawned.data.clone();
         let scratch = spawned.scratch.clone();
         let grant = spawned.grant.clone();
+        // `EVENTS` needs all three: a host outbox, a manifest producer, and
+        // the operator grant covering that producer.
+        let events = services.event_outbox.and_then(|store| {
+            EventOutbox::new(store, &id, manifest.producer_types(), &grant.producers)
+        });
         let spawn_config = spawned.spawn_config.clone();
         #[cfg(windows)]
         let package_sid = spawned.package_sid.clone();
@@ -504,7 +566,7 @@ impl PluginSession {
         let vat_account = account_id.to_string();
         thread::Builder::new()
             .name(format!("plugin-vat-{}", id))
-            .spawn(move || vat_thread(spawned, manifest, vat_account, rx, ready_tx))
+            .spawn(move || vat_thread(spawned, manifest, vat_account, events, rx, ready_tx))
             .map_err(|err| PluginError::message(format!("plugin vat thread: {err}")))?;
         let (desc, limits, features) = ready_rx
             .await
@@ -1519,6 +1581,37 @@ struct PrimaryOpen {
     entrypoints: OpenedEntrypoints,
 }
 
+/// Vat-thread state for the session's primary `open` plus the host services
+/// every `open` (primary or per-job) hands the guest as bindings.
+struct PrimaryState {
+    /// Current primary open, if any.
+    open: Option<PrimaryOpen>,
+    /// `EVENTS` outbox hook; `None` when no producer is declared and granted.
+    events: Option<EventOutbox>,
+}
+
+impl PrimaryState {
+    /// Fresh state before the first `open`.
+    fn new(events: Option<EventOutbox>) -> Self {
+        Self { open: None, events }
+    }
+
+    /// Binding values of the current primary open (empty before `open`).
+    fn values(&self) -> BindingValues {
+        self.open
+            .as_ref()
+            .map(|p| p.values.clone())
+            .unwrap_or_default()
+    }
+
+    /// `EVENTS` publisher for `invocation`, when the outbox is granted.
+    fn events_for(&self, invocation: &Invocation) -> Option<Arc<dyn EventPublisher>> {
+        self.events
+            .as_ref()
+            .map(|outbox| Arc::new(outbox.publisher(invocation)) as Arc<dyn EventPublisher>)
+    }
+}
+
 /// Host-issued invocation identity for one `PluginWorker.open`.
 fn new_invocation(account_id: &str, id: impl Into<String>, deadline_unix_ms: u64) -> Invocation {
     Invocation {
@@ -1533,29 +1626,33 @@ fn new_invocation(account_id: &str, id: impl Into<String>, deadline_unix_ms: u64
 async fn primary_entrypoints<'a>(
     client: &PluginClient,
     account_id: &str,
-    primary: &'a mut Option<PrimaryOpen>,
+    primary: &'a mut PrimaryState,
     values: Option<BindingValues>,
 ) -> Result<&'a OpenedEntrypoints> {
-    let reuse = match (&*primary, &values) {
+    let reuse = match (&primary.open, &values) {
         (Some(_), None) => true,
         (Some(open), Some(values)) => open.values == *values,
         (None, _) => false,
     };
     if !reuse {
         let want = values.unwrap_or_default();
+        let invocation = new_invocation(account_id, uuid::Uuid::new_v4().to_string(), 0);
         let entrypoints = client
             .open(
-                &new_invocation(account_id, uuid::Uuid::new_v4().to_string(), 0),
-                HostBindings::from_values(want.clone()),
+                &invocation,
+                HostBindings {
+                    events: primary.events_for(&invocation),
+                    ..HostBindings::from_values(want.clone())
+                },
             )
             .await
             .map_err(map_abi)?;
-        *primary = Some(PrimaryOpen {
+        primary.open = Some(PrimaryOpen {
             values: want,
             entrypoints,
         });
     }
-    Ok(&primary.as_ref().expect("primary is open").entrypoints)
+    Ok(&primary.open.as_ref().expect("primary is open").entrypoints)
 }
 
 /// Fails closed when the guest did not export `name`.
@@ -1586,6 +1683,7 @@ fn vat_thread(
     spawned: crate::spawn_stdio::SpawnedStdio,
     manifest: PluginManifest,
     account_id: String,
+    events: Option<EventOutbox>,
     mut rx: mpsc::UnboundedReceiver<Work>,
     ready: oneshot::Sender<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>,
 ) {
@@ -1623,7 +1721,7 @@ fn vat_thread(
                         return;
                     }
                 };
-                let mut primary: Option<PrimaryOpen> = None;
+                let mut primary = PrimaryState::new(events);
                 struct BindingOpen {
                     session: Box<dyn bookclerk_plugin_sdk::AdapterDatabaseSession>,
                     host: bookclerk_plugin_abi::HostAdapterDatabaseSessionClient,
@@ -1725,18 +1823,22 @@ fn vat_thread(
                                     continue;
                                 }
                             };
-                            let values = primary
-                                .as_ref()
-                                .map(|p| p.values.clone())
-                                .unwrap_or_default();
+                            let values = primary.values();
+                            let job_invocation = new_invocation(
+                                &account_id,
+                                lease.job_id.clone(),
+                                lease.deadline_unix_ms,
+                            );
+                            let events = primary.events_for(&job_invocation);
                             let out = tokio::select! {
                                 () = wait_flag(Arc::clone(&cancel)) => {
                                     Err(PluginError::from_abi(Some("cancelled"), "fence lost"))
                                 }
                                 out = run_stream_copy(
                                     &client,
-                                    &account_id,
+                                    job_invocation,
                                     values,
+                                    events,
                                     dest,
                                     lease,
                                     spec,
@@ -2197,7 +2299,7 @@ fn vat_thread(
 async fn storage<'a>(
     client: &PluginClient,
     account_id: &str,
-    primary: &'a mut Option<PrimaryOpen>,
+    primary: &'a mut PrimaryState,
 ) -> Result<&'a bookclerk_plugin_sdk::DestinationClient> {
     primary_entrypoints(client, account_id, primary, None)
         .await?
@@ -2211,8 +2313,9 @@ async fn storage<'a>(
 #[allow(clippy::too_many_arguments)]
 async fn run_stream_copy(
     client: &PluginClient,
-    account_id: &str,
+    invocation: Invocation,
     values: BindingValues,
+    events: Option<Arc<dyn EventPublisher>>,
     dest: bookclerk_plugin_sdk::DestinationClient,
     lease: JobInvocationLease,
     spec: StreamCopySpec,
@@ -2225,10 +2328,10 @@ async fn run_stream_copy(
     // separate units.
     let opened = client
         .open(
-            &new_invocation(account_id, lease.job_id.clone(), lease.deadline_unix_ms),
+            &invocation,
             HostBindings {
                 values,
-                events: None,
+                events,
                 databases,
                 cancel: Arc::new(FlagCancel(Arc::clone(&cancel))),
                 storage: None,
