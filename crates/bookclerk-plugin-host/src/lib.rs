@@ -49,12 +49,11 @@ mod spawn_stdio;
 
 pub use bookclerk_plugin_sdk::protocol;
 pub use bookclerk_plugin_sdk::{
-    methods, BookAcquiredDto, CatalogHitDto, CliArgKind, CliArgSpec, CliCommandSpec,
-    CliInvokeParams, CliInvokeResult, CliSchema, EventPollResultDto, ExpandCandidatesParams,
-    ExternalUserDto, FetchTitleParams, HealthDto, ListeningProgressDto, LoginCompleteParams,
-    LoginParams, LoginResultDto, LoginStartResultDto, PlainPartDto, PluginMetadata,
-    PurchaseHintDto, PurchaseHintParams, ScanBookDto, ScanParams, ScanSummaryDto,
-    SearchCatalogParams, SourceAccountDto, SourceFetchDto, SyncListeningResultDto,
+    methods, CatalogHit, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams,
+    CliInvokeResult, CliSchema, EventPollResult, ExpandCandidatesParams, ExternalUser,
+    FetchTitleParams, ListeningProgress, LoginCompleteParams, LoginParams, LoginResult,
+    LoginStartResult, PlainFetch, PlainPart, PluginDescribe, PurchaseHint, PurchaseHintParams,
+    ScanBook, ScanParams, ScanSummary, SearchCatalogParams, SourceAccount, SyncListeningResult,
     PRODUCT_API_VERSION, PROTOCOL_NAME,
 };
 
