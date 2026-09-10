@@ -178,10 +178,10 @@ impl ExtensibleConfig {
 
 /// `application/json` and `application/*+json` structured-syntax suffixes.
 fn is_json_media_type(media_type: &str) -> bool {
+    // Strip any `; charset=...` parameters to compare the type/subtype essence.
     let essence = media_type
-        .split(';')
-        .next()
-        .unwrap_or_default()
+        .split_once(';')
+        .map_or(media_type, |(essence, _params)| essence)
         .trim()
         .to_ascii_lowercase();
     essence == JSON_MEDIA_TYPE

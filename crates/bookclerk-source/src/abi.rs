@@ -690,8 +690,10 @@ mod tests {
 
     #[test]
     fn fetch_options_carry_cdm_provider_tri_state() {
-        let mut download = DownloadOptions::default();
-        download.widevine_cdm_provider = Some(String::new());
+        let mut download = DownloadOptions {
+            widevine_cdm_provider: Some(String::new()),
+            ..DownloadOptions::default()
+        };
         let fetch = abi::FetchOptions::from(&download);
         assert_eq!(fetch.widevine_cdm_provider.as_deref(), Some("off"));
         download.widevine_cdm_provider = None;

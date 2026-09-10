@@ -9,17 +9,22 @@
 use base64::Engine as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Standard padded base64 alphabet.
 fn engine() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
+/// Accepted JSON encodings of a byte string.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum BytesRepr {
+    /// Base64 text (canonical projection).
     Text(String),
+    /// JSON number array (hand-written fixtures).
     Array(Vec<u8>),
 }
 
+/// Decodes either accepted representation.
 fn decode(repr: BytesRepr) -> Result<Vec<u8>, String> {
     match repr {
         BytesRepr::Array(bytes) => Ok(bytes),
