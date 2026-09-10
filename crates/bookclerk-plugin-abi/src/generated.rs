@@ -77,9 +77,9 @@ pub enum Entrypoint {
     /// Library database adapter (`Database`).
     DatabaseAdapter,
     /// Remote-library lifecycle: start/stop, scanLibrary, syncListening,
-    /// pollEvents (`Integration` minus event delivery).
+    /// pollEvents (`RemoteLibrary`).
     RemoteLibrary,
-    /// Guest CLI (`cliDescribe` / `cliInvoke`).
+    /// Guest CLI (`PluginCli.describe` / `PluginCli.invoke`).
     Cli,
     /// OIDC bridge: relying-party client templates and `authenticateUser`.
     Oidc,
@@ -545,7 +545,7 @@ pub struct ConfigOptionValue {
     pub label: String,
 }
 
-/// Declared plugin CLI surface (`cliDescribe` / `describe().cli`).
+/// Declared plugin CLI surface (`PluginCli.describe` / `describe().cli`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliSchema {
@@ -604,7 +604,7 @@ pub struct CliArgSpec {
     pub positional: bool,
 }
 
-/// One named argument value passed to `cliInvoke`.
+/// One named argument value passed to `PluginCli.invoke`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliArg {
@@ -616,7 +616,7 @@ pub struct CliArg {
     pub value: String,
 }
 
-/// Params of `BookclerkPlugin.cliInvoke`.
+/// Params of `PluginCli.invoke`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliInvokeParams {
@@ -628,7 +628,7 @@ pub struct CliInvokeParams {
     pub args: Vec<CliArg>,
 }
 
-/// Result of `BookclerkPlugin.cliInvoke`.
+/// Result of `PluginCli.invoke`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliInvokeResult {
@@ -1388,7 +1388,7 @@ pub struct PurchaseHintResult {
     pub hint: PurchaseHint,
 }
 
-/// Params of `Integration.scanLibrary` (remote library sync).
+/// Params of `RemoteLibrary.scanLibrary` (remote library sync).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanLibraryParams {
@@ -1398,7 +1398,7 @@ pub struct ScanLibraryParams {
     pub force: bool,
 }
 
-/// Params of `Integration.authenticateUser`.
+/// Params of `Oidc.authenticateUser`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthenticateUserParams {
@@ -1432,7 +1432,7 @@ pub struct ExternalUser {
     pub access_token: Option<String>,
 }
 
-/// Success payload of `Integration.pollEvents`: signals for the host to kick
+/// Success payload of `RemoteLibrary.pollEvents`: signals for the host to kick
 /// off workflows.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1494,13 +1494,79 @@ pub struct ListeningProgress {
     pub last_listened_at_unix_ms: Option<u64>,
 }
 
-/// Success payload of `Integration.syncListening`.
+/// Success payload of `RemoteLibrary.syncListening`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncListeningResult {
     /// Progress snapshots to upsert.
     #[serde(default)]
     pub items: Vec<ListeningProgress>,
+}
+
+/// Guest-published domain event (`EventPublisher.publish`). The host stamps
+/// `eventId`, `source` (the plugin id), and `accountId` from the invocation;
+/// guests cannot forge either.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginEvent {
+    /// Snake_case event type; must be listed in `\[\[events.producers\]\]`.
+    #[serde(default)]
+    pub event_type: String,
+    /// Schema version of `payload`, owned by the event type.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Producer idempotency key; a repeat within the outbox dedup window returns
+    /// `PublishOk.duplicate = true`. Empty publishes unconditionally.
+    #[serde(default)]
+    pub deduplication_key: String,
+    /// Encoded event payload; at most `maxEventPayloadBytes`.
+    #[serde(default, with = "crate::json_bytes::b64")]
+    pub payload: Vec<u8>,
+    /// When the producer observed the fact; zero means "now" on the host clock.
+    #[serde(default)]
+    pub occurred_at_unix_ms: u64,
+    /// Trace correlation id; empty inherits `Invocation.correlationId`.
+    #[serde(default)]
+    pub correlation_id: String,
+    /// Id of the event or command that caused this one; empty inherits
+    /// `Invocation.causationId`.
+    #[serde(default)]
+    pub causation_id: String,
+}
+
+/// Success payload of `EventPublisher.publish`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishOk {
+    /// Outbox event id (new or the earlier row when `duplicate`).
+    #[serde(default)]
+    pub event_id: String,
+    /// True when `deduplicationKey` matched an existing outbox row.
+    #[serde(default)]
+    pub duplicate: bool,
+}
+
+/// Identity of one `PluginWorker.open` invocation. The host issues ids; guests
+/// echo `correlationId` / `causationId` onto published events.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Invocation {
+    /// Unique host-issued invocation id.
+    #[serde(default)]
+    pub id: String,
+    /// Account scope; empty for operator / host-wide invocations.
+    #[serde(default)]
+    pub account_id: String,
+    /// UTC Unix milliseconds; zero when the invocation has no deadline. The host
+    /// fence is authoritative.
+    #[serde(default)]
+    pub deadline_unix_ms: u64,
+    /// Trace correlation id; empty when none.
+    #[serde(default)]
+    pub correlation_id: String,
+    /// Id of the event or command that caused this invocation; empty when none.
+    #[serde(default)]
+    pub causation_id: String,
 }
 
 /// Encode a [`EventConsumerSpec`] onto a Cap'n Proto builder.
@@ -3754,4 +3820,130 @@ pub fn read_sync_listening_reply(
         plugin_capnp::sync_listening_reply::Ok(ok) => Ok(Ok(read_sync_listening_result(ok?)?)),
         plugin_capnp::sync_listening_reply::Err(err) => Ok(Err(crate::rpc::read_error(err?))),
     }
+}
+
+/// Encode a [`PluginEvent`] onto a Cap'n Proto builder.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when a list is too long or a nested field cannot be encoded.
+pub fn write_plugin_event(
+    mut b: plugin_capnp::plugin_event::Builder<'_>,
+    v: &PluginEvent,
+) -> capnp::Result<()> {
+    b.set_event_type(&v.event_type);
+    b.set_schema_version(v.schema_version);
+    b.set_deduplication_key(&v.deduplication_key);
+    b.set_payload(&v.payload);
+    b.set_occurred_at_unix_ms(v.occurred_at_unix_ms);
+    b.set_correlation_id(&v.correlation_id);
+    b.set_causation_id(&v.causation_id);
+    Ok(())
+}
+
+/// Decode a [`PluginEvent`] from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when a text field is not UTF-8 or a pointer is malformed.
+pub fn read_plugin_event(r: plugin_capnp::plugin_event::Reader<'_>) -> capnp::Result<PluginEvent> {
+    Ok(PluginEvent {
+        event_type: r.get_event_type()?.to_string()?,
+        schema_version: r.get_schema_version(),
+        deduplication_key: r.get_deduplication_key()?.to_string()?,
+        payload: r.get_payload()?.to_vec(),
+        occurred_at_unix_ms: r.get_occurred_at_unix_ms(),
+        correlation_id: r.get_correlation_id()?.to_string()?,
+        causation_id: r.get_causation_id()?.to_string()?,
+    })
+}
+
+/// Encode a [`PublishOk`] onto a Cap'n Proto builder.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when a list is too long or a nested field cannot be encoded.
+pub fn write_publish_ok(
+    mut b: plugin_capnp::publish_ok::Builder<'_>,
+    v: &PublishOk,
+) -> capnp::Result<()> {
+    b.set_event_id(&v.event_id);
+    b.set_duplicate(v.duplicate);
+    Ok(())
+}
+
+/// Decode a [`PublishOk`] from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when a text field is not UTF-8 or a pointer is malformed.
+pub fn read_publish_ok(r: plugin_capnp::publish_ok::Reader<'_>) -> capnp::Result<PublishOk> {
+    Ok(PublishOk {
+        event_id: r.get_event_id()?.to_string()?,
+        duplicate: r.get_duplicate(),
+    })
+}
+
+/// Encode a `PublishReply` union from a typed result.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when a nested field cannot be encoded.
+pub fn write_publish_reply(
+    b: plugin_capnp::publish_reply::Builder<'_>,
+    v: &Result<PublishOk, crate::PluginError>,
+) -> capnp::Result<()> {
+    match v {
+        Ok(ok) => write_publish_ok(b.init_ok(), ok),
+        Err(err) => {
+            crate::rpc::write_error(b.init_err(), err);
+            Ok(())
+        }
+    }
+}
+
+/// Decode a `PublishReply` union into a typed result.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when the union is unset or a field is malformed.
+pub fn read_publish_reply(
+    r: plugin_capnp::publish_reply::Reader<'_>,
+) -> capnp::Result<Result<PublishOk, crate::PluginError>> {
+    match r.which()? {
+        plugin_capnp::publish_reply::Ok(ok) => Ok(Ok(read_publish_ok(ok?)?)),
+        plugin_capnp::publish_reply::Err(err) => Ok(Err(crate::rpc::read_error(err?))),
+    }
+}
+
+/// Encode a [`Invocation`] onto a Cap'n Proto builder.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when a list is too long or a nested field cannot be encoded.
+pub fn write_invocation(
+    mut b: plugin_capnp::invocation::Builder<'_>,
+    v: &Invocation,
+) -> capnp::Result<()> {
+    b.set_id(&v.id);
+    b.set_account_id(&v.account_id);
+    b.set_deadline_unix_ms(v.deadline_unix_ms);
+    b.set_correlation_id(&v.correlation_id);
+    b.set_causation_id(&v.causation_id);
+    Ok(())
+}
+
+/// Decode a [`Invocation`] from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when a text field is not UTF-8 or a pointer is malformed.
+pub fn read_invocation(r: plugin_capnp::invocation::Reader<'_>) -> capnp::Result<Invocation> {
+    Ok(Invocation {
+        id: r.get_id()?.to_string()?,
+        account_id: r.get_account_id()?.to_string()?,
+        deadline_unix_ms: r.get_deadline_unix_ms(),
+        correlation_id: r.get_correlation_id()?.to_string()?,
+        causation_id: r.get_causation_id()?.to_string()?,
+    })
 }

@@ -16,7 +16,7 @@ use bookclerk_db_guest::{
     guest_list_user_relations_on, guest_prepare_unit_restore, guest_prepare_unit_restore_on,
     host_session, host_session_on, set_connection,
 };
-use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
+use bookclerk_plugin_abi::db::{connect_params_from_bindings, DbConnectParams};
 use bookclerk_plugin_abi::HostAdapterDatabaseSession;
 use bookclerk_plugin_sdk::database_adapter::plugin_error_from_engine;
 use bookclerk_plugin_sdk::manifest_capabilities;
@@ -81,7 +81,7 @@ fn binding_open(ctx: &DatabaseContext) -> Option<BindingOpen> {
         binding: Some(binding),
         provision,
         ..
-    } = connect_params_from_context(ctx).ok()?
+    } = connect_params_from_bindings(ctx).ok()?
     else {
         return None;
     };
@@ -130,7 +130,7 @@ async fn connect_from_context(ctx: &DatabaseContext) -> Result<()> {
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| {
-            connect_params_from_context(ctx).ok().and_then(|params| {
+            connect_params_from_bindings(ctx).ok().and_then(|params| {
                 let DbConnectParams::Sqlite { sqlite_path, .. } = params else {
                     return None;
                 };

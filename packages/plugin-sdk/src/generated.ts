@@ -189,7 +189,7 @@ export interface PluginDescribe {
   brand: Brand;
   /** Discoverable config option groups for source UIs. */
   configOptions: ConfigOption[];
-  /** Embedded CLI schema (same shape as `cliDescribe`); empty when unused. */
+  /** Embedded CLI schema (same shape as `PluginCli.describe`); empty when unused. */
   cli: CliSchema;
 }
 
@@ -215,13 +215,13 @@ export interface OidcClientTemplate {
   originConfigKey: string;
 }
 
-/** Success payload of `BookclerkPlugin.oidcClients`. */
+/** Success payload of `Oidc.clients`. */
 export interface OidcClientsOk {
   /** Client templates; empty when the plugin is not a relying party. */
   clients: OidcClientTemplate[];
 }
 
-/** Result union of `BookclerkPlugin.oidcClients`. */
+/** Result union of `Oidc.clients`. */
 export type OidcClientsReply =
   | { kind: "ok"; value: OidcClientsOk } // Success: OIDC client templates.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
@@ -237,66 +237,68 @@ export interface ExtensibleConfig {
 }
 
 /**
- * Granted configuration for `BookclerkPlugin.destination`. OS paths, FDs,
- * and sockets are transport-private.
+ * Host-granted bindings for one `PluginWorker.open` (`env` in the Workers
+ * idiom). OS paths, FDs, and sockets are transport-private. Capability fields
+ * are null when the manifest does not declare (or the operator did not grant)
+ * the binding.
  */
-export interface DestinationContext {
+export interface Bindings {
   /**
-   * Granted plugin settings (operator `[output.<id>]` table as
-   * `application/json`).
+   * `CONFIG`: granted plugin settings (operator `[vars]` plus the family
+   * settings table) as `application/json`; at most `maxConfigPayloadBytes`.
    */
   config: ExtensibleConfig;
-}
-
-/** Granted configuration for `BookclerkPlugin.source`. */
-export interface SourceContext {
-  /** Granted plugin settings as `application/json`. */
-  config: ExtensibleConfig;
-}
-
-/** Granted configuration for `BookclerkPlugin.worker`. */
-export interface WorkerContext {
-  /** Host job id this handler serves. */
-  jobId: string;
-  /** Granted plugin settings as `application/json`. */
-  config: ExtensibleConfig;
-}
-
-/** Granted configuration for `BookclerkPlugin.contentSource`. */
-export interface ContentSourceContext {
   /**
-   * Granted plugin settings (operator `[sources.<id>]` table as
-   * `application/json`).
+   * `SECRETS`: granted secret values as `application/json`; empty payload
+   * when the manifest declares no `[secrets]`.
    */
-  config: ExtensibleConfig;
-}
-
-/** Granted configuration for `BookclerkPlugin.integration`. */
-export interface IntegrationContext {
+  secrets: ExtensibleConfig;
   /**
-   * Granted plugin settings (operator `[integrations.<id>]` table as
-   * `application/json`).
+   * Database-adapter bootstrap for the `databaseAdapter` entrypoint. First-party
+   * host-managed adapters receive host-private connect params in `config`;
+   * third-party adapters receive this typed bootstrap (and an empty `config`).
    */
-  config: ExtensibleConfig;
+  adapter: DatabaseAdapterConfig;
+  /** `EVENTS`: outbox publisher; null unless `[[events.producers]]` is granted. */
+  events: EventPublisher;
+  /**
+   * Named plugin-owned `[[databases]]` bindings: each entry is an isolated
+   * database provisioned by the active adapter, separate from the Bookclerk
+   * library and from every other plugin. Empty when the manifest declares none.
+   */
+  databases: NamedDatabase[];
+  /** Host cancellation for the whole invocation (fence / lease loss). */
+  cancel: Cancellation;
 }
 
 /**
- * Granted configuration for `BookclerkPlugin.database`. First-party
- * host-managed adapters receive host-private connect params in `config`;
- * third-party adapters receive the typed `adapter` bootstrap instead.
+ * Exported entrypoints returned by `PluginWorker.open`. One capability per
+ * `plugin.toml` `entrypoints` entry / trigger; null when not exported. The host
+ * refuses an entrypoint the manifest or operator grant did not allow.
  */
-export interface DatabaseContext {
-  /**
-   * Host-private connect params for first-party adapters; empty payload for
-   * third-party adapters.
-   */
-  config: ExtensibleConfig;
-  /**
-   * Author-facing bootstrap for third-party adapters; `pluginDataDir` is
-   * empty when `config` carries host-private params instead.
-   */
-  adapter: DatabaseAdapterConfig;
+export interface Entrypoints {
+  /** `[[events.consumers]]` trigger: `event(batch)` handler. */
+  eventConsumer: EventConsumer;
+  /** `[triggers] jobs` trigger: `job(controller)` handler. */
+  jobRunner: JobRunner;
+  /** `storefront` entrypoint. */
+  storefront: ContentSource;
+  /** `storage` entrypoint. */
+  storage: Destination;
+  /** `databaseAdapter` entrypoint. */
+  databaseAdapter: Database;
+  /** `remoteLibrary` entrypoint. */
+  remoteLibrary: RemoteLibrary;
+  /** `cli` entrypoint. */
+  cli: PluginCli;
+  /** `oidc` entrypoint. */
+  oidc: Oidc;
 }
+
+/** Result union of `PluginWorker.open`. */
+export type EntrypointsReply =
+  | { kind: "ok"; value: Entrypoints } // Success: exported entrypoint capabilities.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
 /**
  * Durable command envelope (not a domain event). Command payload schema
@@ -375,7 +377,7 @@ export interface SuspendedOutcome {
   wakeAtUnixMs: number;
 }
 
-/** Terminal or suspended result of `JobHandler.handle`. */
+/** Terminal or suspended result of `JobRunner.job`. */
 export type JobOutcome =
   | { kind: "completed"; value: CompletedOutcome } // Finished successfully.
   | { kind: "retryable"; value: RetryableOutcome } // Transient failure; retry later.
@@ -461,13 +463,48 @@ export interface EventSuspended {
   wakeOnFilterJson: string;
 }
 
-/** Outcome of `Integration.onEvent`. */
+/** Per-event outcome inside an `EventConsumer.event` batch reply. */
 export type EventResult =
   | { kind: "ack"; value: EventAck } // Handled.
   | { kind: "retry"; value: EventRetry } // Redeliver later.
   | { kind: "reject"; value: EventReject } // Stop delivering.
   | { kind: "deadLetter"; value: EventDeadLetter } // Park for operator review.
   | { kind: "suspended"; value: EventSuspended }; // Released with a checkpoint.
+
+/**
+ * One `EventConsumer.event` delivery: at most `maxListPage` events, each
+ * bounded by `maxEventPayloadBytes` / `maxCheckpointBytes`.
+ */
+export interface EventBatch {
+  /** Events in delivery order; the reply carries one `EventResult` per entry. */
+  events: DomainEvent[];
+}
+
+/**
+ * Result union of `EventConsumer.event`. `ok` has exactly one entry per
+ * `EventBatch.events` entry, in order; a short list is a host-side error and
+ * the missing tail is retried.
+ */
+export type EventBatchReply =
+  | { kind: "ok"; value: EventResult[] } // Success: per-event outcomes.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/**
+ * Everything one `JobRunner.job` invocation may touch. Capabilities are
+ * host-served; the guest never sees OS paths or sockets.
+ */
+export interface JobController {
+  /** Durable command envelope. */
+  invocation: JobInvocation;
+  /** Job input objects. */
+  input: Source;
+  /** Job output object store. */
+  output: Destination;
+  /** Progress reporter (host coalesces frequent updates). */
+  progress: ProgressSink;
+  /** Host cancellation probe for this job (fence / lease). */
+  cancel: Cancellation;
+}
 
 /** Success payload of `Destination.head`. */
 export interface HeadOk {
@@ -541,49 +578,14 @@ export type OpenReply =
   | { kind: "ok"; value: OpenOk } // Success: object metadata and body stream.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
-/** Result union of `BookclerkPlugin.describe`. */
+/** Result union of `PluginWorker.describe`. */
 export type DescribeReply =
   | { kind: "ok"; value: PluginDescribe } // Success: plugin identity.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
-/** Result union of `BookclerkPlugin.destination`. */
-export type DestinationReply =
-  | { kind: "ok"; value: Destination } // Success: opened `Destination` capability.
-  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
-
-/** Result union of `BookclerkPlugin.source`. */
-export type SourceReply =
-  | { kind: "ok"; value: Source } // Success: opened `Source` capability.
-  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
-
-/** Result union of `BookclerkPlugin.worker`. */
-export type WorkerReply =
-  | { kind: "ok"; value: JobHandler } // Success: opened `JobHandler` capability.
-  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
-
-/** Result union of `JobHandler.handle`. */
+/** Result union of `JobRunner.job`. */
 export type HandleReply =
   | { kind: "ok"; value: JobOutcome } // Success: job outcome.
-  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
-
-/** Result union of `BookclerkPlugin.contentSource`. */
-export type ContentSourceReply =
-  | { kind: "ok"; value: ContentSource } // Success: opened `ContentSource` capability.
-  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
-
-/** Result union of `BookclerkPlugin.integration`. */
-export type IntegrationReply =
-  | { kind: "ok"; value: Integration } // Success: opened `Integration` capability.
-  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
-
-/** Result union of `BookclerkPlugin.database`. */
-export type DatabaseReply =
-  | { kind: "ok"; value: Database } // Success: opened `Database` capability.
-  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
-
-/** Result union of `Integration.onEvent`. */
-export type EventResultReply =
-  | { kind: "ok"; value: EventResult } // Success: event handling outcome.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
 /** Typed liveness report. */
@@ -731,26 +733,49 @@ export interface Cancellation {
   poll(): Promise<boolean>;
 }
 
-/** Job handler returned by `BookclerkPlugin.worker`; runs one durable command. */
-export interface JobHandler {
+/** `[triggers] jobs` handler (`Entrypoints.jobRunner`); runs one durable command. */
+export interface JobRunner {
   /**
-   * Run one command invocation to a terminal or suspended outcome.
+   * Run one command invocation to a terminal or suspended outcome. Named
+   * database bindings come from `Bindings.databases` at `open`, not per job.
    *
-   * @param invocation - Durable command envelope.
-   * @param input - Job input objects.
-   * @param output - Job output object store.
-   * @param progress - Progress reporter.
-   * @param cancel - Host cancellation probe.
-   * @param database - Append-only. Host-mediated typed SQL session.
-   * @param databases - Append-only. Named plugin-owned database bindings (Workers-style): each entry is an isolated database provisioned by the active adapter, separate from the Bookclerk library and from every other plugin. Empty when the manifest declares none.
+   * @param controller - Envelope plus host-served capabilities.
    * @returns {@link HandleReply}
    */
-  handle(invocation: JobInvocation, input: Source, output: Destination, progress: ProgressSink, cancel: Cancellation, database: GuestDatabase, databases: NamedDatabase[]): Promise<HandleReply>;
+  job(controller: JobController): Promise<HandleReply>;
 }
 
-/** One named plugin-owned database binding delivered on `JobHandler.handle`. */
+/**
+ * `[[events.consumers]]` handler (`Entrypoints.eventConsumer`). Delivery is
+ * at-least-once; consumers must be idempotent on `deduplicationKey`.
+ */
+export interface EventConsumer {
+  /**
+   * Deliver one ordered batch of domain events.
+   *
+   * @param batch - Events in delivery order.
+   * @returns {@link EventBatchReply}
+   */
+  event(batch: EventBatch): Promise<EventBatchReply>;
+}
+
+/**
+ * `EVENTS` binding: host-served outbox publisher granted through
+ * `Bindings.events`. Event types must be listed in `[[events.producers]]`.
+ */
+export interface EventPublisher {
+  /**
+   * Append one event to the outbox (idempotent on `deduplicationKey`).
+   *
+   * @param event - Event to publish.
+   * @returns {@link PublishReply}
+   */
+  publish(event: PluginEvent): Promise<PublishReply>;
+}
+
+/** One named plugin-owned database binding delivered on `Bindings.databases`. */
 export interface NamedDatabase {
-  /** Binding name from `plugin.toml` `capabilities.bindings.databases`. */
+  /** Binding name from `plugin.toml` `[[databases]]`. */
   name: string;
   /** Isolated typed SQL session for this binding (plugin-owned schema). */
   database: GuestDatabase;
@@ -851,21 +876,18 @@ export interface ContentSource {
   catalogDetail(params: CatalogDetailParams): Promise<CatalogDetailReply>;
 }
 
-/** Long-running integration (remote library, listening sync, IdP bridge). */
-export interface Integration {
+/**
+ * `remoteLibrary` entrypoint: long-running remote-library lifecycle (start /
+ * stop, library rescan, listening sync, external-user polling). Event delivery
+ * is `EventConsumer`; credential verification is `Oidc`.
+ */
+export interface RemoteLibrary {
   /**
    * Liveness / readiness probe.
    *
    * @returns {@link HealthReply}
    */
   health(): Promise<HealthReply>;
-  /**
-   * Deliver one domain event (at-least-once; must be idempotent).
-   *
-   * @param event - Event envelope.
-   * @returns {@link EventResultReply}
-   */
-  onEvent(event: DomainEvent): Promise<EventResultReply>;
   /**
    * Start background work after the host has granted bindings.
    *
@@ -898,18 +920,48 @@ export interface Integration {
    */
   syncListening(): Promise<SyncListeningReply>;
   /**
+   * Drain external users the remote side observed since the last poll.
+   *
+   * @returns {@link EventPollReply}
+   */
+  pollEvents(): Promise<EventPollReply>;
+}
+
+/** `cli` entrypoint: guest commands under `bookclerk plugins <id> <command>`. */
+export interface PluginCli {
+  /**
+   * Declared CLI surface.
+   *
+   * @returns {@link CliSchemaReply}
+   */
+  describe(): Promise<CliSchemaReply>;
+  /**
+   * Run one plugin CLI command.
+   *
+   * @param params - Command name and argument values.
+   * @returns {@link CliInvokeReply}
+   */
+  invoke(params: CliInvokeParams): Promise<CliInvokeReply>;
+}
+
+/**
+ * `oidc` entrypoint: relying-party client templates and credential
+ * verification on behalf of the host authorization server.
+ */
+export interface Oidc {
+  /**
+   * Plugin-provided OIDC AS client templates. Empty list when unused.
+   *
+   * @returns {@link OidcClientsReply}
+   */
+  clients(): Promise<OidcClientsReply>;
+  /**
    * Verify remote credentials on behalf of the host.
    *
    * @param params - Username and password.
    * @returns {@link ExternalUserReply}
    */
   authenticateUser(params: AuthenticateUserParams): Promise<ExternalUserReply>;
-  /**
-   * Drain events the remote side produced since the last poll.
-   *
-   * @returns {@link EventPollReply}
-   */
-  pollEvents(): Promise<EventPollReply>;
 }
 
 /**
@@ -987,7 +1039,7 @@ export interface ConfigOptionValue {
   label: string;
 }
 
-/** Declared plugin CLI surface (`cliDescribe` / `describe().cli`). */
+/** Declared plugin CLI surface (`PluginCli.describe` / `describe().cli`). */
 export interface CliSchema {
   /** Commands exposed as `bookclerk plugins <id> <command> ...`. */
   commands: CliCommandSpec[];
@@ -1038,7 +1090,7 @@ export interface CliArgSpec {
   positional: boolean;
 }
 
-/** One named argument value passed to `cliInvoke`. */
+/** One named argument value passed to `PluginCli.invoke`. */
 export interface CliArg {
   /** Arg name matching a `CliArgSpec.name`. */
   name: string;
@@ -1046,7 +1098,7 @@ export interface CliArg {
   value: string;
 }
 
-/** Params of `BookclerkPlugin.cliInvoke`. */
+/** Params of `PluginCli.invoke`. */
 export interface CliInvokeParams {
   /** Command name matching a `CliCommandSpec.name`. */
   command: string;
@@ -1054,7 +1106,7 @@ export interface CliInvokeParams {
   args: CliArg[];
 }
 
-/** Result of `BookclerkPlugin.cliInvoke`. */
+/** Result of `PluginCli.invoke`. */
 export interface CliInvokeResult {
   /** Process-style exit code (0 = success). */
   exitCode: number;
@@ -1066,12 +1118,12 @@ export interface CliInvokeResult {
   payload: ExtensibleConfig;
 }
 
-/** Result union of `BookclerkPlugin.cliDescribe`. */
+/** Result union of `PluginCli.describe`. */
 export type CliSchemaReply =
   | { kind: "ok"; value: CliSchema } // Success: declared CLI surface.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
-/** Result union of `BookclerkPlugin.cliInvoke`. */
+/** Result union of `PluginCli.invoke`. */
 export type CliInvokeReply =
   | { kind: "ok"; value: CliInvokeResult } // Success: command output.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
@@ -1828,7 +1880,7 @@ export type PurchaseHintReply =
   | { kind: "ok"; value: PurchaseHintResult } // Success: hint or not-found marker.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
-/** Params of `Integration.scanLibrary` (remote library sync). */
+/** Params of `RemoteLibrary.scanLibrary` (remote library sync). */
 export interface ScanLibraryParams {
   /**
    * When true, force a full rescan even if the guest would otherwise
@@ -1837,7 +1889,7 @@ export interface ScanLibraryParams {
   force: boolean;
 }
 
-/** Params of `Integration.authenticateUser`. */
+/** Params of `Oidc.authenticateUser`. */
 export interface AuthenticateUserParams {
   /** Integration username / login id. */
   username: string;
@@ -1867,13 +1919,13 @@ export interface ExternalUser {
   accessToken?: string;
 }
 
-/** Result union of `Integration.authenticateUser`. */
+/** Result union of `Oidc.authenticateUser`. */
 export type ExternalUserReply =
   | { kind: "ok"; value: ExternalUser } // Success: verified external user.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
 /**
- * Success payload of `Integration.pollEvents`: signals for the host to kick
+ * Success payload of `RemoteLibrary.pollEvents`: signals for the host to kick
  * off workflows.
  */
 export interface EventPollResult {
@@ -1881,7 +1933,7 @@ export interface EventPollResult {
   users: ExternalUser[];
 }
 
-/** Result union of `Integration.pollEvents`. */
+/** Result union of `RemoteLibrary.pollEvents`. */
 export type EventPollReply =
   | { kind: "ok"; value: EventPollResult } // Success: observed users.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
@@ -1944,16 +1996,77 @@ export interface ListeningProgress {
   lastListenedAtUnixMs?: number;
 }
 
-/** Success payload of `Integration.syncListening`. */
+/** Success payload of `RemoteLibrary.syncListening`. */
 export interface SyncListeningResult {
   /** Progress snapshots to upsert. */
   items: ListeningProgress[];
 }
 
-/** Result union of `Integration.syncListening`. */
+/** Result union of `RemoteLibrary.syncListening`. */
 export type SyncListeningReply =
   | { kind: "ok"; value: SyncListeningResult } // Success: progress snapshots.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/**
+ * Guest-published domain event (`EventPublisher.publish`). The host stamps
+ * `eventId`, `source` (the plugin id), and `accountId` from the invocation;
+ * guests cannot forge either.
+ */
+export interface PluginEvent {
+  /** Snake_case event type; must be listed in `[[events.producers]]`. */
+  eventType: string;
+  /** Schema version of `payload`, owned by the event type. */
+  schemaVersion: number;
+  /**
+   * Producer idempotency key; a repeat within the outbox dedup window returns
+   * `PublishOk.duplicate = true`. Empty publishes unconditionally.
+   */
+  deduplicationKey: string;
+  /** Encoded event payload; at most `maxEventPayloadBytes`. */
+  payload: Uint8Array;
+  /** When the producer observed the fact; zero means "now" on the host clock. */
+  occurredAtUnixMs: number;
+  /** Trace correlation id; empty inherits `Invocation.correlationId`. */
+  correlationId: string;
+  /**
+   * Id of the event or command that caused this one; empty inherits
+   * `Invocation.causationId`.
+   */
+  causationId: string;
+}
+
+/** Success payload of `EventPublisher.publish`. */
+export interface PublishOk {
+  /** Outbox event id (new or the earlier row when `duplicate`). */
+  eventId: string;
+  /** True when `deduplicationKey` matched an existing outbox row. */
+  duplicate: boolean;
+}
+
+/** Result union of `EventPublisher.publish`. */
+export type PublishReply =
+  | { kind: "ok"; value: PublishOk } // Success: outbox row identity.
+  | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
+
+/**
+ * Identity of one `PluginWorker.open` invocation. The host issues ids; guests
+ * echo `correlationId` / `causationId` onto published events.
+ */
+export interface Invocation {
+  /** Unique host-issued invocation id. */
+  id: string;
+  /** Account scope; empty for operator / host-wide invocations. */
+  accountId: string;
+  /**
+   * UTC Unix milliseconds; zero when the invocation has no deadline. The host
+   * fence is authoritative.
+   */
+  deadlineUnixMs: number;
+  /** Trace correlation id; empty when none. */
+  correlationId: string;
+  /** Id of the event or command that caused this invocation; empty when none. */
+  causationId: string;
+}
 
 /** One typed SQL cell or bind parameter. */
 export type DbValue =
@@ -2318,7 +2431,7 @@ export type DbCapabilitiesReply =
   | { kind: "ok"; value: DbCapabilities } // Success: capability advertisement.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
-/** Database adapter returned by `BookclerkPlugin.database`. */
+/** `databaseAdapter` entrypoint (`Entrypoints.databaseAdapter`). */
 export interface Database {
   /**
    * Open one adapter session (capability negotiation + typed execute).
@@ -2460,7 +2573,7 @@ export interface PluginMigration {
   operations: PluginMigrationOp[];
 }
 
-/** Success payload of `BookclerkPlugin.databaseMigrations`. */
+/** Success payload of `PluginWorker.databaseMigrations`. */
 export interface PluginMigrationsOk {
   /**
    * At most `maxListPage` entries; aggregate id+SQL bytes at most
@@ -2470,40 +2583,31 @@ export interface PluginMigrationsOk {
   migrations: PluginMigration[];
 }
 
-/** Result union of `BookclerkPlugin.databaseMigrations`. */
+/** Result union of `PluginWorker.databaseMigrations`. */
 export type PluginMigrationsReply =
   | { kind: "ok"; value: PluginMigrationsOk } // Success: ordered migration sequence.
   | { kind: "err"; value: PluginError }; // Typed failure; `code` is a `PluginErrorCode` wire string.
 
-/** Plugin bootstrap capability: the guest's root object. */
-export interface BookclerkPlugin {
+/**
+ * Plugin bootstrap capability: the guest's root object (Workers `default`
+ * export analogue). `describe()` first; `open()` once per invocation.
+ */
+export interface PluginWorker {
   /**
-   * Identity, ABI version, negotiated features, and advertised roles.
+   * Identity, ABI version, negotiated features, and typed capabilities.
    *
    * @returns {@link DescribeReply}
    */
   describe(): Promise<DescribeReply>;
   /**
-   * Open the object-store destination role.
+   * Open the exported entrypoints for one invocation with host-granted
+   * bindings. Entrypoints the manifest does not export are null.
    *
-   * @param context - Granted destination configuration.
-   * @returns {@link DestinationReply}
+   * @param invocation - Host-issued invocation identity.
+   * @param bindings - Granted `env` bindings.
+   * @returns {@link EntrypointsReply}
    */
-  destination(context: DestinationContext): Promise<DestinationReply>;
-  /**
-   * Open the byte-source role.
-   *
-   * @param context - Granted source configuration.
-   * @returns {@link SourceReply}
-   */
-  source(context: SourceContext): Promise<SourceReply>;
-  /**
-   * Open a job handler for one durable command.
-   *
-   * @param context - Job id and granted configuration.
-   * @returns {@link WorkerReply}
-   */
-  worker(context: WorkerContext): Promise<WorkerReply>;
+  open(invocation: Invocation, bindings: Bindings): Promise<EntrypointsReply>;
   /**
    * Flush and release resources before the process exits.
    *
@@ -2511,49 +2615,10 @@ export interface BookclerkPlugin {
    */
   shutdown(): Promise<EmptyReply>;
   /**
-   * Open the storefront content-source role.
-   *
-   * @param context - Granted storefront configuration.
-   * @returns {@link ContentSourceReply}
-   */
-  contentSource(context: ContentSourceContext): Promise<ContentSourceReply>;
-  /**
-   * Open the integration role.
-   *
-   * @param context - Granted integration configuration.
-   * @returns {@link IntegrationReply}
-   */
-  integration(context: IntegrationContext): Promise<IntegrationReply>;
-  /**
-   * Open the database adapter role.
-   *
-   * @param context - Granted adapter configuration.
-   * @returns {@link DatabaseReply}
-   */
-  database(context: DatabaseContext): Promise<DatabaseReply>;
-  /**
-   * Declared CLI surface.
-   *
-   * @returns {@link CliSchemaReply}
-   */
-  cliDescribe(): Promise<CliSchemaReply>;
-  /**
-   * Run one plugin CLI command.
-   *
-   * @param params - Command name and argument values.
-   * @returns {@link CliInvokeReply}
-   */
-  cliInvoke(params: CliInvokeParams): Promise<CliInvokeReply>;
-  /**
-   * Plugin-provided OIDC AS client templates. Empty list when unused.
-   *
-   * @returns {@link OidcClientsReply}
-   */
-  oidcClients(): Promise<OidcClientsReply>;
-  /**
    * Complete ordered plugin-owned migration sequence for one named binding.
-   * Host calls this at binding initialization, before ordinary execute.
-   * Empty list means the binding has no plugin-owned migrations.
+   * The host calls this before `open` while provisioning `[[databases]]`
+   * (a binding must be migrated before any `Bindings.databases` session is
+   * handed out). Empty list means the binding has no plugin-owned migrations.
    * Bounded by `maxListPage` / `maxPluginMigrationOps` /
    * `maxPluginMigrationTotalOps` / `maxScalarBytes` /
    * `maxPluginMigrationRegistrationBytes`.
