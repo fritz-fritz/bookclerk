@@ -344,7 +344,7 @@ const jobInvocation = {
   );
 }
 
-// --- Native-behind-workerd control plane (dist + hand-maintained embed) ---
+// --- Native-behind-workerd control plane (dist + bundled embed) ---
 
 const embed = await import(join(root, "../embed/bookclerk_plugin.js"));
 const distAdapter = await import(join(dist, "plugin.js"));

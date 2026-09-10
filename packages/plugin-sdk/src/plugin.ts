@@ -22,9 +22,9 @@
 
 import "./cloudflare-workers.d.ts";
 import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
-import { MAX_CHECKPOINT_BYTES } from "./abi.js";
+import { MAX_CHECKPOINT_BYTES, MAX_EVENT_PAYLOAD_BYTES, PLUGIN_ERROR_CODES } from "./abi.js";
 import type { DatabaseBinding, ExecuteReply, ExecuteRequest } from "./db-execute.js";
-import type { BookclerkEnv, EventPublisherBinding, JsonObject } from "./env.js";
+import type { BookclerkEnv, EventPublisherBinding, JsonObject, PublishEvent } from "./env.js";
 import { requirePluginMigrationRegistration } from "./plugin-migrations.js";
 import type {
   AuthenticateUserParams,
@@ -52,6 +52,7 @@ import type {
   PluginCapabilities as WirePluginCapabilities,
   PluginDescribe as WirePluginDescribe,
   PluginMigration,
+  PublishOk,
   PurchaseHint,
   PurchaseHintParams,
   ScanLibraryParams,
@@ -102,20 +103,7 @@ export type {
 // Errors
 // ---------------------------------------------------------------------------
 
-const KNOWN_ERROR_CODES = new Set([
-  "invalid_params",
-  "unauthorized",
-  "forbidden",
-  "not_found",
-  "unavailable",
-  "unsupported",
-  "internal",
-  "payload_too_large",
-  "deadline_exceeded",
-  "invalid_cursor",
-  "cancelled",
-  "conflict",
-]);
+const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set<string>(PLUGIN_ERROR_CODES);
 
 /** Thrown by the SDK when a wire union carries `err`. Unknown codes are kept. */
 export class PluginError extends Error {
@@ -450,6 +438,16 @@ export interface GrantedContext {
   events?: EventPublisherBinding;
   /** Named `[[databases]]` bindings. */
   databases?: Array<{ name: string; database: DatabaseBinding }>;
+}
+
+/**
+ * Context as the launcher sends it on the bridge: {@link GrantedContext}
+ * plus the events grant token the adapter exchanges for the `EVENTS` stub.
+ * Authors never receive this shape.
+ */
+export interface BridgeContext extends GrantedContext {
+  /** Granted-channel bearer for `env.EVENTS.publish`; stripped before dispatch. */
+  eventsToken?: string;
 }
 
 /** Job-runner bridge context: the durable job id plus {@link GrantedContext}. */
@@ -1896,6 +1894,85 @@ class GrantedProgress extends ProgressSink {
   }
 }
 
+/**
+ * Encode a `PublishEvent.payload` (bytes, string, or JSON value) as bytes.
+ *
+ * @param payload - Author-supplied payload.
+ * @returns UTF-8 / raw payload bytes.
+ */
+function publishPayloadBytes(payload: PublishEvent["payload"]): Uint8Array {
+  if (payload === undefined || payload === null) return new Uint8Array(0);
+  if (payload instanceof Uint8Array) return payload;
+  if (payload instanceof ArrayBuffer) return new Uint8Array(payload);
+  if (typeof payload === "string") return new TextEncoder().encode(payload);
+  return new TextEncoder().encode(JSON.stringify(payload));
+}
+
+/**
+ * `EVENTS` binding handed to the author: the adapter exchanges the host's
+ * events grant token on the granted channel, so the author isolate never
+ * holds the bearer itself.
+ */
+class GrantedEvents extends RpcTarget implements EventPublisherBinding {
+  #granted: GrantedFetcher;
+  #auth: Record<string, string>;
+
+  /**
+   * @param granted - Granted reverse channel.
+   * @param auth - Bearer header for the events grant.
+   */
+  constructor(granted: GrantedFetcher, auth: Record<string, string>) {
+    super();
+    this.#granted = granted;
+    this.#auth = auth;
+  }
+
+  /**
+   * Publish one domain event through the host outbox.
+   *
+   * @param event - Event type, schema version, payload, dedup key.
+   * @returns Outbox row identity.
+   */
+  async publish(event: PublishEvent): Promise<PublishOk> {
+    if (!event || typeof event.eventType !== "string" || !event.eventType) {
+      throw PluginError.fromWire("invalid_params", "publish requires eventType");
+    }
+    const payload = publishPayloadBytes(event.payload);
+    if (payload.byteLength > MAX_EVENT_PAYLOAD_BYTES) {
+      throw PluginError.fromWire(
+        "payload_too_large",
+        `event payload of ${payload.byteLength} bytes exceeds ${MAX_EVENT_PAYLOAD_BYTES}`,
+      );
+    }
+    const wire = toBridgeJson({
+      eventType: event.eventType,
+      schemaVersion: Number(event.schemaVersion ?? 1) || 1,
+      deduplicationKey: String(event.deduplicationKey ?? ""),
+      payload,
+      occurredAtUnixMs: Number(event.occurredAtUnixMs ?? 0) || 0,
+      correlationId: String(event.correlationId ?? ""),
+      causationId: String(event.causationId ?? ""),
+    });
+    const resp = await this.#granted.fetch("http://granted/events/publish", {
+      method: "POST",
+      headers: { ...this.#auth, "content-type": "application/json" },
+      body: JSON.stringify(wire),
+    });
+    const value = (await resp.json().catch(() => ({}))) as {
+      error?: { code?: string; message?: string };
+      eventId?: unknown;
+      duplicate?: unknown;
+    };
+    if (value && value.error) {
+      throw PluginError.fromWire(value.error.code || "internal", value.error.message || "");
+    }
+    if (!resp.ok) {
+      throw PluginError.fromWire("internal", `events publish HTTP ${resp.status}`);
+    }
+    return { eventId: String(value.eventId ?? ""), duplicate: Boolean(value.duplicate) };
+  }
+}
+
 /** Resolves `wait()` once the adapter observes host cancellation. */
 class CancelWatch extends RpcTarget implements CancelWatchLike {
   #promise: Promise<void>;
@@ -2084,6 +2161,25 @@ function createInvocationAdapter() {
       return stub as NamedStub;
     }
 
+    /**
+     * Turn the bridge context into the author-facing one: the host's events
+     * grant token becomes an `EVENTS` stub and never reaches the author.
+     *
+     * @param ctx - Bridge context from the launcher.
+     * @returns Author-facing granted context.
+     */
+    #bindContext(ctx: BridgeContext | undefined): GrantedContext {
+      const source = ctx && typeof ctx === "object" ? ctx : {};
+      const { eventsToken, ...rest } = source;
+      const bound: GrantedContext = rest;
+      if (typeof eventsToken === "string" && eventsToken && this.env.GRANTED) {
+        bound.events = new GrantedEvents(this.env.GRANTED, {
+          Authorization: `Bearer ${eventsToken}`,
+        });
+      }
+      return bound;
+    }
+
     async fetch(_request?: Request): Promise<Response> {
       return new Response(null, { status: 404 });
     }
@@ -2143,12 +2239,12 @@ function createInvocationAdapter() {
      */
     async invokeEntrypoint(
       name: EntrypointName,
-      ctx: GrantedContext | undefined,
+      ctx: BridgeContext | undefined,
       method: string,
       args: unknown[] = [],
     ): Promise<unknown> {
       const list = Array.isArray(args) ? args : [];
-      return this.#named(name).bookclerkInvoke(ctx ?? {}, method, ...list);
+      return this.#named(name).bookclerkInvoke(this.#bindContext(ctx), method, ...list);
     }
 
     /**
@@ -2158,8 +2254,8 @@ function createInvocationAdapter() {
      * @param event - Wire domain event.
      * @returns Recorded outcome.
      */
-    async invokeEvent(ctx: GrantedContext | undefined, event: Partial<DomainEvent>): Promise<EventOutcome> {
-      const results = await this.#author().bookclerkEvent(ctx ?? {}, { events: [event] });
+    async invokeEvent(ctx: BridgeContext | undefined, event: Partial<DomainEvent>): Promise<EventOutcome> {
+      const results = await this.#author().bookclerkEvent(this.#bindContext(ctx), { events: [event] });
       const first = Array.isArray(results) ? results[0] : undefined;
       if (!first || typeof first.kind !== "string") {
         throw PluginError.fromWire("internal", "event handler returned no result");
@@ -2178,7 +2274,7 @@ function createInvocationAdapter() {
      */
     async invokeDestination(
       op: string,
-      ctx: GrantedContext | undefined,
+      ctx: BridgeContext | undefined,
       args: Record<string, unknown> = {},
       body?: ReadableStream<Uint8Array>,
     ): Promise<unknown> {
@@ -2225,7 +2321,7 @@ function createInvocationAdapter() {
      * @param key - Object key.
      * @returns Opened byte source result.
      */
-    async invokeSourceOpen(ctx: GrantedContext | undefined, key: string): Promise<unknown> {
+    async invokeSourceOpen(ctx: BridgeContext | undefined, key: string): Promise<unknown> {
       return this.invokeEntrypoint("storage", ctx, "get", [String(key ?? "")]);
     }
 
@@ -2239,7 +2335,7 @@ function createInvocationAdapter() {
      * @returns Wire job outcome.
      */
     async invokeHandle(
-      ctx: JobRunnerContext | undefined,
+      ctx: (JobRunnerContext & BridgeContext) | undefined,
       invocation: Partial<JobInvocation>,
       grantToken: string,
       _databases?: Record<string, string>,
@@ -2247,7 +2343,7 @@ function createInvocationAdapter() {
       const controller = new AbortController();
       try {
         const granted = grantedJobCapabilities(this.env, grantToken, controller);
-        return await this.#author().bookclerkJob(ctx ?? {}, invocation ?? {}, granted);
+        return await this.#author().bookclerkJob(this.#bindContext(ctx), invocation ?? {}, granted);
       } finally {
         controller.abort();
       }

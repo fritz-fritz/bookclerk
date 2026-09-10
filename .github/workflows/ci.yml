@@ -269,6 +269,9 @@ jobs:
           cd packages/plugin-sdk
           npm ci
           npm run build
+          # The isolate embed is bundled from src/ by `npm run build`; a stale
+          # committed bundle (or mirror) is drift.
+          git diff --exit-code -- embed/bookclerk_plugin.js
           npm run lint
           npm run test:tools
           npm run test:db-value
