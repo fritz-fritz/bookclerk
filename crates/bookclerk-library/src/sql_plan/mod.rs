@@ -20,6 +20,7 @@ mod slots;
 mod vectors_typed;
 
 /// Injected `maxResultRows` for conn-vector row-cap cases (sqlite / postgres).
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) const CONTRACT_VECTOR_ROW_CAP: u32 = 5;
 
 use bookclerk_plugin_abi::{encoded_execute_request_bytes, DbCapabilities, ExecuteRequest};
