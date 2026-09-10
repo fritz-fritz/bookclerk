@@ -951,25 +951,53 @@ adapter, never author-facing. Describe rejects unsupported versions.
 First-party destinations (`local`, `s3`) and remaining product guests speak the object-capability ABI.
 Echo examples are `api_version = 3` Integration.
 
-## Reverse channel (`HOST.notify`)
+## Publishing events (`env.EVENTS`)
 
-Workerd guests may call `env.HOST.notify(event)` with a `PluginToHost`-style
-payload. `bookclerk-workerd` wires the isolate `HOST` binding to a loopback
-HTTP callback: events are POSTed to the launcher, buffered in memory for the
-session, and logged (event `type` + size only — not the full JSON body).
+Plugins that declare `[[events.producers]]` publish domain events through the
+`EVENTS` binding — a `Bindings.events` capability the host passes to
+`PluginWorker.open(invocation, bindings)`. There is no other guest → host
+notification path: the former `HOST.notify` reverse channel and its
+`host_stub.js` / `NOTIFY` bindings are gone.
 
-Bridge loopback role routes (`/describe`, `/health`, …) and the notify reverse channel share a
-**per-isolate bearer token** (`BRIDGE_TOKEN` Cap’n Proto binding on both the
-bridge and host workers). The launcher generates the token, injects it into the
-workerd config, and sends `Authorization: Bearer …` on every bridge request;
-`host_stub.js` does the same for notify. Requests without a matching bearer are
-rejected (`401`). Notify parsing also requires a valid `Content-Length` (hard
-max 64 KiB), limits concurrent accepts, and caps the in-memory event buffer
-(drop-oldest when full).
+```ts
+const ok = await env.EVENTS.publish({
+  eventType: "book_acquired",           // must be a granted [[events.producers]] type
+  schemaVersion: 1,                     // defaults to 1
+  deduplicationKey: `acquire:${asin}`,  // optional; see below
+  payload: { asin, title },             // JSON, ≤ 64 KiB UTF-8 (MAX_EVENT_PAYLOAD_BYTES)
+});
+// ok: { eventId: string, duplicate: boolean }
+```
 
-Native stdio guests already have a reverse path on the RPC framing; this workerd
-path is the minimal equivalent until the host fans events into
-integrations/jobs.
+The host `EventPublisher` writes straight into the library outbox
+(`domain_events`) with these rules:
+
+- **Forced provenance.** `source` is always the plugin id and `account_id` is
+  the opening invocation's account; a guest cannot spoof another producer.
+  `correlationId` / `causationId` default to the invocation's values when the
+  guest leaves them empty.
+- **Producer grant.** The binding exists only when the manifest declares
+  `[[events.producers]]` *and* the operator grant covers those types (the
+  consent request lists them). Publishing a type outside that intersection
+  fails with `forbidden`; an empty intersection means no `EVENTS` on `env`.
+- **Payload cap.** `payload` is UTF-8 JSON of at most 64 KiB
+  (`payload_too_large` otherwise). Non-JSON bytes are `invalid_params`; an
+  empty payload is stored as `{}`.
+- **Deduplication.** `(account_id, source, event_type, deduplication_key)` is
+  a permanent unique index on the outbox. A repeat publish returns the existing
+  `eventId` with `duplicate = true` instead of inserting a second row. An empty
+  `deduplicationKey` gets a fresh UUID, so it always publishes.
+- **Availability.** Outbox write failures surface as `unavailable`
+  (retryable); the event is never half-written.
+
+**Transports.** Native guests receive `Bindings.events` as a Cap'n Proto
+capability. Under workerd the trusted adapter isolate mints a per-`open`,
+events-only grant token on the launcher's `GRANTED` channel and hands the author
+a `GrantedEvents` `RpcTarget`; `publish()` POSTs the event to
+`/events/publish`, where the launcher re-checks the grant (unknown, expired, or
+database-only grants are `forbidden`) and enforces the payload cap before
+forwarding to the host publisher. Author isolates never see `GRANTED` or the
+grant token.
 
 ### Common
 

@@ -18,7 +18,6 @@ const BRIDGE_JS: &str = include_str!("../bridge/bridge.js");
 /// Isolate-side egress proxy that enforces the operator domain grant.
 const EGRESS_JS: &str = include_str!("../bridge/egress.js");
 /// Stub `host` module injected so guest JS can call host RPCs inside the isolate.
-const HOST_STUB_JS: &str = include_str!("../bridge/host_stub.js");
 /// Injected as `@bookclerk/plugin-sdk` + `@bookclerk/plugin-sdk/workerd`.
 const SDK_WORKERD_JS: &str = include_str!("../../../packages/plugin-sdk/embed/bookclerk_plugin.js");
 /// Injected as `bookclerk_plugin_sdk/workerd.py`.
@@ -209,8 +208,8 @@ fn write_owner_only_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> 
 /// root is read-only under Landlock, so materializing `.bookclerk/` there fails.
 /// Each call allocates a unique leaf (`w` + root prefix + nonce) with exclusive
 /// `create_dir`, so concurrent sessions of the same plugin cannot clobber
-/// `workerd-config.capnp`. Unix sockets (`granted.sock` / `notify.sock`) still
-/// fit in `sockaddr_un`.
+/// `workerd-config.capnp`. The `granted.sock` unix socket still fits in
+/// `sockaddr_un`.
 ///
 /// Callers that bind sockets first (the launcher) must pass the returned path
 /// into [`materialize`] / [`materialize_native_backend`] so config and sockets
@@ -304,7 +303,7 @@ impl ListenSpec {
         }
     }
 
-    /// TCP port the isolate or notify listener binds.
+    /// TCP port the bridge socket binds.
     #[must_use]
     pub fn port(&self) -> u16 {
         match self {
@@ -511,7 +510,6 @@ pub fn materialize_native_backend(
     egress: &EgressProxy,
     limits: EffectiveWorkerdLimits,
     listen: ListenSpec,
-    notify_addr: Option<&str>,
     granted_addr: Option<&str>,
     backend_addr: &str,
     bridge_token: &str,
@@ -523,7 +521,6 @@ pub fn materialize_native_backend(
         .with_context(|| format!("create {}", bookclerk_dir.display()))?;
     fs::write(bookclerk_dir.join("bridge.js"), BRIDGE_JS)?;
     fs::write(bookclerk_dir.join("egress.js"), EGRESS_JS)?;
-    fs::write(bookclerk_dir.join("host_stub.js"), HOST_STUB_JS)?;
     fs::write(bookclerk_dir.join("adapter.js"), NATIVE_ADAPTER_JS)?;
     fs::write(bookclerk_dir.join("sdk-workerd.js"), SDK_WORKERD_JS)?;
 
@@ -550,18 +547,6 @@ pub fn materialize_native_backend(
         escape_capnp(backend_addr)
     ));
     extra_services.push('\n');
-
-    let host_bindings = match notify_addr {
-        Some(addr) => {
-            extra_services.push_str(&format!(
-                r#"    (name = "hostNotify", external = (address = "{}", http = ())),"#,
-                escape_capnp(addr)
-            ));
-            extra_services.push('\n');
-            format!("{bridge_token_binding},\n    (name = \"NOTIFY\", service = \"hostNotify\")")
-        }
-        None => bridge_token_binding.clone(),
-    };
 
     let mut adapter_bindings = format!(
         r#"{bridge_token_binding},
@@ -603,7 +588,6 @@ const bookclerkPlugin :Workerd.Config = (
   services = [
     (name = "internet", network = (allow = ["public"])),
     (name = "blocked", network = (allow = [])),
-    (name = "host", worker = .hostWorker),
     (name = "egress", worker = .egressWorker),
     (name = "adapter", worker = .adapterWorker),
     (name = "bridge", worker = .bridgeWorker),
@@ -612,17 +596,6 @@ const bookclerkPlugin :Workerd.Config = (
   sockets = [
     {socket_line}
   ]
-);
-
-const hostWorker :Workerd.Worker = (
-  modules = [
-    (name = "host_stub.js", esModule = embed ".bookclerk/host_stub.js")
-  ],
-  compatibilityDate = "{compat_date}",
-  bindings = [
-    {host_bindings}
-  ],
-  globalOutbound = "blocked",
 );
 
 const egressWorker :Workerd.Worker = (
@@ -663,7 +636,6 @@ const bridgeWorker :Workerd.Worker = (
         adapter_modules = adapter_modules,
         policy_escaped = policy_escaped,
         extra_services = extra_services,
-        host_bindings = host_bindings,
         adapter_bindings = adapter_bindings,
         bridge_bindings = bridge_bindings,
     );
@@ -683,7 +655,7 @@ const bridgeWorker :Workerd.Worker = (
 pub struct GeneratedConfig {
     /// Path to the generated workerd config file.
     pub config_path: PathBuf,
-    /// Listen address for the notify / bridge socket.
+    /// Listen address for the bridge socket.
     pub listen: ListenSpec,
     /// Writable state directory for the isolate (outside the install root).
     pub state_dir: PathBuf,
@@ -697,7 +669,7 @@ pub struct GeneratedConfig {
 /// **TMPDIR contents (guest-writable scratch)** — only generated launcher state:
 /// - `.bookclerk/` — first-party bridge / egress / host stub / injected SDK
 /// - `workerd-config.capnp`
-/// - unix notify socket (created by the launcher, not this function)
+/// - `granted.sock` (created by the launcher, not this function)
 ///
 /// **Author `modules/` stay in the read-only install root.** Cap'n Proto paths
 /// that look absolute (`/…`) are resolved via `--import-path` (same rules as
@@ -712,11 +684,11 @@ pub struct GeneratedConfig {
 /// `[workerd]` modules. Direct native Cap'n Proto remains a host-selected
 /// fallback, not plugin-selectable policy bypass.
 ///
-/// `notify_addr` is an optional workerd `external` address (`host:port` or
-/// `unix:/path`) for `HOST.notify` → launcher reverse channel.
+/// `granted_addr` is an optional workerd `external` address (`host:port` or
+/// `unix:/path`) for the adapter-private `GRANTED` capability channel.
 ///
-/// `bridge_token` is a per-isolate bearer shared by the launcher, bridge `/rpc`
-/// + `/health`, and `HOST.notify` reverse channel (`BRIDGE_TOKEN` binding).
+/// `bridge_token` is a per-isolate bearer shared by the launcher and the bridge
+/// `/rpc` + `/health` routes (`BRIDGE_TOKEN` binding).
 ///
 /// # Arguments
 ///
@@ -724,8 +696,8 @@ pub struct GeneratedConfig {
 /// * `manifest` - Parsed plugin manifest.
 /// * `egress` - `egress` input for this call.
 /// * `listen` - Daemon listen address (`host:port` or URL).
-/// * `notify_addr` - String `notify_addr` for this call.
-/// * `bridge_token` - Bearer token for isolate → host notify.
+/// * `granted_addr` - Optional `GRANTED` external service address.
+/// * `bridge_token` - Per-isolate bridge bearer token.
 /// * `state_dir` - Existing session directory from [`workerd_state_dir`], or
 ///   `None` to allocate a unique directory.
 ///
@@ -743,7 +715,6 @@ pub fn materialize(
     egress: &EgressProxy,
     limits: EffectiveWorkerdLimits,
     listen: ListenSpec,
-    notify_addr: Option<&str>,
     granted_addr: Option<&str>,
     bridge_token: &str,
     state_dir: Option<&Path>,
@@ -759,7 +730,6 @@ pub fn materialize(
         .with_context(|| format!("create {}", bookclerk_dir.display()))?;
     fs::write(bookclerk_dir.join("bridge.js"), BRIDGE_JS)?;
     fs::write(bookclerk_dir.join("egress.js"), EGRESS_JS)?;
-    fs::write(bookclerk_dir.join("host_stub.js"), HOST_STUB_JS)?;
     fs::write(bookclerk_dir.join("adapter.js"), ADAPTER_JS)?;
 
     let modules_dir = root.join(&workerd.modules_dir);
@@ -936,23 +906,11 @@ pub fn materialize(
     );
 
     let mut extra_services = String::new();
-    let host_bindings = match notify_addr {
-        Some(addr) => {
-            extra_services.push_str(&format!(
-                r#"    (name = "hostNotify", external = (address = "{}", http = ())),"#,
-                escape_capnp(addr)
-            ));
-            extra_services.push('\n');
-            format!("{bridge_token_binding},\n    (name = \"NOTIFY\", service = \"hostNotify\")")
-        }
-        None => bridge_token_binding.clone(),
-    };
     // Bridge talks to the adapter isolate. GRANTED / BRIDGE_TOKEN are adapter-private
     // (not author `pluginWorker` bindings). wrapPlugin stripping keys is hygiene.
     let bridge_bindings = format!("{adapter_service_binding},\n    {bridge_token_binding}");
     let mut adapter_bindings =
         format!("{plugin_service_binding}{named_entrypoint_bindings},\n    {bridge_token_binding}");
-    let plugin_bindings = String::from(r#"(name = "HOST", service = "host")"#);
     if let Some(addr) = granted_addr {
         extra_services.push_str(&format!(
             r#"    (name = "granted", external = (address = "{}", http = ())),"#,
@@ -986,7 +944,6 @@ const bookclerkPlugin :Workerd.Config = (
   services = [
     (name = "internet", network = (allow = ["public"])),
     (name = "blocked", network = (allow = [])),
-    (name = "host", worker = .hostWorker),
     (name = "egress", worker = .egressWorker),
     (name = "plugin", worker = .pluginWorker),
     (name = "adapter", worker = .adapterWorker),
@@ -996,18 +953,6 @@ const bookclerkPlugin :Workerd.Config = (
   sockets = [
     {socket_line}
   ]
-);
-
-const hostWorker :Workerd.Worker = (
-  modules = [
-    (name = "host_stub.js", esModule = embed ".bookclerk/host_stub.js")
-  ],
-  compatibilityDate = "{compat_date}",
-  {bridge_flags}
-  bindings = [
-    {host_bindings}
-  ],
-  globalOutbound = "blocked",
 );
 
 const egressWorker :Workerd.Worker = (
@@ -1028,9 +973,7 @@ const pluginWorker :Workerd.Worker = (
   ],
   compatibilityDate = "{compat_date}",
   {plugin_flags}
-  bindings = [
-    {plugin_bindings}
-  ],
+  bindings = [],
   globalOutbound = "{plugin_outbound}",
 );
 
@@ -1066,10 +1009,8 @@ const bridgeWorker :Workerd.Worker = (
         adapter_modules = adapter_modules,
         policy_escaped = policy_escaped,
         extra_services = extra_services,
-        host_bindings = host_bindings,
         adapter_bindings = adapter_bindings,
         bridge_bindings = bridge_bindings,
-        plugin_bindings = plugin_bindings,
         plugin_outbound = plugin_outbound,
     );
 
@@ -1269,7 +1210,6 @@ mode = "deny"
             WorkerdLimits::default().effective(),
             ListenSpec::InheritedTcp { port: 9 },
             None,
-            None,
             "test-bridge-token",
             None,
         )
@@ -1416,7 +1356,6 @@ entrypoint = "default"
             WorkerdLimits::default().effective(),
             ListenSpec::InheritedTcp { port: 9 },
             None,
-            None,
             "test-bridge-token",
             None,
         )
@@ -1440,9 +1379,8 @@ entrypoint = "default"
             assert_eq!(socket_names(&capnp), vec!["rpc".to_string()], "{flags:?}");
             assert_eq!(plugin_worker_outbound(&capnp), "blocked", "{flags:?}");
             assert!(
-                capnp.contains("const hostWorker")
-                    && capnp.contains("globalOutbound = \"blocked\""),
-                "host worker must stay blocked: {flags:?}"
+                !capnp.contains("hostWorker") && !capnp.contains("host_stub"),
+                "no HOST reverse channel may be materialized: {flags:?}"
             );
             assert!(
                 capnp.contains("const bridgeWorker") && capnp.contains(r#"(name = "rpc""#),
@@ -1492,7 +1430,6 @@ mode = "deny"
             &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
             WorkerdLimits::default().effective(),
             ListenSpec::InheritedTcp { port: 9 },
-            None,
             Some("unix:/tmp/granted.sock"),
             "test-bridge-token",
             None,
@@ -1582,7 +1519,6 @@ mode = "deny"
             &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
             bookclerk_plugin_manifest::WorkerdLimits::default().effective(),
             ListenSpec::InheritedTcp { port: 9 },
-            None,
             Some("unix:/tmp/granted.sock"),
             "127.0.0.1:9",
             "token",
@@ -1631,7 +1567,6 @@ mode = "deny"
                         &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
                         bookclerk_plugin_manifest::WorkerdLimits::default().effective(),
                         ListenSpec::InheritedTcp { port: 9 },
-                        None,
                         Some("unix:/tmp/granted.sock"),
                         "127.0.0.1:9",
                         "token",
@@ -1687,7 +1622,6 @@ mode = "deny"
                             ),
                             bookclerk_plugin_manifest::WorkerdLimits::default().effective(),
                             ListenSpec::InheritedTcp { port: 9 },
-                            None,
                             Some("unix:/tmp/granted.sock"),
                             "127.0.0.1:9",
                             "token",
@@ -1722,7 +1656,6 @@ mode = "deny"
             &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
             bookclerk_plugin_manifest::WorkerdLimits::default().effective(),
             ListenSpec::InheritedTcp { port: 9 },
-            None,
             Some("unix:/tmp/granted.sock"),
             "127.0.0.1:9",
             "token",
@@ -1768,7 +1701,6 @@ mode = "deny"
             &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
             bookclerk_plugin_manifest::WorkerdLimits::default().effective(),
             ListenSpec::InheritedTcp { port: 9 },
-            None,
             Some("unix:/tmp/granted.sock"),
             "127.0.0.1:9",
             "token",

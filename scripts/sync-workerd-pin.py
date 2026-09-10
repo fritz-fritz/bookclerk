@@ -10,7 +10,7 @@ Derived:
   - packages/plugin-sdk/workerd-pin.json
   - packages/plugin-sdk-python/workerd-pin.json
   - packages/plugin-sdk-python/src/bookclerk_plugin_sdk/workerd-pin.json
-  - packages/plugin-sdk/bridge/{bridge,egress,host_stub}.js
+  - packages/plugin-sdk/bridge/{bridge,egress}.js
   - packages/plugin-sdk-python/src/bookclerk_plugin_sdk/bridge/{…}.js
   - packages/plugin-sdk-python/src/bookclerk_plugin_sdk/bridge/bookclerk_plugin.js
     (copy of packages/plugin-sdk/embed/bookclerk_plugin.js for the adapter isolate
@@ -39,7 +39,7 @@ STUB_COPIES = (
 )
 
 BRIDGE_SRC = ROOT / "crates/bookclerk-workerd/bridge"
-BRIDGE_FILES = ("bridge.js", "egress.js", "host_stub.js")
+BRIDGE_FILES = ("bridge.js", "egress.js")
 BRIDGE_DESTS = (
     ROOT / "packages/plugin-sdk/bridge",
     ROOT / "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/bridge",

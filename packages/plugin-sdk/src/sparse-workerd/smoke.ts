@@ -140,7 +140,6 @@ export async function runSmoke(pluginDir: string): Promise<string> {
   const bridgeToken = randomBytes(32).toString("hex");
   const generated = materializeConfig(root, manifest, {
     listenPort: port,
-    notifyAddr: null,
     bridgeToken,
   });
   const base = `http://${generated.listenAddr}`;

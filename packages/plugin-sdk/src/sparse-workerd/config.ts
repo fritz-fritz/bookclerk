@@ -119,10 +119,8 @@ export function manifestDescribeJson(m: Manifest): string {
 export type MaterializeOptions = {
   /** Loopback listen port for the HTTP bridge socket (`127.0.0.1:<port>`). */
   listenPort: number;
-  /** Optional HOST.notify reverse channel (`host:port`). Smoke omits this. */
-  notifyAddr?: string | null;
   /**
-   * Per-isolate bearer for `/rpc`, `/health`, and HOST.notify (`BRIDGE_TOKEN`).
+   * Per-isolate bearer for `/rpc` and `/health` (`BRIDGE_TOKEN`).
    *
    * Required — generate once per smoke/isolate and send on every bridge request.
    */
@@ -248,11 +246,11 @@ export function egressDomainsFor(
  *
  * Copies bridge scripts into `.bookclerk/`, embeds plugin modules (and the
  * injected SDK when JS/Python guests are present), and writes the Cap'n Proto
- * config. `notifyAddr` may be omitted on the smoke path.
+ * config.
  *
  * @param pluginRoot - Plugin directory containing `plugin.toml` and modules.
  * @param manifest - Validated workerd manifest.
- * @param options - Listen port, bridge token, and optional notify address.
+ * @param options - Listen port and bridge token.
  * @returns Generated config path and loopback listen address.
  * @throws {Error} When `[workerd]` is missing, modules are absent, or the
  *   bridge token is empty.
@@ -274,7 +272,7 @@ export function materializeConfig(
 
   const bookclerkDir = path.join(pluginRoot, ".bookclerk");
   fs.mkdirSync(bookclerkDir, { recursive: true });
-  for (const name of ["bridge.js", "egress.js", "host_stub.js"] as const) {
+  for (const name of ["bridge.js", "egress.js"] as const) {
     const src = path.join(sdkRoot, "bridge", name);
     fs.copyFileSync(src, path.join(bookclerkDir, name));
   }
@@ -432,13 +430,6 @@ export function materializeConfig(
   }
   const bridgeTokenBinding = `(name = "BRIDGE_TOKEN", text = "${escapeCapnp(bridgeToken)}")`;
 
-  let notifyService = "";
-  let hostBindings = bridgeTokenBinding;
-  if (options.notifyAddr) {
-    notifyService = `    (name = "hostNotify", external = (address = "${escapeCapnp(options.notifyAddr)}", http = ())),`;
-    hostBindings = `${bridgeTokenBinding},\n    (name = "NOTIFY", service = "hostNotify")`;
-  }
-
   const compatDate = escapeCapnp(workerd.compatibility_date);
   const config = `using Workerd = import "/workerd/workerd.capnp";
 
@@ -446,28 +437,14 @@ const bookclerkPlugin :Workerd.Config = (
   services = [
     (name = "internet", network = (allow = ["public"])),
     (name = "blocked", network = (allow = [])),
-    (name = "host", worker = .hostWorker),
     (name = "egress", worker = .egressWorker),
     (name = "plugin", worker = .pluginWorker),
     (name = "adapter", worker = .adapterWorker),
     (name = "bridge", worker = .bridgeWorker),
-${notifyService}
   ],
   sockets = [
     (name = "rpc", address = "${listenAddr}", http = (), service = "bridge")
   ]
-);
-
-const hostWorker :Workerd.Worker = (
-  modules = [
-    (name = "host_stub.js", esModule = embed ".bookclerk/host_stub.js")
-  ],
-  compatibilityDate = "${compatDate}",
-  
-  bindings = [
-    ${hostBindings}
-  ],
-  globalOutbound = "blocked",
 );
 
 const egressWorker :Workerd.Worker = (
@@ -488,9 +465,7 @@ const pluginWorker :Workerd.Worker = (
   ],
   compatibilityDate = "${compatDate}",
   ${flagsLine}
-  bindings = [
-    (name = "HOST", service = "host"),
-  ],
+  bindings = [],
   globalOutbound = "${pluginOutbound}",
 );
 
