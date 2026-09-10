@@ -18,7 +18,7 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::discover::DiscoveredPlugin;
-use crate::rpc_session::{PluginSession, HOST_SHARED_ACCOUNT};
+use crate::rpc_session::{PluginSession, SessionServices, HOST_SHARED_ACCOUNT};
 use crate::Result;
 
 /// External integration backed by a discovered plugin binary.
@@ -49,6 +49,20 @@ impl ExternalIntegration {
     ///
     /// Returns an error when the operation fails.
     pub async fn spawn(plugin: &DiscoveredPlugin, config: &Config) -> Result<Self> {
+        Self::spawn_with(plugin, config, SessionServices::default()).await
+    }
+
+    /// [`Self::spawn`] with the host services the guest may receive as
+    /// bindings (`EVENTS` outbox, …).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
+    pub async fn spawn_with(
+        plugin: &DiscoveredPlugin,
+        config: &Config,
+        services: SessionServices,
+    ) -> Result<Self> {
         if plugin.manifest.api_version != PRODUCT_API_VERSION {
             return Err(crate::PluginError::message(format!(
                 "plugin `{}` api_version {} is not supported",
@@ -67,11 +81,13 @@ impl ExternalIntegration {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
         let session = Arc::new(
-            PluginSession::spawn_for_account(
+            PluginSession::spawn_with(
                 plugin,
                 config,
                 config_json.clone(),
                 HOST_SHARED_ACCOUNT,
+                &[],
+                services,
             )
             .await?,
         );
@@ -145,6 +161,7 @@ impl ExternalIntegration {
 pub async fn load_external_integrations(
     config: &Config,
     registry: &mut IntegrationRegistry,
+    services: &SessionServices,
 ) -> Result<()> {
     for plugin in crate::discover_plugins(config)? {
         if !plugin
@@ -165,7 +182,7 @@ pub async fn load_external_integrations(
             );
             continue;
         }
-        match ExternalIntegration::spawn(&plugin, config).await {
+        match ExternalIntegration::spawn_with(&plugin, config, services.clone()).await {
             Ok(i) => {
                 tracing::info!(id = %plugin.manifest.id, "loaded external integration plugin");
                 registry.register(Arc::new(i));

@@ -39,6 +39,7 @@ mod crates_io;
 mod destinations;
 mod discover;
 mod error;
+mod event_publisher;
 mod host;
 mod jail;
 mod manifest;
@@ -83,6 +84,7 @@ pub use discover::{
     discover_plugins, plugin_search_dirs, settings_table, settings_table_for, DiscoveredPlugin,
 };
 pub use error::{PluginError, Result};
+pub use event_publisher::{EventOutbox, OutboxEventPublisher};
 pub use host::{
     backup_adapter_id, database_connect_bindings, export_registered_plugin_units,
     load_external_database, load_external_destinations, load_external_integrations,
@@ -105,7 +107,7 @@ pub use registry::{
 };
 pub use rpc_session::{
     plugin_instance_key, ExecutorIdentity, GuestDatabaseFactory, PluginSession, PluginStorage,
-    RpcBackupOps, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
+    RpcBackupOps, SessionServices, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
 
 /// Register discovered external plugins into the in-process registries.

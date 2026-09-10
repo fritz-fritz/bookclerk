@@ -1230,8 +1230,13 @@ pub(crate) async fn reload_daemon_config_held(state: &AppState) -> anyhow::Resul
         bookclerk_plugin_host::load_external_destinations(&new_cfg, Some(lib_db)).await?
     };
 
-    let candidate_sources = crate::registry::default_registry_with_plugins(&new_cfg).await?;
-    let candidate_integrations = bookclerk_plugin_host::load_integrations(&new_cfg).await?;
+    let candidate_sources =
+        crate::registry::default_registry_with_plugins(&new_cfg, &library_for_auth).await?;
+    let candidate_integrations = bookclerk_plugin_host::load_integrations(
+        &new_cfg,
+        &bookclerk_plugin_host::SessionServices::with_event_outbox(library_for_auth.clone()),
+    )
+    .await?;
 
     let token_changed = candidate_auth.enabled != old_auth_enabled
         || (candidate_auth.enabled && candidate_auth.token != old_token);
