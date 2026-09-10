@@ -269,6 +269,12 @@ export interface Bindings {
   databases: NamedDatabase[];
   /** Host cancellation for the whole invocation (fence / lease loss). */
   cancel: Cancellation;
+  /**
+   * `WORK_FS`: host-granted object storage for durable plugin files (work
+   * filesystem); null unless `[work_fs]` is granted. Job input/output travel on
+   * `JobRunner.job(controller)`, never here.
+   */
+  storage: Destination;
 }
 
 /**

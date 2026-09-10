@@ -922,7 +922,7 @@
       "name": "Bindings",
       "file": "plugin.capnp",
       "dataWords": 0,
-      "pointerCount": 6,
+      "pointerCount": 7,
       "discriminantCount": 0,
       "discriminantOffset": 0,
       "fields": [
@@ -988,6 +988,16 @@
             "name": "Cancellation"
           },
           "offset": 5
+        },
+        {
+          "name": "storage",
+          "codeOrder": 6,
+          "discriminantValue": null,
+          "type": {
+            "kind": "interface",
+            "name": "Destination"
+          },
+          "offset": 6
         }
       ]
     },

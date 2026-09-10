@@ -390,6 +390,7 @@ def _write_bindings(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
     for item, elem in zip(items, v["databases"], strict=True):
         _named_database_codec.write(item, elem, caps)
     s.set_cap(5, caps.export_cap(v["cancel"]))
+    s.set_cap(6, caps.export_cap(v["storage"]))
 
 
 def _read_bindings(s: _StructReader, caps: _CapTable) -> Any:
@@ -400,11 +401,12 @@ def _read_bindings(s: _StructReader, caps: _CapTable) -> Any:
         "events": caps.import_cap(s.get_cap_index(3)),
         "databases": [_named_database_codec.read(item, caps) for item in s.get_struct_list(4, 0, 2)],
         "cancel": caps.import_cap(s.get_cap_index(5)),
+        "storage": caps.import_cap(s.get_cap_index(6)),
     }
 
 
-_bindings_codec = _Codec(0, 6, _write_bindings, _read_bindings)
-"""Wire codec for ``Bindings`` (0 data words, 6 pointers)."""
+_bindings_codec = _Codec(0, 7, _write_bindings, _read_bindings)
+"""Wire codec for ``Bindings`` (0 data words, 7 pointers)."""
 
 
 def _write_entrypoints(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
@@ -5306,13 +5308,13 @@ _plugin_worker_describe_results_codec = _Codec(0, 1, _write_plugin_worker_descri
 
 def _write_plugin_worker_open_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
     _invocation_codec.write(s.init_struct(0, 1, 4), v["invocation"], caps)
-    _bindings_codec.write(s.init_struct(1, 0, 6), v["bindings"], caps)
+    _bindings_codec.write(s.init_struct(1, 0, 7), v["bindings"], caps)
 
 
 def _read_plugin_worker_open_params(s: _StructReader, caps: _CapTable) -> Any:
     return {
         "invocation": _invocation_codec.read(s.get_struct(0, 1, 4), caps),
-        "bindings": _bindings_codec.read(s.get_struct(1, 0, 6), caps),
+        "bindings": _bindings_codec.read(s.get_struct(1, 0, 7), caps),
     }
 
 
