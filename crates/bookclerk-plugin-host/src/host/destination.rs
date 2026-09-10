@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use bookclerk_config::{normalize_storage_prefix, Config};
-use bookclerk_plugin_sdk::{DestinationContext, PRODUCT_API_VERSION};
+use bookclerk_plugin_sdk::{BindingValues, PRODUCT_API_VERSION};
 use bookclerk_storage::{load_s3_credentials, S3Credentials, StorageBackend, StorageError};
 use sea_orm::DatabaseConnection;
 use serde_json::Value;
@@ -170,10 +170,10 @@ async fn spawn_s3_guest(
         .await?,
     );
     session
-        .ensure_destination(DestinationContext {
-            config: bookclerk_plugin_sdk::ExtensibleConfig::json_from(&ctx)
+        .open(BindingValues::config(
+            bookclerk_plugin_sdk::ExtensibleConfig::json_from(&ctx)
                 .map_err(|err| crate::PluginError::message(err.to_string()))?,
-        })
+        ))
         .await?;
     Ok((PluginStorage::new(Arc::clone(&session)), session))
 }

@@ -50,11 +50,11 @@ mod spawn_stdio;
 pub use bookclerk_plugin_sdk::protocol;
 pub use bookclerk_plugin_sdk::{
     methods, CatalogHit, CliArg, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams,
-    CliInvokeResult, CliSchema, ContentSourceContext, EventPollResult, ExpandCandidatesParams,
-    ExternalUser, FetchTitleParams, IntegrationContext, ListeningProgress, LoginCompleteParams,
-    LoginParams, LoginResult, LoginStartResult, PlainFetch, PlainPart, PluginDescribe,
-    PurchaseHint, PurchaseHintParams, ScanBook, ScanParams, ScanSummary, SearchCatalogParams,
-    SourceAccount, SyncListeningResult, PRODUCT_API_VERSION, PROTOCOL_NAME,
+    CliInvokeResult, CliSchema, EventPollResult, ExpandCandidatesParams, ExternalUser,
+    FetchTitleParams, ListeningProgress, LoginCompleteParams, LoginParams, LoginResult,
+    LoginStartResult, PlainFetch, PlainPart, PluginDescribe, PurchaseHint, PurchaseHintParams,
+    ScanBook, ScanParams, ScanSummary, SearchCatalogParams, SourceAccount, SyncListeningResult,
+    PRODUCT_API_VERSION, PROTOCOL_NAME,
 };
 
 pub use bookclerk_plugin_sdk::{JobCheckpoint, JobInvocationLease, JobOutcome};
@@ -84,7 +84,7 @@ pub use discover::{
 };
 pub use error::{PluginError, Result};
 pub use host::{
-    backup_adapter_id, database_connect_context, export_registered_plugin_units,
+    backup_adapter_id, database_connect_bindings, export_registered_plugin_units,
     load_external_database, load_external_destinations, load_external_integrations,
     load_external_sources, migrate_database_plugin, migrate_library_schema, open_library_store,
     open_library_store_for_plugin, restore_plugin_backup_units, DatabaseRegistry,

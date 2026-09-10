@@ -11,8 +11,8 @@ use bookclerk_integrations::{
     IntegrationHealth, IntegrationRegistry, ProvidedOidcClient,
 };
 use bookclerk_plugin_sdk::{
-    AuthenticateUserParams, DomainEvent, EventResult, ExtensibleConfig,
-    IntegrationContext as AbiIntegrationContext, ScanLibraryParams, PRODUCT_API_VERSION,
+    AuthenticateUserParams, BindingValues, DomainEvent, EventResult, ExtensibleConfig,
+    ScanLibraryParams, PRODUCT_API_VERSION,
 };
 use serde_json::Value;
 use tracing::warn;
@@ -23,10 +23,9 @@ use crate::Result;
 
 /// External integration backed by a discovered plugin binary.
 pub struct ExternalIntegration {
-    /// Cap'n Proto session (never given `library.db`).
+    /// Cap'n Proto session (never given `library.db`); opened once with the
+    /// granted plugin config table as the `CONFIG` binding.
     session: Arc<PluginSession>,
-    /// Typed factory context (granted plugin config table as JSON payload).
-    ctx: AbiIntegrationContext,
     /// Operator-facing name from describe metadata (falls back to the manifest id).
     display_name: String,
     /// Whether this integration is enabled in host config after describe.
@@ -101,11 +100,13 @@ impl ExternalIntegration {
                 filter: s.filter.clone().filter(|v| !v.is_null()),
             })
             .collect();
+        session
+            .open(BindingValues::config(ExtensibleConfig::json(
+                &source_config,
+            )))
+            .await?;
         Ok(Self {
             session,
-            ctx: AbiIntegrationContext {
-                config: ExtensibleConfig::json(&source_config),
-            },
             display_name,
             enabled: true,
             brand,
@@ -116,19 +117,19 @@ impl ExternalIntegration {
         })
     }
 
-    /// Runs one typed integration method through the plugin session.
+    /// Runs one typed `remoteLibrary` method through the plugin session.
     ///
     /// # Errors
     ///
-    /// Returns when the factory or the guest method fails.
+    /// Returns when the entrypoint is missing or the guest method fails.
     async fn int_call<T, F, Fut>(&self, call: F) -> bookclerk_integrations::Result<T>
     where
         T: Send + 'static,
-        F: FnOnce(Box<dyn bookclerk_plugin_sdk::Integration>) -> Fut + Send + 'static,
+        F: FnOnce(Box<dyn bookclerk_plugin_sdk::RemoteLibrary>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = std::result::Result<T, bookclerk_plugin_sdk::PluginError>>
             + 'static,
     {
-        Ok(self.session.integration(self.ctx.clone(), call).await?)
+        Ok(self.session.remote_library(call).await?)
     }
 }
 
@@ -207,7 +208,6 @@ impl Integration for ExternalIntegration {
                 let epoch = self.poll_epoch.fetch_add(1, Ordering::SeqCst) + 1;
                 self.poll_cancel.store(false, Ordering::SeqCst);
                 let session = self.session.clone();
-                let ctx = self.ctx.clone();
                 let plugin_id = self.id().to_string();
                 let cancel = self.poll_cancel.clone();
                 let epoch_flag = self.poll_epoch.clone();
@@ -225,10 +225,7 @@ impl Integration for ExternalIntegration {
                             break;
                         }
                         match session
-                            .integration(
-                                ctx.clone(),
-                                |stub| async move { stub.poll_events().await },
-                            )
+                            .remote_library(|stub| async move { stub.poll_events().await })
                             .await
                         {
                             Ok(users) => {
@@ -292,12 +289,12 @@ impl Integration for ExternalIntegration {
                 reason: "plugin declares no [[events.consumers]]".into(),
             });
         }
-        Ok(self
-            .session
-            .integration_cancelable(self.ctx.clone(), cancel, |stub| async move {
-                stub.on_event(event).await
-            })
-            .await?)
+        let mut results = self.session.deliver_events(vec![event], cancel).await?;
+        results.pop().ok_or_else(|| {
+            bookclerk_integrations::IntegrationError::message(
+                "plugin returned no result for the delivered event",
+            )
+        })
     }
 
     fn event_subscriptions(&self) -> Vec<EventSubscription> {
@@ -398,9 +395,7 @@ impl Integration for ExternalIntegration {
             username: username.to_string(),
             password: password.to_string(),
         };
-        let user = self
-            .int_call(move |stub| async move { stub.authenticate_user(params).await })
-            .await?;
+        let user = self.session.oidc_authenticate_user(params).await?;
         Ok(ExternalUser {
             provider: if user.provider.is_empty() {
                 self.id().to_string()

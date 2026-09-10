@@ -11,9 +11,7 @@ use bookclerk_plugin_host::{
     consent_request, discover_plugins, CliInvokeParams, Entrypoint, PluginFamily, PluginGrantStore,
     PluginSession, SearchCatalogParams, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
-use bookclerk_plugin_sdk::{
-    CatalogField, CatalogSort, ContentSourceContext, IntegrationContext, ListDealsParams,
-};
+use bookclerk_plugin_sdk::{CatalogField, CatalogSort, ListDealsParams};
 
 fn artifacts_dir() -> Option<PathBuf> {
     std::env::var_os("BOOKCLERK_PLUGIN_ARTIFACTS").map(PathBuf::from)
@@ -126,16 +124,12 @@ async fn staged_first_party_plugins_describe() {
         {
             let health = if session.has_entrypoint(Entrypoint::Storefront) {
                 session
-                    .content_source(ContentSourceContext::default(), |stub| async move {
-                        stub.health().await
-                    })
+                    .storefront(|stub| async move { stub.health().await })
                     .await
                     .ok()
-            } else if families.contains(&PluginFamily::Integration) {
+            } else if session.has_entrypoint(Entrypoint::RemoteLibrary) {
                 session
-                    .integration(IntegrationContext::default(), |stub| async move {
-                        stub.health().await
-                    })
+                    .remote_library(|stub| async move { stub.health().await })
                     .await
                     .ok()
             } else {
@@ -214,9 +208,7 @@ async fn staged_first_party_plugins_describe() {
                 language: None,
             };
             let hits = match session
-                .content_source(ContentSourceContext::default(), move |stub| async move {
-                    stub.search_catalog(params).await
-                })
+                .storefront(move |stub| async move { stub.search_catalog(params).await })
                 .await
             {
                 Ok(hits) => hits,
@@ -242,7 +234,7 @@ async fn staged_first_party_plugins_describe() {
 
         if plugin.manifest.id == "chirp" {
             let deals = match session
-                .content_source(ContentSourceContext::default(), |stub| async move {
+                .storefront(|stub| async move {
                     stub.list_deals(ListDealsParams { limit: Some(1) }).await
                 })
                 .await
