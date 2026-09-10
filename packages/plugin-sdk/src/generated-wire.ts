@@ -1507,13 +1507,13 @@ export const ExtensibleConfigCodec: StructCodec<T.ExtensibleConfig> = {
 };
 
 /**
- * Wire codec for `Bindings` (0 data words, 6 pointers).
+ * Wire codec for `Bindings` (0 data words, 7 pointers).
  *
  * @internal
  */
 export const BindingsCodec: StructCodec<T.Bindings> = {
   dataWords: 0,
-  pointerCount: 6,
+  pointerCount: 7,
   write(s, v, caps) {
     ExtensibleConfigCodec.write(s.initStruct(0, 1, 2), v.config, caps);
     ExtensibleConfigCodec.write(s.initStruct(1, 1, 2), v.secrets, caps);
@@ -1526,6 +1526,7 @@ export const BindingsCodec: StructCodec<T.Bindings> = {
       }
     }
     s.setCap(5, caps.exportCap(v.cancel));
+    s.setCap(6, caps.exportCap(v.storage));
   },
   read(s, caps) {
     return {
@@ -1535,6 +1536,7 @@ export const BindingsCodec: StructCodec<T.Bindings> = {
       events: caps.importCap(s.getCapIndex(3)) as T.EventPublisher,
       databases: s.getStructList(4, 0, 2).map((item) => NamedDatabaseCodec.read(item, caps)),
       cancel: caps.importCap(s.getCapIndex(5)) as T.Cancellation,
+      storage: caps.importCap(s.getCapIndex(6)) as T.Destination,
     };
   },
 };
@@ -8197,12 +8199,12 @@ export const PluginWorkerOpenParamsCodec: StructCodec<PluginWorkerOpenParams> = 
   pointerCount: 2,
   write(s, v, caps) {
     InvocationCodec.write(s.initStruct(0, 1, 4), v.invocation, caps);
-    BindingsCodec.write(s.initStruct(1, 0, 6), v.bindings, caps);
+    BindingsCodec.write(s.initStruct(1, 0, 7), v.bindings, caps);
   },
   read(s, caps) {
     return {
       invocation: InvocationCodec.read(s.getStruct(0, 1, 4), caps),
-      bindings: BindingsCodec.read(s.getStruct(1, 0, 6), caps),
+      bindings: BindingsCodec.read(s.getStruct(1, 0, 7), caps),
     };
   },
 };

@@ -2231,6 +2231,7 @@ async fn run_stream_copy(
                 events: None,
                 databases,
                 cancel: Arc::new(FlagCancel(Arc::clone(&cancel))),
+                storage: None,
             },
         )
         .await

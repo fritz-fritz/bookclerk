@@ -285,6 +285,10 @@ struct Bindings {
   databases @4 :List(NamedDatabase);
   # Host cancellation for the whole invocation (fence / lease loss).
   cancel @5 :Cancellation;
+  # `WORK_FS`: host-granted object storage for durable plugin files (work
+  # filesystem); null unless `[work_fs]` is granted. Job input/output travel on
+  # `JobRunner.job(controller)`, never here.
+  storage @6 :Destination;
 }
 
 # Exported entrypoints returned by `PluginWorker.open`. One capability per

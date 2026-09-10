@@ -1437,7 +1437,7 @@ impl plugin_worker::Server for PluginServer {
     ) -> capnp::Result<()> {
         let p = params.get()?;
         let invocation = read_invocation(p.get_invocation()?)?;
-        let bindings = read_bindings(p.get_bindings()?)?;
+        let bindings = read_bindings(p.get_bindings()?, self.window)?;
         let result = results.get().init_result();
         match self.inner.open(invocation, bindings).await {
             Ok(eps) => fill_entrypoints(result.init_ok(), eps, self.window),
@@ -1493,7 +1493,7 @@ impl plugin_worker::Server for PluginServer {
 /// # Errors
 ///
 /// Returns a Cap'n Proto error when a nested struct or list cannot be read.
-fn read_bindings(b: bindings::Reader<'_>) -> capnp::Result<Bindings> {
+fn read_bindings(b: bindings::Reader<'_>, window: u32) -> capnp::Result<Bindings> {
     let config = read_extensible_config(b.get_config()?);
     let secrets = read_extensible_config(b.get_secrets()?);
     let adapter = read_database_adapter_config(b.get_adapter()?)?;
@@ -1519,6 +1519,11 @@ fn read_bindings(b: bindings::Reader<'_>) -> capnp::Result<Bindings> {
     } else {
         Box::new(NeverCancel)
     };
+    let storage: Option<Box<dyn Destination>> = if b.has_storage() {
+        Some(Box::new(DestinationClient::new(b.get_storage()?, window)))
+    } else {
+        None
+    };
     Ok(Bindings {
         config,
         secrets,
@@ -1526,6 +1531,7 @@ fn read_bindings(b: bindings::Reader<'_>) -> capnp::Result<Bindings> {
         events,
         databases,
         cancel,
+        storage,
     })
 }
 
@@ -2698,6 +2704,8 @@ pub struct HostBindings {
     pub databases: Vec<(String, Arc<dyn GuestDatabase>)>,
     /// Invocation-wide cancellation (fence / lease loss).
     pub cancel: Arc<dyn Cancellation>,
+    /// `WORK_FS` object storage; `None` unless `[work_fs]` is granted.
+    pub storage: Option<Arc<dyn Destination>>,
 }
 
 impl HostBindings {
@@ -2709,6 +2717,7 @@ impl HostBindings {
             events: None,
             databases: Vec::new(),
             cancel: Arc::new(NeverCancel),
+            storage: None,
         }
     }
 }
@@ -2842,6 +2851,12 @@ impl PluginClient {
             b.set_cancel(capnp_rpc::new_client(CancellationServer {
                 inner: bindings.cancel,
             }));
+            if let Some(storage) = bindings.storage {
+                b.set_storage(capnp_rpc::new_client(DestinationServer::new(
+                    storage,
+                    self.window,
+                )));
+            }
         }
         let reply = req.send().promise.await.map_err(from_capnp)?;
         let result = reply
@@ -4704,6 +4719,102 @@ mod tests {
             .await;
     }
 
+    /// Guest that re-exports its granted `WORK_FS` storage binding as its own
+    /// `storage` entrypoint, so host calls round-trip through the guest vat.
+    struct StorageEchoPlugin;
+
+    #[async_trait::async_trait(?Send)]
+    impl PluginWorker for StorageEchoPlugin {
+        async fn describe(&self) -> Result<PluginDescribe> {
+            Ok(PluginDescribe {
+                api_version: PRODUCT_API_VERSION,
+                id: "storage_echo".into(),
+                capabilities: PluginCapabilities {
+                    entrypoints: vec![Entrypoint::Storage],
+                    ..PluginCapabilities::default()
+                },
+                rpc_features: vec![FEATURE_SCALAR_LIMITS.into()],
+                scalar_limits: ScalarLimits::default().into(),
+                ..PluginDescribe::default()
+            })
+        }
+
+        async fn open(&self, _invocation: Invocation, bindings: Bindings) -> Result<Entrypoints> {
+            let storage = bindings
+                .storage
+                .ok_or_else(|| PluginError::invalid_params("WORK_FS binding missing"))?;
+            Ok(Entrypoints {
+                storage: Some(storage),
+                ..Entrypoints::default()
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn open_forwards_storage_binding() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (client_end, server_end) = duplex(64 * 1024);
+                let (server_r, server_w) = tokio::io::split(server_end);
+                let (client_r, client_w) = tokio::io::split(client_end);
+                tokio::task::spawn_local(async move {
+                    let _ =
+                        serve_plugin(Arc::new(StorageEchoPlugin), server_r, server_w, 64 * 1024)
+                            .await;
+                });
+                let (client, rpc) = connect_plugin(client_r, client_w, 64 * 1024);
+                tokio::task::spawn_local(rpc);
+
+                let missing = client
+                    .open(&Invocation::default(), HostBindings::default())
+                    .await
+                    .err()
+                    .expect("no storage binding -> guest refuses open");
+                assert_eq!(missing.code, PluginErrorCode::InvalidParams);
+
+                let store = Arc::new(MemDest {
+                    store: Mutex::new(HashMap::new()),
+                });
+                let opened = client
+                    .open(
+                        &Invocation::default(),
+                        HostBindings {
+                            storage: Some(Arc::clone(&store) as Arc<dyn Destination>),
+                            ..HostBindings::default()
+                        },
+                    )
+                    .await
+                    .expect("open with WORK_FS");
+                let storage = opened.storage.expect("guest exports storage");
+                storage
+                    .put(
+                        "work/notes.txt",
+                        Box::pin(std::io::Cursor::new(b"granted".to_vec())),
+                        WriteOptions::default(),
+                    )
+                    .await
+                    .expect("put through guest");
+                assert_eq!(
+                    store
+                        .store
+                        .lock()
+                        .expect("lock")
+                        .get("work/notes.txt")
+                        .map(Vec::as_slice),
+                    Some(&b"granted"[..]),
+                    "bytes land in the host-granted store"
+                );
+                let head = storage
+                    .head("work/notes.txt")
+                    .await
+                    .expect("head through guest")
+                    .expect("present");
+                assert_eq!(head.size, 7);
+            })
+            .await;
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn open_injects_named_database_binding() {
         let local = tokio::task::LocalSet::new();
@@ -4737,6 +4848,7 @@ mod tests {
                                 Arc::new(GuestDbProbe) as Arc<dyn GuestDatabase>,
                             )],
                             cancel: Arc::new(TestCancel(Arc::new(AtomicBool::new(false)))),
+                            storage: None,
                         },
                     )
                     .await

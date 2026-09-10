@@ -448,6 +448,10 @@ pub struct Bindings {
     pub databases: Vec<(String, Box<dyn GuestDatabase>)>,
     /// Host cancellation for the whole invocation (fence / lease loss).
     pub cancel: Box<dyn Cancellation>,
+    /// `WORK_FS`: host-granted object storage for durable plugin files;
+    /// `None` unless `[work_fs]` is granted. Job input/output travel on
+    /// [`JobController`], never here.
+    pub storage: Option<Box<dyn Destination>>,
 }
 
 impl Bindings {
@@ -462,6 +466,7 @@ impl Bindings {
             events: None,
             databases: Vec::new(),
             cancel: Box::new(NeverCancel),
+            storage: None,
         }
     }
 

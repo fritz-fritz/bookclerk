@@ -375,6 +375,9 @@ class Bindings(TypedDict):
             Bookclerk library and from every other plugin. Empty when the manifest
             declares none.
         cancel: Host cancellation for the whole invocation (fence / lease loss).
+        storage: `WORK_FS`: host-granted object storage for durable plugin files (work
+            filesystem); null unless `[work_fs]` is granted. Job input/output travel on
+            `JobRunner.job(controller)`, never here.
     """
 
     config: ExtensibleConfig
@@ -383,6 +386,7 @@ class Bindings(TypedDict):
     events: EventPublisher
     databases: list[NamedDatabase]
     cancel: Cancellation
+    storage: Destination
 
 
 class Entrypoints(TypedDict):
