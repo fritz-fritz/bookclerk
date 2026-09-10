@@ -156,10 +156,15 @@ pub async fn guest_scan(
 ///
 /// Returns an error when the operation fails.
 pub async fn guest_scan_rpc(graphql_url: &str, params: &ScanParams) -> Result<ScanSummary> {
-    let credentials =
-        account_credentials_json(&params.credentials).map_err(|e| ChirpError::auth(e.to_string()))?;
-    let (books, accounts, pages) =
-        guest_scan(graphql_url, &credentials, &params.accounts, params.page_size).await?;
+    let credentials = account_credentials_json(&params.credentials)
+        .map_err(|e| ChirpError::auth(e.to_string()))?;
+    let (books, accounts, pages) = guest_scan(
+        graphql_url,
+        &credentials,
+        &params.accounts,
+        params.page_size,
+    )
+    .await?;
     Ok(scan_summary(books, accounts, pages))
 }
 

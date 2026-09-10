@@ -257,20 +257,20 @@ pub async fn guest_sync_listening(state: &Mutex<AbsGuestState>) -> Result<Vec<Li
     Ok(snapshots
         .into_iter()
         .map(|row| ListeningProgress {
-                external_user_id: row.external_user_id,
-                external_item_id: row.external_item_id,
-                identity_id: row.identity_id,
-                title: row.title,
-                authors: row.authors,
-                asin: row.asin,
-                isbn: row.isbn,
-                progress: row.progress,
-                current_time_seconds: row.current_time_seconds,
-                duration_seconds: row.duration_seconds,
-                is_finished: row.is_finished,
-                last_listened_at_unix_ms: row
-                    .last_listened_at
-                    .and_then(|ts| u64::try_from(ts.timestamp_millis()).ok()),
+            external_user_id: row.external_user_id,
+            external_item_id: row.external_item_id,
+            identity_id: row.identity_id,
+            title: row.title,
+            authors: row.authors,
+            asin: row.asin,
+            isbn: row.isbn,
+            progress: row.progress,
+            current_time_seconds: row.current_time_seconds,
+            duration_seconds: row.duration_seconds,
+            is_finished: row.is_finished,
+            last_listened_at_unix_ms: row
+                .last_listened_at
+                .and_then(|ts| u64::try_from(ts.timestamp_millis()).ok()),
         })
         .collect())
 }

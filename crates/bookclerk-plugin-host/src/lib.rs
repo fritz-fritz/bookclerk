@@ -49,12 +49,12 @@ mod spawn_stdio;
 
 pub use bookclerk_plugin_sdk::protocol;
 pub use bookclerk_plugin_sdk::{
-    methods, CatalogHit, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams,
-    CliInvokeResult, CliSchema, EventPollResult, ExpandCandidatesParams, ExternalUser,
-    FetchTitleParams, ListeningProgress, LoginCompleteParams, LoginParams, LoginResult,
-    LoginStartResult, PlainFetch, PlainPart, PluginDescribe, PurchaseHint, PurchaseHintParams,
-    ScanBook, ScanParams, ScanSummary, SearchCatalogParams, SourceAccount, SyncListeningResult,
-    PRODUCT_API_VERSION, PROTOCOL_NAME,
+    methods, CatalogHit, CliArg, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams,
+    CliInvokeResult, CliSchema, ContentSourceContext, EventPollResult, ExpandCandidatesParams,
+    ExternalUser, FetchTitleParams, IntegrationContext, ListeningProgress, LoginCompleteParams,
+    LoginParams, LoginResult, LoginStartResult, PlainFetch, PlainPart, PluginDescribe,
+    PurchaseHint, PurchaseHintParams, ScanBook, ScanParams, ScanSummary, SearchCatalogParams,
+    SourceAccount, SyncListeningResult, PRODUCT_API_VERSION, PROTOCOL_NAME,
 };
 
 pub use bookclerk_plugin_sdk::{JobCheckpoint, JobInvocationLease, JobOutcome};

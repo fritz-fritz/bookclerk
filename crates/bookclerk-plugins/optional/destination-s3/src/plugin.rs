@@ -5,13 +5,13 @@
 use std::pin::Pin;
 
 use async_trait::async_trait;
+use bookclerk_config::OutputS3Config;
 use bookclerk_plugin_sdk::{
     ByteRange, CopyResult, Destination, DestinationContext, JobHandler, ListOptions, ListPage,
     ObjectInfo, ObjectMetadata, PluginDescribe, PluginRoot, PutResult, ReadResult, ScalarLimits,
     Source, SourceContext, StreamCopyHandler, WorkerContext, WriteOptions, FEATURE_SCALAR_LIMITS,
     FEATURE_STORAGE_COPY, FEATURE_STREAMS, PRODUCT_API_VERSION,
 };
-use bookclerk_config::OutputS3Config;
 use bookclerk_plugin_sdk::{OutputS3ContextDto, PluginError, S3CredentialsDto};
 use bookclerk_storage::{ObjectMeta, S3Backend, S3Credentials, StorageBackend, StorageError};
 use tokio::io::AsyncRead;

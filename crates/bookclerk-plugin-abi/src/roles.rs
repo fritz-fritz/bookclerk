@@ -369,18 +369,22 @@ pub trait GuestDatabase {
 }
 
 /// Granted storefront configuration (`BookclerkPlugin.contentSource`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContentSourceContext {
     /// Granted plugin settings (operator `[sources.<id>]` table as
     /// `application/json`).
+    #[serde(default)]
     pub config: ExtensibleConfig,
 }
 
 /// Granted integration configuration (`BookclerkPlugin.integration`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IntegrationContext {
     /// Granted plugin settings (operator `[integrations.<id>]` table as
     /// `application/json`).
+    #[serde(default)]
     pub config: ExtensibleConfig,
 }
 
@@ -389,12 +393,15 @@ pub struct IntegrationContext {
 /// First-party host-managed adapters receive host-private connect params in
 /// [`Self::config`]; third-party adapters receive the typed [`Self::adapter`]
 /// bootstrap (and an empty `config`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DatabaseContext {
     /// Host-private connect params for first-party adapters.
+    #[serde(default)]
     pub config: ExtensibleConfig,
     /// Author-facing bootstrap for third-party adapters; `plugin_data_dir` is
     /// empty when `config` carries host-private params instead.
+    #[serde(default)]
     pub adapter: DatabaseAdapterConfig,
 }
 

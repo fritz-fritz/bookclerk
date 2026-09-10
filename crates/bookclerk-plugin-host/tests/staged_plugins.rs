@@ -137,7 +137,11 @@ async fn staged_first_party_plugins_describe() {
             };
             if let Some(health) = health {
                 if plugin.manifest.id != "audiobookshelf" {
-                    assert!(health.ok, "{} health not ok: {health:?}", plugin.manifest.id);
+                    assert!(
+                        health.ok,
+                        "{} health not ok: {health:?}",
+                        plugin.manifest.id
+                    );
                 }
                 let detail = Some(health.detail.as_str()).filter(|d| !d.is_empty());
                 let expected_detail = match plugin.manifest.id.as_str() {

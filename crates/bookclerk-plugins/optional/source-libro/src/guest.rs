@@ -158,8 +158,8 @@ pub async fn guest_scan(
 ///
 /// Returns an error when the operation fails.
 pub async fn guest_scan_rpc(base_url: &str, params: &ScanParams) -> Result<ScanSummary> {
-    let credentials =
-        account_credentials_json(&params.credentials).map_err(|e| LibroError::auth(e.to_string()))?;
+    let credentials = account_credentials_json(&params.credentials)
+        .map_err(|e| LibroError::auth(e.to_string()))?;
     let (books, accounts, pages) = guest_scan(base_url, &credentials, &params.accounts).await?;
     Ok(scan_summary(books, accounts, pages))
 }
@@ -199,8 +199,7 @@ pub async fn guest_fetch_title_rpc(
     let creds = credentials_from_bytes(creds).map_err(|e| LibroError::auth(e.to_string()))?;
     let work_dir = bookclerk_plugin_sdk::fetch_work_dir(params)
         .map_err(|err| LibroError::api(format!("fetch work directory: {err}")))?;
-    let plain =
-        guest_fetch_title(base_url, &creds, &params.title_id, &work_dir, container).await?;
+    let plain = guest_fetch_title(base_url, &creds, &params.title_id, &work_dir, container).await?;
     Ok(plain.into())
 }
 

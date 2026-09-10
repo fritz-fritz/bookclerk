@@ -377,10 +377,7 @@ impl ContentSource for ExternalSource {
         if credentials.is_some() {
             self.session.require_binding("secrets")?;
         }
-        let credentials = credentials
-            .as_ref()
-            .map(credentials_to_bytes)
-            .transpose()?;
+        let credentials = credentials.as_ref().map(credentials_to_bytes).transpose()?;
         // Jail-granted scratch (already TMPDIR), not the host download cache.
         let cache_dir = {
             let dir = self.session.scratch_dir().join("fetch");

@@ -17,8 +17,8 @@
 
 pub use bookclerk_plugin_abi::{
     Abridgement, AccountCredential, AuthenticateUserParams, Brand, CatalogDetail,
-    CatalogDetailParams, CatalogField, CatalogHit, CatalogHits, CatalogSort, ChapterMarker,
-    CliArg, CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams, CliInvokeResult, CliSchema,
+    CatalogDetailParams, CatalogField, CatalogHit, CatalogHits, CatalogSort, ChapterMarker, CliArg,
+    CliArgKind, CliArgSpec, CliCommandSpec, CliInvokeParams, CliInvokeResult, CliSchema,
     ConfigOption, ConfigOptionValue, EventPollResult, ExpandCandidatesParams, ExternalUser,
     FetchOptions, FetchTitleParams, ListDealsParams, ListeningProgress, LoginCompleteParams,
     LoginParams, LoginResult, LoginStartResult, OutputLocalContextDto, OutputS3ContextDto,
