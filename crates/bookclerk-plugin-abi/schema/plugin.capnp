@@ -1,4 +1,4 @@
-# Bookclerk plugin ABI — object-capability Workers RPC (`api_version = 2`).
+# Bookclerk plugin ABI — object-capability Workers RPC (`api_version = 3`).
 #
 # This file is the first supported plugin contract. Discarded development
 # compatibility fields were removed and ordinals compacted. From this contract
@@ -14,8 +14,9 @@
 # - Identifiers are non-empty `[a-z][a-z0-9_]{0,63}`. Timestamps are UTC
 #   unix milliseconds (UInt64); zero means omitted.
 # - Absent factories/methods return typed `unsupported`.
-# - `describe()` advertises `supportedRoles`. The signed manifest is the host
-#   allowlist of what may be invoked (kind alone is not sufficient).
+# - `describe()` advertises typed `PluginCapabilities` (exported entrypoints,
+#   triggers, bindings). The signed manifest plus the operator grant is the
+#   host allowlist; a guest that widens beyond either is refused.
 #
 # Authors never see transport-private capability table indexes. Public types
 # are the interfaces below plus TypeScript `BookclerkPlugin`. ByteSource is
@@ -26,7 +27,7 @@
 @0x816df58cae22db0c;
 
 # Product ABI version (`plugin.toml` `api_version` / `describe().apiVersion`).
-const apiVersion :UInt32 = 2;
+const apiVersion :UInt32 = 3;
 # Maximum decoded size of an ordinary RPC scalar value (not a stream window).
 const maxScalarBytes :UInt32 = 262144;
 # Maximum bytes returned by one `ByteSource.pull` (flow-control window).
@@ -178,36 +179,31 @@ struct PluginDescribe {
   apiVersion @0 :UInt32;
   # Stable plugin id (`[a-z][a-z0-9_]{0,63}`).
   id @1 :Text;
-  # Manifest kind (`source`, `integration`, `output`, `database`).
-  kind @2 :Text;
   # Human-readable name for UI lists.
-  displayName @3 :Text;
+  displayName @2 :Text;
   # Negotiable feature names the guest supports (see `feature*` constants).
-  rpcFeatures @4 :List(Text);
+  rpcFeatures @3 :List(Text);
   # Guest caps when `rpc.scalarLimits` is advertised.
-  scalarLimits @5 :ScalarLimits;
-  # Advertised factories (`destination`, `source`, `worker`, `contentSource`,
-  # `integration`, `database`). Host still intersects with the manifest allowlist.
-  supportedRoles @6 :List(Text);
-  # Capability method names the guest implements (e.g. `health`, `login`,
-  # `fetchTitle`). The host intersects these with the consent grant.
-  capabilities @7 :List(Text);
+  scalarLimits @4 :ScalarLimits;
+  # Exported entrypoints, triggers, and bindings the guest implements. The
+  # host rejects anything wider than the manifest and the operator grant.
+  capabilities @5 :PluginCapabilities;
   # Portal Accounts connect mode for storefronts.
-  portalAuthMode @8 :PortalAuthMode;
+  portalAuthMode @6 :PortalAuthMode;
   # Env var name operators may set for password helpers; never required for
   # Accounts UI connect. Empty when the guest accepts none.
-  passwordEnvVar @9 :Text $optional;
+  passwordEnvVar @7 :Text $optional;
   # Alternate ids accepted for config / CLI targeting.
-  aliases @10 :List(Text);
-  # UI sort weight among peers of the same kind; lower sorts first.
-  sortKey @11 :UInt32;
+  aliases @8 :List(Text);
+  # UI sort weight among peers of the same family; lower sorts first.
+  sortKey @9 :UInt32;
   # Portal brand colors and icon URL; `brand.id` is empty when the guest has
   # no brand and the host renders a neutral fallback.
-  brand @12 :Brand;
+  brand @10 :Brand;
   # Discoverable config option groups for source UIs.
-  configOptions @13 :List(ConfigOption);
+  configOptions @11 :List(ConfigOption);
   # Embedded CLI schema (same shape as `cliDescribe`); empty when unused.
-  cli @14 :CliSchema;
+  cli @12 :CliSchema;
 }
 
 # Marks a scalar field whose zero value (empty `Text` / `Data`, numeric `0`)
@@ -963,6 +959,54 @@ enum PluginErrorCode $jsonEnum {
 #############################################################################
 
 # --- rust-generated: begin ---
+
+# Named entrypoint a plugin exports (Cloudflare Workers named-entrypoint
+# analogue). Each value is a capability the host calls over RPC; triggers on
+# the default entrypoint (`event`, `job`) are declared separately.
+enum Entrypoint {
+  # Storefront: login, scan, fetch, catalog search (`ContentSource`).
+  storefront @0;
+  # Object storage destination (`Destination`).
+  storage @1;
+  # Library database adapter (`Database`).
+  databaseAdapter @2;
+  # Remote-library lifecycle: start/stop, scanLibrary, syncListening,
+  # pollEvents (`Integration` minus event delivery).
+  remoteLibrary @3;
+  # Guest CLI (`cliDescribe` / `cliInvoke`).
+  cli @4;
+  # OIDC bridge: relying-party client templates and `authenticateUser`.
+  oidc @5;
+}
+
+# One declared event consumer: a `[[events.consumers]]` row the default
+# entrypoint's `event(batch)` handler accepts.
+struct EventConsumerSpec {
+  # Versioned event type (snake_case, e.g. `book_acquired`).
+  eventType @0 :Text;
+  # Schema versions the guest can consume; never empty.
+  schemaVersions @1 :List(UInt32);
+  # Whether `EventResult.suspended` is supported for this type.
+  supportsSuspend @2 :Bool;
+}
+
+# Typed capability declaration returned by `describe()`. The host compares
+# it with `plugin.toml` and the operator grant; widening is rejected at spawn.
+struct PluginCapabilities {
+  # Named entrypoints the guest exports.
+  entrypoints @0 :List(Entrypoint);
+  # Event types the default entrypoint consumes (`event(batch)` trigger).
+  consumes @1 :List(EventConsumerSpec);
+  # Event types the guest may publish through its `EVENTS` binding.
+  produces @2 :List(Text);
+  # Command types the default entrypoint runs (`job(controller)` trigger).
+  jobs @3 :List(Text);
+  # Plugin-owned database binding names (`[[databases]]`).
+  databases @4 :List(Text);
+  # Other named bindings the guest expects on `env` (`CONFIG`, `SECRETS`,
+  # `WORK_FS`, `OAUTH`, `KV`, `EVENTS`, ...).
+  bindings @5 :List(Text);
+}
 
 # Portal Accounts connect mode for storefronts.
 enum PortalAuthMode {

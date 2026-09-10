@@ -14,6 +14,7 @@ use bookclerk_db_guest::{
 };
 use bookclerk_plugin_abi::db::{connect_params_from_context, DbConnectParams};
 use bookclerk_plugin_abi::HostAdapterDatabaseSession;
+use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::database_adapter::plugin_error_from_engine;
 use bookclerk_plugin_sdk::{
     serve, AdapterDatabaseSession, Database, DatabaseContext, PluginDescribe, PluginRoot,
@@ -76,12 +77,10 @@ impl PluginRoot for PostgresRoot {
         Ok(PluginDescribe {
             api_version: PRODUCT_API_VERSION,
             id: "postgres".into(),
-            kind: "database".into(),
             display_name: Some("PostgreSQL".into()),
             rpc_features: vec![FEATURE_SCALAR_LIMITS.into()],
             scalar_limits: ScalarLimits::default().into(),
-            supported_roles: vec!["database".into()],
-            capabilities: vec!["health".into(), "diagnose".into()],
+            capabilities: manifest_capabilities(include_str!("../plugin.toml"))?,
             sort_key: 5,
             ..PluginDescribe::default()
         })

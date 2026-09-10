@@ -31,6 +31,19 @@ as-is; SDKs surface them as a local `unknown` while keeping the raw wire
 code.
 """
 
+Entrypoint = Literal[
+    "storefront",
+    "storage",
+    "databaseAdapter",
+    "remoteLibrary",
+    "cli",
+    "oidc",
+]
+"""Named entrypoint a plugin exports (Cloudflare Workers named-entrypoint
+analogue). Each value is a capability the host calls over RPC; triggers on
+the default entrypoint (`event`, `job`) are declared separately.
+"""
+
 PortalAuthMode = Literal["unspecified", "password", "oauth"]
 """Portal Accounts connect mode for storefronts."""
 
@@ -224,22 +237,18 @@ class PluginDescribe(TypedDict):
     Attributes:
         apiVersion: ABI version the guest speaks; must equal `apiVersion`.
         id: Stable plugin id (`[a-z][a-z0-9_]{0,63}`).
-        kind: Manifest kind (`source`, `integration`, `output`, `database`).
         displayName: Human-readable name for UI lists.
         rpcFeatures: Negotiable feature names the guest supports (see `feature*`
             constants).
         scalarLimits: Guest caps when `rpc.scalarLimits` is advertised.
-        supportedRoles: Advertised factories (`destination`, `source`, `worker`,
-            `contentSource`, `integration`, `database`). Host still intersects with the
-            manifest allowlist.
-        capabilities: Capability method names the guest implements (e.g. `health`,
-            `login`, `fetchTitle`). The host intersects these with the consent grant.
+        capabilities: Exported entrypoints, triggers, and bindings the guest implements.
+            The host rejects anything wider than the manifest and the operator grant.
         portalAuthMode: Portal Accounts connect mode for storefronts.
         passwordEnvVar: Env var name operators may set for password helpers; never
             required for Accounts UI connect. Empty when the guest accepts none. Omitted
             when absent (wire zero value).
         aliases: Alternate ids accepted for config / CLI targeting.
-        sortKey: UI sort weight among peers of the same kind; lower sorts first.
+        sortKey: UI sort weight among peers of the same family; lower sorts first.
         brand: Portal brand colors and icon URL; `brand.id` is empty when the guest has
             no brand and the host renders a neutral fallback.
         configOptions: Discoverable config option groups for source UIs.
@@ -248,12 +257,10 @@ class PluginDescribe(TypedDict):
 
     apiVersion: int
     id: str
-    kind: str
     displayName: str
     rpcFeatures: list[str]
     scalarLimits: ScalarLimits
-    supportedRoles: list[str]
-    capabilities: list[str]
+    capabilities: PluginCapabilities
     portalAuthMode: PortalAuthMode
     passwordEnvVar: NotRequired[str]
     aliases: list[str]
@@ -1962,6 +1969,43 @@ class Integration(Protocol):
             ``EventPollReply``
         """
         ...
+
+
+class EventConsumerSpec(TypedDict):
+    """One declared event consumer: a `[[events.consumers]]` row the default
+    entrypoint's `event(batch)` handler accepts.
+
+    Attributes:
+        eventType: Versioned event type (snake_case, e.g. `book_acquired`).
+        schemaVersions: Schema versions the guest can consume; never empty.
+        supportsSuspend: Whether `EventResult.suspended` is supported for this type.
+    """
+
+    eventType: str
+    schemaVersions: list[int]
+    supportsSuspend: bool
+
+
+class PluginCapabilities(TypedDict):
+    """Typed capability declaration returned by `describe()`. The host compares
+    it with `plugin.toml` and the operator grant; widening is rejected at spawn.
+
+    Attributes:
+        entrypoints: Named entrypoints the guest exports.
+        consumes: Event types the default entrypoint consumes (`event(batch)` trigger).
+        produces: Event types the guest may publish through its `EVENTS` binding.
+        jobs: Command types the default entrypoint runs (`job(controller)` trigger).
+        databases: Plugin-owned database binding names (`[[databases]]`).
+        bindings: Other named bindings the guest expects on `env` (`CONFIG`, `SECRETS`,
+            `WORK_FS`, `OAUTH`, `KV`, `EVENTS`, ...).
+    """
+
+    entrypoints: list[Entrypoint]
+    consumes: list[EventConsumerSpec]
+    produces: list[str]
+    jobs: list[str]
+    databases: list[str]
+    bindings: list[str]
 
 
 class Brand(TypedDict):
@@ -4500,6 +4544,7 @@ class BookclerkPlugin(Protocol):
 
 __all__ = [
     "PluginErrorCode",
+    "Entrypoint",
     "PortalAuthMode",
     "CliArgKind",
     "CatalogSort",
@@ -4633,6 +4678,8 @@ __all__ = [
     "NamedDatabase",
     "ContentSource",
     "Integration",
+    "EventConsumerSpec",
+    "PluginCapabilities",
     "Brand",
     "ConfigOption",
     "ConfigOptionValue",

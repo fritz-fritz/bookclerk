@@ -250,17 +250,27 @@ mod tests {
         let describe = PluginDescribe {
             api_version: PRODUCT_API_VERSION,
             id: "echo".into(),
-            kind: "integration".into(),
-            capabilities: vec!["health".into()],
+            capabilities: PluginCapabilities {
+                entrypoints: vec![Entrypoint::Cli],
+                consumes: vec![EventConsumerSpec {
+                    event_type: "book_acquired".into(),
+                    schema_versions: vec![1],
+                    supports_suspend: true,
+                }],
+                ..PluginCapabilities::default()
+            },
             ..PluginDescribe::default()
         };
         let v = serde_json::to_value(&describe).unwrap();
         assert!(v.get("apiVersion").is_some());
         assert!(v.get("api_version").is_none());
         assert!(v.get("metadataJson").is_none());
+        assert_eq!(v["capabilities"]["entrypoints"][0], "cli");
         let back: PluginDescribe = serde_json::from_value(v).unwrap();
         assert_eq!(back.id, "echo");
-        assert!(back.has_capability("health"));
+        assert!(back.has_entrypoint(Entrypoint::Cli));
+        assert!(back.consumes_event("book_acquired"));
+        assert!(!back.runs_job("book_acquired"));
     }
 
     #[test]

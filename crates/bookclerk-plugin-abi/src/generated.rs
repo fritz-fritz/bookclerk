@@ -63,6 +63,83 @@ fn read_text_list(list: capnp::text_list::Reader<'_>) -> capnp::Result<Vec<Strin
     list.iter().map(|t| Ok(t?.to_string()?)).collect()
 }
 
+/// Named entrypoint a plugin exports (Cloudflare Workers named-entrypoint
+/// analogue). Each value is a capability the host calls over RPC; triggers on
+/// the default entrypoint (`event`, `job`) are declared separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Entrypoint {
+    /// Storefront: login, scan, fetch, catalog search (`ContentSource`).
+    #[default]
+    Storefront,
+    /// Object storage destination (`Destination`).
+    Storage,
+    /// Library database adapter (`Database`).
+    DatabaseAdapter,
+    /// Remote-library lifecycle: start/stop, scanLibrary, syncListening,
+    /// pollEvents (`Integration` minus event delivery).
+    RemoteLibrary,
+    /// Guest CLI (`cliDescribe` / `cliInvoke`).
+    Cli,
+    /// OIDC bridge: relying-party client templates and `authenticateUser`.
+    Oidc,
+}
+
+impl Entrypoint {
+    /// Wire name of this enumerant (matches the TypeScript / Python SDK literal).
+    #[must_use]
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Storefront => "storefront",
+            Self::Storage => "storage",
+            Self::DatabaseAdapter => "databaseAdapter",
+            Self::RemoteLibrary => "remoteLibrary",
+            Self::Cli => "cli",
+            Self::Oidc => "oidc",
+        }
+    }
+
+    /// Parse a wire name; `None` for unknown strings.
+    #[must_use]
+    pub fn from_wire_name(name: &str) -> Option<Self> {
+        match name {
+            "storefront" => Some(Self::Storefront),
+            "storage" => Some(Self::Storage),
+            "databaseAdapter" => Some(Self::DatabaseAdapter),
+            "remoteLibrary" => Some(Self::RemoteLibrary),
+            "cli" => Some(Self::Cli),
+            "oidc" => Some(Self::Oidc),
+            _ => None,
+        }
+    }
+}
+
+impl From<Entrypoint> for plugin_capnp::Entrypoint {
+    fn from(value: Entrypoint) -> Self {
+        match value {
+            Entrypoint::Storefront => Self::Storefront,
+            Entrypoint::Storage => Self::Storage,
+            Entrypoint::DatabaseAdapter => Self::DatabaseAdapter,
+            Entrypoint::RemoteLibrary => Self::RemoteLibrary,
+            Entrypoint::Cli => Self::Cli,
+            Entrypoint::Oidc => Self::Oidc,
+        }
+    }
+}
+
+impl From<plugin_capnp::Entrypoint> for Entrypoint {
+    fn from(value: plugin_capnp::Entrypoint) -> Self {
+        match value {
+            plugin_capnp::Entrypoint::Storefront => Self::Storefront,
+            plugin_capnp::Entrypoint::Storage => Self::Storage,
+            plugin_capnp::Entrypoint::DatabaseAdapter => Self::DatabaseAdapter,
+            plugin_capnp::Entrypoint::RemoteLibrary => Self::RemoteLibrary,
+            plugin_capnp::Entrypoint::Cli => Self::Cli,
+            plugin_capnp::Entrypoint::Oidc => Self::Oidc,
+        }
+    }
+}
+
 /// Portal Accounts connect mode for storefronts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -371,6 +448,48 @@ impl From<plugin_capnp::Abridgement> for Abridgement {
             plugin_capnp::Abridgement::Abridged => Self::Abridged,
         }
     }
+}
+
+/// One declared event consumer: a `\[\[events.consumers\]\]` row the default
+/// entrypoint's `event(batch)` handler accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventConsumerSpec {
+    /// Versioned event type (snake_case, e.g. `book_acquired`).
+    #[serde(default)]
+    pub event_type: String,
+    /// Schema versions the guest can consume; never empty.
+    #[serde(default)]
+    pub schema_versions: Vec<u32>,
+    /// Whether `EventResult.suspended` is supported for this type.
+    #[serde(default)]
+    pub supports_suspend: bool,
+}
+
+/// Typed capability declaration returned by `describe()`. The host compares
+/// it with `plugin.toml` and the operator grant; widening is rejected at spawn.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCapabilities {
+    /// Named entrypoints the guest exports.
+    #[serde(default)]
+    pub entrypoints: Vec<Entrypoint>,
+    /// Event types the default entrypoint consumes (`event(batch)` trigger).
+    #[serde(default)]
+    pub consumes: Vec<EventConsumerSpec>,
+    /// Event types the guest may publish through its `EVENTS` binding.
+    #[serde(default)]
+    pub produces: Vec<String>,
+    /// Command types the default entrypoint runs (`job(controller)` trigger).
+    #[serde(default)]
+    pub jobs: Vec<String>,
+    /// Plugin-owned database binding names (`\[\[databases\]\]`).
+    #[serde(default)]
+    pub databases: Vec<String>,
+    /// Other named bindings the guest expects on `env` (`CONFIG`, `SECRETS`,
+    /// `WORK_FS`, `OAUTH`, `KV`, `EVENTS`, ...).
+    #[serde(default)]
+    pub bindings: Vec<String>,
 }
 
 /// Portal brand crossing the RPC boundary. Distinct from `plugin.toml`
@@ -1382,6 +1501,119 @@ pub struct SyncListeningResult {
     /// Progress snapshots to upsert.
     #[serde(default)]
     pub items: Vec<ListeningProgress>,
+}
+
+/// Encode a [`EventConsumerSpec`] onto a Cap'n Proto builder.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when a list is too long or a nested field cannot be encoded.
+pub fn write_event_consumer_spec(
+    mut b: plugin_capnp::event_consumer_spec::Builder<'_>,
+    v: &EventConsumerSpec,
+) -> capnp::Result<()> {
+    b.set_event_type(&v.event_type);
+    {
+        let mut items = b
+            .reborrow()
+            .init_schema_versions(list_len(v.schema_versions.len())?);
+        for (i, item) in v.schema_versions.iter().enumerate() {
+            items.set(list_len(i)?, *item);
+        }
+    }
+    b.set_supports_suspend(v.supports_suspend);
+    Ok(())
+}
+
+/// Decode a [`EventConsumerSpec`] from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when a text field is not UTF-8 or a pointer is malformed.
+pub fn read_event_consumer_spec(
+    r: plugin_capnp::event_consumer_spec::Reader<'_>,
+) -> capnp::Result<EventConsumerSpec> {
+    Ok(EventConsumerSpec {
+        event_type: r.get_event_type()?.to_string()?,
+        schema_versions: r.get_schema_versions()?.iter().collect::<Vec<_>>(),
+        supports_suspend: r.get_supports_suspend(),
+    })
+}
+
+/// Encode a [`PluginCapabilities`] onto a Cap'n Proto builder.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when a list is too long or a nested field cannot be encoded.
+pub fn write_plugin_capabilities(
+    mut b: plugin_capnp::plugin_capabilities::Builder<'_>,
+    v: &PluginCapabilities,
+) -> capnp::Result<()> {
+    {
+        let mut items = b
+            .reborrow()
+            .init_entrypoints(list_len(v.entrypoints.len())?);
+        for (i, item) in v.entrypoints.iter().enumerate() {
+            items.set(list_len(i)?, (*item).into());
+        }
+    }
+    {
+        let mut items = b.reborrow().init_consumes(list_len(v.consumes.len())?);
+        for (i, item) in v.consumes.iter().enumerate() {
+            write_event_consumer_spec(items.reborrow().get(list_len(i)?), item)?;
+        }
+    }
+    {
+        let mut items = b.reborrow().init_produces(list_len(v.produces.len())?);
+        for (i, item) in v.produces.iter().enumerate() {
+            items.set(list_len(i)?, item);
+        }
+    }
+    {
+        let mut items = b.reborrow().init_jobs(list_len(v.jobs.len())?);
+        for (i, item) in v.jobs.iter().enumerate() {
+            items.set(list_len(i)?, item);
+        }
+    }
+    {
+        let mut items = b.reborrow().init_databases(list_len(v.databases.len())?);
+        for (i, item) in v.databases.iter().enumerate() {
+            items.set(list_len(i)?, item);
+        }
+    }
+    {
+        let mut items = b.reborrow().init_bindings(list_len(v.bindings.len())?);
+        for (i, item) in v.bindings.iter().enumerate() {
+            items.set(list_len(i)?, item);
+        }
+    }
+    Ok(())
+}
+
+/// Decode a [`PluginCapabilities`] from a Cap'n Proto reader.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when a text field is not UTF-8 or a pointer is malformed.
+pub fn read_plugin_capabilities(
+    r: plugin_capnp::plugin_capabilities::Reader<'_>,
+) -> capnp::Result<PluginCapabilities> {
+    Ok(PluginCapabilities {
+        entrypoints: r
+            .get_entrypoints()?
+            .iter()
+            .map(|item| item.map(Into::into))
+            .collect::<Result<Vec<_>, _>>()?,
+        consumes: r
+            .get_consumes()?
+            .iter()
+            .map(|item| read_event_consumer_spec(item))
+            .collect::<capnp::Result<Vec<_>>>()?,
+        produces: read_text_list(r.get_produces()?)?,
+        jobs: read_text_list(r.get_jobs()?)?,
+        databases: read_text_list(r.get_databases()?)?,
+        bindings: read_text_list(r.get_bindings()?)?,
+    })
 }
 
 /// Encode a [`Brand`] onto a Cap'n Proto builder.

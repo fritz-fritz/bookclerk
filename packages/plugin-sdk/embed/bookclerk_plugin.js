@@ -133,7 +133,7 @@ function unsupportedMethod(method) {
 }
 
 /** Product ABI version 2 (`describe().apiVersion`). */
-export const PRODUCT_API_VERSION = 2;
+export const PRODUCT_API_VERSION = 3;
 export const MAX_SCALAR_BYTES = 262144;
 export const MAX_STREAM_WINDOW_BYTES = 1048576;
 export const MAX_LIST_PAGE = 256;

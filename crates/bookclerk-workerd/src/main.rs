@@ -460,11 +460,10 @@ async fn run_native_behind_workerd(
         .context("workerd bridge /health did not become ready")?;
 
     let plugin_id = manifest.id.clone();
-    let policy = match manifest.kind {
-        bookclerk_plugin_manifest::PluginKind::Integration => {
-            bookclerk_workerd::native_broker::BrokerPolicy::integration(plugin_id, "1")
-        }
-        _ => bookclerk_workerd::native_broker::BrokerPolicy::destination(plugin_id, "1"),
+    let policy = if manifest.has_entrypoint(bookclerk_plugin_manifest::Entrypoint::Storage) {
+        bookclerk_workerd::native_broker::BrokerPolicy::destination(plugin_id, "1")
+    } else {
+        bookclerk_workerd::native_broker::BrokerPolicy::integration(plugin_id, "1")
     };
     let result = mediate_native(
         generated.listen.port(),

@@ -10,6 +10,7 @@ use bookclerk_plugin_integration_audiobookshelf::guest::{
     guest_scan_library, guest_start, guest_sync_listening, AbsGuestState,
 };
 use bookclerk_plugin_integration_audiobookshelf::BRAND;
+use bookclerk_plugin_sdk::manifest_capabilities;
 use bookclerk_plugin_sdk::{
     serve, AuthenticateUserParams, Brand, DomainEvent, EventResult, ExternalUser, HealthOk,
     Integration, IntegrationContext, ListeningProgress, PluginDescribe, PluginError, PluginRoot,
@@ -55,21 +56,10 @@ impl PluginRoot for AbsRoot {
         Ok(PluginDescribe {
             api_version: PRODUCT_API_VERSION,
             id: "audiobookshelf".into(),
-            kind: "integration".into(),
             display_name: Some("Audiobookshelf".into()),
             rpc_features: vec![FEATURE_SCALAR_LIMITS.into()],
             scalar_limits: ScalarLimits::default().into(),
-            supported_roles: vec!["integration".into()],
-            capabilities: vec![
-                "pollEvents".into(),
-                "start".into(),
-                "health".into(),
-                "diagnose".into(),
-                "scanLibrary".into(),
-                "syncListening".into(),
-                "authenticateUser".into(),
-                "onEvent".into(),
-            ],
+            capabilities: manifest_capabilities(include_str!("../plugin.toml"))?,
             aliases: vec!["abs".into()],
             brand: Some(Brand {
                 id: BRAND.id.into(),

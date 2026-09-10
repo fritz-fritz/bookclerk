@@ -1137,10 +1137,7 @@ mod tests {
 
     #[test]
     fn python_sdk_injects_db_value_module() {
-        use bookclerk_plugin_manifest::{
-            CapabilitiesManifest, NetworkCapabilities, NetworkMode, PluginKind, PluginManifest,
-            PluginRuntimeKind, WorkerdLimits, WorkerdRuntimeManifest,
-        };
+        use bookclerk_plugin_manifest::{PluginManifest, WorkerdLimits};
 
         let dir = tempfile::tempdir().expect("tempdir");
         let modules = dir.path().join("modules");
@@ -1150,40 +1147,25 @@ mod tests {
             "from bookclerk_plugin_sdk.workerd import BookclerkPlugin\n",
         )
         .expect("plugin.py");
-        let manifest = PluginManifest {
-            api_version: 2,
-            id: "echo_py".into(),
-            name: None,
-            kind: PluginKind::Integration,
-            version: None,
-            logo: None,
-            runtime: PluginRuntimeKind::Workerd,
-            command: None,
-            args: vec![],
-            workerd: Some(WorkerdRuntimeManifest {
-                compatibility_date: "2026-08-01".into(),
-                compatibility_flags: vec![
-                    "python_workers".into(),
-                    "disable_python_external_sdk".into(),
-                ],
-                main_module: "plugin.py".into(),
-                modules_dir: "modules".into(),
-                entrypoint: "default".into(),
-                limits: WorkerdLimits::default(),
-            }),
-            modules: vec![],
-            capabilities: CapabilitiesManifest {
-                network: NetworkCapabilities {
-                    mode: NetworkMode::Deny,
-                    domains: vec![],
-                },
-                bindings: Default::default(),
-                methods: Default::default(),
-                events: Default::default(),
-            },
-            cli: None,
-            oidc: Default::default(),
-        };
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 3
+id = "echo_py"
+runtime = "workerd"
+entrypoints = ["cli"]
+
+[workerd]
+compatibility_date = "2026-08-01"
+compatibility_flags = ["python_workers", "disable_python_external_sdk"]
+main_module = "plugin.py"
+modules_dir = "modules"
+entrypoint = "default"
+
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .expect("manifest");
         let generated = materialize(
             dir.path(),
             &manifest,
@@ -1292,50 +1274,40 @@ mod tests {
     }
 
     fn materialize_capnp(flags: &[&str], mode: NetworkMode) -> String {
-        use bookclerk_plugin_manifest::{
-            CapabilitiesManifest, NetworkCapabilities, PluginKind, PluginManifest,
-            PluginRuntimeKind, WorkerdLimits, WorkerdRuntimeManifest,
-        };
+        use bookclerk_plugin_manifest::{PluginManifest, WorkerdLimits};
 
         let dir = tempfile::tempdir().expect("tempdir");
         let modules = dir.path().join("modules");
         std::fs::create_dir_all(&modules).expect("modules dir");
         std::fs::write(modules.join("index.js"), "export default {};").expect("index.js");
-        let manifest = PluginManifest {
-            api_version: 2,
-            id: "echo".into(),
-            name: None,
-            kind: PluginKind::Integration,
-            version: None,
-            logo: None,
-            runtime: PluginRuntimeKind::Workerd,
-            command: None,
-            args: vec![],
-            workerd: Some(WorkerdRuntimeManifest {
-                compatibility_date: "2026-08-01".into(),
-                compatibility_flags: flags.iter().map(|s| (*s).to_string()).collect(),
-                main_module: "index.js".into(),
-                modules_dir: "modules".into(),
-                entrypoint: "default".into(),
-                limits: WorkerdLimits::default(),
-            }),
-            modules: vec![],
-            capabilities: CapabilitiesManifest {
-                network: NetworkCapabilities {
-                    mode,
-                    domains: if mode == NetworkMode::Outbound {
-                        vec!["example.com".into()]
-                    } else {
-                        vec![]
-                    },
-                },
-                bindings: Default::default(),
-                methods: Default::default(),
-                events: Default::default(),
-            },
-            cli: None,
-            oidc: Default::default(),
+        let flags_toml = flags
+            .iter()
+            .map(|f| format!("{f:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let network_toml = match mode {
+            NetworkMode::Deny => "mode = \"deny\"".to_string(),
+            NetworkMode::Outbound => "mode = \"outbound\"\ndomains = [\"example.com\"]".to_string(),
         };
+        let manifest = PluginManifest::parse(&format!(
+            r#"
+api_version = 3
+id = "echo"
+runtime = "workerd"
+entrypoints = ["cli"]
+
+[workerd]
+compatibility_date = "2026-08-01"
+compatibility_flags = [{flags_toml}]
+main_module = "index.js"
+modules_dir = "modules"
+entrypoint = "default"
+
+[capabilities.network]
+{network_toml}
+"#
+        ))
+        .expect("manifest");
         let generated = materialize(
             dir.path(),
             &manifest,
@@ -1394,46 +1366,30 @@ mod tests {
 
     #[test]
     fn granted_addr_binds_adapter_not_author_plugin() {
-        use bookclerk_plugin_manifest::{
-            CapabilitiesManifest, NetworkCapabilities, NetworkMode, PluginKind, PluginManifest,
-            PluginRuntimeKind, WorkerdLimits, WorkerdRuntimeManifest,
-        };
+        use bookclerk_plugin_manifest::{PluginManifest, WorkerdLimits};
 
         let dir = tempfile::tempdir().expect("tempdir");
         let modules = dir.path().join("modules");
         std::fs::create_dir_all(&modules).expect("modules dir");
         std::fs::write(modules.join("index.js"), "export default {};").expect("index.js");
-        let manifest = PluginManifest {
-            api_version: 2,
-            id: "stream_fixture".into(),
-            name: None,
-            kind: PluginKind::Output,
-            version: None,
-            logo: None,
-            runtime: PluginRuntimeKind::Workerd,
-            command: None,
-            args: vec![],
-            workerd: Some(WorkerdRuntimeManifest {
-                compatibility_date: "2026-08-01".into(),
-                compatibility_flags: vec![],
-                main_module: "index.js".into(),
-                modules_dir: "modules".into(),
-                entrypoint: "default".into(),
-                limits: WorkerdLimits::default(),
-            }),
-            modules: vec![],
-            capabilities: CapabilitiesManifest {
-                network: NetworkCapabilities {
-                    mode: NetworkMode::Deny,
-                    domains: vec![],
-                },
-                bindings: Default::default(),
-                methods: Default::default(),
-                events: Default::default(),
-            },
-            cli: None,
-            oidc: Default::default(),
-        };
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 3
+id = "stream_fixture"
+runtime = "workerd"
+entrypoints = ["storage"]
+
+[workerd]
+compatibility_date = "2026-08-01"
+main_module = "index.js"
+modules_dir = "modules"
+entrypoint = "default"
+
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .expect("manifest");
         let generated = materialize(
             dir.path(),
             &manifest,
