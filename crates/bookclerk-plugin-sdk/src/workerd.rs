@@ -1,4 +1,4 @@
-//! Workerd guest bridge — same [`crate::PluginRoot`] contract as native.
+//! Workerd guest bridge — same [`crate::PluginWorker`] contract as native.
 //!
 //! Audience: authors of `runtime = "workerd"` plugins (JS modules and optional
 //! Rust→Wasm). Dual-stack with native guests:

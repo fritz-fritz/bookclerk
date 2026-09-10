@@ -1,4 +1,4 @@
-//! Host-granted Source/Destination HTTP reverse channel for workerd JobHandler.
+//! Host-granted Source/Destination HTTP reverse channel for workerd `JobRunner.job`.
 //!
 //! HTTP accept/read/write runs on the multi-thread runtime (`tokio::spawn`) so
 //! it is not starved by the Cap'n Proto vat `LocalSet`. Stub calls (`Source`,
@@ -25,7 +25,7 @@ use bookclerk_plugin_abi::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
-/// One JobHandler invocation's granted stubs (vat-thread only).
+/// One `JobRunner.job` invocation's granted stubs (vat-thread only).
 pub struct GrantedSlot {
     /// Host-granted input source.
     pub input: Option<Box<dyn Source>>,

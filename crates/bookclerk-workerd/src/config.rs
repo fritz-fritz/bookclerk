@@ -44,7 +44,7 @@ export default wrapPluginFromNative();
 const SDK_PY_INIT: &str = concat!(
     "\"\"\"Bookclerk plugin SDK (workerd isolate).\n\n",
     "Use: from bookclerk_plugin_sdk.workerd import BookclerkPlugin, js\n\n",
-    "Native guests use Rust serve() / PluginRoot instead.\n",
+    "Native guests use Rust serve() / PluginWorker instead.\n",
     "\"\"\"\n"
 );
 

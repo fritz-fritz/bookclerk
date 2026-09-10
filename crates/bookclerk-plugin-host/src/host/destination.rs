@@ -57,7 +57,7 @@ impl DestinationRegistry {
         self.local = Some(dest);
     }
 
-    /// Records a plugin session used for `JobHandler` invocations.
+    /// Records a plugin session used for `JobRunner.job` invocations.
     pub(crate) fn set_plugin_session(&mut self, session: Arc<PluginSession>) {
         self.plugin_sessions
             .insert(session.instance_key().to_string(), session);
