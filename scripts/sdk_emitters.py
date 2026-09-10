@@ -1136,9 +1136,12 @@ def _ts_struct_codec(ctx: _Ctx, layout_name: str) -> list[str]:
                 out.append(f"      {f['name']}: {_ts_read_expr(ctx, f['type'], f['offset'])},")
             out.append("    };")
             for f in optional:
-                out.append(f"    const {f['name']} = {_ts_read_expr(ctx, f['type'], f['offset'])};")
-                out.append(f"    if (!({_ts_absent_check(f['type'], f['name'])})) {{")
-                out.append(f"      out.{f['name']} = {f['name']};")
+                # Field names may be JS reserved words (`default`); the local
+                # temporary gets a suffix so the emitted code stays valid.
+                local = f"{f['name']}Value"
+                out.append(f"    const {local} = {_ts_read_expr(ctx, f['type'], f['offset'])};")
+                out.append(f"    if (!({_ts_absent_check(f['type'], local)})) {{")
+                out.append(f"      out.{f['name']} = {local};")
                 out.append("    }")
             if optional:
                 out.append("    return out;")

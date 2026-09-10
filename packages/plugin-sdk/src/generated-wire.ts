@@ -1465,9 +1465,9 @@ export const PluginDescribeCodec: StructCodec<T.PluginDescribe> = {
       configOptions: s.getStructList(10, 0, 3).map((item) => ConfigOptionCodec.read(item, caps)),
       cli: CliSchemaCodec.read(s.getStruct(11, 0, 1), caps),
     };
-    const passwordEnvVar = s.getText(7);
-    if (!(passwordEnvVar === "")) {
-      out.passwordEnvVar = passwordEnvVar;
+    const passwordEnvVarValue = s.getText(7);
+    if (!(passwordEnvVarValue === "")) {
+      out.passwordEnvVar = passwordEnvVarValue;
     }
     return out;
   },
@@ -2967,9 +2967,9 @@ export const BrandCodec: StructCodec<T.Brand> = {
       fg: s.getText(3),
       accent: s.getText(4),
     };
-    const iconUrl = s.getText(5);
-    if (!(iconUrl === "")) {
-      out.iconUrl = iconUrl;
+    const iconUrlValue = s.getText(5);
+    if (!(iconUrlValue === "")) {
+      out.iconUrl = iconUrlValue;
     }
     return out;
   },
@@ -3072,9 +3072,9 @@ export const CliCommandSpecCodec: StructCodec<T.CliCommandSpec> = {
       name: s.getText(0),
       args: s.getStructList(2, 1, 5).map((item) => CliArgSpecCodec.read(item, caps)),
     };
-    const about = s.getText(1);
-    if (!(about === "")) {
-      out.about = about;
+    const aboutValue = s.getText(1);
+    if (!(aboutValue === "")) {
+      out.about = aboutValue;
     }
     return out;
   },
@@ -3115,21 +3115,21 @@ export const CliArgSpecCodec: StructCodec<T.CliArgSpec> = {
       required: s.getBool(16),
       positional: s.getBool(17),
     };
-    const long = s.getText(1);
-    if (!(long === "")) {
-      out.long = long;
+    const longValue = s.getText(1);
+    if (!(longValue === "")) {
+      out.long = longValue;
     }
-    const short = s.getText(2);
-    if (!(short === "")) {
-      out.short = short;
+    const shortValue = s.getText(2);
+    if (!(shortValue === "")) {
+      out.short = shortValue;
     }
-    const default = s.getText(3);
-    if (!(default === "")) {
-      out.default = default;
+    const defaultValue = s.getText(3);
+    if (!(defaultValue === "")) {
+      out.default = defaultValue;
     }
-    const about = s.getText(4);
-    if (!(about === "")) {
-      out.about = about;
+    const aboutValue = s.getText(4);
+    if (!(aboutValue === "")) {
+      out.about = aboutValue;
     }
     return out;
   },
@@ -3301,13 +3301,13 @@ export const DatabaseAdapterConfigCodec: StructCodec<T.DatabaseAdapterConfig> = 
       settings: ExtensibleConfigCodec.read(s.getStruct(1, 1, 2), caps),
       openExisting: s.getBool(0),
     };
-    const binding = s.getText(2);
-    if (!(binding === "")) {
-      out.binding = binding;
+    const bindingValue = s.getText(2);
+    if (!(bindingValue === "")) {
+      out.binding = bindingValue;
     }
-    const instanceId = s.getText(3);
-    if (!(instanceId === "")) {
-      out.instanceId = instanceId;
+    const instanceIdValue = s.getText(3);
+    if (!(instanceIdValue === "")) {
+      out.instanceId = instanceIdValue;
     }
     return out;
   },
@@ -3394,9 +3394,9 @@ export const SourceAccountCodec: StructCodec<T.SourceAccount> = {
       marketplace: s.getText(2),
       scanEnabled: s.getBool(0),
     };
-    const label = s.getText(3);
-    if (!(label === "")) {
-      out.label = label;
+    const labelValue = s.getText(3);
+    if (!(labelValue === "")) {
+      out.label = labelValue;
     }
     return out;
   },
@@ -3451,37 +3451,37 @@ export const LoginParamsCodec: StructCodec<T.LoginParams> = {
       showQr: s.getBool(2),
       extra: ExtensibleConfigCodec.read(s.getStruct(9, 1, 2), caps),
     };
-    const label = s.getText(2);
-    if (!(label === "")) {
-      out.label = label;
+    const labelValue = s.getText(2);
+    if (!(labelValue === "")) {
+      out.label = labelValue;
     }
-    const email = s.getText(3);
-    if (!(email === "")) {
-      out.email = email;
+    const emailValue = s.getText(3);
+    if (!(emailValue === "")) {
+      out.email = emailValue;
     }
-    const password = s.getText(4);
-    if (!(password === "")) {
-      out.password = password;
+    const passwordValue = s.getText(4);
+    if (!(passwordValue === "")) {
+      out.password = passwordValue;
     }
-    const callbackBind = s.getText(5);
-    if (!(callbackBind === "")) {
-      out.callbackBind = callbackBind;
+    const callbackBindValue = s.getText(5);
+    if (!(callbackBindValue === "")) {
+      out.callbackBind = callbackBindValue;
     }
-    const callbackIpc = s.getText(6);
-    if (!(callbackIpc === "")) {
-      out.callbackIpc = callbackIpc;
+    const callbackIpcValue = s.getText(6);
+    if (!(callbackIpcValue === "")) {
+      out.callbackIpc = callbackIpcValue;
     }
-    const callbackPublicBase = s.getText(7);
-    if (!(callbackPublicBase === "")) {
-      out.callbackPublicBase = callbackPublicBase;
+    const callbackPublicBaseValue = s.getText(7);
+    if (!(callbackPublicBaseValue === "")) {
+      out.callbackPublicBase = callbackPublicBaseValue;
     }
-    const responseUrl = s.getText(8);
-    if (!(responseUrl === "")) {
-      out.responseUrl = responseUrl;
+    const responseUrlValue = s.getText(8);
+    if (!(responseUrlValue === "")) {
+      out.responseUrl = responseUrlValue;
     }
-    const timeoutSecs = Number(s.getUint64(1));
-    if (!(timeoutSecs === 0)) {
-      out.timeoutSecs = timeoutSecs;
+    const timeoutSecsValue = Number(s.getUint64(1));
+    if (!(timeoutSecsValue === 0)) {
+      out.timeoutSecs = timeoutSecsValue;
     }
     return out;
   },
@@ -3505,9 +3505,9 @@ export const LoginResultCodec: StructCodec<T.LoginResult> = {
     const out: T.LoginResult = {
       account: SourceAccountCodec.read(s.getStruct(0, 1, 4), caps),
     };
-    const credentials = s.getData(1);
-    if (!(credentials.length === 0)) {
-      out.credentials = credentials;
+    const credentialsValue = s.getData(1);
+    if (!(credentialsValue.length === 0)) {
+      out.credentials = credentialsValue;
     }
     return out;
   },
@@ -3734,49 +3734,49 @@ export const ScanBookCodec: StructCodec<T.ScanBook> = {
       productId: s.getText(1),
       title: s.getText(2),
     };
-    const marketplace = s.getText(3);
-    if (!(marketplace === "")) {
-      out.marketplace = marketplace;
+    const marketplaceValue = s.getText(3);
+    if (!(marketplaceValue === "")) {
+      out.marketplace = marketplaceValue;
     }
-    const asin = s.getText(4);
-    if (!(asin === "")) {
-      out.asin = asin;
+    const asinValue = s.getText(4);
+    if (!(asinValue === "")) {
+      out.asin = asinValue;
     }
-    const isbn = s.getText(5);
-    if (!(isbn === "")) {
-      out.isbn = isbn;
+    const isbnValue = s.getText(5);
+    if (!(isbnValue === "")) {
+      out.isbn = isbnValue;
     }
-    const authors = s.getText(6);
-    if (!(authors === "")) {
-      out.authors = authors;
+    const authorsValue = s.getText(6);
+    if (!(authorsValue === "")) {
+      out.authors = authorsValue;
     }
-    const narrators = s.getText(7);
-    if (!(narrators === "")) {
-      out.narrators = narrators;
+    const narratorsValue = s.getText(7);
+    if (!(narratorsValue === "")) {
+      out.narrators = narratorsValue;
     }
-    const series = s.getText(8);
-    if (!(series === "")) {
-      out.series = series;
+    const seriesValue = s.getText(8);
+    if (!(seriesValue === "")) {
+      out.series = seriesValue;
     }
-    const seriesIndex = s.getText(9);
-    if (!(seriesIndex === "")) {
-      out.seriesIndex = seriesIndex;
+    const seriesIndexValue = s.getText(9);
+    if (!(seriesIndexValue === "")) {
+      out.seriesIndex = seriesIndexValue;
     }
-    const contentKind = s.getText(10);
-    if (!(contentKind === "")) {
-      out.contentKind = contentKind;
+    const contentKindValue = s.getText(10);
+    if (!(contentKindValue === "")) {
+      out.contentKind = contentKindValue;
     }
-    const publisher = s.getText(11);
-    if (!(publisher === "")) {
-      out.publisher = publisher;
+    const publisherValue = s.getText(11);
+    if (!(publisherValue === "")) {
+      out.publisher = publisherValue;
     }
-    const lengthMinutes = s.getInt64(0);
-    if (!(lengthMinutes === 0n)) {
-      out.lengthMinutes = lengthMinutes;
+    const lengthMinutesValue = s.getInt64(0);
+    if (!(lengthMinutesValue === 0n)) {
+      out.lengthMinutes = lengthMinutesValue;
     }
-    const subtitle = s.getText(12);
-    if (!(subtitle === "")) {
-      out.subtitle = subtitle;
+    const subtitleValue = s.getText(12);
+    if (!(subtitleValue === "")) {
+      out.subtitle = subtitleValue;
     }
     return out;
   },
@@ -3891,13 +3891,13 @@ export const FetchOptionsCodec: StructCodec<T.FetchOptions> = {
       downloadSpeedLimitKbps: s.getUint32(1),
       saveMetadataJson: s.getBool(7),
     };
-    const widevineCdmPath = s.getText(0);
-    if (!(widevineCdmPath === "")) {
-      out.widevineCdmPath = widevineCdmPath;
+    const widevineCdmPathValue = s.getText(0);
+    if (!(widevineCdmPathValue === "")) {
+      out.widevineCdmPath = widevineCdmPathValue;
     }
-    const widevineCdmProvider = s.getText(1);
-    if (!(widevineCdmProvider === "")) {
-      out.widevineCdmProvider = widevineCdmProvider;
+    const widevineCdmProviderValue = s.getText(1);
+    if (!(widevineCdmProviderValue === "")) {
+      out.widevineCdmProvider = widevineCdmProviderValue;
     }
     return out;
   },
@@ -3931,9 +3931,9 @@ export const FetchTitleParamsCodec: StructCodec<T.FetchTitleParams> = {
       sourceConfig: ExtensibleConfigCodec.read(s.getStruct(5, 1, 2), caps),
       fetch: FetchOptionsCodec.read(s.getStruct(6, 1, 4), caps),
     };
-    const credentials = s.getData(4);
-    if (!(credentials.length === 0)) {
-      out.credentials = credentials;
+    const credentialsValue = s.getData(4);
+    if (!(credentialsValue.length === 0)) {
+      out.credentials = credentialsValue;
     }
     return out;
   },
@@ -3962,13 +3962,13 @@ export const PlainPartCodec: StructCodec<T.PlainPart> = {
     const out: T.PlainPart = {
       path: s.getText(0),
     };
-    const title = s.getText(1);
-    if (!(title === "")) {
-      out.title = title;
+    const titleValue = s.getText(1);
+    if (!(titleValue === "")) {
+      out.title = titleValue;
     }
-    const durationMs = Number(s.getUint64(0));
-    if (!(durationMs === 0)) {
-      out.durationMs = durationMs;
+    const durationMsValue = Number(s.getUint64(0));
+    if (!(durationMsValue === 0)) {
+      out.durationMs = durationMsValue;
     }
     return out;
   },
@@ -4032,17 +4032,17 @@ export const PlainFetchCodec: StructCodec<T.PlainFetch> = {
       parts: s.getStructList(0, 1, 2).map((item) => PlainPartCodec.read(item, caps)),
       chapters: s.getStructList(3, 1, 1).map((item) => ChapterMarkerCodec.read(item, caps)),
     };
-    const m4bPath = s.getText(1);
-    if (!(m4bPath === "")) {
-      out.m4bPath = m4bPath;
+    const m4bPathValue = s.getText(1);
+    if (!(m4bPathValue === "")) {
+      out.m4bPath = m4bPathValue;
     }
-    const coverPath = s.getText(2);
-    if (!(coverPath === "")) {
-      out.coverPath = coverPath;
+    const coverPathValue = s.getText(2);
+    if (!(coverPathValue === "")) {
+      out.coverPath = coverPathValue;
     }
-    const pdfUrl = s.getText(4);
-    if (!(pdfUrl === "")) {
-      out.pdfUrl = pdfUrl;
+    const pdfUrlValue = s.getText(4);
+    if (!(pdfUrlValue === "")) {
+      out.pdfUrl = pdfUrlValue;
     }
     return out;
   },
@@ -4171,9 +4171,9 @@ export const SearchCatalogParamsCodec: StructCodec<T.SearchCatalogParams> = {
       sort: fromOrd(A.CATALOG_SORTS, s.getUint16(4), "CatalogSort"),
       field: fromOrd(A.CATALOG_FIELDS, s.getUint16(5), "CatalogField"),
     };
-    const language = s.getText(2);
-    if (!(language === "")) {
-      out.language = language;
+    const languageValue = s.getText(2);
+    if (!(languageValue === "")) {
+      out.language = languageValue;
     }
     return out;
   },
@@ -4222,29 +4222,29 @@ export const ExpandCandidatesParamsCodec: StructCodec<T.ExpandCandidatesParams> 
       region: s.getText(9),
       limit: s.getUint32(0),
     };
-    const authors = s.getText(3);
-    if (!(authors === "")) {
-      out.authors = authors;
+    const authorsValue = s.getText(3);
+    if (!(authorsValue === "")) {
+      out.authors = authorsValue;
     }
-    const narrators = s.getText(4);
-    if (!(narrators === "")) {
-      out.narrators = narrators;
+    const narratorsValue = s.getText(4);
+    if (!(narratorsValue === "")) {
+      out.narrators = narratorsValue;
     }
-    const series = s.getText(5);
-    if (!(series === "")) {
-      out.series = series;
+    const seriesValue = s.getText(5);
+    if (!(seriesValue === "")) {
+      out.series = seriesValue;
     }
-    const seriesAsin = s.getText(6);
-    if (!(seriesAsin === "")) {
-      out.seriesAsin = seriesAsin;
+    const seriesAsinValue = s.getText(6);
+    if (!(seriesAsinValue === "")) {
+      out.seriesAsin = seriesAsinValue;
     }
-    const asin = s.getText(7);
-    if (!(asin === "")) {
-      out.asin = asin;
+    const asinValue = s.getText(7);
+    if (!(asinValue === "")) {
+      out.asin = asinValue;
     }
-    const isbn = s.getText(8);
-    if (!(isbn === "")) {
-      out.isbn = isbn;
+    const isbnValue = s.getText(8);
+    if (!(isbnValue === "")) {
+      out.isbn = isbnValue;
     }
     return out;
   },
@@ -4284,25 +4284,25 @@ export const PurchaseHintParamsCodec: StructCodec<T.PurchaseHintParams> = {
       region: s.getText(5),
       withPrice: s.getBool(0),
     };
-    const productId = s.getText(0);
-    if (!(productId === "")) {
-      out.productId = productId;
+    const productIdValue = s.getText(0);
+    if (!(productIdValue === "")) {
+      out.productId = productIdValue;
     }
-    const title = s.getText(1);
-    if (!(title === "")) {
-      out.title = title;
+    const titleValue = s.getText(1);
+    if (!(titleValue === "")) {
+      out.title = titleValue;
     }
-    const authors = s.getText(2);
-    if (!(authors === "")) {
-      out.authors = authors;
+    const authorsValue = s.getText(2);
+    if (!(authorsValue === "")) {
+      out.authors = authorsValue;
     }
-    const asin = s.getText(3);
-    if (!(asin === "")) {
-      out.asin = asin;
+    const asinValue = s.getText(3);
+    if (!(asinValue === "")) {
+      out.asin = asinValue;
     }
-    const isbn = s.getText(4);
-    if (!(isbn === "")) {
-      out.isbn = isbn;
+    const isbnValue = s.getText(4);
+    if (!(isbnValue === "")) {
+      out.isbn = isbnValue;
     }
     return out;
   },
@@ -4326,9 +4326,9 @@ export const ListDealsParamsCodec: StructCodec<T.ListDealsParams> = {
     void caps;
     const out: T.ListDealsParams = {
     };
-    const limit = s.getUint32(0);
-    if (!(limit === 0)) {
-      out.limit = limit;
+    const limitValue = s.getUint32(0);
+    if (!(limitValue === 0)) {
+      out.limit = limitValue;
     }
     return out;
   },
@@ -4354,9 +4354,9 @@ export const CatalogDetailParamsCodec: StructCodec<T.CatalogDetailParams> = {
     const out: T.CatalogDetailParams = {
       productId: s.getText(0),
     };
-    const isbn = s.getText(1);
-    if (!(isbn === "")) {
-      out.isbn = isbn;
+    const isbnValue = s.getText(1);
+    if (!(isbnValue === "")) {
+      out.isbn = isbnValue;
     }
     return out;
   },
@@ -4445,85 +4445,85 @@ export const CatalogHitCodec: StructCodec<T.CatalogHit> = {
       origin: s.getText(10),
       abridgement: fromOrd(A.ABRIDGEMENTS, s.getUint16(16), "Abridgement"),
     };
-    const authors = s.getText(2);
-    if (!(authors === "")) {
-      out.authors = authors;
+    const authorsValue = s.getText(2);
+    if (!(authorsValue === "")) {
+      out.authors = authorsValue;
     }
-    const narrators = s.getText(3);
-    if (!(narrators === "")) {
-      out.narrators = narrators;
+    const narratorsValue = s.getText(3);
+    if (!(narratorsValue === "")) {
+      out.narrators = narratorsValue;
     }
-    const series = s.getText(4);
-    if (!(series === "")) {
-      out.series = series;
+    const seriesValue = s.getText(4);
+    if (!(seriesValue === "")) {
+      out.series = seriesValue;
     }
-    const seriesIndex = s.getText(5);
-    if (!(seriesIndex === "")) {
-      out.seriesIndex = seriesIndex;
+    const seriesIndexValue = s.getText(5);
+    if (!(seriesIndexValue === "")) {
+      out.seriesIndex = seriesIndexValue;
     }
-    const asin = s.getText(6);
-    if (!(asin === "")) {
-      out.asin = asin;
+    const asinValue = s.getText(6);
+    if (!(asinValue === "")) {
+      out.asin = asinValue;
     }
-    const isbn = s.getText(7);
-    if (!(isbn === "")) {
-      out.isbn = isbn;
+    const isbnValue = s.getText(7);
+    if (!(isbnValue === "")) {
+      out.isbn = isbnValue;
     }
-    const url = s.getText(8);
-    if (!(url === "")) {
-      out.url = url;
+    const urlValue = s.getText(8);
+    if (!(urlValue === "")) {
+      out.url = urlValue;
     }
-    const coverUrl = s.getText(9);
-    if (!(coverUrl === "")) {
-      out.coverUrl = coverUrl;
+    const coverUrlValue = s.getText(9);
+    if (!(coverUrlValue === "")) {
+      out.coverUrl = coverUrlValue;
     }
-    const subtitle = s.getText(11);
-    if (!(subtitle === "")) {
-      out.subtitle = subtitle;
+    const subtitleValue = s.getText(11);
+    if (!(subtitleValue === "")) {
+      out.subtitle = subtitleValue;
     }
-    const description = s.getText(12);
-    if (!(description === "")) {
-      out.description = description;
+    const descriptionValue = s.getText(12);
+    if (!(descriptionValue === "")) {
+      out.description = descriptionValue;
     }
-    const publisher = s.getText(13);
-    if (!(publisher === "")) {
-      out.publisher = publisher;
+    const publisherValue = s.getText(13);
+    if (!(publisherValue === "")) {
+      out.publisher = publisherValue;
     }
-    const lengthMinutes = s.getInt64(0);
-    if (!(lengthMinutes === 0n)) {
-      out.lengthMinutes = lengthMinutes;
+    const lengthMinutesValue = s.getInt64(0);
+    if (!(lengthMinutesValue === 0n)) {
+      out.lengthMinutes = lengthMinutesValue;
     }
-    const publishedAt = s.getText(14);
-    if (!(publishedAt === "")) {
-      out.publishedAt = publishedAt;
+    const publishedAtValue = s.getText(14);
+    if (!(publishedAtValue === "")) {
+      out.publishedAt = publishedAtValue;
     }
-    const categories = s.getText(15);
-    if (!(categories === "")) {
-      out.categories = categories;
+    const categoriesValue = s.getText(15);
+    if (!(categoriesValue === "")) {
+      out.categories = categoriesValue;
     }
-    const language = s.getText(16);
-    if (!(language === "")) {
-      out.language = language;
+    const languageValue = s.getText(16);
+    if (!(languageValue === "")) {
+      out.language = languageValue;
     }
-    const priceCents = s.getInt64(1);
-    if (!(priceCents === 0n)) {
-      out.priceCents = priceCents;
+    const priceCentsValue = s.getInt64(1);
+    if (!(priceCentsValue === 0n)) {
+      out.priceCents = priceCentsValue;
     }
-    const currency = s.getText(17);
-    if (!(currency === "")) {
-      out.currency = currency;
+    const currencyValue = s.getText(17);
+    if (!(currencyValue === "")) {
+      out.currency = currencyValue;
     }
-    const priceLabel = s.getText(18);
-    if (!(priceLabel === "")) {
-      out.priceLabel = priceLabel;
+    const priceLabelValue = s.getText(18);
+    if (!(priceLabelValue === "")) {
+      out.priceLabel = priceLabelValue;
     }
-    const ratingOverall = s.getFloat64(2);
-    if (!(ratingOverall === 0)) {
-      out.ratingOverall = ratingOverall;
+    const ratingOverallValue = s.getFloat64(2);
+    if (!(ratingOverallValue === 0)) {
+      out.ratingOverall = ratingOverallValue;
     }
-    const ratingCount = s.getInt64(3);
-    if (!(ratingCount === 0n)) {
-      out.ratingCount = ratingCount;
+    const ratingCountValue = s.getInt64(3);
+    if (!(ratingCountValue === 0n)) {
+      out.ratingCount = ratingCountValue;
     }
     return out;
   },
@@ -4686,41 +4686,41 @@ export const PurchaseHintCodec: StructCodec<T.PurchaseHint> = {
     const out: T.PurchaseHint = {
       productId: s.getText(0),
     };
-    const title = s.getText(1);
-    if (!(title === "")) {
-      out.title = title;
+    const titleValue = s.getText(1);
+    if (!(titleValue === "")) {
+      out.title = titleValue;
     }
-    const url = s.getText(2);
-    if (!(url === "")) {
-      out.url = url;
+    const urlValue = s.getText(2);
+    if (!(urlValue === "")) {
+      out.url = urlValue;
     }
-    const priceCents = s.getInt64(0);
-    if (!(priceCents === 0n)) {
-      out.priceCents = priceCents;
+    const priceCentsValue = s.getInt64(0);
+    if (!(priceCentsValue === 0n)) {
+      out.priceCents = priceCentsValue;
     }
-    const currency = s.getText(3);
-    if (!(currency === "")) {
-      out.currency = currency;
+    const currencyValue = s.getText(3);
+    if (!(currencyValue === "")) {
+      out.currency = currencyValue;
     }
-    const priceLabel = s.getText(4);
-    if (!(priceLabel === "")) {
-      out.priceLabel = priceLabel;
+    const priceLabelValue = s.getText(4);
+    if (!(priceLabelValue === "")) {
+      out.priceLabel = priceLabelValue;
     }
-    const listPriceCents = s.getInt64(1);
-    if (!(listPriceCents === 0n)) {
-      out.listPriceCents = listPriceCents;
+    const listPriceCentsValue = s.getInt64(1);
+    if (!(listPriceCentsValue === 0n)) {
+      out.listPriceCents = listPriceCentsValue;
     }
-    const listPriceLabel = s.getText(5);
-    if (!(listPriceLabel === "")) {
-      out.listPriceLabel = listPriceLabel;
+    const listPriceLabelValue = s.getText(5);
+    if (!(listPriceLabelValue === "")) {
+      out.listPriceLabel = listPriceLabelValue;
     }
-    const memberPriceCents = s.getInt64(2);
-    if (!(memberPriceCents === 0n)) {
-      out.memberPriceCents = memberPriceCents;
+    const memberPriceCentsValue = s.getInt64(2);
+    if (!(memberPriceCentsValue === 0n)) {
+      out.memberPriceCents = memberPriceCentsValue;
     }
-    const memberPriceLabel = s.getText(6);
-    if (!(memberPriceLabel === "")) {
-      out.memberPriceLabel = memberPriceLabel;
+    const memberPriceLabelValue = s.getText(6);
+    if (!(memberPriceLabelValue === "")) {
+      out.memberPriceLabel = memberPriceLabelValue;
     }
     return out;
   },
@@ -4848,13 +4848,13 @@ export const ExternalUserCodec: StructCodec<T.ExternalUser> = {
       provider: s.getText(0),
       externalUserId: s.getText(1),
     };
-    const displayName = s.getText(2);
-    if (!(displayName === "")) {
-      out.displayName = displayName;
+    const displayNameValue = s.getText(2);
+    if (!(displayNameValue === "")) {
+      out.displayName = displayNameValue;
     }
-    const accessToken = s.getText(3);
-    if (!(accessToken === "")) {
-      out.accessToken = accessToken;
+    const accessTokenValue = s.getText(3);
+    if (!(accessTokenValue === "")) {
+      out.accessToken = accessTokenValue;
     }
     return out;
   },
@@ -5001,41 +5001,41 @@ export const ListeningProgressCodec: StructCodec<T.ListeningProgress> = {
       externalItemId: s.getText(1),
       isFinished: s.getBool(256),
     };
-    const identityId = s.getInt64(0);
-    if (!(identityId === 0n)) {
-      out.identityId = identityId;
+    const identityIdValue = s.getInt64(0);
+    if (!(identityIdValue === 0n)) {
+      out.identityId = identityIdValue;
     }
-    const title = s.getText(2);
-    if (!(title === "")) {
-      out.title = title;
+    const titleValue = s.getText(2);
+    if (!(titleValue === "")) {
+      out.title = titleValue;
     }
-    const authors = s.getText(3);
-    if (!(authors === "")) {
-      out.authors = authors;
+    const authorsValue = s.getText(3);
+    if (!(authorsValue === "")) {
+      out.authors = authorsValue;
     }
-    const asin = s.getText(4);
-    if (!(asin === "")) {
-      out.asin = asin;
+    const asinValue = s.getText(4);
+    if (!(asinValue === "")) {
+      out.asin = asinValue;
     }
-    const isbn = s.getText(5);
-    if (!(isbn === "")) {
-      out.isbn = isbn;
+    const isbnValue = s.getText(5);
+    if (!(isbnValue === "")) {
+      out.isbn = isbnValue;
     }
-    const progress = s.getFloat64(1);
-    if (!(progress === 0)) {
-      out.progress = progress;
+    const progressValue = s.getFloat64(1);
+    if (!(progressValue === 0)) {
+      out.progress = progressValue;
     }
-    const currentTimeSeconds = s.getFloat64(2);
-    if (!(currentTimeSeconds === 0)) {
-      out.currentTimeSeconds = currentTimeSeconds;
+    const currentTimeSecondsValue = s.getFloat64(2);
+    if (!(currentTimeSecondsValue === 0)) {
+      out.currentTimeSeconds = currentTimeSecondsValue;
     }
-    const durationSeconds = s.getFloat64(3);
-    if (!(durationSeconds === 0)) {
-      out.durationSeconds = durationSeconds;
+    const durationSecondsValue = s.getFloat64(3);
+    if (!(durationSecondsValue === 0)) {
+      out.durationSeconds = durationSecondsValue;
     }
-    const lastListenedAtUnixMs = Number(s.getUint64(5));
-    if (!(lastListenedAtUnixMs === 0)) {
-      out.lastListenedAtUnixMs = lastListenedAtUnixMs;
+    const lastListenedAtUnixMsValue = Number(s.getUint64(5));
+    if (!(lastListenedAtUnixMsValue === 0)) {
+      out.lastListenedAtUnixMs = lastListenedAtUnixMsValue;
     }
     return out;
   },
