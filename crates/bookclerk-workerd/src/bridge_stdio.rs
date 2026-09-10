@@ -161,6 +161,7 @@ impl WorkerdRoot {
             config: bindings.config.clone(),
             secrets: ExtensibleConfig::default(),
             events_token: None,
+            databases: BTreeMap::new(),
         };
         let requested = self.manifest_families();
         let reply: OpenReply = call(
@@ -220,16 +221,41 @@ impl WorkerdRoot {
             }
             None => (None, None),
         };
+        // One database-only grant token per named `[[databases]]` binding:
+        // the adapter isolate reaches each isolated plugin database over
+        // `/db/execute` with its binding token and installs a D1-shaped
+        // binding on the author's `env` for every invocation of this `open`.
+        let mut databases = BTreeMap::new();
+        let mut database_grants = Vec::with_capacity(bindings.databases.len());
+        for (name, database) in bindings.databases {
+            let token = format!("{:032x}", rand::random::<u128>());
+            self.table.borrow_mut().insert(
+                token.clone(),
+                GrantedSlot::database_only(
+                    Rc::from(database),
+                    grant_expiry(invocation.deadline_unix_ms),
+                ),
+            );
+            database_grants.push(RevokeGrant {
+                table: Rc::clone(&self.table),
+                grant: token.clone(),
+            });
+            databases.insert(name, token);
+        }
         let ctx = BridgeContext {
             invocation,
             config: bindings.config,
             secrets: bindings.secrets,
             events_token,
+            databases,
         };
         let ctx_json = context_header(&ctx)?;
-        let keepalive: Option<Rc<dyn std::any::Any>> = events_grant
-            .clone()
-            .map(|grant| grant as Rc<dyn std::any::Any>);
+        let grants = Rc::new(OpenGrants {
+            _events: events_grant,
+            _databases: database_grants,
+        });
+        let keepalive: Option<Rc<dyn std::any::Any>> =
+            Some(Rc::clone(&grants) as Rc<dyn std::any::Any>);
         let invoke =
             InvokeClient::with_keepalive(self.http.clone(), Some(ctx_json.clone()), keepalive);
 
@@ -263,13 +289,8 @@ impl WorkerdRoot {
             exported.job_runner = Some(Box::new(InvokeJobRunner {
                 http: self.http.clone(),
                 ctx,
-                databases: bindings
-                    .databases
-                    .into_iter()
-                    .map(|(name, database)| (name, Rc::from(database)))
-                    .collect(),
                 table: Rc::clone(&self.table),
-                _events_grant: events_grant,
+                _grants: grants,
             }));
         }
         Ok(exported)
@@ -338,7 +359,9 @@ struct OpenReply {
 /// field of `/open` and the `x-bookclerk-context` header of every `/invoke`
 /// and stream request, which the isolate-side SDK installs on the author's
 /// `env`. `eventsToken` is the granted-channel bearer the adapter isolate
-/// turns into the author's `EVENTS` binding; the author never sees it.
+/// turns into the author's `EVENTS` binding, and `databases` maps each named
+/// `[[databases]]` binding to its database-only bearer for `/db/execute`;
+/// the author sees neither token, only the bindings the adapter builds.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BridgeContext {
@@ -347,17 +370,25 @@ struct BridgeContext {
     secrets: ExtensibleConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     events_token: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    databases: BTreeMap<String, String>,
 }
 
-/// `JobRunner.job` context: the durable job id and the per-run database
-/// grant tokens (`binding name → token`) on top of the open context.
+/// `JobRunner.job` context: the durable job id on top of the open context.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct JobBridgeContext<'a> {
     job_id: &'a str,
     #[serde(flatten)]
     base: &'a BridgeContext,
-    databases: &'a BTreeMap<String, String>,
+}
+
+/// Grants minted at `open` that live as long as any exported entrypoint of
+/// that `open` (the `InvokeClient` keepalive and the job runner both hold
+/// this).
+struct OpenGrants {
+    _events: Option<Rc<RevokeGrant>>,
+    _databases: Vec<RevokeGrant>,
 }
 
 /// Grant expiry for an `open`: the invocation deadline when it has one,
@@ -558,17 +589,14 @@ impl Destination for InvokeDestination {
 /// `jobRunner` entrypoint of an author isolate. Each run mints one grant
 /// token for the host `JobController` stubs (input / output / progress /
 /// cancel), which travel in the `JobRunner.job$Params` capability table as
-/// [`GrantCap`] descriptors, plus one database-only token per named binding
-/// carried in the job context.
+/// [`GrantCap`] descriptors; named database bindings ride the open context.
 struct InvokeJobRunner {
     http: BridgeHttp,
     ctx: BridgeContext,
-    /// Named `[[databases]]` bindings granted at `open`; each job run mints a
-    /// database-only grant token per binding.
-    databases: Vec<(String, Rc<dyn GuestDatabase>)>,
     table: GrantedTable,
-    /// Keeps the `EVENTS` grant alive while the job runner is exported.
-    _events_grant: Option<Rc<RevokeGrant>>,
+    /// Keeps the `EVENTS` and database grants alive while the job runner is
+    /// exported.
+    _grants: Rc<OpenGrants>,
 }
 
 #[async_trait(?Send)]
@@ -607,43 +635,9 @@ impl JobRunner for InvokeJobRunner {
             table: Rc::clone(&self.table),
             grant: grant.clone(),
         };
-        // One database-only grant token per named plugin database binding:
-        // the isolate reaches each isolated database over the same
-        // `/db/execute` broker path with its binding token.
-        let mut binding_tokens = BTreeMap::new();
-        let mut binding_revokes = Vec::with_capacity(self.databases.len());
-        for (name, database) in &self.databases {
-            let token = format!("{:032x}", rand::random::<u128>());
-            self.table.borrow_mut().insert(
-                token.clone(),
-                GrantedSlot {
-                    input: None,
-                    output: None,
-                    progress: None,
-                    cancel: None,
-                    expires: std::time::Instant::now() + std::time::Duration::from_secs(3600),
-                    allow_open: false,
-                    allow_put: false,
-                    allow_progress: false,
-                    database: Some(Rc::clone(database)),
-                    allow_database: true,
-                    // The host-side binding session enforces binding_owned
-                    // scope; the broker defers to it.
-                    sql_policy: GuestSqlPolicy::host_authoritative(),
-                    max_request_bytes: MAX_SCALAR_BYTES,
-                    events: None,
-                },
-            );
-            binding_revokes.push(RevokeGrant {
-                table: Rc::clone(&self.table),
-                grant: token.clone(),
-            });
-            binding_tokens.insert(name.clone(), token);
-        }
         let ctx_json = context_header(&JobBridgeContext {
             job_id: &self.ctx.invocation.id,
             base: &self.ctx,
-            databases: &binding_tokens,
         })?;
         let runner = JobRunnerClient::new(
             InvokeClient::new(self.http.clone(), Some(ctx_json)).typed(),
@@ -734,13 +728,11 @@ mod tests {
             config: ExtensibleConfig::default(),
             secrets: ExtensibleConfig::default(),
             events_token: Some("ev".into()),
+            databases: BTreeMap::from([("DB".to_string(), "tok".to_string())]),
         };
-        let mut databases = BTreeMap::new();
-        databases.insert("DB".to_string(), "tok".to_string());
         let json = context_header(&JobBridgeContext {
             job_id: &base.invocation.id,
             base: &base,
-            databases: &databases,
         })
         .expect("encode");
         let v: serde_json::Value = serde_json::from_str(&json).expect("json");
