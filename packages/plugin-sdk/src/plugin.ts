@@ -22,9 +22,25 @@
 
 import "./cloudflare-workers.d.ts";
 import { WorkerEntrypoint, RpcTarget } from "cloudflare:workers";
-import { MAX_CHECKPOINT_BYTES, MAX_EVENT_PAYLOAD_BYTES, PLUGIN_ERROR_CODES } from "./abi.js";
-import type { DatabaseBinding, ExecuteReply, ExecuteRequest } from "./db-execute.js";
+import { MAX_CHECKPOINT_BYTES, MAX_EVENT_PAYLOAD_BYTES } from "./abi.js";
+import {
+  createDatabaseBinding,
+  decodeExecuteResultReply,
+  encodeExecuteRequest,
+  type AtomicTransport,
+  type DatabaseBinding,
+  type ExecuteReply,
+  type ExecuteRequest,
+} from "./db-execute.js";
 import type { BookclerkEnv, EventPublisherBinding, JsonObject, PublishEvent } from "./env.js";
+import { PluginError } from "./errors.js";
+import {
+  dispatchInvoke,
+  InvokeError,
+  type CapDescriptor,
+  type InvokeHost,
+  type InvokeOutcome,
+} from "./invoke.js";
 import { requirePluginMigrationRegistration } from "./plugin-migrations.js";
 import type {
   AuthenticateUserParams,
@@ -33,12 +49,14 @@ import type {
   CliInvokeParams,
   CliInvokeResult,
   CliSchema,
+  DbBootstrap,
   DomainEvent,
   ExpandCandidatesParams,
   ExtensibleConfig,
   ExternalUser,
   FetchTitleParams,
   HealthOk,
+  IdentityHighWater,
   Invocation,
   JobInvocation,
   ListDealsParams,
@@ -61,6 +79,8 @@ import type {
   SearchCatalogParams,
   SourceAccount,
 } from "./generated.js";
+
+export { PluginError } from "./errors.js";
 
 // Product constants come from the generated `abi.ts` projection of
 // `schema/plugin.capnp` — re-exported here for guest convenience.
@@ -100,39 +120,8 @@ export type {
 } from "./generated.js";
 
 // ---------------------------------------------------------------------------
-// Errors
+// Errors (`PluginError` lives in `errors.ts`; re-exported above)
 // ---------------------------------------------------------------------------
-
-const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set<string>(PLUGIN_ERROR_CODES);
-
-/** Thrown by the SDK when a wire union carries `err`. Unknown codes are kept. */
-export class PluginError extends Error {
-  /** Known `PluginErrorCode` wire string, or `unknown`. */
-  readonly code: string;
-  /** Raw wire code, including codes this SDK does not know. */
-  readonly wireCode: string;
-
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "PluginError";
-    this.wireCode = code;
-    this.code = KNOWN_ERROR_CODES.has(code) ? code : "unknown";
-  }
-
-  /**
-   * Construct a {@link PluginError} from a Cap'n Proto / JSON wire code.
-   *
-   * Unknown codes become `unknown` on {@link PluginError.code} while
-   * {@link PluginError.wireCode} keeps the raw value.
-   *
-   * @param code - Wire error code (known or unknown).
-   * @param message - Operator-facing error text.
-   * @returns Typed plugin error.
-   */
-  static fromWire(code: string, message: string): PluginError {
-    return new PluginError(code, message);
-  }
-}
 
 function unsupported(method: string): PluginError {
   return PluginError.fromWire("unsupported", `${method} not implemented`);
@@ -413,6 +402,71 @@ export class AdapterDatabaseSession extends RpcTarget {
   close(): Promise<void> {
     return Promise.resolve();
   }
+
+  /**
+   * Bootstrap-only diagnostic metadata (`DbBootstrap`); optional.
+   *
+   * @returns Engine identity for diagnostics.
+   */
+  bootstrap(): Promise<DbBootstrap> {
+    return Promise.reject(unsupported("bootstrap"));
+  }
+
+  /**
+   * Identity high-water marks for a logical export; optional.
+   *
+   * @returns One row per identity column.
+   */
+  exportIdentity(): Promise<IdentityHighWater[]> {
+    return Promise.reject(unsupported("exportIdentity"));
+  }
+
+  /**
+   * Restore identity high-water marks after a logical import; optional.
+   *
+   * @param _rows - Rows from an earlier {@link AdapterDatabaseSession.exportIdentity}.
+   * @returns Resolves when the marks are applied.
+   */
+  importIdentity(_rows: IdentityHighWater[]): Promise<void> {
+    return Promise.reject(unsupported("importIdentity"));
+  }
+
+  /**
+   * Names of user relations the host may drop before a restore; optional.
+   *
+   * @returns Relation names.
+   */
+  listUserRelations(): Promise<string[]> {
+    return Promise.reject(unsupported("listUserRelations"));
+  }
+
+  /**
+   * Prepare the engine for a unit restore (disable constraints, …); optional.
+   *
+   * @returns Resolves when the engine is ready for the restore.
+   */
+  prepareUnitRestore(): Promise<void> {
+    return Promise.reject(unsupported("prepareUnitRestore"));
+  }
+
+  /**
+   * Drop the named user relations; optional.
+   *
+   * @param _names - Relation names from {@link AdapterDatabaseSession.listUserRelations}.
+   * @returns Resolves when the relations are gone.
+   */
+  dropUserRelations(_names: string[]): Promise<void> {
+    return Promise.reject(unsupported("dropUserRelations"));
+  }
+
+  /**
+   * Re-check constraints after a unit restore; optional.
+   *
+   * @returns Resolves when every constraint holds.
+   */
+  assertRestoreConstraints(): Promise<void> {
+    return Promise.reject(unsupported("assertRestoreConstraints"));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -437,17 +491,50 @@ export interface GrantedContext {
   /** `EVENTS` publisher, when `[[events.producers]]` is granted. */
   events?: EventPublisherBinding;
   /** Named `[[databases]]` bindings. */
-  databases?: Array<{ name: string; database: DatabaseBinding }>;
+  databases?: NamedDatabase[];
+}
+
+/**
+ * Granted-channel SQL transport the adapter hands to the author isolate for
+ * one named `[[databases]]` binding. The author-side SDK wraps it as the
+ * D1-shaped {@link DatabaseBinding} on `env.<BINDING>`; Python authors call
+ * {@link GrantedDatabaseTransport.executeBytes} with Cap'n bytes instead.
+ */
+export interface GrantedDatabaseTransport extends AtomicTransport {
+  /**
+   * Same batch as {@link AtomicTransport.execute}, as Cap'n Proto bytes
+   * (`ExecuteRequest` in, `ExecuteResultReply` out).
+   *
+   * @param bytes - Unpacked `ExecuteRequest` message.
+   * @returns Unpacked `ExecuteResultReply` message.
+   */
+  executeBytes(bytes: Uint8Array): Promise<Uint8Array>;
+}
+
+/**
+ * One named `[[databases]]` binding on the granted context: either an
+ * in-isolate {@link DatabaseBinding} or the adapter's granted-channel
+ * {@link GrantedDatabaseTransport} the author-side SDK wraps.
+ */
+export interface NamedDatabase {
+  /** Binding name (`env.<name>`). */
+  name: string;
+  /** Ready binding (same isolate). */
+  database?: DatabaseBinding;
+  /** Granted transport (crosses the adapter → author RPC boundary). */
+  transport?: GrantedDatabaseTransport;
 }
 
 /**
  * Context as the launcher sends it on the bridge: {@link GrantedContext}
- * plus the events grant token the adapter exchanges for the `EVENTS` stub.
- * Authors never receive this shape.
+ * plus the grant tokens the adapter exchanges for the author's `EVENTS` and
+ * `env.<BINDING>` stubs. Authors never receive this shape.
  */
-export interface BridgeContext extends GrantedContext {
+export interface BridgeContext extends Omit<GrantedContext, "databases"> {
   /** Granted-channel bearer for `env.EVENTS.publish`; stripped before dispatch. */
   eventsToken?: string;
+  /** Named `[[databases]]` binding → database-only bearer for `/db/execute`. */
+  databases?: Record<string, string>;
 }
 
 /** Job-runner bridge context: the durable job id plus {@link GrantedContext}. */
@@ -532,8 +619,12 @@ function invocationEnv(rawEnv: unknown, context: GrantedContext | undefined): Bo
     if (context.events) merged.EVENTS = context.events;
     if (Array.isArray(context.databases)) {
       for (const entry of context.databases) {
-        if (entry && typeof entry.name === "string" && entry.database) {
+        if (!entry || typeof entry.name !== "string" || !entry.name) continue;
+        if (entry.database) {
           merged[entry.name] = entry.database;
+        } else if (entry.transport) {
+          const transport = entry.transport;
+          merged[entry.name] = createDatabaseBinding({ execute: (request) => transport.execute(request) });
         }
       }
     }
@@ -1623,8 +1714,46 @@ export class RemoteLibraryEntrypoint<Env extends BookclerkEnv = BookclerkEnv> ex
 }
 
 /**
+ * Open adapter sessions by id. Workers RPC stubs cannot be retained across
+ * bridge requests, so the session object stays in the author isolate and the
+ * launcher names it through `X-Bookclerk-Target`.
+ */
+const ADAPTER_SESSIONS = new Map<string, AdapterDatabaseSession>();
+
+const ADAPTER_SESSION_METHODS: ReadonlySet<string> = new Set([
+  "capabilities",
+  "execute",
+  "close",
+  "bootstrap",
+  "exportIdentity",
+  "importIdentity",
+  "listUserRelations",
+  "prepareUnitRestore",
+  "dropUserRelations",
+  "assertRestoreConstraints",
+]);
+
+function freshSessionId(): string {
+  const c = (
+    globalThis as {
+      crypto?: { randomUUID?: () => string; getRandomValues?: (out: Uint8Array) => Uint8Array };
+    }
+  ).crypto;
+  if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (c && typeof c.getRandomValues === "function") c.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
  * `databaseAdapter` entrypoint: opens typed SQL sessions for the host
  * library. Export it as `export class DatabaseAdapter extends DatabaseAdapterEntrypoint`.
+ *
+ * The adapter isolate drives sessions through two dispatch verbs on
+ * {@link DatabaseAdapterEntrypoint.bookclerkInvoke}: `openSession` returns a
+ * fresh session id, and `session(id, method, ...params)` calls `method` on
+ * the retained {@link AdapterDatabaseSession}; `close` releases the entry.
  */
 export class DatabaseAdapterEntrypoint<Env extends BookclerkEnv = BookclerkEnv> extends NamedEntrypoint<Env> {
   static override bookclerkMethods = Object.freeze(["openSession"]);
@@ -1636,6 +1765,48 @@ export class DatabaseAdapterEntrypoint<Env extends BookclerkEnv = BookclerkEnv> 
    */
   openSession(): Promise<AdapterDatabaseSession> {
     return Promise.reject(unsupported("openSession"));
+  }
+
+  /**
+   * Adapter dispatch: `openSession` → session id; `session` → call on a
+   * retained session (`args` = `[id, method, ...params]`).
+   *
+   * @param context - Granted bindings for this invocation.
+   * @param method - `openSession` or `session`.
+   * @param args - Method arguments.
+   * @returns Session id for `openSession`, else the session method result.
+   * @internal
+   */
+  override async bookclerkInvoke(context: GrantedContext, method: string, ...args: unknown[]): Promise<unknown> {
+    if (method === "openSession") {
+      const session = (await super.bookclerkInvoke(context, "openSession")) as AdapterDatabaseSession;
+      if (!session || typeof session !== "object") {
+        throw PluginError.fromWire("internal", "openSession returned no session");
+      }
+      const id = freshSessionId();
+      ADAPTER_SESSIONS.set(id, session);
+      return id;
+    }
+    if (method === "session") {
+      const [id, sessionMethod, ...params] = args;
+      const session = typeof id === "string" ? ADAPTER_SESSIONS.get(id) : undefined;
+      if (!session) {
+        throw PluginError.fromWire("invalid_params", `unknown adapter session ${String(id)}`);
+      }
+      const name = String(sessionMethod ?? "");
+      const target = (session as unknown as Record<string, unknown>)[name];
+      if (!ADAPTER_SESSION_METHODS.has(name) || typeof target !== "function") {
+        throw unsupported(name);
+      }
+      applyInvocationEnv(this, context);
+      this.invocation = invocationOf(context);
+      try {
+        return await (target as (...a: unknown[]) => unknown).apply(session, params);
+      } finally {
+        if (name === "close") ADAPTER_SESSIONS.delete(id as string);
+      }
+    }
+    return super.bookclerkInvoke(context, method, ...args);
   }
 }
 
@@ -1973,15 +2144,82 @@ class GrantedEvents extends RpcTarget implements EventPublisherBinding {
   }
 }
 
-/** Resolves `wait()` once the adapter observes host cancellation. */
+/**
+ * Named `[[databases]]` binding transport handed to the author: the adapter
+ * exchanges the binding's database-only grant token on `POST /db/execute`,
+ * so the author isolate never holds the bearer itself. ABI failures come
+ * back inside the `ExecuteResultReply` union and surface as `PluginError`.
+ */
+class GrantedDatabase extends RpcTarget implements GrantedDatabaseTransport {
+  #granted: GrantedFetcher;
+  #auth: Record<string, string>;
+
+  /**
+   * @param granted - Granted reverse channel.
+   * @param auth - Bearer header for the database grant.
+   */
+  constructor(granted: GrantedFetcher, auth: Record<string, string>) {
+    super();
+    this.#granted = granted;
+    this.#auth = auth;
+  }
+
+  /**
+   * Run one typed atomic batch through the host broker.
+   *
+   * @param request - Structured `ExecuteRequest`.
+   * @returns Structured `ExecuteReply`.
+   */
+  async execute(request: ExecuteRequest): Promise<ExecuteReply> {
+    return decodeExecuteResultReply(await this.executeBytes(encodeExecuteRequest(request)));
+  }
+
+  /**
+   * Same batch as Cap'n Proto bytes (Python authors encode locally).
+   *
+   * @param bytes - Unpacked `ExecuteRequest` message.
+   * @returns Unpacked `ExecuteResultReply` message.
+   */
+  async executeBytes(bytes: Uint8Array): Promise<Uint8Array> {
+    const resp = await this.#granted.fetch("http://granted/db/execute", {
+      method: "POST",
+      headers: { ...this.#auth, "content-type": "application/octet-stream" },
+      body: bytes,
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw PluginError.fromWire(
+        resp.status === 401 ? "unauthorized" : resp.status === 413 ? "payload_too_large" : "unavailable",
+        `database grant: ${resp.status} ${text}`.trim(),
+      );
+    }
+    return new Uint8Array(await resp.arrayBuffer());
+  }
+}
+
+/**
+ * Host cancellation as a granted long poll: `GET /cancel` answers `200` once
+ * the host fences the invocation and `204` when the poll window lapses, in
+ * which case the watch re-arms. Polling stops without resolving on any error
+ * or once `stop` aborts (the adapter aborts it when the job call returns).
+ */
 class CancelWatch extends RpcTarget implements CancelWatchLike {
   #promise: Promise<void>;
 
-  constructor(signal: AbortSignal) {
+  constructor(granted: GrantedFetcher, auth: Record<string, string>, stop: AbortSignal) {
     super();
-    this.#promise = new Promise((resolve) => {
-      if (signal.aborted) resolve();
-      else signal.addEventListener("abort", () => resolve(), { once: true });
+    this.#promise = new Promise<void>((resolve) => {
+      const poll = async (): Promise<void> => {
+        while (!stop.aborted) {
+          const resp = await granted.fetch("http://granted/cancel", { headers: auth, signal: stop });
+          if (resp.status === 200) {
+            resolve();
+            return;
+          }
+          if (resp.status !== 204) return;
+        }
+      };
+      poll().catch(() => {});
     });
   }
 
@@ -1990,28 +2228,48 @@ class CancelWatch extends RpcTarget implements CancelWatchLike {
   }
 }
 
-function grantedJobCapabilities(
-  env: AdapterEnv,
-  grantToken: string,
-  controller: AbortController,
-): GrantedJobCapabilities {
-  const granted = env.GRANTED;
-  if (!granted || typeof grantToken !== "string" || !grantToken) {
-    throw PluginError.fromWire("internal", "granted reverse channel missing");
-  }
-  const auth = { Authorization: `Bearer ${grantToken}` };
-  return {
-    input: new GrantedSource(granted, auth, controller.signal),
-    output: new GrantedDestination(granted, auth, controller.signal),
-    progress: new GrantedProgress(granted, auth, controller.signal),
-    cancel: new CancelWatch(controller.signal),
-  };
-}
-
 function bytesToBase64(bytes: Uint8Array): string {
   let bin = "";
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
+}
+
+function base64ToBytes(text: string): Uint8Array {
+  const bin = atob(text);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** Cap'n `Data` field names; bridge JSON carries them as base64 text. */
+const BRIDGE_BYTES_FIELDS: ReadonlySet<string> = new Set(["payload", "sha256", "credentials"]);
+
+/**
+ * Bridge JSON → typed ABI value: base64 `Data` fields (`payload`, `sha256`,
+ * `credentials`) become `Uint8Array`; everything else is structurally
+ * identical, so no per-struct codec is needed.
+ *
+ * @param value - Bridge JSON value.
+ * @returns Typed struct value.
+ */
+export function fromBridgeJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(fromBridgeJson);
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+    if (BRIDGE_BYTES_FIELDS.has(key) && typeof inner === "string") {
+      out[key] = base64ToBytes(inner);
+    } else if (
+      BRIDGE_BYTES_FIELDS.has(key) &&
+      Array.isArray(inner) &&
+      inner.every((n) => typeof n === "number")
+    ) {
+      out[key] = Uint8Array.from(inner as number[]);
+    } else {
+      out[key] = fromBridgeJson(inner);
+    }
+  }
+  return out;
 }
 
 /**
@@ -2034,6 +2292,15 @@ export function toBridgeJson(value: unknown): unknown {
   return out;
 }
 
+function parseHeaderJson(text: string | null | undefined, name: string): unknown {
+  if (text === null || text === undefined || text === "") return undefined;
+  try {
+    return JSON.parse(String(text)) as unknown;
+  } catch (err) {
+    throw new InvokeError(400, "invalid_params", `${name} header is not JSON: ${errorMessage(err)}`);
+  }
+}
+
 function parseJsonBinding(value: unknown): WirePluginDescribe | null {
   if (value == null) return null;
   if (typeof value === "string") {
@@ -2048,9 +2315,10 @@ function parseJsonBinding(value: unknown): WirePluginDescribe | null {
 
 /**
  * Generated adapter isolate: `env.PLUGIN` is the author's default entrypoint
- * and `env.PLUGIN_<ENTRYPOINT>` the named ones. Each bridge route becomes one
- * `bookclerk*` dispatch on the author class; authors cannot replace adapter
- * behavior with adapter-internal names.
+ * and `env.PLUGIN_<ENTRYPOINT>` the named ones. Every `POST /invoke` call
+ * (Cap'n Proto bytes) and every stream route becomes one `bookclerk*`
+ * dispatch on the author class; authors cannot replace adapter behavior with
+ * adapter-internal names.
  *
  * @returns Adapter entrypoint class bound to {@link AdapterEnv}.
  */
@@ -2170,12 +2438,24 @@ function createInvocationAdapter() {
      */
     #bindContext(ctx: BridgeContext | undefined): GrantedContext {
       const source = ctx && typeof ctx === "object" ? ctx : {};
-      const { eventsToken, ...rest } = source;
+      const { eventsToken, databases, ...rest } = source;
       const bound: GrantedContext = rest;
-      if (typeof eventsToken === "string" && eventsToken && this.env.GRANTED) {
-        bound.events = new GrantedEvents(this.env.GRANTED, {
+      const granted = this.env.GRANTED;
+      if (typeof eventsToken === "string" && eventsToken && granted) {
+        bound.events = new GrantedEvents(granted, {
           Authorization: `Bearer ${eventsToken}`,
         });
+      }
+      if (databases && typeof databases === "object" && !Array.isArray(databases) && granted) {
+        const named: NamedDatabase[] = [];
+        for (const [name, token] of Object.entries(databases)) {
+          if (!name || typeof token !== "string" || !token) continue;
+          named.push({
+            name,
+            transport: new GrantedDatabase(granted, { Authorization: `Bearer ${token}` }),
+          });
+        }
+        if (named.length > 0) bound.databases = named;
       }
       return bound;
     }
@@ -2248,25 +2528,11 @@ function createInvocationAdapter() {
     }
 
     /**
-     * Deliver one domain event to the default entrypoint's `event(batch)`.
+     * Stream routes (`GET /destination/get`, `PUT /destination/put`) →
+     * `storage` entrypoint. Every other `Destination` method travels on
+     * `POST /invoke` ({@link InvocationAdapter.invoke}).
      *
-     * @param ctx - Granted context.
-     * @param event - Wire domain event.
-     * @returns Recorded outcome.
-     */
-    async invokeEvent(ctx: BridgeContext | undefined, event: Partial<DomainEvent>): Promise<EventOutcome> {
-      const results = await this.#author().bookclerkEvent(this.#bindContext(ctx), { events: [event] });
-      const first = Array.isArray(results) ? results[0] : undefined;
-      if (!first || typeof first.kind !== "string") {
-        throw PluginError.fromWire("internal", "event handler returned no result");
-      }
-      return first;
-    }
-
-    /**
-     * `/destination/<op>` route → `storage` entrypoint.
-     *
-     * @param op - Destination method name.
+     * @param op - `get` or `put`.
      * @param ctx - Granted context.
      * @param args - Route arguments.
      * @param body - Stream body for `put`.
@@ -2279,10 +2545,6 @@ function createInvocationAdapter() {
       body?: ReadableStream<Uint8Array>,
     ): Promise<unknown> {
       switch (op) {
-        case "head":
-          return this.invokeEntrypoint("storage", ctx, "head", [String(args.key ?? "")]);
-        case "list":
-          return this.invokeEntrypoint("storage", ctx, "list", [args.options ?? {}]);
         case "get":
           return this.invokeEntrypoint("storage", ctx, "get", [String(args.key ?? ""), args.options]);
         case "put": {
@@ -2293,24 +2555,8 @@ function createInvocationAdapter() {
           const bounded = exactLengthBody(body, options?.contentLength);
           return this.invokeEntrypoint("storage", ctx, "put", [String(args.key ?? ""), bounded, options]);
         }
-        case "copy":
-          return this.invokeEntrypoint("storage", ctx, "copy", [String(args.from ?? ""), String(args.to ?? "")]);
-        case "delete":
-          await this.invokeEntrypoint("storage", ctx, "delete", [String(args.key ?? "")]);
-          return { ok: true };
-        case "commit":
-          return this.invokeEntrypoint("storage", ctx, "commit", [
-            String(args.key ?? ""),
-            String(args.commitToken ?? ""),
-          ]);
-        case "abortStage":
-          await this.invokeEntrypoint("storage", ctx, "abortStage", [
-            String(args.key ?? ""),
-            String(args.commitToken ?? ""),
-          ]);
-          return { ok: true };
         default:
-          throw PluginError.fromWire("unsupported", `destination.${op}`);
+          throw PluginError.fromWire("unsupported", `destination.${op} is not a stream route`);
       }
     }
 
@@ -2326,66 +2572,92 @@ function createInvocationAdapter() {
     }
 
     /**
-     * `/worker/handle` route → default entrypoint `job(controller)`.
+     * Resolve one request capability descriptor (`X-Bookclerk-Caps` entry)
+     * into the granted-channel stub handed to the author.
      *
-     * @param ctx - Granted context.
-     * @param invocation - Durable command envelope.
-     * @param grantToken - Per-invocation grant token.
-     * @param _databases - Per-binding grant tokens (bound in a later ABI step).
-     * @returns Wire job outcome.
+     * @param descriptor - Capability descriptor.
+     * @param stop - Aborts when the call returns.
+     * @returns Granted stub, or `undefined` for an unknown kind.
      */
-    async invokeHandle(
-      ctx: (JobRunnerContext & BridgeContext) | undefined,
-      invocation: Partial<JobInvocation>,
-      grantToken: string,
-      _databases?: Record<string, string>,
-    ): Promise<JobOutcomeRecord> {
-      const controller = new AbortController();
-      try {
-        const granted = grantedJobCapabilities(this.env, grantToken, controller);
-        return await this.#author().bookclerkJob(this.#bindContext(ctx), invocation ?? {}, granted);
-      } finally {
-        controller.abort();
+    #importCap(descriptor: CapDescriptor, stop: AbortSignal): unknown {
+      const granted = this.env.GRANTED;
+      if (!granted) {
+        throw new InvokeError(500, "unavailable", "GRANTED reverse channel missing");
+      }
+      const auth = { Authorization: `Bearer ${String(descriptor.token ?? "")}` };
+      switch (descriptor.kind) {
+        case "source":
+          return new GrantedSource(granted, auth, stop);
+        case "destination":
+          return new GrantedDestination(granted, auth, stop);
+        case "progress":
+          return new GrantedProgress(granted, auth, stop);
+        case "cancellation":
+          return new CancelWatch(granted, auth, stop);
+        default:
+          return undefined;
       }
     }
 
     /**
-     * `/cliDescribe` route → `cli.describe`.
+     * `POST /invoke`: one ABI method call as Cap'n Proto bytes. The bridge
+     * passes the request headers through verbatim; the reply carries the
+     * `$Results` bytes plus the descriptors of capabilities it exported.
+     * Transport failures (unknown method, malformed message, missing
+     * binding) come back as an {@link InvokeFailure} with the HTTP status the
+     * bridge should answer with — never as a thrown error, because Workers
+     * RPC drops own properties of thrown errors.
      *
-     * @returns CLI schema.
+     * @param iface - `X-Bookclerk-Interface` (Cap'n interface name).
+     * @param method - `X-Bookclerk-Method`.
+     * @param contextJson - `X-Bookclerk-Context` bridge JSON, or `null`.
+     * @param capsJson - `X-Bookclerk-Caps` JSON descriptor array, or `null`.
+     * @param target - `X-Bookclerk-Target` isolate object id, or `null`.
+     * @param body - `$Params` message bytes.
+     * @returns Reply bytes plus capability descriptors, or a transport failure.
      */
-    async cliDescribe(): Promise<CliSchema> {
-      return (await this.invokeEntrypoint("cli", {}, "describe", [])) as CliSchema;
-    }
-
-    /**
-     * `/cliInvoke` route → `cli.invoke`.
-     *
-     * @param params - Command and arguments.
-     * @returns Invocation result.
-     */
-    async cliInvoke(params: CliInvokeParams): Promise<CliInvokeResult> {
-      return (await this.invokeEntrypoint("cli", {}, "invoke", [params ?? {}])) as CliInvokeResult;
-    }
-
-    /**
-     * `/oidcClients` route → `oidc.clients`.
-     *
-     * @returns Client templates.
-     */
-    async oidcClients(): Promise<OidcClientTemplate[]> {
-      const clients = await this.invokeEntrypoint("oidc", {}, "clients", []);
-      return Array.isArray(clients) ? (clients as OidcClientTemplate[]) : [];
-    }
-
-    /**
-     * `/databaseMigrations` route → default entrypoint `databaseMigrations`.
-     *
-     * @param binding - Binding name.
-     * @returns Bounded registration.
-     */
-    async databaseMigrations(binding: string): Promise<PluginMigration[]> {
-      return this.#author().bookclerkDatabaseMigrations(String(binding ?? ""));
+    async invoke(
+      iface: string,
+      method: string,
+      contextJson: string | null,
+      capsJson: string | null,
+      target: string | null,
+      body: Uint8Array,
+    ): Promise<InvokeOutcome> {
+      const host: InvokeHost = {
+        author: () => this.env.PLUGIN,
+        named: (name) => {
+          const binding = ENTRYPOINT_BINDINGS[name];
+          return (this.env as Record<string, unknown>)[binding] as NamedStub | undefined;
+        },
+        bindContext: (ctx) => this.#bindContext(ctx),
+        importCap: (descriptor, stop) => this.#importCap(descriptor, stop),
+      };
+      try {
+        const context = parseHeaderJson(contextJson, "context");
+        if (context !== undefined && (context === null || typeof context !== "object" || Array.isArray(context))) {
+          throw new InvokeError(400, "invalid_params", "context header must be a JSON object");
+        }
+        const caps = parseHeaderJson(capsJson, "caps") ?? [];
+        if (!Array.isArray(caps)) {
+          throw new InvokeError(400, "invalid_params", "caps header must be a JSON array");
+        }
+        const ctx = context === undefined ? undefined : (fromBridgeJson(context) as BridgeContext);
+        return await dispatchInvoke(
+          String(iface ?? ""),
+          String(method ?? ""),
+          ctx,
+          caps as CapDescriptor[],
+          typeof target === "string" && target ? target : null,
+          body instanceof Uint8Array ? body : new Uint8Array(body ?? []),
+          host,
+        );
+      } catch (err) {
+        if (err instanceof InvokeError) {
+          return { status: err.status, error: { code: err.wireCode, message: err.message } };
+        }
+        return { status: 500, error: { code: "internal", message: errorMessage(err) } };
+      }
     }
 
     /**

@@ -100,6 +100,8 @@ export type {
   EventOutcome,
   EventSuspendOptions,
   GrantedContext,
+  GrantedDatabaseTransport,
+  NamedDatabase,
   GrantedFetcher,
   GrantedJobCapabilities,
   Instant,
