@@ -54,27 +54,23 @@ export type {
   AdapterEnv,
   BookclerkContext,
   BookclerkPluginEnv,
-  DestinationContext,
   DomainEvent,
   EventResult,
+  GrantedContext,
   JobContext,
   JobInvocation,
   JobOutcome,
+  JobRunnerContext,
   OidcClientTemplate,
   PluginDescribe,
-  WorkerContext,
 } from "./plugin.js";
 export type { BookclerkEnv } from "./env.js";
 export type {
   CliSchema,
   CliInvokeParams,
   CliInvokeResult,
-  ContentSourceContext,
-  DatabaseContext,
   ExtensibleConfig,
   HealthOk,
-  IntegrationContext,
-  SourceContext,
 } from "./generated.js";
 export {
   canonicalExecuteRequestHash,
