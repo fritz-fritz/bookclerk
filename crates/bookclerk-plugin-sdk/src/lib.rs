@@ -72,9 +72,9 @@ pub use db_binding::{
     DatabaseBinding, DatabaseBindingOptions, PreparedStatement, RetryToken,
 };
 pub use error::{Result, SdkError};
-pub use manifest_caps::manifest_capabilities;
 pub use fetch_dir::{fetch_work_dir, upload_file_path, FetchWorkDir, UploadFile};
 pub use json::{decode as decode_json, encode as encode_json, encode_atomic_result, page_rows};
+pub use manifest_caps::manifest_capabilities;
 pub use pass_fd::{fd_proc_path, recv_passed_fd, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
 pub use protocol::{
     methods, Abridgement, AccountCredential, AuthenticateUserParams, Brand, CatalogDetail,

@@ -12,12 +12,11 @@
  * export default class MyPlugin extends BookclerkPlugin {
  *   async describe(): Promise<PluginDescribe> {
  *     return {
- *       apiVersion: 2,
+ *       apiVersion: 3,
  *       id: "my_plugin",
- *       kind: "source",
  *       rpcFeatures: [],
  *       scalarLimits: { maxScalarBytes: 262144, maxStreamWindowBytes: 1048576, maxListPage: 256 },
- *       capabilities: ["health", "login", "scan", "fetchTitle"],
+ *       capabilities: { entrypoints: ["storefront"], consumes: [], produces: [], jobs: [], databases: [], bindings: ["CONFIG"] },
  *     };
  *   }
  * }
