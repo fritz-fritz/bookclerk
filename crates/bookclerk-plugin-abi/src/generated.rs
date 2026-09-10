@@ -13,12 +13,20 @@ use serde::{Deserialize, Serialize};
 use crate::plugin_capnp;
 
 /// Cap'n Proto list lengths are `u32`.
+///
+/// # Errors
+///
+/// Returns when `len` exceeds `u32::MAX`.
 fn list_len(len: usize) -> capnp::Result<u32> {
     u32::try_from(len)
         .map_err(|_| capnp::Error::failed(format!("list length {len} exceeds UInt32")))
 }
 
 /// `$optional` text: empty means absent.
+///
+/// # Errors
+///
+/// Returns when the Cap'n Proto text is not valid UTF-8.
 fn opt_text(t: capnp::text::Reader<'_>) -> capnp::Result<Option<String>> {
     let s = t.to_str()?;
     Ok(if s.is_empty() {
@@ -47,6 +55,10 @@ fn opt_num<T: Default + PartialEq>(v: T) -> Option<T> {
 }
 
 /// Owned strings of a `List(Text)`.
+///
+/// # Errors
+///
+/// Returns when an element is not valid UTF-8.
 fn read_text_list(list: capnp::text_list::Reader<'_>) -> capnp::Result<Vec<String>> {
     list.iter().map(|t| Ok(t?.to_string()?)).collect()
 }

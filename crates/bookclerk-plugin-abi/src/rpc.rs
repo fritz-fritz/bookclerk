@@ -293,6 +293,10 @@ fn fill_describe(mut b: plugin_describe::Builder<'_>, d: &PluginDescribe) -> cap
 }
 
 /// Cap'n Proto list lengths are `u32`.
+///
+/// # Errors
+///
+/// Returns when `len` exceeds `u32::MAX`.
 fn u32_len(len: usize) -> capnp::Result<u32> {
     u32::try_from(len)
         .map_err(|_| capnp::Error::failed(format!("list length {len} exceeds UInt32")))
@@ -306,6 +310,10 @@ fn fill_text_list(mut list: capnp::text_list::Builder<'_>, items: &[String]) {
 }
 
 /// Owned strings of a `List(Text)` reader.
+///
+/// # Errors
+///
+/// Returns a Cap'n Proto error when an element is not valid UTF-8.
 fn read_text_list(list: capnp::text_list::Reader<'_>) -> Result<Vec<String>> {
     let mut out = Vec::with_capacity(list.len() as usize);
     for item in list.iter() {
