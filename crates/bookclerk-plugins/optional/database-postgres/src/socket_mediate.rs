@@ -22,23 +22,31 @@ use crate::postgres::postgres_tcp_target;
 /// Rewrites `url` so sqlx dials a guest-local Unix socket that is spliced
 /// through the Bookclerk socket proxy.
 ///
-/// When `BOOKCLERK_SOCKET_PROXY` is unset (plugin crate unit tests, Windows),
-/// the original URL is returned unchanged.
+/// When `BOOKCLERK_SOCKET_PROXY` is unset (plugin crate unit tests), the
+/// original URL is returned unchanged. When the proxy is set on a non-Unix
+/// host, this fails closed — nested `NetPolicy::Deny` forbids ambient TCP and
+/// sqlx has no Windows Unix-socket path to splice through the named-pipe
+/// SOCKET_PROXY.
 ///
 /// # Errors
 ///
 /// Returns when the URL is not a TCP Postgres target, the local listener
-/// cannot be bound, or the rewritten URL cannot be produced.
+/// cannot be bound, the rewritten URL cannot be produced, or the platform
+/// cannot mediate through SOCKET_PROXY.
 pub async fn mediated_connect_url(url: &str) -> Result<String, DbErr> {
+    if std::env::var_os(bookclerk_plugin_sdk::SOCKET_PROXY_ENV).is_none() {
+        return Ok(url.to_string());
+    }
     #[cfg(not(unix))]
     {
-        Ok(url.to_string())
+        let _ = url;
+        Err(DbErr::Custom(
+            "postgres guest cannot splice sqlx through SOCKET_PROXY on this platform; nested Deny forbids ambient TCP"
+                .to_string(),
+        ))
     }
     #[cfg(unix)]
     {
-        if std::env::var_os(bookclerk_plugin_sdk::SOCKET_PROXY_ENV).is_none() {
-            return Ok(url.to_string());
-        }
         let (host, port) = postgres_tcp_target(url).ok_or_else(|| {
             DbErr::Custom(
                 "postgres guest cannot dial a Unix-socket URL through the workerd socket proxy"
@@ -395,6 +403,31 @@ mod tests {
         let url = "postgres://postgres:postgres@localhost:5432/postgres";
         let out = mediated_connect_url(url).await.expect("noop");
         assert_eq!(out, url);
+        match previous {
+            Some(value) => std::env::set_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV, value),
+            None => std::env::remove_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV),
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn mediate_fails_closed_when_socket_proxy_is_set() {
+        let _guard = SOCKET_PROXY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os(bookclerk_plugin_sdk::SOCKET_PROXY_ENV);
+        std::env::set_var(
+            bookclerk_plugin_sdk::SOCKET_PROXY_ENV,
+            r"\\.\pipe\bc-s-test",
+        );
+        let err = mediated_connect_url("postgres://postgres@localhost:5432/postgres")
+            .await
+            .expect_err("windows proxy must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot splice sqlx through SOCKET_PROXY"),
+            "{msg}"
+        );
         match previous {
             Some(value) => std::env::set_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV, value),
             None => std::env::remove_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV),
