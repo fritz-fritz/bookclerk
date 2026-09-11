@@ -392,6 +392,12 @@ struct PluginSettingsGroup {
     id: String,
     /// Handler family wire label (`source`, `integration`, `output`, `database`).
     family: String,
+    /// Provenance-qualified PluginKey when this row came from a discovered install.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin_key: Option<String>,
+    /// Host-evaluated provenance (`platform_bundled`, `verified_installed`, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provenance: Option<String>,
     /// Google favicon (or portal brand) URL for Settings list rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     logo: Option<String>,
@@ -468,6 +474,8 @@ struct PluginConsentLimits {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PluginGrantView {
+    /// Canonical provenance-qualified PluginKey.
+    plugin_key: String,
     /// Plugin id this grant applies to.
     plugin_id: String,
     /// Exported entrypoints the operator approved (`storefront`, `cli`, …).
@@ -478,6 +486,14 @@ struct PluginGrantView {
     network_mode: String,
     /// Hostnames the operator approved for egress.
     domains: Vec<String>,
+    /// Destinations requested by the current manifest.
+    manifest_domains: Vec<String>,
+    /// Operator-added destinations beyond the manifest.
+    operator_added_domains: Vec<String>,
+    /// Operator-denied destinations still listed by the manifest.
+    operator_denied_domains: Vec<String>,
+    /// SHA-256 of the canonical effective authority.
+    authority_revision: String,
     /// Host bindings the operator approved.
     bindings: Vec<String>,
     /// Extra compatibility flags stored on the grant.
@@ -508,11 +524,16 @@ impl PluginGrantView {
     /// Projects a stored grant into operator-facing camelCase JSON, converting CPU percent to cores.
     fn from_grant(grant: &PluginGrant) -> Self {
         Self {
+            plugin_key: grant.plugin_key.clone(),
             plugin_id: grant.plugin_id.clone(),
             entrypoints: grant.entrypoints.iter().cloned().collect(),
             producers: grant.producers.iter().cloned().collect(),
             network_mode: grant.network_mode.clone(),
             domains: grant.domains.iter().cloned().collect(),
+            manifest_domains: grant.manifest_domains.iter().cloned().collect(),
+            operator_added_domains: grant.operator_added_domains.iter().cloned().collect(),
+            operator_denied_domains: grant.operator_denied_domains.iter().cloned().collect(),
+            authority_revision: bookclerk_plugin_host::authority_revision(grant),
             bindings: grant.bindings.iter().cloned().collect(),
             compatibility_flags: grant.compatibility_flags.iter().cloned().collect(),
             approved_at: grant.approved_at.clone(),
@@ -531,6 +552,10 @@ impl PluginGrantView {
 struct PluginConsentResponse {
     /// Plugin id whose grant is being reviewed.
     plugin_id: String,
+    /// Canonical PluginKey for this install (empty when unknown).
+    plugin_key: String,
+    /// Host-evaluated provenance label.
+    provenance: String,
     /// Guest runtime (`native` or `workerd`) — drives which controls are enforceable.
     runtime: String,
     /// Manifest-derived grant the plugin is asking for.
@@ -2218,6 +2243,8 @@ fn build_source_settings_group(
     PluginSettingsGroup {
         id: id.to_string(),
         family: plugin_family_label(bookclerk_plugin_host::PluginFamily::Source).to_string(),
+        plugin_key: None,
+        provenance: None,
         logo: non_empty_logo(source.portal_brand().icon_url),
         settings: options,
     }
@@ -2297,6 +2324,8 @@ fn build_plugin_settings_group(
     PluginSettingsGroup {
         id: id.to_string(),
         family: plugin_family_label(family).to_string(),
+        plugin_key: None,
+        provenance: None,
         logo: None,
         settings: options,
     }
@@ -2340,7 +2369,15 @@ fn plugin_settings_snapshot(
                     group.logo = Some(logo);
                 }
             }
-            groups_by_key.insert((group.family.clone(), group.id.clone()), group);
+            group.plugin_key = Some(plugin.plugin_key().canonical().to_string());
+            group.provenance = Some(plugin.identity.provenance.to_string());
+            groups_by_key.insert(
+                (
+                    group.family.clone(),
+                    plugin.plugin_key().canonical().to_string(),
+                ),
+                group,
+            );
         }
     }
 
@@ -2786,17 +2823,43 @@ fn vec_to_set(values: Vec<String>) -> BTreeSet<String> {
         .collect()
 }
 
+/// Optional query for provenance-qualified consent lookup.
+#[derive(Debug, Deserialize, Default)]
+struct PluginConsentQuery {
+    /// Canonical PluginKey; when set, wins over the path alias.
+    #[serde(default)]
+    plugin_key: Option<String>,
+}
+
+/// Resolves a Settings/consent plugin by PluginKey or unambiguous alias.
+fn resolve_consent_plugin<'a>(
+    plugins: &'a [bookclerk_plugin_host::DiscoveredPlugin],
+    id: &str,
+    plugin_key: Option<&str>,
+) -> Result<&'a bookclerk_plugin_host::DiscoveredPlugin, StatusCode> {
+    let spec = plugin_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(id);
+    bookclerk_plugin_host::resolve_plugin_ref(plugins, spec).map_err(|err| {
+        let message = err.to_string();
+        if message.contains("ambiguous") {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::NOT_FOUND
+        }
+    })
+}
+
 /// Loads the consent dialog for one plugin, including coverage against the stored grant.
 async fn get_plugin_consent(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<PluginConsentQuery>,
 ) -> Result<Json<PluginConsentResponse>, StatusCode> {
     let cfg = state.config.read().await.clone();
-    let plugin = discover_plugins_for_settings(&cfg)
-        .await
-        .into_iter()
-        .find(|p| p.manifest.id == id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let discovered = discover_plugins_for_settings(&cfg).await;
+    let plugin = resolve_consent_plugin(&discovered, &id, query.plugin_key.as_deref())?;
     let request = consent_request(&plugin.manifest, plugin.plugin_key());
     let summary = consent_summary(&request);
     let store = PluginGrantStore::load(&cfg.paths().files_dir).map_err(|err| {
@@ -2804,21 +2867,22 @@ async fn get_plugin_consent(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let existing = store
-        .get(plugin.plugin_key().canonical())
-        .or_else(|| store.get(&id))
+        .get_by_plugin_key(plugin.plugin_key().canonical())
         .cloned();
     let covered = existing
         .as_ref()
         .is_some_and(|grant| grant_covers(grant, &request));
-    let brand = plugin_consent_brand(&state, &plugin).await;
-    let limits = plugin_consent_limits(&plugin, cfg.plugins.jail.cpu_rate_percent);
+    let brand = plugin_consent_brand(&state, plugin).await;
+    let limits = plugin_consent_limits(plugin, cfg.plugins.jail.cpu_rate_percent);
     let runtime = match plugin.manifest.runtime {
         PluginRuntimeKind::Native => "native",
         PluginRuntimeKind::Workerd => "workerd",
     }
     .to_string();
     Ok(Json(PluginConsentResponse {
-        plugin_id: id,
+        plugin_id: plugin.alias().to_string(),
+        plugin_key: plugin.plugin_key().canonical().to_string(),
+        provenance: plugin.identity.provenance.to_string(),
         runtime,
         request: PluginGrantView::from_grant(&request),
         covered,
@@ -2833,17 +2897,15 @@ async fn get_plugin_consent(
 async fn post_plugin_consent(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<PluginConsentQuery>,
     Json(body): Json<PluginConsentApproveRequest>,
 ) -> Result<Json<PluginConsentResponse>, StatusCode> {
     if !body.approve {
         return Err(StatusCode::BAD_REQUEST);
     }
     let cfg = state.config.read().await.clone();
-    let plugin = discover_plugins_for_settings(&cfg)
-        .await
-        .into_iter()
-        .find(|p| p.manifest.id == id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let discovered = discover_plugins_for_settings(&cfg).await;
+    let plugin = resolve_consent_plugin(&discovered, &id, query.plugin_key.as_deref())?;
     let request = consent_request(&plugin.manifest, plugin.plugin_key());
     let summary = consent_summary(&request);
     let approved = build_approved_grant(&request, body.grant)?;
@@ -2856,15 +2918,17 @@ async fn post_plugin_consent(
         tracing::error!(error = %err, "failed to save plugin grants");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-    let brand = plugin_consent_brand(&state, &plugin).await;
-    let limits = plugin_consent_limits(&plugin, cfg.plugins.jail.cpu_rate_percent);
+    let brand = plugin_consent_brand(&state, plugin).await;
+    let limits = plugin_consent_limits(plugin, cfg.plugins.jail.cpu_rate_percent);
     let runtime = match plugin.manifest.runtime {
         PluginRuntimeKind::Native => "native",
         PluginRuntimeKind::Workerd => "workerd",
     }
     .to_string();
     Ok(Json(PluginConsentResponse {
-        plugin_id: id,
+        plugin_id: plugin.alias().to_string(),
+        plugin_key: plugin.plugin_key().canonical().to_string(),
+        provenance: plugin.identity.provenance.to_string(),
         runtime,
         request: PluginGrantView::from_grant(&request),
         covered: true,
@@ -3012,7 +3076,10 @@ async fn patch_settings(
         )
         .await;
         for plugin_id in &enabling {
-            let Some(plugin) = discovered.iter().find(|p| p.manifest.id == *plugin_id) else {
+            let Some(plugin) = bookclerk_plugin_host::resolve_plugin_ref(&discovered, plugin_id)
+                .ok()
+                .or_else(|| discovered.iter().find(|p| p.manifest.id == *plugin_id))
+            else {
                 tracing::warn!(%plugin_id, "cannot enable undiscovered plugin");
                 return Err(StatusCode::BAD_REQUEST.into_response());
             };
@@ -5108,6 +5175,9 @@ mod tests {
             producers: BTreeSet::new(),
             network_mode: "outbound".into(),
             domains: BTreeSet::from(["a.example".into(), "b.example".into()]),
+            manifest_domains: BTreeSet::from(["a.example".into(), "b.example".into()]),
+            operator_added_domains: BTreeSet::new(),
+            operator_denied_domains: BTreeSet::new(),
             bindings: BTreeSet::from(["config".into(), "secrets".into()]),
             compatibility_flags: BTreeSet::new(),
             cpu_ms: Some(30_000),
@@ -5150,7 +5220,7 @@ mod tests {
             Some(PluginGrantOverride {
                 network_mode: None,
                 domains: Some(vec!["a.example".into(), "evil.example".into()]),
-                bindings: Some(vec!["config".into(), "secrets".into(), "oauth".into()]),
+                bindings: Some(vec!["config".into(), "secrets".into()]),
                 compatibility_flags: None,
                 cpu_ms: Some(60_000),
                 subrequests: None,
@@ -5160,14 +5230,32 @@ mod tests {
                 extra_processes: Some(8),
             }),
         )
-        .expect("widen beyond baseline");
+        .expect("network widen beyond baseline");
         assert!(widen.domains.contains("evil.example"));
-        assert!(widen.bindings.contains("oauth"));
+        assert!(widen.operator_added_domains.contains("evil.example"));
+        assert!(!widen.bindings.contains("oauth"));
         assert_eq!(widen.cpu_ms, Some(60_000));
         assert_eq!(widen.disk_mib, Some(2048));
         assert_eq!(widen.memory_mib, Some(1024));
         assert_eq!(widen.cpu_rate_percent, Some(90));
         assert_eq!(widen.extra_processes, Some(8));
+
+        let steal = build_approved_grant(
+            &baseline,
+            Some(PluginGrantOverride {
+                network_mode: None,
+                domains: None,
+                bindings: Some(vec!["config".into(), "secrets".into(), "oauth".into()]),
+                compatibility_flags: None,
+                cpu_ms: None,
+                subrequests: None,
+                disk_mib: None,
+                memory_mib: None,
+                cpu_cores: None,
+                extra_processes: None,
+            }),
+        );
+        assert!(steal.is_err(), "operator must not invent oauth binding");
     }
 
     #[test]

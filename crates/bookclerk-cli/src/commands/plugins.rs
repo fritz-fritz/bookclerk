@@ -117,7 +117,8 @@ pub enum PluginsCommand {
     /// Approve network domains and host bindings for a plugin.
     ///
     /// Grants cover the plugin's declared outbound domains and bindings.
-    /// Redirect hops after an allowed initial host do not require re-approval.
+    /// Operators may add extra network destinations. Structural capabilities
+    /// cannot be invented beyond the package. Redirect policy is separate.
     Approve {
         /// Plugin id.
         id: String,

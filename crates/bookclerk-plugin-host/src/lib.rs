@@ -32,6 +32,7 @@
 //! See `docs/plugins.md`, `docs/adr/plugin-workers-rpc-workerd.md`, and
 //! `docs/plugin-registry.md`.
 
+mod authority;
 mod builtins;
 mod callback_proxy;
 mod consent;
@@ -59,6 +60,10 @@ pub use bookclerk_plugin_sdk::{
     PRODUCT_API_VERSION, PROTOCOL_NAME,
 };
 
+pub use authority::{
+    authority_revision, fence_plugin_key, fence_stale_sessions, is_fenced, register_session,
+    unregister_session,
+};
 pub use bookclerk_plugin_sdk::{JobCheckpoint, JobInvocationLease, JobOutcome};
 pub use builtins::{
     load_integrations, load_sources, register_builtin_integrations, register_builtin_sources,

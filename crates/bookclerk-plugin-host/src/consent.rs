@@ -1,11 +1,17 @@
 //! Operator permission grants for plugin capabilities.
 //!
-//! The manifest consent request is a **baseline suggestion**, not a hard
-//! ceiling. Operators may widen or narrow domains, bindings, flags, network
-//! mode, workerd budgets, and per-plugin disk space. Host hard caps still
-//! apply ([`WorkerdLimits`] maxes, [`PLUGIN_STATE_BUDGET_MIB_MAX`], known
-//! bindings). Overrides that break plugin functionality are the operator's
-//! responsibility — Bookclerk only enforces what the grant records.
+//! Structural authority (entrypoints, producers, host bindings, named
+//! databases, jobs) originates in the plugin package. The operator may
+//! **narrow** it but cannot invent a structural capability the manifest did
+//! not declare.
+//!
+//! Network authority is operator-extensible: the operator may add hostnames
+//! the author omitted. Guest `describe()` remains refinement only.
+//!
+//! ```text
+//! effective structural = manifest ∩ operator grant ∩ host policy
+//! effective network    = host policy ∩ approved(manifest network ∪ operator additions)
+//! ```
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -162,8 +168,21 @@ pub struct PluginGrant {
     pub producers: BTreeSet<String>,
     /// Approved network mode: `deny` or `outbound`.
     pub network_mode: String,
-    /// Approved initial outbound domain patterns (**workerd** allowlist only).
+    /// Approved initial outbound domain patterns (**workerd** allowlist).
+    ///
+    /// Effective set: manifest request ∪ operator additions − operator denials.
     pub domains: BTreeSet<String>,
+    /// Network destinations requested by the installed manifest (not operator-added).
+    #[serde(default)]
+    pub manifest_domains: BTreeSet<String>,
+    /// Operator-added destinations beyond the current manifest request.
+    ///
+    /// Survive upgrades of the same [`plugin_key`]. Do not transfer across provenance.
+    #[serde(default)]
+    pub operator_added_domains: BTreeSet<String>,
+    /// Operator-denied destinations (even if the manifest still lists them).
+    #[serde(default)]
+    pub operator_denied_domains: BTreeSet<String>,
     /// Approved host binding names (`config`, `secrets`, `oauth`, …).
     pub bindings: BTreeSet<String>,
     /// Approved workerd compatibility flags from the consent snapshot.
@@ -253,6 +272,19 @@ impl PluginGrantStore {
         Ok(())
     }
 
+    /// Returns the grant whose canonical PluginKey matches `plugin_key`.
+    ///
+    /// Does not fall back to display aliases — spawn and privilege checks must
+    /// not inherit another provenance's grant.
+    pub fn get_by_plugin_key(&self, plugin_key: &str) -> Option<&PluginGrant> {
+        if plugin_key.is_empty() {
+            return None;
+        }
+        self.grants
+            .iter()
+            .find(|g| !g.plugin_key.is_empty() && g.plugin_key == plugin_key)
+    }
+
     /// Returns the grant for `plugin_key` (canonical), or an unambiguous alias.
     ///
     /// # Arguments
@@ -263,11 +295,7 @@ impl PluginGrantStore {
     ///
     /// A reference to the matching [`PluginGrant`], or `None`.
     pub fn get(&self, plugin_key: &str) -> Option<&PluginGrant> {
-        if let Some(g) = self
-            .grants
-            .iter()
-            .find(|g| !g.plugin_key.is_empty() && g.plugin_key == plugin_key)
-        {
+        if let Some(g) = self.get_by_plugin_key(plugin_key) {
             return Some(g);
         }
         let alias_hits: Vec<_> = self
@@ -294,6 +322,10 @@ impl PluginGrantStore {
                 g.plugin_id == grant.plugin_id
             }
         });
+        if !grant.plugin_key.is_empty() {
+            let revision = crate::authority::authority_revision(&grant);
+            crate::authority::fence_stale_sessions(&grant.plugin_key, &revision);
+        }
         if let Some(i) = idx {
             self.grants[i] = grant;
         } else {
@@ -377,7 +409,10 @@ pub fn consent_request_alias(manifest: &PluginManifest) -> PluginGrant {
             crate::manifest::NetworkMode::Deny => "deny".into(),
             crate::manifest::NetworkMode::Outbound => "outbound".into(),
         },
-        domains,
+        domains: domains.clone(),
+        manifest_domains: domains,
+        operator_added_domains: BTreeSet::new(),
+        operator_denied_domains: BTreeSet::new(),
         bindings,
         compatibility_flags: flags,
         cpu_ms,
@@ -444,8 +479,21 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
             "Workerd initial outbound domains: {}",
             grant.domains.iter().cloned().collect::<Vec<_>>().join(", ")
         ));
-        lines
-            .push("Redirect hops after an allowed initial host do not require re-approval.".into());
+        if !grant.operator_added_domains.is_empty() {
+            lines.push(format!(
+                "Operator-added destinations: {}",
+                grant
+                    .operator_added_domains
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        lines.push(
+            "Redirect destinations must stay within this allowlist unless the operator grants undeclared public redirects; address-space policy still applies."
+                .into(),
+        );
         let pyodide = bookclerk_plugin_manifest::PYODIDE_EGRESS_HOSTS;
         let has_pyodide = pyodide
             .iter()
@@ -569,31 +617,72 @@ pub fn grant_within_ceiling(existing: &PluginGrant, requested: &PluginGrant) -> 
 
 /// True when both grants name the same provenance-qualified plugin.
 ///
-/// Empty keys (legacy / test fixtures) fall back to matching the display alias.
+/// Empty keys are only equal to other empty keys (test fixtures). A keyed
+/// request never inherits an alias-only or differently-keyed grant.
 fn plugin_key_matches(existing: &PluginGrant, requested: &PluginGrant) -> bool {
-    if existing.plugin_key.is_empty() || requested.plugin_key.is_empty() {
-        return true;
-    }
     existing.plugin_key == requested.plugin_key
 }
 
-/// True when a stored grant is usable for enable/spawn of this plugin id.
+/// True when a stored grant is usable for enable/spawn of this PluginKey.
 ///
-/// Operator grants are authoritative: presence for the plugin id is enough.
-/// Manifest changes no longer invalidate a stored grant (operator responsibility).
+/// Structural capabilities on the current manifest must already be approved
+/// (operator may have narrowed, but new entrypoints/bindings require re-consent).
+/// Network destinations re-evaluate separately via [`effective_grant`].
 #[must_use]
 pub fn grant_covers(existing: &PluginGrant, requested: &PluginGrant) -> bool {
     plugin_key_matches(existing, requested)
         && existing.plugin_id == requested.plugin_id
         && requested.entrypoints.is_subset(&existing.entrypoints)
         && requested.producers.is_subset(&existing.producers)
+        && requested.bindings.is_subset(&existing.bindings)
+        && requested
+            .compatibility_flags
+            .is_subset(&existing.compatibility_flags)
+}
+
+/// Reconstructs operator network additions/denials relative to the current manifest.
+fn classified_operator_network(
+    existing: &PluginGrant,
+    requested: &PluginGrant,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    if !existing.operator_added_domains.is_empty() || !existing.operator_denied_domains.is_empty() {
+        return (
+            existing.operator_added_domains.clone(),
+            existing.operator_denied_domains.clone(),
+        );
+    }
+    let manifest = if requested.manifest_domains.is_empty() {
+        &requested.domains
+    } else {
+        &requested.manifest_domains
+    };
+    let added = existing.domains.difference(manifest).cloned().collect();
+    // Legacy grants without explicit denials: do not treat "not yet stored"
+    // manifest hosts as denied — those re-evaluate from the new package.
+    let denied = existing.operator_denied_domains.clone();
+    (added, denied)
+}
+
+/// Effective outbound domains: current manifest ∪ operator additions − denials.
+fn merge_network_domains(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<String> {
+    let (added, denied) = classified_operator_network(existing, requested);
+    let mut domains = if requested.manifest_domains.is_empty() {
+        requested.domains.clone()
+    } else {
+        requested.manifest_domains.clone()
+    };
+    domains.extend(added);
+    for d in denied {
+        domains.remove(&d);
+    }
+    domains
 }
 
 /// Spawn/delivery grant: stored approval is authoritative, host-normalized.
 ///
-/// Does **not** intersect domains/bindings/flags with the manifest request, so
-/// operator widen/narrow overrides survive spawn. Missing workerd budgets fall
-/// back to the request defaults; all numeric limits clamp to host maxes.
+/// Structural capabilities stay at the stored operator snapshot (narrowed).
+/// Network destinations re-evaluate the current manifest plus persisted
+/// operator additions/denials.
 #[must_use]
 pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> PluginGrant {
     let network_mode = if existing.network_mode.is_empty() {
@@ -601,6 +690,8 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
     } else {
         existing.network_mode.clone()
     };
+    let (operator_added_domains, operator_denied_domains) =
+        classified_operator_network(existing, requested);
     PluginGrant {
         plugin_key: if existing.plugin_key.is_empty() {
             requested.plugin_key.clone()
@@ -608,12 +699,35 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
             existing.plugin_key.clone()
         },
         plugin_id: existing.plugin_id.clone(),
-        entrypoints: existing.entrypoints.clone(),
-        producers: existing.producers.clone(),
+        entrypoints: existing
+            .entrypoints
+            .intersection(&requested.entrypoints)
+            .cloned()
+            .collect(),
+        producers: existing
+            .producers
+            .intersection(&requested.producers)
+            .cloned()
+            .collect(),
         network_mode,
-        domains: existing.domains.clone(),
-        bindings: existing.bindings.clone(),
-        compatibility_flags: existing.compatibility_flags.clone(),
+        domains: merge_network_domains(existing, requested),
+        manifest_domains: if requested.manifest_domains.is_empty() {
+            requested.domains.clone()
+        } else {
+            requested.manifest_domains.clone()
+        },
+        operator_added_domains,
+        operator_denied_domains,
+        bindings: existing
+            .bindings
+            .intersection(&requested.bindings)
+            .cloned()
+            .collect(),
+        compatibility_flags: existing
+            .compatibility_flags
+            .intersection(&requested.compatibility_flags)
+            .cloned()
+            .collect(),
         cpu_ms: normalize_cpu_ms(existing.cpu_ms.or(requested.cpu_ms)),
         subrequests: normalize_subrequests(existing.subrequests.or(requested.subrequests)),
         disk_mib: Some(effective_disk_mib(existing.disk_mib.or(requested.disk_mib))),
@@ -635,9 +749,10 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
 /// Validates and normalizes an operator-supplied grant against host hard caps.
 ///
 /// The manifest `baseline` supplies identity defaults and suggested values.
-/// Operators may **widen or narrow** domains, bindings, flags, network mode,
-/// workerd budgets, and disk space. Unknown bindings are rejected; workerd /
-/// disk limits clamp to host maximums.
+/// Operators may **narrow** structural capabilities (entrypoints, producers,
+/// host bindings, flags) and **widen or narrow** network destinations.
+/// Inventing a structural capability the package did not declare is rejected.
+/// Workerd / disk limits clamp to host maximums.
 ///
 /// # Arguments
 ///
@@ -698,6 +813,11 @@ pub fn validate_approved_grant(
                     "invalid database binding name `{name}` (expected [A-Z][A-Z0-9_]*)"
                 )));
             }
+            if !baseline.bindings.contains(binding) {
+                return Err(PluginError::message(format!(
+                    "grant database binding `{binding}` is not declared by plugin.toml"
+                )));
+            }
             continue;
         }
         if !KNOWN_HOST_BINDINGS
@@ -708,6 +828,29 @@ pub fn validate_approved_grant(
                 "unknown host binding `{binding}`"
             )));
         }
+        let known = KNOWN_HOST_BINDINGS
+            .iter()
+            .find(|known| binding.eq_ignore_ascii_case(known))
+            .copied()
+            .unwrap_or(binding.as_str());
+        if !baseline
+            .bindings
+            .iter()
+            .any(|b| b.eq_ignore_ascii_case(known) || b == binding)
+        {
+            return Err(PluginError::message(format!(
+                "grant binding `{binding}` is not declared by plugin.toml (structural authority)"
+            )));
+        }
+    }
+    if let Some(extra) = approved
+        .compatibility_flags
+        .difference(&baseline.compatibility_flags)
+        .next()
+    {
+        return Err(PluginError::message(format!(
+            "grant compatibility flag `{extra}` is not declared by plugin.toml (structural authority)"
+        )));
     }
     let mut domains = BTreeSet::new();
     for raw in &approved.domains {
@@ -765,7 +908,10 @@ pub fn validate_approved_grant(
         entrypoints: baseline.entrypoints.clone(),
         producers: baseline.producers.clone(),
         network_mode: network_mode.to_ascii_lowercase(),
-        domains,
+        domains: domains.clone(),
+        manifest_domains: baseline.domains.clone(),
+        operator_added_domains: domains.difference(&baseline.domains).cloned().collect(),
+        operator_denied_domains: baseline.domains.difference(&domains).cloned().collect(),
         bindings,
         compatibility_flags,
         cpu_ms,
@@ -872,9 +1018,7 @@ pub fn require_grant(
 ) -> Result<PluginGrant> {
     let store = PluginGrantStore::load(files_dir)?;
     let requested = consent_request(&plugin.manifest, plugin.plugin_key());
-    let existing = store
-        .get(plugin.plugin_key().canonical())
-        .or_else(|| store.get(plugin.alias()));
+    let existing = store.get_by_plugin_key(plugin.plugin_key().canonical());
     match existing {
         Some(existing) if grant_covers(existing, &requested) => {
             Ok(effective_grant(existing, &requested))
@@ -950,7 +1094,7 @@ pub fn ensure_platform_grant(
         )));
     }
     let mut store = PluginGrantStore::load(files_dir)?;
-    match store.get(plugin.plugin_key().canonical()) {
+    match store.get_by_plugin_key(plugin.plugin_key().canonical()) {
         Some(existing) if grant_within_ceiling(existing, &requested) => {
             Ok(effective_grant(existing, &requested))
         }
@@ -1005,31 +1149,7 @@ pub fn inject_workerd_grant_env(cmd: &mut Command, grant: &PluginGrant) {
 /// Canonical SHA-256 of a grant's security-relevant fields (not presentation).
 #[must_use]
 pub fn grant_revision(grant: &PluginGrant) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(grant.plugin_key.as_bytes());
-    hasher.update(b"\n");
-    for e in &grant.entrypoints {
-        hasher.update(e.as_bytes());
-        hasher.update(b",");
-    }
-    hasher.update(b"\n");
-    for p in &grant.producers {
-        hasher.update(p.as_bytes());
-        hasher.update(b",");
-    }
-    hasher.update(grant.network_mode.as_bytes());
-    hasher.update(b"\n");
-    for d in &grant.domains {
-        hasher.update(d.as_bytes());
-        hasher.update(b",");
-    }
-    hasher.update(b"\n");
-    for b in &grant.bindings {
-        hasher.update(b.as_bytes());
-        hasher.update(b",");
-    }
-    hex::encode(hasher.finalize())
+    crate::authority::authority_revision(grant)
 }
 
 /// True when a platform grant is deny-network with only `config` / `work_fs` bindings.
@@ -1207,6 +1327,9 @@ mode = "deny"
             producers: BTreeSet::new(),
             network_mode: "outbound".into(),
             domains: domains.iter().map(|s| (*s).to_string()).collect(),
+            manifest_domains: domains.iter().map(|s| (*s).to_string()).collect(),
+            operator_added_domains: BTreeSet::new(),
+            operator_denied_domains: BTreeSet::new(),
             bindings: bindings.iter().map(|s| (*s).to_string()).collect(),
             compatibility_flags: flags.iter().map(|s| (*s).to_string()).collect(),
             cpu_ms: None,
@@ -1227,17 +1350,17 @@ mode = "deny"
     }
 
     #[test]
-    fn grant_covers_allows_operator_binding_subset() {
+    fn grant_covers_rejects_new_structural_binding() {
         let existing = sample_grant(&["a.example"], &["config"], &[]);
         let requested = sample_grant(&["a.example"], &["config", "secrets"], &[]);
-        assert!(grant_covers(&existing, &requested));
+        assert!(!grant_covers(&existing, &requested));
     }
 
     #[test]
-    fn grant_covers_allows_operator_flag_subset() {
+    fn grant_covers_rejects_new_structural_flag() {
         let existing = sample_grant(&[], &[], &["nodejs_compat"]);
         let requested = sample_grant(&[], &[], &["nodejs_compat", "streams_enable_constructors"]);
-        assert!(grant_covers(&existing, &requested));
+        assert!(!grant_covers(&existing, &requested));
     }
 
     #[test]
@@ -1364,7 +1487,7 @@ binding = "CACHE"
 
     #[test]
     fn approved_database_bindings_validate_names_and_keep_case() {
-        let baseline = sample_grant(&[], &[], &[]);
+        let baseline = sample_grant(&[], &["database:DB_2", "config"], &[]);
         let approved = sample_grant(&[], &["database:DB_2", "config"], &[]);
         let grant = validate_approved_grant(&approved, &baseline).expect("valid binding grant");
         assert!(grant.bindings.contains("database:DB_2"));
@@ -1413,14 +1536,8 @@ mode = "deny"
     }
 
     #[test]
-    fn require_grant_succeeds_when_manifest_widens_past_stored_subset() {
+    fn require_grant_requires_reapprove_for_new_secrets() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = PluginGrantStore::default();
-        let mut existing = sample_grant(&[], &["config"], &[]);
-        existing.network_mode = "deny".into();
-        store.upsert(existing);
-        store.save(dir.path()).unwrap();
-
         let plugin = discovered(
             &dir.path().join("install"),
             r#"
@@ -1438,20 +1555,23 @@ mode = "deny"
 [secrets]
 "#,
         );
-        let grant = require_grant(dir.path(), &plugin).unwrap();
-        assert!(grant_has_binding(&grant, "config"));
-        assert!(!grant_has_binding(&grant, "secrets"));
+        let mut store = PluginGrantStore::default();
+        let mut existing = sample_grant(&[], &["config"], &[]);
+        existing.network_mode = "deny".into();
+        existing.plugin_key = plugin.plugin_key().canonical().to_string();
+        store.upsert(existing);
+        store.save(dir.path()).unwrap();
+
+        let err = require_grant(dir.path(), &plugin).unwrap_err().to_string();
+        assert!(
+            err.contains("grant does not match") || err.contains("re-approve"),
+            "{err}"
+        );
     }
 
     #[test]
     fn require_grant_keeps_operator_domain_widen_past_manifest() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = PluginGrantStore::default();
-        let mut existing = sample_grant(&["old.example"], &["config"], &[]);
-        existing.approved_at = "2026-01-01T00:00:00Z".into();
-        store.upsert(existing);
-        store.save(dir.path()).unwrap();
-
         let plugin = discovered(
             &dir.path().join("install"),
             r#"
@@ -1471,9 +1591,20 @@ domains = ["api.example.com"]
 [vars]
 "#,
         );
+        let mut store = PluginGrantStore::default();
+        let mut existing = sample_grant(&["old.example"], &["config"], &[]);
+        existing.approved_at = "2026-01-01T00:00:00Z".into();
+        existing.plugin_key = plugin.plugin_key().canonical().to_string();
+        store.upsert(existing);
+        store.save(dir.path()).unwrap();
+
         let grant = require_grant(dir.path(), &plugin).expect("operator widen kept");
         assert!(grant.domains.contains("old.example"));
-        assert!(!grant.domains.contains("api.example.com"));
+        assert!(
+            grant.domains.contains("api.example.com"),
+            "new manifest hosts re-evaluate on the same PluginKey"
+        );
+        assert!(grant.operator_added_domains.contains("old.example"));
     }
 
     #[test]
@@ -1606,7 +1737,7 @@ mode = "deny"
     }
 
     #[test]
-    fn effective_grant_preserves_operator_approval_without_intersecting() {
+    fn effective_grant_intersects_structural_and_keeps_operator_network() {
         let existing = sample_grant(
             &["a.example", "b.example"],
             &["config", "secrets"],
@@ -1618,21 +1749,76 @@ mode = "deny"
         assert_eq!(effective.entrypoints, existing.entrypoints);
         assert_eq!(effective.approved_at, existing.approved_at);
         assert_eq!(effective.network_mode, existing.network_mode);
-        assert_eq!(effective.domains, existing.domains);
-        assert_eq!(effective.bindings, existing.bindings);
-        assert_eq!(effective.compatibility_flags, existing.compatibility_flags);
+        assert!(effective.domains.contains("a.example"));
+        assert!(effective.domains.contains("b.example"));
+        assert!(effective.operator_added_domains.contains("b.example"));
+        assert_eq!(
+            effective.bindings.iter().cloned().collect::<Vec<_>>(),
+            vec!["config".to_string()]
+        );
+        assert!(effective.compatibility_flags.is_empty());
         assert_eq!(effective.disk_mib, Some(PLUGIN_STATE_BUDGET_MIB_DEFAULT));
+    }
+
+    #[test]
+    fn require_grant_does_not_inherit_across_plugin_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let platformish = discovered(
+            &dir.path().join("a"),
+            r#"
+api_version = 3
+id = "sqlite"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "deny"
+"#,
+        );
+        let impostor = discovered(
+            &dir.path().join("b"),
+            r#"
+api_version = 3
+id = "sqlite"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "deny"
+"#,
+        );
+        assert_ne!(
+            platformish.plugin_key().canonical(),
+            impostor.plugin_key().canonical()
+        );
+        let mut store = PluginGrantStore::default();
+        let mut existing = consent_request(&platformish.manifest, platformish.plugin_key());
+        existing.approved_at = "2026-01-01T00:00:00Z".into();
+        store.upsert(existing);
+        store.save(dir.path()).unwrap();
+        let err = require_grant(dir.path(), &impostor)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no permission grant"), "{err}");
+    }
+
+    #[test]
+    fn upsert_fences_live_session_for_plugin_key() {
+        let key = "path:file:///tmp/demo#demo";
+        let flag = crate::authority::register_session(key, "old-revision");
+        let mut store = PluginGrantStore::default();
+        let mut grant = sample_grant(&["a.example"], &["config"], &[]);
+        grant.plugin_key = key.into();
+        store.upsert(grant);
+        assert!(crate::authority::is_fenced(&flag));
+        crate::authority::unregister_session(&flag);
     }
 
     #[test]
     fn require_grant_keeps_stored_subset_after_repeated_manifest_widening() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = PluginGrantStore::default();
-        let mut existing = sample_grant(&[], &["config"], &[]);
-        existing.network_mode = "deny".into();
-        store.upsert(existing);
-        store.save(dir.path()).unwrap();
-
         let narrowed = discovered(
             &dir.path().join("install"),
             r#"
@@ -1648,6 +1834,13 @@ mode = "deny"
 [vars]
 "#,
         );
+        let mut store = PluginGrantStore::default();
+        let mut existing = sample_grant(&[], &["config"], &[]);
+        existing.network_mode = "deny".into();
+        existing.plugin_key = narrowed.plugin_key().canonical().to_string();
+        store.upsert(existing);
+        store.save(dir.path()).unwrap();
+
         let effective = require_grant(dir.path(), &narrowed).unwrap();
         assert!(grant_has_binding(&effective, "config"));
 
@@ -1669,22 +1862,35 @@ mode = "deny"
 binding = "KV"
 "#,
         );
-        let effective = require_grant(dir.path(), &widened).unwrap();
-        assert!(grant_has_binding(&effective, "config"));
-        assert!(!grant_has_binding(&effective, "plugin_kv"));
+        let err = require_grant(dir.path(), &widened).unwrap_err().to_string();
+        assert!(
+            err.contains("grant does not match") || err.contains("re-approve"),
+            "new structural KV binding must require re-consent: {err}"
+        );
     }
 
     #[test]
-    fn validate_approved_grant_allows_widen_beyond_baseline() {
+    fn validate_approved_grant_allows_network_widen_not_structural() {
         let baseline = sample_grant(&["api.example.com"], &["config"], &["nodejs_compat"]);
         let approved = sample_grant(
             &["api.example.com", "extra.example.com"],
+            &["config"],
+            &["nodejs_compat"],
+        );
+        let grant = validate_approved_grant(&approved, &baseline).expect("network widen ok");
+        assert!(grant.domains.contains("extra.example.com"));
+        assert!(grant.operator_added_domains.contains("extra.example.com"));
+        assert_eq!(grant.manifest_domains, baseline.domains);
+
+        let steal = sample_grant(
+            &["api.example.com"],
             &["config", "secrets"],
             &["nodejs_compat"],
         );
-        let grant = validate_approved_grant(&approved, &baseline).expect("widen ok");
-        assert!(grant.domains.contains("extra.example.com"));
-        assert!(grant.bindings.contains("secrets"));
+        let err = validate_approved_grant(&steal, &baseline)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("structural"), "{err}");
     }
 
     #[test]
