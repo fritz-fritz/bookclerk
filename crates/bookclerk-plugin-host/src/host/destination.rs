@@ -47,11 +47,32 @@ impl DestinationRegistry {
     }
 
     /// Plugin session for `plugin_id` and `account_id`, when that guest was loaded.
+    ///
+    /// `plugin_id` may be the canonical PluginKey (how sessions are stored) or
+    /// a display alias. An alias is accepted only when exactly one loaded
+    /// session for `account_id` matches; two occupants sharing an alias fail
+    /// closed rather than returning an arbitrary twin.
     #[must_use]
     pub fn plugin_session(&self, plugin_id: &str, account_id: &str) -> Option<Arc<PluginSession>> {
-        self.plugin_sessions
+        if let Some(session) = self
+            .plugin_sessions
             .get(&crate::plugin_instance_key(plugin_id, account_id))
+        {
+            return Some(Arc::clone(session));
+        }
+        let hits: Vec<_> = self
+            .plugin_sessions
+            .values()
+            .filter(|session| {
+                session.account_id() == account_id
+                    && crate::identity_matches_occupancy(session.id(), session.alias(), plugin_id)
+            })
             .cloned()
+            .collect();
+        match hits.as_slice() {
+            [one] => Some(Arc::clone(one)),
+            _ => None,
+        }
     }
 
     /// Records the local-filesystem output backend after a successful spawn.
