@@ -208,17 +208,24 @@ else
 fi
 
 if grep -A20 'fn overlay_s3_endpoint' crates/bookclerk-plugin-host/src/consent.rs \
-    | grep -q 'plugin_matches_occupancy'; then
+    | grep -q 'overlay_unique_occupant'; then
   ok "S3 host overlay is PluginKey-aware"
 else
   fail "S3 host overlay still keys only on the display alias"
 fi
 
 if grep -A20 'fn overlay_audiobookshelf_url' crates/bookclerk-plugin-host/src/consent.rs \
-    | grep -q 'plugin_matches_occupancy'; then
+    | grep -q 'overlay_unique_occupant'; then
   ok "Audiobookshelf host overlay is PluginKey-aware"
 else
   fail "Audiobookshelf host overlay still keys only on the display alias"
+fi
+
+if grep -A20 'fn overlay_unique_occupant' crates/bookclerk-plugin-host/src/consent.rs \
+    | grep -q 'resolve_plugin_slot'; then
+  ok "host overlays uniquify occupancy so alias twins cannot inherit URLs"
+else
+  fail "host overlays still match every same-alias install"
 fi
 
 if grep -A40 'pub async fn load_external_destinations' crates/bookclerk-plugin-host/src/host/destination.rs \
@@ -265,6 +272,14 @@ if grep -A35 'pub async fn mediated_connect_url' \
   ok "postgres fail-closes nested Deny without SOCKET_PROXY"
 else
   fail "postgres still returns ambient TCP URLs under nested jail without SOCKET_PROXY"
+fi
+
+if grep -B2 'pub fn postgres_url_with_unix_host' \
+    crates/bookclerk-plugins/optional/database-postgres/src/socket_mediate.rs \
+    | grep -q 'any(unix, test)'; then
+  ok "postgres Unix-socket URL rewrite is not dead on Windows lib clippy"
+else
+  fail "postgres_url_with_unix_host is compiled unused on Windows lib"
 fi
 
 if grep -A35 'fn open_granted_binding_databases' crates/bookclerkd/src/jobs.rs \
@@ -322,6 +337,13 @@ if grep -A25 'pub fn upsert' crates/bookclerk-plugin-host/src/consent.rs \
   ok "grant upsert matches keyless rows by alias only"
 else
   fail "grant upsert can still replace a PluginKey grant via alias"
+fi
+
+if grep -A20 'for plugin_id in &enabling' crates/bookclerkd/src/api.rs \
+    | grep -q 'or_else'; then
+  fail "daemon enable still falls back to first alias twin"
+else
+  ok "daemon enable consent uses resolve_plugin_ref only"
 fi
 
 if grep -n 'reqwest::Client' crates/bookclerk-storage/src >/dev/null 2>&1; then

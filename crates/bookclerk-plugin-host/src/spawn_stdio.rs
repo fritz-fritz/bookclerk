@@ -75,7 +75,12 @@ pub(crate) async fn spawn_stdio_guest(
     let id = plugin.plugin_key().canonical().to_string();
     let alias = plugin.manifest.id.clone();
     let mut grant = spawn_grant(&config.paths().files_dir, plugin)?;
-    crate::consent::overlay_host_implied_network(&mut grant, plugin, config);
+    crate::consent::overlay_host_implied_network(
+        &mut grant,
+        plugin,
+        config,
+        &overlay_discovered_plugins(config, plugin),
+    );
     let spawn_config = spawn_config_for_grant(&grant, config_table);
     let jail = GuestJail::plan(config, plugin, plan)?;
     #[cfg(windows)]
@@ -287,6 +292,17 @@ pub(crate) fn with_spawn_detail(err: PluginError, extra: String) -> PluginError 
         }
         other => PluginError::message(format!("{other}; {extra}")),
     }
+}
+
+fn overlay_discovered_plugins(config: &Config, plugin: &DiscoveredPlugin) -> Vec<DiscoveredPlugin> {
+    let mut list = crate::discover_plugins(config).unwrap_or_default();
+    if !list
+        .iter()
+        .any(|found| found.plugin_key() == plugin.plugin_key())
+    {
+        list.push(plugin.clone());
+    }
+    list
 }
 
 fn stderr_tail_text(tail: &Arc<Mutex<VecDeque<String>>>) -> String {

@@ -3150,12 +3150,18 @@ async fn patch_settings(
         )
         .await;
         for plugin_id in &enabling {
-            let Some(plugin) = bookclerk_plugin_host::resolve_plugin_ref(&discovered, plugin_id)
-                .ok()
-                .or_else(|| discovered.iter().find(|p| p.manifest.id == *plugin_id))
-            else {
-                tracing::warn!(%plugin_id, "cannot enable undiscovered plugin");
-                return Err(StatusCode::BAD_REQUEST.into_response());
+            let plugin = match bookclerk_plugin_host::resolve_plugin_ref(&discovered, plugin_id) {
+                Ok(plugin) => plugin,
+                Err(err) => {
+                    let message = err.to_string();
+                    tracing::warn!(%plugin_id, error = %err, "cannot enable plugin");
+                    let status = if message.contains("ambiguous") {
+                        StatusCode::CONFLICT
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    };
+                    return Err(status.into_response());
+                }
             };
             if let Err(err) = require_grant(&files_dir, plugin) {
                 let request = consent_request(&plugin.manifest, plugin.plugin_key());
@@ -3306,13 +3312,22 @@ async fn migrate_database(
             if body.apply && !body.dry_run {
                 let files_dir = cfg.paths().files_dir.clone();
                 let discovered = discover_plugins_for_settings(&cfg).await;
-                let Some(plugin) = discovered
-                    .iter()
-                    .find(|p| p.manifest.id.eq_ignore_ascii_case(&to_plugin))
-                else {
-                    tracing::warn!(%to_plugin, "cannot apply migrate to undiscovered database plugin");
-                    return Err(StatusCode::BAD_REQUEST);
-                };
+                let plugin =
+                    match bookclerk_plugin_host::resolve_plugin_ref(&discovered, &to_plugin) {
+                        Ok(plugin) => plugin,
+                        Err(err) => {
+                            tracing::warn!(
+                                %to_plugin,
+                                error = %err,
+                                "cannot apply migrate to database plugin"
+                            );
+                            return Err(if err.to_string().contains("ambiguous") {
+                                StatusCode::CONFLICT
+                            } else {
+                                StatusCode::BAD_REQUEST
+                            });
+                        }
+                    };
                 if let Err(err) = require_grant(&files_dir, plugin) {
                     tracing::warn!(
                         plugin = %to_plugin,
@@ -3321,7 +3336,11 @@ async fn migrate_database(
                     );
                     return Err(StatusCode::FORBIDDEN);
                 }
-                let path = apply_migrated_database_plugin(&state, to_plugin.clone()).await?;
+                let path = apply_migrated_database_plugin(
+                    &state,
+                    plugin.plugin_key().canonical().to_string(),
+                )
+                .await?;
                 message.push_str(&format!(
                     "; updated [database].plugin, wrote {}, and reloaded library connection",
                     path.display()

@@ -1459,6 +1459,9 @@ pub fn inject_workerd_grant_env(cmd: &mut Command, grant: &PluginGrant) {
 /// - Audiobookshelf `[integrations.audiobookshelf].base_url`
 /// - S3 `[output.s3].endpoint` (custom/MinIO)
 ///
+/// Occupancy is uniquified with [`crate::resolve_plugin_slot`]: a bare alias
+/// overlays only the unique occupant, and a PluginKey never overlays a twin.
+///
 /// No-op unless the covering grant is outbound.
 ///
 /// # Arguments
@@ -1466,18 +1469,32 @@ pub fn inject_workerd_grant_env(cmd: &mut Command, grant: &PluginGrant) {
 /// * `grant` - Effective covering grant (mutated in place).
 /// * `plugin` - Guest being spawned.
 /// * `config` - Host config (URL already env-applied).
+/// * `discovered` - Installs used to uniquify occupancy (must include `plugin`).
 pub fn overlay_host_implied_network(
     grant: &mut PluginGrant,
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
+    discovered: &[crate::discover::DiscoveredPlugin],
 ) {
     if !grant.network_mode.eq_ignore_ascii_case("outbound") {
         return;
     }
-    overlay_postgres_url(grant, plugin, config);
-    overlay_d1_api_base(grant, plugin, config);
-    overlay_audiobookshelf_url(grant, plugin, config);
-    overlay_s3_endpoint(grant, plugin, config);
+    overlay_postgres_url(grant, plugin, config, discovered);
+    overlay_d1_api_base(grant, plugin, config, discovered);
+    overlay_audiobookshelf_url(grant, plugin, config, discovered);
+    overlay_s3_endpoint(grant, plugin, config, discovered);
+}
+
+/// True when `plugin` is the unique occupant of `spec` among `discovered`.
+fn overlay_unique_occupant(
+    plugin: &crate::discover::DiscoveredPlugin,
+    spec: &str,
+    discovered: &[crate::discover::DiscoveredPlugin],
+) -> bool {
+    matches!(
+        crate::discover::resolve_plugin_slot(discovered, spec),
+        Ok(Some(occupant)) if occupant.plugin_key() == plugin.plugin_key()
+    )
 }
 
 /// Overlay TCP for the active Postgres URL (host-owned, not persisted).
@@ -1485,8 +1502,9 @@ fn overlay_postgres_url(
     grant: &mut PluginGrant,
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
+    discovered: &[crate::discover::DiscoveredPlugin],
 ) {
-    if !overlay_database_slot_matches(plugin, config, DatabasePluginKind::Postgres) {
+    if !overlay_database_slot_matches(plugin, config, DatabasePluginKind::Postgres, discovered) {
         return;
     }
     let Ok(url) = resolve_postgres_url(config) else {
@@ -1503,8 +1521,9 @@ fn overlay_d1_api_base(
     grant: &mut PluginGrant,
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
+    discovered: &[crate::discover::DiscoveredPlugin],
 ) {
-    if !overlay_database_slot_matches(plugin, config, DatabasePluginKind::D1) {
+    if !overlay_database_slot_matches(plugin, config, DatabasePluginKind::D1, discovered) {
         return;
     }
     overlay_http_url(grant, &config.database.d1.api_base, 443);
@@ -1512,14 +1531,14 @@ fn overlay_d1_api_base(
 
 /// True when `plugin` is the selected `[database].plugin` occupant of `kind`.
 ///
-/// A provenance-qualified PluginKey in `[database].plugin` matches only that
-/// key. Alias tokens (`postgres`, `pg`, `d1`) still match the first-party
-/// kind so existing config keeps working, but they do not overlay a twin
-/// install once the operator names a PluginKey.
+/// A provenance-qualified PluginKey matches only that key. Kind tokens
+/// (`postgres`, `pg`, `d1`) resolve through [`crate::resolve_plugin_slot`] so
+/// alias twins do not inherit the operator URL.
 fn overlay_database_slot_matches(
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
     kind: DatabasePluginKind,
+    discovered: &[crate::discover::DiscoveredPlugin],
 ) -> bool {
     if DatabasePluginKind::parse(plugin.alias()) != Some(kind) {
         return false;
@@ -1528,10 +1547,11 @@ fn overlay_database_slot_matches(
     if spec.is_empty() {
         return false;
     }
-    if let Ok(key) = bookclerk_plugin_catalog::PluginKey::parse(spec) {
-        return plugin.plugin_key() == &key;
+    if bookclerk_plugin_catalog::PluginKey::parse(spec).is_ok() {
+        return overlay_unique_occupant(plugin, spec, discovered);
     }
-    DatabasePluginKind::parse(spec) == Some(kind) || plugin.alias().eq_ignore_ascii_case(spec)
+    let kind_id = DatabasePluginKind::parse(spec).map(DatabasePluginKind::as_str);
+    overlay_unique_occupant(plugin, kind_id.unwrap_or(spec), discovered)
 }
 
 /// Overlay TCP for `[integrations.audiobookshelf].base_url`.
@@ -1539,6 +1559,7 @@ fn overlay_audiobookshelf_url(
     grant: &mut PluginGrant,
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
+    discovered: &[crate::discover::DiscoveredPlugin],
 ) {
     if !plugin.alias().eq_ignore_ascii_case("audiobookshelf") {
         return;
@@ -1547,7 +1568,7 @@ fn overlay_audiobookshelf_url(
         config.integrations.occupancy("audiobookshelf"),
         "audiobookshelf",
     );
-    if !crate::plugin_matches_occupancy(plugin, spec) {
+    if !overlay_unique_occupant(plugin, spec, discovered) {
         return;
     }
     overlay_http_url(grant, &config.integrations.audiobookshelf().base_url, 443);
@@ -1559,12 +1580,13 @@ fn overlay_s3_endpoint(
     grant: &mut PluginGrant,
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
+    discovered: &[crate::discover::DiscoveredPlugin],
 ) {
     if !plugin.alias().eq_ignore_ascii_case("s3") {
         return;
     }
     let spec = crate::occupancy_spec(&config.output.s3.plugin, "s3");
-    if !crate::plugin_matches_occupancy(plugin, spec) {
+    if !overlay_unique_occupant(plugin, spec, discovered) {
         return;
     }
     let Some(endpoint) = config.output.s3.endpoint.as_deref() else {
@@ -1903,7 +1925,7 @@ mode = "outbound"
         config.database.postgres.url =
             Some("postgres://postgres:postgres@localhost:5432/postgres".into());
         let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
-        overlay_host_implied_network(&mut grant, &plugin, &config);
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
         let policy = grant.egress_policy();
         assert!(
             policy.allows_tcp("localhost", 5432),
@@ -1935,7 +1957,7 @@ mode = "outbound"
         config.database.plugin = "postgres".into();
         config.database.postgres.url = Some("postgres://bookclerk@db.example.com:5432/db".into());
         let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
-        overlay_host_implied_network(&mut grant, &plugin, &config);
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
         assert!(grant.egress_policy().allows_tcp("db.example.com", 5432));
         assert!(grant.address_cidrs.is_empty());
     }
@@ -1962,7 +1984,7 @@ mode = "outbound"
         config.database.plugin = "sqlite".into();
         config.database.postgres.url = Some("postgres://localhost/db".into());
         let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
-        overlay_host_implied_network(&mut grant, &plugin, &config);
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
         assert!(grant.tcp.is_empty());
         assert!(grant.address_cidrs.is_empty());
     }
@@ -1989,7 +2011,7 @@ mode = "outbound"
         config.database.plugin = "d1".into();
         config.database.d1.api_base = "https://api.cloudflare.com/client/v4".into();
         let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
-        overlay_host_implied_network(&mut grant, &plugin, &config);
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
         assert!(grant.egress_policy().allows_tcp("api.cloudflare.com", 443));
     }
 
@@ -2016,7 +2038,7 @@ mode = "outbound"
             .integrations
             .set_audiobookshelf_string("base_url", "http://127.0.0.1:13378");
         let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
-        overlay_host_implied_network(&mut grant, &plugin, &config);
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
         assert!(grant.egress_policy().allows_tcp("127.0.0.1", 13378));
         assert!(grant.address_cidrs.contains("127.0.0.1/32"));
     }
@@ -2042,7 +2064,7 @@ mode = "outbound"
         let mut config = Config::default();
         config.output.s3.endpoint = Some("http://127.0.0.1:9000".into());
         let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
-        overlay_host_implied_network(&mut grant, &plugin, &config);
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
         assert!(grant.egress_policy().allows_tcp("127.0.0.1", 9000));
         assert!(grant.address_cidrs.contains("127.0.0.1/32"));
     }
@@ -2072,18 +2094,53 @@ mode = "outbound"
         config.database.postgres.url =
             Some("postgres://postgres:postgres@localhost:5432/postgres".into());
 
+        let among = [real.clone(), twin.clone()];
         let mut grant_real = consent_request(&real.manifest, real.plugin_key());
-        overlay_host_implied_network(&mut grant_real, &real, &config);
+        overlay_host_implied_network(&mut grant_real, &real, &config, &among);
         assert!(
             grant_real.egress_policy().allows_tcp("localhost", 5432),
             "selected PluginKey must still get the host postgres overlay"
         );
 
         let mut grant_twin = consent_request(&twin.manifest, twin.plugin_key());
-        overlay_host_implied_network(&mut grant_twin, &twin, &config);
+        overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
         assert!(
             grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
             "alias twin must not inherit the operator postgres URL overlay"
+        );
+    }
+
+    #[test]
+    fn overlay_bare_alias_does_not_grant_when_twins_exist() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let toml = r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#;
+        let real = discovered(a.path(), toml);
+        let twin = discovered(b.path(), toml);
+        let among = [real.clone(), twin.clone()];
+        let mut config = Config::default();
+        config.database.plugin = "postgres".into();
+        config.database.postgres.url =
+            Some("postgres://postgres:postgres@localhost:5432/postgres".into());
+
+        let mut grant_real = consent_request(&real.manifest, real.plugin_key());
+        overlay_host_implied_network(&mut grant_real, &real, &config, &among);
+        let mut grant_twin = consent_request(&twin.manifest, twin.plugin_key());
+        overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
+        assert!(
+            grant_real.tcp.is_empty() && grant_twin.tcp.is_empty(),
+            "ambiguous alias occupancy must not overlay host TCP onto either twin"
         );
     }
 
@@ -2111,15 +2168,16 @@ mode = "outbound"
         config.output.s3.plugin = real.plugin_key().canonical().to_string();
         config.output.s3.endpoint = Some("http://127.0.0.1:9000".into());
 
+        let among = [real.clone(), twin.clone()];
         let mut grant_real = consent_request(&real.manifest, real.plugin_key());
-        overlay_host_implied_network(&mut grant_real, &real, &config);
+        overlay_host_implied_network(&mut grant_real, &real, &config, &among);
         assert!(
             grant_real.egress_policy().allows_tcp("127.0.0.1", 9000),
             "selected PluginKey must still get the host S3 endpoint overlay"
         );
 
         let mut grant_twin = consent_request(&twin.manifest, twin.plugin_key());
-        overlay_host_implied_network(&mut grant_twin, &twin, &config);
+        overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
         assert!(
             grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
             "alias twin must not inherit the operator S3 endpoint overlay"
@@ -2152,12 +2210,13 @@ mode = "outbound"
             .integrations
             .set_audiobookshelf_string("base_url", "http://127.0.0.1:13378");
 
+        let among = [real.clone(), twin.clone()];
         let mut grant_real = consent_request(&real.manifest, real.plugin_key());
-        overlay_host_implied_network(&mut grant_real, &real, &config);
+        overlay_host_implied_network(&mut grant_real, &real, &config, &among);
         assert!(grant_real.egress_policy().allows_tcp("127.0.0.1", 13378));
 
         let mut grant_twin = consent_request(&twin.manifest, twin.plugin_key());
-        overlay_host_implied_network(&mut grant_twin, &twin, &config);
+        overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
         assert!(
             grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
             "alias twin must not inherit the operator Audiobookshelf URL overlay"
