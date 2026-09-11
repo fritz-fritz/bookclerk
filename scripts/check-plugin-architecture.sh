@@ -317,6 +317,13 @@ else
   fail "SOCKET_PROXY_ENV_LOCK is cfg(test) on Windows and fails clippy --all-targets"
 fi
 
+if grep -A25 'pub fn upsert' crates/bookclerk-plugin-host/src/consent.rs \
+    | grep -q 'g.plugin_key.is_empty() && g.plugin_id == grant.plugin_id'; then
+  ok "grant upsert matches keyless rows by alias only"
+else
+  fail "grant upsert can still replace a PluginKey grant via alias"
+fi
+
 if grep -n 'reqwest::Client' crates/bookclerk-storage/src >/dev/null 2>&1; then
   fail "bookclerk-storage still uses ambient reqwest::Client"
 else

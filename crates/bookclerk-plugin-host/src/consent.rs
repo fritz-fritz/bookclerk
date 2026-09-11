@@ -418,19 +418,27 @@ impl PluginGrantStore {
         }
     }
 
-    /// Inserts or replaces the grant for `grant.plugin_key` (falling back to alias).
+    /// Inserts or replaces the grant for `grant.plugin_key`.
+    ///
+    /// Incoming grants with a PluginKey match only that key: they never
+    /// overwrite a different provenance, and never collapse onto a keyless
+    /// same-alias legacy row. A keyless incoming grant (legacy files / tests)
+    /// matches only other keyless rows by alias so it cannot replace a
+    /// provenance-qualified grant.
     ///
     /// # Arguments
     ///
     /// * `grant` - Full consent snapshot to persist in memory (call [`Self::save`] to flush).
     pub fn upsert(&mut self, grant: PluginGrant) {
-        let idx = self.grants.iter().position(|g| {
-            if !grant.plugin_key.is_empty() && !g.plugin_key.is_empty() {
-                g.plugin_key == grant.plugin_key
-            } else {
-                g.plugin_id == grant.plugin_id
-            }
-        });
+        let idx = if grant.plugin_key.is_empty() {
+            self.grants
+                .iter()
+                .position(|g| g.plugin_key.is_empty() && g.plugin_id == grant.plugin_id)
+        } else {
+            self.grants
+                .iter()
+                .position(|g| g.plugin_key == grant.plugin_key)
+        };
         if !grant.plugin_key.is_empty() {
             let revision = crate::authority::authority_revision(&grant);
             crate::authority::fence_stale_sessions(&grant.plugin_key, &revision);
@@ -2699,6 +2707,71 @@ mode = "deny"
         assert!(store
             .get_by_plugin_key("path:file:///tmp/evil#local")
             .is_some());
+    }
+
+    #[test]
+    fn upsert_keyed_grant_does_not_replace_keyless_alias_twin() {
+        let mut store = PluginGrantStore::default();
+        let mut keyless = sample_grant(&[], &["config"], &[]);
+        keyless.plugin_id = "local".into();
+        store.upsert(keyless);
+        let mut keyed = sample_grant(&[], &["secrets"], &[]);
+        keyed.plugin_id = "local".into();
+        keyed.plugin_key = "platform:bookclerk/bookclerk-plugin-destination-local#local".into();
+        store.upsert(keyed);
+        assert_eq!(store.grants.len(), 2);
+        assert!(store
+            .grants
+            .iter()
+            .any(|g| g.plugin_key.is_empty() && grant_has_binding(g, "config")));
+        assert!(grant_has_binding(
+            store
+                .get_by_plugin_key("platform:bookclerk/bookclerk-plugin-destination-local#local")
+                .expect("keyed grant"),
+            "secrets"
+        ));
+    }
+
+    #[test]
+    fn upsert_keyless_grant_does_not_replace_keyed_same_alias() {
+        let mut store = PluginGrantStore::default();
+        let mut keyed = sample_grant(&[], &["config"], &[]);
+        keyed.plugin_id = "local".into();
+        keyed.plugin_key = "platform:bookclerk/bookclerk-plugin-destination-local#local".into();
+        store.upsert(keyed);
+        let mut keyless = sample_grant(&[], &["secrets"], &[]);
+        keyless.plugin_id = "local".into();
+        store.upsert(keyless);
+        assert_eq!(store.grants.len(), 2);
+        assert!(grant_has_binding(
+            store
+                .get_by_plugin_key("platform:bookclerk/bookclerk-plugin-destination-local#local")
+                .expect("keyed grant"),
+            "config"
+        ));
+        assert!(store
+            .grants
+            .iter()
+            .any(|g| g.plugin_key.is_empty() && grant_has_binding(g, "secrets")));
+    }
+
+    #[test]
+    fn upsert_replaces_existing_row_for_the_same_plugin_key() {
+        let mut store = PluginGrantStore::default();
+        let key = "platform:bookclerk/bookclerk-plugin-destination-local#local";
+        let mut first = sample_grant(&[], &["config"], &[]);
+        first.plugin_id = "local".into();
+        first.plugin_key = key.into();
+        store.upsert(first);
+        let mut second = sample_grant(&[], &["secrets"], &[]);
+        second.plugin_id = "local".into();
+        second.plugin_key = key.into();
+        store.upsert(second);
+        assert_eq!(store.grants.len(), 1);
+        assert!(grant_has_binding(
+            store.get_by_plugin_key(key).expect("replaced"),
+            "secrets"
+        ));
     }
 
     #[test]
