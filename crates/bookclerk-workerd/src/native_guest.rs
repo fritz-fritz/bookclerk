@@ -108,16 +108,6 @@ fn wrap_native_guest(
     Ok(cmd)
 }
 
-fn deny_spec(backend: &Path, plugin_root: &Path, state_dir: &Path, inherit_fds: &[i32]) -> Spec {
-    deny_spec_with(
-        backend,
-        plugin_root,
-        state_dir,
-        inherit_fds,
-        nested_enforcement_required(),
-    )
-}
-
 fn deny_spec_with(
     backend: &Path,
     plugin_root: &Path,
@@ -227,7 +217,7 @@ mod tests {
     #[test]
     fn nested_native_guest_spec_denies_ambient_inet() {
         let root = std::env::temp_dir();
-        let spec = deny_spec(&root.join("guest"), &root, &root, &[]);
+        let spec = deny_spec_with(&root.join("guest"), &root, &root, &[], false);
         assert_eq!(spec.net, NetPolicy::Deny);
         assert!(spec.allow_exec);
         assert_eq!(spec.preserve_fds, vec![0, 1, 2]);
@@ -237,7 +227,7 @@ mod tests {
     #[test]
     fn nested_spec_preserves_socket_proxy_dir_fd() {
         let root = std::env::temp_dir();
-        let spec = deny_spec(&root.join("guest"), &root, &root, &[7]);
+        let spec = deny_spec_with(&root.join("guest"), &root, &root, &[7], false);
         assert_eq!(spec.preserve_fds, vec![0, 1, 2, 7]);
     }
 
