@@ -207,6 +207,58 @@ else
   fail "postgres host overlay still keys only on the display alias"
 fi
 
+if grep -A20 'fn overlay_s3_endpoint' crates/bookclerk-plugin-host/src/consent.rs \
+    | grep -q 'plugin_matches_occupancy'; then
+  ok "S3 host overlay is PluginKey-aware"
+else
+  fail "S3 host overlay still keys only on the display alias"
+fi
+
+if grep -A20 'fn overlay_audiobookshelf_url' crates/bookclerk-plugin-host/src/consent.rs \
+    | grep -q 'plugin_matches_occupancy'; then
+  ok "Audiobookshelf host overlay is PluginKey-aware"
+else
+  fail "Audiobookshelf host overlay still keys only on the display alias"
+fi
+
+if grep -A40 'pub async fn load_external_destinations' crates/bookclerk-plugin-host/src/host/destination.rs \
+    | grep -q 'resolve_plugin_slot'; then
+  ok "destination occupancy fail-closes on alias twins"
+else
+  fail "S3/local destination load still last-write-wins on alias twins"
+fi
+
+if grep -A40 'pub async fn load_external_sources' crates/bookclerk-plugin-host/src/host/source.rs \
+    | grep -q 'resolve_plugin_slot'; then
+  ok "source occupancy fail-closes on alias twins"
+else
+  fail "source load still spawns every alias twin"
+fi
+
+if grep -A40 'pub async fn load_external_integrations' crates/bookclerk-plugin-host/src/host/integration.rs \
+    | grep -q 'resolve_plugin_slot'; then
+  ok "integration occupancy fail-closes on alias twins"
+else
+  fail "integration load still spawns every alias twin"
+fi
+
+if grep -n 'not(unix)' crates/bookclerk-plugin-sdk/src/pass_fd.rs \
+    | grep -q . \
+    && grep -A20 'pub fn fd_proc_path' crates/bookclerk-plugin-sdk/src/pass_fd.rs \
+    | grep -q 'not(unix)'; then
+  ok "fd_proc_path compiles on non-Unix"
+else
+  fail "fd_proc_path is Unix-only and will not compile on Windows"
+fi
+
+if grep -A25 'pub async fn mediated_connect_url' \
+    crates/bookclerk-plugins/optional/database-postgres/src/socket_mediate.rs \
+    | grep -q 'nested Deny forbids ambient TCP'; then
+  ok "postgres SOCKET_PROXY fail-closes on non-Unix"
+else
+  fail "postgres still returns ambient TCP URLs when SOCKET_PROXY is set on Windows"
+fi
+
 if grep -n 'reqwest::Client' crates/bookclerk-storage/src >/dev/null 2>&1; then
   fail "bookclerk-storage still uses ambient reqwest::Client"
 else
