@@ -88,7 +88,7 @@ pub async fn load_external_destinations(
             tracing::warn!(
                 id = %plugin.manifest.id,
                 api_version = plugin.manifest.api_version,
-                "output plugin is not api_version 2; skipping"
+                "output plugin is not api_version 3; skipping"
             );
             continue;
         }
@@ -105,7 +105,7 @@ pub async fn load_external_destinations(
             tracing::info!(
                 id = %plugin.manifest.id,
                 path = %plugin.command.display(),
-                "loaded external S3 output plugin (api_version 2)"
+                "loaded external S3 output plugin"
             );
             registry.s3 = Some(Arc::new(storage));
             registry.set_plugin_session(session);

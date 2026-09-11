@@ -25,7 +25,8 @@ contract must be **identical** across runtimes.
    one request). RPC carries bounded values and **stream/stub capabilities**.
    Cap'n Proto field/union ordinals are append-only; unknown members fail
    closed or return typed `unsupported`. `describe()` advertises `apiVersion`
-   and `supportedRoles`; the signed manifest is the host allowlist. Manifest
+   and `supportedRoles`; the verified install receipt (provenance + content
+   hashes) is the host allowlist, not a publisher-signed manifest. Manifest
    `api_version` and `describe().apiVersion` must match
    `PRODUCT_API_VERSION`. Optional facilities use named `rpcFeatures`.
 2. **Workerd is the control-plane front door; native jail is a backend.**
