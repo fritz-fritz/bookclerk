@@ -79,6 +79,7 @@ pub async fn mediated_connect_url(url: &str) -> Result<String, DbErr> {
 /// # Errors
 ///
 /// Returns when `url` is not a valid Postgres URL.
+#[cfg(any(unix, test))]
 pub fn postgres_url_with_unix_host(url: &str, socket_dir: &str) -> Result<String, DbErr> {
     let mut parsed =
         url::Url::parse(url).map_err(|err| DbErr::Custom(format!("postgres URL: {err}")))?;
