@@ -13,6 +13,7 @@
 //! | Native guest (`runtime = "native"`) | [`PluginWorker`] / [`serve`] (`api_version = 3`) |
 //! | Fetch / upload work paths | [`fetch_work_dir`], [`upload_file_path`] |
 //! | Mediated TCP sockets | [`connect_socket`] / [`net`] (Workers `connect()` equivalent) |
+//! | Native HTTPS through the socket proxy | feature `http` → `http::Client` |
 //! | OAuth callback without guest listen | [`callback_tunnel`] |
 //! | Workerd / Wasm guests | [`workerd`] + npm `@bookclerk/plugin-sdk` |
 //! | ABI DTOs / method names | [`protocol`] (re-exports `bookclerk-plugin-abi`) |
@@ -58,6 +59,8 @@ mod db;
 mod db_binding;
 mod error;
 mod fetch_dir;
+#[cfg(feature = "http")]
+pub mod http;
 mod json;
 mod manifest_caps;
 pub mod net;

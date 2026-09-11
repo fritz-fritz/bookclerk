@@ -5,16 +5,23 @@
 //! host socket proxy (`BOOKCLERK_SOCKET_PROXY`) which applies the same
 //! [`bookclerk_plugin_manifest::EgressPolicy`] as workerd `fetch()`/`connect()`.
 //!
-//! On Linux the launcher sets `BOOKCLERK_SOCKET_PROXY=abstract:{name}` so the
-//! Unix socket is not a filesystem path (`sockaddr_un` overflows under Cargo's
-//! workspace `.tmp` on GitHub Actions). Pathname values are still accepted.
+//! On Linux the launcher sets `BOOKCLERK_SOCKET_PROXY=/proc/self/fd/{n}/sockets.sock`
+//! (nested Landlock ABI 6 scopes abstract Unix sockets out of the guest domain).
+//! `abstract:{name}` is still accepted for tests and older launchers.
 
 #![allow(clippy::missing_docs_in_private_items)]
 
 use crate::error::{Result, SdkError};
 
+#[cfg(test)]
+use std::sync::Mutex;
+
 /// Env var set by `bookclerk-workerd` for native-behind-workerd guests.
 pub const SOCKET_PROXY_ENV: &str = "BOOKCLERK_SOCKET_PROXY";
+
+/// Process-wide lock for tests that mutate [`SOCKET_PROXY_ENV`].
+#[cfg(test)]
+pub(crate) static SOCKET_PROXY_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Prefix for [`SOCKET_PROXY_ENV`] when the proxy is a Linux abstract socket.
 pub const SOCKET_PROXY_ABSTRACT_PREFIX: &str = "abstract:";
@@ -97,6 +104,13 @@ impl PluginSocket {
         self.stream.into_split()
     }
 
+    /// Consumes the socket, returning the CONNECT-established Unix stream.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn into_unix_stream(self) -> tokio::net::UnixStream {
+        self.stream
+    }
+
     /// Start TLS on a `starttls` socket.
     ///
     /// The proxy is byte-transparent, so TLS is end-to-end. Wrap
@@ -165,8 +179,8 @@ pub async fn connect(address: SocketAddress, options: ConnectOptions) -> Result<
         }
         if options.secure_transport == SecureTransport::On {
             return Err(SdkError::message(
-                "SecureTransport::On: CONNECT succeeded; wrap the stream with tokio-rustls \
-(workerd authors should use starttls + socket.startTls())",
+                "SecureTransport::On: CONNECT succeeded; use bookclerk_plugin_sdk::http::connect_tls \
+(or wrap PluginSocket::into_unix_stream with tokio-rustls)",
             ));
         }
         Ok(PluginSocket {
@@ -249,11 +263,7 @@ async fn read_http_head(stream: &mut tokio::net::UnixStream) -> Result<String> {
 #[allow(clippy::missing_panics_doc, clippy::await_holding_lock)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// `SOCKET_PROXY_ENV` is process-wide; tests that mutate it must not overlap.
-    static SOCKET_PROXY_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
     async fn connect_through_fake_proxy_and_403() {
