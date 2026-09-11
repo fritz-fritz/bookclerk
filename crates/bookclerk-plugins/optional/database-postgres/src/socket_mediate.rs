@@ -52,24 +52,43 @@ pub async fn mediated_connect_url(url: &str) -> Result<String, DbErr> {
 
 /// Sets (or replaces) the libpq `host=` query so sqlx uses `socket_dir`.
 ///
+/// sqlx `sslmode=prefer` (the default) sends `SSLRequest` even on a Unix
+/// socket. Through the splice that becomes TLS-to-origin. Docker and many
+/// operator servers answer `S` then present a self-signed cert; Prefer does
+/// not fall back after `S`, so the handshake RST looks like a connection
+/// error. Keep `require` / `verify-ca` / `verify-full` for operators who
+/// asked for origin TLS; otherwise force `disable` on this local hop.
+///
 /// # Errors
 ///
 /// Returns when `url` is not a valid Postgres URL.
 pub fn postgres_url_with_unix_host(url: &str, socket_dir: &str) -> Result<String, DbErr> {
     let mut parsed =
         url::Url::parse(url).map_err(|err| DbErr::Custom(format!("postgres URL: {err}")))?;
-    let kept: Vec<(String, String)> = parsed
+    let query: Vec<(String, String)> = parsed
         .query_pairs()
-        .filter(|(key, _)| key != "host" && key != "hostaddr")
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
+    let keep_origin_tls = query.iter().any(|(key, value)| {
+        (key == "sslmode" || key == "ssl-mode")
+            && matches!(value.as_str(), "require" | "verify-ca" | "verify-full")
+    });
     parsed.set_query(None);
     {
         let mut pairs = parsed.query_pairs_mut();
-        for (key, value) in &kept {
+        for (key, value) in &query {
+            if key == "host" || key == "hostaddr" {
+                continue;
+            }
+            if (key == "sslmode" || key == "ssl-mode") && !keep_origin_tls {
+                continue;
+            }
             pairs.append_pair(key, value);
         }
         pairs.append_pair("host", socket_dir);
+        if !keep_origin_tls {
+            pairs.append_pair("sslmode", "disable");
+        }
     }
     Ok(parsed.into())
 }
@@ -336,7 +355,20 @@ mod tests {
         assert_eq!(host.as_deref(), Some("/proc/self/fd/7"));
         assert!(parsed
             .query_pairs()
-            .any(|(k, v)| k == "sslmode" && v == "prefer"));
+            .any(|(k, v)| k == "sslmode" && v == "disable"));
+    }
+
+    #[test]
+    fn unix_host_keeps_require_sslmode() {
+        let out = postgres_url_with_unix_host(
+            "postgres://u@db.example.com:5432/db?sslmode=require",
+            "/tmp/bc-pg",
+        )
+        .expect("rewrite");
+        let parsed = url::Url::parse(&out).expect("url");
+        assert!(parsed
+            .query_pairs()
+            .any(|(k, v)| k == "sslmode" && v == "require"));
     }
 
     #[test]
