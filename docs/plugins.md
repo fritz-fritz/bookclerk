@@ -168,6 +168,13 @@ contract. Host binaries (`bookclerk`, `bookclerkd`) depend on
 builds and local `cargo dev` both load staged guests from `plugins/`.
 Discovered copies of the same **PluginKey** are skipped; the same display
 alias from two provenances stays distinct and requires a qualified ref.
+Enablement occupancy (`[database].plugin`, `[output.s3].plugin`,
+`[output.local].plugin`, `[sources.<id>].plugin`,
+`[integrations.<id>].plugin`) is a PluginKey when set by
+`bookclerk plugins enable`; a bare alias is accepted only when exactly one
+install uses it. Two installs that share `id = "s3"` (or `audible`, …) fail
+closed until the operator names a PluginKey — the host does not last-write-wins
+or spawn every twin.
 After registration, hosts talk **only**
 through `ContentSource` /
 `Integration` (login, scan, fetch, import, revoke, inspect, plus catalog
@@ -625,7 +632,7 @@ covers the current manifest).
 | File | Role |
 | --- | --- |
 | `plugin.toml` (next to the binary or `modules/`) | **Install / discovery** — id, kind, runtime, command or `[workerd]`, capabilities |
-| `config.toml` (`[sources.<id>]` / `[integrations.<id>]`) | **User settings** — `enabled`, opaque knobs |
+| `config.toml` (`[sources.<id>]` / `[integrations.<id>]`) | **User settings** — `enabled`, occupancy `plugin` (PluginKey or unambiguous alias), opaque knobs |
 
 The plugin (or its installer) drops a directory under a search root. Bookclerk
 scans for `plugin.toml`, spawns `bookclerk-workerd` (fronting the native
@@ -878,10 +885,12 @@ disabled**; sources follow the usual `[sources.<id>]` rules (missing → enabled
 ```toml
 [integrations.echo]
 enabled = true
+# plugin = "path:file:///opt/plugins/echo#echo"  # required when the alias is ambiguous
 # greeting = "hi"   # opaque knobs → spawn config
 
 [sources.my_store]
 enabled = true
+# plugin = "cargo:crates.io/bookclerk-plugin-source-my-store#my_store"
 # … opaque knobs …
 ```
 
@@ -1233,8 +1242,10 @@ issue #120 builds on this contract without another public ABI redesign.
 
 First-party S3 ships as `bookclerk-plugin-destination-s3` (`api_version = 3`).
 When the guest is discovered under `plugins/s3/` and `[output.s3].enabled = true`,
-the host loads it at startup via external destination loading instead of the
-in-process S3 backend.
+the host loads the unique occupant (`[output.s3].plugin`, or the `s3` alias when
+only one install exists) at startup via external destination loading instead of
+an in-process S3 backend. A second install that reuses `id = "s3"` does not
+overwrite the destination.
 
 ### Database adapter entrypoints
 

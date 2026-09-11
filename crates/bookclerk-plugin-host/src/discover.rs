@@ -123,6 +123,96 @@ pub fn discover_plugins(config: &Config) -> Result<Vec<DiscoveredPlugin>> {
     Ok(out)
 }
 
+/// Config occupancy selector (`plugin = "…"`), or `alias` when the field is empty.
+///
+/// Occupancy is how host config names the guest that may use a singleton
+/// slot (`[database].plugin`, `[output.s3].plugin`, `[sources.<id>].plugin`).
+/// An empty field still means the display alias, which
+/// [`resolve_plugin_slot`] accepts only when exactly one install uses it.
+///
+/// # Arguments
+///
+/// * `plugin_field` - Occupancy string from config (`plugin = "…"`).
+/// * `alias` - Display alias used when `plugin_field` is empty.
+#[must_use]
+pub fn occupancy_spec<'a>(plugin_field: &'a str, alias: &'a str) -> &'a str {
+    let spec = plugin_field.trim();
+    if spec.is_empty() {
+        alias
+    } else {
+        spec
+    }
+}
+
+/// True when `plugin` is the occupant named by `spec` (PluginKey or alias).
+///
+/// Does not detect alias twins — loaders must call [`resolve_plugin_slot`].
+///
+/// # Arguments
+///
+/// * `plugin` - Candidate install.
+/// * `spec` - Occupancy selector from [`occupancy_spec`].
+#[must_use]
+pub fn plugin_matches_occupancy(plugin: &DiscoveredPlugin, spec: &str) -> bool {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return false;
+    }
+    if let Ok(key) = PluginKey::parse(spec) {
+        return plugin.plugin_key() == &key;
+    }
+    plugin.alias().eq_ignore_ascii_case(spec)
+}
+
+/// Resolves `spec` among `plugins` without treating a vacant slot as an error.
+///
+/// `None` means nothing installed matches. An ambiguous alias is an error
+/// so callers fail closed instead of spawning every twin or last-write-wins.
+///
+/// # Arguments
+///
+/// * `plugins` - Already-filtered family candidates.
+/// * `spec` - Occupancy selector from [`occupancy_spec`].
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when two installs share the alias (or PluginKey).
+pub fn resolve_plugin_slot<'a>(
+    plugins: &'a [DiscoveredPlugin],
+    spec: &str,
+) -> Result<Option<&'a DiscoveredPlugin>> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(key) = PluginKey::parse(spec) {
+        let matches: Vec<_> = plugins.iter().filter(|p| p.plugin_key() == &key).collect();
+        return match matches.as_slice() {
+            [one] => Ok(Some(*one)),
+            [] => Ok(None),
+            _ => Err(PluginError::message(format!(
+                "duplicate plugin key `{spec}`"
+            ))),
+        };
+    }
+    let lower = spec.to_ascii_lowercase();
+    let matches: Vec<_> = plugins
+        .iter()
+        .filter(|p| p.alias().eq_ignore_ascii_case(&lower))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(Some(*one)),
+        [] => Ok(None),
+        many => {
+            let keys: Vec<_> = many.iter().map(|p| p.plugin_key().canonical()).collect();
+            Err(PluginError::message(format!(
+                "plugin alias `{spec}` is ambiguous; use a provenance-qualified PluginKey. candidates: {}",
+                keys.join(", ")
+            )))
+        }
+    }
+}
+
 /// Resolves `spec` to a discovered plugin.
 ///
 /// `spec` may be a canonical [`PluginKey`] or a manifest alias. Bare aliases
@@ -139,35 +229,14 @@ pub fn resolve_plugin_ref<'a>(
     if spec.is_empty() {
         return Err(PluginError::message("plugin reference must not be empty"));
     }
-    if let Ok(key) = PluginKey::parse(spec) {
-        let matches: Vec<_> = plugins.iter().filter(|p| p.plugin_key() == &key).collect();
-        return match matches.as_slice() {
-            [one] => Ok(*one),
-            [] => Err(PluginError::message(format!(
-                "no plugin installed with key `{spec}`"
-            ))),
-            _ => Err(PluginError::message(format!(
-                "duplicate plugin key `{spec}`"
-            ))),
-        };
-    }
-    let lower = spec.to_ascii_lowercase();
-    let matches: Vec<_> = plugins
-        .iter()
-        .filter(|p| p.alias().eq_ignore_ascii_case(&lower))
-        .collect();
-    match matches.as_slice() {
-        [one] => Ok(*one),
-        [] => Err(PluginError::message(format!(
+    match resolve_plugin_slot(plugins, spec)? {
+        Some(plugin) => Ok(plugin),
+        None if PluginKey::parse(spec).is_ok() => Err(PluginError::message(format!(
+            "no plugin installed with key `{spec}`"
+        ))),
+        None => Err(PluginError::message(format!(
             "plugin `{spec}` is not installed"
         ))),
-        many => {
-            let keys: Vec<_> = many.iter().map(|p| p.plugin_key().canonical()).collect();
-            Err(PluginError::message(format!(
-                "plugin alias `{spec}` is ambiguous; use a provenance-qualified PluginKey. candidates: {}",
-                keys.join(", ")
-            )))
-        }
     }
 }
 
@@ -499,6 +568,27 @@ mode = "deny"
         assert!(err.contains("PluginKey"), "{err}");
         let qualified = resolve_plugin_ref(&found, found[0].plugin_key().canonical()).unwrap();
         assert_eq!(qualified.plugin_key(), found[0].plugin_key());
+        let err = resolve_plugin_slot(&found, "echo").unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "{err}");
+        let occupant = resolve_plugin_slot(&found, found[0].plugin_key().canonical()).unwrap();
+        assert_eq!(occupant.unwrap().plugin_key(), found[0].plugin_key());
+        assert!(resolve_plugin_slot(&found, "missing").unwrap().is_none());
+        assert_eq!(occupancy_spec("", "s3"), "s3");
+        assert_eq!(occupancy_spec("  ", "s3"), "s3");
+        assert_eq!(
+            occupancy_spec(found[0].plugin_key().canonical(), "s3"),
+            found[0].plugin_key().canonical()
+        );
+        assert!(plugin_matches_occupancy(
+            &found[0],
+            found[0].plugin_key().canonical()
+        ));
+        assert!(!plugin_matches_occupancy(
+            &found[1],
+            found[0].plugin_key().canonical()
+        ));
+        assert!(plugin_matches_occupancy(&found[0], "echo"));
+        assert!(plugin_matches_occupancy(&found[1], "echo"));
     }
 
     #[test]

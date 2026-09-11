@@ -1816,7 +1816,11 @@ fn plugin_enabled(config: &Config, family: bookclerk_plugin_host::PluginFamily, 
         bookclerk_plugin_host::PluginFamily::Output if id == "local" => config.output.local.enabled,
         bookclerk_plugin_host::PluginFamily::Output => false,
         bookclerk_plugin_host::PluginFamily::Database => {
-            config.database.plugin.eq_ignore_ascii_case(id)
+            let spec = config.database.plugin.trim();
+            spec.eq_ignore_ascii_case(id)
+                || spec
+                    .rsplit_once('#')
+                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case(id))
         }
     }
 }

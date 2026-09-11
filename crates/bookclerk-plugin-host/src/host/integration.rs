@@ -163,17 +163,28 @@ pub async fn load_external_integrations(
     registry: &mut IntegrationRegistry,
     services: &SessionServices,
 ) -> Result<()> {
-    for plugin in crate::discover_plugins(config)? {
-        if !plugin
-            .manifest
-            .families()
-            .contains(&crate::PluginFamily::Integration)
-        {
+    let plugins = crate::discover_plugins(config)?;
+    let integrations: Vec<_> = plugins
+        .into_iter()
+        .filter(|plugin| {
+            plugin
+                .manifest
+                .families()
+                .contains(&crate::PluginFamily::Integration)
+        })
+        .collect();
+    let aliases: std::collections::BTreeSet<String> = integrations
+        .iter()
+        .map(|plugin| plugin.alias().to_ascii_lowercase())
+        .collect();
+    for alias in aliases {
+        if !config.integrations.is_enabled(&alias) {
             continue;
         }
-        if !config.integrations.is_enabled(&plugin.manifest.id) {
+        let spec = crate::occupancy_spec(config.integrations.occupancy(&alias), &alias);
+        let Some(plugin) = crate::resolve_plugin_slot(&integrations, spec)? else {
             continue;
-        }
+        };
         if registry.get(plugin.plugin_key().canonical()).is_some() {
             tracing::debug!(
                 plugin_key = %plugin.plugin_key().canonical(),
@@ -183,9 +194,13 @@ pub async fn load_external_integrations(
             );
             continue;
         }
-        match ExternalIntegration::spawn_with(&plugin, config, services.clone()).await {
+        match ExternalIntegration::spawn_with(plugin, config, services.clone()).await {
             Ok(i) => {
-                tracing::info!(id = %plugin.manifest.id, "loaded external integration plugin");
+                tracing::info!(
+                    id = %plugin.manifest.id,
+                    plugin_key = %plugin.plugin_key().canonical(),
+                    "loaded external integration plugin"
+                );
                 registry.register(Arc::new(i));
             }
             Err(err) => {

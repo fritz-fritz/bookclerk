@@ -1528,7 +1528,14 @@ fn overlay_audiobookshelf_url(
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
 ) {
-    if plugin.manifest.id != "audiobookshelf" {
+    if !plugin.alias().eq_ignore_ascii_case("audiobookshelf") {
+        return;
+    }
+    let spec = crate::occupancy_spec(
+        config.integrations.occupancy("audiobookshelf"),
+        "audiobookshelf",
+    );
+    if !crate::plugin_matches_occupancy(plugin, spec) {
         return;
     }
     overlay_http_url(grant, &config.integrations.audiobookshelf().base_url, 443);
@@ -1541,7 +1548,11 @@ fn overlay_s3_endpoint(
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
 ) {
-    if plugin.manifest.id != "s3" {
+    if !plugin.alias().eq_ignore_ascii_case("s3") {
+        return;
+    }
+    let spec = crate::occupancy_spec(&config.output.s3.plugin, "s3");
+    if !crate::plugin_matches_occupancy(plugin, spec) {
         return;
     }
     let Some(endpoint) = config.output.s3.endpoint.as_deref() else {
@@ -2061,6 +2072,83 @@ mode = "outbound"
         assert!(
             grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
             "alias twin must not inherit the operator postgres URL overlay"
+        );
+    }
+
+    #[test]
+    fn overlay_s3_plugin_key_spec_does_not_grant_alias_twin() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let toml = r#"
+api_version = 3
+id = "s3"
+runtime = "native"
+command = "./guest"
+entrypoints = ["storage"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#;
+        let real = discovered(a.path(), toml);
+        let twin = discovered(b.path(), toml);
+        assert_eq!(real.alias(), twin.alias());
+        assert_ne!(real.plugin_key(), twin.plugin_key());
+        let mut config = Config::default();
+        config.output.s3.plugin = real.plugin_key().canonical().to_string();
+        config.output.s3.endpoint = Some("http://127.0.0.1:9000".into());
+
+        let mut grant_real = consent_request(&real.manifest, real.plugin_key());
+        overlay_host_implied_network(&mut grant_real, &real, &config);
+        assert!(
+            grant_real.egress_policy().allows_tcp("127.0.0.1", 9000),
+            "selected PluginKey must still get the host S3 endpoint overlay"
+        );
+
+        let mut grant_twin = consent_request(&twin.manifest, twin.plugin_key());
+        overlay_host_implied_network(&mut grant_twin, &twin, &config);
+        assert!(
+            grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
+            "alias twin must not inherit the operator S3 endpoint overlay"
+        );
+    }
+
+    #[test]
+    fn overlay_audiobookshelf_plugin_key_spec_does_not_grant_alias_twin() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let toml = r#"
+api_version = 3
+id = "audiobookshelf"
+runtime = "native"
+command = "./guest"
+entrypoints = ["remoteLibrary"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#;
+        let real = discovered(a.path(), toml);
+        let twin = discovered(b.path(), toml);
+        let mut config = Config::default();
+        config
+            .integrations
+            .set_audiobookshelf_string("plugin", real.plugin_key().canonical().to_string());
+        config
+            .integrations
+            .set_audiobookshelf_string("base_url", "http://127.0.0.1:13378");
+
+        let mut grant_real = consent_request(&real.manifest, real.plugin_key());
+        overlay_host_implied_network(&mut grant_real, &real, &config);
+        assert!(grant_real.egress_policy().allows_tcp("127.0.0.1", 13378));
+
+        let mut grant_twin = consent_request(&twin.manifest, twin.plugin_key());
+        overlay_host_implied_network(&mut grant_twin, &twin, &config);
+        assert!(
+            grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
+            "alias twin must not inherit the operator Audiobookshelf URL overlay"
         );
     }
 

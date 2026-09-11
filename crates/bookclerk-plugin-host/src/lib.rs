@@ -84,8 +84,8 @@ pub use consent::{
 pub use crates_io::search_crates_io;
 pub use destinations::{build_acquire_destinations, build_storage_backend};
 pub use discover::{
-    discover_plugins, plugin_search_dirs, resolve_plugin_ref, settings_table, settings_table_for,
-    DiscoveredPlugin,
+    discover_plugins, occupancy_spec, plugin_matches_occupancy, plugin_search_dirs,
+    resolve_plugin_ref, resolve_plugin_slot, settings_table, settings_table_for, DiscoveredPlugin,
 };
 pub use error::{PluginError, Result};
 pub use event_publisher::{EventOutbox, OutboxEventPublisher};
@@ -129,100 +129,132 @@ pub async fn register_discovered(
     integrations: &mut bookclerk_integrations::IntegrationRegistry,
 ) -> Result<()> {
     let plugins = discover_plugins(config)?;
-    for plugin in plugins {
+    let storefronts: Vec<_> = plugins
+        .iter()
+        .filter(|plugin| plugin.manifest.has_entrypoint(Entrypoint::Storefront))
+        .cloned()
+        .collect();
+    let source_aliases: std::collections::BTreeSet<String> = storefronts
+        .iter()
+        .map(|plugin| plugin.alias().to_ascii_lowercase())
+        .collect();
+    for alias in source_aliases {
+        if !config.sources.is_enabled(&alias) {
+            tracing::debug!(id = %alias, "external source plugin disabled in config; skipping");
+            continue;
+        }
+        let spec = occupancy_spec(config.sources.occupancy(&alias), &alias);
+        let Some(plugin) = resolve_plugin_slot(&storefronts, spec)? else {
+            continue;
+        };
+        if sources.get(plugin.plugin_key().canonical()).is_some() {
+            tracing::debug!(
+                plugin_key = %plugin.plugin_key().canonical(),
+                alias = %plugin.manifest.id,
+                path = %plugin.root.join("plugin.toml").display(),
+                "skipping external source — PluginKey already registered"
+            );
+            continue;
+        }
+        match ExternalSource::spawn(plugin, config).await {
+            Ok(source) => {
+                tracing::info!(
+                    id = %plugin.manifest.id,
+                    plugin_key = %plugin.plugin_key().canonical(),
+                    path = %plugin.command.display(),
+                    "registered external source plugin"
+                );
+                sources.register(std::sync::Arc::new(source));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    id = %plugin.manifest.id,
+                    %err,
+                    "failed to start external source plugin; skipping"
+                );
+            }
+        }
+    }
+
+    let integration_plugins: Vec<_> = plugins
+        .iter()
+        .filter(|plugin| {
+            plugin
+                .manifest
+                .families()
+                .contains(&PluginFamily::Integration)
+        })
+        .cloned()
+        .collect();
+    let integration_aliases: std::collections::BTreeSet<String> = integration_plugins
+        .iter()
+        .map(|plugin| plugin.alias().to_ascii_lowercase())
+        .collect();
+    for alias in integration_aliases {
+        if !config.integrations.is_enabled(&alias) {
+            tracing::debug!(
+                id = %alias,
+                "external integration plugin disabled in config; skipping"
+            );
+            continue;
+        }
+        let spec = occupancy_spec(config.integrations.occupancy(&alias), &alias);
+        let Some(plugin) = resolve_plugin_slot(&integration_plugins, spec)? else {
+            continue;
+        };
+        if integrations.get(plugin.plugin_key().canonical()).is_some() {
+            tracing::debug!(
+                plugin_key = %plugin.plugin_key().canonical(),
+                alias = %plugin.manifest.id,
+                path = %plugin.root.join("plugin.toml").display(),
+                "skipping external integration — PluginKey already registered"
+            );
+            continue;
+        }
+        match ExternalIntegration::spawn(plugin, config).await {
+            Ok(integration) => {
+                tracing::info!(
+                    id = %plugin.manifest.id,
+                    plugin_key = %plugin.plugin_key().canonical(),
+                    path = %plugin.command.display(),
+                    "registered external integration plugin"
+                );
+                integrations.register(std::sync::Arc::new(integration));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    id = %plugin.manifest.id,
+                    %err,
+                    "failed to start external integration plugin; skipping"
+                );
+            }
+        }
+    }
+
+    for plugin in &plugins {
         for family in plugin.manifest.families() {
             match family {
-                PluginFamily::Source => {
-                    if !config.sources.is_enabled(&plugin.manifest.id) {
-                        tracing::debug!(
-                            id = %plugin.manifest.id,
-                            "external source plugin disabled in config; skipping"
-                        );
-                        continue;
-                    }
-                    if sources.get(plugin.plugin_key().canonical()).is_some() {
-                        tracing::debug!(
-                            plugin_key = %plugin.plugin_key().canonical(),
-                            alias = %plugin.manifest.id,
-                            path = %plugin.root.join("plugin.toml").display(),
-                            "skipping external source — PluginKey already registered"
-                        );
-                        continue;
-                    }
-                    match ExternalSource::spawn(&plugin, config).await {
-                        Ok(source) => {
-                            tracing::info!(
-                                id = %plugin.manifest.id,
-                                path = %plugin.command.display(),
-                                "registered external source plugin"
-                            );
-                            sources.register(std::sync::Arc::new(source));
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                id = %plugin.manifest.id,
-                                %err,
-                                "failed to start external source plugin; skipping"
-                            );
-                        }
-                    }
-                }
-                PluginFamily::Integration => {
-                    if !config.integrations.is_enabled(&plugin.manifest.id) {
-                        tracing::debug!(
-                            id = %plugin.manifest.id,
-                            "external integration plugin disabled in config; skipping"
-                        );
-                        continue;
-                    }
-                    if integrations.get(plugin.plugin_key().canonical()).is_some() {
-                        tracing::debug!(
-                            plugin_key = %plugin.plugin_key().canonical(),
-                            alias = %plugin.manifest.id,
-                            path = %plugin.root.join("plugin.toml").display(),
-                            "skipping external integration — PluginKey already registered"
-                        );
-                        continue;
-                    }
-                    match ExternalIntegration::spawn(&plugin, config).await {
-                        Ok(integration) => {
-                            tracing::info!(
-                                id = %plugin.manifest.id,
-                                path = %plugin.command.display(),
-                                "registered external integration plugin"
-                            );
-                            integrations.register(std::sync::Arc::new(integration));
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                id = %plugin.manifest.id,
-                                %err,
-                                "failed to start external integration plugin; skipping"
-                            );
-                        }
-                    }
-                }
                 PluginFamily::Output => {
-                    if !config.output.s3.enabled || plugin.manifest.id != "s3" {
+                    let spec = occupancy_spec(&config.output.s3.plugin, "s3");
+                    if config.output.s3.enabled && plugin_matches_occupancy(plugin, spec) {
+                        tracing::info!(
+                            id = %plugin.manifest.id,
+                            plugin_key = %plugin.plugin_key().canonical(),
+                            "discovered output plugin (loaded via load_external_destinations at startup)"
+                        );
+                    } else {
                         tracing::debug!(
                             id = %plugin.manifest.id,
                             "external output plugin skipped (enable [output.s3] for id=s3)"
                         );
-                        continue;
                     }
-                    tracing::info!(
-                        id = %plugin.manifest.id,
-                        "discovered output plugin (loaded via load_external_destinations at startup)"
-                    );
                 }
                 PluginFamily::Database => {
-                    if plugin
-                        .manifest
-                        .id
-                        .eq_ignore_ascii_case(&config.database.plugin)
-                    {
+                    let spec = occupancy_spec(&config.database.plugin, plugin.alias());
+                    if plugin_matches_occupancy(plugin, spec) {
                         tracing::info!(
                             id = %plugin.manifest.id,
+                            plugin_key = %plugin.plugin_key().canonical(),
                             "discovered database plugin (loaded via load_external_database at startup)"
                         );
                     } else {
@@ -233,6 +265,7 @@ pub async fn register_discovered(
                         );
                     }
                 }
+                PluginFamily::Source | PluginFamily::Integration => {}
             }
         }
     }

@@ -256,16 +256,27 @@ pub async fn load_external_sources(
     registry: &mut SourceRegistry,
     services: &SessionServices,
 ) -> Result<()> {
-    for plugin in crate::discover_plugins(config)? {
-        if !plugin
-            .manifest
-            .has_entrypoint(crate::Entrypoint::Storefront)
-        {
+    let plugins = crate::discover_plugins(config)?;
+    let storefronts: Vec<_> = plugins
+        .into_iter()
+        .filter(|plugin| {
+            plugin
+                .manifest
+                .has_entrypoint(crate::Entrypoint::Storefront)
+        })
+        .collect();
+    let aliases: std::collections::BTreeSet<String> = storefronts
+        .iter()
+        .map(|plugin| plugin.alias().to_ascii_lowercase())
+        .collect();
+    for alias in aliases {
+        if !config.sources.is_enabled(&alias) {
             continue;
         }
-        if !config.sources.is_enabled(&plugin.manifest.id) {
+        let spec = crate::occupancy_spec(config.sources.occupancy(&alias), &alias);
+        let Some(plugin) = crate::resolve_plugin_slot(&storefronts, spec)? else {
             continue;
-        }
+        };
         if registry.get(plugin.plugin_key().canonical()).is_some() {
             tracing::debug!(
                 plugin_key = %plugin.plugin_key().canonical(),
@@ -275,9 +286,13 @@ pub async fn load_external_sources(
             );
             continue;
         }
-        match ExternalSource::spawn_with(&plugin, config, services.clone()).await {
+        match ExternalSource::spawn_with(plugin, config, services.clone()).await {
             Ok(s) => {
-                tracing::info!(id = %plugin.manifest.id, "loaded external source plugin");
+                tracing::info!(
+                    id = %plugin.manifest.id,
+                    plugin_key = %plugin.plugin_key().canonical(),
+                    "loaded external source plugin"
+                );
                 registry.register(Arc::new(s));
             }
             Err(err) => {
