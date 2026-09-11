@@ -236,7 +236,7 @@ mode = "outbound"
 domains = ["api.example.com"]
 ```
 
-**Native** (coarse jail internet — do **not** declare `domains`):
+**Native** (nested jail denies ambient `AF_INET`; SDK sockets share the same policy):
 
 ```toml
 runtime = "native"
@@ -244,14 +244,14 @@ command = "./my-plugin"
 
 [capabilities.network]
 mode = "outbound"
-
-[capabilities.bindings]
-oauth = true   # only when an OAuth callback on loopback is required
+tcp = [{ host = "api.example.com", ports = [443] }]
+# domains are workerd-only — omit them on native plugins.
 ```
 
-Operators must `bookclerk plugins approve` before enable. Native outbound
-approvals warn that networking is not hostname-filtered. Workerd redirect hops
-do not need re-allowlist membership.
+Operators must `bookclerk plugins approve` before enable. Native TCP is
+`host` + `ports` on the same `EgressPolicy` as workerd `connect()`. Workerd
+redirect hops stay on the fetch allowlist unless the operator granted
+undeclared public redirects.
 
 Recommended asset names use **Bookclerk targets** (not raw rustc triples):
 

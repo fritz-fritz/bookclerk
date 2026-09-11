@@ -14,13 +14,18 @@
 //! ```
 
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+use bookclerk_config::{resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_plugin_abi::{PluginCapabilities, PortalAuthMode};
-use bookclerk_plugin_manifest::{EgressPolicy, NetworkMode, TcpGrant};
+use bookclerk_plugin_manifest::{
+    is_public_internet, is_restricted_hostname, normalize_domain_pattern, EgressPolicy,
+    NetworkMode, TcpGrant,
+};
 
 use crate::manifest::{PluginManifest, PluginRuntimeKind, WorkerdLimits};
 use crate::spawn_plan::GuestRuntimeKind;
@@ -1372,6 +1377,80 @@ pub fn inject_workerd_grant_env(cmd: &mut Command, grant: &PluginGrant) {
     }
 }
 
+/// Overlay TCP + CIDR implied by host-configured `[database.postgres].url`.
+///
+/// Not persisted and not operator-invented structural authority. The operator
+/// already configured the URL; spawn injects the matching `EgressPolicy` so
+/// the nested native guest can `connect()` it. No-op unless this guest is the
+/// active Postgres database plugin and the covering grant is outbound.
+///
+/// # Arguments
+///
+/// * `grant` - Effective covering grant (mutated in place).
+/// * `plugin` - Guest being spawned.
+/// * `config` - Host config (URL already env-applied).
+pub fn overlay_host_implied_network(
+    grant: &mut PluginGrant,
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+) {
+    if DatabasePluginKind::parse(&plugin.manifest.id) != Some(DatabasePluginKind::Postgres) {
+        return;
+    }
+    if DatabasePluginKind::parse(&config.database.plugin) != Some(DatabasePluginKind::Postgres) {
+        return;
+    }
+    if !grant.network_mode.eq_ignore_ascii_case("outbound") {
+        return;
+    }
+    let Ok(url) = resolve_postgres_url(config) else {
+        return;
+    };
+    let Some((host, port)) = bookclerk_plugin_database_postgres::postgres_tcp_target(&url) else {
+        return;
+    };
+    add_tcp_grant(grant, &host, port);
+    for cidr in implied_cidrs_for_host(&host) {
+        grant.address_cidrs.insert(cidr);
+    }
+}
+
+/// Inserts `host:port` into the effective TCP grant set (merging ports).
+fn add_tcp_grant(grant: &mut PluginGrant, host: &str, port: u16) {
+    let Some(host) = normalize_domain_pattern(host) else {
+        return;
+    };
+    let mut ports = grant
+        .tcp
+        .iter()
+        .find(|t| t.host == host)
+        .map(|t| t.ports.clone())
+        .unwrap_or_default();
+    grant.tcp.retain(|t| t.host != host);
+    if !ports.contains(&port) {
+        ports.push(port);
+        ports.sort_unstable();
+    }
+    grant.tcp.insert(TcpGrant { host, ports });
+}
+
+/// CIDRs the socket proxy needs beyond the public Internet for `host`.
+fn implied_cidrs_for_host(host: &str) -> Vec<String> {
+    if is_restricted_hostname(host) {
+        return vec!["127.0.0.1/32".into(), "::1/128".into()];
+    }
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return Vec::new();
+    };
+    if is_public_internet(ip) {
+        return Vec::new();
+    }
+    match ip {
+        IpAddr::V4(_) => vec![format!("{ip}/32")],
+        IpAddr::V6(_) => vec![format!("{ip}/128")],
+    }
+}
+
 /// Canonical SHA-256 of a grant's security-relevant fields (not presentation).
 #[must_use]
 pub fn grant_revision(grant: &PluginGrant) -> String {
@@ -1611,6 +1690,93 @@ mode = "deny"
         existing.network_mode = "deny".into();
         let requested = sample_grant(&[], &[], &[]);
         assert!(grant_covers(&existing, &requested));
+    }
+
+    #[test]
+    fn overlay_implies_loopback_tcp_from_postgres_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config.database.plugin = "postgres".into();
+        config.database.postgres.url =
+            Some("postgres://postgres:postgres@localhost:5432/postgres".into());
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config);
+        let policy = grant.egress_policy();
+        assert!(
+            policy.allows_tcp("localhost", 5432),
+            "implied localhost TCP: {policy:?}"
+        );
+        assert!(grant.address_cidrs.contains("127.0.0.1/32"));
+        assert!(grant.address_cidrs.contains("::1/128"));
+    }
+
+    #[test]
+    fn overlay_public_host_needs_tcp_not_cidr() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config.database.plugin = "postgres".into();
+        config.database.postgres.url = Some("postgres://bookclerk@db.example.com:5432/db".into());
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config);
+        assert!(grant.egress_policy().allows_tcp("db.example.com", 5432));
+        assert!(grant.address_cidrs.is_empty());
+    }
+
+    #[test]
+    fn overlay_skips_when_sqlite_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config.database.plugin = "sqlite".into();
+        config.database.postgres.url = Some("postgres://localhost/db".into());
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config);
+        assert!(grant.tcp.is_empty());
+        assert!(grant.address_cidrs.is_empty());
     }
 
     #[test]

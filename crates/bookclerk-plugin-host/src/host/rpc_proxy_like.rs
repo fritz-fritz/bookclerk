@@ -145,7 +145,9 @@ fn guest_config(staged: &StagedGuest, plugin_id: &str, postgres_url: Option<Stri
 fn approve_guest(config: &Config, plugin: &DiscoveredPlugin) {
     let files = &config.paths().files_dir;
     let mut grants = PluginGrantStore::load(files).expect("load grants");
-    grants.upsert(consent_request(&plugin.manifest, plugin.plugin_key()));
+    let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+    crate::consent::overlay_host_implied_network(&mut grant, plugin, config);
+    grants.upsert(grant);
     grants.save(files).expect("save grants");
 }
 

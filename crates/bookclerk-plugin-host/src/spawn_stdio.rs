@@ -68,7 +68,8 @@ pub(crate) async fn spawn_stdio_guest(
 ) -> Result<SpawnedStdio> {
     let id = plugin.plugin_key().canonical().to_string();
     let alias = plugin.manifest.id.clone();
-    let grant = spawn_grant(&config.paths().files_dir, plugin)?;
+    let mut grant = spawn_grant(&config.paths().files_dir, plugin)?;
+    crate::consent::overlay_host_implied_network(&mut grant, plugin, config);
     let spawn_config = spawn_config_for_grant(&grant, config_table);
     let jail = GuestJail::plan(config, plugin, plan)?;
 
@@ -118,12 +119,11 @@ pub(crate) async fn spawn_stdio_guest(
         inject_workerd_grant_env(&mut cmd, &grant);
         if let Some(backend) = &plan.native_backend {
             cmd.env(NATIVE_BACKEND_ENV, backend);
-            // Isolation::Required (and any other confined start) nested-jails
-            // the native backend. Isolation::Off keeps ambient AF_INET so the
-            // postgres LIKE CI vector is unchanged on this branch.
-            if matches!(&jail.start, Start::Confined { .. }) {
-                cmd.env(NESTED_NATIVE_JAIL_ENV, "1");
-            }
+            // Nested Deny is independent of the outer launcher jail. Isolation::Off
+            // still fronts native guests with workerd; ambient AF_INET stays denied
+            // when bookclerk-jail is beside the launcher.
+            #[cfg(unix)]
+            cmd.env(NESTED_NATIVE_JAIL_ENV, "1");
             if let Some(jail_bin) = plan.nested_jail_helper() {
                 cmd.env(NESTED_JAIL_BIN_ENV, jail_bin);
             }

@@ -176,6 +176,12 @@ sqlx-postgres driver inside SeaORM. Connect fails closed when
 `server_version_num < 160000` or `server_encoding` is not UTF8. The connection
 URL is standard libpq-style: `postgres://user:password@host:5432/dbname`.
 
+The guest is native-behind-workerd. Nested `NetPolicy::Deny` blocks ambient
+TCP; sqlx talks to a guest-local Unix socket that the SDK splices through
+the workerd socket proxy. Host spawn overlays TCP + loopback/private CIDRs
+implied by `[database.postgres].url` (not persisted as invented structural
+authority).
+
 Configuration (at least one of `url` or `url_file` is required):
 
 ```toml

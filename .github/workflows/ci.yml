@@ -697,7 +697,7 @@ jobs:
           # Production spawn always goes through bookclerk-workerd; the guest
           # binary alone is not enough after the mandatory front-door change
           # (mirrors the main Test job's PATH / BOOKCLERK_WORKERD_BIN setup).
-          cargo build -p bookclerk-plugin-database-postgres -p bookclerk-workerd
+          cargo build -p bookclerk-plugin-database-postgres -p bookclerk-workerd -p bookclerk-jail
           cargo ensure-workerd
           export PATH="${{ github.workspace }}/target/debug:$PATH"
           cargo test -p bookclerk-plugin-host --lib production_rpc_proxy_keeps_like_through_postgres_guest -- --ignored --nocapture
