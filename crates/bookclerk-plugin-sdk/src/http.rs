@@ -543,14 +543,15 @@ impl RequestBuilder {
     }
 
     /// Query string pairs (serde_urlencoded).
+    ///
+    /// Values are decoded after `serde_urlencoded` so [`append_query`] encodes
+    /// them once (reqwest-compatible). Storing the encoded form would turn
+    /// `,` into `%252C` and Audible catalog search into HTTP 400.
     #[must_use]
     pub fn query<T: Serialize>(mut self, query: &T) -> Self {
         if let Ok(s) = serde_urlencoded::to_string(query) {
-            for pair in s.split('&').filter(|p| !p.is_empty()) {
-                let mut it = pair.splitn(2, '=');
-                let k = it.next().unwrap_or("").to_string();
-                let v = it.next().unwrap_or("").to_string();
-                self.query.push((k, v));
+            for (k, v) in url::form_urlencoded::parse(s.as_bytes()) {
+                self.query.push((k.into_owned(), v.into_owned()));
             }
         }
         self
@@ -1276,5 +1277,31 @@ mod tests {
         assert_eq!(resp.text().await.unwrap(), "ping");
         server.await.unwrap();
         std::env::remove_var(SOCKET_PROXY_ENV);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
+mod query_encoding_tests {
+    use super::*;
+
+    /// Audible catalog `response_groups` uses commas. serde_urlencoded emits
+    /// `%2C`; appending that string as a raw pair would become `%252C`.
+    #[test]
+    fn query_encodes_commas_once() {
+        let req = Client::new()
+            .get("https://api.audible.com/1.0/catalog/search")
+            .query(&[("response_groups", "product_attrs,product_desc")]);
+        let mut url = Url::parse("https://api.audible.com/1.0/catalog/search").unwrap();
+        append_query(&mut url, &req.query);
+        let serialized = url.as_str();
+        assert!(
+            !serialized.contains("%252C"),
+            "double-encoded comma: {serialized}"
+        );
+        assert!(
+            serialized.contains("product_attrs%2Cproduct_desc"),
+            "{serialized}"
+        );
     }
 }
