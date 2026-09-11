@@ -1653,6 +1653,11 @@ export interface PluginGrant {
   manifestDomains?: string[];
   operatorAddedDomains?: string[];
   operatorDeniedDomains?: string[];
+  tcp?: { host: string; ports: number[] }[];
+  operatorAddedTcp?: { host: string; ports: number[] }[];
+  addressCidrs?: string[];
+  operatorAddedCidrs?: string[];
+  allowUndeclaredPublicRedirects?: boolean;
   authorityRevision?: string;
   bindings: string[];
   compatibilityFlags: string[];
@@ -1764,6 +1769,9 @@ export async function approvePluginConsent(
   grant?: {
     networkMode: string;
     domains: string[];
+    tcp?: { host: string; ports: number[] }[];
+    addressCidrs?: string[];
+    allowUndeclaredPublicRedirects?: boolean;
     bindings: string[];
     compatibilityFlags: string[];
     cpuMs?: number;

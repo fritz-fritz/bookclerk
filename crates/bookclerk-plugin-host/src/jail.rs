@@ -486,10 +486,11 @@ fn jail_net_policy(
         // `bookclerk-workerd` must `bind(127.0.0.1:0)` for the host↔isolate RPC
         // bridge, for author isolates and native backends alike. Linux Landlock
         // has no loopback-only policy, so `OutboundListen` also permits
-        // `connect`. Isolate egress (`WORKERD_GRANT_NETWORK_MODE` →
+        // `connect` for the launcher. Isolate egress (`WORKERD_GRANT_*` →
         // `globalOutbound = blocked` under deny) remains the grant enforcement
-        // layer for isolates; a native backend's own sockets are not
-        // OS-denied on this path.
+        // layer for isolates. Native-behind-workerd guests are wrapped in a
+        // nested `NetPolicy::Deny` jail (`native_guest.rs`) and must use the
+        // SDK socket proxy rather than ambient `AF_INET`.
         return NetPolicy::OutboundListen;
     }
     let denied = grant.is_some_and(|g| g.network_mode.eq_ignore_ascii_case("deny"));
@@ -1103,6 +1104,7 @@ entrypoints = ["{entrypoint}"]
             cpu_rate_percent: None,
             extra_processes: None,
             approved_at: "2026-01-01T00:00:00Z".into(),
+            ..PluginGrant::empty()
         };
         let denied = build_spec_with_grant(
             &workerd,
@@ -1148,6 +1150,7 @@ entrypoints = ["{entrypoint}"]
                 cpu_rate_percent: None,
                 extra_processes: None,
                 approved_at: "2026-01-01T00:00:00Z".into(),
+                ..PluginGrant::empty()
             }),
         );
         assert_eq!(native_denied.net, NetPolicy::Deny);
@@ -1246,6 +1249,7 @@ entrypoints = ["{entrypoint}"]
                 cpu_rate_percent: Some(40),
                 extra_processes: Some(4),
                 approved_at: "2026-01-01T00:00:00Z".into(),
+                ..PluginGrant::empty()
             }),
         );
         assert_eq!(native_with_grant.memory_bytes, Some(256 * 1024 * 1024));
@@ -1333,6 +1337,7 @@ entrypoints = ["{entrypoint}"]
                 cpu_rate_percent: Some(want),
                 extra_processes: Some(2),
                 approved_at: "2026-01-01T00:00:00Z".into(),
+                ..PluginGrant::empty()
             }),
         );
         assert_eq!(spec.cpu_rate_percent, Some(want));

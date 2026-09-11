@@ -147,6 +147,27 @@ pub fn authority_revision(grant: &PluginGrant) -> String {
         hasher.update(d.as_bytes());
         hasher.update(b",");
     }
+    hasher.update(b"\ntcp\n");
+    for t in &grant.tcp {
+        hasher.update(t.host.as_bytes());
+        hasher.update(b":");
+        for p in &t.ports {
+            hasher.update(p.to_string().as_bytes());
+            hasher.update(b",");
+        }
+        hasher.update(b";");
+    }
+    hasher.update(b"\ncidrs\n");
+    for c in &grant.address_cidrs {
+        hasher.update(c.as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"\nredirects\n");
+    hasher.update(
+        u8::from(grant.allow_undeclared_public_redirects)
+            .to_string()
+            .as_bytes(),
+    );
     hex::encode(hasher.finalize())
 }
 
@@ -175,6 +196,7 @@ mod tests {
             cpu_rate_percent: None,
             extra_processes: None,
             approved_at: "2026-01-01T00:00:00Z".into(),
+            ..PluginGrant::empty()
         }
     }
 
@@ -206,5 +228,22 @@ mod tests {
         assert!(is_fenced(&stale));
         unregister_session(&current);
         unregister_session(&stale);
+    }
+
+    #[test]
+    fn tcp_and_cidr_changes_revision() {
+        let a = grant(&["a.example"]);
+        let mut b = a.clone();
+        b.tcp.insert(bookclerk_plugin_manifest::TcpGrant {
+            host: "db.example.com".into(),
+            ports: vec![5432],
+        });
+        assert_ne!(authority_revision(&a), authority_revision(&b));
+        let mut c = a.clone();
+        c.address_cidrs.insert("10.0.60.100/32".into());
+        assert_ne!(authority_revision(&a), authority_revision(&c));
+        let mut d = a.clone();
+        d.allow_undeclared_public_redirects = true;
+        assert_ne!(authority_revision(&a), authority_revision(&d));
     }
 }

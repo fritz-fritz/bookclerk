@@ -228,6 +228,8 @@ async fn run_isolate(
 
     let mut cmd = tokio::process::Command::new(workerd_bin);
     cmd.arg("serve")
+        // Unlocks the egress worker's `$experimental` inbound CONNECT handler.
+        .arg(bookclerk_workerd::WORKERD_SERVE_EXPERIMENTAL)
         .arg(&generated.config_path)
         // Cap'n Proto `/modules/…` embeds resolve against the RO install root.
         .arg(format!("--import-path={}", generated.import_path.display()))
@@ -297,19 +299,33 @@ async fn run_native_behind_workerd(
         "starting native-behind-workerd isolate"
     );
 
-    let mut guest = tokio::process::Command::new(backend)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true)
+    let state_dir = config::workerd_state_dir(root)?;
+    let _state_cleanup = RemoveDirOnDrop(state_dir.clone());
+    let bridge_token = generate_bridge_token();
+
+    #[cfg(unix)]
+    let (socket_proxy_path, socket_listener) = {
+        let path = state_dir.join("sockets.sock");
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path)
+            .with_context(|| format!("bind socket proxy {}", path.display()))?;
+        (path, listener)
+    };
+
+    let mut guest_cmd =
+        bookclerk_workerd::native_guest::native_guest_command(backend, root, &state_dir)?;
+    #[cfg(unix)]
+    {
+        guest_cmd.env(
+            bookclerk_workerd::socket_proxy::SOCKET_PROXY_ENV,
+            &socket_proxy_path,
+        );
+    }
+    let mut guest = guest_cmd
         .spawn()
         .with_context(|| format!("spawn native guest {}", backend.display()))?;
     let guest_stdin = guest.stdin.take().context("native guest stdin")?;
     let guest_stdout = guest.stdout.take().context("native guest stdout")?;
-
-    let state_dir = config::workerd_state_dir(root)?;
-    let _state_cleanup = RemoveDirOnDrop(state_dir.clone());
-    let bridge_token = generate_bridge_token();
 
     #[cfg(unix)]
     let (listen, rpc_listener) = {
@@ -362,6 +378,7 @@ async fn run_native_behind_workerd(
 
     let mut cmd = tokio::process::Command::new(&workerd_bin);
     cmd.arg("serve")
+        .arg(bookclerk_workerd::WORKERD_SERVE_EXPERIMENTAL)
         .arg(&generated.config_path)
         .arg(format!("--import-path={}", generated.import_path.display()))
         .current_dir(&generated.state_dir)
@@ -386,6 +403,19 @@ async fn run_native_behind_workerd(
         .await
         .context("workerd bridge /health did not become ready")?;
 
+    #[cfg(unix)]
+    let socket_fence = {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let fence = Arc::new(AtomicBool::new(false));
+        bookclerk_workerd::socket_proxy::spawn_unix(
+            socket_listener,
+            egress.policy().clone(),
+            Arc::clone(&fence),
+        )?;
+        fence
+    };
+
     let result = mediate_native(
         generated.listen.port(),
         bridge_token.clone(),
@@ -398,6 +428,9 @@ async fn run_native_behind_workerd(
         manifest.capabilities(),
     )
     .await;
+
+    #[cfg(unix)]
+    socket_fence.store(true, std::sync::atomic::Ordering::SeqCst);
 
     let _ = child.kill().await;
     let _ = child.wait().await;
