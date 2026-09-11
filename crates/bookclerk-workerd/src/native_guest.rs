@@ -36,22 +36,62 @@ pub const NESTED_AC_SID_ENV: &str = "BOOKCLERK_NESTED_AC_SID";
 ///
 /// # Errors
 ///
-/// Returns an error when the nested jail spec cannot be serialized.
+/// Returns an error when nested Deny is required but `bookclerk-jail` is
+/// missing, or when the nested jail spec cannot be serialized.
 pub fn native_guest_command(
     backend: &Path,
     plugin_root: &Path,
     state_dir: &Path,
     inherit_fds: &[i32],
 ) -> Result<Command> {
-    let nested_requested = std::env::var_os(NESTED_JAIL_ENV).is_some_and(|v| v == "1");
+    wrap_native_guest(
+        backend,
+        plugin_root,
+        state_dir,
+        inherit_fds,
+        std::env::var_os(NESTED_JAIL_ENV).is_some_and(|v| v == "1"),
+        find_jail(),
+        nested_enforcement_required(),
+    )
+}
+
+/// True when nested Deny must not be skipped if `bookclerk-jail` is absent.
+///
+/// Host Isolation::Required sets [`NESTED_JAIL_ENFORCEMENT_ENV`]. CI also
+/// sets `BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT`, which must not silently
+/// exec the backend with ambient `AF_INET`.
+fn nested_enforcement_required() -> bool {
+    std::env::var_os("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT").is_some()
+        || std::env::var(NESTED_JAIL_ENFORCEMENT_ENV).as_deref() == Ok("required")
+}
+
+fn wrap_native_guest(
+    backend: &Path,
+    plugin_root: &Path,
+    state_dir: &Path,
+    inherit_fds: &[i32],
+    nested_requested: bool,
+    jail: Option<PathBuf>,
+    enforcement_required: bool,
+) -> Result<Command> {
     let mut cmd = if nested_requested {
-        if let Some(jail) = find_jail() {
-            let spec = deny_spec(backend, plugin_root, state_dir, inherit_fds);
+        if let Some(jail) = jail {
+            let spec = deny_spec_with(
+                backend,
+                plugin_root,
+                state_dir,
+                inherit_fds,
+                enforcement_required,
+            );
             let json = serde_json::to_string(&spec).context("serialize nested native jail spec")?;
             let mut wrapped = Command::new(jail);
             wrapped.env(SPEC_ENV, json);
             wrapped.arg(backend);
             wrapped
+        } else if enforcement_required {
+            anyhow::bail!(
+                "bookclerk-jail not found beside bookclerk-workerd; nested AF_INET denial is required"
+            );
         } else {
             tracing::warn!(
                 "bookclerk-jail not found beside bookclerk-workerd; native guest will not get nested AF_INET denial"
@@ -69,9 +109,23 @@ pub fn native_guest_command(
 }
 
 fn deny_spec(backend: &Path, plugin_root: &Path, state_dir: &Path, inherit_fds: &[i32]) -> Spec {
-    let enforcement = if std::env::var_os("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT").is_some()
-        || std::env::var(NESTED_JAIL_ENFORCEMENT_ENV).as_deref() == Ok("required")
-    {
+    deny_spec_with(
+        backend,
+        plugin_root,
+        state_dir,
+        inherit_fds,
+        nested_enforcement_required(),
+    )
+}
+
+fn deny_spec_with(
+    backend: &Path,
+    plugin_root: &Path,
+    state_dir: &Path,
+    inherit_fds: &[i32],
+    enforcement_required: bool,
+) -> Spec {
+    let enforcement = if enforcement_required {
         Enforcement::Required
     } else {
         Enforcement::BestEffort
@@ -168,7 +222,7 @@ fn find_jail() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bookclerk_sandbox::NetPolicy;
+    use bookclerk_sandbox::{Enforcement, NetPolicy};
 
     #[test]
     fn nested_native_guest_spec_denies_ambient_inet() {
@@ -198,5 +252,32 @@ mod tests {
         assert!(roots.contains(&files));
         assert!(roots.iter().any(|p| p.ends_with("data")));
         assert!(roots.iter().any(|p| p.ends_with("tmp")));
+    }
+
+    #[test]
+    fn nested_deny_spec_is_required_when_enforcement_is_required() {
+        let root = std::env::temp_dir();
+        let spec = deny_spec_with(&root.join("guest"), &root, &root, &[], true);
+        assert_eq!(spec.enforcement, Enforcement::Required);
+        assert_eq!(spec.net, NetPolicy::Deny);
+    }
+
+    #[test]
+    fn missing_jail_fail_closes_when_nested_enforcement_required() {
+        let root = std::env::temp_dir();
+        let err = wrap_native_guest(&root.join("guest"), &root, &root, &[], true, None, true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("bookclerk-jail not found"),
+            "missing jail must fail closed when nested Deny is required: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_jail_continues_when_nested_enforcement_is_best_effort() {
+        let root = std::env::temp_dir();
+        wrap_native_guest(&root.join("guest"), &root, &root, &[], true, None, false)
+            .expect("Isolation::Off may continue without bookclerk-jail");
     }
 }
