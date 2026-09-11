@@ -544,7 +544,7 @@ impl RequestBuilder {
 
     /// Query string pairs (serde_urlencoded).
     ///
-    /// Values are decoded after `serde_urlencoded` so [`append_query`] encodes
+    /// Values are decoded after `serde_urlencoded` so the URL encoder emits
     /// them once (reqwest-compatible). Storing the encoded form would turn
     /// `,` into `%252C` and Audible catalog search into HTTP 400.
     #[must_use]
