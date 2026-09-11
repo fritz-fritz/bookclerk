@@ -657,13 +657,20 @@ impl PluginSession {
         let instance_key = plugin_instance_key(&id, account_id);
         let identity = ExecutorIdentity::from_plugin_with_runtime(plugin, account_id, plan.runtime)
             .with_grant_revision(&grant);
+<<<<<<< HEAD
         let files_dir = spawned.files_dir.clone();
+=======
+>>>>>>> e78a5d7c (plugin: route native postgres TCP through the workerd socket gateway)
         if identity.grant_revision.is_empty() {
             return Err(PluginError::message(format!(
                 "plugin `{}` spawn is missing an authority revision",
                 plugin.plugin_key().canonical()
             )));
         }
+<<<<<<< HEAD
+=======
+        let files_dir = spawned.files_dir.clone();
+>>>>>>> e78a5d7c (plugin: route native postgres TCP through the workerd socket gateway)
         let (tx, rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) =
             oneshot::channel::<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>();
