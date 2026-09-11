@@ -4,6 +4,10 @@
 //! nested jail denies ambient internet; this module speaks HTTP CONNECT to the
 //! host socket proxy (`BOOKCLERK_SOCKET_PROXY`) which applies the same
 //! [`bookclerk_plugin_manifest::EgressPolicy`] as workerd `fetch()`/`connect()`.
+//!
+//! On Linux the launcher sets `BOOKCLERK_SOCKET_PROXY=abstract:{name}` so the
+//! Unix socket is not a filesystem path (`sockaddr_un` overflows under Cargo's
+//! workspace `.tmp` on GitHub Actions). Pathname values are still accepted.
 
 #![allow(clippy::missing_docs_in_private_items)]
 
@@ -11,6 +15,9 @@ use crate::error::{Result, SdkError};
 
 /// Env var set by `bookclerk-workerd` for native-behind-workerd guests.
 pub const SOCKET_PROXY_ENV: &str = "BOOKCLERK_SOCKET_PROXY";
+
+/// Prefix for [`SOCKET_PROXY_ENV`] when the proxy is a Linux abstract socket.
+pub const SOCKET_PROXY_ABSTRACT_PREFIX: &str = "abstract:";
 
 /// Destination for [`connect`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,14 +141,13 @@ pub async fn connect(address: SocketAddress, options: ConnectOptions) -> Result<
     #[cfg(unix)]
     {
         use tokio::io::AsyncWriteExt;
-        use tokio::net::UnixStream;
 
-        let path = std::env::var(SOCKET_PROXY_ENV).map_err(|_| {
+        let spec = std::env::var(SOCKET_PROXY_ENV).map_err(|_| {
             SdkError::message(
                 "BOOKCLERK_SOCKET_PROXY is unset; native TCP requires native-behind-workerd",
             )
         })?;
-        let mut stream = UnixStream::connect(&path).await?;
+        let mut stream = connect_proxy(&spec).await?;
         let host = if address.hostname.contains(':') && !address.hostname.starts_with('[') {
             format!("[{}]:{}", address.hostname, address.port)
         } else {
@@ -172,6 +178,50 @@ pub async fn connect(address: SocketAddress, options: ConnectOptions) -> Result<
 }
 
 #[cfg(unix)]
+/// Connects to the host socket proxy (pathname or Linux `abstract:` name).
+///
+/// # Errors
+///
+/// Returns an I/O error when the proxy cannot be reached, or a message when
+/// `abstract:` is used off Linux.
+async fn connect_proxy(spec: &str) -> Result<tokio::net::UnixStream> {
+    use tokio::net::UnixStream;
+    if let Some(name) = spec.strip_prefix(SOCKET_PROXY_ABSTRACT_PREFIX) {
+        return connect_abstract(name).await;
+    }
+    Ok(UnixStream::connect(spec).await?)
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+/// Connects to a Linux abstract-namespace Unix socket.
+///
+/// # Errors
+///
+/// Returns an I/O error when the name is invalid or `connect(2)` fails.
+async fn connect_abstract(name: &str) -> Result<tokio::net::UnixStream> {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixStream as StdUnixStream};
+    use tokio::net::UnixStream;
+
+    let addr = SocketAddr::from_abstract_name(name.as_bytes())?;
+    let std_stream = StdUnixStream::connect_addr(&addr)?;
+    std_stream.set_nonblocking(true)?;
+    Ok(UnixStream::from_std(std_stream)?)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+/// Linux abstract sockets are not available on this target.
+///
+/// # Errors
+///
+/// Always returns a message error.
+async fn connect_abstract(_name: &str) -> Result<tokio::net::UnixStream> {
+    Err(SdkError::message(
+        "BOOKCLERK_SOCKET_PROXY=abstract:… is Linux-only",
+    ))
+}
+
+#[cfg(unix)]
 /// Reads the CONNECT response header from the socket proxy.
 ///
 /// # Errors
@@ -196,13 +246,20 @@ async fn read_http_head(stream: &mut tokio::net::UnixStream) -> Result<String> {
 }
 
 #[cfg(all(test, unix))]
-#[allow(clippy::missing_panics_doc)]
+#[allow(clippy::missing_panics_doc, clippy::await_holding_lock)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// `SOCKET_PROXY_ENV` is process-wide; tests that mutate it must not overlap.
+    static SOCKET_PROXY_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
     async fn connect_through_fake_proxy_and_403() {
+        let _guard = SOCKET_PROXY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let ok_path = dir.path().join("ok.sock");
         let deny_path = dir.path().join("deny.sock");
@@ -261,6 +318,64 @@ mod tests {
             Err(err) => assert!(err.to_string().contains("403"), "{err}"),
         }
         deny_server.await.unwrap();
+        std::env::remove_var(SOCKET_PROXY_ENV);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn connect_through_abstract_proxy() {
+        use std::os::linux::net::SocketAddrExt;
+        use std::os::unix::net::SocketAddr;
+
+        let _guard = SOCKET_PROXY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let name = format!(
+            "bc-sdk-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let addr = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind_addr(&addr).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0_u8; 256];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&buf[..n]).starts_with("CONNECT 127.0.0.1:9"),
+                "{}",
+                String::from_utf8_lossy(&buf[..n])
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            stream.write_all(b"abs").await.unwrap();
+        });
+        std::env::set_var(
+            SOCKET_PROXY_ENV,
+            format!("{SOCKET_PROXY_ABSTRACT_PREFIX}{name}"),
+        );
+        let mut sock = connect(
+            SocketAddress {
+                hostname: "127.0.0.1".into(),
+                port: 9,
+            },
+            ConnectOptions::default(),
+        )
+        .await
+        .expect("abstract connect");
+        let mut buf = [0_u8; 8];
+        let n = sock.stream().read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"abs");
+        sock.close().await.unwrap();
+        server.await.unwrap();
         std::env::remove_var(SOCKET_PROXY_ENV);
     }
 }

@@ -79,7 +79,7 @@ pub use json::{decode as decode_json, encode as encode_json, encode_atomic_resul
 pub use manifest_caps::manifest_capabilities;
 pub use net::{
     connect as connect_socket, ConnectOptions, PluginSocket, SecureTransport, SocketAddress,
-    SOCKET_PROXY_ENV,
+    SOCKET_PROXY_ABSTRACT_PREFIX, SOCKET_PROXY_ENV,
 };
 pub use pass_fd::{fd_proc_path, recv_passed_fd, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
 pub use protocol::{
