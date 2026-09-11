@@ -347,10 +347,24 @@ else
 fi
 
 if grep -A25 'apply_setting_overrides(&mut cfg, &pairs)' crates/bookclerkd/src/api.rs \
-    | grep -q 'stamp_occupancy_plugin_key'; then
+    | grep -q 'stamp_settings_occupancy'; then
   ok "settings enable stamps occupancy PluginKey"
 else
   fail "settings enable still persists alias occupancy"
+fi
+
+if grep -A8 'cannot stamp occupancy for enable' crates/bookclerkd/src/api.rs \
+    | grep -q 'BAD_REQUEST'; then
+  ok "settings occupancy stamp fail-closes when the occupant cannot be resolved"
+else
+  fail "settings enable still writes config when occupancy stamp cannot resolve"
+fi
+
+if grep -A20 'fn stamp_settings_occupancy' crates/bookclerkd/src/api.rs \
+    | grep -q 'resolve_plugin_ref'; then
+  ok "settings occupancy stamp resolves PluginKey uniquely"
+else
+  fail "settings occupancy stamp helper is missing"
 fi
 
 if grep -n 'stamp_occupancy_plugin_key' crates/bookclerk-cli/src/commands/plugins.rs >/dev/null; then

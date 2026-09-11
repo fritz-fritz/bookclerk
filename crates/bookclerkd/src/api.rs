@@ -2534,6 +2534,27 @@ fn apply_database_enable_updates(
     Ok(())
 }
 
+/// Stamps PluginKey occupancy for newly enabled plugins, then upgrades unique aliases.
+///
+/// # Errors
+///
+/// Returns when an enable target cannot be resolved uniquely or occupancy
+/// cannot be written (unmapped output family).
+fn stamp_settings_occupancy(
+    cfg: &mut Config,
+    discovered: &[bookclerk_plugin_host::DiscoveredPlugin],
+    enabling: &[String],
+) -> Result<(), String> {
+    for plugin_id in enabling {
+        let plugin = bookclerk_plugin_host::resolve_plugin_ref(discovered, plugin_id)
+            .map_err(|err| err.to_string())?;
+        bookclerk_plugin_host::stamp_occupancy_plugin_key(cfg, plugin)
+            .map_err(|err| err.to_string())?;
+    }
+    bookclerk_plugin_host::upgrade_unique_alias_occupancy(cfg, discovered);
+    Ok(())
+}
+
 /// True for truthy Settings strings (`1`, `true`, `yes`, `on`).
 fn setting_value_is_enabled(value: &str) -> bool {
     matches!(
@@ -3212,22 +3233,10 @@ async fn patch_settings(
         return Err(StatusCode::BAD_REQUEST.into_response());
     }
 
-    for plugin_id in &enabling {
-        match bookclerk_plugin_host::resolve_plugin_ref(&discovered, plugin_id) {
-            Ok(plugin) => {
-                if let Err(err) =
-                    bookclerk_plugin_host::stamp_occupancy_plugin_key(&mut cfg, plugin)
-                {
-                    tracing::warn!(%plugin_id, error = %err, "cannot stamp occupancy PluginKey");
-                    return Err(StatusCode::BAD_REQUEST.into_response());
-                }
-            }
-            Err(err) => {
-                tracing::warn!(%plugin_id, error = %err, "cannot stamp occupancy for enable");
-            }
-        }
+    if let Err(err) = stamp_settings_occupancy(&mut cfg, &discovered, &enabling) {
+        tracing::warn!(error = %err, "cannot stamp occupancy for enable");
+        return Err(StatusCode::BAD_REQUEST.into_response());
     }
-    bookclerk_plugin_host::upgrade_unique_alias_occupancy(&mut cfg, &discovered);
 
     cfg.write_toml_file(&config_path).map_err(|err| {
         tracing::error!(error = %err, "settings update write failed");
@@ -5099,9 +5108,9 @@ mod tests {
     use super::{
         allowed_setting_key, apply_database_enable_updates, build_approved_grant,
         build_plugin_settings_group, current_settings_snapshot, database_backends_requiring_grant,
-        normalize_disabled_shelves, normalize_setting_value, title_id_candidates,
-        validate_daemon_listen, validate_daemon_listen_against_auth, InviteLinkError,
-        PluginGrantOverride,
+        normalize_disabled_shelves, normalize_setting_value, stamp_settings_occupancy,
+        title_id_candidates, validate_daemon_listen, validate_daemon_listen_against_auth,
+        InviteLinkError, PluginGrantOverride,
     };
     use bookclerk_config::{Config, ListenAddrs};
 
@@ -5603,6 +5612,18 @@ mod tests {
         )
         .expect("disable keyed sqlite");
         assert_eq!(cfg.database.plugin, "");
+    }
+
+    #[test]
+    fn stamp_settings_occupancy_fail_closed_when_missing() {
+        let mut cfg = Config::default();
+        cfg.database.plugin = "postgres".into();
+        let err = stamp_settings_occupancy(&mut cfg, &[], &["postgres".into()]).unwrap_err();
+        assert!(
+            err.contains("not installed") || err.contains("postgres"),
+            "{err}"
+        );
+        assert_eq!(cfg.database.plugin, "postgres");
     }
 
     #[test]
