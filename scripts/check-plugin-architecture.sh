@@ -117,9 +117,18 @@ else
   ok "native postgres networking is SDK sockets, not coarse jail"
 fi
 
+if grep -A20 'pub fn bind_socket_proxy' crates/bookclerk-workerd/src/unix_bind.rs \
+    | grep -q 'SOCKET_PROXY_ABSTRACT_PREFIX'; then
+  fail "socket proxy still binds an abstract socket (nested Landlock ABI 6 scopes those out)"
+else
+  ok "native SOCKET_PROXY is a pathname (nested Landlock can connect)"
+fi
+
 if grep -B8 'NESTED_NATIVE_JAIL_ENV, "1"' crates/bookclerk-plugin-host/src/spawn_stdio.rs \
     | grep -q 'Start::Confined'; then
   fail "nested native jail is still gated on outer confinement"
 else
   ok "nested native jail is requested for Unix native-behind-workerd"
 fi
+
+exit "$status"

@@ -199,10 +199,11 @@ fn spawn_accept_loop(sqlx_host: &str, host: String, port: u16) -> Result<(), DbE
                     let dest_host = host.clone();
                     tokio::spawn(async move {
                         if let Err(err) = splice_to_proxy(local, dest_host, port).await {
-                            tracing::debug!(
+                            tracing::warn!(
                                 error = %err,
-                                "postgres socket mediator session ended"
+                                "postgres socket mediator could not splice through the socket proxy"
                             );
+                            eprintln!("postgres socket mediator: {err}");
                         }
                     });
                 }
