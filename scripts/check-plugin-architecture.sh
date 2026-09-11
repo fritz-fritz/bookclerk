@@ -346,6 +346,33 @@ else
   ok "daemon enable consent uses resolve_plugin_ref only"
 fi
 
+if grep -A25 'apply_setting_overrides(&mut cfg, &pairs)' crates/bookclerkd/src/api.rs \
+    | grep -q 'stamp_occupancy_plugin_key'; then
+  ok "settings enable stamps occupancy PluginKey"
+else
+  fail "settings enable still persists alias occupancy"
+fi
+
+if grep -n 'stamp_occupancy_plugin_key' crates/bookclerk-cli/src/commands/plugins.rs >/dev/null; then
+  ok "CLI enable stamps occupancy PluginKey"
+else
+  fail "CLI enable no longer stamps occupancy PluginKey"
+fi
+
+if grep -A20 'for id in disabled_targets' crates/bookclerkd/src/api.rs \
+    | grep -q 'occupancy_matches_alias'; then
+  ok "settings database disable matches PluginKey occupancy"
+else
+  fail "settings database disable still string-equals the occupancy field"
+fi
+
+if grep -A25 'pub fn parse(s: &str)' crates/bookclerk-config/src/database.rs \
+    | grep -q 'rsplit_once'; then
+  ok "DatabasePluginKind::parse accepts PluginKey occupancy"
+else
+  fail "DatabasePluginKind::parse still only understands bare aliases"
+fi
+
 if grep -n 'reqwest::Client' crates/bookclerk-storage/src >/dev/null 2>&1; then
   fail "bookclerk-storage still uses ambient reqwest::Client"
 else

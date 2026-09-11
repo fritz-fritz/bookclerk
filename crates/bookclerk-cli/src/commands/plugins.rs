@@ -10,9 +10,9 @@ use bookclerk_plugin_catalog::{
 };
 use bookclerk_plugin_host::{
     consent_request, consent_summary, host_target_triple, occupancy_spec, plugin_matches_occupancy,
-    require_grant, search_crates_io, CliInvokeParams, CliInvokeResult, CliSchema, DiscoveredPlugin,
-    Entrypoint, PluginFamily, PluginGrantStore, PluginSession, CRATE_NAME_PREFIX,
-    HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
+    require_grant, search_crates_io, stamp_occupancy_plugin_key, CliInvokeParams, CliInvokeResult,
+    CliSchema, DiscoveredPlugin, Entrypoint, PluginFamily, PluginGrantStore, PluginSession,
+    CRATE_NAME_PREFIX, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
@@ -1396,36 +1396,15 @@ fn set_plugin_enabled(
         match family {
             PluginFamily::Source => {
                 cfg.sources.set_enabled(&plugin.manifest.id, enabled);
-                if enabled {
-                    cfg.sources.set_string(
-                        &plugin.manifest.id,
-                        "plugin",
-                        plugin.plugin_key().canonical(),
-                    );
-                }
             }
             PluginFamily::Integration => {
                 cfg.integrations.set_enabled(&plugin.manifest.id, enabled);
-                if enabled {
-                    cfg.integrations
-                        .plugin_table_mut(&plugin.manifest.id)
-                        .insert(
-                            "plugin".into(),
-                            toml::Value::String(plugin.plugin_key().canonical().to_string()),
-                        );
-                }
             }
             PluginFamily::Output if plugin.manifest.id == "s3" => {
                 cfg.output.s3.enabled = enabled;
-                if enabled {
-                    cfg.output.s3.plugin = plugin.plugin_key().canonical().to_string();
-                }
             }
             PluginFamily::Output if plugin.manifest.id == "local" => {
                 cfg.output.local.enabled = enabled;
-                if enabled {
-                    cfg.output.local.plugin = plugin.plugin_key().canonical().to_string();
-                }
             }
             PluginFamily::Output => {
                 anyhow::bail!(
@@ -1434,15 +1413,14 @@ fn set_plugin_enabled(
                 );
             }
             PluginFamily::Database => {
-                if enabled {
-                    cfg.database.plugin = plugin.plugin_key().canonical().to_string();
-                } else if occupies_database_slot(&plugin, &config.database.plugin) {
-                    anyhow::bail!(
-                        "cannot disable the active database plugin `{}`; \
-                         enable another backend first with `bookclerk plugins enable <id>`",
-                        plugin.manifest.id
-                    );
-                } else {
+                if !enabled {
+                    if occupies_database_slot(&plugin, &config.database.plugin) {
+                        anyhow::bail!(
+                            "cannot disable the active database plugin `{}`; \
+                             enable another backend first with `bookclerk plugins enable <id>`",
+                            plugin.manifest.id
+                        );
+                    }
                     anyhow::bail!(
                         "database plugin `{}` is not active ([database].plugin = `{}`)",
                         plugin.manifest.id,
@@ -1451,6 +1429,9 @@ fn set_plugin_enabled(
                 }
             }
         }
+    }
+    if enabled {
+        stamp_occupancy_plugin_key(&mut cfg, &plugin).map_err(|err| anyhow::anyhow!("{err}"))?;
     }
     let path = cfg.paths().config_file.clone();
     cfg.write_toml_file(&path)?;

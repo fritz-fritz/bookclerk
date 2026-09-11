@@ -2526,7 +2526,7 @@ fn apply_database_enable_updates(
     // Unchecking the active backend with no replacement clears `database.plugin`
     // so the prior plugin does not stay selected after save.
     for id in disabled_targets {
-        if config.database.plugin.eq_ignore_ascii_case(&id) {
+        if bookclerk_plugin_host::occupancy_matches_alias(&config.database.plugin, &id) {
             config.database.plugin.clear();
             break;
         }
@@ -2588,9 +2588,10 @@ fn database_backends_requiring_grant(
             if id.is_empty() {
                 continue;
             }
-            if !current_database_plugin.eq_ignore_ascii_case(id) {
-                ids.push(id.to_string());
+            if bookclerk_plugin_host::occupancy_matches_alias(current_database_plugin, id) {
+                continue;
             }
+            ids.push(id.to_string());
             continue;
         }
         let Some(rest) = key.strip_prefix("database.") else {
@@ -2602,9 +2603,10 @@ fn database_backends_requiring_grant(
         if id.is_empty() || id.contains('.') || !setting_value_is_enabled(value) {
             continue;
         }
-        if !current_database_plugin.eq_ignore_ascii_case(id) {
-            ids.push(id.to_string());
+        if bookclerk_plugin_host::occupancy_matches_alias(current_database_plugin, id) {
+            continue;
         }
+        ids.push(id.to_string());
     }
     ids.sort();
     ids.dedup();
@@ -3141,14 +3143,14 @@ async fn patch_settings(
             enabling.push(id);
         }
     }
+    let discovered = discover_plugins_for_settings(
+        &Config::load(Some(files_dir.clone()), Some(config_path.clone())).map_err(|err| {
+            tracing::error!(error = %err, "failed to load config for consent check");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?,
+    )
+    .await;
     if !enabling.is_empty() {
-        let discovered = discover_plugins_for_settings(
-            &Config::load(Some(files_dir.clone()), Some(config_path.clone())).map_err(|err| {
-                tracing::error!(error = %err, "failed to load config for consent check");
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            })?,
-        )
-        .await;
         for plugin_id in &enabling {
             let plugin = match bookclerk_plugin_host::resolve_plugin_ref(&discovered, plugin_id) {
                 Ok(plugin) => plugin,
@@ -3209,6 +3211,23 @@ async fn patch_settings(
         tracing::warn!(error = %err, "rejected daemon.listen settings update");
         return Err(StatusCode::BAD_REQUEST.into_response());
     }
+
+    for plugin_id in &enabling {
+        match bookclerk_plugin_host::resolve_plugin_ref(&discovered, plugin_id) {
+            Ok(plugin) => {
+                if let Err(err) =
+                    bookclerk_plugin_host::stamp_occupancy_plugin_key(&mut cfg, plugin)
+                {
+                    tracing::warn!(%plugin_id, error = %err, "cannot stamp occupancy PluginKey");
+                    return Err(StatusCode::BAD_REQUEST.into_response());
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%plugin_id, error = %err, "cannot stamp occupancy for enable");
+            }
+        }
+    }
+    bookclerk_plugin_host::upgrade_unique_alias_occupancy(&mut cfg, &discovered);
 
     cfg.write_toml_file(&config_path).map_err(|err| {
         tracing::error!(error = %err, "settings update write failed");
@@ -5398,6 +5417,28 @@ mod tests {
             "sqlite"
         )
         .is_empty());
+        assert!(database_backends_requiring_grant(
+            &[("database.sqlite.enabled".into(), "true".into())],
+            "platform:bookclerk/sqlite#sqlite"
+        )
+        .is_empty());
+        assert_eq!(
+            database_backends_requiring_grant(
+                &[("database.plugin".into(), "d1".into())],
+                "platform:bookclerk/sqlite#sqlite"
+            ),
+            vec!["d1".to_string()]
+        );
+        assert_eq!(
+            database_backends_requiring_grant(
+                &[(
+                    "database.plugin".into(),
+                    "platform:bookclerk/sqlite#sqlite".into()
+                )],
+                "sqlite"
+            ),
+            vec!["platform:bookclerk/sqlite#sqlite".to_string()]
+        );
     }
 
     #[test]
@@ -5550,6 +5591,18 @@ mod tests {
         )
         .expect("switch");
         assert_eq!(cfg.database.plugin, "postgres");
+    }
+
+    #[test]
+    fn database_enable_updates_clear_plugin_key_occupancy() {
+        let mut cfg = Config::default();
+        cfg.database.plugin = "platform:bookclerk/sqlite#sqlite".into();
+        apply_database_enable_updates(
+            &mut cfg,
+            &[("database.sqlite.enabled".into(), "false".into())],
+        )
+        .expect("disable keyed sqlite");
+        assert_eq!(cfg.database.plugin, "");
     }
 
     #[test]

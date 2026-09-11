@@ -171,10 +171,11 @@ alias from two provenances stays distinct and requires a qualified ref.
 Enablement occupancy (`[database].plugin`, `[output.s3].plugin`,
 `[output.local].plugin`, `[sources.<id>].plugin`,
 `[integrations.<id>].plugin`) is a PluginKey when set by
-`bookclerk plugins enable`; a bare alias is accepted only when exactly one
-install uses it. Two installs that share `id = "s3"` (or `audible`, …) fail
-closed until the operator names a PluginKey — the host does not last-write-wins
-or spawn every twin.
+`bookclerk plugins enable` or Settings enable; a settings save also
+upgrades a unique alias occupant to its PluginKey. A bare alias is accepted
+only when exactly one install uses it. Two installs that share `id = "s3"`
+(or `audible`, …) fail closed until the operator names a PluginKey — the host
+does not last-write-wins or spawn every twin.
 After registration, hosts talk **only**
 through `ContentSource` /
 `Integration` (login, scan, fetch, import, revoke, inspect, plus catalog

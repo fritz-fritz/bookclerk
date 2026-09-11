@@ -671,8 +671,12 @@ async fn run_database(
             };
 
             if apply && !dry_run {
+                let plugins = bookclerk_plugin_host::discover_plugins(config)?;
+                let plugin = bookclerk_plugin_host::resolve_plugin_ref(&plugins, &to_plugin)
+                    .map_err(|err| anyhow::anyhow!("{err}"))?;
                 let mut cfg = config.clone();
-                cfg.database.plugin = to_plugin.clone();
+                bookclerk_plugin_host::stamp_occupancy_plugin_key(&mut cfg, plugin)
+                    .map_err(|err| anyhow::anyhow!("{err}"))?;
                 let path = cfg.paths().config_file.clone();
                 cfg.write_toml_file(&path)?;
                 message.push_str(&format!(
