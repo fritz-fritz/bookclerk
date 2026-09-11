@@ -77,8 +77,8 @@ standalone author repos: [plugin-registry.md](plugin-registry.md).
 | **Reference example** | Echo samples under `examples/`; CI/`cargo dev --examples` only — never packaged |
 | **Third-party plugin** | Outside this monorepo; same jail + Workers RPC ABI |
 | **Plugin package** | Rust crate under `crates/bookclerk-plugins/`, or a workerd archive (`plugin.toml` + `modules/`) |
-| **In-process fallback** | When a platform guest is missing or fails to start, hosts fall back to logic in `bookclerk-library` / `bookclerk-storage` |
-| **`bundled-plugins`** | Optional host feature linking storefronts in-process (dev only; omit for release packaging) |
+| **In-process fallback** | None for ordinary plugins. Database adapter *crates* stay linked for host-owned SQL lowering, not guest execution |
+| **Verified artifact** | Installed bytes that match the install receipt (`manifest_sha256` + `payload_root_sha256`) for a provenance-qualified PluginKey |
 | **`BookclerkEntrypoint`** | Workerd default-export base (`event(batch)` / `job(job)` / `databaseMigrations(binding)` / optional `describe()` / `shutdown()`); named entrypoints are exported `*Entrypoint` subclasses. TS extends `WorkerEntrypoint`. Rust guests implement `PluginWorker` (`describe` / `open(invocation, bindings) -> Entrypoints`) + `serve` |
 
 ## Local development (external guests)
@@ -109,16 +109,18 @@ cargo test-staged                       # describe/health conformance smoke
 Add `--release` to any alias for release builds. Override staging dir with
 `BOOKCLERK_PLUGIN_ARTIFACTS`. Forward host args after `--` (e.g. `cargo dev -- --help`).
 
-Optional in-process iteration (no staging): build hosts with
-`--features bundled-plugins` on `bookclerk-cli` / `bookclerkd`.
+First-party storefronts are always staged external guests — there is no
+in-process host feature.
 
 Reference Echo examples (distinct plugin ids):
 
-Plugin **ids are globally unique across kinds** (source / integration / output /
-database). The grammar is strict and non-lossy: lowercase `[a-z0-9_]{2,32}` with
+Plugin **ids are display aliases**, not globally unique security identities.
+The grammar is still strict and non-lossy: lowercase `[a-z0-9_]{2,32}` with
 no leading/trailing `_` and no `__` (same rule as the crates.io `{id}` segment).
 Invalid characters are rejected at manifest load / install — never rewritten —
-so values like `a/b` and `a_b` cannot collide after sanitization.
+so values like `a/b` and `a_b` cannot collide after sanitization. Two installs
+may share an alias; address them with a provenance-qualified PluginKey when
+that happens.
 
 | Path | Runtime |
 | --- | --- |
@@ -162,12 +164,11 @@ is narrow on top of that:
 
 First-party guests ship under `crates/bookclerk-plugins/` with the guest SDK
 contract. Host binaries (`bookclerk`, `bookclerkd`) depend on
-**`bookclerk-plugin-host`** only — not on individual store crates. Optional
-`bundled-plugins` features on the hosts call `register_builtin_*` to link
-first-party libraries in-process for faster Rust iteration; release builds omit
-that feature and load staged guests from `plugins/` instead. Discovered
-external copies of the same id are skipped when an in-process adapter is already
-registered. After registration, hosts talk **only**
+**`bookclerk-plugin-host`** only — not on individual store crates. Release
+builds and local `cargo dev` both load staged guests from `plugins/`.
+Discovered copies of the same **PluginKey** are skipped; the same display
+alias from two provenances stays distinct and requires a qualified ref.
+After registration, hosts talk **only**
 through `ContentSource` /
 `Integration` (login, scan, fetch, import, revoke, inspect, plus catalog
 `searchCatalog` / `catalogDetail` / `expandCandidates` / `purchaseHint` /
@@ -183,34 +184,27 @@ enabling.
 
 ## Shipping without a store
 
-Both hosts carry one optional feature per in-process plugin (`bundled-plugins`
-enables the full set). **Default builds link no storefront** (external guests
-only):
+Both hosts **link no storefront**. Storefronts are staged guests only:
 
 ```bash
 # Default: external guests only (release packaging).
 cargo build --release -p bookclerk-cli -p bookclerkd
-
-# Everything except Audible (still in-process, opt-in).
-cargo build -p bookclerk-cli -p bookclerkd --features bundled-plugins \
-  --no-default-features \
-  --features bookclerk-plugin-source-libro,bookclerk-plugin-source-chirp,bookclerk-plugin-source-graphicaudio,bookclerk-plugin-integration-audiobookshelf
 ```
 
 This exists for Audible specifically. Adrm and Widevine CENC decrypt live in that
 plugin, and some regions restrict distributing a binary that can circumvent
 DRM — so whoever packages Bookclerk needs the option to ship hosts that contain
 no such code at all, rather than a build flag that merely disables it at runtime.
-Omitting the feature omits the crate, and with it the ciphers, the content-key
+Omitting the guest omits the crate, and with it the ciphers, the content-key
 handling, and the CDM.
 
 Nothing else has to move for that to hold. The shared MP4 plumbing
 (`bookclerk-mp4`) parses and rewrites containers and takes a `SampleTransform`
 from its caller; the Audible plugin's transform is the only one that decrypts.
-`scripts/check-store-free-hosts.sh` asserts it in CI: default hosts must link
-no plugin package and reach no cipher crate. Opt-in `--features bundled-plugins`
-must still link Audible for in-process dev. A shared crate that grew an `aes`
-dependency fails the default-host check.
+`scripts/check-store-free-hosts.sh` and `scripts/check-plugin-architecture.sh`
+assert it in CI: default hosts must link no plugin package and reach no cipher
+crate, and must not grow an in-process `bundled-plugins` path. A shared crate
+that grew an `aes` dependency fails the default-host check.
 
 Users of a store-free build can still add any storefront back as an external
 guest, since discovery is independent of these features. That is a deployment
@@ -1030,10 +1024,10 @@ const ok = await env.EVENTS.publish({
 The host `EventPublisher` writes straight into the library outbox
 (`domain_events`) with these rules:
 
-- **Forced provenance.** `source` is always the plugin id and `account_id` is
-  the opening invocation's account; a guest cannot spoof another producer.
-  `correlationId` / `causationId` default to the invocation's values when the
-  guest leaves them empty.
+- **Forced provenance.** `source` is always the plugin's PluginKey and
+  `account_id` is the opening invocation's account; a guest cannot spoof
+  another producer. `correlationId` / `causationId` default to the
+  invocation's values when the guest leaves them empty.
 - **Producer grant.** The binding exists only when the manifest declares
   `[[events.producers]]` *and* the operator grant covers those types (the
   consent request lists them). Publishing a type outside that intersection
@@ -1425,14 +1419,15 @@ capabilities, then set `enabled = true` in `config.toml` (or
 `bookclerk plugins enable`). No rebuild of Bookclerk is required when
 `api_version` matches.
 
-### First-party plugins (dual load via plugin host)
+### First-party plugins (staged guests)
 
 Audible, Libro.fm, Chirp, GraphicAudio, and Audiobookshelf ship as **external
 plugins** under `crates/bookclerk-plugins/`. The host crate
-`bookclerk-plugin-host` also registers the same adapters **in-process**
-(`register_builtin_*` / `load_sources` / `load_integrations`) so `cargo run`
-works without staging binaries. CLI/daemon call only those host helpers —
-never store crates by name. Discovery skips an id that is already registered.
+`bookclerk-plugin-host` loads them through `load_sources` /
+`load_integrations` as staged guests — the same path third-party plugins
+use. CLI/daemon call only those host helpers — never store crates by name.
+Discovery skips a PluginKey that is already registered; a colliding display
+alias requires a provenance-qualified ref.
 
 Guest binaries depend on **`bookclerk-plugin-sdk`** (+ their private store crate
 for first-party). TypeScript workerd guests depend on **`@bookclerk/plugin-sdk`**.

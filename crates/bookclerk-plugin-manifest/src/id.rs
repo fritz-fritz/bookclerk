@@ -1,8 +1,9 @@
-//! Plugin id grammar shared by manifest parse, host registry, and SDKs.
+//! Display-alias grammar shared by manifest parse, host registry, and SDKs.
 //!
-//! Ids are globally unique across plugin kinds. The grammar is **non-lossy**:
-//! characters that would need rewriting (for example `/` → `_`) are rejected
-//! instead of sanitized, so `a/b` and `a_b` cannot collide in the registry.
+//! The `id` is a CLI/UI alias, not a globally unique security identity.
+//! The grammar is **non-lossy**: characters that would need rewriting
+//! (for example `/` → `_`) are rejected instead of sanitized, so `a/b`
+//! and `a_b` cannot collide as aliases.
 
 use crate::error::{Error, Result};
 

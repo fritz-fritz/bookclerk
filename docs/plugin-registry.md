@@ -50,12 +50,15 @@ Publisher / packaging examples (reference only — never in `package-plugins`):
 
 ### Trust (staged)
 
-Unattended install **requires** `archive_sha256`. Publisher signatures /
-notarization are optional; Bookclerk never re-signs third-party binaries.
+Unattended install **requires** content hashes on the install receipt
+(`archive_sha256` plus `manifest_sha256` / `payload_root_sha256` after unpack).
+Publisher PKI / notarization is optional and is **not** the identity model;
+hashes prove the installed bytes match the recorded artifact, not who authored
+them.
 
 | Flag / config | Effect |
 | --- | --- |
-| `--allow-unsigned` / `[plugins] allow_unsigned` | Permit packages without publisher signatures (digest still required) |
+| Verified install receipt | Required. Modified installed bytes lose platform trust (`provenance = Modified`) |
 | Yanked versions | Refused by install-grade validation |
 | macOS / Windows code signatures | Warn via `plugins doctor` when tooling is available; interactive override only |
 
@@ -284,11 +287,12 @@ GitLab, or cloud API tokens are required for public assets. Private/authenticate
 buckets are out of scope for v1 (operators can still unpack manually).
 
 **Checksums:** publish `SHA256SUMS` (or per-asset `.sha256`) next to assets.
-Unattended install **requires** a matching `archive_sha256` on each artifact
-entry before enabling by default.
+Unattended install **requires** matching content hashes (`archive_sha256`,
+then `manifest_sha256` / `payload_root_sha256` on the installed tree).
 
-**Signing (later):** optional minisign/cosign; dashboard can surface “signed by
-publisher” vs “crates.io metadata only”.
+**Publisher authenticity (later, optional):** minisign/cosign can attest who
+published an artifact. That is independent of PluginKey / content hashes and
+is not required for install.
 
 ## Host install layout
 
@@ -409,7 +413,7 @@ Author loop (native):
 | Option | Verdict |
 | --- | --- |
 | **`bookclerk-plugin-sdk`** (chosen) | Clear guest surface; host cannot leak into author builds; publishable later without renaming |
-| Features on `bookclerk-plugin-host` (`bundled-plugins`) | Opt-in in-process dev; release hosts omit storefront features |
+| Linking plugin crates into hosts | Forbidden. Production hosts never execute ordinary plugins in-process |
 | `bookclerk-plugin-dev` | Sounds like build tooling; authors would think it’s test-only |
 
 ### What you never need

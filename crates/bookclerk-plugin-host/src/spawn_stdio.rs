@@ -22,8 +22,10 @@ use crate::{PluginError, Result};
 
 /// Jailed plugin child with stdio pipes (describe not yet called).
 pub(crate) struct SpawnedStdio {
-    /// Plugin id from the manifest.
+    /// Provenance-qualified PluginKey (canonical text).
     pub id: String,
+    /// Manifest display alias (`plugin.toml` `id`).
+    pub alias: String,
     /// Child process; killed on drop of the session that owns it.
     pub child: Child,
     /// Guest stdin (host writes RPC / capnp).
@@ -64,7 +66,8 @@ pub(crate) async fn spawn_stdio_guest(
     config_table: Value,
     extra_env: &[(&str, std::ffi::OsString)],
 ) -> Result<SpawnedStdio> {
-    let id = plugin.manifest.id.clone();
+    let id = plugin.plugin_key().canonical().to_string();
+    let alias = plugin.manifest.id.clone();
     let grant = spawn_grant(&config.paths().files_dir, plugin)?;
     let spawn_config = spawn_config_for_grant(&grant, config_table);
     let jail = GuestJail::plan(config, plugin, plan)?;
@@ -164,6 +167,7 @@ pub(crate) async fn spawn_stdio_guest(
 
     Ok(SpawnedStdio {
         id,
+        alias,
         child,
         stdin,
         stdout,

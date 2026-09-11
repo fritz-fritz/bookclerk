@@ -107,7 +107,8 @@ async fn staged_first_party_plugins_describe() {
             PluginSession::spawn_for_account(plugin, &config, serde_json::json!({}), account)
                 .await
                 .unwrap_or_else(|e| panic!("spawn {}: {e}", plugin.manifest.id));
-        assert_eq!(session.id(), plugin.manifest.id);
+        assert_eq!(session.id(), plugin.plugin_key().canonical());
+        assert_eq!(session.alias(), plugin.manifest.id);
         let desc = session
             .describe()
             .await

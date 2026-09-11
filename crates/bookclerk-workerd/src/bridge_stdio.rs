@@ -62,8 +62,9 @@ pub enum Backend {
 /// Serves Bookclerk capnp on stdio while talking HTTP/JSRPC to the isolate.
 ///
 /// Must run inside a `LocalSet` (same thread as the granted HTTP server).
-/// `capabilities` come from the signed manifest and decide which
-/// [`Entrypoints`] `open` exports; `backend` selects the data plane.
+/// `capabilities` come from the verified install receipt and covering grant
+/// and decide which [`Entrypoints`] `open` exports; `backend` selects the
+/// data plane.
 ///
 /// # Errors
 ///
@@ -108,7 +109,7 @@ impl WorkerdRoot {
         !self.capabilities.jobs.is_empty() || self.exports(Entrypoint::Storage)
     }
 
-    /// Entrypoint families the signed manifest lets this plugin export; the
+    /// Entrypoint families the covering grant lets this plugin export; the
     /// adapter isolate filters the same list again against `PLUGIN_DESCRIBE`.
     fn manifest_families(&self) -> Vec<&'static str> {
         let mut out = Vec::new();

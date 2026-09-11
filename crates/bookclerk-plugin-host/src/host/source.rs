@@ -8,9 +8,9 @@
 //!   scratch under the guest `TMPDIR` (`…/plugins/<id>/tmp/fetch`)
 //! - seals login credentials via [`SourceScope`] (`provider = plugin id`)
 //! - loads those credentials for `scan` and `fetch_title` (plugin never opens the DB)
-//! - upserts scan book DTOs via [`SourceScope`] with `source` forced to the plugin id
+//! - upserts scan book DTOs via [`SourceScope`] with `source` forced to the plugin alias
 //!
-//! First-party in-process adapters use the same [`SourceScope`] boundary.
+//! External guests share the same [`SourceScope`] boundary.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -116,7 +116,14 @@ impl ExternalSource {
             bookclerk_plugin_sdk::PortalAuthMode::Password
             | bookclerk_plugin_sdk::PortalAuthMode::Unspecified => PortalAuthMode::Password,
         };
-        let aliases = leak_str_slice(&describe.aliases, &[]);
+        let mut alias_list = describe.aliases.clone();
+        if !alias_list
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(&plugin.manifest.id))
+        {
+            alias_list.push(plugin.manifest.id.clone());
+        }
+        let aliases = leak_str_slice(&alias_list, &[]);
         let password_env = describe
             .password_env_var
             .as_deref()
@@ -259,11 +266,12 @@ pub async fn load_external_sources(
         if !config.sources.is_enabled(&plugin.manifest.id) {
             continue;
         }
-        if registry.get(&plugin.manifest.id).is_some() {
+        if registry.get(plugin.plugin_key().canonical()).is_some() {
             tracing::debug!(
-                id = %plugin.manifest.id,
+                plugin_key = %plugin.plugin_key().canonical(),
+                alias = %plugin.manifest.id,
                 path = %plugin.root.join("plugin.toml").display(),
-                "skipping external source — already registered in-process"
+                "skipping external source — PluginKey already registered"
             );
             continue;
         }
@@ -283,6 +291,10 @@ pub async fn load_external_sources(
 #[async_trait]
 impl ContentSource for ExternalSource {
     fn id(&self) -> &str {
+        self.session.alias()
+    }
+
+    fn plugin_key(&self) -> &str {
         self.session.id()
     }
 

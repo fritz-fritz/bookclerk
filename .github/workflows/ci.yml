@@ -277,6 +277,7 @@ jobs:
           npm run test:db-value
           npm run test:plugin-migrations
           npm run test:entrypoints
+          npm run test:entrypoints-codec
 
       - name: Python plugin SDK tools conformance
         if: needs.plan.outputs.run_sdk == 'true' || needs.plan.outputs.python_sdk == 'true'
@@ -387,6 +388,7 @@ jobs:
           cargo clippy -p bookclerk-cli -p bookclerkd --no-default-features \
             --all-targets -- -D warnings
           ./scripts/check-store-free-hosts.sh
+          ./scripts/check-plugin-architecture.sh
 
       - name: Build app (platform + optional + examples)
         if: needs.plan.outputs.run_build_app == 'true'

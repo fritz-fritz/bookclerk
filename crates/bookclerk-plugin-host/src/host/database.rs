@@ -347,21 +347,21 @@ impl DatabaseRegistry {
 /// Returns an error when the operation fails.
 pub async fn load_external_database(config: &Config) -> PluginResult<DatabaseRegistry> {
     let mut registry = DatabaseRegistry::default();
-    let active = config.database.plugin.trim().to_ascii_lowercase();
-    for plugin in crate::discover_plugins(config)? {
-        if !plugin
-            .manifest
-            .has_entrypoint(crate::Entrypoint::DatabaseAdapter)
-        {
-            continue;
-        }
-        if plugin.manifest.id.to_ascii_lowercase() != active {
-            continue;
-        }
-        match ExternalDatabase::spawn(&plugin, config).await {
+    let spec = config.database.plugin.trim();
+    let plugins = crate::discover_plugins(config)?;
+    let adapters: Vec<_> = plugins
+        .into_iter()
+        .filter(|p| {
+            p.manifest
+                .has_entrypoint(crate::Entrypoint::DatabaseAdapter)
+        })
+        .collect();
+    match crate::resolve_plugin_ref(&adapters, spec) {
+        Ok(plugin) => match ExternalDatabase::spawn(plugin, config).await {
             Ok(db) => {
                 tracing::info!(
-                    id = %plugin.manifest.id,
+                    alias = %plugin.manifest.id,
+                    plugin_key = %plugin.plugin_key().canonical(),
                     path = %plugin.command.display(),
                     "loaded external database plugin"
                 );
@@ -369,36 +369,33 @@ pub async fn load_external_database(config: &Config) -> PluginResult<DatabaseReg
             }
             Err(err) => {
                 return Err(PluginError::Other(anyhow::anyhow!(
-                    "failed to start database plugin `{active}`: {err}"
+                    "failed to start database plugin `{spec}`: {err}"
                 )));
             }
-        }
-        break;
-    }
-    if registry.active.is_none() {
-        let files = &config.paths().files_dir;
-        let expected = files.join("plugins").join(&active);
-        let mut hint = format!(
-            "looked under {} (set {} to the directory `cargo dev` uses, \
-             typically ./BookclerkFiles, or run `cargo install-platform` / \
-             `cargo dev-cli -- daemon token`)",
-            expected.display(),
-            bookclerk_config::BOOKCLERK_FILES_DIR_ENV
-        );
-        if let Ok(cwd) = std::env::current_dir() {
-            let alt = cwd.join("BookclerkFiles").join("plugins").join(&active);
-            if alt.is_dir() && alt != expected {
-                hint.push_str(&format!(
-                    "; found guest at {} — export {}={}",
-                    alt.display(),
-                    bookclerk_config::BOOKCLERK_FILES_DIR_ENV,
-                    cwd.join("BookclerkFiles").display()
-                ));
+        },
+        Err(err) => {
+            let files = &config.paths().files_dir;
+            let expected = files.join("plugins").join(spec);
+            let mut hint = format!(
+                "looked under {} (set {} to the directory `cargo dev` uses, \
+                 typically ./BookclerkFiles, or run `cargo install-platform` / \
+                 `cargo dev-cli -- daemon token`)",
+                expected.display(),
+                bookclerk_config::BOOKCLERK_FILES_DIR_ENV
+            );
+            if let Ok(cwd) = std::env::current_dir() {
+                let alt = cwd.join("BookclerkFiles").join("plugins").join(spec);
+                if alt.is_dir() && alt != expected {
+                    hint.push_str(&format!(
+                        "; found guest at {} — export {}={}",
+                        alt.display(),
+                        bookclerk_config::BOOKCLERK_FILES_DIR_ENV,
+                        cwd.join("BookclerkFiles").display()
+                    ));
+                }
             }
+            return Err(PluginError::Other(anyhow::anyhow!("{err}; {hint}")));
         }
-        return Err(PluginError::Other(anyhow::anyhow!(
-            "database plugin `{active}` not found — {hint} (see docs/database.md)"
-        )));
     }
     Ok(registry)
 }

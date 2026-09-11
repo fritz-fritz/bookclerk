@@ -1,18 +1,14 @@
 //! External plugin host for Bookclerk (`bookclerk-plugin-host`).
 //!
-//! Discovers staged guests under `$BOOKCLERK_FILES_DIR/plugins/`, spawns them
-//! over the Workers RPC ABI (native binary or `bookclerk-workerd`), and
-//! optionally links first-party adapters in-process when the `bundled-plugins`
-//! feature is enabled on the host binary.
+//! Discovers staged guests under `$BOOKCLERK_FILES_DIR/plugins/` and spawns
+//! them over the Workers RPC ABI through the mandatory `bookclerk-workerd`
+//! front door (`api_version = 3` Cap'n Proto on stdio).
 //!
-//! Two load paths share the same registries:
-//!
-//! 1. **In-process builtins** — [`register_builtin_sources`] /
-//!    [`register_builtin_integrations`] link first-party library crates so
-//!    `cargo run` works without staging binaries.
-//! 2. **External guests** — separate executables (or `bookclerk-workerd` +
-//!    modules) discovered from install directories (`plugin.toml`) over
-//!    Cap'n Proto `api_version = 3` on stdio.
+//! Production hosts never link ordinary plugin implementation crates.
+//! First-party storefronts (Audible, Libro.fm, …) are staged guests, the
+//! same path third-party plugins use. Database adapter crates
+//! (`bookclerk-plugin-database-*`) remain linked for **host-owned** SQL
+//! lowering, not in-process plugin execution.
 //!
 //! External plugins are **untrusted** relative to the host: the host never
 //! passes `library.db` / `master.key` / the files-dir root, clears
@@ -20,6 +16,8 @@
 //! Operators must `bookclerk plugins approve` domains/bindings before enable;
 //! the same covering grant is required again at every external spawn and at
 //! privileged delivery points (`config` / `secrets` / `work_fs` / `oauth`).
+//! Durable identity is provenance-qualified [`bookclerk_plugin_catalog::PluginKey`];
+//! the manifest `id` is a display / CLI alias.
 //!
 //! Host binaries should depend on **this** crate for registration — not on
 //! individual store crates.
@@ -66,9 +64,7 @@ pub use authority::{
 };
 pub use bookclerk_plugin_manifest::TcpGrant;
 pub use bookclerk_plugin_sdk::{JobCheckpoint, JobInvocationLease, JobOutcome};
-pub use builtins::{
-    load_integrations, load_sources, register_builtin_integrations, register_builtin_sources,
-};
+pub use builtins::{load_integrations, load_sources};
 pub use consent::{
     active_processes_for, consent_request, consent_request_alias, consent_summary,
     cores_to_percent, database_binding_name, effective_cpu_cores, effective_cpu_rate_percent,
@@ -144,11 +140,12 @@ pub async fn register_discovered(
                         );
                         continue;
                     }
-                    if sources.get(&plugin.manifest.id).is_some() {
+                    if sources.get(plugin.plugin_key().canonical()).is_some() {
                         tracing::debug!(
-                            id = %plugin.manifest.id,
+                            plugin_key = %plugin.plugin_key().canonical(),
+                            alias = %plugin.manifest.id,
                             path = %plugin.root.join("plugin.toml").display(),
-                            "skipping external source — already registered in-process"
+                            "skipping external source — PluginKey already registered"
                         );
                         continue;
                     }
@@ -178,11 +175,12 @@ pub async fn register_discovered(
                         );
                         continue;
                     }
-                    if integrations.get(&plugin.manifest.id).is_some() {
+                    if integrations.get(plugin.plugin_key().canonical()).is_some() {
                         tracing::debug!(
-                            id = %plugin.manifest.id,
+                            plugin_key = %plugin.plugin_key().canonical(),
+                            alias = %plugin.manifest.id,
                             path = %plugin.root.join("plugin.toml").display(),
-                            "skipping external integration — already registered in-process"
+                            "skipping external integration — PluginKey already registered"
                         );
                         continue;
                     }
