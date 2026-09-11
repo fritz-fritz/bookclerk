@@ -439,6 +439,12 @@ fn parse_retry_after(response: &Response) -> Option<Duration> {
 
 impl D1Proxy {
     /// Constructs a new instance with default or provided parameters.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the HTTP client cannot be built. Under nested Deny /
+    /// [`bookclerk_plugin_sdk::SOCKET_PROXY_ENV`] this does not fall back to
+    /// ambient TCP.
     #[must_use]
     pub fn new(
         api_base: String,
@@ -450,7 +456,7 @@ impl D1Proxy {
             .timeout(D1_REQUEST_TIMEOUT)
             .connect_timeout(D1_CONNECT_TIMEOUT)
             .build()
-            .unwrap_or_else(|_| HttpClient::new());
+            .expect("D1 HTTP client");
         Self {
             inner: Arc::new(D1Inner {
                 api_base: api_base.trim_end_matches('/').to_string(),

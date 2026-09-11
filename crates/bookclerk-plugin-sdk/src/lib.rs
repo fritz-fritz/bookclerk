@@ -81,8 +81,9 @@ pub use fetch_dir::{fetch_work_dir, upload_file_path, FetchWorkDir, UploadFile};
 pub use json::{decode as decode_json, encode as encode_json, encode_atomic_result, page_rows};
 pub use manifest_caps::manifest_capabilities;
 pub use net::{
-    connect as connect_socket, ConnectOptions, PluginSocket, SecureTransport, SocketAddress,
-    SOCKET_PROXY_ABSTRACT_PREFIX, SOCKET_PROXY_ENV,
+    connect as connect_socket, nested_native_jail_requested, ConnectOptions, PluginSocket,
+    SecureTransport, SocketAddress, NESTED_NATIVE_JAIL_ENV, SOCKET_PROXY_ABSTRACT_PREFIX,
+    SOCKET_PROXY_ENV,
 };
 pub use pass_fd::{fd_proc_path, recv_passed_fd, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
 pub use protocol::{

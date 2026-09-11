@@ -4,8 +4,8 @@
 //! this module wraps [`reqwest::Client`] over ambient TCP. When the proxy
 //! is set, every request is `CONNECT` + rustls over the Unix or Windows
 //! named-pipe proxy — nested `NetPolicy::Deny` guests must not call
-//! `socket(AF_INET)`. `BOOKCLERK_NESTED_NATIVE_JAIL=1` without a proxy
-//! fails closed rather than falling back to ambient TCP.
+//! `socket(AF_INET)`. When [`crate::NESTED_NATIVE_JAIL_ENV`] is `1` without a
+//! proxy, construction fails closed rather than falling back to ambient TCP.
 //!
 //! Fetch domain grants do **not** imply TCP. Native manifests must declare
 //! `capabilities.network.tcp` (or rely on a host overlay) for each
@@ -27,7 +27,10 @@ use tokio_rustls::client::TlsStream;
 use url::Url;
 
 use crate::error::{Result, SdkError};
-use crate::net::{connect, ConnectOptions, SecureTransport, SocketAddress, SOCKET_PROXY_ENV};
+use crate::net::{
+    connect, nested_native_jail_requested, ConnectOptions, SecureTransport, SocketAddress,
+    NESTED_NATIVE_JAIL_ENV, SOCKET_PROXY_ENV,
+};
 
 pub use http::header;
 pub use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
@@ -388,10 +391,10 @@ impl Client {
     fn from_builder(builder: ClientBuilder) -> HttpResult<Self> {
         if !use_socket_proxy() {
             if nested_native_jail_requested() {
-                return Err(Error::new(
-                    "BOOKCLERK_SOCKET_PROXY is required when BOOKCLERK_NESTED_NATIVE_JAIL=1; \
-                     nested Deny forbids ambient TCP",
-                ));
+                return Err(Error::new(format!(
+                    "{SOCKET_PROXY_ENV} is required when {NESTED_NATIVE_JAIL_ENV}=1; \
+                     nested Deny forbids ambient TCP"
+                )));
             }
             return Ok(Self {
                 inner: Inner::Direct(direct_reqwest(&builder)?),
@@ -897,11 +900,6 @@ fn use_socket_proxy() -> bool {
     }
 }
 
-/// Host sets `BOOKCLERK_NESTED_NATIVE_JAIL=1` for native-behind-workerd.
-fn nested_native_jail_requested() -> bool {
-    std::env::var("BOOKCLERK_NESTED_NATIVE_JAIL").as_deref() == Ok("1")
-}
-
 /// # Errors
 ///
 /// Returns when the reqwest builder rejects the requested options.
@@ -1316,9 +1314,9 @@ mod query_encoding_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous_proxy = std::env::var_os(SOCKET_PROXY_ENV);
-        let previous_jail = std::env::var_os("BOOKCLERK_NESTED_NATIVE_JAIL");
+        let previous_jail = std::env::var_os(NESTED_NATIVE_JAIL_ENV);
         std::env::remove_var(SOCKET_PROXY_ENV);
-        std::env::set_var("BOOKCLERK_NESTED_NATIVE_JAIL", "1");
+        std::env::set_var(NESTED_NATIVE_JAIL_ENV, "1");
         let err = Client::builder()
             .build()
             .expect_err("nested Deny must not use ambient TCP");
@@ -1328,8 +1326,8 @@ mod query_encoding_tests {
             None => std::env::remove_var(SOCKET_PROXY_ENV),
         }
         match previous_jail {
-            Some(v) => std::env::set_var("BOOKCLERK_NESTED_NATIVE_JAIL", v),
-            None => std::env::remove_var("BOOKCLERK_NESTED_NATIVE_JAIL"),
+            Some(v) => std::env::set_var(NESTED_NATIVE_JAIL_ENV, v),
+            None => std::env::remove_var(NESTED_NATIVE_JAIL_ENV),
         }
     }
 
@@ -1340,6 +1338,8 @@ mod query_encoding_tests {
         let _guard = crate::net::SOCKET_PROXY_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_jail = std::env::var_os(NESTED_NATIVE_JAIL_ENV);
+        std::env::remove_var(NESTED_NATIVE_JAIL_ENV);
         let req = Client::new()
             .get("https://api.audible.com/1.0/catalog/search")
             .query(&[("response_groups", "product_attrs,product_desc")]);
@@ -1354,5 +1354,9 @@ mod query_encoding_tests {
             serialized.contains("product_attrs%2Cproduct_desc"),
             "{serialized}"
         );
+        match previous_jail {
+            Some(v) => std::env::set_var(NESTED_NATIVE_JAIL_ENV, v),
+            None => std::env::remove_var(NESTED_NATIVE_JAIL_ENV),
+        }
     }
 }

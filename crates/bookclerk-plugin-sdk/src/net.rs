@@ -15,14 +15,29 @@
 
 use crate::error::{Result, SdkError};
 
-#[cfg(test)]
+#[cfg(all(test, any(unix, feature = "http")))]
 use std::sync::Mutex;
 
 /// Env var set by `bookclerk-workerd` for native-behind-workerd guests.
 pub const SOCKET_PROXY_ENV: &str = "BOOKCLERK_SOCKET_PROXY";
 
+/// Host sets this to `1` so the native backend is nested under `NetPolicy::Deny`.
+///
+/// SDK HTTP and native TCP fail closed when this is set and
+/// [`SOCKET_PROXY_ENV`] is unset.
+pub const NESTED_NATIVE_JAIL_ENV: &str = "BOOKCLERK_NESTED_NATIVE_JAIL";
+
+/// True when the host nested the native backend under `NetPolicy::Deny`.
+#[must_use]
+pub fn nested_native_jail_requested() -> bool {
+    std::env::var(NESTED_NATIVE_JAIL_ENV).as_deref() == Ok("1")
+}
+
 /// Process-wide lock for tests that mutate [`SOCKET_PROXY_ENV`].
-#[cfg(test)]
+///
+/// Unix net tests and `http` tests take this lock. Windows without `http` has
+/// no SOCKET_PROXY env mutation in this crate.
+#[cfg(all(test, any(unix, feature = "http")))]
 pub(crate) static SOCKET_PROXY_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Prefix for [`SOCKET_PROXY_ENV`] when the proxy is a Linux abstract socket.

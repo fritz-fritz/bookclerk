@@ -251,12 +251,20 @@ else
   fail "fd_proc_path is Unix-only and will not compile on Windows"
 fi
 
-if grep -A25 'pub async fn mediated_connect_url' \
+if grep -A40 'pub async fn mediated_connect_url' \
     crates/bookclerk-plugins/optional/database-postgres/src/socket_mediate.rs \
-    | grep -q 'nested Deny forbids ambient TCP'; then
+    | grep -q 'cannot splice sqlx through SOCKET_PROXY'; then
   ok "postgres SOCKET_PROXY fail-closes on non-Unix"
 else
   fail "postgres still returns ambient TCP URLs when SOCKET_PROXY is set on Windows"
+fi
+
+if grep -A35 'pub async fn mediated_connect_url' \
+    crates/bookclerk-plugins/optional/database-postgres/src/socket_mediate.rs \
+    | grep -q 'nested_native_jail_requested'; then
+  ok "postgres fail-closes nested Deny without SOCKET_PROXY"
+else
+  fail "postgres still returns ambient TCP URLs under nested jail without SOCKET_PROXY"
 fi
 
 if grep -A35 'fn open_granted_binding_databases' crates/bookclerkd/src/jobs.rs \
@@ -300,6 +308,13 @@ if grep -A20 'pub fn new()' crates/bookclerk-plugin-sdk/src/http.rs \
   ok "SDK HTTP Client::new fail-closes under nested Deny instead of ambient TCP"
 else
   fail "SDK HTTP Client::new still falls back to ambient reqwest when the proxy fails"
+fi
+
+if grep -B2 'static SOCKET_PROXY_ENV_LOCK' crates/bookclerk-plugin-sdk/src/net.rs \
+    | grep -q 'unix, feature = "http"'; then
+  ok "SOCKET_PROXY_ENV_LOCK is not unused on Windows without http tests"
+else
+  fail "SOCKET_PROXY_ENV_LOCK is cfg(test) on Windows and fails clippy --all-targets"
 fi
 
 if grep -n 'reqwest::Client' crates/bookclerk-storage/src >/dev/null 2>&1; then
