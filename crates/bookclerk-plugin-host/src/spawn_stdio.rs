@@ -2,8 +2,10 @@
 
 #![allow(clippy::missing_docs_in_private_items)]
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 
 use bookclerk_config::Config;
 use serde_json::Value;
@@ -40,6 +42,8 @@ pub(crate) struct SpawnedStdio {
     /// Host-owned AppContainer profile.
     #[cfg(windows)]
     pub appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
+    /// Last lines of guest stderr (workerd + native child), for spawn failures.
+    pub stderr_tail: Arc<Mutex<VecDeque<String>>>,
 }
 
 /// Spawns the jailed guest with piped stdio. Caller performs Cap'n Proto connect.
@@ -137,8 +141,9 @@ pub(crate) async fn spawn_stdio_guest(
 
     let mut child = cmd.spawn()?;
 
+    let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
     if let Some(stderr) = child.stderr.take() {
-        forward_guest_stderr(id.clone(), stderr);
+        forward_guest_stderr(id.clone(), stderr, Arc::clone(&stderr_tail));
     }
     let stdin = child
         .stdin
@@ -162,14 +167,19 @@ pub(crate) async fn spawn_stdio_guest(
         package_sid: jail.package_sid,
         #[cfg(windows)]
         appcontainer: jail.appcontainer,
+        stderr_tail,
     })
 }
+
+/// Lines of guest stderr retained for spawn/describe failure messages.
+const STDERR_TAIL_LINES: usize = 40;
 
 /// Re-emits each guest stderr line through tracing so `bookclerkd` JSON logs
 /// stay structured (jail summaries used to land as raw `eprintln!` on the
 /// inherited daemon stderr). ANSI from guest formatters is stripped so JSON
-/// does not encode CSI as `\u001b`.
-fn forward_guest_stderr(plugin: String, stderr: ChildStderr) {
+/// does not encode CSI as `\u001b`. Also keeps a short ring for panic text:
+/// tests often have no tracing subscriber, so workerd/guest logs were invisible.
+fn forward_guest_stderr(plugin: String, stderr: ChildStderr, tail: Arc<Mutex<VecDeque<String>>>) {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -177,7 +187,51 @@ fn forward_guest_stderr(plugin: String, stderr: ChildStderr) {
             if line.is_empty() {
                 continue;
             }
+            if let Ok(mut buf) = tail.lock() {
+                if buf.len() >= STDERR_TAIL_LINES {
+                    buf.pop_front();
+                }
+                buf.push_back(line.to_string());
+            }
             tracing::info!(plugin = %plugin, "{line}");
         }
     });
+}
+
+/// Guest process status plus captured stderr, for describe/spawn failures.
+pub(crate) fn spawn_failure_detail(
+    child: &mut Child,
+    stderr_tail: &Arc<Mutex<VecDeque<String>>>,
+) -> String {
+    let status = match child.try_wait() {
+        Ok(Some(st)) => format!("guest exited: {st}"),
+        Ok(None) => "guest still running".into(),
+        Err(e) => format!("guest wait error: {e}"),
+    };
+    let stderr = stderr_tail_text(stderr_tail);
+    if stderr.is_empty() {
+        status
+    } else {
+        format!("{status}\n--- guest stderr ---\n{stderr}")
+    }
+}
+
+/// Attaches [`spawn_failure_detail`] without losing the ABI error class.
+pub(crate) fn with_spawn_detail(err: PluginError, extra: String) -> PluginError {
+    match err {
+        PluginError::Unavailable(message) => {
+            PluginError::unavailable(format!("{message}; {extra}"))
+        }
+        PluginError::Message(message) => PluginError::message(format!("{message}; {extra}")),
+        PluginError::Abi { code, message } => {
+            PluginError::from_abi(Some(&code), format!("{message}; {extra}"))
+        }
+        other => PluginError::message(format!("{other}; {extra}")),
+    }
+}
+
+fn stderr_tail_text(tail: &Arc<Mutex<VecDeque<String>>>) -> String {
+    tail.lock()
+        .map(|buf| buf.iter().cloned().collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default()
 }
