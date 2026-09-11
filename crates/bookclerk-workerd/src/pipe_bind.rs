@@ -62,6 +62,7 @@ pub fn bind_socket_proxy(package_sid: Option<&str>) -> io::Result<BoundSocketPro
 ///
 /// Returns when the security descriptor cannot be built or `CreateNamedPipe`
 /// fails.
+#[allow(unsafe_code)]
 pub fn create_pipe(name: &str, package_sid: &str, first: bool) -> io::Result<NamedPipeServer> {
     let mut options = ServerOptions::new();
     options
