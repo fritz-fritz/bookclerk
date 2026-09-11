@@ -295,6 +295,13 @@ else
   fail "fetch_dir imports recv_passed_fd on Windows (unused import under clippy -D warnings)"
 fi
 
+if grep -A20 'pub fn new()' crates/bookclerk-plugin-sdk/src/http.rs \
+    | grep -q 'nested_native_jail_requested'; then
+  ok "SDK HTTP Client::new fail-closes under nested Deny instead of ambient TCP"
+else
+  fail "SDK HTTP Client::new still falls back to ambient reqwest when the proxy fails"
+fi
+
 if grep -n 'reqwest::Client' crates/bookclerk-storage/src >/dev/null 2>&1; then
   fail "bookclerk-storage still uses ambient reqwest::Client"
 else
