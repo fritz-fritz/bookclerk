@@ -31,6 +31,7 @@
 //! 3. New spawns re-read the grant file and refuse to return a session whose
 //!    revision no longer matches disk.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -427,15 +428,11 @@ fn hash_grant(kind: &[u8], grant: &PluginGrant) -> String {
         hasher.update(b",");
     }
     hasher.update(b"\ntcp\n");
-    for t in &grant.tcp {
-        hasher.update(t.host.as_bytes());
-        hasher.update(b":");
-        for p in &t.ports {
-            hasher.update(p.to_string().as_bytes());
-            hasher.update(b",");
-        }
-        hasher.update(b";");
-    }
+    hash_tcp_grants(&mut hasher, &grant.tcp);
+    hasher.update(b"\noperator_added_tcp\n");
+    hash_tcp_grants(&mut hasher, &grant.operator_added_tcp);
+    hasher.update(b"\noperator_denied_tcp\n");
+    hash_tcp_grants(&mut hasher, &grant.operator_denied_tcp);
     hasher.update(b"\ncidrs\n");
     for c in &grant.address_cidrs {
         hasher.update(c.as_bytes());
@@ -484,6 +481,19 @@ fn hash_grant(kind: &[u8], grant: &PluginGrant) -> String {
             .as_bytes(),
     );
     hex::encode(hasher.finalize())
+}
+
+/// Canonical digest of TCP grants (`host:port,…;`).
+fn hash_tcp_grants(hasher: &mut Sha256, grants: &BTreeSet<bookclerk_plugin_manifest::TcpGrant>) {
+    for t in grants {
+        hasher.update(t.host.as_bytes());
+        hasher.update(b":");
+        for p in &t.ports {
+            hasher.update(p.to_string().as_bytes());
+            hasher.update(b",");
+        }
+        hasher.update(b";");
+    }
 }
 
 #[cfg(test)]
@@ -654,6 +664,13 @@ mod tests {
         let mut d = a.clone();
         d.allow_undeclared_public_redirects = true;
         assert_ne!(authority_revision(&a), authority_revision(&d));
+        let mut e = a.clone();
+        e.operator_denied_tcp
+            .insert(bookclerk_plugin_manifest::TcpGrant {
+                host: "cdn.example.com".into(),
+                ports: vec![443],
+            });
+        assert_ne!(authority_revision(&a), authority_revision(&e));
     }
 
     fn write_grants_from_child(path: &Path, text: &str) {

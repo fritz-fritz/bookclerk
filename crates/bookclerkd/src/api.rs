@@ -501,6 +501,8 @@ struct PluginGrantView {
     tcp: Vec<TcpGrantView>,
     /// Operator-added TCP grants.
     operator_added_tcp: Vec<TcpGrantView>,
+    /// Operator-denied TCP grants still listed by the manifest.
+    operator_denied_tcp: Vec<TcpGrantView>,
     /// Effective address-space CIDRs.
     address_cidrs: Vec<String>,
     /// Operator-added CIDRs.
@@ -574,6 +576,11 @@ impl PluginGrantView {
             tcp: grant.tcp.iter().map(TcpGrantView::from).collect(),
             operator_added_tcp: grant
                 .operator_added_tcp
+                .iter()
+                .map(TcpGrantView::from)
+                .collect(),
+            operator_denied_tcp: grant
+                .operator_denied_tcp
                 .iter()
                 .map(TcpGrantView::from)
                 .collect(),

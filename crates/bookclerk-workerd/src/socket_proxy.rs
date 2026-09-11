@@ -355,39 +355,22 @@ mod tests {
     }
 
     #[tokio::test]
-<<<<<<< HEAD
     async fn idle_connect_terminates_when_fenced_without_further_rpc() {
-=======
-    async fn proxy_dials_ipv4_when_localhost_has_no_ipv6_listener() {
->>>>>>> 725b62cf (plugin: retry socket-proxy dials and disable Prefer TLS on postgres unix)
         let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = echo.local_addr().unwrap().port();
         tokio::spawn(async move {
             let (mut s, _) = echo.accept().await.unwrap();
             let mut buf = [0_u8; 32];
-<<<<<<< HEAD
             let _ = s.read(&mut buf).await;
-=======
-            let n = s.read(&mut buf).await.unwrap();
-            s.write_all(&buf[..n]).await.unwrap();
->>>>>>> 725b62cf (plugin: retry socket-proxy dials and disable Prefer TLS on postgres unix)
         });
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("proxy.sock");
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
-<<<<<<< HEAD
         let policy = tcp_policy("127.0.0.1", port, &["127.0.0.1/32"]);
         let fence = Arc::new(AtomicBool::new(false));
         spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
         let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
         let req = format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n");
-=======
-        let policy = tcp_policy("localhost", port, &["127.0.0.1/32", "::1/128"]);
-        let fence = Arc::new(AtomicBool::new(false));
-        spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
-        let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
-        let req = format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\n");
->>>>>>> 725b62cf (plugin: retry socket-proxy dials and disable Prefer TLS on postgres unix)
         client.write_all(req.as_bytes()).await.unwrap();
         let mut head = Vec::new();
         let mut tmp = [0_u8; 1];
@@ -398,7 +381,6 @@ mod tests {
                 break;
             }
         }
-<<<<<<< HEAD
         assert!(
             String::from_utf8_lossy(&head).contains("200"),
             "{}",
@@ -411,7 +393,36 @@ mod tests {
             .expect("idle CONNECT must unblock when fenced")
             .expect("read after fence");
         assert_eq!(n, 0, "fenced idle CONNECT must EOF without another RPC");
-=======
+    }
+
+    #[tokio::test]
+    async fn proxy_dials_ipv4_when_localhost_has_no_ipv6_listener() {
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = echo.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = echo.accept().await.unwrap();
+            let mut buf = [0_u8; 32];
+            let n = s.read(&mut buf).await.unwrap();
+            s.write_all(&buf[..n]).await.unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("proxy.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let policy = tcp_policy("localhost", port, &["127.0.0.1/32", "::1/128"]);
+        let fence = Arc::new(AtomicBool::new(false));
+        spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
+        let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        let req = format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\n");
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut head = Vec::new();
+        let mut tmp = [0_u8; 1];
+        loop {
+            client.read_exact(&mut tmp).await.unwrap();
+            head.push(tmp[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
         let text = String::from_utf8_lossy(&head);
         assert!(text.contains("200"), "{text}");
         client.write_all(b"ping").await.unwrap();
@@ -419,7 +430,6 @@ mod tests {
         let n = client.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"ping");
         fence.store(true, Ordering::SeqCst);
->>>>>>> 725b62cf (plugin: retry socket-proxy dials and disable Prefer TLS on postgres unix)
     }
 
     #[tokio::test]
