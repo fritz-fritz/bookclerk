@@ -47,8 +47,8 @@ impl IntegrationRegistry {
     /// `Some(...)` when found / applicable; otherwise `None`.
     #[must_use]
     pub fn get(&self, id: &str) -> Option<Arc<dyn Integration>> {
-        let matches = self.matches(id);
-        (matches.len() == 1).then(|| matches.into_iter().next().expect("len == 1"))
+        let mut matches = self.matches(id);
+        (matches.len() == 1).then(|| matches.remove(0))
     }
 
     /// Integrations whose PluginKey or display alias match `id`.
