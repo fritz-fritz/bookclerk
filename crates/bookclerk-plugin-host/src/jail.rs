@@ -776,7 +776,7 @@ entrypoints = ["{entrypoint}"]
 
     /// Front-door plan against fake `bookclerk-workerd` + `workerd` files in `helpers`.
     fn fronted(plugin: &DiscoveredPlugin, helpers: &Path) -> SpawnPlan {
-        for name in ["bookclerk-workerd", "workerd"] {
+        for name in ["bookclerk-workerd", "workerd", "bookclerk-jail"] {
             let path = helpers.join(name);
             if !path.exists() {
                 std::fs::write(&path, b"").expect("fake helper");
@@ -972,9 +972,9 @@ entrypoints = ["{entrypoint}"]
     }
 
     /// The product path: the jail execs `bookclerk-workerd`, which execs the
-    /// pinned `workerd` and the native backend. All three must stay readable,
-    /// the loopback bridge needs `OutboundListen`, and the pids budget counts
-    /// the whole launcher tree.
+    /// pinned `workerd`, the nested `bookclerk-jail`, and the native backend.
+    /// All four must stay readable, the loopback bridge needs `OutboundListen`,
+    /// and the pids budget counts the whole launcher tree.
     #[test]
     fn a_native_guest_behind_workerd_gets_the_launcher_tree_grants() {
         let files = tempfile::tempdir().expect("tempdir");
@@ -999,6 +999,9 @@ entrypoints = ["{entrypoint}"]
             &plan.launcher,
             plan.workerd_bin.as_ref().expect("workerd bin"),
             &plugin.command,
+            plan.nested_jail_helper()
+                .as_ref()
+                .expect("nested jail beside launcher"),
         ] {
             assert!(
                 spec.reads.iter().any(|r| exe.starts_with(r)),
