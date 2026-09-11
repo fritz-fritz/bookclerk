@@ -261,10 +261,39 @@ async fn staged_first_party_plugins_describe() {
 /// True when a staged-plugin smoke call failed because a live storefront was down.
 fn live_storefront_unavailable(err: &impl std::fmt::Display) -> bool {
     let msg = err.to_string().to_ascii_lowercase();
-    msg.contains("http status")
+    http_error_status(&msg)
         || msg.contains("timed out")
         || msg.contains("timeout")
         || msg.contains("connection refused")
         || msg.contains("dns error")
         || msg.contains("error sending request")
+}
+
+/// True when `msg` (already lowercased) reports an HTTP 4xx/5xx from reqwest or SDK HTTP.
+fn http_error_status(msg: &str) -> bool {
+    if msg.contains("http status") {
+        return true;
+    }
+    // SDK HTTP: `HTTP 500 Internal Server Error for {url}`
+    let Some(after) = msg.split("http ").nth(1) else {
+        return false;
+    };
+    after
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse::<u16>()
+        .is_ok_and(|code| (400..600).contains(&code))
+}
+
+#[test]
+fn live_storefront_unavailable_matches_sdk_http_status() {
+    assert!(live_storefront_unavailable(
+        &"internal: enrichment error: HTTP 500 Internal Server Error for https://api.audible.com/1.0/catalog/search"
+    ));
+    assert!(live_storefront_unavailable(&"http status 503"));
+    assert!(live_storefront_unavailable(&"GraphQL HTTP 403: forbidden"));
+    assert!(!live_storefront_unavailable(
+        &"audible search_catalog must succeed (empty ok)"
+    ));
 }
