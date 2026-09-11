@@ -915,7 +915,7 @@ Structural capabilities originate in the
 manifest; the operator may **narrow** them but cannot invent entrypoints,
 producers, or host bindings. Network destinations are operator-extensible:
 operators may add fetch hosts, TCP `host:ports`, and CIDRs beyond the
-manifest, **and may deny** individual fetch hosts or TCP grants so a later
+manifest, **and may deny** individual fetch hosts, TCP grants, or CIDRs so a later
 package upgrade of the same PluginKey does not silently restore them. Host
 hard caps still
 apply (`WorkerdLimits` maxes, disk/memory max 4096 MiB, CPU rate
@@ -957,10 +957,16 @@ is identity-only so the previous approval remains usable). Do not
 expect spawn-time hash checks in this release.
 
 On upgrade of the **same PluginKey**, operator-added network destinations
+<<<<<<< HEAD
 and operator **denials** (fetch hosts and TCP grants) survive; new
 structural capabilities stay pending until the operator consents
 (`grant_covers` is identity-only). A different provenance (even with the
 same manifest alias) does not inherit grants.
+=======
+and operator **denials** (fetch hosts, TCP grants, and CIDRs) survive; new sensitive
+structural authority re-prompts. A different provenance (even with the same
+manifest id) does not inherit grants.
+>>>>>>> 19672f99 (plugin: persist operator CIDR denials across PluginKey upgrades)
 
 ## Enabling and settings in `config.toml`
 
