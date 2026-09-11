@@ -170,7 +170,7 @@ export interface DestinationGetResults {
  */
 export interface DestinationPutParams {
   key: string;
-  body: T.ByteSource;
+  body?: T.ByteSource | null;
   options: T.WriteOptions;
 }
 
@@ -6739,7 +6739,7 @@ export const DestinationPutParamsCodec: StructCodec<DestinationPutParams> = {
     }
   },
   read(s, caps) {
-    const out: T.DestinationPutParams = {
+    const out: DestinationPutParams = {
       key: s.getText(0),
       options: WriteOptionsCodec.read(s.getStruct(2, 2, 3), caps),
     };

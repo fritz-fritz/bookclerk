@@ -2139,19 +2139,40 @@ var JobControllerCodec = {
     if (v.invocation != null) {
       JobInvocationCodec.write(s.initStruct(0, 3, 8), v.invocation, caps);
     }
-    s.setCap(1, caps.exportCap(v.input));
-    s.setCap(2, caps.exportCap(v.output));
-    s.setCap(3, caps.exportCap(v.progress));
-    s.setCap(4, caps.exportCap(v.cancel));
+    if (v.input != null) {
+      s.setCap(1, caps.exportCap(v.input));
+    }
+    if (v.output != null) {
+      s.setCap(2, caps.exportCap(v.output));
+    }
+    if (v.progress != null) {
+      s.setCap(3, caps.exportCap(v.progress));
+    }
+    if (v.cancel != null) {
+      s.setCap(4, caps.exportCap(v.cancel));
+    }
   },
   read(s, caps) {
-    return {
-      invocation: JobInvocationCodec.read(s.getStruct(0, 3, 8), caps),
-      input: caps.importCap(s.getCapIndex(1)),
-      output: caps.importCap(s.getCapIndex(2)),
-      progress: caps.importCap(s.getCapIndex(3)),
-      cancel: caps.importCap(s.getCapIndex(4))
+    const out = {
+      invocation: JobInvocationCodec.read(s.getStruct(0, 3, 8), caps)
     };
+    const inputValue = caps.importCap(s.getCapIndex(1));
+    if (!(inputValue == null)) {
+      out.input = inputValue;
+    }
+    const outputValue = caps.importCap(s.getCapIndex(2));
+    if (!(outputValue == null)) {
+      out.output = outputValue;
+    }
+    const progressValue = caps.importCap(s.getCapIndex(3));
+    if (!(progressValue == null)) {
+      out.progress = progressValue;
+    }
+    const cancelValue = caps.importCap(s.getCapIndex(4));
+    if (!(cancelValue == null)) {
+      out.cancel = cancelValue;
+    }
+    return out;
   }
 };
 var HeadOkCodec = {
@@ -2421,7 +2442,9 @@ var AdapterSessionReplyCodec = {
     switch (v.kind) {
       case "ok":
         s.setUint16(0, 0);
-        s.setCap(0, caps.exportCap(v.value));
+        if (v.value != null) {
+          s.setCap(0, caps.exportCap(v.value));
+        }
         break;
       case "err":
         s.setUint16(0, 1);
