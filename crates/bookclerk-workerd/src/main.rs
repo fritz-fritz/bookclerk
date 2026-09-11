@@ -7,8 +7,7 @@
 //!
 //! Under Linux Landlock `OutboundListen`, only `bind(port=0)` is allowed — the
 //! launcher binds the bridge RPC socket itself and passes it to workerd via
-//! `--socket-fd` (same inherited-FD pattern as the plugin fetch-directory
-//! channel). The adapter-private `GRANTED` capability channel uses a Linux
+//! `--socket-fd`. The adapter-private `GRANTED` capability channel uses a Linux
 //! abstract unix socket (or a relative `unix:granted.sock` under `$TMPDIR` on
 //! other Unix), or an already-bound loopback TCP listener on Windows
 //! (AppContainer-friendly).
@@ -16,8 +15,6 @@
 //! Author `modules/` stay in the read-only install root (Cap'n Proto
 //! `/modules/…` embeds + `--import-path`). `$TMPDIR` only holds generated
 //! bridge assets, config, and sockets.
-
-#![cfg_attr(unix, allow(unsafe_code))] // fcntl clear CLOEXEC for --socket-fd
 
 mod manifest_env;
 
@@ -546,18 +543,7 @@ async fn mediate_bridge(
 /// Clears `FD_CLOEXEC` so workerd inherits the bound RPC listener via `--socket-fd`.
 fn clear_cloexec(listener: &std::net::TcpListener) -> Result<()> {
     use std::os::fd::AsRawFd;
-    let fd = listener.as_raw_fd();
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
-        bail!("F_GETFD failed: {}", std::io::Error::last_os_error());
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
-        bail!(
-            "F_SETFD clear CLOEXEC failed: {}",
-            std::io::Error::last_os_error()
-        );
-    }
-    Ok(())
+    bookclerk_workerd::unix_bind::clear_cloexec(listener.as_raw_fd()).map_err(anyhow::Error::from)
 }
 
 /// Forwards workerd stdout/stderr lines through tracing (JSON when the parent is bookclerkd).
