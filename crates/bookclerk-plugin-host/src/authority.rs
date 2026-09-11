@@ -438,6 +438,16 @@ fn hash_grant(kind: &[u8], grant: &PluginGrant) -> String {
         hasher.update(c.as_bytes());
         hasher.update(b",");
     }
+    hasher.update(b"\noperator_added_cidrs\n");
+    for c in &grant.operator_added_cidrs {
+        hasher.update(c.as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"\noperator_denied_cidrs\n");
+    for c in &grant.operator_denied_cidrs {
+        hasher.update(c.as_bytes());
+        hasher.update(b",");
+    }
     hasher.update(b"\nredirects\n");
     hasher.update(
         u8::from(grant.allow_undeclared_public_redirects)
@@ -671,6 +681,9 @@ mod tests {
                 ports: vec![443],
             });
         assert_ne!(authority_revision(&a), authority_revision(&e));
+        let mut f = a.clone();
+        f.operator_denied_cidrs.insert("10.0.0.0/8".into());
+        assert_ne!(authority_revision(&a), authority_revision(&f));
     }
 
     fn write_grants_from_child(path: &Path, text: &str) {
