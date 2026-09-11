@@ -4,7 +4,8 @@
 //! this module wraps [`reqwest::Client`] over ambient TCP. When the proxy
 //! is set, every request is `CONNECT` + rustls over the Unix or Windows
 //! named-pipe proxy — nested `NetPolicy::Deny` guests must not call
-//! `socket(AF_INET)`.
+//! `socket(AF_INET)`. `BOOKCLERK_NESTED_NATIVE_JAIL=1` without a proxy
+//! fails closed rather than falling back to ambient TCP.
 //!
 //! Fetch domain grants do **not** imply TCP. Native manifests must declare
 //! `capabilities.network.tcp` (or rely on a host overlay) for each
@@ -272,7 +273,9 @@ impl ClientBuilder {
     ///
     /// # Errors
     ///
-    /// Returns when the ambient reqwest client cannot be constructed.
+    /// Returns when nested Deny is set without a socket proxy, when the
+    /// ambient reqwest client cannot be constructed, or when the proxied
+    /// rustls config fails.
     pub fn build(self) -> HttpResult<Client> {
         Client::from_builder(self)
     }
@@ -354,13 +357,21 @@ impl Client {
     ///
     /// # Panics
     ///
-    /// Panics only when the ambient reqwest builder fails (should not happen
-    /// with default options).
+    /// Panics when [`crate::SOCKET_PROXY_ENV`] or nested Deny is in force and
+    /// the proxied client cannot be built. Does not fall back to ambient TCP.
+    /// Ambient reqwest construction failure without those env vars also panics
+    /// only if the last-resort `reqwest::Client::new` cannot be created.
     #[must_use]
     pub fn new() -> Self {
-        Self::builder().build().unwrap_or_else(|_| Self {
-            inner: Inner::Direct(reqwest::Client::new()),
-        })
+        match Self::builder().build() {
+            Ok(client) => client,
+            Err(err) if use_socket_proxy() || nested_native_jail_requested() => {
+                panic!("HTTP client failed under nested Deny / SOCKET_PROXY: {err}");
+            }
+            Err(_) => Self {
+                inner: Inner::Direct(reqwest::Client::new()),
+            },
+        }
     }
 
     /// Builder.
@@ -371,9 +382,17 @@ impl Client {
 
     /// # Errors
     ///
-    /// Returns when the ambient reqwest builder or the proxied rustls config fails.
+    /// Returns when nested Deny is set without [`crate::SOCKET_PROXY_ENV`],
+    /// when the ambient reqwest builder fails, or when the proxied rustls
+    /// config fails.
     fn from_builder(builder: ClientBuilder) -> HttpResult<Self> {
         if !use_socket_proxy() {
+            if nested_native_jail_requested() {
+                return Err(Error::new(
+                    "BOOKCLERK_SOCKET_PROXY is required when BOOKCLERK_NESTED_NATIVE_JAIL=1; \
+                     nested Deny forbids ambient TCP",
+                ));
+            }
             return Ok(Self {
                 inner: Inner::Direct(direct_reqwest(&builder)?),
             });
@@ -878,6 +897,11 @@ fn use_socket_proxy() -> bool {
     }
 }
 
+/// Host sets `BOOKCLERK_NESTED_NATIVE_JAIL=1` for native-behind-workerd.
+fn nested_native_jail_requested() -> bool {
+    std::env::var("BOOKCLERK_NESTED_NATIVE_JAIL").as_deref() == Ok("1")
+}
+
 /// # Errors
 ///
 /// Returns when the reqwest builder rejects the requested options.
@@ -1286,10 +1310,36 @@ mod tests {
 mod query_encoding_tests {
     use super::*;
 
+    #[test]
+    fn nested_jail_without_socket_proxy_fails_closed() {
+        let _guard = crate::net::SOCKET_PROXY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_proxy = std::env::var_os(SOCKET_PROXY_ENV);
+        let previous_jail = std::env::var_os("BOOKCLERK_NESTED_NATIVE_JAIL");
+        std::env::remove_var(SOCKET_PROXY_ENV);
+        std::env::set_var("BOOKCLERK_NESTED_NATIVE_JAIL", "1");
+        let err = Client::builder()
+            .build()
+            .expect_err("nested Deny must not use ambient TCP");
+        assert!(err.to_string().contains("SOCKET_PROXY"), "{err}");
+        match previous_proxy {
+            Some(v) => std::env::set_var(SOCKET_PROXY_ENV, v),
+            None => std::env::remove_var(SOCKET_PROXY_ENV),
+        }
+        match previous_jail {
+            Some(v) => std::env::set_var("BOOKCLERK_NESTED_NATIVE_JAIL", v),
+            None => std::env::remove_var("BOOKCLERK_NESTED_NATIVE_JAIL"),
+        }
+    }
+
     /// Audible catalog `response_groups` uses commas. serde_urlencoded emits
     /// `%2C`; appending that string as a raw pair would become `%252C`.
     #[test]
     fn query_encodes_commas_once() {
+        let _guard = crate::net::SOCKET_PROXY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let req = Client::new()
             .get("https://api.audible.com/1.0/catalog/search")
             .query(&[("response_groups", "product_attrs,product_desc")]);
