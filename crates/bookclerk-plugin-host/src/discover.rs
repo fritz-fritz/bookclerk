@@ -677,18 +677,10 @@ mode = "deny"
             found[0].plugin_key().canonical()
         ));
         assert!(plugin_matches_occupancy(&found[0], "echo"));
-<<<<<<< HEAD
         assert!(!plugin_matches_occupancy(&found[0], "other"));
-=======
-        assert!(plugin_matches_occupancy(&found[1], "echo"));
         assert!(identity_matches_occupancy(
             found[0].plugin_key().canonical(),
             found[0].alias(),
-            found[0].plugin_key().canonical()
-        ));
-        assert!(!identity_matches_occupancy(
-            found[1].plugin_key().canonical(),
-            found[1].alias(),
             found[0].plugin_key().canonical()
         ));
         assert!(identity_matches_occupancy(
@@ -701,7 +693,11 @@ mode = "deny"
             "echo",
             ""
         ));
->>>>>>> ee049a7d (plugin: key privilege-path grants and plugin DBs on PluginKey)
+        assert!(!identity_matches_occupancy(
+            found[0].plugin_key().canonical(),
+            "echo",
+            "other"
+        ));
     }
 
     #[test]
