@@ -191,7 +191,7 @@ pub struct PluginGrant {
     /// Operator-denied destinations (even if the manifest still lists them).
     #[serde(default)]
     pub operator_denied_domains: BTreeSet<String>,
-    /// Effective raw TCP grants (manifest ∪ operator additions).
+    /// Effective raw TCP grants (manifest ∪ operator additions − denials).
     #[serde(default)]
     pub tcp: BTreeSet<TcpGrant>,
     /// TCP grants requested by the installed manifest.
@@ -200,6 +200,13 @@ pub struct PluginGrant {
     /// Operator-added TCP grants; survive upgrades of the same PluginKey.
     #[serde(default)]
     pub operator_added_tcp: BTreeSet<TcpGrant>,
+    /// Operator-denied TCP grants (even if the current manifest still lists them).
+    ///
+    /// Same PluginKey upgrades must not silently restore a TCP host the operator
+    /// removed. Host spawn overlays (postgres URL, D1, ABS, S3) may still add
+    /// destinations from operator config after this set is applied.
+    #[serde(default)]
+    pub operator_denied_tcp: BTreeSet<TcpGrant>,
     /// Effective CIDR grants beyond the public Internet.
     #[serde(default)]
     pub address_cidrs: BTreeSet<String>,
@@ -268,6 +275,7 @@ impl PluginGrant {
             tcp: BTreeSet::new(),
             manifest_tcp: BTreeSet::new(),
             operator_added_tcp: BTreeSet::new(),
+            operator_denied_tcp: BTreeSet::new(),
             address_cidrs: BTreeSet::new(),
             manifest_cidrs: BTreeSet::new(),
             operator_added_cidrs: BTreeSet::new(),
@@ -525,6 +533,7 @@ pub fn consent_request_alias(manifest: &PluginManifest) -> PluginGrant {
         tcp: tcp.clone(),
         manifest_tcp: tcp,
         operator_added_tcp: BTreeSet::new(),
+        operator_denied_tcp: BTreeSet::new(),
         address_cidrs: address_cidrs.clone(),
         manifest_cidrs: address_cidrs,
         operator_added_cidrs: BTreeSet::new(),
@@ -830,22 +839,40 @@ fn merge_network_domains(existing: &PluginGrant, requested: &PluginGrant) -> BTr
     domains
 }
 
-/// Operator-added TCP grants relative to the current manifest.
-fn merge_operator_tcp(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<TcpGrant> {
-    if !existing.operator_added_tcp.is_empty() {
-        return existing.operator_added_tcp.clone();
+/// Reconstructs operator TCP additions/denials relative to the current manifest.
+fn classified_operator_tcp(
+    existing: &PluginGrant,
+    requested: &PluginGrant,
+) -> (BTreeSet<TcpGrant>, BTreeSet<TcpGrant>) {
+    if !existing.operator_added_tcp.is_empty() || !existing.operator_denied_tcp.is_empty() {
+        return (
+            existing.operator_added_tcp.clone(),
+            existing.operator_denied_tcp.clone(),
+        );
     }
-    existing
+    let added = existing
         .tcp
         .difference(&requested.manifest_tcp)
         .cloned()
-        .collect()
+        .collect();
+    // Legacy grants without explicit TCP denials: new package hosts re-evaluate.
+    let denied = existing.operator_denied_tcp.clone();
+    (added, denied)
 }
 
-/// Effective TCP: current manifest ∪ operator additions.
+/// Operator-added TCP grants relative to the current manifest.
+fn merge_operator_tcp(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<TcpGrant> {
+    classified_operator_tcp(existing, requested).0
+}
+
+/// Effective TCP: current manifest ∪ operator additions − operator denials.
 fn merge_tcp(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<TcpGrant> {
+    let (added, denied) = classified_operator_tcp(existing, requested);
     let mut tcp = requested.manifest_tcp.clone();
-    tcp.extend(merge_operator_tcp(existing, requested));
+    tcp.extend(added);
+    for grant in denied {
+        tcp.remove(&grant);
+    }
     tcp
 }
 
@@ -908,6 +935,7 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
         tcp: merge_tcp(existing, requested),
         manifest_tcp: requested.manifest_tcp.clone(),
         operator_added_tcp: merge_operator_tcp(existing, requested),
+        operator_denied_tcp: classified_operator_tcp(existing, requested).1,
         address_cidrs: merge_cidrs(existing, requested),
         manifest_cidrs: requested.manifest_cidrs.clone(),
         operator_added_cidrs: if existing.operator_added_cidrs.is_empty() {
@@ -1123,6 +1151,11 @@ pub fn validate_approved_grant(
         operator_added_tcp: approved
             .tcp
             .difference(&baseline.manifest_tcp)
+            .cloned()
+            .collect(),
+        operator_denied_tcp: baseline
+            .manifest_tcp
+            .difference(&approved.tcp)
             .cloned()
             .collect(),
         address_cidrs: approved.address_cidrs.clone(),
@@ -2322,6 +2355,44 @@ mode = "deny"
         );
         assert!(effective.compatibility_flags.is_empty());
         assert_eq!(effective.disk_mib, Some(PLUGIN_STATE_BUDGET_MIB_DEFAULT));
+    }
+
+    #[test]
+    fn effective_grant_keeps_operator_tcp_denials_across_manifest_upgrade() {
+        let denied = TcpGrant {
+            host: "old.example.com".into(),
+            ports: vec![443],
+        };
+        let added = TcpGrant {
+            host: "extra.example.com".into(),
+            ports: vec![443],
+        };
+        let mut existing = sample_grant(&["api.example.com"], &["config"], &[]);
+        existing.tcp.insert(added.clone());
+        existing.operator_added_tcp.insert(added.clone());
+        existing.operator_denied_tcp.insert(denied.clone());
+        existing.manifest_tcp.insert(denied.clone());
+
+        let mut requested = sample_grant(&["api.example.com"], &["config"], &[]);
+        requested.tcp.insert(denied.clone());
+        requested.manifest_tcp.insert(denied.clone());
+        requested.tcp.insert(TcpGrant {
+            host: "new.example.com".into(),
+            ports: vec![443],
+        });
+        requested.manifest_tcp.insert(TcpGrant {
+            host: "new.example.com".into(),
+            ports: vec![443],
+        });
+
+        let effective = effective_grant(&existing, &requested);
+        assert!(
+            !effective.tcp.contains(&denied),
+            "operator TCP denials must survive a same-PluginKey package upgrade"
+        );
+        assert!(effective.tcp.contains(&added));
+        assert!(effective.tcp.iter().any(|t| t.host == "new.example.com"));
+        assert!(effective.operator_denied_tcp.contains(&denied));
     }
 
     #[test]
