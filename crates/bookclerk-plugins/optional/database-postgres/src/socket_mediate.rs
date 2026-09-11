@@ -311,9 +311,12 @@ async fn splice_to_proxy(
 }
 
 #[cfg(test)]
-#[allow(clippy::missing_panics_doc)]
+#[allow(clippy::missing_panics_doc, clippy::await_holding_lock)]
 mod tests {
     use super::*;
+
+    /// `SOCKET_PROXY_ENV` is process-wide; tests that read or mutate it must not overlap.
+    static SOCKET_PROXY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn unix_host_query_overrides_tcp_authority() {
@@ -351,18 +354,25 @@ mod tests {
 
     #[tokio::test]
     async fn mediate_is_noop_without_socket_proxy() {
+        let _guard = SOCKET_PROXY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os(bookclerk_plugin_sdk::SOCKET_PROXY_ENV);
+        std::env::remove_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV);
         let url = "postgres://postgres:postgres@localhost:5432/postgres";
         let out = mediated_connect_url(url).await.expect("noop");
         assert_eq!(out, url);
+        match previous {
+            Some(value) => std::env::set_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV, value),
+            None => std::env::remove_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV),
+        }
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn mediator_splices_through_socket_proxy() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        static SOCKET_PROXY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = SOCKET_PROXY_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
