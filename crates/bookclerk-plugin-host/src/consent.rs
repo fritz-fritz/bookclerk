@@ -2448,6 +2448,32 @@ mode = "deny"
     }
 
     #[test]
+    fn effective_grant_keeps_operator_domain_denials_across_manifest_upgrade() {
+        let denied = "old.example.com".to_string();
+        let added = "extra.example.com".to_string();
+        let mut existing = sample_grant(&["api.example.com"], &["config"], &[]);
+        existing.domains.insert(added.clone());
+        existing.operator_added_domains.insert(added.clone());
+        existing.operator_denied_domains.insert(denied.clone());
+        existing.manifest_domains.insert(denied.clone());
+
+        let mut requested = sample_grant(&["api.example.com"], &["config"], &[]);
+        requested.domains.insert(denied.clone());
+        requested.manifest_domains.insert(denied.clone());
+        requested.domains.insert("new.example.com".into());
+        requested.manifest_domains.insert("new.example.com".into());
+
+        let effective = effective_grant(&existing, &requested);
+        assert!(
+            !effective.domains.contains(&denied),
+            "operator fetch-host denials must survive a same-PluginKey package upgrade"
+        );
+        assert!(effective.domains.contains(&added));
+        assert!(effective.domains.contains("new.example.com"));
+        assert!(effective.operator_denied_domains.contains(&denied));
+    }
+
+    #[test]
     fn require_grant_does_not_inherit_across_plugin_keys() {
         let dir = tempfile::tempdir().unwrap();
         let platformish = discovered(
