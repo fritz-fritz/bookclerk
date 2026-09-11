@@ -1377,12 +1377,18 @@ pub fn inject_workerd_grant_env(cmd: &mut Command, grant: &PluginGrant) {
     }
 }
 
-/// Overlay TCP + CIDR implied by host-configured `[database.postgres].url`.
+/// Overlay TCP + CIDR implied by host configuration (not persisted).
 ///
-/// Not persisted and not operator-invented structural authority. The operator
-/// already configured the URL; spawn injects the matching `EgressPolicy` so
-/// the nested native guest can `connect()` it. No-op unless this guest is the
-/// active Postgres database plugin and the covering grant is outbound.
+/// Not operator-invented structural authority. The operator already configured
+/// the destination URL; spawn injects matching `EgressPolicy` so the nested
+/// native guest can `connect()` it. Covers:
+///
+/// - active Postgres `[database.postgres].url`
+/// - active D1 `[database.d1].api_base`
+/// - Audiobookshelf `[integrations.audiobookshelf].base_url`
+/// - S3 `[output.s3].endpoint` (custom/MinIO)
+///
+/// No-op unless the covering grant is outbound.
 ///
 /// # Arguments
 ///
@@ -1394,13 +1400,25 @@ pub fn overlay_host_implied_network(
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
 ) {
+    if !grant.network_mode.eq_ignore_ascii_case("outbound") {
+        return;
+    }
+    overlay_postgres_url(grant, plugin, config);
+    overlay_d1_api_base(grant, plugin, config);
+    overlay_audiobookshelf_url(grant, plugin, config);
+    overlay_s3_endpoint(grant, plugin, config);
+}
+
+/// Overlay TCP for the active Postgres URL (host-owned, not persisted).
+fn overlay_postgres_url(
+    grant: &mut PluginGrant,
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+) {
     if DatabasePluginKind::parse(&plugin.manifest.id) != Some(DatabasePluginKind::Postgres) {
         return;
     }
     if DatabasePluginKind::parse(&config.database.plugin) != Some(DatabasePluginKind::Postgres) {
-        return;
-    }
-    if !grant.network_mode.eq_ignore_ascii_case("outbound") {
         return;
     }
     let Ok(url) = resolve_postgres_url(config) else {
@@ -1409,10 +1427,80 @@ pub fn overlay_host_implied_network(
     let Some((host, port)) = bookclerk_plugin_database_postgres::postgres_tcp_target(&url) else {
         return;
     };
-    add_tcp_grant(grant, &host, port);
-    for cidr in implied_cidrs_for_host(&host) {
+    overlay_tcp_host(grant, &host, port);
+}
+
+/// Overlay TCP for `[database.d1].api_base` when this guest is the active D1 plugin.
+fn overlay_d1_api_base(
+    grant: &mut PluginGrant,
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+) {
+    if DatabasePluginKind::parse(&plugin.manifest.id) != Some(DatabasePluginKind::D1) {
+        return;
+    }
+    if DatabasePluginKind::parse(&config.database.plugin) != Some(DatabasePluginKind::D1) {
+        return;
+    }
+    overlay_http_url(grant, &config.database.d1.api_base, 443);
+}
+
+/// Overlay TCP for `[integrations.audiobookshelf].base_url`.
+fn overlay_audiobookshelf_url(
+    grant: &mut PluginGrant,
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+) {
+    if plugin.manifest.id != "audiobookshelf" {
+        return;
+    }
+    overlay_http_url(grant, &config.integrations.audiobookshelf().base_url, 443);
+}
+
+/// Overlay TCP for `[output.s3].endpoint` (MinIO / custom). Default AWS hosts
+/// come from the S3 guest manifest `tcp` list.
+fn overlay_s3_endpoint(
+    grant: &mut PluginGrant,
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+) {
+    if plugin.manifest.id != "s3" {
+        return;
+    }
+    let Some(endpoint) = config.output.s3.endpoint.as_deref() else {
+        return;
+    };
+    overlay_http_url(grant, endpoint, 443);
+}
+
+/// Parses an HTTP(S) URL or bare host and grants TCP + implied CIDRs.
+fn overlay_http_url(grant: &mut PluginGrant, raw: &str, default_port: u16) {
+    let Some((host, port)) = tcp_target_from_http_url(raw, default_port) else {
+        return;
+    };
+    overlay_tcp_host(grant, &host, port);
+}
+
+/// Grants TCP for `host:port` plus loopback/private CIDRs when `host` is not public.
+fn overlay_tcp_host(grant: &mut PluginGrant, host: &str, port: u16) {
+    add_tcp_grant(grant, host, port);
+    for cidr in implied_cidrs_for_host(host) {
         grant.address_cidrs.insert(cidr);
     }
+}
+
+/// Host + port for an HTTP(S) URL or a scheme-less host[:port].
+fn tcp_target_from_http_url(raw: &str, default_port: u16) -> Option<(String, u16)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = url::Url::parse(trimmed)
+        .ok()
+        .or_else(|| url::Url::parse(&format!("https://{trimmed}")).ok())?;
+    let host = parsed.host_str()?.to_string();
+    let port = parsed.port_or_known_default().unwrap_or(default_port);
+    Some((host, port))
 }
 
 /// Inserts `host:port` into the effective TCP grant set (merging ports).
@@ -1777,6 +1865,86 @@ mode = "outbound"
         overlay_host_implied_network(&mut grant, &plugin, &config);
         assert!(grant.tcp.is_empty());
         assert!(grant.address_cidrs.is_empty());
+    }
+
+    #[test]
+    fn overlay_d1_api_base_implies_tcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "d1"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config.database.plugin = "d1".into();
+        config.database.d1.api_base = "https://api.cloudflare.com/client/v4".into();
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config);
+        assert!(grant.egress_policy().allows_tcp("api.cloudflare.com", 443));
+    }
+
+    #[test]
+    fn overlay_audiobookshelf_loopback_implies_cidrs() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "audiobookshelf"
+runtime = "native"
+command = "./guest"
+entrypoints = ["remoteLibrary"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config
+            .integrations
+            .set_audiobookshelf_string("base_url", "http://127.0.0.1:13378");
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config);
+        assert!(grant.egress_policy().allows_tcp("127.0.0.1", 13378));
+        assert!(grant.address_cidrs.contains("127.0.0.1/32"));
+    }
+
+    #[test]
+    fn overlay_s3_custom_endpoint_implies_tcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "s3"
+runtime = "native"
+command = "./guest"
+entrypoints = ["storage"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config.output.s3.endpoint = Some("http://127.0.0.1:9000".into());
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config);
+        assert!(grant.egress_policy().allows_tcp("127.0.0.1", 9000));
+        assert!(grant.address_cidrs.contains("127.0.0.1/32"));
     }
 
     #[test]
