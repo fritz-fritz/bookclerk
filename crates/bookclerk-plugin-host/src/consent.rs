@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use bookclerk_plugin_abi::{PluginCapabilities, PortalAuthMode};
+use bookclerk_plugin_manifest::{EgressPolicy, NetworkMode, TcpGrant};
 
 use crate::manifest::{PluginManifest, PluginRuntimeKind, WorkerdLimits};
 use crate::spawn_plan::GuestRuntimeKind;
@@ -49,6 +50,8 @@ pub const WORKERD_GRANT_DOMAINS_ENV: &str = "BOOKCLERK_WORKERD_GRANT_DOMAINS";
 pub const WORKERD_GRANT_CPU_MS_ENV: &str = "BOOKCLERK_WORKERD_GRANT_CPU_MS";
 /// Grant subrequest budget injected into workerd `EGRESS_POLICY`.
 pub const WORKERD_GRANT_SUBREQUESTS_ENV: &str = "BOOKCLERK_WORKERD_GRANT_SUBREQUESTS";
+/// Canonical JSON [`EgressPolicy`] (preferred over piecemeal domain env vars).
+pub const WORKERD_GRANT_POLICY_ENV: &str = "BOOKCLERK_WORKERD_GRANT_POLICY";
 
 /// Default per-plugin `data/` and `tmp/` disk budget (MiB each).
 pub const PLUGIN_STATE_BUDGET_MIB_DEFAULT: u32 = 512;
@@ -335,6 +338,30 @@ pub struct PluginGrant {
     /// Operator-denied destinations (even if the manifest still lists them).
     #[serde(default)]
     pub operator_denied_domains: BTreeSet<String>,
+    /// Effective raw TCP grants (manifest ∪ operator additions).
+    #[serde(default)]
+    pub tcp: BTreeSet<TcpGrant>,
+    /// TCP grants requested by the installed manifest.
+    #[serde(default)]
+    pub manifest_tcp: BTreeSet<TcpGrant>,
+    /// Operator-added TCP grants; survive upgrades of the same PluginKey.
+    #[serde(default)]
+    pub operator_added_tcp: BTreeSet<TcpGrant>,
+    /// Effective CIDR grants beyond the public Internet.
+    #[serde(default)]
+    pub address_cidrs: BTreeSet<String>,
+    /// CIDRs requested by the installed manifest.
+    #[serde(default)]
+    pub manifest_cidrs: BTreeSet<String>,
+    /// Operator-added CIDRs; survive upgrades of the same PluginKey.
+    #[serde(default)]
+    pub operator_added_cidrs: BTreeSet<String>,
+    /// Effective undeclared-public-redirect permission.
+    #[serde(default)]
+    pub allow_undeclared_public_redirects: bool,
+    /// Explicit operator override for undeclared public redirects (`None` = follow manifest).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_allow_undeclared_public_redirects: Option<bool>,
     /// Approved host binding names (`config`, `secrets`, `oauth`, …).
     pub bindings: BTreeSet<String>,
     /// Approved workerd compatibility flags from the consent snapshot.
@@ -389,6 +416,63 @@ impl PluginGrant {
     #[must_use]
     pub fn allows_job(&self, job_type: &str) -> bool {
         self.jobs.iter().any(|j| j == job_type)
+    }
+
+    /// Empty grant used as a struct-update base for tests and new fields.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            schema_version: 0,
+            plugin_key: String::new(),
+            plugin_id: String::new(),
+            entrypoints: BTreeSet::new(),
+            producers: BTreeSet::new(),
+            consumers: BTreeSet::new(),
+            jobs: BTreeSet::new(),
+            network_mode: "deny".into(),
+            domains: BTreeSet::new(),
+            manifest_domains: BTreeSet::new(),
+            operator_added_domains: BTreeSet::new(),
+            operator_denied_domains: BTreeSet::new(),
+            tcp: BTreeSet::new(),
+            manifest_tcp: BTreeSet::new(),
+            operator_added_tcp: BTreeSet::new(),
+            address_cidrs: BTreeSet::new(),
+            manifest_cidrs: BTreeSet::new(),
+            operator_added_cidrs: BTreeSet::new(),
+            allow_undeclared_public_redirects: false,
+            operator_allow_undeclared_public_redirects: None,
+            bindings: BTreeSet::new(),
+            compatibility_flags: BTreeSet::new(),
+            cpu_ms: None,
+            subrequests: None,
+            disk_mib: None,
+            memory_mib: None,
+            cpu_rate_percent: None,
+            extra_processes: None,
+            approved_at: String::new(),
+        }
+    }
+
+    /// Canonical typed network policy for workerd and the native socket proxy.
+    #[must_use]
+    pub fn egress_policy(&self) -> EgressPolicy {
+        let mode = if self.network_mode.eq_ignore_ascii_case("outbound") {
+            NetworkMode::Outbound
+        } else {
+            NetworkMode::Deny
+        };
+        let mut tcp: Vec<TcpGrant> = self.tcp.iter().cloned().collect();
+        tcp.sort();
+        EgressPolicy {
+            mode,
+            domains: self.domains.iter().cloned().collect(),
+            max_redirects: bookclerk_plugin_manifest::DEFAULT_MAX_REDIRECTS,
+            subrequests: self.subrequests,
+            allow_undeclared_public_redirects: self.allow_undeclared_public_redirects,
+            tcp,
+            address_cidrs: self.address_cidrs.iter().cloned().collect(),
+        }
     }
 }
 
@@ -558,6 +642,27 @@ pub fn consent_request_alias(manifest: &PluginManifest) -> PluginGrant {
         })
         .into_iter()
         .collect();
+    let net = &manifest.capabilities.network;
+    let tcp: BTreeSet<TcpGrant> = net
+        .tcp
+        .iter()
+        .filter_map(|t| {
+            let host = bookclerk_plugin_manifest::normalize_domain_pattern(&t.host)?;
+            let mut ports = t.ports.clone();
+            ports.sort_unstable();
+            ports.dedup();
+            Some(TcpGrant { host, ports })
+        })
+        .collect();
+    let address_cidrs: BTreeSet<String> = net
+        .address_cidrs
+        .iter()
+        .filter_map(|raw| {
+            bookclerk_plugin_manifest::CidrGrant::parse(raw)
+                .ok()
+                .map(|g| format!("{}/{}", g.network, g.prefix))
+        })
+        .collect();
     let (cpu_ms, subrequests) = if manifest.runtime == PluginRuntimeKind::Workerd {
         let effective = manifest
             .workerd
@@ -589,6 +694,14 @@ pub fn consent_request_alias(manifest: &PluginManifest) -> PluginGrant {
         manifest_domains: domains,
         operator_added_domains: BTreeSet::new(),
         operator_denied_domains: BTreeSet::new(),
+        tcp: tcp.clone(),
+        manifest_tcp: tcp,
+        operator_added_tcp: BTreeSet::new(),
+        address_cidrs: address_cidrs.clone(),
+        manifest_cidrs: address_cidrs,
+        operator_added_cidrs: BTreeSet::new(),
+        allow_undeclared_public_redirects: net.allow_undeclared_public_redirects,
+        operator_allow_undeclared_public_redirects: None,
         bindings,
         compatibility_flags: flags,
         cpu_ms,
@@ -667,11 +780,11 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
             grant.jobs.iter().cloned().collect::<Vec<_>>().join(", ")
         ));
     }
-    if grant.network_mode == "outbound" && grant.domains.is_empty() {
+    if grant.network_mode == "outbound" && grant.domains.is_empty() && grant.tcp.is_empty() {
         lines.push(
-            "Native / coarse outbound: OS jail allow-or-deny only (no hostname filter). \
-             Domain allowlists are enforced for workerd guests. Jail memory/CPU/process \
-             and disk budgets apply to both runtimes."
+            "Outbound mode with no fetch hosts or TCP grants: the guest cannot fetch or \
+             connect until the operator adds destinations. Ambient internet sockets are \
+             not a grant."
                 .into(),
         );
     }
@@ -705,6 +818,39 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
                 pyodide.join(", ")
             ));
         }
+    }
+    if !grant.tcp.is_empty() {
+        let listed: Vec<String> = grant
+            .tcp
+            .iter()
+            .map(|t| {
+                let ports = t
+                    .ports
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{}:[{}]", t.host, ports)
+            })
+            .collect();
+        lines.push(format!("Raw TCP connect: {}", listed.join(", ")));
+    }
+    if !grant.address_cidrs.is_empty() {
+        lines.push(format!(
+            "Address-space CIDRs (in addition to the public Internet): {}",
+            grant
+                .address_cidrs
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if grant.allow_undeclared_public_redirects {
+        lines.push(
+            "Allow redirects to undeclared public destinations (address-space policy still applies)."
+                .into(),
+        );
     }
     if !grant.bindings.is_empty() {
         lines.push(format!(
@@ -1003,6 +1149,41 @@ fn merge_network_domains(existing: &PluginGrant, requested: &PluginGrant) -> BTr
     domains
 }
 
+/// Operator-added TCP grants relative to the current manifest.
+fn merge_operator_tcp(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<TcpGrant> {
+    if !existing.operator_added_tcp.is_empty() {
+        return existing.operator_added_tcp.clone();
+    }
+    existing
+        .tcp
+        .difference(&requested.manifest_tcp)
+        .cloned()
+        .collect()
+}
+
+/// Effective TCP: current manifest ∪ operator additions.
+fn merge_tcp(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<TcpGrant> {
+    let mut tcp = requested.manifest_tcp.clone();
+    tcp.extend(merge_operator_tcp(existing, requested));
+    tcp
+}
+
+/// Effective CIDRs: current manifest ∪ operator additions.
+fn merge_cidrs(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<String> {
+    let added = if existing.operator_added_cidrs.is_empty() {
+        existing
+            .address_cidrs
+            .difference(&requested.manifest_cidrs)
+            .cloned()
+            .collect()
+    } else {
+        existing.operator_added_cidrs.clone()
+    };
+    let mut cidrs = requested.manifest_cidrs.clone();
+    cidrs.extend(added);
+    cidrs
+}
+
 /// Spawn/delivery grant: stored approval is authoritative, host-normalized.
 ///
 /// Structural capabilities stay at the stored operator snapshot (narrowed).
@@ -1054,6 +1235,25 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
         },
         operator_added_domains,
         operator_denied_domains,
+        tcp: merge_tcp(existing, requested),
+        manifest_tcp: requested.manifest_tcp.clone(),
+        operator_added_tcp: merge_operator_tcp(existing, requested),
+        address_cidrs: merge_cidrs(existing, requested),
+        manifest_cidrs: requested.manifest_cidrs.clone(),
+        operator_added_cidrs: if existing.operator_added_cidrs.is_empty() {
+            existing
+                .address_cidrs
+                .difference(&requested.manifest_cidrs)
+                .cloned()
+                .collect()
+        } else {
+            existing.operator_added_cidrs.clone()
+        },
+        allow_undeclared_public_redirects: existing
+            .operator_allow_undeclared_public_redirects
+            .unwrap_or(requested.allow_undeclared_public_redirects),
+        operator_allow_undeclared_public_redirects: existing
+            .operator_allow_undeclared_public_redirects,
         bindings: intersect_or_legacy_inherit(
             &existing.bindings,
             &requested.bindings,
@@ -1272,6 +1472,28 @@ pub fn validate_approved_grant(
         manifest_domains: baseline.domains.clone(),
         operator_added_domains: domains.difference(&baseline.domains).cloned().collect(),
         operator_denied_domains: baseline.domains.difference(&domains).cloned().collect(),
+        tcp: approved.tcp.clone(),
+        manifest_tcp: baseline.manifest_tcp.clone(),
+        operator_added_tcp: approved
+            .tcp
+            .difference(&baseline.manifest_tcp)
+            .cloned()
+            .collect(),
+        address_cidrs: approved.address_cidrs.clone(),
+        manifest_cidrs: baseline.manifest_cidrs.clone(),
+        operator_added_cidrs: approved
+            .address_cidrs
+            .difference(&baseline.manifest_cidrs)
+            .cloned()
+            .collect(),
+        allow_undeclared_public_redirects: approved.allow_undeclared_public_redirects,
+        operator_allow_undeclared_public_redirects: if approved.allow_undeclared_public_redirects
+            != baseline.allow_undeclared_public_redirects
+        {
+            Some(approved.allow_undeclared_public_redirects)
+        } else {
+            approved.operator_allow_undeclared_public_redirects
+        },
         bindings,
         compatibility_flags,
         cpu_ms,
@@ -1504,6 +1726,9 @@ pub fn inject_workerd_grant_env(cmd: &mut Command, grant: &PluginGrant) {
     if let Some(subrequests) = grant.subrequests {
         cmd.env(WORKERD_GRANT_SUBREQUESTS_ENV, subrequests.to_string());
     }
+    if let Ok(policy) = serde_json::to_string(&grant.egress_policy()) {
+        cmd.env(WORKERD_GRANT_POLICY_ENV, policy);
+    }
 }
 
 /// Canonical SHA-256 of a grant's security-relevant fields (not presentation).
@@ -1516,6 +1741,9 @@ pub fn grant_revision(grant: &PluginGrant) -> String {
 fn is_safe_platform_request(grant: &PluginGrant) -> bool {
     grant.network_mode == "deny"
         && grant.domains.is_empty()
+        && grant.tcp.is_empty()
+        && grant.address_cidrs.is_empty()
+        && !grant.allow_undeclared_public_redirects
         && grant.compatibility_flags.is_empty()
         && grant
             .bindings
@@ -1526,7 +1754,7 @@ fn is_safe_platform_request(grant: &PluginGrant) -> bool {
 /// Reject `describe()` capability claims that exceed the manifest and the
 /// covering grant.
 ///
-/// The guest's typed [`PluginCapabilities`] must not widen what the signed
+/// The guest's typed [`PluginCapabilities`] must not widen what
 /// `plugin.toml` declares: no extra entrypoints, event consumers, producers,
 /// job types, database bindings, or named bindings. Every advertised
 /// entrypoint and producer must also be present in the operator grant, and
@@ -1731,6 +1959,7 @@ mode = "deny"
             cpu_rate_percent: None,
             extra_processes: None,
             approved_at: "2026-01-01T00:00:00Z".into(),
+            ..PluginGrant::empty()
         }
     }
 

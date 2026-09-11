@@ -26,6 +26,9 @@ pub const WORKERD_LAUNCHER_ENV: &str = "BOOKCLERK_PLUGIN_WORKERD";
 pub const WORKERD_BIN_ENV: &str = "BOOKCLERK_WORKERD_BIN";
 /// Environment variable naming the native backend `bookclerk-workerd` fronts.
 pub const NATIVE_BACKEND_ENV: &str = "BOOKCLERK_NATIVE_BACKEND";
+/// Set to `1` when the host jail is confined so `bookclerk-workerd` may wrap
+/// the native backend in a nested `NetPolicy::Deny` jail.
+pub const NESTED_NATIVE_JAIL_ENV: &str = "BOOKCLERK_NESTED_NATIVE_JAIL";
 
 /// Which transport a spawn uses to reach the guest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
