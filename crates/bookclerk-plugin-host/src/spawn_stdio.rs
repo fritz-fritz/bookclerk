@@ -46,11 +46,15 @@ pub(crate) struct SpawnedStdio {
     /// AppContainer package SID.
     #[cfg(windows)]
     pub package_sid: Option<String>,
-    /// Host-owned AppContainer profile.
+    /// Host-owned AppContainer profile. Held so Drop does not tear down the
+    /// jail while the vat thread still owns this guest.
     #[cfg(windows)]
+    #[allow(dead_code)]
     pub appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
-    /// Nested Deny AppContainer for the native backend (Windows).
+    /// Nested Deny AppContainer for the native backend. Held for the same
+    /// lifetime as [`Self::appcontainer`].
     #[cfg(windows)]
+    #[allow(dead_code)]
     pub nested_appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
     /// Last lines of guest stderr (workerd + native child), for spawn failures.
     pub stderr_tail: Arc<Mutex<VecDeque<String>>>,
