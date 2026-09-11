@@ -10,6 +10,7 @@ use chrono::Utc;
 use crate::coordinate::{PackageCoordinate, RegistrySource};
 use crate::error::{CatalogError, Result};
 use crate::extract::{extract_archive, safe_join, sha256_file, write_file};
+use crate::identity::{PluginKey, PluginProvenance};
 use crate::kind::RuntimeIdentity;
 use crate::manifest::{parse_sha256_hex, BookclerkPackageManifest};
 use crate::receipt::InstallReceipt;
@@ -110,6 +111,10 @@ impl Installer {
         validate_plugin_id(&runtime.id)?;
 
         let dest = safe_join(&opts.plugins_root, Path::new(&runtime.id))?;
+        let incoming_key = match PluginKey::from_coordinate(coordinate, &runtime.id) {
+            Ok(key) => key,
+            Err(_) => PluginKey::from_install_path(&dest, &runtime.id)?,
+        };
         if dest.exists() {
             if let Ok(existing) = InstallReceipt::load(&dest) {
                 if existing.runtime.id.eq_ignore_ascii_case(&runtime.id)
@@ -122,6 +127,22 @@ impl Installer {
                         existing.runtime.kind.as_str(),
                         dest.display()
                     )));
+                }
+                if let Ok(existing_key) = existing.plugin_key() {
+                    if existing_key != incoming_key && !opts.replace {
+                        return Err(CatalogError::message(format!(
+                            "alias `{}` is already installed as `{}`; \
+                             a different provenance (`{incoming_key}`) cannot reuse this directory",
+                            runtime.id, existing_key
+                        )));
+                    }
+                    if existing_key != incoming_key && opts.replace {
+                        return Err(CatalogError::message(format!(
+                            "alias `{}` belongs to `{}`; refusing to replace it with `{incoming_key}` \
+                             (grants do not transfer across provenance)",
+                            runtime.id, existing_key
+                        )));
+                    }
                 }
                 let conflict = existing.runtime != runtime
                     || existing.coordinate.source.kind_name() != coordinate.source.kind_name()
@@ -156,7 +177,17 @@ impl Installer {
         let _ = expected;
 
         if opts.dry_run {
-            let receipt = build_receipt(manifest, coordinate, artifact, &target, None, &opts.trust);
+            let receipt = build_receipt(
+                manifest,
+                coordinate,
+                artifact,
+                &target,
+                None,
+                &dest,
+                &incoming_key,
+                PluginProvenance::VerifiedInstalled,
+                true,
+            )?;
             return Ok(InstallOutcome {
                 plugin_root: dest,
                 receipt,
@@ -287,8 +318,11 @@ impl Installer {
             artifact,
             &target,
             Some(exe_digest),
-            &opts.trust,
-        );
+            &dest,
+            &incoming_key,
+            PluginProvenance::VerifiedInstalled,
+            false,
+        )?;
         if let Err(e) = receipt.store(&dest) {
             let _ = fs::remove_dir_all(&dest);
             if let Some(bak) = &backup {
@@ -427,15 +461,19 @@ impl Installer {
     }
 }
 
-/// Builds an [`InstallReceipt`] from the package manifest, chosen artifact, and trust policy.
+/// Builds an [`InstallReceipt`] from the package manifest, chosen artifact, and content hashes.
+#[allow(clippy::too_many_arguments)]
 fn build_receipt(
     manifest: &BookclerkPackageManifest,
     coordinate: &PackageCoordinate,
     artifact: &crate::manifest::ArtifactTarget,
     target: &str,
     exe_digest: Option<String>,
-    trust: &TrustPolicy,
-) -> InstallReceipt {
+    dest: &Path,
+    plugin_key: &PluginKey,
+    provenance: PluginProvenance,
+    dry_run: bool,
+) -> Result<InstallReceipt> {
     let registry_url = match &coordinate.source {
         RegistrySource::Cargo { registry_url } => Some(registry_url.clone()),
         RegistrySource::Npm { registry_url } => Some(registry_url.clone()),
@@ -443,14 +481,26 @@ fn build_receipt(
         RegistrySource::Static { index_url } => Some(index_url.clone()),
         RegistrySource::LocalArchive => None,
     };
-    InstallReceipt {
+    let (manifest_sha256, payload_root_sha256) = if dry_run {
+        (String::new(), String::new())
+    } else {
+        (
+            crate::payload::manifest_sha256(dest)?,
+            crate::payload::payload_root_sha256(dest)?,
+        )
+    };
+    Ok(InstallReceipt {
         schema_version: InstallReceipt::SCHEMA_VERSION,
+        plugin_key: plugin_key.canonical().to_string(),
+        provenance,
         coordinate: coordinate.clone(),
         version: coordinate.version.clone(),
         registry_url,
         artifact_url: artifact.url.clone(),
         target: target.to_string(),
         archive_sha256: artifact.archive_sha256.clone(),
+        manifest_sha256,
+        payload_root_sha256,
         executable_sha256: exe_digest.or_else(|| artifact.executable_sha256.clone()),
         protocol: manifest.effective_protocol(),
         api_version: manifest.api_version,
@@ -459,9 +509,7 @@ fn build_receipt(
         approved_network: manifest.sandbox.network.clone(),
         installed_at: Utc::now(),
         update_constraint: None,
-        publisher_key_id: manifest.publisher.as_ref().and_then(|p| p.key_id.clone()),
-        allow_unsigned: trust.allow_unsigned,
-    }
+    })
 }
 
 /// Reject plugin ids that fail the strict grammar (also blocks path escape).
@@ -688,11 +736,40 @@ fn remove_dir_retry(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::extract::sha256_bytes;
-    use crate::kind::PluginKind;
+    use crate::kind::{PluginKind, RuntimeIdentity};
     use crate::manifest::ArtifactTarget;
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use tar::Builder;
+
+    fn sample_receipt(kind: PluginKind, id: &str) -> InstallReceipt {
+        let key = PluginKey::from_install_path(Path::new("/tmp/old"), id).unwrap();
+        InstallReceipt {
+            schema_version: InstallReceipt::SCHEMA_VERSION,
+            plugin_key: key.canonical().to_string(),
+            provenance: PluginProvenance::VerifiedInstalled,
+            coordinate: PackageCoordinate {
+                source: RegistrySource::LocalArchive,
+                name: "old".into(),
+                version: "1.0.0".into(),
+            },
+            version: "1.0.0".into(),
+            registry_url: None,
+            artifact_url: "file:///old".into(),
+            target: "linux-x64-gnu".into(),
+            archive_sha256: "ab".repeat(32),
+            manifest_sha256: "cd".repeat(32),
+            payload_root_sha256: "ef".repeat(32),
+            executable_sha256: None,
+            protocol: "workers-rpc".into(),
+            api_version: 3,
+            runtime: RuntimeIdentity::new(kind, id),
+            requested_sandbox: Default::default(),
+            approved_network: "none".into(),
+            installed_at: Utc::now(),
+            update_constraint: None,
+        }
+    }
 
     fn make_echo_archive(dir: &Path) -> (PathBuf, String) {
         let archive = dir.join("echo.tar.gz");
@@ -799,29 +876,7 @@ mod tests {
         let plugins = tmp.path().join("plugins");
         let dest = plugins.join("echo");
         fs::create_dir_all(&dest).unwrap();
-        let existing = InstallReceipt {
-            schema_version: InstallReceipt::SCHEMA_VERSION,
-            coordinate: PackageCoordinate {
-                source: RegistrySource::LocalArchive,
-                name: "old".into(),
-                version: "1.0.0".into(),
-            },
-            version: "1.0.0".into(),
-            registry_url: None,
-            artifact_url: "file:///old".into(),
-            target: "linux-x64-gnu".into(),
-            archive_sha256: "ab".repeat(32),
-            executable_sha256: None,
-            protocol: "workers-rpc".into(),
-            api_version: 1,
-            runtime: RuntimeIdentity::new(PluginKind::Source, "echo"),
-            requested_sandbox: Default::default(),
-            approved_network: "none".into(),
-            installed_at: Utc::now(),
-            update_constraint: None,
-            publisher_key_id: None,
-            allow_unsigned: true,
-        };
+        let existing = sample_receipt(PluginKind::Source, "echo");
         existing.store(&dest).unwrap();
         fs::write(
             dest.join("plugin.toml"),

@@ -6,10 +6,13 @@ mod adapters;
 mod catalog;
 mod coordinate;
 mod error;
+mod evaluate;
 mod extract;
+mod identity;
 mod install;
 mod kind;
 mod manifest;
+mod payload;
 mod receipt;
 mod target;
 mod trust;
@@ -22,8 +25,14 @@ pub use adapters::{
 pub use catalog::{CatalogHit, SearchQuery, CATALOG_DTO_SCHEMA_VERSION};
 pub use coordinate::{PackageCoordinate, RegistrySource};
 pub use error::{CatalogError, Result};
+pub use evaluate::{evaluate_install, stamp_platform_receipt};
 pub use extract::{
     extract_archive, safe_join, sha256_bytes, sha256_file, MAX_ARCHIVE_BYTES, MAX_EXTRACTED_BYTES,
+};
+pub use identity::{
+    is_platform_plugin_key, platform_artifact, ArtifactIdentity, PlatformArtifact,
+    PluginInstallIdentity, PluginKey, PluginProvenance, ProvenanceScheme, PLATFORM_ARTIFACTS,
+    PLATFORM_PRODUCT,
 };
 pub use install::{
     InstallOptions, InstallOutcome, Installer, DOWNLOAD_TIMEOUT, MAX_DOWNLOAD_BYTES,
@@ -34,6 +43,7 @@ pub use manifest::{
     BookclerkPackageManifest, PackageLinks, PublisherIdentity, SandboxRequest,
     MANIFEST_SCHEMA_VERSION, PROTOCOL_WORKERS_RPC,
 };
+pub use payload::{manifest_sha256, payload_root_sha256, PAYLOAD_SKIP_NAMES};
 pub use receipt::{InstallReceipt, RECEIPT_FILE};
 pub use target::{
     host_bookclerk_target, normalize_target, rust_triple, select_target, ArchiveFormat, TARGETS,
