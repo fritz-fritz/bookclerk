@@ -151,6 +151,37 @@ else
   ok "Windows named-pipe SOCKET_PROXY allows the CreateNamedPipe FFI sink"
 fi
 
+if grep -B2 'impl GrantedListener for tokio::net::UnixListener' crates/bookclerk-workerd/src/granted.rs \
+    | grep -q 'cfg(unix)'; then
+  ok "GRANTED UnixListener is Unix-only"
+else
+  fail "GRANTED UnixListener is compiled on Windows (tokio UnixListener is Unix-only)"
+fi
+
+if grep -n 'nested_enforcement_required' crates/bookclerk-workerd/src/native_guest.rs >/dev/null; then
+  ok "nested Deny fail-closes when jail is missing and enforcement is required"
+else
+  fail "nested jail missing-helper path no longer fail-closes"
+fi
+
+if grep -n 'upsert_event_subscriber(&node_id, &plugin.manifest.id' crates/bookclerkd/src/event_worker.rs >/dev/null; then
+  fail "event catalog still keys discovered plugins on the display alias"
+else
+  ok "event catalog keys discovered plugins on PluginKey"
+fi
+
+if grep -n 'upsert_event_subscriber(&node_id, integration.id()' crates/bookclerkd/src/event_worker.rs >/dev/null; then
+  fail "event catalog still keys loaded integrations on the display alias"
+else
+  ok "event catalog keys loaded integrations on PluginKey"
+fi
+
+if grep -n 'plugin_id: plugin.manifest.id.clone()' crates/bookclerkd/src/oidc.rs >/dev/null; then
+  fail "OIDC ownership still keys on the display alias"
+else
+  ok "OIDC plugin-owned clients key on PluginKey"
+fi
+
 if ! grep -n 'socket_proxy::spawn_windows' crates/bookclerk-workerd/src/main.rs >/dev/null 2>&1; then
   fail "Windows SOCKET_PROXY accept loop is not started from bookclerk-workerd"
 else

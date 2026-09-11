@@ -1158,7 +1158,8 @@ only (no plugin-provided code / CEL). Echo and Audiobookshelf may omit both
 Any `[[events.consumers]]` row requires an `event(batch)` handler on the default export.
 Each host heartbeats discovered config-enabled integration manifests (even when
 spawn failed) and currently loaded integrations into `event_subscriber_nodes`
-keyed by `(node_id, plugin_id)`. Nodes do not delete catalog rows they lack.
+keyed by `(node_id, PluginKey)` (`plugin_id` stores the canonical PluginKey, not
+the display alias). Nodes do not delete catalog rows they lack.
 A plugin is live when any heartbeating node (60s TTL) has it enabled; matching
 subscriptions are the union of those enabled rows. The dispatcher then
 `INSERT OR IGNORE`s deliveries for pending events (one D1 atomic op per
@@ -1185,7 +1186,7 @@ slices so producer latency does not track sleeper count. Acquire success writes
 acquire-status change (book uuid, storage key, product ids — never media bytes)
 and sets envelope `source` to the book’s storefront plugin id.
 The producer `ordering_key` is stored on the envelope and copied verbatim onto
-each delivery. Each VPS claims only plugin ids loaded on that process **and**
+each delivery. Each VPS claims only PluginKeys loaded on that process **and**
 only events its node-local catalog matches (type, schema version, filter). The
 host evaluates catalog JSON filters, then compare-and-sets a concrete delivery
 id inside a generic atomic plan. Wake page size follows negotiated `maxBinds`
