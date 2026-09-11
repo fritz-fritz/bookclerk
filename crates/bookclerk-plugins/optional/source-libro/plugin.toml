@@ -9,6 +9,13 @@ entrypoints = ["storefront"]
 
 [capabilities.network]
 mode = "outbound"
+tcp = [
+    { host = "libro.fm", ports = [443] },
+    { host = "www.libro.fm", ports = [443] },
+    { host = "covers.libro.fm", ports = [443] },
+]
+# Native TCP via the SDK HTTP client. CDN hosts used only as redirect
+# targets still need a TCP grant if they are the CONNECT destination.
 
 [vars]
 
