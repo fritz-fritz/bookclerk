@@ -131,4 +131,22 @@ else
   ok "nested native jail is requested for Unix native-behind-workerd"
 fi
 
+# Native guests must not open ambient TCP (reqwest::Client) in product src.
+hits="$(find crates/bookclerk-plugins/optional crates/bookclerk-enrich/src \
+  -name '*.rs' ! -path '*/tests/*' -print0 \
+  | xargs -0 grep -n 'reqwest::Client' || true)"
+if [[ -n "$hits" ]]; then
+  echo "FAIL: ambient reqwest::Client remains in native guest / enrich src:" >&2
+  echo "$hits" >&2
+  status=1
+else
+  ok "native storefront/enrich HTTP is not ambient reqwest::Client"
+fi
+
+if grep -n 'reqwest::Client' crates/bookclerk-storage/src >/dev/null 2>&1; then
+  fail "bookclerk-storage still uses ambient reqwest::Client"
+else
+  ok "S3 storage HTTP is not ambient reqwest::Client"
+fi
+
 exit "$status"
