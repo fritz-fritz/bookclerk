@@ -509,6 +509,8 @@ pub struct PluginSession {
     scratch: std::path::PathBuf,
     /// Spawn config JSON captured at spawn.
     spawn_config: Value,
+    /// Cancelled when effective authority for this PluginKey changes.
+    authority_fence: Arc<AtomicBool>,
     /// AppContainer package SID.
     #[cfg(windows)]
     package_sid: Option<String>,
@@ -631,6 +633,10 @@ impl PluginSession {
         let instance_key = plugin_instance_key(&id, account_id);
         let identity = ExecutorIdentity::from_plugin_with_runtime(plugin, account_id, plan.runtime)
             .with_grant_revision(&grant);
+        let authority_fence = crate::authority::register_session(
+            plugin.plugin_key().canonical(),
+            &identity.grant_revision,
+        );
         let (tx, rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) =
             oneshot::channel::<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>();
@@ -662,6 +668,7 @@ impl PluginSession {
             grant,
             scratch,
             spawn_config,
+            authority_fence,
             #[cfg(windows)]
             package_sid,
         })
@@ -717,6 +724,10 @@ impl PluginSession {
 
     /// Sends work to the vat thread.
     async fn call<T>(&self, build: impl FnOnce(oneshot::Sender<Result<T>>) -> Work) -> Result<T> {
+        if crate::authority::is_fenced(&self.authority_fence) {
+            let _ = self.tx.send(Work::Shutdown);
+            return Err(crate::authority::fenced_error());
+        }
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(build(reply))
@@ -1419,6 +1430,7 @@ impl PluginSession {
 
 impl Drop for PluginSession {
     fn drop(&mut self) {
+        crate::authority::unregister_session(&self.authority_fence);
         let _ = self.tx.send(Work::Shutdown);
     }
 }
