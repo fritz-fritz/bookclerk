@@ -16,7 +16,8 @@ use tokio::process::Command;
 
 const JAIL_BIN: &str = "bookclerk-jail";
 const JAIL_BIN_ENV: &str = "BOOKCLERK_PLUGIN_JAIL";
-/// Host sets this to `1` when the outer plugin jail is confined.
+/// Host sets this to `1` for native-behind-workerd guests on Unix so ambient
+/// `AF_INET` is denied even when the outer launcher jail is Isolation::Off.
 const NESTED_JAIL_ENV: &str = "BOOKCLERK_NESTED_NATIVE_JAIL";
 
 /// Builds a command that execs `backend` under `bookclerk-jail` with Deny net
@@ -73,6 +74,12 @@ fn deny_spec(backend: &Path, plugin_root: &Path, state_dir: &Path, inherit_fds: 
     }
     spec.writes.push(state_dir.to_path_buf());
     spec.writes.extend(inherited_write_roots());
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // sqlx Postgres mediation binds `{dir}/.s.PGSQL.{port}` under a short
+        // `/tmp/bc-pg-{pid}` path so sockaddr_un cannot overflow.
+        spec.writes.push(PathBuf::from("/tmp"));
+    }
     spec.net = NetPolicy::Deny;
     spec.allow_exec = true;
     spec.system_paths = true;

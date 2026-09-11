@@ -110,4 +110,16 @@ else
   ok "no in-process register_builtin_* on hosts"
 fi
 
-exit "$status"
+if grep -n 'coarse jail' crates/bookclerk-plugins/optional/database-postgres/plugin.toml \
+    docs/plugin-registry.md >/dev/null 2>&1; then
+  fail "postgres/native docs still describe coarse jail outbound"
+else
+  ok "native postgres networking is SDK sockets, not coarse jail"
+fi
+
+if grep -B8 'NESTED_NATIVE_JAIL_ENV, "1"' crates/bookclerk-plugin-host/src/spawn_stdio.rs \
+    | grep -q 'Start::Confined'; then
+  fail "nested native jail is still gated on outer confinement"
+else
+  ok "nested native jail is requested for Unix native-behind-workerd"
+fi
