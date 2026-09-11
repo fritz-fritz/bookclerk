@@ -23,18 +23,27 @@ use crate::postgres::postgres_tcp_target;
 /// through the Bookclerk socket proxy.
 ///
 /// When `BOOKCLERK_SOCKET_PROXY` is unset (plugin crate unit tests), the
-/// original URL is returned unchanged. When the proxy is set on a non-Unix
-/// host, this fails closed — nested `NetPolicy::Deny` forbids ambient TCP and
-/// sqlx has no Windows Unix-socket path to splice through the named-pipe
+/// original URL is returned unchanged unless nested Deny is in force. When
+/// [`bookclerk_plugin_sdk::NESTED_NATIVE_JAIL_ENV`] is `1` without a proxy,
+/// this fails closed — nested `NetPolicy::Deny` forbids ambient TCP. When
+/// the proxy is set on a non-Unix host, this also fails closed because sqlx
+/// has no Windows Unix-socket path to splice through the named-pipe
 /// SOCKET_PROXY.
 ///
 /// # Errors
 ///
-/// Returns when the URL is not a TCP Postgres target, the local listener
-/// cannot be bound, the rewritten URL cannot be produced, or the platform
-/// cannot mediate through SOCKET_PROXY.
+/// Returns when nested Deny is set without SOCKET_PROXY, the URL is not a
+/// TCP Postgres target, the local listener cannot be bound, the rewritten
+/// URL cannot be produced, or the platform cannot mediate through SOCKET_PROXY.
 pub async fn mediated_connect_url(url: &str) -> Result<String, DbErr> {
     if std::env::var_os(bookclerk_plugin_sdk::SOCKET_PROXY_ENV).is_none() {
+        if bookclerk_plugin_sdk::nested_native_jail_requested() {
+            return Err(DbErr::Custom(format!(
+                "{} is required when {}=1; nested Deny forbids ambient TCP",
+                bookclerk_plugin_sdk::SOCKET_PROXY_ENV,
+                bookclerk_plugin_sdk::NESTED_NATIVE_JAIL_ENV,
+            )));
+        }
         return Ok(url.to_string());
     }
     #[cfg(not(unix))]
@@ -399,13 +408,43 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os(bookclerk_plugin_sdk::SOCKET_PROXY_ENV);
+        let previous_jail = std::env::var_os(bookclerk_plugin_sdk::NESTED_NATIVE_JAIL_ENV);
         std::env::remove_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV);
+        std::env::remove_var(bookclerk_plugin_sdk::NESTED_NATIVE_JAIL_ENV);
         let url = "postgres://postgres:postgres@localhost:5432/postgres";
         let out = mediated_connect_url(url).await.expect("noop");
         assert_eq!(out, url);
         match previous {
             Some(value) => std::env::set_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV, value),
             None => std::env::remove_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV),
+        }
+        match previous_jail {
+            Some(value) => std::env::set_var(bookclerk_plugin_sdk::NESTED_NATIVE_JAIL_ENV, value),
+            None => std::env::remove_var(bookclerk_plugin_sdk::NESTED_NATIVE_JAIL_ENV),
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_jail_without_socket_proxy_fails_closed() {
+        let _guard = SOCKET_PROXY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os(bookclerk_plugin_sdk::SOCKET_PROXY_ENV);
+        let previous_jail = std::env::var_os(bookclerk_plugin_sdk::NESTED_NATIVE_JAIL_ENV);
+        std::env::remove_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV);
+        std::env::set_var(bookclerk_plugin_sdk::NESTED_NATIVE_JAIL_ENV, "1");
+        let err = mediated_connect_url("postgres://postgres@localhost:5432/postgres")
+            .await
+            .expect_err("nested Deny must not use ambient TCP");
+        let msg = err.to_string();
+        assert!(msg.contains("SOCKET_PROXY"), "{msg}");
+        match previous {
+            Some(value) => std::env::set_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV, value),
+            None => std::env::remove_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV),
+        }
+        match previous_jail {
+            Some(value) => std::env::set_var(bookclerk_plugin_sdk::NESTED_NATIVE_JAIL_ENV, value),
+            None => std::env::remove_var(bookclerk_plugin_sdk::NESTED_NATIVE_JAIL_ENV),
         }
     }
 
