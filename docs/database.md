@@ -185,7 +185,9 @@ token such as `postgres` / `pg`). The overlay is not persisted as invented
 structural authority. A second install that reuses `id = "postgres"` does
 not receive the operator URL when `[database].plugin` names the other
 PluginKey. Windows LIKE uses the same nested Deny plus named-pipe CONNECT
-for SDK HTTP; postgres Unix-socket mediation is Unix-only.
+for SDK HTTP; postgres Unix-socket mediation is Unix-only. When
+`BOOKCLERK_SOCKET_PROXY` is set on Windows the guest fail-closes rather than
+dialing ambient TCP (sqlx has no Unix-socket rewrite there).
 
 Configuration (at least one of `url` or `url_file` is required):
 
