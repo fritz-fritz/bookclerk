@@ -4,10 +4,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CatalogError, Result};
 
-/// Trust / signing policy for plugin installation.
+/// Trust policy for plugin installation (digest-required artifacts).
+///
+/// `allow_unsigned` means the operator accepted a package that has no
+/// independent publisher authenticity proof. Archive SHA-256 is still
+/// required. This is not a cryptographic signature check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustPolicy {
-    /// Allow packages without publisher signatures (digests still required).
+    /// Allow packages without independent publisher authenticity proof
+    /// (content digests are still required).
     pub allow_unsigned: bool,
     /// Refuse yanked versions (always true for unattended).
     pub refuse_yanked: bool,
@@ -45,7 +50,8 @@ impl TrustPolicy {
             Ok(())
         } else {
             Err(CatalogError::message(
-                "refusing unsigned community plugin; pass --allow-unsigned after verifying the digest",
+                "refusing community plugin without an explicit operator override; \
+                 pass --allow-unsigned after verifying the digest",
             ))
         }
     }

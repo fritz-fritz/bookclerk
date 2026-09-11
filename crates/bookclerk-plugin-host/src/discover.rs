@@ -1,14 +1,16 @@
 //! Scan plugin directories for `plugin.toml` manifests.
 //!
-//! Discovery is install-time only (`id`, `kind`, `command`, …). User settings
-//! come from the matching `[sources.<id>]` / `[integrations.<id>]` table in
-//! `config.toml` and are attached when the plugin is spawned.
+//! Discovery is install-time only. User settings come from the matching
+//! `[sources.<id>]` / `[integrations.<id>]` table in `config.toml` (alias)
+//! and are attached when the plugin is spawned. Durable identity is
+//! [`PluginKey`], not the manifest alias.
 
 use std::path::{Path, PathBuf};
 
 use bookclerk_config::Config;
 use bookclerk_library::BOOKCLERK_SCHEMA_NAMESPACE;
 use bookclerk_plugin_abi::PRODUCT_API_VERSION;
+use bookclerk_plugin_catalog::{evaluate_install, PluginInstallIdentity, PluginKey};
 
 use crate::manifest::PluginManifest;
 use crate::{PluginError, Result};
@@ -22,6 +24,56 @@ pub struct DiscoveredPlugin {
     pub root: PathBuf,
     /// Absolute path to the plugin executable.
     pub command: PathBuf,
+    /// Host-evaluated provenance-qualified identity.
+    pub identity: PluginInstallIdentity,
+}
+
+impl DiscoveredPlugin {
+    /// Builds a discovered plugin, evaluating content hashes and provenance.
+    ///
+    /// When the install tree cannot be hashed (tests that only write a
+    /// guest binary), falls back to path provenance without platform trust.
+    #[must_use]
+    pub fn new(manifest: PluginManifest, root: PathBuf, command: PathBuf) -> Self {
+        let identity =
+            evaluate_install(&root, &manifest).unwrap_or_else(|_| local_identity(&root, &manifest));
+        Self {
+            manifest,
+            root,
+            command,
+            identity,
+        }
+    }
+
+    /// Display / CLI alias (`plugin.toml` id).
+    #[must_use]
+    pub fn alias(&self) -> &str {
+        self.identity.alias()
+    }
+
+    /// Provenance-qualified key.
+    #[must_use]
+    pub fn plugin_key(&self) -> &PluginKey {
+        &self.identity.plugin_key
+    }
+}
+
+/// Path-only identity used when an install tree cannot be hashed (test fixtures).
+fn local_identity(root: &Path, manifest: &PluginManifest) -> PluginInstallIdentity {
+    let plugin_key = PluginKey::from_install_path(root, &manifest.id).unwrap_or_else(|_| {
+        PluginKey::parse("path:file:///invalid-plugin-root#ab").expect("valid fallback id")
+    });
+    PluginInstallIdentity {
+        artifact: bookclerk_plugin_catalog::ArtifactIdentity {
+            plugin_key: plugin_key.clone(),
+            version: manifest.version.clone().unwrap_or_else(|| "0.0.0".into()),
+            manifest_sha256: String::new(),
+            payload_root_sha256: String::new(),
+            archive_sha256: None,
+        },
+        plugin_key,
+        provenance: bookclerk_plugin_catalog::PluginProvenance::LocalDevelopment,
+    }
 }
 
 /// Resolve search roots: `BOOKCLERK_PLUGIN_DIRS` then `$FILES_DIR/plugins`.
@@ -45,46 +97,85 @@ pub fn plugin_search_dirs(config: &Config) -> Vec<PathBuf> {
 /// - `$dir/plugin.toml` (single plugin at root), or
 /// - `$dir/<name>/plugin.toml` (one plugin per subdirectory).
 ///
-/// Plugin ids are **globally unique across kinds**. Two manifests that claim
-/// the same `id` (even with different kinds) are a hard error — Bookclerk
-/// refuses to start with an ambiguous plugin set.
-///
-/// # Arguments
-///
-/// * `config` - Host config providing `files_dir` and plugin search roots.
-///
-/// # Returns
-///
-/// Sorted list of spawnable plugins (command path resolved).
+/// Duplicate [`PluginKey`] values are a hard error. The same manifest alias
+/// from different provenances is allowed; callers must use
+/// [`resolve_plugin_ref`] which requires a qualified key when the alias is
+/// ambiguous.
 ///
 /// # Errors
 ///
-/// Returns [`PluginError`] on duplicate ids, missing binaries, or I/O failures.
+/// Returns [`PluginError`] on duplicate keys, missing binaries, or I/O failures.
 pub fn discover_plugins(config: &Config) -> Result<Vec<DiscoveredPlugin>> {
     let mut out = Vec::new();
-    // id (lowercased) → (kind, first manifest path)
-    let mut seen: std::collections::HashMap<String, (crate::PluginFamily, PathBuf)> =
-        std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
     for dir in plugin_search_dirs(config) {
         if !dir.is_dir() {
             continue;
         }
         discover_in_dir(&dir, &mut out, &mut seen)?;
     }
-    out.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
+    out.sort_by(|a, b| {
+        a.manifest
+            .id
+            .cmp(&b.manifest.id)
+            .then_with(|| a.plugin_key().canonical().cmp(b.plugin_key().canonical()))
+    });
     Ok(out)
 }
 
-/// Lowercased plugin id used to detect duplicate installs across kinds.
-fn conflict_key(id: &str) -> String {
-    id.trim().to_ascii_lowercase()
+/// Resolves `spec` to a discovered plugin.
+///
+/// `spec` may be a canonical [`PluginKey`] or a manifest alias. Bare aliases
+/// resolve only when exactly one discovered plugin uses that id.
+///
+/// # Errors
+///
+/// Returns an error when `spec` matches nothing or more than one plugin.
+pub fn resolve_plugin_ref<'a>(
+    plugins: &'a [DiscoveredPlugin],
+    spec: &str,
+) -> Result<&'a DiscoveredPlugin> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(PluginError::message("plugin reference must not be empty"));
+    }
+    if let Ok(key) = PluginKey::parse(spec) {
+        let matches: Vec<_> = plugins.iter().filter(|p| p.plugin_key() == &key).collect();
+        return match matches.as_slice() {
+            [one] => Ok(*one),
+            [] => Err(PluginError::message(format!(
+                "no plugin installed with key `{spec}`"
+            ))),
+            _ => Err(PluginError::message(format!(
+                "duplicate plugin key `{spec}`"
+            ))),
+        };
+    }
+    let lower = spec.to_ascii_lowercase();
+    let matches: Vec<_> = plugins
+        .iter()
+        .filter(|p| p.alias().eq_ignore_ascii_case(&lower))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(*one),
+        [] => Err(PluginError::message(format!(
+            "plugin `{spec}` is not installed"
+        ))),
+        many => {
+            let keys: Vec<_> = many.iter().map(|p| p.plugin_key().canonical()).collect();
+            Err(PluginError::message(format!(
+                "plugin alias `{spec}` is ambiguous; use a provenance-qualified PluginKey. candidates: {}",
+                keys.join(", ")
+            )))
+        }
+    }
 }
 
 /// Discovers `$dir/plugin.toml` or each `$dir/<name>/plugin.toml`; skips unreadable directories.
 fn discover_in_dir(
     dir: &Path,
     out: &mut Vec<DiscoveredPlugin>,
-    seen: &mut std::collections::HashMap<String, (crate::PluginFamily, PathBuf)>,
+    seen: &mut std::collections::HashMap<String, PathBuf>,
 ) -> Result<()> {
     let root_manifest = dir.join("plugin.toml");
     if root_manifest.is_file() {
@@ -111,12 +202,12 @@ fn discover_in_dir(
     Ok(())
 }
 
-/// Parses a manifest, rejects duplicate ids / missing binaries, and skips newer `api_version`.
+/// Parses a manifest, rejects duplicate keys / missing binaries, and skips newer `api_version`.
 fn push_manifest(
     manifest_path: &Path,
     root: &Path,
     out: &mut Vec<DiscoveredPlugin>,
-    seen: &mut std::collections::HashMap<String, (crate::PluginFamily, PathBuf)>,
+    seen: &mut std::collections::HashMap<String, PathBuf>,
 ) -> Result<()> {
     let text = std::fs::read_to_string(manifest_path)?;
     let manifest = PluginManifest::parse(&text)?;
@@ -135,22 +226,6 @@ fn push_manifest(
         );
         return Ok(());
     }
-    let key = conflict_key(&manifest.id);
-    if let Some((first_kind, first_path)) = seen.get(&key) {
-        return Err(PluginError::message(format!(
-            "duplicate plugin id `{}`: already claimed by {} plugin at {} and also by {} plugin at {} \
-             (ids must be globally unique across kinds)",
-            manifest.id,
-            first_kind.as_str(),
-            first_path.display(),
-            manifest.primary_family().as_str(),
-            manifest_path.display()
-        )));
-    }
-    seen.insert(
-        key,
-        (manifest.primary_family(), manifest_path.to_path_buf()),
-    );
     let command = resolve_spawn_command(root, &manifest)?;
     if !command.is_file() {
         return Err(PluginError::message(format!(
@@ -159,11 +234,19 @@ fn push_manifest(
             command.display()
         )));
     }
-    out.push(DiscoveredPlugin {
-        manifest,
-        root: root.to_path_buf(),
-        command,
-    });
+    let plugin = DiscoveredPlugin::new(manifest, root.to_path_buf(), command);
+    let key = plugin.plugin_key().canonical().to_string();
+    if let Some(first_path) = seen.get(&key) {
+        return Err(PluginError::message(format!(
+            "duplicate plugin key `{}` (alias `{}`): already discovered at {} and also at {}",
+            key,
+            plugin.alias(),
+            first_path.display(),
+            manifest_path.display()
+        )));
+    }
+    seen.insert(key, manifest_path.to_path_buf());
+    out.push(plugin);
     Ok(())
 }
 
@@ -385,7 +468,7 @@ mode = "deny"
     }
 
     #[test]
-    fn duplicate_kind_and_id_is_hard_error() {
+    fn duplicate_alias_is_allowed_and_requires_qualified_ref() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");
         write_plugin(&plugins.join("echo-a"), "echo", "cli");
@@ -397,14 +480,18 @@ mode = "deny"
             )),
             ..Config::default()
         };
-        let err = discover_plugins(&cfg).unwrap_err().to_string();
-        assert!(err.contains("duplicate plugin id `echo`"), "{err}");
-        assert!(err.contains("globally unique"), "{err}");
-        assert!(err.contains("plugin.toml"), "{err}");
+        let found = discover_plugins(&cfg).unwrap();
+        assert_eq!(found.len(), 2);
+        assert_ne!(found[0].plugin_key(), found[1].plugin_key());
+        let err = resolve_plugin_ref(&found, "echo").unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "{err}");
+        assert!(err.contains("PluginKey"), "{err}");
+        let qualified = resolve_plugin_ref(&found, found[0].plugin_key().canonical()).unwrap();
+        assert_eq!(qualified.plugin_key(), found[0].plugin_key());
     }
 
     #[test]
-    fn same_id_different_kind_is_hard_error() {
+    fn same_alias_different_family_is_allowed() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");
         write_plugin(&plugins.join("echo-src"), "echo", "storefront");
@@ -416,11 +503,10 @@ mode = "deny"
             )),
             ..Config::default()
         };
-        let err = discover_plugins(&cfg).unwrap_err().to_string();
-        assert!(err.contains("duplicate plugin id `echo`"), "{err}");
-        assert!(err.contains("source"), "{err}");
-        assert!(err.contains("integration"), "{err}");
-        assert!(err.contains("globally unique"), "{err}");
+        let found = discover_plugins(&cfg).unwrap();
+        assert_eq!(found.len(), 2);
+        let err = resolve_plugin_ref(&found, "echo").unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "{err}");
     }
 
     #[test]

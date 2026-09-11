@@ -531,6 +531,25 @@ fn stage_guest(
     }
 
     stage_embedded_logo(&guest.dir, &out, &manifest_src)?;
+    stamp_platform_if_known(guest, &out)?;
+    Ok(())
+}
+
+/// Host-stamps a verified platform receipt for installer-shipped sqlite/local.
+fn stamp_platform_if_known(guest: &DiscoveredGuest, out: &Path) -> Result<()> {
+    let Some(package) = guest.package.as_deref() else {
+        return Ok(());
+    };
+    if bookclerk_plugin_catalog::platform_artifact(package, &guest.id).is_none() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(out.join("plugin.toml"))
+        .with_context(|| format!("read {}", out.join("plugin.toml").display()))?;
+    let manifest = bookclerk_plugin_manifest::PluginManifest::parse(&text)
+        .with_context(|| format!("parse staged plugin.toml for {}", guest.id))?;
+    let version = env!("CARGO_PKG_VERSION");
+    bookclerk_plugin_catalog::stamp_platform_receipt(out, package, &manifest, version)
+        .with_context(|| format!("stamp platform receipt for {}", guest.id))?;
     Ok(())
 }
 
