@@ -1474,10 +1474,7 @@ fn overlay_postgres_url(
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
 ) {
-    if DatabasePluginKind::parse(&plugin.manifest.id) != Some(DatabasePluginKind::Postgres) {
-        return;
-    }
-    if DatabasePluginKind::parse(&config.database.plugin) != Some(DatabasePluginKind::Postgres) {
+    if !overlay_database_slot_matches(plugin, config, DatabasePluginKind::Postgres) {
         return;
     }
     let Ok(url) = resolve_postgres_url(config) else {
@@ -1495,13 +1492,34 @@ fn overlay_d1_api_base(
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
 ) {
-    if DatabasePluginKind::parse(&plugin.manifest.id) != Some(DatabasePluginKind::D1) {
-        return;
-    }
-    if DatabasePluginKind::parse(&config.database.plugin) != Some(DatabasePluginKind::D1) {
+    if !overlay_database_slot_matches(plugin, config, DatabasePluginKind::D1) {
         return;
     }
     overlay_http_url(grant, &config.database.d1.api_base, 443);
+}
+
+/// True when `plugin` is the selected `[database].plugin` occupant of `kind`.
+///
+/// A provenance-qualified PluginKey in `[database].plugin` matches only that
+/// key. Alias tokens (`postgres`, `pg`, `d1`) still match the first-party
+/// kind so existing config keeps working, but they do not overlay a twin
+/// install once the operator names a PluginKey.
+fn overlay_database_slot_matches(
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+    kind: DatabasePluginKind,
+) -> bool {
+    if DatabasePluginKind::parse(plugin.alias()) != Some(kind) {
+        return false;
+    }
+    let spec = config.database.plugin.trim();
+    if spec.is_empty() {
+        return false;
+    }
+    if let Ok(key) = bookclerk_plugin_catalog::PluginKey::parse(spec) {
+        return plugin.plugin_key() == &key;
+    }
+    DatabasePluginKind::parse(spec) == Some(kind) || plugin.alias().eq_ignore_ascii_case(spec)
 }
 
 /// Overlay TCP for `[integrations.audiobookshelf].base_url`.
@@ -2004,6 +2022,46 @@ mode = "outbound"
         overlay_host_implied_network(&mut grant, &plugin, &config);
         assert!(grant.egress_policy().allows_tcp("127.0.0.1", 9000));
         assert!(grant.address_cidrs.contains("127.0.0.1/32"));
+    }
+
+    #[test]
+    fn overlay_plugin_key_spec_does_not_grant_alias_twin() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let toml = r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#;
+        let real = discovered(a.path(), toml);
+        let twin = discovered(b.path(), toml);
+        assert_eq!(real.alias(), twin.alias());
+        assert_ne!(real.plugin_key(), twin.plugin_key());
+        let mut config = Config::default();
+        config.database.plugin = real.plugin_key().canonical().to_string();
+        config.database.postgres.url =
+            Some("postgres://postgres:postgres@localhost:5432/postgres".into());
+
+        let mut grant_real = consent_request(&real.manifest, real.plugin_key());
+        overlay_host_implied_network(&mut grant_real, &real, &config);
+        assert!(
+            grant_real.egress_policy().allows_tcp("localhost", 5432),
+            "selected PluginKey must still get the host postgres overlay"
+        );
+
+        let mut grant_twin = consent_request(&twin.manifest, twin.plugin_key());
+        overlay_host_implied_network(&mut grant_twin, &twin, &config);
+        assert!(
+            grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
+            "alias twin must not inherit the operator postgres URL overlay"
+        );
     }
 
     #[test]
