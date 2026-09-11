@@ -80,8 +80,8 @@ pub fn create_pipe(name: &str, package_sid: &str, first: bool) -> io::Result<Nam
 mod tests {
     use super::*;
 
-    #[test]
-    fn pipe_name_is_local_and_unguessable() {
+    #[tokio::test]
+    async fn pipe_name_is_local_and_unguessable() {
         let a = bind_socket_proxy(Some(ALL_APPLICATION_PACKAGES_SID)).expect("pipe a");
         let b = bind_socket_proxy(None).expect("pipe b");
         assert!(a.spec.starts_with(r"\\.\pipe\bc-s-"), "{}", a.spec);
