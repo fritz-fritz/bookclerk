@@ -1658,6 +1658,7 @@ export interface PluginGrant {
   operatorDeniedTcp?: { host: string; ports: number[] }[];
   addressCidrs?: string[];
   operatorAddedCidrs?: string[];
+  operatorDeniedCidrs?: string[];
   allowUndeclaredPublicRedirects?: boolean;
   authorityRevision?: string;
   bindings: string[];

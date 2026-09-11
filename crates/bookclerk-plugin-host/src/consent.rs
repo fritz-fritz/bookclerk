@@ -11,6 +11,7 @@
 //! ```text
 //! effective structural = manifest ∩ operator grant ∩ host policy
 //! effective network    = host policy ∩ approved(manifest network ∪ operator additions)
+//!                      − operator denials
 //! ```
 
 use std::collections::BTreeSet;
@@ -216,6 +217,13 @@ pub struct PluginGrant {
     /// Operator-added CIDRs; survive upgrades of the same PluginKey.
     #[serde(default)]
     pub operator_added_cidrs: BTreeSet<String>,
+    /// Operator-denied CIDRs (even if the current manifest still lists them).
+    ///
+    /// Same PluginKey upgrades must not silently restore an address-space grant
+    /// the operator removed. Host spawn overlays (loopback postgres/ABS) may
+    /// still add CIDRs from operator config after this set is applied.
+    #[serde(default)]
+    pub operator_denied_cidrs: BTreeSet<String>,
     /// Effective undeclared-public-redirect permission.
     #[serde(default)]
     pub allow_undeclared_public_redirects: bool,
@@ -279,6 +287,7 @@ impl PluginGrant {
             address_cidrs: BTreeSet::new(),
             manifest_cidrs: BTreeSet::new(),
             operator_added_cidrs: BTreeSet::new(),
+            operator_denied_cidrs: BTreeSet::new(),
             allow_undeclared_public_redirects: false,
             operator_allow_undeclared_public_redirects: None,
             bindings: BTreeSet::new(),
@@ -537,6 +546,7 @@ pub fn consent_request_alias(manifest: &PluginManifest) -> PluginGrant {
         address_cidrs: address_cidrs.clone(),
         manifest_cidrs: address_cidrs,
         operator_added_cidrs: BTreeSet::new(),
+        operator_denied_cidrs: BTreeSet::new(),
         allow_undeclared_public_redirects: net.allow_undeclared_public_redirects,
         operator_allow_undeclared_public_redirects: None,
         bindings,
@@ -876,19 +886,35 @@ fn merge_tcp(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<TcpGra
     tcp
 }
 
-/// Effective CIDRs: current manifest ∪ operator additions.
+/// Reconstructs operator CIDR additions/denials relative to the current manifest.
+fn classified_operator_cidrs(
+    existing: &PluginGrant,
+    requested: &PluginGrant,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    if !existing.operator_added_cidrs.is_empty() || !existing.operator_denied_cidrs.is_empty() {
+        return (
+            existing.operator_added_cidrs.clone(),
+            existing.operator_denied_cidrs.clone(),
+        );
+    }
+    let added = existing
+        .address_cidrs
+        .difference(&requested.manifest_cidrs)
+        .cloned()
+        .collect();
+    // Legacy grants without explicit CIDR denials: new package CIDRs re-evaluate.
+    let denied = existing.operator_denied_cidrs.clone();
+    (added, denied)
+}
+
+/// Effective CIDRs: current manifest ∪ operator additions − operator denials.
 fn merge_cidrs(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<String> {
-    let added = if existing.operator_added_cidrs.is_empty() {
-        existing
-            .address_cidrs
-            .difference(&requested.manifest_cidrs)
-            .cloned()
-            .collect()
-    } else {
-        existing.operator_added_cidrs.clone()
-    };
+    let (added, denied) = classified_operator_cidrs(existing, requested);
     let mut cidrs = requested.manifest_cidrs.clone();
     cidrs.extend(added);
+    for cidr in denied {
+        cidrs.remove(&cidr);
+    }
     cidrs
 }
 
@@ -906,6 +932,8 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
     };
     let (operator_added_domains, operator_denied_domains) =
         classified_operator_network(existing, requested);
+    let (operator_added_cidrs, operator_denied_cidrs) =
+        classified_operator_cidrs(existing, requested);
     PluginGrant {
         plugin_key: if existing.plugin_key.is_empty() {
             requested.plugin_key.clone()
@@ -938,15 +966,8 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
         operator_denied_tcp: classified_operator_tcp(existing, requested).1,
         address_cidrs: merge_cidrs(existing, requested),
         manifest_cidrs: requested.manifest_cidrs.clone(),
-        operator_added_cidrs: if existing.operator_added_cidrs.is_empty() {
-            existing
-                .address_cidrs
-                .difference(&requested.manifest_cidrs)
-                .cloned()
-                .collect()
-        } else {
-            existing.operator_added_cidrs.clone()
-        },
+        operator_added_cidrs,
+        operator_denied_cidrs,
         allow_undeclared_public_redirects: existing
             .operator_allow_undeclared_public_redirects
             .unwrap_or(requested.allow_undeclared_public_redirects),
@@ -1163,6 +1184,11 @@ pub fn validate_approved_grant(
         operator_added_cidrs: approved
             .address_cidrs
             .difference(&baseline.manifest_cidrs)
+            .cloned()
+            .collect(),
+        operator_denied_cidrs: baseline
+            .manifest_cidrs
+            .difference(&approved.address_cidrs)
             .cloned()
             .collect(),
         allow_undeclared_public_redirects: approved.allow_undeclared_public_redirects,
@@ -2393,6 +2419,32 @@ mode = "deny"
         assert!(effective.tcp.contains(&added));
         assert!(effective.tcp.iter().any(|t| t.host == "new.example.com"));
         assert!(effective.operator_denied_tcp.contains(&denied));
+    }
+
+    #[test]
+    fn effective_grant_keeps_operator_cidr_denials_across_manifest_upgrade() {
+        let denied = "10.0.0.0/8".to_string();
+        let added = "192.168.0.0/16".to_string();
+        let mut existing = sample_grant(&["api.example.com"], &["config"], &[]);
+        existing.address_cidrs.insert(added.clone());
+        existing.operator_added_cidrs.insert(added.clone());
+        existing.operator_denied_cidrs.insert(denied.clone());
+        existing.manifest_cidrs.insert(denied.clone());
+
+        let mut requested = sample_grant(&["api.example.com"], &["config"], &[]);
+        requested.address_cidrs.insert(denied.clone());
+        requested.manifest_cidrs.insert(denied.clone());
+        requested.address_cidrs.insert("172.16.0.0/12".into());
+        requested.manifest_cidrs.insert("172.16.0.0/12".into());
+
+        let effective = effective_grant(&existing, &requested);
+        assert!(
+            !effective.address_cidrs.contains(&denied),
+            "operator CIDR denials must survive a same-PluginKey package upgrade"
+        );
+        assert!(effective.address_cidrs.contains(&added));
+        assert!(effective.address_cidrs.contains("172.16.0.0/12"));
+        assert!(effective.operator_denied_cidrs.contains(&denied));
     }
 
     #[test]

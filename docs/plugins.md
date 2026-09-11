@@ -832,7 +832,7 @@ by provenance-qualified PluginKey. Structural capabilities originate in the
 manifest; the operator may **narrow** them but cannot invent entrypoints,
 producers, or host bindings. Network destinations are operator-extensible:
 operators may add fetch hosts, TCP `host:ports`, and CIDRs beyond the
-manifest, **and may deny** individual fetch hosts or TCP grants so a later
+manifest, **and may deny** individual fetch hosts, TCP grants, or CIDRs so a later
 package upgrade of the same PluginKey does not silently restore them. Host
 hard caps still
 apply (`WorkerdLimits` maxes, disk/memory max 4096 MiB, CPU rate
@@ -865,7 +865,7 @@ Global confinement knobs (Settings → Confinement, or `config.toml`):
 | `plugins.jail.extra_processes` | ceiling on extra processes/threads beyond launcher overhead (default **2**; Spec `active_processes` = overhead + extra) |
 
 On upgrade of the **same PluginKey**, operator-added network destinations
-and operator **denials** (fetch hosts and TCP grants) survive; new sensitive
+and operator **denials** (fetch hosts, TCP grants, and CIDRs) survive; new sensitive
 structural authority re-prompts. A different provenance (even with the same
 manifest id) does not inherit grants.
 
