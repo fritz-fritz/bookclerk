@@ -368,6 +368,9 @@ impl Client {
         ClientBuilder::new()
     }
 
+    /// # Errors
+    ///
+    /// Returns when the ambient reqwest builder or the proxied rustls config fails.
     fn from_builder(builder: ClientBuilder) -> HttpResult<Self> {
         if !use_socket_proxy() {
             return Ok(Self {
@@ -574,6 +577,9 @@ impl RequestBuilder {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns when the URL is invalid or the ambient HTTP request fails.
     async fn send_direct(self, http: reqwest::Client) -> HttpResult<Response> {
         let mut url = Url::parse(&self.url)?;
         append_query(&mut url, &self.query);
@@ -597,6 +603,9 @@ impl RequestBuilder {
     }
 
     #[cfg(unix)]
+    /// # Errors
+    ///
+    /// Returns on CONNECT/TLS failure, timeout, or when the origin errors.
     async fn send_proxied(self, proxy: ProxiedClient) -> HttpResult<Response> {
         let timeout = self.timeout.or(proxy.timeout);
         let fut = self.send_proxied_inner(proxy);
@@ -609,6 +618,9 @@ impl RequestBuilder {
     }
 
     #[cfg(unix)]
+    /// # Errors
+    ///
+    /// Returns when CONNECT, TLS, or an origin hop fails, or redirects exceed the policy.
     async fn send_proxied_inner(self, proxy: ProxiedClient) -> HttpResult<Response> {
         let mut url = Url::parse(&self.url)?;
         append_query(&mut url, &self.query);
@@ -864,6 +876,9 @@ fn use_socket_proxy() -> bool {
     }
 }
 
+/// # Errors
+///
+/// Returns when the reqwest builder rejects the requested options.
 fn direct_reqwest(builder: &ClientBuilder) -> HttpResult<reqwest::Client> {
     let mut b = reqwest::Client::builder();
     if let Some(t) = builder.timeout {
@@ -937,6 +952,9 @@ fn reqwest_headers(headers: &reqwest::header::HeaderMap) -> HeaderMap {
 }
 
 #[cfg(unix)]
+/// # Errors
+///
+/// Returns when the proxied response body cannot be collected.
 async fn collect_incoming(incoming: hyper::body::Incoming) -> HttpResult<Bytes> {
     let collected = incoming
         .collect()
@@ -1001,6 +1019,9 @@ fn redirect_location(current: &Url, headers: &HeaderMap, status: StatusCode) -> 
 }
 
 #[cfg(unix)]
+/// # Errors
+///
+/// Returns when the request cannot be built or the proxied origin hop fails.
 async fn proxy_once(
     hyper: &hyper_util::client::legacy::Client<SocketProxyConnector, Full<Bytes>>,
     method: &Method,
@@ -1034,6 +1055,9 @@ async fn proxy_once(
 }
 
 #[cfg(unix)]
+/// # Errors
+///
+/// Returns when the TLS server name is invalid or the handshake fails.
 async fn wrap_tls(
     hostname: &str,
     stream: tokio::net::UnixStream,
@@ -1048,6 +1072,9 @@ async fn wrap_tls(
 }
 
 #[cfg(unix)]
+/// # Errors
+///
+/// Returns when the rustls client config cannot be built (does not currently fail).
 fn rustls_client_config() -> Result<Arc<rustls::ClientConfig>> {
     static CELL: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     Ok(Arc::clone(CELL.get_or_init(|| {
@@ -1093,6 +1120,9 @@ impl tower_service::Service<http::Uri> for SocketProxyConnector {
 }
 
 #[cfg(unix)]
+/// # Errors
+///
+/// Returns when CONNECT, TLS, or URI parsing fails.
 async fn connect_uri(
     dst: http::Uri,
     tls: Arc<rustls::ClientConfig>,
