@@ -329,6 +329,7 @@ mod tests {
         assert!(!policy.allows_tcp("api.example.com", 443));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn proxy_denies_unapproved_connect_without_dialing() {
         let dir = tempfile::tempdir().unwrap();
@@ -349,6 +350,7 @@ mod tests {
         fence.store(true, Ordering::SeqCst);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn proxy_echoes_approved_connect_and_fences() {
         let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -386,6 +388,7 @@ mod tests {
         fence.store(true, Ordering::SeqCst);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn proxy_dials_ipv4_when_localhost_has_no_ipv6_listener() {
         let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -423,6 +426,7 @@ mod tests {
         fence.store(true, Ordering::SeqCst);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn proxy_denies_private_ip_without_cidr_even_with_tcp_host() {
         let dir = tempfile::tempdir().unwrap();

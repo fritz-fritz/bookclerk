@@ -145,6 +145,18 @@ else
   ok "SDK HTTP honors SOCKET_PROXY on Unix and Windows"
 fi
 
+if ! grep -n 'allow(unsafe_code)' crates/bookclerk-workerd/src/pipe_bind.rs >/dev/null 2>&1; then
+  fail "Windows named-pipe CreateNamedPipe is missing allow(unsafe_code)"
+else
+  ok "Windows named-pipe SOCKET_PROXY allows the CreateNamedPipe FFI sink"
+fi
+
+if ! grep -n 'socket_proxy::spawn_windows' crates/bookclerk-workerd/src/main.rs >/dev/null 2>&1; then
+  fail "Windows SOCKET_PROXY accept loop is not started from bookclerk-workerd"
+else
+  ok "Windows SOCKET_PROXY accept loop is wired in the launcher"
+fi
+
 # Native guests must not open ambient TCP (reqwest::Client) in product src.
 hits="$(find crates/bookclerk-plugins/optional crates/bookclerk-enrich/src \
   -name '*.rs' ! -path '*/tests/*' -print0 \
