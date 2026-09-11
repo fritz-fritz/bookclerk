@@ -392,6 +392,10 @@ impl PluginGrantStore {
 
     /// Returns the grant for `plugin_key` (canonical), or an unambiguous alias.
     ///
+    /// Display / CLI helper only. Spawn, overlay, and other privilege checks
+    /// must call [`Self::get_by_plugin_key`] so an alias cannot inherit another
+    /// provenance's grant.
+    ///
     /// # Arguments
     ///
     /// * `plugin_key` - Canonical PluginKey text, or a display alias.
@@ -2661,6 +2665,40 @@ mode = "deny"
             .unwrap_err()
             .to_string();
         assert!(err.contains("no permission grant"), "{err}");
+    }
+
+    #[test]
+    fn get_by_plugin_key_does_not_fall_back_to_alias() {
+        let mut store = PluginGrantStore::default();
+        let mut grant = sample_grant(&[], &["config"], &[]);
+        grant.plugin_id = "local".into();
+        grant.plugin_key = "platform:bookclerk/bookclerk-plugin-destination-local#local".into();
+        store.upsert(grant);
+        assert!(store.get_by_plugin_key("local").is_none());
+        assert!(store.get("local").is_some(), "CLI alias helper still works");
+        assert!(store
+            .get_by_plugin_key("platform:bookclerk/bookclerk-plugin-destination-local#local")
+            .is_some());
+    }
+
+    #[test]
+    fn get_alias_is_ambiguous_when_plugin_key_twins_exist() {
+        let mut store = PluginGrantStore::default();
+        let mut a = sample_grant(&[], &["config"], &[]);
+        a.plugin_id = "local".into();
+        a.plugin_key = "platform:bookclerk/bookclerk-plugin-destination-local#local".into();
+        let mut b = sample_grant(&[], &["config"], &[]);
+        b.plugin_id = "local".into();
+        b.plugin_key = "path:file:///tmp/evil#local".into();
+        store.upsert(a);
+        store.upsert(b);
+        assert!(store.get("local").is_none());
+        assert!(store
+            .get_by_plugin_key("platform:bookclerk/bookclerk-plugin-destination-local#local")
+            .is_some());
+        assert!(store
+            .get_by_plugin_key("path:file:///tmp/evil#local")
+            .is_some());
     }
 
     #[test]

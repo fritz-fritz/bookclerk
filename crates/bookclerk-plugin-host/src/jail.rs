@@ -271,7 +271,7 @@ impl GuestJail {
                     Ok(launcher) => {
                         #[cfg(windows)]
                         {
-                            let label = format!("plugin:{id}");
+                            let label = format!("plugin:{}", plugin.plugin_key().fs_id());
                             match bookclerk_sandbox::spawn::AppContainerSession::create(&label) {
                                 Ok(session) => {
                                     package_sid = Some(session.package_sid().to_string());
@@ -405,7 +405,7 @@ fn build_spec_with_grant(
     // install read-only plus host-managed data/tmp grants, not free-form paths.
     apply_global_jail_resource_overrides(&mut resources, &config.plugins.jail, spawn.runtime);
     Spec {
-        label: format!("plugin:{}", plugin.manifest.id),
+        label: format!("plugin:{}", plugin.plugin_key().fs_id()),
         // The install directory covers `plugin.toml` and, in the usual layout,
         // the binary. A manifest may name an absolute `command` elsewhere, and
         // a workerd-fronted guest also execs `bookclerk-workerd`, the pinned
@@ -822,7 +822,10 @@ entrypoints = ["{entrypoint}"]
             None,
         );
 
-        assert_eq!(spec.label, "plugin:libro");
+        assert_eq!(
+            spec.label,
+            format!("plugin:{}", plugin.plugin_key().fs_id())
+        );
         assert_eq!(
             spec.net,
             NetPolicy::Outbound,

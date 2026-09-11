@@ -1306,8 +1306,11 @@ separate from the Bookclerk library and from every other plugin
 (near-equivalent to a Cloudflare Workers D1 binding):
 
 - **SQLite** — one file per binding under
-  `$BOOKCLERK_FILES_DIR/plugin-databases/<plugin>/<BINDING>.db` (the sqlite
-  adapter jail grants that directory).
+  `$BOOKCLERK_FILES_DIR/plugin-databases/<plugin-key-fs-id>/<BINDING>.db`
+  (the sqlite adapter jail grants that directory). The leaf is
+  `PluginKey::fs_id()` (`pk-` plus 16 hex), not the display alias and not
+  the canonical PluginKey (which is not a valid Windows path component).
+  The `plugin_databases` registry still stores the canonical PluginKey.
 - **PostgreSQL** — one database per binding (`pb_` + 32 hex of the
   `(plugin, binding)` digest; 35 ≤ 63), created on first use (`CREATEDB`
   required). This is a separate database, not a schema on the library DB,

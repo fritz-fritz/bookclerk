@@ -21,6 +21,7 @@ use bookclerk_plugin_abi::{
     sql_catalog_page_rows, AdapterExecuteRequest, DbBootstrap, DbCapabilities, DbConnectParams,
     DbValue, IsolationReq, SqlType, SqlTypeEnv, SQL_CATALOG_TABLE, SQL_SCHEMA_TABLE,
 };
+use bookclerk_plugin_catalog::PluginKey;
 use bookclerk_plugin_sdk::GuestDatabase;
 use bookclerk_plugin_sdk::PRODUCT_API_VERSION;
 use bookclerk_plugin_sdk::{
@@ -583,6 +584,19 @@ impl GuestDatabase for BindingGuestDatabase {
     }
 }
 
+/// Filesystem-safe leaf for `plugin-databases/<leaf>/`.
+///
+/// Canonical PluginKeys contain `:` / `#` and are not valid directory names
+/// on Windows. State dirs already use [`PluginKey::fs_id`]; bindings follow.
+/// A bare alias (legacy registry row) is kept as-is so existing files still
+/// resolve.
+fn plugin_database_owner_leaf(owner_plugin_id: &str) -> String {
+    match PluginKey::parse(owner_plugin_id) {
+        Ok(key) => key.fs_id(),
+        Err(_) => owner_plugin_id.to_string(),
+    }
+}
+
 /// Collision-resistant instance id for one `(owner_plugin_id, binding)` pair.
 ///
 /// Length-prefixed SHA-256 so `("ab_c", "D")` and `("ab", "C_D")` cannot
@@ -634,7 +648,7 @@ pub(crate) fn plugin_binding_unit_ref(
             .paths()
             .files_dir
             .join("plugin-databases")
-            .join(owner_plugin_id)
+            .join(plugin_database_owner_leaf(owner_plugin_id))
             .join(format!("{binding}.db"))
             .display()
             .to_string(),
@@ -1044,7 +1058,7 @@ impl ExternalDatabase {
     /// plugin database bindings of `owner_plugin_id`.
     ///
     /// Backend-native units: SQLite gets a file per binding under
-    /// `<files_dir>/plugin-databases/<plugin>/<BINDING>.db`, PostgreSQL a
+    /// `<files_dir>/plugin-databases/<plugin-key-fs-id>/<BINDING>.db`, PostgreSQL a
     /// dedicated database (`pb_` + 32 hex of the `(plugin, binding)` digest),
     /// and D1 its own database (`bookclerk-pb-` + the same 32 hex). Third-party
     /// adapters advertising `pluginDatabases` receive `binding` plus a
@@ -2856,6 +2870,51 @@ mod tests {
         assert!(pg_long.len() <= 63, "{pg_long}");
         assert!(d1_long.len() <= 64, "{d1_long}");
         assert_eq!(binding_instance_id(&long_owner, &long_binding).len(), 64);
+    }
+
+    #[test]
+    fn sqlite_plugin_database_path_uses_plugin_key_fs_id() {
+        let files = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            paths: Some(bookclerk_config::Paths::from_files_dir(
+                files.path().to_path_buf(),
+            )),
+            ..Config::default()
+        };
+        let key = PluginKey::platform("bookclerk-plugin-destination-local", "local")
+            .expect("platform key");
+        let unit = plugin_binding_unit_ref(
+            &config,
+            Some(DatabasePluginKind::Sqlite),
+            key.canonical(),
+            "DB",
+        );
+        assert!(
+            unit.contains(&key.fs_id()),
+            "PluginKey sqlite unit must use fs_id: {unit}"
+        );
+        assert!(
+            !unit.contains("platform:"),
+            "PluginKey must not be a raw path component: {unit}"
+        );
+        let legacy =
+            plugin_binding_unit_ref(&config, Some(DatabasePluginKind::Sqlite), "local", "DB");
+        assert!(
+            legacy.contains("plugin-databases"),
+            "legacy alias path: {legacy}"
+        );
+        let legacy_path = std::path::Path::new(&legacy);
+        assert_eq!(
+            legacy_path.file_name().and_then(|n| n.to_str()),
+            Some("DB.db")
+        );
+        assert_eq!(
+            legacy_path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str()),
+            Some("local")
+        );
     }
 
     #[test]

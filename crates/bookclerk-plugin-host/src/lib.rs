@@ -84,8 +84,9 @@ pub use consent::{
 pub use crates_io::search_crates_io;
 pub use destinations::{build_acquire_destinations, build_storage_backend};
 pub use discover::{
-    discover_plugins, occupancy_spec, plugin_matches_occupancy, plugin_search_dirs,
-    resolve_plugin_ref, resolve_plugin_slot, settings_table, settings_table_for, DiscoveredPlugin,
+    discover_plugins, identity_matches_occupancy, occupancy_spec, plugin_matches_occupancy,
+    plugin_search_dirs, resolve_plugin_ref, resolve_plugin_slot, settings_table,
+    settings_table_for, DiscoveredPlugin,
 };
 pub use error::{PluginError, Result};
 pub use event_publisher::{EventOutbox, OutboxEventPublisher};

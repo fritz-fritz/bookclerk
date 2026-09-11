@@ -259,6 +259,42 @@ else
   fail "postgres still returns ambient TCP URLs when SOCKET_PROXY is set on Windows"
 fi
 
+if grep -A35 'fn open_granted_binding_databases' crates/bookclerkd/src/jobs.rs \
+    | grep -q 'get_by_plugin_key'; then
+  ok "plugin_copy bindings look up grants by PluginKey"
+else
+  fail "plugin_copy still uses alias PluginGrantStore::get"
+fi
+
+if grep -A40 'fn open_granted_binding_databases' crates/bookclerkd/src/jobs.rs \
+    | grep -q 'owner.id()'; then
+  ok "plugin_copy bindings are owned by the session PluginKey"
+else
+  fail "plugin_copy still keys plugin databases on the job's plugin_id string"
+fi
+
+if grep -A30 'pub fn plugin_session' crates/bookclerk-plugin-host/src/host/destination.rs \
+    | grep -q 'identity_matches_occupancy'; then
+  ok "destination plugin_session occupancy is PluginKey-aware"
+else
+  fail "destination plugin_session still looks up only plugin_instance_key(alias)"
+fi
+
+if grep -A20 'pub(crate) fn plugin_binding_unit_ref' \
+    crates/bookclerk-plugin-host/src/host/database.rs \
+    | grep -q 'plugin_database_owner_leaf'; then
+  ok "sqlite plugin databases use PluginKey fs_id"
+else
+  fail "sqlite plugin-databases path still joins the raw owner id"
+fi
+
+if grep -B1 'fd_proc_path, recv_passed_fd' \
+    crates/bookclerk-plugin-sdk/src/fetch_dir.rs | grep -q 'cfg(unix)'; then
+  ok "SDK fetch_dir recv_passed_fd import is Unix-only"
+else
+  fail "fetch_dir imports recv_passed_fd on Windows (unused import under clippy -D warnings)"
+fi
+
 if grep -n 'reqwest::Client' crates/bookclerk-storage/src >/dev/null 2>&1; then
   fail "bookclerk-storage still uses ambient reqwest::Client"
 else

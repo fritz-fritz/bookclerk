@@ -826,6 +826,55 @@ struct PluginDbListItem {
     created_at: String,
 }
 
+/// Registry rows for `spec`: canonical PluginKey, or an unambiguous alias.
+///
+/// Privilege-sensitive drop/list must not collapse two PluginKeys onto one
+/// display alias. A parseable PluginKey is an exact registry lookup; a bare
+/// alias matches only when every hit shares the same stored PluginKey (or a
+/// single leftover alias-era row).
+///
+/// # Arguments
+///
+/// * `store` - Open library with the `plugin_databases` registry.
+/// * `spec` - Canonical PluginKey, display alias, or `None` for every row.
+///
+/// # Errors
+///
+/// Returns an error when the registry query fails or the alias is ambiguous.
+async fn plugin_db_rows_for_spec(
+    store: &bookclerk_library::LibraryStore,
+    spec: Option<&str>,
+) -> anyhow::Result<Vec<bookclerk_library::PluginDatabaseRecord>> {
+    match spec.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(store.list_plugin_databases(None).await?),
+        Some(spec) if bookclerk_plugin_catalog::PluginKey::parse(spec).is_ok() => {
+            Ok(store.list_plugin_databases(Some(spec)).await?)
+        }
+        Some(alias) => {
+            let all = store.list_plugin_databases(None).await?;
+            let suffix = format!("#{alias}");
+            let mut keys = std::collections::BTreeSet::new();
+            for row in &all {
+                if row.plugin_id.eq_ignore_ascii_case(alias) || row.plugin_id.ends_with(&suffix) {
+                    keys.insert(row.plugin_id.clone());
+                }
+            }
+            match keys.len() {
+                0 => Ok(Vec::new()),
+                1 => {
+                    let key = keys.into_iter().next().ok_or_else(|| {
+                        anyhow::anyhow!("plugin alias `{alias}` matched no PluginKey")
+                    })?;
+                    Ok(all.into_iter().filter(|row| row.plugin_id == key).collect())
+                }
+                _ => anyhow::bail!(
+                    "plugin alias `{alias}` is ambiguous; pass a PluginKey (`plugins db list` shows owners)"
+                ),
+            }
+        }
+    }
+}
+
 /// Lists or drops isolated plugin database bindings via the registry.
 async fn run_plugin_db(
     config: &Config,
@@ -835,7 +884,7 @@ async fn run_plugin_db(
     let store = crate::registry::open_library(config).await?;
     match command {
         PluginDbCommand::List { plugin } => {
-            let rows = store.list_plugin_databases(plugin.as_deref()).await?;
+            let rows = plugin_db_rows_for_spec(&store, plugin.as_deref()).await?;
             let items: Vec<PluginDbListItem> = rows
                 .into_iter()
                 .map(|r| PluginDbListItem {
@@ -868,7 +917,7 @@ async fn run_plugin_db(
             binding,
             yes,
         } => {
-            let rows = store.list_plugin_databases(Some(&plugin)).await?;
+            let rows = plugin_db_rows_for_spec(&store, Some(&plugin)).await?;
             let rows: Vec<_> = rows
                 .into_iter()
                 .filter(|r| binding.as_deref().is_none_or(|b| r.binding == b))

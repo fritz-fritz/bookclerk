@@ -144,6 +144,30 @@ pub fn occupancy_spec<'a>(plugin_field: &'a str, alias: &'a str) -> &'a str {
     }
 }
 
+/// True when `plugin_key` / `alias` is the occupant named by `spec`.
+///
+/// A parseable PluginKey never falls through to an alias comparison, so a
+/// miss cannot inherit another provenance's grant or session. Does not
+/// detect alias twins — callers that load or privilege-check must require
+/// a unique match ([`resolve_plugin_slot`], destination session lookup).
+///
+/// # Arguments
+///
+/// * `plugin_key` - Canonical [`PluginKey`] text.
+/// * `alias` - Manifest display id.
+/// * `spec` - Occupancy selector from [`occupancy_spec`] or a job/CLI id.
+#[must_use]
+pub fn identity_matches_occupancy(plugin_key: &str, alias: &str, spec: &str) -> bool {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return false;
+    }
+    if let Ok(key) = PluginKey::parse(spec) {
+        return plugin_key == key.canonical();
+    }
+    alias.eq_ignore_ascii_case(spec)
+}
+
 /// True when `plugin` is the occupant named by `spec` (PluginKey or alias).
 ///
 /// Does not detect alias twins — loaders must call [`resolve_plugin_slot`].
@@ -154,14 +178,7 @@ pub fn occupancy_spec<'a>(plugin_field: &'a str, alias: &'a str) -> &'a str {
 /// * `spec` - Occupancy selector from [`occupancy_spec`].
 #[must_use]
 pub fn plugin_matches_occupancy(plugin: &DiscoveredPlugin, spec: &str) -> bool {
-    let spec = spec.trim();
-    if spec.is_empty() {
-        return false;
-    }
-    if let Ok(key) = PluginKey::parse(spec) {
-        return plugin.plugin_key() == &key;
-    }
-    plugin.alias().eq_ignore_ascii_case(spec)
+    identity_matches_occupancy(plugin.plugin_key().canonical(), plugin.alias(), spec)
 }
 
 /// Resolves `spec` among `plugins` without treating a vacant slot as an error.
@@ -589,6 +606,26 @@ mode = "deny"
         ));
         assert!(plugin_matches_occupancy(&found[0], "echo"));
         assert!(plugin_matches_occupancy(&found[1], "echo"));
+        assert!(identity_matches_occupancy(
+            found[0].plugin_key().canonical(),
+            found[0].alias(),
+            found[0].plugin_key().canonical()
+        ));
+        assert!(!identity_matches_occupancy(
+            found[1].plugin_key().canonical(),
+            found[1].alias(),
+            found[0].plugin_key().canonical()
+        ));
+        assert!(identity_matches_occupancy(
+            found[0].plugin_key().canonical(),
+            "echo",
+            "ECHO"
+        ));
+        assert!(!identity_matches_occupancy(
+            found[0].plugin_key().canonical(),
+            "echo",
+            ""
+        ));
     }
 
     #[test]
