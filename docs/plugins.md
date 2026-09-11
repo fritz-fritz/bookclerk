@@ -412,7 +412,7 @@ tcp = [{ host = "api.example.com", ports = [443] }]
 | Network `mode` | Native-behind-workerd | Workerd |
 | --- | --- | --- |
 | `deny` | nested guest jail `NetPolicy::Deny`; no socket proxy grants | OS jail stays `OutboundListen` for the RPC bridge; isolate `globalOutbound` → blocked |
-| `outbound` | nested guest jail still `Deny`; TCP via `bookclerk_plugin_sdk::connect` → Unix HTTP CONNECT proxy | isolate `globalOutbound` → egress worker; `fetch()` and `connect()` share one `EgressPolicy` |
+| `outbound` | nested guest jail still `Deny`; TCP via `bookclerk_plugin_sdk::connect` → HTTP CONNECT proxy (Unix socket / Windows named pipe) | isolate `globalOutbound` → egress worker; `fetch()` and `connect()` share one `EgressPolicy` |
 
 `capabilities.network.domains` is the **fetch** allowlist (workerd only). Raw TCP is `capabilities.network.tcp` (`host` + `ports`). The operator may add extra fetch hosts, TCP targets, and CIDRs; the guest `describe()` cannot. Default address-space policy is public Internet only — loopback, RFC1918, link-local, ULA, and metadata stay denied unless an explicit CIDR is granted. `allow_undeclared_public_redirects` lets fetch redirects leave the domain allowlist for **public** destinations only; it never implies those special ranges.
 
@@ -515,6 +515,12 @@ Windows cannot confine a process after it has started. `bookclerk-jail` therefor
 read/write paths for a **per-launch** Package SID, maps `NetPolicy` to
 capability names (`internetClient`, `privateNetworkClientServer`, …), places the
 guest in a kill-on-close Job Object, and proxies stdio until the guest exits.
+
+Native-behind-workerd guests get a **second** AppContainer (`NetPolicy::Deny`,
+no `internetClient` SIDs). The host pre-creates that profile so the SOCKET_PROXY
+named pipe can be ACL'd to the nested Package SID before the guest starts.
+OAuth callback pipes use the same nested SID. Isolation::Required fails closed
+if the nested profile cannot be created.
 
 #### Job Object launch ordering
 
@@ -909,7 +915,9 @@ Structural capabilities originate in the
 manifest; the operator may **narrow** them but cannot invent entrypoints,
 producers, or host bindings. Network destinations are operator-extensible:
 operators may add fetch hosts, TCP `host:ports`, and CIDRs beyond the
-manifest, and may grant undeclared public redirects. Host hard caps still
+manifest, **and may deny** individual fetch hosts or TCP grants so a later
+package upgrade of the same PluginKey does not silently restore them. Host
+hard caps still
 apply (`WorkerdLimits` maxes, disk/memory max 4096 MiB, CPU rate
 up to `logical_cpus × 100` one-core percent, extra processes 62 / absolute PIDs
 64, known bindings). Workerd plugins use isolate `cpuMs` instead of per-plugin
@@ -920,11 +928,11 @@ plugin behaviour if overrides remove capabilities the guest needs.
 
 Domain allowlists and TCP grants are enforced for **both** workerd and
 native-behind-workerd guests through one canonical `EgressPolicy` (workerd
-`EGRESS_POLICY` / `BOOKCLERK_WORKERD_GRANT_POLICY`; native Unix CONNECT
-proxy). Direct-native diagnostic transport is test-only and still uses the
-OS jail mapping. Redirect hops stay on the fetch allowlist unless the
-operator grants undeclared public redirects; address-space policy still
-applies.
+`EGRESS_POLICY` / `BOOKCLERK_WORKERD_GRANT_POLICY`; native CONNECT proxy —
+Unix domain socket or Windows named pipe). Direct-native diagnostic transport
+is test-only and still uses the OS jail mapping. Redirect hops stay on the
+fetch allowlist unless the operator grants undeclared public redirects;
+address-space policy still applies.
 
 Guest filesystem access remains install read-only plus host-managed
 `plugin-state/<PluginKey fs-id>/data` and `plugin-state/<PluginKey fs-id>/tmp`
@@ -949,9 +957,10 @@ is identity-only so the previous approval remains usable). Do not
 expect spawn-time hash checks in this release.
 
 On upgrade of the **same PluginKey**, operator-added network destinations
-survive; new structural capabilities stay pending until the operator
-consents (`grant_covers` is identity-only). A different provenance (even
-with the same manifest alias) does not inherit grants.
+and operator **denials** (fetch hosts and TCP grants) survive; new
+structural capabilities stay pending until the operator consents
+(`grant_covers` is identity-only). A different provenance (even with the
+same manifest alias) does not inherit grants.
 
 ## Enabling and settings in `config.toml`
 

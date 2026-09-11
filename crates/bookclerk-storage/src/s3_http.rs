@@ -20,7 +20,7 @@ use bookclerk_plugin_sdk::SOCKET_PROXY_ENV;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 
-/// True when the guest must speak S3 through the workerd Unix CONNECT proxy.
+/// True when the guest must speak S3 through the workerd CONNECT proxy.
 #[must_use]
 pub(crate) fn socket_proxy_enabled() -> bool {
     std::env::var_os(SOCKET_PROXY_ENV).is_some()
