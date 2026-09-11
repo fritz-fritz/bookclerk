@@ -957,16 +957,10 @@ is identity-only so the previous approval remains usable). Do not
 expect spawn-time hash checks in this release.
 
 On upgrade of the **same PluginKey**, operator-added network destinations
-<<<<<<< HEAD
-and operator **denials** (fetch hosts and TCP grants) survive; new
+and operator **denials** (fetch hosts, TCP grants, and CIDRs) survive; new
 structural capabilities stay pending until the operator consents
 (`grant_covers` is identity-only). A different provenance (even with the
 same manifest alias) does not inherit grants.
-=======
-and operator **denials** (fetch hosts, TCP grants, and CIDRs) survive; new sensitive
-structural authority re-prompts. A different provenance (even with the same
-manifest id) does not inherit grants.
->>>>>>> 19672f99 (plugin: persist operator CIDR denials across PluginKey upgrades)
 
 ## Enabling and settings in `config.toml`
 
