@@ -16,9 +16,9 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Result, SdkError};
+use crate::pass_fd::PLUGIN_FD_CHANNEL_ENV;
 #[cfg(unix)]
-use crate::pass_fd::fd_proc_path;
-use crate::pass_fd::{recv_passed_fd, PLUGIN_FD_CHANNEL_ENV};
+use crate::pass_fd::{fd_proc_path, recv_passed_fd};
 use crate::protocol::FetchTitleParams;
 
 /// An open fetch work directory received from the host for one `fetchTitle` call.
