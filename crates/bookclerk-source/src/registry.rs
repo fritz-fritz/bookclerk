@@ -37,8 +37,8 @@ impl SourceRegistry {
     /// Look up a source by PluginKey, or by an unambiguous display alias.
     #[must_use]
     pub fn get(&self, id_or_alias: &str) -> Option<Arc<dyn ContentSource>> {
-        let matches = self.matches(id_or_alias);
-        (matches.len() == 1).then(|| matches.into_iter().next().expect("len == 1"))
+        let mut matches = self.matches(id_or_alias);
+        (matches.len() == 1).then(|| matches.remove(0))
     }
 
     /// Sources whose PluginKey, display alias, or extra aliases match `id_or_alias`.
@@ -67,9 +67,9 @@ impl SourceRegistry {
     ///
     /// Returns an API error when `id_or_alias` is not registered.
     pub fn require(&self, id_or_alias: &str) -> Result<Arc<dyn ContentSource>> {
-        let matches = self.matches(id_or_alias);
+        let mut matches = self.matches(id_or_alias);
         match matches.len() {
-            1 => Ok(matches.into_iter().next().expect("len == 1")),
+            1 => Ok(matches.remove(0)),
             0 => Err(SourceError::api(format!(
                 "content source `{id_or_alias}` is not registered"
             ))),
