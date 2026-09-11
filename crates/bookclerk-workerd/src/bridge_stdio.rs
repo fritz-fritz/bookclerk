@@ -8,7 +8,7 @@
 //! `EventConsumerClient`, `JobRunnerClient`, `DatabaseClient`, …) are reused
 //! unchanged over the [`InvokeClient`] hook. Object bodies stream over the
 //! dedicated `/destination/get` / `/destination/put` routes. The exported
-//! [`Entrypoints`] follow the signed `plugin.toml` capabilities (the host
+//! [`Entrypoints`] follow the verified `plugin.toml` capabilities (the host
 //! allowlist), never a guest-declared widening. See `docs/workerd-bridge.md`.
 //!
 //! With a [`Backend::Native`] guest the isolate stays the control plane
