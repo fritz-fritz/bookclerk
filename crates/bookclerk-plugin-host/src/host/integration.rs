@@ -174,11 +174,12 @@ pub async fn load_external_integrations(
         if !config.integrations.is_enabled(&plugin.manifest.id) {
             continue;
         }
-        if registry.get(&plugin.manifest.id).is_some() {
+        if registry.get(plugin.plugin_key().canonical()).is_some() {
             tracing::debug!(
-                id = %plugin.manifest.id,
+                plugin_key = %plugin.plugin_key().canonical(),
+                alias = %plugin.manifest.id,
                 path = %plugin.root.join("plugin.toml").display(),
-                "skipping external integration — already registered in-process"
+                "skipping external integration — PluginKey already registered"
             );
             continue;
         }
@@ -202,6 +203,10 @@ pub async fn load_external_integrations(
 #[async_trait]
 impl Integration for ExternalIntegration {
     fn id(&self) -> &str {
+        self.session.alias()
+    }
+
+    fn plugin_key(&self) -> &str {
         self.session.id()
     }
 

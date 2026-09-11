@@ -515,7 +515,7 @@ pub struct Entrypoints {
 
 /// Root `PluginWorker` capability (`describe` / `open` / `shutdown`).
 ///
-/// `describe()` advertises typed capabilities; the signed manifest plus the
+/// `describe()` advertises typed capabilities; the verified install receipt plus the
 /// operator grant is the host allowlist. `open()` returns the exported
 /// [`Entrypoints`] for one invocation.
 #[async_trait::async_trait(?Send)]
