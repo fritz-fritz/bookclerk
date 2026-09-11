@@ -200,6 +200,13 @@ else
   ok "native storefront/enrich HTTP is not ambient reqwest::Client"
 fi
 
+if grep -A25 'fn overlay_postgres_url' crates/bookclerk-plugin-host/src/consent.rs \
+    | grep -q 'overlay_database_slot_matches'; then
+  ok "postgres host overlay is PluginKey-aware"
+else
+  fail "postgres host overlay still keys only on the display alias"
+fi
+
 if grep -n 'reqwest::Client' crates/bookclerk-storage/src >/dev/null 2>&1; then
   fail "bookclerk-storage still uses ambient reqwest::Client"
 else
