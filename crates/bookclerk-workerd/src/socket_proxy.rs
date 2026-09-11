@@ -1,8 +1,9 @@
 //! Host-mediated TCP proxy for native-behind-workerd guests.
 //!
 //! Native plugins must not open ambient `AF_INET` sockets. They speak HTTP
-//! CONNECT to this Unix (or loopback) listener; the launcher applies the same
-//! [`EgressPolicy`] as workerd `fetch()`/`connect()` and splices bytes.
+//! CONNECT to this Unix-domain (or Windows named-pipe) listener; the launcher
+//! applies the same [`EgressPolicy`] as workerd `fetch()`/`connect()` and
+//! splices bytes.
 
 #![allow(clippy::missing_docs_in_private_items)]
 
@@ -57,13 +58,11 @@ pub fn spawn_unix(
     Ok(())
 }
 
-#[cfg(unix)]
-async fn handle_client(
-    stream: tokio::net::UnixStream,
-    policy: EgressPolicy,
-    fence: Arc<AtomicBool>,
-) -> Result<()> {
-    let (reader, mut writer) = stream.into_split();
+async fn handle_client<S>(stream: S, policy: EgressPolicy, fence: Arc<AtomicBool>) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     reader.read_line(&mut line).await?;
@@ -137,8 +136,62 @@ could not dial an allowed address",
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
     writer.flush().await?;
-    let mut client = reader.into_inner().reunite(writer)?;
+    let reader = reader.into_inner();
+    let mut client = reader.unsplit(writer);
     splice(&mut client, &mut upstream, &fence).await
+}
+
+/// Serve HTTP CONNECT on a Windows named pipe until the task is cancelled.
+///
+/// `first` is the instance created before the nested guest was spawned so
+/// `BOOKCLERK_SOCKET_PROXY` is connectable immediately.
+///
+/// # Errors
+///
+/// Returns an error only if the accept task cannot be spawned (it does not).
+#[cfg(windows)]
+pub fn spawn_windows(
+    first: tokio::net::windows::named_pipe::NamedPipeServer,
+    name: String,
+    package_sid: String,
+    policy: EgressPolicy,
+    fence: Arc<AtomicBool>,
+) -> Result<()> {
+    tokio::spawn(async move {
+        let mut server = first;
+        loop {
+            if fence.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Err(err) = server.connect().await {
+                tracing::debug!(error = %err, "socket proxy pipe connect failed");
+                break;
+            }
+            let connected = server;
+            match crate::pipe_bind::create_pipe(&name, &package_sid, false) {
+                Ok(next) => server = next,
+                Err(err) => {
+                    tracing::debug!(error = %err, "socket proxy next pipe instance failed");
+                    let policy = policy.clone();
+                    let fence = Arc::clone(&fence);
+                    tokio::spawn(async move {
+                        if let Err(err) = handle_client(connected, policy, fence).await {
+                            tracing::debug!(error = %err, "socket proxy session ended");
+                        }
+                    });
+                    break;
+                }
+            }
+            let policy = policy.clone();
+            let fence = Arc::clone(&fence);
+            tokio::spawn(async move {
+                if let Err(err) = handle_client(connected, policy, fence).await {
+                    tracing::debug!(error = %err, "socket proxy session ended");
+                }
+            });
+        }
+    });
+    Ok(())
 }
 
 fn parse_connect(request: &str) -> Result<(String, u16)> {

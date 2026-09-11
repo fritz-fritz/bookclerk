@@ -128,7 +128,21 @@ if grep -B8 'NESTED_NATIVE_JAIL_ENV, "1"' crates/bookclerk-plugin-host/src/spawn
     | grep -q 'Start::Confined'; then
   fail "nested native jail is still gated on outer confinement"
 else
-  ok "nested native jail is requested for Unix native-behind-workerd"
+  ok "nested native jail is requested for native-behind-workerd"
+fi
+
+if grep -B5 'NESTED_NATIVE_JAIL_ENV, "1"' crates/bookclerk-plugin-host/src/spawn_stdio.rs \
+    | grep -q 'cfg(unix)'; then
+  fail "nested native jail is still Unix-only (Windows native guests need nested Deny)"
+else
+  ok "nested native jail is requested on every OS"
+fi
+
+if grep -A12 'fn use_socket_proxy' crates/bookclerk-plugin-sdk/src/http.rs \
+    | grep -q 'not(unix)'; then
+  fail "SDK HTTP still treats SOCKET_PROXY as Unix-only"
+else
+  ok "SDK HTTP honors SOCKET_PROXY on Unix and Windows"
 fi
 
 # Native guests must not open ambient TCP (reqwest::Client) in product src.

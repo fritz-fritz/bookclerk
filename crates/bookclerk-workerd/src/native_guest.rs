@@ -3,7 +3,7 @@
 //! The workerd launcher itself needs loopback TCP for the RPC bridge, so the
 //! host jail stays `OutboundListen`. The native child must not inherit ambient
 //! `AF_INET`/`AF_INET6`; it talks Cap'n Proto over stdio and TCP through the
-//! Unix socket proxy.
+//! host socket proxy (Unix domain socket or Windows named pipe).
 
 #![allow(clippy::missing_docs_in_private_items)]
 
@@ -16,9 +16,16 @@ use tokio::process::Command;
 
 const JAIL_BIN: &str = "bookclerk-jail";
 const JAIL_BIN_ENV: &str = "BOOKCLERK_PLUGIN_JAIL";
-/// Host sets this to `1` for native-behind-workerd guests on Unix so ambient
-/// `AF_INET` is denied even when the outer launcher jail is Isolation::Off.
+/// Host sets this to `1` for native-behind-workerd guests so ambient `AF_INET`
+/// is denied even when the outer launcher jail is Isolation::Off.
 const NESTED_JAIL_ENV: &str = "BOOKCLERK_NESTED_NATIVE_JAIL";
+/// When `required`, nested jail creation/launch failures fail closed.
+const NESTED_JAIL_ENFORCEMENT_ENV: &str = "BOOKCLERK_NESTED_JAIL_ENFORCEMENT";
+/// Pre-created nested AppContainer profile moniker (Windows).
+const NESTED_AC_PROFILE_ENV: &str = "BOOKCLERK_NESTED_AC_PROFILE";
+/// Nested AppContainer Package SID used to ACL the SOCKET_PROXY pipe (Windows).
+#[cfg(windows)]
+pub const NESTED_AC_SID_ENV: &str = "BOOKCLERK_NESTED_AC_SID";
 
 /// Builds a command that execs `backend` under `bookclerk-jail` with Deny net
 /// when the host requested a nested jail and the helper is available.
@@ -62,7 +69,9 @@ pub fn native_guest_command(
 }
 
 fn deny_spec(backend: &Path, plugin_root: &Path, state_dir: &Path, inherit_fds: &[i32]) -> Spec {
-    let enforcement = if std::env::var_os("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT").is_some() {
+    let enforcement = if std::env::var_os("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT").is_some()
+        || std::env::var(NESTED_JAIL_ENFORCEMENT_ENV).as_deref() == Ok("required")
+    {
         Enforcement::Required
     } else {
         Enforcement::BestEffort
@@ -84,6 +93,11 @@ fn deny_spec(backend: &Path, plugin_root: &Path, state_dir: &Path, inherit_fds: 
     spec.allow_exec = true;
     spec.system_paths = true;
     spec.enforcement = enforcement;
+    if let Ok(name) = std::env::var(NESTED_AC_PROFILE_ENV) {
+        if !name.is_empty() {
+            spec.windows_profile_name = Some(name);
+        }
+    }
     spec.preserve_fds = {
         let mut fds = vec![0, 1, 2];
         fds.extend(inherit_fds.iter().copied().filter(|fd| *fd > 2));

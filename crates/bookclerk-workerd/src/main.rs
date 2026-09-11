@@ -314,7 +314,15 @@ async fn run_native_behind_workerd(
         }
         fds
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let socket_proxy = {
+        let sid = std::env::var(bookclerk_workerd::native_guest::NESTED_AC_SID_ENV).ok();
+        bookclerk_workerd::pipe_bind::bind_socket_proxy(sid.as_deref())
+            .context("bind socket proxy named pipe")?
+    };
+    #[cfg(not(any(unix, windows)))]
+    let inherit_fds: Vec<i32> = Vec::new();
+    #[cfg(windows)]
     let inherit_fds: Vec<i32> = Vec::new();
 
     let mut guest_cmd = bookclerk_workerd::native_guest::native_guest_command(
@@ -324,6 +332,13 @@ async fn run_native_behind_workerd(
         &inherit_fds,
     )?;
     #[cfg(unix)]
+    {
+        guest_cmd.env(
+            bookclerk_workerd::socket_proxy::SOCKET_PROXY_ENV,
+            &socket_proxy.spec,
+        );
+    }
+    #[cfg(windows)]
     {
         guest_cmd.env(
             bookclerk_workerd::socket_proxy::SOCKET_PROXY_ENV,
@@ -424,6 +439,20 @@ async fn run_native_behind_workerd(
         )?;
         fence
     };
+    #[cfg(windows)]
+    let socket_fence = {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let fence = Arc::new(AtomicBool::new(false));
+        bookclerk_workerd::socket_proxy::spawn_windows(
+            socket_proxy.first,
+            socket_proxy.name,
+            socket_proxy.package_sid,
+            egress.policy().clone(),
+            Arc::clone(&fence),
+        )?;
+        fence
+    };
 
     let result = mediate_native(
         generated.listen.port(),
@@ -439,6 +468,8 @@ async fn run_native_behind_workerd(
     .await;
 
     #[cfg(unix)]
+    socket_fence.store(true, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(windows)]
     socket_fence.store(true, std::sync::atomic::Ordering::SeqCst);
 
     let _ = child.kill().await;

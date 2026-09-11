@@ -107,7 +107,7 @@ impl S3Backend {
         if cfg.force_path_style {
             s3_config = s3_config.force_path_style(true);
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if crate::s3_http::socket_proxy_enabled() {
             let http = crate::s3_http::socket_proxy_http_client()?;
             s3_config = s3_config.http_client(http);

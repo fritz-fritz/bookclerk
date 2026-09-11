@@ -14,7 +14,7 @@ mod fanout;
 mod local;
 mod s3;
 mod s3_credentials;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod s3_http;
 /// [`StorageBackend`] trait plus object metadata and audio-key helpers.
 mod traits;

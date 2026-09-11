@@ -1,9 +1,10 @@
 //! Native guest HTTP through the workerd socket proxy.
 //!
-//! When [`crate::SOCKET_PROXY_ENV`] is unset (crate tests, Windows, host-owned
-//! D1), this module wraps [`reqwest::Client`] over ambient TCP. When the proxy
-//! is set, every request is `CONNECT` + rustls over the Unix proxy — nested
-//! `NetPolicy::Deny` guests must not call `socket(AF_INET)`.
+//! When [`crate::SOCKET_PROXY_ENV`] is unset (crate tests, host-owned D1),
+//! this module wraps [`reqwest::Client`] over ambient TCP. When the proxy
+//! is set, every request is `CONNECT` + rustls over the Unix or Windows
+//! named-pipe proxy — nested `NetPolicy::Deny` guests must not call
+//! `socket(AF_INET)`.
 //!
 //! Fetch domain grants do **not** imply TCP. Native manifests must declare
 //! `capabilities.network.tcp` (or rely on a host overlay) for each
@@ -287,7 +288,7 @@ impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kind = match self.inner {
             Inner::Direct(_) => "direct",
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Inner::Proxied(_) => "proxied",
         };
         f.debug_struct("Client").field("mode", &kind).finish()
@@ -297,11 +298,11 @@ impl std::fmt::Debug for Client {
 #[derive(Clone)]
 enum Inner {
     Direct(reqwest::Client),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Proxied(Box<ProxiedClient>),
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone)]
 struct ProxiedClient {
     hyper: hyper_util::client::legacy::Client<SocketProxyConnector, Full<Bytes>>,
@@ -377,7 +378,7 @@ impl Client {
                 inner: Inner::Direct(direct_reqwest(&builder)?),
             });
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let connector = SocketProxyConnector {
                 tls: rustls_client_config()?,
@@ -404,7 +405,7 @@ impl Client {
                 })),
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Ok(Self {
                 inner: Inner::Direct(direct_reqwest(&builder)?),
@@ -573,7 +574,7 @@ impl RequestBuilder {
         let inner = self.client.inner.clone();
         match inner {
             Inner::Direct(http) => self.send_direct(http).await,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Inner::Proxied(proxy) => self.send_proxied(*proxy).await,
         }
     }
@@ -603,7 +604,7 @@ impl RequestBuilder {
         })
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     /// # Errors
     ///
     /// Returns on CONNECT/TLS failure, timeout, or when the origin errors.
@@ -618,7 +619,7 @@ impl RequestBuilder {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     /// # Errors
     ///
     /// Returns when CONNECT, TLS, or an origin hop fails, or redirects exceed the policy.
@@ -679,7 +680,7 @@ pub struct Response {
 
 enum ResponseInner {
     Direct(reqwest::Response),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Proxied(hyper::body::Incoming),
 }
 
@@ -731,7 +732,7 @@ impl Response {
     pub async fn bytes(self) -> HttpResult<Bytes> {
         match self.inner {
             ResponseInner::Direct(resp) => Ok(resp.bytes().await?),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             ResponseInner::Proxied(incoming) => collect_incoming(incoming).await,
         }
     }
@@ -764,7 +765,7 @@ impl Response {
     pub async fn chunk(&mut self) -> HttpResult<Option<Bytes>> {
         match &mut self.inner {
             ResponseInner::Direct(resp) => Ok(resp.chunk().await?),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             ResponseInner::Proxied(incoming) => loop {
                 match incoming.frame().await {
                     None => return Ok(None),
@@ -786,7 +787,7 @@ impl Response {
             ResponseInner::Direct(resp) => ByteStream {
                 inner: ByteStreamInner::Direct(Box::pin(resp.bytes_stream())),
             },
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             ResponseInner::Proxied(incoming) => ByteStream {
                 inner: ByteStreamInner::Proxied(incoming),
             },
@@ -801,7 +802,7 @@ pub struct ByteStream {
 
 enum ByteStreamInner {
     Direct(std::pin::Pin<Box<dyn Stream<Item = reqwest::Result<Bytes>> + Send>>),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Proxied(hyper::body::Incoming),
 }
 
@@ -822,7 +823,7 @@ impl Stream for ByteStream {
                 std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
                 std::task::Poll::Pending => std::task::Poll::Pending,
             },
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             ByteStreamInner::Proxied(incoming) => {
                 match std::pin::Pin::new(incoming).poll_frame(cx) {
                     std::task::Poll::Ready(Some(Ok(frame))) => {
@@ -843,13 +844,13 @@ impl Stream for ByteStream {
     }
 }
 
-/// CONNECT then rustls to `address` (HTTPS origins). Unix only.
+/// CONNECT then rustls to `address` (HTTPS origins).
 ///
 /// # Errors
 ///
 /// Returns when the proxy is missing, CONNECT is denied, or TLS fails.
-#[cfg(unix)]
-pub async fn connect_tls(address: SocketAddress) -> Result<TlsStream<tokio::net::UnixStream>> {
+#[cfg(any(unix, windows))]
+pub async fn connect_tls(address: SocketAddress) -> Result<TlsStream<crate::net::ProxyStream>> {
     let hostname = address.hostname.clone();
     wrap_tls(
         &hostname,
@@ -861,17 +862,17 @@ pub async fn connect_tls(address: SocketAddress) -> Result<TlsStream<tokio::net:
             },
         )
         .await?
-        .into_unix_stream(),
+        .into_stream(),
     )
     .await
 }
 
 fn use_socket_proxy() -> bool {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         std::env::var_os(SOCKET_PROXY_ENV).is_some()
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         false
     }
@@ -952,7 +953,7 @@ fn reqwest_headers(headers: &reqwest::header::HeaderMap) -> HeaderMap {
     out
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 /// # Errors
 ///
 /// Returns when the proxied response body cannot be collected.
@@ -964,7 +965,7 @@ async fn collect_incoming(incoming: hyper::body::Incoming) -> HttpResult<Bytes> 
     Ok(collected.to_bytes())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn apply_cookies(jar: &Option<Arc<CookieJar>>, url: &Url, headers: &mut HeaderMap) {
     let Some(jar) = jar else {
         return;
@@ -986,7 +987,7 @@ fn apply_cookies(jar: &Option<Arc<CookieJar>>, url: &Url, headers: &mut HeaderMa
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn store_cookies(jar: &Option<Arc<CookieJar>>, url: &Url, headers: &HeaderMap) {
     let Some(jar) = jar else {
         return;
@@ -1003,14 +1004,14 @@ fn store_cookies(jar: &Option<Arc<CookieJar>>, url: &Url, headers: &HeaderMap) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn redirect_to_get(status: StatusCode, method: &Method) -> bool {
     let code = status.as_u16();
     (matches!(code, 301 | 302) && *method == Method::POST)
         || (code == 303 && *method != Method::GET && *method != Method::HEAD)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn redirect_location(current: &Url, headers: &HeaderMap, status: StatusCode) -> Option<Url> {
     if !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
         return None;
@@ -1019,7 +1020,7 @@ fn redirect_location(current: &Url, headers: &HeaderMap, status: StatusCode) -> 
     current.join(loc).ok()
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 /// # Errors
 ///
 /// Returns when the request cannot be built or the proxied origin hop fails.
@@ -1055,14 +1056,14 @@ async fn proxy_once(
     })
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 /// # Errors
 ///
 /// Returns when the TLS server name is invalid or the handshake fails.
 async fn wrap_tls(
     hostname: &str,
-    stream: tokio::net::UnixStream,
-) -> Result<TlsStream<tokio::net::UnixStream>> {
+    stream: crate::net::ProxyStream,
+) -> Result<TlsStream<crate::net::ProxyStream>> {
     let config = rustls_client_config()?;
     let server_name = rustls::pki_types::ServerName::try_from(hostname.to_string())
         .map_err(|err| SdkError::message(format!("tls server name `{hostname}`: {err}")))?;
@@ -1072,7 +1073,7 @@ async fn wrap_tls(
         .map_err(|err| SdkError::message(format!("tls handshake {hostname}: {err}")))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 /// # Errors
 ///
 /// Returns when the rustls client config cannot be built (does not currently fail).
@@ -1090,13 +1091,13 @@ fn rustls_client_config() -> Result<Arc<rustls::ClientConfig>> {
     })))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone)]
 struct SocketProxyConnector {
     tls: Arc<rustls::ClientConfig>,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl tower_service::Service<http::Uri> for SocketProxyConnector {
     type Response = hyper_util::rt::TokioIo<MaybeTls>;
     type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -1120,7 +1121,7 @@ impl tower_service::Service<http::Uri> for SocketProxyConnector {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 /// # Errors
 ///
 /// Returns when CONNECT, TLS, or URI parsing fails.
@@ -1145,7 +1146,7 @@ async fn connect_uri(
         ConnectOptions::default(),
     )
     .await?
-    .into_unix_stream();
+    .into_stream();
     let io = if scheme == "https" {
         let server_name = rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|err| SdkError::message(format!("tls server name `{host}`: {err}")))?;
@@ -1160,40 +1161,40 @@ async fn connect_uri(
     Ok(hyper_util::rt::TokioIo::new(io))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 trait ProxyIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl<T> ProxyIo for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct MaybeTls {
     inner: Box<dyn ProxyIo>,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl MaybeTls {
-    fn plain(stream: tokio::net::UnixStream) -> Self {
+    fn plain(stream: crate::net::ProxyStream) -> Self {
         Self {
             inner: Box::new(stream),
         }
     }
 
-    fn tls(stream: TlsStream<tokio::net::UnixStream>) -> Self {
+    fn tls(stream: TlsStream<crate::net::ProxyStream>) -> Self {
         Self {
             inner: Box::new(stream),
         }
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl hyper_util::client::legacy::connect::Connection for MaybeTls {
     fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
         hyper_util::client::legacy::connect::Connected::new()
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl tokio::io::AsyncRead for MaybeTls {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
@@ -1204,7 +1205,7 @@ impl tokio::io::AsyncRead for MaybeTls {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl tokio::io::AsyncWrite for MaybeTls {
     fn poll_write(
         mut self: std::pin::Pin<&mut Self>,

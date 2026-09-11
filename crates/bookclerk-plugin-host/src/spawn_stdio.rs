@@ -16,8 +16,11 @@ use crate::consent::{inject_workerd_grant_env, spawn_config_for_grant, spawn_gra
 use crate::discover::DiscoveredPlugin;
 use crate::jail::{GuestJail, Start};
 use crate::spawn_plan::{
-    SpawnPlan, NATIVE_BACKEND_ENV, NESTED_JAIL_BIN_ENV, NESTED_NATIVE_JAIL_ENV, WORKERD_BIN_ENV,
+    SpawnPlan, NATIVE_BACKEND_ENV, NESTED_JAIL_BIN_ENV, NESTED_JAIL_ENFORCEMENT_ENV,
+    NESTED_NATIVE_JAIL_ENV, WORKERD_BIN_ENV,
 };
+#[cfg(windows)]
+use crate::spawn_plan::{NESTED_AC_PROFILE_ENV, NESTED_AC_SID_ENV};
 use crate::{PluginError, Result};
 
 /// Jailed plugin child with stdio pipes (describe not yet called).
@@ -46,6 +49,9 @@ pub(crate) struct SpawnedStdio {
     /// Host-owned AppContainer profile.
     #[cfg(windows)]
     pub appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
+    /// Nested Deny AppContainer for the native backend (Windows).
+    #[cfg(windows)]
+    pub nested_appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
     /// Last lines of guest stderr (workerd + native child), for spawn failures.
     pub stderr_tail: Arc<Mutex<VecDeque<String>>>,
 }
@@ -72,6 +78,8 @@ pub(crate) async fn spawn_stdio_guest(
     crate::consent::overlay_host_implied_network(&mut grant, plugin, config);
     let spawn_config = spawn_config_for_grant(&grant, config_table);
     let jail = GuestJail::plan(config, plugin, plan)?;
+    #[cfg(windows)]
+    let mut nested_appcontainer = None;
 
     let mut cmd = match &jail.start {
         Start::Confined { launcher, .. } => {
@@ -122,10 +130,44 @@ pub(crate) async fn spawn_stdio_guest(
             // Nested Deny is independent of the outer launcher jail. Isolation::Off
             // still fronts native guests with workerd; ambient AF_INET stays denied
             // when bookclerk-jail is beside the launcher.
-            #[cfg(unix)]
-            cmd.env(NESTED_NATIVE_JAIL_ENV, "1");
             if let Some(jail_bin) = plan.nested_jail_helper() {
                 cmd.env(NESTED_JAIL_BIN_ENV, jail_bin);
+            }
+            #[cfg(not(windows))]
+            cmd.env(NESTED_NATIVE_JAIL_ENV, "1");
+            #[cfg(windows)]
+            {
+                let label = format!("native-behind-workerd:{alias}");
+                match bookclerk_sandbox::spawn::AppContainerSession::create(&label) {
+                    Ok(session) => {
+                        cmd.env(NESTED_NATIVE_JAIL_ENV, "1");
+                        cmd.env(NESTED_AC_PROFILE_ENV, session.profile_name());
+                        cmd.env(NESTED_AC_SID_ENV, session.package_sid());
+                        nested_appcontainer = Some(session);
+                    }
+                    Err(err) => {
+                        let required = matches!(
+                            &jail.start,
+                            Start::Confined { spec, .. }
+                                if spec.enforcement == bookclerk_sandbox::Enforcement::Required
+                        );
+                        if required {
+                            return Err(PluginError::message(format!(
+                                "could not pre-create nested AppContainer for `{alias}`: {err}"
+                            )));
+                        }
+                        tracing::warn!(
+                            error = %err,
+                            "could not pre-create nested AppContainer; native guest will not \
+                             get nested Deny (OAuth and SOCKET_PROXY need the Package SID)"
+                        );
+                    }
+                }
+            }
+            if let Start::Confined { spec, .. } = &jail.start {
+                if spec.enforcement == bookclerk_sandbox::Enforcement::Required {
+                    cmd.env(NESTED_JAIL_ENFORCEMENT_ENV, "required");
+                }
             }
         }
         // The launcher resolves `workerd` beside itself unless told otherwise;
@@ -176,9 +218,14 @@ pub(crate) async fn spawn_stdio_guest(
         data: jail.data,
         scratch: jail.scratch,
         #[cfg(windows)]
-        package_sid: jail.package_sid,
+        package_sid: nested_appcontainer
+            .as_ref()
+            .map(|s| s.package_sid().to_string())
+            .or(jail.package_sid),
         #[cfg(windows)]
         appcontainer: jail.appcontainer,
+        #[cfg(windows)]
+        nested_appcontainer,
         stderr_tail,
     })
 }
