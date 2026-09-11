@@ -1148,7 +1148,9 @@ def _ts_struct_codec(ctx: _Ctx, layout_name: str) -> list[str]:
         optional = [f for f in plain if ctx.omit_when_null(layout_name, f)]
         if plain:
             if optional:
-                out.append(f"    const out: T.{tname} = {{")
+                # Method envelopes live in this file, not in generated.ts (`T.`).
+                type_ref = tname if "$" in layout_name else f"T.{tname}"
+                out.append(f"    const out: {type_ref} = {{")
             else:
                 out.append("    return {")
             for f in plain:
@@ -1190,7 +1192,12 @@ def _ts_envelope_type(ctx: _Ctx, layout_name: str) -> list[str]:
         f"export interface {tname} {{",
     ]
     for f in sorted(st["fields"], key=lambda f: f["codeOrder"]):
-        out.append(f"  {f['name']}: {_ts_type_from_layout(ctx, f['type'])};")
+        ty = _ts_type_from_layout(ctx, f["type"])
+        optional = ctx.omit_when_null(layout_name, f)
+        if f["type"]["kind"] == "interface":
+            ty = f"{ty} | null"
+        opt = "?" if optional else ""
+        out.append(f"  {f['name']}{opt}: {ty};")
     out.append("}")
     out.append("")
     return out
