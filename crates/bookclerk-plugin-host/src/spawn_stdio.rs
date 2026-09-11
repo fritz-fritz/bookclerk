@@ -15,7 +15,9 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use crate::consent::{inject_workerd_grant_env, spawn_config_for_grant, spawn_grant, PluginGrant};
 use crate::discover::DiscoveredPlugin;
 use crate::jail::{GuestJail, Start};
-use crate::spawn_plan::{SpawnPlan, NATIVE_BACKEND_ENV, NESTED_NATIVE_JAIL_ENV, WORKERD_BIN_ENV};
+use crate::spawn_plan::{
+    SpawnPlan, NATIVE_BACKEND_ENV, NESTED_JAIL_BIN_ENV, NESTED_NATIVE_JAIL_ENV, WORKERD_BIN_ENV,
+};
 use crate::{PluginError, Result};
 
 /// Jailed plugin child with stdio pipes (describe not yet called).
@@ -113,8 +115,15 @@ pub(crate) async fn spawn_stdio_guest(
         inject_workerd_grant_env(&mut cmd, &grant);
         if let Some(backend) = &plan.native_backend {
             cmd.env(NATIVE_BACKEND_ENV, backend);
+            // Isolation::Required (and any other confined start) nested-jails
+            // the native backend. Isolation::Off keeps ambient AF_INET so the
+            // postgres LIKE CI vector is unchanged on this branch.
             if matches!(&jail.start, Start::Confined { .. }) {
                 cmd.env(NESTED_NATIVE_JAIL_ENV, "1");
+            }
+            #[cfg(unix)]
+            if let Some(jail_bin) = plan.nested_jail_helper() {
+                cmd.env(NESTED_JAIL_BIN_ENV, jail_bin);
             }
         }
         // The launcher resolves `workerd` beside itself unless told otherwise;
