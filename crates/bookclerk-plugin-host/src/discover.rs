@@ -7,12 +7,12 @@
 
 use std::path::{Path, PathBuf};
 
-use bookclerk_config::Config;
+use bookclerk_config::{Config, DatabasePluginKind};
 use bookclerk_library::BOOKCLERK_SCHEMA_NAMESPACE;
 use bookclerk_plugin_abi::PRODUCT_API_VERSION;
 use bookclerk_plugin_catalog::{evaluate_install, PluginInstallIdentity, PluginKey};
 
-use crate::manifest::PluginManifest;
+use crate::manifest::{PluginFamily, PluginManifest};
 use crate::{PluginError, Result};
 
 /// A discovered plugin ready to spawn.
@@ -123,6 +123,113 @@ pub fn discover_plugins(config: &Config) -> Result<Vec<DiscoveredPlugin>> {
     Ok(out)
 }
 
+/// Config occupancy selector (`plugin = "…"`), or `alias` when the field is empty.
+///
+/// Occupancy is how host config names the guest that may use a singleton
+/// slot (`[database].plugin`, `[output.s3].plugin`, `[sources.<id>].plugin`).
+/// An empty field still means the display alias, which
+/// [`resolve_plugin_slot`] accepts only when exactly one install uses it.
+///
+/// # Arguments
+///
+/// * `plugin_field` - Occupancy string from config (`plugin = "…"`).
+/// * `alias` - Display alias used when `plugin_field` is empty.
+#[must_use]
+pub fn occupancy_spec<'a>(plugin_field: &'a str, alias: &'a str) -> &'a str {
+    let spec = plugin_field.trim();
+    if spec.is_empty() {
+        alias
+    } else {
+        spec
+    }
+}
+
+/// True when `plugin_key` / `alias` is the occupant named by `spec`.
+///
+/// A parseable PluginKey never falls through to an alias comparison, so a
+/// miss cannot inherit another provenance's grant or session. Does not
+/// detect alias twins — callers that load or privilege-check must require
+/// a unique match ([`resolve_plugin_slot`], destination session lookup).
+///
+/// # Arguments
+///
+/// * `plugin_key` - Canonical [`PluginKey`] text.
+/// * `alias` - Manifest display id.
+/// * `spec` - Occupancy selector from [`occupancy_spec`] or a job/CLI id.
+#[must_use]
+pub fn identity_matches_occupancy(plugin_key: &str, alias: &str, spec: &str) -> bool {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return false;
+    }
+    if let Ok(key) = PluginKey::parse(spec) {
+        return plugin_key == key.canonical();
+    }
+    alias.eq_ignore_ascii_case(spec)
+}
+
+/// True when `plugin` is the occupant named by `spec` (PluginKey or alias).
+///
+/// Does not detect alias twins — loaders must call [`resolve_plugin_slot`].
+///
+/// # Arguments
+///
+/// * `plugin` - Candidate install.
+/// * `spec` - Occupancy selector from [`occupancy_spec`].
+#[must_use]
+pub fn plugin_matches_occupancy(plugin: &DiscoveredPlugin, spec: &str) -> bool {
+    identity_matches_occupancy(plugin.plugin_key().canonical(), plugin.alias(), spec)
+}
+
+/// Resolves `spec` among `plugins` without treating a vacant slot as an error.
+///
+/// `None` means nothing installed matches. An ambiguous alias is an error
+/// so callers fail closed instead of spawning every twin or last-write-wins.
+///
+/// # Arguments
+///
+/// * `plugins` - Already-filtered family candidates.
+/// * `spec` - Occupancy selector from [`occupancy_spec`].
+///
+/// # Errors
+///
+/// Returns [`PluginError`] when two installs share the alias (or PluginKey).
+pub fn resolve_plugin_slot<'a>(
+    plugins: &'a [DiscoveredPlugin],
+    spec: &str,
+) -> Result<Option<&'a DiscoveredPlugin>> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(key) = PluginKey::parse(spec) {
+        let matches: Vec<_> = plugins.iter().filter(|p| p.plugin_key() == &key).collect();
+        return match matches.as_slice() {
+            [one] => Ok(Some(*one)),
+            [] => Ok(None),
+            _ => Err(PluginError::message(format!(
+                "duplicate plugin key `{spec}`"
+            ))),
+        };
+    }
+    let lower = spec.to_ascii_lowercase();
+    let matches: Vec<_> = plugins
+        .iter()
+        .filter(|p| p.alias().eq_ignore_ascii_case(&lower))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(Some(*one)),
+        [] => Ok(None),
+        many => {
+            let keys: Vec<_> = many.iter().map(|p| p.plugin_key().canonical()).collect();
+            Err(PluginError::message(format!(
+                "plugin alias `{spec}` is ambiguous; use a provenance-qualified PluginKey. candidates: {}",
+                keys.join(", ")
+            )))
+        }
+    }
+}
+
 /// Resolves `spec` to a discovered plugin.
 ///
 /// `spec` may be a canonical [`PluginKey`] or a manifest alias. Bare aliases
@@ -139,35 +246,163 @@ pub fn resolve_plugin_ref<'a>(
     if spec.is_empty() {
         return Err(PluginError::message("plugin reference must not be empty"));
     }
-    if let Ok(key) = PluginKey::parse(spec) {
-        let matches: Vec<_> = plugins.iter().filter(|p| p.plugin_key() == &key).collect();
-        return match matches.as_slice() {
-            [one] => Ok(*one),
-            [] => Err(PluginError::message(format!(
-                "no plugin installed with key `{spec}`"
-            ))),
-            _ => Err(PluginError::message(format!(
-                "duplicate plugin key `{spec}`"
-            ))),
-        };
-    }
-    let lower = spec.to_ascii_lowercase();
-    let matches: Vec<_> = plugins
-        .iter()
-        .filter(|p| p.alias().eq_ignore_ascii_case(&lower))
-        .collect();
-    match matches.as_slice() {
-        [one] => Ok(*one),
-        [] => Err(PluginError::message(format!(
+    match resolve_plugin_slot(plugins, spec)? {
+        Some(plugin) => Ok(plugin),
+        None if PluginKey::parse(spec).is_ok() => Err(PluginError::message(format!(
+            "no plugin installed with key `{spec}`"
+        ))),
+        None => Err(PluginError::message(format!(
             "plugin `{spec}` is not installed"
         ))),
-        many => {
-            let keys: Vec<_> = many.iter().map(|p| p.plugin_key().canonical()).collect();
-            Err(PluginError::message(format!(
-                "plugin alias `{spec}` is ambiguous; use a provenance-qualified PluginKey. candidates: {}",
-                keys.join(", ")
-            )))
+    }
+}
+
+/// True when occupancy `spec` names the display alias (or kind token) `alias`.
+///
+/// A PluginKey occupant matches its manifest id and first-party kind tokens
+/// (`pg` ↔ `postgres`). A bare alias does **not** match a PluginKey string
+/// passed as `alias` — pinning a key from alias occupancy is a different
+/// occupant selector and must re-check consent.
+///
+/// # Arguments
+///
+/// * `spec` - Occupancy selector from config (`plugin = "…"`).
+/// * `alias` - Display alias or first-party kind token being compared.
+#[must_use]
+pub fn occupancy_matches_alias(spec: &str, alias: &str) -> bool {
+    let spec = spec.trim();
+    let alias = alias.trim();
+    if spec.is_empty() || alias.is_empty() {
+        return false;
+    }
+    if spec.eq_ignore_ascii_case(alias) {
+        return true;
+    }
+    if let Ok(key) = PluginKey::parse(spec) {
+        if key.manifest_id().eq_ignore_ascii_case(alias) {
+            return true;
         }
+        return DatabasePluginKind::parse(key.manifest_id()).is_some()
+            && DatabasePluginKind::parse(key.manifest_id()) == DatabasePluginKind::parse(alias)
+            && PluginKey::parse(alias).is_err();
+    }
+    if PluginKey::parse(alias).is_ok() {
+        return false;
+    }
+    let spec_kind = DatabasePluginKind::parse(spec);
+    let alias_kind = DatabasePluginKind::parse(alias);
+    spec_kind.is_some() && spec_kind == alias_kind
+}
+
+/// Writes this install's canonical PluginKey into each family occupancy field.
+///
+/// Call after flipping `enabled` (CLI / Settings). Occupancy is how loaders
+/// name a singleton slot; stamping the key means a later alias twin cannot
+/// steal the slot.
+///
+/// # Errors
+///
+/// Returns when the plugin exports `Storage` but is not `s3` or `local`
+/// (those destinations are not mapped in `config.toml` yet).
+pub fn stamp_occupancy_plugin_key(config: &mut Config, plugin: &DiscoveredPlugin) -> Result<()> {
+    let canonical = plugin.plugin_key().canonical().to_string();
+    for family in plugin.manifest.families() {
+        match family {
+            PluginFamily::Source => {
+                config
+                    .sources
+                    .set_string(plugin.alias(), "plugin", canonical.clone());
+            }
+            PluginFamily::Integration => {
+                config
+                    .integrations
+                    .plugin_table_mut(plugin.alias())
+                    .insert("plugin".into(), toml::Value::String(canonical.clone()));
+            }
+            PluginFamily::Output if plugin.alias().eq_ignore_ascii_case("s3") => {
+                config.output.s3.plugin = canonical.clone();
+            }
+            PluginFamily::Output if plugin.alias().eq_ignore_ascii_case("local") => {
+                config.output.local.plugin = canonical.clone();
+            }
+            PluginFamily::Output => {
+                return Err(PluginError::message(format!(
+                    "output plugin `{}` enable/disable is not mapped to config.toml yet",
+                    plugin.alias()
+                )));
+            }
+            PluginFamily::Database => {
+                config.database.plugin = canonical.clone();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Rewrites unique alias occupancy strings to canonical PluginKeys.
+///
+/// Ambiguous aliases and vacant slots are left unchanged so loaders still
+/// fail closed. An empty `discovered` slice is a no-op so a settings
+/// discovery timeout cannot wipe occupancy.
+pub fn upgrade_unique_alias_occupancy(config: &mut Config, discovered: &[DiscoveredPlugin]) {
+    if discovered.is_empty() {
+        return;
+    }
+    upgrade_occupancy_field(&mut config.database.plugin, discovered);
+    if !config.output.s3.plugin.trim().is_empty() || config.output.s3.enabled {
+        let spec = occupancy_spec(&config.output.s3.plugin, "s3").to_string();
+        if let Some(key) = unique_canonical_occupancy(&spec, discovered) {
+            config.output.s3.plugin = key;
+        }
+    }
+    if !config.output.local.plugin.trim().is_empty() || config.output.local.enabled {
+        let spec = occupancy_spec(&config.output.local.plugin, "local").to_string();
+        if let Some(key) = unique_canonical_occupancy(&spec, discovered) {
+            config.output.local.plugin = key;
+        }
+    }
+    let source_ids: Vec<String> = config.sources.plugins.keys().cloned().collect();
+    for id in source_ids {
+        let spec = occupancy_spec(config.sources.occupancy(&id), &id).to_string();
+        if let Some(key) = unique_canonical_occupancy(&spec, discovered) {
+            config.sources.set_string(&id, "plugin", key);
+        }
+    }
+    let integration_ids: Vec<String> = config.integrations.plugins.keys().cloned().collect();
+    for id in integration_ids {
+        let spec = occupancy_spec(config.integrations.occupancy(&id), &id).to_string();
+        if let Some(key) = unique_canonical_occupancy(&spec, discovered) {
+            config
+                .integrations
+                .plugin_table_mut(&id)
+                .insert("plugin".into(), toml::Value::String(key));
+        }
+    }
+}
+
+/// Canonical PluginKey when `spec` uniquely resolves and is not already that key.
+fn unique_canonical_occupancy(spec: &str, discovered: &[DiscoveredPlugin]) -> Option<String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    match resolve_plugin_slot(discovered, spec) {
+        Ok(Some(plugin)) => {
+            let canonical = plugin.plugin_key().canonical();
+            if spec == canonical {
+                None
+            } else {
+                Some(canonical.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Replaces `field` with a unique PluginKey when `spec` is a unique alias.
+fn upgrade_occupancy_field(field: &mut String, discovered: &[DiscoveredPlugin]) {
+    if let Some(key) = unique_canonical_occupancy(field, discovered) {
+        *field = key;
     }
 }
 
@@ -391,7 +626,22 @@ fn inject_abs_api_key_from_env(plugin_id: &str, table: &mut toml::Table) {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    /// Sets the Unix execute bit so discovery tests can treat the stub as a command.
+    fn chmod_exec(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+        }
+    }
 
     #[test]
     fn discovers_nested_plugin_toml() {
@@ -401,9 +651,7 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         let bin = nested.join("echo-bin");
         fs::write(&bin, b"#!/bin/sh\n").unwrap();
-        let mut perms = fs::metadata(&bin).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&bin, perms).unwrap();
+        chmod_exec(&bin);
         fs::write(
             nested.join("plugin.toml"),
             r#"
@@ -446,9 +694,7 @@ mode = "deny"
         fs::create_dir_all(dir).unwrap();
         let bin = dir.join("bin");
         fs::write(&bin, b"#!/bin/sh\n").unwrap();
-        let mut perms = fs::metadata(&bin).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&bin, perms).unwrap();
+        chmod_exec(&bin);
         fs::write(
             dir.join("plugin.toml"),
             format!(
@@ -488,6 +734,136 @@ mode = "deny"
         assert!(err.contains("PluginKey"), "{err}");
         let qualified = resolve_plugin_ref(&found, found[0].plugin_key().canonical()).unwrap();
         assert_eq!(qualified.plugin_key(), found[0].plugin_key());
+        let err = resolve_plugin_slot(&found, "echo").unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "{err}");
+        let occupant = resolve_plugin_slot(&found, found[0].plugin_key().canonical()).unwrap();
+        assert_eq!(occupant.unwrap().plugin_key(), found[0].plugin_key());
+        assert!(resolve_plugin_slot(&found, "missing").unwrap().is_none());
+        assert_eq!(occupancy_spec("", "s3"), "s3");
+        assert_eq!(occupancy_spec("  ", "s3"), "s3");
+        assert_eq!(
+            occupancy_spec(found[0].plugin_key().canonical(), "s3"),
+            found[0].plugin_key().canonical()
+        );
+        assert!(plugin_matches_occupancy(
+            &found[0],
+            found[0].plugin_key().canonical()
+        ));
+        assert!(!plugin_matches_occupancy(
+            &found[1],
+            found[0].plugin_key().canonical()
+        ));
+        assert!(plugin_matches_occupancy(&found[0], "echo"));
+        assert!(plugin_matches_occupancy(&found[1], "echo"));
+        assert!(identity_matches_occupancy(
+            found[0].plugin_key().canonical(),
+            found[0].alias(),
+            found[0].plugin_key().canonical()
+        ));
+        assert!(!identity_matches_occupancy(
+            found[1].plugin_key().canonical(),
+            found[1].alias(),
+            found[0].plugin_key().canonical()
+        ));
+        assert!(identity_matches_occupancy(
+            found[0].plugin_key().canonical(),
+            "echo",
+            "ECHO"
+        ));
+        assert!(!identity_matches_occupancy(
+            found[0].plugin_key().canonical(),
+            "echo",
+            ""
+        ));
+        assert!(occupancy_matches_alias(
+            found[0].plugin_key().canonical(),
+            "echo"
+        ));
+        assert!(!occupancy_matches_alias(
+            "echo",
+            found[0].plugin_key().canonical()
+        ));
+        let mut cfg_echo = cfg.clone();
+        cfg_echo.integrations.set_enabled("echo", true);
+        cfg_echo
+            .integrations
+            .plugin_table_mut("echo")
+            .insert("plugin".into(), toml::Value::String("echo".into()));
+        upgrade_unique_alias_occupancy(&mut cfg_echo, &found);
+        assert_eq!(cfg_echo.integrations.occupancy("echo"), "echo");
+    }
+
+    #[test]
+    fn occupancy_matches_alias_kind_tokens_and_keys() {
+        assert!(occupancy_matches_alias("sqlite", "sqlite"));
+        assert!(occupancy_matches_alias("pg", "postgres"));
+        assert!(occupancy_matches_alias("postgres", "postgresql"));
+        assert!(occupancy_matches_alias(
+            "platform:bookclerk/sqlite#sqlite",
+            "sqlite"
+        ));
+        assert!(occupancy_matches_alias(
+            "platform:bookclerk/postgres#postgres",
+            "pg"
+        ));
+        assert!(!occupancy_matches_alias(
+            "sqlite",
+            "platform:bookclerk/sqlite#sqlite"
+        ));
+        assert!(!occupancy_matches_alias(
+            "platform:bookclerk/sqlite#sqlite",
+            "postgres"
+        ));
+        assert!(!occupancy_matches_alias("", "sqlite"));
+    }
+
+    #[test]
+    fn stamp_and_upgrade_unique_occupancy_to_plugin_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        write_plugin(&plugins.join("sqlite"), "sqlite", "databaseAdapter");
+        write_plugin(&plugins.join("echo"), "echo", "cli");
+        write_plugin(&plugins.join("s3"), "s3", "storage");
+
+        let mut cfg = Config {
+            paths: Some(bookclerk_config::Paths::from_files_dir(
+                tmp.path().to_path_buf(),
+            )),
+            ..Config::default()
+        };
+        let found = discover_plugins(&cfg).unwrap();
+        let sqlite = resolve_plugin_ref(&found, "sqlite").unwrap();
+        stamp_occupancy_plugin_key(&mut cfg, sqlite).unwrap();
+        assert_eq!(cfg.database.plugin, sqlite.plugin_key().canonical());
+
+        let echo = resolve_plugin_ref(&found, "echo").unwrap();
+        cfg.integrations.set_enabled("echo", true);
+        stamp_occupancy_plugin_key(&mut cfg, echo).unwrap();
+        assert_eq!(
+            cfg.integrations.occupancy("echo"),
+            echo.plugin_key().canonical()
+        );
+
+        let s3 = resolve_plugin_ref(&found, "s3").unwrap();
+        cfg.output.s3.enabled = true;
+        stamp_occupancy_plugin_key(&mut cfg, s3).unwrap();
+        assert_eq!(cfg.output.s3.plugin, s3.plugin_key().canonical());
+
+        cfg.database.plugin = "sqlite".into();
+        cfg.integrations
+            .plugin_table_mut("echo")
+            .insert("plugin".into(), toml::Value::String("echo".into()));
+        cfg.output.s3.plugin = "s3".into();
+        upgrade_unique_alias_occupancy(&mut cfg, &found);
+        assert_eq!(cfg.database.plugin, sqlite.plugin_key().canonical());
+        assert_eq!(
+            cfg.integrations.occupancy("echo"),
+            echo.plugin_key().canonical()
+        );
+        assert_eq!(cfg.output.s3.plugin, s3.plugin_key().canonical());
+
+        upgrade_unique_alias_occupancy(&mut cfg, &[]);
+        assert_eq!(cfg.database.plugin, sqlite.plugin_key().canonical());
     }
 
     #[test]

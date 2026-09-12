@@ -9,9 +9,10 @@ use bookclerk_plugin_catalog::{
     StaticAdapter, TrustPolicy,
 };
 use bookclerk_plugin_host::{
-    consent_request, consent_summary, host_target_triple, require_grant, search_crates_io,
-    CliInvokeParams, CliInvokeResult, CliSchema, DiscoveredPlugin, Entrypoint, PluginFamily,
-    PluginGrantStore, PluginSession, CRATE_NAME_PREFIX, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
+    consent_request, consent_summary, host_target_triple, occupancy_spec, plugin_matches_occupancy,
+    require_grant, search_crates_io, stamp_occupancy_plugin_key, CliInvokeParams, CliInvokeResult,
+    CliSchema, DiscoveredPlugin, Entrypoint, PluginFamily, PluginGrantStore, PluginSession,
+    CRATE_NAME_PREFIX, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
@@ -825,6 +826,55 @@ struct PluginDbListItem {
     created_at: String,
 }
 
+/// Registry rows for `spec`: canonical PluginKey, or an unambiguous alias.
+///
+/// Privilege-sensitive drop/list must not collapse two PluginKeys onto one
+/// display alias. A parseable PluginKey is an exact registry lookup; a bare
+/// alias matches only when every hit shares the same stored PluginKey (or a
+/// single leftover alias-era row).
+///
+/// # Arguments
+///
+/// * `store` - Open library with the `plugin_databases` registry.
+/// * `spec` - Canonical PluginKey, display alias, or `None` for every row.
+///
+/// # Errors
+///
+/// Returns an error when the registry query fails or the alias is ambiguous.
+async fn plugin_db_rows_for_spec(
+    store: &bookclerk_library::LibraryStore,
+    spec: Option<&str>,
+) -> anyhow::Result<Vec<bookclerk_library::PluginDatabaseRecord>> {
+    match spec.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(store.list_plugin_databases(None).await?),
+        Some(spec) if bookclerk_plugin_catalog::PluginKey::parse(spec).is_ok() => {
+            Ok(store.list_plugin_databases(Some(spec)).await?)
+        }
+        Some(alias) => {
+            let all = store.list_plugin_databases(None).await?;
+            let suffix = format!("#{alias}");
+            let mut keys = std::collections::BTreeSet::new();
+            for row in &all {
+                if row.plugin_id.eq_ignore_ascii_case(alias) || row.plugin_id.ends_with(&suffix) {
+                    keys.insert(row.plugin_id.clone());
+                }
+            }
+            match keys.len() {
+                0 => Ok(Vec::new()),
+                1 => {
+                    let key = keys.into_iter().next().ok_or_else(|| {
+                        anyhow::anyhow!("plugin alias `{alias}` matched no PluginKey")
+                    })?;
+                    Ok(all.into_iter().filter(|row| row.plugin_id == key).collect())
+                }
+                _ => anyhow::bail!(
+                    "plugin alias `{alias}` is ambiguous; pass a PluginKey (`plugins db list` shows owners)"
+                ),
+            }
+        }
+    }
+}
+
 /// Lists or drops isolated plugin database bindings via the registry.
 async fn run_plugin_db(
     config: &Config,
@@ -834,7 +884,7 @@ async fn run_plugin_db(
     let store = crate::registry::open_library(config).await?;
     match command {
         PluginDbCommand::List { plugin } => {
-            let rows = store.list_plugin_databases(plugin.as_deref()).await?;
+            let rows = plugin_db_rows_for_spec(&store, plugin.as_deref()).await?;
             let items: Vec<PluginDbListItem> = rows
                 .into_iter()
                 .map(|r| PluginDbListItem {
@@ -867,7 +917,7 @@ async fn run_plugin_db(
             binding,
             yes,
         } => {
-            let rows = store.list_plugin_databases(Some(&plugin)).await?;
+            let rows = plugin_db_rows_for_spec(&store, Some(&plugin)).await?;
             let rows: Vec<_> = rows
                 .into_iter()
                 .filter(|r| binding.as_deref().is_none_or(|b| r.binding == b))
@@ -1344,8 +1394,12 @@ fn set_plugin_enabled(
     // A multi-family plugin flips every family prefix it belongs to.
     for family in plugin.manifest.families() {
         match family {
-            PluginFamily::Source => cfg.sources.set_enabled(&plugin.manifest.id, enabled),
-            PluginFamily::Integration => cfg.integrations.set_enabled(&plugin.manifest.id, enabled),
+            PluginFamily::Source => {
+                cfg.sources.set_enabled(&plugin.manifest.id, enabled);
+            }
+            PluginFamily::Integration => {
+                cfg.integrations.set_enabled(&plugin.manifest.id, enabled);
+            }
             PluginFamily::Output if plugin.manifest.id == "s3" => {
                 cfg.output.s3.enabled = enabled;
             }
@@ -1359,15 +1413,14 @@ fn set_plugin_enabled(
                 );
             }
             PluginFamily::Database => {
-                if enabled {
-                    cfg.database.plugin = plugin.manifest.id.clone();
-                } else if matches_plugin_id(&plugin.manifest.id, &config.database.plugin) {
-                    anyhow::bail!(
-                        "cannot disable the active database plugin `{}`; \
-                         enable another backend first with `bookclerk plugins enable <id>`",
-                        plugin.manifest.id
-                    );
-                } else {
+                if !enabled {
+                    if occupies_database_slot(&plugin, &config.database.plugin) {
+                        anyhow::bail!(
+                            "cannot disable the active database plugin `{}`; \
+                             enable another backend first with `bookclerk plugins enable <id>`",
+                            plugin.manifest.id
+                        );
+                    }
                     anyhow::bail!(
                         "database plugin `{}` is not active ([database].plugin = `{}`)",
                         plugin.manifest.id,
@@ -1376,6 +1429,9 @@ fn set_plugin_enabled(
                 }
             }
         }
+    }
+    if enabled {
+        stamp_occupancy_plugin_key(&mut cfg, &plugin).map_err(|err| anyhow::anyhow!("{err}"))?;
     }
     let path = cfg.paths().config_file.clone();
     cfg.write_toml_file(&path)?;
@@ -1394,9 +1450,9 @@ fn set_plugin_enabled(
     })
 }
 
-/// Case-insensitive equality between a manifest id and the active `[database].plugin`.
-fn matches_plugin_id(manifest_id: &str, active: &str) -> bool {
-    manifest_id.eq_ignore_ascii_case(active)
+/// True when `plugin` occupies `[database].plugin`.
+fn occupies_database_slot(plugin: &DiscoveredPlugin, active: &str) -> bool {
+    plugin_matches_occupancy(plugin, occupancy_spec(active, plugin.alias()))
 }
 
 /// Discovers plugins and returns the one whose manifest id matches, or errors if missing.
@@ -1414,15 +1470,39 @@ fn is_enabled(config: &Config, plugin: &DiscoveredPlugin) -> bool {
         .families()
         .into_iter()
         .any(|family| match family {
-            PluginFamily::Source => config.sources.is_enabled(&plugin.manifest.id),
-            PluginFamily::Integration => config.integrations.is_enabled(&plugin.manifest.id),
-            PluginFamily::Output if plugin.manifest.id == "s3" => config.output.s3.enabled,
-            PluginFamily::Output if plugin.manifest.id == "local" => config.output.local.enabled,
+            PluginFamily::Source => {
+                config.sources.is_enabled(plugin.alias())
+                    && plugin_matches_occupancy(
+                        plugin,
+                        occupancy_spec(config.sources.occupancy(plugin.alias()), plugin.alias()),
+                    )
+            }
+            PluginFamily::Integration => {
+                config.integrations.is_enabled(plugin.alias())
+                    && plugin_matches_occupancy(
+                        plugin,
+                        occupancy_spec(
+                            config.integrations.occupancy(plugin.alias()),
+                            plugin.alias(),
+                        ),
+                    )
+            }
+            PluginFamily::Output if plugin.manifest.id == "s3" => {
+                config.output.s3.enabled
+                    && plugin_matches_occupancy(
+                        plugin,
+                        occupancy_spec(&config.output.s3.plugin, "s3"),
+                    )
+            }
+            PluginFamily::Output if plugin.manifest.id == "local" => {
+                config.output.local.enabled
+                    && plugin_matches_occupancy(
+                        plugin,
+                        occupancy_spec(&config.output.local.plugin, "local"),
+                    )
+            }
             PluginFamily::Output => false,
-            PluginFamily::Database => config
-                .database
-                .plugin
-                .eq_ignore_ascii_case(&plugin.manifest.id),
+            PluginFamily::Database => occupies_database_slot(plugin, &config.database.plugin),
         })
 }
 

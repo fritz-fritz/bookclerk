@@ -11,16 +11,22 @@
 //! ```text
 //! effective structural = manifest ∩ operator grant ∩ host policy
 //! effective network    = host policy ∩ approved(manifest network ∪ operator additions)
+//!                      − operator denials
 //! ```
 
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+use bookclerk_config::{resolve_postgres_url, Config, DatabasePluginKind};
 use bookclerk_plugin_abi::{PluginCapabilities, PortalAuthMode};
-use bookclerk_plugin_manifest::{EgressPolicy, NetworkMode, TcpGrant};
+use bookclerk_plugin_manifest::{
+    is_public_internet, is_restricted_hostname, normalize_domain_pattern, EgressPolicy,
+    NetworkMode, TcpGrant,
+};
 
 use crate::manifest::{PluginManifest, PluginRuntimeKind, WorkerdLimits};
 use crate::spawn_plan::GuestRuntimeKind;
@@ -186,7 +192,7 @@ pub struct PluginGrant {
     /// Operator-denied destinations (even if the manifest still lists them).
     #[serde(default)]
     pub operator_denied_domains: BTreeSet<String>,
-    /// Effective raw TCP grants (manifest ∪ operator additions).
+    /// Effective raw TCP grants (manifest ∪ operator additions − denials).
     #[serde(default)]
     pub tcp: BTreeSet<TcpGrant>,
     /// TCP grants requested by the installed manifest.
@@ -195,6 +201,13 @@ pub struct PluginGrant {
     /// Operator-added TCP grants; survive upgrades of the same PluginKey.
     #[serde(default)]
     pub operator_added_tcp: BTreeSet<TcpGrant>,
+    /// Operator-denied TCP grants (even if the current manifest still lists them).
+    ///
+    /// Same PluginKey upgrades must not silently restore a TCP host the operator
+    /// removed. Host spawn overlays (postgres URL, D1, ABS, S3) may still add
+    /// destinations from operator config after this set is applied.
+    #[serde(default)]
+    pub operator_denied_tcp: BTreeSet<TcpGrant>,
     /// Effective CIDR grants beyond the public Internet.
     #[serde(default)]
     pub address_cidrs: BTreeSet<String>,
@@ -204,6 +217,13 @@ pub struct PluginGrant {
     /// Operator-added CIDRs; survive upgrades of the same PluginKey.
     #[serde(default)]
     pub operator_added_cidrs: BTreeSet<String>,
+    /// Operator-denied CIDRs (even if the current manifest still lists them).
+    ///
+    /// Same PluginKey upgrades must not silently restore an address-space grant
+    /// the operator removed. Host spawn overlays (loopback postgres/ABS) may
+    /// still add CIDRs from operator config after this set is applied.
+    #[serde(default)]
+    pub operator_denied_cidrs: BTreeSet<String>,
     /// Effective undeclared-public-redirect permission.
     #[serde(default)]
     pub allow_undeclared_public_redirects: bool,
@@ -263,9 +283,11 @@ impl PluginGrant {
             tcp: BTreeSet::new(),
             manifest_tcp: BTreeSet::new(),
             operator_added_tcp: BTreeSet::new(),
+            operator_denied_tcp: BTreeSet::new(),
             address_cidrs: BTreeSet::new(),
             manifest_cidrs: BTreeSet::new(),
             operator_added_cidrs: BTreeSet::new(),
+            operator_denied_cidrs: BTreeSet::new(),
             allow_undeclared_public_redirects: false,
             operator_allow_undeclared_public_redirects: None,
             bindings: BTreeSet::new(),
@@ -370,6 +392,10 @@ impl PluginGrantStore {
 
     /// Returns the grant for `plugin_key` (canonical), or an unambiguous alias.
     ///
+    /// Display / CLI helper only. Spawn, overlay, and other privilege checks
+    /// must call [`Self::get_by_plugin_key`] so an alias cannot inherit another
+    /// provenance's grant.
+    ///
     /// # Arguments
     ///
     /// * `plugin_key` - Canonical PluginKey text, or a display alias.
@@ -392,19 +418,27 @@ impl PluginGrantStore {
         }
     }
 
-    /// Inserts or replaces the grant for `grant.plugin_key` (falling back to alias).
+    /// Inserts or replaces the grant for `grant.plugin_key`.
+    ///
+    /// Incoming grants with a PluginKey match only that key: they never
+    /// overwrite a different provenance, and never collapse onto a keyless
+    /// same-alias legacy row. A keyless incoming grant (legacy files / tests)
+    /// matches only other keyless rows by alias so it cannot replace a
+    /// provenance-qualified grant.
     ///
     /// # Arguments
     ///
     /// * `grant` - Full consent snapshot to persist in memory (call [`Self::save`] to flush).
     pub fn upsert(&mut self, grant: PluginGrant) {
-        let idx = self.grants.iter().position(|g| {
-            if !grant.plugin_key.is_empty() && !g.plugin_key.is_empty() {
-                g.plugin_key == grant.plugin_key
-            } else {
-                g.plugin_id == grant.plugin_id
-            }
-        });
+        let idx = if grant.plugin_key.is_empty() {
+            self.grants
+                .iter()
+                .position(|g| g.plugin_key.is_empty() && g.plugin_id == grant.plugin_id)
+        } else {
+            self.grants
+                .iter()
+                .position(|g| g.plugin_key == grant.plugin_key)
+        };
         if !grant.plugin_key.is_empty() {
             let revision = crate::authority::authority_revision(&grant);
             crate::authority::fence_stale_sessions(&grant.plugin_key, &revision);
@@ -520,9 +554,11 @@ pub fn consent_request_alias(manifest: &PluginManifest) -> PluginGrant {
         tcp: tcp.clone(),
         manifest_tcp: tcp,
         operator_added_tcp: BTreeSet::new(),
+        operator_denied_tcp: BTreeSet::new(),
         address_cidrs: address_cidrs.clone(),
         manifest_cidrs: address_cidrs,
         operator_added_cidrs: BTreeSet::new(),
+        operator_denied_cidrs: BTreeSet::new(),
         allow_undeclared_public_redirects: net.allow_undeclared_public_redirects,
         operator_allow_undeclared_public_redirects: None,
         bindings,
@@ -825,38 +861,72 @@ fn merge_network_domains(existing: &PluginGrant, requested: &PluginGrant) -> BTr
     domains
 }
 
-/// Operator-added TCP grants relative to the current manifest.
-fn merge_operator_tcp(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<TcpGrant> {
-    if !existing.operator_added_tcp.is_empty() {
-        return existing.operator_added_tcp.clone();
+/// Reconstructs operator TCP additions/denials relative to the current manifest.
+fn classified_operator_tcp(
+    existing: &PluginGrant,
+    requested: &PluginGrant,
+) -> (BTreeSet<TcpGrant>, BTreeSet<TcpGrant>) {
+    if !existing.operator_added_tcp.is_empty() || !existing.operator_denied_tcp.is_empty() {
+        return (
+            existing.operator_added_tcp.clone(),
+            existing.operator_denied_tcp.clone(),
+        );
     }
-    existing
+    let added = existing
         .tcp
         .difference(&requested.manifest_tcp)
         .cloned()
-        .collect()
+        .collect();
+    // Legacy grants without explicit TCP denials: new package hosts re-evaluate.
+    let denied = existing.operator_denied_tcp.clone();
+    (added, denied)
 }
 
-/// Effective TCP: current manifest ∪ operator additions.
+/// Operator-added TCP grants relative to the current manifest.
+fn merge_operator_tcp(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<TcpGrant> {
+    classified_operator_tcp(existing, requested).0
+}
+
+/// Effective TCP: current manifest ∪ operator additions − operator denials.
 fn merge_tcp(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<TcpGrant> {
+    let (added, denied) = classified_operator_tcp(existing, requested);
     let mut tcp = requested.manifest_tcp.clone();
-    tcp.extend(merge_operator_tcp(existing, requested));
+    tcp.extend(added);
+    for grant in denied {
+        tcp.remove(&grant);
+    }
     tcp
 }
 
-/// Effective CIDRs: current manifest ∪ operator additions.
+/// Reconstructs operator CIDR additions/denials relative to the current manifest.
+fn classified_operator_cidrs(
+    existing: &PluginGrant,
+    requested: &PluginGrant,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    if !existing.operator_added_cidrs.is_empty() || !existing.operator_denied_cidrs.is_empty() {
+        return (
+            existing.operator_added_cidrs.clone(),
+            existing.operator_denied_cidrs.clone(),
+        );
+    }
+    let added = existing
+        .address_cidrs
+        .difference(&requested.manifest_cidrs)
+        .cloned()
+        .collect();
+    // Legacy grants without explicit CIDR denials: new package CIDRs re-evaluate.
+    let denied = existing.operator_denied_cidrs.clone();
+    (added, denied)
+}
+
+/// Effective CIDRs: current manifest ∪ operator additions − operator denials.
 fn merge_cidrs(existing: &PluginGrant, requested: &PluginGrant) -> BTreeSet<String> {
-    let added = if existing.operator_added_cidrs.is_empty() {
-        existing
-            .address_cidrs
-            .difference(&requested.manifest_cidrs)
-            .cloned()
-            .collect()
-    } else {
-        existing.operator_added_cidrs.clone()
-    };
+    let (added, denied) = classified_operator_cidrs(existing, requested);
     let mut cidrs = requested.manifest_cidrs.clone();
     cidrs.extend(added);
+    for cidr in denied {
+        cidrs.remove(&cidr);
+    }
     cidrs
 }
 
@@ -874,6 +944,8 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
     };
     let (operator_added_domains, operator_denied_domains) =
         classified_operator_network(existing, requested);
+    let (operator_added_cidrs, operator_denied_cidrs) =
+        classified_operator_cidrs(existing, requested);
     PluginGrant {
         plugin_key: if existing.plugin_key.is_empty() {
             requested.plugin_key.clone()
@@ -903,17 +975,11 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
         tcp: merge_tcp(existing, requested),
         manifest_tcp: requested.manifest_tcp.clone(),
         operator_added_tcp: merge_operator_tcp(existing, requested),
+        operator_denied_tcp: classified_operator_tcp(existing, requested).1,
         address_cidrs: merge_cidrs(existing, requested),
         manifest_cidrs: requested.manifest_cidrs.clone(),
-        operator_added_cidrs: if existing.operator_added_cidrs.is_empty() {
-            existing
-                .address_cidrs
-                .difference(&requested.manifest_cidrs)
-                .cloned()
-                .collect()
-        } else {
-            existing.operator_added_cidrs.clone()
-        },
+        operator_added_cidrs,
+        operator_denied_cidrs,
         allow_undeclared_public_redirects: existing
             .operator_allow_undeclared_public_redirects
             .unwrap_or(requested.allow_undeclared_public_redirects),
@@ -1120,11 +1186,21 @@ pub fn validate_approved_grant(
             .difference(&baseline.manifest_tcp)
             .cloned()
             .collect(),
+        operator_denied_tcp: baseline
+            .manifest_tcp
+            .difference(&approved.tcp)
+            .cloned()
+            .collect(),
         address_cidrs: approved.address_cidrs.clone(),
         manifest_cidrs: baseline.manifest_cidrs.clone(),
         operator_added_cidrs: approved
             .address_cidrs
             .difference(&baseline.manifest_cidrs)
+            .cloned()
+            .collect(),
+        operator_denied_cidrs: baseline
+            .manifest_cidrs
+            .difference(&approved.address_cidrs)
             .cloned()
             .collect(),
         allow_undeclared_public_redirects: approved.allow_undeclared_public_redirects,
@@ -1372,6 +1448,219 @@ pub fn inject_workerd_grant_env(cmd: &mut Command, grant: &PluginGrant) {
     }
 }
 
+/// Overlay TCP + CIDR implied by host configuration (not persisted).
+///
+/// Not operator-invented structural authority. The operator already configured
+/// the destination URL; spawn injects matching `EgressPolicy` so the nested
+/// native guest can `connect()` it. Covers:
+///
+/// - active Postgres `[database.postgres].url`
+/// - active D1 `[database.d1].api_base`
+/// - Audiobookshelf `[integrations.audiobookshelf].base_url`
+/// - S3 `[output.s3].endpoint` (custom/MinIO)
+///
+/// Occupancy is uniquified with [`crate::resolve_plugin_slot`]: a bare alias
+/// overlays only the unique occupant, and a PluginKey never overlays a twin.
+///
+/// No-op unless the covering grant is outbound.
+///
+/// # Arguments
+///
+/// * `grant` - Effective covering grant (mutated in place).
+/// * `plugin` - Guest being spawned.
+/// * `config` - Host config (URL already env-applied).
+/// * `discovered` - Installs used to uniquify occupancy (must include `plugin`).
+pub fn overlay_host_implied_network(
+    grant: &mut PluginGrant,
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+    discovered: &[crate::discover::DiscoveredPlugin],
+) {
+    if !grant.network_mode.eq_ignore_ascii_case("outbound") {
+        return;
+    }
+    overlay_postgres_url(grant, plugin, config, discovered);
+    overlay_d1_api_base(grant, plugin, config, discovered);
+    overlay_audiobookshelf_url(grant, plugin, config, discovered);
+    overlay_s3_endpoint(grant, plugin, config, discovered);
+}
+
+/// True when `plugin` is the unique occupant of `spec` among `discovered`.
+fn overlay_unique_occupant(
+    plugin: &crate::discover::DiscoveredPlugin,
+    spec: &str,
+    discovered: &[crate::discover::DiscoveredPlugin],
+) -> bool {
+    matches!(
+        crate::discover::resolve_plugin_slot(discovered, spec),
+        Ok(Some(occupant)) if occupant.plugin_key() == plugin.plugin_key()
+    )
+}
+
+/// Overlay TCP for the active Postgres URL (host-owned, not persisted).
+fn overlay_postgres_url(
+    grant: &mut PluginGrant,
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+    discovered: &[crate::discover::DiscoveredPlugin],
+) {
+    if !overlay_database_slot_matches(plugin, config, DatabasePluginKind::Postgres, discovered) {
+        return;
+    }
+    let Ok(url) = resolve_postgres_url(config) else {
+        return;
+    };
+    let Some((host, port)) = bookclerk_plugin_database_postgres::postgres_tcp_target(&url) else {
+        return;
+    };
+    overlay_tcp_host(grant, &host, port);
+}
+
+/// Overlay TCP for `[database.d1].api_base` when this guest is the active D1 plugin.
+fn overlay_d1_api_base(
+    grant: &mut PluginGrant,
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+    discovered: &[crate::discover::DiscoveredPlugin],
+) {
+    if !overlay_database_slot_matches(plugin, config, DatabasePluginKind::D1, discovered) {
+        return;
+    }
+    overlay_http_url(grant, &config.database.d1.api_base, 443);
+}
+
+/// True when `plugin` is the selected `[database].plugin` occupant of `kind`.
+///
+/// A provenance-qualified PluginKey matches only that key. Kind tokens
+/// (`postgres`, `pg`, `d1`) resolve through [`crate::resolve_plugin_slot`] so
+/// alias twins do not inherit the operator URL.
+fn overlay_database_slot_matches(
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+    kind: DatabasePluginKind,
+    discovered: &[crate::discover::DiscoveredPlugin],
+) -> bool {
+    if DatabasePluginKind::parse(plugin.alias()) != Some(kind) {
+        return false;
+    }
+    let spec = config.database.plugin.trim();
+    if spec.is_empty() {
+        return false;
+    }
+    if bookclerk_plugin_catalog::PluginKey::parse(spec).is_ok() {
+        return overlay_unique_occupant(plugin, spec, discovered);
+    }
+    let kind_id = DatabasePluginKind::parse(spec).map(DatabasePluginKind::as_str);
+    overlay_unique_occupant(plugin, kind_id.unwrap_or(spec), discovered)
+}
+
+/// Overlay TCP for `[integrations.audiobookshelf].base_url`.
+fn overlay_audiobookshelf_url(
+    grant: &mut PluginGrant,
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+    discovered: &[crate::discover::DiscoveredPlugin],
+) {
+    if !plugin.alias().eq_ignore_ascii_case("audiobookshelf") {
+        return;
+    }
+    let spec = crate::occupancy_spec(
+        config.integrations.occupancy("audiobookshelf"),
+        "audiobookshelf",
+    );
+    if !overlay_unique_occupant(plugin, spec, discovered) {
+        return;
+    }
+    overlay_http_url(grant, &config.integrations.audiobookshelf().base_url, 443);
+}
+
+/// Overlay TCP for `[output.s3].endpoint` (MinIO / custom). Default AWS hosts
+/// come from the S3 guest manifest `tcp` list.
+fn overlay_s3_endpoint(
+    grant: &mut PluginGrant,
+    plugin: &crate::discover::DiscoveredPlugin,
+    config: &Config,
+    discovered: &[crate::discover::DiscoveredPlugin],
+) {
+    if !plugin.alias().eq_ignore_ascii_case("s3") {
+        return;
+    }
+    let spec = crate::occupancy_spec(&config.output.s3.plugin, "s3");
+    if !overlay_unique_occupant(plugin, spec, discovered) {
+        return;
+    }
+    let Some(endpoint) = config.output.s3.endpoint.as_deref() else {
+        return;
+    };
+    overlay_http_url(grant, endpoint, 443);
+}
+
+/// Parses an HTTP(S) URL or bare host and grants TCP + implied CIDRs.
+fn overlay_http_url(grant: &mut PluginGrant, raw: &str, default_port: u16) {
+    let Some((host, port)) = tcp_target_from_http_url(raw, default_port) else {
+        return;
+    };
+    overlay_tcp_host(grant, &host, port);
+}
+
+/// Grants TCP for `host:port` plus loopback/private CIDRs when `host` is not public.
+fn overlay_tcp_host(grant: &mut PluginGrant, host: &str, port: u16) {
+    add_tcp_grant(grant, host, port);
+    for cidr in implied_cidrs_for_host(host) {
+        grant.address_cidrs.insert(cidr);
+    }
+}
+
+/// Host + port for an HTTP(S) URL or a scheme-less host[:port].
+fn tcp_target_from_http_url(raw: &str, default_port: u16) -> Option<(String, u16)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = url::Url::parse(trimmed)
+        .ok()
+        .or_else(|| url::Url::parse(&format!("https://{trimmed}")).ok())?;
+    let host = parsed.host_str()?.to_string();
+    let port = parsed.port_or_known_default().unwrap_or(default_port);
+    Some((host, port))
+}
+
+/// Inserts `host:port` into the effective TCP grant set (merging ports).
+fn add_tcp_grant(grant: &mut PluginGrant, host: &str, port: u16) {
+    let Some(host) = normalize_domain_pattern(host) else {
+        return;
+    };
+    let mut ports = grant
+        .tcp
+        .iter()
+        .find(|t| t.host == host)
+        .map(|t| t.ports.clone())
+        .unwrap_or_default();
+    grant.tcp.retain(|t| t.host != host);
+    if !ports.contains(&port) {
+        ports.push(port);
+        ports.sort_unstable();
+    }
+    grant.tcp.insert(TcpGrant { host, ports });
+}
+
+/// CIDRs the socket proxy needs beyond the public Internet for `host`.
+fn implied_cidrs_for_host(host: &str) -> Vec<String> {
+    if is_restricted_hostname(host) {
+        return vec!["127.0.0.1/32".into(), "::1/128".into()];
+    }
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return Vec::new();
+    };
+    if is_public_internet(ip) {
+        return Vec::new();
+    }
+    match ip {
+        IpAddr::V4(_) => vec![format!("{ip}/32")],
+        IpAddr::V6(_) => vec![format!("{ip}/128")],
+    }
+}
+
 /// Canonical SHA-256 of a grant's security-relevant fields (not presentation).
 #[must_use]
 pub fn grant_revision(grant: &PluginGrant) -> String {
@@ -1611,6 +1900,327 @@ mode = "deny"
         existing.network_mode = "deny".into();
         let requested = sample_grant(&[], &[], &[]);
         assert!(grant_covers(&existing, &requested));
+    }
+
+    #[test]
+    fn overlay_implies_loopback_tcp_from_postgres_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config.database.plugin = "postgres".into();
+        config.database.postgres.url =
+            Some("postgres://postgres:postgres@localhost:5432/postgres".into());
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
+        let policy = grant.egress_policy();
+        assert!(
+            policy.allows_tcp("localhost", 5432),
+            "implied localhost TCP: {policy:?}"
+        );
+        assert!(grant.address_cidrs.contains("127.0.0.1/32"));
+        assert!(grant.address_cidrs.contains("::1/128"));
+    }
+
+    #[test]
+    fn overlay_public_host_needs_tcp_not_cidr() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config.database.plugin = "postgres".into();
+        config.database.postgres.url = Some("postgres://bookclerk@db.example.com:5432/db".into());
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
+        assert!(grant.egress_policy().allows_tcp("db.example.com", 5432));
+        assert!(grant.address_cidrs.is_empty());
+    }
+
+    #[test]
+    fn overlay_skips_when_sqlite_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config.database.plugin = "sqlite".into();
+        config.database.postgres.url = Some("postgres://localhost/db".into());
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
+        assert!(grant.tcp.is_empty());
+        assert!(grant.address_cidrs.is_empty());
+    }
+
+    #[test]
+    fn overlay_d1_api_base_implies_tcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "d1"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config.database.plugin = "d1".into();
+        config.database.d1.api_base = "https://api.cloudflare.com/client/v4".into();
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
+        assert!(grant.egress_policy().allows_tcp("api.cloudflare.com", 443));
+    }
+
+    #[test]
+    fn overlay_audiobookshelf_loopback_implies_cidrs() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "audiobookshelf"
+runtime = "native"
+command = "./guest"
+entrypoints = ["remoteLibrary"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config
+            .integrations
+            .set_audiobookshelf_string("base_url", "http://127.0.0.1:13378");
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
+        assert!(grant.egress_policy().allows_tcp("127.0.0.1", 13378));
+        assert!(grant.address_cidrs.contains("127.0.0.1/32"));
+    }
+
+    #[test]
+    fn overlay_s3_custom_endpoint_implies_tcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "s3"
+runtime = "native"
+command = "./guest"
+entrypoints = ["storage"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config.output.s3.endpoint = Some("http://127.0.0.1:9000".into());
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
+        assert!(grant.egress_policy().allows_tcp("127.0.0.1", 9000));
+        assert!(grant.address_cidrs.contains("127.0.0.1/32"));
+    }
+
+    #[test]
+    fn overlay_plugin_key_spec_does_not_grant_alias_twin() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let toml = r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#;
+        let real = discovered(a.path(), toml);
+        let twin = discovered(b.path(), toml);
+        assert_eq!(real.alias(), twin.alias());
+        assert_ne!(real.plugin_key(), twin.plugin_key());
+        let mut config = Config::default();
+        config.database.plugin = real.plugin_key().canonical().to_string();
+        config.database.postgres.url =
+            Some("postgres://postgres:postgres@localhost:5432/postgres".into());
+
+        let among = [real.clone(), twin.clone()];
+        let mut grant_real = consent_request(&real.manifest, real.plugin_key());
+        overlay_host_implied_network(&mut grant_real, &real, &config, &among);
+        assert!(
+            grant_real.egress_policy().allows_tcp("localhost", 5432),
+            "selected PluginKey must still get the host postgres overlay"
+        );
+
+        let mut grant_twin = consent_request(&twin.manifest, twin.plugin_key());
+        overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
+        assert!(
+            grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
+            "alias twin must not inherit the operator postgres URL overlay"
+        );
+    }
+
+    #[test]
+    fn overlay_bare_alias_does_not_grant_when_twins_exist() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let toml = r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#;
+        let real = discovered(a.path(), toml);
+        let twin = discovered(b.path(), toml);
+        let among = [real.clone(), twin.clone()];
+        let mut config = Config::default();
+        config.database.plugin = "postgres".into();
+        config.database.postgres.url =
+            Some("postgres://postgres:postgres@localhost:5432/postgres".into());
+
+        let mut grant_real = consent_request(&real.manifest, real.plugin_key());
+        overlay_host_implied_network(&mut grant_real, &real, &config, &among);
+        let mut grant_twin = consent_request(&twin.manifest, twin.plugin_key());
+        overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
+        assert!(
+            grant_real.tcp.is_empty() && grant_twin.tcp.is_empty(),
+            "ambiguous alias occupancy must not overlay host TCP onto either twin"
+        );
+    }
+
+    #[test]
+    fn overlay_s3_plugin_key_spec_does_not_grant_alias_twin() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let toml = r#"
+api_version = 3
+id = "s3"
+runtime = "native"
+command = "./guest"
+entrypoints = ["storage"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#;
+        let real = discovered(a.path(), toml);
+        let twin = discovered(b.path(), toml);
+        assert_eq!(real.alias(), twin.alias());
+        assert_ne!(real.plugin_key(), twin.plugin_key());
+        let mut config = Config::default();
+        config.output.s3.plugin = real.plugin_key().canonical().to_string();
+        config.output.s3.endpoint = Some("http://127.0.0.1:9000".into());
+
+        let among = [real.clone(), twin.clone()];
+        let mut grant_real = consent_request(&real.manifest, real.plugin_key());
+        overlay_host_implied_network(&mut grant_real, &real, &config, &among);
+        assert!(
+            grant_real.egress_policy().allows_tcp("127.0.0.1", 9000),
+            "selected PluginKey must still get the host S3 endpoint overlay"
+        );
+
+        let mut grant_twin = consent_request(&twin.manifest, twin.plugin_key());
+        overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
+        assert!(
+            grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
+            "alias twin must not inherit the operator S3 endpoint overlay"
+        );
+    }
+
+    #[test]
+    fn overlay_audiobookshelf_plugin_key_spec_does_not_grant_alias_twin() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let toml = r#"
+api_version = 3
+id = "audiobookshelf"
+runtime = "native"
+command = "./guest"
+entrypoints = ["remoteLibrary"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#;
+        let real = discovered(a.path(), toml);
+        let twin = discovered(b.path(), toml);
+        let mut config = Config::default();
+        config
+            .integrations
+            .set_audiobookshelf_string("plugin", real.plugin_key().canonical().to_string());
+        config
+            .integrations
+            .set_audiobookshelf_string("base_url", "http://127.0.0.1:13378");
+
+        let among = [real.clone(), twin.clone()];
+        let mut grant_real = consent_request(&real.manifest, real.plugin_key());
+        overlay_host_implied_network(&mut grant_real, &real, &config, &among);
+        assert!(grant_real.egress_policy().allows_tcp("127.0.0.1", 13378));
+
+        let mut grant_twin = consent_request(&twin.manifest, twin.plugin_key());
+        overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
+        assert!(
+            grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
+            "alias twin must not inherit the operator Audiobookshelf URL overlay"
+        );
     }
 
     #[test]
@@ -1991,6 +2601,96 @@ mode = "deny"
     }
 
     #[test]
+    fn effective_grant_keeps_operator_tcp_denials_across_manifest_upgrade() {
+        let denied = TcpGrant {
+            host: "old.example.com".into(),
+            ports: vec![443],
+        };
+        let added = TcpGrant {
+            host: "extra.example.com".into(),
+            ports: vec![443],
+        };
+        let mut existing = sample_grant(&["api.example.com"], &["config"], &[]);
+        existing.tcp.insert(added.clone());
+        existing.operator_added_tcp.insert(added.clone());
+        existing.operator_denied_tcp.insert(denied.clone());
+        existing.manifest_tcp.insert(denied.clone());
+
+        let mut requested = sample_grant(&["api.example.com"], &["config"], &[]);
+        requested.tcp.insert(denied.clone());
+        requested.manifest_tcp.insert(denied.clone());
+        requested.tcp.insert(TcpGrant {
+            host: "new.example.com".into(),
+            ports: vec![443],
+        });
+        requested.manifest_tcp.insert(TcpGrant {
+            host: "new.example.com".into(),
+            ports: vec![443],
+        });
+
+        let effective = effective_grant(&existing, &requested);
+        assert!(
+            !effective.tcp.contains(&denied),
+            "operator TCP denials must survive a same-PluginKey package upgrade"
+        );
+        assert!(effective.tcp.contains(&added));
+        assert!(effective.tcp.iter().any(|t| t.host == "new.example.com"));
+        assert!(effective.operator_denied_tcp.contains(&denied));
+    }
+
+    #[test]
+    fn effective_grant_keeps_operator_cidr_denials_across_manifest_upgrade() {
+        let denied = "10.0.0.0/8".to_string();
+        let added = "192.168.0.0/16".to_string();
+        let mut existing = sample_grant(&["api.example.com"], &["config"], &[]);
+        existing.address_cidrs.insert(added.clone());
+        existing.operator_added_cidrs.insert(added.clone());
+        existing.operator_denied_cidrs.insert(denied.clone());
+        existing.manifest_cidrs.insert(denied.clone());
+
+        let mut requested = sample_grant(&["api.example.com"], &["config"], &[]);
+        requested.address_cidrs.insert(denied.clone());
+        requested.manifest_cidrs.insert(denied.clone());
+        requested.address_cidrs.insert("172.16.0.0/12".into());
+        requested.manifest_cidrs.insert("172.16.0.0/12".into());
+
+        let effective = effective_grant(&existing, &requested);
+        assert!(
+            !effective.address_cidrs.contains(&denied),
+            "operator CIDR denials must survive a same-PluginKey package upgrade"
+        );
+        assert!(effective.address_cidrs.contains(&added));
+        assert!(effective.address_cidrs.contains("172.16.0.0/12"));
+        assert!(effective.operator_denied_cidrs.contains(&denied));
+    }
+
+    #[test]
+    fn effective_grant_keeps_operator_domain_denials_across_manifest_upgrade() {
+        let denied = "old.example.com".to_string();
+        let added = "extra.example.com".to_string();
+        let mut existing = sample_grant(&["api.example.com"], &["config"], &[]);
+        existing.domains.insert(added.clone());
+        existing.operator_added_domains.insert(added.clone());
+        existing.operator_denied_domains.insert(denied.clone());
+        existing.manifest_domains.insert(denied.clone());
+
+        let mut requested = sample_grant(&["api.example.com"], &["config"], &[]);
+        requested.domains.insert(denied.clone());
+        requested.manifest_domains.insert(denied.clone());
+        requested.domains.insert("new.example.com".into());
+        requested.manifest_domains.insert("new.example.com".into());
+
+        let effective = effective_grant(&existing, &requested);
+        assert!(
+            !effective.domains.contains(&denied),
+            "operator fetch-host denials must survive a same-PluginKey package upgrade"
+        );
+        assert!(effective.domains.contains(&added));
+        assert!(effective.domains.contains("new.example.com"));
+        assert!(effective.operator_denied_domains.contains(&denied));
+    }
+
+    #[test]
     fn require_grant_does_not_inherit_across_plugin_keys() {
         let dir = tempfile::tempdir().unwrap();
         let platformish = discovered(
@@ -2032,6 +2732,105 @@ mode = "deny"
             .unwrap_err()
             .to_string();
         assert!(err.contains("no permission grant"), "{err}");
+    }
+
+    #[test]
+    fn get_by_plugin_key_does_not_fall_back_to_alias() {
+        let mut store = PluginGrantStore::default();
+        let mut grant = sample_grant(&[], &["config"], &[]);
+        grant.plugin_id = "local".into();
+        grant.plugin_key = "platform:bookclerk/bookclerk-plugin-destination-local#local".into();
+        store.upsert(grant);
+        assert!(store.get_by_plugin_key("local").is_none());
+        assert!(store.get("local").is_some(), "CLI alias helper still works");
+        assert!(store
+            .get_by_plugin_key("platform:bookclerk/bookclerk-plugin-destination-local#local")
+            .is_some());
+    }
+
+    #[test]
+    fn get_alias_is_ambiguous_when_plugin_key_twins_exist() {
+        let mut store = PluginGrantStore::default();
+        let mut a = sample_grant(&[], &["config"], &[]);
+        a.plugin_id = "local".into();
+        a.plugin_key = "platform:bookclerk/bookclerk-plugin-destination-local#local".into();
+        let mut b = sample_grant(&[], &["config"], &[]);
+        b.plugin_id = "local".into();
+        b.plugin_key = "path:file:///tmp/evil#local".into();
+        store.upsert(a);
+        store.upsert(b);
+        assert!(store.get("local").is_none());
+        assert!(store
+            .get_by_plugin_key("platform:bookclerk/bookclerk-plugin-destination-local#local")
+            .is_some());
+        assert!(store
+            .get_by_plugin_key("path:file:///tmp/evil#local")
+            .is_some());
+    }
+
+    #[test]
+    fn upsert_keyed_grant_does_not_replace_keyless_alias_twin() {
+        let mut store = PluginGrantStore::default();
+        let mut keyless = sample_grant(&[], &["config"], &[]);
+        keyless.plugin_id = "local".into();
+        store.upsert(keyless);
+        let mut keyed = sample_grant(&[], &["secrets"], &[]);
+        keyed.plugin_id = "local".into();
+        keyed.plugin_key = "platform:bookclerk/bookclerk-plugin-destination-local#local".into();
+        store.upsert(keyed);
+        assert_eq!(store.grants.len(), 2);
+        assert!(store
+            .grants
+            .iter()
+            .any(|g| g.plugin_key.is_empty() && grant_has_binding(g, "config")));
+        assert!(grant_has_binding(
+            store
+                .get_by_plugin_key("platform:bookclerk/bookclerk-plugin-destination-local#local")
+                .expect("keyed grant"),
+            "secrets"
+        ));
+    }
+
+    #[test]
+    fn upsert_keyless_grant_does_not_replace_keyed_same_alias() {
+        let mut store = PluginGrantStore::default();
+        let mut keyed = sample_grant(&[], &["config"], &[]);
+        keyed.plugin_id = "local".into();
+        keyed.plugin_key = "platform:bookclerk/bookclerk-plugin-destination-local#local".into();
+        store.upsert(keyed);
+        let mut keyless = sample_grant(&[], &["secrets"], &[]);
+        keyless.plugin_id = "local".into();
+        store.upsert(keyless);
+        assert_eq!(store.grants.len(), 2);
+        assert!(grant_has_binding(
+            store
+                .get_by_plugin_key("platform:bookclerk/bookclerk-plugin-destination-local#local")
+                .expect("keyed grant"),
+            "config"
+        ));
+        assert!(store
+            .grants
+            .iter()
+            .any(|g| g.plugin_key.is_empty() && grant_has_binding(g, "secrets")));
+    }
+
+    #[test]
+    fn upsert_replaces_existing_row_for_the_same_plugin_key() {
+        let mut store = PluginGrantStore::default();
+        let key = "platform:bookclerk/bookclerk-plugin-destination-local#local";
+        let mut first = sample_grant(&[], &["config"], &[]);
+        first.plugin_id = "local".into();
+        first.plugin_key = key.into();
+        store.upsert(first);
+        let mut second = sample_grant(&[], &["secrets"], &[]);
+        second.plugin_id = "local".into();
+        second.plugin_key = key.into();
+        store.upsert(second);
+        assert_eq!(store.grants.len(), 1);
+        assert!(grant_has_binding(
+            store.get_by_plugin_key(key).expect("replaced"),
+            "secrets"
+        ));
     }
 
     #[test]

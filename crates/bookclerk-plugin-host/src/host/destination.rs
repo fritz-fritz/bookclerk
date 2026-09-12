@@ -19,6 +19,8 @@ use crate::Result as PluginResult;
 
 /// Manifest id of the platform S3 output plugin (`s3`).
 const S3_PLUGIN_ID: &str = "s3";
+/// Manifest id of the platform local-filesystem destination guest.
+const LOCAL_PLUGIN_ID: &str = "local";
 
 /// Long-lived external output plugins loaded at host startup.
 #[derive(Default, Clone)]
@@ -45,11 +47,32 @@ impl DestinationRegistry {
     }
 
     /// Plugin session for `plugin_id` and `account_id`, when that guest was loaded.
+    ///
+    /// `plugin_id` may be the canonical PluginKey (how sessions are stored) or
+    /// a display alias. An alias is accepted only when exactly one loaded
+    /// session for `account_id` matches; two occupants sharing an alias fail
+    /// closed rather than returning an arbitrary twin.
     #[must_use]
     pub fn plugin_session(&self, plugin_id: &str, account_id: &str) -> Option<Arc<PluginSession>> {
-        self.plugin_sessions
+        if let Some(session) = self
+            .plugin_sessions
             .get(&crate::plugin_instance_key(plugin_id, account_id))
+        {
+            return Some(Arc::clone(session));
+        }
+        let hits: Vec<_> = self
+            .plugin_sessions
+            .values()
+            .filter(|session| {
+                session.account_id() == account_id
+                    && crate::identity_matches_occupancy(session.id(), session.alias(), plugin_id)
+            })
             .cloned()
+            .collect();
+        match hits.as_slice() {
+            [one] => Some(Arc::clone(one)),
+            _ => None,
+        }
     }
 
     /// Records the local-filesystem output backend after a successful spawn.
@@ -80,44 +103,79 @@ pub async fn load_external_destinations(
     db: Option<&DatabaseConnection>,
 ) -> PluginResult<DestinationRegistry> {
     let mut registry = DestinationRegistry::default();
-    for plugin in crate::discover_plugins(config)? {
-        if !plugin.manifest.has_entrypoint(crate::Entrypoint::Storage) {
-            continue;
-        }
-        if plugin.manifest.api_version != PRODUCT_API_VERSION {
-            tracing::warn!(
-                id = %plugin.manifest.id,
-                api_version = plugin.manifest.api_version,
-                "output plugin is not api_version 2; skipping"
-            );
-            continue;
-        }
-        if plugin.manifest.id == S3_PLUGIN_ID {
-            if !config.output.s3.enabled {
-                tracing::debug!(id = %plugin.manifest.id, "S3 output disabled in config; skipping external plugin");
-                continue;
+    let plugins = crate::discover_plugins(config)?;
+    let storage: Vec<_> = plugins
+        .into_iter()
+        .filter(|plugin| plugin.manifest.has_entrypoint(crate::Entrypoint::Storage))
+        .collect();
+
+    if config.output.s3.enabled {
+        let spec = crate::occupancy_spec(&config.output.s3.plugin, S3_PLUGIN_ID);
+        match crate::resolve_plugin_slot(&storage, spec)? {
+            Some(plugin) if !plugin.alias().eq_ignore_ascii_case(S3_PLUGIN_ID) => {
+                return Err(crate::PluginError::message(format!(
+                    "[output.s3].plugin `{spec}` is not an s3 destination (alias {})",
+                    plugin.alias()
+                )));
             }
-            let (storage, session) = spawn_s3_guest(&plugin, config, db).await.map_err(|err| {
-                crate::PluginError::message(format!(
-                    "failed to start S3 output plugin guest: {err}"
-                ))
-            })?;
-            tracing::info!(
-                id = %plugin.manifest.id,
-                path = %plugin.command.display(),
-                "loaded external S3 output plugin (api_version 2)"
-            );
-            registry.s3 = Some(Arc::new(storage));
-            registry.set_plugin_session(session);
-            continue;
+            Some(plugin) if plugin.manifest.api_version != PRODUCT_API_VERSION => {
+                tracing::warn!(
+                    id = %plugin.manifest.id,
+                    plugin_key = %plugin.plugin_key().canonical(),
+                    api_version = plugin.manifest.api_version,
+                    "output plugin is not api_version 3; skipping"
+                );
+            }
+            Some(plugin) => {
+                let (storage_backend, session) =
+                    spawn_s3_guest(plugin, config, db).await.map_err(|err| {
+                        crate::PluginError::message(format!(
+                            "failed to start S3 output plugin guest: {err}"
+                        ))
+                    })?;
+                tracing::info!(
+                    id = %plugin.manifest.id,
+                    plugin_key = %plugin.plugin_key().canonical(),
+                    path = %plugin.command.display(),
+                    "loaded external S3 output plugin"
+                );
+                registry.s3 = Some(Arc::new(storage_backend));
+                registry.set_plugin_session(session);
+            }
+            None => {
+                tracing::debug!(
+                    spec,
+                    "S3 output enabled but no matching storage plugin is installed"
+                );
+            }
         }
-        super::destination_local::try_load_local(&plugin, config, &mut registry)
-            .await
-            .map_err(|err| {
-                crate::PluginError::message(format!(
-                    "failed to start local output plugin guest: {err}"
-                ))
-            })?;
+    }
+
+    if config.output.local.enabled {
+        let spec = crate::occupancy_spec(&config.output.local.plugin, LOCAL_PLUGIN_ID);
+        match crate::resolve_plugin_slot(&storage, spec)? {
+            Some(plugin) if !plugin.alias().eq_ignore_ascii_case(LOCAL_PLUGIN_ID) => {
+                return Err(crate::PluginError::message(format!(
+                    "[output.local].plugin `{spec}` is not a local destination (alias {})",
+                    plugin.alias()
+                )));
+            }
+            Some(plugin) => {
+                super::destination_local::try_load_local(plugin, config, &mut registry)
+                    .await
+                    .map_err(|err| {
+                        crate::PluginError::message(format!(
+                            "failed to start local output plugin guest: {err}"
+                        ))
+                    })?;
+            }
+            None => {
+                tracing::debug!(
+                    spec,
+                    "local output enabled but no matching storage plugin is installed"
+                );
+            }
+        }
     }
     Ok(registry)
 }

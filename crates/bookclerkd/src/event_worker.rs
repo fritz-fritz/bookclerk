@@ -186,6 +186,9 @@ fn spawn_delivery_worker(state: Arc<AppState>) {
 }
 
 /// Upsert this node's discovered + loaded integration subscriptions.
+///
+/// Catalog `plugin_id` is the provenance-qualified PluginKey. Display aliases
+/// are not globally unique and must not collapse two installs onto one row.
 pub async fn upsert_event_subscriber_catalog(state: &AppState) {
     let cfg = state.config.read().await.clone();
     let node_id = event_node_id(state, &cfg.paths().files_dir);
@@ -203,12 +206,14 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
                 }
                 let enabled = cfg.integrations.is_enabled(&plugin.manifest.id);
                 let subs = catalog_from_manifest(&plugin);
+                let plugin_id = plugin.plugin_key().canonical().to_string();
                 if let Err(err) = library
-                    .upsert_event_subscriber(&node_id, &plugin.manifest.id, &subs, enabled)
+                    .upsert_event_subscriber(&node_id, &plugin_id, &subs, enabled)
                     .await
                 {
                     warn!(
-                        plugin = %plugin.manifest.id,
+                        plugin_key = %plugin_id,
+                        alias = %plugin.manifest.id,
                         error = %err,
                         "event subscriber catalog upsert failed"
                     );
@@ -225,12 +230,14 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
     let integrations = state.integrations.read().await;
     for integration in integrations.all() {
         let subs = catalog_from_runtime(&integration.event_subscriptions());
+        let plugin_id = durable_plugin_identity(integration.plugin_key(), integration.id());
         if let Err(err) = library
-            .upsert_event_subscriber(&node_id, integration.id(), &subs, true)
+            .upsert_event_subscriber(&node_id, &plugin_id, &subs, true)
             .await
         {
             warn!(
-                plugin = %integration.id(),
+                plugin_key = %plugin_id,
+                alias = %integration.id(),
                 error = %err,
                 "loaded integration catalog upsert failed"
             );
@@ -403,14 +410,43 @@ fn catalog_fingerprint(catalog: &[bookclerk_library::EventSubscriberCatalogRecor
     parts.join("|")
 }
 
-/// Plugin ids currently loaded on this process.
+/// Durable catalog / delivery identity: PluginKey when present, else alias.
+///
+/// Empty keys (in-crate test doubles) fall back to the display alias. Product
+/// guests always have a provenance-qualified key.
+fn durable_plugin_identity(plugin_key: &str, alias: &str) -> String {
+    let key = plugin_key.trim();
+    if key.is_empty() {
+        alias.to_string()
+    } else {
+        key.to_string()
+    }
+}
+
+/// Plugin ids currently loaded on this process (PluginKey, plus unique aliases).
+///
+/// Alias ids are included only when a single loaded guest uses that display
+/// name so alias-era deliveries can drain after the catalog switches to
+/// PluginKey. Colliding aliases never share a claim id.
 async fn loaded_plugin_ids(state: &AppState) -> Vec<String> {
     let integrations = state.integrations.read().await;
-    integrations
-        .all()
-        .iter()
-        .map(|i| i.id().to_string())
-        .collect()
+    let all = integrations.all();
+    let mut ids = Vec::new();
+    for integration in all {
+        let key = durable_plugin_identity(integration.plugin_key(), integration.id());
+        ids.push(key.clone());
+        let alias = integration.id();
+        if alias != key
+            && all
+                .iter()
+                .filter(|other| other.id().eq_ignore_ascii_case(alias))
+                .count()
+                == 1
+        {
+            ids.push(alias.to_string());
+        }
+    }
+    ids
 }
 
 /// Claim the next ready delivery, replaying a lost RPC within [`CLAIM_REPLAY_BUDGET`].
@@ -1142,5 +1178,113 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    fn discovered_echo(root: &std::path::Path) -> bookclerk_plugin_host::DiscoveredPlugin {
+        std::fs::create_dir_all(root).unwrap();
+        let toml = r#"
+api_version = 3
+id = "echo"
+runtime = "native"
+command = "./guest"
+entrypoints = ["cli"]
+
+[capabilities.network]
+mode = "deny"
+
+[[events.consumers]]
+type = "book_acquired"
+schema_versions = [1]
+"#;
+        std::fs::write(root.join("plugin.toml"), toml).unwrap();
+        let command = root.join("guest");
+        std::fs::write(&command, b"#!/bin/sh\n").unwrap();
+        let manifest = bookclerk_plugin_host::PluginManifest::parse(toml).unwrap();
+        bookclerk_plugin_host::DiscoveredPlugin::new(manifest, root.to_path_buf(), command)
+    }
+
+    #[test]
+    fn durable_plugin_identity_prefers_plugin_key() {
+        assert_eq!(
+            durable_plugin_identity("path:file:///tmp/a#echo", "echo"),
+            "path:file:///tmp/a#echo"
+        );
+        assert_eq!(durable_plugin_identity("", "echo"), "echo");
+        assert_eq!(durable_plugin_identity("   ", "echo"), "echo");
+    }
+
+    #[test]
+    fn event_catalog_keys_same_alias_installs_on_distinct_plugin_keys() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let left = discovered_echo(a.path());
+        let right = discovered_echo(b.path());
+        assert_eq!(left.manifest.id, "echo");
+        assert_eq!(right.manifest.id, "echo");
+        assert_ne!(
+            left.plugin_key().canonical(),
+            right.plugin_key().canonical()
+        );
+        assert_eq!(
+            durable_plugin_identity(left.plugin_key().canonical(), left.alias()),
+            left.plugin_key().canonical()
+        );
+        assert_eq!(
+            durable_plugin_identity(right.plugin_key().canonical(), right.alias()),
+            right.plugin_key().canonical()
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_does_not_collapse_same_alias_plugin_keys() {
+        let db = bookclerk_plugin_database_sqlite::open_memory()
+            .await
+            .unwrap();
+        let store = LibraryStore::from_connection(db.clone());
+        let left = "path:file:///tmp/a#echo";
+        let right = "path:file:///tmp/b#echo";
+        store
+            .upsert_event_subscriber(
+                "node-a",
+                left,
+                &[EventCatalogSubscription::new("book_acquired", vec![1])],
+                true,
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_event_subscriber(
+                "node-a",
+                right,
+                &[EventCatalogSubscription::new("book_acquired", vec![1])],
+                true,
+            )
+            .await
+            .unwrap();
+        let created = store
+            .publish_domain_event(publish_spec("book_acquired:alias-collision"))
+            .await
+            .unwrap();
+        let PublishDomainEventOutcome::Created { id } = created else {
+            panic!("{created:?}");
+        };
+        dispatch_pending(&store, 7, "", false, 0, "test-node")
+            .await
+            .unwrap();
+        assert!(store
+            .get_event_delivery(&format!("{id}:{left}"))
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_event_delivery(&format!("{id}:{right}"))
+            .await
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_event_delivery(&format!("{id}:echo"))
+            .await
+            .unwrap()
+            .is_none());
     }
 }

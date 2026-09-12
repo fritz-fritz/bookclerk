@@ -90,6 +90,16 @@ fn copy_plugin_toml_and_assets(src: &Path, dest: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn stage_files_dir() -> Option<TempDir> {
+    // Cargo TMPDIR is workspace `.tmp`. Nested plugin-state paths overflow
+    // Linux sockaddr_un (~108 bytes) on GitHub Actions; keep staging under a
+    // similarly long prefix so native-behind-workerd cannot regress to
+    // pathname sockets.
+    let base = std::env::temp_dir().join("gha-sunlen").join("x".repeat(48));
+    std::fs::create_dir_all(&base).ok()?;
+    tempfile::Builder::new().prefix("td").tempdir_in(base).ok()
+}
+
 fn stage_first_party_guest(id: &str) -> Option<StagedGuest> {
     let src = plugin_crate_dir(id);
     if !src.join("plugin.toml").is_file() {
@@ -109,7 +119,7 @@ fn stage_first_party_guest(id: &str) -> Option<StagedGuest> {
     }
     let toml = std::fs::read_to_string(install.path().join("plugin.toml")).ok()?;
     let manifest = bookclerk_plugin_manifest::parse(&toml).ok()?;
-    let files = TempDir::new().ok()?;
+    let files = stage_files_dir()?;
     Some(StagedGuest {
         files,
         plugin: DiscoveredPlugin::new(manifest, install.path().to_path_buf(), dest_bin),
@@ -135,7 +145,14 @@ fn guest_config(staged: &StagedGuest, plugin_id: &str, postgres_url: Option<Stri
 fn approve_guest(config: &Config, plugin: &DiscoveredPlugin) {
     let files = &config.paths().files_dir;
     let mut grants = PluginGrantStore::load(files).expect("load grants");
-    grants.upsert(consent_request(&plugin.manifest, plugin.plugin_key()));
+    let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+    crate::consent::overlay_host_implied_network(
+        &mut grant,
+        plugin,
+        config,
+        std::slice::from_ref(plugin),
+    );
+    grants.upsert(grant);
     grants.save(files).expect("save grants");
 }
 

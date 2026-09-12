@@ -15,6 +15,7 @@
 //! `authority_revision` is SHA-256 of the canonical effective policy. Grant
 //! changes fence already-running sessions that still hold the old revision.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -148,17 +149,23 @@ pub fn authority_revision(grant: &PluginGrant) -> String {
         hasher.update(b",");
     }
     hasher.update(b"\ntcp\n");
-    for t in &grant.tcp {
-        hasher.update(t.host.as_bytes());
-        hasher.update(b":");
-        for p in &t.ports {
-            hasher.update(p.to_string().as_bytes());
-            hasher.update(b",");
-        }
-        hasher.update(b";");
-    }
+    hash_tcp_grants(&mut hasher, &grant.tcp);
+    hasher.update(b"\noperator_added_tcp\n");
+    hash_tcp_grants(&mut hasher, &grant.operator_added_tcp);
+    hasher.update(b"\noperator_denied_tcp\n");
+    hash_tcp_grants(&mut hasher, &grant.operator_denied_tcp);
     hasher.update(b"\ncidrs\n");
     for c in &grant.address_cidrs {
+        hasher.update(c.as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"\noperator_added_cidrs\n");
+    for c in &grant.operator_added_cidrs {
+        hasher.update(c.as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"\noperator_denied_cidrs\n");
+    for c in &grant.operator_denied_cidrs {
         hasher.update(c.as_bytes());
         hasher.update(b",");
     }
@@ -169,6 +176,19 @@ pub fn authority_revision(grant: &PluginGrant) -> String {
             .as_bytes(),
     );
     hex::encode(hasher.finalize())
+}
+
+/// Canonical digest of TCP grants (`host:port,…;`).
+fn hash_tcp_grants(hasher: &mut Sha256, grants: &BTreeSet<bookclerk_plugin_manifest::TcpGrant>) {
+    for t in grants {
+        hasher.update(t.host.as_bytes());
+        hasher.update(b":");
+        for p in &t.ports {
+            hasher.update(p.to_string().as_bytes());
+            hasher.update(b",");
+        }
+        hasher.update(b";");
+    }
 }
 
 #[cfg(test)]
@@ -245,5 +265,15 @@ mod tests {
         let mut d = a.clone();
         d.allow_undeclared_public_redirects = true;
         assert_ne!(authority_revision(&a), authority_revision(&d));
+        let mut e = a.clone();
+        e.operator_denied_tcp
+            .insert(bookclerk_plugin_manifest::TcpGrant {
+                host: "cdn.example.com".into(),
+                ports: vec![443],
+            });
+        assert_ne!(authority_revision(&a), authority_revision(&e));
+        let mut f = a.clone();
+        f.operator_denied_cidrs.insert("10.0.0.0/8".into());
+        assert_ne!(authority_revision(&a), authority_revision(&f));
     }
 }

@@ -485,8 +485,10 @@ impl SessionServices {
 pub struct PluginSession {
     /// Work queue into the vat thread.
     tx: mpsc::UnboundedSender<Work>,
-    /// Plugin id.
+    /// Provenance-qualified PluginKey (canonical text).
     id: String,
+    /// Manifest display alias (`plugin.toml` `id`).
+    alias: String,
     /// Guest data directory.
     data: std::path::PathBuf,
     /// Instance key `(plugin_id, account_id)`.
@@ -618,6 +620,7 @@ impl PluginSession {
     ) -> Result<Self> {
         let manifest = plugin.manifest.clone();
         let id = spawned.id.clone();
+        let alias = spawned.alias.clone();
         let data = spawned.data.clone();
         let scratch = spawned.scratch.clone();
         let grant = spawned.grant.clone();
@@ -633,6 +636,12 @@ impl PluginSession {
         let instance_key = plugin_instance_key(&id, account_id);
         let identity = ExecutorIdentity::from_plugin_with_runtime(plugin, account_id, plan.runtime)
             .with_grant_revision(&grant);
+        if identity.grant_revision.is_empty() {
+            return Err(PluginError::message(format!(
+                "plugin `{}` spawn is missing an authority revision",
+                plugin.plugin_key().canonical()
+            )));
+        }
         let authority_fence = crate::authority::register_session(
             plugin.plugin_key().canonical(),
             &identity.grant_revision,
@@ -657,6 +666,7 @@ impl PluginSession {
         Ok(Self {
             tx,
             id,
+            alias,
             data,
             instance_key,
             account_id: account_id.to_string(),
@@ -710,10 +720,16 @@ impl PluginSession {
         self.features.iter().any(|f| f == FEATURE_STORAGE_COPY)
     }
 
-    /// Plugin id.
+    /// Provenance-qualified PluginKey (canonical text).
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Manifest display / CLI alias (`plugin.toml` `id`).
+    #[must_use]
+    pub fn alias(&self) -> &str {
+        &self.alias
     }
 
     /// Guest data directory.

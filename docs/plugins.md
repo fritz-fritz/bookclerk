@@ -77,8 +77,8 @@ standalone author repos: [plugin-registry.md](plugin-registry.md).
 | **Reference example** | Echo samples under `examples/`; CI/`cargo dev --examples` only — never packaged |
 | **Third-party plugin** | Outside this monorepo; same jail + Workers RPC ABI |
 | **Plugin package** | Rust crate under `crates/bookclerk-plugins/`, or a workerd archive (`plugin.toml` + `modules/`) |
-| **In-process fallback** | When a platform guest is missing or fails to start, hosts fall back to logic in `bookclerk-library` / `bookclerk-storage` |
-| **`bundled-plugins`** | Optional host feature linking storefronts in-process (dev only; omit for release packaging) |
+| **In-process fallback** | None for ordinary plugins. Database adapter *crates* stay linked for host-owned SQL lowering, not guest execution |
+| **Verified artifact** | Installed bytes that match the install receipt (`manifest_sha256` + `payload_root_sha256`) for a provenance-qualified PluginKey |
 | **`BookclerkEntrypoint`** | Workerd default-export base (`event(batch)` / `job(job)` / `databaseMigrations(binding)` / optional `describe()` / `shutdown()`); named entrypoints are exported `*Entrypoint` subclasses. TS extends `WorkerEntrypoint`. Rust guests implement `PluginWorker` (`describe` / `open(invocation, bindings) -> Entrypoints`) + `serve` |
 
 ## Local development (external guests)
@@ -109,16 +109,18 @@ cargo test-staged                       # describe/health conformance smoke
 Add `--release` to any alias for release builds. Override staging dir with
 `BOOKCLERK_PLUGIN_ARTIFACTS`. Forward host args after `--` (e.g. `cargo dev -- --help`).
 
-Optional in-process iteration (no staging): build hosts with
-`--features bundled-plugins` on `bookclerk-cli` / `bookclerkd`.
+First-party storefronts are always staged external guests — there is no
+in-process host feature.
 
 Reference Echo examples (distinct plugin ids):
 
-Plugin **ids are globally unique across kinds** (source / integration / output /
-database). The grammar is strict and non-lossy: lowercase `[a-z0-9_]{2,32}` with
+Plugin **ids are display aliases**, not globally unique security identities.
+The grammar is still strict and non-lossy: lowercase `[a-z0-9_]{2,32}` with
 no leading/trailing `_` and no `__` (same rule as the crates.io `{id}` segment).
 Invalid characters are rejected at manifest load / install — never rewritten —
-so values like `a/b` and `a_b` cannot collide after sanitization.
+so values like `a/b` and `a_b` cannot collide after sanitization. Two installs
+may share an alias; address them with a provenance-qualified PluginKey when
+that happens.
 
 | Path | Runtime |
 | --- | --- |
@@ -162,12 +164,19 @@ is narrow on top of that:
 
 First-party guests ship under `crates/bookclerk-plugins/` with the guest SDK
 contract. Host binaries (`bookclerk`, `bookclerkd`) depend on
-**`bookclerk-plugin-host`** only — not on individual store crates. Optional
-`bundled-plugins` features on the hosts call `register_builtin_*` to link
-first-party libraries in-process for faster Rust iteration; release builds omit
-that feature and load staged guests from `plugins/` instead. Discovered
-external copies of the same id are skipped when an in-process adapter is already
-registered. After registration, hosts talk **only**
+**`bookclerk-plugin-host`** only — not on individual store crates. Release
+builds and local `cargo dev` both load staged guests from `plugins/`.
+Discovered copies of the same **PluginKey** are skipped; the same display
+alias from two provenances stays distinct and requires a qualified ref.
+Enablement occupancy (`[database].plugin`, `[output.s3].plugin`,
+`[output.local].plugin`, `[sources.<id>].plugin`,
+`[integrations.<id>].plugin`) is a PluginKey when set by
+`bookclerk plugins enable` or Settings enable; a settings save also
+upgrades a unique alias occupant to its PluginKey. A bare alias is accepted
+only when exactly one install uses it. Two installs that share `id = "s3"`
+(or `audible`, …) fail closed until the operator names a PluginKey — the host
+does not last-write-wins or spawn every twin.
+After registration, hosts talk **only**
 through `ContentSource` /
 `Integration` (login, scan, fetch, import, revoke, inspect, plus catalog
 `searchCatalog` / `catalogDetail` / `expandCandidates` / `purchaseHint` /
@@ -183,34 +192,27 @@ enabling.
 
 ## Shipping without a store
 
-Both hosts carry one optional feature per in-process plugin (`bundled-plugins`
-enables the full set). **Default builds link no storefront** (external guests
-only):
+Both hosts **link no storefront**. Storefronts are staged guests only:
 
 ```bash
 # Default: external guests only (release packaging).
 cargo build --release -p bookclerk-cli -p bookclerkd
-
-# Everything except Audible (still in-process, opt-in).
-cargo build -p bookclerk-cli -p bookclerkd --features bundled-plugins \
-  --no-default-features \
-  --features bookclerk-plugin-source-libro,bookclerk-plugin-source-chirp,bookclerk-plugin-source-graphicaudio,bookclerk-plugin-integration-audiobookshelf
 ```
 
 This exists for Audible specifically. Adrm and Widevine CENC decrypt live in that
 plugin, and some regions restrict distributing a binary that can circumvent
 DRM — so whoever packages Bookclerk needs the option to ship hosts that contain
 no such code at all, rather than a build flag that merely disables it at runtime.
-Omitting the feature omits the crate, and with it the ciphers, the content-key
+Omitting the guest omits the crate, and with it the ciphers, the content-key
 handling, and the CDM.
 
 Nothing else has to move for that to hold. The shared MP4 plumbing
 (`bookclerk-mp4`) parses and rewrites containers and takes a `SampleTransform`
 from its caller; the Audible plugin's transform is the only one that decrypts.
-`scripts/check-store-free-hosts.sh` asserts it in CI: default hosts must link
-no plugin package and reach no cipher crate. Opt-in `--features bundled-plugins`
-must still link Audible for in-process dev. A shared crate that grew an `aes`
-dependency fails the default-host check.
+`scripts/check-store-free-hosts.sh` and `scripts/check-plugin-architecture.sh`
+assert it in CI: default hosts must link no plugin package and reach no cipher
+crate, and must not grow an in-process `bundled-plugins` path. A shared crate
+that grew an `aes` dependency fails the default-host check.
 
 Users of a store-free build can still add any storefront back as an external
 guest, since discovery is independent of these features. That is a deployment
@@ -356,7 +358,7 @@ tcp = [{ host = "api.example.com", ports = [443] }]
 | Network `mode` | Native-behind-workerd | Workerd |
 | --- | --- | --- |
 | `deny` | nested guest jail `NetPolicy::Deny`; no socket proxy grants | OS jail stays `OutboundListen` for the RPC bridge; isolate `globalOutbound` → blocked |
-| `outbound` | nested guest jail still `Deny`; TCP via `bookclerk_plugin_sdk::connect` → Unix HTTP CONNECT proxy | isolate `globalOutbound` → egress worker; `fetch()` and `connect()` share one `EgressPolicy` |
+| `outbound` | nested guest jail still `Deny`; TCP via `bookclerk_plugin_sdk::connect` → HTTP CONNECT proxy (Unix socket / Windows named pipe) | isolate `globalOutbound` → egress worker; `fetch()` and `connect()` share one `EgressPolicy` |
 
 `capabilities.network.domains` is the **fetch** allowlist (workerd only). Raw TCP is `capabilities.network.tcp` (`host` + `ports`). The operator may add extra fetch hosts, TCP targets, and CIDRs; the guest `describe()` cannot. Default address-space policy is public Internet only — loopback, RFC1918, link-local, ULA, and metadata stay denied unless an explicit CIDR is granted. `allow_undeclared_public_redirects` lets fetch redirects leave the domain allowlist for **public** destinations only; it never implies those special ranges.
 
@@ -459,6 +461,12 @@ Windows cannot confine a process after it has started. `bookclerk-jail` therefor
 read/write paths for a **per-launch** Package SID, maps `NetPolicy` to
 capability names (`internetClient`, `privateNetworkClientServer`, …), places the
 guest in a kill-on-close Job Object, and proxies stdio until the guest exits.
+
+Native-behind-workerd guests get a **second** AppContainer (`NetPolicy::Deny`,
+no `internetClient` SIDs). The host pre-creates that profile so the SOCKET_PROXY
+named pipe can be ACL'd to the nested Package SID before the guest starts.
+OAuth callback pipes use the same nested SID. Isolation::Required fails closed
+if the nested profile cannot be created.
 
 #### Job Object launch ordering
 
@@ -625,7 +633,7 @@ covers the current manifest).
 | File | Role |
 | --- | --- |
 | `plugin.toml` (next to the binary or `modules/`) | **Install / discovery** — id, kind, runtime, command or `[workerd]`, capabilities |
-| `config.toml` (`[sources.<id>]` / `[integrations.<id>]`) | **User settings** — `enabled`, opaque knobs |
+| `config.toml` (`[sources.<id>]` / `[integrations.<id>]`) | **User settings** — `enabled`, occupancy `plugin` (PluginKey or unambiguous alias), opaque knobs |
 
 The plugin (or its installer) drops a directory under a search root. Bookclerk
 scans for `plugin.toml`, spawns `bookclerk-workerd` (fronting the native
@@ -832,7 +840,9 @@ by provenance-qualified PluginKey. Structural capabilities originate in the
 manifest; the operator may **narrow** them but cannot invent entrypoints,
 producers, or host bindings. Network destinations are operator-extensible:
 operators may add fetch hosts, TCP `host:ports`, and CIDRs beyond the
-manifest, and may grant undeclared public redirects. Host hard caps still
+manifest, **and may deny** individual fetch hosts, TCP grants, or CIDRs so a later
+package upgrade of the same PluginKey does not silently restore them. Host
+hard caps still
 apply (`WorkerdLimits` maxes, disk/memory max 4096 MiB, CPU rate
 up to `logical_cpus × 100` one-core percent, extra processes 62 / absolute PIDs
 64, known bindings). Workerd plugins use isolate `cpuMs` instead of per-plugin
@@ -843,11 +853,11 @@ plugin behaviour if overrides remove capabilities the guest needs.
 
 Domain allowlists and TCP grants are enforced for **both** workerd and
 native-behind-workerd guests through one canonical `EgressPolicy` (workerd
-`EGRESS_POLICY` / `BOOKCLERK_WORKERD_GRANT_POLICY`; native Unix CONNECT
-proxy). Direct-native diagnostic transport is test-only and still uses the
-OS jail mapping. Redirect hops stay on the fetch allowlist unless the
-operator grants undeclared public redirects; address-space policy still
-applies.
+`EGRESS_POLICY` / `BOOKCLERK_WORKERD_GRANT_POLICY`; native CONNECT proxy —
+Unix domain socket or Windows named pipe). Direct-native diagnostic transport
+is test-only and still uses the OS jail mapping. Redirect hops stay on the
+fetch allowlist unless the operator grants undeclared public redirects;
+address-space policy still applies.
 
 Guest filesystem access remains install read-only plus host-managed
 `plugin-state/<plugin-key-fs-id>/data` and `…/tmp` — not a free-form widen.
@@ -863,8 +873,9 @@ Global confinement knobs (Settings → Confinement, or `config.toml`):
 | `plugins.jail.extra_processes` | ceiling on extra processes/threads beyond launcher overhead (default **2**; Spec `active_processes` = overhead + extra) |
 
 On upgrade of the **same PluginKey**, operator-added network destinations
-survive; new sensitive structural authority re-prompts. A different
-provenance (even with the same manifest id) does not inherit grants.
+and operator **denials** (fetch hosts, TCP grants, and CIDRs) survive; new sensitive
+structural authority re-prompts. A different provenance (even with the same
+manifest id) does not inherit grants.
 
 ## Enabling and settings in `config.toml`
 
@@ -875,10 +886,12 @@ disabled**; sources follow the usual `[sources.<id>]` rules (missing → enabled
 ```toml
 [integrations.echo]
 enabled = true
+# plugin = "path:file:///opt/plugins/echo#echo"  # required when the alias is ambiguous
 # greeting = "hi"   # opaque knobs → spawn config
 
 [sources.my_store]
 enabled = true
+# plugin = "cargo:crates.io/bookclerk-plugin-source-my-store#my_store"
 # … opaque knobs …
 ```
 
@@ -1030,10 +1043,10 @@ const ok = await env.EVENTS.publish({
 The host `EventPublisher` writes straight into the library outbox
 (`domain_events`) with these rules:
 
-- **Forced provenance.** `source` is always the plugin id and `account_id` is
-  the opening invocation's account; a guest cannot spoof another producer.
-  `correlationId` / `causationId` default to the invocation's values when the
-  guest leaves them empty.
+- **Forced provenance.** `source` is always the plugin's PluginKey and
+  `account_id` is the opening invocation's account; a guest cannot spoof
+  another producer. `correlationId` / `causationId` default to the
+  invocation's values when the guest leaves them empty.
 - **Producer grant.** The binding exists only when the manifest declares
   `[[events.producers]]` *and* the operator grant covers those types (the
   consent request lists them). Publishing a type outside that intersection
@@ -1155,7 +1168,8 @@ only (no plugin-provided code / CEL). Echo and Audiobookshelf may omit both
 Any `[[events.consumers]]` row requires an `event(batch)` handler on the default export.
 Each host heartbeats discovered config-enabled integration manifests (even when
 spawn failed) and currently loaded integrations into `event_subscriber_nodes`
-keyed by `(node_id, plugin_id)`. Nodes do not delete catalog rows they lack.
+keyed by `(node_id, PluginKey)` (`plugin_id` stores the canonical PluginKey, not
+the display alias). Nodes do not delete catalog rows they lack.
 A plugin is live when any heartbeating node (60s TTL) has it enabled; matching
 subscriptions are the union of those enabled rows. The dispatcher then
 `INSERT OR IGNORE`s deliveries for pending events (one D1 atomic op per
@@ -1182,7 +1196,7 @@ slices so producer latency does not track sleeper count. Acquire success writes
 acquire-status change (book uuid, storage key, product ids — never media bytes)
 and sets envelope `source` to the book’s storefront plugin id.
 The producer `ordering_key` is stored on the envelope and copied verbatim onto
-each delivery. Each VPS claims only plugin ids loaded on that process **and**
+each delivery. Each VPS claims only PluginKeys loaded on that process **and**
 only events its node-local catalog matches (type, schema version, filter). The
 host evaluates catalog JSON filters, then compare-and-sets a concrete delivery
 id inside a generic atomic plan. Wake page size follows negotiated `maxBinds`
@@ -1229,8 +1243,10 @@ issue #120 builds on this contract without another public ABI redesign.
 
 First-party S3 ships as `bookclerk-plugin-destination-s3` (`api_version = 3`).
 When the guest is discovered under `plugins/s3/` and `[output.s3].enabled = true`,
-the host loads it at startup via external destination loading instead of the
-in-process S3 backend.
+the host loads the unique occupant (`[output.s3].plugin`, or the `s3` alias when
+only one install exists) at startup via external destination loading instead of
+an in-process S3 backend. A second install that reuses `id = "s3"` does not
+overwrite the destination.
 
 ### Database adapter entrypoints
 
@@ -1291,8 +1307,11 @@ separate from the Bookclerk library and from every other plugin
 (near-equivalent to a Cloudflare Workers D1 binding):
 
 - **SQLite** — one file per binding under
-  `$BOOKCLERK_FILES_DIR/plugin-databases/<plugin>/<BINDING>.db` (the sqlite
-  adapter jail grants that directory).
+  `$BOOKCLERK_FILES_DIR/plugin-databases/<plugin-key-fs-id>/<BINDING>.db`
+  (the sqlite adapter jail grants that directory). The leaf is
+  `PluginKey::fs_id()` (`pk-` plus 16 hex), not the display alias and not
+  the canonical PluginKey (which is not a valid Windows path component).
+  The `plugin_databases` registry still stores the canonical PluginKey.
 - **PostgreSQL** — one database per binding (`pb_` + 32 hex of the
   `(plugin, binding)` digest; 35 ≤ 63), created on first use (`CREATEDB`
   required). This is a separate database, not a schema on the library DB,
@@ -1425,14 +1444,15 @@ capabilities, then set `enabled = true` in `config.toml` (or
 `bookclerk plugins enable`). No rebuild of Bookclerk is required when
 `api_version` matches.
 
-### First-party plugins (dual load via plugin host)
+### First-party plugins (staged guests)
 
 Audible, Libro.fm, Chirp, GraphicAudio, and Audiobookshelf ship as **external
 plugins** under `crates/bookclerk-plugins/`. The host crate
-`bookclerk-plugin-host` also registers the same adapters **in-process**
-(`register_builtin_*` / `load_sources` / `load_integrations`) so `cargo run`
-works without staging binaries. CLI/daemon call only those host helpers —
-never store crates by name. Discovery skips an id that is already registered.
+`bookclerk-plugin-host` loads them through `load_sources` /
+`load_integrations` as staged guests — the same path third-party plugins
+use. CLI/daemon call only those host helpers — never store crates by name.
+Discovery skips a PluginKey that is already registered; a colliding display
+alias requires a provenance-qualified ref.
 
 Guest binaries depend on **`bookclerk-plugin-sdk`** (+ their private store crate
 for first-party). TypeScript workerd guests depend on **`@bookclerk/plugin-sdk`**.
