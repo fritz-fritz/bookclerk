@@ -1465,6 +1465,15 @@ mod tests {
     }
 
     #[test]
+    fn portable_json_object_length_casts_to_text_on_postgres() {
+        let sql = lower_canonical_to_postgres(crate::sql_v1::PORTABLE_JSON_OBJECT_SEMANTICS);
+        assert!(sql.contains("length(CAST(json_build_object"), "{sql}");
+        assert!(sql.contains("AS TEXT)"), "{sql}");
+        assert!(!sql.to_ascii_lowercase().contains("json_object("), "{sql}");
+        assert!(!sql.contains("json_extract("), "{sql}");
+    }
+
+    #[test]
     fn postgres_dml_lowering_does_not_rewrite_ddl_types() {
         let canonical =
             "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY AUTOINCREMENT, b BLOB)";
