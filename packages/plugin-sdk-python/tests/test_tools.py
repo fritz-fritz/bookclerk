@@ -105,7 +105,7 @@ def test_sync_embed_optional_vendor(tmp_path: Path):
     assert "ok" in check_plugin(staging)
 
 
-def test_format_manifest_emits_sealed_table_binding():
+def test_format_manifest_emits_sealed_and_loopback_tables():
     text = format_manifest(
         {
             "api_version": 3,
@@ -114,16 +114,23 @@ def test_format_manifest_emits_sealed_table_binding():
             "command": "./echo",
             "entrypoints": ["cli"],
             "secrets": {"binding": "SECRETS"},
+            "oauth": {"binding": "OAUTH"},
             "capabilities": {"network": {"mode": "deny"}},
         }
     )
     assert "\n[secrets]\n" in text
+    assert "\n[oauth]\n" in text
     assert 'binding = "SECRETS"' in text
+    assert 'binding = "OAUTH"' in text
 
 
-def test_env_properties_include_sealed_binding(tmp_path: Path):
-    names = [name for name, _, _ in env_properties_for({"id": "echo", "secrets": {}})]
+def test_env_properties_include_sealed_and_loopback_bindings(tmp_path: Path):
+    names = [
+        name
+        for name, _, _ in env_properties_for({"id": "echo", "secrets": {}, "oauth": {}})
+    ]
     assert "SECRETS" in names
+    assert "OAUTH" in names
     (tmp_path / "plugin.toml").write_text(
         format_manifest(
             {
@@ -133,6 +140,7 @@ def test_env_properties_include_sealed_binding(tmp_path: Path):
                 "command": "./echo",
                 "entrypoints": ["cli"],
                 "secrets": {"binding": "SECRETS"},
+                "oauth": {"binding": "OAUTH"},
                 "capabilities": {"network": {"mode": "deny"}},
             }
         ),
@@ -142,4 +150,6 @@ def test_env_properties_include_sealed_binding(tmp_path: Path):
     stub = (tmp_path / "bookclerk_configuration.py").read_text(encoding="utf-8")
     assert "wrote" in msg
     assert "SECRETS: dict[str, str]" in stub
+    assert "OAUTH: Any" in stub
     assert "[secrets]" in stub
+    assert "[oauth]" in stub
