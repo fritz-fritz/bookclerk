@@ -1754,8 +1754,9 @@ export async function fetchPluginConsent(
 /**
  * Approves network consent for a plugin.
  *
- * @param id - Plugin id.
- * @param grant
+ * @param id - Display alias from Settings.
+ * @param grant - Operator-approved grant overlay; omitted fields keep defaults.
+ * @param pluginKey - Provenance-qualified PluginKey when the alias is ambiguous.
  * @returns Updated consent response after approval.
  */
 export async function approvePluginConsent(
