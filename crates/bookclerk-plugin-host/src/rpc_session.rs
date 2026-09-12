@@ -825,6 +825,11 @@ impl PluginSession {
         progress: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
         databases: Vec<(String, GuestDatabaseFactory)>,
     ) -> Result<bookclerk_plugin_sdk::JobOutcome> {
+        if !self.grant.jobs.is_empty() && !self.grant.allows_job("stream_copy") {
+            return Err(PluginError::message(
+                "plugin grant does not authorize job trigger `stream_copy`",
+            ));
+        }
         self.call(|reply| Work::StreamCopy {
             lease,
             spec: StreamCopySpec {
@@ -1004,6 +1009,17 @@ impl PluginSession {
         batch: Vec<DomainEvent>,
         cancel: Arc<AtomicBool>,
     ) -> Result<Vec<EventResult>> {
+        for event in &batch {
+            if !self
+                .grant
+                .allows_event_consumer(&event.event_type, event.schema_version)
+            {
+                return Err(PluginError::message(format!(
+                    "plugin grant does not authorize event consumer `{}` schema {}",
+                    event.event_type, event.schema_version
+                )));
+            }
+        }
         self.call(|reply| Work::DeliverEvents {
             batch,
             cancel,

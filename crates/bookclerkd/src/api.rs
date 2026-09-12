@@ -25,8 +25,8 @@ use bookclerk_library::{
 use bookclerk_plugin_host::{
     consent_request, consent_summary, cores_to_percent, effective_cpu_cores, format_cpu_cores,
     grant_covers, host_cpu_cores_max, percent_to_cores, require_grant, validate_approved_grant,
-    DatabaseRegistry, DestinationRegistry, PluginGrant, PluginGrantStore, PluginRuntimeKind,
-    WorkerdLimits, KNOWN_HOST_BINDINGS, PLUGIN_JAIL_CPU_CORES_DEFAULT,
+    DatabaseRegistry, DestinationRegistry, GrantedEventConsumer, PluginGrant, PluginGrantStore,
+    PluginRuntimeKind, WorkerdLimits, KNOWN_HOST_BINDINGS, PLUGIN_JAIL_CPU_CORES_DEFAULT,
     PLUGIN_JAIL_CPU_RATE_DEFAULT, PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT,
     PLUGIN_JAIL_EXTRA_PROCESSES_MAX, PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX,
     PLUGIN_STATE_BUDGET_MIB_DEFAULT, PLUGIN_STATE_BUDGET_MIB_MAX,
@@ -482,6 +482,10 @@ struct PluginGrantView {
     entrypoints: Vec<String>,
     /// Event types the operator approved the plugin to publish.
     producers: Vec<String>,
+    /// Approved event-consumer subscriptions.
+    consumers: Vec<GrantedEventConsumer>,
+    /// Approved job trigger types.
+    jobs: Vec<String>,
     /// Approved egress mode (`deny`, `allowlist`, and similar).
     network_mode: String,
     /// Hostnames the operator approved for egress.
@@ -528,6 +532,8 @@ impl PluginGrantView {
             plugin_id: grant.plugin_id.clone(),
             entrypoints: grant.entrypoints.iter().cloned().collect(),
             producers: grant.producers.iter().cloned().collect(),
+            consumers: grant.consumers.iter().cloned().collect(),
+            jobs: grant.jobs.iter().cloned().collect(),
             network_mode: grant.network_mode.clone(),
             domains: grant.domains.iter().cloned().collect(),
             manifest_domains: grant.manifest_domains.iter().cloned().collect(),
@@ -5173,6 +5179,8 @@ mod tests {
             plugin_id: "demo".into(),
             entrypoints: BTreeSet::from(["storefront".into()]),
             producers: BTreeSet::new(),
+            consumers: Default::default(),
+            jobs: Default::default(),
             network_mode: "outbound".into(),
             domains: BTreeSet::from(["a.example".into(), "b.example".into()]),
             manifest_domains: BTreeSet::from(["a.example".into(), "b.example".into()]),

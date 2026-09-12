@@ -24,6 +24,7 @@ use bookclerk_plugin_abi::{PluginCapabilities, PortalAuthMode};
 use crate::manifest::{PluginManifest, PluginRuntimeKind, WorkerdLimits};
 use crate::spawn_plan::GuestRuntimeKind;
 use crate::{PluginError, Result};
+use bookclerk_plugin_manifest::EventConsumer;
 
 /// Filename under `$BOOKCLERK_FILES_DIR` for persisted grants.
 pub const GRANTS_FILE: &str = "plugin-grants.json";
@@ -150,6 +151,135 @@ pub fn granted_database_bindings(grant: &PluginGrant) -> Vec<String> {
         .collect()
 }
 
+/// One approved event-consumer subscription (structural authority).
+///
+/// Identity includes the event type plus the security-relevant subscription
+/// properties that change what the plugin receives: schema versions, suspend
+/// support, and the host-owned payload filter. Operational knobs
+/// (`resource_class`, `max_retries`) are **not** part of authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantedEventConsumer {
+    /// Versioned event type (`book_acquired`, …).
+    pub event_type: String,
+    /// Schema versions this grant may deliver (sorted, unique).
+    pub schema_versions: Vec<u32>,
+    /// Whether `EventResult::Suspended` is authorized for this type.
+    pub supports_suspend: bool,
+    /// Canonical JSON of the host-owned payload filter, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+}
+
+impl GrantedEventConsumer {
+    /// Structural consumer snapshot from a `[[events.consumers]]` row.
+    #[must_use]
+    pub fn from_manifest(consumer: &EventConsumer) -> Self {
+        let mut schema_versions = consumer.schema_versions.clone();
+        schema_versions.sort_unstable();
+        schema_versions.dedup();
+        Self {
+            event_type: consumer.event_type.clone(),
+            schema_versions,
+            supports_suspend: consumer.supports_suspend,
+            filter: canonical_event_filter(&consumer.filter),
+        }
+    }
+
+    /// True when `requested` is the same type with equal-or-narrower schemas,
+    /// equal-or-narrower suspend, and the same filter.
+    #[must_use]
+    pub fn covers(&self, requested: &Self) -> bool {
+        self.event_type == requested.event_type
+            && requested
+                .schema_versions
+                .iter()
+                .all(|v| self.schema_versions.contains(v))
+            && (!requested.supports_suspend || self.supports_suspend)
+            && self.filter == requested.filter
+    }
+
+    /// Intersection used when a stored grant already covers the current manifest.
+    #[must_use]
+    pub fn intersect(&self, requested: &Self) -> Option<Self> {
+        if self.event_type != requested.event_type || self.filter != requested.filter {
+            return None;
+        }
+        let schema_versions: Vec<u32> = requested
+            .schema_versions
+            .iter()
+            .copied()
+            .filter(|v| self.schema_versions.contains(v))
+            .collect();
+        if schema_versions.is_empty() && !requested.schema_versions.is_empty() {
+            return None;
+        }
+        Some(Self {
+            event_type: self.event_type.clone(),
+            schema_versions,
+            supports_suspend: self.supports_suspend && requested.supports_suspend,
+            filter: self.filter.clone(),
+        })
+    }
+}
+
+/// Minified JSON for an event filter; `null` / missing → `None`.
+fn canonical_event_filter(filter: &Option<serde_json::Value>) -> Option<String> {
+    filter.as_ref().and_then(|value| {
+        if value.is_null() {
+            None
+        } else {
+            serde_json::to_string(value).ok()
+        }
+    })
+}
+
+/// True when every requested consumer is covered by some approved consumer.
+#[must_use]
+pub fn consumers_cover(
+    existing: &BTreeSet<GrantedEventConsumer>,
+    requested: &BTreeSet<GrantedEventConsumer>,
+) -> bool {
+    requested
+        .iter()
+        .all(|req| existing.iter().any(|got| got.covers(req)))
+}
+
+/// Intersect stored consumers with the current manifest request.
+fn intersect_consumers(
+    existing: &BTreeSet<GrantedEventConsumer>,
+    requested: &BTreeSet<GrantedEventConsumer>,
+) -> BTreeSet<GrantedEventConsumer> {
+    requested
+        .iter()
+        .filter_map(|req| {
+            existing
+                .iter()
+                .find(|got| got.event_type == req.event_type && got.filter == req.filter)
+                .and_then(|got| got.intersect(req))
+        })
+        .collect()
+}
+
+/// Consumers declared by `plugin.toml` as structural grant entries.
+#[must_use]
+pub fn granted_consumers_from_manifest(
+    manifest: &PluginManifest,
+) -> BTreeSet<GrantedEventConsumer> {
+    manifest
+        .events
+        .consumers
+        .iter()
+        .map(GrantedEventConsumer::from_manifest)
+        .collect()
+}
+
+/// Job trigger types declared by `[triggers].jobs`.
+#[must_use]
+pub fn granted_jobs_from_manifest(manifest: &PluginManifest) -> BTreeSet<String> {
+    manifest.triggers.jobs.iter().cloned().collect()
+}
+
 /// One approved grant snapshot for a provenance-qualified plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -166,6 +296,12 @@ pub struct PluginGrant {
     /// Approved event types the plugin may publish through its events binding.
     #[serde(default)]
     pub producers: BTreeSet<String>,
+    /// Approved event-consumer subscriptions (type + schema + suspend + filter).
+    #[serde(default)]
+    pub consumers: BTreeSet<GrantedEventConsumer>,
+    /// Approved `[triggers].jobs` types the plugin may handle.
+    #[serde(default)]
+    pub jobs: BTreeSet<String>,
     /// Approved network mode: `deny` or `outbound`.
     pub network_mode: String,
     /// Approved initial outbound domain patterns (**workerd** allowlist).
@@ -217,6 +353,22 @@ pub struct PluginGrant {
     pub extra_processes: Option<u32>,
     /// RFC 3339 time when the operator approved this grant.
     pub approved_at: String,
+}
+
+impl PluginGrant {
+    /// True when this grant authorizes delivering `event_type` at `schema_version`.
+    #[must_use]
+    pub fn allows_event_consumer(&self, event_type: &str, schema_version: u32) -> bool {
+        self.consumers
+            .iter()
+            .any(|c| c.event_type == event_type && c.schema_versions.contains(&schema_version))
+    }
+
+    /// True when this grant authorizes handling `job_type`.
+    #[must_use]
+    pub fn allows_job(&self, job_type: &str) -> bool {
+        self.jobs.iter().any(|j| j == job_type)
+    }
 }
 
 /// On-disk grant store.
@@ -405,6 +557,8 @@ pub fn consent_request_alias(manifest: &PluginManifest) -> PluginGrant {
             .map(|e| e.wire_name().to_string())
             .collect(),
         producers: manifest.producer_types().into_iter().collect(),
+        consumers: granted_consumers_from_manifest(manifest),
+        jobs: granted_jobs_from_manifest(manifest),
         network_mode: match manifest.capabilities.network.mode {
             crate::manifest::NetworkMode::Deny => "deny".into(),
             crate::manifest::NetworkMode::Outbound => "outbound".into(),
@@ -464,6 +618,31 @@ pub fn consent_summary(grant: &PluginGrant) -> Vec<String> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
+        ));
+    }
+    if !grant.consumers.is_empty() {
+        let names: Vec<String> = grant
+            .consumers
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} (schemas {}; suspend={})",
+                    c.event_type,
+                    c.schema_versions
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    c.supports_suspend
+                )
+            })
+            .collect();
+        lines.push(format!("Consumes events: {}", names.join("; ")));
+    }
+    if !grant.jobs.is_empty() {
+        lines.push(format!(
+            "Job triggers: {}",
+            grant.jobs.iter().cloned().collect::<Vec<_>>().join(", ")
         ));
     }
     if grant.network_mode == "outbound" && grant.domains.is_empty() {
@@ -613,6 +792,10 @@ pub fn grant_within_ceiling(existing: &PluginGrant, requested: &PluginGrant) -> 
         && existing
             .compatibility_flags
             .is_subset(&requested.compatibility_flags)
+        && consumers_cover(&requested.consumers, &existing.consumers)
+        && existing.jobs.is_subset(&requested.jobs)
+        && existing.entrypoints.is_subset(&requested.entrypoints)
+        && existing.producers.is_subset(&requested.producers)
 }
 
 /// True when both grants name the same provenance-qualified plugin.
@@ -634,6 +817,8 @@ pub fn grant_covers(existing: &PluginGrant, requested: &PluginGrant) -> bool {
         && existing.plugin_id == requested.plugin_id
         && requested.entrypoints.is_subset(&existing.entrypoints)
         && requested.producers.is_subset(&existing.producers)
+        && consumers_cover(&existing.consumers, &requested.consumers)
+        && requested.jobs.is_subset(&existing.jobs)
         && requested.bindings.is_subset(&existing.bindings)
         && requested
             .compatibility_flags
@@ -707,6 +892,12 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
         producers: existing
             .producers
             .intersection(&requested.producers)
+            .cloned()
+            .collect(),
+        consumers: intersect_consumers(&existing.consumers, &requested.consumers),
+        jobs: existing
+            .jobs
+            .intersection(&requested.jobs)
             .cloned()
             .collect(),
         network_mode,
@@ -793,6 +984,16 @@ pub fn validate_approved_grant(
     if let Some(extra) = approved.producers.difference(&baseline.producers).next() {
         return Err(PluginError::message(format!(
             "grant event producer `{extra}` is not declared by plugin.toml"
+        )));
+    }
+    if !consumers_cover(&baseline.consumers, &approved.consumers) {
+        return Err(PluginError::message(
+            "grant event consumer is not declared by plugin.toml (structural authority)",
+        ));
+    }
+    if let Some(extra) = approved.jobs.difference(&baseline.jobs).next() {
+        return Err(PluginError::message(format!(
+            "grant job trigger `{extra}` is not declared by plugin.toml (structural authority)"
         )));
     }
     let network_mode = if approved.network_mode.is_empty() {
@@ -905,8 +1106,32 @@ pub fn validate_approved_grant(
     Ok(PluginGrant {
         plugin_key: baseline.plugin_key.clone(),
         plugin_id: baseline.plugin_id.clone(),
-        entrypoints: baseline.entrypoints.clone(),
-        producers: baseline.producers.clone(),
+        entrypoints: if approved.entrypoints.is_empty() {
+            baseline.entrypoints.clone()
+        } else {
+            approved.entrypoints.clone()
+        },
+        producers: if approved.producers.is_empty() && baseline.producers.is_empty() {
+            BTreeSet::new()
+        } else if approved.producers.is_empty() {
+            baseline.producers.clone()
+        } else {
+            approved.producers.clone()
+        },
+        consumers: if approved.consumers.is_empty() && !baseline.consumers.is_empty() {
+            // Empty approved consumers with a non-empty baseline means the
+            // operator omitted the field (legacy JSON). Inherit the request.
+            // Explicit narrowing to none is represented by a stored empty set
+            // that already passed [`consumers_cover`] against baseline.
+            baseline.consumers.clone()
+        } else {
+            approved.consumers.clone()
+        },
+        jobs: if approved.jobs.is_empty() && !baseline.jobs.is_empty() {
+            baseline.jobs.clone()
+        } else {
+            approved.jobs.clone()
+        },
         network_mode: network_mode.to_ascii_lowercase(),
         domains: domains.clone(),
         manifest_domains: baseline.domains.clone(),
@@ -1228,6 +1453,20 @@ pub fn validate_described_capabilities(
                 consumer.event_type
             )));
         }
+        if !grant.consumers.iter().any(|c| {
+            c.event_type == consumer.event_type
+                && consumer
+                    .schema_versions
+                    .iter()
+                    .all(|v| c.schema_versions.contains(v))
+                && (!consumer.supports_suspend || c.supports_suspend)
+        }) {
+            return Err(PluginError::message(format!(
+                "plugin `{id}` grant lacks event consumer `{}`; re-approve with \
+                 `bookclerk plugins approve {id}`",
+                consumer.event_type
+            )));
+        }
     }
     for producer in &described.produces {
         if !declared.produces.contains(producer) {
@@ -1246,6 +1485,12 @@ pub fn validate_described_capabilities(
         if !declared.jobs.contains(job) {
             return Err(PluginError::message(format!(
                 "plugin `{id}` describe() runs job `{job}` not declared in plugin.toml"
+            )));
+        }
+        if !grant.jobs.contains(job) {
+            return Err(PluginError::message(format!(
+                "plugin `{id}` grant lacks job trigger `{job}`; re-approve with \
+                 `bookclerk plugins approve {id}`"
             )));
         }
     }
@@ -1334,6 +1579,8 @@ mode = "deny"
             plugin_id: "demo".into(),
             entrypoints: ["storefront".to_string()].into_iter().collect(),
             producers: BTreeSet::new(),
+            consumers: Default::default(),
+            jobs: Default::default(),
             network_mode: "outbound".into(),
             domains: domains.iter().map(|s| (*s).to_string()).collect(),
             manifest_domains: domains.iter().map(|s| (*s).to_string()).collect(),
@@ -1363,6 +1610,111 @@ mode = "deny"
         let existing = sample_grant(&["a.example"], &["config"], &[]);
         let requested = sample_grant(&["a.example"], &["config", "secrets"], &[]);
         assert!(!grant_covers(&existing, &requested));
+    }
+
+    #[test]
+    fn grant_covers_rejects_new_event_consumer() {
+        let existing = sample_grant(&[], &["config"], &[]);
+        let mut requested = existing.clone();
+        requested.consumers.insert(GrantedEventConsumer {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: false,
+            filter: None,
+        });
+        assert!(!grant_covers(&existing, &requested));
+        let approved = requested.clone();
+        assert!(grant_covers(&approved, &requested));
+    }
+
+    #[test]
+    fn grant_covers_rejects_new_job_trigger() {
+        let existing = sample_grant(&[], &["config"], &[]);
+        let mut requested = existing.clone();
+        requested.jobs.insert("stream_copy".into());
+        assert!(!grant_covers(&existing, &requested));
+        assert!(grant_covers(&requested, &requested));
+    }
+
+    #[test]
+    fn adding_consumer_or_job_changes_authority_revision() {
+        let base = sample_grant(&[], &["config"], &[]);
+        let mut with_consumer = base.clone();
+        with_consumer.consumers.insert(GrantedEventConsumer {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: true,
+            filter: None,
+        });
+        assert_ne!(grant_revision(&base), grant_revision(&with_consumer));
+        let mut with_job = base.clone();
+        with_job.jobs.insert("stream_copy".into());
+        assert_ne!(grant_revision(&base), grant_revision(&with_job));
+        assert_ne!(grant_revision(&with_consumer), grant_revision(&with_job));
+    }
+
+    #[test]
+    fn validate_approved_grant_rejects_invented_consumer_and_job() {
+        let baseline = sample_grant(&[], &["config"], &[]);
+        let mut steal = baseline.clone();
+        steal.consumers.insert(GrantedEventConsumer {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: false,
+            filter: None,
+        });
+        let err = validate_approved_grant(&steal, &baseline)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("consumer"), "{err}");
+        let mut steal_job = baseline.clone();
+        steal_job.jobs.insert("stream_copy".into());
+        let err = validate_approved_grant(&steal_job, &baseline)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("job trigger"), "{err}");
+    }
+
+    #[test]
+    fn consent_request_includes_consumers_and_jobs() {
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 3
+id = "demo"
+runtime = "native"
+command = "./demo"
+entrypoints = ["cli"]
+
+[capabilities.network]
+mode = "deny"
+
+[[events.consumers]]
+type = "book_acquired"
+schema_versions = [1]
+supports_suspend = true
+
+[triggers]
+jobs = ["stream_copy"]
+"#,
+        )
+        .unwrap();
+        let grant = consent_request_alias(&manifest);
+        assert!(grant
+            .consumers
+            .iter()
+            .any(|c| c.event_type == "book_acquired"
+                && c.schema_versions == vec![1]
+                && c.supports_suspend));
+        assert!(grant.jobs.contains("stream_copy"));
+        let summary = consent_summary(&grant);
+        assert!(
+            summary.iter().any(|l| l.contains("Consumes events")),
+            "{summary:?}"
+        );
+        assert!(
+            summary.iter().any(|l| l.contains("Job triggers")),
+            "{summary:?}"
+        );
     }
 
     #[test]

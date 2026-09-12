@@ -202,7 +202,42 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
                     continue;
                 }
                 let enabled = cfg.integrations.is_enabled(&plugin.manifest.id);
-                let subs = catalog_from_manifest(&plugin);
+                let grant = bookclerk_plugin_host::PluginGrantStore::load(&cfg.paths().files_dir)
+                    .ok()
+                    .and_then(|store| {
+                        store
+                            .get_by_plugin_key(plugin.plugin_key().canonical())
+                            .cloned()
+                    });
+                let requested =
+                    bookclerk_plugin_host::granted_consumers_from_manifest(&plugin.manifest);
+                let admitted = grant
+                    .as_ref()
+                    .map(|g| {
+                        requested
+                            .iter()
+                            .filter(|req| g.consumers.iter().any(|got| got.covers(req)))
+                            .cloned()
+                            .collect::<std::collections::BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                if admitted.is_empty() {
+                    continue;
+                }
+                let subs = catalog_from_manifest(&plugin)
+                    .into_iter()
+                    .filter(|s| {
+                        admitted.iter().any(|c| {
+                            c.event_type == s.event_type
+                                && s.schema_versions
+                                    .iter()
+                                    .all(|v| c.schema_versions.contains(v))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if subs.is_empty() {
+                    continue;
+                }
                 if let Err(err) = library
                     .upsert_event_subscriber(&node_id, &plugin.manifest.id, &subs, enabled)
                     .await

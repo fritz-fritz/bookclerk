@@ -1648,6 +1648,15 @@ export interface PluginGrant {
   entrypoints: string[];
   /** Event types the operator approved the plugin to publish. */
   producers: string[];
+  /** Approved event-consumer subscriptions (type + schemas + suspend + filter). */
+  consumers?: Array<{
+    eventType: string;
+    schemaVersions: number[];
+    supportsSuspend: boolean;
+    filter?: string | null;
+  }>;
+  /** Approved `[triggers].jobs` types. */
+  jobs?: string[];
   networkMode: string;
   domains: string[];
   manifestDomains?: string[];
