@@ -10,9 +10,11 @@ use crate::ExecuteRequest;
 
 /// Applies host semantic desugars to canonical SQL.
 ///
-/// Explicit `NULLS FIRST`/`LAST` and an already-wrapped `NULLIF(divisor, 0)`
-/// are left unchanged. Callers must run this **once** before proof generation;
-/// adapters must not repeat it.
+/// Explicit `NULLS FIRST`/`LAST` and a divisor that is structurally
+/// `NULLIF(<expression>, 0)` are left unchanged. A `NULLIF` call whose second
+/// argument is not the integer `0` (for example `NULLIF(0, 1)`) still gains
+/// an outer zero guard. Callers must run this **once** before proof
+/// generation; adapters must not repeat it.
 #[must_use]
 pub fn desugar_canonical_sql(sql: &str) -> String {
     let sql = rewrite_div_mod_null_on_zero(sql);
@@ -64,10 +66,110 @@ fn rewrite_div_mod_null_on_zero(sql: &str) -> String {
     out
 }
 
-/// True when `atom` is already a `NULLIF(…)` call (host or prior desugar).
+/// True when `atom` is structurally `NULLIF(<expression>, 0)`.
+///
+/// Any other `NULLIF` call (including `NULLIF(0, 1)`, which evaluates to `0`)
+/// still needs an outer zero guard so `/` and `%` stay portable.
 fn operand_already_nullif(atom: &str) -> bool {
-    let trimmed = atom.trim_start();
-    ident_eq_ci(trimmed, 0, "NULLIF")
+    let s = unwrap_outer_parens(atom);
+    let i = skip_trivia_idx(s, 0);
+    if !ident_eq_ci(s, i, "NULLIF") {
+        return false;
+    }
+    let after_name = skip_trivia_idx(s, i + "NULLIF".len());
+    if s.as_bytes().get(after_name) != Some(&b'(') {
+        return false;
+    }
+    let close = skip_balanced(s, after_name);
+    if close < after_name.saturating_add(2) {
+        return false;
+    }
+    if skip_trivia_idx(s, close) != s.len() {
+        return false;
+    }
+    let inside = &s[after_name + 1..close - 1];
+    let Some(args) = split_top_level_args(inside) else {
+        return false;
+    };
+    args.len() == 2 && is_integer_zero(args[1])
+}
+
+/// Strips matching outer parentheses and surrounding whitespace.
+fn unwrap_outer_parens(atom: &str) -> &str {
+    let mut cur = atom;
+    loop {
+        let start = skip_trivia_idx(cur, 0);
+        let mut end = cur.len();
+        while end > start {
+            let Some(ch) = cur[..end].chars().next_back() else {
+                break;
+            };
+            if ch.is_whitespace() {
+                end -= ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if start >= end {
+            return "";
+        }
+        let span = &cur[start..end];
+        if span.as_bytes().first() != Some(&b'(') || span.as_bytes().last() != Some(&b')') {
+            return span;
+        }
+        let close = skip_balanced(span, 0);
+        if close != span.len() {
+            return span;
+        }
+        cur = &span[1..span.len() - 1];
+    }
+}
+
+/// Top-level comma-separated arguments inside a call (literals/comments skipped).
+fn split_top_level_args(inside: &str) -> Option<Vec<&str>> {
+    let mut args = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < inside.len() {
+        if let Some(len) = literal_or_comment_len(&inside[i..]) {
+            i += len;
+            continue;
+        }
+        let ch = inside[i..].chars().next()?;
+        match ch {
+            '(' => depth += 1,
+            ')' if depth == 0 => return None,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                args.push(&inside[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += ch.len_utf8();
+    }
+    if depth != 0 {
+        return None;
+    }
+    args.push(&inside[start..]);
+    Some(args)
+}
+
+/// True when `arg` is the integer token `0` (optional parens and trivia).
+fn is_integer_zero(arg: &str) -> bool {
+    let s = unwrap_outer_parens(arg);
+    let i = skip_trivia_idx(s, 0);
+    if s.as_bytes().get(i) != Some(&b'0') {
+        return false;
+    }
+    let after = i + 1;
+    if let Some(&b) = s.as_bytes().get(after) {
+        if b.is_ascii_digit() || b == b'.' || b == b'e' || b == b'E' || b == b'x' || b == b'X' {
+            return false;
+        }
+    }
+    skip_trivia_idx(s, after) == s.len()
 }
 
 /// Operand of `/` or `%`: admitted primary (paren, ident, call, CAST, unary, number, bind).
@@ -471,5 +573,50 @@ mod tests {
         assert_eq!(out.matches("/*c*/").count(), 1, "{out}");
         let spaces = "SELECT 1 /   * FROM t";
         assert_eq!(desugar_canonical_sql(spaces), spaces);
+    }
+
+    #[test]
+    fn nullif_zero_guard_is_structural_not_name_only() {
+        let already = desugar_canonical_sql("SELECT 1 / NULLIF(x, 0)");
+        assert_eq!(already, "SELECT 1 / NULLIF(x, 0)");
+        assert_eq!(desugar_canonical_sql(&already), already);
+
+        let div = desugar_canonical_sql("SELECT 1 / NULLIF(0, 1)");
+        assert_eq!(div, "SELECT 1 / NULLIF(NULLIF(0, 1), 0)");
+        assert_eq!(desugar_canonical_sql(&div), div, "must stay idempotent");
+
+        let modulo = desugar_canonical_sql("SELECT 1 % NULLIF(0, 1)");
+        assert_eq!(modulo, "SELECT 1 % NULLIF(NULLIF(0, 1), 0)");
+        assert_eq!(desugar_canonical_sql(&modulo), modulo);
+
+        let folded = desugar_canonical_sql("SELECT 1 / nullif(0, 1)");
+        assert_eq!(folded, "SELECT 1 / NULLIF(nullif(0, 1), 0)");
+        assert_eq!(desugar_canonical_sql(&folded), folded);
+
+        let spaced = desugar_canonical_sql("SELECT 1 /  NULLIF ( 0 , 1 )");
+        assert!(spaced.contains("NULLIF(NULLIF ( 0 , 1 ), 0)"), "{spaced}");
+        assert_eq!(desugar_canonical_sql(&spaced), spaced);
+
+        let comments = desugar_canonical_sql("SELECT 1 / NULLIF(/*z*/ 0, /*w*/ 1)");
+        assert_eq!(comments, "SELECT 1 / NULLIF(NULLIF(/*z*/ 0, /*w*/ 1), 0)");
+        assert_eq!(desugar_canonical_sql(&comments), comments);
+
+        let trivia = desugar_canonical_sql("SELECT 1 / /*c*/ NULLIF(0, 1)");
+        assert_eq!(trivia, "SELECT 1 / /*c*/ NULLIF(NULLIF(0, 1), 0)");
+        assert_eq!(desugar_canonical_sql(&trivia), trivia);
+
+        let parens = desugar_canonical_sql("SELECT 1 / (NULLIF(0, 1))");
+        assert_eq!(parens, "SELECT 1 / NULLIF((NULLIF(0, 1)), 0)");
+        assert_eq!(desugar_canonical_sql(&parens), parens);
+
+        let already_parens = desugar_canonical_sql("SELECT 1 / (NULLIF(x, 0))");
+        assert_eq!(already_parens, "SELECT 1 / (NULLIF(x, 0))");
+        assert_eq!(desugar_canonical_sql(&already_parens), already_parens);
+
+        let already_inner_zero = desugar_canonical_sql("SELECT 1 / NULLIF(0, 0)");
+        assert_eq!(already_inner_zero, "SELECT 1 / NULLIF(0, 0)");
+
+        let nested = desugar_canonical_sql("SELECT 1 / NULLIF(NULLIF(0, 1), 0)");
+        assert_eq!(nested, "SELECT 1 / NULLIF(NULLIF(0, 1), 0)");
     }
 }
