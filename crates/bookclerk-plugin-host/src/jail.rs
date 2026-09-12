@@ -53,7 +53,7 @@ const JAIL_BIN_ENV: &str = "BOOKCLERK_PLUGIN_JAIL";
 
 /// The private directory a plugin keeps state in.
 ///
-/// State is keyed by [`PluginKey`] (`plugin-state/<fs_id>/data`), not the
+/// State is keyed by [`bookclerk_plugin_catalog::PluginKey`] (`plugin-state/<fs_id>/data`), not the
 /// display alias. Invalid keys cannot be constructed.
 ///
 /// # Errors
