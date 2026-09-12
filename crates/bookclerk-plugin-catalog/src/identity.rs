@@ -56,6 +56,11 @@ pub struct PlatformArtifact {
 
 impl PlatformArtifact {
     /// [`PluginKey`] for this platform package.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a baked-in [`PLATFORM_ARTIFACTS`] package name or manifest id
+    /// fails the PluginKey grammar. Those rows are compile-time constants.
     #[must_use]
     pub fn plugin_key(self) -> PluginKey {
         PluginKey::platform(self.package_name, self.manifest_id)
