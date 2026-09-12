@@ -832,9 +832,19 @@ pub fn admitted_bookclerk_sql_samples(seed: u64, count: usize) -> Vec<String> {
         };
         out.push(sql);
     }
-    out.push("SELECT json_object('a', 1, 'b', NULL)".into());
+    // Length/extract keep SQLite/Postgres differentials portable (JSON
+    // spacing and duplicate-key winner are engine-specific). The calls
+    // still exercise 2-arg null retention and 32-arg (16-pair) arity.
+    out.push(
+        "SELECT CASE WHEN length(json_object('a', 1, 'b', NULL)) \
+             > length(json_object('a', 1)) THEN 1 ELSE 0 END"
+            .into(),
+    );
     let pairs: Vec<String> = (0..16).map(|i| format!("'k{i:02}', 'v{i:02}'")).collect();
-    out.push(format!("SELECT json_object({})", pairs.join(", ")));
+    out.push(format!(
+        "SELECT json_extract(json_object({}), '$.k15')",
+        pairs.join(", ")
+    ));
     out.push("SELECT 1 / NULLIF(0, 1), 1 % NULLIF(0, 1)".into());
     out.push("SELECT 10 / NULLIF(2, 0)".into());
     out
