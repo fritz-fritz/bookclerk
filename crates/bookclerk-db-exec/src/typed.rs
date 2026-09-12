@@ -1068,9 +1068,11 @@ fn db_value_cell_len(v: &DbValue) -> usize {
 ///
 /// Column names and declared types come from rusqlite/SQLite metadata when the
 /// adapter recorded them ([`take_positional_result_columns`]), otherwise from
-/// the first engine row (Postgres `type_info`, else `column_names`). Duplicate
-/// names are rejected here, before any name-keyed map conversion. Empty
-/// Postgres `SELECT`s record metadata via a one-row probe first.
+/// the first engine row (Postgres `type_info`, else `column_names`). Postgres
+/// `?column?` labels are uniquified when two unnamed items would otherwise
+/// collide. Guest duplicate aliases are rejected here, before any name-keyed
+/// map conversion. Empty Postgres `SELECT`s record metadata via a one-row
+/// probe first.
 ///
 /// # Errors
 ///
@@ -1095,6 +1097,7 @@ fn statement_result_from_query_results(
             .map(db_columns_from_engine_row)
             .unwrap_or_default()
     });
+    uniquify_postgres_anonymous_columns(&mut db_columns);
     reject_duplicate_column_names(&db_columns)?;
     let mut db_rows = Vec::with_capacity(engine_rows.len());
     for engine in engine_rows {
@@ -1201,6 +1204,26 @@ fn db_type_from_pg_type_name(name: &str) -> DbType {
         "BYTEA" => DbType::Bytes,
         "TEXT" | "VARCHAR" | "NAME" | "BPCHAR" | "CHAR" | "CSTRING" | "UNKNOWN" => DbType::Text,
         _ => DbType::Unspecified,
+    }
+}
+
+/// Postgres names every unnamed SELECT item `?column?`.
+///
+/// SQLite uses the expression text, so `SELECT 1, 2` has distinct names.
+/// Duplicate `?column?` would fail [`reject_duplicate_column_names`] even
+/// though the cells are positional. Guest aliases that collide (`SELECT x, x`)
+/// are left unchanged and still fail closed.
+fn uniquify_postgres_anonymous_columns(columns: &mut [DbColumn]) {
+    let n = columns.iter().filter(|c| c.name == "?column?").count();
+    if n <= 1 {
+        return;
+    }
+    let mut i = 0usize;
+    for col in columns.iter_mut() {
+        if col.name == "?column?" {
+            col.name = format!("_bc_anon_{i}");
+            i += 1;
+        }
     }
 }
 
@@ -2473,6 +2496,45 @@ mod tests {
             },
         ];
         assert!(reject_duplicate_column_names(&cols).is_err());
+    }
+
+    #[test]
+    fn postgres_anonymous_column_names_are_uniquified() {
+        let mut cols = vec![
+            DbColumn {
+                name: "?column?".into(),
+                db_type: DbType::Int64,
+            },
+            DbColumn {
+                name: "?column?".into(),
+                db_type: DbType::Int64,
+            },
+        ];
+        uniquify_postgres_anonymous_columns(&mut cols);
+        reject_duplicate_column_names(&cols).expect("anonymous postgres names");
+        assert_eq!(cols[0].name, "_bc_anon_0");
+        assert_eq!(cols[1].name, "_bc_anon_1");
+
+        let mut one = vec![DbColumn {
+            name: "?column?".into(),
+            db_type: DbType::Int64,
+        }];
+        uniquify_postgres_anonymous_columns(&mut one);
+        assert_eq!(one[0].name, "?column?");
+
+        let mut user = vec![
+            DbColumn {
+                name: "x".into(),
+                db_type: DbType::Int64,
+            },
+            DbColumn {
+                name: "x".into(),
+                db_type: DbType::Int64,
+            },
+        ];
+        uniquify_postgres_anonymous_columns(&mut user);
+        assert_eq!(user[0].name, "x");
+        assert!(reject_duplicate_column_names(&user).is_err());
     }
 
     #[test]
