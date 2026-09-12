@@ -304,19 +304,33 @@ async fn run_native_behind_workerd(
     let bridge_token = generate_bridge_token();
 
     #[cfg(unix)]
-    let (socket_proxy_path, socket_listener) = {
-        let (spec, listener) = bookclerk_workerd::unix_bind::bind_socket_proxy(&state_dir)
-            .context("bind socket proxy")?;
-        (spec, listener)
+    let socket_proxy =
+        bookclerk_workerd::unix_bind::bind_socket_proxy(&state_dir).context("bind socket proxy")?;
+    #[cfg(unix)]
+    let inherit_fds = {
+        use std::os::fd::AsRawFd;
+        let mut fds = Vec::new();
+        if let Some(ref dir) = socket_proxy.inherit_dir {
+            bookclerk_workerd::unix_bind::clear_cloexec(dir.as_raw_fd())
+                .context("clear CLOEXEC on socket-proxy dir fd")?;
+            fds.push(dir.as_raw_fd());
+        }
+        fds
     };
+    #[cfg(not(unix))]
+    let inherit_fds: Vec<i32> = Vec::new();
 
-    let mut guest_cmd =
-        bookclerk_workerd::native_guest::native_guest_command(backend, root, &state_dir)?;
+    let mut guest_cmd = bookclerk_workerd::native_guest::native_guest_command(
+        backend,
+        root,
+        &state_dir,
+        &inherit_fds,
+    )?;
     #[cfg(unix)]
     {
         guest_cmd.env(
             bookclerk_workerd::socket_proxy::SOCKET_PROXY_ENV,
-            &socket_proxy_path,
+            &socket_proxy.spec,
         );
     }
     let mut guest = guest_cmd
@@ -407,7 +421,7 @@ async fn run_native_behind_workerd(
         use std::sync::Arc;
         let fence = Arc::new(AtomicBool::new(false));
         bookclerk_workerd::socket_proxy::spawn_unix(
-            socket_listener,
+            socket_proxy.listener,
             egress.policy().clone(),
             Arc::clone(&fence),
         )?;
