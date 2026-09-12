@@ -46,6 +46,8 @@ pub(crate) struct SpawnedStdio {
     pub appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
     /// Last lines of guest stderr (workerd + native child), for spawn failures.
     pub stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    /// Files dir used to re-read `plugin-grants.json` before returning a session.
+    pub files_dir: PathBuf,
 }
 
 /// Spawns the jailed guest with piped stdio. Caller performs Cap'n Proto connect.
@@ -176,6 +178,7 @@ pub(crate) async fn spawn_stdio_guest(
         #[cfg(windows)]
         appcontainer: jail.appcontainer,
         stderr_tail,
+        files_dir: config.paths().files_dir.clone(),
     })
 }
 

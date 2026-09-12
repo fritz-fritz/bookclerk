@@ -98,7 +98,12 @@ payloads for several storefront / integration surfaces, and a reverse
    grants. Fetch does not imply TCP. Default address space is public
    Internet only. Native guests are nested under `NetPolicy::Deny` and must
    use the SDK socket capability; the launcher jail stays `OutboundListen`
-   for the RPC bridge.
+   for the RPC bridge. Grant mutation is live: `plugin-grants.json` changes
+   fence running vats immediately (vat shutdown + kill child + drop the
+   socket proxy and granted channels), including CLI writes observed by
+   `bookclerkd`. Idle mediated TCP is interrupted on the fence; enforcement
+   does not wait for the next host RPC. `authority_revision` (effective
+   grant) stays distinct from `configuration_revision` (manifest hash).
 
 ## Consequences
 

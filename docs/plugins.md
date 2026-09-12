@@ -892,7 +892,19 @@ manifest stays within the installer envelope (deny network, `config` /
 privilege.
 
 Grants are persisted under `$BOOKCLERK_FILES_DIR/plugin-grants.json`, keyed
-by provenance-qualified PluginKey. Structural capabilities originate in the
+by provenance-qualified PluginKey. Saving that file is the operator
+mechanism (`bookclerk plugins approve` and `POST /api/plugins/{id}/consent`).
+`bookclerkd` watches the file (and same-process saves notify immediately)
+and **proactively** fences any live session whose `authority_revision` no
+longer matches: the vat receives `Work::Shutdown`, the jailed
+`bookclerk-workerd` child is killed, the native guest and mediated TCP
+proxy drop, and EVENTS / granted database channels go with the vat. This
+does **not** wait for the next plugin RPC. `authority_revision` hashes
+effective consent (structural + network). It is distinct from
+`configuration_revision` (installed `plugin.toml` hash) on the executor
+identity.
+
+Structural capabilities originate in the
 manifest; the operator may **narrow** them but cannot invent entrypoints,
 producers, or host bindings. Network destinations are operator-extensible:
 operators may add fetch hosts, TCP `host:ports`, and CIDRs beyond the

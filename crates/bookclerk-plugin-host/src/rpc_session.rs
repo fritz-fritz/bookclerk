@@ -633,10 +633,7 @@ impl PluginSession {
         let instance_key = plugin_instance_key(&id, account_id);
         let identity = ExecutorIdentity::from_plugin_with_runtime(plugin, account_id, plan.runtime)
             .with_grant_revision(&grant);
-        let authority_fence = crate::authority::register_session(
-            plugin.plugin_key().canonical(),
-            &identity.grant_revision,
-        );
+        let files_dir = spawned.files_dir.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) =
             oneshot::channel::<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>();
@@ -667,6 +664,26 @@ impl PluginSession {
                 desc.api_version
             )));
         }
+        match crate::consent::spawn_grant(&files_dir, plugin) {
+            Ok(fresh)
+                if crate::authority::authority_revision(&fresh) == identity.grant_revision => {}
+            Ok(_) => {
+                let _ = tx.send(Work::Shutdown);
+                return Err(crate::authority::fenced_error());
+            }
+            Err(err) => {
+                let _ = tx.send(Work::Shutdown);
+                return Err(err);
+            }
+        }
+        let shutdown_tx = tx.clone();
+        let authority_fence = crate::authority::register_session_with_shutdown(
+            plugin.plugin_key().canonical(),
+            &identity.grant_revision,
+            Arc::new(move || {
+                let _ = shutdown_tx.send(Work::Shutdown);
+            }),
+        );
         Ok(Self {
             tx,
             id,
