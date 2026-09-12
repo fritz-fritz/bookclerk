@@ -39,8 +39,8 @@ async fn staged_first_party_plugins_describe() {
         }
     };
     assert!(
-        files.join("plugins").join("sqlite").is_dir(),
-        "platform sqlite missing under {}/plugins (run cargo install-platform)",
+        files.join("install-ledger.json").is_file(),
+        "platform install ledger missing under {} (run cargo install-platform)",
         files.display()
     );
 

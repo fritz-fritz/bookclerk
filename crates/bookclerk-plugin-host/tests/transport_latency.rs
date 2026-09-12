@@ -83,7 +83,8 @@ fn stage_sqlite_guest() -> Option<StagedGuest> {
     let manifest = bookclerk_plugin_manifest::parse(&toml).ok()?;
     Some(StagedGuest {
         files: TempDir::new().ok()?,
-        plugin: DiscoveredPlugin::new(manifest, install.path().to_path_buf(), dest_bin),
+        plugin: DiscoveredPlugin::try_new(manifest, install.path().to_path_buf(), dest_bin, None)
+            .ok()?,
         _install: install,
     })
 }

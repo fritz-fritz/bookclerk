@@ -747,20 +747,30 @@ entrypoints = ["{entrypoint}"]
         );
         std::fs::write(root.join("plugin.toml"), &toml).expect("write plugin.toml");
         let manifest = crate::PluginManifest::parse(&toml).expect("test manifest");
-        DiscoveredPlugin::new(manifest, root.to_path_buf(), command)
+        DiscoveredPlugin::try_new(manifest, root.to_path_buf(), command, None)
+            .expect("test plugin tree must evaluate")
     }
 
-    fn sqlite_plugin_at(root: &Path) -> DiscoveredPlugin {
+    fn sqlite_plugin_at(files: &Path) -> DiscoveredPlugin {
+        let key = bookclerk_plugin_catalog::PluginKey::platform(
+            "bookclerk-plugin-database-sqlite",
+            "sqlite",
+        )
+        .unwrap();
+        let root = files.join("plugins").join(key.fs_id());
+        std::fs::create_dir_all(&root).expect("platform plugin dir");
         let plugin =
-            plugin_with_entrypoint(root, "sqlite", JailNetworkNeed::None, "databaseAdapter");
+            plugin_with_entrypoint(&root, "sqlite", JailNetworkNeed::None, "databaseAdapter");
         bookclerk_plugin_catalog::stamp_platform_receipt(
-            root,
+            &plugin.root,
+            files,
             "bookclerk-plugin-database-sqlite",
             &plugin.manifest,
             "0.0.0",
         )
         .expect("stamp platform sqlite");
-        DiscoveredPlugin::new(plugin.manifest, plugin.root, plugin.command)
+        DiscoveredPlugin::try_new(plugin.manifest, plugin.root, plugin.command, Some(files))
+            .expect("stamped platform sqlite")
     }
 
     /// Diagnostic-transport plan: the jail execs the native command itself.
@@ -857,9 +867,8 @@ entrypoints = ["{entrypoint}"]
     #[test]
     fn sqlite_guest_gets_library_db_files_but_not_secrets() {
         let files = tempfile::tempdir().expect("tempdir");
-        let install = tempfile::tempdir().expect("tempdir");
         let config = config_at(files.path());
-        let plugin = sqlite_plugin_at(install.path());
+        let plugin = sqlite_plugin_at(files.path());
         ensure_sqlite_library_files(&config).expect("touch sqlite files");
 
         let spec = build_spec(
@@ -937,10 +946,9 @@ entrypoints = ["{entrypoint}"]
     #[test]
     fn planning_sqlite_precreates_library_sidecars() {
         let files = tempfile::tempdir().expect("tempdir");
-        let install = tempfile::tempdir().expect("tempdir");
         let mut config = config_at(files.path());
         config.plugins.isolation = Isolation::Off;
-        let plugin = sqlite_plugin_at(install.path());
+        let plugin = sqlite_plugin_at(files.path());
 
         let _jail = GuestJail::plan(&config, &plugin, &direct(&plugin)).expect("plan");
         for path in sqlite_library_paths(&config) {

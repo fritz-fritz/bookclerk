@@ -112,7 +112,8 @@ fn stage_first_party_guest(id: &str) -> Option<StagedGuest> {
     let files = TempDir::new().ok()?;
     Some(StagedGuest {
         files,
-        plugin: DiscoveredPlugin::new(manifest, install.path().to_path_buf(), dest_bin),
+        plugin: DiscoveredPlugin::try_new(manifest, install.path().to_path_buf(), dest_bin, None)
+            .ok()?,
         _install: install,
     })
 }

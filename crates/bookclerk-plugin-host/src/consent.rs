@@ -1168,12 +1168,19 @@ mod tests {
         let command = root.join("guest");
         std::fs::write(&command, b"#!/bin/sh\n").unwrap();
         let manifest = PluginManifest::parse(toml).unwrap();
-        DiscoveredPlugin::new(manifest, root.to_path_buf(), command)
+        DiscoveredPlugin::try_new(manifest, root.to_path_buf(), command, None)
+            .expect("test plugin tree must evaluate")
     }
 
-    fn stamped_sqlite(root: &std::path::Path) -> DiscoveredPlugin {
+    fn stamped_sqlite(files: &std::path::Path) -> DiscoveredPlugin {
+        let key = bookclerk_plugin_catalog::PluginKey::platform(
+            "bookclerk-plugin-database-sqlite",
+            "sqlite",
+        )
+        .unwrap();
+        let root = files.join("plugins").join(key.fs_id());
         let plugin = discovered(
-            root,
+            &root,
             r#"
 api_version = 3
 id = "sqlite"
@@ -1190,13 +1197,15 @@ mode = "deny"
 "#,
         );
         bookclerk_plugin_catalog::stamp_platform_receipt(
-            root,
+            &plugin.root,
+            files,
             "bookclerk-plugin-database-sqlite",
             &plugin.manifest,
             "0.0.0",
         )
         .expect("stamp");
-        DiscoveredPlugin::new(plugin.manifest, plugin.root, plugin.command)
+        DiscoveredPlugin::try_new(plugin.manifest, plugin.root, plugin.command, Some(files))
+            .expect("stamped platform plugin")
     }
 
     fn sample_grant(domains: &[&str], bindings: &[&str], flags: &[&str]) -> PluginGrant {
@@ -1479,7 +1488,7 @@ domains = ["api.example.com"]
     #[test]
     fn platform_grant_auto_persists_for_sqlite() {
         let dir = tempfile::tempdir().unwrap();
-        let plugin = stamped_sqlite(&dir.path().join("install"));
+        let plugin = stamped_sqlite(dir.path());
         assert_eq!(
             plugin.identity.provenance,
             PluginProvenance::PlatformBundled
@@ -1546,12 +1555,19 @@ mode = "deny"
         );
         bookclerk_plugin_catalog::stamp_platform_receipt(
             &plugin.root,
+            dir.path(),
             "bookclerk-plugin-database-sqlite",
             &plugin.manifest,
             "0.0.0",
         )
         .unwrap();
-        let plugin = DiscoveredPlugin::new(plugin.manifest, plugin.root, plugin.command);
+        let plugin = DiscoveredPlugin::try_new(
+            plugin.manifest,
+            plugin.root,
+            plugin.command,
+            Some(dir.path()),
+        )
+        .unwrap();
 
         let mut store = PluginGrantStore::default();
         let mut existing = sample_grant(&[], &["config", "work_fs"], &[]);
@@ -1593,12 +1609,19 @@ mode = "deny"
         );
         bookclerk_plugin_catalog::stamp_platform_receipt(
             &plugin.root,
+            dir.path(),
             "bookclerk-plugin-database-sqlite",
             &plugin.manifest,
             "0.0.0",
         )
         .unwrap();
-        let plugin = DiscoveredPlugin::new(plugin.manifest, plugin.root, plugin.command);
+        let plugin = DiscoveredPlugin::try_new(
+            plugin.manifest,
+            plugin.root,
+            plugin.command,
+            Some(dir.path()),
+        )
+        .unwrap();
         let err = ensure_platform_grant(dir.path(), &plugin)
             .unwrap_err()
             .to_string();

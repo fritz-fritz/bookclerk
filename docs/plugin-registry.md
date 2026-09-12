@@ -1,6 +1,6 @@
 # Plugin registry (crates.io taxonomy + install without Rust)
 
-Third-party plugins install as archives under `$BOOKCLERK_FILES_DIR/plugins/<id>/`
+Third-party plugins install as archives under `$BOOKCLERK_FILES_DIR/plugins/<plugin-key-fs-id>/`
 (see [plugins.md](plugins.md) and the ADR
 [plugin-workers-rpc-workerd.md](adr/plugin-workers-rpc-workerd.md)):
 
@@ -75,7 +75,7 @@ These landed on the follow-up ecosystem track instead of expanding #74:
 | --- | --- |
 | crates.io crate | **Discovery index** + install URL metadata for plugin *authors* |
 | HTTPS downloadable archive | **Native:** per OS/arch binary + `plugin.toml`. **Workerd:** `plugin.toml` + `modules/` (portable) |
-| `$BOOKCLERK_FILES_DIR/plugins/<id>/` | **Installed** layout Bookclerk already loads |
+| `$BOOKCLERK_FILES_DIR/plugins/<plugin-key-fs-id>/` | **Installed** layout (`pk-` + 128-bit PluginKey digest); the manifest `id` remains a display alias |
 | Platform installer / `cargo package-platform` | **Hosts + jail + workerd + sqlite + local** — always bundled, not pulled from crates.io |
 
 Bookclerk never runs `cargo build` / `npm install` on the user’s machine to
@@ -99,7 +99,7 @@ crates.io ──search / metadata──► bookclerk plugins search|install
                               (native: per OS/arch; workerd: portable)
                                         │
                                         ▼
-                    plugins/<id>/{plugin.toml, binary and/or modules/}
+                    plugins/<plugin-key-fs-id>/{plugin.toml, binary and/or modules/}
 ```
 
 ## Crate naming taxonomy
@@ -298,7 +298,7 @@ publisher” vs “crates.io metadata only”.
 2. Read `[package.metadata.bookclerk]` from the crate’s published Cargo.toml
 3. Pick the host `target_triple` (or override)
 4. Download + verify the archive
-5. Extract into `$BOOKCLERK_FILES_DIR/plugins/<id>/`
+5. Extract into `$BOOKCLERK_FILES_DIR/plugins/<plugin-key-fs-id>/`
 6. Leave `enabled = false` for integrations (existing default); operator enables
    in config / dashboard
 

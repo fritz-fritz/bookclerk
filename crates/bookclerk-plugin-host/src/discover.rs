@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use bookclerk_config::Config;
 use bookclerk_library::BOOKCLERK_SCHEMA_NAMESPACE;
 use bookclerk_plugin_abi::PRODUCT_API_VERSION;
-use bookclerk_plugin_catalog::{evaluate_install, PluginInstallIdentity, PluginKey};
+use bookclerk_plugin_catalog::{evaluate_install_in, PluginInstallIdentity, PluginKey};
 
 use crate::manifest::PluginManifest;
 use crate::{PluginError, Result};
@@ -31,12 +31,45 @@ pub struct DiscoveredPlugin {
 impl DiscoveredPlugin {
     /// Builds a discovered plugin, evaluating content hashes and provenance.
     ///
-    /// When the install tree cannot be hashed (tests that only write a
-    /// guest binary), falls back to path provenance without platform trust.
+    /// Incomplete synthetic trees should use [`Self::for_test`] instead of
+    /// weakening production evaluation.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the install tree cannot be evaluated. Prefer [`Self::try_new`].
     #[must_use]
     pub fn new(manifest: PluginManifest, root: PathBuf, command: PathBuf) -> Self {
-        let identity =
-            evaluate_install(&root, &manifest).unwrap_or_else(|_| local_identity(&root, &manifest));
+        Self::try_new(manifest, root, command, None).expect("plugin tree must evaluate")
+    }
+
+    /// Production constructor: fail closed on malformed receipts, hash errors,
+    /// and unrecognized install receipts.
+    ///
+    /// # Errors
+    ///
+    /// Returns when identity evaluation fails closed.
+    pub fn try_new(
+        manifest: PluginManifest,
+        root: PathBuf,
+        command: PathBuf,
+        files_dir: Option<&Path>,
+    ) -> Result<Self> {
+        let identity = evaluate_install_in(&root, &manifest, files_dir)
+            .map_err(|err| PluginError::message(err.to_string()))?;
+        Ok(Self {
+            manifest,
+            root,
+            command,
+            identity,
+        })
+    }
+
+    /// Explicit test/dev constructor for incomplete plugin trees.
+    ///
+    /// Does not hash the tree or consult receipts. Never grants platform trust.
+    #[must_use]
+    pub fn for_test(manifest: PluginManifest, root: PathBuf, command: PathBuf) -> Self {
+        let identity = local_identity(&root, &manifest);
         Self {
             manifest,
             root,
@@ -60,9 +93,8 @@ impl DiscoveredPlugin {
 
 /// Path-only identity used when an install tree cannot be hashed (test fixtures).
 fn local_identity(root: &Path, manifest: &PluginManifest) -> PluginInstallIdentity {
-    let plugin_key = PluginKey::from_install_path(root, &manifest.id).unwrap_or_else(|_| {
-        PluginKey::parse("path:file:///invalid-plugin-root#ab").expect("valid fallback id")
-    });
+    let plugin_key = PluginKey::from_install_path(root, &manifest.id)
+        .expect("test plugin root must form a PluginKey");
     PluginInstallIdentity {
         artifact: bookclerk_plugin_catalog::ArtifactIdentity {
             plugin_key: plugin_key.clone(),
@@ -112,7 +144,12 @@ pub fn discover_plugins(config: &Config) -> Result<Vec<DiscoveredPlugin>> {
         if !dir.is_dir() {
             continue;
         }
-        discover_in_dir(&dir, &mut out, &mut seen)?;
+        discover_in_dir(
+            &dir,
+            config.paths().files_dir.as_path(),
+            &mut out,
+            &mut seen,
+        )?;
     }
     out.sort_by(|a, b| {
         a.manifest
@@ -174,12 +211,13 @@ pub fn resolve_plugin_ref<'a>(
 /// Discovers `$dir/plugin.toml` or each `$dir/<name>/plugin.toml`; skips unreadable directories.
 fn discover_in_dir(
     dir: &Path,
+    files_dir: &Path,
     out: &mut Vec<DiscoveredPlugin>,
     seen: &mut std::collections::HashMap<String, PathBuf>,
 ) -> Result<()> {
     let root_manifest = dir.join("plugin.toml");
     if root_manifest.is_file() {
-        push_manifest(&root_manifest, dir, out, seen)?;
+        push_manifest(&root_manifest, dir, files_dir, out, seen)?;
         return Ok(());
     }
     let entries = match std::fs::read_dir(dir) {
@@ -196,7 +234,7 @@ fn discover_in_dir(
         }
         let manifest_path = path.join("plugin.toml");
         if manifest_path.is_file() {
-            push_manifest(&manifest_path, &path, out, seen)?;
+            push_manifest(&manifest_path, &path, files_dir, out, seen)?;
         }
     }
     Ok(())
@@ -206,6 +244,7 @@ fn discover_in_dir(
 fn push_manifest(
     manifest_path: &Path,
     root: &Path,
+    files_dir: &Path,
     out: &mut Vec<DiscoveredPlugin>,
     seen: &mut std::collections::HashMap<String, PathBuf>,
 ) -> Result<()> {
@@ -234,7 +273,7 @@ fn push_manifest(
             command.display()
         )));
     }
-    let plugin = DiscoveredPlugin::new(manifest, root.to_path_buf(), command);
+    let plugin = DiscoveredPlugin::try_new(manifest, root.to_path_buf(), command, Some(files_dir))?;
     let key = plugin.plugin_key().canonical().to_string();
     if let Some(first_path) = seen.get(&key) {
         return Err(PluginError::message(format!(
@@ -559,6 +598,48 @@ binding = "DB"
         assert!(
             err.contains("migration_plan") || err.to_lowercase().contains("unknown"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn malformed_receipt_fails_discovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        write_plugin(&plugins.join("echo"), "echo", "cli");
+        fs::write(plugins.join("echo").join("receipt.json"), b"{not-json").unwrap();
+        let cfg = Config {
+            paths: Some(bookclerk_config::Paths::from_files_dir(
+                tmp.path().to_path_buf(),
+            )),
+            ..Config::default()
+        };
+        let err = discover_plugins(&cfg).unwrap_err().to_string();
+        assert!(
+            err.contains("receipt")
+                || err.contains("malformed")
+                || err.contains("json")
+                || err.contains("expected")
+                || err.contains("string"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn absent_receipt_is_local_development() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        write_plugin(&plugins.join("echo"), "echo", "cli");
+        let cfg = Config {
+            paths: Some(bookclerk_config::Paths::from_files_dir(
+                tmp.path().to_path_buf(),
+            )),
+            ..Config::default()
+        };
+        let found = discover_plugins(&cfg).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].identity.provenance,
+            bookclerk_plugin_catalog::PluginProvenance::LocalDevelopment
         );
     }
 }
