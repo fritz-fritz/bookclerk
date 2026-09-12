@@ -833,12 +833,12 @@ pub fn admitted_bookclerk_sql_samples(seed: u64, count: usize) -> Vec<String> {
         out.push(sql);
     }
     // Length/extract keep SQLite/Postgres differentials portable (JSON
-    // spacing and duplicate-key winner are engine-specific). CAST AS TEXT
-    // is required: Postgres `json_build_object` is JSON-typed. The calls
-    // still exercise 2-arg null retention and 32-arg (16-pair) arity.
+    // spacing and duplicate-key winner are engine-specific). Postgres
+    // lowering casts `json_build_object` to TEXT so `length` is legal. The
+    // calls still exercise 2-arg null retention and 32-arg (16-pair) arity.
     out.push(
-        "SELECT CASE WHEN length(CAST(json_object('a', 1, 'b', NULL) AS TEXT)) \
-             > length(CAST(json_object('a', 1) AS TEXT)) THEN 1 ELSE 0 END"
+        "SELECT CASE WHEN length(json_object('a', 1, 'b', NULL)) \
+             > length(json_object('a', 1)) THEN 1 ELSE 0 END"
             .into(),
     );
     let pairs: Vec<String> = (0..16).map(|i| format!("'k{i:02}', 'v{i:02}'")).collect();

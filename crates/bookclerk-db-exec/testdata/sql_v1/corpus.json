@@ -43,7 +43,21 @@
     {
       "id": "json-object",
       "canonical": "SELECT json_object('k', ?) AS o",
-      "postgres": "SELECT json_build_object('k', $1) AS o"
+      "postgres": "SELECT (json_build_object('k', $1)::text) AS o"
+    },
+    {
+      "id": "json-object-length",
+      "canonical": "SELECT length(json_object('a', 1, 'b', NULL))",
+      "postgres": "SELECT length((json_build_object('a', 1, 'b', NULL)::text))"
+    },
+    {
+      "id": "json-object-nested",
+      "canonical": "SELECT json_extract(json_object('n', json_object('k', 'v')), '$.n')",
+      "postgresContains": [
+        "json_build_object('n', json_build_object('k', 'v'))",
+        "#>> '{n}'"
+      ],
+      "postgresNotContains": ["json_object(", "json_extract("]
     },
     {
       "id": "ifnull-greatest",
