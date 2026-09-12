@@ -191,7 +191,8 @@ pub use sql_types::{
     sql_v1_ident_in_bounds, statement_sql_hash, typecheck_create_index_sql,
     typecheck_execute_request, ColumnReference, CreateIndexSchema, CreateTableSchema, SqlType,
     SqlTypeEnv, INSERT_SELECT_WRAP_ALIAS, POSTGRES_IDENT_FN_PREFIX, POSTGRES_IDENT_TRIGGER_PREFIX,
-    SQL_CATALOG_TABLE, SQL_DDL_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE, SQL_V1_MAX_IDENT_BYTES,
+    SQL_CATALOG_TABLE, SQL_DDL_TABLE, SQL_IDENTITY_TABLE, SQL_SCHEMA_TABLE,
+    SQL_V1_JSON_OBJECT_MAX_ARGS, SQL_V1_MAX_IDENT_BYTES,
 };
 #[cfg(feature = "host")]
 pub use sql_types::{

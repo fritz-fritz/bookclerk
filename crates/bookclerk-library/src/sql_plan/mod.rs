@@ -491,7 +491,7 @@ mod limits_tests {
         assert!(err.to_string().contains("maxFunctionArgs"), "{err}");
         caps.max_function_args = 3;
         validate_execute_request(&ok_fn, &caps).expect("N replace args");
-        let chunked = ExecuteRequest {
+        let json_obj = ExecuteRequest {
             operation_id: "op".into(),
             request_hash: String::new(),
             statements: vec![stmt(
@@ -501,7 +501,13 @@ mod limits_tests {
             deadline_unix_ms: 0,
         };
         caps.max_function_args = 2;
-        validate_execute_request(&chunked, &caps).expect("json_object is adapter-chunked");
+        let err = validate_execute_request(&json_obj, &caps).unwrap_err();
+        assert!(
+            err.to_string().contains("maxFunctionArgs"),
+            "json_object is not adapter-chunked: {err}"
+        );
+        caps.max_function_args = 8;
+        validate_execute_request(&json_obj, &caps).expect("4-arg json_object under cap 8");
 
         for mut advertised in [
             DbCapabilities::advertised_sqlite(),

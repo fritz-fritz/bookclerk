@@ -2407,6 +2407,32 @@ async fn postgres_binding_sql_v1_p1_vectors() {
     {
         panic!("{err}");
     }
+    let mut nullif_guard = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_DIV_NULLIF_NOT_ZERO_GUARD,
+        vec![],
+    );
+    nullif_guard.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-div-nullif-guard", vec![nullif_guard]))
+        .await
+        .expect("div NULLIF not-zero guard");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_div_nullif_not_zero_guard_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
+    let mut json_obj = binding_stmt(
+        bookclerk_db_exec::sql_v1::PORTABLE_JSON_OBJECT_SEMANTICS,
+        vec![],
+    );
+    json_obj.max_rows = 8;
+    let reply = run_postgres_binding(&db, binding_req("pg-json-object-semantics", vec![json_obj]))
+        .await
+        .expect("json_object semantics");
+    if let Some(err) =
+        bookclerk_db_exec::sql_v1::portable_json_object_semantics_mismatch(&reply.statements[0])
+    {
+        panic!("{err}");
+    }
     run_postgres_binding(
         &db,
         binding_req(

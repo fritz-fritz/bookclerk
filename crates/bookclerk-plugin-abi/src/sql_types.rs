@@ -1435,7 +1435,16 @@ pub fn cast_is_legal(from: SqlType, to: SqlType) -> bool {
     )
 }
 
+/// Portable SQL-v1 `json_object` maximum argument count (16 key/value pairs).
+///
+/// Matches Cloudflare D1's physical function-argument limit
+/// ([`crate::D1_MAX_FUNCTION_ARGS`]). Larger objects are not admitted; adapters
+/// must not emulate them with `json_patch` (JSON Merge Patch deletes nulls).
+pub const SQL_V1_JSON_OBJECT_MAX_ARGS: usize = 32;
+
 /// SQL-v1 helper arity `(min, max)` inclusive. Unknown names return `None`.
+///
+/// `json_object` is even arity `2..=`[`SQL_V1_JSON_OBJECT_MAX_ARGS`] (16 pairs).
 #[must_use]
 pub fn sql_v1_helper_arity(name: &str) -> Option<(usize, usize)> {
     Some(match name.to_ascii_lowercase().as_str() {
@@ -1445,7 +1454,7 @@ pub fn sql_v1_helper_arity(name: &str) -> Option<(usize, usize)> {
         "sum" | "avg" | "abs" | "length" | "lower" | "upper" | "json_valid" | "count" => (1, 1),
         "round" => (1, 2),
         "json_extract" => (2, 2),
-        "json_object" => (2, 64),
+        "json_object" => (2, SQL_V1_JSON_OBJECT_MAX_ARGS),
         "replace" => (3, 3),
         "substr" => (2, 3),
         "trim" => (1, 2),
@@ -3812,6 +3821,13 @@ mod tests {
     use super::*;
     use crate::{DbPlanStatementKind, DbResultSelection};
 
+    fn json_object_n_pairs(n: usize) -> String {
+        let args: Vec<String> = (0..n)
+            .flat_map(|i| [format!("'k{i:02}'"), format!("'v{i:02}'")])
+            .collect();
+        format!("json_object({})", args.join(", "))
+    }
+
     fn stmt(sql: &str) -> TypedDbStatement {
         TypedDbStatement {
             sql: sql.into(),
@@ -4325,9 +4341,21 @@ mod tests {
         assert!(!sql_v1_helper_arity_ok("json_object", 3));
         assert!(sql_v1_helper_arity_ok("json_object", 2));
         assert!(sql_v1_helper_arity_ok("json_object", 4));
-        assert!(sql_v1_helper_arity_ok("json_object", 42));
-        assert!(sql_v1_helper_arity_ok("json_object", 64));
+        assert!(sql_v1_helper_arity_ok(
+            "json_object",
+            SQL_V1_JSON_OBJECT_MAX_ARGS
+        ));
+        assert!(!sql_v1_helper_arity_ok(
+            "json_object",
+            SQL_V1_JSON_OBJECT_MAX_ARGS + 2
+        ));
+        assert!(!sql_v1_helper_arity_ok("json_object", 42));
+        assert!(!sql_v1_helper_arity_ok("json_object", 64));
         assert!(!sql_v1_helper_arity_ok("json_object", 65));
+        assert_eq!(
+            sql_v1_helper_arity("json_object"),
+            Some((2, crate::D1_MAX_FUNCTION_ARGS as usize))
+        );
         assert!(sql_v1_helper_arity_ok("coalesce", 2));
         for sql in [
             "SELECT abs()",
@@ -4336,6 +4364,29 @@ mod tests {
             "SELECT json_object('a', 1, 'b')",
         ] {
             let err = typecheck_execute_request(&req(sql), &SqlTypeEnv::new()).unwrap_err();
+            assert!(err.to_string().contains("arity"), "{sql}: {err}");
+        }
+    }
+
+    #[test]
+    fn json_object_portable_arity_is_32_args() {
+        assert!(sql_v1_helper_arity_ok("json_object", 2));
+        assert!(sql_v1_helper_arity_ok("json_object", 32));
+        assert!(!sql_v1_helper_arity_ok("json_object", 34));
+        assert!(!sql_v1_helper_arity_ok("json_object", 33));
+        typecheck_execute_request(&req("SELECT json_object('a', 1)"), &SqlTypeEnv::new())
+            .expect("2 args");
+        typecheck_execute_request(
+            &req(&format!("SELECT {}", json_object_n_pairs(16))),
+            &SqlTypeEnv::new(),
+        )
+        .expect("32 args = 16 pairs");
+        for sql in [
+            format!("SELECT {}", json_object_n_pairs(17)),
+            "SELECT json_object('k')".into(),
+            "SELECT json_object('a', 1, 'b')".into(),
+        ] {
+            let err = typecheck_execute_request(&req(&sql), &SqlTypeEnv::new()).unwrap_err();
             assert!(err.to_string().contains("arity"), "{sql}: {err}");
         }
     }

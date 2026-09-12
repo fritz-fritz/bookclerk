@@ -33,6 +33,8 @@ pub const D1_MAX_BINDS: u32 = 100;
 pub const D1_MAX_SQL_STATEMENT_BYTES: u32 = 100_000;
 
 /// Cloudflare D1 maximum arguments to one physical SQL function.
+///
+/// Portable SQL-v1 `json_object` uses this same ceiling (16 key/value pairs).
 pub const D1_MAX_FUNCTION_ARGS: u32 = 32;
 
 /// SQLite default `SQLITE_MAX_FUNCTION_ARG`.
