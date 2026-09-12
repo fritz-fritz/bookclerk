@@ -19,6 +19,11 @@ use tokio::net::TcpStream;
 pub const SOCKET_PROXY_ENV: &str = "BOOKCLERK_SOCKET_PROXY";
 
 /// Serve HTTP CONNECT on a Unix listener until the task is cancelled.
+///
+/// # Errors
+///
+/// Returns an error when the listener cannot be marked non-blocking or
+/// converted to a Tokio listener.
 #[cfg(unix)]
 pub fn spawn_unix(
     listener: std::os::unix::net::UnixListener,
@@ -128,6 +133,11 @@ fn parse_connect(request: &str) -> Result<(String, u16)> {
 }
 
 /// Parses `host:port` or `[ipv6]:port`.
+///
+/// # Errors
+///
+/// Returns an error when the target is missing a port or the port is not a
+/// `u16`.
 pub fn parse_authority(target: &str) -> Result<(String, u16)> {
     if let Some(rest) = target.strip_prefix('[') {
         let (host, port_part) = rest
