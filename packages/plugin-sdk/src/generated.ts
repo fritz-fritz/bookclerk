@@ -2235,7 +2235,8 @@ export interface DbCapabilities {
   pluginDatabases: boolean;
   /**
    * Maximum arguments in one physical function call after adapter hiding
-   * (nested json_object / min / max / coalesce). `0` is unspecified.
+   * (nested min / max / coalesce). Portable json_object is already ≤ 32
+   * arguments (16 pairs), matching D1. `0` is unspecified.
    */
   maxFunctionArgs: number;
   /** Maximum columns in one CREATE TABLE / result row. `0` is unspecified. */

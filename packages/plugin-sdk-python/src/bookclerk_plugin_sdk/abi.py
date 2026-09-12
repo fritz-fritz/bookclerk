@@ -3929,7 +3929,8 @@ class DbCapabilities(TypedDict):
         pluginDatabases: Append-only. Adapter can open additional isolated sessions for
             plugin-owned database bindings (per-binding file / schema / database).
         maxFunctionArgs: Maximum arguments in one physical function call after adapter
-            hiding (nested json_object / min / max / coalesce). `0` is unspecified.
+            hiding (nested min / max / coalesce). Portable json_object is already ≤ 32
+            arguments (16 pairs), matching D1. `0` is unspecified.
         maxSchemaColumns: Maximum columns in one CREATE TABLE / result row. `0` is
             unspecified.
         maxPatternBytes: Maximum UTF-8 bytes of a BookclerkSQL LIKE pattern value
