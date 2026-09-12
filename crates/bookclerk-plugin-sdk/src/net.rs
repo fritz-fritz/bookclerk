@@ -172,6 +172,12 @@ pub async fn connect(address: SocketAddress, options: ConnectOptions) -> Result<
 }
 
 #[cfg(unix)]
+/// Reads the CONNECT response header from the socket proxy.
+///
+/// # Errors
+///
+/// Returns an error when the stream ends early, the handshake exceeds 8 KiB,
+/// or the proxy returns a non-success status.
 async fn read_http_head(stream: &mut tokio::net::UnixStream) -> Result<String> {
     use tokio::io::AsyncReadExt;
     let mut buf = Vec::new();
@@ -190,6 +196,7 @@ async fn read_http_head(stream: &mut tokio::net::UnixStream) -> Result<String> {
 }
 
 #[cfg(all(test, unix))]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

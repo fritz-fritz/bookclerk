@@ -47,6 +47,10 @@ impl CidrGrant {
     }
 
     /// Masks host bits so `network` is the canonical subnet address.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `prefix` exceeds the address family's width.
     fn masked(addr: IpAddr, prefix: u8) -> Result<Self, String> {
         let max = if addr.is_ipv4() { 32 } else { 128 };
         if prefix > max {
@@ -201,6 +205,7 @@ fn ipv6_prefix_eq(ip: Ipv6Addr, net: Ipv6Addr, prefix: u8) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
