@@ -540,11 +540,15 @@ pub fn portable_div_nullif_not_zero_guard_mismatch(stmt: &StatementResult) -> Op
 /// `json_object` nulls, duplicate keys, nested objects, and 16-pair (32-arg) arity.
 ///
 /// Length comparisons distinguish JSON `null` retention from merge-patch
-/// deletion without depending on exact JSON spacing.
+/// deletion without depending on exact JSON spacing. `CAST(... AS TEXT)` is
+/// required: SQL-v1 types `json_object` as TEXT, but Postgres
+/// `json_build_object` is JSON-typed and `length(json)` is not a function.
 pub const PORTABLE_JSON_OBJECT_SEMANTICS: &str = "SELECT \
-     CASE WHEN length(json_object('a', 1, 'b', NULL)) > length(json_object('a', 1)) \
+     CASE WHEN length(CAST(json_object('a', 1, 'b', NULL) AS TEXT)) \
+          > length(CAST(json_object('a', 1) AS TEXT)) \
           THEN 1 ELSE 0 END AS null_retained, \
-     CASE WHEN length(json_object('a', 1, 'a', NULL)) > 2 THEN 1 ELSE 0 END AS dup_null_retained, \
+     CASE WHEN length(CAST(json_object('a', 1, 'a', NULL) AS TEXT)) > 2 \
+          THEN 1 ELSE 0 END AS dup_null_retained, \
      json_extract(json_extract(json_object('n', json_object('k', 'v')), '$.n'), '$.k') AS nested, \
      json_extract(json_object(\
         'k00', 'v00', 'k01', 'v01', 'k02', 'v02', 'k03', 'v03', \
