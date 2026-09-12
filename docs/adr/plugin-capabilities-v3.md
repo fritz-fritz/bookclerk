@@ -77,6 +77,14 @@ payloads for several storefront / integration surfaces, and a reverse
    `crates/bookclerk-workerd/tests/conformance.rs` plus
    `bookclerk-workerd-native-fixture` keep the transports honest.
 
+8. **One network policy engine.** `fetch()`, workerd `connect()`, and the
+   native-behind-workerd socket proxy consume the same `EgressPolicy`:
+   fetch hosts, TCP `host+ports`, redirect consent, and CIDR address-space
+   grants. Fetch does not imply TCP. Default address space is public
+   Internet only. Native guests are nested under `NetPolicy::Deny` and must
+   use the SDK socket capability; the launcher jail stays `OutboundListen`
+   for the RPC bridge.
+
 ## Consequences
 
 - Daemon / CLI / UI group plugins by handler family, not `PluginKind`.

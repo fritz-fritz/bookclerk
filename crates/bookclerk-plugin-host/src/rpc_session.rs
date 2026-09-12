@@ -642,7 +642,7 @@ impl PluginSession {
             oneshot::channel::<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>();
         let vat_account = account_id.to_string();
         thread::Builder::new()
-            .name(format!("plugin-vat-{}", id))
+            .name(vat_thread_name(&id))
             .spawn(move || vat_thread(spawned, manifest, vat_account, events, rx, ready_tx))
             .map_err(|err| PluginError::message(format!("plugin vat thread: {err}")))?;
         let (desc, limits, features) = ready_rx
@@ -1762,6 +1762,14 @@ async fn open_database_adapter(
         .ok_or_else(|| missing_entrypoint("databaseAdapter"))
 }
 
+/// Short OS thread name (Linux `TASK_COMM_LEN` is 16 bytes including NUL).
+fn vat_thread_name(plugin_key: &str) -> String {
+    let alias = plugin_key.rsplit('#').next().unwrap_or("plugin");
+    let mut name = format!("bc-{alias}");
+    name.truncate(15);
+    name
+}
+
 fn vat_thread(
     spawned: crate::spawn_stdio::SpawnedStdio,
     manifest: PluginManifest,
@@ -1784,11 +1792,14 @@ fn vat_thread(
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async move {
+                let grant = spawned.grant;
+                let mut child = spawned.child;
+                let stderr_tail = spawned.stderr_tail;
                 let (client, rpc) =
                     connect_plugin(spawned.stdout, spawned.stdin, MAX_STREAM_WINDOW_BYTES);
                 tokio::task::spawn_local(rpc);
                 let client = match client.describe().await {
-                    Ok(desc) => match negotiate_describe(&desc, &manifest, &spawned.grant) {
+                    Ok(desc) => match negotiate_describe(&desc, &manifest, &grant) {
                         Ok((limits, features)) => {
                             let client = client.with_limits(limits);
                             let _ = ready.send(Ok((desc, limits, features)));
@@ -1800,7 +1811,13 @@ fn vat_thread(
                         }
                     },
                     Err(err) => {
-                        let _ = ready.send(Err(map_abi(err)));
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        let extra =
+                            crate::spawn_stdio::spawn_failure_detail(&mut child, &stderr_tail);
+                        let _ = ready.send(Err(crate::spawn_stdio::with_spawn_detail(
+                            map_abi(err),
+                            extra,
+                        )));
                         return;
                     }
                 };
@@ -2372,7 +2389,7 @@ fn vat_thread(
                         }
                     }
                 }
-                drop(spawned.child);
+                drop(child);
             })
             .await;
     });
@@ -2877,6 +2894,16 @@ mod tests {
             plugin_instance_key("local", OPERATOR_ACCOUNT),
             plugin_instance_key("local", "acct-a")
         );
+    }
+
+    #[test]
+    fn vat_thread_name_stays_short_and_uses_alias() {
+        assert_eq!(
+            super::vat_thread_name("path:file:///tmp/install#postgres"),
+            "bc-postgres"
+        );
+        assert_eq!(super::vat_thread_name("sqlite").len(), 9);
+        assert!(super::vat_thread_name("sqlite").len() <= 15);
     }
 
     fn manifest_with(entrypoint: &str) -> PluginManifest {
