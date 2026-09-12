@@ -64,11 +64,6 @@ pub fn lower_canonical_sql_typed(
 
 fn lower_mechanical(backend: DatabaseBackend, sql: String) -> String {
     let sql = rewrite_insert_or_ignore_unique_conflict(&sql);
-    let sql = if backend == DatabaseBackend::Postgres {
-        sql
-    } else {
-        chunk_json_object_calls(&sql, bookclerk_plugin_abi::D1_MAX_FUNCTION_ARGS as usize)
-    };
     if backend != DatabaseBackend::Postgres {
         return rewrite_like_to_glob(&sql);
     }
@@ -217,57 +212,6 @@ fn rewrite_like_to_glob(sql: &str) -> String {
         i += ch.len_utf8();
     }
     out
-}
-
-/// Nests `json_object` so each physical call has at most `max_args` arguments.
-///
-/// Cloudflare D1 allows 32 function arguments. Portable SQL-v1 admits even
-/// arity 2–64; sqlite-family adapters hide the extra arity with `json_patch`.
-fn chunk_json_object_calls(sql: &str, max_args: usize) -> String {
-    let max_args = max_args.max(2) & !1;
-    let mut i = 0;
-    let mut out = String::with_capacity(sql.len());
-    while i < sql.len() {
-        if let Some(len) = literal_or_comment_len(&sql[i..]) {
-            out.push_str(&sql[i..i + len]);
-            i += len;
-            continue;
-        }
-        if ident_call_at(sql, i, "json_object") {
-            let name_end = i + "json_object".len();
-            let open = sql[name_end..]
-                .char_indices()
-                .find(|(_, c)| !c.is_whitespace())
-                .map(|(off, _)| name_end + off)
-                .unwrap_or(name_end);
-            if let Some((args, rest)) = split_call_args(&sql[open + 1..]) {
-                let rewritten: Vec<String> = args
-                    .iter()
-                    .map(|a| chunk_json_object_calls(a, max_args))
-                    .collect();
-                out.push_str(&json_object_chunked_expr(&rewritten, max_args));
-                i = sql.len() - rest.len();
-                continue;
-            }
-        }
-        let ch = sql[i..].chars().next().unwrap_or('\0');
-        out.push(ch);
-        i += ch.len_utf8();
-    }
-    out
-}
-
-fn json_object_chunked_expr(args: &[String], max_args: usize) -> String {
-    if args.len() <= max_args {
-        return format!("json_object({})", args.join(", "));
-    }
-    let head = &args[..max_args];
-    let tail = &args[max_args..];
-    format!(
-        "json_patch({}, {})",
-        json_object_chunked_expr(head, max_args),
-        json_object_chunked_expr(tail, max_args)
-    )
 }
 
 /// Bind-safe GLOB conversion of a SQL v1 `LIKE` pattern expression.
@@ -1425,17 +1369,24 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_family_chunks_json_object_to_d1_function_arg_cap() {
-        let keys: Vec<String> = (0..20).map(|i| format!("'{i}', {i}")).collect();
+    fn sqlite_family_does_not_json_patch_json_object() {
+        let keys: Vec<String> = (0..16).map(|i| format!("'{i}', {i}")).collect();
         let sql = format!("SELECT json_object({})", keys.join(", "));
         let out = lower_canonical_sql(DatabaseBackend::Sqlite, &sql);
-        assert!(out.contains("json_patch("), "{out}");
-        assert!(
-            !out.contains("json_object('0', 0, '1', 1, '2', 2, '3', 3, '4', 4, '5', 5, '6', 6, '7', 7, '8', 8, '9', 9, '10', 10, '11', 11, '12', 12, '13', 13, '14', 14, '15', 15, '16', 16"),
-            "physical json_object must not keep 40 args: {out}"
+        assert_eq!(out, sql, "32-arg json_object must stay identity: {out}");
+        assert!(!out.contains("json_patch"), "{out}");
+        let with_null = lower_canonical_sql(
+            DatabaseBackend::Sqlite,
+            "SELECT json_object('a', 1, 'b', NULL, 'a', NULL)",
         );
+        assert_eq!(
+            with_null,
+            "SELECT json_object('a', 1, 'b', NULL, 'a', NULL)"
+        );
+        assert!(!with_null.contains("json_patch"), "{with_null}");
         let lit = lower_canonical_sql(DatabaseBackend::Sqlite, "SELECT json_object('k;semi', 'v')");
         assert!(lit.contains("'k;semi'"), "{lit}");
+        assert!(!lit.contains("json_patch"), "{lit}");
     }
 
     #[test]
@@ -1798,6 +1749,17 @@ mod tests {
             lower_canonical_sql(DatabaseBackend::Postgres, &sql),
             sql,
             "adapter must not double-wrap NULLIF: {sql}"
+        );
+        let misleading = bookclerk_plugin_abi::desugar_canonical_sql("SELECT 1 / NULLIF(0, 1)");
+        assert_eq!(misleading, "SELECT 1 / NULLIF(NULLIF(0, 1), 0)");
+        assert_eq!(
+            lower_canonical_sql(DatabaseBackend::Postgres, &misleading),
+            misleading,
+            "adapter must not wrap an already-structural NULLIF(expr, 0): {misleading}"
+        );
+        assert_eq!(
+            lower_canonical_sql(DatabaseBackend::Sqlite, &misleading),
+            misleading
         );
     }
 

@@ -192,6 +192,23 @@ mod tests {
                 "INSERT INTO db_serialization_slots (slot_key, bump) VALUES ('dup-diff', 1)".into(),
                 Vec::new(),
             ),
+            (
+                "SELECT 1 / NULLIF(0, 1) AS d, 1 % NULLIF(0, 1) AS m".into(),
+                Vec::new(),
+            ),
+            ("SELECT 10 / NULLIF(2, 0) AS d".into(), Vec::new()),
+            (
+                "SELECT json_object('a', 1, 'b', NULL) AS o".into(),
+                Vec::new(),
+            ),
+            (
+                "SELECT json_object('a', 1, 'a', NULL) AS o".into(),
+                Vec::new(),
+            ),
+            (
+                "SELECT json_extract(json_extract(json_object('n', json_object('k', 'v')), '$.n'), '$.k') AS v".into(),
+                Vec::new(),
+            ),
         ];
         for sql in admitted_bookclerk_sql_samples(7, 24) {
             cases.push((sql.clone(), sample_params(&sql)));

@@ -4395,6 +4395,28 @@ mod tests {
         {
             panic!("{err}");
         }
+        let nullif_guard = sel(
+            "d1-div-nullif-guard",
+            bookclerk_db_exec::sql_v1::PORTABLE_DIV_NULLIF_NOT_ZERO_GUARD,
+        )
+        .await
+        .expect("div NULLIF not-zero guard");
+        if let Some(err) = bookclerk_db_exec::sql_v1::portable_div_nullif_not_zero_guard_mismatch(
+            &nullif_guard.statements[0],
+        ) {
+            panic!("{err}");
+        }
+        let json_obj = sel(
+            "d1-json-object-semantics",
+            bookclerk_db_exec::sql_v1::PORTABLE_JSON_OBJECT_SEMANTICS,
+        )
+        .await
+        .expect("json_object semantics");
+        if let Some(err) = bookclerk_db_exec::sql_v1::portable_json_object_semantics_mismatch(
+            &json_obj.statements[0],
+        ) {
+            panic!("{err}");
+        }
         exec(
             "d1-div-ddl",
             "CREATE TABLE IF NOT EXISTS divops (n INTEGER)",

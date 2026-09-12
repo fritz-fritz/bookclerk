@@ -84,12 +84,21 @@
       "id": "div-mod-null-on-zero",
       "canonical": "SELECT 1 / NULLIF(0, 0), 4 % NULLIF(0, 0), a / NULLIF(b, 0)",
       "postgresContains": ["NULLIF(0, 0)", "NULLIF(b, 0)"]
+    },
+    {
+      "id": "div-nullif-not-zero-still-guarded",
+      "canonical": "SELECT 1 / NULLIF(NULLIF(0, 1), 0), 1 % NULLIF(NULLIF(0, 1), 0)",
+      "postgresContains": ["NULLIF(NULLIF(0, 1), 0)"]
     }
   ],
   "sqliteIdentity": [
     {
       "id": "sqlite-leaves-question-marks",
       "canonical": "a = ? AND b = ?"
+    },
+    {
+      "id": "sqlite-json-object-no-patch",
+      "canonical": "SELECT json_object('a', 1, 'b', NULL, 'a', NULL)"
     }
   ]
 }

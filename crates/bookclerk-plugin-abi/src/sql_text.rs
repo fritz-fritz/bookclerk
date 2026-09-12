@@ -560,11 +560,15 @@ pub struct SqlFnCall {
 
 /// Helpers adapters may nest so each physical call stays inside
 /// [`crate::DbCapabilities::max_function_args`].
+///
+/// `json_object` is not chunkable: portable SQL-v1 already caps it at
+/// [`crate::SQL_V1_JSON_OBJECT_MAX_ARGS`] (D1's physical limit). Nesting via
+/// `json_patch` is not equivalent (JSON Merge Patch deletes nulls).
 #[must_use]
 pub fn sql_v1_helper_is_chunkable(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "json_object" | "min" | "max" | "coalesce"
+        "min" | "max" | "coalesce"
     )
 }
 
@@ -687,8 +691,9 @@ fn count_call_args(sql: &str, open: usize) -> Result<Option<(usize, usize)>> {
 
 /// Enforces [`crate::DbCapabilities::max_function_args`] on non-chunkable helpers.
 ///
-/// `json_object` / `min` / `max` / `coalesce` are omitted: adapters nest them
-/// so each physical call stays inside the advertised cap.
+/// `min` / `max` / `coalesce` are omitted: adapters nest them so each physical
+/// call stays inside the advertised cap. `json_object` is enforced here: the
+/// portable maximum is already [`crate::SQL_V1_JSON_OBJECT_MAX_ARGS`].
 ///
 /// # Errors
 ///
@@ -827,6 +832,11 @@ pub fn admitted_bookclerk_sql_samples(seed: u64, count: usize) -> Vec<String> {
         };
         out.push(sql);
     }
+    out.push("SELECT json_object('a', 1, 'b', NULL)".into());
+    let pairs: Vec<String> = (0..16).map(|i| format!("'k{i:02}', 'v{i:02}'")).collect();
+    out.push(format!("SELECT json_object({})", pairs.join(", ")));
+    out.push("SELECT 1 / NULLIF(0, 1), 1 % NULLIF(0, 1)".into());
+    out.push("SELECT 10 / NULLIF(2, 0)".into());
     out
 }
 
@@ -1018,8 +1028,22 @@ mod tests {
         require_function_args_within("SELECT replace(a, 'x', 'y')", 3).expect("N");
         let err = require_function_args_within("SELECT replace(a, 'x', 'y')", 2).unwrap_err();
         assert!(err.to_string().contains("maxFunctionArgs"), "{err}");
-        require_function_args_within("SELECT json_object('a', 1, 'b', 2, 'c', 3, 'd', 4)", 2)
-            .expect("json_object is adapter-chunked");
+        let err =
+            require_function_args_within("SELECT json_object('a', 1, 'b', 2, 'c', 3, 'd', 4)", 2)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("maxFunctionArgs"),
+            "json_object is not adapter-chunked: {err}"
+        );
+        require_function_args_within("SELECT json_object('a', 1, 'b', 2, 'c', 3, 'd', 4)", 8)
+            .expect("4 args under cap 8");
+        let max_pairs: Vec<String> = (0..16).map(|i| format!("'{i}', {i}")).collect();
+        let max_sql = format!("SELECT json_object({})", max_pairs.join(", "));
+        require_function_args_within(&max_sql, crate::D1_MAX_FUNCTION_ARGS)
+            .expect("32-arg json_object matches D1 cap");
+        let err = require_function_args_within(&max_sql, 31).unwrap_err();
+        assert!(err.to_string().contains("maxFunctionArgs"), "{err}");
+        require_function_args_within("SELECT min(1, 2, 3)", 2).expect("min stays adapter-chunked");
     }
 
     #[test]
