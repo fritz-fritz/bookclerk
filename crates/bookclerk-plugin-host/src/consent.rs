@@ -177,7 +177,7 @@ pub struct PluginGrant {
     pub manifest_domains: BTreeSet<String>,
     /// Operator-added destinations beyond the current manifest request.
     ///
-    /// Survive upgrades of the same [`plugin_key`]. Do not transfer across provenance.
+    /// Survive upgrades of the same [`Self::plugin_key`]. Do not transfer across provenance.
     #[serde(default)]
     pub operator_added_domains: BTreeSet<String>,
     /// Operator-denied destinations (even if the manifest still lists them).
