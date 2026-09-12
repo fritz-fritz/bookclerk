@@ -9,6 +9,7 @@
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use bookclerk_plugin_manifest::EgressPolicy;
@@ -37,19 +38,24 @@ pub fn spawn_unix(
             if fence.load(Ordering::SeqCst) {
                 break;
             }
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let policy = policy.clone();
-                    let fence = Arc::clone(&fence);
-                    tokio::spawn(async move {
-                        if let Err(err) = handle_client(stream, policy, fence).await {
-                            tracing::debug!(error = %err, "socket proxy session ended");
+            tokio::select! {
+                () = wait_fence(&fence) => break,
+                accept = listener.accept() => {
+                    match accept {
+                        Ok((stream, _)) => {
+                            let policy = policy.clone();
+                            let fence = Arc::clone(&fence);
+                            tokio::spawn(async move {
+                                if let Err(err) = handle_client(stream, policy, fence).await {
+                                    tracing::debug!(error = %err, "socket proxy session ended");
+                                }
+                            });
                         }
-                    });
-                }
-                Err(err) => {
-                    tracing::debug!(error = %err, "socket proxy accept failed");
-                    break;
+                        Err(err) => {
+                            tracing::debug!(error = %err, "socket proxy accept failed");
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -157,6 +163,12 @@ pub fn parse_authority(target: &str) -> Result<(String, u16)> {
     Ok((host.to_string(), port))
 }
 
+async fn wait_fence(fence: &AtomicBool) {
+    while !fence.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn splice<C, U>(client: &mut C, upstream: &mut U, fence: &AtomicBool) -> Result<()>
 where
     C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -166,9 +178,16 @@ where
     let mut up_buf = vec![0_u8; 16 * 1024];
     loop {
         if fence.load(Ordering::SeqCst) {
+            let _ = client.shutdown().await;
+            let _ = upstream.shutdown().await;
             bail!("session fenced");
         }
         tokio::select! {
+            () = wait_fence(fence) => {
+                let _ = client.shutdown().await;
+                let _ = upstream.shutdown().await;
+                bail!("session fenced");
+            }
             n = client.read(&mut client_buf) => {
                 let n = n?;
                 if n == 0 {
@@ -199,6 +218,8 @@ pub fn resolved_addresses_denied(policy: &EgressPolicy, ips: &[IpAddr]) -> bool 
 mod tests {
     use super::*;
     use bookclerk_plugin_manifest::{NetworkMode, TcpGrant};
+    use std::time::Duration as StdDuration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn tcp_policy(host: &str, port: u16, cidrs: &[&str]) -> EgressPolicy {
         EgressPolicy {
@@ -312,6 +333,47 @@ mod tests {
         let n = client.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"ping");
         fence.store(true, Ordering::SeqCst);
+    }
+
+    #[tokio::test]
+    async fn idle_connect_terminates_when_fenced_without_further_rpc() {
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = echo.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = echo.accept().await.unwrap();
+            let mut buf = [0_u8; 32];
+            let _ = s.read(&mut buf).await;
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("proxy.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let policy = tcp_policy("127.0.0.1", port, &["127.0.0.1/32"]);
+        let fence = Arc::new(AtomicBool::new(false));
+        spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
+        let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        let req = format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n");
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut head = Vec::new();
+        let mut tmp = [0_u8; 1];
+        loop {
+            client.read_exact(&mut tmp).await.unwrap();
+            head.push(tmp[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&head).contains("200"),
+            "{}",
+            String::from_utf8_lossy(&head)
+        );
+        fence.store(true, Ordering::SeqCst);
+        let mut buf = [0_u8; 8];
+        let n = tokio::time::timeout(StdDuration::from_secs(2), client.read(&mut buf))
+            .await
+            .expect("idle CONNECT must unblock when fenced")
+            .expect("read after fence");
+        assert_eq!(n, 0, "fenced idle CONNECT must EOF without another RPC");
     }
 
     #[tokio::test]

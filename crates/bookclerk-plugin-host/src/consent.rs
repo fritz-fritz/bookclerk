@@ -526,7 +526,13 @@ impl PluginGrantStore {
     pub fn save(&self, files_dir: &Path) -> Result<()> {
         let path = Self::path(files_dir);
         let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, text)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &text)?;
+        if std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&path);
+            std::fs::rename(&tmp, &path)?;
+        }
+        crate::authority::notify_grants_changed();
         Ok(())
     }
 
@@ -2555,6 +2561,7 @@ mode = "deny"
 
     #[test]
     fn upsert_fences_live_session_for_plugin_key() {
+        let _lock = crate::authority::test_live_lock();
         let key = "path:file:///tmp/demo";
         let flag = crate::authority::register_session(key, "old-revision");
         let mut store = PluginGrantStore::default();
