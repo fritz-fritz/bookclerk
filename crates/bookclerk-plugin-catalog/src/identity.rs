@@ -7,13 +7,16 @@
 //! [`ArtifactIdentity`].
 //!
 //! Platform trust is host-controlled ([`PluginProvenance::PlatformBundled`])
-//! after content verification. A third-party package that declares
-//! `id = "sqlite"` does not receive platform defaults.
+//! only after the host install ledger records the exact PluginKey and payload
+//! digests for a known platform artifact. A third-party package that declares
+//! `id = "sqlite"` does not receive platform defaults. `receipt.json` is
+//! metadata; it cannot manufacture platform authority.
 
 use std::fmt;
 use std::path::{Component, Path};
+use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 use crate::coordinate::{PackageCoordinate, RegistrySource};
@@ -22,6 +25,12 @@ use bookclerk_plugin_manifest::validate_plugin_id;
 
 /// Product name recorded on Bookclerk-shipped platform artifacts.
 pub const PLATFORM_PRODUCT: &str = "bookclerk";
+
+/// Hex characters of SHA-256 used in [`PluginKey::fs_id`] (128 bits).
+pub const PLUGIN_KEY_FS_ID_HEX_CHARS: usize = 32;
+
+/// Default Cargo registry origin used in canonical `cargo:` PluginKeys.
+pub const CRATES_IO_INDEX: &str = "https://crates.io";
 
 /// Known installer-shipped platform packages. Host-controlled; never read from
 /// plugin-authored manifest fields other than matching `id` after provenance
@@ -37,6 +46,33 @@ pub const PLATFORM_ARTIFACTS: &[PlatformArtifact] = &[
         package_name: "bookclerk-plugin-destination-local",
         manifest_id: "local",
         allowed_entrypoints: &["storage"],
+        allowed_bindings: &["config", "work_fs"],
+    },
+];
+
+/// Host-controlled first-party database adapter identities.
+///
+/// Secret injection, library-path grants, and host-private connect params
+/// require this exact package + manifest id **and** a ledger-backed
+/// provenance. A third-party tree that merely reuses the `sqlite` /
+/// `postgres` / `d1` alias never matches.
+pub const FIRST_PARTY_DATABASE_ADAPTERS: &[PlatformArtifact] = &[
+    PlatformArtifact {
+        package_name: "bookclerk-plugin-database-sqlite",
+        manifest_id: "sqlite",
+        allowed_entrypoints: &["databaseAdapter"],
+        allowed_bindings: &["config", "work_fs"],
+    },
+    PlatformArtifact {
+        package_name: "bookclerk-plugin-database-postgres",
+        manifest_id: "postgres",
+        allowed_entrypoints: &["databaseAdapter"],
+        allowed_bindings: &["config", "work_fs"],
+    },
+    PlatformArtifact {
+        package_name: "bookclerk-plugin-database-d1",
+        manifest_id: "d1",
+        allowed_entrypoints: &["databaseAdapter"],
         allowed_bindings: &["config", "work_fs"],
     },
 ];
@@ -83,6 +119,30 @@ pub fn platform_artifact(
 #[must_use]
 pub fn is_platform_plugin_key(key: &PluginKey) -> bool {
     PLATFORM_ARTIFACTS.iter().any(|a| a.plugin_key() == *key)
+}
+
+/// True when `key` names a host-controlled first-party database adapter.
+///
+/// Matches exact package name + manifest id on `platform:` or the canonical
+/// crates.io `cargo:` index. Path / npm / PyPI / third-party cargo indexes
+/// never inherit first-party host-private behavior from an alias.
+#[must_use]
+pub fn is_first_party_database_adapter(key: &PluginKey) -> bool {
+    let package = key.package();
+    let manifest_id = key.manifest_id();
+    let spec = FIRST_PARTY_DATABASE_ADAPTERS
+        .iter()
+        .find(|a| a.package_name == package && a.manifest_id == manifest_id);
+    if spec.is_none() {
+        return false;
+    }
+    match key.scheme() {
+        ProvenanceScheme::Platform => true,
+        ProvenanceScheme::Cargo => key
+            .canonical()
+            .starts_with(&format!("cargo:{CRATES_IO_INDEX}#")),
+        _ => false,
+    }
 }
 
 /// Provenance scheme in a canonical [`PluginKey`].
@@ -139,18 +199,41 @@ impl fmt::Display for ProvenanceScheme {
 
 /// Stable identity across upgrades (not version, not artifact hash).
 ///
-/// Canonical text (deterministic, unambiguous):
+/// Canonical text (deterministic, unambiguous). Registry index URL and
+/// package name are `#`-separated so a registry path cannot be confused
+/// with a package path:
 ///
-/// - `cargo:{origin}/{package}#{manifest_id}`
-/// - `npm:{origin}/{package}#{manifest_id}`
-/// - `pypi:{origin}/{package}#{manifest_id}`
+/// - `cargo:{index_url}#{package}#{manifest_id}`
+/// - `npm:{index_url}#{package}#{manifest_id}`
+/// - `pypi:{index_url}#{package}#{manifest_id}`
 /// - `registry:{index_url}#{package}#{manifest_id}`
 /// - `platform:bookclerk/{package}#{manifest_id}`
 /// - `path:file://{normalized_absolute_path}#{manifest_id}`
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PluginKey {
-    /// Canonical UTF-8 form (see type docs).
+    /// Canonical UTF-8 form (see type docs). Always produced by [`Self::parse`].
     canonical: String,
+}
+
+impl Serialize for PluginKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.canonical)
+    }
+}
+
+impl<'de> Deserialize<'de> for PluginKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        PluginKey::parse(&raw).map_err(de::Error::custom)
+    }
+}
+
+impl FromStr for PluginKey {
+    type Err = CatalogError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::parse(s)
+    }
 }
 
 impl PluginKey {
@@ -191,19 +274,19 @@ impl PluginKey {
         match &coordinate.source {
             RegistrySource::Cargo { registry_url } => Self::from_parts(
                 ProvenanceScheme::Cargo,
-                &normalize_origin(registry_url)?,
+                &normalize_index_url(registry_url)?,
                 &coordinate.name,
                 manifest_id,
             ),
             RegistrySource::Npm { registry_url } => Self::from_parts(
                 ProvenanceScheme::Npm,
-                &normalize_origin(registry_url)?,
+                &normalize_index_url(registry_url)?,
                 &coordinate.name,
                 manifest_id,
             ),
             RegistrySource::Pypi { simple_url } => Self::from_parts(
                 ProvenanceScheme::Pypi,
-                &normalize_origin(simple_url)?,
+                &normalize_index_url(simple_url)?,
                 &coordinate.name,
                 manifest_id,
             ),
@@ -281,7 +364,7 @@ impl PluginKey {
                         "registry plugin key needs a package name",
                     ));
                 }
-                format!("{}:{source}/{package}#{manifest_id}", scheme.as_str())
+                format!("{}:{source}#{package}#{manifest_id}", scheme.as_str())
             }
         };
         Ok(Self { canonical })
@@ -299,10 +382,10 @@ impl PluginKey {
         hex::encode(Sha256::digest(self.canonical.as_bytes()))
     }
 
-    /// Filesystem-safe directory leaf (`pk-` + first 16 hex chars of the digest).
+    /// Filesystem-safe directory leaf (`pk-` + 32 hex chars / 128 bits of SHA-256).
     #[must_use]
     pub fn fs_id(&self) -> String {
-        format!("pk-{}", &self.digest_sha256()[..16])
+        format!("pk-{}", &self.digest_sha256()[..PLUGIN_KEY_FS_ID_HEX_CHARS])
     }
 
     /// Manifest plugin id (display alias).
@@ -315,11 +398,17 @@ impl PluginKey {
     }
 
     /// Provenance scheme.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the in-memory canonical string is not a valid PluginKey.
+    /// That is a programming error: every [`PluginKey`] is produced by
+    /// [`Self::parse`] or a typed constructor that goes through it.
     #[must_use]
     pub fn scheme(&self) -> ProvenanceScheme {
         parse_canonical(&self.canonical)
             .map(|p| p.scheme)
-            .unwrap_or(ProvenanceScheme::Path)
+            .expect("PluginKey canonical text is always parseable")
     }
 
     /// Package coordinate / name when present (empty for `path:` keys).
@@ -388,9 +477,15 @@ fn parse_canonical(raw: &str) -> Result<ParsedKey> {
             PluginKey::from_parts(scheme, index, package, id)?
         }
         ProvenanceScheme::Cargo | ProvenanceScheme::Npm | ProvenanceScheme::Pypi => {
-            let (origin_pkg, id) = rsplit_hash(rest)?;
-            let (origin, package) = split_origin_package(origin_pkg)?;
-            PluginKey::from_parts(scheme, &origin, &package, id)?
+            let (index_and_pkg, id) = rsplit_hash(rest)?;
+            let (index, package) = index_and_pkg.split_once('#').ok_or_else(|| {
+                CatalogError::message(format!(
+                    "{} plugin key must be {}:<index_url>#<package>#<id>",
+                    scheme.as_str(),
+                    scheme.as_str()
+                ))
+            })?;
+            PluginKey::from_parts(scheme, &normalize_index_url(index)?, package, id)?
         }
     };
     Ok(ParsedKey {
@@ -408,20 +503,11 @@ fn parsed_package(canonical: &str) -> Option<String> {
             let (source_pkg, _) = rest.rsplit_once('#')?;
             source_pkg.split_once('/').map(|(_, p)| p.to_string())
         }
-        "registry" => {
+        "registry" | "cargo" | "npm" | "pypi" => {
             let (index_and_pkg, _) = rest.rsplit_once('#')?;
             index_and_pkg.split_once('#').map(|(_, p)| p.to_string())
         }
-        _ => {
-            let (origin_pkg, _) = rest.rsplit_once('#')?;
-            let url = url::Url::parse(origin_pkg).ok()?;
-            let path = url.path().trim_start_matches('/');
-            if path.is_empty() {
-                None
-            } else {
-                Some(path.to_string())
-            }
-        }
+        _ => None,
     }
 }
 
@@ -429,24 +515,6 @@ fn parsed_package(canonical: &str) -> Option<String> {
 fn rsplit_hash(s: &str) -> Result<(&str, &str)> {
     s.rsplit_once('#')
         .ok_or_else(|| CatalogError::message("plugin key must end with #<manifest_id>"))
-}
-
-/// Splits `https://origin/package` into `(origin, package)`.
-fn split_origin_package(s: &str) -> Result<(String, String)> {
-    let url = url::Url::parse(s).map_err(|e| CatalogError::message(e.to_string()))?;
-    if url.scheme() != "https" && url.scheme() != "http" {
-        return Err(CatalogError::message(format!(
-            "plugin key origin `{s}` must be http(s)"
-        )));
-    }
-    let origin = normalize_origin(s)?;
-    let package = url.path().trim_start_matches('/').to_string();
-    if package.is_empty() {
-        return Err(CatalogError::message(
-            "plugin key origin must include /{package}",
-        ));
-    }
-    Ok((origin, package))
 }
 
 /// Identity of one exact installed build: [`PluginKey`] + version + hashes.
@@ -517,36 +585,68 @@ impl PluginInstallIdentity {
     }
 }
 
-/// Normalizes a registry origin (scheme + host, no trailing slash, lowercase host).
-fn normalize_origin(raw: &str) -> Result<String> {
-    let url = url::Url::parse(raw).or_else(|_| url::Url::parse(&format!("https://{raw}")))?;
-    if url.scheme() != "https" && url.scheme() != "http" {
+/// Normalizes a registry index URL (scheme + host + port + path).
+///
+/// Query and fragment are stripped. Default ports are omitted. Host is
+/// lowercased. `.` path segments are collapsed; `..` is rejected. A redundant
+/// trailing slash is dropped so `https://example/a/` and `https://example/a`
+/// are the same principal. Origin-only URLs (`https://crates.io/`) collapse
+/// to `https://crates.io`. `file://` indexes (local static catalogs) keep
+/// their filesystem path.
+fn normalize_index_url(raw: &str) -> Result<String> {
+    let mut url = url::Url::parse(raw).or_else(|_| url::Url::parse(&format!("https://{raw}")))?;
+    if url.scheme() != "https" && url.scheme() != "http" && url.scheme() != "file" {
         return Err(CatalogError::message(format!(
-            "registry origin `{raw}` must be http(s)"
+            "registry index `{raw}` must be http(s) or file"
         )));
+    }
+    url.set_fragment(None);
+    url.set_query(None);
+    let mut segments = Vec::new();
+    for seg in url.path().split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            return Err(CatalogError::message(format!(
+                "registry index `{raw}` must not contain `..` path segments"
+            )));
+        }
+        if seg.contains('#') {
+            return Err(CatalogError::message(
+                "registry index path must not contain '#'",
+            ));
+        }
+        segments.push(seg.to_string());
+    }
+    if url.scheme() == "file" {
+        let path = if segments.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", segments.join("/"))
+        };
+        return Ok(format!("file://{path}"));
     }
     let host = url
         .host_str()
-        .ok_or_else(|| CatalogError::message(format!("registry origin `{raw}` missing host")))?
+        .ok_or_else(|| CatalogError::message(format!("registry index `{raw}` missing host")))?
         .to_ascii_lowercase();
-    let port = url.port();
-    let origin = match port {
+    url.set_host(Some(&host))
+        .map_err(|e| CatalogError::message(e.to_string()))?;
+    if (url.port() == Some(443) && url.scheme() == "https")
+        || (url.port() == Some(80) && url.scheme() == "http")
+    {
+        let _ = url.set_port(None);
+    }
+    let authority = match url.port() {
         None => format!("{}://{host}", url.scheme()),
         Some(p) => format!("{}://{host}:{p}", url.scheme()),
     };
-    Ok(origin)
-}
-
-/// Normalizes a static index URL (origin + path, no fragment, no trailing slash).
-fn normalize_index_url(raw: &str) -> Result<String> {
-    let mut url = url::Url::parse(raw)?;
-    url.set_fragment(None);
-    url.set_query(None);
-    let mut s = url.as_str().to_string();
-    if s.ends_with('/') && url.path() != "/" {
-        s.pop();
+    if segments.is_empty() {
+        Ok(authority)
+    } else {
+        Ok(format!("{authority}/{}", segments.join("/")))
     }
-    Ok(s)
 }
 
 /// `file://` URL for an install directory (forward slashes, no trailing slash).
@@ -609,7 +709,7 @@ mod tests {
         let key = PluginKey::from_coordinate(&cargo, "foo").unwrap();
         assert_eq!(
             key.canonical(),
-            "cargo:https://crates.io/bookclerk-plugin-source-foo#foo"
+            "cargo:https://crates.io#bookclerk-plugin-source-foo#foo"
         );
         assert_eq!(key.package(), "bookclerk-plugin-source-foo");
 
@@ -617,12 +717,12 @@ mod tests {
         let key = PluginKey::from_coordinate(&npm, "foo").unwrap();
         assert_eq!(
             key.canonical(),
-            "npm:https://registry.npmjs.org/@author/foo#foo"
+            "npm:https://registry.npmjs.org#@author/foo#foo"
         );
 
         let pypi = PackageCoordinate::parse("pypi:foo==0.1.0").unwrap();
         let key = PluginKey::from_coordinate(&pypi, "foo").unwrap();
-        assert_eq!(key.canonical(), "pypi:https://pypi.org/foo#foo");
+        assert_eq!(key.canonical(), "pypi:https://pypi.org#foo#foo");
 
         let reg = PackageCoordinate::parse(
             "registry:https://plugins.example/index.json#author/foo@1.0.0",
@@ -633,6 +733,97 @@ mod tests {
             key.canonical(),
             "registry:https://plugins.example/index.json#author/foo#foo"
         );
+    }
+
+    #[test]
+    fn same_origin_different_registry_paths_are_distinct_keys() {
+        let team_a = PackageCoordinate {
+            source: RegistrySource::Cargo {
+                registry_url: "https://packages.example/team-a/".into(),
+            },
+            name: "widget".into(),
+            version: "1.0.0".into(),
+        };
+        let team_b = PackageCoordinate {
+            source: RegistrySource::Cargo {
+                registry_url: "https://packages.example/team-b/".into(),
+            },
+            name: "widget".into(),
+            version: "1.0.0".into(),
+        };
+        let a = PluginKey::from_coordinate(&team_a, "widget").unwrap();
+        let b = PluginKey::from_coordinate(&team_b, "widget").unwrap();
+        assert_eq!(
+            a.canonical(),
+            "cargo:https://packages.example/team-a#widget#widget"
+        );
+        assert_eq!(
+            b.canonical(),
+            "cargo:https://packages.example/team-b#widget#widget"
+        );
+        assert_ne!(a, b);
+        let a_again = PackageCoordinate {
+            source: RegistrySource::Cargo {
+                registry_url: "https://packages.example/team-a/./".into(),
+            },
+            name: "widget".into(),
+            version: "9.9.9".into(),
+        };
+        assert_eq!(
+            PluginKey::from_coordinate(&a_again, "widget").unwrap(),
+            a,
+            "same registry path + different version keeps PluginKey"
+        );
+    }
+
+    #[test]
+    fn plugin_key_parse_rejects_noncanonical_and_serde_runs_parse() {
+        assert!(PluginKey::parse("cargo:https://crates.io/pkg#id").is_err());
+        assert!(PluginKey::parse("not-a-key").is_err());
+        let key = PluginKey::parse("cargo:https://crates.io#pkg#id").unwrap();
+        let json = serde_json::to_string(&key).unwrap();
+        assert_eq!(json, "\"cargo:https://crates.io#pkg#id\"");
+        let back: PluginKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, key);
+        let err =
+            serde_json::from_str::<PluginKey>("\"cargo:https://crates.io/pkg#id\"").unwrap_err();
+        assert!(err.to_string().contains("plugin key") || err.to_string().contains("index_url"));
+        let err = serde_json::from_str::<PluginKey>("{\"canonical\":\"nope\"}").unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn file_registry_indexes_round_trip() {
+        let coord = PackageCoordinate::parse(
+            "registry:file:///tmp/indexes/team-a/index.json#community/echo@1.0.0",
+        )
+        .unwrap();
+        let key = PluginKey::from_coordinate(&coord, "echo").unwrap();
+        assert_eq!(
+            key.canonical(),
+            "registry:file:///tmp/indexes/team-a/index.json#community/echo#echo"
+        );
+        assert_eq!(PluginKey::parse(key.canonical()).unwrap(), key);
+    }
+
+    #[test]
+    fn first_party_database_adapter_requires_exact_package_not_alias() {
+        let sqlite = PluginKey::platform("bookclerk-plugin-database-sqlite", "sqlite").unwrap();
+        assert!(is_first_party_database_adapter(&sqlite));
+        let path = PluginKey::from_install_path(Path::new("/tmp/sqlite"), "sqlite").unwrap();
+        assert!(!is_first_party_database_adapter(&path));
+        let npm = PackageCoordinate::parse("npm:bookclerk-plugin-database-sqlite@1.0.0").unwrap();
+        let npm_key = PluginKey::from_coordinate(&npm, "sqlite").unwrap();
+        assert!(!is_first_party_database_adapter(&npm_key));
+        let other_reg = PackageCoordinate {
+            source: RegistrySource::Cargo {
+                registry_url: "https://packages.example/evil/".into(),
+            },
+            name: "bookclerk-plugin-database-sqlite".into(),
+            version: "1.0.0".into(),
+        };
+        let evil = PluginKey::from_coordinate(&other_reg, "sqlite").unwrap();
+        assert!(!is_first_party_database_adapter(&evil));
     }
 
     #[test]
@@ -649,8 +840,9 @@ mod tests {
     fn parse_round_trips() {
         let key = PluginKey::platform("bookclerk-plugin-destination-local", "local").unwrap();
         assert_eq!(PluginKey::parse(key.canonical()).unwrap(), key);
-        assert_eq!(key.fs_id().len(), 19); // pk- + 16 hex
+        assert_eq!(key.fs_id().len(), 3 + PLUGIN_KEY_FS_ID_HEX_CHARS); // pk- + 32 hex
         assert!(key.fs_id().starts_with("pk-"));
+        assert_eq!(key.scheme(), ProvenanceScheme::Platform);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Deterministic immutable payload identity for an installed plugin tree.
 //!
-//! [`payload_root_sha256`] hashes **packaged** files only. Bookclerk-owned
-//! mutable state (`data/`, `tmp/`) and install receipts are excluded.
+//! [`payload_root_sha256`] hashes packaged files. Host-owned install receipts
+//! (`receipt.json` and its temp/backup names) are excluded. Mutable plugin
+//! state lives outside the install tree under `plugin-state/`.
 //!
 //! The digest proves: these installed bytes match the artifact recorded for this
 //! provenance-qualified package. It does **not** prove publisher identity.
@@ -14,15 +15,11 @@ use sha2::{Digest, Sha256};
 use crate::error::{CatalogError, Result};
 use crate::extract::sha256_file;
 
-/// Directory / file names excluded from the immutable payload (runtime state
-/// and host-owned receipts).
-pub const PAYLOAD_SKIP_NAMES: &[&str] = &[
-    "data",
-    "tmp",
-    "receipt.json",
-    "receipt.json.bak",
-    "receipt.json.tmp",
-];
+/// Directory / file names excluded from the immutable payload (host-owned
+/// receipts only). Packaged `data/` and `tmp/` are hashed: mutable plugin
+/// state lives under `$FILES_DIR/plugin-state/<plugin-key>/`, not inside
+/// the install tree.
+pub const PAYLOAD_SKIP_NAMES: &[&str] = &["receipt.json", "receipt.json.bak", "receipt.json.tmp"];
 
 /// SHA-256 of `plugin.toml` at `plugin_root`.
 ///
@@ -154,19 +151,34 @@ mod tests {
         let manifest = manifest_sha256(root).unwrap();
         assert_eq!(manifest.len(), 64);
 
-        // Reverse-create equivalent tree.
+        // Reverse-create equivalent tree, including formerly skipped packaged paths.
         let dir2 = tempfile::tempdir().unwrap();
         let root2 = dir2.path();
         write_file(&root2.join("bin/guest"), b"#!/bin/sh\n").unwrap();
         write_file(&root2.join("plugin.toml"), b"id = \"echo\"\n").unwrap();
+        write_file(&root2.join("data/secret"), b"nope").unwrap();
+        write_file(&root2.join("tmp/scratch"), b"nope").unwrap();
         let b = payload_root_sha256(root2).unwrap();
         assert_eq!(a, b);
 
-        // Mutating packaged bytes changes the root; mutating data/ does not.
-        write_file(&root.join("data/secret"), b"changed").unwrap();
+        // Mutating a packaged file under data/ changes identity; receipt does not.
+        write_file(&root.join("receipt.json"), b"{changed}").unwrap();
         assert_eq!(a, payload_root_sha256(root).unwrap());
-        write_file(&root.join("plugin.toml"), b"id = \"echo\"\n#x\n").unwrap();
+        write_file(&root.join("data/secret"), b"changed").unwrap();
         assert_ne!(a, payload_root_sha256(root).unwrap());
+    }
+
+    #[test]
+    fn payload_hash_covers_packaged_data_and_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_file(&root.join("plugin.toml"), b"id = \"echo\"\n").unwrap();
+        write_file(&root.join("data/keep"), b"one").unwrap();
+        let before = payload_root_sha256(root).unwrap();
+        write_file(&root.join("data/keep"), b"two").unwrap();
+        assert_ne!(before, payload_root_sha256(root).unwrap());
+        write_file(&root.join("tmp/scratch"), b"x").unwrap();
+        assert_ne!(before, payload_root_sha256(root).unwrap());
     }
 
     #[test]

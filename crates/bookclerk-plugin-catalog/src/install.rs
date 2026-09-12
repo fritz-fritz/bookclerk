@@ -12,6 +12,7 @@ use crate::error::{CatalogError, Result};
 use crate::extract::{extract_archive, safe_join, sha256_file, write_file};
 use crate::identity::{PluginKey, PluginProvenance};
 use crate::kind::RuntimeIdentity;
+use crate::ledger::record_install;
 use crate::manifest::{parse_sha256_hex, BookclerkPackageManifest};
 use crate::receipt::InstallReceipt;
 use crate::target::{host_bookclerk_target, select_target, ArchiveFormat};
@@ -110,11 +111,17 @@ impl Installer {
         let runtime = manifest.runtime();
         validate_plugin_id(&runtime.id)?;
 
-        let dest = safe_join(&opts.plugins_root, Path::new(&runtime.id))?;
-        let incoming_key = match PluginKey::from_coordinate(coordinate, &runtime.id) {
-            Ok(key) => key,
-            Err(_) => PluginKey::from_install_path(&dest, &runtime.id)?,
+        let incoming_key = match &coordinate.source {
+            RegistrySource::LocalArchive => PluginKey::from_install_path(
+                Path::new(&coordinate.name),
+                &runtime.id,
+            )
+            .or_else(|_| {
+                PluginKey::from_install_path(&opts.plugins_root.join(&runtime.id), &runtime.id)
+            })?,
+            _ => PluginKey::from_coordinate(coordinate, &runtime.id)?,
         };
+        let dest = safe_join(&opts.plugins_root, Path::new(&incoming_key.fs_id()))?;
         if dest.exists() {
             if let Ok(existing) = InstallReceipt::load(&dest) {
                 if existing.runtime.id.eq_ignore_ascii_case(&runtime.id)
@@ -129,18 +136,10 @@ impl Installer {
                     )));
                 }
                 if let Ok(existing_key) = existing.plugin_key() {
-                    if existing_key != incoming_key && !opts.replace {
+                    if existing_key != incoming_key {
                         return Err(CatalogError::message(format!(
-                            "alias `{}` is already installed as `{}`; \
-                             a different provenance (`{incoming_key}`) cannot reuse this directory",
-                            runtime.id, existing_key
-                        )));
-                    }
-                    if existing_key != incoming_key && opts.replace {
-                        return Err(CatalogError::message(format!(
-                            "alias `{}` belongs to `{}`; refusing to replace it with `{incoming_key}` \
-                             (grants do not transfer across provenance)",
-                            runtime.id, existing_key
+                            "install directory {} belongs to `{existing_key}`; refusing `{incoming_key}`",
+                            dest.display()
                         )));
                     }
                 }
@@ -332,6 +331,25 @@ impl Installer {
             let _ = fs::remove_dir_all(&staging);
             return Err(e);
         }
+        if let Some(files_dir) = opts.plugins_root.parent() {
+            if let Err(e) = record_install(
+                files_dir,
+                &incoming_key,
+                &coordinate.name,
+                &runtime.id,
+                &receipt.manifest_sha256,
+                &receipt.payload_root_sha256,
+                PluginProvenance::VerifiedInstalled,
+            ) {
+                let _ = fs::remove_dir_all(&dest);
+                if let Some(bak) = &backup {
+                    let _ = fs::rename(bak, &dest);
+                }
+                let _ = restore_plugin_state(&state_hold, &dest);
+                let _ = fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+        }
 
         // Drop staging (download/extract/state hold). Leave `previous` backup for
         // commit/rollback after the caller's health check.
@@ -424,22 +442,22 @@ impl Installer {
 
     /// Remove an installed plugin directory; optionally purge data/tmp state.
     ///
+    /// `spec` is a canonical PluginKey or a manifest alias. Bare aliases are
+    /// accepted only when exactly one install under `plugins_root` uses that id.
+    ///
     /// # Errors
     ///
     /// Returns an error when the operation fails.
-    pub fn remove(plugins_root: &Path, id: &str, purge_state: bool) -> Result<()> {
-        validate_plugin_id(id)?;
-        let dest = safe_join(plugins_root, Path::new(id))?;
-        if !dest.exists() {
-            return Err(CatalogError::message(format!(
-                "plugin `{id}` is not installed under {}",
-                plugins_root.display()
-            )));
-        }
-        // Keep data/tmp unless purge — move them aside if !purge and they live under dest.
+    pub fn remove(plugins_root: &Path, spec: &str, purge_state: bool) -> Result<()> {
+        let dest = resolve_installed_dir(plugins_root, spec)?;
+        let leaf = dest
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(spec)
+            .to_string();
         let data = dest.join("data");
         let tmp = dest.join("tmp");
-        let state_backup = plugins_root.join(format!(".state-keep-{id}"));
+        let state_backup = plugins_root.join(format!(".state-keep-{leaf}"));
         if !purge_state && (data.exists() || tmp.exists()) {
             fs::create_dir_all(&state_backup)?;
             if data.exists() {
@@ -449,15 +467,61 @@ impl Installer {
                 let _ = fs::rename(&tmp, state_backup.join("tmp"));
             }
         }
-        // Retry-friendly remove (Windows file locks).
         remove_dir_retry(&dest)?;
         if purge_state {
-            let _ = fs::remove_dir_all(plugins_root.join(id).join("data"));
-            let _ = fs::remove_dir_all(state_backup);
-        } else if state_backup.exists() {
-            // Leave state in .state-keep-<id> for possible reinstall.
+            let _ = fs::remove_dir_all(&state_backup);
         }
         Ok(())
+    }
+}
+
+/// Resolves `spec` to an install directory under `plugins_root`.
+fn resolve_installed_dir(plugins_root: &Path, spec: &str) -> Result<PathBuf> {
+    if let Ok(key) = PluginKey::parse(spec) {
+        let dest = safe_join(plugins_root, Path::new(&key.fs_id()))?;
+        if dest.exists() {
+            return Ok(dest);
+        }
+        return Err(CatalogError::message(format!(
+            "plugin `{spec}` is not installed under {}",
+            plugins_root.display()
+        )));
+    }
+    let mut matches = Vec::new();
+    let alias_legacy = safe_join(plugins_root, Path::new(spec))?;
+    if alias_legacy.exists() {
+        matches.push(alias_legacy);
+    }
+    if let Ok(entries) = fs::read_dir(plugins_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() || !path.join("plugin.toml").is_file() {
+                continue;
+            }
+            let id_match = InstallReceipt::load(&path)
+                .ok()
+                .map(|r| r.runtime.id.eq_ignore_ascii_case(spec))
+                .or_else(|| {
+                    std::fs::read_to_string(path.join("plugin.toml"))
+                        .ok()
+                        .and_then(|t| PluginManifest::parse(&t).ok())
+                        .map(|m| m.id.eq_ignore_ascii_case(spec))
+                })
+                .unwrap_or(false);
+            if id_match && !matches.iter().any(|p| p == &path) {
+                matches.push(path);
+            }
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.pop().expect("len 1")),
+        0 => Err(CatalogError::message(format!(
+            "plugin `{spec}` is not installed under {}",
+            plugins_root.display()
+        ))),
+        _ => Err(CatalogError::message(format!(
+            "plugin alias `{spec}` is ambiguous; use a provenance-qualified PluginKey"
+        ))),
     }
 }
 
@@ -742,35 +806,6 @@ mod tests {
     use flate2::Compression;
     use tar::Builder;
 
-    fn sample_receipt(kind: PluginKind, id: &str) -> InstallReceipt {
-        let key = PluginKey::from_install_path(Path::new("/tmp/old"), id).unwrap();
-        InstallReceipt {
-            schema_version: InstallReceipt::SCHEMA_VERSION,
-            plugin_key: key.canonical().to_string(),
-            provenance: PluginProvenance::VerifiedInstalled,
-            coordinate: PackageCoordinate {
-                source: RegistrySource::LocalArchive,
-                name: "old".into(),
-                version: "1.0.0".into(),
-            },
-            version: "1.0.0".into(),
-            registry_url: None,
-            artifact_url: "file:///old".into(),
-            target: "linux-x64-gnu".into(),
-            archive_sha256: "ab".repeat(32),
-            manifest_sha256: "cd".repeat(32),
-            payload_root_sha256: "ef".repeat(32),
-            executable_sha256: None,
-            protocol: "workers-rpc".into(),
-            api_version: 3,
-            runtime: RuntimeIdentity::new(kind, id),
-            requested_sandbox: Default::default(),
-            approved_network: "none".into(),
-            installed_at: Utc::now(),
-            update_constraint: None,
-        }
-    }
-
     fn make_echo_archive(dir: &Path) -> (PathBuf, String) {
         let archive = dir.join("echo.tar.gz");
         {
@@ -871,23 +906,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_same_id_different_kind_on_install() {
+    fn rejects_same_plugin_key_different_kind_on_install() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");
-        let dest = plugins.join("echo");
-        fs::create_dir_all(&dest).unwrap();
-        let existing = sample_receipt(PluginKind::Source, "echo");
-        existing.store(&dest).unwrap();
-        fs::write(
-            dest.join("plugin.toml"),
-            "api_version = 3\nid = \"echo\"\ncommand = \"./echo\"\nentrypoints = [\"storefront\"]\n\
-             [capabilities.network]\nmode = \"deny\"\n",
-        )
-        .unwrap();
-
         let (archive, digest) = make_echo_archive(tmp.path());
         let target = host_bookclerk_target();
-        let manifest = BookclerkPackageManifest {
+        let mut manifest = BookclerkPackageManifest {
             schema_version: 1,
             protocol: None,
             api_version: 1,
@@ -901,7 +925,7 @@ mod tests {
             artifacts: vec![ArtifactTarget {
                 target: target.into(),
                 url: format!("file://{}", archive.display()),
-                archive_sha256: digest,
+                archive_sha256: digest.clone(),
                 archive_root: ".".into(),
                 executable: "echo".into(),
                 executable_sha256: None,
@@ -926,11 +950,96 @@ mod tests {
             name: archive.display().to_string(),
             version: "1.0.0".into(),
         };
+        Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
+        manifest.kind = PluginKind::Source;
         let err = Installer::install_from_manifest(&manifest, &coord, &opts)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("globally unique"), "{err}");
-        assert!(err.contains("source"), "{err}");
+        assert!(
+            err.contains("globally unique") || err.contains("already installed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn same_alias_different_local_archives_coexist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let (archive_a, digest_a) = make_echo_archive(tmp.path());
+        let archive_b = tmp.path().join("echo-b.tar.gz");
+        fs::copy(&archive_a, &archive_b).unwrap();
+        let target = host_bookclerk_target();
+        let manifest_for = |digest: String, url: String| BookclerkPackageManifest {
+            schema_version: 1,
+            protocol: None,
+            api_version: 1,
+            api_version_max: None,
+            min_bookclerk: None,
+            kind: PluginKind::Integration,
+            id: "echo".into(),
+            display_name: Some("Echo".into()),
+            description: None,
+            coordinate: None,
+            artifacts: vec![ArtifactTarget {
+                target: target.into(),
+                url,
+                archive_sha256: digest,
+                archive_root: ".".into(),
+                executable: "echo".into(),
+                executable_sha256: None,
+            }],
+            sandbox: Default::default(),
+            links: Default::default(),
+            yanked: false,
+            released_at: None,
+            publisher: None,
+        };
+        let opts = InstallOptions {
+            plugins_root: plugins,
+            trust: TrustPolicy {
+                allow_unsigned: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let coord_a = PackageCoordinate {
+            source: RegistrySource::LocalArchive,
+            name: archive_a.display().to_string(),
+            version: "1.0.0".into(),
+        };
+        let coord_b = PackageCoordinate {
+            source: RegistrySource::LocalArchive,
+            name: archive_b.display().to_string(),
+            version: "1.0.0".into(),
+        };
+        let a = Installer::install_from_manifest(
+            &manifest_for(digest_a.clone(), format!("file://{}", archive_a.display())),
+            &coord_a,
+            &opts,
+        )
+        .unwrap();
+        let b = Installer::install_from_manifest(
+            &manifest_for(digest_a, format!("file://{}", archive_b.display())),
+            &coord_b,
+            &opts,
+        )
+        .unwrap();
+        assert_ne!(a.plugin_root, b.plugin_root);
+        assert_ne!(a.receipt.plugin_key, b.receipt.plugin_key);
+        assert!(a
+            .plugin_root
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("pk-"));
+        assert!(b
+            .plugin_root
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("pk-"));
     }
 
     /// Minimal v3 `plugin.toml` for an integration guest.

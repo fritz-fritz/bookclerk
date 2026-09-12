@@ -146,12 +146,25 @@ impl InstallReceipt {
     ///
     /// # Errors
     ///
-    /// Returns an error when the operation fails.
+    /// Returns [`CatalogError::ReceiptNotFound`] when `receipt.json` is absent.
+    /// Any other I/O or JSON failure is returned as an error (fail closed).
     pub fn load(plugin_root: &Path) -> Result<Self> {
         let path = Self::path_in(plugin_root);
-        let text = fs::read_to_string(&path)
-            .map_err(|e| CatalogError::message(format!("read {}: {e}", path.display())))?;
-        Ok(serde_json::from_str(&text)?)
+        match fs::read_to_string(&path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Err(CatalogError::ReceiptNotFound)
+            }
+            Err(err) => Err(CatalogError::message(format!(
+                "read {}: {err}",
+                path.display()
+            ))),
+            Ok(text) => serde_json::from_str(&text).map_err(|err| {
+                CatalogError::message(format!(
+                    "malformed install receipt {}: {err}",
+                    path.display()
+                ))
+            }),
+        }
     }
 
     /// Atomically write receipt (temp + rename).

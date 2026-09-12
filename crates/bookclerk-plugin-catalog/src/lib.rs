@@ -11,6 +11,7 @@ mod extract;
 mod identity;
 mod install;
 mod kind;
+mod ledger;
 mod manifest;
 mod payload;
 mod receipt;
@@ -25,19 +26,24 @@ pub use adapters::{
 pub use catalog::{CatalogHit, SearchQuery, CATALOG_DTO_SCHEMA_VERSION};
 pub use coordinate::{PackageCoordinate, RegistrySource};
 pub use error::{CatalogError, Result};
-pub use evaluate::{evaluate_install, stamp_platform_receipt};
+pub use evaluate::{evaluate_install, evaluate_install_in, stamp_platform_receipt};
 pub use extract::{
     extract_archive, safe_join, sha256_bytes, sha256_file, MAX_ARCHIVE_BYTES, MAX_EXTRACTED_BYTES,
 };
 pub use identity::{
-    is_platform_plugin_key, platform_artifact, ArtifactIdentity, PlatformArtifact,
-    PluginInstallIdentity, PluginKey, PluginProvenance, ProvenanceScheme, PLATFORM_ARTIFACTS,
-    PLATFORM_PRODUCT,
+    is_first_party_database_adapter, is_platform_plugin_key, platform_artifact, ArtifactIdentity,
+    PlatformArtifact, PluginInstallIdentity, PluginKey, PluginProvenance, ProvenanceScheme,
+    CRATES_IO_INDEX, FIRST_PARTY_DATABASE_ADAPTERS, PLATFORM_ARTIFACTS, PLATFORM_PRODUCT,
+    PLUGIN_KEY_FS_ID_HEX_CHARS,
 };
 pub use install::{
     InstallOptions, InstallOutcome, Installer, DOWNLOAD_TIMEOUT, MAX_DOWNLOAD_BYTES,
 };
 pub use kind::{PluginKind, RuntimeIdentity};
+pub use ledger::{
+    record_install, InstallLedger, InstallLedgerEntry, INSTALL_LEDGER_FILE,
+    INSTALL_LEDGER_SCHEMA_VERSION,
+};
 pub use manifest::{
     normalize_protocol, parse_sha256_hex, validate_sha256_hex, ArtifactTarget,
     BookclerkPackageManifest, PackageLinks, PublisherIdentity, SandboxRequest,
