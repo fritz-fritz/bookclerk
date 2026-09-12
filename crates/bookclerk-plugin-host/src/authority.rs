@@ -1,7 +1,8 @@
 //! Canonical effective authority and live session fencing.
 //!
 //! Structural capabilities originate in the plugin package. The operator may
-//! narrow them but cannot invent entrypoints, producers, or host bindings.
+//! narrow them but cannot invent entrypoints, consumers, producers, jobs, or
+//! host bindings.
 //! Network destinations are operator-extensible: explicit host-owned grants
 //! may add hostnames beyond the manifest. Guest `describe()` cannot widen
 //! either class.
@@ -115,6 +116,25 @@ pub fn authority_revision(grant: &PluginGrant) -> String {
         hasher.update(p.as_bytes());
         hasher.update(b",");
     }
+    hasher.update(b"\nconsumers\n");
+    for c in &grant.consumers {
+        hasher.update(c.event_type.as_bytes());
+        hasher.update(b"|");
+        for v in &c.schema_versions {
+            hasher.update(v.to_string().as_bytes());
+            hasher.update(b",");
+        }
+        hasher.update(if c.supports_suspend { b"s1|" } else { b"s0|" });
+        if let Some(filter) = &c.filter {
+            hasher.update(filter.as_bytes());
+        }
+        hasher.update(b";");
+    }
+    hasher.update(b"\njobs\n");
+    for j in &grant.jobs {
+        hasher.update(j.as_bytes());
+        hasher.update(b",");
+    }
     hasher.update(b"\nbindings\n");
     for b in &grant.bindings {
         hasher.update(b.as_bytes());
@@ -161,6 +181,8 @@ mod tests {
             plugin_id: "demo".into(),
             entrypoints: ["storefront".to_string()].into_iter().collect(),
             producers: BTreeSet::new(),
+            consumers: Default::default(),
+            jobs: Default::default(),
             network_mode: "outbound".into(),
             domains: domains.iter().map(|s| (*s).to_string()).collect(),
             manifest_domains: domains.iter().map(|s| (*s).to_string()).collect(),
@@ -194,6 +216,22 @@ mod tests {
         b.domains.insert("b.example".into());
         b.operator_added_domains.insert("b.example".into());
         assert_ne!(authority_revision(&a), authority_revision(&b));
+    }
+
+    #[test]
+    fn consumer_and_job_changes_alter_authority_revision() {
+        let a = grant(&["a.example"]);
+        let mut b = a.clone();
+        b.consumers.insert(crate::GrantedEventConsumer {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: false,
+            filter: None,
+        });
+        assert_ne!(authority_revision(&a), authority_revision(&b));
+        let mut c = a.clone();
+        c.jobs.insert("stream_copy".into());
+        assert_ne!(authority_revision(&a), authority_revision(&c));
     }
 
     #[test]

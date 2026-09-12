@@ -783,6 +783,8 @@ export function SettingsPage({
           pluginId,
           entrypoints: [],
           producers: [],
+          consumers: [],
+          jobs: [],
           networkMode: "deny",
           domains: [],
           bindings: [],
