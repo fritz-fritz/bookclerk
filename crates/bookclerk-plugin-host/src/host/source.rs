@@ -126,7 +126,7 @@ impl ExternalSource {
         } else {
             describe.sort_key
         };
-        let plugin_data_dir = plugin_data_dir(config, &plugin.manifest.id)?;
+        let plugin_data_dir = plugin_data_dir(config, plugin)?;
         session
             .open(BindingValues::config(ExtensibleConfig::json(
                 &source_config,

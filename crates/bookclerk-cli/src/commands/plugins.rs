@@ -208,8 +208,12 @@ pub enum RegistryKindArg {
 #[derive(Debug, Serialize)]
 /// One discovered plugin row for `plugins list` JSON/text output.
 struct PluginListItem {
-    /// Runtime plugin id from `plugin.toml`.
+    /// Runtime plugin id from `plugin.toml` (display alias; not globally unique).
     id: String,
+    /// Provenance-qualified PluginKey (canonical text).
+    plugin_key: String,
+    /// Host-evaluated provenance (`platform_bundled`, `verified_installed`, …).
+    provenance: String,
     /// Primary handler family (`source`, `integration`, `output`, `database`).
     family: String,
     /// Exported entrypoints declared in `plugin.toml` (`storefront`, `cli`, …).
@@ -238,6 +242,8 @@ pub async fn run(
                 .iter()
                 .map(|p| PluginListItem {
                     id: p.manifest.id.clone(),
+                    plugin_key: p.plugin_key().canonical().to_string(),
+                    provenance: p.identity.provenance.to_string(),
                     family: p.manifest.primary_family().as_str().to_string(),
                     entrypoints: p
                         .manifest
@@ -269,8 +275,10 @@ pub async fn run(
                     }
                     for p in &items {
                         println!(
-                            "{} family={} entrypoints={} enabled={} cli={} command={}",
+                            "{} key={} provenance={} family={} entrypoints={} enabled={} cli={} command={}",
                             p.id,
+                            p.plugin_key,
+                            p.provenance,
                             p.family,
                             p.entrypoints.join(","),
                             p.enabled,
@@ -1267,7 +1275,7 @@ fn run_approve(config: &Config, id: &str, yes: bool, format: OutputFormat) -> an
     use std::io::{self, IsTerminal, Write};
 
     let plugin = find_plugin(config, id)?;
-    let grant = consent_request(&plugin.manifest);
+    let grant = consent_request(&plugin.manifest, plugin.plugin_key());
     let summary = consent_summary(&grant);
 
     for line in &summary {
@@ -1324,7 +1332,7 @@ fn set_plugin_enabled(
 ) -> anyhow::Result<()> {
     let plugin = find_plugin(config, id)?;
     if enabled {
-        require_grant(&config.paths().files_dir, &plugin.manifest).map_err(|err| {
+        require_grant(&config.paths().files_dir, &plugin).map_err(|err| {
             anyhow::anyhow!(
                 "{err}\nRun `bookclerk plugins approve {}` first.",
                 plugin.manifest.id
@@ -1393,10 +1401,9 @@ fn matches_plugin_id(manifest_id: &str, active: &str) -> bool {
 /// Discovers plugins and returns the one whose manifest id matches, or errors if missing.
 fn find_plugin(config: &Config, id: &str) -> anyhow::Result<DiscoveredPlugin> {
     let plugins = bookclerk_plugin_host::discover_plugins(config)?;
-    plugins
-        .into_iter()
-        .find(|p| p.manifest.id == id)
-        .ok_or_else(|| anyhow::anyhow!("plugin `{id}` not discovered"))
+    bookclerk_plugin_host::resolve_plugin_ref(&plugins, id)
+        .cloned()
+        .map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 /// Whether `config.toml` currently enables this discovered plugin.

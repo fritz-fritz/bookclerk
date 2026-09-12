@@ -56,7 +56,7 @@ async fn staged_first_party_plugins_describe() {
     // optional/examples need an explicit approve snapshot for this smoke test).
     let mut grants = PluginGrantStore::load(&config.paths().files_dir).expect("load grants");
     for plugin in &plugins {
-        grants.upsert(consent_request(&plugin.manifest));
+        grants.upsert(consent_request(&plugin.manifest, plugin.plugin_key()));
     }
     grants.save(&config.paths().files_dir).expect("save grants");
 
