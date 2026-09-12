@@ -198,11 +198,15 @@ mod tests {
             ),
             ("SELECT 10 / NULLIF(2, 0) AS d".into(), Vec::new()),
             (
-                "SELECT json_object('a', 1, 'b', NULL) AS o".into(),
+                "SELECT CASE WHEN length(json_object('a', 1, 'b', NULL)) \
+                 > length(json_object('a', 1)) THEN 1 ELSE 0 END AS null_retained"
+                    .into(),
                 Vec::new(),
             ),
             (
-                "SELECT json_object('a', 1, 'a', NULL) AS o".into(),
+                "SELECT CASE WHEN length(json_object('a', 1, 'a', NULL)) > 2 \
+                 THEN 1 ELSE 0 END AS dup_null_retained"
+                    .into(),
                 Vec::new(),
             ),
             (
