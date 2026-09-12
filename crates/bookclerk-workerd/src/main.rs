@@ -305,11 +305,9 @@ async fn run_native_behind_workerd(
 
     #[cfg(unix)]
     let (socket_proxy_path, socket_listener) = {
-        let path = state_dir.join("sockets.sock");
-        let _ = std::fs::remove_file(&path);
-        let listener = std::os::unix::net::UnixListener::bind(&path)
-            .with_context(|| format!("bind socket proxy {}", path.display()))?;
-        (path, listener)
+        let (spec, listener) = bookclerk_workerd::unix_bind::bind_socket_proxy(&state_dir)
+            .context("bind socket proxy")?;
+        (spec, listener)
     };
 
     let mut guest_cmd =
