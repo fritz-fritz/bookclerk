@@ -25,6 +25,10 @@ const NESTED_JAIL_ENV: &str = "BOOKCLERK_NESTED_NATIVE_JAIL";
 /// `inherit_fds` are extra descriptors the nested jail must keep (the socket
 /// proxy directory fd so the guest can `connect(/proc/self/fd/N/sockets.sock)`).
 /// Isolation::Off still inherits them via cleared `FD_CLOEXEC`.
+///
+/// # Errors
+///
+/// Returns an error when the nested jail spec cannot be serialized.
 pub fn native_guest_command(
     backend: &Path,
     plugin_root: &Path,
