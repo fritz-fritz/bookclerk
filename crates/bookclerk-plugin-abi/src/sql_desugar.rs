@@ -589,6 +589,13 @@ mod tests {
         assert_eq!(modulo, "SELECT 1 % NULLIF(NULLIF(0, 1), 0)");
         assert_eq!(desugar_canonical_sql(&modulo), modulo);
 
+        let pair = desugar_canonical_sql("SELECT 1 / NULLIF(0, 1), 1 % NULLIF(0, 1)");
+        assert_eq!(
+            pair,
+            "SELECT 1 / NULLIF(NULLIF(0, 1), 0), 1 % NULLIF(NULLIF(0, 1), 0)"
+        );
+        assert_eq!(desugar_canonical_sql(&pair), pair);
+
         let folded = desugar_canonical_sql("SELECT 1 / nullif(0, 1)");
         assert_eq!(folded, "SELECT 1 / NULLIF(nullif(0, 1), 0)");
         assert_eq!(desugar_canonical_sql(&folded), folded);

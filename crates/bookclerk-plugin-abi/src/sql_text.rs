@@ -846,10 +846,11 @@ pub fn admitted_bookclerk_sql_samples(seed: u64, count: usize) -> Vec<String> {
         "SELECT json_extract(json_object({}), '$.k15')",
         pairs.join(", ")
     ));
-    // Aliases are required: Postgres names every unnamed expression
-    // `?column?`, and duplicate names fail closed at the adapter.
-    out.push("SELECT 1 / NULLIF(0, 1) AS d0, 1 % NULLIF(0, 1) AS m0".into());
-    out.push("SELECT 10 / NULLIF(2, 0) AS already".into());
+    // Unaliased pair: Postgres names both `?column?`; the adapter uniquifies
+    // those engine labels so this stays a / % semantics sample, not a
+    // duplicate-name check (`SELECT x, x` still fails closed).
+    out.push("SELECT 1 / NULLIF(0, 1), 1 % NULLIF(0, 1)".into());
+    out.push("SELECT 10 / NULLIF(2, 0)".into());
     out
 }
 
