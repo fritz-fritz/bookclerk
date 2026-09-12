@@ -21,15 +21,20 @@ const NESTED_JAIL_ENV: &str = "BOOKCLERK_NESTED_NATIVE_JAIL";
 
 /// Builds a command that execs `backend` under `bookclerk-jail` with Deny net
 /// when the host requested a nested jail and the helper is available.
+///
+/// `inherit_fds` are extra descriptors the nested jail must keep (the socket
+/// proxy directory fd so the guest can `connect(/proc/self/fd/N/sockets.sock)`).
+/// Isolation::Off still inherits them via cleared `FD_CLOEXEC`.
 pub fn native_guest_command(
     backend: &Path,
     plugin_root: &Path,
     state_dir: &Path,
+    inherit_fds: &[i32],
 ) -> Result<Command> {
     let nested_requested = std::env::var_os(NESTED_JAIL_ENV).is_some_and(|v| v == "1");
     let mut cmd = if nested_requested {
         if let Some(jail) = find_jail() {
-            let spec = deny_spec(backend, plugin_root, state_dir);
+            let spec = deny_spec(backend, plugin_root, state_dir, inherit_fds);
             let json = serde_json::to_string(&spec).context("serialize nested native jail spec")?;
             let mut wrapped = Command::new(jail);
             wrapped.env(SPEC_ENV, json);
@@ -51,7 +56,7 @@ pub fn native_guest_command(
     Ok(cmd)
 }
 
-fn deny_spec(backend: &Path, plugin_root: &Path, state_dir: &Path) -> Spec {
+fn deny_spec(backend: &Path, plugin_root: &Path, state_dir: &Path, inherit_fds: &[i32]) -> Spec {
     let enforcement = if std::env::var_os("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT").is_some() {
         Enforcement::Required
     } else {
@@ -68,7 +73,13 @@ fn deny_spec(backend: &Path, plugin_root: &Path, state_dir: &Path) -> Spec {
     spec.allow_exec = true;
     spec.system_paths = true;
     spec.enforcement = enforcement;
-    spec.preserve_fds = vec![0, 1, 2];
+    spec.preserve_fds = {
+        let mut fds = vec![0, 1, 2];
+        fds.extend(inherit_fds.iter().copied().filter(|fd| *fd > 2));
+        fds.sort_unstable();
+        fds.dedup();
+        fds
+    };
     spec
 }
 
@@ -137,11 +148,18 @@ mod tests {
     #[test]
     fn nested_native_guest_spec_denies_ambient_inet() {
         let root = std::env::temp_dir();
-        let spec = deny_spec(&root.join("guest"), &root, &root);
+        let spec = deny_spec(&root.join("guest"), &root, &root, &[]);
         assert_eq!(spec.net, NetPolicy::Deny);
         assert!(spec.allow_exec);
         assert_eq!(spec.preserve_fds, vec![0, 1, 2]);
         assert!(spec.writes.iter().any(|p| p == &root));
+    }
+
+    #[test]
+    fn nested_spec_preserves_socket_proxy_dir_fd() {
+        let root = std::env::temp_dir();
+        let spec = deny_spec(&root.join("guest"), &root, &root, &[7]);
+        assert_eq!(spec.preserve_fds, vec![0, 1, 2, 7]);
     }
 
     #[test]
