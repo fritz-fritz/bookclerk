@@ -846,8 +846,10 @@ pub fn admitted_bookclerk_sql_samples(seed: u64, count: usize) -> Vec<String> {
         "SELECT json_extract(json_object({}), '$.k15')",
         pairs.join(", ")
     ));
-    out.push("SELECT 1 / NULLIF(0, 1), 1 % NULLIF(0, 1)".into());
-    out.push("SELECT 10 / NULLIF(2, 0)".into());
+    // Aliases are required: Postgres names every unnamed expression
+    // `?column?`, and duplicate names fail closed at the adapter.
+    out.push("SELECT 1 / NULLIF(0, 1) AS d0, 1 % NULLIF(0, 1) AS m0".into());
+    out.push("SELECT 10 / NULLIF(2, 0) AS already".into());
     out
 }
 
