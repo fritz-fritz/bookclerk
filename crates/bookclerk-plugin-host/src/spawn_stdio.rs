@@ -121,7 +121,6 @@ pub(crate) async fn spawn_stdio_guest(
             if matches!(&jail.start, Start::Confined { .. }) {
                 cmd.env(NESTED_NATIVE_JAIL_ENV, "1");
             }
-            #[cfg(unix)]
             if let Some(jail_bin) = plan.nested_jail_helper() {
                 cmd.env(NESTED_JAIL_BIN_ENV, jail_bin);
             }
