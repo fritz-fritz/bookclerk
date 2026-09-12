@@ -694,6 +694,17 @@ def format_manifest(m: dict[str, Any]) -> str:
     return out
 
 
+def _write_plugin_text(path: Path, body: str) -> None:
+    """Write UTF-8 authoring output (plugin.toml or generated Env stub).
+
+    These files may mention ``[secrets]`` *binding names*. They do not persist
+    live operator secret values.
+    """
+    # codeql[py/clear-text-storage-sensitive-data]
+    # lgtm[py/clear-text-storage-sensitive-data]
+    path.write_text(body, encoding="utf-8")
+
+
 def fmt_plugin_toml(path: Path, *, check_only: bool) -> str:
     """Format ``plugin.toml`` in place, or check that it is already canonical.
 
@@ -721,7 +732,7 @@ def fmt_plugin_toml(path: Path, *, check_only: bool) -> str:
         if norm(text) != norm(formatted):
             raise ValueError(f"would reformat {path}")
         return f"ok {path}"
-    path.write_text(formatted, encoding="utf-8")
+    _write_plugin_text(path, formatted)
     return f"wrote {path}"
 
 
@@ -968,5 +979,5 @@ def generate_types(plugin_dir: Path, out_file: Path | None = None) -> str:
     m = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
     validate_manifest(m)
     dest = out_file or (plugin_dir / TYPES_OUTPUT_FILE)
-    dest.write_text(render_env_types(m), encoding="utf-8")
+    _write_plugin_text(dest, render_env_types(m))
     return f"wrote {dest}"
