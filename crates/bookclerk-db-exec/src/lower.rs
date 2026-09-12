@@ -19,10 +19,11 @@ use sea_orm::DatabaseBackend;
 ///
 /// Every backend rewrites `INSERT OR IGNORE` to unique/PK `ON CONFLICT DO
 /// NOTHING` (SQLite `OR IGNORE` would otherwise swallow `NOT NULL`). Postgres
-/// adapters then rewrite helpers (`IFNULL`, `json_extract`, 2+-arg `min`/`max`,
-/// `json_valid`, `round`/`sum`/`avg`) and `?` placeholders. Default `ORDER BY`
-/// NULLS and `/` `%` by-zero `NULLIF` are host semantic desugars, not adapter
-/// rewrites. Binding and host **DDL** type/identity rewrites
+/// adapters then rewrite helpers (`IFNULL`, `json_object` → TEXT,
+/// `json_extract`, 2+-arg `min`/`max`, `json_valid`, `round`/`sum`/`avg`)
+/// and `?` placeholders. Default `ORDER BY` NULLS and `/` `%` by-zero
+/// `NULLIF` are host semantic desugars, not adapter rewrites. Binding and host
+/// **DDL** type/identity rewrites
 /// (`AUTOINCREMENT`, `BLOB`, `INTEGER`) stay on the adapter execution edge
 /// ([`crate::schema_sql_for_backend`], [`crate::lower_binding_ddl_execute_request`])
 /// so this function does not classify statements.
@@ -400,7 +401,7 @@ fn overflow_dialect(backend: DatabaseBackend) -> OverflowDialect {
 /// Maps SQLite helpers used in host plans onto PostgreSQL equivalents.
 fn sqlite_fns_to_postgres(sql: &str) -> String {
     let mut sql = rewrite_fn_name(sql, "ifnull", "COALESCE");
-    sql = rewrite_fn_name(&sql, "json_object", "json_build_object");
+    sql = rewrite_json_object(&sql);
     sql = rewrite_variadic_min_max(&sql);
     sql = rewrite_round_sum_avg(&sql);
     sql = rewrite_json_valid(&sql);
@@ -448,6 +449,74 @@ fn rewrite_fn_name(sql: &str, name: &str, pg_name: &str) -> String {
         i += ch.len_utf8();
     }
     out
+}
+
+/// Maps `json_object` onto `json_build_object` and the SQL-v1 TEXT wire type.
+///
+/// Postgres `json_build_object` returns `json`, so `length(json_object(…))`
+/// would fail (`length(json)` does not exist). Nested `json_object` values stay
+/// `json` so they nest as objects rather than JSON strings.
+fn rewrite_json_object(sql: &str) -> String {
+    rewrite_json_object_calls(sql, false)
+}
+
+fn rewrite_json_object_calls(sql: &str, keep_json: bool) -> String {
+    let mut i = 0;
+    let mut out = String::with_capacity(sql.len() + 16);
+    while i < sql.len() {
+        if let Some(len) = literal_or_comment_len(&sql[i..]) {
+            out.push_str(&sql[i..i + len]);
+            i += len;
+            continue;
+        }
+        if ident_call_at(sql, i, "json_object") {
+            let open = sql[i + "json_object".len()..]
+                .char_indices()
+                .find(|(_, c)| !c.is_whitespace())
+                .map(|(off, _)| i + "json_object".len() + off)
+                .unwrap_or(i + "json_object".len());
+            if let Some((args, rest)) = split_call_args(&sql[open + 1..]) {
+                let rewritten: Vec<String> = args
+                    .iter()
+                    .map(|a| {
+                        let nested = is_sole_json_object_call(a);
+                        rewrite_json_object_calls(a, nested)
+                    })
+                    .collect();
+                let call = format!("json_build_object({})", rewritten.join(", "));
+                if keep_json {
+                    out.push_str(&call);
+                } else {
+                    out.push('(');
+                    out.push_str(&call);
+                    out.push_str("::text)");
+                }
+                i = sql.len() - rest.len();
+                continue;
+            }
+        }
+        let ch = sql[i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// True when `s` is exactly one `json_object(…)` call (optional outer space).
+fn is_sole_json_object_call(s: &str) -> bool {
+    let s = s.trim();
+    if !ident_call_at(s, 0, "json_object") {
+        return false;
+    }
+    let open = s["json_object".len()..]
+        .char_indices()
+        .find(|(_, c)| !c.is_whitespace())
+        .map(|(off, _)| "json_object".len() + off)
+        .unwrap_or("json_object".len());
+    matches!(
+        split_call_args(&s[open + 1..]),
+        Some((_, rest)) if rest.trim().is_empty()
+    )
 }
 
 /// Rewrites 2+-arg `min`/`max` (SQLite scalars) to `LEAST`/`GREATEST`.
@@ -1442,9 +1511,43 @@ mod tests {
             "SELECT COALESCE(NULL, 5), COALESCE(x, 0)"
         );
         let sql = lower_canonical_to_postgres("SELECT json_object('k', ?), JSON_OBJECT('a', 1)");
-        assert!(sql.contains("json_build_object('k', $1)"), "{sql}");
-        assert!(sql.contains("json_build_object('a', 1)"), "{sql}");
+        assert!(sql.contains("(json_build_object('k', $1)::text)"), "{sql}");
+        assert!(sql.contains("(json_build_object('a', 1)::text)"), "{sql}");
         assert!(!sql.to_ascii_lowercase().contains("json_object("), "{sql}");
+    }
+
+    #[test]
+    fn postgres_json_object_is_text_except_nested_constructor_values() {
+        let length = lower_canonical_to_postgres("SELECT length(json_object('a', 1, 'b', NULL))");
+        assert_eq!(
+            length,
+            "SELECT length((json_build_object('a', 1, 'b', NULL)::text))"
+        );
+        let nested = lower_canonical_to_postgres(
+            "SELECT json_extract(json_object('n', json_object('k', 'v')), '$.n')",
+        );
+        assert!(
+            nested.contains("json_build_object('n', json_build_object('k', 'v'))"),
+            "{nested}"
+        );
+        assert!(
+            !nested.contains("json_build_object('k', 'v')::text"),
+            "nested constructor values must stay json: {nested}"
+        );
+        assert!(nested.contains("::text"), "{nested}");
+        let portable = lower_canonical_to_postgres(crate::sql_v1::PORTABLE_JSON_OBJECT_SEMANTICS);
+        assert!(
+            portable.contains("length((json_build_object('a', 1, 'b', NULL)::text))"),
+            "{portable}"
+        );
+        assert!(
+            portable.contains("json_build_object('n', json_build_object('k', 'v'))"),
+            "{portable}"
+        );
+        assert!(
+            !portable.to_ascii_lowercase().contains("json_object("),
+            "{portable}"
+        );
     }
 
     #[test]
@@ -1462,15 +1565,6 @@ mod tests {
         assert!(sql.contains("json_build_object"), "{sql}");
         assert!(!sql.contains("json_extract("), "{sql}");
         assert!(!sql.contains("json_valid("), "{sql}");
-    }
-
-    #[test]
-    fn portable_json_object_length_casts_to_text_on_postgres() {
-        let sql = lower_canonical_to_postgres(crate::sql_v1::PORTABLE_JSON_OBJECT_SEMANTICS);
-        assert!(sql.contains("length(CAST(json_build_object"), "{sql}");
-        assert!(sql.contains("AS TEXT)"), "{sql}");
-        assert!(!sql.to_ascii_lowercase().contains("json_object("), "{sql}");
-        assert!(!sql.contains("json_extract("), "{sql}");
     }
 
     #[test]
