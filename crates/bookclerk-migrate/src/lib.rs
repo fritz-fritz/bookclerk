@@ -124,9 +124,12 @@ pub async fn migrate(opts: MigrateOptions) -> Result<MigrateSummary> {
     // --- AccountsSettings.json ---
     let mut account_id_map = HashMap::new();
     if let Some(accounts_path) = &source.accounts_settings {
+        let dest_store = dest.as_ref().ok_or_else(|| {
+            MigrateError::Accounts("destination store required to import accounts".into())
+        })?;
         let acct = import_accounts(
             accounts_path,
-            &dest.as_ref().expect("dest store").store,
+            &dest_store.store,
             opts.force,
             opts.skip_auth,
             opts.dry_run,
@@ -151,9 +154,12 @@ pub async fn migrate(opts: MigrateOptions) -> Result<MigrateSummary> {
 
     // --- LibationContext.db ---
     if let Some(db_path) = &source.library_db {
+        let dest_store = dest.as_ref().ok_or_else(|| {
+            MigrateError::Library("destination store required to import library".into())
+        })?;
         let lib = import_library_db(
             db_path,
-            &dest.as_ref().expect("dest store").store,
+            &dest_store.store,
             &audio_paths,
             books_root.as_path(),
             &account_id_map,
