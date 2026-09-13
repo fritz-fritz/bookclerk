@@ -115,10 +115,12 @@ payloads for several storefront / integration surfaces, and a reverse
    logical key. A bare `id = "sqlite"` confers no privilege; platform
    defaults require host-stamped provenance plus matching content hashes.
 
-10. **No in-process product plugins.** `bookclerk` / `bookclerkd` never
-    link ordinary plugin implementation crates. Direct host↔native Cap'n
-    Proto remains `DirectNativeDiagnostic` only. CI
-    (`scripts/check-plugin-architecture.sh`) enforces both.
+10. **No in-process product plugins.** `bookclerk` / `bookclerkd` /
+    `bookclerk-plugin-host` never link ordinary plugin implementation crates,
+    including `bookclerk-plugin-database-*`. Database adapters own physical
+    lowering behind `databaseAdapter` (`openSession`, `dropUnit`). Direct
+    host↔native Cap'n Proto remains `DirectNativeDiagnostic` only. CI
+    (`scripts/check-plugin-architecture.sh`) enforces this.
 
 ## Consequences
 

@@ -204,7 +204,9 @@ async fn spawn_s3_guest(
     };
     let grant = crate::consent::spawn_grant(&config.paths().files_dir, plugin)?;
     let mut extra_env = Vec::new();
-    if crate::consent::grant_has_binding(&grant, "secrets") {
+    if crate::is_first_party_s3_output(plugin)
+        && crate::consent::grant_has_binding(&grant, "secrets")
+    {
         if let Some(creds) = &credentials {
             extra_env.push((
                 bookclerk_storage::ENV_AWS_ACCESS_KEY_ID,

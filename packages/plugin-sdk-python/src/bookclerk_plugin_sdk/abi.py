@@ -4122,6 +4122,17 @@ class Database(Protocol):
         """
         ...
 
+    async def drop_unit(self, unit_ref: str) -> EmptyReply:
+        """Physically drop one provisioned binding unit (`unitRef` is adapter-owned).
+
+        Args:
+            unit_ref: Adapter-native unit (sqlite path, postgres database, D1 name).
+
+        Returns:
+            ``EmptyReply``
+        """
+        ...
+
 
 class IdentityHighWater(TypedDict):
     """Adapter-private identity high-water (sqlite_sequence / bookclerk_identity).

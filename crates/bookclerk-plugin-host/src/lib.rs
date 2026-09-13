@@ -6,9 +6,10 @@
 //!
 //! Production hosts never link ordinary plugin implementation crates.
 //! First-party storefronts (Audible, Libro.fm, …) are staged guests, the
-//! same path third-party plugins use. Database adapter crates
-//! (`bookclerk-plugin-database-*`) remain linked for **host-owned** SQL
-//! lowering, not in-process plugin execution.
+//! same path third-party plugins use. Database adapters own physical
+//! lowering behind the typed `databaseAdapter` capability (`openSession`,
+//! `dropUnit`); production hosts do not link `bookclerk-plugin-database-*`
+//! crates to perform product behavior.
 //!
 //! External plugins are **untrusted** relative to the host: the host never
 //! passes `library.db` / `master.key` / the files-dir root, clears
@@ -90,7 +91,8 @@ pub use consent::{
 pub use crates_io::search_crates_io;
 pub use destinations::{build_acquire_destinations, build_storage_backend};
 pub use discover::{
-    discover_plugins, identity_matches_occupancy, occupancy_matches_alias, occupancy_spec,
+    discover_plugins, first_party_database_kind, identity_matches_occupancy,
+    is_first_party_local_output, is_first_party_s3_output, occupancy_matches_alias, occupancy_spec,
     plugin_matches_occupancy, plugin_search_dirs, resolve_plugin_ref, resolve_plugin_slot,
     settings_table, settings_table_for, stamp_occupancy_plugin_key, upgrade_unique_alias_occupancy,
     DiscoveredPlugin,

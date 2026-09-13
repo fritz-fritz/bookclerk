@@ -5043,6 +5043,34 @@ _database_open_session_results_codec = _Codec(0, 1, _write_database_open_session
 """Wire codec for ``DatabaseOpenSessionResults`` (0 data words, 1 pointers)."""
 
 
+def _write_database_drop_unit_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    s.set_text(0, v["unitRef"])
+
+
+def _read_database_drop_unit_params(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "unitRef": s.get_text(0),
+    }
+
+
+_database_drop_unit_params_codec = _Codec(0, 1, _write_database_drop_unit_params, _read_database_drop_unit_params)
+"""Wire codec for ``DatabaseDropUnitParams`` (0 data words, 1 pointers)."""
+
+
+def _write_database_drop_unit_results(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
+    _empty_reply_codec.write(s.init_struct(0, 1, 1), v["result"], caps)
+
+
+def _read_database_drop_unit_results(s: _StructReader, caps: _CapTable) -> Any:
+    return {
+        "result": _empty_reply_codec.read(s.get_struct(0, 1, 1), caps),
+    }
+
+
+_database_drop_unit_results_codec = _Codec(0, 1, _write_database_drop_unit_results, _read_database_drop_unit_results)
+"""Wire codec for ``DatabaseDropUnitResults`` (0 data words, 1 pointers)."""
+
+
 def _write_adapter_database_session_capabilities_params(s: _CapnpStruct, v: Any, caps: _CapTable) -> None:
     pass
 

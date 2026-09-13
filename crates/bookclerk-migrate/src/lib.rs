@@ -14,6 +14,7 @@ mod files;
 mod library;
 mod native;
 mod settings;
+mod store;
 
 pub use accounts::import_accounts;
 pub use discover::{discover_source, ClassicSource};
@@ -114,12 +115,18 @@ pub async fn migrate(opts: MigrateOptions) -> Result<MigrateSummary> {
 
     let books_root = config.output.local.root.clone();
 
+    let dest = if source.accounts_settings.is_some() || source.library_db.is_some() {
+        Some(store::DestStore::open(&opts.dest_files_dir, opts.dry_run).await?)
+    } else {
+        None
+    };
+
     // --- AccountsSettings.json ---
     let mut account_id_map = HashMap::new();
     if let Some(accounts_path) = &source.accounts_settings {
         let acct = import_accounts(
             accounts_path,
-            &opts.dest_files_dir,
+            &dest.as_ref().expect("dest store").store,
             opts.force,
             opts.skip_auth,
             opts.dry_run,
@@ -144,15 +151,9 @@ pub async fn migrate(opts: MigrateOptions) -> Result<MigrateSummary> {
 
     // --- LibationContext.db ---
     if let Some(db_path) = &source.library_db {
-        let library_db = opts.dest_files_dir.join("library.db");
-        let store = if opts.dry_run {
-            bookclerk_plugin_database_sqlite::open_store_memory().await?
-        } else {
-            bookclerk_plugin_database_sqlite::open_store(&library_db).await?
-        };
         let lib = import_library_db(
             db_path,
-            &store,
+            &dest.as_ref().expect("dest store").store,
             &audio_paths,
             books_root.as_path(),
             &account_id_map,

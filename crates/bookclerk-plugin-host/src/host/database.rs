@@ -111,6 +111,9 @@ pub struct ExternalDatabase {
     /// Manifest id (first-party `sqlite` / `d1` / `postgres`, or a
     /// third-party adapter id) used to build the factory context.
     plugin_id: String,
+    /// Verified first-party adapter kind, if this guest is a host-controlled
+    /// sqlite / postgres / d1 artifact. Alias text never sets this.
+    first_party_kind: Option<DatabasePluginKind>,
     /// Guest HOME / data directory passed in the factory context.
     plugin_data_dir: std::path::PathBuf,
     /// Granted `[database.<id>]` settings delivered to third-party adapters
@@ -152,14 +155,11 @@ impl ExternalDatabase {
         let table = crate::settings_table(config, plugin);
         let config_json = toml_to_json(&toml::Value::Table(table));
         let plugin_data_dir = plugin_data_dir(config, plugin)?;
-        let extra_env = match DatabasePluginKind::parse(&plugin.manifest.id) {
+        let extra_env = match crate::first_party_database_kind(plugin) {
             Some(DatabasePluginKind::D1) | Some(DatabasePluginKind::Postgres) => Vec::new(),
             Some(DatabasePluginKind::Sqlite) => {
-                // Host-selected sqlite adapter: tell the guest (and the nested
-                // native jail) where `library.db` lives. Provenance must not
-                // gate this path — a staged copy of the platform guest still
-                // needs the file, and a bare `id = "sqlite"` without platform
-                // provenance must not receive auto-consent elsewhere.
+                // Host-selected first-party sqlite adapter: tell the guest
+                // (and the nested native jail) where `library.db` lives.
                 let path = config.database.sqlite_path(&config.paths().files_dir);
                 vec![(
                     "BOOKCLERK_SQLITE_PATH",
@@ -182,6 +182,7 @@ impl ExternalDatabase {
         Ok(Self {
             session,
             plugin_id: plugin.manifest.id.clone(),
+            first_party_kind: crate::first_party_database_kind(plugin),
             plugin_data_dir,
             settings_json: config_json,
             files_dir: config.paths().files_dir.clone(),
@@ -213,7 +214,7 @@ impl ExternalDatabase {
     ) -> Result<(DatabaseConnection, DbCapabilities), DbErr> {
         let ctx = connect_bindings(
             config,
-            &self.plugin_id,
+            self.first_party_kind,
             &self.plugin_data_dir,
             &self.session,
             &self.settings_json,
@@ -1096,7 +1097,7 @@ impl ExternalDatabase {
                 self.plugin_id
             )));
         }
-        let kind = DatabasePluginKind::parse(&self.plugin_id);
+        let kind = self.first_party_kind;
         let backend_kind = match kind {
             Some(DatabasePluginKind::Sqlite) => "sqlite",
             Some(DatabasePluginKind::Postgres) => "postgres",
@@ -1184,7 +1185,7 @@ impl ExternalDatabase {
         unit_ref: &str,
         provision: bool,
     ) -> PluginResult<(DatabaseConnection, DbCapabilities)> {
-        let kind = DatabasePluginKind::parse(&self.plugin_id);
+        let kind = self.first_party_kind;
         let ctx =
             self.binding_open_values(config, kind, owner_plugin_id, binding, unit_ref, provision)?;
         let key = format!("{owner_plugin_id}/{binding}");
@@ -1397,61 +1398,83 @@ impl ExternalDatabase {
     /// Physically deletes a provisioned binding unit. The registry row is the
     /// caller's to remove **after** this returns success.
     ///
-    /// SQLite deletes the file and journal sidecars. PostgreSQL issues
-    /// `DROP DATABASE`. D1 deletes the Cloudflare database by name. Unknown
-    /// adapters fail closed so a registry row cannot outlive a unit the host
-    /// cannot prove is gone.
+    /// Spawns the matching database adapter and calls `Database.dropUnit`.
+    /// SQLite unlinks the file and journal sidecars. PostgreSQL issues
+    /// `DROP DATABASE`. D1 deletes the Cloudflare database by name. Adapters
+    /// that do not implement `dropUnit` fail closed so a registry row cannot
+    /// outlive a unit the host cannot prove is gone.
     ///
     /// # Errors
     ///
-    /// Returns when credentials are missing, the backend refuses the delete,
-    /// or the adapter family is unknown.
+    /// Returns when the adapter is not installed, spawn fails, credentials
+    /// are missing, or the guest refuses the delete.
     pub async fn drop_provisioned_unit(
         config: &Config,
         backend_kind: &str,
         unit_ref: &str,
     ) -> PluginResult<()> {
-        match backend_kind {
-            "sqlite" => {
-                for suffix in ["", "-wal", "-shm", "-journal"] {
-                    let path = format!("{unit_ref}{suffix}");
-                    match std::fs::remove_file(&path) {
-                        Ok(()) => {}
-                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(err) => {
-                            return Err(PluginError::message(format!(
-                                "could not delete {path}: {err}"
-                            )));
-                        }
-                    }
-                }
-                Ok(())
+        let plugins = crate::discover_plugins(config)?;
+        let adapters: Vec<_> = plugins
+            .into_iter()
+            .filter(|p| {
+                p.manifest
+                    .has_entrypoint(crate::Entrypoint::DatabaseAdapter)
+            })
+            .collect();
+        let plugin = resolve_drop_adapter(config, &adapters, backend_kind)?;
+        let ext = Self::spawn(plugin, config).await?;
+        let values = database_connect_bindings(config, plugin, &ext.session)?;
+        ext.session.db_drop_unit(values, unit_ref).await
+    }
+
+    /// Verified first-party adapter kind, if any.
+    #[must_use]
+    pub fn first_party_kind(&self) -> Option<DatabasePluginKind> {
+        self.first_party_kind
+    }
+}
+
+/// Selects the adapter guest that must perform `dropUnit` for `backend_kind`.
+fn resolve_drop_adapter<'a>(
+    config: &Config,
+    adapters: &'a [DiscoveredPlugin],
+    backend_kind: &str,
+) -> PluginResult<&'a DiscoveredPlugin> {
+    let spec = config.database.plugin.trim();
+    if !spec.is_empty() {
+        if let Ok(occupant) = crate::resolve_plugin_ref(adapters, spec) {
+            if adapter_matches_backend(occupant, backend_kind) {
+                return Ok(occupant);
             }
-            "postgres" => {
-                let url = resolve_postgres_url(config)
-                    .map_err(|err| PluginError::message(err.to_string()))?;
-                bookclerk_plugin_database_postgres::drop_binding(&url, unit_ref)
-                    .await
-                    .map_err(|err| PluginError::message(err.to_string()))
-            }
-            "d1" => {
-                let token =
-                    resolve_d1_api_token().map_err(|err| PluginError::message(err.to_string()))?;
-                bookclerk_plugin_database_d1::delete_database(
-                    &config.database.d1.api_base,
-                    &config.database.d1.account_id,
-                    &token,
-                    unit_ref,
-                )
-                .await
-                .map_err(|err| PluginError::message(err.to_string()))
-            }
-            other => Err(PluginError::message(format!(
-                "cannot drop adapter `{other}` unit `{unit_ref}`: the host cannot prove deletion; \
-                 remove it with the adapter, then retry"
-            ))),
         }
     }
+    let hits: Vec<_> = adapters
+        .iter()
+        .filter(|plugin| adapter_matches_backend(plugin, backend_kind))
+        .collect();
+    match hits.as_slice() {
+        [one] => Ok(one),
+        [] => Err(PluginError::message(format!(
+            "cannot drop adapter `{backend_kind}` unit: no matching database plugin is installed; \
+             remove it with the adapter, then retry"
+        ))),
+        _ => Err(PluginError::message(format!(
+            "cannot drop adapter `{backend_kind}` unit: multiple database plugins match; \
+             set [database].plugin to a qualified PluginKey"
+        ))),
+    }
+}
+
+/// True when `plugin` is the adapter that should physically drop `backend_kind`.
+///
+/// Verified first-party adapters match on kind. Everyone else matches only on
+/// display alias or exact PluginKey text so an alias twin cannot steal drop.
+fn adapter_matches_backend(plugin: &DiscoveredPlugin, backend_kind: &str) -> bool {
+    if let Some(kind) = crate::first_party_database_kind(plugin) {
+        return kind.as_str().eq_ignore_ascii_case(backend_kind);
+    }
+    plugin.alias().eq_ignore_ascii_case(backend_kind)
+        || plugin.plugin_key().canonical() == backend_kind
 }
 
 /// Open the library for a specific `[database].plugin` id (ignoring the active config value).
@@ -2598,7 +2621,7 @@ pub fn database_connect_bindings(
     let settings_json = toml_to_json(&toml::Value::Table(table));
     connect_bindings(
         config,
-        &plugin.manifest.id,
+        crate::first_party_database_kind(plugin),
         &plugin_data_dir,
         session,
         &settings_json,
@@ -2609,20 +2632,20 @@ pub fn database_connect_bindings(
 /// Builds the database adapter's `PluginWorker.open` binding values from host
 /// config.
 ///
-/// First-party ids (`sqlite`, `d1`, `postgres`) receive host-private connect
-/// params with host-injected paths / secrets. Any other id is a third-party
-/// adapter and receives the public [`bookclerk_plugin_abi::DatabaseAdapterConfig`]
-/// payload carrying its granted `[database.<id>]` settings, so custom adapters
-/// bootstrap without a host registry change.
+/// Verified first-party adapters receive host-private connect params (library
+/// path, postgres URL, D1 token). Any other install — including a third-party
+/// tree whose alias is `sqlite` / `postgres` / `d1` — receives the public
+/// [`bookclerk_plugin_abi::DatabaseAdapterConfig`] payload carrying its granted
+/// `[database.<id>]` settings.
 fn connect_bindings(
     config: &Config,
-    plugin_id: &str,
+    first_party_kind: Option<DatabasePluginKind>,
     plugin_data_dir: &Path,
     session: &PluginSession,
     settings_json: &Value,
 ) -> Result<bookclerk_plugin_sdk::BindingValues, DbErr> {
     let data_dir = plugin_data_dir.display().to_string();
-    let params = match DatabasePluginKind::parse(plugin_id) {
+    let params = match first_party_kind {
         Some(DatabasePluginKind::Sqlite) => sqlite_connect_params(config, plugin_data_dir),
         Some(DatabasePluginKind::D1) => {
             session
@@ -2695,10 +2718,10 @@ fn canonical_seaorm_backend() -> DbBackend {
     DbBackend::Sqlite
 }
 
-/// Fills missing diagnostic engine identity from the plugin id.
+/// Fills missing diagnostic engine identity from occupancy text.
 ///
-/// Guest-reported `engine` always wins. The host never requires sqlite or
-/// postgres names.
+/// Guest-reported `engine` always wins. This is presentation only: it never
+/// injects secrets, grants files, or selects first-party privilege.
 fn apply_bootstrap_metadata(bootstrap: &mut DbBootstrap, plugin_id: &str) {
     if !bootstrap.engine.is_empty() {
         return;
@@ -2711,7 +2734,7 @@ fn apply_bootstrap_metadata(bootstrap: &mut DbBootstrap, plugin_id: &str) {
     };
 }
 
-/// SQLite connect params for first-party `sqlite` and arbitrary sqlite-family ids.
+/// SQLite connect params for a verified first-party sqlite adapter.
 fn sqlite_connect_params(config: &Config, plugin_data_dir: &Path) -> DbConnectParams {
     let path = config.database.sqlite_path(&config.paths().files_dir);
     DbConnectParams::Sqlite {
@@ -2830,6 +2853,15 @@ mod tests {
         let settings = cfg.settings.json_value().expect("json settings");
         assert_eq!(settings["url"], "custom://host/db");
         assert_eq!(settings["pool_size"], 4);
+    }
+
+    #[test]
+    fn sqlite_alias_public_settings_are_not_host_connect_params() {
+        let settings = serde_json::json!({ "path": "/tmp/evil.db" });
+        let ctx = adapter_config_bindings("/tmp/plugins/sqlite/data", &settings)
+            .expect("adapter context");
+        bookclerk_plugin_abi::db::connect_params_from_bindings(&ctx)
+            .expect_err("third-party sqlite alias must not decode as host connect params");
     }
 
     #[test]
@@ -3108,21 +3140,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drop_provisioned_sqlite_unit_deletes_file_and_sidecars() {
+    async fn drop_provisioned_sqlite_unit_requires_installed_adapter() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("binding.db");
         std::fs::write(&path, b"sqlite").expect("db file");
         let unit = path.display().to_string();
-        std::fs::write(format!("{unit}-wal"), b"wal").expect("wal");
-        std::fs::write(format!("{unit}-shm"), b"shm").expect("shm");
-        std::fs::write(format!("{unit}-journal"), b"j").expect("journal");
-        ExternalDatabase::drop_provisioned_unit(&Config::default(), "sqlite", &unit)
+        let err = ExternalDatabase::drop_provisioned_unit(&Config::default(), "sqlite", &unit)
             .await
-            .expect("drop sqlite unit");
-        assert!(!path.exists(), "binding file must be gone");
-        assert!(!std::path::Path::new(&format!("{unit}-wal")).exists());
-        assert!(!std::path::Path::new(&format!("{unit}-shm")).exists());
-        assert!(!std::path::Path::new(&format!("{unit}-journal")).exists());
+            .expect_err("no staged sqlite adapter");
+        assert!(
+            err.to_string().contains("cannot drop"),
+            "host must not unlink sqlite files without the adapter: {err}"
+        );
+        assert!(
+            path.exists(),
+            "unit file remains until the adapter drops it"
+        );
     }
 
     #[tokio::test]

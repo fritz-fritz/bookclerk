@@ -77,7 +77,7 @@ standalone author repos: [plugin-registry.md](plugin-registry.md).
 | **Reference example** | Echo samples under `examples/`; CI/`cargo dev --examples` only — never packaged |
 | **Third-party plugin** | Outside this monorepo; same jail + Workers RPC ABI |
 | **Plugin package** | Rust crate under `crates/bookclerk-plugins/`, or a workerd archive (`plugin.toml` + `modules/`) |
-| **In-process fallback** | None for ordinary plugins. Database adapter *crates* stay linked for host-owned SQL lowering, not guest execution |
+| **In-process fallback** | None. Storefronts, destinations, and database adapters run as staged external guests. Physical lowering (`openSession`, `dropUnit`, engine connect) stays in the adapter. |
 | **Verified artifact** | Installed bytes that match the install receipt (`manifest_sha256` + `payload_root_sha256`) for a provenance-qualified PluginKey |
 | **`BookclerkEntrypoint`** | Workerd default-export base (`event(batch)` / `job(job)` / `databaseMigrations(binding)` / optional `describe()` / `shutdown()`); named entrypoints are exported `*Entrypoint` subclasses. TS extends `WorkerEntrypoint`. Rust guests implement `PluginWorker` (`describe` / `open(invocation, bindings) -> Entrypoints`) + `serve` |
 
@@ -1363,7 +1363,8 @@ closed). Non-SQL engines are unsupported.
 
 | Method | Notes |
 | --- | --- |
-| `Database.openSession` | Opens the adapter session. The guest connects its engine from `DatabaseContext.config` (first-party guests receive host-injected connect params; SQLite: path grant; D1/Postgres: host-injected credentials). |
+| `Database.openSession` | Opens the adapter session. The guest connects its engine from `DatabaseContext.config` (verified first-party guests receive host-injected connect params; SQLite: path grant; D1/Postgres: host-injected credentials). |
+| `Database.dropUnit` | Physically deletes one provisioned binding unit (`unitRef` is adapter-owned: sqlite path, postgres database, D1 name). Missing units are success. Adapters that cannot prove deletion fail closed. |
 | `AdapterDatabaseSession.capabilities` | Typed control-plane call after `openSession`. Advertises SQL contract version, execution semantics, `schemaMigrations`, backup flags, and all limits. Host policy requires `schemaMigrations`. Diagnostic engine identity is not a capability. The host must not invent these from the plugin id. |
 | `AdapterDatabaseSession.bootstrap` | Diagnostic engine name only (`engine`). Not part of `DbCapabilities`, never used to admit a guest or generate SQL. Any string is valid. |
 | `AdapterDatabaseSession.execute` | The one typed atomic operation (`AdapterExecuteRequest` → `ExecuteReply`). The request is already-desugared canonical Bookclerk SQL (`?` placeholders) plus 1:1 hash-bound proofs. Adapters lower at execute. Guests do not interpret Bookclerk operation names. `job(job)` does **not** receive the host library on `env`. Plugins that need durable SQL declare `[[databases]]` bindings and receive physically separate units on `env.<BINDING>`. |
@@ -1402,7 +1403,7 @@ separate from the Bookclerk library and from every other plugin
 - **SQLite** — one file per binding under
   `$BOOKCLERK_FILES_DIR/plugin-databases/<plugin-key-fs-id>/<BINDING>.db`
   (the sqlite adapter jail grants that directory). The leaf is
-  `PluginKey::fs_id()` (`pk-` plus 16 hex), not the display alias and not
+  `PluginKey::fs_id()` (`pk-` plus 32 hex / 128 bits), not the display alias and not
   the canonical PluginKey (which is not a valid Windows path component).
   The `plugin_databases` registry still stores the canonical PluginKey.
 - **PostgreSQL** — one database per binding (`pb_` + 32 hex of the
@@ -1425,9 +1426,7 @@ operator approval before enable, like other capabilities. Provisioned units
 are recorded in the host `plugin_databases` registry (an existing row wins so
 re-opens never re-target a binding); inspect and remove them with
 `bookclerk plugins db list` / `bookclerk plugins db drop <plugin> [binding]`
-(the drop command deletes the physical SQLite file, PostgreSQL database, or
-Cloudflare D1 database, then removes the registry row; it fails closed if
-physical delete cannot be proven).
+(the drop command calls the adapter's `Database.dropUnit`, then removes the registry row; it fails closed if physical delete cannot be proven).
 
 Inside a binding the plugin **owns its schema** by registering a complete
 ordered history at startup (`databaseMigrations(binding)`): opaque

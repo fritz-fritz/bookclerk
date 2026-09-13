@@ -1469,13 +1469,13 @@ fn set_plugin_enabled(
                         );
                 }
             }
-            PluginFamily::Output if plugin.manifest.id == "s3" => {
+            PluginFamily::Output if bookclerk_plugin_host::is_first_party_s3_output(&plugin) => {
                 cfg.output.s3.enabled = enabled;
                 if enabled {
                     cfg.output.s3.plugin = plugin.plugin_key().canonical().to_string();
                 }
             }
-            PluginFamily::Output if plugin.manifest.id == "local" => {
+            PluginFamily::Output if bookclerk_plugin_host::is_first_party_local_output(&plugin) => {
                 cfg.output.local.enabled = enabled;
                 if enabled {
                     cfg.output.local.plugin = plugin.plugin_key().canonical().to_string();
@@ -1569,14 +1569,14 @@ fn is_enabled(config: &Config, plugin: &DiscoveredPlugin) -> bool {
                         ),
                     )
             }
-            PluginFamily::Output if plugin.manifest.id == "s3" => {
+            PluginFamily::Output if bookclerk_plugin_host::is_first_party_s3_output(plugin) => {
                 config.output.s3.enabled
                     && plugin_matches_occupancy(
                         plugin,
                         occupancy_spec(&config.output.s3.plugin, "s3"),
                     )
             }
-            PluginFamily::Output if plugin.manifest.id == "local" => {
+            PluginFamily::Output if bookclerk_plugin_host::is_first_party_local_output(plugin) => {
                 config.output.local.enabled
                     && plugin_matches_occupancy(
                         plugin,

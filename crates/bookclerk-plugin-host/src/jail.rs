@@ -563,20 +563,14 @@ pub(crate) fn is_sqlite_database_plugin(plugin: &DiscoveredPlugin) -> bool {
     plugin
         .manifest
         .has_entrypoint(crate::Entrypoint::DatabaseAdapter)
-        && is_trusted_platform_plugin(plugin, "sqlite")
+        && crate::first_party_database_kind(plugin)
+            == Some(bookclerk_config::DatabasePluginKind::Sqlite)
 }
 
 /// True when this guest is the verified Bookclerk platform local storage plugin.
 fn is_platform_local_storage(plugin: &DiscoveredPlugin) -> bool {
     plugin.manifest.has_entrypoint(crate::Entrypoint::Storage)
-        && is_trusted_platform_plugin(plugin, "local")
-}
-
-/// Platform extra jail grants require host-stamped provenance, not a bare id.
-fn is_trusted_platform_plugin(plugin: &DiscoveredPlugin, expected_alias: &str) -> bool {
-    plugin.identity.provenance.grants_platform_defaults()
-        && plugin.alias() == expected_alias
-        && bookclerk_plugin_catalog::is_platform_plugin_key(plugin.plugin_key())
+        && crate::is_first_party_local_output(plugin)
 }
 
 /// `library.db` plus the journal sidecars SQLite opens beside it.
@@ -912,39 +906,54 @@ entrypoints = ["{entrypoint}"]
     }
 
     #[test]
-    fn fake_sqlite_alias_does_not_get_library_db_grants() {
+    fn fake_first_party_aliases_do_not_get_host_private_grants() {
         let files = tempfile::tempdir().expect("tempdir");
         let install = tempfile::tempdir().expect("tempdir");
-        let config = config_at(files.path());
-        let plugin = plugin_with_entrypoint(
-            install.path(),
-            "sqlite",
-            JailNetworkNeed::None,
-            "databaseAdapter",
-        );
+        let mut config = config_at(files.path());
+        config.output.local.enabled = true;
+        config.output.local.root = files.path().join("books");
+        std::fs::create_dir_all(&config.output.local.root).expect("output root");
         ensure_sqlite_library_files(&config).expect("touch sqlite files");
-
-        let spec = build_spec(
-            &plugin,
-            &direct(&plugin),
-            &config,
-            &plugin_data_dir(&config, &plugin).unwrap(),
-            &plugin_scratch_dir(&config, &plugin).unwrap(),
-            Vec::new(),
-            Enforcement::Required,
-            None,
-        );
-        for path in sqlite_library_paths(&config) {
+        let output_root = resolved_local_output_root(&config);
+        for (id, entrypoint) in [
+            ("sqlite", "databaseAdapter"),
+            ("postgres", "databaseAdapter"),
+            ("d1", "databaseAdapter"),
+            ("local", "storage"),
+        ] {
+            let root = install.path().join(id);
+            std::fs::create_dir_all(&root).expect("alias install dir");
+            let plugin = plugin_with_entrypoint(&root, id, JailNetworkNeed::None, entrypoint);
+            let spec = build_spec(
+                &plugin,
+                &direct(&plugin),
+                &config,
+                &plugin_data_dir(&config, &plugin).unwrap(),
+                &plugin_scratch_dir(&config, &plugin).unwrap(),
+                Vec::new(),
+                Enforcement::Required,
+                None,
+            );
+            for path in sqlite_library_paths(&config) {
+                assert!(
+                    !spec.writes.contains(&path),
+                    "third-party `{id}` must not receive {}",
+                    path.display()
+                );
+            }
             assert!(
-                !spec.writes.contains(&path),
-                "untrusted sqlite alias must not receive {}",
-                path.display()
+                !spec.writes.contains(&plugin_databases_dir(&config)),
+                "third-party `{id}` must not receive plugin-databases/"
+            );
+            assert!(
+                !spec.writes.contains(&output_root),
+                "third-party `{id}` must not receive local output root"
+            );
+            assert_eq!(
+                plugin.identity.provenance,
+                bookclerk_plugin_catalog::PluginProvenance::LocalDevelopment
             );
         }
-        assert_eq!(
-            plugin.identity.provenance,
-            bookclerk_plugin_catalog::PluginProvenance::LocalDevelopment
-        );
     }
 
     #[test]

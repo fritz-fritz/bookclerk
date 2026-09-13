@@ -21,12 +21,12 @@ status=0
 # Check the actual default feature set (empty: external guests only).
 # Do not pass --no-default-features — that would stop matching the packaged
 # default build if defaults ever gain features. Storefronts are staged guests;
-# SQLite and local output ship as staged guests. Database adapter crates may
-# remain in the host graph for host-owned SQL lowering.
+# SQLite, local output, and optional database adapters ship as staged guests.
+# Production hosts must not link adapter implementation crates for lowering.
 for host in bookclerk-cli bookclerkd; do
   tree="$(cargo tree -p "$host" --edges normal --prefix none --format '{lib}')"
 
-  stores="$(grep -E '^bookclerk_plugin_(source|integration|destination)_' <<<"$tree" | sort -u || true)"
+  stores="$(grep -E '^bookclerk_plugin_(source|integration|destination|database)_' <<<"$tree" | sort -u || true)"
   if [[ -n "$stores" ]]; then
     echo "FAIL: $host (default) still links store/destination plugin crates:" >&2
     sed 's/^/  /' <<<"$stores" >&2

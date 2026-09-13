@@ -1862,6 +1862,37 @@ fn overlay_unique_occupant(
     )
 }
 
+/// TCP host/port a Postgres URL would dial (`None` for Unix-socket URLs).
+///
+/// Query `host` / `hostaddr` / `port` override the URL authority. A `host`
+/// that starts with `/` is a libpq directory for `.s.PGSQL.{port}`. Copied
+/// into the host so production does not link the postgres adapter crate.
+#[must_use]
+pub(crate) fn postgres_tcp_target(url: &str) -> Option<(String, u16)> {
+    let parsed = url::Url::parse(url).ok()?;
+    let mut host = parsed
+        .host_str()
+        .filter(|h| !h.is_empty())
+        .map(str::to_string);
+    let mut port = parsed.port().unwrap_or(5432);
+    let mut unix_socket = parsed
+        .host_str()
+        .is_some_and(|h| h.starts_with('/') || h.starts_with("%2F") || h.starts_with("%2f"));
+    for (key, value) in parsed.query_pairs() {
+        match &*key {
+            "host" if value.starts_with('/') => unix_socket = true,
+            "host" => host = Some(value.into_owned()),
+            "hostaddr" => host = Some(value.into_owned()),
+            "port" => port = value.parse().ok()?,
+            _ => {}
+        }
+    }
+    if unix_socket {
+        return None;
+    }
+    Some((host?, port))
+}
+
 /// Overlay TCP for the active Postgres URL (host-owned, not persisted).
 fn overlay_postgres_url(
     grant: &mut PluginGrant,
@@ -1875,7 +1906,7 @@ fn overlay_postgres_url(
     let Ok(url) = resolve_postgres_url(config) else {
         return;
     };
-    let Some((host, port)) = bookclerk_plugin_database_postgres::postgres_tcp_target(&url) else {
+    let Some((host, port)) = postgres_tcp_target(&url) else {
         return;
     };
     overlay_tcp_host(grant, &host, port);
@@ -1905,7 +1936,7 @@ fn overlay_database_slot_matches(
     kind: DatabasePluginKind,
     discovered: &[crate::discover::DiscoveredPlugin],
 ) -> bool {
-    if DatabasePluginKind::parse(plugin.alias()) != Some(kind) {
+    if crate::first_party_database_kind(plugin) != Some(kind) {
         return false;
     }
     let spec = config.database.plugin.trim();
@@ -2195,6 +2226,20 @@ mod tests {
             .expect("test plugin tree must evaluate")
     }
 
+    fn first_party_database(
+        root: &std::path::Path,
+        package: &str,
+        id: &str,
+        toml: &str,
+    ) -> DiscoveredPlugin {
+        let mut plugin = discovered(root, toml);
+        let key = bookclerk_plugin_catalog::PluginKey::platform(package, id).unwrap();
+        plugin.identity.plugin_key = key.clone();
+        plugin.identity.artifact.plugin_key = key;
+        plugin.identity.provenance = PluginProvenance::VerifiedInstalled;
+        plugin
+    }
+
     fn stamped_sqlite(files: &std::path::Path) -> DiscoveredPlugin {
         let key = bookclerk_plugin_catalog::PluginKey::platform(
             "bookclerk-plugin-database-sqlite",
@@ -2427,8 +2472,10 @@ jobs = ["stream_copy"]
     #[test]
     fn overlay_implies_loopback_tcp_from_postgres_url() {
         let dir = tempfile::tempdir().unwrap();
-        let plugin = discovered(
+        let plugin = first_party_database(
             dir.path(),
+            "bookclerk-plugin-database-postgres",
+            "postgres",
             r#"
 api_version = 3
 id = "postgres"
@@ -2460,8 +2507,10 @@ mode = "outbound"
     #[test]
     fn overlay_public_host_needs_tcp_not_cidr() {
         let dir = tempfile::tempdir().unwrap();
-        let plugin = discovered(
+        let plugin = first_party_database(
             dir.path(),
+            "bookclerk-plugin-database-postgres",
+            "postgres",
             r#"
 api_version = 3
 id = "postgres"
@@ -2487,8 +2536,10 @@ mode = "outbound"
     #[test]
     fn overlay_skips_when_sqlite_is_active() {
         let dir = tempfile::tempdir().unwrap();
-        let plugin = discovered(
+        let plugin = first_party_database(
             dir.path(),
+            "bookclerk-plugin-database-postgres",
+            "postgres",
             r#"
 api_version = 3
 id = "postgres"
@@ -2514,8 +2565,10 @@ mode = "outbound"
     #[test]
     fn overlay_d1_api_base_implies_tcp() {
         let dir = tempfile::tempdir().unwrap();
-        let plugin = discovered(
+        let plugin = first_party_database(
             dir.path(),
+            "bookclerk-plugin-database-d1",
+            "d1",
             r#"
 api_version = 3
 id = "d1"
@@ -2535,6 +2588,81 @@ mode = "outbound"
         let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
         overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
         assert!(grant.egress_policy().allows_tcp("api.cloudflare.com", 443));
+    }
+
+    #[test]
+    fn overlay_third_party_postgres_alias_does_not_get_host_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        assert!(crate::first_party_database_kind(&plugin).is_none());
+        let mut config = Config::default();
+        config.database.plugin = "postgres".into();
+        config.database.postgres.url =
+            Some("postgres://postgres:postgres@localhost:5432/postgres".into());
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
+        assert!(
+            grant.tcp.is_empty() && grant.address_cidrs.is_empty(),
+            "third-party postgres alias must not inherit host URL overlay: {grant:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_third_party_d1_alias_does_not_get_api_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = discovered(
+            dir.path(),
+            r#"
+api_version = 3
+id = "d1"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        assert!(crate::first_party_database_kind(&plugin).is_none());
+        let mut config = Config::default();
+        config.database.plugin = "d1".into();
+        config.database.d1.api_base = "https://api.cloudflare.com/client/v4".into();
+        let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+        overlay_host_implied_network(&mut grant, &plugin, &config, std::slice::from_ref(&plugin));
+        assert!(
+            grant.tcp.is_empty(),
+            "third-party d1 alias must not inherit host D1 API overlay"
+        );
+    }
+
+    #[test]
+    fn postgres_tcp_target_parses_host_port_and_skips_unix() {
+        assert_eq!(
+            postgres_tcp_target("postgres://u:p@db.example.com:6543/library"),
+            Some(("db.example.com".into(), 6543))
+        );
+        assert_eq!(
+            postgres_tcp_target("postgres://localhost/db"),
+            Some(("localhost".into(), 5432))
+        );
+        assert!(postgres_tcp_target("postgres://%2Fvar%2Frun%2Fpostgresql/db").is_none());
+        assert!(postgres_tcp_target("postgres://ignored/db?host=/var/run/postgresql").is_none());
     }
 
     #[test]
@@ -2607,7 +2735,12 @@ mode = "outbound"
 
 [vars]
 "#;
-        let real = discovered(a.path(), toml);
+        let real = first_party_database(
+            a.path(),
+            "bookclerk-plugin-database-postgres",
+            "postgres",
+            toml,
+        );
         let twin = discovered(b.path(), toml);
         assert_eq!(real.alias(), twin.alias());
         assert_ne!(real.plugin_key(), twin.plugin_key());

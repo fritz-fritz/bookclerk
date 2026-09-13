@@ -805,6 +805,24 @@ export interface DatabaseOpenSessionResults {
 }
 
 /**
+ * Params envelope of `Database.dropUnit`.
+ *
+ * @internal
+ */
+export interface DatabaseDropUnitParams {
+  unitRef: string;
+}
+
+/**
+ * Results envelope of `Database.dropUnit`.
+ *
+ * @internal
+ */
+export interface DatabaseDropUnitResults {
+  result: T.EmptyReply;
+}
+
+/**
  * Params envelope of `AdapterDatabaseSession.capabilities`.
  *
  * @internal
@@ -8175,6 +8193,46 @@ export const DatabaseOpenSessionResultsCodec: StructCodec<DatabaseOpenSessionRes
   read(s, caps) {
     return {
       result: AdapterSessionReplyCodec.read(s.getStruct(0, 1, 1), caps),
+    };
+  },
+};
+
+/**
+ * Wire codec for the `Database.dropUnit` params envelope (0 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const DatabaseDropUnitParamsCodec: StructCodec<DatabaseDropUnitParams> = {
+  dataWords: 0,
+  pointerCount: 1,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.unitRef ?? "");
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      unitRef: s.getText(0),
+    };
+  },
+};
+
+/**
+ * Wire codec for the `Database.dropUnit` results envelope (0 data words, 1 pointers).
+ *
+ * @internal
+ */
+export const DatabaseDropUnitResultsCodec: StructCodec<DatabaseDropUnitResults> = {
+  dataWords: 0,
+  pointerCount: 1,
+  write(s, v, caps) {
+    if (v.result != null) {
+      EmptyReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    }
+  },
+  read(s, caps) {
+    return {
+      result: EmptyReplyCodec.read(s.getStruct(0, 1, 1), caps),
     };
   },
 };
