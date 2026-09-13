@@ -2841,6 +2841,8 @@ mode = "outbound"
     }
 
     #[test]
+    /// Invalid installation state (defense in depth): PluginKey occupancy must
+    /// not overlay host TCP onto a different PluginKey that reused the alias.
     fn overlay_plugin_key_spec_does_not_grant_alias_twin() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
@@ -2887,6 +2889,8 @@ mode = "outbound"
     }
 
     #[test]
+    /// Invalid installation state (defense in depth): a bare alias occupancy
+    /// grants neither twin when two PluginKeys share that alias.
     fn overlay_bare_alias_does_not_grant_when_twins_exist() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
@@ -2921,6 +2925,8 @@ mode = "outbound"
     }
 
     #[test]
+    /// Invalid installation state (defense in depth): S3 PluginKey occupancy
+    /// must not overlay host TCP onto an alias twin.
     fn overlay_s3_plugin_key_spec_does_not_grant_alias_twin() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
@@ -2961,6 +2967,8 @@ mode = "outbound"
     }
 
     #[test]
+    /// Invalid installation state (defense in depth): ABS PluginKey occupancy
+    /// must not overlay host TCP onto an alias twin.
     fn overlay_audiobookshelf_plugin_key_spec_does_not_grant_alias_twin() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
@@ -3622,6 +3630,8 @@ mode = "deny"
     }
 
     #[test]
+    /// Invalid installation state (defense in depth): a keyed grant must not
+    /// replace a keyless same-alias legacy row.
     fn upsert_keyed_grant_does_not_replace_keyless_alias_twin() {
         let mut store = PluginGrantStore::default();
         let mut keyless = sample_grant(&[], &["config"], &[]);
@@ -3645,6 +3655,8 @@ mode = "deny"
     }
 
     #[test]
+    /// Invalid installation state (defense in depth): a keyless grant must not
+    /// replace a provenance-qualified same-alias row.
     fn upsert_keyless_grant_does_not_replace_keyed_same_alias() {
         let mut store = PluginGrantStore::default();
         let mut keyed = sample_grant(&[], &["config"], &[]);
