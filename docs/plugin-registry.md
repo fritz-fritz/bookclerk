@@ -308,12 +308,15 @@ Alias uniqueness (one Bookclerk installation):
 - Same PluginKey + same alias (update) → allowed
 - Different PluginKey + already-used alias → **rejected** (even with a full
   PluginKey or `--replace`)
-- Same PluginKey changing its manifest alias → explicit `--replace`; fails if
-  the new alias is occupied; PluginKey stays stable
+- Same PluginKey + different manifest alias → **rejected** (even with
+  `--replace`). Alias changes are not supported by ordinary
+  install/update/replace; they need an explicit future migration because
+  `[sources.<id>]` / `[integrations.<id>]` stay keyed by alias
 - Corrupt disk with two PluginKeys sharing an alias → discovery fails closed
 
-`--replace` updates the existing PluginKey. It never lets a different
-provenance seize an alias.
+`--replace` updates files for an existing PluginKey at its current alias. It
+never lets a different provenance seize an alias, and it never renames an
+installed PluginKey's alias.
 
 No `cargo` / `rustc` on PATH is required.
 

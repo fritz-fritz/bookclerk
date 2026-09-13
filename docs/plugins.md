@@ -118,7 +118,11 @@ Plugin **aliases** (`plugin.toml` `id`) are globally unique within one
 Bookclerk installation: each alias maps to exactly zero or one installed
 [`PluginKey`]. Duplicate aliases from different PluginKeys are invalid
 installation state (discovery fails closed; install rejects the second
-package, including with `--replace`). Aliases are for humans and CLI
+package, including with `--replace`). An installed PluginKey's alias is
+immutable across ordinary install/update/replace — a package cannot keep
+the same PluginKey while changing `id = "foo"` to `id = "foo2"`, because
+`[sources.<id>]` / `[integrations.<id>]` and related settings stay keyed
+by alias. Aliases are for humans and CLI
 ergonomics (`bookclerk plugins info postgres`). They are **not** trust:
 a third-party package that is the sole installed `sqlite` still receives
 no platform secrets, SQLite library path, or first-party jail allowances.

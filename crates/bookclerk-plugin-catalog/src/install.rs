@@ -35,9 +35,12 @@ pub struct InstallOptions {
     pub target: Option<String>,
     /// When true, resolve and verify without writing an install.
     pub dry_run: bool,
-    /// When true, overwrite an existing install of the **same** [`PluginKey`].
+    /// When true, overwrite an existing install of the **same** [`PluginKey`]
+    /// at the **same** alias.
     ///
-    /// Does not allow a different PluginKey to seize an already-used alias.
+    /// Does not allow a different PluginKey to seize an already-used alias,
+    /// and does not rename an installed PluginKey's alias. Alias changes are
+    /// not supported by ordinary install/update/replace.
     pub replace: bool,
     /// When true, refuse network fetches (local/cache only).
     pub offline: bool,
@@ -173,6 +176,13 @@ impl Installer {
             &runtime.id,
             opts.replace,
         )?;
+        reject_alias_change(
+            &opts.plugins_root,
+            &dest,
+            ledger.as_ref(),
+            &incoming_key,
+            &runtime.id,
+        )?;
         let previous_ledger = ledger
             .as_ref()
             .and_then(|loaded| loaded.get(&incoming_key).cloned());
@@ -194,12 +204,6 @@ impl Installer {
                         return Err(CatalogError::message(format!(
                             "install directory {} belongs to `{existing_key}`; refusing `{incoming_key}`",
                             dest.display()
-                        )));
-                    }
-                    if !existing.runtime.id.eq_ignore_ascii_case(&runtime.id) && !opts.replace {
-                        return Err(CatalogError::message(format!(
-                            "plugin `{}` is changing its alias from `{}` to `{}`; pass --replace",
-                            incoming_key, existing.runtime.id, runtime.id
                         )));
                     }
                 }
@@ -482,22 +486,86 @@ impl Installer {
     /// `spec` is a canonical PluginKey or a globally unique alias. Duplicate
     /// aliases on disk fail closed.
     ///
+    /// Removal establishes exactly one durable [`PluginKey`] **before** any
+    /// tree mutation (valid receipt, otherwise a parseable manifest alias plus
+    /// exactly one matching host-ledger row). The install tree is held aside,
+    /// the ledger row is removed, optional PluginKey state is purged, then the
+    /// held tree is deleted. Ledger or identity failures restore the tree.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the operation fails.
+    /// Returns when the plugin is missing, durable identity cannot be
+    /// established, the trust ledger cannot be read or written, or the tree
+    /// cannot be held, restored, or deleted.
     pub fn remove(plugins_root: &Path, spec: &str, purge_state: bool) -> Result<()> {
         let dest = resolve_installed_dir(plugins_root, spec)?;
-        let key = InstallReceipt::load(&dest)
-            .ok()
-            .and_then(|r| r.plugin_key().ok());
-        remove_dir_retry(&dest)?;
-        if let (Some(files_dir), Some(key)) = (plugins_root.parent(), key.as_ref()) {
-            restore_ledger_entry(files_dir, key, None)?;
+        let files_dir = plugins_root.parent();
+        let mut ledger = match files_dir {
+            Some(dir) => Some(InstallLedger::load(dir)?),
+            None => None,
+        };
+        let key = resolve_remove_plugin_key(&dest, ledger.as_ref())?;
+        let previous_ledger = ledger.as_ref().and_then(|loaded| loaded.get(&key).cloned());
+
+        let staging_parent = plugins_root.join(".staging");
+        fs::create_dir_all(&staging_parent)?;
+        let hold = hold_removing_path(&staging_parent, &key);
+        rename_retry(&dest, &hold)?;
+
+        if let (Some(dir), Some(ledger)) = (files_dir, ledger.as_mut()) {
+            ledger.remove(&key);
+            if let Err(err) = ledger.store(dir) {
+                return Err(remove_after_hold_failure(
+                    &hold,
+                    &dest,
+                    dir,
+                    &key,
+                    previous_ledger,
+                    err,
+                    "install ledger",
+                ));
+            }
             if purge_state {
-                let _ = fs::remove_dir_all(files_dir.join("plugin-state").join(key.fs_id()));
+                let state = dir.join("plugin-state").join(key.fs_id());
+                if state.exists() {
+                    if let Err(err) = remove_dir_retry(&state) {
+                        return Err(remove_after_hold_failure(
+                            &hold,
+                            &dest,
+                            dir,
+                            &key,
+                            previous_ledger,
+                            err,
+                            &format!("plugin state {}", state.display()),
+                        ));
+                    }
+                }
             }
         }
-        Ok(())
+
+        match remove_dir_retry(&hold) {
+            Ok(()) => Ok(()),
+            Err(_) if !hold.exists() && !dest.exists() => Ok(()),
+            Err(err) => {
+                if let Some(dir) = files_dir {
+                    return Err(remove_after_hold_failure(
+                        &hold,
+                        &dest,
+                        dir,
+                        &key,
+                        previous_ledger,
+                        err,
+                        "held install tree",
+                    ));
+                }
+                match restore_held_tree(&hold, &dest) {
+                    Ok(()) => Err(err),
+                    Err(restore_err) => Err(CatalogError::message(format!(
+                        "{err}; also failed to restore install tree: {restore_err}"
+                    ))),
+                }
+            }
+        }
     }
 }
 
@@ -727,6 +795,203 @@ fn reject_alias_collision(
     Ok(())
 }
 
+/// Rejects installing a new alias onto an already-installed [`PluginKey`].
+///
+/// Ordinary update/replace cannot rename aliases because product configuration
+/// (`[sources.<id>]`, `[integrations.<id>]`, enablement) remains keyed by alias.
+fn reject_alias_change(
+    plugins_root: &Path,
+    dest: &Path,
+    ledger: Option<&InstallLedger>,
+    incoming_key: &PluginKey,
+    incoming_alias: &str,
+) -> Result<()> {
+    for existing in existing_aliases_for_plugin_key(plugins_root, dest, ledger, incoming_key)? {
+        if !existing.eq_ignore_ascii_case(incoming_alias) {
+            return Err(CatalogError::message(format!(
+                "plugin `{incoming_key}` is already installed as `{existing}`; refusing alias \
+                 change to `{incoming_alias}`. Alias changes are not supported by ordinary \
+                 install/update/replace and require an explicit future migration mechanism"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Known aliases for `incoming_key` from the dest tree, install occupancy, and ledger.
+fn existing_aliases_for_plugin_key(
+    plugins_root: &Path,
+    dest: &Path,
+    ledger: Option<&InstallLedger>,
+    incoming_key: &PluginKey,
+) -> Result<Vec<String>> {
+    let mut aliases = Vec::new();
+    let mut push_unique = |alias: String| {
+        if !aliases
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&alias))
+        {
+            aliases.push(alias);
+        }
+    };
+    if dest.exists() {
+        if let Some(alias) = alias_from_install_dir(dest) {
+            push_unique(alias);
+        }
+    }
+    for (key, alias, _) in installed_alias_owners(plugins_root)? {
+        if key == *incoming_key {
+            push_unique(alias);
+        }
+    }
+    if let Some(row) = ledger.and_then(|loaded| loaded.get(incoming_key)) {
+        push_unique(row.manifest_id.clone());
+    }
+    Ok(aliases)
+}
+
+/// Receipt alias, otherwise parseable `plugin.toml` `id`.
+fn alias_from_install_dir(dest: &Path) -> Option<String> {
+    InstallReceipt::load(dest)
+        .ok()
+        .map(|receipt| receipt.runtime.id)
+        .or_else(|| {
+            fs::read_to_string(dest.join("plugin.toml"))
+                .ok()
+                .and_then(|text| PluginManifest::parse(&text).ok())
+                .map(|manifest| manifest.id)
+        })
+}
+
+/// Exactly one durable [`PluginKey`] for removal, before any tree mutation.
+///
+/// Prefers a valid receipt PluginKey. When the receipt is missing or
+/// malformed, recovers from a parseable installed manifest alias plus exactly
+/// one matching host-ledger row. Ambiguous or unresolvable identity fails closed.
+fn resolve_remove_plugin_key(dest: &Path, ledger: Option<&InstallLedger>) -> Result<PluginKey> {
+    match InstallReceipt::load(dest).and_then(|receipt| receipt.plugin_key()) {
+        Ok(key) => return Ok(key),
+        Err(err) if err.is_receipt_not_found() => {}
+        Err(_) => {}
+    }
+    let Some(alias) = fs::read_to_string(dest.join("plugin.toml"))
+        .ok()
+        .and_then(|text| PluginManifest::parse(&text).ok())
+        .map(|manifest| manifest.id)
+    else {
+        return Err(CatalogError::message(format!(
+            "cannot establish a durable PluginKey for {}; the install receipt is missing or \
+             malformed and the installed plugin.toml alias is not parseable. Removal is refused \
+             before mutating the plugin tree",
+            dest.display()
+        )));
+    };
+    let Some(ledger) = ledger else {
+        return Err(CatalogError::message(format!(
+            "cannot establish a durable PluginKey for alias `{alias}` at {}; the install receipt \
+             is missing or malformed and no host install ledger is available. Removal is refused \
+             before mutating the plugin tree",
+            dest.display()
+        )));
+    };
+    let matches: Vec<&InstallLedgerEntry> = ledger
+        .artifacts
+        .iter()
+        .filter(|row| row.manifest_id.eq_ignore_ascii_case(&alias))
+        .collect();
+    match matches.len() {
+        1 => PluginKey::parse(&matches[0].plugin_key).map_err(|err| {
+            CatalogError::message(format!(
+                "cannot establish a durable PluginKey for alias `{alias}`: install ledger row \
+                 `{err}`"
+            ))
+        }),
+        0 => Err(CatalogError::message(format!(
+            "cannot establish a durable PluginKey for alias `{alias}` at {}; the install receipt \
+             is missing or malformed and the host install ledger has no matching row. Removal is \
+             refused before mutating the plugin tree",
+            dest.display()
+        ))),
+        _ => Err(CatalogError::message(format!(
+            "cannot establish a durable PluginKey for alias `{alias}` at {}; the install receipt \
+             is missing or malformed and the host install ledger has {} matching rows. Removal is \
+             refused before mutating the plugin tree",
+            dest.display(),
+            matches.len()
+        ))),
+    }
+}
+
+/// Staging path that holds an install tree while remove updates the ledger.
+fn hold_removing_path(staging_parent: &Path, key: &PluginKey) -> PathBuf {
+    let base = format!("{}.removing", key.fs_id());
+    let candidate = staging_parent.join(&base);
+    if !candidate.exists() {
+        return candidate;
+    }
+    for n in 1..128 {
+        let candidate = staging_parent.join(format!("{base}-{n}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    staging_parent.join(format!("{base}-{}", std::process::id()))
+}
+
+/// Moves a held install tree back to `dest` after a failed remove step.
+fn restore_held_tree(hold: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        if hold.exists() {
+            return Err(CatalogError::message(format!(
+                "cannot restore {} because {} already exists",
+                hold.display(),
+                dest.display()
+            )));
+        }
+        return Ok(());
+    }
+    if !hold.exists() {
+        return Err(CatalogError::message(format!(
+            "held install tree {} is missing; cannot restore {}",
+            hold.display(),
+            dest.display()
+        )));
+    }
+    rename_retry(hold, dest)
+}
+
+/// Restores tree and ledger after a remove step failed while the tree was held.
+fn remove_after_hold_failure(
+    hold: &Path,
+    dest: &Path,
+    files_dir: &Path,
+    key: &PluginKey,
+    previous_ledger: Option<InstallLedgerEntry>,
+    err: CatalogError,
+    what: &str,
+) -> CatalogError {
+    let ledger_restore = restore_ledger_entry(files_dir, key, previous_ledger);
+    let tree_restore = restore_held_tree(hold, dest);
+    let mut msg = format!("failed to update {what} during plugin remove: {err}");
+    match ledger_restore {
+        Ok(()) => {}
+        Err(restore_err) => {
+            msg.push_str(&format!(
+                "; also failed to restore install ledger: {restore_err}"
+            ));
+        }
+    }
+    match tree_restore {
+        Ok(()) => {}
+        Err(restore_err) => {
+            msg.push_str(&format!(
+                "; also failed to restore install tree: {restore_err}"
+            ));
+        }
+    }
+    CatalogError::message(msg)
+}
+
 /// Installed (PluginKey, alias, path) under `plugins_root`.
 fn installed_alias_owners(plugins_root: &Path) -> Result<Vec<(PluginKey, String, PathBuf)>> {
     let mut out = Vec::new();
@@ -856,6 +1121,26 @@ fn remove_dir_retry(path: &Path) -> Result<()> {
     )))
 }
 
+/// Retries `rename` up to five times (50 ms apart) for transient Windows locks.
+fn rename_retry(from: &Path, to: &Path) -> Result<()> {
+    let mut last = None;
+    for _ in 0..5 {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    Err(CatalogError::message(format!(
+        "failed to rename {} to {}: {}",
+        from.display(),
+        to.display(),
+        last.map(|e| e.to_string()).unwrap_or_default()
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -905,6 +1190,64 @@ mod tests {
 
     fn make_echo_archive(dir: &Path) -> (PathBuf, String) {
         make_named_archive(dir, "echo.tar.gz", "echo")
+    }
+
+    fn echo_install_opts(plugins: PathBuf, replace: bool) -> InstallOptions {
+        InstallOptions {
+            plugins_root: plugins,
+            replace,
+            trust: TrustPolicy::allow_unverified_publisher(),
+            ..Default::default()
+        }
+    }
+
+    fn echo_manifest(
+        id: &str,
+        digest: String,
+        url: String,
+        target: &str,
+    ) -> BookclerkPackageManifest {
+        BookclerkPackageManifest {
+            schema_version: 1,
+            protocol: None,
+            api_version: 1,
+            api_version_max: None,
+            min_bookclerk: None,
+            kind: PluginKind::Integration,
+            id: id.into(),
+            display_name: Some("Echo".into()),
+            description: None,
+            coordinate: None,
+            artifacts: vec![ArtifactTarget {
+                target: target.into(),
+                url,
+                archive_sha256: digest,
+                archive_root: ".".into(),
+                executable: "echo".into(),
+                executable_sha256: None,
+            }],
+            sandbox: Default::default(),
+            links: Default::default(),
+            yanked: false,
+            released_at: None,
+            publisher: None,
+        }
+    }
+
+    fn dir_names(path: &Path) -> Vec<String> {
+        if !path.is_dir() {
+            return Vec::new();
+        }
+        let mut names: Vec<String> = fs::read_dir(path)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn corrupt_receipt(dest: &Path) {
+        fs::write(dest.join("receipt.json"), b"{not-valid-receipt").unwrap();
     }
 
     #[test]
@@ -1154,6 +1497,7 @@ mod tests {
         let second = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         assert_eq!(first.plugin_root, second.plugin_root);
         assert_eq!(first.receipt.plugin_key, second.receipt.plugin_key);
+        assert_eq!(second.receipt.runtime.id, "echo");
         Installer::commit(&second).unwrap();
     }
 
@@ -1420,55 +1764,32 @@ mod tests {
     }
 
     #[test]
-    fn same_plugin_key_alias_rename_requires_replace_and_rejects_occupied() {
+    fn same_plugin_key_alias_change_is_rejected_even_with_replace() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");
         let (archive, digest) = make_named_archive(tmp.path(), "echo.tar.gz", "echo");
         let target = host_bookclerk_target();
-        let manifest_for = |id: &str, digest: String, url: String| BookclerkPackageManifest {
-            schema_version: 1,
-            protocol: None,
-            api_version: 1,
-            api_version_max: None,
-            min_bookclerk: None,
-            kind: PluginKind::Integration,
-            id: id.into(),
-            display_name: Some("Echo".into()),
-            description: None,
-            coordinate: None,
-            artifacts: vec![ArtifactTarget {
-                target: target.into(),
-                url,
-                archive_sha256: digest,
-                archive_root: ".".into(),
-                executable: "echo".into(),
-                executable_sha256: None,
-            }],
-            sandbox: Default::default(),
-            links: Default::default(),
-            yanked: false,
-            released_at: None,
-            publisher: None,
-        };
-        let opts = InstallOptions {
-            plugins_root: plugins.clone(),
-            trust: TrustPolicy::allow_unverified_publisher(),
-            ..Default::default()
-        };
         let file_url = |p: &Path| format!("file://{}", p.display());
+        let opts = echo_install_opts(plugins.clone(), false);
         let coord = PackageCoordinate {
             source: RegistrySource::LocalArchive,
             name: archive.display().to_string(),
             version: "1.0.0".into(),
         };
         let first = Installer::install_from_manifest(
-            &manifest_for("echo", digest.clone(), file_url(&archive)),
+            &echo_manifest("echo", digest.clone(), file_url(&archive), target),
             &coord,
             &opts,
         )
         .unwrap();
         Installer::commit(&first).unwrap();
-        let key = first.receipt.plugin_key().unwrap();
+
+        let toml_before = fs::read(first.plugin_root.join("plugin.toml")).unwrap();
+        let receipt_before = fs::read(first.plugin_root.join("receipt.json")).unwrap();
+        let ledger_path = InstallLedger::path(tmp.path());
+        let ledger_before = fs::read(&ledger_path).unwrap();
+        let tree_before = dir_names(&plugins);
+        let staging_before = dir_names(&plugins.join(".staging"));
 
         let (archive2, digest2) = make_named_archive(tmp.path(), "echo.tar.gz", "echo2");
         assert_eq!(archive, archive2);
@@ -1477,29 +1798,51 @@ mod tests {
             name: archive2.display().to_string(),
             version: "1.0.0".into(),
         };
-        let err = Installer::install_from_manifest(
-            &manifest_for("echo2", digest2.clone(), file_url(&archive2)),
-            &coord2,
-            &opts,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(
-            err.contains("changing its alias") || err.contains("--replace"),
-            "{err}"
-        );
+        let incoming = echo_manifest("echo2", digest2.clone(), file_url(&archive2), target);
+        let err = Installer::install_from_manifest(&incoming, &coord2, &opts)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing alias change"), "{err}");
+        assert!(err.contains("not supported by ordinary"), "{err}");
+        assert!(err.contains("migration"), "{err}");
 
         let mut replace_opts = opts.clone();
         replace_opts.replace = true;
-        let renamed = Installer::install_from_manifest(
-            &manifest_for("echo2", digest2.clone(), file_url(&archive2)),
-            &coord2,
-            &replace_opts,
-        )
-        .unwrap();
-        assert_eq!(renamed.receipt.plugin_key().unwrap(), key);
-        assert_eq!(renamed.receipt.runtime.id, "echo2");
-        Installer::commit(&renamed).unwrap();
+        let err = Installer::install_from_manifest(&incoming, &coord2, &replace_opts)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing alias change"), "{err}");
+        assert!(err.contains("not supported by ordinary"), "{err}");
+        assert!(
+            !err.contains("pass --replace"),
+            "replace must not be offered as an alias-rename path: {err}"
+        );
+
+        assert_eq!(
+            fs::read(first.plugin_root.join("plugin.toml")).unwrap(),
+            toml_before
+        );
+        assert_eq!(
+            fs::read(first.plugin_root.join("receipt.json")).unwrap(),
+            receipt_before
+        );
+        assert_eq!(fs::read(&ledger_path).unwrap(), ledger_before);
+        assert_eq!(dir_names(&plugins), tree_before);
+        assert_eq!(dir_names(&plugins.join(".staging")), staging_before);
+        let receipt = InstallReceipt::load(&first.plugin_root).unwrap();
+        assert_eq!(receipt.runtime.id, "echo");
+        assert_eq!(
+            receipt.plugin_key().unwrap(),
+            first.receipt.plugin_key().unwrap()
+        );
+        let ledger = InstallLedger::load(tmp.path()).unwrap();
+        assert_eq!(
+            ledger
+                .get(&first.receipt.plugin_key().unwrap())
+                .unwrap()
+                .manifest_id,
+            "echo"
+        );
 
         let (other, other_digest) = make_named_archive(tmp.path(), "other.tar.gz", "other");
         let other_coord = PackageCoordinate {
@@ -1508,7 +1851,7 @@ mod tests {
             version: "1.0.0".into(),
         };
         let other_out = Installer::install_from_manifest(
-            &manifest_for("other", other_digest, file_url(&other)),
+            &echo_manifest("other", other_digest, file_url(&other), target),
             &other_coord,
             &opts,
         )
@@ -1522,13 +1865,211 @@ mod tests {
             version: "1.0.0".into(),
         };
         let err = Installer::install_from_manifest(
-            &manifest_for("other", digest3, file_url(&archive3)),
+            &echo_manifest("other", digest3, file_url(&archive3), target),
             &coord3,
             &replace_opts,
         )
         .unwrap_err()
         .to_string();
         assert!(err.contains("already owned"), "{err}");
+    }
+
+    fn installed_echo(
+        tmp: &Path,
+    ) -> (
+        PathBuf,
+        PathBuf,
+        PluginKey,
+        BookclerkPackageManifest,
+        PackageCoordinate,
+        InstallOptions,
+    ) {
+        let plugins = tmp.join("plugins");
+        let (archive, digest) = make_echo_archive(tmp);
+        let target = host_bookclerk_target();
+        let opts = echo_install_opts(plugins.clone(), true);
+        let coord = PackageCoordinate {
+            source: RegistrySource::LocalArchive,
+            name: archive.display().to_string(),
+            version: "1.0.0".into(),
+        };
+        let manifest = echo_manifest(
+            "echo",
+            digest,
+            format!("file://{}", archive.display()),
+            target,
+        );
+        let first = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
+        Installer::commit(&first).unwrap();
+        let key = first.receipt.plugin_key().unwrap();
+        (plugins, first.plugin_root, key, manifest, coord, opts)
+    }
+
+    #[test]
+    fn remove_with_valid_receipt_drops_tree_and_ledger_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (plugins, dest, key, _, _, _) = installed_echo(tmp.path());
+        assert!(dest.is_dir());
+        assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_some());
+
+        Installer::remove(&plugins, "echo", false).unwrap();
+        assert!(!dest.exists());
+        assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_none());
+    }
+
+    #[test]
+    fn remove_recovers_plugin_key_from_unique_ledger_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (plugins, dest, key, manifest, coord, opts) = installed_echo(tmp.path());
+        corrupt_receipt(&dest);
+        assert!(InstallReceipt::load(&dest).is_err());
+
+        Installer::remove(&plugins, "echo", false).unwrap();
+        assert!(!dest.exists());
+        assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_none());
+
+        let again = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
+        Installer::commit(&again).unwrap();
+        assert!(again.plugin_root.is_dir());
+        assert_eq!(again.receipt.runtime.id, "echo");
+        assert!(InstallLedger::load(tmp.path())
+            .unwrap()
+            .get(&again.receipt.plugin_key().unwrap())
+            .is_some());
+    }
+
+    #[test]
+    fn remove_recovered_plugin_key_purges_state_when_requested() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (plugins, dest, key, _, _, _) = installed_echo(tmp.path());
+        let state = tmp.path().join("plugin-state").join(key.fs_id());
+        fs::create_dir_all(state.join("data")).unwrap();
+        fs::write(state.join("data/marker"), b"keep-me-not").unwrap();
+        corrupt_receipt(&dest);
+
+        Installer::remove(&plugins, "echo", true).unwrap();
+        assert!(!dest.exists());
+        assert!(!state.exists());
+        assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_none());
+    }
+
+    #[test]
+    fn remove_malformed_receipt_without_ledger_identity_leaves_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (plugins, dest, key, _, _, _) = installed_echo(tmp.path());
+        corrupt_receipt(&dest);
+        let mut ledger = InstallLedger::load(tmp.path()).unwrap();
+        ledger.remove(&key);
+        ledger.store(tmp.path()).unwrap();
+        let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
+
+        let err = Installer::remove(&plugins, "echo", false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("cannot establish a durable PluginKey"),
+            "{err}"
+        );
+        assert!(err.contains("before mutating"), "{err}");
+        assert!(dest.is_dir());
+        assert_eq!(fs::read(dest.join("plugin.toml")).unwrap(), toml_before);
+        assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_none());
+    }
+
+    #[test]
+    fn remove_malformed_receipt_with_ambiguous_ledger_leaves_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (plugins, dest, key, _, _, _) = installed_echo(tmp.path());
+        corrupt_receipt(&dest);
+        let mut ledger = InstallLedger::load(tmp.path()).unwrap();
+        let mut extra = ledger.get(&key).unwrap().clone();
+        extra.plugin_key =
+            PluginKey::from_install_path(&tmp.path().join("other-archive.tar.gz"), "echo")
+                .unwrap()
+                .canonical()
+                .to_string();
+        ledger.artifacts.push(extra);
+        ledger.store(tmp.path()).unwrap();
+        let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
+
+        let err = Installer::remove(&plugins, "echo", false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("cannot establish a durable PluginKey"),
+            "{err}"
+        );
+        assert!(
+            err.contains("matching rows")
+                || err.contains("ambiguous")
+                || err.contains("2 matching"),
+            "{err}"
+        );
+        assert!(dest.is_dir());
+        assert_eq!(fs::read(dest.join("plugin.toml")).unwrap(), toml_before);
+    }
+
+    #[test]
+    fn remove_malformed_trust_ledger_leaves_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (plugins, dest, _, _, _, _) = installed_echo(tmp.path());
+        let ledger_path = InstallLedger::path(tmp.path());
+        let garbage = b"{not-valid-install-ledger";
+        fs::write(&ledger_path, garbage).unwrap();
+        let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
+
+        let err = Installer::remove(&plugins, "echo", false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("install-ledger")
+                || err.contains("expected")
+                || err.contains("json")
+                || err.contains("EOF")
+                || err.contains("key must be"),
+            "{err}"
+        );
+        assert_eq!(fs::read(&ledger_path).unwrap(), garbage);
+        assert!(dest.is_dir());
+        assert_eq!(fs::read(dest.join("plugin.toml")).unwrap(), toml_before);
+    }
+
+    #[test]
+    fn remove_ledger_write_failure_restores_held_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (plugins, dest, key, _, _, _) = installed_echo(tmp.path());
+        let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
+        let receipt_before = fs::read(dest.join("receipt.json")).unwrap();
+        let ledger_before = fs::read(InstallLedger::path(tmp.path())).unwrap();
+        fs::create_dir_all(tmp.path().join("install-ledger.json.tmp")).unwrap();
+
+        let err = Installer::remove(&plugins, "echo", false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("install ledger")
+                || err.contains("Is a directory")
+                || err.contains("directory"),
+            "{err}"
+        );
+        assert!(
+            dest.is_dir(),
+            "held tree must be restored after ledger write failure"
+        );
+        assert_eq!(fs::read(dest.join("plugin.toml")).unwrap(), toml_before);
+        assert_eq!(fs::read(dest.join("receipt.json")).unwrap(), receipt_before);
+        assert_eq!(
+            fs::read(InstallLedger::path(tmp.path())).unwrap(),
+            ledger_before
+        );
+        assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_some());
+        if plugins.join(".staging").is_dir() {
+            let leftover = dir_names(&plugins.join(".staging"));
+            assert!(
+                leftover.iter().all(|n| !n.contains("removing")),
+                "restore must not leave a .removing hold: {leftover:?}"
+            );
+        }
     }
 
     /// Minimal v3 `plugin.toml` for an integration guest.

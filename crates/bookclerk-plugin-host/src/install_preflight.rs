@@ -34,8 +34,8 @@ pub fn configured_alias_occupants(config: &Config) -> Result<Vec<(PluginKey, Str
 /// Rejects installing `incoming_alias` when a different PluginKey already owns
 /// it anywhere in the configured discovery universe.
 ///
-/// Same PluginKey remains eligible for update/replace. `--replace` cannot
-/// seize a foreign alias. Duplicate/ambiguous occupants fail closed.
+/// Same PluginKey remains eligible for update/replace at the **same** alias.
+/// `--replace` cannot seize a foreign alias or rename an installed alias.
 ///
 /// # Errors
 ///

@@ -50,7 +50,7 @@ pub enum PluginsCommand {
         /// Override Bookclerk target (e.g. `linux-x64-gnu`).
         #[arg(long)]
         target: Option<String>,
-        /// Replace an existing install with a different coordinate.
+        /// Replace files for an existing install of the same PluginKey at the same alias.
         #[arg(long)]
         replace: bool,
         /// Approve sandbox/network capability changes on update/replace.
@@ -692,8 +692,8 @@ async fn run_update(
             plugins_root: plugins_root.clone(),
             target: Some(receipt.target.clone()),
             dry_run,
-            // Same runtime id from the same coordinate family; replace allows
-            // collision but must not bypass capability approval (see installer).
+            // Same PluginKey at the same alias; replace updates files but cannot
+            // rename aliases or seize a foreign PluginKey's alias.
             replace: true,
             offline: false,
             trust: TrustPolicy {
