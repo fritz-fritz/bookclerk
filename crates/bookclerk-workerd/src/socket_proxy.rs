@@ -290,6 +290,7 @@ pub fn resolved_addresses_denied(policy: &EgressPolicy, ips: &[IpAddr]) -> bool 
 mod tests {
     use super::*;
     use bookclerk_plugin_manifest::{NetworkMode, TcpGrant};
+    #[cfg(unix)]
     use std::time::Duration as StdDuration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -451,6 +452,7 @@ mod tests {
         assert_eq!(n, 0, "fenced idle CONNECT must EOF without another RPC");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn proxy_dials_ipv4_when_localhost_has_no_ipv6_listener() {
         let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

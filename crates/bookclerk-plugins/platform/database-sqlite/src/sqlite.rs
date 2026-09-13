@@ -259,8 +259,8 @@ pub async fn open(path: &Path) -> std::result::Result<DatabaseConnection, DbErr>
 
 /// Deletes a SQLite binding unit and journal sidecars. Missing files are success.
 ///
-/// Used by [`crate::plugin::SqliteDatabase::drop_unit`] so the host does not
-/// link this crate to unlink plugin-database files.
+/// Called from the sqlite adapter's `Database.dropUnit` implementation so the
+/// host does not link this crate to unlink plugin-database files.
 ///
 /// # Errors
 ///
