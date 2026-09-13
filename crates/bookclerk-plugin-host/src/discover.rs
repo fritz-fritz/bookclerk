@@ -957,15 +957,20 @@ mode = "deny"
         );
 
         let s3 = resolve_plugin_ref(&found, "s3").unwrap();
+        let err = stamp_occupancy_plugin_key(&mut cfg, s3)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not mapped"),
+            "path-install s3 alias must not occupy [output.s3]: {err}"
+        );
         cfg.output.s3.enabled = true;
-        stamp_occupancy_plugin_key(&mut cfg, s3).unwrap();
-        assert_eq!(cfg.output.s3.plugin, s3.plugin_key().canonical());
+        cfg.output.s3.plugin = "s3".into();
 
         cfg.database.plugin = "sqlite".into();
         cfg.integrations
             .plugin_table_mut("echo")
             .insert("plugin".into(), toml::Value::String("echo".into()));
-        cfg.output.s3.plugin = "s3".into();
         upgrade_unique_alias_occupancy(&mut cfg, &found);
         assert_eq!(cfg.database.plugin, sqlite.plugin_key().canonical());
         assert_eq!(

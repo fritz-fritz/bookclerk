@@ -120,10 +120,34 @@ fn stage_first_party_guest(id: &str) -> Option<StagedGuest> {
     let toml = std::fs::read_to_string(install.path().join("plugin.toml")).ok()?;
     let manifest = bookclerk_plugin_manifest::parse(&toml).ok()?;
     let files = stage_files_dir()?;
+    if id == "sqlite" {
+        let version = manifest.version.as_deref().unwrap_or("0.0.0");
+        bookclerk_plugin_catalog::stamp_platform_receipt(
+            install.path(),
+            files.path(),
+            "bookclerk-plugin-database-sqlite",
+            &manifest,
+            version,
+        )
+        .ok()?;
+    }
+    let mut plugin = DiscoveredPlugin::try_new(
+        manifest,
+        install.path().to_path_buf(),
+        dest_bin,
+        Some(files.path()),
+    )
+    .ok()?;
+    if matches!(id, "postgres" | "d1") {
+        let package = format!("bookclerk-plugin-database-{id}");
+        let key = bookclerk_plugin_catalog::PluginKey::platform(&package, id).ok()?;
+        plugin.identity.plugin_key = key.clone();
+        plugin.identity.artifact.plugin_key = key;
+        plugin.identity.provenance = bookclerk_plugin_catalog::PluginProvenance::VerifiedInstalled;
+    }
     Some(StagedGuest {
         files,
-        plugin: DiscoveredPlugin::try_new(manifest, install.path().to_path_buf(), dest_bin, None)
-            .ok()?,
+        plugin,
         _install: install,
     })
 }
