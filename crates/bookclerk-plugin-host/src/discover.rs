@@ -93,11 +93,9 @@ impl DiscoveredPlugin {
 
 /// First-party database adapter kind when provenance + PluginKey match.
 ///
-/// [`PluginProvenance::PlatformBundled`] (platform sqlite) and
-/// [`PluginProvenance::VerifiedInstalled`] (crates.io / platform postgres and
-/// D1) both qualify. [`PluginProvenance::LocalDevelopment`] and
-/// [`PluginProvenance::Modified`] never do. Alias text (`id = "sqlite"`) is
-/// not consulted.
+/// `PlatformBundled` (platform sqlite) and `VerifiedInstalled` (crates.io /
+/// platform postgres and D1) both qualify. `LocalDevelopment` and `Modified`
+/// never do. Alias text (`id = "sqlite"`) is not consulted.
 #[must_use]
 pub fn first_party_database_kind(plugin: &DiscoveredPlugin) -> Option<DatabasePluginKind> {
     if !plugin.identity.provenance.is_verified_artifact() {
