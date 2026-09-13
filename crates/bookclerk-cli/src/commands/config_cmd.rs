@@ -644,11 +644,6 @@ async fn run_database(
                 .trim()
                 .to_string();
             let to_plugin = to.trim().to_string();
-            bookclerk_config::DatabasePluginKind::parse(&from_plugin)
-                .ok_or_else(|| anyhow::anyhow!("unknown source database plugin `{from_plugin}`"))?;
-            bookclerk_config::DatabasePluginKind::parse(&to_plugin).ok_or_else(|| {
-                anyhow::anyhow!("unknown destination database plugin `{to_plugin}`")
-            })?;
 
             let summary = bookclerk_plugin_host::migrate_database_plugin(
                 config,
