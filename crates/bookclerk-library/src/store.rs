@@ -566,17 +566,29 @@ impl LibraryStore {
             .collect())
     }
 
+    /// Count library identity rows (SQL `COUNT`, not a full fetch).
+    ///
+    /// Same cardinality as [`Self::count_accounts`]. Prefer this when the caller
+    /// only needs a number for an operator-facing summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation fails.
+    pub async fn count_identities(&self) -> Result<i64> {
+        let count = accounts::Entity::find()
+            .count(&self.db)
+            .await
+            .map_err(LibraryError::Orm)?;
+        Ok(count as i64)
+    }
+
     /// Count account rows (SQL `COUNT`, not a full fetch).
     ///
     /// # Errors
     ///
     /// Returns an error when the operation fails.
     pub async fn count_accounts(&self) -> Result<i64> {
-        let count = accounts::Entity::find()
-            .count(&self.db)
-            .await
-            .map_err(LibraryError::Orm)?;
-        Ok(count as i64)
+        self.count_identities().await
     }
 
     /// Resolve an account row by id or nickname (`label`), case-insensitive.

@@ -6,6 +6,7 @@
 //! into Bookclerk `files` layouts, and round-trips native `.tar.zst` backups.
 
 mod accounts;
+mod classic_storefront;
 mod discover;
 /// Migration error types (`MigrateError`) returned to CLI import/export commands.
 mod error;
@@ -17,6 +18,7 @@ mod settings;
 mod store;
 
 pub use accounts::import_accounts;
+pub use classic_storefront::write_classic_storefront_file;
 pub use discover::{discover_source, ClassicSource};
 pub use error::{MigrateError, Result};
 pub use export_libation::{export_libation, LibationExportOptions, LibationExportSummary};
