@@ -1771,17 +1771,18 @@ export class DatabaseAdapterEntrypoint<Env extends BookclerkEnv = BookclerkEnv> 
    * Physically drops one provisioned binding unit.
    *
    * @param _unitRef - Adapter-native unit identity.
+   * @returns Resolves when the unit is dropped.
    */
   dropUnit(_unitRef: string): Promise<void> {
     return Promise.reject(unsupported("dropUnit"));
   }
 
   /**
-   * Adapter dispatch: `openSession` → session id; `session` → call on a
-   * retained session (`args` = `[id, method, ...params]`).
+   * Adapter dispatch: `openSession` → session id; `dropUnit`; `session` → call
+   * on a retained session (`args` = `[id, method, ...params]`).
    *
    * @param context - Granted bindings for this invocation.
-   * @param method - `openSession` or `session`.
+   * @param method - `openSession`, `dropUnit`, or `session`.
    * @param args - Method arguments.
    * @returns Session id for `openSession`, else the session method result.
    * @internal

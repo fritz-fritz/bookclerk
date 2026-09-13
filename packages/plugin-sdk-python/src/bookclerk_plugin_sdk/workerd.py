@@ -1126,7 +1126,17 @@ class DatabaseAdapterEntrypoint(NamedEntrypoint):
         raise _unsupported("openSession")
 
     async def dropUnit(self, _unit_ref: str):
-        """Physically drop one provisioned binding unit."""
+        """Physically drop one provisioned binding unit.
+
+        Args:
+            _unit_ref: Adapter-native unit identity.
+
+        Returns:
+            ``None`` when the unit is dropped.
+
+        Raises:
+            PluginError: ``unsupported`` unless a subclass implements the drop.
+        """
         raise _unsupported("dropUnit")
 
     async def bookclerkInvoke(self, context=None, method="", *args):
