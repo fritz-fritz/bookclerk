@@ -1843,11 +1843,7 @@ fn plugin_enabled(config: &Config, family: bookclerk_plugin_host::PluginFamily, 
         bookclerk_plugin_host::PluginFamily::Output if id == "local" => config.output.local.enabled,
         bookclerk_plugin_host::PluginFamily::Output => false,
         bookclerk_plugin_host::PluginFamily::Database => {
-            let spec = config.database.plugin.trim();
-            spec.eq_ignore_ascii_case(id)
-                || spec
-                    .rsplit_once('#')
-                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case(id))
+            bookclerk_plugin_host::occupancy_matches_alias(config.database.plugin.trim(), id)
         }
     }
 }
@@ -2452,6 +2448,18 @@ fn plugin_settings_snapshot(
             if group.logo.is_none() {
                 if let Some(logo) = settings_logo_from_manifest(plugin) {
                     group.logo = Some(logo);
+                }
+            }
+            if family == bookclerk_plugin_host::PluginFamily::Database {
+                let spec = config.database.plugin.trim();
+                let enabled = !spec.is_empty()
+                    && bookclerk_plugin_host::plugin_matches_occupancy(plugin, spec);
+                if let Some(option) = group
+                    .settings
+                    .iter_mut()
+                    .find(|option| option.key == format!("database.{}.enabled", plugin.alias()))
+                {
+                    option.value = enabled.to_string();
                 }
             }
             group.plugin_key = Some(plugin.plugin_key().canonical().to_string());
@@ -5637,6 +5645,41 @@ mod tests {
         )
         .expect("switch");
         assert_eq!(cfg.database.plugin, "postgres");
+    }
+
+    #[test]
+    fn database_enabled_toggle_follows_plugin_key_occupancy() {
+        let mut cfg = Config::default();
+        cfg.database.plugin = "platform:bookclerk/bookclerk-plugin-database-sqlite".into();
+        let sqlite = build_plugin_settings_group(
+            &cfg,
+            bookclerk_plugin_host::PluginFamily::Database,
+            "sqlite",
+            toml::Table::new(),
+        );
+        assert_eq!(
+            sqlite
+                .settings
+                .iter()
+                .find(|option| option.key == "database.sqlite.enabled")
+                .map(|option| option.value.as_str()),
+            Some("true"),
+            "first-party PluginKey occupancy must still show sqlite as enabled"
+        );
+        let postgres = build_plugin_settings_group(
+            &cfg,
+            bookclerk_plugin_host::PluginFamily::Database,
+            "postgres",
+            toml::Table::new(),
+        );
+        assert_eq!(
+            postgres
+                .settings
+                .iter()
+                .find(|option| option.key == "database.postgres.enabled")
+                .map(|option| option.value.as_str()),
+            Some("false")
+        );
     }
 
     #[test]
