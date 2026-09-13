@@ -895,14 +895,23 @@ Grants are persisted under `$BOOKCLERK_FILES_DIR/plugin-grants.json`, keyed
 by provenance-qualified PluginKey. Saving that file is the operator
 mechanism (`bookclerk plugins approve` and `POST /api/plugins/{id}/consent`).
 `bookclerkd` watches the file (and same-process saves notify immediately)
-and **proactively** fences any live session whose `authority_revision` no
-longer matches: the vat receives `Work::Shutdown`, the jailed
+and **proactively** fences any live session whose persisted
+`grant_revision` no longer matches. Malformed grant files keep
+last-known-good authority and are retried on later ticks; the watcher
+does not advance its fingerprint until a grant file loads successfully.
+The vat receives `Work::Shutdown`, the jailed
 `bookclerk-workerd` child is killed, the native guest and mediated TCP
 proxy drop, and EVENTS / granted database channels go with the vat. This
-does **not** wait for the next plugin RPC. `authority_revision` hashes
-effective consent (structural + network). It is distinct from
-`configuration_revision` (installed `plugin.toml` hash) on the executor
-identity.
+does **not** wait for the next plugin RPC.
+
+`grant_revision` is the digest of **persisted** operator consent.
+`authority_revision` is the digest of **effective** runtime authority
+(manifest ∩ grant ∩ host policy, plus host-controlled overlays such as a
+configured PostgreSQL TCP URL, and clamped resource budgets). The watcher
+never compares one digest type against the other. Host-config overlay
+changes fence/restart through `configuration_revision` on the executor
+identity. `authority_revision` is also distinct from
+`configuration_revision` (installed `plugin.toml` hash).
 
 Structural capabilities originate in the
 manifest; the operator may **narrow** them but cannot invent entrypoints,

@@ -507,6 +507,8 @@ struct PluginGrantView {
     operator_added_cidrs: Vec<String>,
     /// Undeclared public redirect permission.
     allow_undeclared_public_redirects: bool,
+    /// SHA-256 of persisted operator consent (no host overlays).
+    grant_revision: String,
     /// SHA-256 of the canonical effective authority.
     authority_revision: String,
     /// Host bindings the operator approved.
@@ -578,6 +580,7 @@ impl PluginGrantView {
             address_cidrs: grant.address_cidrs.iter().cloned().collect(),
             operator_added_cidrs: grant.operator_added_cidrs.iter().cloned().collect(),
             allow_undeclared_public_redirects: grant.allow_undeclared_public_redirects,
+            grant_revision: bookclerk_plugin_host::grant_revision(grant),
             authority_revision: bookclerk_plugin_host::authority_revision(grant),
             bindings: grant.bindings.iter().cloned().collect(),
             compatibility_flags: grant.compatibility_flags.iter().cloned().collect(),
