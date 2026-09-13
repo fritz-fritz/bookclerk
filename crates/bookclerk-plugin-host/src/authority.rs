@@ -52,7 +52,9 @@ pub type SessionShutdown = Arc<dyn Fn() + Send + Sync>;
 struct LiveSession {
     /// Canonical PluginKey for this vat.
     plugin_key: String,
-    /// [`authority_revision`] captured at spawn.
+    /// [`grant_revision`] of the persisted operator grant at spawn.
+    grant_revision: String,
+    /// [`authority_revision`] of the effective runtime grant at spawn.
     revision: String,
     /// Set when a later grant for this key no longer matches `revision`.
     cancelled: Arc<AtomicBool>,
@@ -100,10 +102,26 @@ pub fn register_session_with_shutdown(
     revision: &str,
     shutdown: SessionShutdown,
 ) -> Arc<AtomicBool> {
+    register_session_revisions(plugin_key, revision, revision, shutdown)
+}
+
+/// Registers a live session with distinct persisted vs effective revisions.
+///
+/// `grant_revision` is the digest of the **stored** operator grant. `revision`
+/// is [`authority_revision`] of the **effective** runtime grant (after host
+/// overlays). The grant watcher compares grant revisions only.
+#[must_use]
+pub fn register_session_revisions(
+    plugin_key: &str,
+    grant_revision: &str,
+    revision: &str,
+    shutdown: SessionShutdown,
+) -> Arc<AtomicBool> {
     let cancelled = Arc::new(AtomicBool::new(false));
     if let Ok(mut guard) = live().lock() {
         guard.push(LiveSession {
             plugin_key: plugin_key.to_string(),
+            grant_revision: grant_revision.to_string(),
             revision: revision.to_string(),
             cancelled: Arc::clone(&cancelled),
             shutdown,
@@ -150,26 +168,49 @@ pub fn fence_stale_sessions(plugin_key: &str, current_revision: &str) {
     }
 }
 
-/// Reconcile every live session against a loaded grant store.
+/// Fences live sessions whose **persisted** [`grant_revision`] is not current.
+pub fn fence_stale_grant_revisions(plugin_key: &str, current_grant_revision: &str) {
+    if plugin_key.is_empty() {
+        return;
+    }
+    let mut hooks: Vec<SessionShutdown> = Vec::new();
+    if let Ok(guard) = live().lock() {
+        for session in guard.iter() {
+            if session.plugin_key == plugin_key
+                && (current_grant_revision.is_empty()
+                    || session.grant_revision != current_grant_revision)
+            {
+                session.cancelled.store(true, Ordering::SeqCst);
+                hooks.push(Arc::clone(&session.shutdown));
+            }
+        }
+    }
+    for hook in hooks {
+        hook();
+    }
+}
+
+/// Reconcile every live session against a loaded **persisted** grant store.
 ///
-/// Missing keys and revision mismatches are fenced. Sessions whose stored
-/// [`authority_revision`] still matches stay up. Configuration / `plugin.toml`
-/// hash is **not** consulted — that is [`crate::ExecutorIdentity::configuration_revision`].
+/// Missing keys and [`grant_revision`] mismatches are fenced. Effective
+/// [`authority_revision`] (host overlays, clamped budgets) is **not** compared
+/// to the persisted digest. Host-config overlay changes fence through
+/// [`crate::ExecutorIdentity::configuration_revision`].
 pub fn apply_grant_store(store: &PluginGrantStore) {
     let snapshot: Vec<(String, String)> = match live().lock() {
         Ok(guard) => guard
             .iter()
-            .map(|s| (s.plugin_key.clone(), s.revision.clone()))
+            .map(|s| (s.plugin_key.clone(), s.grant_revision.clone()))
             .collect(),
         Err(_) => return,
     };
-    for (key, revision) in snapshot {
+    for (key, session_grant_revision) in snapshot {
         let current = store
             .get_by_plugin_key(&key)
-            .map(authority_revision)
+            .map(grant_revision)
             .unwrap_or_default();
-        if current != revision {
-            fence_stale_sessions(&key, &current);
+        if current != session_grant_revision {
+            fence_stale_grant_revisions(&key, &current);
         }
     }
 }
@@ -206,8 +247,17 @@ fn grants_fingerprint(path: &Path) -> String {
 /// another process are picked up within [`GRANT_WATCH_INTERVAL`].
 pub async fn watch_grants_loop(files_dir: PathBuf, stop: Arc<AtomicBool>) {
     let path = PluginGrantStore::path(&files_dir);
-    let mut last = grants_fingerprint(&path);
-    reconcile_grants_from_disk(&files_dir);
+    let mut last = String::new();
+    match PluginGrantStore::load(&files_dir) {
+        Ok(store) => {
+            apply_grant_store(&store);
+            last = grants_fingerprint(&path);
+        }
+        Err(err) => tracing::warn!(
+            error = %err,
+            "plugin grant store unreadable at watch start; retrying on later ticks"
+        ),
+    }
     while !stop.load(Ordering::SeqCst) {
         tokio::select! {
             () = tokio::time::sleep(GRANT_WATCH_INTERVAL) => {}
@@ -220,8 +270,19 @@ pub async fn watch_grants_loop(files_dir: PathBuf, stop: Arc<AtomicBool>) {
         if next == last {
             continue;
         }
-        last = next;
-        reconcile_grants_from_disk(&files_dir);
+        match PluginGrantStore::load(&files_dir) {
+            Ok(store) => {
+                apply_grant_store(&store);
+                last = next;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "plugin grant store unreadable or malformed; keeping last-known-good \
+                     authority and retrying on the next watch tick"
+                );
+            }
+        }
     }
 }
 
@@ -278,14 +339,30 @@ pub fn fenced_error() -> PluginError {
     PluginError::message("plugin session fenced: effective authority changed")
 }
 
-/// Canonical SHA-256 of security-relevant effective authority (not presentation).
+/// Canonical SHA-256 of persisted operator consent (no host runtime overlays).
 ///
-/// Includes structural capabilities, network mode, approved domains, operator
-/// additions/denials, and bindings. Omits `approved_at` and display aliases
-/// except the PluginKey. Distinct from [`crate::ExecutorIdentity::configuration_revision`].
+/// Used by the grant-file watcher and [`PluginGrantStore::upsert`] to detect
+/// CLI/operator changes. Never compare this digest to [`authority_revision`].
+#[must_use]
+pub fn grant_revision(grant: &PluginGrant) -> String {
+    hash_grant(b"grant", grant)
+}
+
+/// Canonical SHA-256 of security-relevant **effective** authority.
+///
+/// Hash the grant **after** manifest ∩ operator ∩ host policy and host-controlled
+/// overlays (TCP/CIDR implied by configured destinations, clamped budgets).
+/// Omits `approved_at` and display aliases except the PluginKey. Distinct from
+/// [`grant_revision`] and [`crate::ExecutorIdentity::configuration_revision`].
 #[must_use]
 pub fn authority_revision(grant: &PluginGrant) -> String {
+    hash_grant(b"authority", grant)
+}
+
+fn hash_grant(kind: &[u8], grant: &PluginGrant) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(kind);
+    hasher.update(b"\n");
     hasher.update(grant.plugin_key.as_bytes());
     hasher.update(b"\nstructural\n");
     for e in &grant.entrypoints {
@@ -364,7 +441,11 @@ pub fn authority_revision(grant: &PluginGrant) -> String {
         hasher.update(b",");
     }
     hasher.update(b"\nredirects\n");
-    hasher.update(u8::from(grant.allow_undeclared_public_redirects).to_string().as_bytes());
+    hasher.update(
+        u8::from(grant.allow_undeclared_public_redirects)
+            .to_string()
+            .as_bytes(),
+    );
     hasher.update(b"\nbudgets\n");
     hasher.update(
         crate::consent::effective_disk_mib(grant.disk_mib)
@@ -545,7 +626,7 @@ mod tests {
         let key = "path:file:///tmp/apply-store";
         let mut approved = grant(&["a.example"]);
         approved.plugin_key = key.into();
-        let matching_rev = authority_revision(&approved);
+        let matching_rev = grant_revision(&approved);
         let matching = register_session(key, &matching_rev);
         let stale = register_session(key, "rev-old");
         let mut store = PluginGrantStore::default();
@@ -605,22 +686,28 @@ mod tests {
         let key = "path:file:///tmp/cross-process#demo";
         let mut initial = grant(&["api.example"]);
         initial.plugin_key = key.into();
-        let initial_rev = authority_revision(&initial);
+        let initial_grant_rev = grant_revision(&initial);
+        let initial_auth_rev = authority_revision(&initial);
         let mut store = PluginGrantStore::default();
         store.grants.push(initial.clone());
         store.save(dir.path()).expect("save initial grants");
         let loaded = PluginGrantStore::load(dir.path()).expect("reload");
         assert_eq!(
-            authority_revision(&loaded.grants[0]),
-            initial_rev,
-            "grant file must round-trip authority_revision"
+            grant_revision(&loaded.grants[0]),
+            initial_grant_rev,
+            "grant file must round-trip grant_revision"
+        );
+        assert_ne!(
+            initial_grant_rev, initial_auth_rev,
+            "persisted grant_revision must not equal effective authority_revision"
         );
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let events_open = Arc::new(AtomicBool::new(true));
-        let flag = register_session_with_shutdown(
+        let flag = register_session_revisions(
             key,
-            &initial_rev,
+            &initial_grant_rev,
+            &initial_auth_rev,
             Arc::new({
                 let shutdown = Arc::clone(&shutdown);
                 let events_open = Arc::clone(&events_open);
@@ -642,7 +729,7 @@ mod tests {
         revoked.network_mode = "deny".into();
         revoked.domains.clear();
         revoked.tcp.clear();
-        assert_ne!(authority_revision(&revoked), initial_rev);
+        assert_ne!(grant_revision(&revoked), initial_grant_rev);
         let mut next = PluginGrantStore::default();
         next.grants.push(revoked);
         let text = serde_json::to_string_pretty(&next).expect("grants json");
@@ -696,14 +783,16 @@ mod tests {
             ports: vec![addr.port()],
         });
         initial.address_cidrs.insert("127.0.0.1/32".into());
-        let initial_rev = authority_revision(&initial);
+        let initial_grant_rev = grant_revision(&initial);
+        let initial_auth_rev = authority_revision(&initial);
         let mut store = PluginGrantStore::default();
         store.grants.push(initial.clone());
         store.save(dir.path()).expect("save");
 
-        let flag = register_session_with_shutdown(
+        let flag = register_session_revisions(
             key,
-            &initial_rev,
+            &initial_grant_rev,
+            &initial_auth_rev,
             Arc::new({
                 let client = Arc::clone(&client);
                 move || {
@@ -738,6 +827,127 @@ mod tests {
         notify_grants_changed();
         tokio::time::sleep(GRANT_WATCH_INTERVAL).await;
         assert!(is_fenced(&flag));
+        unregister_session(&flag);
+    }
+
+    #[test]
+    fn grant_and_authority_revisions_are_distinct_digests() {
+        let g = grant(&["api.example"]);
+        assert_ne!(grant_revision(&g), authority_revision(&g));
+        assert_eq!(grant_revision(&g).len(), 64);
+        assert_eq!(authority_revision(&g).len(), 64);
+    }
+
+    #[test]
+    fn host_tcp_overlay_does_not_change_persisted_grant_revision() {
+        let _lock = test_live_lock();
+        let key = "path:file:///tmp/overlay-postgres";
+        let mut persisted = grant(&["api.example"]);
+        persisted.plugin_key = key.into();
+        persisted.network_mode = "outbound".into();
+        let mut effective = persisted.clone();
+        effective.tcp.insert(bookclerk_plugin_manifest::TcpGrant {
+            host: "127.0.0.1".into(),
+            ports: vec![5432],
+        });
+        effective.address_cidrs.insert("127.0.0.1/32".into());
+        assert_ne!(
+            authority_revision(&persisted),
+            authority_revision(&effective),
+            "host overlay TCP must change effective authority"
+        );
+        let flag = register_session_revisions(
+            key,
+            &grant_revision(&persisted),
+            &authority_revision(&effective),
+            Arc::new(|| {}),
+        );
+        let mut store = PluginGrantStore::default();
+        store.grants.push(persisted);
+        apply_grant_store(&store);
+        assert!(
+            !is_fenced(&flag),
+            "unchanged persisted grant must not fence an overlaid postgres session"
+        );
+        unregister_session(&flag);
+    }
+
+    #[test]
+    fn persisted_grant_change_fences_overlaid_session() {
+        let _lock = test_live_lock();
+        let key = "path:file:///tmp/overlay-revoke";
+        let mut persisted = grant(&["api.example"]);
+        persisted.plugin_key = key.into();
+        let mut effective = persisted.clone();
+        effective.tcp.insert(bookclerk_plugin_manifest::TcpGrant {
+            host: "127.0.0.1".into(),
+            ports: vec![5432],
+        });
+        let flag = register_session_revisions(
+            key,
+            &grant_revision(&persisted),
+            &authority_revision(&effective),
+            Arc::new(|| {}),
+        );
+        persisted.network_mode = "deny".into();
+        persisted.domains.clear();
+        let mut store = PluginGrantStore::default();
+        store.grants.push(persisted);
+        apply_grant_store(&store);
+        assert!(is_fenced(&flag));
+        unregister_session(&flag);
+    }
+
+    #[tokio::test]
+    async fn malformed_grant_file_is_retried_without_mass_fence() {
+        let _lock = test_live_lock();
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let key = "path:file:///tmp/malformed-grant";
+        let mut initial = grant(&["api.example"]);
+        initial.plugin_key = key.into();
+        let grant_rev = grant_revision(&initial);
+        let auth_rev = authority_revision(&initial);
+        let mut store = PluginGrantStore::default();
+        store.grants.push(initial.clone());
+        store.save(dir.path()).expect("save");
+
+        let flag = register_session_revisions(key, &grant_rev, &auth_rev, Arc::new(|| {}));
+        let stop = spawn_grant_watcher(dir.path().to_path_buf());
+        tokio::time::sleep(GRANT_WATCH_INTERVAL).await;
+        assert!(
+            !is_fenced(&flag),
+            "valid grant must not fence on watch start"
+        );
+
+        write_grants_from_child(&PluginGrantStore::path(dir.path()), "{ not valid json");
+        tokio::time::sleep(GRANT_WATCH_INTERVAL * 3).await;
+        assert!(
+            !is_fenced(&flag),
+            "malformed grant file must keep last-known-good authority"
+        );
+
+        let mut next = PluginGrantStore::default();
+        let mut revoked = initial;
+        revoked.network_mode = "deny".into();
+        revoked.domains.clear();
+        next.grants.push(revoked);
+        write_grants_from_child(
+            &PluginGrantStore::path(dir.path()),
+            &serde_json::to_string_pretty(&next).expect("json"),
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if is_fenced(&flag) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        stop.store(true, Ordering::SeqCst);
+        notify_grants_changed();
+        assert!(
+            is_fenced(&flag),
+            "valid replacement after a malformed file must be observed"
+        );
         unregister_session(&flag);
     }
 }

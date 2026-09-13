@@ -102,8 +102,12 @@ payloads for several storefront / integration surfaces, and a reverse
    fence running vats immediately (vat shutdown + kill child + drop the
    socket proxy and granted channels), including CLI writes observed by
    `bookclerkd`. Idle mediated TCP is interrupted on the fence; enforcement
-   does not wait for the next host RPC. `authority_revision` (effective
-   grant) stays distinct from `configuration_revision` (manifest hash).
+   does not wait for the next host RPC. `grant_revision` (persisted operator
+   consent) is distinct from `authority_revision` (effective runtime grant
+   after host overlays and clamped budgets) and from
+   `configuration_revision` (manifest / host-config hash). The grant
+   watcher compares grant revisions only and retries malformed files
+   without mass-fencing.
 
 ## Consequences
 

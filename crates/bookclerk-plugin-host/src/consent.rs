@@ -586,8 +586,8 @@ impl PluginGrantStore {
             }
         });
         if !grant.plugin_key.is_empty() {
-            let revision = crate::authority::authority_revision(&grant);
-            crate::authority::fence_stale_sessions(&grant.plugin_key, &revision);
+            let revision = crate::authority::grant_revision(&grant);
+            crate::authority::fence_stale_grant_revisions(&grant.plugin_key, &revision);
         }
         if let Some(i) = idx {
             self.grants[i] = grant;
@@ -1740,7 +1740,7 @@ pub fn inject_workerd_grant_env(cmd: &mut Command, grant: &PluginGrant) {
 /// Canonical SHA-256 of a grant's security-relevant fields (not presentation).
 #[must_use]
 pub fn grant_revision(grant: &PluginGrant) -> String {
-    crate::authority::authority_revision(grant)
+    crate::authority::grant_revision(grant)
 }
 
 /// True when a platform grant is deny-network with only `config` / `work_fs` bindings.

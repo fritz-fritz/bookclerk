@@ -333,8 +333,10 @@ pub struct ExecutorIdentity {
     pub account_id: String,
     /// Configuration revision (installed `plugin.toml` SHA-256).
     pub configuration_revision: String,
-    /// Grant revision (revocation changes this).
+    /// Grant revision (persisted operator consent; revocation changes this).
     pub grant_revision: String,
+    /// Effective runtime authority (host overlays + clamped budgets).
+    pub authority_revision: String,
     /// `workerd` / `native-behind-workerd` / `native-direct`
     /// ([`GuestRuntimeKind::label`]).
     pub runtime_backend: String,
@@ -386,6 +388,7 @@ impl ExecutorIdentity {
             account_id: account_id.to_string(),
             configuration_revision: plugin.identity.artifact.manifest_sha256.clone(),
             grant_revision: String::new(),
+            authority_revision: String::new(),
             runtime_backend: runtime.label().to_string(),
             compatibility_date: plugin
                 .manifest
@@ -396,10 +399,27 @@ impl ExecutorIdentity {
         }
     }
 
-    /// Fills [`Self::grant_revision`] from the covering consent grant.
+    /// Fills persisted [`Self::grant_revision`] and effective
+    /// [`Self::authority_revision`] from a grant snapshot.
+    ///
+    /// When host overlays apply, pass the persisted grant to
+    /// [`Self::with_persisted_and_effective`].
     #[must_use]
     pub fn with_grant_revision(mut self, grant: &crate::PluginGrant) -> Self {
         self.grant_revision = crate::consent::grant_revision(grant);
+        self.authority_revision = crate::authority::authority_revision(grant);
+        self
+    }
+
+    /// Fills revisions from a persisted operator grant and the effective runtime grant.
+    #[must_use]
+    pub fn with_persisted_and_effective(
+        mut self,
+        persisted: &crate::PluginGrant,
+        effective: &crate::PluginGrant,
+    ) -> Self {
+        self.grant_revision = crate::consent::grant_revision(persisted);
+        self.authority_revision = crate::authority::authority_revision(effective);
         self
     }
 
@@ -408,7 +428,7 @@ impl ExecutorIdentity {
     #[must_use]
     pub fn session_key(&self) -> String {
         format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             self.plugin_id,
             self.artifact_digest,
             self.version,
@@ -416,6 +436,7 @@ impl ExecutorIdentity {
             self.account_id,
             self.configuration_revision,
             self.grant_revision,
+            self.authority_revision,
             self.runtime_backend,
             self.compatibility_date
         )
@@ -666,7 +687,7 @@ impl PluginSession {
         }
         match crate::consent::spawn_grant(&files_dir, plugin) {
             Ok(fresh)
-                if crate::authority::authority_revision(&fresh) == identity.grant_revision => {}
+                if crate::authority::authority_revision(&fresh) == identity.authority_revision => {}
             Ok(_) => {
                 let _ = tx.send(Work::Shutdown);
                 return Err(crate::authority::fenced_error());
@@ -677,9 +698,10 @@ impl PluginSession {
             }
         }
         let shutdown_tx = tx.clone();
-        let authority_fence = crate::authority::register_session_with_shutdown(
+        let authority_fence = crate::authority::register_session_revisions(
             plugin.plugin_key().canonical(),
             &identity.grant_revision,
+            &identity.authority_revision,
             Arc::new(move || {
                 let _ = shutdown_tx.send(Work::Shutdown);
             }),
