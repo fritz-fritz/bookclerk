@@ -87,7 +87,7 @@ else
   fail "jail extra grants no longer require first-party provenance helpers"
 fi
 
-if grep -RIn 'host-owned SQL lowering' docs scripts crates >/dev/null 2>&1; then
+if grep -RIn 'host-owned SQL lowering' docs crates >/dev/null 2>&1; then
   fail "stale 'host-owned SQL lowering' comment remains (lowering belongs in adapters)"
 else
   ok "no stale host-owned SQL lowering comments"
