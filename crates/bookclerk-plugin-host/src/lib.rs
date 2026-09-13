@@ -77,25 +77,26 @@ pub use consent::{
     effective_memory_mib, format_cpu_cores, grant_covers, grant_has_binding, grant_revision,
     grant_within_ceiling, granted_consumers_from_manifest, granted_database_bindings,
     granted_jobs_from_manifest, host_cpu_cores_max, host_cpu_rate_max, host_logical_cpus,
-    inject_workerd_grant_env, jail_process_overhead, network_compatible,
-    overlay_host_implied_network, pending_structural, percent_to_cores, require_binding,
-    require_grant, spawn_config_for_grant, spawn_grant, validate_approved_grant,
-    validate_described_capabilities, GrantedEventConsumer, PendingStructural, PluginGrant,
-    PluginGrantStore, GRANTS_FILE, GRANT_SCHEMA_VERSION, KNOWN_HOST_BINDINGS,
-    PLUGIN_JAIL_ACTIVE_PROCESSES_MAX, PLUGIN_JAIL_CPU_CORES_DEFAULT, PLUGIN_JAIL_CPU_RATE_DEFAULT,
-    PLUGIN_JAIL_CPU_RATE_MAX, PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT, PLUGIN_JAIL_EXTRA_PROCESSES_MAX,
-    PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX, PLUGIN_STATE_BUDGET_MIB_DEFAULT,
-    PLUGIN_STATE_BUDGET_MIB_MAX, WORKERD_GRANT_CPU_MS_ENV, WORKERD_GRANT_DOMAINS_ENV,
-    WORKERD_GRANT_NETWORK_MODE_ENV, WORKERD_GRANT_POLICY_ENV, WORKERD_GRANT_SUBREQUESTS_ENV,
+    host_overlay_config_digest, inject_workerd_grant_env, jail_process_overhead,
+    network_compatible, overlay_host_implied_network, pending_structural, percent_to_cores,
+    reconcile_host_overlay_authority, require_binding, require_grant, spawn_config_for_grant,
+    spawn_grant, validate_approved_grant, validate_described_capabilities, GrantedEventConsumer,
+    PendingStructural, PluginGrant, PluginGrantStore, GRANTS_FILE, GRANT_SCHEMA_VERSION,
+    KNOWN_HOST_BINDINGS, PLUGIN_JAIL_ACTIVE_PROCESSES_MAX, PLUGIN_JAIL_CPU_CORES_DEFAULT,
+    PLUGIN_JAIL_CPU_RATE_DEFAULT, PLUGIN_JAIL_CPU_RATE_MAX, PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT,
+    PLUGIN_JAIL_EXTRA_PROCESSES_MAX, PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX,
+    PLUGIN_STATE_BUDGET_MIB_DEFAULT, PLUGIN_STATE_BUDGET_MIB_MAX, WORKERD_GRANT_CPU_MS_ENV,
+    WORKERD_GRANT_DOMAINS_ENV, WORKERD_GRANT_NETWORK_MODE_ENV, WORKERD_GRANT_POLICY_ENV,
+    WORKERD_GRANT_SUBREQUESTS_ENV,
 };
 pub use crates_io::search_crates_io;
 pub use destinations::{build_acquire_destinations, build_storage_backend};
 pub use discover::{
     discover_plugins, first_party_database_kind, identity_matches_occupancy,
-    is_first_party_local_output, is_first_party_s3_output, occupancy_matches_alias, occupancy_spec,
-    plugin_matches_occupancy, plugin_search_dirs, resolve_plugin_ref, resolve_plugin_slot,
-    settings_table, settings_table_for, stamp_occupancy_plugin_key, upgrade_unique_alias_occupancy,
-    DiscoveredPlugin,
+    is_first_party_local_output, is_first_party_s3_output, occupancy_matches_alias,
+    occupancy_names_alias, occupancy_spec, plugin_matches_occupancy, plugin_search_dirs,
+    resolve_plugin_ref, resolve_plugin_slot, settings_table, settings_table_for,
+    stamp_occupancy_plugin_key, upgrade_unique_alias_occupancy, DiscoveredPlugin,
 };
 pub use error::{PluginError, Result};
 pub use event_publisher::{EventOutbox, OutboxEventPublisher};

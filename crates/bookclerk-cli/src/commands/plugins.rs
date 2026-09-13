@@ -866,11 +866,13 @@ async fn run_doctor(
 #[derive(Debug, Serialize)]
 /// One `plugins db list` row from the `plugin_databases` registry.
 struct PluginDbListItem {
-    /// Owning plugin id.
+    /// Owning plugin PluginKey.
     plugin_id: String,
     /// Binding name from `plugin.toml` `capabilities.bindings.databases`.
     binding: String,
-    /// Adapter family that provisioned the unit (`sqlite`, `postgres`, `d1`).
+    /// Adapter PluginKey that provisioned the unit.
+    adapter_plugin_key: String,
+    /// Diagnostic adapter family (`sqlite`, `postgres`, `d1`).
     backend_kind: String,
     /// Backend-native unit: file path, Postgres database name, or D1 database name.
     unit_ref: String,
@@ -878,23 +880,15 @@ struct PluginDbListItem {
     created_at: String,
 }
 
-/// Registry rows for `spec`: canonical PluginKey, or an unambiguous alias.
+/// Registry rows for `spec`: canonical PluginKey, or a globally unique alias.
 ///
-/// Privilege-sensitive drop/list must not collapse two PluginKeys onto one
-/// display alias. A parseable PluginKey is an exact registry lookup; a bare
-/// alias matches only when every hit shares the same stored PluginKey (or a
-/// single leftover alias-era row).
-///
-/// # Arguments
-///
-/// * `store` - Open library with the `plugin_databases` registry.
-/// * `spec` - Canonical PluginKey, display alias, or `None` for every row.
-///
-/// # Errors
-///
-/// Returns an error when the registry query fails or the alias is ambiguous.
+/// A parseable PluginKey is an exact registry lookup. A bare alias resolves
+/// through discovery to exactly one PluginKey. Leftover alias-era rows keyed
+/// by the bare alias are listed only when nothing is installed under that
+/// alias.
 async fn plugin_db_rows_for_spec(
     store: &bookclerk_library::LibraryStore,
+    config: &Config,
     spec: Option<&str>,
 ) -> anyhow::Result<Vec<bookclerk_library::PluginDatabaseRecord>> {
     match spec.map(str::trim).filter(|s| !s.is_empty()) {
@@ -903,25 +897,18 @@ async fn plugin_db_rows_for_spec(
             Ok(store.list_plugin_databases(Some(spec)).await?)
         }
         Some(alias) => {
-            let all = store.list_plugin_databases(None).await?;
-            let suffix = format!("#{alias}");
-            let mut keys = std::collections::BTreeSet::new();
-            for row in &all {
-                if row.plugin_id.eq_ignore_ascii_case(alias) || row.plugin_id.ends_with(&suffix) {
-                    keys.insert(row.plugin_id.clone());
+            let plugins = bookclerk_plugin_host::discover_plugins(config)?;
+            match bookclerk_plugin_host::resolve_plugin_ref(&plugins, alias) {
+                Ok(plugin) => Ok(store
+                    .list_plugin_databases(Some(plugin.plugin_key().canonical()))
+                    .await?),
+                Err(_) => {
+                    let all = store.list_plugin_databases(None).await?;
+                    Ok(all
+                        .into_iter()
+                        .filter(|row| row.plugin_id.eq_ignore_ascii_case(alias))
+                        .collect())
                 }
-            }
-            match keys.len() {
-                0 => Ok(Vec::new()),
-                1 => {
-                    let key = keys.into_iter().next().ok_or_else(|| {
-                        anyhow::anyhow!("plugin alias `{alias}` matched no PluginKey")
-                    })?;
-                    Ok(all.into_iter().filter(|row| row.plugin_id == key).collect())
-                }
-                _ => anyhow::bail!(
-                    "plugin alias `{alias}` is ambiguous; pass a PluginKey (`plugins db list` shows owners)"
-                ),
             }
         }
     }
@@ -936,12 +923,13 @@ async fn run_plugin_db(
     let store = crate::registry::open_library(config).await?;
     match command {
         PluginDbCommand::List { plugin } => {
-            let rows = plugin_db_rows_for_spec(&store, plugin.as_deref()).await?;
+            let rows = plugin_db_rows_for_spec(&store, config, plugin.as_deref()).await?;
             let items: Vec<PluginDbListItem> = rows
                 .into_iter()
                 .map(|r| PluginDbListItem {
                     plugin_id: r.plugin_id,
                     binding: r.binding,
+                    adapter_plugin_key: r.adapter_plugin_key,
                     backend_kind: r.backend_kind,
                     unit_ref: r.unit_ref,
                     created_at: r.created_at,
@@ -954,9 +942,10 @@ async fn run_plugin_db(
                 }
                 for item in &items {
                     println!(
-                        "{}/{}: backend={} unit={} created={}",
+                        "{}/{}: adapter={} backend={} unit={} created={}",
                         item.plugin_id,
                         item.binding,
+                        item.adapter_plugin_key,
                         item.backend_kind,
                         item.unit_ref,
                         item.created_at
@@ -969,7 +958,7 @@ async fn run_plugin_db(
             binding,
             yes,
         } => {
-            let rows = plugin_db_rows_for_spec(&store, Some(&plugin)).await?;
+            let rows = plugin_db_rows_for_spec(&store, config, Some(&plugin)).await?;
             let rows: Vec<_> = rows
                 .into_iter()
                 .filter(|r| binding.as_deref().is_none_or(|b| r.binding == b))
@@ -989,7 +978,7 @@ async fn run_plugin_db(
             for row in &rows {
                 bookclerk_plugin_host::ExternalDatabase::drop_provisioned_unit(
                     config,
-                    &row.backend_kind,
+                    &row.adapter_plugin_key,
                     &row.unit_ref,
                 )
                 .await
@@ -998,8 +987,12 @@ async fn run_plugin_db(
                     .remove_plugin_databases(&row.plugin_id, Some(&row.binding))
                     .await?;
                 println!(
-                    "deleted {}/{} ({} {})",
-                    row.plugin_id, row.binding, row.backend_kind, row.unit_ref
+                    "deleted {}/{} (adapter {} backend {} {})",
+                    row.plugin_id,
+                    row.binding,
+                    row.adapter_plugin_key,
+                    row.backend_kind,
+                    row.unit_ref
                 );
             }
             Ok(())

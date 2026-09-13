@@ -25,6 +25,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::process::Command;
 
 use bookclerk_config::{resolve_postgres_url, Config, DatabasePluginKind};
@@ -1850,6 +1851,92 @@ pub fn overlay_host_implied_network(
     overlay_s3_endpoint(grant, plugin, config, discovered);
 }
 
+/// SHA-256 of host config that participates in implied network overlays.
+///
+/// Changing a Postgres URL, D1 API origin, S3 endpoint, or Audiobookshelf URL
+/// must mint a new executor `configuration_revision` and fence live sessions.
+#[must_use]
+pub fn host_overlay_config_digest(config: &Config) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(config.database.plugin.as_bytes());
+    hasher.update(b"\npostgres\n");
+    hasher.update(
+        config
+            .database
+            .postgres
+            .url
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
+    );
+    hasher.update(b"\n");
+    if let Some(path) = &config.database.postgres.url_file {
+        hasher.update(path.to_string_lossy().as_bytes());
+    }
+    hasher.update(b"\nd1\n");
+    hasher.update(config.database.d1.api_base.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(config.database.d1.account_id.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(config.database.d1.database_id.as_bytes());
+    hasher.update(b"\ns3\n");
+    hasher.update(config.output.s3.plugin.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(
+        config
+            .output
+            .s3
+            .endpoint
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
+    );
+    hasher.update(b"\nabs\n");
+    hasher.update(config.integrations.occupancy("audiobookshelf").as_bytes());
+    hasher.update(b"\n");
+    hasher.update(config.integrations.audiobookshelf().base_url.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Recomputes effective overlay authority and fences sessions that no longer match.
+///
+/// Host-config destination changes do not touch `plugin-grants.json`, so the
+/// grant watcher cannot see them. Config reload must call this.
+pub fn reconcile_host_overlay_authority(config: &Config) {
+    let discovered = match crate::discover_plugins(config) {
+        Ok(found) => found,
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot reconcile overlay authority without discovery");
+            return;
+        }
+    };
+    let store = match PluginGrantStore::load(&config.paths().files_dir) {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot reconcile overlay authority without grants");
+            return;
+        }
+    };
+    for (key, session_rev) in crate::authority::live_authority_snapshot() {
+        let Some(plugin) = discovered
+            .iter()
+            .find(|plugin| plugin.plugin_key().canonical() == key)
+        else {
+            continue;
+        };
+        let Some(persisted) = store.get_by_plugin_key(&key) else {
+            crate::authority::fence_stale_sessions(&key, "");
+            continue;
+        };
+        let mut effective = persisted.clone();
+        overlay_host_implied_network(&mut effective, plugin, config, &discovered);
+        let current = crate::authority::authority_revision(&effective);
+        if current != session_rev {
+            crate::authority::fence_stale_sessions(&key, &current);
+        }
+    }
+}
+
 /// True when `plugin` is the unique occupant of `spec` among `discovered`.
 fn overlay_unique_occupant(
     plugin: &crate::discover::DiscoveredPlugin,
@@ -1929,7 +2016,7 @@ fn overlay_d1_api_base(
 ///
 /// A provenance-qualified PluginKey matches only that key. Kind tokens
 /// (`postgres`, `pg`, `d1`) resolve through [`crate::resolve_plugin_slot`] so
-/// alias twins do not inherit the operator URL.
+/// corrupt duplicate aliases fail closed instead of inheriting the operator URL.
 fn overlay_database_slot_matches(
     plugin: &crate::discover::DiscoveredPlugin,
     config: &Config,
@@ -2761,7 +2848,7 @@ mode = "outbound"
         overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
         assert!(
             grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
-            "alias twin must not inherit the operator postgres URL overlay"
+            "corrupt duplicate alias must not inherit the operator postgres URL overlay"
         );
     }
 
@@ -2795,7 +2882,7 @@ mode = "outbound"
         overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
         assert!(
             grant_real.tcp.is_empty() && grant_twin.tcp.is_empty(),
-            "ambiguous alias occupancy must not overlay host TCP onto either twin"
+            "corrupt duplicate alias occupancy must not overlay host TCP onto either install"
         );
     }
 
@@ -2835,7 +2922,7 @@ mode = "outbound"
         overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
         assert!(
             grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
-            "alias twin must not inherit the operator S3 endpoint overlay"
+            "corrupt duplicate alias must not inherit the operator S3 endpoint overlay"
         );
     }
 
@@ -2874,7 +2961,68 @@ mode = "outbound"
         overlay_host_implied_network(&mut grant_twin, &twin, &config, &among);
         assert!(
             grant_twin.tcp.is_empty() && grant_twin.address_cidrs.is_empty(),
-            "alias twin must not inherit the operator Audiobookshelf URL overlay"
+            "corrupt duplicate alias must not inherit the operator Audiobookshelf URL overlay"
+        );
+    }
+
+    #[test]
+    fn postgres_host_overlay_changes_authority_not_persisted_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = first_party_database(
+            dir.path(),
+            "bookclerk-plugin-database-postgres",
+            "postgres",
+            r#"
+api_version = 3
+id = "postgres"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "outbound"
+
+[vars]
+"#,
+        );
+        let mut config = Config::default();
+        config.database.plugin = plugin.plugin_key().canonical().to_string();
+        config.database.postgres.url =
+            Some("postgres://postgres:postgres@127.0.0.1:5432/library".into());
+        let persisted = consent_request(&plugin.manifest, plugin.plugin_key());
+        assert!(persisted.tcp.is_empty(), "manifest has no fixed TCP host");
+        let grant_rev = grant_revision(&persisted);
+        let mut effective = persisted.clone();
+        overlay_host_implied_network(
+            &mut effective,
+            &plugin,
+            &config,
+            std::slice::from_ref(&plugin),
+        );
+        assert!(
+            effective.egress_policy().allows_tcp("127.0.0.1", 5432),
+            "config Postgres URL must overlay TCP"
+        );
+        assert_eq!(
+            grant_revision(&persisted),
+            grant_rev,
+            "persisted grant digest is taken from the stored object, not the overlay"
+        );
+        assert_ne!(
+            crate::authority::authority_revision(&persisted),
+            crate::authority::authority_revision(&effective)
+        );
+        let overlay_before = host_overlay_config_digest(&config);
+        config.database.postgres.url =
+            Some("postgres://postgres:postgres@10.0.0.8:5432/library".into());
+        assert_ne!(overlay_before, host_overlay_config_digest(&config));
+        let mut moved = persisted.clone();
+        overlay_host_implied_network(&mut moved, &plugin, &config, std::slice::from_ref(&plugin));
+        assert!(moved.egress_policy().allows_tcp("10.0.0.8", 5432));
+        assert_ne!(
+            crate::authority::authority_revision(&effective),
+            crate::authority::authority_revision(&moved),
+            "destination change must invalidate effective runtime authority"
         );
     }
 

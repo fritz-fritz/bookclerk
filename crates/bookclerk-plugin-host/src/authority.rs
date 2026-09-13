@@ -216,6 +216,18 @@ pub fn apply_grant_store(store: &PluginGrantStore) {
     }
 }
 
+/// Live `(plugin_key, authority_revision)` pairs for overlay reconciliation.
+#[must_use]
+pub fn live_authority_snapshot() -> Vec<(String, String)> {
+    match live().lock() {
+        Ok(guard) => guard
+            .iter()
+            .map(|session| (session.plugin_key.clone(), session.revision.clone()))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Load `plugin-grants.json` and fence sessions that no longer match.
 ///
 /// Unreadable / malformed files are left untouched for this tick so a
@@ -899,6 +911,37 @@ mod tests {
         assert!(
             !is_fenced(&flag),
             "unchanged persisted grant must not fence an overlaid postgres session"
+        );
+        unregister_session(&flag);
+    }
+
+    #[test]
+    fn host_destination_change_fences_overlaid_session() {
+        let _lock = test_live_lock();
+        let key = "path:file:///tmp/overlay-dest-change";
+        let mut persisted = grant(&["api.example"]);
+        persisted.plugin_key = key.into();
+        persisted.network_mode = "outbound".into();
+        let mut effective = persisted.clone();
+        effective.tcp.insert(bookclerk_plugin_manifest::TcpGrant {
+            host: "127.0.0.1".into(),
+            ports: vec![5432],
+        });
+        let flag = register_session_revisions(
+            key,
+            &grant_revision(&persisted),
+            &authority_revision(&effective),
+            Arc::new(|| {}),
+        );
+        let mut moved = persisted.clone();
+        moved.tcp.insert(bookclerk_plugin_manifest::TcpGrant {
+            host: "10.0.0.8".into(),
+            ports: vec![5432],
+        });
+        fence_stale_sessions(key, &authority_revision(&moved));
+        assert!(
+            is_fenced(&flag),
+            "host destination change must fence the overlaid session"
         );
         unregister_session(&flag);
     }

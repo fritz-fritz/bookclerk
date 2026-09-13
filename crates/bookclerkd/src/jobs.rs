@@ -254,7 +254,7 @@ pub const JOB_SUSPENDED_DETAIL_PREFIX: &str = "suspended until ";
 /// and asks the active database adapter to open (provisioning on first use)
 /// one isolated session per binding. Fails closed: a missing PluginKey
 /// grant, or a granted binding that cannot be provisioned, fails the job
-/// rather than running without isolation or inheriting an alias twin's grant.
+/// rather than running without isolation or inheriting another plugin's grant.
 async fn open_granted_binding_databases(
     state: &AppState,
     library: &bookclerk_library::LibraryStore,

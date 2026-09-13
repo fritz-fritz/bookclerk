@@ -1253,6 +1253,24 @@ pub async fn start_integration_watchers(state: &AppState) {
     }
 }
 
+/// Fingerprint of host-owned database connect settings (occupancy + URLs).
+fn database_connect_fingerprint(cfg: &Config) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}",
+        cfg.database.plugin,
+        cfg.database.postgres.url.as_deref().unwrap_or(""),
+        cfg.database
+            .postgres
+            .url_file
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        cfg.database.d1.api_base,
+        cfg.database.d1.account_id,
+        cfg.database.d1.database_id
+    )
+}
+
 /// Reload `config.toml` from disk and publish a complete candidate runtime.
 ///
 /// Auth is always rebuilt and swapped **before** listen rebind notification so a
@@ -1264,14 +1282,14 @@ pub async fn reload_daemon_config(state: &AppState) -> anyhow::Result<String> {
 
 /// Like [`reload_daemon_config`] when the caller already holds `reload_lock`.
 pub(crate) async fn reload_daemon_config_held(state: &AppState) -> anyhow::Result<String> {
-    let (files_dir, config_path, old_listen, old_db_plugin, old_auth_enabled, old_token) = {
+    let (files_dir, config_path, old_listen, old_db_fingerprint, old_auth_enabled, old_token) = {
         let cfg = state.config.read().await;
         let auth = state.auth.read().await;
         (
             cfg.paths().files_dir.clone(),
             cfg.paths().config_file.clone(),
             cfg.daemon.listen.clone(),
-            cfg.database.plugin.clone(),
+            database_connect_fingerprint(&cfg),
             auth.enabled,
             auth.token.clone(),
         )
@@ -1283,7 +1301,7 @@ pub(crate) async fn reload_daemon_config_held(state: &AppState) -> anyhow::Resul
     new_cfg.warn_unsupported_options();
 
     // Build the full candidate before mutating live state.
-    let db_plugin_changed = !old_db_plugin.eq_ignore_ascii_case(&new_cfg.database.plugin);
+    let db_plugin_changed = old_db_fingerprint != database_connect_fingerprint(&new_cfg);
 
     let _job_runtime = if db_plugin_changed {
         Some(
@@ -1368,6 +1386,8 @@ pub(crate) async fn reload_daemon_config_held(state: &AppState) -> anyhow::Resul
         *state.config.write().await = new_cfg.clone();
     }
 
+    bookclerk_plugin_host::reconcile_host_overlay_authority(&new_cfg);
+
     // Start watchers for the new integration set (awaited — no untracked race).
     start_integration_watchers(state).await;
     crate::event_worker::upsert_event_subscriber_catalog(state).await;
@@ -1385,10 +1405,7 @@ pub(crate) async fn reload_daemon_config_held(state: &AppState) -> anyhow::Resul
         new_cfg.auth_password().is_some()
     );
     if db_plugin_changed {
-        detail.push_str(&format!(
-            "; switched database plugin `{old_db_plugin}` → `{}`",
-            new_cfg.database.plugin
-        ));
+        detail.push_str("; database connect target updated");
     }
     if token_changed {
         detail.push_str("; operator auth runtime updated");
@@ -2505,6 +2522,7 @@ async fn discover_plugins_for_settings(
 fn apply_database_enable_updates(
     config: &mut Config,
     updates: &[(String, String)],
+    discovered: &[bookclerk_plugin_host::DiscoveredPlugin],
 ) -> Result<(), String> {
     let mut enabled_targets = Vec::new();
     let mut disabled_targets = Vec::new();
@@ -2536,7 +2554,7 @@ fn apply_database_enable_updates(
     // Unchecking the active backend with no replacement clears `database.plugin`
     // so the prior plugin does not stay selected after save.
     for id in disabled_targets {
-        if bookclerk_plugin_host::occupancy_matches_alias(&config.database.plugin, &id) {
+        if bookclerk_plugin_host::occupancy_names_alias(&config.database.plugin, &id, discovered) {
             config.database.plugin.clear();
             break;
         }
@@ -3225,7 +3243,7 @@ async fn patch_settings(
         StatusCode::INTERNAL_SERVER_ERROR.into_response()
     })?;
 
-    apply_database_enable_updates(&mut cfg, &updates).map_err(|err| {
+    apply_database_enable_updates(&mut cfg, &updates, &discovered).map_err(|err| {
         tracing::warn!(error = %err, "rejected database settings update");
         StatusCode::BAD_REQUEST.into_response()
     })?;
@@ -5441,13 +5459,13 @@ mod tests {
         .is_empty());
         assert!(database_backends_requiring_grant(
             &[("database.sqlite.enabled".into(), "true".into())],
-            "platform:bookclerk/sqlite#sqlite"
+            "platform:bookclerk/bookclerk-plugin-database-sqlite"
         )
         .is_empty());
         assert_eq!(
             database_backends_requiring_grant(
                 &[("database.plugin".into(), "d1".into())],
-                "platform:bookclerk/sqlite#sqlite"
+                "platform:bookclerk/bookclerk-plugin-database-sqlite"
             ),
             vec!["d1".to_string()]
         );
@@ -5455,11 +5473,11 @@ mod tests {
             database_backends_requiring_grant(
                 &[(
                     "database.plugin".into(),
-                    "platform:bookclerk/sqlite#sqlite".into()
+                    "platform:bookclerk/bookclerk-plugin-database-sqlite".into()
                 )],
                 "sqlite"
             ),
-            vec!["platform:bookclerk/sqlite#sqlite".to_string()]
+            vec!["platform:bookclerk/bookclerk-plugin-database-sqlite".to_string()]
         );
     }
 
@@ -5596,12 +5614,17 @@ mod tests {
         apply_database_enable_updates(
             &mut cfg,
             &[("database.sqlite.enabled".into(), "false".into())],
+            &[],
         )
         .expect("disable");
         assert_eq!(cfg.database.plugin, "");
 
-        apply_database_enable_updates(&mut cfg, &[("database.d1.enabled".into(), "true".into())])
-            .expect("enable d1");
+        apply_database_enable_updates(
+            &mut cfg,
+            &[("database.d1.enabled".into(), "true".into())],
+            &[],
+        )
+        .expect("enable d1");
         assert_eq!(cfg.database.plugin, "d1");
 
         apply_database_enable_updates(
@@ -5610,6 +5633,7 @@ mod tests {
                 ("database.d1.enabled".into(), "false".into()),
                 ("database.postgres.enabled".into(), "true".into()),
             ],
+            &[],
         )
         .expect("switch");
         assert_eq!(cfg.database.plugin, "postgres");
@@ -5618,10 +5642,11 @@ mod tests {
     #[test]
     fn database_enable_updates_clear_plugin_key_occupancy() {
         let mut cfg = Config::default();
-        cfg.database.plugin = "platform:bookclerk/sqlite#sqlite".into();
+        cfg.database.plugin = "platform:bookclerk/bookclerk-plugin-database-sqlite".into();
         apply_database_enable_updates(
             &mut cfg,
             &[("database.sqlite.enabled".into(), "false".into())],
+            &[],
         )
         .expect("disable keyed sqlite");
         assert_eq!(cfg.database.plugin, "");
