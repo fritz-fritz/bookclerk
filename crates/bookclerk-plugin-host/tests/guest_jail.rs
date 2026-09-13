@@ -21,8 +21,9 @@ use std::path::{Path, PathBuf};
 
 use bookclerk_config::{Config, Isolation, Paths};
 use bookclerk_plugin_host::{
-    consent_request, discover_plugins, plugin_data_dir, require_grant, DiscoveredPlugin,
-    PluginGrantStore, PluginSession, SessionServices, HOST_SHARED_ACCOUNT,
+    consent_request, discover_plugins, grant_has_binding, pending_structural, plugin_data_dir,
+    require_grant, DiscoveredPlugin, PluginGrantStore, PluginSession, SessionServices,
+    HOST_SHARED_ACCOUNT,
 };
 
 /// Spawns `plugin` the way the daemon does, minus the workerd front door.
@@ -344,10 +345,11 @@ async fn spawn_fails_without_consent_grant() {
     );
 }
 
-/// Extra bindings in a later `plugin.toml` are new structural authority and
-/// require a fresh operator grant. Spawn must not silently proceed.
+/// Extra bindings in a later `plugin.toml` stay pending. The existing grant
+/// still covers spawn; the new binding is not delivered until the operator
+/// consents.
 #[tokio::test]
-async fn spawn_requires_reapprove_when_manifest_adds_structural_bindings() {
+async fn spawn_keeps_grant_when_manifest_adds_structural_bindings() {
     let fixture = Fixture::new(|_| BTreeMap::new());
     let install = fixture
         .config
@@ -365,13 +367,24 @@ async fn spawn_requires_reapprove_when_manifest_adds_structural_bindings() {
     .expect("widen plugin.toml");
 
     let plugin = fixture.plugin();
-    let err = require_grant(fixture.config.paths().files_dir.as_path(), &plugin)
-        .expect_err("new secrets binding requires re-consent")
-        .to_string();
+    let effective = require_grant(fixture.config.paths().files_dir.as_path(), &plugin)
+        .expect("existing approval still covers the previously granted surface");
     assert!(
-        err.contains("grant does not match")
-            || err.contains("re-approve")
-            || err.contains("approve"),
-        "got: {err}"
+        !grant_has_binding(&effective, "secrets"),
+        "new secrets binding must not become effective automatically: {effective:?}"
+    );
+    assert!(
+        !grant_has_binding(&effective, "config"),
+        "new config binding must not become effective automatically: {effective:?}"
+    );
+    let requested = consent_request(&plugin.manifest, plugin.plugin_key());
+    let pending = pending_structural(&effective, &requested);
+    assert!(
+        pending.bindings.contains("secrets"),
+        "secrets must stay pending until the operator consents: {pending:?}"
+    );
+    assert!(
+        pending.bindings.contains("config"),
+        "config must stay pending until the operator consents: {pending:?}"
     );
 }
