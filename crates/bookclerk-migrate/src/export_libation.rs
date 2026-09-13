@@ -94,19 +94,12 @@ pub async fn export_libation(opts: LibationExportOptions) -> Result<LibationExpo
             .push("library.db missing — accounts/books empty".into());
         None
     };
-    let empty_accounts = Vec::new();
-    let accounts = if let Some(dest) = dest.as_ref() {
-        dest.store.list_accounts().await?
-    } else {
-        empty_accounts
-    };
-    summary.accounts = accounts.len();
-    let accounts_json = accounts_to_libation_json(&accounts);
-    if !opts.dry_run {
-        let path = opts.dest.join("AccountsSettings.json");
-        let bytes = serde_json::to_vec_pretty(&accounts_json)
-            .map_err(|e| MigrateError::Accounts(e.to_string()))?;
-        std::fs::write(&path, bytes)?;
+    if let Some(dest) = dest.as_ref() {
+        // Operator-facing summary is a SQL COUNT; account rows stay in the helper.
+        summary.accounts = usize::try_from(dest.store.count_accounts().await?).unwrap_or(0);
+        if !opts.dry_run {
+            write_libation_accounts_settings(&opts.dest, dest).await?;
+        }
     }
 
     let books = if let Some(dest) = dest.as_ref() {
@@ -124,6 +117,32 @@ pub async fn export_libation(opts: LibationExportOptions) -> Result<LibationExpo
     }
 
     Ok(summary)
+}
+
+/// Writes `AccountsSettings.json` from library account rows.
+///
+/// Account records stay in this helper so the export summary (printed by the
+/// CLI) only reports a SQL `COUNT`, not payloads from `list_accounts()`.
+///
+/// # Arguments
+///
+/// * `dest_dir` - Classic Libation Files directory to write into.
+/// * `dest` - Open destination library store.
+///
+/// # Errors
+///
+/// Returns an error when listing accounts or writing the JSON file fails.
+async fn write_libation_accounts_settings(
+    dest_dir: &Path,
+    dest: &crate::store::DestStore,
+) -> Result<()> {
+    let accounts = dest.store.list_accounts().await?;
+    let accounts_json = accounts_to_libation_json(&accounts);
+    let path = dest_dir.join("AccountsSettings.json");
+    let bytes = serde_json::to_vec_pretty(&accounts_json)
+        .map_err(|e| MigrateError::Accounts(e.to_string()))?;
+    std::fs::write(&path, bytes)?;
+    Ok(())
 }
 
 /// Projects Bookclerk account rows into classic `AccountsSettings.json` shape.
@@ -391,3 +410,69 @@ CREATE TABLE IF NOT EXISTS "CategoryCategoryLadder" (
     PRIMARY KEY ("_categoriesCategoryId", "_categoryLaddersCategoryLadderId")
 );
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn libation_export_summary_is_cardinality_only() {
+        let src = tempdir().unwrap();
+        let dest = tempdir().unwrap();
+        let store = crate::store::DestStore::open(src.path(), false)
+            .await
+            .unwrap();
+        store
+            .store
+            .upsert_account("reader@example.com", "us", Some("Reader"), true, "audible")
+            .await
+            .unwrap();
+        drop(store);
+
+        let summary = export_libation(LibationExportOptions {
+            files_dir: src.path().to_path_buf(),
+            dest: dest.path().to_path_buf(),
+            force: true,
+            dry_run: false,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(summary.accounts, 1);
+        assert!(summary
+            .warnings
+            .iter()
+            .all(|w| !w.contains("reader@example.com")));
+        let json = std::fs::read_to_string(dest.path().join("AccountsSettings.json")).unwrap();
+        assert!(json.contains("reader@example.com"));
+        assert!(json.contains("Reader"));
+    }
+
+    #[tokio::test]
+    async fn libation_export_dry_run_counts_without_writing_accounts() {
+        let src = tempdir().unwrap();
+        let dest = tempdir().unwrap();
+        let store = crate::store::DestStore::open(src.path(), false)
+            .await
+            .unwrap();
+        store
+            .store
+            .upsert_account("reader@example.com", "us", None, true, "audible")
+            .await
+            .unwrap();
+        drop(store);
+
+        let summary = export_libation(LibationExportOptions {
+            files_dir: src.path().to_path_buf(),
+            dest: dest.path().to_path_buf(),
+            force: true,
+            dry_run: true,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(summary.accounts, 1);
+        assert!(!dest.path().join("AccountsSettings.json").exists());
+    }
+}
