@@ -58,7 +58,8 @@ pub struct IntegrationContext {
 /// Downstream consumer of acquired books / identity signals (e.g. Audiobookshelf).
 #[async_trait]
 pub trait Integration: Send + Sync {
-    /// Display / CLI alias (`audiobookshelf`, …). Not globally unique.
+    /// Display / CLI alias (`audiobookshelf`, …). Globally unique within one
+    /// installation; durable identity is [`Self::plugin_key`].
     fn id(&self) -> &str;
 
     /// Provenance-qualified PluginKey when this adapter is an external guest.

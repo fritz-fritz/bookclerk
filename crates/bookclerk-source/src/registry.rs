@@ -34,7 +34,9 @@ impl SourceRegistry {
         self.sources.insert(key, source);
     }
 
-    /// Look up a source by PluginKey, or by an unambiguous display alias.
+    /// Look up a source by PluginKey, or by its installation-unique display alias.
+    ///
+    /// Multiple alias hits fail closed (invalid installation state).
     #[must_use]
     pub fn get(&self, id_or_alias: &str) -> Option<Arc<dyn ContentSource>> {
         let mut matches = self.matches(id_or_alias);

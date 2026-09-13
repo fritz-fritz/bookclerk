@@ -1365,6 +1365,8 @@ schema_versions = [1]
     }
 
     #[test]
+    /// Invalid installation state (defense in depth): catalog identity stays on
+    /// PluginKey even when two installs share a display alias.
     fn event_catalog_keys_same_alias_installs_on_distinct_plugin_keys() {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
@@ -1387,6 +1389,8 @@ schema_versions = [1]
     }
 
     #[tokio::test]
+    /// Invalid installation state (defense in depth): dispatch must not collapse
+    /// two PluginKeys that share a display alias onto one catalog row.
     async fn dispatch_does_not_collapse_same_alias_plugin_keys() {
         let db = bookclerk_plugin_database_sqlite::open_memory()
             .await

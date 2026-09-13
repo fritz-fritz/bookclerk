@@ -49,9 +49,8 @@ impl DestinationRegistry {
     /// Plugin session for `plugin_id` and `account_id`, when that guest was loaded.
     ///
     /// `plugin_id` may be the canonical PluginKey (how sessions are stored) or
-    /// a display alias. An alias is accepted only when exactly one loaded
-    /// session for `account_id` matches; two occupants sharing an alias fail
-    /// closed rather than returning an arbitrary twin.
+    /// a display alias. Aliases are installation-unique; two occupants sharing
+    /// an alias is invalid state and fails closed rather than returning a twin.
     #[must_use]
     pub fn plugin_session(&self, plugin_id: &str, account_id: &str) -> Option<Arc<PluginSession>> {
         if let Some(session) = self
