@@ -118,6 +118,14 @@ impl InstallLedger {
         }
     }
 
+    /// Removes the row for `plugin_key` if present.
+    pub fn remove(&mut self, plugin_key: &PluginKey) -> bool {
+        let canonical = plugin_key.canonical();
+        let before = self.artifacts.len();
+        self.artifacts.retain(|row| row.plugin_key != canonical);
+        self.artifacts.len() != before
+    }
+
     /// Atomically writes the ledger under `files_dir`.
     ///
     /// # Errors
@@ -163,6 +171,26 @@ pub fn record_install(
         provenance,
         recorded_at: Utc::now(),
     });
+    ledger.store(files_dir)
+}
+
+/// Restores `previous` for `plugin_key`, or deletes the row when `previous` is `None`.
+///
+/// # Errors
+///
+/// Returns when the ledger cannot be loaded or stored.
+pub fn restore_ledger_entry(
+    files_dir: &Path,
+    plugin_key: &PluginKey,
+    previous: Option<InstallLedgerEntry>,
+) -> Result<()> {
+    let mut ledger = InstallLedger::load(files_dir)?;
+    match previous {
+        Some(entry) => ledger.upsert(entry),
+        None => {
+            ledger.remove(plugin_key);
+        }
+    }
     ledger.store(files_dir)
 }
 

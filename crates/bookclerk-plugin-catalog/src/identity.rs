@@ -2,9 +2,9 @@
 //!
 //! A bare `plugin.toml` `id` (`sqlite`, `local`, `audible`) is a **display
 //! alias**, not a security principal. Durable ownership uses [`PluginKey`]:
-//! canonical provenance + package coordinate + manifest id. Version and
-//! content hashes are **not** part of the key; they belong on
-//! [`ArtifactIdentity`].
+//! canonical provenance + package coordinate. The alias is not part of the
+//! key, so a same-package rename keeps identity stable. Version and content
+//! hashes are **not** part of the key; they belong on [`ArtifactIdentity`].
 //!
 //! Platform trust is host-controlled ([`PluginProvenance::PlatformBundled`])
 //! only after the host install ledger records the exact PluginKey and payload
@@ -123,16 +123,17 @@ pub fn is_platform_plugin_key(key: &PluginKey) -> bool {
 
 /// True when `key` names a host-controlled first-party database adapter.
 ///
-/// Matches exact package name + manifest id on `platform:` or the canonical
-/// crates.io `cargo:` index. Path / npm / PyPI / third-party cargo indexes
-/// never inherit first-party host-private behavior from an alias.
+/// Matches exact package name on `platform:` or the canonical crates.io
+/// `cargo:` index. The live manifest alias is **not** consulted here; callers
+/// that inject host-private state must also require verified provenance and
+/// the expected alias on the discovered plugin. Path / npm / PyPI /
+/// third-party cargo indexes never inherit first-party behavior from an alias.
 #[must_use]
 pub fn is_first_party_database_adapter(key: &PluginKey) -> bool {
     let package = key.package();
-    let manifest_id = key.manifest_id();
     let spec = FIRST_PARTY_DATABASE_ADAPTERS
         .iter()
-        .find(|a| a.package_name == package && a.manifest_id == manifest_id);
+        .find(|a| a.package_name == package);
     if spec.is_none() {
         return false;
     }
@@ -201,14 +202,15 @@ impl fmt::Display for ProvenanceScheme {
 ///
 /// Canonical text (deterministic, unambiguous). Registry index URL and
 /// package name are `#`-separated so a registry path cannot be confused
-/// with a package path:
+/// with a package path. The human alias is **not** included (it lives on
+/// the manifest / receipt `runtime.id`):
 ///
-/// - `cargo:{index_url}#{package}#{manifest_id}`
-/// - `npm:{index_url}#{package}#{manifest_id}`
-/// - `pypi:{index_url}#{package}#{manifest_id}`
-/// - `registry:{index_url}#{package}#{manifest_id}`
-/// - `platform:bookclerk/{package}#{manifest_id}`
-/// - `path:file://{normalized_absolute_path}#{manifest_id}`
+/// - `cargo:{index_url}#{package}`
+/// - `npm:{index_url}#{package}`
+/// - `pypi:{index_url}#{package}`
+/// - `registry:{index_url}#{package}`
+/// - `platform:bookclerk/{package}`
+/// - `path:file://{normalized_absolute_path}`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PluginKey {
     /// Canonical UTF-8 form (see type docs). Always produced by [`Self::parse`].
@@ -249,53 +251,64 @@ impl PluginKey {
         })
     }
 
-    /// Platform-bundled key (`platform:bookclerk/{package}#{id}`).
+    /// Platform-bundled key (`platform:bookclerk/{package}`).
+    ///
+    /// `manifest_id` is validated as a plugin alias but is not part of the key.
     ///
     /// # Errors
     ///
     /// Returns an error when `manifest_id` fails the plugin id grammar.
     pub fn platform(package_name: &str, manifest_id: &str) -> Result<Self> {
-        Self::from_parts(
-            ProvenanceScheme::Platform,
-            PLATFORM_PRODUCT,
-            package_name,
-            manifest_id,
-        )
+        validate_plugin_id(manifest_id).map_err(|e| CatalogError::message(e.to_string()))?;
+        Self::from_parts(ProvenanceScheme::Platform, PLATFORM_PRODUCT, package_name)
     }
 
     /// Registry-sourced key (Cargo / npm / PyPI / static index).
     ///
-    /// Version is stripped from `coordinate` — it is not part of the key.
+    /// Version and the human alias are **not** part of the key. `manifest_id`
+    /// is validated as a plugin alias only.
     ///
     /// # Errors
     ///
     /// Returns an error when the coordinate or id is invalid.
     pub fn from_coordinate(coordinate: &PackageCoordinate, manifest_id: &str) -> Result<Self> {
         match &coordinate.source {
-            RegistrySource::Cargo { registry_url } => Self::from_parts(
-                ProvenanceScheme::Cargo,
-                &normalize_index_url(registry_url)?,
-                &coordinate.name,
-                manifest_id,
-            ),
-            RegistrySource::Npm { registry_url } => Self::from_parts(
-                ProvenanceScheme::Npm,
-                &normalize_index_url(registry_url)?,
-                &coordinate.name,
-                manifest_id,
-            ),
-            RegistrySource::Pypi { simple_url } => Self::from_parts(
-                ProvenanceScheme::Pypi,
-                &normalize_index_url(simple_url)?,
-                &coordinate.name,
-                manifest_id,
-            ),
-            RegistrySource::Static { index_url } => Self::from_parts(
-                ProvenanceScheme::Registry,
-                &normalize_index_url(index_url)?,
-                &coordinate.name,
-                manifest_id,
-            ),
+            RegistrySource::Cargo { registry_url } => {
+                validate_plugin_id(manifest_id)
+                    .map_err(|e| CatalogError::message(e.to_string()))?;
+                Self::from_parts(
+                    ProvenanceScheme::Cargo,
+                    &normalize_index_url(registry_url)?,
+                    &coordinate.name,
+                )
+            }
+            RegistrySource::Npm { registry_url } => {
+                validate_plugin_id(manifest_id)
+                    .map_err(|e| CatalogError::message(e.to_string()))?;
+                Self::from_parts(
+                    ProvenanceScheme::Npm,
+                    &normalize_index_url(registry_url)?,
+                    &coordinate.name,
+                )
+            }
+            RegistrySource::Pypi { simple_url } => {
+                validate_plugin_id(manifest_id)
+                    .map_err(|e| CatalogError::message(e.to_string()))?;
+                Self::from_parts(
+                    ProvenanceScheme::Pypi,
+                    &normalize_index_url(simple_url)?,
+                    &coordinate.name,
+                )
+            }
+            RegistrySource::Static { index_url } => {
+                validate_plugin_id(manifest_id)
+                    .map_err(|e| CatalogError::message(e.to_string()))?;
+                Self::from_parts(
+                    ProvenanceScheme::Registry,
+                    &normalize_index_url(index_url)?,
+                    &coordinate.name,
+                )
+            }
             RegistrySource::LocalArchive => {
                 // Local archives still need a filesystem identity after extract.
                 // Callers should use [`Self::from_install_path`] on the dest root.
@@ -313,18 +326,13 @@ impl PluginKey {
     /// Returns an error when the path cannot be made into a `file://` URL or
     /// the id is invalid.
     pub fn from_install_path(root: &Path, manifest_id: &str) -> Result<Self> {
+        validate_plugin_id(manifest_id).map_err(|e| CatalogError::message(e.to_string()))?;
         let file_url = path_to_file_url(root)?;
-        Self::from_parts(ProvenanceScheme::Path, &file_url, "", manifest_id)
+        Self::from_parts(ProvenanceScheme::Path, &file_url, "")
     }
 
     /// Formats one canonical key from already-normalized parts.
-    fn from_parts(
-        scheme: ProvenanceScheme,
-        source: &str,
-        package: &str,
-        manifest_id: &str,
-    ) -> Result<Self> {
-        validate_plugin_id(manifest_id).map_err(|e| CatalogError::message(e.to_string()))?;
+    fn from_parts(scheme: ProvenanceScheme, source: &str, package: &str) -> Result<Self> {
         if source.is_empty() && scheme != ProvenanceScheme::Path {
             return Err(CatalogError::message("plugin key source must not be empty"));
         }
@@ -345,10 +353,10 @@ impl PluginKey {
                         "registry plugin key needs a package name",
                     ));
                 }
-                format!("registry:{source}#{package}#{manifest_id}")
+                format!("registry:{source}#{package}")
             }
             ProvenanceScheme::Path => {
-                format!("path:{source}#{manifest_id}")
+                format!("path:{source}")
             }
             ProvenanceScheme::Platform => {
                 if package.is_empty() {
@@ -356,7 +364,7 @@ impl PluginKey {
                         "platform plugin key needs a package name",
                     ));
                 }
-                format!("platform:{source}/{package}#{manifest_id}")
+                format!("platform:{source}/{package}")
             }
             ProvenanceScheme::Cargo | ProvenanceScheme::Npm | ProvenanceScheme::Pypi => {
                 if package.is_empty() {
@@ -364,7 +372,7 @@ impl PluginKey {
                         "registry plugin key needs a package name",
                     ));
                 }
-                format!("{}:{source}#{package}#{manifest_id}", scheme.as_str())
+                format!("{}:{source}#{package}", scheme.as_str())
             }
         };
         Ok(Self { canonical })
@@ -386,15 +394,6 @@ impl PluginKey {
     #[must_use]
     pub fn fs_id(&self) -> String {
         format!("pk-{}", &self.digest_sha256()[..PLUGIN_KEY_FS_ID_HEX_CHARS])
-    }
-
-    /// Manifest plugin id (display alias).
-    #[must_use]
-    pub fn manifest_id(&self) -> &str {
-        self.canonical
-            .rsplit_once('#')
-            .map(|(_, id)| id)
-            .unwrap_or(self.canonical.as_str())
     }
 
     /// Provenance scheme.
@@ -448,16 +447,20 @@ fn parse_canonical(raw: &str) -> Result<ParsedKey> {
     })?;
     let rebuilt = match scheme {
         ProvenanceScheme::Path => {
-            let (source, id) = rest
-                .split_once('#')
-                .ok_or_else(|| CatalogError::message("path plugin key must be path:file://…#id"))?;
-            PluginKey::from_parts(scheme, source, "", id)?
+            if rest.contains('#') {
+                return Err(CatalogError::message(
+                    "path plugin key must be path:file://… (alias is not part of the key)",
+                ));
+            }
+            PluginKey::from_parts(scheme, rest, "")?
         }
         ProvenanceScheme::Platform => {
-            let (source_pkg, id) = rest.split_once('#').ok_or_else(|| {
-                CatalogError::message("platform plugin key must be platform:bookclerk/pkg#id")
-            })?;
-            let (product, package) = source_pkg.split_once('/').ok_or_else(|| {
+            if rest.contains('#') {
+                return Err(CatalogError::message(
+                    "platform plugin key must be platform:bookclerk/pkg (alias is not part of the key)",
+                ));
+            }
+            let (product, package) = rest.split_once('/').ok_or_else(|| {
                 CatalogError::message("platform plugin key must include product/package")
             })?;
             if product != PLATFORM_PRODUCT {
@@ -465,27 +468,16 @@ fn parse_canonical(raw: &str) -> Result<ParsedKey> {
                     "unsupported platform product `{product}`"
                 )));
             }
-            PluginKey::from_parts(scheme, product, package, id)?
+            PluginKey::from_parts(scheme, product, package)?
         }
         ProvenanceScheme::Registry => {
-            let (index_and_pkg, id) = rsplit_hash(rest)?;
-            let (index, package) = index_and_pkg.split_once('#').ok_or_else(|| {
-                CatalogError::message(
-                    "registry plugin key must be registry:<index_url>#<package>#<id>",
-                )
-            })?;
-            PluginKey::from_parts(scheme, index, package, id)?
+            let (index, package) = split_index_package(rest, "registry:<index_url>#<package>")?;
+            PluginKey::from_parts(scheme, index, package)?
         }
         ProvenanceScheme::Cargo | ProvenanceScheme::Npm | ProvenanceScheme::Pypi => {
-            let (index_and_pkg, id) = rsplit_hash(rest)?;
-            let (index, package) = index_and_pkg.split_once('#').ok_or_else(|| {
-                CatalogError::message(format!(
-                    "{} plugin key must be {}:<index_url>#<package>#<id>",
-                    scheme.as_str(),
-                    scheme.as_str()
-                ))
-            })?;
-            PluginKey::from_parts(scheme, &normalize_index_url(index)?, package, id)?
+            let (index, package) =
+                split_index_package(rest, &format!("{}:<index_url>#<package>", scheme.as_str()))?;
+            PluginKey::from_parts(scheme, &normalize_index_url(index)?, package)?
         }
     };
     Ok(ParsedKey {
@@ -499,22 +491,23 @@ fn parsed_package(canonical: &str) -> Option<String> {
     let (scheme, rest) = canonical.split_once(':')?;
     match scheme {
         "path" => Some(String::new()),
-        "platform" => {
-            let (source_pkg, _) = rest.rsplit_once('#')?;
-            source_pkg.split_once('/').map(|(_, p)| p.to_string())
-        }
-        "registry" | "cargo" | "npm" | "pypi" => {
-            let (index_and_pkg, _) = rest.rsplit_once('#')?;
-            index_and_pkg.split_once('#').map(|(_, p)| p.to_string())
-        }
+        "platform" => rest.split_once('/').map(|(_, p)| p.to_string()),
+        "registry" | "cargo" | "npm" | "pypi" => rest.split_once('#').map(|(_, p)| p.to_string()),
         _ => None,
     }
 }
 
-/// Splits `rest` on the last `#` into `(prefix, manifest_id)`.
-fn rsplit_hash(s: &str) -> Result<(&str, &str)> {
-    s.rsplit_once('#')
-        .ok_or_else(|| CatalogError::message("plugin key must end with #<manifest_id>"))
+/// Splits `rest` on the single `#` into `(index_url, package)`.
+fn split_index_package<'a>(s: &'a str, expected: &str) -> Result<(&'a str, &'a str)> {
+    let (index, package) = s
+        .split_once('#')
+        .ok_or_else(|| CatalogError::message(format!("plugin key must be {expected}")))?;
+    if index.contains('#') || package.contains('#') || package.is_empty() {
+        return Err(CatalogError::message(format!(
+            "plugin key must be {expected} (alias is not part of the key)"
+        )));
+    }
+    Ok((index, package))
 }
 
 /// Identity of one exact installed build: [`PluginKey`] + version + hashes.
@@ -569,8 +562,10 @@ impl fmt::Display for PluginProvenance {
 /// Evaluated identity for one discovered install directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginInstallIdentity {
-    /// Stable logical identity.
+    /// Stable logical identity (provenance + package; not the alias).
     pub plugin_key: PluginKey,
+    /// Human-facing alias from `plugin.toml` `id`.
+    pub alias: String,
     /// Exact installed build.
     pub artifact: ArtifactIdentity,
     /// Host-evaluated provenance (never plugin-authored).
@@ -578,10 +573,10 @@ pub struct PluginInstallIdentity {
 }
 
 impl PluginInstallIdentity {
-    /// Display alias (`plugin.toml` id).
+    /// Display alias (`plugin.toml` id). Never a security principal.
     #[must_use]
     pub fn alias(&self) -> &str {
-        self.plugin_key.manifest_id()
+        &self.alias
     }
 }
 
@@ -692,15 +687,15 @@ mod tests {
         let sqlite = PluginKey::platform("bookclerk-plugin-database-sqlite", "sqlite").unwrap();
         assert_eq!(
             sqlite.canonical(),
-            "platform:bookclerk/bookclerk-plugin-database-sqlite#sqlite"
+            "platform:bookclerk/bookclerk-plugin-database-sqlite"
         );
-        assert_eq!(sqlite.manifest_id(), "sqlite");
         assert!(is_platform_plugin_key(&sqlite));
 
         let fake = PluginKey::from_install_path(Path::new("/tmp/evil-sqlite"), "sqlite").unwrap();
-        assert_eq!(fake.manifest_id(), "sqlite");
         assert_ne!(sqlite, fake);
         assert!(!is_platform_plugin_key(&fake));
+        assert!(fake.canonical().starts_with("path:file://"));
+        assert!(!fake.canonical().contains("#sqlite"));
     }
 
     #[test]
@@ -709,7 +704,7 @@ mod tests {
         let key = PluginKey::from_coordinate(&cargo, "foo").unwrap();
         assert_eq!(
             key.canonical(),
-            "cargo:https://crates.io#bookclerk-plugin-source-foo#foo"
+            "cargo:https://crates.io#bookclerk-plugin-source-foo"
         );
         assert_eq!(key.package(), "bookclerk-plugin-source-foo");
 
@@ -717,12 +712,12 @@ mod tests {
         let key = PluginKey::from_coordinate(&npm, "foo").unwrap();
         assert_eq!(
             key.canonical(),
-            "npm:https://registry.npmjs.org#@author/foo#foo"
+            "npm:https://registry.npmjs.org#@author/foo"
         );
 
         let pypi = PackageCoordinate::parse("pypi:foo==0.1.0").unwrap();
         let key = PluginKey::from_coordinate(&pypi, "foo").unwrap();
-        assert_eq!(key.canonical(), "pypi:https://pypi.org#foo#foo");
+        assert_eq!(key.canonical(), "pypi:https://pypi.org#foo");
 
         let reg = PackageCoordinate::parse(
             "registry:https://plugins.example/index.json#author/foo@1.0.0",
@@ -731,7 +726,7 @@ mod tests {
         let key = PluginKey::from_coordinate(&reg, "foo").unwrap();
         assert_eq!(
             key.canonical(),
-            "registry:https://plugins.example/index.json#author/foo#foo"
+            "registry:https://plugins.example/index.json#author/foo"
         );
     }
 
@@ -755,11 +750,11 @@ mod tests {
         let b = PluginKey::from_coordinate(&team_b, "widget").unwrap();
         assert_eq!(
             a.canonical(),
-            "cargo:https://packages.example/team-a#widget#widget"
+            "cargo:https://packages.example/team-a#widget"
         );
         assert_eq!(
             b.canonical(),
-            "cargo:https://packages.example/team-b#widget#widget"
+            "cargo:https://packages.example/team-b#widget"
         );
         assert_ne!(a, b);
         let a_again = PackageCoordinate {
@@ -778,16 +773,17 @@ mod tests {
 
     #[test]
     fn plugin_key_parse_rejects_noncanonical_and_serde_runs_parse() {
-        assert!(PluginKey::parse("cargo:https://crates.io/pkg#id").is_err());
         assert!(PluginKey::parse("not-a-key").is_err());
-        let key = PluginKey::parse("cargo:https://crates.io#pkg#id").unwrap();
+        assert!(
+            PluginKey::parse("cargo:https://crates.io#pkg#id").is_err(),
+            "legacy alias-in-key form must fail closed"
+        );
+        assert!(PluginKey::parse("platform:bookclerk/pkg#id").is_err());
+        let key = PluginKey::parse("cargo:https://crates.io#pkg").unwrap();
         let json = serde_json::to_string(&key).unwrap();
-        assert_eq!(json, "\"cargo:https://crates.io#pkg#id\"");
+        assert_eq!(json, "\"cargo:https://crates.io#pkg\"");
         let back: PluginKey = serde_json::from_str(&json).unwrap();
         assert_eq!(back, key);
-        let err =
-            serde_json::from_str::<PluginKey>("\"cargo:https://crates.io/pkg#id\"").unwrap_err();
-        assert!(err.to_string().contains("plugin key") || err.to_string().contains("index_url"));
         let err = serde_json::from_str::<PluginKey>("{\"canonical\":\"nope\"}").unwrap_err();
         assert!(!err.to_string().is_empty());
     }
@@ -801,7 +797,7 @@ mod tests {
         let key = PluginKey::from_coordinate(&coord, "echo").unwrap();
         assert_eq!(
             key.canonical(),
-            "registry:file:///tmp/indexes/team-a/index.json#community/echo#echo"
+            "registry:file:///tmp/indexes/team-a/index.json#community/echo"
         );
         assert_eq!(PluginKey::parse(key.canonical()).unwrap(), key);
     }
@@ -852,7 +848,17 @@ mod tests {
         let a = PluginKey::from_coordinate(&cargo, "sqlite").unwrap();
         let b = PluginKey::from_coordinate(&npm, "sqlite").unwrap();
         assert_ne!(a, b);
-        assert_eq!(a.manifest_id(), "sqlite");
-        assert_eq!(b.manifest_id(), "sqlite");
+    }
+
+    #[test]
+    fn alias_is_not_part_of_plugin_key() {
+        let coord = PackageCoordinate::parse("cargo:bookclerk-plugin-source-foo@1.0.0").unwrap();
+        let echo = PluginKey::from_coordinate(&coord, "echo").unwrap();
+        let renamed = PluginKey::from_coordinate(&coord, "echo2").unwrap();
+        assert_eq!(echo, renamed);
+        assert_eq!(
+            echo.canonical(),
+            "cargo:https://crates.io#bookclerk-plugin-source-foo"
+        );
     }
 }

@@ -114,11 +114,23 @@ Optional in-process iteration (no staging): build hosts with
 
 Reference Echo examples (distinct plugin ids):
 
-Plugin **ids are globally unique across kinds** (source / integration / output /
-database). The grammar is strict and non-lossy: lowercase `[a-z0-9_]{2,32}` with
-no leading/trailing `_` and no `__` (same rule as the crates.io `{id}` segment).
-Invalid characters are rejected at manifest load / install — never rewritten —
-so values like `a/b` and `a_b` cannot collide after sanitization.
+Plugin **aliases** (`plugin.toml` `id`) are globally unique within one
+Bookclerk installation: each alias maps to exactly zero or one installed
+[`PluginKey`]. Duplicate aliases from different PluginKeys are invalid
+installation state (discovery fails closed; install rejects the second
+package, including with `--replace`). Aliases are for humans and CLI
+ergonomics (`bookclerk plugins info postgres`). They are **not** trust:
+a third-party package that is the sole installed `sqlite` still receives
+no platform secrets, SQLite library path, or first-party jail allowances.
+Durable ownership (grants, sessions, databases, jobs, state directories,
+the install ledger) uses PluginKey.
+
+Plugin aliases are globally unique across kinds (source / integration /
+output / database). The grammar is strict and non-lossy: lowercase
+`[a-z0-9_]{2,32}` with no leading/trailing `_` and no `__` (same rule as
+the crates.io `{id}` segment). Invalid characters are rejected at manifest
+load / install — never rewritten — so values like `a/b` and `a_b` cannot
+collide after sanitization.
 
 | Path | Runtime |
 | --- | --- |

@@ -55,7 +55,7 @@ notarization are optional; Bookclerk never re-signs third-party binaries.
 
 | Flag / config | Effect |
 | --- | --- |
-| `--allow-unsigned` / `[plugins] allow_unsigned` | Permit packages without publisher signatures (digest still required) |
+| `--allow-unverified-publisher` / `[plugins] allow_unverified_publisher` | Permit community packages that have no independent publisher authenticity proof. Archive SHA-256 is still required. Bookclerk does **not** verify publisher signatures. |
 | Yanked versions | Refused by install-grade validation |
 | macOS / Windows code signatures | Warn via `plugins doctor` when tooling is available; interactive override only |
 
@@ -301,6 +301,19 @@ publisher” vs “crates.io metadata only”.
 5. Extract into `$BOOKCLERK_FILES_DIR/plugins/<plugin-key-fs-id>/`
 6. Leave `enabled = false` for integrations (existing default); operator enables
    in config / dashboard
+
+Alias uniqueness (one Bookclerk installation):
+
+- Different PluginKey + unused alias → allowed
+- Same PluginKey + same alias (update) → allowed
+- Different PluginKey + already-used alias → **rejected** (even with a full
+  PluginKey or `--replace`)
+- Same PluginKey changing its manifest alias → explicit `--replace`; fails if
+  the new alias is occupied; PluginKey stays stable
+- Corrupt disk with two PluginKeys sharing an alias → discovery fails closed
+
+`--replace` updates the existing PluginKey. It never lets a different
+provenance seize an alias.
 
 No `cargo` / `rustc` on PATH is required.
 

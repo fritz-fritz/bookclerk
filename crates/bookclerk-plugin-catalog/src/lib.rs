@@ -41,7 +41,7 @@ pub use install::{
 };
 pub use kind::{PluginKind, RuntimeIdentity};
 pub use ledger::{
-    record_install, InstallLedger, InstallLedgerEntry, INSTALL_LEDGER_FILE,
+    record_install, restore_ledger_entry, InstallLedger, InstallLedgerEntry, INSTALL_LEDGER_FILE,
     INSTALL_LEDGER_SCHEMA_VERSION,
 };
 pub use manifest::{

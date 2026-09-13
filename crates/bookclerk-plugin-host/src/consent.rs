@@ -1285,8 +1285,8 @@ mode = "deny"
     fn grant_covers_rejects_mismatched_plugin_keys() {
         let mut a = sample_grant(&["a.example"], &["config"], &[]);
         let mut b = a.clone();
-        a.plugin_key = "platform:bookclerk/bookclerk-plugin-database-sqlite#sqlite".into();
-        b.plugin_key = "path:file:///tmp/evil#sqlite".into();
+        a.plugin_key = "platform:bookclerk/bookclerk-plugin-database-sqlite".into();
+        b.plugin_key = "path:file:///tmp/evil".into();
         a.plugin_id = "sqlite".into();
         b.plugin_id = "sqlite".into();
         assert!(!grant_covers(&a, &b));

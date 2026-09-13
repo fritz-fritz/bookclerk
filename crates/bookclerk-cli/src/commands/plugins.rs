@@ -54,9 +54,9 @@ pub enum PluginsCommand {
         /// Approve sandbox/network capability changes on update/replace.
         #[arg(long)]
         approve_capabilities: bool,
-        /// Allow unsigned community plugins (digest still required).
+        /// Allow community packages without independent publisher authenticity (digest still required).
         #[arg(long)]
-        allow_unsigned: bool,
+        allow_unverified_publisher: bool,
         /// Do not download; only resolve and print the plan.
         #[arg(long)]
         dry_run: bool,
@@ -72,8 +72,8 @@ pub enum PluginsCommand {
         #[arg(long)]
         to: Option<String>,
         #[arg(long)]
-        /// Allow unsigned community plugins on this update (digest still required).
-        allow_unsigned: bool,
+        /// Allow community packages without independent publisher authenticity on this update (digest still required).
+        allow_unverified_publisher: bool,
         #[arg(long)]
         /// Approve sandbox/network capability changes without a separate prompt.
         approve_capabilities: bool,
@@ -85,7 +85,7 @@ pub enum PluginsCommand {
     Remove {
         /// Plugin runtime id.
         id: String,
-        /// Also delete data/ and tmp/ state.
+        /// Also delete `$FILES_DIR/plugin-state/<PluginKey>/`.
         #[arg(long)]
         purge_state: bool,
     },
@@ -297,7 +297,7 @@ pub async fn run(
             target,
             replace,
             approve_capabilities,
-            allow_unsigned,
+            allow_unverified_publisher,
             dry_run,
             offline,
         } => {
@@ -309,7 +309,7 @@ pub async fn run(
                 target,
                 replace,
                 approve_capabilities,
-                allow_unsigned,
+                allow_unverified_publisher,
                 dry_run,
                 offline,
                 format,
@@ -319,7 +319,7 @@ pub async fn run(
         PluginsCommand::Update {
             id,
             to,
-            allow_unsigned,
+            allow_unverified_publisher,
             approve_capabilities,
             dry_run,
         } => {
@@ -327,7 +327,7 @@ pub async fn run(
                 config,
                 id,
                 to,
-                allow_unsigned,
+                allow_unverified_publisher,
                 approve_capabilities,
                 dry_run,
                 format,
@@ -570,14 +570,15 @@ async fn run_install(
     target: Option<String>,
     replace: bool,
     approve_capabilities: bool,
-    allow_unsigned: bool,
+    allow_unverified_publisher: bool,
     dry_run: bool,
     offline: bool,
     format: OutputFormat,
 ) -> anyhow::Result<()> {
     let plugins_root = config.paths().files_dir.join("plugins");
     let trust = TrustPolicy {
-        allow_unsigned: allow_unsigned || config.plugins.allow_unsigned,
+        allow_unverified_publisher: allow_unverified_publisher
+            || config.plugins.allow_unverified_publisher,
         ..TrustPolicy::default()
     };
     let opts = InstallOptions {
@@ -608,7 +609,7 @@ async fn run_install(
     // Historical note: `skip_health: true` (install default) means "run health
     // here"; `false` leaves health + commit/rollback to the caller (update).
     if !outcome.dry_run && opts.skip_health {
-        if let Err(err) = health_check_installed(config, &outcome.receipt.runtime.id).await {
+        if let Err(err) = health_check_installed(config, &outcome.receipt.plugin_key).await {
             let _ = Installer::rollback(&outcome);
             anyhow::bail!("post-install health check failed: {err:#}; install rolled back");
         }
@@ -643,16 +644,21 @@ async fn run_update(
     config: &Config,
     id: Option<String>,
     to: Option<String>,
-    allow_unsigned: bool,
+    allow_unverified_publisher: bool,
     approve_capabilities: bool,
     dry_run: bool,
     format: OutputFormat,
 ) -> anyhow::Result<()> {
     let plugins_root = config.paths().files_dir.join("plugins");
     let plugins = bookclerk_plugin_host::discover_plugins(config)?;
-    let targets: Vec<_> = plugins
+    let targets: Vec<_> = match id.as_deref() {
+        Some(want) => vec![bookclerk_plugin_host::resolve_plugin_ref(&plugins, want)
+            .map_err(|err| anyhow::anyhow!("{err}"))?
+            .clone()],
+        None => plugins,
+    };
+    let targets: Vec<_> = targets
         .into_iter()
-        .filter(|p| id.as_ref().is_none_or(|want| want == &p.manifest.id))
         .filter(|p| InstallReceipt::path_in(&p.root).is_file())
         .collect();
     if targets.is_empty() {
@@ -689,7 +695,8 @@ async fn run_update(
             replace: true,
             offline: false,
             trust: TrustPolicy {
-                allow_unsigned: allow_unsigned || config.plugins.allow_unsigned,
+                allow_unverified_publisher: allow_unverified_publisher
+                    || config.plugins.allow_unverified_publisher,
                 ..TrustPolicy::default()
             },
             skip_health: false,
@@ -697,7 +704,8 @@ async fn run_update(
         };
         let outcome = Installer::install_from_manifest(&manifest, &coord, &opts)?;
         if !outcome.dry_run {
-            if let Err(err) = health_check_installed(config, &plugin.manifest.id).await {
+            if let Err(err) = health_check_installed(config, plugin.plugin_key().canonical()).await
+            {
                 let _ = Installer::rollback(&outcome);
                 anyhow::bail!(
                     "update health check failed for {}: {err:#}; previous version restored",
@@ -730,7 +738,7 @@ async fn run_update(
     })
 }
 
-/// Deletes an installed plugin directory, optionally purging `data/` and `tmp/`.
+/// Deletes an installed plugin directory, optionally purging `plugin-state/`.
 fn run_remove(
     config: &Config,
     id: &str,
@@ -755,14 +763,11 @@ async fn run_doctor(
     format: OutputFormat,
 ) -> anyhow::Result<()> {
     let plugins = bookclerk_plugin_host::discover_plugins(config)?;
-    let targets: Vec<_> = if let Some(id) = id {
-        let p = plugins
-            .into_iter()
-            .find(|p| p.manifest.id == id)
-            .ok_or_else(|| anyhow::anyhow!("plugin `{id}` not discovered"))?;
-        vec![p]
-    } else {
-        plugins
+    let targets: Vec<_> = match id.as_deref() {
+        Some(want) => vec![bookclerk_plugin_host::resolve_plugin_ref(&plugins, want)
+            .map_err(|err| anyhow::anyhow!("{err}"))?
+            .clone()],
+        None => plugins,
     };
     let mut reports = Vec::new();
     for plugin in targets {
@@ -789,11 +794,15 @@ async fn run_doctor(
             }
             Err(_) => lines.push("receipt=missing (manual drop-in)".into()),
         }
-        match health_check_installed(config, &plugin.manifest.id).await {
+        match health_check_installed(config, plugin.plugin_key().canonical()).await {
             Ok(msg) => lines.push(msg),
             Err(err) => lines.push(format!("health=FAIL {err:#}")),
         }
-        reports.push(json!({ "id": plugin.manifest.id, "lines": lines }));
+        reports.push(json!({
+            "id": plugin.manifest.id,
+            "plugin_key": plugin.plugin_key().canonical(),
+            "lines": lines
+        }));
     }
     emit(format, &reports, || {
         for report in &reports {

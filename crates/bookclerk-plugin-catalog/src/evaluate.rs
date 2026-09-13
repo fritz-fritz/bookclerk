@@ -63,6 +63,7 @@ pub fn evaluate_install_in(
             };
             Ok(PluginInstallIdentity {
                 plugin_key,
+                alias: manifest.id.clone(),
                 artifact,
                 provenance: PluginProvenance::LocalDevelopment,
             })
@@ -70,12 +71,6 @@ pub fn evaluate_install_in(
         Err(err) => Err(err),
         Ok(receipt) => {
             let plugin_key = receipt.plugin_key()?;
-            if plugin_key.manifest_id() != manifest.id {
-                return Err(CatalogError::message(format!(
-                    "receipt plugin key `{plugin_key}` does not match plugin.toml id `{}`",
-                    manifest.id
-                )));
-            }
             let hashes_match = receipt.manifest_sha256.eq_ignore_ascii_case(&manifest_sha)
                 && receipt
                     .payload_root_sha256
@@ -112,6 +107,7 @@ pub fn evaluate_install_in(
             };
             Ok(PluginInstallIdentity {
                 plugin_key,
+                alias: manifest.id.clone(),
                 artifact,
                 provenance,
             })

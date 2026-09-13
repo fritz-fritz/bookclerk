@@ -94,7 +94,7 @@ pub fn packages_for(root: &Path, sel: BuildSelection) -> Result<Vec<String>> {
 
 /// Canonical PluginKey used when staging/installing `guest`.
 ///
-/// Platform artifacts use `platform:bookclerk/{package}#{id}`. Workspace
+/// Platform artifacts use `platform:bookclerk/{package}`. Workspace
 /// Cargo packages use the crates.io `cargo:` form so dest leaves stay stable.
 /// Other trees use a path key of the source directory.
 ///

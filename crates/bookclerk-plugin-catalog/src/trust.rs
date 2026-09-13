@@ -6,14 +6,14 @@ use crate::error::{CatalogError, Result};
 
 /// Trust policy for plugin installation (digest-required artifacts).
 ///
-/// `allow_unsigned` means the operator accepted a package that has no
-/// independent publisher authenticity proof. Archive SHA-256 is still
-/// required. This is not a cryptographic signature check.
+/// [`Self::allow_unverified_publisher`] means the operator accepted a package
+/// that has no independent publisher authenticity proof. Archive SHA-256 is
+/// still required. Bookclerk does **not** verify publisher signatures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustPolicy {
-    /// Allow packages without independent publisher authenticity proof
+    /// Allow community packages without independent publisher authenticity
     /// (content digests are still required).
-    pub allow_unsigned: bool,
+    pub allow_unverified_publisher: bool,
     /// Refuse yanked versions (always true for unattended).
     pub refuse_yanked: bool,
     /// When true, warn instead of refuse on missing OS code signature.
@@ -23,7 +23,7 @@ pub struct TrustPolicy {
 impl Default for TrustPolicy {
     fn default() -> Self {
         Self {
-            allow_unsigned: false,
+            allow_unverified_publisher: false,
             refuse_yanked: true,
             warn_on_unsigned_os: true,
         }
@@ -31,27 +31,28 @@ impl Default for TrustPolicy {
 }
 
 impl TrustPolicy {
-    /// Interactive default: allow unsigned after explicit flag.
+    /// Interactive default: allow community packages after an explicit flag.
     #[must_use]
-    pub fn allow_unsigned() -> Self {
+    pub fn allow_unverified_publisher() -> Self {
         Self {
-            allow_unsigned: true,
+            allow_unverified_publisher: true,
             ..Self::default()
         }
     }
 
-    /// Returns `Ok(())` when unsigned packages are permitted by this policy.
+    /// Returns `Ok(())` when community packages without publisher authenticity
+    /// are permitted by this policy.
     ///
     /// # Errors
     ///
-    /// Returns an error when the operation fails.
-    pub fn check_unsigned_allowed(&self) -> Result<()> {
-        if self.allow_unsigned {
+    /// Returns an error when the operator has not opted in.
+    pub fn check_unverified_publisher_allowed(&self) -> Result<()> {
+        if self.allow_unverified_publisher {
             Ok(())
         } else {
             Err(CatalogError::message(
                 "refusing community plugin without an explicit operator override; \
-                 pass --allow-unsigned after verifying the digest",
+                 pass --allow-unverified-publisher after verifying the digest",
             ))
         }
     }
