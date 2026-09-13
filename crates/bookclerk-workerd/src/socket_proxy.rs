@@ -292,6 +292,7 @@ mod tests {
     use bookclerk_plugin_manifest::{NetworkMode, TcpGrant};
     #[cfg(unix)]
     use std::time::Duration as StdDuration;
+    #[cfg(unix)]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn tcp_policy(host: &str, port: u16, cidrs: &[&str]) -> EgressPolicy {
