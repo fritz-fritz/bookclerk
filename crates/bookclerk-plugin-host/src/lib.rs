@@ -17,7 +17,7 @@
 //! Operators must `bookclerk plugins approve` domains/bindings before enable;
 //! the same covering grant is required again at every external spawn and at
 //! privileged delivery points (`config` / `secrets` / `work_fs` / `oauth`).
-//! Durable identity is provenance-qualified [`bookclerk_plugin_catalog::PluginKey`];
+//! Durable identity is provenance-qualified `PluginKey`;
 //! the manifest `id` is a display / CLI alias.
 //!
 //! Host binaries should depend on **this** crate for registration — not on
