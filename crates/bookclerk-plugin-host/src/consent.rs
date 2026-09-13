@@ -1708,6 +1708,50 @@ pub fn grant_has_binding(grant: &PluginGrant, name: &str) -> bool {
         .any(|binding| binding.eq_ignore_ascii_case(name))
 }
 
+/// Maps a `describe()` env binding name onto the persisted grant token.
+///
+/// Host bindings (`CONFIG`, `[secrets]`, `[work_fs]`, `[oauth]`, KV) are
+/// authorized through [`PluginGrant::bindings`]. Producer `EVENTS` names are
+/// authorized through [`PluginGrant::producers`] instead.
+fn grant_binding_for_described(manifest: &PluginManifest, env_name: &str) -> Option<&'static str> {
+    use bookclerk_plugin_manifest::{
+        CONFIG_BINDING, DEFAULT_KV_BINDING, DEFAULT_OAUTH_BINDING, DEFAULT_SECRETS_BINDING,
+        DEFAULT_WORK_FS_BINDING,
+    };
+    if env_name == CONFIG_BINDING {
+        return Some("config");
+    }
+    if manifest
+        .secrets
+        .as_ref()
+        .is_some_and(|binding| env_name == binding.name_or(DEFAULT_SECRETS_BINDING))
+    {
+        return Some("secrets");
+    }
+    if manifest
+        .work_fs
+        .as_ref()
+        .is_some_and(|binding| env_name == binding.name_or(DEFAULT_WORK_FS_BINDING))
+    {
+        return Some("work_fs");
+    }
+    if manifest
+        .oauth
+        .as_ref()
+        .is_some_and(|binding| env_name == binding.name_or(DEFAULT_OAUTH_BINDING))
+    {
+        return Some("oauth");
+    }
+    if manifest
+        .kv_namespaces
+        .iter()
+        .any(|kv| env_name == kv.name_or(DEFAULT_KV_BINDING))
+    {
+        return Some("plugin_kv");
+    }
+    None
+}
+
 /// Fail closed when a delivery site needs a binding the covering grant lacks.
 ///
 /// # Errors
@@ -2283,6 +2327,9 @@ pub fn validate_described_capabilities(
             return Err(PluginError::message(format!(
                 "plugin `{id}` describe() expects binding `{binding}` not declared in plugin.toml"
             )));
+        }
+        if let Some(grant_name) = grant_binding_for_described(manifest, binding) {
+            require_binding(grant, grant_name)?;
         }
     }
     if portal_auth_mode == PortalAuthMode::Oauth {
@@ -3938,6 +3985,56 @@ type = "demo_pinged"
         .unwrap_err()
         .to_string();
         assert!(err.contains("grant lacks event producer"), "{err}");
+    }
+
+    #[test]
+    fn validate_describe_rejects_ungranted_host_binding() {
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 3
+id = "demo"
+runtime = "native"
+command = "./demo"
+entrypoints = ["cli"]
+
+[capabilities.network]
+mode = "deny"
+
+[vars]
+
+[secrets]
+"#,
+        )
+        .unwrap();
+        let requested = consent_request_alias(&manifest);
+        assert!(grant_has_binding(&requested, "config"));
+        assert!(grant_has_binding(&requested, "secrets"));
+        let mut granted_a = requested.clone();
+        granted_a.bindings.remove("secrets");
+        let described_a = PluginCapabilities {
+            entrypoints: vec![bookclerk_plugin_abi::Entrypoint::Cli],
+            bindings: vec!["CONFIG".into()],
+            ..PluginCapabilities::default()
+        };
+        validate_described_capabilities(
+            &manifest,
+            &granted_a,
+            &described_a,
+            PortalAuthMode::Unspecified,
+        )
+        .expect("describe of granted config only must succeed");
+        let err = validate_described_capabilities(
+            &manifest,
+            &granted_a,
+            &manifest.capabilities(),
+            PortalAuthMode::Unspecified,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("grant lacks binding `secrets`"),
+            "describe of ungranted secrets must fail: {err}"
+        );
     }
 
     #[test]
