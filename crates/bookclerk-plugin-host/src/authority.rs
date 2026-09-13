@@ -52,7 +52,7 @@ pub type SessionShutdown = Arc<dyn Fn() + Send + Sync>;
 struct LiveSession {
     /// Canonical PluginKey for this vat.
     plugin_key: String,
-    /// [`grant_revision`] of the persisted operator grant at spawn.
+    /// [`crate::grant_revision`] of the persisted operator grant at spawn.
     grant_revision: String,
     /// [`authority_revision`] of the effective runtime grant at spawn.
     revision: String,
@@ -168,7 +168,7 @@ pub fn fence_stale_sessions(plugin_key: &str, current_revision: &str) {
     }
 }
 
-/// Fences live sessions whose **persisted** [`grant_revision`] is not current.
+/// Fences live sessions whose **persisted** [`crate::grant_revision`] is not current.
 pub fn fence_stale_grant_revisions(plugin_key: &str, current_grant_revision: &str) {
     if plugin_key.is_empty() {
         return;
@@ -192,7 +192,7 @@ pub fn fence_stale_grant_revisions(plugin_key: &str, current_grant_revision: &st
 
 /// Reconcile every live session against a loaded **persisted** grant store.
 ///
-/// Missing keys and [`grant_revision`] mismatches are fenced. Effective
+/// Missing keys and [`crate::grant_revision`] mismatches are fenced. Effective
 /// [`authority_revision`] (host overlays, clamped budgets) is **not** compared
 /// to the persisted digest. Host-config overlay changes fence through
 /// [`crate::ExecutorIdentity::configuration_revision`].
@@ -353,7 +353,7 @@ pub fn grant_revision(grant: &PluginGrant) -> String {
 /// Hash the grant **after** manifest ∩ operator ∩ host policy and host-controlled
 /// overlays (TCP/CIDR implied by configured destinations, clamped budgets).
 /// Omits `approved_at` and display aliases except the PluginKey. Distinct from
-/// [`grant_revision`] and [`crate::ExecutorIdentity::configuration_revision`].
+/// [`crate::grant_revision`] and [`crate::ExecutorIdentity::configuration_revision`].
 #[must_use]
 pub fn authority_revision(grant: &PluginGrant) -> String {
     hash_grant(b"authority", grant)
