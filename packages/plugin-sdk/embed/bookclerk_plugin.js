@@ -6167,6 +6167,34 @@ var DatabaseOpenSessionResultsCodec = {
     };
   }
 };
+var DatabaseDropUnitParamsCodec = {
+  dataWords: 0,
+  pointerCount: 1,
+  write(s, v, caps) {
+    void caps;
+    s.setText(0, v.unitRef ?? "");
+  },
+  read(s, caps) {
+    void caps;
+    return {
+      unitRef: s.getText(0)
+    };
+  }
+};
+var DatabaseDropUnitResultsCodec = {
+  dataWords: 0,
+  pointerCount: 1,
+  write(s, v, caps) {
+    if (v.result != null) {
+      EmptyReplyCodec.write(s.initStruct(0, 1, 1), v.result, caps);
+    }
+  },
+  read(s, caps) {
+    return {
+      result: EmptyReplyCodec.read(s.getStruct(0, 1, 1), caps)
+    };
+  }
+};
 var AdapterDatabaseSessionCapabilitiesParamsCodec = {
   dataWords: 0,
   pointerCount: 0,
@@ -6755,6 +6783,13 @@ var METHODS = {
       },
       // The session id is exported through the reply CapTable as `adapterSession`.
       ok: (value) => okValue(value)
+    }),
+    dropUnit: spec({
+      params: DatabaseDropUnitParamsCodec,
+      results: DatabaseDropUnitResultsCodec,
+      stub: "databaseAdapter",
+      call: (s, p, cx) => named(s, cx.host.bindContext(cx.ctx), "dropUnit", [String(p.unitRef ?? "")]),
+      ok: okEmpty
     })
   },
   AdapterDatabaseSession: {
@@ -7999,7 +8034,7 @@ function freshSessionId() {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 var DatabaseAdapterEntrypoint = class extends NamedEntrypoint {
-  static bookclerkMethods = Object.freeze(["openSession"]);
+  static bookclerkMethods = Object.freeze(["openSession", "dropUnit"]);
   /**
    * Opens a session. Sessions cannot survive suspension.
    *
@@ -8007,6 +8042,14 @@ var DatabaseAdapterEntrypoint = class extends NamedEntrypoint {
    */
   openSession() {
     return Promise.reject(unsupported("openSession"));
+  }
+  /**
+   * Physically drops one provisioned binding unit.
+   *
+   * @param _unitRef - Adapter-native unit identity.
+   */
+  dropUnit(_unitRef) {
+    return Promise.reject(unsupported("dropUnit"));
   }
   /**
    * Adapter dispatch: `openSession` → session id; `session` → call on a
@@ -8027,6 +8070,12 @@ var DatabaseAdapterEntrypoint = class extends NamedEntrypoint {
       const id = freshSessionId();
       ADAPTER_SESSIONS.set(id, session2);
       return id;
+    }
+    if (method === "dropUnit") {
+      applyInvocationEnv(this, context);
+      this.invocation = invocationOf(context);
+      await this.dropUnit(String(args[0] ?? ""));
+      return void 0;
     }
     if (method === "session") {
       const [id, sessionMethod, ...params] = args;

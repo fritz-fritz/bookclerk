@@ -91,6 +91,45 @@ impl DiscoveredPlugin {
     }
 }
 
+/// First-party database adapter kind when provenance + PluginKey match.
+///
+/// [`PluginProvenance::PlatformBundled`] (platform sqlite) and
+/// [`PluginProvenance::VerifiedInstalled`] (crates.io / platform postgres and
+/// D1) both qualify. [`PluginProvenance::LocalDevelopment`] and
+/// [`PluginProvenance::Modified`] never do. Alias text (`id = "sqlite"`) is
+/// not consulted.
+#[must_use]
+pub fn first_party_database_kind(plugin: &DiscoveredPlugin) -> Option<DatabasePluginKind> {
+    if !plugin.identity.provenance.is_verified_artifact() {
+        return None;
+    }
+    if !bookclerk_plugin_catalog::is_first_party_database_adapter(plugin.plugin_key()) {
+        return None;
+    }
+    match plugin.plugin_key().manifest_id() {
+        "sqlite" => Some(DatabasePluginKind::Sqlite),
+        "postgres" => Some(DatabasePluginKind::Postgres),
+        "d1" => Some(DatabasePluginKind::D1),
+        _ => None,
+    }
+}
+
+/// True when this install is the verified Bookclerk local-filesystem destination.
+#[must_use]
+pub fn is_first_party_local_output(plugin: &DiscoveredPlugin) -> bool {
+    plugin.identity.provenance.is_verified_artifact()
+        && bookclerk_plugin_catalog::is_first_party_destination(plugin.plugin_key())
+        && plugin.plugin_key().manifest_id() == "local"
+}
+
+/// True when this install is the verified Bookclerk S3 destination.
+#[must_use]
+pub fn is_first_party_s3_output(plugin: &DiscoveredPlugin) -> bool {
+    plugin.identity.provenance.is_verified_artifact()
+        && bookclerk_plugin_catalog::is_first_party_destination(plugin.plugin_key())
+        && plugin.plugin_key().manifest_id() == "s3"
+}
+
 /// Path-only identity used when an install tree cannot be hashed (test fixtures).
 fn local_identity(root: &Path, manifest: &PluginManifest) -> PluginInstallIdentity {
     let plugin_key = PluginKey::from_install_path(root, &manifest.id)
@@ -359,10 +398,10 @@ pub fn stamp_occupancy_plugin_key(config: &mut Config, plugin: &DiscoveredPlugin
                     .plugin_table_mut(plugin.alias())
                     .insert("plugin".into(), toml::Value::String(canonical.clone()));
             }
-            PluginFamily::Output if plugin.alias().eq_ignore_ascii_case("s3") => {
+            PluginFamily::Output if is_first_party_s3_output(plugin) => {
                 config.output.s3.plugin = canonical.clone();
             }
-            PluginFamily::Output if plugin.alias().eq_ignore_ascii_case("local") => {
+            PluginFamily::Output if is_first_party_local_output(plugin) => {
                 config.output.local.plugin = canonical.clone();
             }
             PluginFamily::Output => {
@@ -616,10 +655,10 @@ pub fn settings_table_for(
             inject_abs_api_key_from_env(&plugin.manifest.id, &mut table);
             table
         }
-        crate::PluginFamily::Output if plugin.manifest.id == "s3" => {
+        crate::PluginFamily::Output if is_first_party_s3_output(plugin) => {
             output_s3_settings_table(&config.output.s3)
         }
-        crate::PluginFamily::Output if plugin.manifest.id == "local" => {
+        crate::PluginFamily::Output if is_first_party_local_output(plugin) => {
             output_local_settings_table(&config.output.local)
         }
         crate::PluginFamily::Database => database_settings_table(config, plugin),
@@ -629,19 +668,23 @@ pub fn settings_table_for(
 
 /// Serializes `[database.<id>]` for the matching database plugin id.
 ///
-/// First-party ids use their typed config sections; third-party adapters get
-/// the opaque `[database.<id>]` table (delivered as `DatabaseAdapterConfig`).
+/// First-party verified adapters use their typed config sections; third-party
+/// adapters (including trees that reuse the `sqlite` / `postgres` / `d1`
+/// alias) get the opaque `[database.<id>]` table.
 fn database_settings_table(config: &Config, plugin: &DiscoveredPlugin) -> toml::Table {
-    let id = plugin.manifest.id.to_ascii_lowercase();
-    let value = match id.as_str() {
-        "sqlite" => toml::Value::try_from(&config.database.sqlite),
-        "d1" => toml::Value::try_from(&config.database.d1),
-        "postgres" => toml::Value::try_from(&config.database.postgres),
-        _ => {
+    let value = match first_party_database_kind(plugin) {
+        Some(DatabasePluginKind::Sqlite) => toml::Value::try_from(&config.database.sqlite),
+        Some(DatabasePluginKind::D1) => toml::Value::try_from(&config.database.d1),
+        Some(DatabasePluginKind::Postgres) => toml::Value::try_from(&config.database.postgres),
+        None => {
             return config
                 .database
                 .plugin_table(&plugin.manifest.id)
-                .or_else(|| config.database.plugin_table(&id))
+                .or_else(|| {
+                    config
+                        .database
+                        .plugin_table(&plugin.manifest.id.to_ascii_lowercase())
+                })
                 .cloned()
                 .unwrap_or_default();
         }
@@ -871,19 +914,16 @@ mode = "deny"
         assert!(occupancy_matches_alias("pg", "postgres"));
         assert!(occupancy_matches_alias("postgres", "postgresql"));
         assert!(occupancy_matches_alias(
-            "platform:bookclerk/sqlite#sqlite",
+            "platform:bookclerk/sqlite",
             "sqlite"
         ));
-        assert!(occupancy_matches_alias(
-            "platform:bookclerk/postgres#postgres",
-            "pg"
-        ));
+        assert!(occupancy_matches_alias("platform:bookclerk/postgres", "pg"));
         assert!(!occupancy_matches_alias(
             "sqlite",
-            "platform:bookclerk/sqlite#sqlite"
+            "platform:bookclerk/sqlite"
         ));
         assert!(!occupancy_matches_alias(
-            "platform:bookclerk/sqlite#sqlite",
+            "platform:bookclerk/sqlite",
             "postgres"
         ));
         assert!(!occupancy_matches_alias("", "sqlite"));
@@ -1067,5 +1107,47 @@ binding = "DB"
             found[0].identity.provenance,
             bookclerk_plugin_catalog::PluginProvenance::LocalDevelopment
         );
+    }
+
+    #[test]
+    fn third_party_aliases_do_not_inherit_first_party_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        write_plugin(&plugins.join("sqlite"), "sqlite", "databaseAdapter");
+        write_plugin(&plugins.join("postgres"), "postgres", "databaseAdapter");
+        write_plugin(&plugins.join("d1"), "d1", "databaseAdapter");
+        write_plugin(&plugins.join("local"), "local", "storage");
+        let mut cfg = Config {
+            paths: Some(bookclerk_config::Paths::from_files_dir(
+                tmp.path().to_path_buf(),
+            )),
+            ..Config::default()
+        };
+        cfg.database.sqlite.path = Some(std::path::PathBuf::from("secret-library.db"));
+        cfg.database.postgres.url = Some("postgres://secret@db/library".into());
+        cfg.database.d1.account_id = "acct_secret".into();
+        cfg.output.local.root = std::path::PathBuf::from("/secret/output");
+        let found = discover_plugins(&cfg).unwrap();
+        for id in ["sqlite", "postgres", "d1", "local"] {
+            let plugin = found.iter().find(|p| p.alias() == id).expect(id);
+            assert!(
+                first_party_database_kind(plugin).is_none(),
+                "{id} must not be first-party from a path install"
+            );
+            assert!(
+                !is_first_party_local_output(plugin),
+                "{id} must not inherit local output privilege"
+            );
+            assert!(
+                !is_first_party_s3_output(plugin),
+                "{id} must not inherit s3 privilege"
+            );
+            let table = settings_table(&cfg, plugin);
+            let dump = toml::to_string(&toml::Value::Table(table)).unwrap();
+            assert!(
+                !dump.contains("secret") && !dump.contains("acct_secret"),
+                "{id} received first-party settings: {dump}"
+            );
+        }
     }
 }

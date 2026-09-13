@@ -175,7 +175,24 @@ fn postgres_plugin_tests_enabled() -> bool {
 }
 
 fn postgres_url_with_db(url: &str, db_name: &str) -> String {
-    bookclerk_plugin_database_postgres::postgres::postgres_url_with_database(url, db_name)
+    let (base, query) = match url.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (url, None),
+    };
+    let trimmed = base.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(slash) => {
+            let head = &trimmed[..slash];
+            match query {
+                Some(q) => format!("{head}/{db_name}?{q}"),
+                None => format!("{head}/{db_name}"),
+            }
+        }
+        None => match query {
+            Some(q) => format!("{trimmed}/{db_name}?{q}"),
+            None => format!("{trimmed}/{db_name}"),
+        },
+    }
 }
 
 async fn create_disposable_postgres_url() -> String {

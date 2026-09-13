@@ -86,16 +86,20 @@ pub async fn export_libation(opts: LibationExportOptions) -> Result<LibationExpo
     }
 
     let library_db = opts.files_dir.join("library.db");
-    let store = if library_db.exists() {
-        bookclerk_plugin_database_sqlite::open_store(&library_db).await?
+    let dest = if library_db.exists() {
+        Some(crate::store::DestStore::open(&opts.files_dir, false).await?)
     } else {
         summary
             .warnings
             .push("library.db missing — accounts/books empty".into());
-        bookclerk_plugin_database_sqlite::open_store_memory().await?
+        None
     };
-
-    let accounts = store.list_accounts().await?;
+    let empty_accounts = Vec::new();
+    let accounts = if let Some(dest) = dest.as_ref() {
+        dest.store.list_accounts().await?
+    } else {
+        empty_accounts
+    };
     summary.accounts = accounts.len();
     let accounts_json = accounts_to_libation_json(&accounts);
     if !opts.dry_run {
@@ -105,7 +109,11 @@ pub async fn export_libation(opts: LibationExportOptions) -> Result<LibationExpo
         std::fs::write(&path, bytes)?;
     }
 
-    let books = store.list_books(None).await?;
+    let books = if let Some(dest) = dest.as_ref() {
+        dest.store.list_books(None).await?
+    } else {
+        Vec::new()
+    };
     summary.books = books.len();
     if !opts.dry_run {
         let db_path = opts.dest.join("LibationContext.db");

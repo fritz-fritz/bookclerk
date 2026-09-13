@@ -2498,6 +2498,13 @@ export interface Database {
    * @returns {@link AdapterSessionReply}
    */
   openSession(): Promise<AdapterSessionReply>;
+  /**
+   * Physically drop one provisioned binding unit (`unitRef` is adapter-owned).
+   *
+   * @param unitRef - Adapter-native unit (sqlite path, postgres database, D1 name).
+   * @returns {@link EmptyReply}
+   */
+  dropUnit(unitRef: string): Promise<EmptyReply>;
 }
 
 /**

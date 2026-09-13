@@ -8,7 +8,9 @@
 #   - persist grants under a bare manifest id without PluginKey
 #   - leave authority revision empty on a product spawn
 #
-# Database adapter crates remain linked for host-owned SQL lowering.
+# Physical SQL lowering belongs in database adapter guests. Production hosts
+# must not link `bookclerk-plugin-database-*` merely to perform product
+# behavior (provision, drop, backup sidecars, secret injection).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -33,16 +35,16 @@ for toml in crates/bookclerk-cli/Cargo.toml crates/bookclerkd/Cargo.toml crates/
   fi
 done
 
-FORBIDDEN_LIBS='^bookclerk_plugin_(source|integration|destination)_'
+FORBIDDEN_LIBS='^bookclerk_plugin_(source|integration|destination|database)_'
 for host in bookclerk-cli bookclerkd bookclerk-plugin-host; do
   tree="$(cargo tree -p "$host" --edges normal --prefix none --format '{lib}')"
   hits="$(grep -E "$FORBIDDEN_LIBS" <<<"$tree" | sort -u || true)"
   if [[ -n "$hits" ]]; then
-    echo "FAIL: $host links ordinary plugin implementation crates:" >&2
+    echo "FAIL: $host links plugin implementation crates:" >&2
     sed 's/^/  /' <<<"$hits" >&2
     status=1
   else
-    ok "$host does not link source/integration/destination plugin crates"
+    ok "$host does not link source/integration/destination/database plugin crates"
   fi
 done
 
@@ -78,11 +80,17 @@ else
   ok "no is_platform_plugin_id"
 fi
 
-if grep -RIn --include='*.rs' 'fn is_trusted_platform_plugin' \
-  crates/bookclerk-plugin-host/src/jail.rs >/dev/null; then
-  ok "platform extra jail grants require verified provenance"
+if grep -n 'first_party_database_kind' crates/bookclerk-plugin-host/src/jail.rs >/dev/null \
+  && grep -n 'is_first_party_local_output' crates/bookclerk-plugin-host/src/jail.rs >/dev/null; then
+  ok "extra jail grants require verified first-party identity"
 else
-  fail "is_trusted_platform_plugin missing from jail.rs"
+  fail "jail extra grants no longer require first-party provenance helpers"
+fi
+
+if grep -RIn 'host-owned SQL lowering' docs scripts crates >/dev/null 2>&1; then
+  fail "stale 'host-owned SQL lowering' comment remains (lowering belongs in adapters)"
+else
+  ok "no stale host-owned SQL lowering comments"
 fi
 
 if ! grep -n 'grant.plugin_key = plugin_key' crates/bookclerk-plugin-host/src/consent.rs >/dev/null; then

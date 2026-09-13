@@ -18,8 +18,8 @@ use bookclerk_config::Config;
 use bookclerk_plugin_abi::HostAdapterDatabaseSession;
 use bookclerk_plugin_sdk::{
     connect_plugin, negotiate_rpc_features, BindingValues, ByteRange as AbiByteRange, Cancellation,
-    CopyResult, Destination, DomainEvent, EventConsumer, EventPublisher, EventResult, HostBindings,
-    Invocation, JobInvocation, JobInvocationLease, ListOptions, ObjectMetadata, Oidc,
+    CopyResult, Database, Destination, DomainEvent, EventConsumer, EventPublisher, EventResult,
+    HostBindings, Invocation, JobInvocation, JobInvocationLease, ListOptions, ObjectMetadata, Oidc,
     OidcClientTemplate, OpenedEntrypoints, PluginCli, PluginClient, PluginDescribe, PutResult,
     ReadResult, ScalarLimits, Source, StreamCopySpec, WriteOptions, FEATURE_SCALAR_LIMITS,
     FEATURE_STORAGE_COPY, FEATURE_STREAMS, MAX_SCALAR_BYTES, MAX_STREAM_WINDOW_BYTES,
@@ -201,6 +201,12 @@ enum Work {
     /// host-private connect params, taking the `databaseAdapter` entrypoint.
     DbOpen {
         values: BindingValues,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// `Database.dropUnit` on a dedicated adapter open (no session retained).
+    DbDropUnit {
+        values: BindingValues,
+        unit_ref: String,
         reply: oneshot::Sender<Result<()>>,
     },
     DbBegin {
@@ -1158,6 +1164,25 @@ impl PluginSession {
     /// exports no `databaseAdapter`.
     pub async fn db_open(&self, values: BindingValues) -> Result<()> {
         self.call(|reply| Work::DbOpen { values, reply }).await
+    }
+
+    /// Physically drops one provisioned binding unit via `Database.dropUnit`.
+    ///
+    /// Opens the adapter factory with `values` (library connect params) and
+    /// does not retain a session. Used by `plugins db drop`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a plugin error when `open` / `dropUnit` fails or the guest
+    /// exports no `databaseAdapter`.
+    pub async fn db_drop_unit(&self, values: BindingValues, unit_ref: &str) -> Result<()> {
+        let unit_ref = unit_ref.to_string();
+        self.call(|reply| Work::DbDropUnit {
+            values,
+            unit_ref,
+            reply,
+        })
+        .await
     }
 
     /// Opens an isolated adapter session for one named plugin database binding.
@@ -2187,6 +2212,18 @@ fn vat_thread(
                                 db_host_session = Some(handle.host);
                                 db_txn = None;
                                 Ok(())
+                            }
+                            .await;
+                            let _ = reply.send(out);
+                        }
+                        Work::DbDropUnit {
+                            values,
+                            unit_ref,
+                            reply,
+                        } => {
+                            let out = async {
+                                let db = open_database_adapter(&client, &account_id, values).await?;
+                                db.drop_unit(&unit_ref).await.map_err(map_abi)
                             }
                             .await;
                             let _ = reply.send(out);
