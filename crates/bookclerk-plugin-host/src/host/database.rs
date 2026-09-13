@@ -2783,7 +2783,15 @@ fn toml_to_json(value: &toml::Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookclerk_config::Paths;
     use bookclerk_plugin_sdk::DbCapabilities;
+
+    fn config_at(files: &std::path::Path) -> Config {
+        Config {
+            paths: Some(Paths::from_files_dir(files.to_path_buf())),
+            ..Config::default()
+        }
+    }
 
     #[test]
     fn backup_adapter_id_keeps_third_party_plugin_id() {
@@ -3141,13 +3149,15 @@ mod tests {
 
     #[tokio::test]
     async fn drop_provisioned_sqlite_unit_requires_installed_adapter() {
+        let files = tempfile::tempdir().expect("tempdir");
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("binding.db");
         std::fs::write(&path, b"sqlite").expect("db file");
         let unit = path.display().to_string();
-        let err = ExternalDatabase::drop_provisioned_unit(&Config::default(), "sqlite", &unit)
-            .await
-            .expect_err("no staged sqlite adapter");
+        let err =
+            ExternalDatabase::drop_provisioned_unit(&config_at(files.path()), "sqlite", &unit)
+                .await
+                .expect_err("no staged sqlite adapter");
         assert!(
             err.to_string().contains("cannot drop"),
             "host must not unlink sqlite files without the adapter: {err}"
@@ -3160,10 +3170,14 @@ mod tests {
 
     #[tokio::test]
     async fn drop_provisioned_unknown_adapter_fails_closed() {
-        let err =
-            ExternalDatabase::drop_provisioned_unit(&Config::default(), "custom-sql", "unit-ref")
-                .await
-                .expect_err("unknown adapter must not unregister");
+        let files = tempfile::tempdir().expect("tempdir");
+        let err = ExternalDatabase::drop_provisioned_unit(
+            &config_at(files.path()),
+            "custom-sql",
+            "unit-ref",
+        )
+        .await
+        .expect_err("unknown adapter must not unregister");
         assert!(err.to_string().contains("cannot drop"), "{err}");
     }
 
