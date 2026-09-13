@@ -10,7 +10,8 @@
 //! It does **not** establish platform or first-party authority by itself.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -73,12 +74,17 @@ impl InstallLedger {
     ///
     /// # Errors
     ///
-    /// Returns an error when the file exists but cannot be read or parsed.
-    /// A missing file is not an error.
+    /// Returns an error when the file exists but cannot be read or parsed,
+    /// or when `files_dir` contains `..` / cannot be contained.
+    /// A missing file (or missing files dir) is not an error.
     pub fn load(files_dir: &Path) -> Result<Self> {
-        let path = Self::path(files_dir);
+        let Some(path) = resolved_ledger_path(files_dir)? else {
+            return Ok(Self::default());
+        };
+        // `files_dir` is the operator `$BOOKCLERK_FILES_DIR`, not plugin-supplied.
+        // codeql[rust/path-injection]
         match fs::read_to_string(&path) {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => Err(CatalogError::message(format!(
                 "read {}: {err}",
                 path.display()
@@ -132,13 +138,71 @@ impl InstallLedger {
     ///
     /// Returns when the directory cannot be created or the file cannot be written.
     pub fn store(&self, files_dir: &Path) -> Result<()> {
+        if files_dir
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            return Err(CatalogError::message(
+                "refusing install-ledger path with '..' in files_dir",
+            ));
+        }
         fs::create_dir_all(files_dir)?;
-        let final_path = Self::path(files_dir);
-        let tmp = files_dir.join(format!("{INSTALL_LEDGER_FILE}.tmp"));
+        let Some(final_path) = resolved_ledger_path(files_dir)? else {
+            return Err(CatalogError::message(format!(
+                "install-ledger files_dir vanished: {}",
+                files_dir.display()
+            )));
+        };
+        let tmp = final_path.with_extension("json.tmp");
         let text = serde_json::to_string_pretty(self)?;
+        // Operator `$BOOKCLERK_FILES_DIR`, not plugin-supplied.
+        // codeql[rust/path-injection]
         fs::write(&tmp, text)?;
+        // codeql[rust/path-injection]
         fs::rename(&tmp, &final_path)?;
         Ok(())
+    }
+}
+
+/// Contained `$FILES_DIR/install-ledger.json`, or `None` when `files_dir` is missing.
+///
+/// Rejects `..` in `files_dir` and requires the resolved path to stay under the
+/// canonical files dir. Missing files-dir is treated as an empty ledger.
+///
+/// # Errors
+///
+/// Returns when `files_dir` contains `..`, cannot be canonicalized (except
+/// NotFound), or the joined ledger path escapes that directory.
+fn resolved_ledger_path(files_dir: &Path) -> Result<Option<PathBuf>> {
+    if files_dir
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(CatalogError::message(
+            "refusing install-ledger path with '..' in files_dir",
+        ));
+    }
+    let base = match files_dir.canonicalize() {
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(CatalogError::message(format!(
+                "canonicalize {}: {err}",
+                files_dir.display()
+            )));
+        }
+        Ok(base) => base,
+    };
+    let path = base.join(INSTALL_LEDGER_FILE);
+    if !path.starts_with(&base) {
+        return Err(CatalogError::message(
+            "install-ledger path escaped files_dir",
+        ));
+    }
+    match path.file_name().and_then(|n| n.to_str()) {
+        Some(name) if name == INSTALL_LEDGER_FILE => Ok(Some(path)),
+        _ => Err(CatalogError::message(
+            "refusing unexpected install-ledger filename",
+        )),
     }
 }
 
@@ -207,4 +271,44 @@ pub fn entry_matches(
         && entry
             .payload_root_sha256
             .eq_ignore_ascii_case(payload_root_sha256)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_missing_files_dir_is_empty_ledger() {
+        let missing = std::env::temp_dir().join("bookclerk-no-such-files-dir-install-ledger");
+        let _ = fs::remove_dir_all(&missing);
+        let ledger = InstallLedger::load(&missing).unwrap();
+        assert!(ledger.artifacts.is_empty());
+    }
+
+    #[test]
+    fn load_rejects_parent_dir_components_in_files_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sneaky = tmp.path().join("a").join("..").join("b");
+        let err = InstallLedger::load(&sneaky).unwrap_err().to_string();
+        assert!(err.contains(".."), "{err}");
+    }
+
+    #[test]
+    fn store_and_load_round_trip_under_canonical_files_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ledger = InstallLedger::default();
+        ledger.upsert(InstallLedgerEntry {
+            plugin_key: "path:file:///tmp/demo#demo".into(),
+            package_name: "demo".into(),
+            manifest_id: "demo".into(),
+            manifest_sha256: "aa".into(),
+            payload_root_sha256: "bb".into(),
+            provenance: PluginProvenance::LocalDevelopment,
+            recorded_at: Utc::now(),
+        });
+        ledger.store(tmp.path()).unwrap();
+        let loaded = InstallLedger::load(tmp.path()).unwrap();
+        assert_eq!(loaded.artifacts.len(), 1);
+        assert_eq!(loaded.artifacts[0].plugin_key, "path:file:///tmp/demo#demo");
+    }
 }
