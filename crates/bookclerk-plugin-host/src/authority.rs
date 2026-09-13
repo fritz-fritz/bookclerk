@@ -359,6 +359,7 @@ pub fn authority_revision(grant: &PluginGrant) -> String {
     hash_grant(b"authority", grant)
 }
 
+/// SHA-256 of `grant` with a domain prefix (`grant` vs `authority`).
 fn hash_grant(kind: &[u8], grant: &PluginGrant) -> String {
     let mut hasher = Sha256::new();
     hasher.update(kind);
