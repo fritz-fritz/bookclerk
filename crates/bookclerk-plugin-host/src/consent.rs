@@ -1085,6 +1085,7 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
     }
 }
 
+/// Intersects stored and requested sets; empty legacy grants inherit `requested`.
 fn intersect_or_legacy_inherit<T: Clone + Ord>(
     existing: &BTreeSet<T>,
     requested: &BTreeSet<T>,
