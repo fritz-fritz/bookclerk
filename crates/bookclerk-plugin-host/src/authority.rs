@@ -167,6 +167,42 @@ pub fn authority_revision(grant: &PluginGrant) -> String {
         hasher.update(d.as_bytes());
         hasher.update(b",");
     }
+    hasher.update(b"\nbudgets\n");
+    hasher.update(
+        crate::consent::effective_disk_mib(grant.disk_mib)
+            .to_string()
+            .as_bytes(),
+    );
+    hasher.update(b"|mem|");
+    hasher.update(
+        crate::consent::effective_memory_mib(grant.memory_mib)
+            .to_string()
+            .as_bytes(),
+    );
+    hasher.update(b"|cpu_ms|");
+    if let Some(cpu_ms) = grant.cpu_ms {
+        hasher.update(cpu_ms.to_string().as_bytes());
+    } else {
+        hasher.update(b"unset");
+    }
+    hasher.update(b"|subrequests|");
+    if let Some(subrequests) = grant.subrequests {
+        hasher.update(subrequests.to_string().as_bytes());
+    } else {
+        hasher.update(b"unset");
+    }
+    hasher.update(b"|cpu_rate|");
+    hasher.update(
+        crate::consent::effective_cpu_rate_percent(grant.cpu_rate_percent)
+            .to_string()
+            .as_bytes(),
+    );
+    hasher.update(b"|extra_proc|");
+    hasher.update(
+        crate::consent::effective_extra_processes(grant.extra_processes)
+            .to_string()
+            .as_bytes(),
+    );
     hex::encode(hasher.finalize())
 }
 
@@ -177,7 +213,8 @@ mod tests {
 
     fn grant(domains: &[&str]) -> PluginGrant {
         PluginGrant {
-            plugin_key: "path:file:///tmp/demo#demo".into(),
+            schema_version: crate::GRANT_SCHEMA_VERSION,
+            plugin_key: "path:file:///tmp/demo".into(),
             plugin_id: "demo".into(),
             entrypoints: ["storefront".to_string()].into_iter().collect(),
             producers: BTreeSet::new(),
@@ -244,5 +281,26 @@ mod tests {
         assert!(is_fenced(&stale));
         unregister_session(&current);
         unregister_session(&stale);
+    }
+
+    #[test]
+    fn resource_budgets_change_authority_revision() {
+        let a = grant(&["a.example"]);
+        for mutate in [
+            |g: &mut PluginGrant| g.memory_mib = Some(128),
+            |g: &mut PluginGrant| g.cpu_rate_percent = Some(25),
+            |g: &mut PluginGrant| g.extra_processes = Some(1),
+            |g: &mut PluginGrant| g.disk_mib = Some(64),
+            |g: &mut PluginGrant| g.subrequests = Some(7),
+            |g: &mut PluginGrant| g.cpu_ms = Some(1_000),
+        ] {
+            let mut b = a.clone();
+            mutate(&mut b);
+            assert_ne!(
+                authority_revision(&a),
+                authority_revision(&b),
+                "budget mutation must change authority revision"
+            );
+        }
     }
 }

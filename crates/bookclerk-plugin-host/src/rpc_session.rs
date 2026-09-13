@@ -825,7 +825,7 @@ impl PluginSession {
         progress: Option<(bookclerk_library::LibraryStore, bookclerk_library::JobFence)>,
         databases: Vec<(String, GuestDatabaseFactory)>,
     ) -> Result<bookclerk_plugin_sdk::JobOutcome> {
-        if !self.grant.jobs.is_empty() && !self.grant.allows_job("stream_copy") {
+        if !self.grant.allows_job("stream_copy") {
             return Err(PluginError::message(
                 "plugin grant does not authorize job trigger `stream_copy`",
             ));

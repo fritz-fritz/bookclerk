@@ -1093,6 +1093,7 @@ entrypoints = ["{entrypoint}"]
         // Operator `deny` must not strip the loopback RPC bind; isolate egress
         // still honours the grant via WORKERD_GRANT_NETWORK_MODE.
         let deny = PluginGrant {
+            schema_version: crate::GRANT_SCHEMA_VERSION,
             plugin_key: String::new(),
             plugin_id: "echo".into(),
             entrypoints: Default::default(),
@@ -1140,6 +1141,7 @@ entrypoints = ["{entrypoint}"]
             Enforcement::Required,
             None,
             Some(&PluginGrant {
+                schema_version: crate::GRANT_SCHEMA_VERSION,
                 plugin_key: String::new(),
                 plugin_id: "oauth".into(),
                 entrypoints: Default::default(),
@@ -1240,6 +1242,7 @@ entrypoints = ["{entrypoint}"]
             Enforcement::Required,
             None,
             Some(&PluginGrant {
+                schema_version: crate::GRANT_SCHEMA_VERSION,
                 plugin_key: String::new(),
                 plugin_id: "native".into(),
                 entrypoints: Default::default(),
@@ -1329,6 +1332,7 @@ entrypoints = ["{entrypoint}"]
             Enforcement::Required,
             None,
             Some(&PluginGrant {
+                schema_version: crate::GRANT_SCHEMA_VERSION,
                 plugin_key: String::new(),
                 plugin_id: "native".into(),
                 entrypoints: Default::default(),
