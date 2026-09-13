@@ -315,19 +315,28 @@ pub(crate) fn effective_spawn_grant(
     grant
 }
 
-/// Discover installs used to uniquify occupancy, always including `plugin`.
+/// Occupancy list used to uniquify host overlays, always including `plugin`.
+///
+/// Must **not** call [`crate::discover_plugins`]: that re-hashes every staged
+/// payload (debug guest binaries are hundreds of MiB) on each spawn.
 pub(crate) fn overlay_discovered_plugins(
     config: &Config,
     plugin: &DiscoveredPlugin,
 ) -> Vec<DiscoveredPlugin> {
-    let mut list = crate::discover_plugins(config).unwrap_or_default();
-    if !list
-        .iter()
-        .any(|found| found.plugin_key() == plugin.plugin_key())
-    {
-        list.push(plugin.clone());
+    match crate::discover::discover_occupancy_plugins(config) {
+        Ok(mut list) => {
+            list.retain(|found| found.root != plugin.root);
+            list.push(plugin.clone());
+            list
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "overlay occupancy scan failed; skipping host-implied network overlay"
+            );
+            Vec::new()
+        }
     }
-    list
 }
 
 fn stderr_tail_text(tail: &Arc<Mutex<VecDeque<String>>>) -> String {

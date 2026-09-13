@@ -195,6 +195,31 @@ pub fn discover_plugins(config: &Config) -> Result<Vec<DiscoveredPlugin>> {
     Ok(out)
 }
 
+/// Occupancy identities (alias + PluginKey) **without** payload hashing.
+///
+/// Host spawn overlays only need to uniquify occupancy and fail closed on
+/// corrupt duplicate aliases. Re-running [`discover_plugins`] here would
+/// SHA-256 every staged debug binary on each spawn (hundreds of MiB each)
+/// and stall CI. Provenance for the guest being spawned stays on the
+/// already-evaluated [`DiscoveredPlugin`] passed into spawn.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] on duplicate keys, duplicate aliases, or I/O
+/// failures while reading manifests.
+pub(crate) fn discover_occupancy_plugins(config: &Config) -> Result<Vec<DiscoveredPlugin>> {
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
+    for dir in plugin_search_dirs(config) {
+        if !dir.is_dir() {
+            continue;
+        }
+        occupancy_in_dir(&dir, &mut out, &mut seen)?;
+    }
+    assert_unique_aliases(&out)?;
+    Ok(out)
+}
+
 /// Config occupancy selector (`plugin = "…"`), or `alias` when the field is empty.
 ///
 /// Occupancy is how host config names the guest that may use a singleton
@@ -521,6 +546,71 @@ fn upgrade_occupancy_field(field: &mut String, discovered: &[DiscoveredPlugin]) 
     if let Some(key) = unique_canonical_occupancy(field, discovered) {
         *field = key;
     }
+}
+
+/// Occupancy walk of `$dir/plugin.toml` or `$dir/<name>/plugin.toml` (no payload hash).
+fn occupancy_in_dir(
+    dir: &Path,
+    out: &mut Vec<DiscoveredPlugin>,
+    seen: &mut std::collections::HashMap<String, PathBuf>,
+) -> Result<()> {
+    let root_manifest = dir.join("plugin.toml");
+    if root_manifest.is_file() {
+        push_occupancy_manifest(&root_manifest, dir, out, seen)?;
+        return Ok(());
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(err) => {
+            tracing::warn!(path = %dir.display(), %err, "cannot read plugin directory");
+            return Ok(());
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest_path = path.join("plugin.toml");
+        if manifest_path.is_file() {
+            push_occupancy_manifest(&manifest_path, &path, out, seen)?;
+        }
+    }
+    Ok(())
+}
+
+/// Parses a manifest for occupancy (PluginKey + alias) without hashing the tree.
+fn push_occupancy_manifest(
+    manifest_path: &Path,
+    root: &Path,
+    out: &mut Vec<DiscoveredPlugin>,
+    seen: &mut std::collections::HashMap<String, PathBuf>,
+) -> Result<()> {
+    let text = std::fs::read_to_string(manifest_path)?;
+    let manifest = PluginManifest::parse(&text)?;
+    if manifest.id == BOOKCLERK_SCHEMA_NAMESPACE {
+        return Ok(());
+    }
+    if manifest.api_version > PRODUCT_API_VERSION {
+        return Ok(());
+    }
+    let command = match resolve_spawn_command(root, &manifest) {
+        Ok(command) => command,
+        Err(_) => root.to_path_buf(),
+    };
+    let plugin = DiscoveredPlugin::for_test(manifest, root.to_path_buf(), command);
+    let key = plugin.plugin_key().canonical().to_string();
+    if let Some(first_path) = seen.get(&key) {
+        return Err(PluginError::message(format!(
+            "duplicate plugin key `{key}` (alias `{}`): already discovered at {} and also at {}",
+            plugin.alias(),
+            first_path.display(),
+            manifest_path.display()
+        )));
+    }
+    seen.insert(key, manifest_path.to_path_buf());
+    out.push(plugin);
+    Ok(())
 }
 
 /// Discovers `$dir/plugin.toml` or each `$dir/<name>/plugin.toml`; skips unreadable directories.
@@ -1123,6 +1213,25 @@ binding = "DB"
             err.contains("migration_plan") || err.to_lowercase().contains("unknown"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn occupancy_scan_lists_aliases_without_payload_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        write_plugin(&plugins.join("sqlite"), "sqlite", "databaseAdapter");
+        write_plugin(&plugins.join("echo"), "echo", "cli");
+        std::fs::write(plugins.join("sqlite").join("blob.bin"), vec![0_u8; 256]).unwrap();
+        let cfg = Config {
+            paths: Some(bookclerk_config::Paths::from_files_dir(
+                tmp.path().to_path_buf(),
+            )),
+            ..Config::default()
+        };
+        let occ = discover_occupancy_plugins(&cfg).expect("occupancy");
+        let aliases: Vec<_> = occ.iter().map(|p| p.alias().to_string()).collect();
+        assert!(aliases.iter().any(|a| a == "sqlite"), "{aliases:?}");
+        assert!(aliases.iter().any(|a| a == "echo"), "{aliases:?}");
     }
 
     #[test]

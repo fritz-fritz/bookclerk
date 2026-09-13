@@ -431,4 +431,11 @@ else
   ok "S3 storage HTTP is not ambient reqwest::Client"
 fi
 
+if grep -A25 'fn overlay_discovered_plugins' crates/bookclerk-plugin-host/src/spawn_stdio.rs \
+    | grep -q 'discover_plugins(config)'; then
+  fail "spawn overlay occupancy still re-hashes every install via discover_plugins"
+else
+  ok "spawn overlay occupancy uses a lightweight scan"
+fi
+
 exit "$status"
