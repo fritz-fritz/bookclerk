@@ -104,12 +104,10 @@ pub fn first_party_database_kind(plugin: &DiscoveredPlugin) -> Option<DatabasePl
     if !bookclerk_plugin_catalog::is_first_party_database_adapter(plugin.plugin_key()) {
         return None;
     }
-    match plugin.plugin_key().manifest_id() {
-        "sqlite" => Some(DatabasePluginKind::Sqlite),
-        "postgres" => Some(DatabasePluginKind::Postgres),
-        "d1" => Some(DatabasePluginKind::D1),
-        _ => None,
-    }
+    bookclerk_plugin_catalog::FIRST_PARTY_DATABASE_ADAPTERS
+        .iter()
+        .find(|artifact| artifact.package_name == plugin.plugin_key().package())
+        .and_then(|artifact| DatabasePluginKind::parse(artifact.manifest_id))
 }
 
 /// True when this install is the verified Bookclerk local-filesystem destination.
@@ -117,7 +115,7 @@ pub fn first_party_database_kind(plugin: &DiscoveredPlugin) -> Option<DatabasePl
 pub fn is_first_party_local_output(plugin: &DiscoveredPlugin) -> bool {
     plugin.identity.provenance.is_verified_artifact()
         && bookclerk_plugin_catalog::is_first_party_destination(plugin.plugin_key())
-        && plugin.plugin_key().manifest_id() == "local"
+        && plugin.plugin_key().package() == "bookclerk-plugin-destination-local"
 }
 
 /// True when this install is the verified Bookclerk S3 destination.
@@ -125,7 +123,7 @@ pub fn is_first_party_local_output(plugin: &DiscoveredPlugin) -> bool {
 pub fn is_first_party_s3_output(plugin: &DiscoveredPlugin) -> bool {
     plugin.identity.provenance.is_verified_artifact()
         && bookclerk_plugin_catalog::is_first_party_destination(plugin.plugin_key())
-        && plugin.plugin_key().manifest_id() == "s3"
+        && plugin.plugin_key().package() == "bookclerk-plugin-destination-s3"
 }
 
 /// Path-only identity used when an install tree cannot be hashed (test fixtures).
@@ -222,8 +220,8 @@ pub fn occupancy_spec<'a>(plugin_field: &'a str, alias: &'a str) -> &'a str {
 ///
 /// A parseable PluginKey never falls through to an alias comparison, so a
 /// miss cannot inherit another provenance's grant or session. Does not
-/// detect alias twins — callers that load or privilege-check must require
-/// a unique match ([`resolve_plugin_slot`], destination session lookup).
+/// detect corrupt duplicate aliases — callers that load or privilege-check
+/// must require a unique match ([`resolve_plugin_slot`]).
 ///
 /// # Arguments
 ///
@@ -244,7 +242,7 @@ pub fn identity_matches_occupancy(plugin_key: &str, alias: &str, spec: &str) -> 
 
 /// True when `plugin` is the occupant named by `spec` (PluginKey or alias).
 ///
-/// Does not detect alias twins — loaders must call [`resolve_plugin_slot`].
+/// Does not detect corrupt duplicate aliases — loaders must call [`resolve_plugin_slot`].
 ///
 /// # Arguments
 ///
@@ -336,10 +334,12 @@ pub fn resolve_plugin_ref<'a>(
 
 /// True when occupancy `spec` names the display alias (or kind token) `alias`.
 ///
-/// A PluginKey occupant matches its manifest id and first-party kind tokens
-/// (`pg` ↔ `postgres`). A bare alias does **not** match a PluginKey string
-/// passed as `alias` — pinning a key from alias occupancy is a different
-/// occupant selector and must re-check consent.
+/// Bare kind tokens (`pg` ↔ `postgres`) match without discovery. A PluginKey
+/// occupant matches only when it is a host-controlled first-party package
+/// whose **package name** maps to that alias — never via a `#fragment`.
+/// Third-party keys need [`occupancy_names_alias`] plus discovery.
+///
+/// A bare alias does **not** match a PluginKey string passed as `alias`.
 ///
 /// # Arguments
 ///
@@ -356,26 +356,66 @@ pub fn occupancy_matches_alias(spec: &str, alias: &str) -> bool {
         return true;
     }
     if let Ok(key) = PluginKey::parse(spec) {
-        if key.manifest_id().eq_ignore_ascii_case(alias) {
-            return true;
+        if PluginKey::parse(alias).is_ok() {
+            return false;
         }
-        return DatabasePluginKind::parse(key.manifest_id()).is_some()
-            && DatabasePluginKind::parse(key.manifest_id()) == DatabasePluginKind::parse(alias)
-            && PluginKey::parse(alias).is_err();
+        return first_party_occupancy_alias(&key).is_some_and(|id| kind_or_alias_match(id, alias));
     }
     if PluginKey::parse(alias).is_ok() {
         return false;
     }
-    let spec_kind = DatabasePluginKind::parse(spec);
-    let alias_kind = DatabasePluginKind::parse(alias);
-    spec_kind.is_some() && spec_kind == alias_kind
+    kind_or_alias_match(spec, alias)
+}
+
+/// True when occupancy `spec` names `alias` among `discovered` installs.
+///
+/// Uses [`occupancy_matches_alias`] first, then resolves `spec` to exactly one
+/// PluginKey. Corrupt duplicate aliases fail closed (`false`).
+#[must_use]
+pub fn occupancy_names_alias(spec: &str, alias: &str, discovered: &[DiscoveredPlugin]) -> bool {
+    if occupancy_matches_alias(spec, alias) {
+        return true;
+    }
+    match resolve_plugin_slot(discovered, spec) {
+        Ok(Some(plugin)) => kind_or_alias_match(plugin.alias(), alias),
+        _ => false,
+    }
+}
+
+/// Host-controlled alias for a first-party PluginKey (package + scheme, not fragment).
+fn first_party_occupancy_alias(key: &PluginKey) -> Option<&'static str> {
+    if bookclerk_plugin_catalog::is_first_party_database_adapter(key) {
+        return bookclerk_plugin_catalog::FIRST_PARTY_DATABASE_ADAPTERS
+            .iter()
+            .find(|artifact| artifact.package_name == key.package())
+            .map(|artifact| artifact.manifest_id);
+    }
+    if bookclerk_plugin_catalog::is_first_party_destination(key) {
+        return bookclerk_plugin_catalog::FIRST_PARTY_DESTINATIONS
+            .iter()
+            .find(|artifact| artifact.package_name == key.package())
+            .map(|artifact| artifact.manifest_id);
+    }
+    None
+}
+
+/// Case-insensitive alias or first-party kind-token equality (`pg` ↔ `postgres`).
+fn kind_or_alias_match(left: &str, right: &str) -> bool {
+    let left = left.trim();
+    let right = right.trim();
+    if left.eq_ignore_ascii_case(right) {
+        return true;
+    }
+    let left_kind = DatabasePluginKind::parse(left);
+    let right_kind = DatabasePluginKind::parse(right);
+    left_kind.is_some() && left_kind == right_kind
 }
 
 /// Writes this install's canonical PluginKey into each family occupancy field.
 ///
 /// Call after flipping `enabled` (CLI / Settings). Occupancy is how loaders
-/// name a singleton slot; stamping the key means a later alias twin cannot
-/// steal the slot.
+/// name a singleton slot; stamping the key means a later install cannot
+/// steal the slot by reusing the alias.
 ///
 /// # Errors
 ///
@@ -888,9 +928,14 @@ mode = "deny"
             "echo",
             "other"
         ));
-        assert!(occupancy_matches_alias(
+        assert!(!occupancy_matches_alias(
             found[0].plugin_key().canonical(),
             "echo"
+        ));
+        assert!(occupancy_names_alias(
+            found[0].plugin_key().canonical(),
+            "echo",
+            &found
         ));
         assert!(!occupancy_matches_alias(
             "echo",
@@ -903,7 +948,10 @@ mode = "deny"
             .plugin_table_mut("echo")
             .insert("plugin".into(), toml::Value::String("echo".into()));
         upgrade_unique_alias_occupancy(&mut cfg_echo, &found);
-        assert_eq!(cfg_echo.integrations.occupancy("echo"), "echo");
+        assert_eq!(
+            cfg_echo.integrations.occupancy("echo"),
+            found[0].plugin_key().canonical()
+        );
     }
 
     #[test]
@@ -912,16 +960,23 @@ mode = "deny"
         assert!(occupancy_matches_alias("pg", "postgres"));
         assert!(occupancy_matches_alias("postgres", "postgresql"));
         assert!(occupancy_matches_alias(
-            "platform:bookclerk/sqlite",
+            "platform:bookclerk/bookclerk-plugin-database-sqlite",
             "sqlite"
         ));
-        assert!(occupancy_matches_alias("platform:bookclerk/postgres", "pg"));
-        assert!(!occupancy_matches_alias(
-            "sqlite",
-            "platform:bookclerk/sqlite"
+        assert!(occupancy_matches_alias(
+            "platform:bookclerk/bookclerk-plugin-database-postgres",
+            "pg"
         ));
         assert!(!occupancy_matches_alias(
-            "platform:bookclerk/sqlite",
+            "sqlite",
+            "platform:bookclerk/bookclerk-plugin-database-sqlite"
+        ));
+        assert!(!occupancy_matches_alias(
+            "platform:bookclerk/bookclerk-plugin-database-sqlite",
+            "postgres"
+        ));
+        assert!(!occupancy_matches_alias(
+            "cargo:https://evil.example#bookclerk-plugin-database-postgres",
             "postgres"
         ));
         assert!(!occupancy_matches_alias("", "sqlite"));

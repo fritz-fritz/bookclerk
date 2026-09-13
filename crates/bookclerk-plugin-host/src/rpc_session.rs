@@ -405,6 +405,23 @@ impl ExecutorIdentity {
         }
     }
 
+    /// Folds overlay-relevant host config into [`Self::configuration_revision`].
+    ///
+    /// Changing a Postgres URL / D1 API origin / S3 endpoint / Audiobookshelf
+    /// URL must not reuse a session that was spawned under the old overlay.
+    #[must_use]
+    pub fn with_overlay_config(mut self, config: &Config) -> Self {
+        let digest = crate::consent::host_overlay_config_digest(config);
+        if !digest.is_empty() {
+            if self.configuration_revision.is_empty() {
+                self.configuration_revision = digest;
+            } else {
+                self.configuration_revision = format!("{}:{digest}", self.configuration_revision);
+            }
+        }
+        self
+    }
+
     /// Fills persisted [`Self::grant_revision`] and effective
     /// [`Self::authority_revision`] from a grant snapshot.
     ///
@@ -634,7 +651,7 @@ impl PluginSession {
         let spawned =
             crate::spawn_stdio::spawn_stdio_guest(plugin, &plan, config, config_table, extra_env)
                 .await?;
-        Self::connect_spawned(spawned, plugin, &plan, account_id, services).await
+        Self::connect_spawned(spawned, plugin, &plan, account_id, services, config).await
     }
 
     /// Connects Cap'n Proto over the spawned stdio and negotiates `describe`.
@@ -644,6 +661,7 @@ impl PluginSession {
         plan: &SpawnPlan,
         account_id: &str,
         services: SessionServices,
+        config: &Config,
     ) -> Result<Self> {
         let manifest = plugin.manifest.clone();
         let id = spawned.id.clone();
@@ -662,14 +680,15 @@ impl PluginSession {
         let guest_pid = spawned.child.id();
         let instance_key = plugin_instance_key(&id, account_id);
         let identity = ExecutorIdentity::from_plugin_with_runtime(plugin, account_id, plan.runtime)
-            .with_grant_revision(&grant);
-        let files_dir = spawned.files_dir.clone();
+            .with_overlay_config(config)
+            .with_persisted_and_effective(&spawned.persisted_grant, &spawned.grant);
         if identity.grant_revision.is_empty() {
             return Err(PluginError::message(format!(
                 "plugin `{}` spawn is missing an authority revision",
                 plugin.plugin_key().canonical()
             )));
         }
+        let files_dir = spawned.files_dir.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         let (ready_tx, ready_rx) =
             oneshot::channel::<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>();
@@ -691,11 +710,13 @@ impl PluginSession {
             )));
         }
         match crate::consent::spawn_grant(&files_dir, plugin) {
-            Ok(fresh)
-                if crate::authority::authority_revision(&fresh) == identity.authority_revision => {}
-            Ok(_) => {
-                let _ = tx.send(Work::Shutdown);
-                return Err(crate::authority::fenced_error());
+            Ok(fresh) => {
+                let effective = crate::spawn_stdio::effective_spawn_grant(&fresh, plugin, config);
+                if crate::authority::authority_revision(&effective) == identity.authority_revision {
+                } else {
+                    let _ = tx.send(Work::Shutdown);
+                    return Err(crate::authority::fenced_error());
+                }
             }
             Err(err) => {
                 let _ = tx.send(Work::Shutdown);

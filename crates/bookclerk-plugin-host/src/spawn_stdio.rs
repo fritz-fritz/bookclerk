@@ -35,8 +35,10 @@ pub(crate) struct SpawnedStdio {
     pub stdin: ChildStdin,
     /// Guest stdout (host reads RPC / capnp).
     pub stdout: ChildStdout,
-    /// Covering operator grant.
+    /// Covering **effective** grant (persisted ∩ overlays).
     pub grant: PluginGrant,
+    /// Persisted operator grant before host overlays.
+    pub persisted_grant: PluginGrant,
     /// Spawn config JSON or destination context extras.
     pub spawn_config: Value,
     /// Guest HOME / data directory.
@@ -80,13 +82,8 @@ pub(crate) async fn spawn_stdio_guest(
 ) -> Result<SpawnedStdio> {
     let id = plugin.plugin_key().canonical().to_string();
     let alias = plugin.manifest.id.clone();
-    let mut grant = spawn_grant(&config.paths().files_dir, plugin)?;
-    crate::consent::overlay_host_implied_network(
-        &mut grant,
-        plugin,
-        config,
-        &overlay_discovered_plugins(config, plugin),
-    );
+    let persisted_grant = spawn_grant(&config.paths().files_dir, plugin)?;
+    let grant = effective_spawn_grant(&persisted_grant, plugin, config);
     let spawn_config = spawn_config_for_grant(&grant, config_table);
     let jail = GuestJail::plan(config, plugin, plan)?;
     #[cfg(windows)]
@@ -225,6 +222,7 @@ pub(crate) async fn spawn_stdio_guest(
         stdin,
         stdout,
         grant,
+        persisted_grant,
         spawn_config,
         data: jail.data,
         scratch: jail.scratch,
@@ -301,7 +299,27 @@ pub(crate) fn with_spawn_detail(err: PluginError, extra: String) -> PluginError 
     }
 }
 
-fn overlay_discovered_plugins(config: &Config, plugin: &DiscoveredPlugin) -> Vec<DiscoveredPlugin> {
+/// Applies host-implied network overlays to a persisted spawn grant.
+pub(crate) fn effective_spawn_grant(
+    persisted: &PluginGrant,
+    plugin: &DiscoveredPlugin,
+    config: &Config,
+) -> PluginGrant {
+    let mut grant = persisted.clone();
+    crate::consent::overlay_host_implied_network(
+        &mut grant,
+        plugin,
+        config,
+        &overlay_discovered_plugins(config, plugin),
+    );
+    grant
+}
+
+/// Discover installs used to uniquify occupancy, always including `plugin`.
+pub(crate) fn overlay_discovered_plugins(
+    config: &Config,
+    plugin: &DiscoveredPlugin,
+) -> Vec<DiscoveredPlugin> {
     let mut list = crate::discover_plugins(config).unwrap_or_default();
     if !list
         .iter()

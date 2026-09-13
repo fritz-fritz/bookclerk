@@ -108,9 +108,10 @@ fn stamp_library_adapter_request(
 pub struct ExternalDatabase {
     /// Cap'n Proto session (vat holds the database session).
     session: Arc<PluginSession>,
-    /// Manifest id (first-party `sqlite` / `d1` / `postgres`, or a
-    /// third-party adapter id) used to build the factory context.
+    /// Manifest alias used to build the factory context (presentation).
     plugin_id: String,
+    /// Canonical PluginKey of this adapter guest (durable drop/restore owner).
+    adapter_plugin_key: String,
     /// Verified first-party adapter kind, if this guest is a host-controlled
     /// sqlite / postgres / d1 artifact. Alias text never sets this.
     first_party_kind: Option<DatabasePluginKind>,
@@ -182,6 +183,7 @@ impl ExternalDatabase {
         Ok(Self {
             session,
             plugin_id: plugin.manifest.id.clone(),
+            adapter_plugin_key: plugin.plugin_key().canonical().to_string(),
             first_party_kind: crate::first_party_database_kind(plugin),
             plugin_data_dir,
             settings_json: config_json,
@@ -1108,15 +1110,21 @@ impl ExternalDatabase {
         for binding in bindings {
             let default_unit = self.default_binding_unit(config, kind, owner_plugin_id, binding);
             let record = store
-                .record_plugin_database(owner_plugin_id, binding, backend_kind, &default_unit)
+                .record_plugin_database(
+                    owner_plugin_id,
+                    binding,
+                    &self.adapter_plugin_key,
+                    backend_kind,
+                    &default_unit,
+                )
                 .await
                 .map_err(|err| PluginError::message(err.to_string()))?;
-            if record.backend_kind != backend_kind {
+            if record.adapter_plugin_key != self.adapter_plugin_key {
                 return Err(PluginError::message(format!(
-                    "plugin database binding `{owner_plugin_id}/{binding}` was provisioned on \
-                     `{}` but the active adapter is `{backend_kind}`; migrate or drop it with \
-                     `bookclerk plugins db drop {owner_plugin_id} {binding}`",
-                    record.backend_kind
+                    "plugin database binding `{owner_plugin_id}/{binding}` was provisioned by \
+                     adapter `{}` and cannot be opened by `{}`; drop it with the original \
+                     adapter (`bookclerk plugins db drop {owner_plugin_id} {binding}`)",
+                    record.adapter_plugin_key, self.adapter_plugin_key
                 )));
             }
             let ctx = self.binding_open_values(
@@ -1398,7 +1406,7 @@ impl ExternalDatabase {
     /// Physically deletes a provisioned binding unit. The registry row is the
     /// caller's to remove **after** this returns success.
     ///
-    /// Spawns the matching database adapter and calls `Database.dropUnit`.
+    /// Spawns the **original** adapter PluginKey and calls `Database.dropUnit`.
     /// SQLite unlinks the file and journal sidecars. PostgreSQL issues
     /// `DROP DATABASE`. D1 deletes the Cloudflare database by name. Adapters
     /// that do not implement `dropUnit` fail closed so a registry row cannot
@@ -1410,7 +1418,7 @@ impl ExternalDatabase {
     /// are missing, or the guest refuses the delete.
     pub async fn drop_provisioned_unit(
         config: &Config,
-        backend_kind: &str,
+        adapter_plugin_key: &str,
         unit_ref: &str,
     ) -> PluginResult<()> {
         let plugins = crate::discover_plugins(config)?;
@@ -1421,10 +1429,16 @@ impl ExternalDatabase {
                     .has_entrypoint(crate::Entrypoint::DatabaseAdapter)
             })
             .collect();
-        let plugin = resolve_drop_adapter(config, &adapters, backend_kind)?;
+        let plugin = resolve_drop_adapter(&adapters, adapter_plugin_key)?;
         let ext = Self::spawn(plugin, config).await?;
         let values = database_connect_bindings(config, plugin, &ext.session)?;
         ext.session.db_drop_unit(values, unit_ref).await
+    }
+
+    /// Canonical PluginKey of this adapter guest.
+    #[must_use]
+    pub fn adapter_plugin_key(&self) -> &str {
+        &self.adapter_plugin_key
     }
 
     /// Verified first-party adapter kind, if any.
@@ -1434,47 +1448,17 @@ impl ExternalDatabase {
     }
 }
 
-/// Selects the adapter guest that must perform `dropUnit` for `backend_kind`.
+/// Selects the adapter guest that provisioned the unit (`adapter_plugin_key`).
 fn resolve_drop_adapter<'a>(
-    config: &Config,
     adapters: &'a [DiscoveredPlugin],
-    backend_kind: &str,
+    adapter_plugin_key: &str,
 ) -> PluginResult<&'a DiscoveredPlugin> {
-    let spec = config.database.plugin.trim();
-    if !spec.is_empty() {
-        if let Ok(occupant) = crate::resolve_plugin_ref(adapters, spec) {
-            if adapter_matches_backend(occupant, backend_kind) {
-                return Ok(occupant);
-            }
-        }
-    }
-    let hits: Vec<_> = adapters
-        .iter()
-        .filter(|plugin| adapter_matches_backend(plugin, backend_kind))
-        .collect();
-    match hits.as_slice() {
-        [one] => Ok(one),
-        [] => Err(PluginError::message(format!(
-            "cannot drop adapter `{backend_kind}` unit: no matching database plugin is installed; \
-             remove it with the adapter, then retry"
-        ))),
-        _ => Err(PluginError::message(format!(
-            "cannot drop adapter `{backend_kind}` unit: multiple database plugins match; \
-             set [database].plugin to a qualified PluginKey"
-        ))),
-    }
-}
-
-/// True when `plugin` is the adapter that should physically drop `backend_kind`.
-///
-/// Verified first-party adapters match on kind. Everyone else matches only on
-/// display alias or exact PluginKey text so an alias twin cannot steal drop.
-fn adapter_matches_backend(plugin: &DiscoveredPlugin, backend_kind: &str) -> bool {
-    if let Some(kind) = crate::first_party_database_kind(plugin) {
-        return kind.as_str().eq_ignore_ascii_case(backend_kind);
-    }
-    plugin.alias().eq_ignore_ascii_case(backend_kind)
-        || plugin.plugin_key().canonical() == backend_kind
+    crate::resolve_plugin_ref(adapters, adapter_plugin_key).map_err(|err| {
+        PluginError::message(format!(
+            "cannot drop adapter `{adapter_plugin_key}` unit: {err}; \
+             the original adapter PluginKey must still be installed"
+        ))
+    })
 }
 
 /// Open the library for a specific `[database].plugin` id (ignoring the active config value).
@@ -2799,6 +2783,11 @@ mod tests {
         assert_eq!(backup_adapter_id("postgres"), "postgres");
         assert_eq!(backup_adapter_id("d1"), "d1");
         assert_eq!(backup_adapter_id("sql-conformance"), "sql-conformance");
+        assert_eq!(
+            backup_adapter_id("cargo:https://evil.example#something#postgres"),
+            "cargo:https://evil.example#something#postgres",
+            "PluginKey fragments must not become first-party engine labels"
+        );
     }
 
     #[test]
@@ -3179,6 +3168,48 @@ mod tests {
         .await
         .expect_err("unknown adapter must not unregister");
         assert!(err.to_string().contains("cannot drop"), "{err}");
+    }
+
+    #[test]
+    fn resolve_drop_adapter_requires_original_plugin_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(
+            root.join("plugin.toml"),
+            r#"
+api_version = 3
+id = "sqlite"
+runtime = "native"
+command = "./guest"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "deny"
+
+[vars]
+"#,
+        )
+        .expect("toml");
+        std::fs::write(root.join("guest"), b"").expect("guest");
+        let plugin = DiscoveredPlugin::for_test(
+            crate::PluginManifest::parse(
+                &std::fs::read_to_string(root.join("plugin.toml")).expect("read"),
+            )
+            .expect("manifest"),
+            root.to_path_buf(),
+            root.join("guest"),
+        );
+        let adapters = [plugin.clone()];
+        let found = resolve_drop_adapter(&adapters, plugin.plugin_key().canonical()).unwrap();
+        assert_eq!(found.plugin_key(), plugin.plugin_key());
+        let err = resolve_drop_adapter(&adapters, "path:file:///tmp/other-sqlite")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot drop"), "{err}");
+        let err = resolve_drop_adapter(&adapters, "postgres")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot drop"), "{err}");
     }
 
     #[tokio::test]

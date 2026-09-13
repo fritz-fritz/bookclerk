@@ -231,30 +231,30 @@ fi
 
 if grep -A20 'fn overlay_unique_occupant' crates/bookclerk-plugin-host/src/consent.rs \
     | grep -q 'resolve_plugin_slot'; then
-  ok "host overlays uniquify occupancy so alias twins cannot inherit URLs"
+  ok "host overlays uniquify occupancy so duplicate aliases cannot inherit URLs"
 else
   fail "host overlays still match every same-alias install"
 fi
 
 if grep -A40 'pub async fn load_external_destinations' crates/bookclerk-plugin-host/src/host/destination.rs \
     | grep -q 'resolve_plugin_slot'; then
-  ok "destination occupancy fail-closes on alias twins"
+  ok "destination occupancy fail-closes on duplicate aliases"
 else
-  fail "S3/local destination load still last-write-wins on alias twins"
+  fail "S3/local destination load still last-write-wins on duplicate aliases"
 fi
 
 if grep -A40 'pub async fn load_external_sources' crates/bookclerk-plugin-host/src/host/source.rs \
     | grep -q 'resolve_plugin_slot'; then
-  ok "source occupancy fail-closes on alias twins"
+  ok "source occupancy fail-closes on duplicate aliases"
 else
-  fail "source load still spawns every alias twin"
+  fail "source load still spawns every alias duplicate"
 fi
 
 if grep -A40 'pub async fn load_external_integrations' crates/bookclerk-plugin-host/src/host/integration.rs \
     | grep -q 'resolve_plugin_slot'; then
-  ok "integration occupancy fail-closes on alias twins"
+  ok "integration occupancy fail-closes on duplicate aliases"
 else
-  fail "integration load still spawns every alias twin"
+  fail "integration load still spawns every alias duplicate"
 fi
 
 if grep -n 'not(unix)' crates/bookclerk-plugin-sdk/src/pass_fd.rs \
@@ -349,7 +349,7 @@ fi
 
 if grep -A20 'for plugin_id in &enabling' crates/bookclerkd/src/api.rs \
     | grep -q 'or_else'; then
-  fail "daemon enable still falls back to first alias twin"
+  fail "daemon enable still falls back to the first duplicate alias"
 else
   ok "daemon enable consent uses resolve_plugin_ref only"
 fi
@@ -382,17 +382,47 @@ else
 fi
 
 if grep -A20 'for id in disabled_targets' crates/bookclerkd/src/api.rs \
-    | grep -q 'occupancy_matches_alias'; then
-  ok "settings database disable matches PluginKey occupancy"
+    | grep -q 'occupancy_names_alias'; then
+  ok "settings database disable resolves occupancy via unique alias / PluginKey"
 else
   fail "settings database disable still string-equals the occupancy field"
 fi
 
-if grep -A25 'pub fn parse(s: &str)' crates/bookclerk-config/src/database.rs \
+if grep -A40 'pub fn parse(s: &str)' crates/bookclerk-config/src/database.rs \
     | grep -q 'rsplit_once'; then
-  ok "DatabasePluginKind::parse accepts PluginKey occupancy"
+  fail "DatabasePluginKind::parse still derives kind from PluginKey fragments"
 else
-  fail "DatabasePluginKind::parse still only understands bare aliases"
+  ok "DatabasePluginKind::parse is bare kind tokens only"
+fi
+
+if grep -n 'adapter_plugin_key' crates/bookclerk-library/src/migrations/unreleased_ops.rs >/dev/null; then
+  ok "plugin_databases persists adapter PluginKey"
+else
+  fail "plugin_databases is missing adapter_plugin_key"
+fi
+
+if grep -n 'with_persisted_and_effective' crates/bookclerk-plugin-host/src/rpc_session.rs >/dev/null; then
+  ok "spawn separates persisted grant_revision from effective authority_revision"
+else
+  fail "spawn still hashes the overlaid grant as both revisions"
+fi
+
+if grep -nE 'same_alias_different_.*coexist' crates >/dev/null 2>&1; then
+  fail "same-alias coexistence tests remain"
+else
+  ok "no supported same-alias coexistence tests"
+fi
+
+if grep -n 'allow_unsigned' crates docs >/dev/null 2>&1; then
+  fail "allow_unsigned terminology remains"
+else
+  ok "unsigned publisher terminology was renamed"
+fi
+
+if grep -nE 'peel_plugin_state|restore_plugin_state' crates >/dev/null 2>&1; then
+  fail "install-root data/tmp preservation remains"
+else
+  ok "install-root data/tmp preservation was removed"
 fi
 
 if grep -n 'reqwest::Client' crates/bookclerk-storage/src >/dev/null 2>&1; then

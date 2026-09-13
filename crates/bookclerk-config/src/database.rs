@@ -47,25 +47,17 @@ impl DatabasePluginKind {
         }
     }
 
-    /// Parse a plugin id, kind alias (`pg` → postgres), or occupancy PluginKey.
+    /// Parse a first-party backend id or kind token (`sqlite`, `postgres`, `pg`, `d1`).
     ///
-    /// Occupancy may be a provenance-qualified key
-    /// (`platform:bookclerk/sqlite#sqlite`); the fragment after `#` is the
-    /// display alias used for first-party kind selection.
+    /// Does **not** inspect PluginKey text. A provenance-qualified occupancy
+    /// string such as `cargo:https://evil.example#postgres` is not a kind.
+    /// First-party classification belongs in plugin-host after resolving a
+    /// discovered install (PluginKey + verified provenance).
     ///
     /// # Returns
     ///
     /// `Some` when recognised; `None` for unknown values.
     pub fn parse(s: &str) -> Option<Self> {
-        let s = s.trim();
-        if let Some(kind) = Self::parse_alias(s) {
-            return Some(kind);
-        }
-        s.rsplit_once('#').and_then(|(_, id)| Self::parse_alias(id))
-    }
-
-    /// Parse a first-party backend id or kind token (not a PluginKey).
-    fn parse_alias(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "sqlite" | "local" => Some(Self::Sqlite),
             "d1" | "cloudflare-d1" | "cloudflare_d1" => Some(Self::D1),
@@ -383,17 +375,14 @@ mod tests {
             DatabasePluginKind::parse("POSTGRES"),
             Some(DatabasePluginKind::Postgres)
         );
-        assert_eq!(
-            DatabasePluginKind::parse("platform:bookclerk/sqlite#sqlite"),
-            Some(DatabasePluginKind::Sqlite)
+        assert!(
+            DatabasePluginKind::parse("platform:bookclerk/sqlite#sqlite").is_none(),
+            "PluginKey fragments must not select a first-party kind"
         );
-        assert_eq!(
-            DatabasePluginKind::parse("platform:bookclerk/postgres#postgres"),
-            Some(DatabasePluginKind::Postgres)
-        );
-        assert_eq!(
-            DatabasePluginKind::parse("platform:bookclerk/d1#d1"),
-            Some(DatabasePluginKind::D1)
+        assert!(DatabasePluginKind::parse("platform:bookclerk/postgres#postgres").is_none());
+        assert!(DatabasePluginKind::parse("platform:bookclerk/d1#d1").is_none());
+        assert!(
+            DatabasePluginKind::parse("cargo:https://evil.example#something#postgres").is_none()
         );
         assert!(DatabasePluginKind::parse("platform:bookclerk/echo#echo").is_none());
     }
@@ -412,13 +401,14 @@ mod tests {
         );
 
         let keyed = DatabaseConfig {
-            plugin: "platform:bookclerk/postgres#postgres".into(),
+            plugin: "platform:bookclerk/bookclerk-plugin-database-postgres".into(),
             ..Default::default()
         };
         assert!(
-            keyed.validate().is_err(),
-            "PluginKey occupancy must still require postgres url"
+            keyed.validate().is_ok(),
+            "config crate must not treat PluginKey occupancy as first-party postgres"
         );
+        assert!(keyed.active_plugin().is_err());
     }
 
     #[test]

@@ -154,7 +154,13 @@ pub async fn restore_plugin_backup_units(
             ))
         })?;
         store
-            .rebind_plugin_database(plugin_id, binding, &backend_kind, &unit_ref)
+            .rebind_plugin_database(
+                plugin_id,
+                binding,
+                ext.adapter_plugin_key(),
+                &backend_kind,
+                &unit_ref,
+            )
             .await
             .map_err(|err| PluginError::message(err.to_string()))?;
     }
