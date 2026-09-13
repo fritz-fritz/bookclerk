@@ -1,9 +1,15 @@
 //! Operator permission grants for plugin capabilities.
 //!
-//! Structural authority (entrypoints, producers, host bindings, named
-//! databases, jobs) originates in the plugin package. The operator may
-//! **narrow** it but cannot invent a structural capability the manifest did
-//! not declare.
+//! Structural authority (entrypoints, producers, event consumers, host
+//! bindings, named databases, jobs) originates in the plugin package. The
+//! operator may **narrow** it but cannot invent a structural capability the
+//! manifest did not declare. Modern grants ([`GRANT_SCHEMA_VERSION`]) treat
+//! empty structural sets as an explicit empty approval; omitted
+//! `schemaVersion` (legacy `0`) still inherits the current manifest.
+//!
+//! A stored grant remains usable when a later package version adds optional
+//! structural capabilities; the extras stay pending until the operator
+//! consents. `describe()` that claims an ungranted capability is rejected.
 //!
 //! Network authority is operator-extensible: the operator may add hostnames
 //! the author omitted. Guest `describe()` remains refinement only.
@@ -28,6 +34,12 @@ use bookclerk_plugin_manifest::EventConsumer;
 
 /// Filename under `$BOOKCLERK_FILES_DIR` for persisted grants.
 pub const GRANTS_FILE: &str = "plugin-grants.json";
+/// Current persisted [`PluginGrant`] document version.
+///
+/// Missing / `0` JSON is a **legacy** document: empty structural sets inherit
+/// the current manifest request. Version [`GRANT_SCHEMA_VERSION`] treats empty
+/// sets as an explicit operator approval of nothing.
+pub const GRANT_SCHEMA_VERSION: u32 = 2;
 
 /// Env keys consumed by `bookclerk-workerd` (`grant.rs`) at isolate start.
 pub const WORKERD_GRANT_NETWORK_MODE_ENV: &str = "BOOKCLERK_WORKERD_GRANT_NETWORK_MODE";
@@ -284,6 +296,9 @@ pub fn granted_jobs_from_manifest(manifest: &PluginManifest) -> BTreeSet<String>
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginGrant {
+    /// Persisted document version. `0` (or omitted JSON) is legacy inherit-if-empty.
+    #[serde(default)]
+    pub schema_version: u32,
     /// Canonical [`bookclerk_plugin_catalog::PluginKey`].
     #[serde(default)]
     pub plugin_key: String,
@@ -356,6 +371,11 @@ pub struct PluginGrant {
 }
 
 impl PluginGrant {
+    /// True when empty structural sets mean “approve none”, not “inherit manifest”.
+    #[must_use]
+    pub fn structural_explicit(&self) -> bool {
+        self.schema_version >= GRANT_SCHEMA_VERSION
+    }
     /// True when this grant authorizes delivering `event_type` at `schema_version`.
     #[must_use]
     pub fn allows_event_consumer(&self, event_type: &str, schema_version: u32) -> bool {
@@ -549,6 +569,7 @@ pub fn consent_request_alias(manifest: &PluginManifest) -> PluginGrant {
         (None, None)
     };
     PluginGrant {
+        schema_version: GRANT_SCHEMA_VERSION,
         plugin_key: String::new(),
         plugin_id: manifest.id.clone(),
         entrypoints: manifest
@@ -798,31 +819,149 @@ pub fn grant_within_ceiling(existing: &PluginGrant, requested: &PluginGrant) -> 
         && existing.producers.is_subset(&requested.producers)
 }
 
-/// True when both grants name the same provenance-qualified plugin.
-///
-/// Empty keys are only equal to other empty keys (test fixtures). A keyed
-/// request never inherits an alias-only or differently-keyed grant.
-fn plugin_key_matches(existing: &PluginGrant, requested: &PluginGrant) -> bool {
-    existing.plugin_key == requested.plugin_key
-}
-
 /// True when a stored grant is usable for enable/spawn of this PluginKey.
 ///
-/// Structural capabilities on the current manifest must already be approved
-/// (operator may have narrowed, but new entrypoints/bindings require re-consent).
-/// Network destinations re-evaluate separately via [`effective_grant`].
+/// Identity match is enough. Extra capabilities on a newer manifest stay
+/// pending until the operator approves them; [`effective_grant`] intersects.
 #[must_use]
 pub fn grant_covers(existing: &PluginGrant, requested: &PluginGrant) -> bool {
-    plugin_key_matches(existing, requested)
-        && existing.plugin_id == requested.plugin_id
-        && requested.entrypoints.is_subset(&existing.entrypoints)
-        && requested.producers.is_subset(&existing.producers)
-        && consumers_cover(&existing.consumers, &requested.consumers)
-        && requested.jobs.is_subset(&existing.jobs)
-        && requested.bindings.is_subset(&existing.bindings)
-        && requested
-            .compatibility_flags
-            .is_subset(&existing.compatibility_flags)
+    if !existing.plugin_key.is_empty() || !requested.plugin_key.is_empty() {
+        return existing.plugin_key == requested.plugin_key;
+    }
+    existing.plugin_id == requested.plugin_id
+}
+
+/// Structural capabilities the current manifest requests that the stored grant
+/// does not yet authorize.
+#[must_use]
+pub fn pending_structural(existing: &PluginGrant, requested: &PluginGrant) -> PendingStructural {
+    let entrypoints = requested
+        .entrypoints
+        .difference(&existing.entrypoints)
+        .cloned()
+        .collect();
+    let producers = requested
+        .producers
+        .difference(&existing.producers)
+        .cloned()
+        .collect();
+    let jobs = requested.jobs.difference(&existing.jobs).cloned().collect();
+    let bindings = requested
+        .bindings
+        .difference(&existing.bindings)
+        .cloned()
+        .collect();
+    let compatibility_flags = requested
+        .compatibility_flags
+        .difference(&existing.compatibility_flags)
+        .cloned()
+        .collect();
+    let consumers = requested
+        .consumers
+        .iter()
+        .filter(|req| !existing.consumers.iter().any(|got| got.covers(req)))
+        .cloned()
+        .collect();
+    PendingStructural {
+        entrypoints,
+        producers,
+        consumers,
+        jobs,
+        bindings,
+        compatibility_flags,
+    }
+}
+
+/// Newly requested structural capabilities awaiting operator consent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingStructural {
+    /// Entrypoints declared by the current manifest but not granted.
+    pub entrypoints: BTreeSet<String>,
+    /// Event producers declared by the current manifest but not granted.
+    pub producers: BTreeSet<String>,
+    /// Event consumers declared by the current manifest but not granted.
+    pub consumers: BTreeSet<GrantedEventConsumer>,
+    /// Job triggers declared by the current manifest but not granted.
+    pub jobs: BTreeSet<String>,
+    /// Host / database bindings declared by the current manifest but not granted.
+    pub bindings: BTreeSet<String>,
+    /// Compatibility flags declared by the current manifest but not granted.
+    pub compatibility_flags: BTreeSet<String>,
+}
+
+impl PendingStructural {
+    /// True when the current manifest introduces no unapproved structural caps.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entrypoints.is_empty()
+            && self.producers.is_empty()
+            && self.consumers.is_empty()
+            && self.jobs.is_empty()
+            && self.bindings.is_empty()
+            && self.compatibility_flags.is_empty()
+    }
+
+    /// CLI/UI lines for capabilities waiting on consent.
+    #[must_use]
+    pub fn summary_lines(&self) -> Vec<String> {
+        if self.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec!["Awaiting consent (not automatically approved):".into()];
+        if !self.entrypoints.is_empty() {
+            lines.push(format!(
+                "  entrypoints: {}",
+                self.entrypoints
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !self.producers.is_empty() {
+            lines.push(format!(
+                "  event producers: {}",
+                self.producers
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !self.consumers.is_empty() {
+            lines.push(format!(
+                "  event consumers: {}",
+                self.consumers
+                    .iter()
+                    .map(|c| c.event_type.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !self.jobs.is_empty() {
+            lines.push(format!(
+                "  jobs: {}",
+                self.jobs.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !self.bindings.is_empty() {
+            lines.push(format!(
+                "  bindings: {}",
+                self.bindings.iter().cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !self.compatibility_flags.is_empty() {
+            lines.push(format!(
+                "  compatibility flags: {}",
+                self.compatibility_flags
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        lines
+    }
 }
 
 /// Reconstructs operator network additions/denials relative to the current manifest.
@@ -878,28 +1017,37 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
     let (operator_added_domains, operator_denied_domains) =
         classified_operator_network(existing, requested);
     PluginGrant {
+        schema_version: existing.schema_version,
         plugin_key: if existing.plugin_key.is_empty() {
             requested.plugin_key.clone()
         } else {
             existing.plugin_key.clone()
         },
-        plugin_id: existing.plugin_id.clone(),
-        entrypoints: existing
-            .entrypoints
-            .intersection(&requested.entrypoints)
-            .cloned()
-            .collect(),
-        producers: existing
-            .producers
-            .intersection(&requested.producers)
-            .cloned()
-            .collect(),
-        consumers: intersect_consumers(&existing.consumers, &requested.consumers),
-        jobs: existing
-            .jobs
-            .intersection(&requested.jobs)
-            .cloned()
-            .collect(),
+        plugin_id: if existing.plugin_id.is_empty() {
+            requested.plugin_id.clone()
+        } else {
+            existing.plugin_id.clone()
+        },
+        entrypoints: intersect_or_legacy_inherit(
+            &existing.entrypoints,
+            &requested.entrypoints,
+            existing.structural_explicit(),
+        ),
+        producers: intersect_or_legacy_inherit(
+            &existing.producers,
+            &requested.producers,
+            existing.structural_explicit(),
+        ),
+        consumers: if !existing.structural_explicit() && existing.consumers.is_empty() {
+            requested.consumers.clone()
+        } else {
+            intersect_consumers(&existing.consumers, &requested.consumers)
+        },
+        jobs: intersect_or_legacy_inherit(
+            &existing.jobs,
+            &requested.jobs,
+            existing.structural_explicit(),
+        ),
         network_mode,
         domains: merge_network_domains(existing, requested),
         manifest_domains: if requested.manifest_domains.is_empty() {
@@ -909,16 +1057,16 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
         },
         operator_added_domains,
         operator_denied_domains,
-        bindings: existing
-            .bindings
-            .intersection(&requested.bindings)
-            .cloned()
-            .collect(),
-        compatibility_flags: existing
-            .compatibility_flags
-            .intersection(&requested.compatibility_flags)
-            .cloned()
-            .collect(),
+        bindings: intersect_or_legacy_inherit(
+            &existing.bindings,
+            &requested.bindings,
+            existing.structural_explicit(),
+        ),
+        compatibility_flags: intersect_or_legacy_inherit(
+            &existing.compatibility_flags,
+            &requested.compatibility_flags,
+            existing.structural_explicit(),
+        ),
         cpu_ms: normalize_cpu_ms(existing.cpu_ms.or(requested.cpu_ms)),
         subrequests: normalize_subrequests(existing.subrequests.or(requested.subrequests)),
         disk_mib: Some(effective_disk_mib(existing.disk_mib.or(requested.disk_mib))),
@@ -935,6 +1083,17 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
             .map(|v| effective_extra_processes(Some(v))),
         approved_at: existing.approved_at.clone(),
     }
+}
+
+fn intersect_or_legacy_inherit<T: Clone + Ord>(
+    existing: &BTreeSet<T>,
+    requested: &BTreeSet<T>,
+    explicit: bool,
+) -> BTreeSet<T> {
+    if !explicit && existing.is_empty() {
+        return requested.clone();
+    }
+    existing.intersection(requested).cloned().collect()
 }
 
 /// Validates and normalizes an operator-supplied grant against host hard caps.
@@ -1104,34 +1263,13 @@ pub fn validate_approved_grant(
         .or(baseline.extra_processes)
         .map(|v| effective_extra_processes(Some(v)));
     Ok(PluginGrant {
+        schema_version: GRANT_SCHEMA_VERSION,
         plugin_key: baseline.plugin_key.clone(),
         plugin_id: baseline.plugin_id.clone(),
-        entrypoints: if approved.entrypoints.is_empty() {
-            baseline.entrypoints.clone()
-        } else {
-            approved.entrypoints.clone()
-        },
-        producers: if approved.producers.is_empty() && baseline.producers.is_empty() {
-            BTreeSet::new()
-        } else if approved.producers.is_empty() {
-            baseline.producers.clone()
-        } else {
-            approved.producers.clone()
-        },
-        consumers: if approved.consumers.is_empty() && !baseline.consumers.is_empty() {
-            // Empty approved consumers with a non-empty baseline means the
-            // operator omitted the field (legacy JSON). Inherit the request.
-            // Explicit narrowing to none is represented by a stored empty set
-            // that already passed [`consumers_cover`] against baseline.
-            baseline.consumers.clone()
-        } else {
-            approved.consumers.clone()
-        },
-        jobs: if approved.jobs.is_empty() && !baseline.jobs.is_empty() {
-            baseline.jobs.clone()
-        } else {
-            approved.jobs.clone()
-        },
+        entrypoints: approved.entrypoints.clone(),
+        producers: approved.producers.clone(),
+        consumers: approved.consumers.clone(),
+        jobs: approved.jobs.clone(),
         network_mode: network_mode.to_ascii_lowercase(),
         domains: domains.clone(),
         manifest_domains: baseline.domains.clone(),
@@ -1575,6 +1713,7 @@ mode = "deny"
 
     fn sample_grant(domains: &[&str], bindings: &[&str], flags: &[&str]) -> PluginGrant {
         PluginGrant {
+            schema_version: GRANT_SCHEMA_VERSION,
             plugin_key: String::new(),
             plugin_id: "demo".into(),
             entrypoints: ["storefront".to_string()].into_iter().collect(),
@@ -1606,14 +1745,19 @@ mode = "deny"
     }
 
     #[test]
-    fn grant_covers_rejects_new_structural_binding() {
+    fn grant_covers_allows_new_structural_caps_as_pending() {
         let existing = sample_grant(&["a.example"], &["config"], &[]);
         let requested = sample_grant(&["a.example"], &["config", "secrets"], &[]);
-        assert!(!grant_covers(&existing, &requested));
+        assert!(grant_covers(&existing, &requested));
+        let pending = pending_structural(&existing, &requested);
+        assert!(pending.bindings.contains("secrets"));
+        let effective = effective_grant(&existing, &requested);
+        assert!(!effective.bindings.contains("secrets"));
+        assert!(effective.bindings.contains("config"));
     }
 
     #[test]
-    fn grant_covers_rejects_new_event_consumer() {
+    fn grant_covers_keeps_identity_when_manifest_adds_consumer() {
         let existing = sample_grant(&[], &["config"], &[]);
         let mut requested = existing.clone();
         requested.consumers.insert(GrantedEventConsumer {
@@ -1622,17 +1766,26 @@ mode = "deny"
             supports_suspend: false,
             filter: None,
         });
-        assert!(!grant_covers(&existing, &requested));
+        assert!(grant_covers(&existing, &requested));
+        let pending = pending_structural(&existing, &requested);
+        assert_eq!(pending.consumers.len(), 1);
+        let effective = effective_grant(&existing, &requested);
+        assert!(effective.consumers.is_empty());
         let approved = requested.clone();
         assert!(grant_covers(&approved, &requested));
+        assert!(pending_structural(&approved, &requested).is_empty());
     }
 
     #[test]
-    fn grant_covers_rejects_new_job_trigger() {
+    fn grant_covers_keeps_identity_when_manifest_adds_job() {
         let existing = sample_grant(&[], &["config"], &[]);
         let mut requested = existing.clone();
         requested.jobs.insert("stream_copy".into());
-        assert!(!grant_covers(&existing, &requested));
+        assert!(grant_covers(&existing, &requested));
+        assert!(pending_structural(&existing, &requested)
+            .jobs
+            .contains("stream_copy"));
+        assert!(effective_grant(&existing, &requested).jobs.is_empty());
         assert!(grant_covers(&requested, &requested));
     }
 
@@ -1718,10 +1871,16 @@ jobs = ["stream_copy"]
     }
 
     #[test]
-    fn grant_covers_rejects_new_structural_flag() {
+    fn grant_covers_treats_new_flag_as_pending() {
         let existing = sample_grant(&[], &[], &["nodejs_compat"]);
         let requested = sample_grant(&[], &[], &["nodejs_compat", "streams_enable_constructors"]);
-        assert!(!grant_covers(&existing, &requested));
+        assert!(grant_covers(&existing, &requested));
+        assert!(pending_structural(&existing, &requested)
+            .compatibility_flags
+            .contains("streams_enable_constructors"));
+        assert!(!effective_grant(&existing, &requested)
+            .compatibility_flags
+            .contains("streams_enable_constructors"));
     }
 
     #[test]
@@ -1923,11 +2082,13 @@ mode = "deny"
         store.upsert(existing);
         store.save(dir.path()).unwrap();
 
-        let err = require_grant(dir.path(), &plugin).unwrap_err().to_string();
-        assert!(
-            err.contains("grant does not match") || err.contains("re-approve"),
-            "{err}"
-        );
+        let effective = require_grant(dir.path(), &plugin).unwrap();
+        assert!(grant_has_binding(&effective, "config"));
+        assert!(!grant_has_binding(&effective, "secrets"));
+        let err = require_binding(&effective, "secrets")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("secrets"), "{err}");
     }
 
     #[test]
@@ -2181,7 +2342,7 @@ mode = "deny"
 
     #[test]
     fn upsert_fences_live_session_for_plugin_key() {
-        let key = "path:file:///tmp/demo#demo";
+        let key = "path:file:///tmp/demo";
         let flag = crate::authority::register_session(key, "old-revision");
         let mut store = PluginGrantStore::default();
         let mut grant = sample_grant(&["a.example"], &["config"], &[]);
@@ -2237,10 +2398,14 @@ mode = "deny"
 binding = "KV"
 "#,
         );
-        let err = require_grant(dir.path(), &widened).unwrap_err().to_string();
+        let effective = require_grant(dir.path(), &widened).unwrap();
+        assert!(grant_has_binding(&effective, "config"));
+        assert!(!grant_has_binding(&effective, "plugin_kv"));
+        let requested = consent_request(&widened.manifest, widened.plugin_key());
+        let pending = pending_structural(&effective, &requested);
         assert!(
-            err.contains("grant does not match") || err.contains("re-approve"),
-            "new structural KV binding must require re-consent: {err}"
+            pending.bindings.contains("plugin_kv"),
+            "new KV binding must stay pending: {pending:?}"
         );
     }
 
@@ -2444,10 +2609,13 @@ type = "demo_pinged"
         )
         .unwrap();
 
-        // A grant that lost the producer no longer covers the manifest request.
+        // Same PluginKey still covers enable/spawn; the missing producer stays
+        // pending and describe() cannot claim it.
         let mut narrowed = grant.clone();
         narrowed.producers.clear();
-        assert!(!grant_covers(&narrowed, &grant));
+        assert!(grant_covers(&narrowed, &grant));
+        let pending = pending_structural(&narrowed, &grant);
+        assert!(pending.producers.contains("demo_pinged"));
         let err = validate_described_capabilities(
             &manifest,
             &narrowed,
@@ -2547,5 +2715,130 @@ domains = ["api.example.com"]
         let decoded: PluginGrant = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.cpu_ms, Some(12_000));
         assert_eq!(decoded.subrequests, Some(75));
+    }
+
+    #[test]
+    fn explicit_empty_consumers_and_jobs_stay_empty() {
+        let mut approved = sample_grant(&[], &["config"], &[]);
+        approved.schema_version = GRANT_SCHEMA_VERSION;
+        approved.consumers.clear();
+        approved.jobs.clear();
+        let mut baseline = approved.clone();
+        baseline.consumers.insert(GrantedEventConsumer {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: false,
+            filter: None,
+        });
+        baseline.jobs.insert("stream_copy".into());
+        let grant = validate_approved_grant(&approved, &baseline).unwrap();
+        assert!(grant.consumers.is_empty());
+        assert!(grant.jobs.is_empty());
+        assert_eq!(grant.schema_version, GRANT_SCHEMA_VERSION);
+        let effective = effective_grant(&grant, &baseline);
+        assert!(effective.consumers.is_empty());
+        assert!(effective.jobs.is_empty());
+    }
+
+    #[test]
+    fn legacy_empty_structural_sets_inherit_manifest() {
+        let mut existing = sample_grant(&[], &["config"], &[]);
+        existing.schema_version = 0;
+        existing.consumers.clear();
+        existing.jobs.clear();
+        existing.entrypoints.clear();
+        let mut requested = existing.clone();
+        requested.schema_version = GRANT_SCHEMA_VERSION;
+        requested.entrypoints.insert("storefront".into());
+        requested.consumers.insert(GrantedEventConsumer {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: false,
+            filter: None,
+        });
+        requested.jobs.insert("stream_copy".into());
+        let effective = effective_grant(&existing, &requested);
+        assert!(effective.entrypoints.contains("storefront"));
+        assert_eq!(effective.consumers.len(), 1);
+        assert!(effective.jobs.contains("stream_copy"));
+    }
+
+    #[test]
+    fn manifest_ab_grant_a_is_effective_a_only() {
+        let mut existing = sample_grant(&[], &["config"], &[]);
+        existing.entrypoints = ["cli".into()].into_iter().collect();
+        let mut requested = existing.clone();
+        requested.entrypoints = ["cli".into(), "storefront".into()].into_iter().collect();
+        requested.consumers.insert(GrantedEventConsumer {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: false,
+            filter: None,
+        });
+        let effective = effective_grant(&existing, &requested);
+        assert_eq!(
+            effective.entrypoints,
+            ["cli".to_string()].into_iter().collect()
+        );
+        assert!(effective.consumers.is_empty());
+        let pending = pending_structural(&existing, &requested);
+        assert!(pending.entrypoints.contains("storefront"));
+        assert_eq!(pending.consumers.len(), 1);
+
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 3
+id = "demo"
+runtime = "native"
+command = "./demo"
+entrypoints = ["cli", "storefront"]
+
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .unwrap();
+        let described_ok = PluginCapabilities {
+            entrypoints: vec![bookclerk_plugin_abi::Entrypoint::Cli],
+            ..PluginCapabilities::default()
+        };
+        validate_described_capabilities(
+            &manifest,
+            &effective,
+            &described_ok,
+            PortalAuthMode::Unspecified,
+        )
+        .unwrap();
+        let described_extra = PluginCapabilities {
+            entrypoints: vec![
+                bookclerk_plugin_abi::Entrypoint::Cli,
+                bookclerk_plugin_abi::Entrypoint::Storefront,
+            ],
+            ..PluginCapabilities::default()
+        };
+        let err = validate_described_capabilities(
+            &manifest,
+            &effective,
+            &described_extra,
+            PortalAuthMode::Unspecified,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("storefront"), "{err}");
+    }
+
+    #[test]
+    fn omitted_schema_version_json_is_legacy() {
+        let json = r#"{
+            "pluginId":"demo",
+            "networkMode":"deny",
+            "domains":[],
+            "bindings":["config"],
+            "compatibilityFlags":[],
+            "approvedAt":"2026-01-01T00:00:00Z"
+        }"#;
+        let grant: PluginGrant = serde_json::from_str(json).unwrap();
+        assert_eq!(grant.schema_version, 0);
+        assert!(!grant.structural_explicit());
     }
 }

@@ -209,32 +209,7 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
                             .get_by_plugin_key(plugin.plugin_key().canonical())
                             .cloned()
                     });
-                let requested =
-                    bookclerk_plugin_host::granted_consumers_from_manifest(&plugin.manifest);
-                let admitted = grant
-                    .as_ref()
-                    .map(|g| {
-                        requested
-                            .iter()
-                            .filter(|req| g.consumers.iter().any(|got| got.covers(req)))
-                            .cloned()
-                            .collect::<std::collections::BTreeSet<_>>()
-                    })
-                    .unwrap_or_default();
-                if admitted.is_empty() {
-                    continue;
-                }
-                let subs = catalog_from_manifest(&plugin)
-                    .into_iter()
-                    .filter(|s| {
-                        admitted.iter().any(|c| {
-                            c.event_type == s.event_type
-                                && s.schema_versions
-                                    .iter()
-                                    .all(|v| c.schema_versions.contains(v))
-                        })
-                    })
-                    .collect::<Vec<_>>();
+                let subs = granted_catalog_subscriptions(&plugin, grant.as_ref());
                 if subs.is_empty() {
                     continue;
                 }
@@ -321,6 +296,37 @@ fn catalog_from_manifest(
             },
             filter: s.filter.clone().filter(|v| !v.is_null()),
         })
+        .collect()
+}
+
+/// Catalog rows the operator grant actually authorizes (manifest ∩ grant).
+fn granted_catalog_subscriptions(
+    plugin: &bookclerk_plugin_host::DiscoveredPlugin,
+    stored: Option<&bookclerk_plugin_host::PluginGrant>,
+) -> Vec<EventCatalogSubscription> {
+    let requested = bookclerk_plugin_host::consent_request(&plugin.manifest, plugin.plugin_key());
+    let admitted = stored
+        .map(|g| bookclerk_plugin_host::effective_grant(g, &requested).consumers)
+        .unwrap_or_default();
+    filter_catalog_by_granted_consumers(&catalog_from_manifest(plugin), &admitted)
+}
+
+/// Keep catalog rows whose event type + schema versions are granted.
+fn filter_catalog_by_granted_consumers(
+    catalog: &[EventCatalogSubscription],
+    admitted: &std::collections::BTreeSet<bookclerk_plugin_host::GrantedEventConsumer>,
+) -> Vec<EventCatalogSubscription> {
+    catalog
+        .iter()
+        .filter(|s| {
+            admitted.iter().any(|c| {
+                c.event_type == s.event_type
+                    && s.schema_versions
+                        .iter()
+                        .all(|v| c.schema_versions.contains(v))
+            })
+        })
+        .cloned()
         .collect()
 }
 
@@ -921,6 +927,39 @@ mod tests {
         assert_eq!(domain.invocation_sequence, 0);
         assert!(!domain.resume_pending);
         assert_eq!(domain.payload, br#"{"titleId":"u1"}"#);
+    }
+
+    #[test]
+    fn catalog_uses_granted_consumers_not_full_manifest() {
+        let catalog = vec![
+            EventCatalogSubscription {
+                event_type: "book_acquired".into(),
+                schema_versions: vec![1],
+                supports_suspend: true,
+                resource_class: "network".into(),
+                filter: None,
+            },
+            EventCatalogSubscription {
+                event_type: "book_deleted".into(),
+                schema_versions: vec![1],
+                supports_suspend: false,
+                resource_class: "network".into(),
+                filter: None,
+            },
+        ];
+        let mut admitted = std::collections::BTreeSet::new();
+        admitted.insert(bookclerk_plugin_host::GrantedEventConsumer {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: true,
+            filter: None,
+        });
+        let kept = filter_catalog_by_granted_consumers(&catalog, &admitted);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].event_type, "book_acquired");
+        let empty =
+            filter_catalog_by_granted_consumers(&catalog, &std::collections::BTreeSet::new());
+        assert!(empty.is_empty());
     }
 
     #[test]

@@ -5175,6 +5175,7 @@ mod tests {
         use std::collections::BTreeSet;
 
         let baseline = PluginGrant {
+            schema_version: bookclerk_plugin_host::GRANT_SCHEMA_VERSION,
             plugin_key: String::new(),
             plugin_id: "demo".into(),
             entrypoints: BTreeSet::from(["storefront".into()]),
