@@ -86,6 +86,46 @@ pub struct InstallOutcome {
 pub struct Installer;
 
 impl Installer {
+    /// PluginKey this installer would assign for `coordinate` + runtime alias.
+    ///
+    /// Host/CLI alias preflight uses the same identity the activate step will
+    /// write so a foreign occupant cannot be compared against a different key.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the coordinate cannot form a canonical [`PluginKey`].
+    pub fn plugin_key_for(
+        coordinate: &PackageCoordinate,
+        runtime_id: &str,
+        plugins_root: &Path,
+    ) -> Result<PluginKey> {
+        match &coordinate.source {
+            RegistrySource::LocalArchive => {
+                PluginKey::from_install_path(Path::new(&coordinate.name), runtime_id).or_else(
+                    |_| PluginKey::from_install_path(&plugins_root.join(runtime_id), runtime_id),
+                )
+            }
+            _ => PluginKey::from_coordinate(coordinate, runtime_id),
+        }
+    }
+
+    /// Coordinate used when installing from a local archive path.
+    #[must_use]
+    pub fn local_archive_coordinate(
+        archive: &Path,
+        manifest: &BookclerkPackageManifest,
+    ) -> PackageCoordinate {
+        PackageCoordinate {
+            source: RegistrySource::LocalArchive,
+            name: archive.display().to_string(),
+            version: manifest
+                .coordinate
+                .as_ref()
+                .map(|c| c.version.clone())
+                .unwrap_or_else(|| "0.0.0".into()),
+        }
+    }
+
     /// Install from an already-validated package manifest (fixture / adapter output).
     ///
     /// # Arguments
@@ -117,25 +157,25 @@ impl Installer {
         let runtime = manifest.runtime();
         validate_plugin_id(&runtime.id)?;
 
-        let incoming_key = match &coordinate.source {
-            RegistrySource::LocalArchive => PluginKey::from_install_path(
-                Path::new(&coordinate.name),
-                &runtime.id,
-            )
-            .or_else(|_| {
-                PluginKey::from_install_path(&opts.plugins_root.join(&runtime.id), &runtime.id)
-            })?,
-            _ => PluginKey::from_coordinate(coordinate, &runtime.id)?,
-        };
+        let incoming_key = Self::plugin_key_for(coordinate, &runtime.id, &opts.plugins_root)?;
         let dest = safe_join(&opts.plugins_root, Path::new(&incoming_key.fs_id()))?;
         let files_dir = opts.plugins_root.parent().map(Path::to_path_buf);
+        // Fail closed on a malformed/unreadable trust ledger *before* any
+        // install-tree mutation (staging, backup rename, activate).
+        let ledger = match files_dir.as_ref() {
+            Some(dir) => Some(InstallLedger::load(dir)?),
+            None => None,
+        };
         reject_alias_collision(
             &opts.plugins_root,
-            files_dir.as_deref(),
+            ledger.as_ref(),
             &incoming_key,
             &runtime.id,
             opts.replace,
         )?;
+        let previous_ledger = ledger
+            .as_ref()
+            .and_then(|loaded| loaded.get(&incoming_key).cloned());
         if dest.exists() {
             if let Ok(existing) = InstallReceipt::load(&dest) {
                 if existing.runtime.id.eq_ignore_ascii_case(&runtime.id)
@@ -291,12 +331,6 @@ impl Installer {
             fs::set_permissions(&exe, perms)?;
         }
 
-        let previous_ledger = files_dir.as_ref().and_then(|dir| {
-            InstallLedger::load(dir)
-                .ok()
-                .and_then(|ledger| ledger.get(&incoming_key).cloned())
-        });
-
         let backup = if dest.exists() {
             let bak = staging_parent.join(format!("{}.backup", incoming_key.fs_id()));
             if bak.exists() {
@@ -424,15 +458,7 @@ impl Installer {
         manifest: &BookclerkPackageManifest,
         opts: &InstallOptions,
     ) -> Result<InstallOutcome> {
-        let coordinate = PackageCoordinate {
-            source: RegistrySource::LocalArchive,
-            name: archive.display().to_string(),
-            version: manifest
-                .coordinate
-                .as_ref()
-                .map(|c| c.version.clone())
-                .unwrap_or_else(|| "0.0.0".into()),
-        };
+        let coordinate = Self::local_archive_coordinate(archive, manifest);
         // Rewrite artifact URL to the local file for the selected target.
         let mut m = manifest.clone();
         let host = opts
@@ -665,7 +691,7 @@ fn command_matches_executable(command: &str, executable: &str) -> bool {
 /// Rejects installing `incoming_alias` when a different PluginKey already owns it.
 fn reject_alias_collision(
     plugins_root: &Path,
-    files_dir: Option<&Path>,
+    ledger: Option<&InstallLedger>,
     incoming_key: &PluginKey,
     incoming_alias: &str,
     replace: bool,
@@ -685,18 +711,16 @@ fn reject_alias_collision(
             path.display()
         )));
     }
-    if let Some(dir) = files_dir {
-        if let Ok(ledger) = InstallLedger::load(dir) {
-            for row in &ledger.artifacts {
-                if row.manifest_id.eq_ignore_ascii_case(incoming_alias)
-                    && row.plugin_key != incoming_key.canonical()
-                {
-                    return Err(CatalogError::message(format!(
-                        "plugin alias `{incoming_alias}` is already owned by `{}` in the install ledger; \
-                         a different PluginKey cannot take this alias{replace_hint}",
-                        row.plugin_key
-                    )));
-                }
+    if let Some(ledger) = ledger {
+        for row in &ledger.artifacts {
+            if row.manifest_id.eq_ignore_ascii_case(incoming_alias)
+                && row.plugin_key != incoming_key.canonical()
+            {
+                return Err(CatalogError::message(format!(
+                    "plugin alias `{incoming_alias}` is already owned by `{}` in the install ledger; \
+                     a different PluginKey cannot take this alias{replace_hint}",
+                    row.plugin_key
+                )));
             }
         }
     }
@@ -1241,6 +1265,106 @@ mod tests {
         let restored = InstallLedger::load(files_dir).unwrap();
         let row = restored.get(&key).expect("ledger row");
         assert_eq!(row.payload_root_sha256, old_payload);
+    }
+
+    #[test]
+    fn malformed_trust_ledger_aborts_before_tree_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let (archive, digest) = make_echo_archive(tmp.path());
+        let target = host_bookclerk_target();
+        let manifest = BookclerkPackageManifest {
+            schema_version: 1,
+            protocol: None,
+            api_version: 1,
+            api_version_max: None,
+            min_bookclerk: None,
+            kind: PluginKind::Integration,
+            id: "echo".into(),
+            display_name: Some("Echo".into()),
+            description: None,
+            coordinate: None,
+            artifacts: vec![ArtifactTarget {
+                target: target.into(),
+                url: format!("file://{}", archive.display()),
+                archive_sha256: digest,
+                archive_root: ".".into(),
+                executable: "echo".into(),
+                executable_sha256: None,
+            }],
+            sandbox: Default::default(),
+            links: Default::default(),
+            yanked: false,
+            released_at: None,
+            publisher: None,
+        };
+        let opts = InstallOptions {
+            plugins_root: plugins.clone(),
+            replace: true,
+            trust: TrustPolicy::allow_unverified_publisher(),
+            ..Default::default()
+        };
+        let coord = PackageCoordinate {
+            source: RegistrySource::LocalArchive,
+            name: archive.display().to_string(),
+            version: "1.0.0".into(),
+        };
+        let first = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
+        Installer::commit(&first).unwrap();
+        fs::write(first.plugin_root.join("marker.txt"), b"untouched").unwrap();
+        let toml_before = fs::read(first.plugin_root.join("plugin.toml")).unwrap();
+        let mut tree_before: Vec<_> = fs::read_dir(&plugins)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        tree_before.sort();
+
+        let ledger_path = InstallLedger::path(tmp.path());
+        let garbage = b"{not-valid-install-ledger";
+        fs::write(&ledger_path, garbage).unwrap();
+
+        let err = Installer::install_from_manifest(&manifest, &coord, &opts)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("install-ledger")
+                || err.contains("expected")
+                || err.contains("json")
+                || err.contains("EOF")
+                || err.contains("key must be"),
+            "{err}"
+        );
+
+        assert_eq!(
+            fs::read(&ledger_path).unwrap(),
+            garbage,
+            "malformed ledger must not be rewritten"
+        );
+        assert_eq!(
+            fs::read(first.plugin_root.join("plugin.toml")).unwrap(),
+            toml_before
+        );
+        assert_eq!(
+            fs::read(first.plugin_root.join("marker.txt")).unwrap(),
+            b"untouched"
+        );
+        assert!(first.plugin_root.is_dir());
+        let mut tree_after: Vec<_> = fs::read_dir(&plugins)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        tree_after.sort();
+        assert_eq!(tree_before, tree_after);
+        if plugins.join(".staging").is_dir() {
+            let leftover: Vec<_> = fs::read_dir(plugins.join(".staging"))
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert!(
+                leftover.is_empty(),
+                "malformed ledger must not leave a replacement in .staging: {leftover:?}"
+            );
+        }
     }
 
     #[test]

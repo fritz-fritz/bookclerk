@@ -9,9 +9,11 @@ use bookclerk_plugin_catalog::{
     StaticAdapter, TrustPolicy,
 };
 use bookclerk_plugin_host::{
-    consent_request, consent_summary, host_target_triple, require_grant, search_crates_io,
-    CliInvokeParams, CliInvokeResult, CliSchema, DiscoveredPlugin, Entrypoint, PluginFamily,
-    PluginGrantStore, PluginSession, CRATE_NAME_PREFIX, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
+    consent_request, consent_summary, host_target_triple,
+    install_from_manifest_with_configured_aliases, install_local_archive_with_configured_aliases,
+    require_grant, search_crates_io, CliInvokeParams, CliInvokeResult, CliSchema, DiscoveredPlugin,
+    Entrypoint, PluginFamily, PluginGrantStore, PluginSession, CRATE_NAME_PREFIX,
+    HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
@@ -208,7 +210,7 @@ pub enum RegistryKindArg {
 #[derive(Debug, Serialize)]
 /// One discovered plugin row for `plugins list` JSON/text output.
 struct PluginListItem {
-    /// Runtime plugin id from `plugin.toml` (display alias; not globally unique).
+    /// Runtime plugin id from `plugin.toml` (globally unique presentation alias).
     id: String,
     /// Provenance-qualified PluginKey (canonical text).
     plugin_key: String,
@@ -598,11 +600,11 @@ async fn run_install(
         })?;
         let text = std::fs::read_to_string(manifest_path)?;
         let manifest = bookclerk_plugin_catalog::BookclerkPackageManifest::from_json(&text)?;
-        Installer::install_local_archive(archive, &manifest, &opts)?
+        install_local_archive_with_configured_aliases(config, archive, &manifest, &opts)?
     } else {
         let coord = resolve_coordinate(coordinate)?;
         let manifest = bookclerk_plugin_catalog::fetch_manifest_for_coordinate(&coord, &[])?;
-        Installer::install_from_manifest(&manifest, &coord, &opts)?
+        install_from_manifest_with_configured_aliases(config, &manifest, &coord, &opts)?
     };
 
     // Post-install health when not dry-run.
@@ -702,7 +704,8 @@ async fn run_update(
             skip_health: false,
             approve_capabilities,
         };
-        let outcome = Installer::install_from_manifest(&manifest, &coord, &opts)?;
+        let outcome =
+            install_from_manifest_with_configured_aliases(config, &manifest, &coord, &opts)?;
         if !outcome.dry_run {
             if let Err(err) = health_check_installed(config, plugin.plugin_key().canonical()).await
             {

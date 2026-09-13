@@ -540,6 +540,7 @@ mode = "deny"
     }
 
     #[test]
+    /// Invalid installation state: two PluginKeys sharing alias `echo` fail closed.
     fn duplicate_aliases_fail_closed_with_both_keys() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");
@@ -559,6 +560,7 @@ mode = "deny"
     }
 
     #[test]
+    /// Invalid installation state: the same alias cannot be a source and an integration.
     fn same_alias_different_family_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins = tmp.path().join("plugins");

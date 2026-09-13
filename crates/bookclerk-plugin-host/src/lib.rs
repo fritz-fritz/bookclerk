@@ -41,6 +41,7 @@ mod discover;
 mod error;
 mod event_publisher;
 mod host;
+mod install_preflight;
 mod jail;
 mod manifest;
 mod registry;
@@ -93,6 +94,10 @@ pub use host::{
     load_external_sources, migrate_database_plugin, migrate_library_schema, open_library_store,
     open_library_store_for_plugin, restore_plugin_backup_units, DatabaseRegistry,
     DestinationRegistry, ExternalDatabase, ExternalIntegration, ExternalSource,
+};
+pub use install_preflight::{
+    configured_alias_occupants, install_from_manifest_with_configured_aliases,
+    install_local_archive_with_configured_aliases, reject_configured_alias_collision,
 };
 pub use jail::plugin_data_dir;
 pub use manifest::{
