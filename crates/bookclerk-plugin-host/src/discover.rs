@@ -468,6 +468,11 @@ pub fn stamp_occupancy_plugin_key(config: &mut Config, plugin: &DiscoveredPlugin
                 config.output.local.plugin = canonical.clone();
             }
             PluginFamily::Output => {
+                // Third-party destinations have no occupancy field. Multi-family
+                // guests still stamp their other families (CLI enable skips here).
+                if plugin.manifest.families().len() > 1 {
+                    continue;
+                }
                 return Err(PluginError::message(format!(
                     "output plugin `{}` enable/disable is not mapped to config.toml yet",
                     plugin.alias()
