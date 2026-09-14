@@ -880,7 +880,8 @@ struct PluginDbListItem {
     created_at: String,
 }
 
-/// Registry rows for `spec`: canonical PluginKey, or a globally unique alias.
+/// Registry rows for `spec`: canonical PluginKey, or an alias unique within
+/// this host plugin namespace (`$FILES_DIR`).
 ///
 /// A parseable PluginKey is an exact registry lookup. A bare alias resolves
 /// through discovery to exactly one PluginKey. Leftover alias-era rows keyed
