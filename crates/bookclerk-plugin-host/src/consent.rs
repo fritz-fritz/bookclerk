@@ -1039,11 +1039,7 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
             &requested.producers,
             existing.structural_explicit(),
         ),
-        consumers: if !existing.structural_explicit() && existing.consumers.is_empty() {
-            requested.consumers.clone()
-        } else {
-            intersect_consumers(&existing.consumers, &requested.consumers)
-        },
+        consumers: intersect_consumers(&existing.consumers, &requested.consumers),
         jobs: intersect_or_legacy_inherit(
             &existing.jobs,
             &requested.jobs,
@@ -1068,33 +1064,32 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
             &requested.compatibility_flags,
             existing.structural_explicit(),
         ),
-        cpu_ms: normalize_cpu_ms(existing.cpu_ms.or(requested.cpu_ms)),
-        subrequests: normalize_subrequests(existing.subrequests.or(requested.subrequests)),
-        disk_mib: Some(effective_disk_mib(existing.disk_mib.or(requested.disk_mib))),
-        memory_mib: Some(effective_memory_mib(
-            existing.memory_mib.or(requested.memory_mib),
-        )),
+        // Budgets are operator/stored authority: never auto-widen from a newer
+        // manifest when the stored grant left a field unset.
+        cpu_ms: normalize_cpu_ms(existing.cpu_ms),
+        subrequests: normalize_subrequests(existing.subrequests),
+        disk_mib: Some(effective_disk_mib(existing.disk_mib)),
+        memory_mib: Some(effective_memory_mib(existing.memory_mib)),
         cpu_rate_percent: existing
             .cpu_rate_percent
-            .or(requested.cpu_rate_percent)
             .map(|v| effective_cpu_rate_percent(Some(v))),
         extra_processes: existing
             .extra_processes
-            .or(requested.extra_processes)
             .map(|v| effective_extra_processes(Some(v))),
         approved_at: existing.approved_at.clone(),
     }
 }
 
-/// Intersects stored and requested sets; empty legacy grants inherit `requested`.
+/// Intersects stored and requested sets.
+///
+/// Empty stored sets mean “approve none” for every schema version. Legacy
+/// grants that omitted structural fields must re-approve rather than inherit
+/// a newer manifest’s full surface.
 fn intersect_or_legacy_inherit<T: Clone + Ord>(
     existing: &BTreeSet<T>,
     requested: &BTreeSet<T>,
-    explicit: bool,
+    _explicit: bool,
 ) -> BTreeSet<T> {
-    if !explicit && existing.is_empty() {
-        return requested.clone();
-    }
     existing.intersection(requested).cloned().collect()
 }
 
@@ -2743,7 +2738,7 @@ domains = ["api.example.com"]
     }
 
     #[test]
-    fn legacy_empty_structural_sets_inherit_manifest() {
+    fn legacy_empty_structural_sets_do_not_inherit_manifest() {
         let mut existing = sample_grant(&[], &["config"], &[]);
         existing.schema_version = 0;
         existing.consumers.clear();
@@ -2760,9 +2755,26 @@ domains = ["api.example.com"]
         });
         requested.jobs.insert("stream_copy".into());
         let effective = effective_grant(&existing, &requested);
-        assert!(effective.entrypoints.contains("storefront"));
-        assert_eq!(effective.consumers.len(), 1);
-        assert!(effective.jobs.contains("stream_copy"));
+        assert!(effective.entrypoints.is_empty());
+        assert!(effective.consumers.is_empty());
+        assert!(effective.jobs.is_empty());
+        let pending = pending_structural(&existing, &requested);
+        assert!(pending.entrypoints.contains("storefront"));
+        assert_eq!(pending.consumers.len(), 1);
+        assert!(pending.jobs.contains("stream_copy"));
+    }
+
+    #[test]
+    fn effective_grant_does_not_auto_widen_unset_budgets() {
+        let mut existing = sample_grant(&[], &["config"], &[]);
+        existing.cpu_ms = None;
+        existing.disk_mib = Some(64);
+        let mut requested = existing.clone();
+        requested.cpu_ms = Some(60_000);
+        requested.disk_mib = Some(512);
+        let effective = effective_grant(&existing, &requested);
+        assert_eq!(effective.cpu_ms, None);
+        assert_eq!(effective.disk_mib, Some(effective_disk_mib(Some(64))));
     }
 
     #[test]
