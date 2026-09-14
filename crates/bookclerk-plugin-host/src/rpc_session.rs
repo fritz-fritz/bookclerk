@@ -659,26 +659,16 @@ impl PluginSession {
         let (ready_tx, ready_rx) =
             oneshot::channel::<Result<(PluginDescribe, ScalarLimits, Vec<String>)>>();
         let vat_account = account_id.to_string();
-        if let Err(err) = thread::Builder::new()
+        thread::Builder::new()
             .name(vat_thread_name(&id))
             .spawn(move || vat_thread(spawned, manifest, vat_account, events, rx, ready_tx))
-        {
-            crate::authority::unregister_session(&authority_fence);
-            return Err(PluginError::message(format!("plugin vat thread: {err}")));
-        }
-        let (desc, limits, features) = match ready_rx.await {
-            Ok(Ok(ready)) => ready,
-            Ok(Err(err)) => {
-                crate::authority::unregister_session(&authority_fence);
-                return Err(err);
-            }
-            Err(err) => {
-                crate::authority::unregister_session(&authority_fence);
-                return Err(PluginError::message(format!("plugin vat dropped: {err}")));
-            }
-        };
+            .map_err(|err| PluginError::message(format!("plugin vat thread: {err}")))?;
+        // Live-session registration happens after describe succeeds; pre-register
+        // failures must not call unregister_session.
+        let (desc, limits, features) = ready_rx
+            .await
+            .map_err(|err| PluginError::message(format!("plugin vat dropped: {err}")))??;
         if desc.api_version != PRODUCT_API_VERSION {
-            crate::authority::unregister_session(&authority_fence);
             let _ = tx.send(Work::Shutdown);
             return Err(PluginError::message(format!(
                 "plugin `{id}` describe apiVersion {} is not {PRODUCT_API_VERSION}",
