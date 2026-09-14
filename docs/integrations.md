@@ -59,7 +59,7 @@ Typical behavior when enabled:
 - Health / diagnose via `integrations status` / `test`
 - On `book_acquired`, optionally notify ABS to scan the library
 - Optional user watch via `pollEvents` — host may mint claim tickets / notify
-- SPA credential return-visit login (`authenticate_user`) when allowed
+- SPA credential return-visit login (`oidc.authenticateUser`) when allowed
 - Optional **listening sync** (`supports_listening_sync`) into the shared
   `listening_progress` table — used by Discover when present, ignored when not
 
