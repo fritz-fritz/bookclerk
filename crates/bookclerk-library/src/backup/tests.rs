@@ -1797,7 +1797,13 @@ async fn empty_included_plugin_backup_preserves_live_registry() {
     assert_eq!(outcome.manifest.units.len(), 1, "library unit only");
 
     LibraryStore::from_connection(db.clone())
-        .record_plugin_database("demoplug", "notes", "sqlite", "/tmp/after-backup.db")
+        .record_plugin_database(
+            "demoplug",
+            "notes",
+            "platform:bookclerk/bookclerk-plugin-database-sqlite",
+            "sqlite",
+            "/tmp/after-backup.db",
+        )
         .await
         .unwrap();
     restore_backup(&db, files.path(), &outcome.manifest.id, &restore_ok())
