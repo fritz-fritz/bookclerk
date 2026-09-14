@@ -250,13 +250,15 @@ FORBIDDEN_BOOTSTRAP_READS = (
 # prefix (the only name space reserved from plugin SQL). These are the
 # pre-prefix spellings; matching one in production host code means a table
 # escaped the rule. `DbCapabilities.schema_migrations` (a Rust field, always
-# written `.schema_migrations` / `schema_migrations:`) is excluded.
+# written `.schema_migrations` / `schema_migrations:`) is excluded. Patterns
+# are case-insensitive so `SCHEMA_MIGRATIONS` / `BOOKCLERK_` string literals
+# match the same invariant as runtime SQL identifier folding.
 FORBIDDEN_UNPREFIXED_BOOKKEEPING = (
-    re.compile(r"(?<![.\w])schema_migrations\b(?!\s*:(?!:))"),
-    re.compile(r"(?<![.\w])plugin_migrations\b(?!\s*:(?!:))"),
-    re.compile(r"(?<![.\w])db_atomic_receipts\b"),
-    re.compile(r"(?<![.\w])db_serialization_slots\b"),
-    re.compile(r"(?<!\w)_bc_src\b"),
+    re.compile(r"(?<![.\w])schema_migrations\b(?!\s*:(?!:))", re.IGNORECASE),
+    re.compile(r"(?<![.\w])plugin_migrations\b(?!\s*:(?!:))", re.IGNORECASE),
+    re.compile(r"(?<![.\w])db_atomic_receipts\b", re.IGNORECASE),
+    re.compile(r"(?<![.\w])db_serialization_slots\b", re.IGNORECASE),
+    re.compile(r"(?<!\w)_bc_src\b", re.IGNORECASE),
 )
 UNPREFIXED_BOOKKEEPING_GLOBS = (
     "crates/bookclerk-library/src/**/*.rs",

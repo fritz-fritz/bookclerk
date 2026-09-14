@@ -1782,12 +1782,8 @@ async fn empty_included_plugin_backup_preserves_live_registry() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::RowMarker)
-        .await
-        .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
-        .await
-        .unwrap();
+    apply_host_schema(&db).await.unwrap();
+    let state = current_schema_state(&db).await.unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
     req.include_plugin_databases = true;
     let outcome = backup_library(&db, &req).await.unwrap().unwrap();

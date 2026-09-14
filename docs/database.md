@@ -494,7 +494,7 @@ an unencrypted fallback.
 use bookclerk_library::{
     SecretStore, EncryptedSecretRecord, secret_kind, secret_account_type,
     build_sealed_record, unseal_secret, upsert_secret,
-    configure_master_key, require_master_key, seal_with_dek, unseal_with_dek,
+    configure_master_key, require_master_key,
 };
 
 // At startup: configure_master_key(&paths.files_dir)?;
