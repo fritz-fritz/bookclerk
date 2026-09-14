@@ -935,7 +935,8 @@ operator grants undeclared public redirects; address-space policy still
 applies.
 
 Guest filesystem access remains install read-only plus host-managed
-`plugin-state/<plugin-key-fs-id>/data` and `…/tmp` — not a free-form widen.
+`plugin-state/<PluginKey fs-id>/data` and `plugin-state/<PluginKey fs-id>/tmp`
+— not a free-form widen.
 
 Global confinement knobs (Settings → Confinement, or `config.toml`):
 
@@ -947,11 +948,6 @@ Global confinement knobs (Settings → Confinement, or `config.toml`):
 | `plugins.jail.cpu_rate_percent` | per-jail CPU ceiling as integer percent of one core (default **80**; 100 = 1.00 core; UI edits cores to two decimals; max = cores×100; OS shares if oversubscribed) |
 | `plugins.jail.extra_processes` | ceiling on extra processes/threads beyond launcher overhead (default **2**; Spec `active_processes` = overhead + extra) |
 
-<<<<<<< HEAD
-Guest filesystem access remains install read-only plus host-managed
-`plugin-state/<PluginKey fs-id>/data` and `plugin-state/<PluginKey fs-id>/tmp`
-— not a free-form widen.
-
 **Deferred (discovery/install):** a content hash bound to the grant so a
 different binary under the same id cannot keep an old grant forever. End goal
 once install/upgrade exists: on upgrade, **refresh the registered hash without
@@ -959,12 +955,11 @@ re-prompting** when capabilities did not widen; re-prompt only when the
 capability scope expands (new structural caps stay pending; `grant_covers`
 is identity-only so the previous approval remains usable). Do not
 expect spawn-time hash checks in this release.
-=======
+
 On upgrade of the **same PluginKey**, operator-added network destinations
 survive; new structural capabilities stay pending until the operator
 consents (`grant_covers` is identity-only). A different provenance (even
 with the same manifest alias) does not inherit grants.
->>>>>>> 32a25203 (plugin: unified fetch/connect policy, workerd sockets, and SSRF CIDRs)
 
 ## Enabling and settings in `config.toml`
 
