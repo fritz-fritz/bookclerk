@@ -1333,7 +1333,9 @@ fn set_plugin_enabled(
     }
     let mut cfg = config.clone();
     // A multi-family plugin flips every family prefix it belongs to.
-    for family in plugin.manifest.families() {
+    let families: Vec<_> = plugin.manifest.families().into_iter().collect();
+    let multi_family = families.len() > 1;
+    for family in families {
         match family {
             PluginFamily::Source => cfg.sources.set_enabled(&plugin.manifest.id, enabled),
             PluginFamily::Integration => cfg.integrations.set_enabled(&plugin.manifest.id, enabled),
@@ -1344,6 +1346,12 @@ fn set_plugin_enabled(
                 cfg.output.local.enabled = enabled;
             }
             PluginFamily::Output => {
+                // Third-party destinations have no config.toml enable knob yet.
+                // Skip so multi-family guests (e.g. storage + events) can still
+                // toggle their other families.
+                if multi_family {
+                    continue;
+                }
                 anyhow::bail!(
                     "output plugin `{}` enable/disable is not mapped to config.toml yet",
                     plugin.manifest.id
@@ -1358,6 +1366,9 @@ fn set_plugin_enabled(
                          enable another backend first with `bookclerk plugins enable <id>`",
                         plugin.manifest.id
                     );
+                } else if multi_family {
+                    // Not the active backend; other families still need flipping.
+                    continue;
                 } else {
                     anyhow::bail!(
                         "database plugin `{}` is not active ([database].plugin = `{}`)",

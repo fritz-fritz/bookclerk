@@ -102,10 +102,7 @@ pub fn smoke_plugin(plugin_dir: &Path) -> Result<String, String> {
                 &json!({}),
                 &bridge_token,
             )?)
-        } else if manifest
-            .families()
-            .contains(&bookclerk_plugin_manifest::PluginFamily::Integration)
-        {
+        } else if manifest.has_entrypoint(bookclerk_plugin_manifest::Entrypoint::RemoteLibrary) {
             Some(post_json(
                 &format!("{base}/integration/health"),
                 &json!({}),
