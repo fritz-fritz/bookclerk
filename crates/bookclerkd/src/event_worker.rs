@@ -195,6 +195,7 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
     })
     .await;
     let library = state.library_snapshot().await;
+    let mut catalogued = std::collections::HashSet::<String>::new();
     match discovered {
         Ok(Ok(plugins)) => {
             for plugin in plugins {
@@ -210,9 +211,9 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
                             .cloned()
                     });
                 let subs = granted_catalog_subscriptions(&plugin, grant.as_ref());
-                if subs.is_empty() {
-                    continue;
-                }
+                // Always upsert — including an empty list — so a narrowed or
+                // revoked grant clears the prior catalog row immediately instead
+                // of leaving deliveries live until the heartbeat TTL expires.
                 if let Err(err) = library
                     .upsert_event_subscriber(&node_id, &plugin.manifest.id, &subs, enabled)
                     .await
@@ -223,6 +224,7 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
                         "event subscriber catalog upsert failed"
                     );
                 }
+                catalogued.insert(plugin.manifest.id.clone());
             }
         }
         Ok(Err(err)) => {
@@ -234,6 +236,12 @@ pub async fn upsert_event_subscriber_catalog(state: &AppState) {
     }
     let integrations = state.integrations.read().await;
     for integration in integrations.all() {
+        // Discovered guests are also loaded into `state.integrations`. Their
+        // grant-filtered catalog row was written above; do not overwrite it
+        // with the full runtime/manifest subscription list.
+        if catalogued.contains(integration.id()) {
+            continue;
+        }
         let subs = catalog_from_runtime(&integration.event_subscriptions());
         if let Err(err) = library
             .upsert_event_subscriber(&node_id, integration.id(), &subs, true)
@@ -311,22 +319,36 @@ fn granted_catalog_subscriptions(
     filter_catalog_by_granted_consumers(&catalog_from_manifest(plugin), &admitted)
 }
 
-/// Keep catalog rows whose event type + schema versions are granted.
+/// Keep catalog rows that match a granted consumer on type, schemas, and
+/// filter, applying the grant's `supports_suspend` narrowing onto the row.
 fn filter_catalog_by_granted_consumers(
     catalog: &[EventCatalogSubscription],
     admitted: &std::collections::BTreeSet<bookclerk_plugin_host::GrantedEventConsumer>,
 ) -> Vec<EventCatalogSubscription> {
     catalog
         .iter()
-        .filter(|s| {
-            admitted.iter().any(|c| {
-                c.event_type == s.event_type
-                    && s.schema_versions
-                        .iter()
-                        .all(|v| c.schema_versions.contains(v))
+        .filter_map(|s| {
+            let catalog_filter = bookclerk_plugin_host::canonical_event_filter(&s.filter);
+            admitted.iter().find_map(|c| {
+                if c.event_type != s.event_type {
+                    return None;
+                }
+                if !s
+                    .schema_versions
+                    .iter()
+                    .all(|v| c.schema_versions.contains(v))
+                {
+                    return None;
+                }
+                if c.filter != catalog_filter {
+                    return None;
+                }
+                let mut row = s.clone();
+                // Manifest may advertise suspend; the grant can narrow it off.
+                row.supports_suspend = s.supports_suspend && c.supports_suspend;
+                Some(row)
             })
         })
-        .cloned()
         .collect()
 }
 
@@ -960,6 +982,60 @@ mod tests {
         let empty =
             filter_catalog_by_granted_consumers(&catalog, &std::collections::BTreeSet::new());
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn catalog_applies_grant_supports_suspend_narrowing() {
+        let catalog = vec![EventCatalogSubscription {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: true,
+            resource_class: "network".into(),
+            filter: None,
+        }];
+        let mut admitted = std::collections::BTreeSet::new();
+        admitted.insert(bookclerk_plugin_host::GrantedEventConsumer {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: false,
+            filter: None,
+        });
+        let kept = filter_catalog_by_granted_consumers(&catalog, &admitted);
+        assert_eq!(kept.len(), 1);
+        assert!(!kept[0].supports_suspend);
+    }
+
+    #[test]
+    fn catalog_requires_matching_consumer_filter() {
+        let catalog = vec![
+            EventCatalogSubscription {
+                event_type: "book_acquired".into(),
+                schema_versions: vec![1],
+                supports_suspend: false,
+                resource_class: "network".into(),
+                filter: None,
+            },
+            EventCatalogSubscription {
+                event_type: "book_acquired".into(),
+                schema_versions: vec![1],
+                supports_suspend: false,
+                resource_class: "network".into(),
+                filter: Some(serde_json::json!({"titleId":"u1"})),
+            },
+        ];
+        let mut admitted = std::collections::BTreeSet::new();
+        admitted.insert(bookclerk_plugin_host::GrantedEventConsumer {
+            event_type: "book_acquired".into(),
+            schema_versions: vec![1],
+            supports_suspend: false,
+            filter: Some(r#"{"titleId":"u1"}"#.into()),
+        });
+        let kept = filter_catalog_by_granted_consumers(&catalog, &admitted);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            kept[0].filter.as_ref(),
+            Some(&serde_json::json!({"titleId":"u1"}))
+        );
     }
 
     #[test]

@@ -236,7 +236,8 @@ impl GrantedEventConsumer {
 }
 
 /// Minified JSON for an event filter; `null` / missing → `None`.
-fn canonical_event_filter(filter: &Option<serde_json::Value>) -> Option<String> {
+#[must_use]
+pub fn canonical_event_filter(filter: &Option<serde_json::Value>) -> Option<String> {
     filter.as_ref().and_then(|value| {
         if value.is_null() {
             None
