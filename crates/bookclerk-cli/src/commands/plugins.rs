@@ -12,9 +12,8 @@ use bookclerk_plugin_host::{
     consent_request, consent_summary, host_target_triple,
     install_from_manifest_with_configured_aliases, install_local_archive_with_configured_aliases,
     occupancy_spec, plugin_matches_occupancy, require_grant, search_crates_io, CliInvokeParams,
-    CliInvokeResult, CliSchema, DiscoveredPlugin,
-    Entrypoint, PluginFamily, PluginGrantStore, PluginSession, CRATE_NAME_PREFIX,
-    HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
+    CliInvokeResult, CliSchema, DiscoveredPlugin, Entrypoint, PluginFamily, PluginGrantStore,
+    PluginSession, CRATE_NAME_PREFIX, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
@@ -1527,8 +1526,15 @@ fn set_plugin_enabled(
 }
 
 /// True when `plugin` occupies `[database].plugin`.
+///
+/// An empty active slot means no database backend is selected — do not fall
+/// back to the candidate's own alias (that would mark every adapter enabled).
 fn occupies_database_slot(plugin: &DiscoveredPlugin, active: &str) -> bool {
-    plugin_matches_occupancy(plugin, occupancy_spec(active, plugin.alias()))
+    let active = active.trim();
+    if active.is_empty() {
+        return false;
+    }
+    plugin_matches_occupancy(plugin, active)
 }
 
 /// Discovers plugins and returns the one whose manifest id matches, or errors if missing.

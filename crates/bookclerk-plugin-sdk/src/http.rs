@@ -683,6 +683,10 @@ impl RequestBuilder {
                         method = Method::GET;
                         body.clear();
                     }
+                    // Do not forward Authorization across origins (credential leak).
+                    if loc.origin() != url.origin() {
+                        headers.remove(header::AUTHORIZATION);
+                    }
                     url = loc;
                     continue;
                 }
