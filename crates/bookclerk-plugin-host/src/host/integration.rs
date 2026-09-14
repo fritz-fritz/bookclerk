@@ -427,6 +427,11 @@ impl Integration for ExternalIntegration {
     async fn provided_oidc_clients(
         &self,
     ) -> bookclerk_integrations::Result<Vec<ProvidedOidcClient>> {
+        // Client registration must match credential login: only guests that
+        // negotiated the `oidc` entrypoint may materialize IdP relying parties.
+        if !self.session.has_entrypoint(crate::Entrypoint::Oidc) {
+            return Ok(Vec::new());
+        }
         match self.session.oidc_clients().await {
             Ok(clients) => Ok(clients
                 .into_iter()
