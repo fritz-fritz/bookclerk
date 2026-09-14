@@ -184,16 +184,14 @@ First-party guests ship under `crates/bookclerk-plugins/` with the guest SDK
 contract. Host binaries (`bookclerk`, `bookclerkd`) depend on
 **`bookclerk-plugin-host`** only — not on individual store crates. Release
 builds and local `cargo dev` both load staged guests from `plugins/`.
-Discovered copies of the same **PluginKey** are skipped; the same display
-alias from two provenances stays distinct and requires a qualified ref.
-Enablement occupancy (`[database].plugin`, `[output.s3].plugin`,
-`[output.local].plugin`, `[sources.<id>].plugin`,
-`[integrations.<id>].plugin`) is a PluginKey when set by
-`bookclerk plugins enable` or Settings enable; a settings save also
+Discovered copies of the same **PluginKey** are skipped. Duplicate display
+aliases from different PluginKeys on the **same host** are invalid
+installation state (discovery fails closed). Enablement occupancy
+(`[database].plugin`, `[output.s3].plugin`, `[output.local].plugin`,
+`[sources.<id>].plugin`, `[integrations.<id>].plugin`) is a PluginKey when
+set by `bookclerk plugins enable` or Settings enable; a settings save also
 upgrades a unique alias occupant to its PluginKey. A bare alias is accepted
-only when exactly one install uses it. Two installs that share `id = "s3"`
-(or `audible`, …) fail closed until the operator names a PluginKey — the host
-does not last-write-wins or spawn every twin.
+only when exactly one install on this host uses it.
 After registration, hosts talk **only**
 through `ContentSource` /
 `Integration` (login, scan, fetch, import, revoke, inspect, plus catalog
@@ -1543,8 +1541,8 @@ plugins** under `crates/bookclerk-plugins/`. The host crate
 `bookclerk-plugin-host` loads them through `load_sources` /
 `load_integrations` as staged guests — the same path third-party plugins
 use. CLI/daemon call only those host helpers — never store crates by name.
-Discovery skips a PluginKey that is already registered; a colliding display
-alias requires a provenance-qualified ref.
+Discovery skips a PluginKey that is already registered. A colliding display
+alias from a different PluginKey on the same host is invalid (fail closed).
 
 Guest binaries depend on **`bookclerk-plugin-sdk`** (+ their private store crate
 for first-party). TypeScript workerd guests depend on **`@bookclerk/plugin-sdk`**.
