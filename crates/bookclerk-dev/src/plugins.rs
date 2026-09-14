@@ -311,6 +311,14 @@ fn remove_legacy_alias_install(plugins_root: &Path, alias: &str, canonical: &Pat
     Ok(())
 }
 
+/// Returns true when `a` and `b` name the same directory after canonicalize.
+///
+/// Falls back to path equality when either side cannot be canonicalized.
+///
+/// # Arguments
+///
+/// * `a` - First filesystem path.
+/// * `b` - Second filesystem path.
 fn paths_same_dir(a: &Path, b: &Path) -> bool {
     match (fs::canonicalize(a), fs::canonicalize(b)) {
         (Ok(ca), Ok(cb)) => ca == cb,
