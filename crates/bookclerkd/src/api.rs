@@ -24,12 +24,13 @@ use bookclerk_library::{
 };
 use bookclerk_plugin_host::{
     consent_request, consent_summary, cores_to_percent, effective_cpu_cores, format_cpu_cores,
-    grant_covers, host_cpu_cores_max, percent_to_cores, require_grant, validate_approved_grant,
-    DatabaseRegistry, DestinationRegistry, GrantedEventConsumer, PluginGrant, PluginGrantStore,
-    PluginRuntimeKind, WorkerdLimits, KNOWN_HOST_BINDINGS, PLUGIN_JAIL_CPU_CORES_DEFAULT,
-    PLUGIN_JAIL_CPU_RATE_DEFAULT, PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT,
-    PLUGIN_JAIL_EXTRA_PROCESSES_MAX, PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX,
-    PLUGIN_STATE_BUDGET_MIB_DEFAULT, PLUGIN_STATE_BUDGET_MIB_MAX,
+    grant_covers, host_cpu_cores_max, pending_structural, percent_to_cores, require_grant,
+    validate_approved_grant, DatabaseRegistry, DestinationRegistry, GrantedEventConsumer,
+    PluginGrant, PluginGrantStore, PluginRuntimeKind, WorkerdLimits, KNOWN_HOST_BINDINGS,
+    PLUGIN_JAIL_CPU_CORES_DEFAULT, PLUGIN_JAIL_CPU_RATE_DEFAULT,
+    PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT, PLUGIN_JAIL_EXTRA_PROCESSES_MAX,
+    PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX, PLUGIN_STATE_BUDGET_MIB_DEFAULT,
+    PLUGIN_STATE_BUDGET_MIB_MAX,
 };
 use bookclerk_search::{SearchEngine, SearchHit};
 use bookclerk_source::SourceRegistry;
@@ -2875,9 +2876,9 @@ async fn get_plugin_consent(
     let existing = store
         .get_by_plugin_key(plugin.plugin_key().canonical())
         .cloned();
-    let covered = existing
-        .as_ref()
-        .is_some_and(|grant| grant_covers(grant, &request));
+    let covered = existing.as_ref().is_some_and(|grant| {
+        grant_covers(grant, &request) && pending_structural(grant, &request).is_empty()
+    });
     let brand = plugin_consent_brand(&state, plugin).await;
     let limits = plugin_consent_limits(plugin, cfg.plugins.jail.cpu_rate_percent);
     let runtime = match plugin.manifest.runtime {
