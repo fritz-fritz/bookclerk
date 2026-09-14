@@ -1712,6 +1712,42 @@ async fn library_only_restore_preserves_plugin_registry() {
 }
 
 #[tokio::test]
+async fn empty_included_plugin_backup_preserves_live_registry() {
+    // `--include-plugin-databases` with an empty registry still sets the
+    // manifest flag, but captures no units. Restore must not wipe bindings
+    // registered after the backup was taken.
+    let files = tempfile::tempdir().unwrap();
+    let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
+        .await
+        .unwrap();
+    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap();
+    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+        .await
+        .unwrap();
+    let mut req = backup_req(files.path(), state, BackupReason::Manual);
+    req.include_plugin_databases = true;
+    let outcome = backup_library(&db, &req).await.unwrap().unwrap();
+    assert!(outcome.manifest.include_plugin_databases);
+    assert_eq!(outcome.manifest.units.len(), 1, "library unit only");
+
+    LibraryStore::from_connection(db.clone())
+        .record_plugin_database("demoplug", "notes", "sqlite", "/tmp/after-backup.db")
+        .await
+        .unwrap();
+    restore_backup(&db, files.path(), &outcome.manifest.id, &restore_ok())
+        .await
+        .unwrap();
+    let rows = LibraryStore::from_connection(db.clone())
+        .list_plugin_databases(None)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].unit_ref, "/tmp/after-backup.db");
+}
+
+#[tokio::test]
 async fn restore_sqlite_keeps_foreign_keys_enforced() {
     let files = tempfile::tempdir().unwrap();
     let src = bookclerk_plugin_database_sqlite::open_memory_unmigrated()

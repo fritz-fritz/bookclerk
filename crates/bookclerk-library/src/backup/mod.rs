@@ -706,7 +706,12 @@ pub enum BackupResolve {
 /// Plugin units are returned for the host/CLI to restore onto the target
 /// adapter. Restore replaces Bookclerk-visible schema for the library unit
 /// and does not merge or auto-migrate. Plugin-owned migrations are not run.
-/// `plugin_databases` rows are left untouched (environment-local placement).
+///
+/// The library `plugin_databases` registry is preserved when the recovery
+/// point carries no plugin units (including `--include-plugin-databases` with
+/// an empty registry at capture). When plugin units are present, library
+/// restore clears the registry so leftover bindings cannot outlive the
+/// captured set; the host/CLI rebinds while restoring those units.
 ///
 /// # Errors
 ///
@@ -739,13 +744,16 @@ pub async fn restore_backup_in_repo(
 ) -> Result<RestorePlan> {
     ensure_restore_target_is_replaceable(db, opts.host_schema_kind).await?;
     let validated = verify_recovery_point(repo, id)?;
+    // Preserve when no plugin units were captured — `include_plugin_databases`
+    // alone is not enough (an empty registry at backup still sets the flag).
+    let preserve_plugin_registry = validated.plugin_units.is_empty();
     restore_backup_unit(
         db,
         repo,
         &validated.library,
         CanonicalRestoreKind::Library,
         opts,
-        !validated.manifest.include_plugin_databases,
+        preserve_plugin_registry,
     )
     .await?;
     Ok(RestorePlan {
