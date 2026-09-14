@@ -70,10 +70,15 @@ payloads for several storefront / integration surfaces, and a reverse
    enter JavaScript. Direct host↔native Cap'n Proto is
    `SpawnTransport::DirectNativeDiagnostic` only (tests / diagnostics).
 
-7. **Three-path conformance.** Identical vectors run against (a) workerd
-   author fixtures, (b) workerd → broker → jailed native, and (c) diagnostic
-   direct Cap'n Proto — covering storefront/CLI, jobs (incl. cancel), events,
-   and database sessions. Shared helpers in
+7. **Three-path conformance.** Shared vectors run against (a) workerd
+   author fixtures, (b) workerd → broker → nested-jailed native backend,
+   and (c) diagnostic direct Cap'n Proto — **for every surface those
+   fixtures support** (storefront/CLI and jobs on all three paths; events
+   and named-database binding vectors on workerd author fixtures; product
+   sqlite `databaseAdapter` on native-behind-workerd). Path (b)'s OS
+   confinement is the nested `NetPolicy::Deny` around the native child
+   inside `bookclerk-workerd` (the harness does not separately spawn
+   `bookclerk-jail`). Shared helpers in
    `crates/bookclerk-workerd/tests/conformance.rs` plus
    `bookclerk-workerd-native-fixture` keep the transports honest.
 
