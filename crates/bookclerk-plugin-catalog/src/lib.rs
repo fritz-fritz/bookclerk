@@ -13,6 +13,7 @@ mod install;
 mod kind;
 mod ledger;
 mod manifest;
+mod mutation_lock;
 mod payload;
 mod receipt;
 mod target;
@@ -38,6 +39,7 @@ pub use identity::{
 };
 pub use install::{
     InstallOptions, InstallOutcome, Installer, DOWNLOAD_TIMEOUT, MAX_DOWNLOAD_BYTES,
+    PLUGIN_HOLD_DIR,
 };
 pub use kind::{PluginKind, RuntimeIdentity};
 pub use ledger::{
@@ -49,6 +51,7 @@ pub use manifest::{
     BookclerkPackageManifest, PackageLinks, PublisherIdentity, SandboxRequest,
     MANIFEST_SCHEMA_VERSION, PROTOCOL_WORKERS_RPC,
 };
+pub use mutation_lock::{acquire_plugins_lock, PluginMutationLock, PLUGIN_MUTATION_LOCK_FILE};
 pub use payload::{manifest_sha256, payload_root_sha256, PAYLOAD_SKIP_NAMES};
 pub use receipt::{InstallReceipt, RECEIPT_FILE};
 pub use target::{

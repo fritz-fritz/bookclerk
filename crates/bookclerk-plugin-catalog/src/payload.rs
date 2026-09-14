@@ -17,7 +17,7 @@ use crate::extract::sha256_file;
 
 /// Directory / file names excluded from the immutable payload (host-owned
 /// receipts only). Packaged `data/` and `tmp/` are hashed: mutable plugin
-/// state lives under `$FILES_DIR/plugin-state/<plugin-key>/`, not inside
+/// state lives under `$FILES_DIR/plugin-state/<PluginKey fs-id>/`, not inside
 /// the install tree.
 pub const PAYLOAD_SKIP_NAMES: &[&str] = &["receipt.json", "receipt.json.bak", "receipt.json.tmp"];
 

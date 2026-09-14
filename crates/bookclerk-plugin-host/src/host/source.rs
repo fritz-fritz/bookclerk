@@ -4,8 +4,8 @@
 //!
 //! External plugins are untrusted. This host adapter:
 //! - never passes `library.db` or the Bookclerk files-dir root
-//! - gives only a scoped `plugin_data_dir` (`…/plugins/<id>/data`) and fetch
-//!   scratch under the guest `TMPDIR` (`…/plugins/<id>/tmp/fetch`)
+//! - gives only a scoped `plugin_data_dir` (`…/plugin-state/<PluginKey fs-id>/data`) and fetch
+//!   scratch under the guest `TMPDIR` (`…/plugin-state/<PluginKey fs-id>/tmp/fetch`)
 //! - seals login credentials via [`SourceScope`] (`provider = plugin id`)
 //! - loads those credentials for `scan` and `fetch_title` (plugin never opens the DB)
 //! - upserts scan book DTOs via [`SourceScope`] with `source` forced to the plugin id

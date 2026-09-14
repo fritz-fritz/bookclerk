@@ -3,6 +3,11 @@
 //! The catalog installer only sees `$FILES_DIR/plugins` plus the install
 //! ledger. Runtime discovery also searches `BOOKCLERK_PLUGIN_DIRS`. This
 //! module applies the same search-root order before any install mutation.
+//!
+//! Callers must hold [`PluginMutationLock`] for this host `$FILES_DIR` for
+//! the entire preflight → catalog install → health → commit/rollback
+//! transaction. The lock is host-local and does not coordinate with other
+//! `$FILES_DIR` values or a shared Bookclerk database.
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +16,7 @@ use bookclerk_library::BOOKCLERK_SCHEMA_NAMESPACE;
 use bookclerk_plugin_abi::PRODUCT_API_VERSION;
 use bookclerk_plugin_catalog::{
     BookclerkPackageManifest, CatalogError, InstallOptions, InstallOutcome, InstallReceipt,
-    Installer, PackageCoordinate, PluginKey,
+    Installer, PackageCoordinate, PluginKey, PluginMutationLock,
 };
 
 use crate::discover::plugin_search_dirs;
@@ -51,35 +56,46 @@ pub fn reject_configured_alias_collision(
 
 /// Catalog install after [`reject_configured_alias_collision`].
 ///
+/// `lock` must already cover `opts.plugins_root` so alias preflight and the
+/// catalog transaction share one host-local mutation lock.
+///
 /// # Errors
 ///
-/// Returns a catalog error when preflight rejects the alias or install fails.
+/// Returns a catalog error when the lock does not cover this plugins root,
+/// preflight rejects the alias, or install fails.
 pub fn install_from_manifest_with_configured_aliases(
     config: &Config,
+    lock: &PluginMutationLock,
     manifest: &BookclerkPackageManifest,
     coordinate: &PackageCoordinate,
     opts: &InstallOptions,
 ) -> bookclerk_plugin_catalog::Result<InstallOutcome> {
+    lock.require_plugins_root(&opts.plugins_root)?;
     preflight_install_alias(
         config,
         coordinate,
         &manifest.runtime().id,
         &opts.plugins_root,
     )?;
-    Installer::install_from_manifest(manifest, coordinate, opts)
+    Installer::install_from_manifest_with_lock(lock, manifest, coordinate, opts)
 }
 
 /// Local-archive install after [`reject_configured_alias_collision`].
 ///
+/// `lock` must already cover `opts.plugins_root`.
+///
 /// # Errors
 ///
-/// Returns a catalog error when preflight rejects the alias or install fails.
+/// Returns a catalog error when the lock does not cover this plugins root,
+/// preflight rejects the alias, or install fails.
 pub fn install_local_archive_with_configured_aliases(
     config: &Config,
+    lock: &PluginMutationLock,
     archive: &Path,
     manifest: &BookclerkPackageManifest,
     opts: &InstallOptions,
 ) -> bookclerk_plugin_catalog::Result<InstallOutcome> {
+    lock.require_plugins_root(&opts.plugins_root)?;
     let coordinate = Installer::local_archive_coordinate(archive, manifest);
     preflight_install_alias(
         config,
@@ -87,7 +103,7 @@ pub fn install_local_archive_with_configured_aliases(
         &manifest.runtime().id,
         &opts.plugins_root,
     )?;
-    Installer::install_local_archive(archive, manifest, opts)
+    Installer::install_local_archive_with_lock(lock, archive, manifest, opts)
 }
 
 /// Resolves the incoming PluginKey and rejects a foreign alias occupant.
@@ -361,9 +377,11 @@ mod tests {
             trust: bookclerk_plugin_catalog::TrustPolicy::allow_unverified_publisher(),
             ..Default::default()
         };
-        let err = install_from_manifest_with_configured_aliases(&cfg, &manifest, &coord, &opts)
-            .unwrap_err()
-            .to_string();
+        let lock = PluginMutationLock::acquire(tmp.path()).unwrap();
+        let err =
+            install_from_manifest_with_configured_aliases(&cfg, &lock, &manifest, &coord, &opts)
+                .unwrap_err()
+                .to_string();
         assert!(err.contains("already owned"), "{err}");
         assert_eq!(
             fs::read(&ledger).unwrap(),

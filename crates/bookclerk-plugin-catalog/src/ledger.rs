@@ -6,6 +6,10 @@
 //! lives at `$FILES_DIR/install-ledger.json`, records the exact PluginKey and
 //! payload digests for a known platform artifact.
 //!
+//! The ledger is host-local, like the install tree and
+//! [`crate::PLUGIN_MUTATION_LOCK_FILE`]. It is not a cluster-wide inventory
+//! and is never locked through PostgreSQL/D1 advisory locks.
+//!
 //! The receipt remains useful metadata (version, archive URL, sandbox snapshot).
 //! It does **not** establish platform or first-party authority by itself.
 

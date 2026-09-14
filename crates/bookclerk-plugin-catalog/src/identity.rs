@@ -6,6 +6,13 @@
 //! key, so a same-package rename keeps identity stable. Version and content
 //! hashes are **not** part of the key; they belong on [`ArtifactIdentity`].
 //!
+//! Aliases are unique within **one host plugin namespace** (`$BOOKCLERK_FILES_DIR`),
+//! conceptually `(HostId, alias) → PluginKey`. A future stable `HostId` may
+//! be persisted locally (for example `$FILES_DIR/host.json`) for shared-database
+//! placement; this crate does not implement HostId, cluster inventory, or
+//! database advisory locks. Two hosts with distinct files dirs may install the
+//! same alias and PluginKey independently.
+//!
 //! Platform trust is host-controlled ([`PluginProvenance::PlatformBundled`])
 //! only after the host install ledger records the exact PluginKey and payload
 //! digests for a known platform artifact. A third-party package that declares

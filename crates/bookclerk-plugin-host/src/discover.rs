@@ -162,9 +162,9 @@ pub fn discover_plugins(config: &Config) -> Result<Vec<DiscoveredPlugin>> {
 
 /// Resolves `spec` to a discovered plugin.
 ///
-/// `spec` may be a canonical [`PluginKey`] or a globally unique alias. In valid
-/// installed state an alias maps to exactly one PluginKey. Duplicate aliases
-/// fail closed rather than picking first or last.
+/// `spec` may be a canonical [`PluginKey`] or an alias unique in this host
+/// plugin namespace. In valid installed state an alias maps to exactly one
+/// PluginKey. Duplicate aliases fail closed rather than picking first or last.
 ///
 /// # Errors
 ///

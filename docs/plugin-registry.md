@@ -302,7 +302,7 @@ publisher” vs “crates.io metadata only”.
 6. Leave `enabled = false` for integrations (existing default); operator enables
    in config / dashboard
 
-Alias uniqueness (one Bookclerk installation):
+Alias uniqueness (one host plugin namespace / `$BOOKCLERK_FILES_DIR`):
 
 - Different PluginKey + unused alias → allowed
 - Same PluginKey + same alias (update) → allowed
@@ -313,6 +313,8 @@ Alias uniqueness (one Bookclerk installation):
   install/update/replace; they need an explicit future migration because
   `[sources.<id>]` / `[integrations.<id>]` stay keyed by alias
 - Corrupt disk with two PluginKeys sharing an alias → discovery fails closed
+- Distinct hosts with distinct `$FILES_DIR` values may install the same alias
+  and PluginKey independently (no shared-database lock)
 
 `--replace` updates files for an existing PluginKey at its current alias. It
 never lets a different provenance seize an alias, and it never renames an
