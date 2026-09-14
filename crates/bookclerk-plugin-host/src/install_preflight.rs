@@ -132,18 +132,16 @@ pub(crate) fn reject_alias_collision_in_dirs(
     if matches.is_empty() {
         return Ok(());
     }
-    let foreign: Vec<_> = matches
-        .iter()
-        .filter(|(key, _, _)| key != incoming_key)
-        .collect();
-    if !foreign.is_empty() {
+    let foreign_or_dup = matches.len() > 1 || matches.iter().any(|(key, _, _)| key != incoming_key);
+    if foreign_or_dup {
         let details: Vec<_> = matches
             .iter()
             .map(|(key, _, path)| format!("`{key}` at {}", path.display()))
             .collect();
         return Err(PluginError::message(format!(
-            "plugin alias `{incoming_alias}` is already owned by a different PluginKey; \
-             a different PluginKey cannot take this alias (`--replace` updates the existing PluginKey only): {}",
+            "plugin alias `{incoming_alias}` is already occupied; \
+             a different PluginKey cannot take this alias (`--replace` updates the existing PluginKey only), \
+             and the same PluginKey must not appear in more than one discovery root: {}",
             details.join("; ")
         )));
     }
@@ -204,10 +202,16 @@ fn push_alias_occupant(
         return Ok(());
     }
     let receipt = InstallReceipt::load(root).ok();
-    let alias = receipt
-        .as_ref()
-        .map(|row| row.runtime.id.clone())
-        .unwrap_or_else(|| manifest.id.clone());
+    let alias = manifest.id.clone();
+    if let Some(row) = receipt.as_ref() {
+        if !row.runtime.id.eq_ignore_ascii_case(&alias) {
+            return Err(PluginError::message(format!(
+                "plugin at {}: install receipt alias `{}` does not match plugin.toml alias `{alias}`",
+                root.display(),
+                row.runtime.id
+            )));
+        }
+    }
     let key = receipt
         .and_then(|row| row.plugin_key().ok())
         .or_else(|| PluginKey::from_install_path(root, &alias).ok())
@@ -296,7 +300,7 @@ mod tests {
         let err = reject_configured_alias_collision(&cfg, &incoming, "echo")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("already owned"), "{err}");
+        assert!(err.contains("already occupied"), "{err}");
         assert!(err.contains("PluginKey"), "{err}");
     }
 
@@ -313,7 +317,7 @@ mod tests {
         let err = reject_alias_collision_in_dirs(&dirs, &incoming, "echo")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("already owned"), "{err}");
+        assert!(err.contains("already occupied"), "{err}");
         assert!(err.contains("--replace"), "{err}");
     }
 
@@ -347,7 +351,7 @@ mod tests {
         let err = reject_configured_alias_collision(&cfg, &incoming, "ECHO")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("already owned"), "{err}");
+        assert!(err.contains("already occupied"), "{err}");
         assert!(err.contains("--replace"), "{err}");
     }
 
@@ -382,7 +386,7 @@ mod tests {
             install_from_manifest_with_configured_aliases(&cfg, &lock, &manifest, &coord, &opts)
                 .unwrap_err()
                 .to_string();
-        assert!(err.contains("already owned"), "{err}");
+        assert!(err.contains("already occupied"), "{err}");
         assert_eq!(
             fs::read(&ledger).unwrap(),
             b"{\"schema_version\":1,\"artifacts\":[]}"

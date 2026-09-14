@@ -400,7 +400,7 @@ impl Installer {
             )));
         }
 
-        let receipt = build_receipt(
+        let receipt = match build_receipt(
             manifest,
             coordinate,
             artifact,
@@ -410,7 +410,14 @@ impl Installer {
             &incoming_key,
             PluginProvenance::VerifiedInstalled,
             false,
-        )?;
+        ) {
+            Ok(receipt) => receipt,
+            Err(e) => {
+                restore_tree(&backup);
+                let _ = fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+        };
         if let Err(e) = receipt.store(&dest) {
             restore_tree(&backup);
             let _ = fs::remove_dir_all(&staging);
@@ -712,16 +719,21 @@ fn resolve_installed_dir(plugins_root: &Path, spec: &str) -> Result<PathBuf> {
             if !path.is_dir() || !path.join("plugin.toml").is_file() {
                 continue;
             }
-            let id_match = InstallReceipt::load(&path)
+            let toml_alias = std::fs::read_to_string(path.join("plugin.toml"))
                 .ok()
-                .map(|r| r.runtime.id.eq_ignore_ascii_case(spec))
-                .or_else(|| {
-                    std::fs::read_to_string(path.join("plugin.toml"))
-                        .ok()
-                        .and_then(|t| PluginManifest::parse(&t).ok())
-                        .map(|m| m.id.eq_ignore_ascii_case(spec))
-                })
-                .unwrap_or(false);
+                .and_then(|t| PluginManifest::parse(&t).ok())
+                .map(|m| m.id);
+            let receipt_alias = InstallReceipt::load(&path).ok().map(|r| r.runtime.id);
+            // Host `plugin.toml` is the alias source of truth. A receipt may
+            // confirm the same alias but cannot redirect lookup onto another id.
+            let id_match = match (&toml_alias, &receipt_alias) {
+                (Some(toml), Some(receipt)) => {
+                    toml.eq_ignore_ascii_case(spec) && receipt.eq_ignore_ascii_case(toml)
+                }
+                (Some(toml), None) => toml.eq_ignore_ascii_case(spec),
+                (None, Some(receipt)) => receipt.eq_ignore_ascii_case(spec),
+                (None, None) => false,
+            };
             if id_match && !matches.iter().any(|p| p == &path) {
                 matches.push(path);
             }

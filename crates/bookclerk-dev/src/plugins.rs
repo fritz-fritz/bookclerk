@@ -244,6 +244,9 @@ pub fn install_platform(root: &Path, files_dir: &Path, release: bool) -> Result<
     let plugins_root = files_dir.join("plugins");
     fs::create_dir_all(&plugins_root)
         .with_context(|| format!("create {}", plugins_root.display()))?;
+    // Serialize against CLI/daemon install/remove/discovery on the same host files dir.
+    let _lock = bookclerk_plugin_catalog::PluginMutationLock::acquire(files_dir)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let bin_dir = root.join("target").join(profile_dir(release));
     for guest in discover_tier(root, PLATFORM_PLUGINS_DIR)? {
         let leaf = guest_install_leaf(&guest)?;
@@ -252,6 +255,9 @@ pub fn install_platform(root: &Path, files_dir: &Path, release: bool) -> Result<
             fs::remove_dir_all(&out).with_context(|| format!("clear {}", out.display()))?;
         }
         stage_guest(root, &bin_dir, &plugins_root, &guest, Some(files_dir))?;
+        // Pre-PluginKey installs lived at `plugins/<alias>/`. Leaving that tree
+        // beside `plugins/<fs_id>/` makes discovery fail closed on duplicate aliases.
+        remove_legacy_alias_install(&plugins_root, &guest.id, &out)?;
         eprintln!(
             "installed platform plugin `{}` ({}) -> {}",
             guest.id,
@@ -260,6 +266,56 @@ pub fn install_platform(root: &Path, files_dir: &Path, release: bool) -> Result<
         );
     }
     Ok(())
+}
+
+/// Removes a pre-`pk-*` install leaf named after the display alias, if present.
+///
+/// # Arguments
+///
+/// * `plugins_root` - Host `$FILES_DIR/plugins` directory.
+/// * `alias` - Manifest / display id (`sqlite`, `local`, …).
+/// * `canonical` - Current `pk-*` install directory for the same guest.
+///
+/// # Errors
+///
+/// Returns when removing the legacy directory fails.
+fn remove_legacy_alias_install(plugins_root: &Path, alias: &str, canonical: &Path) -> Result<()> {
+    let legacy = plugins_root.join(alias);
+    if !legacy.is_dir() {
+        return Ok(());
+    }
+    if paths_same_dir(&legacy, canonical) {
+        return Ok(());
+    }
+    // Only retire trees that look like an install of this alias (avoid clobbering
+    // an unrelated directory that happens to share the name).
+    let toml = legacy.join("plugin.toml");
+    if !toml.is_file() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(&toml)
+        .with_context(|| format!("read legacy manifest {}", toml.display()))?;
+    let Ok(manifest) = bookclerk_plugin_manifest::PluginManifest::parse(&text) else {
+        return Ok(());
+    };
+    if !manifest.id.eq_ignore_ascii_case(alias) {
+        return Ok(());
+    }
+    fs::remove_dir_all(&legacy)
+        .with_context(|| format!("remove legacy alias install {}", legacy.display()))?;
+    eprintln!(
+        "removed legacy alias install `{}` -> {}",
+        alias,
+        legacy.display()
+    );
+    Ok(())
+}
+
+fn paths_same_dir(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
 }
 
 /// Stage platform guests into a temp dir for `package-platform` bundling.
@@ -778,6 +834,61 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf()
+    }
+
+    #[test]
+    fn remove_legacy_alias_install_deletes_matching_alias_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let canonical = plugins.join("pk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        fs::create_dir_all(&canonical).unwrap();
+        let legacy = plugins.join("sqlite");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("plugin.toml"),
+            r#"
+api_version = 3
+id = "sqlite"
+runtime = "native"
+command = "./bin"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .unwrap();
+        remove_legacy_alias_install(&plugins, "sqlite", &canonical).unwrap();
+        assert!(!legacy.exists(), "legacy alias tree should be removed");
+        assert!(canonical.exists(), "canonical pk-* tree must remain");
+    }
+
+    #[test]
+    fn remove_legacy_alias_install_skips_unrelated_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let canonical = plugins.join("pk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        fs::create_dir_all(&canonical).unwrap();
+        let other = plugins.join("sqlite");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(
+            other.join("plugin.toml"),
+            r#"
+api_version = 3
+id = "other"
+runtime = "native"
+command = "./bin"
+entrypoints = ["cli"]
+
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .unwrap();
+        remove_legacy_alias_install(&plugins, "sqlite", &canonical).unwrap();
+        assert!(other.exists(), "non-matching id must not be deleted");
     }
 
     #[test]

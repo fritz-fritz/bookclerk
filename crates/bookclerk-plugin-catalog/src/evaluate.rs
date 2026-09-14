@@ -71,6 +71,15 @@ pub fn evaluate_install_in(
         Err(err) => Err(err),
         Ok(receipt) => {
             let plugin_key = receipt.plugin_key()?;
+            require_key_derived_install_path(root, &plugin_key)?;
+            if !receipt.runtime.id.eq_ignore_ascii_case(&manifest.id) {
+                return Err(CatalogError::message(format!(
+                    "install receipt alias `{}` does not match plugin.toml alias `{}` at {}",
+                    receipt.runtime.id,
+                    manifest.id,
+                    root.display()
+                )));
+            }
             let hashes_match = receipt.manifest_sha256.eq_ignore_ascii_case(&manifest_sha)
                 && receipt
                     .payload_root_sha256
@@ -113,6 +122,24 @@ pub fn evaluate_install_in(
             })
         }
     }
+}
+
+/// For `pk-*` install directories, require `basename == key.fs_id()`.
+fn require_key_derived_install_path(root: &Path, key: &PluginKey) -> Result<()> {
+    let Some(name) = root.file_name().and_then(|n| n.to_str()) else {
+        return Err(CatalogError::message(format!(
+            "install directory {} has a non-Unicode name; refusing to trust receipt PluginKey",
+            root.display()
+        )));
+    };
+    if name.starts_with("pk-") && name != key.fs_id() {
+        return Err(CatalogError::message(format!(
+            "install directory {} does not match receipt PluginKey filesystem id `{}`",
+            root.display(),
+            key.fs_id()
+        )));
+    }
+    Ok(())
 }
 
 /// Build a host-owned platform-bundled receipt **and** ledger row.
@@ -235,6 +262,36 @@ mode = "deny"
         let identity = evaluate_install_in(&root, &manifest, Some(files.path())).unwrap();
         assert_eq!(identity.provenance, PluginProvenance::Modified);
         assert!(!identity.provenance.grants_platform_defaults());
+    }
+
+    #[test]
+    fn pk_directory_mismatching_receipt_fs_id_fails_closed() {
+        let files = tempfile::tempdir().unwrap();
+        let key = PluginKey::platform("bookclerk-plugin-database-sqlite", "sqlite").unwrap();
+        let wrong = files
+            .path()
+            .join("plugins")
+            .join("pk-ffffffffffffffffffffffffffffffff");
+        std::fs::create_dir_all(&wrong).unwrap();
+        write_sqlite_tree(&wrong);
+        let manifest = parse_sqlite(&wrong);
+        stamp_platform_receipt(
+            &wrong,
+            files.path(),
+            "bookclerk-plugin-database-sqlite",
+            &manifest,
+            "0.1.0",
+        )
+        .unwrap();
+        // Move receipt+ledger to claim the real key while sitting under a foreign pk-* leaf.
+        let err = evaluate_install_in(&wrong, &manifest, Some(files.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("does not match receipt PluginKey filesystem id")
+                || err.contains(&key.fs_id()),
+            "{err}"
+        );
     }
 
     #[test]
