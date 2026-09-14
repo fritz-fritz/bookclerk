@@ -1443,36 +1443,15 @@ fn set_plugin_enabled(
         match family {
             PluginFamily::Source => {
                 cfg.sources.set_enabled(&plugin.manifest.id, enabled);
-                if enabled {
-                    cfg.sources.set_string(
-                        &plugin.manifest.id,
-                        "plugin",
-                        plugin.plugin_key().canonical(),
-                    );
-                }
             }
             PluginFamily::Integration => {
                 cfg.integrations.set_enabled(&plugin.manifest.id, enabled);
-                if enabled {
-                    cfg.integrations
-                        .plugin_table_mut(&plugin.manifest.id)
-                        .insert(
-                            "plugin".into(),
-                            toml::Value::String(plugin.plugin_key().canonical().to_string()),
-                        );
-                }
             }
             PluginFamily::Output if bookclerk_plugin_host::is_first_party_s3_output(&plugin) => {
                 cfg.output.s3.enabled = enabled;
-                if enabled {
-                    cfg.output.s3.plugin = plugin.plugin_key().canonical().to_string();
-                }
             }
             PluginFamily::Output if bookclerk_plugin_host::is_first_party_local_output(&plugin) => {
                 cfg.output.local.enabled = enabled;
-                if enabled {
-                    cfg.output.local.plugin = plugin.plugin_key().canonical().to_string();
-                }
             }
             PluginFamily::Output => {
                 // Third-party destinations have no config.toml enable knob yet.
@@ -1488,7 +1467,8 @@ fn set_plugin_enabled(
             }
             PluginFamily::Database => {
                 if enabled {
-                    cfg.database.plugin = plugin.plugin_key().canonical().to_string();
+                    // Occupancy PluginKey is stamped below via
+                    // `stamp_occupancy_plugin_key`.
                 } else if occupies_database_slot(&plugin, &config.database.plugin) {
                     anyhow::bail!(
                         "cannot disable the active database plugin `{}`; \
@@ -1507,6 +1487,10 @@ fn set_plugin_enabled(
                 }
             }
         }
+    }
+    if enabled {
+        bookclerk_plugin_host::stamp_occupancy_plugin_key(&mut cfg, &plugin)
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
     }
     let path = cfg.paths().config_file.clone();
     cfg.write_toml_file(&path)?;
