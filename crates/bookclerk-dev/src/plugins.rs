@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
+use bookclerk_plugin_catalog::{
+    platform_artifact, PackageCoordinate, PluginKey, RegistrySource, CRATES_IO_INDEX,
+};
 
 /// Workspace-relative directory of always-shipped platform guests (`sqlite`, `local`).
 const PLATFORM_PLUGINS_DIR: &str = "crates/bookclerk-plugins/platform";
@@ -87,6 +90,44 @@ pub fn packages_for(root: &Path, sel: BuildSelection) -> Result<Vec<String>> {
         }
     }
     Ok(pkgs)
+}
+
+/// Canonical PluginKey used when staging/installing `guest`.
+///
+/// Platform artifacts use `platform:bookclerk/{package}`. Workspace
+/// Cargo packages use the crates.io `cargo:` form so dest leaves stay stable.
+/// Other trees use a path key of the source directory.
+///
+/// # Errors
+///
+/// Returns when the id or coordinate cannot form a PluginKey.
+pub fn guest_plugin_key(guest: &DiscoveredGuest) -> Result<PluginKey> {
+    if let Some(package) = guest.package.as_deref() {
+        if platform_artifact(package, &guest.id).is_some() {
+            return PluginKey::platform(package, &guest.id)
+                .map_err(|err| anyhow::anyhow!(err.to_string()));
+        }
+        let coordinate = PackageCoordinate {
+            source: RegistrySource::Cargo {
+                registry_url: CRATES_IO_INDEX.to_string(),
+            },
+            name: package.to_string(),
+            version: "0.0.0".into(),
+        };
+        return PluginKey::from_coordinate(&coordinate, &guest.id)
+            .map_err(|err| anyhow::anyhow!(err.to_string()));
+    }
+    PluginKey::from_install_path(&guest.dir, &guest.id)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))
+}
+
+/// Install-directory leaf (`pk-` + 128-bit digest) for `guest`.
+///
+/// # Errors
+///
+/// Returns when [`guest_plugin_key`] fails.
+pub fn guest_install_leaf(guest: &DiscoveredGuest) -> Result<String> {
+    Ok(guest_plugin_key(guest)?.fs_id())
 }
 
 /// Native guests contribute a Cargo package; workerd guests ship `modules/`
@@ -178,13 +219,13 @@ pub fn stage_plugins(
         guests.extend(discover_examples(root)?);
     }
     for guest in guests {
-        stage_guest(root, &bin_dir, dest, &guest)?;
+        stage_guest(root, &bin_dir, dest, &guest, None)?;
     }
     eprintln!("BOOKCLERK_PLUGIN_ARTIFACTS={}", dest.display());
     Ok(())
 }
 
-/// Install platform guests into `$FILES_DIR/plugins/{id}/` (installer layout).
+/// Install platform guests into `$FILES_DIR/plugins/{plugin-key-fs-id}/`.
 ///
 /// # Arguments
 ///
@@ -203,20 +244,86 @@ pub fn install_platform(root: &Path, files_dir: &Path, release: bool) -> Result<
     let plugins_root = files_dir.join("plugins");
     fs::create_dir_all(&plugins_root)
         .with_context(|| format!("create {}", plugins_root.display()))?;
+    // Serialize against CLI/daemon install/remove/discovery on the same host files dir.
+    let _lock = bookclerk_plugin_catalog::PluginMutationLock::acquire(files_dir)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
     let bin_dir = root.join("target").join(profile_dir(release));
     for guest in discover_tier(root, PLATFORM_PLUGINS_DIR)? {
-        let out = plugins_root.join(&guest.id);
+        let leaf = guest_install_leaf(&guest)?;
+        let out = plugins_root.join(&leaf);
         if out.exists() {
             fs::remove_dir_all(&out).with_context(|| format!("clear {}", out.display()))?;
         }
-        stage_guest(root, &bin_dir, &plugins_root, &guest)?;
+        stage_guest(root, &bin_dir, &plugins_root, &guest, Some(files_dir))?;
+        // Pre-PluginKey installs lived at `plugins/<alias>/`. Leaving that tree
+        // beside `plugins/<fs_id>/` makes discovery fail closed on duplicate aliases.
+        remove_legacy_alias_install(&plugins_root, &guest.id, &out)?;
         eprintln!(
-            "installed platform plugin `{}` -> {}",
+            "installed platform plugin `{}` ({}) -> {}",
             guest.id,
+            leaf,
             out.display()
         );
     }
     Ok(())
+}
+
+/// Removes a pre-`pk-*` install leaf named after the display alias, if present.
+///
+/// # Arguments
+///
+/// * `plugins_root` - Host `$FILES_DIR/plugins` directory.
+/// * `alias` - Manifest / display id (`sqlite`, `local`, …).
+/// * `canonical` - Current `pk-*` install directory for the same guest.
+///
+/// # Errors
+///
+/// Returns when removing the legacy directory fails.
+fn remove_legacy_alias_install(plugins_root: &Path, alias: &str, canonical: &Path) -> Result<()> {
+    let legacy = plugins_root.join(alias);
+    if !legacy.is_dir() {
+        return Ok(());
+    }
+    if paths_same_dir(&legacy, canonical) {
+        return Ok(());
+    }
+    // Only retire trees that look like an install of this alias (avoid clobbering
+    // an unrelated directory that happens to share the name).
+    let toml = legacy.join("plugin.toml");
+    if !toml.is_file() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(&toml)
+        .with_context(|| format!("read legacy manifest {}", toml.display()))?;
+    let Ok(manifest) = bookclerk_plugin_manifest::PluginManifest::parse(&text) else {
+        return Ok(());
+    };
+    if !manifest.id.eq_ignore_ascii_case(alias) {
+        return Ok(());
+    }
+    fs::remove_dir_all(&legacy)
+        .with_context(|| format!("remove legacy alias install {}", legacy.display()))?;
+    eprintln!(
+        "removed legacy alias install `{}` -> {}",
+        alias,
+        legacy.display()
+    );
+    Ok(())
+}
+
+/// Returns true when `a` and `b` name the same directory after canonicalize.
+///
+/// Falls back to path equality when either side cannot be canonicalized.
+///
+/// # Arguments
+///
+/// * `a` - First filesystem path.
+/// * `b` - Second filesystem path.
+fn paths_same_dir(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
 }
 
 /// Stage platform guests into a temp dir for `package-platform` bundling.
@@ -258,7 +365,7 @@ pub fn stage_platform_for_pack(
     fs::create_dir_all(dest).with_context(|| format!("create staging dir {}", dest.display()))?;
     let bin_dir = root.join("target").join(profile_dir(release));
     for guest in discover_tier(root, PLATFORM_PLUGINS_DIR)? {
-        stage_guest(root, &bin_dir, dest, &guest)?;
+        stage_guest(root, &bin_dir, dest, &guest, None)?;
     }
     Ok(())
 }
@@ -490,8 +597,10 @@ fn stage_guest(
     bin_dir: &Path,
     dest_root: &Path,
     guest: &DiscoveredGuest,
+    files_dir: Option<&Path>,
 ) -> Result<()> {
-    let out = dest_root.join(&guest.id);
+    let leaf = guest_install_leaf(guest)?;
+    let out = dest_root.join(leaf);
     fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
 
     let manifest_src = guest.dir.join(&guest.manifest_name);
@@ -531,6 +640,32 @@ fn stage_guest(
     }
 
     stage_embedded_logo(&guest.dir, &out, &manifest_src)?;
+    stamp_platform_if_known(guest, &out, files_dir)?;
+    Ok(())
+}
+
+/// Host-stamps a verified platform receipt + ledger row for installer-shipped sqlite/local.
+fn stamp_platform_if_known(
+    guest: &DiscoveredGuest,
+    out: &Path,
+    files_dir: Option<&Path>,
+) -> Result<()> {
+    let Some(files_dir) = files_dir else {
+        return Ok(());
+    };
+    let Some(package) = guest.package.as_deref() else {
+        return Ok(());
+    };
+    if bookclerk_plugin_catalog::platform_artifact(package, &guest.id).is_none() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(out.join("plugin.toml"))
+        .with_context(|| format!("read {}", out.join("plugin.toml").display()))?;
+    let manifest = bookclerk_plugin_manifest::PluginManifest::parse(&text)
+        .with_context(|| format!("parse staged plugin.toml for {}", guest.id))?;
+    let version = env!("CARGO_PKG_VERSION");
+    bookclerk_plugin_catalog::stamp_platform_receipt(out, files_dir, package, &manifest, version)
+        .with_context(|| format!("stamp platform receipt for {}", guest.id))?;
     Ok(())
 }
 
@@ -707,6 +842,61 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf()
+    }
+
+    #[test]
+    fn remove_legacy_alias_install_deletes_matching_alias_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let canonical = plugins.join("pk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        fs::create_dir_all(&canonical).unwrap();
+        let legacy = plugins.join("sqlite");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(
+            legacy.join("plugin.toml"),
+            r#"
+api_version = 3
+id = "sqlite"
+runtime = "native"
+command = "./bin"
+entrypoints = ["databaseAdapter"]
+
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .unwrap();
+        remove_legacy_alias_install(&plugins, "sqlite", &canonical).unwrap();
+        assert!(!legacy.exists(), "legacy alias tree should be removed");
+        assert!(canonical.exists(), "canonical pk-* tree must remain");
+    }
+
+    #[test]
+    fn remove_legacy_alias_install_skips_unrelated_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let canonical = plugins.join("pk-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        fs::create_dir_all(&canonical).unwrap();
+        let other = plugins.join("sqlite");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(
+            other.join("plugin.toml"),
+            r#"
+api_version = 3
+id = "other"
+runtime = "native"
+command = "./bin"
+entrypoints = ["cli"]
+
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .unwrap();
+        remove_legacy_alias_install(&plugins, "sqlite", &canonical).unwrap();
+        assert!(other.exists(), "non-matching id must not be deleted");
     }
 
     #[test]
