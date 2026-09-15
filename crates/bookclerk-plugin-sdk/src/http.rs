@@ -683,9 +683,12 @@ impl RequestBuilder {
                         method = Method::GET;
                         body.clear();
                     }
-                    // Do not forward Authorization across origins (credential leak).
+                    // Match workerd egress.js: strip Fetch credentials across origins.
                     if loc.origin() != url.origin() {
                         headers.remove(header::AUTHORIZATION);
+                        headers.remove(header::COOKIE);
+                        headers.remove(header::PROXY_AUTHORIZATION);
+                        headers.remove("cookie2");
                     }
                     url = loc;
                     continue;
@@ -1006,6 +1009,9 @@ fn apply_cookies(jar: &Option<Arc<CookieJar>>, url: &Url, headers: &mut HeaderMa
         .collect::<Vec<_>>()
         .join("; ");
     if cookie.is_empty() {
+        // Clear a prior hop's Cookie so an empty jar for this origin cannot
+        // leave stale credentials on the next request.
+        headers.remove(header::COOKIE);
         return;
     }
     if let Ok(v) = HeaderValue::from_str(&cookie) {
