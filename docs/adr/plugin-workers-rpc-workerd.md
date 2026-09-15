@@ -144,10 +144,11 @@ spawn error in every `[plugins].isolation` mode. Direct host↔native Cap'n
 Proto survives only as `SpawnTransport::DirectNativeDiagnostic` for tests and
 diagnostics; no product binary selects it.
 
-Still deferred: deny-direct-native-egress / HTTP proxy (a native backend behind
-the front door shares the launcher's `OutboundListen` jail, so a deny-network
-native manifest is no longer OS-denied `connect`), OAuth/listen broker,
-container executor, and VPS benchmarks.
+Native-behind-workerd guests are wrapped in a nested `NetPolicy::Deny` jail
+(`bookclerk-workerd` `native_guest.rs`) and must use the SDK `SOCKET_PROXY`
+for any egress; the launcher jail stays `OutboundListen` so
+`bookclerk-workerd` can bind the host↔isolate RPC bridge. Still deferred:
+OAuth/listen broker, container executor, and VPS benchmarks.
 
 Instances are keyed by `(plugin_id, account_id)`. Shared-isolate concurrent
 principals are not a proven isolation boundary (stubs are transferable).
