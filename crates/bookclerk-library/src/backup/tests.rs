@@ -1851,10 +1851,10 @@ async fn empty_included_plugin_backup_preserves_live_registry() {
     let db = bookclerk_plugin_database_sqlite::open_memory_unmigrated()
         .await
         .unwrap();
-    apply_host_schema(&db, HostSchemaKind::PragmaMarker)
+    apply_host_schema(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
-    let state = current_schema_state(&db, HostSchemaKind::PragmaMarker)
+    let state = current_schema_state(&db, HostSchemaKind::RowMarker)
         .await
         .unwrap();
     let mut req = backup_req(files.path(), state, BackupReason::Manual);
