@@ -692,7 +692,7 @@ covers the current manifest).
 
 | File | Role |
 | --- | --- |
-| `plugin.toml` (next to the binary or `modules/`) | **Install / discovery** — id, kind, runtime, command or `[workerd]`, capabilities |
+| `plugin.toml` (next to the binary or `modules/`) | **Install / discovery** — id, runtime, command or `[workerd]`, capabilities / entrypoints |
 | `config.toml` (`[sources.<id>]` / `[integrations.<id>]`) | **User settings** — `enabled`, occupancy `plugin` (PluginKey or unambiguous alias), opaque knobs |
 
 The plugin (or its installer) drops a directory under a search root. Bookclerk
@@ -702,13 +702,17 @@ the spawn config. Users never put `command` in `config.toml`.
 
 ## Layout
 
+Install trees are immutable and key-derived (`plugins/<PluginKey fs-id>/`, a
+`pk-*` leaf). Mutable guest state is **not** nested in the install directory.
+
 Native:
 
 ```text
-$BOOKCLERK_FILES_DIR/plugins/
-  echo/
+$BOOKCLERK_FILES_DIR/
+  plugins/pk-<fs-id>/
     plugin.toml
     bookclerk-plugin-echo-native-rust   # executable
+  plugin-state/pk-<fs-id>/
     data/                               # host-created: guest state, its HOME
     tmp/                                # host-created: guest scratch, its TMPDIR
 ```
@@ -716,20 +720,19 @@ $BOOKCLERK_FILES_DIR/plugins/
 Workerd (script archive — no per-OS binary required):
 
 ```text
-$BOOKCLERK_FILES_DIR/plugins/
-  echo/
+$BOOKCLERK_FILES_DIR/
+  plugins/pk-<fs-id>/
     plugin.toml
     modules/
       index.js
+  plugin-state/pk-<fs-id>/
     data/
     tmp/
 ```
 
-`data/` and `tmp/` are created by the host at spawn, so a plugin archive should
-not ship them; deleting one plugin's state means deleting those two directories.
-They are keyed by plugin id under `$BOOKCLERK_FILES_DIR/plugins/<id>/` wherever
-the guest itself was installed — read-only to the guest apart from that writable
-pair.
+`plugin-state/.../data` and `tmp` are created by the host at spawn, so a plugin
+archive should not ship them. Deleting one plugin's state means deleting that
+PluginKey's `plugin-state` tree. The install directory itself stays read-only.
 
 Additional roots: `BOOKCLERK_PLUGIN_DIRS` (OS path list). A guest staged under one
 of those still keeps its state under the files dir, so an upgrade that replaces
@@ -1485,16 +1488,16 @@ Authors never see the token.
 
 ## Examples
 
-Native Echo:
+Native Echo (stage into the host plugin namespace; do not copy into a
+legacy `plugins/echo/` alias directory):
 
 ```bash
-cargo build -p bookclerk-plugin-echo-native-rust
-mkdir -p "$BOOKCLERK_FILES_DIR/plugins/echo"
-cp target/debug/bookclerk-plugin-echo-native-rust \
-  "$BOOKCLERK_FILES_DIR/plugins/echo/"
-cp examples/plugins-echo-native-rust/plugin.toml \
-  "$BOOKCLERK_FILES_DIR/plugins/echo/"
+cargo stage-plugins --examples
 ```
+
+The installer places the guest at `plugins/<PluginKey fs-id>/` (`pk-*`) and
+records host-owned ledger identity. Aliases such as `echo` remain presentation
+handles for CLI/config.
 
 Workerd Echo — install `plugin.toml` + `modules/` from any of
 [`examples/plugins-echo-workerd-ts/`](../examples/plugins-echo-workerd-ts/),
