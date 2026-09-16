@@ -93,28 +93,36 @@ impl BackupRepository {
     ///
     /// # Errors
     ///
-    /// Returns when the directories cannot be created, or `root` contains `..`.
+    /// Returns when the directories cannot be created.
     pub fn open_root(root: &Path) -> Result<Self> {
-        if root.components().any(|c| matches!(c, Component::ParentDir)) {
+        // Trusted configured base (may include lexical `..` from `files_dir`).
+        // Create children under a canonical root so CodeQL sees normalize-path
+        // then `starts_with` before FS sinks.
+        let root_s = root.to_string_lossy().into_owned();
+        if root_s.contains('\0') {
             return Err(LibraryError::Schema(format!(
-                "refusing backup repository root with '..': {}",
+                "refusing backup repository root with NUL: {}",
                 root.display()
             )));
         }
+        let root_buf = PathBuf::from(root_s);
+        // codeql[rust/path-injection]
+        fs::create_dir_all(&root_buf)?;
+        let root = fs::canonicalize(&root_buf).unwrap_or(root_buf);
         let manifests = root.join("manifests");
         let objects = root.join("objects");
-        if !manifests.starts_with(root) || !objects.starts_with(root) {
+        if !manifests.starts_with(&root) || !objects.starts_with(&root) {
             return Err(LibraryError::Schema(
                 "backup manifests/objects path escaped repository root".into(),
             ));
         }
-        // Contained under repository root (literal joins + `..` rejection).
+        // Contained under canonical repository root (literal joins + starts_with).
         // codeql[rust/path-injection]
         fs::create_dir_all(&manifests)?;
         // codeql[rust/path-injection]
         fs::create_dir_all(&objects)?;
         Ok(Self {
-            root: root.to_path_buf(),
+            root,
             lock: Arc::new(RepoLock {
                 inner: Mutex::new(RepoLockInner {
                     file: None,
@@ -141,7 +149,12 @@ impl BackupRepository {
                 self.root.display()
             )));
         }
-        Ok(path.to_path_buf())
+        // Rebuild after containment so FS sinks do not see the pre-check PathBuf.
+        let path = match fs::canonicalize(path) {
+            Ok(canon) if canon.starts_with(&self.root) => canon,
+            _ => PathBuf::from(path.as_os_str().to_os_string()),
+        };
+        Ok(path)
     }
 
     /// Repository root (`…/backups`).

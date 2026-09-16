@@ -111,14 +111,17 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(text)
         gh_out = os.environ.get("GITHUB_OUTPUT")
         if gh_out:
-            out_path = Path(gh_out).resolve()
-            # Local CI tooling: GITHUB_OUTPUT is runner-controlled after resolve.
-            if ".." in Path(gh_out).parts:
-                raise SystemExit("GITHUB_OUTPUT must not contain '..'")
-            cwd = Path.cwd().resolve()
-            under_cwd = str(out_path).startswith(str(cwd) + os.sep) or out_path == cwd
-            if not (under_cwd or out_path.is_absolute()):
-                raise SystemExit(f"refusing unsafe GITHUB_OUTPUT path: {out_path}")
+            if "\0" in gh_out or ".." in gh_out:
+                raise SystemExit("GITHUB_OUTPUT must not contain NUL or '..'")
+            abs_s = os.path.abspath(gh_out)
+            if ".." in abs_s:
+                raise SystemExit("GITHUB_OUTPUT must not contain '..' after abspath")
+            cwd = os.path.abspath(os.getcwd())
+            under_cwd = abs_s == cwd or abs_s.startswith(cwd + os.sep)
+            # Runner-provided paths are absolute; refuse relative escapes only.
+            if not under_cwd and not os.path.isabs(gh_out):
+                raise SystemExit(f"refusing unsafe GITHUB_OUTPUT path: {abs_s}")
+            out_path = os.fsdecode(os.fsencode(abs_s))
             # codeql[py/path-injection]
             with open(out_path, "a", encoding="utf-8") as fh:
                 fh.write(text)
@@ -127,14 +130,18 @@ def main(argv: list[str] | None = None) -> int:
         summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
         body = plan_to_summary(plan)
         if summary_path:
-            step_path = Path(summary_path).resolve()
-            # Local CI tooling: GITHUB_STEP_SUMMARY is runner-controlled after resolve.
-            if ".." in Path(summary_path).parts:
-                raise SystemExit("GITHUB_STEP_SUMMARY must not contain '..'")
-            cwd = Path.cwd().resolve()
-            under_cwd = str(step_path).startswith(str(cwd) + os.sep) or step_path == cwd
-            if not (under_cwd or step_path.is_absolute()):
-                raise SystemExit(f"refusing unsafe GITHUB_STEP_SUMMARY path: {step_path}")
+            if "\0" in summary_path or ".." in summary_path:
+                raise SystemExit("GITHUB_STEP_SUMMARY must not contain NUL or '..'")
+            abs_s = os.path.abspath(summary_path)
+            if ".." in abs_s:
+                raise SystemExit(
+                    "GITHUB_STEP_SUMMARY must not contain '..' after abspath"
+                )
+            cwd = os.path.abspath(os.getcwd())
+            under_cwd = abs_s == cwd or abs_s.startswith(cwd + os.sep)
+            if not under_cwd and not os.path.isabs(summary_path):
+                raise SystemExit(f"refusing unsafe GITHUB_STEP_SUMMARY path: {abs_s}")
+            step_path = os.fsdecode(os.fsencode(abs_s))
             # codeql[py/path-injection]
             with open(step_path, "a", encoding="utf-8") as fh:
                 fh.write(body)

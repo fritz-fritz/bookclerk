@@ -286,20 +286,14 @@ impl SpawnPlan {
         let name = format!("bookclerk-jail{}", std::env::consts::EXE_SUFFIX);
         if let Some(path) = std::env::var_os(NESTED_JAIL_BIN_ENV) {
             let path = PathBuf::from(path);
-            // Env override for helper beside the host; existence check only.
-            // codeql[rust/path-injection]
-            if path.is_file() {
+            if let Ok(path) = bookclerk_sandbox::require_spawn_executable(&path) {
                 return Some(path);
             }
         }
-        self.launcher
-            .parent()
-            .map(|dir| dir.join(name))
-            .filter(|p| {
-                // Contained beside launcher binary.
-                // codeql[rust/path-injection]
-                p.is_file()
-            })
+        self.launcher.parent().and_then(|dir| {
+            let candidate = dir.join(&name);
+            bookclerk_sandbox::require_spawn_executable(&candidate).ok()
+        })
     }
 }
 

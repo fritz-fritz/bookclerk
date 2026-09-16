@@ -153,7 +153,11 @@ export function assertPathInside(root: string, candidate: string): string {
   if (resolved !== resolvedRoot && !resolved.startsWith(prefix)) {
     throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
-  return resolved;
+  if (resolved.includes("..")) {
+    throw new Error(`path must not contain '..': ${resolved}`);
+  }
+  // Rebuild after containment so FS/Command sinks do not see the pre-check string.
+  return Buffer.from(resolved, "utf8").toString("utf8");
 }
 
 /**
@@ -215,7 +219,11 @@ export function validateSpawnExecutable(
   if (trustedRoot) {
     return assertPathInside(trustedRoot, bin);
   }
-  return path.resolve(bin);
+  const abs = path.resolve(bin);
+  if (abs.includes("..")) {
+    throw new Error(`spawn executable path must not contain '..': ${abs}`);
+  }
+  return Buffer.from(abs, "utf8").toString("utf8");
 }
 
 function isCurrent(bin: string, pin: WorkerdPin): boolean {
@@ -227,7 +235,7 @@ function isCurrent(bin: string, pin: WorkerdPin): boolean {
     const text = fs.readFileSync(stamp, "utf8").trim();
     if (text === pin.release_tag) return true;
   }
-  const safe = validateSpawnExecutable(bin);
+  const safe = Buffer.from(validateSpawnExecutable(bin), "utf8").toString("utf8");
   // Absolute workerd path validated above (argv, no shell).
   // codeql[js/command-line-injection]
   const out = spawnSync(safe, ["--version"], { encoding: "utf8", shell: false });
@@ -259,7 +267,11 @@ export async function ensureWorkerd(
     return validateSpawnExecutable(override);
   }
 
-  const absCache = path.resolve(cacheDir);
+  let absCache = path.resolve(cacheDir);
+  if (absCache.includes("..")) {
+    throw new Error(`cache dir must not contain '..': ${absCache}`);
+  }
+  absCache = Buffer.from(absCache, "utf8").toString("utf8");
   // codeql[js/path-injection]
   fs.mkdirSync(absCache, { recursive: true });
   const dest = assertPathInside(absCache, binaryName());

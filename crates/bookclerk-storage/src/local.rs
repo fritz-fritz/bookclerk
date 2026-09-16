@@ -45,21 +45,23 @@ impl LocalFsBackend {
     /// Returns an error when the operation fails.
     pub fn with_prefix(root: PathBuf, prefix: &str) -> Result<Self> {
         let prefix = normalize_prefix(prefix);
-        if root
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
+        // Operator-configured storage root may include lexical `..` (joined onto
+        // `files_dir` by config resolution). Reject NUL, create, then canonicalize
+        // so later joins get a normalize-path → starts_with barrier for CodeQL.
+        let root_s = root.to_string_lossy().into_owned();
+        if root_s.contains('\0') {
             return Err(StorageError::InvalidKey(root.display().to_string()));
         }
-        // Operator-configured storage root; `..` rejected above.
+        let root = PathBuf::from(root_s);
         // codeql[rust/path-injection]
         std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
         if !prefix.is_empty() {
             let prefix_dir = root.join(prefix.trim_end_matches('/'));
             if !prefix_dir.starts_with(&root) {
                 return Err(StorageError::InvalidKey(prefix));
             }
-            // Contained under storage root (normalized prefix + starts_with).
+            // Contained under canonical storage root (join + starts_with).
             // codeql[rust/path-injection]
             std::fs::create_dir_all(&prefix_dir)?;
         }

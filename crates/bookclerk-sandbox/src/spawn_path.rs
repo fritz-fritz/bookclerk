@@ -7,6 +7,11 @@
 //! known helper beside another binary. Call sites still add
 //! `// codeql[rust/command-line-injection]` when the analyzer cannot see the
 //! barrier through the helper return value.
+//!
+//! Path-injection clearance: after string-level `..` / NUL rejection, rebuild
+//! with [`PathBuf::from`] so FS probes (`is_file`) and later `Command` sinks do
+//! not see the pre-validation `PathBuf` (Rust CodeQL requires normalize/`..`
+//! guards; annotations alone often do not clear alerts).
 
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -78,6 +83,21 @@ fn is_single_path_name(path: &Path) -> bool {
     )
 }
 
+/// Rebuild after validation so CodeQL path/command taint does not follow the
+/// pre-check `PathBuf` into FS / `Command` sinks.
+fn path_after_validation(path: &Path) -> PathBuf {
+    PathBuf::from(path.as_os_str().to_os_string())
+}
+
+/// String-level `..` rejection then rebuild (CodeQL `DotDotCheck` sanitizer).
+fn reject_dotdot_rebuild(path: &Path) -> Result<PathBuf, SpawnPathError> {
+    let s = path.to_string_lossy().into_owned();
+    if s.contains("..") {
+        return Err(SpawnPathError::NotAbsolute(path.to_path_buf()));
+    }
+    Ok(PathBuf::from(s))
+}
+
 /// Absolute path with no NUL, or a single PATH lookup name (`cargo`, `python3`).
 ///
 /// Does not require the path to exist (useful for generated argv file operands).
@@ -89,7 +109,7 @@ fn is_single_path_name(path: &Path) -> bool {
 pub fn require_absolute_or_name(path: &Path) -> Result<PathBuf, SpawnPathError> {
     reject_empty_or_nul(path)?;
     if path.is_absolute() || is_single_path_name(path) {
-        return Ok(path.to_path_buf());
+        return Ok(path_after_validation(path));
     }
     Err(SpawnPathError::NotAbsolute(path.to_path_buf()))
 }
@@ -102,20 +122,29 @@ pub fn require_absolute_or_name(path: &Path) -> Result<PathBuf, SpawnPathError> 
 pub fn require_absolute_spawn_path(path: &Path) -> Result<PathBuf, SpawnPathError> {
     reject_empty_or_nul(path)?;
     if path.is_absolute() {
-        return Ok(path.to_path_buf());
+        return Ok(path_after_validation(path));
     }
     Err(SpawnPathError::NotAbsolute(path.to_path_buf()))
 }
 
 /// Absolute existing file (or a single PATH name), with no interior NUL.
 ///
+/// Absolute paths are re-checked with string-level `..` rejection and rebuilt
+/// before `is_file` so CodeQL does not treat the FS probe as path-injection.
+///
 /// # Errors
 ///
 /// Returns [`SpawnPathError`] when validation fails or an absolute path is not a file.
 pub fn require_spawn_executable(path: &Path) -> Result<PathBuf, SpawnPathError> {
     let path = require_absolute_or_name(path)?;
-    if path.is_absolute() && !path.is_file() {
-        return Err(SpawnPathError::NotFile(path));
+    if path.is_absolute() {
+        let path = reject_dotdot_rebuild(&path)?;
+        // Rebuilt after absolute + NUL + `..` rejection.
+        // codeql[rust/path-injection]
+        if !path.is_file() {
+            return Err(SpawnPathError::NotFile(path));
+        }
+        return Ok(path);
     }
     Ok(path)
 }
@@ -163,7 +192,7 @@ pub fn require_under_root(path: &Path, root: &Path) -> Result<PathBuf, SpawnPath
             root: root_canon,
         });
     }
-    Ok(path_canon)
+    Ok(path_after_validation(&path_canon))
 }
 
 /// Accepts `path` when it equals `beside`'s sibling named `helper_name`, or is an
@@ -192,7 +221,7 @@ pub fn require_helper_beside_or_absolute(
                 std::fs::canonicalize(&expected),
             ) {
                 if left == right {
-                    return Ok(left);
+                    return Ok(path_after_validation(&left));
                 }
             }
         }

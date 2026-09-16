@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .path_guard import resolve_under
+from .path_guard import cli_user_path
 from .sparse_workerd import run_smoke
 from .tools import check_plugin, fmt_plugin_toml, generate_types, package_plugin, sync_embed
 
@@ -45,9 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     cmd = args[0]
     try:
         if cmd == "check":
-            directory = resolve_under(
-                Path.cwd(), Path(args[1] if len(args) > 1 else ".").resolve()
-            )
+            directory = cli_user_path(args[1] if len(args) > 1 else ".")
             print(check_plugin(directory))
             return 0
         if cmd == "fmt":
@@ -60,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
                     path = Path(a)
                 else:
                     raise SystemExit(f"unknown fmt flag: {a}")
-            print(fmt_plugin_toml(path, check_only=check_only))
+            print(fmt_plugin_toml(cli_user_path(path), check_only=check_only))
             return 0
         if cmd == "types":
             out = None
@@ -75,16 +73,12 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     raise SystemExit(f"unknown types flag: {args[i]}")
                 i += 1
-            directory = resolve_under(Path.cwd(), directory.resolve())
-            out_resolved = (
-                resolve_under(Path.cwd(), out.resolve()) if out is not None else None
-            )
+            directory = cli_user_path(directory)
+            out_resolved = cli_user_path(out) if out is not None else None
             print(generate_types(directory, out_resolved))
             return 0
         if cmd == "sync-embed":
-            directory = resolve_under(
-                Path.cwd(), Path(args[1] if len(args) > 1 else ".").resolve()
-            )
+            directory = cli_user_path(args[1] if len(args) > 1 else ".")
             print(sync_embed(directory))
             return 0
         if cmd == "package":
@@ -102,15 +96,13 @@ def main(argv: list[str] | None = None) -> int:
                 i += 1
             if out is None:
                 raise SystemExit("package requires --out <dir>")
-            directory = resolve_under(Path.cwd(), directory.resolve())
-            out_dir = resolve_under(Path.cwd(), out.resolve())
+            directory = cli_user_path(directory)
+            out_dir = cli_user_path(out)
             archive = package_plugin(directory, out_dir)
             print(f"packed {archive}")
             return 0
         if cmd == "smoke":
-            directory = resolve_under(
-                Path.cwd(), Path(args[1] if len(args) > 1 else ".").resolve()
-            )
+            directory = cli_user_path(args[1] if len(args) > 1 else ".")
             print(run_smoke(directory))
             return 0
         print(f"unknown command: {cmd}", file=sys.stderr)

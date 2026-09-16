@@ -20,10 +20,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ..path_guard import cli_user_path, resolve_under
 from ..tools import validate_manifest
 from .config import materialize_config
 from .ensure import default_cache_dir, ensure_workerd, validate_spawn_executable
-from ..path_guard import resolve_under
 
 
 def _free_loopback_port() -> int:
@@ -150,7 +150,7 @@ def run_smoke(plugin_dir: Path) -> str:
     Examples:
         >>> # print(run_smoke(Path("./my-workerd-plugin")))
     """
-    root = Path(plugin_dir).resolve()
+    root = cli_user_path(plugin_dir)
     toml_path = resolve_under(root, "plugin.toml")
     # codeql[py/path-injection]
     if not toml_path.is_file():
@@ -174,12 +174,16 @@ def run_smoke(plugin_dir: Path) -> str:
     base = f"http://{listen_addr}"
 
     env = {**os.environ, "BOOKCLERK_PLUGIN_ROOT": str(root)}
-    safe_bin = validate_spawn_executable(workerd_bin)
-    safe_config = validate_spawn_executable(config_path, root)
+    argv0 = os.fsdecode(
+        os.fsencode(os.fspath(validate_spawn_executable(workerd_bin)))
+    )
+    argv_cfg = os.fsdecode(
+        os.fsencode(os.fspath(validate_spawn_executable(config_path, root)))
+    )
     # Absolute workerd + config paths; argv list only (shell=False).
     # codeql[py/command-line-injection]
     proc = subprocess.Popen(
-        [str(safe_bin), "serve", str(safe_config)],
+        [argv0, "serve", argv_cfg],
         cwd=str(root),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,

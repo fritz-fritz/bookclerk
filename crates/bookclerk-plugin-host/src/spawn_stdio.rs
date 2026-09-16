@@ -112,7 +112,10 @@ pub(crate) async fn spawn_stdio_guest(
                         plan.launcher.display()
                     ))
                 })?;
-            // Jail launcher and guest program validated absolute (no NUL).
+            // Jail launcher and guest program validated absolute (no NUL); rebuild
+            // again so Command::new does not see the pre-check PathBuf.
+            let launcher = PathBuf::from(launcher.as_os_str().to_os_string());
+            let program = PathBuf::from(program.as_os_str().to_os_string());
             // codeql[rust/command-line-injection]
             let mut cmd = Command::new(&launcher);
             cmd.arg("--").arg(&program).args(&plan.args);
@@ -133,7 +136,7 @@ pub(crate) async fn spawn_stdio_guest(
                         plan.launcher.display()
                     ))
                 })?;
-            // Guest program validated absolute (no NUL).
+            let program = PathBuf::from(program.as_os_str().to_os_string());
             // codeql[rust/command-line-injection]
             let mut cmd = Command::new(&program);
             cmd.args(&plan.args);

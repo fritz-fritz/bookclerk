@@ -395,16 +395,16 @@ def download_and_probe_media(
 
     if keep_dir is not None:
         raw = Path(keep_dir)
-        if any(part == ".." for part in raw.parts):
-            raise ValueError(f"download dir must not contain '..': {keep_dir}")
-        keep_dir_path = raw.expanduser().resolve()
-        cwd = Path.cwd().resolve()
-        # Prefer containment under cwd; allow other absolute paths after resolve.
-        under_cwd = (
-            str(keep_dir_path).startswith(str(cwd) + os.sep) or keep_dir_path == cwd
-        )
-        if not under_cwd and not keep_dir_path.is_absolute():
+        if any(part == ".." for part in raw.parts) or "\0" in str(keep_dir):
+            raise ValueError(f"download dir must not contain '..' or NUL: {keep_dir}")
+        abs_s = os.path.abspath(os.path.expanduser(str(raw)))
+        if ".." in abs_s:
+            raise ValueError(f"download dir must not contain '..' after abspath: {keep_dir}")
+        cwd = os.path.abspath(os.getcwd())
+        under_cwd = abs_s == cwd or abs_s.startswith(cwd + os.sep)
+        if not under_cwd and not os.path.isabs(str(raw)):
             raise ValueError(f"download dir must resolve to an absolute path: {keep_dir}")
+        keep_dir_path = Path(os.fsdecode(os.fsencode(abs_s)))
         # codeql[py/path-injection]
         keep_dir_path.mkdir(parents=True, exist_ok=True)
         ext = probe.get("kind") if probe.get("kind") != "unknown" else "bin"

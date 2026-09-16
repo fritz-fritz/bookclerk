@@ -311,24 +311,47 @@ pub fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
             path.display()
         )));
     }
-    let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    if !path.starts_with(root) && !path.starts_with(&root_canon) {
+    let root_norm = match root.canonicalize() {
+        Ok(c) => c,
+        Err(_) => {
+            let s = root.to_string_lossy().into_owned();
+            if s.contains("..") {
+                return Err(CatalogError::message(format!(
+                    "refusing root with '..': {}",
+                    root.display()
+                )));
+            }
+            PathBuf::from(s)
+        }
+    };
+    let path_norm = match path.canonicalize() {
+        Ok(c) => c,
+        Err(_) => {
+            if !path.starts_with(root) && !path.starts_with(&root_norm) {
+                return Err(CatalogError::message(format!(
+                    "path {} escapes root {}",
+                    path.display(),
+                    root.display()
+                )));
+            }
+            let s = path.to_string_lossy().into_owned();
+            if s.contains("..") {
+                return Err(CatalogError::message(format!(
+                    "refusing path with '..': {}",
+                    path.display()
+                )));
+            }
+            PathBuf::from(s)
+        }
+    };
+    if !path_norm.starts_with(&root_norm) {
         return Err(CatalogError::message(format!(
             "path {} escapes root {}",
-            path.display(),
-            root.display()
+            path_norm.display(),
+            root_norm.display()
         )));
     }
-    if let Ok(canon) = path.canonicalize() {
-        if !canon.starts_with(&root_canon) && !canon.starts_with(root) {
-            return Err(CatalogError::message(format!(
-                "path {} escapes root {}",
-                path.display(),
-                root.display()
-            )));
-        }
-    }
-    Ok(path.to_path_buf())
+    Ok(path_norm)
 }
 
 /// Wraps an I/O or tar error as a catalog message.

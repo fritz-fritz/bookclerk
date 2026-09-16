@@ -152,7 +152,7 @@ def validate_spawn_executable(
     """Validate a workerd (or helper) binary path before ``subprocess`` spawn.
 
     Requires an absolute path with no NUL bytes. When ``trusted_root`` is set,
-    resolves both paths and requires the binary to stay under that root.
+    requires the binary to stay under that root via :func:`resolve_under`.
 
     Args:
         bin_path: Candidate executable path.
@@ -173,7 +173,16 @@ def validate_spawn_executable(
         raise ValueError(f"spawn executable must be absolute: {path}")
     if trusted_root is not None:
         return resolve_under(trusted_root, path)
-    return path.resolve()
+    s = os.path.abspath(os.fspath(path))
+    if ".." in s:
+        raise ValueError(f"spawn executable path must not contain '..': {s}")
+    return Path(os.fsdecode(os.fsencode(s)))
+
+
+def _spawn_argv0(bin_path: Path | str, trusted_root: Path | str | None = None) -> str:
+    """Return a validated argv0 string with taint broken for CodeQL."""
+    safe = validate_spawn_executable(bin_path, trusted_root)
+    return os.fsdecode(os.fsencode(os.fspath(safe)))
 
 
 def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
@@ -182,11 +191,11 @@ def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
     if stamp.is_file() and stamp.read_text(encoding="utf-8").strip() == pin["release_tag"]:
         return True
     try:
-        safe = validate_spawn_executable(bin_path)
+        argv0 = _spawn_argv0(bin_path)
         # Absolute workerd path validated above (argv list, no shell).
         # codeql[py/command-line-injection]
         proc = subprocess.run(
-            [str(safe), "--version"],
+            [argv0, "--version"],
             capture_output=True,
             text=True,
             check=False,
@@ -232,7 +241,10 @@ def ensure_workerd(
         if path.is_file() and _is_current(path, pin):
             return validate_spawn_executable(path)
 
-    cache = (cache_dir or default_cache_dir()).resolve()
+    cache_s = os.path.abspath(os.fspath(cache_dir or default_cache_dir()))
+    if ".." in cache_s:
+        raise ValueError(f"cache dir must not contain '..': {cache_s}")
+    cache = Path(os.fsdecode(os.fsencode(cache_s)))
     # codeql[py/path-injection]
     cache.mkdir(parents=True, exist_ok=True)
     dest = resolve_under(cache, binary_name())

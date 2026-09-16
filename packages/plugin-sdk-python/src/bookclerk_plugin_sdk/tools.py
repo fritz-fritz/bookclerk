@@ -21,7 +21,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from .path_guard import resolve_under
+from .path_guard import resolve_under, cli_user_path
 
 # Required for local bookclerk-workerd / Pyodide without pywrangler.
 PYTHON_WORKERD_FLAGS = ("python_workers", "disable_python_external_sdk")
@@ -289,7 +289,7 @@ def _ensure_python_flags(flags: list[Any] | None) -> list[str]:
 
 
 def _sdk_workerd_embed_src() -> Path:
-    return Path(__file__).resolve().parent / "workerd.py"
+    return cli_user_path(Path(__file__).parent) / "workerd.py"
 
 
 ENTRYPOINT_EXPORT_CLASSES: dict[str, str] = {
@@ -381,7 +381,7 @@ def check_plugin(plugin_dir: Path) -> str:
         >>> # print(check_plugin(Path("./my-plugin")))
         >>> # ok id=echo entrypoints=storefront runtime=workerd
     """
-    root = Path(plugin_dir).resolve()
+    root = cli_user_path(plugin_dir)
     toml_path = resolve_under(root, "plugin.toml")
     # codeql[py/path-injection]
     text = toml_path.read_text(encoding="utf-8")
@@ -426,7 +426,7 @@ def check_plugin(plugin_dir: Path) -> str:
                 )
     elif runtime == "native":
         cmd = Path(m["command"])
-        resolved = cmd.resolve() if cmd.is_absolute() else resolve_under(root, cmd)
+        resolved = cli_user_path(cmd) if cmd.is_absolute() else resolve_under(root, cmd)
         # codeql[py/path-injection]
         if not resolved.exists() and resolve_under(root, ".require-binary").exists():
             raise FileNotFoundError(f"native command not found: {resolved}")
@@ -455,7 +455,7 @@ def sync_embed(plugin_dir: Path) -> str:
     Examples:
         >>> # print(sync_embed(Path("./my-python-workerd-plugin")))
     """
-    root = Path(plugin_dir).resolve()
+    root = cli_user_path(plugin_dir)
     toml_path = resolve_under(root, "plugin.toml")
     # codeql[py/path-injection]
     text = toml_path.read_text(encoding="utf-8")
@@ -745,7 +745,7 @@ def fmt_plugin_toml(path: Path, *, check_only: bool) -> str:
         OSError: If the file cannot be read or written.
     """
     # Contain authoring writes under cwd (CLI tool).
-    safe = resolve_under(Path.cwd(), Path(path).resolve())
+    safe = resolve_under(Path.cwd(), cli_user_path(path))
     # codeql[py/path-injection]
     text = safe.read_text(encoding="utf-8")
     m = tomllib.loads(text)
@@ -802,8 +802,8 @@ def package_plugin(plugin_dir: Path, out_dir: Path) -> Path:
         >>> # archive = package_plugin(Path("./my-plugin"), Path("./dist"))
         >>> # print(f"packed {archive}")
     """
-    root = Path(plugin_dir).resolve()
-    out = Path(out_dir).resolve()
+    root = cli_user_path(plugin_dir)
+    out = cli_user_path(out_dir)
     toml_path = resolve_under(root, "plugin.toml")
     # codeql[py/path-injection]
     m = tomllib.loads(toml_path.read_text(encoding="utf-8"))
@@ -822,7 +822,7 @@ def package_plugin(plugin_dir: Path, out_dir: Path) -> Path:
     if runtime == "native":
         shutil.copy2(toml_path, resolve_under(staging, "plugin.toml"))
         cmd = Path(m["command"])
-        src = cmd.resolve() if cmd.is_absolute() else resolve_under(root, cmd)
+        src = cli_user_path(cmd) if cmd.is_absolute() else resolve_under(root, cmd)
         # codeql[py/path-injection]
         if not src.is_file():
             raise FileNotFoundError(f"native binary not found for package: {src}")
@@ -1033,7 +1033,7 @@ def generate_types(plugin_dir: Path, out_file: Path | None = None) -> str:
         ValueError: When the manifest is invalid or bindings collide.
         OSError: If files cannot be read or written.
     """
-    root = Path(plugin_dir).resolve()
+    root = cli_user_path(plugin_dir)
     toml_path = resolve_under(root, "plugin.toml")
     # codeql[py/path-injection]
     m = tomllib.loads(toml_path.read_text(encoding="utf-8"))
@@ -1041,7 +1041,7 @@ def generate_types(plugin_dir: Path, out_file: Path | None = None) -> str:
     if out_file is None:
         dest = resolve_under(root, TYPES_OUTPUT_FILE)
     else:
-        dest = resolve_under(Path.cwd(), Path(out_file).resolve())
+        dest = resolve_under(Path.cwd(), cli_user_path(out_file))
     # codeql[py/path-injection]
     dest.write_text(render_env_types(m), encoding="utf-8")
     return f"wrote {dest}"
