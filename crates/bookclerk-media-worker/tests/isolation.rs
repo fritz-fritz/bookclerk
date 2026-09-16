@@ -143,6 +143,8 @@ fn run_worker(job: &MediaJob, confinement: Confinement) -> WorkerRun {
             .expect("spawn worker")
     } else if needs_spawn_jail() {
         let jail = jail_bin().expect("bookclerk-jail beside worker for spawn-time confinement");
+        // Build artifact beside the media-worker binary (cargo integration test).
+        // codeql[rust/command-line-injection]
         Command::new(jail)
             .arg("--")
             .arg(WORKER)

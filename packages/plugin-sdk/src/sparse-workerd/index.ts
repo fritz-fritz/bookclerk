@@ -13,6 +13,9 @@ export {
   packageRoot,
   binaryName,
   platformKey,
+  assertPathInside,
+  validateFetchUrl,
+  validateSpawnExecutable,
   type WorkerdPin,
   type WorkerdAsset,
 } from "./ensure.js";

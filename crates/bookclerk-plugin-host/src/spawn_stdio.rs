@@ -98,8 +98,24 @@ pub(crate) async fn spawn_stdio_guest(
                 runtime = plan.runtime.label(),
                 "starting plugin guest under a jail"
             );
-            let mut cmd = Command::new(launcher);
-            cmd.arg("--").arg(&plan.launcher).args(&plan.args);
+            let launcher =
+                bookclerk_sandbox::require_spawn_executable(launcher).map_err(|err| {
+                    PluginError::message(format!(
+                        "plugin `{id}`: invalid jail launcher {}: {err}",
+                        launcher.display()
+                    ))
+                })?;
+            let program =
+                bookclerk_sandbox::require_spawn_executable(&plan.launcher).map_err(|err| {
+                    PluginError::message(format!(
+                        "plugin `{id}`: invalid guest program {}: {err}",
+                        plan.launcher.display()
+                    ))
+                })?;
+            // Jail launcher and guest program validated absolute (no NUL).
+            // codeql[rust/command-line-injection]
+            let mut cmd = Command::new(&launcher);
+            cmd.arg("--").arg(&program).args(&plan.args);
             cmd
         }
         Start::Unconfined { reason } => {
@@ -110,7 +126,16 @@ pub(crate) async fn spawn_stdio_guest(
                 "starting plugin guest WITHOUT a jail; it can reach everything \
                  this user can"
             );
-            let mut cmd = Command::new(&plan.launcher);
+            let program =
+                bookclerk_sandbox::require_spawn_executable(&plan.launcher).map_err(|err| {
+                    PluginError::message(format!(
+                        "plugin `{id}`: invalid guest program {}: {err}",
+                        plan.launcher.display()
+                    ))
+                })?;
+            // Guest program validated absolute (no NUL).
+            // codeql[rust/command-line-injection]
+            let mut cmd = Command::new(&program);
             cmd.args(&plan.args);
             cmd
         }

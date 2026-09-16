@@ -53,6 +53,8 @@ fn backend_enforces_filesystem() -> bool {
 /// Run this test binary again with `ROLE` set, and return its exit status.
 fn run_helper(role: &str, allowed: &Path, denied: &Path) -> std::process::Output {
     let exe = std::env::current_exe().expect("current_exe");
+    // Re-exec this cargo test binary as a confinement helper (build artifact).
+    // codeql[rust/command-line-injection]
     Command::new(exe)
         .arg("--nocapture")
         // Run only the helper entry point, not the whole suite.

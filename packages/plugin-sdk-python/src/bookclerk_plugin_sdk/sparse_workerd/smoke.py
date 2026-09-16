@@ -22,7 +22,8 @@ from typing import Any
 
 from ..tools import validate_manifest
 from .config import materialize_config
-from .ensure import default_cache_dir, ensure_workerd
+from .ensure import default_cache_dir, ensure_workerd, validate_spawn_executable
+from ..path_guard import resolve_under
 
 
 def _free_loopback_port() -> int:
@@ -149,10 +150,12 @@ def run_smoke(plugin_dir: Path) -> str:
     Examples:
         >>> # print(run_smoke(Path("./my-workerd-plugin")))
     """
-    root = plugin_dir.resolve()
-    toml_path = root / "plugin.toml"
+    root = Path(plugin_dir).resolve()
+    toml_path = resolve_under(root, "plugin.toml")
+    # codeql[py/path-injection]
     if not toml_path.is_file():
         raise FileNotFoundError(f"missing plugin.toml in {root}")
+    # codeql[py/path-injection]
     manifest = tomllib.loads(toml_path.read_text(encoding="utf-8"))
     validate_manifest(manifest)
     runtime = manifest.get("runtime") or "native"
@@ -171,14 +174,19 @@ def run_smoke(plugin_dir: Path) -> str:
     base = f"http://{listen_addr}"
 
     env = {**os.environ, "BOOKCLERK_PLUGIN_ROOT": str(root)}
+    safe_bin = validate_spawn_executable(workerd_bin)
+    safe_config = validate_spawn_executable(config_path, root)
+    # Absolute workerd + config paths; argv list only (shell=False).
+    # codeql[py/command-line-injection]
     proc = subprocess.Popen(
-        [str(workerd_bin), "serve", str(config_path)],
+        [str(safe_bin), "serve", str(safe_config)],
         cwd=str(root),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
         text=True,
+        shell=False,
     )
     try:
         _wait_for_health(base, bridge_token)

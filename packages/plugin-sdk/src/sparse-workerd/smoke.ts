@@ -24,7 +24,12 @@ import {
 import type { HealthReply } from "../generated.js";
 import { validateManifest, type Manifest } from "../tools/validate.js";
 import { materializeConfig } from "./config.js";
-import { defaultCacheDir, ensureWorkerd } from "./ensure.js";
+import {
+  assertPathInside,
+  defaultCacheDir,
+  ensureWorkerd,
+  validateSpawnExecutable,
+} from "./ensure.js";
 
 async function freeLoopbackPort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -132,10 +137,13 @@ async function invokeHealth(
 }
 
 function loadManifest(pluginDir: string): Manifest {
-  const tomlPath = path.join(pluginDir, "plugin.toml");
+  const root = path.resolve(pluginDir);
+  const tomlPath = assertPathInside(root, "plugin.toml");
+  // codeql[js/path-injection]
   if (!fs.existsSync(tomlPath)) {
-    throw new Error(`missing plugin.toml in ${pluginDir}`);
+    throw new Error(`missing plugin.toml in ${root}`);
   }
+  // codeql[js/path-injection]
   const m = parseToml(fs.readFileSync(tomlPath, "utf8")) as Manifest;
   validateManifest(m);
   return m;
@@ -190,10 +198,18 @@ export async function runSmoke(pluginDir: string): Promise<string> {
     bridgeToken,
   });
   const base = `http://${generated.listenAddr}`;
+  const safeBin = validateSpawnExecutable(workerdBin);
+  const safeConfig = validateSpawnExecutable(
+    generated.configPath,
+    root,
+  );
 
-  const child = spawn(workerdBin, ["serve", generated.configPath], {
+  // Absolute workerd + config paths; argv only (shell: false).
+  // codeql[js/command-line-injection]
+  const child = spawn(safeBin, ["serve", safeConfig], {
     cwd: root,
     stdio: ["ignore", "pipe", "pipe"],
+    shell: false,
     env: { ...process.env, BOOKCLERK_PLUGIN_ROOT: root },
   });
 

@@ -13,7 +13,10 @@ from .ensure import (
     load_pin,
     package_root,
     platform_key,
+    validate_fetch_url,
+    validate_spawn_executable,
 )
+from ..path_guard import resolve_under
 from .smoke import run_smoke
 
 __all__ = [
@@ -26,5 +29,8 @@ __all__ = [
     "package_root",
     "platform_key",
     "plugin_global_outbound",
+    "resolve_under",
     "run_smoke",
+    "validate_fetch_url",
+    "validate_spawn_executable",
 ]

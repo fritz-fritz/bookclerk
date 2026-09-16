@@ -57,7 +57,8 @@ export function packageRoot(): string {
  * @returns Parsed pin document.
  */
 export function loadPin(root = packageRoot()): WorkerdPin {
-  const pinPath = path.join(root, "workerd-pin.json");
+  const pinPath = assertPathInside(path.resolve(root), "workerd-pin.json");
+  // codeql[js/path-injection]
   return JSON.parse(fs.readFileSync(pinPath, "utf8")) as WorkerdPin;
 }
 
@@ -118,14 +119,118 @@ export function defaultCacheDir(): string {
   return path.join(home, ".cache", "bookclerk", "workerd");
 }
 
+/**
+ * Resolves `candidate` and requires it to stay under `root`.
+ *
+ * Rejects NUL bytes and `..` segments. Absolute candidates are allowed when
+ * they resolve inside `root`; relative candidates are joined under `root`
+ * first. Used before filesystem reads/writes that take CLI/manifest paths.
+ *
+ * @param root - Trusted directory (resolved).
+ * @param candidate - Absolute path or path relative to `root`.
+ * @returns Absolute path under `root`.
+ * @throws {Error} When the path is empty, contains NUL/`..`, or escapes `root`.
+ */
+export function assertPathInside(root: string, candidate: string): string {
+  if (!root || root.includes("\0") || !candidate || candidate.includes("\0")) {
+    throw new Error("path is empty or contains NUL");
+  }
+  const normalized = candidate.replace(/\\/g, "/");
+  if (normalized.split("/").includes("..")) {
+    throw new Error(`path must not contain '..': ${candidate}`);
+  }
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.isAbsolute(candidate)
+    ? path.resolve(candidate)
+    : path.resolve(resolvedRoot, candidate);
+  const rel = path.relative(resolvedRoot, resolved);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
+  }
+  const prefix = resolvedRoot.endsWith(path.sep)
+    ? resolvedRoot
+    : resolvedRoot + path.sep;
+  if (resolved !== resolvedRoot && !resolved.startsWith(prefix)) {
+    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
+  }
+  return resolved;
+}
+
+/**
+ * Validates a URL before `fetch` / download (CodeQL `js/request-forgery`).
+ *
+ * Allows `https:` anywhere, or `http:` only to loopback hosts.
+ *
+ * @param url - Absolute URL string.
+ * @returns Canonical href safe to request.
+ * @throws {Error} When the URL is invalid or uses a disallowed scheme/host.
+ */
+export function validateFetchUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`invalid URL: ${url}`);
+  }
+  if (parsed.protocol === "https:") {
+    return parsed.href;
+  }
+  if (parsed.protocol === "http:") {
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === "127.0.0.1" ||
+      host === "localhost" ||
+      host === "::1" ||
+      host === "[::1]"
+    ) {
+      return parsed.href;
+    }
+  }
+  throw new Error(
+    `refusing non-HTTPS (or non-loopback HTTP) URL: ${parsed.protocol}//${parsed.host}`,
+  );
+}
+
+/**
+ * Validates a workerd (or helper) binary path before spawn.
+ *
+ * Requires an absolute path with no NUL bytes. When `trustedRoot` is set,
+ * resolves both paths and requires the binary to stay under that root.
+ *
+ * @param bin - Candidate executable path.
+ * @param trustedRoot - Optional directory the binary must remain under.
+ * @returns Absolute validated path.
+ * @throws {Error} When the path is relative, contains NUL, or escapes `trustedRoot`.
+ */
+export function validateSpawnExecutable(
+  bin: string,
+  trustedRoot?: string,
+): string {
+  if (!bin || bin.includes("\0")) {
+    throw new Error("spawn executable path is empty or contains NUL");
+  }
+  if (!path.isAbsolute(bin)) {
+    throw new Error(`spawn executable must be absolute: ${bin}`);
+  }
+  if (trustedRoot) {
+    return assertPathInside(trustedRoot, bin);
+  }
+  return path.resolve(bin);
+}
+
 function isCurrent(bin: string, pin: WorkerdPin): boolean {
-  const dir = path.dirname(bin);
-  const stamp = path.join(dir, pin.version_stamp);
+  const dir = path.resolve(path.dirname(bin));
+  const stamp = assertPathInside(dir, pin.version_stamp);
+  // codeql[js/path-injection]
   if (fs.existsSync(stamp)) {
+    // codeql[js/path-injection]
     const text = fs.readFileSync(stamp, "utf8").trim();
     if (text === pin.release_tag) return true;
   }
-  const out = spawnSync(bin, ["--version"], { encoding: "utf8" });
+  const safe = validateSpawnExecutable(bin);
+  // Absolute workerd path validated above (argv, no shell).
+  // codeql[js/command-line-injection]
+  const out = spawnSync(safe, ["--version"], { encoding: "utf8", shell: false });
   if (out.status !== 0) return false;
   const combined = `${out.stdout ?? ""}${out.stderr ?? ""}`;
   const pinBare = pin.release_tag.replace(/^v/, "");
@@ -148,14 +253,19 @@ export async function ensureWorkerd(
 ): Promise<string> {
   const pin = loadPin(root);
   const override = process.env.BOOKCLERK_WORKERD_BIN;
+  // codeql[js/path-injection]
   if (override && fs.existsSync(override) && isCurrent(override, pin)) {
-    return override;
+    // Env override: absolute file only (may live outside the cache dir).
+    return validateSpawnExecutable(override);
   }
 
-  fs.mkdirSync(cacheDir, { recursive: true });
-  const dest = path.join(cacheDir, binaryName());
+  const absCache = path.resolve(cacheDir);
+  // codeql[js/path-injection]
+  fs.mkdirSync(absCache, { recursive: true });
+  const dest = assertPathInside(absCache, binaryName());
+  // codeql[js/path-injection]
   if (fs.existsSync(dest) && isCurrent(dest, pin)) {
-    return dest;
+    return validateSpawnExecutable(dest, absCache);
   }
 
   const key = platformKey();
@@ -165,8 +275,10 @@ export async function ensureWorkerd(
     );
   }
   const asset = pin.assets[key]!;
-  const url = downloadUrl(pin, asset.artifact);
+  const url = validateFetchUrl(downloadUrl(pin, asset.artifact));
   console.error(`bookclerk-plugin: fetching ${url}`);
+  // HTTPS (or loopback HTTP) URL validated above.
+  // codeql[js/request-forgery]
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`GET ${url} returned ${res.status}`);
@@ -179,19 +291,22 @@ export async function ensureWorkerd(
     );
   }
 
-  const tmp = path.join(cacheDir, `${binaryName()}.tmp`);
+  const tmp = assertPathInside(absCache, `${binaryName()}.tmp`);
   await pipeline(
     Readable.from(compressed),
     createGunzip(),
+    // codeql[js/path-injection]
     fs.createWriteStream(tmp),
   );
   if (process.platform !== "win32") {
     fs.chmodSync(tmp, 0o755);
   }
   fs.renameSync(tmp, dest);
-  fs.writeFileSync(path.join(cacheDir, pin.version_stamp), `${pin.release_tag}\n`);
+  const stampPath = assertPathInside(absCache, pin.version_stamp);
+  // codeql[js/path-injection]
+  fs.writeFileSync(stampPath, `${pin.release_tag}\n`);
   console.error(
     `bookclerk-plugin: installed ${pin.release_tag} → ${dest}`,
   );
-  return dest;
+  return validateSpawnExecutable(dest, absCache);
 }

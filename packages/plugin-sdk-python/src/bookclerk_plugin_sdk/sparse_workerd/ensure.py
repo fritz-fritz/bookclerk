@@ -16,6 +16,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ..path_guard import resolve_under
+
 _PKG = Path(__file__).resolve().parent.parent  # bookclerk_plugin_sdk/
 
 
@@ -41,9 +43,10 @@ def load_pin(root: Path | None = None) -> dict[str, Any]:
         FileNotFoundError: If the pin file is missing.
         json.JSONDecodeError: If the pin file is not valid JSON.
     """
-    pin_path = (root or package_root()) / "workerd-pin.json"
+    pin_path = resolve_under(root or package_root(), "workerd-pin.json")
     import json
 
+    # codeql[py/path-injection]
     return json.loads(pin_path.read_text(encoding="utf-8"))
 
 
@@ -114,18 +117,82 @@ def default_cache_dir() -> Path:
     return home / ".cache" / "bookclerk" / "workerd"
 
 
+def validate_fetch_url(url: str) -> str:
+    """Validate a URL before ``urlopen`` / download (request-forgery guard).
+
+    Allows ``https:`` anywhere, or ``http:`` only to loopback hosts.
+
+    Args:
+        url: Absolute URL string.
+
+    Returns:
+        The same URL when it passes scheme/host checks.
+
+    Raises:
+        ValueError: When the URL is invalid or uses a disallowed scheme/host.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme == "https" and parsed.netloc:
+        return url
+    if parsed.scheme == "http":
+        host = (parsed.hostname or "").lower()
+        if host in {"127.0.0.1", "localhost", "::1"}:
+            return url
+    raise ValueError(
+        f"refusing non-HTTPS (or non-loopback HTTP) URL: {parsed.scheme}://{parsed.netloc}"
+    )
+
+
+def validate_spawn_executable(
+    bin_path: Path | str,
+    trusted_root: Path | str | None = None,
+) -> Path:
+    """Validate a workerd (or helper) binary path before ``subprocess`` spawn.
+
+    Requires an absolute path with no NUL bytes. When ``trusted_root`` is set,
+    resolves both paths and requires the binary to stay under that root.
+
+    Args:
+        bin_path: Candidate executable path.
+        trusted_root: Optional directory the binary must remain under.
+
+    Returns:
+        Absolute validated :class:`~pathlib.Path`.
+
+    Raises:
+        ValueError: When the path is relative, contains NUL, or escapes
+            ``trusted_root``.
+    """
+    path = Path(bin_path)
+    raw = os.fsencode(path)
+    if not raw or b"\0" in raw:
+        raise ValueError("spawn executable path is empty or contains NUL")
+    if not path.is_absolute():
+        raise ValueError(f"spawn executable must be absolute: {path}")
+    if trusted_root is not None:
+        return resolve_under(trusted_root, path)
+    return path.resolve()
+
+
 def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
-    stamp = bin_path.parent / pin["version_stamp"]
+    stamp = resolve_under(bin_path.parent, pin["version_stamp"])
+    # codeql[py/path-injection]
     if stamp.is_file() and stamp.read_text(encoding="utf-8").strip() == pin["release_tag"]:
         return True
     try:
+        safe = validate_spawn_executable(bin_path)
+        # Absolute workerd path validated above (argv list, no shell).
+        # codeql[py/command-line-injection]
         proc = subprocess.run(
-            [str(bin_path), "--version"],
+            [str(safe), "--version"],
             capture_output=True,
             text=True,
             check=False,
+            shell=False,
         )
-    except OSError:
+    except (OSError, ValueError):
         return False
     if proc.returncode != 0:
         return False
@@ -155,19 +222,23 @@ def ensure_workerd(
         RuntimeError: If no asset exists for this platform or the download hash
             mismatches.
         OSError: If the binary cannot be written or executed.
+        ValueError: If a resolved binary path fails spawn validation.
     """
     pin = load_pin(root)
     override = os.environ.get("BOOKCLERK_WORKERD_BIN")
     if override:
         path = Path(override)
+        # codeql[py/path-injection]
         if path.is_file() and _is_current(path, pin):
-            return path
+            return validate_spawn_executable(path)
 
-    cache = cache_dir or default_cache_dir()
+    cache = (cache_dir or default_cache_dir()).resolve()
+    # codeql[py/path-injection]
     cache.mkdir(parents=True, exist_ok=True)
-    dest = cache / binary_name()
+    dest = resolve_under(cache, binary_name())
+    # codeql[py/path-injection]
     if dest.is_file() and _is_current(dest, pin):
-        return dest
+        return validate_spawn_executable(dest, cache)
 
     key = platform_key()
     assets = pin.get("assets") or {}
@@ -176,8 +247,9 @@ def ensure_workerd(
             f"no pinned workerd asset for {platform.system()}-{platform.machine()}"
         )
     asset = assets[key]
-    url = download_url(pin, asset["artifact"])
+    url = validate_fetch_url(download_url(pin, asset["artifact"]))
     print(f"bookclerk-plugin: fetching {url}", flush=True)
+    # HTTPS (or loopback HTTP) URL validated above.
     with urllib.request.urlopen(url) as resp:  # noqa: S310 — pinned GitHub release URL
         compressed = resp.read()
     got = hashlib.sha256(compressed).hexdigest()
@@ -186,7 +258,7 @@ def ensure_workerd(
             f"workerd download sha256 mismatch: got {got}, expected {asset['sha256_hex']}"
         )
 
-    tmp = cache / f"{binary_name()}.tmp"
+    tmp = resolve_under(cache, f"{binary_name()}.tmp")
     with gzip.GzipFile(fileobj=__import__("io").BytesIO(compressed)) as gz, tmp.open(
         "wb"
     ) as out:
@@ -194,6 +266,8 @@ def ensure_workerd(
     if platform.system().lower() != "windows":
         tmp.chmod(0o755)
     tmp.replace(dest)
-    (cache / pin["version_stamp"]).write_text(f"{pin['release_tag']}\n", encoding="utf-8")
+    stamp_path = resolve_under(cache, pin["version_stamp"])
+    # codeql[py/path-injection]
+    stamp_path.write_text(f"{pin['release_tag']}\n", encoding="utf-8")
     print(f"bookclerk-plugin: installed {pin['release_tag']} → {dest}", flush=True)
-    return dest
+    return validate_spawn_executable(dest, cache)

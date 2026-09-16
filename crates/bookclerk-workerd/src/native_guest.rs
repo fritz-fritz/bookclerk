@@ -74,19 +74,32 @@ fn wrap_native_guest(
     jail: Option<PathBuf>,
     enforcement_required: bool,
 ) -> Result<Command> {
+    let backend = bookclerk_sandbox::require_absolute_spawn_path(backend)
+        .with_context(|| format!("validate native backend {}", backend.display()))?;
     let mut cmd = if nested_requested {
         if let Some(jail) = jail {
+            let jail_name = format!("{JAIL_BIN}{}", std::env::consts::EXE_SUFFIX);
+            let beside = std::env::current_exe().ok();
+            let jail_display = jail.display().to_string();
+            let jail = bookclerk_sandbox::require_helper_beside_or_absolute(
+                &jail,
+                &jail_name,
+                beside.as_deref(),
+            )
+            .with_context(|| format!("validate nested jail {jail_display}"))?;
             let spec = deny_spec_with(
-                backend,
+                &backend,
                 plugin_root,
                 state_dir,
                 inherit_fds,
                 enforcement_required,
             );
             let json = serde_json::to_string(&spec).context("serialize nested native jail spec")?;
-            let mut wrapped = Command::new(jail);
+            // Jail / backend paths validated absolute (helper-beside or env override).
+            // codeql[rust/command-line-injection]
+            let mut wrapped = Command::new(&jail);
             wrapped.env(SPEC_ENV, json);
-            wrapped.arg(backend);
+            wrapped.arg(&backend);
             wrapped
         } else if enforcement_required {
             anyhow::bail!(
@@ -96,10 +109,14 @@ fn wrap_native_guest(
             tracing::warn!(
                 "bookclerk-jail not found beside bookclerk-workerd; native guest will not get nested AF_INET denial"
             );
-            Command::new(backend)
+            // Backend path validated by require_absolute_spawn_path above.
+            // codeql[rust/command-line-injection]
+            Command::new(&backend)
         }
     } else {
-        Command::new(backend)
+        // Backend path validated by require_absolute_spawn_path above.
+        // codeql[rust/command-line-injection]
+        Command::new(&backend)
     };
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -191,18 +208,23 @@ fn extra_write_roots(vars: impl IntoIterator<Item = (&'static str, PathBuf)>) ->
 }
 
 fn find_jail() -> Option<PathBuf> {
+    let name = format!("{JAIL_BIN}{}", std::env::consts::EXE_SUFFIX);
+    let beside = std::env::current_exe().ok();
     if let Some(path) = std::env::var_os(JAIL_BIN_ENV) {
         let p = PathBuf::from(path);
-        if p.is_file() {
+        if let Ok(p) =
+            bookclerk_sandbox::require_helper_beside_or_absolute(&p, &name, beside.as_deref())
+        {
             return Some(p);
         }
     }
-    let name = format!("{JAIL_BIN}{}", std::env::consts::EXE_SUFFIX);
-    if let Ok(exe) = std::env::current_exe() {
+    if let Some(exe) = beside {
         if let Some(dir) = exe.parent() {
             let candidate = dir.join(&name);
-            if candidate.is_file() {
-                return Some(candidate);
+            if let Ok(p) =
+                bookclerk_sandbox::require_helper_beside_or_absolute(&candidate, &name, Some(&exe))
+            {
+                return Some(p);
             }
         }
     }

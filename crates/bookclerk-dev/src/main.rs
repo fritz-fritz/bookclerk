@@ -382,10 +382,24 @@ fn prepend_helper_path(root: &Path, release: bool, cmd: &mut Command) {
 }
 
 /// Builds a `cargo` command rooted at the workspace (honors `$CARGO`).
-fn cargo(root: &Path) -> Command {
-    let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+fn cargo(root: &Path) -> Result<Command> {
+    let program = match std::env::var_os("CARGO") {
+        Some(raw) => {
+            let path = PathBuf::from(raw);
+            bookclerk_sandbox::require_absolute_or_name(&path).with_context(|| {
+                format!(
+                    "CARGO={} is not an absolute path or a single PATH name",
+                    path.display()
+                )
+            })?
+        }
+        None => PathBuf::from("cargo"),
+    };
+    // `$CARGO` validated absolute/name (or the literal `cargo` when unset).
+    // codeql[rust/command-line-injection]
+    let mut cmd = Command::new(&program);
     cmd.current_dir(root);
-    cmd
+    Ok(cmd)
 }
 
 /// Builds/installs platform guests, optionally stages extras, then execs the host.
@@ -474,7 +488,7 @@ fn test_staged(root: &Path, release: bool, skip_build: bool) -> Result<()> {
     plugins::install_platform(root, &files_dir, release)?;
     plugins::stage_plugins(root, &artifacts, release, true, true, true)?;
 
-    let mut cmd = cargo(root);
+    let mut cmd = cargo(root)?;
     cmd.args([
         "test",
         "-p",
