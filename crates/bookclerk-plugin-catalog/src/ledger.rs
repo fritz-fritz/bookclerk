@@ -150,6 +150,8 @@ impl InstallLedger {
                 "refusing install-ledger path with '..' in files_dir",
             ));
         }
+        // Operator `$BOOKCLERK_FILES_DIR`; `..` rejected above.
+        // codeql[rust/path-injection]
         fs::create_dir_all(files_dir)?;
         let Some(final_path) = resolved_ledger_path(files_dir)? else {
             return Err(CatalogError::message(format!(
@@ -284,6 +286,8 @@ mod tests {
     #[test]
     fn load_missing_files_dir_is_empty_ledger() {
         let missing = std::env::temp_dir().join("bookclerk-no-such-files-dir-install-ledger");
+        // Temp path in unit test.
+        // codeql[rust/path-injection]
         let _ = fs::remove_dir_all(&missing);
         let ledger = InstallLedger::load(&missing).unwrap();
         assert!(ledger.artifacts.is_empty());

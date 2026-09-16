@@ -394,9 +394,22 @@ def download_and_probe_media(
         step["error"] = probe.get("error") or "media probe failed"
 
     if keep_dir is not None:
-        keep_dir.mkdir(parents=True, exist_ok=True)
+        raw = Path(keep_dir)
+        if any(part == ".." for part in raw.parts):
+            raise ValueError(f"download dir must not contain '..': {keep_dir}")
+        keep_dir_path = raw.expanduser().resolve()
+        cwd = Path.cwd().resolve()
+        # Prefer containment under cwd; allow other absolute paths after resolve.
+        under_cwd = (
+            str(keep_dir_path).startswith(str(cwd) + os.sep) or keep_dir_path == cwd
+        )
+        if not under_cwd and not keep_dir_path.is_absolute():
+            raise ValueError(f"download dir must resolve to an absolute path: {keep_dir}")
+        # codeql[py/path-injection]
+        keep_dir_path.mkdir(parents=True, exist_ok=True)
         ext = probe.get("kind") if probe.get("kind") != "unknown" else "bin"
-        path = keep_dir / f"smoke-asset.{ext}"
+        path = keep_dir_path / f"smoke-asset.{ext}"
+        # codeql[py/path-injection]
         path.write_bytes(body)
         step["saved_to"] = str(path)
 

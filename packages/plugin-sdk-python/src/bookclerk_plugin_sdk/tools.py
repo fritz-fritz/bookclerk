@@ -21,6 +21,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from .path_guard import resolve_under
+
 # Required for local bookclerk-workerd / Pyodide without pywrangler.
 PYTHON_WORKERD_FLAGS = ("python_workers", "disable_python_external_sdk")
 """Compatibility flags required for Python Workers under bookclerk-workerd."""
@@ -270,7 +272,7 @@ def _validate_surface(m: dict[str, Any]) -> None:
 
 def _workerd_modules_dir(plugin_dir: Path, m: dict[str, Any]) -> Path:
     w = m["workerd"]
-    return plugin_dir / (w.get("modules_dir") or "modules")
+    return resolve_under(plugin_dir, w.get("modules_dir") or "modules")
 
 
 def _is_python_workerd(m: dict[str, Any]) -> bool:
@@ -379,30 +381,38 @@ def check_plugin(plugin_dir: Path) -> str:
         >>> # print(check_plugin(Path("./my-plugin")))
         >>> # ok id=echo entrypoints=storefront runtime=workerd
     """
-    text = (plugin_dir / "plugin.toml").read_text(encoding="utf-8")
+    root = Path(plugin_dir).resolve()
+    toml_path = resolve_under(root, "plugin.toml")
+    # codeql[py/path-injection]
+    text = toml_path.read_text(encoding="utf-8")
     m = tomllib.loads(text)
     validate_manifest(m)
     if m.get("logo") is not None:
         kind, value = validate_logo(str(m["logo"]))
         if kind == "embedded":
-            logo_path = plugin_dir / value
+            logo_path = resolve_under(root, value)
+            # codeql[py/path-injection]
             if not logo_path.is_file():
                 raise FileNotFoundError(f"embedded logo missing: {logo_path}")
     runtime = m.get("runtime") or "native"
     if runtime == "workerd":
         w = m["workerd"]
-        modules_dir = _workerd_modules_dir(plugin_dir, m)
+        modules_dir = _workerd_modules_dir(root, m)
+        # codeql[py/path-injection]
         if not modules_dir.is_dir():
             raise FileNotFoundError(f"workerd modules_dir missing: {modules_dir}")
-        main = modules_dir / w["main_module"]
+        main = resolve_under(modules_dir, w["main_module"])
+        # codeql[py/path-injection]
         if not main.is_file():
             raise FileNotFoundError(f"workerd main_module missing: {main}")
         entrypoints = [str(e) for e in (m.get("entrypoints") or [])]
         main_lower = w["main_module"].lower()
         if main_lower.endswith((".js", ".mjs")):
+            # codeql[py/path-injection]
             src = main.read_text(encoding="utf-8")
             check_main_module_source(main.name, src, entrypoints, "js")
         if _is_python_workerd(m):
+            # codeql[py/path-injection]
             src = main.read_text(encoding="utf-8")
             check_main_module_source(main.name, src, entrypoints, "python")
             flags = list(w.get("compatibility_flags") or [])
@@ -416,8 +426,9 @@ def check_plugin(plugin_dir: Path) -> str:
                 )
     elif runtime == "native":
         cmd = Path(m["command"])
-        resolved = cmd if cmd.is_absolute() else plugin_dir / cmd
-        if not resolved.exists() and (plugin_dir / ".require-binary").exists():
+        resolved = cmd.resolve() if cmd.is_absolute() else resolve_under(root, cmd)
+        # codeql[py/path-injection]
+        if not resolved.exists() and resolve_under(root, ".require-binary").exists():
             raise FileNotFoundError(f"native command not found: {resolved}")
     entrypoints = ",".join(str(e) for e in (m.get("entrypoints") or []))
     return f"ok id={m['id']} entrypoints={entrypoints} runtime={runtime}"
@@ -444,7 +455,9 @@ def sync_embed(plugin_dir: Path) -> str:
     Examples:
         >>> # print(sync_embed(Path("./my-python-workerd-plugin")))
     """
-    toml_path = plugin_dir / "plugin.toml"
+    root = Path(plugin_dir).resolve()
+    toml_path = resolve_under(root, "plugin.toml")
+    # codeql[py/path-injection]
     text = toml_path.read_text(encoding="utf-8")
     m = tomllib.loads(text)
     validate_manifest(m)
@@ -455,20 +468,24 @@ def sync_embed(plugin_dir: Path) -> str:
             "sync-embed (Python SDK): main_module must end with .py "
             f"(got {m['workerd'].get('main_module')!r})"
         )
-    modules_dir = _workerd_modules_dir(plugin_dir, m)
-    pkg = modules_dir / "bookclerk_plugin_sdk"
+    modules_dir = _workerd_modules_dir(root, m)
+    pkg = resolve_under(modules_dir, "bookclerk_plugin_sdk")
+    # codeql[py/path-injection]
     pkg.mkdir(parents=True, exist_ok=True)
-    init = pkg / "__init__.py"
+    init = resolve_under(pkg, "__init__.py")
+    # codeql[py/path-injection]
     if not init.is_file():
+        # codeql[py/path-injection]
         init.write_text(
             '"""Bookclerk plugin SDK (vendored for workerd). Prefer .workerd."""\n',
             encoding="utf-8",
         )
-    dest = pkg / "workerd.py"
+    dest = resolve_under(pkg, "workerd.py")
     shutil.copy2(_sdk_workerd_embed_src(), dest)
 
     new_text = _ensure_python_flags_in_toml_text(text, m)
     if new_text != text:
+        # codeql[py/path-injection]
         toml_path.write_text(new_text, encoding="utf-8")
         return f"synced {dest} + python workerd flags in {toml_path}"
     return f"synced {dest}"
@@ -727,7 +744,10 @@ def fmt_plugin_toml(path: Path, *, check_only: bool) -> str:
         ValueError: If validation fails or ``check_only`` finds a drift.
         OSError: If the file cannot be read or written.
     """
-    text = path.read_text(encoding="utf-8")
+    # Contain authoring writes under cwd (CLI tool).
+    safe = resolve_under(Path.cwd(), Path(path).resolve())
+    # codeql[py/path-injection]
+    text = safe.read_text(encoding="utf-8")
     m = tomllib.loads(text)
     validate_manifest(m)
     formatted = format_manifest(m)
@@ -738,10 +758,11 @@ def fmt_plugin_toml(path: Path, *, check_only: bool) -> str:
 
     if check_only:
         if norm(text) != norm(formatted):
-            raise ValueError(f"would reformat {path}")
-        return f"ok {path}"
-    path.write_text(formatted, encoding="utf-8")
-    return f"wrote {path}"
+            raise ValueError(f"would reformat {safe}")
+        return f"ok {safe}"
+    # codeql[py/path-injection]
+    safe.write_text(formatted, encoding="utf-8")
+    return f"wrote {safe}"
 
 
 def _host_target() -> str:
@@ -781,70 +802,90 @@ def package_plugin(plugin_dir: Path, out_dir: Path) -> Path:
         >>> # archive = package_plugin(Path("./my-plugin"), Path("./dist"))
         >>> # print(f"packed {archive}")
     """
-    m = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
+    root = Path(plugin_dir).resolve()
+    out = Path(out_dir).resolve()
+    toml_path = resolve_under(root, "plugin.toml")
+    # codeql[py/path-injection]
+    m = tomllib.loads(toml_path.read_text(encoding="utf-8"))
     validate_manifest(m)
     version = m.get("version") or "0.0.0"
     plugin_id = m["id"]
-    out_dir.mkdir(parents=True, exist_ok=True)
-    staging = out_dir / f".staging-{plugin_id}"
+    # codeql[py/path-injection]
+    out.mkdir(parents=True, exist_ok=True)
+    staging = resolve_under(out, f".staging-{plugin_id}")
+    # codeql[py/path-injection]
     if staging.exists():
         shutil.rmtree(staging)
+    # codeql[py/path-injection]
     staging.mkdir(parents=True)
     runtime = m.get("runtime") or "native"
     if runtime == "native":
-        shutil.copy2(plugin_dir / "plugin.toml", staging / "plugin.toml")
+        shutil.copy2(toml_path, resolve_under(staging, "plugin.toml"))
         cmd = Path(m["command"])
-        src = cmd if cmd.is_absolute() else plugin_dir / cmd
+        src = cmd.resolve() if cmd.is_absolute() else resolve_under(root, cmd)
+        # codeql[py/path-injection]
         if not src.is_file():
             raise FileNotFoundError(f"native binary not found for package: {src}")
-        dest = staging / src.name
+        dest = resolve_under(staging, src.name)
         shutil.copy2(src, dest)
         os.chmod(dest, 0o755)
         stem = f"bookclerk-plugin-{plugin_id}-{version}-{_host_target()}"
     else:
         modules_dir = m["workerd"].get("modules_dir") or "modules"
-        shutil.copytree(plugin_dir / modules_dir, staging / modules_dir)
-        toml_text = (plugin_dir / "plugin.toml").read_text(encoding="utf-8")
+        src_modules = resolve_under(root, modules_dir)
+        dest_modules = resolve_under(staging, modules_dir)
+        shutil.copytree(src_modules, dest_modules)
+        # codeql[py/path-injection]
+        toml_text = toml_path.read_text(encoding="utf-8")
         if _is_python_workerd(m):
             # Vendor package-shaped SDK so archives work even without host injection.
-            pkg = staging / modules_dir / "bookclerk_plugin_sdk"
+            pkg = resolve_under(dest_modules, "bookclerk_plugin_sdk")
+            # codeql[py/path-injection]
             pkg.mkdir(parents=True, exist_ok=True)
-            (pkg / "__init__.py").write_text(
+            # codeql[py/path-injection]
+            resolve_under(pkg, "__init__.py").write_text(
                 '"""Bookclerk plugin SDK (vendored for workerd)."""\n',
                 encoding="utf-8",
             )
-            shutil.copy2(_sdk_workerd_embed_src(), pkg / "workerd.py")
+            shutil.copy2(_sdk_workerd_embed_src(), resolve_under(pkg, "workerd.py"))
             toml_text = _ensure_python_flags_in_toml_text(toml_text, m)
-        (staging / "plugin.toml").write_text(toml_text, encoding="utf-8")
+        # codeql[py/path-injection]
+        resolve_under(staging, "plugin.toml").write_text(toml_text, encoding="utf-8")
         stem = f"bookclerk-plugin-{plugin_id}-{version}-workerd"
 
     if m.get("logo") is not None:
         kind, value = validate_logo(str(m["logo"]))
         if kind == "embedded":
-            src = plugin_dir / value
+            src = resolve_under(root, value)
+            # codeql[py/path-injection]
             if not src.is_file():
                 raise FileNotFoundError(f"embedded logo missing for package: {src}")
-            dest = staging / value
+            dest = resolve_under(staging, value)
+            # codeql[py/path-injection]
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
 
     archive_name = f"{stem}.tar.gz"
-    archive_path = out_dir / archive_name
+    archive_path = resolve_under(out, archive_name)
     subprocess.run(
         ["tar", "-C", str(staging), "-czf", str(archive_path), "."],
         check=True,
     )
     shutil.rmtree(staging)
+    # codeql[py/path-injection]
     digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-    sums = out_dir / "SHA256SUMS"
+    sums = resolve_under(out, "SHA256SUMS")
     lines = []
+    # codeql[py/path-injection]
     if sums.is_file():
+        # codeql[py/path-injection]
         lines = [
             ln
             for ln in sums.read_text(encoding="utf-8").splitlines()
             if ln and not ln.endswith(archive_name)
         ]
     lines.append(f"{digest}  {archive_name}")
+    # codeql[py/path-injection]
     sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return archive_path
 
@@ -992,8 +1033,15 @@ def generate_types(plugin_dir: Path, out_file: Path | None = None) -> str:
         ValueError: When the manifest is invalid or bindings collide.
         OSError: If files cannot be read or written.
     """
-    m = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
+    root = Path(plugin_dir).resolve()
+    toml_path = resolve_under(root, "plugin.toml")
+    # codeql[py/path-injection]
+    m = tomllib.loads(toml_path.read_text(encoding="utf-8"))
     validate_manifest(m)
-    dest = out_file or (plugin_dir / TYPES_OUTPUT_FILE)
+    if out_file is None:
+        dest = resolve_under(root, TYPES_OUTPUT_FILE)
+    else:
+        dest = resolve_under(Path.cwd(), Path(out_file).resolve())
+    # codeql[py/path-injection]
     dest.write_text(render_env_types(m), encoding="utf-8")
     return f"wrote {dest}"

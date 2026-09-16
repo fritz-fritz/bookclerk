@@ -1,7 +1,7 @@
 //! Generate a real workerd Cap'n Proto config for one plugin isolate.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use bookclerk_plugin_abi::{Entrypoint, PluginDescribe};
@@ -12,6 +12,62 @@ use bookclerk_plugin_manifest::{
 
 use crate::egress::EgressProxy;
 use crate::pin::BUNDLED_WORKERD_COMPAT_DATE;
+
+/// Join `root` / `rel` and require the result stays under `root`.
+///
+/// Rejects `..` and absolute `rel`. Used before every state-dir FS sink so
+/// Cap'n Proto / bridge assets cannot escape the session directory.
+fn join_under(root: &Path, rel: impl AsRef<Path>) -> Result<PathBuf> {
+    let rel = rel.as_ref();
+    if rel.is_absolute() {
+        bail!(
+            "refusing absolute path under {}: {}",
+            root.display(),
+            rel.display()
+        );
+    }
+    for comp in rel.components() {
+        match comp {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                bail!(
+                    "refusing path traversal under {}: {}",
+                    root.display(),
+                    rel.display()
+                );
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                bail!(
+                    "refusing rooted path under {}: {}",
+                    root.display(),
+                    rel.display()
+                );
+            }
+        }
+    }
+    let out = root.join(rel);
+    if !out.starts_with(root) {
+        bail!("path {} escapes root {}", out.display(), root.display());
+    }
+    Ok(out)
+}
+
+/// Returns `path` when it stays under `root` (lexical; canonical when present).
+fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        bail!("refusing path with '..': {}", path.display());
+    }
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if !path.starts_with(root) && !path.starts_with(&root_canon) {
+        bail!("path {} escapes root {}", path.display(), root.display());
+    }
+    if let Ok(canon) = path.canonicalize() {
+        if !canon.starts_with(&root_canon) && !canon.starts_with(root) {
+            bail!("path {} escapes root {}", path.display(), root.display());
+        }
+    }
+    Ok(path.to_path_buf())
+}
 
 /// Host↔isolate RPC bridge script materialized into the workerd state dir.
 const BRIDGE_JS: &str = include_str!("../bridge/bridge.js");
@@ -122,17 +178,27 @@ fn workerd_state_base(plugin_root: &Path) -> PathBuf {
 /// Returns an I/O error when the directory cannot be created, including
 /// [`std::io::ErrorKind::AlreadyExists`].
 fn create_exclusive_owner_only_dir(path: &Path) -> std::io::Result<()> {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing path with '..': {}", path.display()),
+        ));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         let mut builder = fs::DirBuilder::new();
         builder.mode(0o700);
+        // Contained under workerd state base (caller) + `..` rejection.
+        // codeql[rust/path-injection]
         builder.create(path)?;
+        // codeql[rust/path-injection]
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
         Ok(())
     }
     #[cfg(not(unix))]
     {
+        // codeql[rust/path-injection]
         fs::create_dir(path)
     }
 }
@@ -145,6 +211,10 @@ fn create_exclusive_owner_only_dir(path: &Path) -> std::io::Result<()> {
 ///
 /// Returns an error when the directory cannot be created or chmodded.
 fn ensure_owner_only_dir(path: &Path) -> Result<()> {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        bail!("refusing path with '..': {}", path.display());
+    }
+    // codeql[rust/path-injection]
     if path.exists() {
         return chmod_owner_only_dir(path);
     }
@@ -154,12 +224,15 @@ fn ensure_owner_only_dir(path: &Path) -> Result<()> {
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
         builder.mode(0o700);
+        // Contained by caller (state_dir / session root) + `..` rejection.
+        // codeql[rust/path-injection]
         builder
             .create(path)
             .with_context(|| format!("create {}", path.display()))?;
     }
     #[cfg(not(unix))]
     {
+        // codeql[rust/path-injection]
         fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     }
     chmod_owner_only_dir(path)
@@ -173,6 +246,8 @@ fn ensure_owner_only_dir(path: &Path) -> Result<()> {
 #[cfg(unix)]
 fn chmod_owner_only_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
+    // Contained by caller + `..` rejection in [`ensure_owner_only_dir`].
+    // codeql[rust/path-injection]
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
         .with_context(|| format!("chmod 0700 {}", path.display()))?;
     Ok(())
@@ -196,6 +271,9 @@ fn chmod_owner_only_dir(_path: &Path) -> Result<()> {
 fn write_owner_only_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     use std::io::Write;
 
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        bail!("refusing path with '..': {}", path.display());
+    }
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -203,6 +281,8 @@ fn write_owner_only_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> 
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
+    // Contained under state_dir via [`join_under`] at call sites + `..` rejection.
+    // codeql[rust/path-injection]
     let mut file = opts
         .open(path)
         .with_context(|| format!("create {}", path.display()))?;
@@ -211,6 +291,7 @@ fn write_owner_only_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // codeql[rust/path-injection]
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod 0600 {}", path.display()))?;
     }
@@ -246,12 +327,14 @@ pub fn workerd_state_dir(plugin_root: &Path) -> Result<PathBuf> {
     use rand::RngCore;
 
     let base = workerd_state_base(plugin_root);
+    // Base is `$TMPDIR` or `plugin_root/.bookclerk-state` (trusted host paths).
+    // codeql[rust/path-injection]
     fs::create_dir_all(&base).with_context(|| format!("create {}", base.display()))?;
     let mut rng = rand::thread_rng();
     for _ in 0..64 {
         let mut nonce = [0u8; SESSION_NONCE_HEX / 2];
         rng.fill_bytes(&mut nonce);
-        let dir = base.join(workerd_state_leaf(plugin_root, &hex::encode(nonce)));
+        let dir = join_under(&base, workerd_state_leaf(plugin_root, &hex::encode(nonce)))?;
         match create_exclusive_owner_only_dir(&dir) {
             Ok(()) => return Ok(dir),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -529,13 +612,22 @@ pub fn materialize_native_backend(
     state_dir: Option<&Path>,
 ) -> Result<GeneratedConfig> {
     let state_dir = resolve_state_dir(root, state_dir)?;
-    let bookclerk_dir = state_dir.join(".bookclerk");
+    let bookclerk_dir = join_under(&state_dir, ".bookclerk")?;
+    // Contained under session state_dir via [`join_under`].
+    // codeql[rust/path-injection]
     fs::create_dir_all(&bookclerk_dir)
         .with_context(|| format!("create {}", bookclerk_dir.display()))?;
-    fs::write(bookclerk_dir.join("bridge.js"), BRIDGE_JS)?;
-    fs::write(bookclerk_dir.join("egress.js"), EGRESS_JS)?;
-    fs::write(bookclerk_dir.join("adapter.js"), NATIVE_ADAPTER_JS)?;
-    fs::write(bookclerk_dir.join("sdk-workerd.js"), SDK_WORKERD_JS)?;
+    // codeql[rust/path-injection]
+    fs::write(join_under(&bookclerk_dir, "bridge.js")?, BRIDGE_JS)?;
+    // codeql[rust/path-injection]
+    fs::write(join_under(&bookclerk_dir, "egress.js")?, EGRESS_JS)?;
+    // codeql[rust/path-injection]
+    fs::write(join_under(&bookclerk_dir, "adapter.js")?, NATIVE_ADAPTER_JS)?;
+    // codeql[rust/path-injection]
+    fs::write(
+        join_under(&bookclerk_dir, "sdk-workerd.js")?,
+        SDK_WORKERD_JS,
+    )?;
 
     let domains = egress_domains_for(false, egress.mode(), egress.allowed_initial_hosts());
     let subrequests = match egress.policy().subrequests {
@@ -651,7 +743,7 @@ const bridgeWorker :Workerd.Worker = (
         egress_flags = EGRESS_COMPAT_FLAGS,
     );
 
-    let config_path = state_dir.join("workerd-config.capnp");
+    let config_path = join_under(&state_dir, "workerd-config.capnp")?;
     write_owner_only_file(&config_path, config)?;
     let import_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     Ok(GeneratedConfig {
@@ -737,19 +829,34 @@ pub fn materialize(
         .context("missing [workerd] table")?;
 
     let state_dir = resolve_state_dir(root, state_dir)?;
-    let bookclerk_dir = state_dir.join(".bookclerk");
+    let bookclerk_dir = join_under(&state_dir, ".bookclerk")?;
+    // Contained under session state_dir via [`join_under`].
+    // codeql[rust/path-injection]
     fs::create_dir_all(&bookclerk_dir)
         .with_context(|| format!("create {}", bookclerk_dir.display()))?;
-    fs::write(bookclerk_dir.join("bridge.js"), BRIDGE_JS)?;
-    fs::write(bookclerk_dir.join("egress.js"), EGRESS_JS)?;
-    fs::write(bookclerk_dir.join("adapter.js"), ADAPTER_JS)?;
+    // codeql[rust/path-injection]
+    fs::write(join_under(&bookclerk_dir, "bridge.js")?, BRIDGE_JS)?;
+    // codeql[rust/path-injection]
+    fs::write(join_under(&bookclerk_dir, "egress.js")?, EGRESS_JS)?;
+    // codeql[rust/path-injection]
+    fs::write(join_under(&bookclerk_dir, "adapter.js")?, ADAPTER_JS)?;
 
-    let modules_dir = root.join(&workerd.modules_dir);
+    let modules_dir = {
+        let rel = Path::new(&workerd.modules_dir);
+        if rel.components().any(|c| matches!(c, Component::ParentDir)) {
+            bail!("refusing modules_dir with '..': {}", workerd.modules_dir);
+        }
+        let dir = root.join(rel);
+        require_under(root, &dir)?
+    };
+    // Contained under install root via [`require_under`].
+    // codeql[rust/path-injection]
     if !modules_dir.is_dir() {
         bail!("modules dir missing: {}", modules_dir.display());
     }
     let main_rel = format!("{}/{}", workerd.modules_dir, workerd.main_module);
-    let main_abs = root.join(&main_rel);
+    let main_abs = require_under(root, &root.join(&main_rel))?;
+    // codeql[rust/path-injection]
     if !main_abs.is_file() {
         bail!("main module missing: {}", main_abs.display());
     }
@@ -795,7 +902,12 @@ pub fn materialize(
 
     // Inject dual-stack SDK under the package import names authors use.
     if needs_js {
-        fs::write(bookclerk_dir.join("sdk-workerd.js"), SDK_WORKERD_JS)?;
+        // Contained under state_dir/.bookclerk via [`join_under`].
+        // codeql[rust/path-injection]
+        fs::write(
+            join_under(&bookclerk_dir, "sdk-workerd.js")?,
+            SDK_WORKERD_JS,
+        )?;
         for mod_name in SDK_JS_MODULE_NAMES {
             if seen_names.contains(*mod_name) {
                 continue;
@@ -808,11 +920,28 @@ pub fn materialize(
         }
     }
     if needs_python {
-        fs::write(bookclerk_dir.join("sdk-workerd.py"), SDK_WORKERD_PY)?;
-        fs::write(bookclerk_dir.join("sdk-db-value.py"), SDK_DB_VALUE_PY)?;
-        fs::write(bookclerk_dir.join("sdk-product-abi.py"), SDK_PRODUCT_ABI_PY)?;
-        fs::write(bookclerk_dir.join("sdk-guest-sql.py"), SDK_GUEST_SQL_PY)?;
-        fs::write(bookclerk_dir.join("sdk-init.py"), SDK_PY_INIT)?;
+        // codeql[rust/path-injection]
+        fs::write(
+            join_under(&bookclerk_dir, "sdk-workerd.py")?,
+            SDK_WORKERD_PY,
+        )?;
+        // codeql[rust/path-injection]
+        fs::write(
+            join_under(&bookclerk_dir, "sdk-db-value.py")?,
+            SDK_DB_VALUE_PY,
+        )?;
+        // codeql[rust/path-injection]
+        fs::write(
+            join_under(&bookclerk_dir, "sdk-product-abi.py")?,
+            SDK_PRODUCT_ABI_PY,
+        )?;
+        // codeql[rust/path-injection]
+        fs::write(
+            join_under(&bookclerk_dir, "sdk-guest-sql.py")?,
+            SDK_GUEST_SQL_PY,
+        )?;
+        // codeql[rust/path-injection]
+        fs::write(join_under(&bookclerk_dir, "sdk-init.py")?, SDK_PY_INIT)?;
         for (module_name, embed_file) in [
             (SDK_PY_INIT_MODULE, "sdk-init.py"),
             (SDK_PY_PRODUCT_ABI_MODULE, "sdk-product-abi.py"),
@@ -933,7 +1062,12 @@ pub fn materialize(
     }
 
     // Adapter always loads the JS SDK (even when the author isolate is Python).
-    fs::write(bookclerk_dir.join("sdk-workerd.js"), SDK_WORKERD_JS)?;
+    // Contained under state_dir/.bookclerk via [`join_under`].
+    // codeql[rust/path-injection]
+    fs::write(
+        join_under(&bookclerk_dir, "sdk-workerd.js")?,
+        SDK_WORKERD_JS,
+    )?;
     let adapter_sdk_embeds: Vec<String> = SDK_JS_MODULE_NAMES
         .iter()
         .map(|mod_name| {
@@ -1028,7 +1162,7 @@ const bridgeWorker :Workerd.Worker = (
         egress_flags = EGRESS_COMPAT_FLAGS,
     );
 
-    let config_path = state_dir.join("workerd-config.capnp");
+    let config_path = join_under(&state_dir, "workerd-config.capnp")?;
     write_owner_only_file(&config_path, config)?;
 
     let import_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
@@ -1137,13 +1271,20 @@ fn collect_modules(dir: &Path) -> Result<Vec<PathBuf>> {
 
 /// Recursively appends workerd-loadable module files under `dir`.
 fn collect_modules_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    // Contained under install `modules_dir` (caller used [`require_under`]).
+    // codeql[rust/path-injection]
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
+        if !path.starts_with(dir) {
+            continue;
+        }
+        // codeql[rust/path-injection]
         if path.is_dir() {
             collect_modules_inner(&path, out)?;
             continue;
         }
+        // codeql[rust/path-injection]
         if !path.is_file() {
             continue;
         }
@@ -1223,7 +1364,11 @@ mode = "deny"
 
         let dir = tempfile::tempdir().expect("tempdir");
         let modules = dir.path().join("modules");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         std::fs::create_dir_all(&modules).expect("modules dir");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         std::fs::write(
             modules.join("plugin.py"),
             "from bookclerk_plugin_sdk.workerd import BookclerkEntrypoint\n",
@@ -1259,6 +1404,8 @@ mode = "deny"
             None,
         )
         .expect("materialize");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         let capnp = std::fs::read_to_string(&generated.config_path).expect("read capnp");
         assert!(capnp.contains(SDK_PY_DB_VALUE_MODULE));
         assert!(capnp.contains("sdk-db-value.py"));
@@ -1333,7 +1480,11 @@ mode = "deny"
 
         let dir = tempfile::tempdir().expect("tempdir");
         let modules = dir.path().join("modules");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         std::fs::create_dir_all(&modules).expect("modules dir");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         std::fs::write(modules.join("index.js"), "export default {};").expect("index.js");
         let manifest = PluginManifest::parse(
             r#"
@@ -1366,6 +1517,8 @@ address_cidrs = ["10.0.60.100/32"]
             None,
         )
         .expect("materialize");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         let capnp = std::fs::read_to_string(&generated.config_path).expect("read capnp");
         assert!(
             capnp.contains(r#"allow = ["10.0.60.100/32", "public"]"#)
@@ -1414,7 +1567,11 @@ address_cidrs = ["10.0.60.100/32"]
 
         let dir = tempfile::tempdir().expect("tempdir");
         let modules = dir.path().join("modules");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         std::fs::create_dir_all(&modules).expect("modules dir");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         std::fs::write(modules.join("index.js"), "export default {};").expect("index.js");
         let flags_toml = flags
             .iter()
@@ -1460,6 +1617,8 @@ entrypoint = "default"
             None,
         )
         .expect("materialize");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         std::fs::read_to_string(&generated.config_path).expect("read capnp")
     }
 
@@ -1504,7 +1663,11 @@ entrypoint = "default"
 
         let dir = tempfile::tempdir().expect("tempdir");
         let modules = dir.path().join("modules");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         std::fs::create_dir_all(&modules).expect("modules dir");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         std::fs::write(modules.join("index.js"), "export default {};").expect("index.js");
         let manifest = PluginManifest::parse(
             r#"
@@ -1535,6 +1698,8 @@ mode = "deny"
             None,
         )
         .expect("materialize");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         let capnp = std::fs::read_to_string(&generated.config_path).expect("read capnp");
         assert!(
             capnp.contains(r#"(name = "granted", external = (address = "unix:/tmp/granted.sock""#),
@@ -1628,6 +1793,8 @@ mode = "deny"
             None,
         )
         .expect("materialize native");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         let capnp = std::fs::read_to_string(&generated.config_path).expect("read");
         assert!(
             !capnp.contains("PLUGIN_BACKEND") && !capnp.contains("nativeBackend"),
@@ -1696,6 +1863,8 @@ mode = "deny"
             None,
         )
         .expect("materialize");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         let capnp = std::fs::read_to_string(&generated.config_path).expect("read capnp");
         assert!(
             capnp.contains(
@@ -1745,6 +1914,8 @@ mode = "deny"
                 "missing config in {}",
                 dir.display()
             );
+            // Tempdir / generated state path in unit test.
+            // codeql[rust/path-injection]
             let _ = std::fs::remove_dir_all(dir);
         }
     }
@@ -1781,12 +1952,16 @@ mode = "deny"
                             None,
                         )
                         .expect("materialize native");
+                        // Tempdir / generated state path in unit test.
+                        // codeql[rust/path-injection]
                         let capnp = std::fs::read_to_string(&generated.config_path).expect("read");
                         assert!(
                             capnp.contains(r#"(name = "PLUGIN_DESCRIBE", json = ""#)
                                 && !capnp.contains("const pluginWorker"),
                             "native config clobbered:\n{capnp}"
                         );
+                        // Tempdir / generated state path in unit test.
+                        // codeql[rust/path-injection]
                         let _ = std::fs::remove_dir_all(&generated.state_dir);
                     }
                 })
@@ -1814,6 +1989,8 @@ mode = "deny"
             None,
         )
         .expect("materialize");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         let dir_mode = std::fs::metadata(&generated.state_dir)
             .expect("dir meta")
             .permissions()
@@ -1825,6 +2002,8 @@ mode = "deny"
             "session dir {}",
             generated.state_dir.display()
         );
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         let cfg_mode = std::fs::metadata(&generated.config_path)
             .expect("cfg meta")
             .permissions()
@@ -1836,6 +2015,8 @@ mode = "deny"
             "config {}",
             generated.config_path.display()
         );
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         let _ = std::fs::remove_dir_all(&generated.state_dir);
     }
 
@@ -1846,6 +2027,8 @@ mode = "deny"
 
         let plugin = tempfile::tempdir().expect("plugin");
         let session = tempfile::tempdir().expect("session");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         std::fs::set_permissions(session.path(), std::fs::Permissions::from_mode(0o755))
             .expect("chmod 0755");
         let generated = materialize_native_backend(
@@ -1859,6 +2042,8 @@ mode = "deny"
             Some(session.path()),
         )
         .expect("materialize");
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         let dir_mode = std::fs::metadata(session.path())
             .expect("dir meta")
             .permissions()
@@ -1868,6 +2053,8 @@ mode = "deny"
             dir_mode, 0o700,
             "existing session dir must be tightened to 0700"
         );
+        // Tempdir / generated state path in unit test.
+        // codeql[rust/path-injection]
         let cfg_mode = std::fs::metadata(&generated.config_path)
             .expect("cfg meta")
             .permissions()
