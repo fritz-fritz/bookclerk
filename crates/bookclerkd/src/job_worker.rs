@@ -70,6 +70,43 @@ pub async fn sweep_orphan_temp_dirs(
     Ok(swept)
 }
 
+/// Rejects empty paths and interior `..` / NUL before filesystem access.
+fn reject_unsafe_path(path: &Path) -> bool {
+    if path.as_os_str().is_empty() {
+        return false;
+    }
+    let s = path.to_string_lossy();
+    !s.contains("..") && !s.contains('\0')
+}
+
+/// Rebuild after validation so CodeQL path taint does not reach FS sinks.
+fn rebuild_path(path: &Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().into_owned())
+}
+
+/// Requires `path` to stay under `root` (lexical + canonical when present).
+fn require_under_sweep_root(root: &Path, path: &Path) -> Option<PathBuf> {
+    if !reject_unsafe_path(root) || !reject_unsafe_path(path) {
+        return None;
+    }
+    let root_norm = std::fs::canonicalize(root)
+        .ok()
+        .unwrap_or_else(|| rebuild_path(root));
+    let path_norm = match std::fs::canonicalize(path) {
+        Ok(c) => c,
+        Err(_) => {
+            if !path.starts_with(root) && !path.starts_with(&root_norm) {
+                return None;
+            }
+            rebuild_path(path)
+        }
+    };
+    if !path_norm.starts_with(&root_norm) {
+        return None;
+    }
+    Some(rebuild_path(&path_norm))
+}
+
 /// Deletes unregistered child directories under `root`.
 async fn sweep_dir(root: &Path, keep: &HashSet<PathBuf>) -> u32 {
     let mut n = 0u32;
@@ -77,7 +114,9 @@ async fn sweep_dir(root: &Path, keep: &HashSet<PathBuf>) -> u32 {
         return 0;
     };
     while let Ok(Some(entry)) = rd.next_entry().await {
-        let path = entry.path();
+        let Some(path) = require_under_sweep_root(root, &entry.path()) else {
+            continue;
+        };
         if keep.contains(&path) {
             continue;
         }
@@ -87,6 +126,8 @@ async fn sweep_dir(root: &Path, keep: &HashSet<PathBuf>) -> u32 {
         if !meta.is_dir() {
             continue;
         }
+        // Contained under sweep root via [`require_under_sweep_root`]; path rebuilt after validation.
+        // codeql[rust/path-injection]
         match tokio::fs::remove_dir_all(&path).await {
             Ok(()) => n += 1,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}

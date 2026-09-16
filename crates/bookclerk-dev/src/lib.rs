@@ -87,10 +87,10 @@ pub fn default_files_dir() -> std::path::PathBuf {
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn reset_files_dir(files_dir: &std::path::Path) -> anyhow::Result<()> {
     use anyhow::{bail, Context};
+    use bookclerk_sandbox::require_absolute_spawn_path;
 
-    if files_dir.as_os_str().is_empty() {
-        bail!("refusing to reset empty BOOKCLERK_FILES_DIR");
-    }
+    let files_dir = require_absolute_spawn_path(files_dir)
+        .map_err(|err| anyhow::anyhow!("invalid BOOKCLERK_FILES_DIR: {err}"))?;
     // Guard against wiping a filesystem root if misconfigured.
     if files_dir
         .components()
@@ -103,11 +103,15 @@ pub fn reset_files_dir(files_dir: &std::path::Path) -> anyhow::Result<()> {
             files_dir.display()
         );
     }
+    // Absolute path validated by [`require_absolute_spawn_path`]; rebuilt after validation.
+    // codeql[rust/path-injection]
     if files_dir.exists() {
-        std::fs::remove_dir_all(files_dir)
+        // codeql[rust/path-injection]
+        std::fs::remove_dir_all(&files_dir)
             .with_context(|| format!("remove {}", files_dir.display()))?;
     }
-    std::fs::create_dir_all(files_dir)
+    // codeql[rust/path-injection]
+    std::fs::create_dir_all(&files_dir)
         .with_context(|| format!("recreate {}", files_dir.display()))?;
     Ok(())
 }

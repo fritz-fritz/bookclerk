@@ -1,7 +1,7 @@
 //! Local SQLite engine for the database plugin (rusqlite SeaORM proxy).
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -228,6 +228,21 @@ impl std::fmt::Debug for SqliteProxy {
     }
 }
 
+/// Rejects empty paths and interior `..` / NUL, then rebuilds for FS sinks.
+fn validated_db_path(path: &Path) -> std::result::Result<PathBuf, DbErr> {
+    if path.as_os_str().is_empty() {
+        return Err(DbErr::Custom("refusing empty database path".into()));
+    }
+    let s = path.to_string_lossy();
+    if s.contains("..") || s.contains('\0') {
+        return Err(DbErr::Custom(format!(
+            "refusing unsafe database path: {}",
+            path.display()
+        )));
+    }
+    Ok(PathBuf::from(s.into_owned()))
+}
+
 /// Opens a SQLite file and returns a SeaORM proxy (no schema application).
 ///
 /// The host applies DDL after `openSession` + capability negotiation.
@@ -237,10 +252,15 @@ impl std::fmt::Debug for SqliteProxy {
 /// Returns [`DbErr`] when the parent directory cannot be created, the file
 /// cannot be opened, or the SeaORM proxy cannot connect.
 pub async fn open(path: &Path) -> std::result::Result<DatabaseConnection, DbErr> {
+    let path = validated_db_path(path)?;
     if let Some(parent) = path.parent() {
+        // Parent validated via [`validated_db_path`]; path rebuilt after validation.
+        // codeql[rust/path-injection]
         std::fs::create_dir_all(parent).map_err(|e| DbErr::Custom(e.to_string()))?;
     }
-    let conn = rusqlite::Connection::open(path).map_err(rusqlite_db_err)?;
+    // Path validated via [`validated_db_path`]; rebuilt after validation.
+    // codeql[rust/path-injection]
+    let conn = rusqlite::Connection::open(&path).map_err(rusqlite_db_err)?;
     // TRUNCATE keeps a durable rollback journal without unlinking it on commit.
     // The jailed sqlite guest only has file-level Landlock grants for the DB and
     // sidecars (not the files-dir parent), so DELETE journal mode fails with

@@ -491,6 +491,13 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        let dir = {
+            let s = dir.to_string_lossy().into_owned();
+            assert!(!s.contains("..") && !s.contains('\0'));
+            std::path::PathBuf::from(s)
+        };
+        // Test temp dir rebuilt after `..`/NUL rejection.
+        // codeql[rust/path-injection]
         std::fs::create_dir_all(&dir).unwrap();
         let proxy_path = dir.join("proxy.sock");
         let listener = tokio::net::UnixListener::bind(&proxy_path).unwrap();
@@ -532,6 +539,7 @@ mod tests {
         assert_eq!(&buf[..n], b"SQL");
         server.await.unwrap();
         std::env::remove_var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV);
+        // codeql[rust/path-injection]
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

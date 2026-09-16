@@ -320,8 +320,13 @@ fn bundle_dir_name(version: &str) -> String {
 /// Copies the pinned `workerd` binary and version stamp into the platform bundle.
 fn copy_pinned_workerd(root: &Path, bundle: &Path) -> Result<()> {
     let workerd = crate::ensure_workerd_for_profile(root, true)?;
+    let workerd = bookclerk_sandbox::require_spawn_executable(&workerd)
+        .with_context(|| format!("validate workerd binary {}", workerd.display()))?;
     let dest_name = bookclerk_workerd::binary_name();
-    let dest = bundle.join(dest_name);
+    let dest = bookclerk_sandbox::require_under_root(&bundle.join(dest_name), bundle)
+        .with_context(|| format!("validate workerd dest under {}", bundle.display()))?;
+    // Contained under bundle via [`require_under_root`]; paths rebuilt after validation.
+    // codeql[rust/path-injection]
     fs::copy(&workerd, &dest)
         .with_context(|| format!("copy {} -> {}", workerd.display(), dest.display()))?;
     set_executable(&dest)?;
@@ -329,8 +334,16 @@ fn copy_pinned_workerd(root: &Path, bundle: &Path) -> Result<()> {
         .parent()
         .map(|d| d.join(bookclerk_workerd::WORKERD_VERSION_STAMP));
     if let Some(src) = stamp_src {
+        let stamp_dest = bookclerk_sandbox::require_under_root(
+            &bundle.join(bookclerk_workerd::WORKERD_VERSION_STAMP),
+            bundle,
+        )
+        .with_context(|| format!("validate workerd stamp dest under {}", bundle.display()))?;
+        // Contained under bundle via [`require_under_root`]; path rebuilt after validation.
+        // codeql[rust/path-injection]
         if src.is_file() {
-            let _ = fs::copy(&src, bundle.join(bookclerk_workerd::WORKERD_VERSION_STAMP));
+            // codeql[rust/path-injection]
+            let _ = fs::copy(&src, &stamp_dest);
         }
     }
     eprintln!("copied pinned workerd -> {}", dest.display());

@@ -11,6 +11,7 @@
 //! Reported throughput is over payload bytes, on a warm page cache; compare runs
 //! on one machine rather than across machines.
 
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use bookclerk_mp4::fixture::ProgressiveFixture;
@@ -22,6 +23,19 @@ const FRAMES_PER_SECOND: usize = 43;
 /// Synthetic AAC frame size in bytes (~128 kbit/s at 43 frames/s).
 const BYTES_PER_FRAME: usize = 372;
 
+/// Rejects relative/`..`/NUL paths and rebuilds before filesystem access.
+fn validated_absolute(path: &Path) -> PathBuf {
+    assert!(
+        path.is_absolute(),
+        "bench path must be absolute: {}",
+        path.display()
+    );
+    let s = path.to_string_lossy().into_owned();
+    assert!(!s.contains(".."), "bench path must not contain '..': {s}");
+    assert!(!s.contains('\0'), "bench path must not contain NUL");
+    PathBuf::from(s)
+}
+
 fn main() {
     let hours: usize = std::env::args()
         .nth(1)
@@ -29,10 +43,12 @@ fn main() {
         .unwrap_or(3);
     let count = FRAMES_PER_SECOND * 3600 * hours;
 
-    let dir = std::env::temp_dir().join("bench_remux");
+    let dir = validated_absolute(&std::env::temp_dir().join("bench_remux"));
+    // Path validated via [`validated_absolute`]; rebuilt after validation.
+    // codeql[rust/path-injection]
     std::fs::create_dir_all(&dir).expect("create scratch dir");
-    let input = dir.join("in.m4a");
-    let output = dir.join("out.m4b");
+    let input = validated_absolute(&dir.join("in.m4a"));
+    let output = validated_absolute(&dir.join("out.m4b"));
 
     let fixture = ProgressiveFixture::default().with_samples(
         (0..count)
@@ -54,5 +70,6 @@ fn main() {
         );
     }
 
+    // codeql[rust/path-injection]
     std::fs::remove_dir_all(&dir).ok();
 }

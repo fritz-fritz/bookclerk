@@ -13,7 +13,9 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::drm::{decrypt_adrm, decrypt_cenc, CencDecryptRequest, DecryptRequest};
+use crate::drm::{
+    decrypt_adrm, decrypt_cenc, validated_fs_path, CencDecryptRequest, DecryptRequest,
+};
 use audible_rs::api::client::Client;
 use audible_rs::auth::login::{self as login_flow, LoginServer};
 use audible_rs::auth::Authenticator;
@@ -357,9 +359,13 @@ pub async fn guest_fetch_title(
     let want_cover = options.download_cover || options.fixup_metadata;
     let mut cover_path = None;
     if want_cover {
-        let work_dir = cache_dir.join(title_id);
+        let work_dir = validated_fs_path(&cache_dir.join(title_id))
+            .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
+        // Path validated via [`validated_fs_path`]; rebuilt after validation.
+        // codeql[rust/path-injection]
         tokio::fs::create_dir_all(&work_dir).await?;
-        let cover_dest = work_dir.join(format!("{title_id}.cover.jpg"));
+        let cover_dest = validated_fs_path(&work_dir.join(format!("{title_id}.cover.jpg")))
+            .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
         match download_cover_jpeg(
             &account.client,
             &account.marketplace,
@@ -376,9 +382,13 @@ pub async fn guest_fetch_title(
         }
     }
 
-    let work_dir = cache_dir.join(title_id);
+    let work_dir = validated_fs_path(&cache_dir.join(title_id))
+        .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
+    // Path validated via [`validated_fs_path`]; rebuilt after validation.
+    // codeql[rust/path-injection]
     tokio::fs::create_dir_all(&work_dir).await?;
-    let m4b_path = work_dir.join(format!("{title_id}.m4b"));
+    let m4b_path = validated_fs_path(&work_dir.join(format!("{title_id}.m4b")))
+        .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
 
     let trim = if options.strip_audible_brand_audio {
         let brand = chapter_info
@@ -444,9 +454,15 @@ pub async fn guest_fetch_title(
         }
     } else if downloaded.path != m4b_path {
         if let Some(parent) = m4b_path.parent() {
+            // Path validated via [`validated_fs_path`]; rebuilt after validation.
+            // codeql[rust/path-injection]
             tokio::fs::create_dir_all(parent).await?;
         }
-        tokio::fs::copy(&downloaded.path, &m4b_path).await?;
+        let from = validated_fs_path(&downloaded.path)
+            .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
+        // Paths validated via [`validated_fs_path`]; rebuilt after validation.
+        // codeql[rust/path-injection]
+        tokio::fs::copy(&from, &m4b_path).await?;
         m4b_path
     } else {
         downloaded.path

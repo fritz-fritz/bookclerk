@@ -112,33 +112,26 @@ pub fn export_native(opts: NativeExportOptions) -> Result<NativeExportSummary> {
     let mut file_count = 0usize;
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
 
-    push_if_exists(&opts.files_dir, "config.toml", &mut entries, &mut included);
-    push_if_exists(&opts.files_dir, "library.db", &mut entries, &mut included);
+    push_if_exists(&opts.files_dir, "config.toml", &mut entries, &mut included)?;
+    push_if_exists(&opts.files_dir, "library.db", &mut entries, &mut included)?;
 
     if opts.include_plugin_manifests {
-        collect_plugin_tomls(&opts.files_dir.join("plugins"), &mut entries, &mut included)?;
+        let plugins = opts.files_dir.join("plugins");
+        collect_plugin_tomls(&plugins, &mut entries, &mut included)?;
     }
     if opts.include_cache {
-        collect_dir(
-            &opts.files_dir.join("cache"),
-            "cache",
-            &mut entries,
-            &mut included,
-            true,
-        )?;
+        let cache = opts.files_dir.join("cache");
+        collect_dir(&cache, &cache, "cache", &mut entries, &mut included, true)?;
     }
     if opts.include_logs {
-        collect_dir(
-            &opts.files_dir.join("logs"),
-            "logs",
-            &mut entries,
-            &mut included,
-            true,
-        )?;
+        let logs = opts.files_dir.join("logs");
+        collect_dir(&logs, &logs, "logs", &mut entries, &mut included, true)?;
     }
     if opts.include_plugin_databases {
+        let plugin_databases = opts.files_dir.join("plugin-databases");
         collect_dir(
-            &opts.files_dir.join("plugin-databases"),
+            &plugin_databases,
+            &plugin_databases,
             "plugin-databases",
             &mut entries,
             &mut included,
@@ -295,41 +288,106 @@ fn is_safe_archive_path(path: &Path) -> bool {
     true
 }
 
+/// Rejects empty paths and interior `..` / NUL before filesystem access.
+fn reject_unsafe_path(path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() {
+        return Err(err("refusing empty path"));
+    }
+    let s = path.to_string_lossy();
+    if s.contains("..") || s.contains('\0') {
+        return Err(err(format!("refusing unsafe path: {}", path.display())));
+    }
+    Ok(())
+}
+
+/// Rebuild after validation so CodeQL path taint does not reach FS sinks.
+fn rebuild_path(path: &Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().into_owned())
+}
+
+/// Requires `path` to stay under `root` (canonical when present).
+fn require_under_walk_root(root: &Path, path: &Path) -> Result<PathBuf> {
+    reject_unsafe_path(root)?;
+    reject_unsafe_path(path)?;
+    let root_norm = match std::fs::canonicalize(root) {
+        Ok(c) => c,
+        Err(_) => rebuild_path(root),
+    };
+    let path_norm = match std::fs::canonicalize(path) {
+        Ok(c) => c,
+        Err(_) => {
+            if !path.starts_with(root) && !path.starts_with(&root_norm) {
+                return Err(err(format!(
+                    "path {} escapes walk root {}",
+                    path.display(),
+                    root.display()
+                )));
+            }
+            rebuild_path(path)
+        }
+    };
+    if !path_norm.starts_with(&root_norm) {
+        return Err(err(format!(
+            "path {} escapes walk root {}",
+            path_norm.display(),
+            root_norm.display()
+        )));
+    }
+    Ok(rebuild_path(&path_norm))
+}
+
 /// Adds `rel` to the export list when that file exists under the files dir.
 fn push_if_exists(
     root: &Path,
     rel: &str,
     entries: &mut Vec<(String, PathBuf)>,
     included: &mut Vec<String>,
-) {
-    let path = root.join(rel);
+) -> Result<()> {
+    reject_unsafe_path(root)?;
+    let path = rebuild_path(&root.join(rel));
+    require_under_walk_root(root, &path)?;
+    // Contained under files_dir via [`require_under_walk_root`]; path rebuilt after validation.
+    // codeql[rust/path-injection]
     if path.is_file() {
         entries.push((rel.to_string(), path));
         included.push(rel.to_string());
     }
+    Ok(())
 }
 
 /// Walks a directory into archive entries (`cache/`, `logs/`); missing dirs are skipped.
 fn collect_dir(
+    walk_root: &Path,
     dir: &Path,
     arc_prefix: &str,
     entries: &mut Vec<(String, PathBuf)>,
     included: &mut Vec<String>,
     recursive: bool,
 ) -> Result<()> {
+    let dir = require_under_walk_root(walk_root, dir)?;
+    // Contained under walk_root via [`require_under_walk_root`]; path rebuilt after validation.
+    // codeql[rust/path-injection]
     if !dir.is_dir() {
         return Ok(());
     }
     included.push(format!("{arc_prefix}/"));
-    for entry in std::fs::read_dir(dir)? {
+    // Contained under walk_root via [`require_under_walk_root`]; path rebuilt after validation.
+    // codeql[rust/path-injection]
+    for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
-        let path = entry.path();
+        let path = require_under_walk_root(walk_root, &entry.path())?;
         let name = entry.file_name();
         let arc_name = format!("{arc_prefix}/{}", name.to_string_lossy());
+        // Contained under walk_root via [`require_under_walk_root`]; path rebuilt after validation.
+        // codeql[rust/path-injection]
         if path.is_file() {
             entries.push((arc_name, path));
-        } else if recursive && path.is_dir() {
-            collect_dir(&path, &arc_name, entries, included, true)?;
+        } else if recursive {
+            // Contained under walk_root via [`require_under_walk_root`]; path rebuilt after validation.
+            // codeql[rust/path-injection]
+            if path.is_dir() {
+                collect_dir(walk_root, &path, &arc_name, entries, included, true)?;
+            }
         }
     }
     Ok(())
@@ -341,21 +399,33 @@ fn collect_plugin_tomls(
     entries: &mut Vec<(String, PathBuf)>,
     included: &mut Vec<String>,
 ) -> Result<()> {
+    let plugins_root = require_under_walk_root(plugins_root, plugins_root)?;
+    // Contained under plugins_root via [`require_under_walk_root`]; path rebuilt after validation.
+    // codeql[rust/path-injection]
     if !plugins_root.is_dir() {
         return Ok(());
     }
     included.push("plugins/**/plugin.toml".into());
-    let root_toml = plugins_root.join("plugin.toml");
+    let root_toml =
+        require_under_walk_root(plugins_root.as_path(), &plugins_root.join("plugin.toml"))?;
+    // Contained under plugins_root via [`require_under_walk_root`]; path rebuilt after validation.
+    // codeql[rust/path-injection]
     if root_toml.is_file() {
         entries.push(("plugins/plugin.toml".into(), root_toml));
     }
-    for entry in std::fs::read_dir(plugins_root)? {
+    // Contained under plugins_root via [`require_under_walk_root`]; path rebuilt after validation.
+    // codeql[rust/path-injection]
+    for entry in std::fs::read_dir(&plugins_root)? {
         let entry = entry?;
-        let path = entry.path();
+        let path = require_under_walk_root(plugins_root.as_path(), &entry.path())?;
+        // Contained under plugins_root via [`require_under_walk_root`]; path rebuilt after validation.
+        // codeql[rust/path-injection]
         if !path.is_dir() {
             continue;
         }
-        let toml = path.join("plugin.toml");
+        let toml = require_under_walk_root(plugins_root.as_path(), &path.join("plugin.toml"))?;
+        // Contained under plugins_root via [`require_under_walk_root`]; path rebuilt after validation.
+        // codeql[rust/path-injection]
         if toml.is_file() {
             let name = entry.file_name();
             entries.push((

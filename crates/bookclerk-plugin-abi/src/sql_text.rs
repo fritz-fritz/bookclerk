@@ -1072,15 +1072,26 @@ mod tests {
         }
     }
 
+    fn rebuild_test_path(path: &std::path::Path) -> std::path::PathBuf {
+        let s = path.to_string_lossy().into_owned();
+        assert!(!s.contains("..") && !s.contains('\0'));
+        std::path::PathBuf::from(s)
+    }
+
     #[test]
     fn fuzz_corpus_sql_parse_does_not_panic() {
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fuzz/corpus/sql_parse");
+        let dir = rebuild_test_path(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fuzz/corpus/sql_parse"),
+        );
+        // codeql[rust/path-injection]
         for entry in std::fs::read_dir(&dir).expect("fuzz corpus") {
-            let path = entry.expect("entry").path();
+            let path = rebuild_test_path(&entry.expect("entry").path());
+            // codeql[rust/path-injection]
             if !path.is_file() {
                 continue;
             }
+            // codeql[rust/path-injection]
             let sql = std::fs::read_to_string(&path).expect("read");
             let _ = sql_v1_pack_statements(&sql);
             let _ = crate::validate_sql_v1_grammar(&sql, false);

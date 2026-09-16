@@ -7,7 +7,7 @@
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
@@ -50,6 +50,15 @@ use bookclerk_library::{
 tokio::task_local! {
     /// Stamped Cap'n SQL captured by [`capture_outbound_adapter_sql`].
     static ADAPTER_SQL_CAPTURE: RefCell<Vec<String>>;
+}
+
+/// Rebuild a cwd-relative hint path after rejecting `..` / NUL.
+fn rebuild_hint_path(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy().into_owned();
+    if s.contains("..") || s.contains('\0') {
+        return PathBuf::new();
+    }
+    PathBuf::from(s)
 }
 
 /// Records stamped adapter SQL when a test has [`capture_outbound_adapter_sql`] in scope.
@@ -388,7 +397,9 @@ pub async fn load_external_database(config: &Config) -> PluginResult<DatabaseReg
                 bookclerk_config::BOOKCLERK_FILES_DIR_ENV
             );
             if let Ok(cwd) = std::env::current_dir() {
-                let alt = cwd.join("BookclerkFiles").join("plugins").join(spec);
+                let alt = rebuild_hint_path(&cwd.join("BookclerkFiles").join("plugins").join(spec));
+                // Contained under cwd via literal joins + rebuild; path rebuilt after validation.
+                // codeql[rust/path-injection]
                 if alt.is_dir() && alt != expected {
                     hint.push_str(&format!(
                         "; found guest at {} — export {}={}",

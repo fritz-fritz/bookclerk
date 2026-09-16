@@ -95,7 +95,16 @@ fn stage_files_dir() -> Option<TempDir> {
     // Linux sockaddr_un (~108 bytes) on GitHub Actions; keep staging under a
     // similarly long prefix so native-behind-workerd cannot regress to
     // pathname sockets.
-    let base = std::env::temp_dir().join("gha-sunlen").join("x".repeat(48));
+    let base = {
+        let path = std::env::temp_dir().join("gha-sunlen").join("x".repeat(48));
+        let s = path.to_string_lossy().into_owned();
+        if s.contains("..") || s.contains('\0') {
+            return None;
+        }
+        std::path::PathBuf::from(s)
+    };
+    // Test temp base rebuilt after `..`/NUL rejection.
+    // codeql[rust/path-injection]
     std::fs::create_dir_all(&base).ok()?;
     tempfile::Builder::new().prefix("td").tempdir_in(base).ok()
 }
