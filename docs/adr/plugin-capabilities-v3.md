@@ -39,8 +39,9 @@ payloads for several storefront / integration surfaces, and a reverse
    not declare. Adding a consumer or job on a same-PluginKey upgrade leaves
    the existing approval usable for the previously granted subset; the new
    capability stays pending until the operator consents. Empty structural
-   sets on modern grants (`schema_version` ≥ 2) mean “approve none”, not
-   “inherit the manifest”. `authority_revision` includes consumers, jobs,
+   sets mean “approve none” for every grant schema version, including
+   omitted/`0` legacy JSON; they do not inherit the manifest.
+   `authority_revision` includes consumers, jobs,
    and operator-controlled resource budgets.
 
 2. **`PluginWorker.open(invocation, bindings) -> Entrypoints`.** One open per

@@ -3,9 +3,10 @@
 //! Structural authority (entrypoints, producers, event consumers, host
 //! bindings, named databases, jobs) originates in the plugin package. The
 //! operator may **narrow** it but cannot invent a structural capability the
-//! manifest did not declare. Modern grants ([`GRANT_SCHEMA_VERSION`]) treat
-//! empty structural sets as an explicit empty approval; omitted
-//! `schemaVersion` (legacy `0`) still inherits the current manifest.
+//! manifest did not declare. Empty stored structural sets grant no authority
+//! for every persisted document version, including omitted/`0` legacy JSON.
+//! Newly requested structural capabilities stay pending until explicitly
+//! approved; they are never inherited from a newer manifest.
 //!
 //! A stored grant remains usable when a later package version adds optional
 //! structural capabilities; the extras stay pending until the operator
@@ -36,9 +37,10 @@ use bookclerk_plugin_manifest::EventConsumer;
 pub const GRANTS_FILE: &str = "plugin-grants.json";
 /// Current persisted [`PluginGrant`] document version.
 ///
-/// Missing / `0` JSON is a **legacy** document: empty structural sets inherit
-/// the current manifest request. Version [`GRANT_SCHEMA_VERSION`] treats empty
-/// sets as an explicit operator approval of nothing.
+/// This constant versions the on-disk grant representation. Missing / `0` JSON
+/// is a legacy document. Empty structural sets are fail-closed at **every**
+/// schema version: they approve nothing and do not acquire capabilities merely
+/// because a newer manifest requests them.
 pub const GRANT_SCHEMA_VERSION: u32 = 2;
 
 /// Env keys consumed by `bookclerk-workerd` (`grant.rs`) at isolate start.
@@ -297,7 +299,11 @@ pub fn granted_jobs_from_manifest(manifest: &PluginManifest) -> BTreeSet<String>
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginGrant {
-    /// Persisted document version. `0` (or omitted JSON) is legacy inherit-if-empty.
+    /// Persisted grant document version.
+    ///
+    /// `0` (or omitted JSON) is a legacy document. Empty structural sets
+    /// approve nothing at every version; a newer manifest cannot acquire
+    /// entrypoints, producers, consumers, jobs, or bindings by request alone.
     #[serde(default)]
     pub schema_version: u32,
     /// Canonical [`bookclerk_plugin_catalog::PluginKey`].
@@ -372,11 +378,6 @@ pub struct PluginGrant {
 }
 
 impl PluginGrant {
-    /// True when empty structural sets mean “approve none”, not “inherit manifest”.
-    #[must_use]
-    pub fn structural_explicit(&self) -> bool {
-        self.schema_version >= GRANT_SCHEMA_VERSION
-    }
     /// True when this grant authorizes delivering `event_type` at `schema_version`.
     #[must_use]
     pub fn allows_event_consumer(&self, event_type: &str, schema_version: u32) -> bool {
@@ -1029,22 +1030,10 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
         } else {
             existing.plugin_id.clone()
         },
-        entrypoints: intersect_or_legacy_inherit(
-            &existing.entrypoints,
-            &requested.entrypoints,
-            existing.structural_explicit(),
-        ),
-        producers: intersect_or_legacy_inherit(
-            &existing.producers,
-            &requested.producers,
-            existing.structural_explicit(),
-        ),
+        entrypoints: intersect_structural(&existing.entrypoints, &requested.entrypoints),
+        producers: intersect_structural(&existing.producers, &requested.producers),
         consumers: intersect_consumers(&existing.consumers, &requested.consumers),
-        jobs: intersect_or_legacy_inherit(
-            &existing.jobs,
-            &requested.jobs,
-            existing.structural_explicit(),
-        ),
+        jobs: intersect_structural(&existing.jobs, &requested.jobs),
         network_mode,
         domains: merge_network_domains(existing, requested),
         manifest_domains: if requested.manifest_domains.is_empty() {
@@ -1054,15 +1043,10 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
         },
         operator_added_domains,
         operator_denied_domains,
-        bindings: intersect_or_legacy_inherit(
-            &existing.bindings,
-            &requested.bindings,
-            existing.structural_explicit(),
-        ),
-        compatibility_flags: intersect_or_legacy_inherit(
+        bindings: intersect_structural(&existing.bindings, &requested.bindings),
+        compatibility_flags: intersect_structural(
             &existing.compatibility_flags,
             &requested.compatibility_flags,
-            existing.structural_explicit(),
         ),
         // Budgets are operator/stored authority: never auto-widen from a newer
         // manifest when the stored grant left a field unset.
@@ -1080,15 +1064,18 @@ pub fn effective_grant(existing: &PluginGrant, requested: &PluginGrant) -> Plugi
     }
 }
 
-/// Intersects stored and requested sets.
+/// Intersects stored approval with the current manifest request.
 ///
-/// Empty stored sets mean “approve none” for every schema version. Legacy
-/// grants that omitted structural fields must re-approve rather than inherit
-/// a newer manifest’s full surface.
-fn intersect_or_legacy_inherit<T: Clone + Ord>(
+/// Empty stored sets yield an empty result for every grant schema version.
+/// Newly requested members stay pending until the operator approves them.
+///
+/// # Arguments
+///
+/// * `existing` - Stored operator-approved set.
+/// * `requested` - Current manifest request.
+fn intersect_structural<T: Clone + Ord>(
     existing: &BTreeSet<T>,
     requested: &BTreeSet<T>,
-    _explicit: bool,
 ) -> BTreeSet<T> {
     existing.intersection(requested).cloned().collect()
 }
@@ -2744,9 +2731,12 @@ domains = ["api.example.com"]
         existing.consumers.clear();
         existing.jobs.clear();
         existing.entrypoints.clear();
+        existing.bindings.clear();
+        existing.producers.clear();
         let mut requested = existing.clone();
         requested.schema_version = GRANT_SCHEMA_VERSION;
         requested.entrypoints.insert("storefront".into());
+        requested.bindings.insert("secrets".into());
         requested.consumers.insert(GrantedEventConsumer {
             event_type: "book_acquired".into(),
             schema_versions: vec![1],
@@ -2758,10 +2748,12 @@ domains = ["api.example.com"]
         assert!(effective.entrypoints.is_empty());
         assert!(effective.consumers.is_empty());
         assert!(effective.jobs.is_empty());
+        assert!(effective.bindings.is_empty());
         let pending = pending_structural(&existing, &requested);
         assert!(pending.entrypoints.contains("storefront"));
         assert_eq!(pending.consumers.len(), 1);
         assert!(pending.jobs.contains("stream_copy"));
+        assert!(pending.bindings.contains("secrets"));
     }
 
     #[test]
@@ -2853,6 +2845,5 @@ mode = "deny"
         }"#;
         let grant: PluginGrant = serde_json::from_str(json).unwrap();
         assert_eq!(grant.schema_version, 0);
-        assert!(!grant.structural_explicit());
     }
 }
