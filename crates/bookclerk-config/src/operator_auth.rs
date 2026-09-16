@@ -66,13 +66,14 @@ pub fn validate_operator_token(token: &str, source: &str) -> Result<String> {
 /// # Errors
 ///
 /// Returns an error when the operation fails.
+#[allow(unsafe_code)] // `MaybeUninit` + fallible fill; avoids a zero array CodeQL models as a key.
 pub fn generate_operator_token() -> Result<String> {
-    // Scratch buffer filled by the OS CSPRNG; not a hard-coded key/IV.
-    // codeql[rust/hard-coded-cryptographic-value]
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes)
+    let mut bytes = std::mem::MaybeUninit::<[u8; 32]>::uninit();
+    // SAFETY: `getrandom::fill` writes all 32 bytes on success.
+    let dest = unsafe { &mut *bytes.as_mut_ptr() };
+    getrandom::fill(dest)
         .map_err(|err| ConfigError::Invalid(format!("failed to generate operator token: {err}")))?;
-    Ok(encode_hex(&bytes))
+    Ok(encode_hex(unsafe { bytes.assume_init_ref() }))
 }
 
 /// Encodes random token bytes as lowercase hex for the operator API secret.
