@@ -48,21 +48,32 @@ struct AvatarKind {
 /// Absolute path of a stored avatar for `user_id` with `ext`.
 ///
 /// `user_id` is numeric and `ext` must be an allowlisted kind, so the file name
-/// cannot contain path separators. The result is still required to stay under
-/// `{files_dir}/avatars`.
+/// cannot contain path separators. Lexical `..` / `.` components in the trusted
+/// operator `files_dir` are normalized so configs like `BookclerkFiles/../data`
+/// still resolve. The result must stay under `{normalized_files_dir}/avatars`.
 fn avatar_path_with_ext(files_dir: &Path, user_id: i64, ext: &str) -> Option<PathBuf> {
     if !AVATAR_KINDS.iter().any(|(kind, _)| *kind == ext) {
         return None;
     }
-    if files_dir
-        .components()
-        .any(|c| matches!(c, Component::ParentDir))
-    {
-        return None;
-    }
+    let files_dir = normalize_lexical_path(files_dir);
     let dir = files_dir.join("avatars");
     let path = dir.join(format!("{user_id}.{ext}"));
     path.starts_with(&dir).then_some(path)
+}
+
+/// Collapse `.` and `..` in a trusted operator path without touching the filesystem.
+fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Stored avatar path and content type when a file exists.
@@ -475,7 +486,9 @@ mod tests {
         assert!(path.starts_with(dir.join("avatars")));
         assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("7.png"));
         assert!(avatar_path_with_ext(&dir, 7, "exe").is_none());
-        assert!(avatar_path_with_ext(Path::new("/tmp/bookclerk-files/../etc"), 7, "png").is_none());
+        let nested = avatar_path_with_ext(Path::new("/tmp/bookclerk-files/../data"), 7, "png")
+            .expect("normalized files_dir");
+        assert_eq!(nested, PathBuf::from("/tmp/data/avatars/7.png"));
     }
 
     #[tokio::test]

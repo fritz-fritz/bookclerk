@@ -3505,7 +3505,7 @@ async fn postgres_reclaim_expired_resume_restores_resume_pending() {
 
 async fn reclaim_expired_resume_restores(store: &LibraryStore) {
     let created = persist_outbox_event(
-        &store,
+        store,
         outbox_spec(
             "book_acquired",
             "book_acquired:reclaim-resume",
@@ -4976,7 +4976,7 @@ async fn park_echo_wake(
     wake_type: &str,
     wake_filter: &str,
 ) -> crate::EventDeliveryRecord {
-    let created = persist_outbox_event(&store, outbox_spec("book_acquired", dedup, payload))
+    let created = persist_outbox_event(store, outbox_spec("book_acquired", dedup, payload))
         .await
         .unwrap();
     let id = expect_created(created);
@@ -5525,7 +5525,7 @@ async fn postgres_stale_wake_finish_and_cursor_do_not_clobber_new_owner() {
 
 async fn stale_wake_fence_does_not_clobber(store: &LibraryStore) {
     let created = persist_outbox_event(
-        &store,
+        store,
         outbox_spec("book_acquired", "book_acquired:fence-stale", "{}"),
     )
     .await
@@ -5593,7 +5593,7 @@ async fn stale_wake_delivery_update_does_not_clear(store: &LibraryStore) {
     )
     .await;
     let trigger = persist_outbox_event(
-        &store,
+        store,
         outbox_spec(
             "book_acquired",
             "book_acquired:stale-wake-upd-2",

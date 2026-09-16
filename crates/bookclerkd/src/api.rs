@@ -4092,7 +4092,7 @@ struct CreateRequestBody {
 /// Query string for multi-store Discover catalog search.
 struct CatalogSearchQuery {
     /// Search text; queries shorter than two characters return an empty page.
-    /// Rejected above 256 characters so catalog search cannot allocate from an
+    /// Rejected above 256 UTF-8 bytes so catalog search cannot allocate from an
     /// unbounded query string.
     q: Option<String>,
     /// Alias for [`Self::page_size`] (typeahead / legacy).
@@ -4476,7 +4476,7 @@ async fn discover_catalog_search(
     if query.len() > CATALOG_QUERY_MAX {
         return Err((
             StatusCode::BAD_REQUEST,
-            "catalog query must be 256 characters or fewer".into(),
+            format!("catalog query must be {CATALOG_QUERY_MAX} bytes or fewer"),
         ));
     }
     if query.trim().len() < 2 {

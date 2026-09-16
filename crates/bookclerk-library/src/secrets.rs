@@ -42,7 +42,7 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use chrono::Utc;
-use rand::RngCore;
+use rand::Rng;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
@@ -318,9 +318,7 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
 
 /// Fills an `N`-byte array from the OS CSPRNG (salt and nonce generation).
 fn random_bytes_array<const N: usize>() -> [u8; N] {
-    let mut out = vec![0_u8; N];
-    rand::rngs::OsRng.fill_bytes(&mut out);
-    out.try_into().expect("random buffer length matches N")
+    std::array::from_fn(|_| rand::rngs::OsRng.gen::<u8>())
 }
 
 /// Encrypt `plaintext` with Argon2id key derivation + XChaCha20-Poly1305 (legacy).

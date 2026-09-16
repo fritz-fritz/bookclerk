@@ -6,6 +6,7 @@
 
 use crate::error::{ConfigError, Result};
 use crate::redact::register_secret;
+use rand::Rng;
 
 /// How an operator token was resolved from env (config-layer only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,9 +68,7 @@ pub fn validate_operator_token(token: &str, source: &str) -> Result<String> {
 ///
 /// Returns an error when the operation fails.
 pub fn generate_operator_token() -> Result<String> {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes)
-        .map_err(|err| ConfigError::Invalid(format!("failed to generate operator token: {err}")))?;
+    let bytes: [u8; 32] = rand::rngs::OsRng.gen();
     Ok(encode_hex(&bytes))
 }
 

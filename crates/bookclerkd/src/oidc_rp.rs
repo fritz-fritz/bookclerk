@@ -730,7 +730,7 @@ async fn put_oidc_config(
     if body.providers.len() > MAX_OIDC_PROVIDERS {
         return Err(oidc_config_error(
             StatusCode::BAD_REQUEST,
-            "at most 16 identity providers",
+            format!("at most {MAX_OIDC_PROVIDERS} identity providers"),
         ));
     }
 
@@ -2547,6 +2547,60 @@ mod http_tests {
         assert!(on_disk.contains("id = \"github\""), "{on_disk}");
         assert!(on_disk.contains("client_id = \"ui-client\""), "{on_disk}");
         assert!(!on_disk.contains("client_secret"), "{on_disk}");
+    }
+
+    #[tokio::test]
+    async fn oidc_config_put_rejects_too_many_providers() {
+        let (state, app, library, _dir, _dek) = persist_harness().await;
+        let cookie =
+            portal_cookie_for_user(&library, bookclerk_library::UserRole::Owner, "Owner").await;
+        let seed = serde_json::json!({
+            "enabled": true,
+            "providers": [{
+                "id": "github",
+                "name": "GitHub",
+                "preset": "github",
+                "client_id": "keep-me",
+                "provision": "any",
+                "default_role": "member",
+                "link_by_email": true
+            }]
+        });
+        let (status, json) = put_oidc_json(app.clone(), &cookie, &seed).await;
+        assert_eq!(status, StatusCode::OK, "{json:?}");
+
+        let providers: Vec<Value> = (0..=MAX_OIDC_PROVIDERS)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("p{i}"),
+                    "name": format!("Provider {i}"),
+                    "preset": "github",
+                    "client_id": format!("client-{i}"),
+                    "provision": "any",
+                    "default_role": "member",
+                    "link_by_email": true
+                })
+            })
+            .collect();
+        assert_eq!(providers.len(), MAX_OIDC_PROVIDERS + 1);
+        let oversized = serde_json::json!({
+            "enabled": true,
+            "providers": providers
+        });
+        let (status, json) = put_oidc_json(app, &cookie, &oversized).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{json:?}");
+        assert_eq!(json["error"], "oidc_config");
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&MAX_OIDC_PROVIDERS.to_string()),
+            "{json:?}"
+        );
+
+        let live = state.config.read().await;
+        assert_eq!(live.auth.oidc.providers.len(), 1);
+        assert_eq!(live.auth.oidc.providers[0].client_id, "keep-me");
     }
 
     #[tokio::test]

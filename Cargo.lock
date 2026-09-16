@@ -1427,6 +1427,7 @@ dependencies = [
  "directories",
  "getrandom 0.4.3",
  "oslog",
+ "rand 0.8.7",
  "regex",
  "serde",
  "serde_json",

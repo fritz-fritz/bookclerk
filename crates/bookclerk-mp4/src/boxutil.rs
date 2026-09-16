@@ -169,6 +169,19 @@ pub fn read_u8(r: &mut impl Read) -> Result<u8> {
 }
 
 /// Reads exactly `n` bytes into a new buffer (no zero-initialized crypto array).
+///
+/// # Arguments
+///
+/// * `r` - Reader to pull bytes from.
+/// * `n` - Exact number of bytes required.
+///
+/// # Returns
+///
+/// A `Vec` of length `n` filled from `r`.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O fails or fewer than `n` bytes are available.
 pub fn read_exact_vec(r: &mut impl Read, n: usize) -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(n);
     let got = r.take(n as u64).read_to_end(&mut buf)?;
@@ -183,6 +196,18 @@ pub fn read_exact_vec(r: &mut impl Read, n: usize) -> Result<Vec<u8>> {
 }
 
 /// Reads exactly `N` bytes as a fixed array.
+///
+/// # Arguments
+///
+/// * `r` - Reader to pull bytes from.
+///
+/// # Returns
+///
+/// An `[u8; N]` filled from `r`.
+///
+/// # Errors
+///
+/// Returns an error when the underlying I/O fails or fewer than `N` bytes are available.
 pub fn read_array<const N: usize>(r: &mut impl Read) -> Result<[u8; N]> {
     let buf = read_exact_vec(r, N)?;
     <[u8; N]>::try_from(buf).map_err(|_| {
@@ -208,8 +233,7 @@ pub fn read_array<const N: usize>(r: &mut impl Read) -> Result<[u8; N]> {
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_u32(r: &mut impl Read) -> Result<u32> {
-    let mut buf = [0u8; 4];
-    r.read_exact(&mut buf)?;
+    let buf = read_array::<4>(r)?;
     Ok(u32::from_be_bytes(buf))
 }
 
@@ -227,8 +251,7 @@ pub fn read_u32(r: &mut impl Read) -> Result<u32> {
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_u64(r: &mut impl Read) -> Result<u64> {
-    let mut buf = [0u8; 8];
-    r.read_exact(&mut buf)?;
+    let buf = read_array::<8>(r)?;
     Ok(u64::from_be_bytes(buf))
 }
 
@@ -246,9 +269,7 @@ pub fn read_u64(r: &mut impl Read) -> Result<u64> {
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_fourcc(r: &mut impl Read) -> Result<FourCC> {
-    let mut buf = [0u8; 4];
-    r.read_exact(&mut buf)?;
-    Ok(FourCC(buf))
+    Ok(FourCC(read_array::<4>(r)?))
 }
 
 /// Reads an ISO-BMFF box header (size + type, including extended size).
@@ -397,8 +418,7 @@ pub fn find_child<R: Read + Seek>(
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_full_box_version_flags(r: &mut impl Read) -> Result<(u8, u32)> {
     let version = read_u8(r)?;
-    let mut flags = [0u8; 3];
-    r.read_exact(&mut flags)?;
+    let flags = read_array::<3>(r)?;
     let flags_u32 = (u32::from(flags[0]) << 16) | (u32::from(flags[1]) << 8) | u32::from(flags[2]);
     Ok((version, flags_u32))
 }
