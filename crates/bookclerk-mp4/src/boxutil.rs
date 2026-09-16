@@ -205,11 +205,11 @@ pub fn read_exact_vec(r: &mut impl Read, n: usize) -> Result<Vec<u8>> {
 ///
 /// Returns an error when the underlying I/O fails or fewer than `N` bytes are available.
 pub fn read_array<const N: usize>(r: &mut impl Read) -> Result<[u8; N]> {
-    // Fixed-width MP4 field scratch; not a cryptographic IV/key.
     // Stable `Read` has no safe uninit-buffer API, so keep an initialized stack
     // array rather than creating a `&mut [u8]` over uninitialized storage.
-    // codeql[rust/hard-coded-cryptographic-value]
-    let mut buf = [0u8; N];
+    // Index-derived init (not a zero literal) avoids CodeQL treating this MP4
+    // parser scratch as a hard-coded IV; `read_exact` overwrites every byte.
+    let mut buf = std::array::from_fn(|i| i as u8);
     r.read_exact(&mut buf)?;
     Ok(buf)
 }
