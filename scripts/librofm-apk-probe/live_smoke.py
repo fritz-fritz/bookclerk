@@ -404,12 +404,20 @@ def download_and_probe_media(
         under_cwd = abs_s == cwd or abs_s.startswith(cwd + os.sep)
         if not under_cwd and not os.path.isabs(str(raw)):
             raise ValueError(f"download dir must resolve to an absolute path: {keep_dir}")
-        keep_dir_path = Path(os.fsdecode(os.fsencode(abs_s)))
-        # codeql[py/path-injection]
+        import re
+
+        safe = re.fullmatch(
+            r"^(?:/[A-Za-z0-9._/-]+|[A-Za-z]:\\[A-Za-z0-9._\\-]+)$",
+            abs_s,
+        )
+        if safe is None:
+            raise ValueError(f"download dir fails absolute allowlist: {abs_s!r}")
+        keep_dir_path = Path(safe.group(0))
         keep_dir_path.mkdir(parents=True, exist_ok=True)
         ext = probe.get("kind") if probe.get("kind") != "unknown" else "bin"
+        if not isinstance(ext, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,16}", ext):
+            ext = "bin"
         path = keep_dir_path / f"smoke-asset.{ext}"
-        # codeql[py/path-injection]
         path.write_bytes(body)
         step["saved_to"] = str(path)
 

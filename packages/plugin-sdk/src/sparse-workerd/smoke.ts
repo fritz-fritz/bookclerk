@@ -26,6 +26,7 @@ import { validateManifest, type Manifest } from "../tools/validate.js";
 import { materializeConfig } from "./config.js";
 import {
   assertPathInside,
+  argv0Allowlist,
   defaultCacheDir,
   ensureWorkerd,
   validateSpawnExecutable,
@@ -198,14 +199,10 @@ export async function runSmoke(pluginDir: string): Promise<string> {
     bridgeToken,
   });
   const base = `http://${generated.listenAddr}`;
-  const safeBin = Buffer.from(
-    validateSpawnExecutable(workerdBin),
-    "utf8",
-  ).toString("utf8");
-  const safeConfig = Buffer.from(
+  const safeBin = argv0Allowlist(validateSpawnExecutable(workerdBin));
+  const safeConfig = argv0Allowlist(
     validateSpawnExecutable(generated.configPath, root),
-    "utf8",
-  ).toString("utf8");
+  );
 
   // Absolute workerd + config paths; argv only (shell: false).
   // codeql[js/command-line-injection]

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -29,6 +30,18 @@ from ci_plan.plan import (  # noqa: E402
     plan_to_json,
     plan_to_summary,
 )
+
+
+_SAFE_ABS_PATH = re.compile(r"^(?:/[A-Za-z0-9._/-]+|[A-Za-z]:\\[A-Za-z0-9._\\-]+)$")
+
+
+def _open_append_safe(path_s: str):
+    """Open an absolute path for append after a regex allowlist (CodeQL sanitizer)."""
+    m = _SAFE_ABS_PATH.fullmatch(path_s)
+    if m is None:
+        raise SystemExit(f"refusing path that fails absolute allowlist: {path_s!r}")
+    # Matched group is the CodeQL-recognized sanitized path.
+    return open(m.group(0), "a", encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -121,9 +134,7 @@ def main(argv: list[str] | None = None) -> int:
             # Runner-provided paths are absolute; refuse relative escapes only.
             if not under_cwd and not os.path.isabs(gh_out):
                 raise SystemExit(f"refusing unsafe GITHUB_OUTPUT path: {abs_s}")
-            out_path = os.fsdecode(os.fsencode(abs_s))
-            # codeql[py/path-injection]
-            with open(out_path, "a", encoding="utf-8") as fh:
+            with _open_append_safe(abs_s) as fh:
                 fh.write(text)
 
     if args.write_summary:
@@ -141,9 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             under_cwd = abs_s == cwd or abs_s.startswith(cwd + os.sep)
             if not under_cwd and not os.path.isabs(summary_path):
                 raise SystemExit(f"refusing unsafe GITHUB_STEP_SUMMARY path: {abs_s}")
-            step_path = os.fsdecode(os.fsencode(abs_s))
-            # codeql[py/path-injection]
-            with open(step_path, "a", encoding="utf-8") as fh:
+            with _open_append_safe(abs_s) as fh:
                 fh.write(body)
                 if not body.endswith("\n"):
                     fh.write("\n")

@@ -23,7 +23,12 @@ from typing import Any
 from ..path_guard import cli_user_path, resolve_under
 from ..tools import validate_manifest
 from .config import materialize_config
-from .ensure import default_cache_dir, ensure_workerd, validate_spawn_executable
+from .ensure import (
+    _spawn_argv0,
+    default_cache_dir,
+    ensure_workerd,
+    validate_spawn_executable,
+)
 
 
 def _free_loopback_port() -> int:
@@ -174,12 +179,8 @@ def run_smoke(plugin_dir: Path) -> str:
     base = f"http://{listen_addr}"
 
     env = {**os.environ, "BOOKCLERK_PLUGIN_ROOT": str(root)}
-    argv0 = os.fsdecode(
-        os.fsencode(os.fspath(validate_spawn_executable(workerd_bin)))
-    )
-    argv_cfg = os.fsdecode(
-        os.fsencode(os.fspath(validate_spawn_executable(config_path, root)))
-    )
+    argv0 = _spawn_argv0(workerd_bin)
+    argv_cfg = _spawn_argv0(config_path, root)
     # Absolute workerd + config paths; argv list only (shell=False).
     # codeql[py/command-line-injection]
     proc = subprocess.Popen(

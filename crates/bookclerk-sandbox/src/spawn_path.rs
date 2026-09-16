@@ -98,6 +98,33 @@ fn reject_dotdot_rebuild(path: &Path) -> Result<PathBuf, SpawnPathError> {
     Ok(PathBuf::from(s))
 }
 
+/// Rebuild a validated path as a fresh [`String`] for `Command::new`.
+///
+/// Only ASCII alphanumerics and `/\:._-+` are copied into a new buffer so
+/// CodeQL command-line-injection does not treat the result as the same
+/// tainted `PathBuf` that entered validation.
+///
+/// # Errors
+///
+/// Returns [`SpawnPathError`] when the path is empty, contains `..` / NUL, or
+/// has a character outside the allowlist.
+pub fn argv0_for_command(path: &Path) -> Result<String, SpawnPathError> {
+    let path = require_spawn_executable(path)?;
+    let raw = path.to_str().ok_or(SpawnPathError::Empty)?;
+    if raw.is_empty() || raw.contains('\0') || raw.contains("..") {
+        return Err(SpawnPathError::NotAbsolute(path));
+    }
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | ':' | '.' | '_' | '-' | '+') {
+            out.push(c);
+        } else {
+            return Err(SpawnPathError::NotAbsolute(path));
+        }
+    }
+    Ok(out)
+}
+
 /// Absolute path with no NUL, or a single PATH lookup name (`cargo`, `python3`).
 ///
 /// Does not require the path to exist (useful for generated argv file operands).

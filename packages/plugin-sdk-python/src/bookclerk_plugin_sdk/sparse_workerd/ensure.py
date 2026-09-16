@@ -181,8 +181,14 @@ def validate_spawn_executable(
 
 def _spawn_argv0(bin_path: Path | str, trusted_root: Path | str | None = None) -> str:
     """Return a validated argv0 string with taint broken for CodeQL."""
+    import re
+
     safe = validate_spawn_executable(bin_path, trusted_root)
-    return os.fsdecode(os.fsencode(os.fspath(safe)))
+    s = os.fspath(safe)
+    m = re.fullmatch(r"^(?:/[A-Za-z0-9._/-]+|[A-Za-z]:\\[A-Za-z0-9._\\-]+)$", s)
+    if m is None:
+        raise ValueError(f"spawn executable fails absolute allowlist: {s!r}")
+    return m.group(0)
 
 
 def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:

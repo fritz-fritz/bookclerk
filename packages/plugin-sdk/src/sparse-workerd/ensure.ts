@@ -226,6 +226,15 @@ export function validateSpawnExecutable(
   return Buffer.from(abs, "utf8").toString("utf8");
 }
 
+/** Rebuild an absolute path via regex allowlist (CodeQL command/path sanitizer). */
+export function argv0Allowlist(bin: string): string {
+  const m = /^(?:\/[A-Za-z0-9._/-]+|[A-Za-z]:\\[A-Za-z0-9._\\-]+)$/.exec(bin);
+  if (!m) {
+    throw new Error(`spawn executable fails absolute allowlist: ${bin}`);
+  }
+  return m[0];
+}
+
 function isCurrent(bin: string, pin: WorkerdPin): boolean {
   const dir = path.resolve(path.dirname(bin));
   const stamp = assertPathInside(dir, pin.version_stamp);
@@ -235,8 +244,8 @@ function isCurrent(bin: string, pin: WorkerdPin): boolean {
     const text = fs.readFileSync(stamp, "utf8").trim();
     if (text === pin.release_tag) return true;
   }
-  const safe = Buffer.from(validateSpawnExecutable(bin), "utf8").toString("utf8");
-  // Absolute workerd path validated above (argv, no shell).
+  const safe = argv0Allowlist(validateSpawnExecutable(bin));
+  // Absolute workerd path validated + regex-allowlisted (argv, no shell).
   // codeql[js/command-line-injection]
   const out = spawnSync(safe, ["--version"], { encoding: "utf8", shell: false });
   if (out.status !== 0) return false;

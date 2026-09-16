@@ -98,24 +98,13 @@ pub(crate) async fn spawn_stdio_guest(
                 runtime = plan.runtime.label(),
                 "starting plugin guest under a jail"
             );
-            let launcher =
-                bookclerk_sandbox::require_spawn_executable(launcher).map_err(|err| {
-                    PluginError::message(format!(
-                        "plugin `{id}`: invalid jail launcher {}: {err}",
-                        launcher.display()
-                    ))
-                })?;
-            let program =
-                bookclerk_sandbox::require_spawn_executable(&plan.launcher).map_err(|err| {
-                    PluginError::message(format!(
-                        "plugin `{id}`: invalid guest program {}: {err}",
-                        plan.launcher.display()
-                    ))
-                })?;
-            // Jail launcher and guest program validated absolute (no NUL); rebuild
-            // again so Command::new does not see the pre-check PathBuf.
-            let launcher = PathBuf::from(launcher.as_os_str().to_os_string());
-            let program = PathBuf::from(program.as_os_str().to_os_string());
+            let launcher = bookclerk_sandbox::argv0_for_command(launcher).map_err(|err| {
+                PluginError::message(format!("plugin `{id}`: invalid jail launcher: {err}"))
+            })?;
+            let program = bookclerk_sandbox::argv0_for_command(&plan.launcher).map_err(|err| {
+                PluginError::message(format!("plugin `{id}`: invalid guest program: {err}"))
+            })?;
+            // Fresh allowlisted argv0 strings (not the pre-check PathBuf).
             // codeql[rust/command-line-injection]
             let mut cmd = Command::new(&launcher);
             cmd.arg("--").arg(&program).args(&plan.args);
@@ -129,14 +118,9 @@ pub(crate) async fn spawn_stdio_guest(
                 "starting plugin guest WITHOUT a jail; it can reach everything \
                  this user can"
             );
-            let program =
-                bookclerk_sandbox::require_spawn_executable(&plan.launcher).map_err(|err| {
-                    PluginError::message(format!(
-                        "plugin `{id}`: invalid guest program {}: {err}",
-                        plan.launcher.display()
-                    ))
-                })?;
-            let program = PathBuf::from(program.as_os_str().to_os_string());
+            let program = bookclerk_sandbox::argv0_for_command(&plan.launcher).map_err(|err| {
+                PluginError::message(format!("plugin `{id}`: invalid guest program: {err}"))
+            })?;
             // codeql[rust/command-line-injection]
             let mut cmd = Command::new(&program);
             cmd.args(&plan.args);
