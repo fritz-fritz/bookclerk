@@ -2,8 +2,16 @@
 # Vendored third-party trees are patched for dependency alignment only;
 # do not treat their upstream crypto patterns as product regressions.
 #
-# Default setup does not load this file until the repository property
-# `github-codeql-config-file` is set to `.github/codeql/codeql-config.yml`.
+# Default setup does NOT load this file automatically. The repository
+# property `github-codeql-config-file` MUST be set to
+# `.github/codeql/codeql-config.yml` (GitHub → Settings → Code security →
+# CodeQL → Configuration file, or via the `github-codeql-config-file`
+# custom property). Without that property, remote+local / default-setup
+# scans still analyze `third_party/**` and inflate first-party alert noise
+# (historically ~107 third-party path-injection findings alone).
+#
+# Keep `paths-ignore: third_party/**` — that exclusion is critical for
+# product signal. Also ignore build outputs under `target/` and `ui/dist/`.
 name: Bookclerk CodeQL
 paths-ignore:
   - third_party/**
