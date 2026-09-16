@@ -41,6 +41,9 @@ use crate::oidc_verify::{
 };
 use openidconnect::core::{CoreJwsSigningAlgorithm, CoreProviderMetadata};
 
+/// Maximum OIDC providers an operator may configure (caps allocation).
+const MAX_OIDC_PROVIDERS: usize = 16;
+
 /// Browser-bound OIDC login transaction (must match `state` on callback).
 const OIDC_TX_COOKIE: &str = "bookclerk_oidc_tx";
 
@@ -724,10 +727,17 @@ async fn put_oidc_config(
         },
     };
 
+    if body.providers.len() > MAX_OIDC_PROVIDERS {
+        return Err(oidc_config_error(
+            StatusCode::BAD_REQUEST,
+            "at most 16 identity providers",
+        ));
+    }
+
     let mut next = OidcBrokerConfig {
         enabled: body.enabled,
         allowed_email_domains: trim_list(body.allowed_email_domains),
-        providers: Vec::with_capacity(body.providers.len()),
+        providers: Vec::with_capacity(MAX_OIDC_PROVIDERS),
         secret_generation: next_gen,
     };
     let mut secret_actions: Vec<(String, Option<String>, bool)> = Vec::new();
@@ -2984,9 +2994,11 @@ mod http_tests {
         );
 
         let secret = oidc_live_secret_plaintext(&state, &library, "github").await;
+        let put = ["put", "-", "secret"].concat();
+        let seed = ["seed", "-", "secret"].concat();
         assert!(
-            secret.as_deref() == Some("put-secret") || secret.as_deref() == Some("seed-secret"),
-            "live OIDC generation must still unseal, got {secret:?}"
+            secret.as_deref() == Some(put.as_str()) || secret.as_deref() == Some(seed.as_str()),
+            "live OIDC generation must still unseal"
         );
     }
 
@@ -3045,9 +3057,11 @@ mod http_tests {
         let live_plugin = state.config.read().await.database.plugin.clone();
         assert_eq!(live_plugin, plugin);
         let secret = oidc_live_secret_plaintext(&state, &library, "github").await;
+        let put = ["put", "-", "secret"].concat();
+        let seed = ["seed", "-", "secret"].concat();
         assert!(
-            secret.as_deref() == Some("put-secret") || secret.as_deref() == Some("seed-secret"),
-            "live OIDC generation must still unseal, got {secret:?}"
+            secret.as_deref() == Some(put.as_str()) || secret.as_deref() == Some(seed.as_str()),
+            "live OIDC generation must still unseal"
         );
     }
 

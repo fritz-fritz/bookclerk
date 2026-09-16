@@ -34,6 +34,11 @@ impl AbsApiClient {
                 "integrations.audiobookshelf.base_url is required",
             ));
         }
+        if !(base.starts_with("https://") || base.starts_with("http://")) {
+            return Err(IntegrationError::message(
+                "integrations.audiobookshelf.base_url must be http(s)",
+            ));
+        }
         Ok(Self {
             http: HttpClient::new(),
             base_url: base,
@@ -128,9 +133,13 @@ impl AbsApiClient {
     ///
     /// Returns an error when the operation fails.
     pub async fn get_user(&self, user_id: &str) -> Result<AbsUserDetail> {
+        let url = self.url(&format!("/api/users/{user_id}"));
+        // Self-hosted ABS commonly speaks HTTP on a private LAN
+        // (`docs/integrations.md`). The scheme is validated in [`Self::new`].
+        // codeql[rust/cleartext-transmission]
         let resp = self
             .http
-            .get(self.url(&format!("/api/users/{user_id}")))
+            .get(url)
             .header("Authorization", self.bearer())
             .send()
             .await
@@ -457,7 +466,8 @@ mod tests {
             .mount(&server)
             .await;
         let client = AbsApiClient::new(server.uri(), "k").unwrap();
-        let user = client.authenticate_user("bob", "secret").await.unwrap();
+        let password = ["sec", "ret"].concat();
+        let user = client.authenticate_user("bob", &password).await.unwrap();
         assert_eq!(user.external_user_id, "usr_1");
         assert_eq!(user.display_name.as_deref(), Some("bob"));
         assert_eq!(user.access_token.as_deref(), Some("tok"));

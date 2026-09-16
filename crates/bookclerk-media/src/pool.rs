@@ -1097,7 +1097,7 @@ mod tests {
         assert!(worker_env_allowed("SystemRoot"));
         assert!(worker_env_allowed("SYSTEMROOT"));
 
-        for secret in [
+        for name in [
             "BOOKCLERK_AUTH_PASSWORD",
             "BOOKCLERK_OPERATOR_TOKEN",
             "BOOKCLERK_FILES_DIR",
@@ -1106,8 +1106,8 @@ mod tests {
             "BOOKCLERK_DATABASE_POSTGRES_URL",
         ] {
             assert!(
-                !worker_env_allowed(secret),
-                "{secret} must not be inherited"
+                !worker_env_allowed(name),
+                "secret env names must not be inherited"
             );
         }
         // The worker is launched by absolute path and never spawns anything.

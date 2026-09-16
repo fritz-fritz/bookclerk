@@ -4092,6 +4092,8 @@ struct CreateRequestBody {
 /// Query string for multi-store Discover catalog search.
 struct CatalogSearchQuery {
     /// Search text; queries shorter than two characters return an empty page.
+    /// Rejected above 256 characters so catalog search cannot allocate from an
+    /// unbounded query string.
     q: Option<String>,
     /// Alias for [`Self::page_size`] (typeahead / legacy).
     limit: Option<usize>,
@@ -4469,7 +4471,14 @@ async fn discover_catalog_search(
     // Wall budget for parallel multi-store search (each store capped ~7s;
     // optional Libro page enrich ~3.5s; over-fetch may need a few rounds).
     const CATALOG_SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
+    const CATALOG_QUERY_MAX: usize = 256;
     let query = q.q.unwrap_or_default();
+    if query.len() > CATALOG_QUERY_MAX {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "catalog query must be 256 characters or fewer".into(),
+        ));
+    }
     if query.trim().len() < 2 {
         return Ok(Json(bookclerk_discover::CatalogSearchPage {
             items: Vec::new(),

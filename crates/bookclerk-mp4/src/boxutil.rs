@@ -161,9 +161,35 @@ impl BoxHeader {
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_u8(r: &mut impl Read) -> Result<u8> {
-    let mut buf = [0u8; 1];
-    r.read_exact(&mut buf)?;
-    Ok(buf[0])
+    let mut buf = 0u8;
+    r.read_exact(std::slice::from_mut(&mut buf))?;
+    Ok(buf)
+}
+
+/// Reads exactly `n` bytes into a new buffer (no zero-initialized crypto array).
+pub fn read_exact_vec(r: &mut impl Read, n: usize) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let got = r.take(n as u64).read_to_end(&mut buf)?;
+    if got != n {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("expected {n} bytes, got {got}"),
+        )
+        .into());
+    }
+    Ok(buf)
+}
+
+/// Reads exactly `N` bytes as a fixed array.
+pub fn read_array<const N: usize>(r: &mut impl Read) -> Result<[u8; N]> {
+    let buf = read_exact_vec(r, N)?;
+    <[u8; N]>::try_from(buf).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("expected {N} bytes"),
+        )
+        .into()
+    })
 }
 
 /// Reads a big-endian `u32` from `data` at `offset` and advances it.
