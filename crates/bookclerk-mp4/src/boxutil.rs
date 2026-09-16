@@ -204,14 +204,14 @@ pub fn read_exact_vec(r: &mut impl Read, n: usize) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns an error when the underlying I/O fails or fewer than `N` bytes are available.
-#[allow(unsafe_code)] // `MaybeUninit` + `read_exact` avoids a zero-filled array CodeQL models as an IV.
 pub fn read_array<const N: usize>(r: &mut impl Read) -> Result<[u8; N]> {
-    let mut buf = std::mem::MaybeUninit::<[u8; N]>::uninit();
-    // SAFETY: `read_exact` writes all `N` bytes on success; on error the buffer
-    // is dropped without being assumed initialized.
-    let dest = unsafe { &mut *buf.as_mut_ptr() };
-    r.read_exact(dest)?;
-    Ok(unsafe { buf.assume_init() })
+    // Fixed-width MP4 field scratch; not a cryptographic IV/key.
+    // Stable `Read` has no safe uninit-buffer API, so keep an initialized stack
+    // array rather than creating a `&mut [u8]` over uninitialized storage.
+    // codeql[rust/hard-coded-cryptographic-value]
+    let mut buf = [0u8; N];
+    r.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 /// Reads a big-endian `u32` from `data` at `offset` and advances it.
