@@ -161,14 +161,10 @@ impl BoxHeader {
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_u8(r: &mut impl Read) -> Result<u8> {
-    let bytes = read_exact_vec(r, 1)?;
-    bytes
-        .first()
-        .copied()
-        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into())
+    Ok(read_array::<1>(r)?[0])
 }
 
-/// Reads exactly `n` bytes into a new buffer (no zero-initialized crypto array).
+/// Reads exactly `n` bytes into a new buffer (for dynamically sized fields).
 ///
 /// # Arguments
 ///
@@ -195,7 +191,7 @@ pub fn read_exact_vec(r: &mut impl Read, n: usize) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Reads exactly `N` bytes as a fixed array.
+/// Reads exactly `N` bytes into a stack array via [`Read::read_exact`].
 ///
 /// # Arguments
 ///
@@ -209,14 +205,11 @@ pub fn read_exact_vec(r: &mut impl Read, n: usize) -> Result<Vec<u8>> {
 ///
 /// Returns an error when the underlying I/O fails or fewer than `N` bytes are available.
 pub fn read_array<const N: usize>(r: &mut impl Read) -> Result<[u8; N]> {
-    let buf = read_exact_vec(r, N)?;
-    <[u8; N]>::try_from(buf).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            format!("expected {N} bytes"),
-        )
-        .into()
-    })
+    // Fixed-width MP4 field scratch; not a cryptographic IV/key.
+    // codeql[rust/hard-coded-cryptographic-value]
+    let mut buf = [0u8; N];
+    r.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 /// Reads a big-endian `u32` from `data` at `offset` and advances it.

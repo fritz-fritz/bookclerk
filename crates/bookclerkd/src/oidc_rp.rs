@@ -41,8 +41,48 @@ use crate::oidc_verify::{
 };
 use openidconnect::core::{CoreJwsSigningAlgorithm, CoreProviderMetadata};
 
-/// Maximum OIDC providers an operator may configure (caps allocation).
+/// Maximum OIDC providers an operator may configure (enforced while deserializing).
 const MAX_OIDC_PROVIDERS: usize = 16;
+
+/// Deserialize `providers` and fail as soon as the sequence exceeds [`MAX_OIDC_PROVIDERS`].
+fn deserialize_bounded_oidc_providers<'de, D>(
+    deserializer: D,
+) -> Result<Vec<OidcProviderPut>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct BoundedVisitor;
+
+    impl<'de> Visitor<'de> for BoundedVisitor {
+        type Value = Vec<OidcProviderPut>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "at most {MAX_OIDC_PROVIDERS} identity providers")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let hint = seq.size_hint().unwrap_or(0).min(MAX_OIDC_PROVIDERS);
+            let mut out = Vec::with_capacity(hint);
+            while let Some(item) = seq.next_element::<OidcProviderPut>()? {
+                if out.len() >= MAX_OIDC_PROVIDERS {
+                    return Err(A::Error::custom(format!(
+                        "at most {MAX_OIDC_PROVIDERS} identity providers"
+                    )));
+                }
+                out.push(item);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedVisitor)
+}
 
 /// Browser-bound OIDC login transaction (must match `state` on callback).
 const OIDC_TX_COOKIE: &str = "bookclerk_oidc_tx";
@@ -191,7 +231,7 @@ struct OidcConfigPut {
     #[serde(default)]
     /// Replacement broker-wide email domain allowlist.
     allowed_email_domains: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bounded_oidc_providers")]
     /// Full replacement list of IdPs (omitted secrets keep the previous generation).
     providers: Vec<OidcProviderPut>,
     /// `integrations.public_origin`. Omit to leave unchanged; empty string clears.
@@ -2588,13 +2628,17 @@ mod http_tests {
             "providers": providers
         });
         let (status, json) = put_oidc_json(app, &cookie, &oversized).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{json:?}");
-        assert_eq!(json["error"], "oidc_config");
+        // Bound is enforced in `deserialize_bounded_oidc_providers`, so Axum's
+        // Json extractor rejects before the handler (422), and config is unchanged.
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{json:?}");
+        let detail = json
+            .get("message")
+            .and_then(|v| v.as_str())
+            .or_else(|| json.get("raw").and_then(|v| v.as_str()))
+            .unwrap_or_default();
         assert!(
-            json["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains(&MAX_OIDC_PROVIDERS.to_string()),
+            detail.contains(&MAX_OIDC_PROVIDERS.to_string())
+                || detail.contains("identity providers"),
             "{json:?}"
         );
 

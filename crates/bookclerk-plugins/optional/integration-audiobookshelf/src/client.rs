@@ -3,7 +3,7 @@
 //! Contract pin: see `openapi/PIN.md` in this plugin package.
 
 use bookclerk_integrations::{ExternalUser, IntegrationError, Result};
-use bookclerk_plugin_sdk::http::{Client as HttpClient, Response, StatusCode};
+use bookclerk_plugin_sdk::http::{redirect, Client as HttpClient, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -79,8 +79,14 @@ impl AbsApiClient {
             ));
         }
         validate_abs_base_url(&base)?;
+        let http = HttpClient::builder()
+            // Do not follow redirects: 307/308 would resend bodies (including
+            // `/login` passwords) and could downgrade HTTPS→HTTP.
+            .redirect(redirect::Policy::none())
+            .build()
+            .map_err(|err| IntegrationError::message(err.to_string()))?;
         Ok(Self {
-            http: HttpClient::new(),
+            http,
             base_url: base,
             api_key: api_key.into(),
         })

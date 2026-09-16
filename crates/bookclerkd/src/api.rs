@@ -4092,8 +4092,8 @@ struct CreateRequestBody {
 /// Query string for multi-store Discover catalog search.
 struct CatalogSearchQuery {
     /// Search text; queries shorter than two characters return an empty page.
-    /// Rejected above 256 UTF-8 bytes so catalog search cannot allocate from an
-    /// unbounded query string.
+    /// Rejected above 256 UTF-8 bytes as a downstream catalog-search limit
+    /// (the HTTP query extractor has already materialized `q`).
     q: Option<String>,
     /// Alias for [`Self::page_size`] (typeahead / legacy).
     limit: Option<usize>,
@@ -4471,6 +4471,8 @@ async fn discover_catalog_search(
     // Wall budget for parallel multi-store search (each store capped ~7s;
     // optional Libro page enrich ~3.5s; over-fetch may need a few rounds).
     const CATALOG_SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
+    // Downstream catalog-search limit (not an HTTP-boundary allocation cap;
+    // `Query` has already deserialized `q`).
     const CATALOG_QUERY_MAX: usize = 256;
     let query = q.q.unwrap_or_default();
     if query.len() > CATALOG_QUERY_MAX {
