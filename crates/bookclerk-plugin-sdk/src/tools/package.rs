@@ -159,6 +159,10 @@ fn host_bookclerk_target() -> String {
 }
 
 /// Rejects empty paths and interior `..` / NUL before filesystem access.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the path is empty or contains `..` / NUL.
 fn reject_unsafe_path(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() {
         return Err(SdkError::message("refusing empty path"));
@@ -179,6 +183,10 @@ fn rebuild_path(path: &Path) -> PathBuf {
 }
 
 /// Join `root` / `name` and require the result stays under `root`.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when `root` is unsafe, `name` escapes, or the join leaves `root`.
 fn join_under_root(root: &Path, name: &std::ffi::OsStr) -> Result<PathBuf> {
     reject_unsafe_path(root)?;
     for comp in Path::new(name).components() {
@@ -205,6 +213,10 @@ fn join_under_root(root: &Path, name: &std::ffi::OsStr) -> Result<PathBuf> {
 }
 
 /// Requires `path` to stay under `root`.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when `path` is unsafe or escapes `root`.
 fn require_under_root(root: &Path, path: &Path) -> Result<PathBuf> {
     reject_unsafe_path(path)?;
     let path = rebuild_path(path);
