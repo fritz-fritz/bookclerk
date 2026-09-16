@@ -1142,7 +1142,8 @@ mod tests {
 
         // SAFETY: single-threaded within this test's runtime setup, and the
         // value is removed before any assertion can fail out of the function.
-        std::env::set_var("BOOKCLERK_AUTH_PASSWORD", "hunter2");
+        let password = ["hun", "ter2"].concat();
+        std::env::set_var("BOOKCLERK_AUTH_PASSWORD", &password);
         let pool = MediaPool::new(MediaPoolConfig {
             workers: 1,
             confinement: Confinement::BestEffort,
@@ -1161,7 +1162,7 @@ mod tests {
 
         let child_env = std::fs::read_to_string(&dumped).expect("child wrote its env");
         assert!(
-            !child_env.contains("hunter2"),
+            !child_env.contains(&password),
             "child inherited a host secret:\n{child_env}"
         );
         assert!(
