@@ -226,7 +226,13 @@ export function validateSpawnExecutable(
   return Buffer.from(abs, "utf8").toString("utf8");
 }
 
-/** Rebuild an absolute path via regex allowlist (CodeQL command/path sanitizer). */
+/**
+ * Rebuild an absolute path via regex allowlist (CodeQL command/path sanitizer).
+ *
+ * @param bin - Absolute path already checked by {@link validateSpawnExecutable}.
+ * @returns The matched absolute path string.
+ * @throws {Error} When `bin` fails the absolute-path allowlist.
+ */
 export function argv0Allowlist(bin: string): string {
   const m = /^(?:\/[A-Za-z0-9._/-]+|[A-Za-z]:\\[A-Za-z0-9._\\-]+)$/.exec(bin);
   if (!m) {
@@ -244,10 +250,17 @@ function isCurrent(bin: string, pin: WorkerdPin): boolean {
     const text = fs.readFileSync(stamp, "utf8").trim();
     if (text === pin.release_tag) return true;
   }
-  const safe = argv0Allowlist(validateSpawnExecutable(bin));
-  // Absolute workerd path validated + regex-allowlisted (argv, no shell).
-  // codeql[js/command-line-injection]
-  const out = spawnSync(safe, ["--version"], { encoding: "utf8", shell: false });
+  const validated = validateSpawnExecutable(bin);
+  const base = path.basename(validated);
+  if (base !== "workerd" && base !== "workerd.exe") {
+    throw new Error(`expected workerd binary, got ${base}`);
+  }
+  // Literal program name + PATH to the validated directory (no tainted argv0).
+  const out = spawnSync("workerd", ["--version"], {
+    encoding: "utf8",
+    shell: false,
+    env: { ...process.env, PATH: path.dirname(validated) },
+  });
   if (out.status !== 0) return false;
   const combined = `${out.stdout ?? ""}${out.stderr ?? ""}`;
   const pinBare = pin.release_tag.replace(/^v/, "");

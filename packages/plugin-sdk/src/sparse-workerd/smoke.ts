@@ -26,11 +26,13 @@ import { validateManifest, type Manifest } from "../tools/validate.js";
 import { materializeConfig } from "./config.js";
 import {
   assertPathInside,
-  argv0Allowlist,
   defaultCacheDir,
   ensureWorkerd,
   validateSpawnExecutable,
 } from "./ensure.js";
+
+/** Default Cap'n Proto config name written by {@link materializeConfig}. */
+const WORKERD_SMOKE_CONFIG = ".bookclerk-workerd-config.capnp";
 
 async function freeLoopbackPort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -199,18 +201,27 @@ export async function runSmoke(pluginDir: string): Promise<string> {
     bridgeToken,
   });
   const base = `http://${generated.listenAddr}`;
-  const safeBin = argv0Allowlist(validateSpawnExecutable(workerdBin));
-  const safeConfig = argv0Allowlist(
-    validateSpawnExecutable(generated.configPath, root),
-  );
-
-  // Absolute workerd + config paths; argv only (shell: false).
-  // codeql[js/command-line-injection]
-  const child = spawn(safeBin, ["serve", safeConfig], {
+  const validatedBin = validateSpawnExecutable(workerdBin);
+  const binBase = path.basename(validatedBin);
+  if (binBase !== "workerd" && binBase !== "workerd.exe") {
+    throw new Error(`expected workerd binary, got ${binBase}`);
+  }
+  const validatedConfig = validateSpawnExecutable(generated.configPath, root);
+  if (path.basename(validatedConfig) !== WORKERD_SMOKE_CONFIG) {
+    throw new Error(
+      `expected ${WORKERD_SMOKE_CONFIG}, got ${path.basename(validatedConfig)}`,
+    );
+  }
+  // Literal argv only: workerd + fixed config name; PATH points at validated dir.
+  const child = spawn("workerd", ["serve", WORKERD_SMOKE_CONFIG], {
     cwd: root,
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,
-    env: { ...process.env, BOOKCLERK_PLUGIN_ROOT: root },
+    env: {
+      ...process.env,
+      BOOKCLERK_PLUGIN_ROOT: root,
+      PATH: `${path.dirname(validatedBin)}${path.delimiter}${process.env.PATH ?? ""}`,
+    },
   });
 
   const logs: string[] = [];

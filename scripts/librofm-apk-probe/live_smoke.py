@@ -394,30 +394,9 @@ def download_and_probe_media(
         step["error"] = probe.get("error") or "media probe failed"
 
     if keep_dir is not None:
-        raw = Path(keep_dir)
-        if any(part == ".." for part in raw.parts) or "\0" in str(keep_dir):
-            raise ValueError(f"download dir must not contain '..' or NUL: {keep_dir}")
-        abs_s = os.path.abspath(os.path.expanduser(str(raw)))
-        if ".." in abs_s:
-            raise ValueError(f"download dir must not contain '..' after abspath: {keep_dir}")
-        cwd = os.path.abspath(os.getcwd())
-        under_cwd = abs_s == cwd or abs_s.startswith(cwd + os.sep)
-        if not under_cwd and not os.path.isabs(str(raw)):
-            raise ValueError(f"download dir must resolve to an absolute path: {keep_dir}")
-        import re
-
-        safe = re.fullmatch(
-            r"^(?:/[A-Za-z0-9._/-]+|[A-Za-z]:\\[A-Za-z0-9._\\-]+)$",
-            abs_s,
-        )
-        if safe is None:
-            raise ValueError(f"download dir fails absolute allowlist: {abs_s!r}")
-        keep_dir_path = Path(safe.group(0))
-        keep_dir_path.mkdir(parents=True, exist_ok=True)
+        keep_dir.mkdir(parents=True, exist_ok=True)
         ext = probe.get("kind") if probe.get("kind") != "unknown" else "bin"
-        if not isinstance(ext, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,16}", ext):
-            ext = "bin"
-        path = keep_dir_path / f"smoke-asset.{ext}"
+        path = keep_dir / f"smoke-asset.{ext}"
         path.write_bytes(body)
         step["saved_to"] = str(path)
 

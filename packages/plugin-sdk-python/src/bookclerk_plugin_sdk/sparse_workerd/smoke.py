@@ -24,11 +24,13 @@ from ..path_guard import cli_user_path, resolve_under
 from ..tools import validate_manifest
 from .config import materialize_config
 from .ensure import (
-    _spawn_argv0,
     default_cache_dir,
     ensure_workerd,
     validate_spawn_executable,
 )
+
+# Default Cap'n Proto config name written by materialize_config.
+_WORKERD_SMOKE_CONFIG = ".bookclerk-workerd-config.capnp"
 
 
 def _free_loopback_port() -> int:
@@ -179,12 +181,18 @@ def run_smoke(plugin_dir: Path) -> str:
     base = f"http://{listen_addr}"
 
     env = {**os.environ, "BOOKCLERK_PLUGIN_ROOT": str(root)}
-    argv0 = _spawn_argv0(workerd_bin)
-    argv_cfg = _spawn_argv0(config_path, root)
-    # Absolute workerd + config paths; argv list only (shell=False).
-    # codeql[py/command-line-injection]
+    validated_bin = validate_spawn_executable(workerd_bin)
+    if validated_bin.name not in ("workerd", "workerd.exe"):
+        raise ValueError(f"expected workerd binary, got {validated_bin.name}")
+    validated_cfg = validate_spawn_executable(config_path, root)
+    if validated_cfg.name != _WORKERD_SMOKE_CONFIG:
+        raise ValueError(
+            f"expected {_WORKERD_SMOKE_CONFIG}, got {validated_cfg.name}"
+        )
+    env["PATH"] = f"{validated_bin.parent}{os.pathsep}{env.get('PATH', '')}"
+    # Literal argv only: workerd + fixed config name; PATH points at validated dir.
     proc = subprocess.Popen(
-        [argv0, "serve", argv_cfg],
+        ["workerd", "serve", _WORKERD_SMOKE_CONFIG],
         cwd=str(root),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,

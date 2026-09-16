@@ -98,16 +98,8 @@ pub(crate) async fn spawn_stdio_guest(
                 runtime = plan.runtime.label(),
                 "starting plugin guest under a jail"
             );
-            let launcher = bookclerk_sandbox::argv0_for_command(launcher).map_err(|err| {
-                PluginError::message(format!("plugin `{id}`: invalid jail launcher: {err}"))
-            })?;
-            let program = bookclerk_sandbox::argv0_for_command(&plan.launcher).map_err(|err| {
-                PluginError::message(format!("plugin `{id}`: invalid guest program: {err}"))
-            })?;
-            // Fresh allowlisted argv0 strings (not the pre-check PathBuf).
-            // codeql[rust/command-line-injection]
-            let mut cmd = Command::new(&launcher);
-            cmd.arg("--").arg(&program).args(&plan.args);
+            let mut cmd = Command::new(launcher);
+            cmd.arg("--").arg(&plan.launcher).args(&plan.args);
             cmd
         }
         Start::Unconfined { reason } => {
@@ -118,11 +110,7 @@ pub(crate) async fn spawn_stdio_guest(
                 "starting plugin guest WITHOUT a jail; it can reach everything \
                  this user can"
             );
-            let program = bookclerk_sandbox::argv0_for_command(&plan.launcher).map_err(|err| {
-                PluginError::message(format!("plugin `{id}`: invalid guest program: {err}"))
-            })?;
-            // codeql[rust/command-line-injection]
-            let mut cmd = Command::new(&program);
+            let mut cmd = Command::new(&plan.launcher);
             cmd.args(&plan.args);
             cmd
         }

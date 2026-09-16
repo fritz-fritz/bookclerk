@@ -197,15 +197,18 @@ def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
     if stamp.is_file() and stamp.read_text(encoding="utf-8").strip() == pin["release_tag"]:
         return True
     try:
-        argv0 = _spawn_argv0(bin_path)
-        # Absolute workerd path validated above (argv list, no shell).
-        # codeql[py/command-line-injection]
+        validated = validate_spawn_executable(bin_path)
+        if validated.name not in ("workerd", "workerd.exe"):
+            raise ValueError(f"expected workerd binary, got {validated.name}")
+        # Literal program name + PATH to the validated directory.
+        env = {**os.environ, "PATH": str(validated.parent)}
         proc = subprocess.run(
-            [argv0, "--version"],
+            ["workerd", "--version"],
             capture_output=True,
             text=True,
             check=False,
             shell=False,
+            env=env,
         )
     except (OSError, ValueError):
         return False
