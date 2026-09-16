@@ -55,11 +55,7 @@ pub fn decrypt_cenc_sample_in_place(key: &[u8; 16], iv: &[u8; 16], sample: &mut 
 #[must_use]
 pub fn expand_cenc_iv(iv8: &[u8; 8]) -> [u8; 16] {
     // ISO/IEC 23001-7: 8-byte CENC IVs are left-aligned and zero-padded to 16.
-    let mut v = Vec::with_capacity(16);
-    v.extend_from_slice(iv8);
-    v.resize(16, 0);
-    v.try_into()
-        .unwrap_or_else(|_| unreachable!("8-byte IV plus 8 padding bytes is 16"))
+    std::array::from_fn(|i| iv8.get(i).copied().unwrap_or_else(u8::default))
 }
 
 #[cfg(test)]

@@ -161,14 +161,16 @@ impl BoxHeader {
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_u8(r: &mut impl Read) -> Result<u8> {
-    let mut buf = 0u8;
-    r.read_exact(std::slice::from_mut(&mut buf))?;
-    Ok(buf)
+    let bytes = read_exact_vec(r, 1)?;
+    bytes
+        .first()
+        .copied()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into())
 }
 
 /// Reads exactly `n` bytes into a new buffer (no zero-initialized crypto array).
 pub fn read_exact_vec(r: &mut impl Read, n: usize) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(n);
     let got = r.take(n as u64).read_to_end(&mut buf)?;
     if got != n {
         return Err(std::io::Error::new(
