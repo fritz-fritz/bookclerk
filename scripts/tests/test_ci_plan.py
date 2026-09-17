@@ -14,7 +14,10 @@ from unittest import mock
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
-from ci_plan.github_paths import github_actions_file_path  # noqa: E402
+from ci_plan.github_paths import (  # noqa: E402
+    github_actions_file_path,
+    open_github_actions_append,
+)
 from ci_plan.plan import (  # noqa: E402
     PlanError,
     build_plan,
@@ -284,6 +287,18 @@ class GithubActionsFilePathTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 github_actions_file_path("/tmp/x", label="GITHUB_STEP_SUMMARY")
             self.assertIn("neither RUNNER_TEMP nor GITHUB_WORKSPACE", str(ctx.exception))
+
+    def test_open_append_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bc-runner-") as tmp:
+            root = os.path.realpath(tmp)
+            target_dir = os.path.join(root, "_runner_file_commands")
+            os.makedirs(target_dir, exist_ok=True)
+            target = os.path.join(target_dir, "set_output_x")
+            with mock.patch.dict(os.environ, {"RUNNER_TEMP": root}, clear=True):
+                with open_github_actions_append(target, label="GITHUB_OUTPUT") as fh:
+                    fh.write("full_suite=false\n")
+            with open(target, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "full_suite=false\n")
 
 if __name__ == "__main__":
     unittest.main()

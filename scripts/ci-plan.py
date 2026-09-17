@@ -22,7 +22,7 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
-from ci_plan.github_paths import github_actions_file_path  # noqa: E402
+from ci_plan.github_paths import open_github_actions_append  # noqa: E402
 from ci_plan.plan import (  # noqa: E402
     PlanError,
     plan_from_event,
@@ -112,18 +112,16 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(text)
         gh_out = os.environ.get("GITHUB_OUTPUT")
         if gh_out:
-            out_path = github_actions_file_path(gh_out, label="GITHUB_OUTPUT")
-            with open(out_path, "a", encoding="utf-8") as fh:
+            with open_github_actions_append(gh_out, label="GITHUB_OUTPUT") as fh:
                 fh.write(text)
 
     if args.write_summary:
         summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
         body = plan_to_summary(plan)
         if summary_path:
-            step_path = github_actions_file_path(
+            with open_github_actions_append(
                 summary_path, label="GITHUB_STEP_SUMMARY"
-            )
-            with open(step_path, "a", encoding="utf-8") as fh:
+            ) as fh:
                 fh.write(body)
                 if not body.endswith("\n"):
                     fh.write("\n")
