@@ -246,35 +246,44 @@ class CiPlanTests(unittest.TestCase):
 
 class GithubActionsFilePathTests(unittest.TestCase):
     def test_accepts_path_under_runner_temp(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp).resolve()
-            target = root / "_runner_file_commands" / "set_output_x"
-            target.parent.mkdir(parents=True)
-            target.write_text("", encoding="utf-8")
-            with mock.patch.dict(os.environ, {"RUNNER_TEMP": str(root)}, clear=True):
-                got = github_actions_file_path(str(target), label="GITHUB_OUTPUT")
-            self.assertEqual(got, target.resolve())
+        with tempfile.TemporaryDirectory(prefix="bc-runner-") as tmp:
+            root = os.path.realpath(tmp)
+            # Allowlist rejects characters outside [A-Za-z0-9._-]; mkdtemp is fine.
+            target_dir = os.path.join(root, "_runner_file_commands")
+            os.makedirs(target_dir, exist_ok=True)
+            target = os.path.join(target_dir, "set_output_x")
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("")
+            with mock.patch.dict(os.environ, {"RUNNER_TEMP": root}, clear=True):
+                got = github_actions_file_path(target, label="GITHUB_OUTPUT")
+            self.assertEqual(got, target)
 
     def test_rejects_escape_outside_runner_roots(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp).resolve()
-            outside = Path(tempfile.mkdtemp()).resolve() / "leak"
-            outside.write_text("x", encoding="utf-8")
+        with tempfile.TemporaryDirectory(prefix="bc-runner-") as tmp:
+            root = os.path.realpath(tmp)
+            outside_dir = tempfile.mkdtemp(prefix="bc-outside-")
+            outside = os.path.join(os.path.realpath(outside_dir), "leak")
+            with open(outside, "w", encoding="utf-8") as fh:
+                fh.write("x")
             try:
-                with mock.patch.dict(os.environ, {"RUNNER_TEMP": str(root)}, clear=True):
+                with mock.patch.dict(os.environ, {"RUNNER_TEMP": root}, clear=True):
                     with self.assertRaises(SystemExit) as ctx:
-                        github_actions_file_path(str(outside), label="GITHUB_OUTPUT")
+                        github_actions_file_path(outside, label="GITHUB_OUTPUT")
                 self.assertIn("outside RUNNER_TEMP", str(ctx.exception))
             finally:
-                outside.unlink(missing_ok=True)
-                outside.parent.rmdir()
+                os.unlink(outside)
+                os.rmdir(outside_dir)
+
+    def test_rejects_parent_dir_spelling(self) -> None:
+        with mock.patch.dict(os.environ, {"RUNNER_TEMP": "/tmp/runner"}, clear=True):
+            with self.assertRaises(SystemExit):
+                github_actions_file_path("/tmp/runner/../etc/passwd", label="GITHUB_OUTPUT")
 
     def test_requires_runner_roots(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(SystemExit) as ctx:
                 github_actions_file_path("/tmp/x", label="GITHUB_STEP_SUMMARY")
             self.assertIn("neither RUNNER_TEMP nor GITHUB_WORKSPACE", str(ctx.exception))
-
 
 if __name__ == "__main__":
     unittest.main()

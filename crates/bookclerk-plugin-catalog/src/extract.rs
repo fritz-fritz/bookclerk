@@ -301,8 +301,8 @@ pub fn safe_join(dest: &Path, rel: &Path) -> Result<PathBuf> {
 /// relative segment is still separate.
 ///
 /// When `path` does not exist yet, canonicalizes the nearest existing ancestor
-/// and rejoins the missing suffix (same approach as
-/// [`bookclerk_sandbox::require_under_root`]) so a symlinked parent such as
+/// and rejoins the missing suffix (same approach as bookclerk-sandbox
+/// `require_under_root`) so a symlinked parent such as
 /// `root/.staging -> /outside` cannot pass a lexical `starts_with` check.
 ///
 /// # Errors
