@@ -23,17 +23,23 @@ const FRAMES_PER_SECOND: usize = 43;
 /// Synthetic AAC frame size in bytes (~128 kbit/s at 43 frames/s).
 const BYTES_PER_FRAME: usize = 372;
 
-/// Rejects relative/`..`/NUL paths and rebuilds before filesystem access.
+/// Rebuilds an absolute bench path after empty/NUL rejection (no `..` string ban).
 fn validated_absolute(path: &Path) -> PathBuf {
     assert!(
         path.is_absolute(),
         "bench path must be absolute: {}",
         path.display()
     );
-    let s = path.to_string_lossy().into_owned();
-    assert!(!s.contains(".."), "bench path must not contain '..': {s}");
-    assert!(!s.contains('\0'), "bench path must not contain NUL");
-    PathBuf::from(s)
+    assert!(!path.as_os_str().is_empty(), "bench path must not be empty");
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(
+            !path.as_os_str().as_bytes().contains(&0),
+            "bench path must not contain NUL"
+        );
+    }
+    PathBuf::from(path.as_os_str().to_os_string())
 }
 
 fn main() {

@@ -294,16 +294,21 @@ pub fn safe_join(dest: &Path, rel: &Path) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// Returns `path` when it stays under `root` (lexical, then canonical when possible).
+/// Returns `path` when it stays under `root` (canonical containment).
 ///
 /// Use before filesystem sinks that already hold an absolute path built from a
 /// trusted root (install dest, staging, receipt). Prefer [`safe_join`] when the
 /// relative segment is still separate.
 ///
+/// When `path` does not exist yet, canonicalizes the nearest existing ancestor
+/// and rejoins the missing suffix (same approach as
+/// [`bookclerk_sandbox::require_under_root`]) so a symlinked parent such as
+/// `root/.staging -> /outside` cannot pass a lexical `starts_with` check.
+///
 /// # Errors
 ///
-/// Returns when `path` contains `..`, or escapes `root` lexically or after
-/// `canonicalize`.
+/// Returns when `path` contains a `ParentDir` component, or escapes `root`
+/// lexically or after canonicalize.
 pub fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
     if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(CatalogError::message(format!(
@@ -311,37 +316,50 @@ pub fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
             path.display()
         )));
     }
-    let root_norm = match root.canonicalize() {
-        Ok(c) => c,
-        Err(_) => {
-            let s = root.to_string_lossy().into_owned();
-            if s.contains("..") {
-                return Err(CatalogError::message(format!(
-                    "refusing root with '..': {}",
-                    root.display()
-                )));
-            }
-            PathBuf::from(s)
-        }
-    };
+    let root_norm = root.canonicalize().map_err(|source| {
+        CatalogError::message(format!(
+            "could not canonicalize root {}: {source}",
+            root.display()
+        ))
+    })?;
     let path_norm = match path.canonicalize() {
         Ok(c) => c,
-        Err(_) => {
-            if !path.starts_with(root) && !path.starts_with(&root_norm) {
-                return Err(CatalogError::message(format!(
-                    "path {} escapes root {}",
-                    path.display(),
-                    root.display()
-                )));
+        Err(err) => {
+            let mut suffix = Vec::new();
+            let mut cursor = path.to_path_buf();
+            loop {
+                match cursor.canonicalize() {
+                    Ok(canon) => {
+                        let mut out = canon;
+                        for part in suffix.iter().rev() {
+                            out.push(part);
+                        }
+                        break out;
+                    }
+                    Err(_) => {
+                        let name = cursor.file_name().ok_or_else(|| {
+                            CatalogError::message(format!(
+                                "could not resolve path {} under {}: {err}",
+                                path.display(),
+                                root.display()
+                            ))
+                        })?;
+                        suffix.push(name.to_os_string());
+                        match cursor.parent() {
+                            Some(parent) if !parent.as_os_str().is_empty() => {
+                                cursor = parent.to_path_buf();
+                            }
+                            _ => {
+                                return Err(CatalogError::message(format!(
+                                    "could not resolve path {} under {}: {err}",
+                                    path.display(),
+                                    root.display()
+                                )));
+                            }
+                        }
+                    }
+                }
             }
-            let s = path.to_string_lossy().into_owned();
-            if s.contains("..") {
-                return Err(CatalogError::message(format!(
-                    "refusing path with '..': {}",
-                    path.display()
-                )));
-            }
-            PathBuf::from(s)
         }
     };
     if !path_norm.starts_with(&root_norm) {
@@ -351,7 +369,7 @@ pub fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
             root_norm.display()
         )));
     }
-    Ok(path_norm)
+    Ok(PathBuf::from(path_norm.as_os_str().to_os_string()))
 }
 
 /// Wraps an I/O or tar error as a catalog message.
@@ -423,6 +441,21 @@ mod tests {
         let err = safe_join(Path::new("/tmp/out"), Path::new("a/../../evil")).unwrap_err();
         assert!(
             err.to_string().contains("traversal") || err.to_string().contains("refusing"),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn require_under_rejects_symlinked_parent_escape() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let staging = root.path().join(".staging");
+        std::os::unix::fs::symlink(outside.path(), &staging).unwrap();
+        let escaped = staging.join("new");
+        let err = require_under(root.path(), &escaped).unwrap_err();
+        assert!(
+            err.to_string().contains("escapes") || err.to_string().contains("could not"),
             "{err}"
         );
     }

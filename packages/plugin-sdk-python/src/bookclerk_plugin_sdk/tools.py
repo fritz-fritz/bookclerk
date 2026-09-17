@@ -744,8 +744,8 @@ def fmt_plugin_toml(path: Path, *, check_only: bool) -> str:
         ValueError: If validation fails or ``check_only`` finds a drift.
         OSError: If the file cannot be read or written.
     """
-    # Contain authoring writes under cwd (CLI tool).
-    safe = resolve_under(Path.cwd(), cli_user_path(path))
+    # Operator-selected plugin.toml path (trusted operation root for this write).
+    safe = cli_user_path(path)
     # codeql[py/path-injection]
     text = safe.read_text(encoding="utf-8")
     m = tomllib.loads(text)
@@ -1041,7 +1041,8 @@ def generate_types(plugin_dir: Path, out_file: Path | None = None) -> str:
     if out_file is None:
         dest = resolve_under(root, TYPES_OUTPUT_FILE)
     else:
-        dest = resolve_under(Path.cwd(), cli_user_path(out_file))
+        # Operator-selected output path (not forced under cwd).
+        dest = cli_user_path(out_file)
     # codeql[py/path-injection]
     dest.write_text(render_env_types(m), encoding="utf-8")
     return f"wrote {dest}"

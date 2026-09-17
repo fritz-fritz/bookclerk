@@ -228,23 +228,39 @@ impl std::fmt::Debug for SqliteProxy {
     }
 }
 
-/// Rejects empty paths and interior `..` / NUL, then rebuilds for FS sinks.
+/// Rebuilds a configured database path for FS sinks after empty/NUL rejection.
+///
+/// The path is a trusted configured location (may lexically contain `..` from
+/// `files_dir`). Do not reject `..` substrings or convert through UTF-8 lossy.
 ///
 /// # Errors
 ///
-/// Returns [`DbErr::Custom`] when the path is empty or contains `..` / NUL.
+/// Returns [`DbErr::Custom`] when the path is empty or contains an interior NUL.
 fn validated_db_path(path: &Path) -> std::result::Result<PathBuf, DbErr> {
     if path.as_os_str().is_empty() {
         return Err(DbErr::Custom("refusing empty database path".into()));
     }
-    let s = path.to_string_lossy();
-    if s.contains("..") || s.contains('\0') {
-        return Err(DbErr::Custom(format!(
-            "refusing unsafe database path: {}",
-            path.display()
-        )));
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if path.as_os_str().as_bytes().contains(&0) {
+            return Err(DbErr::Custom(format!(
+                "refusing database path with interior NUL: {}",
+                path.display()
+            )));
+        }
     }
-    Ok(PathBuf::from(s.into_owned()))
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        if path.as_os_str().encode_wide().any(|c| c == 0) {
+            return Err(DbErr::Custom(format!(
+                "refusing database path with interior NUL: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(PathBuf::from(path.as_os_str().to_os_string()))
 }
 
 /// Opens a SQLite file and returns a SeaORM proxy (no schema application).

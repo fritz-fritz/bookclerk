@@ -14,41 +14,44 @@ def _fresh(path_s: str) -> Path:
 def resolve_under(root: Path | str, *parts: str | Path) -> Path:
     """Join ``parts`` under ``root`` and require the result stay inside ``root``.
 
-    Rejects ``..`` segments. When a single absolute ``parts`` entry is given,
-    validates that path is under ``root`` without joining. Uses ``abspath`` /
-    string ``..`` checks (not ``Path.resolve()``) so containment is a CodeQL
-    barrier without treating resolve itself as the only sink.
+    ``root`` is a trusted operation root (plugin directory, output directory,
+    cache). It may be absolute or relative and may lexically contain ``..``
+    before normalization — we abspath/normpath it first. Only ``parts`` are
+    treated as untrusted relative suffixes (``..`` components rejected).
 
     Args:
-        root: Trusted directory.
-        *parts: Relative segments to join, or one absolute path to validate.
+        root: Trusted directory (user-selected plugin/output root, or cache).
+        *parts: Relative segments to join, or one absolute path to validate
+            under ``root``.
 
     Returns:
         Absolute path under ``root``.
 
     Raises:
-        ValueError: When the path contains ``..`` / NUL or escapes ``root``.
+        ValueError: When a part contains ``..`` / NUL or the result escapes
+            ``root``.
     """
-    root_s = os.path.abspath(os.fspath(root))
+    root_s = os.path.abspath(os.path.normpath(os.fspath(root)))
     if "\0" in root_s:
         raise ValueError(f"root path contains NUL: {root}")
-    if ".." in root_s:
-        raise ValueError(f"root path must not contain '..': {root_s}")
     root_path = _fresh(root_s)
 
-    if len(parts) == 1 and Path(parts[0]).is_absolute():
-        resolved_s = os.path.abspath(os.fspath(parts[0]))
+    if len(parts) == 1 and os.path.isabs(os.fspath(parts[0])):
+        resolved_s = os.path.abspath(os.path.normpath(os.fspath(parts[0])))
     else:
         for part in parts:
-            if ".." in Path(part).parts:
-                raise ValueError(f"path must not contain '..': {part}")
+            part_s = os.fspath(part)
+            if "\0" in part_s:
+                raise ValueError(f"path contains NUL: {part}")
+            # Component-level check: allow names like ``edition..2``.
+            for seg in Path(part_s).parts:
+                if seg == "..":
+                    raise ValueError(f"path must not contain '..': {part}")
         joined = root_path.joinpath(*parts) if parts else root_path
-        resolved_s = os.path.abspath(os.fspath(joined))
+        resolved_s = os.path.abspath(os.path.normpath(os.fspath(joined)))
 
     if "\0" in resolved_s:
         raise ValueError(f"path contains NUL: {resolved_s}")
-    if ".." in resolved_s:
-        raise ValueError(f"path must not contain '..': {resolved_s}")
     if os.path.commonpath([root_s, resolved_s]) != root_s:
         raise ValueError(f"path {resolved_s} escapes root {root_s}")
     if resolved_s != root_s and not resolved_s.startswith(root_s + os.sep):
@@ -59,9 +62,19 @@ def resolve_under(root: Path | str, *parts: str | Path) -> Path:
 def cli_user_path(raw: str | Path) -> Path:
     """Accept a CLI path argument (any user-chosen location; no cwd jail).
 
-    Authoring CLIs historically took absolute or relative paths without forcing
-    containment under ``Path.cwd()``. Reject NUL only; tools apply containment
-    relative to the plugin root they open.
+    Authoring CLIs take absolute or relative paths without forcing containment
+    under ``Path.cwd()``. Reject NUL only; callers apply
+    :func:`resolve_under` for manifest-derived children beneath the opened
+    plugin/output root.
+
+    Args:
+        raw: Operator-selected path (absolute, relative, or ``~``-prefixed).
+
+    Returns:
+        Normalized absolute path.
+
+    Raises:
+        ValueError: When the path contains an interior NUL.
     """
     p = Path(raw).expanduser()
     s = os.fspath(p)
@@ -71,6 +84,4 @@ def cli_user_path(raw: str | Path) -> Path:
         s = os.path.normpath(os.path.join(os.getcwd(), s))
     else:
         s = os.path.normpath(s)
-    if ".." in s:
-        raise ValueError(f"path must not contain '..': {s}")
     return _fresh(s)

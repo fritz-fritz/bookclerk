@@ -1348,22 +1348,30 @@ fn collect_modules(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Recursively appends workerd-loadable module files under `dir`.
+///
+/// Symlinks are rejected so a nested `modules/leak -> /outside` cannot pass a
+/// lexical `starts_with` check and walk/embed files outside the plugin tree.
 fn collect_modules_inner(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     // Contained under install `modules_dir` (caller used [`require_under`]).
     // codeql[rust/path-injection]
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            bail!(
+                "refusing symlink in workerd modules tree: {}",
+                entry.path().display()
+            );
+        }
         let path = entry.path();
         if !path.starts_with(dir) {
             continue;
         }
-        // codeql[rust/path-injection]
-        if path.is_dir() {
+        if file_type.is_dir() {
             collect_modules_inner(&path, out)?;
             continue;
         }
-        // codeql[rust/path-injection]
-        if !path.is_file() {
+        if !file_type.is_file() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();

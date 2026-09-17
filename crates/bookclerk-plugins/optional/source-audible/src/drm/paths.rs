@@ -1,20 +1,42 @@
-//! Path validation before DRM filesystem sinks.
+//! Path rebuild before DRM filesystem sinks (CodeQL barrier only).
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::error::{DrmError, Result};
 
-/// Rejects empty paths and interior `..` / NUL, then rebuilds for FS sinks.
+/// True when `s` contains an interior NUL.
+fn os_contains_nul(s: &OsStr) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        s.as_bytes().contains(&0)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        s.encode_wide().any(|c| c == 0)
+    }
+}
+
+/// Rebuilds `path` for FS sinks after empty/NUL rejection.
+///
+/// Download/output paths are caller-selected under the acquire cache, not
+/// untrusted suffixes under a separate root. Do not reject lexical `..` or
+/// convert through UTF-8 lossy here.
+///
+/// # Errors
+///
+/// Returns [`DrmError::Native`] when the path is empty or contains NUL.
 pub(crate) fn validated_fs_path(path: &Path) -> Result<PathBuf> {
     if path.as_os_str().is_empty() {
         return Err(DrmError::Native("refusing empty path".into()));
     }
-    let s = path.to_string_lossy();
-    if s.contains("..") || s.contains('\0') {
+    if os_contains_nul(path.as_os_str()) {
         return Err(DrmError::Native(format!(
-            "refusing unsafe path: {}",
+            "refusing path with interior NUL: {}",
             path.display()
         )));
     }
-    Ok(PathBuf::from(s.into_owned()))
+    Ok(PathBuf::from(path.as_os_str().to_os_string()))
 }

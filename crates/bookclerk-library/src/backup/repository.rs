@@ -135,6 +135,11 @@ impl BackupRepository {
     }
 
     /// Returns `path` when it stays under this repository root.
+    ///
+    /// Canonicalizes when possible. An existing path that canonicalizes outside
+    /// the root is rejected (symlink escape). A missing leaf falls back to
+    /// canonicalizing the nearest existing parent and rejoining the remaining
+    /// components — never returning a lexical path that failed containment.
     fn under_root(&self, path: &Path) -> Result<PathBuf> {
         if path.components().any(|c| matches!(c, Component::ParentDir)) {
             return Err(LibraryError::Schema(format!(
@@ -149,12 +154,63 @@ impl BackupRepository {
                 self.root.display()
             )));
         }
-        // Rebuild after containment so FS sinks do not see the pre-check PathBuf.
         let path = match fs::canonicalize(path) {
-            Ok(canon) if canon.starts_with(&self.root) => canon,
-            _ => PathBuf::from(path.as_os_str().to_os_string()),
+            Ok(canon) => {
+                if !canon.starts_with(&self.root) {
+                    return Err(LibraryError::Schema(format!(
+                        "backup path {} escapes repository root {} after canonicalize",
+                        canon.display(),
+                        self.root.display()
+                    )));
+                }
+                canon
+            }
+            Err(err) => {
+                // Missing leaf: canonicalize existing ancestors, rejoin suffix.
+                let mut suffix = Vec::new();
+                let mut cursor = path.to_path_buf();
+                loop {
+                    match fs::canonicalize(&cursor) {
+                        Ok(canon) => {
+                            let mut out = canon;
+                            for part in suffix.iter().rev() {
+                                out.push(part);
+                            }
+                            if !out.starts_with(&self.root) {
+                                return Err(LibraryError::Schema(format!(
+                                    "backup path {} escapes repository root {}",
+                                    out.display(),
+                                    self.root.display()
+                                )));
+                            }
+                            break out;
+                        }
+                        Err(_) => {
+                            let name = cursor.file_name().ok_or_else(|| {
+                                LibraryError::Schema(format!(
+                                    "could not resolve backup path {}: {err}",
+                                    path.display()
+                                ))
+                            })?;
+                            suffix.push(name.to_os_string());
+                            match cursor.parent() {
+                                Some(parent) if !parent.as_os_str().is_empty() => {
+                                    cursor = parent.to_path_buf();
+                                }
+                                _ => {
+                                    return Err(LibraryError::Schema(format!(
+                                        "could not resolve backup path {}: {err}",
+                                        path.display()
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         };
-        Ok(path)
+        // Rebuild after containment so FS sinks do not see the pre-check PathBuf.
+        Ok(PathBuf::from(path.as_os_str().to_os_string()))
     }
 
     /// Repository root (`…/backups`).

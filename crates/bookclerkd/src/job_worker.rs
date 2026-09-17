@@ -59,7 +59,10 @@ pub async fn sweep_orphan_temp_dirs(
     for row in library.list_all_job_temp_paths().await? {
         if let Ok(Some(job)) = library.get_job(&row.job_id).await {
             if job.state.is_active() {
-                active_keep.insert(PathBuf::from(row.path));
+                // Same representation as [`sweep_dir`]: prefer canonicalize so a
+                // lexical DB path and a symlink-resolved DirEntry still match.
+                let path = PathBuf::from(&row.path);
+                active_keep.insert(normalize_existing_path(&path));
             }
         }
     }
@@ -70,41 +73,28 @@ pub async fn sweep_orphan_temp_dirs(
     Ok(swept)
 }
 
-/// Rejects empty paths and interior `..` / NUL before filesystem access.
-fn reject_unsafe_path(path: &Path) -> bool {
-    if path.as_os_str().is_empty() {
-        return false;
+/// Canonical path when the target exists; otherwise a rebuilt PathBuf.
+fn normalize_existing_path(path: &Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(canon) => PathBuf::from(canon.as_os_str().to_os_string()),
+        Err(_) => PathBuf::from(path.as_os_str().to_os_string()),
     }
-    let s = path.to_string_lossy();
-    !s.contains("..") && !s.contains('\0')
 }
 
-/// Rebuild after validation so CodeQL path taint does not reach FS sinks.
-fn rebuild_path(path: &Path) -> PathBuf {
-    PathBuf::from(path.to_string_lossy().into_owned())
-}
-
-/// Requires `path` to stay under `root` (lexical + canonical when present).
+/// Requires `path` to stay under canonical `root`.
+///
+/// Sweep only visits existing `DirEntry` paths, so canonicalize should succeed.
+/// Keep-set membership uses the same canonical form via [`normalize_existing_path`].
 fn require_under_sweep_root(root: &Path, path: &Path) -> Option<PathBuf> {
-    if !reject_unsafe_path(root) || !reject_unsafe_path(path) {
+    if path.as_os_str().is_empty() {
         return None;
     }
-    let root_norm = std::fs::canonicalize(root)
-        .ok()
-        .unwrap_or_else(|| rebuild_path(root));
-    let path_norm = match std::fs::canonicalize(path) {
-        Ok(c) => c,
-        Err(_) => {
-            if !path.starts_with(root) && !path.starts_with(&root_norm) {
-                return None;
-            }
-            rebuild_path(path)
-        }
-    };
+    let root_norm = std::fs::canonicalize(root).ok()?;
+    let path_norm = std::fs::canonicalize(path).ok()?;
     if !path_norm.starts_with(&root_norm) {
         return None;
     }
-    Some(rebuild_path(&path_norm))
+    Some(PathBuf::from(path_norm.as_os_str().to_os_string()))
 }
 
 /// Deletes unregistered child directories under `root`.
@@ -126,7 +116,7 @@ async fn sweep_dir(root: &Path, keep: &HashSet<PathBuf>) -> u32 {
         if !meta.is_dir() {
             continue;
         }
-        // Contained under sweep root via [`require_under_sweep_root`]; path rebuilt after validation.
+        // Contained under sweep root via [`require_under_sweep_root`].
         // codeql[rust/path-injection]
         match tokio::fs::remove_dir_all(&path).await {
             Ok(()) => n += 1,

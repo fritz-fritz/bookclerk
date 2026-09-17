@@ -81,13 +81,13 @@ impl LocalFsBackend {
     fn resolve(&self, key: &str) -> Result<PathBuf> {
         validate_key(key)?;
         let full = self.full_key(key);
-        // full_key only prepends a normalized prefix; still reject escape in the
-        // combined path.
-        if full.contains("..") {
+        if Path::new(&full)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             return Err(StorageError::InvalidKey(key.into()));
         }
         let path = self.root.join(&full);
-        // Prevent path escape above root.
         let canonical_root = self
             .root
             .canonicalize()
@@ -96,31 +96,55 @@ impl LocalFsBackend {
             if !canonical.starts_with(&canonical_root) {
                 return Err(StorageError::InvalidKey(key.into()));
             }
-        } else {
-            // Parent must still stay under root when the file does not exist yet.
-            if let Some(parent) = path.parent() {
-                let parent_canon = if parent.exists() {
-                    parent
-                        .canonicalize()
-                        .unwrap_or_else(|_| parent.to_path_buf())
-                } else {
-                    parent.to_path_buf()
-                };
-                if parent_canon.is_absolute()
-                    && !parent_canon.starts_with(&canonical_root)
-                    && !path.starts_with(&self.root)
-                {
-                    return Err(StorageError::InvalidKey(key.into()));
+            return Ok(PathBuf::from(canonical.as_os_str().to_os_string()));
+        }
+        // Missing leaf/intermediates: canonicalize nearest existing ancestor and
+        // rejoin the suffix (rejects symlink-parent escapes).
+        let mut suffix = Vec::new();
+        let mut cursor = path.clone();
+        loop {
+            match cursor.canonicalize() {
+                Ok(canon) => {
+                    if !canon.starts_with(&canonical_root) {
+                        return Err(StorageError::InvalidKey(key.into()));
+                    }
+                    let mut out = canon;
+                    for part in suffix.iter().rev() {
+                        out.push(part);
+                    }
+                    if !out.starts_with(&canonical_root) {
+                        return Err(StorageError::InvalidKey(key.into()));
+                    }
+                    return Ok(out);
+                }
+                Err(_) => {
+                    let name = cursor
+                        .file_name()
+                        .ok_or_else(|| StorageError::InvalidKey(key.into()))?;
+                    suffix.push(name.to_os_string());
+                    match cursor.parent() {
+                        Some(parent) if !parent.as_os_str().is_empty() => {
+                            cursor = parent.to_path_buf();
+                        }
+                        _ => return Err(StorageError::InvalidKey(key.into())),
+                    }
                 }
             }
         }
-        Ok(path)
     }
 }
 
-/// Rejects empty keys, absolute keys, and any `..` segment.
+/// Rejects empty keys, absolute keys, and any `ParentDir` segment.
 fn validate_key(key: &str) -> Result<()> {
-    if key.is_empty() || key.starts_with('/') || key.contains("..") {
+    if key.is_empty() || key.starts_with('/') {
+        return Err(StorageError::InvalidKey(key.into()));
+    }
+    if Path::new(key).components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        )
+    }) {
         return Err(StorageError::InvalidKey(key.into()));
     }
     Ok(())
