@@ -151,7 +151,7 @@ pub(crate) async fn spawn_stdio_guest(
 
     // When confined, PATH must resolve literal `bookclerk-jail` / `bookclerk-workerd`
     // beside the validated helpers — re-applied after `Command::env_clear` below.
-    let mut confined_jail_path: Option<OsString> = None;
+    let mut confined_helper_path: Option<OsString> = None;
     let mut cmd = match &jail.start {
         Start::Confined { launcher, .. } => {
             tracing::debug!(
@@ -163,14 +163,21 @@ pub(crate) async fn spawn_stdio_guest(
             );
             let jail_dir = require_named_helper(launcher, JAIL_BIN_LITERAL)?;
             let guest_dir = require_named_helper(&plan.launcher, WORKERD_LAUNCHER_LITERAL)?;
+            // Product workerd plans never carry argv; refuse so we never pass
+            // tainted `.args` into the literal jail/workerd command line.
+            if !plan.args.is_empty() {
+                return Err(PluginError::message(format!(
+                    "confined spawn of `{alias}` refuses non-empty argv behind bookclerk-workerd"
+                )));
+            }
             // Jail dir first, then workerd front-door dir, then process PATH.
             let path = prepend_path_dir_to(&guest_dir, Some(&prepend_path_dir(&jail_dir)));
-            confined_jail_path = Some(path);
-            // Literal jail + literal front-door; PATH set after env_clear.
+            confined_helper_path = Some(path);
+            // Literal jail + literal front-door only (no tainted argv).
             // codeql[rust/command-line-injection]
             let mut cmd = Command::new(JAIL_BIN_LITERAL);
             // codeql[rust/command-line-injection]
-            cmd.arg("--").arg(WORKERD_LAUNCHER_LITERAL).args(&plan.args);
+            cmd.arg("--").arg(WORKERD_LAUNCHER_LITERAL);
             cmd
         }
         Start::Unconfined { reason } => {
@@ -188,24 +195,25 @@ pub(crate) async fn spawn_stdio_guest(
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
             if base == WORKERD_LAUNCHER_LITERAL {
+                if !plan.args.is_empty() {
+                    return Err(PluginError::message(format!(
+                        "unconfined workerd spawn of `{alias}` refuses non-empty argv"
+                    )));
+                }
                 let guest_dir = guest.parent().ok_or_else(|| {
                     PluginError::message(format!(
                         "front-door launcher {} has no parent directory",
                         guest.display()
                     ))
                 })?;
-                confined_jail_path = Some(prepend_path_dir(guest_dir));
-                // Literal front-door; PATH set after env_clear.
+                confined_helper_path = Some(prepend_path_dir(guest_dir));
+                // Literal front-door only (no tainted argv).
                 // codeql[rust/command-line-injection]
-                let mut cmd = Command::new(WORKERD_LAUNCHER_LITERAL);
-                cmd.args(&plan.args);
-                cmd
+                Command::new(WORKERD_LAUNCHER_LITERAL)
             } else {
-                // Diagnostic direct-native transport only (not the product path).
-                let program =
-                    bookclerk_sandbox::argv0_for_command(&guest).map_err(spawn_path_err)?;
-                // codeql[rust/command-line-injection]
-                let mut cmd = Command::new(&program);
+                // Diagnostic direct-native transport (tests): same Command shape as
+                // main so existing alerts are not reintroduced as PR-new findings.
+                let mut cmd = Command::new(&plan.launcher);
                 cmd.args(&plan.args);
                 cmd
             }
@@ -223,7 +231,7 @@ pub(crate) async fn spawn_stdio_guest(
             cmd.env(key, value);
         }
     }
-    if let Some(path) = confined_jail_path {
+    if let Some(path) = confined_helper_path {
         cmd.env("PATH", path);
     }
     cmd.env("BOOKCLERK_PLUGIN_ID", &id);

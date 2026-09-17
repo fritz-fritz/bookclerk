@@ -229,6 +229,10 @@ impl std::fmt::Debug for SqliteProxy {
 }
 
 /// Rejects empty paths and interior `..` / NUL, then rebuilds for FS sinks.
+///
+/// # Errors
+///
+/// Returns [`DbErr::Custom`] when the path is empty or contains `..` / NUL.
 fn validated_db_path(path: &Path) -> std::result::Result<PathBuf, DbErr> {
     if path.as_os_str().is_empty() {
         return Err(DbErr::Custom("refusing empty database path".into()));
