@@ -4,13 +4,17 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
+from ci_plan.github_paths import github_actions_file_path  # noqa: E402
 from ci_plan.plan import (  # noqa: E402
     PlanError,
     build_plan,
@@ -238,6 +242,38 @@ class CiPlanTests(unittest.TestCase):
         p = plan_from_event(base=None, head=None, metadata=META, paths=None)
         self.assertTrue(p.full_suite)
         self.assertTrue(any("planner error" in r for r in p.reasons))
+
+
+class GithubActionsFilePathTests(unittest.TestCase):
+    def test_accepts_path_under_runner_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            target = root / "_runner_file_commands" / "set_output_x"
+            target.parent.mkdir(parents=True)
+            target.write_text("", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"RUNNER_TEMP": str(root)}, clear=True):
+                got = github_actions_file_path(str(target), label="GITHUB_OUTPUT")
+            self.assertEqual(got, target.resolve())
+
+    def test_rejects_escape_outside_runner_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            outside = Path(tempfile.mkdtemp()).resolve() / "leak"
+            outside.write_text("x", encoding="utf-8")
+            try:
+                with mock.patch.dict(os.environ, {"RUNNER_TEMP": str(root)}, clear=True):
+                    with self.assertRaises(SystemExit) as ctx:
+                        github_actions_file_path(str(outside), label="GITHUB_OUTPUT")
+                self.assertIn("outside RUNNER_TEMP", str(ctx.exception))
+            finally:
+                outside.unlink(missing_ok=True)
+                outside.parent.rmdir()
+
+    def test_requires_runner_roots(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(SystemExit) as ctx:
+                github_actions_file_path("/tmp/x", label="GITHUB_STEP_SUMMARY")
+            self.assertIn("neither RUNNER_TEMP nor GITHUB_WORKSPACE", str(ctx.exception))
 
 
 if __name__ == "__main__":

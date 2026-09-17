@@ -506,6 +506,60 @@ mod tests {
         assert!(kept.exists());
     }
 
+    /// Keep-set paths come from the DB as lexical strings; DirEntry walks are
+    /// canonical. A symlink between the registered path and the on-disk entry
+    /// must still match so we do not delete an active job's work dir.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sweep_keep_matches_across_symlink_path_identity() {
+        use bookclerk_library::{EnqueueJobSpec, JobKind, JobPayload, JobTrigger};
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let real_cache = tmp.path().join("real-cache");
+        let cache_link = tmp.path().join("cache-link");
+        let kept_real = real_cache.join("acquire").join("kept-title");
+        tokio::fs::create_dir_all(&kept_real).await.unwrap();
+        tokio::fs::write(kept_real.join("y"), b"y").await.unwrap();
+        symlink(&real_cache, &cache_link).unwrap();
+
+        let store = LibraryStore::from_connection(
+            bookclerk_plugin_database_sqlite::open_memory()
+                .await
+                .unwrap(),
+        );
+        let created = store
+            .enqueue_job(EnqueueJobSpec {
+                kind: JobKind::Acquire,
+                payload: JobPayload {
+                    account: None,
+                    title: Some("kept".into()),
+                    trigger: JobTrigger::Api,
+                    ..Default::default()
+                },
+                priority: 0,
+                max_attempts: 3,
+                max_pending: 8,
+                run_after: None,
+            })
+            .await
+            .unwrap();
+        let bookclerk_library::EnqueueOutcome::Created { id } = created else {
+            panic!("expected created");
+        };
+        // Lexical path through the symlink (what a job may have registered).
+        let lexical_kept = cache_link.join("acquire").join("kept-title");
+        store
+            .register_job_temp_path(&id, &lexical_kept.to_string_lossy())
+            .await
+            .unwrap();
+
+        let swept = sweep_orphan_temp_dirs(&store, &cache_link).await.unwrap();
+        assert_eq!(swept, 0);
+        assert!(kept_real.exists());
+        assert!(lexical_kept.exists());
+    }
+
     #[test]
     fn heartbeat_ok_true_renews_lease() {
         assert!(matches!(
