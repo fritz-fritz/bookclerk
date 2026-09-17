@@ -35,7 +35,7 @@ def github_actions_file_path(path_s: str, *, label: str) -> str:
     ``RUNNER_TEMP`` or ``GITHUB_WORKSPACE`` via ``realpath`` + ``commonpath``.
 
     Static analysis: the return value is a ``path-injection`` barrier in
-    ``.github/codeql/extensions/bookclerk-python`` (see that model pack).
+    ``.github/codeql/model-packs/bookclerk-python`` (see that model pack).
 
     Args:
         path_s: Raw env value for the file command.

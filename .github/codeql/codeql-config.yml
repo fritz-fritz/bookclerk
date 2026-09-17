@@ -13,14 +13,21 @@
 # Keep `paths-ignore: third_party/**` — that exclusion is critical for
 # product signal. Also ignore build outputs under `target/` and `ui/dist/`.
 #
-# Local model packs under `extensions/` declare path-injection /
+# Local model packs under `model-packs/` declare path-injection /
 # command-injection barriers for semantic validators (ci_plan.github_paths,
 # bookclerk_sandbox::spawn_path). Prefer those barriers over encoding
-# analyzer expectations into filename character allowlists. With advanced
-# setup, pass the packs via CODEQL_ACTION_EXTRA_OPTIONS
-# `--additional-packs=.../.github/codeql/extensions --extension-packs=...`
-# (or publish them). Default setup loads this config when the repository
-# property points here; keep the packs next to this file for discovery.
+# analyzer expectations into filename character allowlists.
+#
+# Do NOT place multi-language packs under `.github/codeql/extensions/` —
+# CodeQL Action auto-loads every pack there into every language job, and
+# Python `barrierModel` (3 columns) vs Rust `barrierModel` (4 columns)
+# then crash Analyze with column/type errors. Keep packs here and wire them
+# explicitly for advanced setup, e.g. CODEQL_ACTION_EXTRA_OPTIONS:
+#   --additional-packs=${{ github.workspace }}/.github/codeql/model-packs
+#   --extension-packs=fritz-fritz/bookclerk-python-extensions
+#   (and the rust pack for rust jobs). Default setup loads this config when
+#   `github-codeql-config-file` points here; packs stay available for that
+#   wiring without being auto-injected into every language.
 name: Bookclerk CodeQL
 paths-ignore:
   - third_party/**

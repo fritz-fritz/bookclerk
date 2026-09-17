@@ -10,7 +10,7 @@
 //!
 //! Static analysis: successful `Ok(PathBuf)` returns are modeled as
 //! `command-injection` / `path-injection` barriers in
-//! `.github/codeql/extensions/bookclerk-rust`. Call sites may still add
+//! `.github/codeql/model-packs/bookclerk-rust`. Call sites may still add
 //! `// codeql[rust/command-line-injection]` when a given CodeQL build does not
 //! load that model pack.
 
