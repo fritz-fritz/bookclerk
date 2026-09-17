@@ -379,10 +379,8 @@ fn collect_dir(
         let arc_name = format!("{arc_prefix}/{}", name.to_string_lossy());
         if path.is_file() {
             entries.push((arc_name, path));
-        } else if recursive {
-            if path.is_dir() {
-                collect_dir(walk_root, &path, &arc_name, entries, included, true)?;
-            }
+        } else if recursive && path.is_dir() {
+            collect_dir(walk_root, &path, &arc_name, entries, included, true)?;
         }
     }
     Ok(())
