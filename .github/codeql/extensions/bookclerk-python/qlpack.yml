@@ -1,0 +1,7 @@
+name: fritz-fritz/bookclerk-python-extensions
+version: 0.0.1
+library: true
+extensionTargets:
+  codeql/python-all: "*"
+dataExtensions:
+  - models/*.model.yml

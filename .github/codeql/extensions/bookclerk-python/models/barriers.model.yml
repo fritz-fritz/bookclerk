@@ -1,0 +1,14 @@
+# Semantic path validators — path-injection barriers.
+#
+# Runtime checks live in the Python helpers (realpath + commonpath under
+# RUNNER_TEMP / GITHUB_WORKSPACE, or resolve_under). These rows tell CodeQL
+# that successful return values are safe for filesystem sinks.
+extensions:
+  - addsTo:
+      pack: codeql/python-all
+      extensible: barrierModel
+    data:
+      - ["ci_plan.github_paths", "Member[github_actions_file_path].ReturnValue", "path-injection"]
+      - ["ci_plan.github_paths", "Member[open_github_actions_append].ReturnValue", "path-injection"]
+      - ["bookclerk_plugin_sdk.path_guard", "Member[resolve_under].ReturnValue", "path-injection"]
+      - ["bookclerk_plugin_sdk.path_guard", "Member[cli_user_path].ReturnValue", "path-injection"]

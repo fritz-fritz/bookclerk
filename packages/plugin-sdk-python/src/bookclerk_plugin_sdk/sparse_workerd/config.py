@@ -183,11 +183,19 @@ def module_field_for(name: str) -> tuple[str, bool]:
 def collect_modules(directory: Path) -> list[Path]:
     """Collect embeddable module files under ``directory``.
 
+    Symlinks are refused (matching the Rust workerd walker) so a nested
+    ``modules/leak -> /outside`` cannot recurse or embed files outside the
+    plugin install tree. ``Path.is_dir()`` follows symlinks; check
+    ``is_symlink()`` first.
+
     Args:
         directory: Plugin modules root to walk recursively.
 
     Returns:
         Sorted list of ``.js``/``.mjs``/``.py``/``.wasm``/``.json`` file paths.
+
+    Raises:
+        ValueError: When a directory entry is a symlink.
     """
     root = directory.resolve()
     out: list[Path] = []
@@ -195,6 +203,10 @@ def collect_modules(directory: Path) -> list[Path]:
     def walk(d: Path) -> None:
         # codeql[py/path-injection]
         for entry in sorted(d.iterdir(), key=lambda p: p.name):
+            if entry.is_symlink():
+                raise ValueError(
+                    f"refusing symlink in workerd modules tree: {entry}"
+                )
             p = resolve_under(root, entry.relative_to(root))
             if entry.is_dir():
                 walk(p)

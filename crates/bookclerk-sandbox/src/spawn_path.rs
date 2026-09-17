@@ -1,17 +1,18 @@
 //! Validate program and argv path operands before `Command::new` / `.arg`.
 //!
-//! CodeQL `rust/command-line-injection` treats env/config-derived paths as
-//! tainted when they reach `std`/`tokio` `Command` sinks. These helpers enforce
-//! absolute paths (or a single PATH lookup component), reject interior NULs,
-//! and optionally require containment under a trusted root or equality with a
-//! known helper beside another binary. Call sites still add
-//! `// codeql[rust/command-line-injection]` when the analyzer cannot see the
-//! barrier through the helper return value.
+//! These helpers enforce the *runtime* properties we need for spawn safety:
+//! absolute paths (or a single PATH lookup name), no interior NULs, existing
+//! regular files after canonicalize where required, and optional containment
+//! under a trusted root or equality with a known helper beside another binary.
+//! Paths stay as [`PathBuf`] / [`OsStr`] end-to-end — character allowlists do
+//! not establish executable provenance and reject valid spaces / Unicode /
+//! non-UTF-8 Unix paths.
 //!
-//! Path-injection clearance: after string-level `..` / NUL rejection, rebuild
-//! with [`PathBuf::from`] so FS probes (`is_file`) and later `Command` sinks do
-//! not see the pre-validation `PathBuf` (Rust CodeQL requires normalize/`..`
-//! guards; annotations alone often do not clear alerts).
+//! Static analysis: successful `Ok(PathBuf)` returns are modeled as
+//! `command-injection` / `path-injection` barriers in
+//! `.github/codeql/extensions/bookclerk-rust`. Call sites may still add
+//! `// codeql[rust/command-line-injection]` when a given CodeQL build does not
+//! load that model pack.
 
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -83,51 +84,16 @@ fn is_single_path_name(path: &Path) -> bool {
     )
 }
 
-/// Rebuild after validation so CodeQL path/command taint does not follow the
-/// pre-check `PathBuf` into FS / `Command` sinks.
+/// Rebuild after validation so later sinks do not share the pre-check `PathBuf`.
 fn path_after_validation(path: &Path) -> PathBuf {
     PathBuf::from(path.as_os_str().to_os_string())
-}
-
-/// String-level `..` rejection then rebuild (CodeQL `DotDotCheck` sanitizer).
-fn reject_dotdot_rebuild(path: &Path) -> Result<PathBuf, SpawnPathError> {
-    let s = path.to_string_lossy().into_owned();
-    if s.contains("..") {
-        return Err(SpawnPathError::NotAbsolute(path.to_path_buf()));
-    }
-    Ok(PathBuf::from(s))
-}
-
-/// Rebuild a validated path as a fresh [`String`] for `Command::new`.
-///
-/// Only ASCII alphanumerics and `/\:._-+` are copied into a new buffer so
-/// CodeQL command-line-injection does not treat the result as the same
-/// tainted `PathBuf` that entered validation.
-///
-/// # Errors
-///
-/// Returns [`SpawnPathError`] when the path is empty, contains `..` / NUL, or
-/// has a character outside the allowlist.
-pub fn argv0_for_command(path: &Path) -> Result<String, SpawnPathError> {
-    let path = require_spawn_executable(path)?;
-    let raw = path.to_str().ok_or(SpawnPathError::Empty)?;
-    if raw.is_empty() || raw.contains('\0') || raw.contains("..") {
-        return Err(SpawnPathError::NotAbsolute(path));
-    }
-    let mut out = String::with_capacity(raw.len());
-    for c in raw.chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '/' | '\\' | ':' | '.' | '_' | '-' | '+') {
-            out.push(c);
-        } else {
-            return Err(SpawnPathError::NotAbsolute(path));
-        }
-    }
-    Ok(out)
 }
 
 /// Absolute path with no NUL, or a single PATH lookup name (`cargo`, `python3`).
 ///
 /// Does not require the path to exist (useful for generated argv file operands).
+/// Lexical `..` in an absolute spelling is allowed; callers that need a real
+/// file should use [`require_spawn_executable`] (canonicalize).
 ///
 /// # Errors
 ///
@@ -154,24 +120,29 @@ pub fn require_absolute_spawn_path(path: &Path) -> Result<PathBuf, SpawnPathErro
     Err(SpawnPathError::NotAbsolute(path.to_path_buf()))
 }
 
-/// Absolute existing file (or a single PATH name), with no interior NUL.
+/// Absolute existing regular file (or a single PATH name), with no interior NUL.
 ///
-/// Absolute paths are re-checked with string-level `..` rejection and rebuilt
-/// before `is_file` so CodeQL does not treat the FS probe as path-injection.
+/// Absolute paths are canonicalized so symlink targets and lexical `..` resolve
+/// to the file that will actually be executed. PATH lookup names are returned
+/// as-is for the OS to resolve at spawn time.
 ///
 /// # Errors
 ///
-/// Returns [`SpawnPathError`] when validation fails or an absolute path is not a file.
+/// Returns [`SpawnPathError`] when validation fails, canonicalize fails, or an
+/// absolute path is not a regular file.
 pub fn require_spawn_executable(path: &Path) -> Result<PathBuf, SpawnPathError> {
     let path = require_absolute_or_name(path)?;
     if path.is_absolute() {
-        let path = reject_dotdot_rebuild(&path)?;
-        // Rebuilt after absolute + NUL + `..` rejection.
+        let canon =
+            std::fs::canonicalize(&path).map_err(|source| SpawnPathError::Canonicalize {
+                path: path.clone(),
+                source,
+            })?;
         // codeql[rust/path-injection]
-        if !path.is_file() {
-            return Err(SpawnPathError::NotFile(path));
+        if !canon.is_file() {
+            return Err(SpawnPathError::NotFile(canon));
         }
-        return Ok(path);
+        return Ok(path_after_validation(&canon));
     }
     Ok(path)
 }
@@ -226,7 +197,9 @@ pub fn require_under_root(path: &Path, root: &Path) -> Result<PathBuf, SpawnPath
 /// absolute existing file (env override).
 ///
 /// Equality with the beside-host helper is the preferred product path; absolute
-/// env overrides still require [`require_spawn_executable`].
+/// env overrides still require [`require_spawn_executable`]. Operator-selectable
+/// absolute overrides are an explicit trust decision (document/model that at the
+/// call site) — filename characters alone never make an arbitrary executable safe.
 ///
 /// # Errors
 ///
@@ -272,6 +245,22 @@ mod tests {
             Err(SpawnPathError::NotAbsolute(_))
         ));
         assert!(require_absolute_or_name(Path::new("cargo")).is_ok());
+    }
+
+    #[test]
+    fn spawn_executable_accepts_space_in_filename() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let bin = dir.path().join("my helper");
+        std::fs::write(&bin, b"x").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).unwrap();
+        }
+        let got = require_spawn_executable(&bin).expect("space ok");
+        assert_eq!(got, std::fs::canonicalize(&bin).unwrap());
     }
 
     #[test]

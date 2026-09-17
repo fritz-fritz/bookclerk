@@ -1,0 +1,21 @@
+# Semantic spawn/path validators — command-injection and path-injection barriers.
+#
+# Runtime checks live in bookclerk_sandbox::spawn_path (absolute/PATH name,
+# existing regular file after canonicalize, root containment, beside-helper
+# equality). Successful Ok(PathBuf) values are barriers; keep PathBuf/OsStr
+# end-to-end rather than ASCII-rewriting for the analyzer.
+extensions:
+  - addsTo:
+      pack: codeql/rust-all
+      extensible: barrierModel
+    data:
+      - ["bookclerk_sandbox::spawn_path::require_absolute_or_name", "ReturnValue.Field[core::result::Result::Ok(0)]", "command-injection", "manual"]
+      - ["bookclerk_sandbox::spawn_path::require_absolute_or_name", "ReturnValue.Field[core::result::Result::Ok(0)]", "path-injection", "manual"]
+      - ["bookclerk_sandbox::spawn_path::require_absolute_spawn_path", "ReturnValue.Field[core::result::Result::Ok(0)]", "command-injection", "manual"]
+      - ["bookclerk_sandbox::spawn_path::require_absolute_spawn_path", "ReturnValue.Field[core::result::Result::Ok(0)]", "path-injection", "manual"]
+      - ["bookclerk_sandbox::spawn_path::require_spawn_executable", "ReturnValue.Field[core::result::Result::Ok(0)]", "command-injection", "manual"]
+      - ["bookclerk_sandbox::spawn_path::require_spawn_executable", "ReturnValue.Field[core::result::Result::Ok(0)]", "path-injection", "manual"]
+      - ["bookclerk_sandbox::spawn_path::require_under_root", "ReturnValue.Field[core::result::Result::Ok(0)]", "command-injection", "manual"]
+      - ["bookclerk_sandbox::spawn_path::require_under_root", "ReturnValue.Field[core::result::Result::Ok(0)]", "path-injection", "manual"]
+      - ["bookclerk_sandbox::spawn_path::require_helper_beside_or_absolute", "ReturnValue.Field[core::result::Result::Ok(0)]", "command-injection", "manual"]
+      - ["bookclerk_sandbox::spawn_path::require_helper_beside_or_absolute", "ReturnValue.Field[core::result::Result::Ok(0)]", "path-injection", "manual"]

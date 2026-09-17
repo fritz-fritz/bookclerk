@@ -251,15 +251,15 @@ class GithubActionsFilePathTests(unittest.TestCase):
     def test_accepts_path_under_runner_temp(self) -> None:
         with tempfile.TemporaryDirectory(prefix="bc-runner-") as tmp:
             root = os.path.realpath(tmp)
-            # Allowlist rejects characters outside [A-Za-z0-9._-]; mkdtemp is fine.
             target_dir = os.path.join(root, "_runner_file_commands")
             os.makedirs(target_dir, exist_ok=True)
-            target = os.path.join(target_dir, "set_output_x")
+            # Spaces / Unicode must survive (no ASCII regex allowlist).
+            target = os.path.join(target_dir, "set output café")
             with open(target, "w", encoding="utf-8") as fh:
                 fh.write("")
             with mock.patch.dict(os.environ, {"RUNNER_TEMP": root}, clear=True):
                 got = github_actions_file_path(target, label="GITHUB_OUTPUT")
-            self.assertEqual(got, target)
+            self.assertEqual(got, os.path.realpath(target))
 
     def test_rejects_escape_outside_runner_roots(self) -> None:
         with tempfile.TemporaryDirectory(prefix="bc-runner-") as tmp:
@@ -277,10 +277,34 @@ class GithubActionsFilePathTests(unittest.TestCase):
                 os.unlink(outside)
                 os.rmdir(outside_dir)
 
-    def test_rejects_parent_dir_spelling(self) -> None:
-        with mock.patch.dict(os.environ, {"RUNNER_TEMP": "/tmp/runner"}, clear=True):
-            with self.assertRaises(SystemExit):
-                github_actions_file_path("/tmp/runner/../etc/passwd", label="GITHUB_OUTPUT")
+    def test_rejects_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bc-runner-") as tmp:
+            root = os.path.realpath(tmp)
+            outside_dir = tempfile.mkdtemp(prefix="bc-outside-")
+            outside = os.path.join(os.path.realpath(outside_dir), "secret")
+            with open(outside, "w", encoding="utf-8") as fh:
+                fh.write("x")
+            link = os.path.join(root, "leak")
+            try:
+                os.symlink(outside, link)
+                with mock.patch.dict(os.environ, {"RUNNER_TEMP": root}, clear=True):
+                    with self.assertRaises(SystemExit) as ctx:
+                        github_actions_file_path(link, label="GITHUB_OUTPUT")
+                self.assertIn("outside RUNNER_TEMP", str(ctx.exception))
+            finally:
+                if os.path.lexists(link):
+                    os.unlink(link)
+                os.unlink(outside)
+                os.rmdir(outside_dir)
+
+    def test_rejects_resolved_escape_via_dotdot(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bc-runner-") as tmp:
+            root = os.path.realpath(tmp)
+            escape = os.path.join(root, "..", "not-under-root")
+            with mock.patch.dict(os.environ, {"RUNNER_TEMP": root}, clear=True):
+                with self.assertRaises(SystemExit) as ctx:
+                    github_actions_file_path(escape, label="GITHUB_OUTPUT")
+            self.assertIn("outside RUNNER_TEMP", str(ctx.exception))
 
     def test_requires_runner_roots(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -299,6 +323,7 @@ class GithubActionsFilePathTests(unittest.TestCase):
                     fh.write("full_suite=false\n")
             with open(target, encoding="utf-8") as fh:
                 self.assertEqual(fh.read(), "full_suite=false\n")
+
 
 if __name__ == "__main__":
     unittest.main()
