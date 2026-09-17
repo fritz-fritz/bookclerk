@@ -189,14 +189,10 @@ fn workerd_serve_command(
     let import_path = bookclerk_sandbox::require_absolute_spawn_path(&generated.import_path)
         .context("validate workerd --import-path")?;
 
-    // Binary and config paths validated absolute / under state_dir above.
-    // codeql[rust/command-line-injection]
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.arg("serve")
         // Unlocks the egress worker's `$experimental` inbound CONNECT handler.
         .arg(bookclerk_workerd::WORKERD_SERVE_EXPERIMENTAL);
-    // Contained under the session `state_dir` by [`require_under_root`].
-    // codeql[rust/command-line-injection]
     cmd.arg(&config_path)
         // Cap'n Proto `/modules/…` embeds resolve against the RO install root.
         .arg(format!("--import-path={}", import_path.display()))

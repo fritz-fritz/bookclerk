@@ -50,7 +50,6 @@ async fn staged_first_party_plugins_describe() {
         assert!(!s.contains("..") && !s.contains('\0'));
         std::path::PathBuf::from(s)
     };
-    // codeql[rust/path-injection]
     assert!(
         ledger.is_file(),
         "platform install ledger missing under {} (run cargo install-platform)",

@@ -40,8 +40,6 @@ fn join_plugin_toml(root: &Path) -> Result<PathBuf> {
 /// Reads and validates `plugin.toml` from the guest install root.
 pub fn load_manifest(root: &Path) -> Result<PluginManifest> {
     let path = join_plugin_toml(root)?;
-    // Contained under plugin install root via [`join_plugin_toml`]; path rebuilt after validation.
-    // codeql[rust/path-injection]
     let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     PluginManifest::parse(&text).map_err(|e| anyhow::anyhow!("{e}"))
 }

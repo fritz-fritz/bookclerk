@@ -58,7 +58,6 @@ export function packageRoot(): string {
  */
 export function loadPin(root = packageRoot()): WorkerdPin {
   const pinPath = assertPathInside(path.resolve(root), "workerd-pin.json");
-  // codeql[js/path-injection]
   return JSON.parse(fs.readFileSync(pinPath, "utf8")) as WorkerdPin;
 }
 
@@ -153,15 +152,11 @@ export function assertPathInside(root: string, candidate: string): string {
   if (resolved !== resolvedRoot && !resolved.startsWith(prefix)) {
     throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
-  if (resolved.includes("..")) {
-    throw new Error(`path must not contain '..': ${resolved}`);
-  }
-  // Rebuild after containment so FS/Command sinks do not see the pre-check string.
-  return Buffer.from(resolved, "utf8").toString("utf8");
+  return resolved;
 }
 
 /**
- * Validates a URL before `fetch` / download (CodeQL `js/request-forgery`).
+ * Validates a URL before `fetch` / download.
  *
  * Allows `https:` anywhere, or `http:` only to loopback hosts.
  *
@@ -219,34 +214,13 @@ export function validateSpawnExecutable(
   if (trustedRoot) {
     return assertPathInside(trustedRoot, bin);
   }
-  const abs = path.resolve(bin);
-  if (abs.includes("..")) {
-    throw new Error(`spawn executable path must not contain '..': ${abs}`);
-  }
-  return Buffer.from(abs, "utf8").toString("utf8");
-}
-
-/**
- * Rebuild an absolute path via regex allowlist (CodeQL command/path sanitizer).
- *
- * @param bin - Absolute path already checked by {@link validateSpawnExecutable}.
- * @returns The matched absolute path string.
- * @throws {Error} When `bin` fails the absolute-path allowlist.
- */
-export function argv0Allowlist(bin: string): string {
-  const m = /^(?:\/[A-Za-z0-9._/-]+|[A-Za-z]:\\[A-Za-z0-9._\\-]+)$/.exec(bin);
-  if (!m) {
-    throw new Error(`spawn executable fails absolute allowlist: ${bin}`);
-  }
-  return m[0];
+  return path.resolve(bin);
 }
 
 function isCurrent(bin: string, pin: WorkerdPin): boolean {
   const dir = path.resolve(path.dirname(bin));
   const stamp = assertPathInside(dir, pin.version_stamp);
-  // codeql[js/path-injection]
   if (fs.existsSync(stamp)) {
-    // codeql[js/path-injection]
     const text = fs.readFileSync(stamp, "utf8").trim();
     if (text === pin.release_tag) return true;
   }
@@ -255,7 +229,7 @@ function isCurrent(bin: string, pin: WorkerdPin): boolean {
   if (base !== "workerd" && base !== "workerd.exe") {
     throw new Error(`expected workerd binary, got ${base}`);
   }
-  // Literal program name + PATH to the validated directory (no tainted argv0).
+  // Literal program name; PATH points at the validated binary's directory.
   const out = spawnSync("workerd", ["--version"], {
     encoding: "utf8",
     shell: false,
@@ -283,21 +257,14 @@ export async function ensureWorkerd(
 ): Promise<string> {
   const pin = loadPin(root);
   const override = process.env.BOOKCLERK_WORKERD_BIN;
-  // codeql[js/path-injection]
   if (override && fs.existsSync(override) && isCurrent(override, pin)) {
     // Env override: absolute file only (may live outside the cache dir).
     return validateSpawnExecutable(override);
   }
 
-  let absCache = path.resolve(cacheDir);
-  if (absCache.includes("..")) {
-    throw new Error(`cache dir must not contain '..': ${absCache}`);
-  }
-  absCache = Buffer.from(absCache, "utf8").toString("utf8");
-  // codeql[js/path-injection]
+  const absCache = path.resolve(cacheDir);
   fs.mkdirSync(absCache, { recursive: true });
   const dest = assertPathInside(absCache, binaryName());
-  // codeql[js/path-injection]
   if (fs.existsSync(dest) && isCurrent(dest, pin)) {
     return validateSpawnExecutable(dest, absCache);
   }
@@ -311,8 +278,7 @@ export async function ensureWorkerd(
   const asset = pin.assets[key]!;
   const url = validateFetchUrl(downloadUrl(pin, asset.artifact));
   console.error(`bookclerk-plugin: fetching ${url}`);
-  // HTTPS (or loopback HTTP) URL validated above.
-  // codeql[js/request-forgery]
+  // HTTPS (or loopback HTTP) URL validated by validateFetchUrl above.
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`GET ${url} returned ${res.status}`);
@@ -329,7 +295,6 @@ export async function ensureWorkerd(
   await pipeline(
     Readable.from(compressed),
     createGunzip(),
-    // codeql[js/path-injection]
     fs.createWriteStream(tmp),
   );
   if (process.platform !== "win32") {
@@ -337,7 +302,6 @@ export async function ensureWorkerd(
   }
   fs.renameSync(tmp, dest);
   const stampPath = assertPathInside(absCache, pin.version_stamp);
-  // codeql[js/path-injection]
   fs.writeFileSync(stampPath, `${pin.release_tag}\n`);
   console.error(
     `bookclerk-plugin: installed ${pin.release_tag} → ${dest}`,

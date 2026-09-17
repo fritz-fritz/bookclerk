@@ -1,4 +1,4 @@
-//! Path rebuild before DRM filesystem sinks (CodeQL barrier only).
+//! Empty/NUL checks before DRM filesystem sinks.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ fn os_contains_nul(s: &OsStr) -> bool {
     }
 }
 
-/// Rebuilds `path` for FS sinks after empty/NUL rejection.
+/// Rejects empty paths and interior NULs; returns `path` unchanged otherwise.
 ///
 /// Download/output paths are caller-selected under the acquire cache, not
 /// untrusted suffixes under a separate root. Do not reject lexical `..` or
@@ -38,5 +38,5 @@ pub(crate) fn validated_fs_path(path: &Path) -> Result<PathBuf> {
             path.display()
         )));
     }
-    Ok(PathBuf::from(path.as_os_str().to_os_string()))
+    Ok(path.to_path_buf())
 }

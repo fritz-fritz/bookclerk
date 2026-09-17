@@ -861,7 +861,7 @@ fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
 
 /// Runs `cargo build [-p …]` for the selected packages; inherits stdio and fails on non-zero exit.
 fn build_packages(root: &Path, release: bool, packages: &[String]) -> Result<()> {
-    let mut cmd = cargo(root)?;
+    let mut cmd = cargo(root);
     cmd.arg("build");
     if release {
         cmd.arg("--release");
@@ -885,24 +885,10 @@ fn build_packages(root: &Path, release: bool, packages: &[String]) -> Result<()>
 }
 
 /// `cargo` command (`$CARGO` or `cargo`) with cwd set to the workspace root.
-fn cargo(root: &Path) -> Result<Command> {
-    let program = match std::env::var_os("CARGO") {
-        Some(raw) => {
-            let path = PathBuf::from(raw);
-            bookclerk_sandbox::require_absolute_or_name(&path).with_context(|| {
-                format!(
-                    "CARGO={} is not an absolute path or a single PATH name",
-                    path.display()
-                )
-            })?
-        }
-        None => PathBuf::from("cargo"),
-    };
-    // `$CARGO` validated absolute/name (or the literal `cargo` when unset).
-    // codeql[rust/command-line-injection]
-    let mut cmd = Command::new(&program);
+fn cargo(root: &Path) -> Command {
+    let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cmd.current_dir(root);
-    Ok(cmd)
+    cmd
 }
 
 /// Cargo profile directory name: `release` or `debug`.

@@ -46,7 +46,6 @@ def load_pin(root: Path | None = None) -> dict[str, Any]:
     pin_path = resolve_under(root or package_root(), "workerd-pin.json")
     import json
 
-    # codeql[py/path-injection]
     return json.loads(pin_path.read_text(encoding="utf-8"))
 
 
@@ -166,34 +165,18 @@ def validate_spawn_executable(
             ``trusted_root``.
     """
     path = Path(bin_path)
-    raw = os.fsencode(path)
-    if not raw or b"\0" in raw:
+    s = os.fspath(path)
+    if not s or "\0" in s:
         raise ValueError("spawn executable path is empty or contains NUL")
     if not path.is_absolute():
         raise ValueError(f"spawn executable must be absolute: {path}")
     if trusted_root is not None:
         return resolve_under(trusted_root, path)
-    s = os.path.abspath(os.fspath(path))
-    if ".." in s:
-        raise ValueError(f"spawn executable path must not contain '..': {s}")
-    return Path(os.fsdecode(os.fsencode(s)))
-
-
-def _spawn_argv0(bin_path: Path | str, trusted_root: Path | str | None = None) -> str:
-    """Return a validated argv0 string with taint broken for CodeQL."""
-    import re
-
-    safe = validate_spawn_executable(bin_path, trusted_root)
-    s = os.fspath(safe)
-    m = re.fullmatch(r"^(?:/[A-Za-z0-9._/-]+|[A-Za-z]:\\[A-Za-z0-9._\\-]+)$", s)
-    if m is None:
-        raise ValueError(f"spawn executable fails absolute allowlist: {s!r}")
-    return m.group(0)
+    return Path(os.path.abspath(s))
 
 
 def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
     stamp = resolve_under(bin_path.parent, pin["version_stamp"])
-    # codeql[py/path-injection]
     if stamp.is_file() and stamp.read_text(encoding="utf-8").strip() == pin["release_tag"]:
         return True
     try:
@@ -246,18 +229,13 @@ def ensure_workerd(
     override = os.environ.get("BOOKCLERK_WORKERD_BIN")
     if override:
         path = Path(override)
-        # codeql[py/path-injection]
         if path.is_file() and _is_current(path, pin):
             return validate_spawn_executable(path)
 
     cache_s = os.path.abspath(os.fspath(cache_dir or default_cache_dir()))
-    if ".." in cache_s:
-        raise ValueError(f"cache dir must not contain '..': {cache_s}")
-    cache = Path(os.fsdecode(os.fsencode(cache_s)))
-    # codeql[py/path-injection]
+    cache = Path(cache_s)
     cache.mkdir(parents=True, exist_ok=True)
     dest = resolve_under(cache, binary_name())
-    # codeql[py/path-injection]
     if dest.is_file() and _is_current(dest, pin):
         return validate_spawn_executable(dest, cache)
 
@@ -288,7 +266,6 @@ def ensure_workerd(
         tmp.chmod(0o755)
     tmp.replace(dest)
     stamp_path = resolve_under(cache, pin["version_stamp"])
-    # codeql[py/path-injection]
     stamp_path.write_text(f"{pin['release_tag']}\n", encoding="utf-8")
     print(f"bookclerk-plugin: installed {pin['release_tag']} → {dest}", flush=True)
     return validate_spawn_executable(dest, cache)

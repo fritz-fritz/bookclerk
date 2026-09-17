@@ -164,12 +164,8 @@ impl ProgressiveFixture {
         let payload_len: usize = self.samples.iter().map(Vec::len).sum();
         let path = crate::fs_path::validated(path)?;
         if let Some(parent) = path.parent() {
-            // Path validated via [`crate::fs_path::validated`]; rebuilt after validation.
-            // codeql[rust/path-injection]
             std::fs::create_dir_all(parent)?;
         }
-        // Path validated via [`crate::fs_path::validated`]; rebuilt after validation.
-        // codeql[rust/path-injection]
         let mut out = std::fs::File::create(&path)?;
         out.write_all(&ftyp)?;
         out.write_all(&moov)?;

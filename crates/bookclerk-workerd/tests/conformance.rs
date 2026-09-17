@@ -46,7 +46,6 @@ fn rebuild_test_path(path: &Path) -> PathBuf {
 
 fn create_dir_test(path: &Path) {
     let path = rebuild_test_path(path);
-    // codeql[rust/path-injection]
     std::fs::create_dir_all(&path).expect("mkdir");
 }
 

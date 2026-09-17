@@ -142,11 +142,9 @@ async function invokeHealth(
 function loadManifest(pluginDir: string): Manifest {
   const root = path.resolve(pluginDir);
   const tomlPath = assertPathInside(root, "plugin.toml");
-  // codeql[js/path-injection]
   if (!fs.existsSync(tomlPath)) {
     throw new Error(`missing plugin.toml in ${root}`);
   }
-  // codeql[js/path-injection]
   const m = parseToml(fs.readFileSync(tomlPath, "utf8")) as Manifest;
   validateManifest(m);
   return m;

@@ -359,8 +359,6 @@ fn wait_child(child: std::process::Child, label: &str) -> Result<std::process::E
 
 /// Test-harness command that re-execs this binary in child mode.
 fn child_cmd(op: &str) -> Command {
-    // Re-exec this cargo test binary (build artifact) in child mode.
-    // codeql[rust/command-line-injection]
     let mut cmd = Command::new(std::env::current_exe().expect("current test exe"));
     cmd.env(CHILD_ENV, op)
         .env("RUST_BACKTRACE", "1")
@@ -383,8 +381,6 @@ fn installed_plugin_dirs(plugins: &Path) -> Result<Vec<String>, String> {
         if name == ".staging" {
             continue;
         }
-        // Tempdir install tree in unit test.
-        // codeql[rust/path-injection]
         if entry.path().join("plugin.toml").is_file() {
             names.push(name.into_owned());
         }

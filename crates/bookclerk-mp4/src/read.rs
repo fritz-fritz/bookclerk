@@ -43,8 +43,6 @@ impl SampleReader {
     /// Returns [`crate::Mp4Error::Io`] when the file cannot be opened.
     pub fn open(path: &Path) -> Result<Self> {
         let path = crate::fs_path::validated(path)?;
-        // Path validated via [`crate::fs_path::validated`]; rebuilt after validation.
-        // codeql[rust/path-injection]
         Ok(Self::new(File::open(path)?))
     }
 

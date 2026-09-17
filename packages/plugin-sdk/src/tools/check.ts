@@ -126,7 +126,6 @@ export function checkMainModuleSource(
 export function checkPlugin(pluginDir: string): string {
   const root = path.resolve(pluginDir);
   const tomlPath = assertPathInside(root, "plugin.toml");
-  // codeql[js/path-injection]
   const text = fs.readFileSync(tomlPath, "utf8");
   const m = parseToml(text) as Manifest;
   validateManifest(m);
@@ -134,7 +133,6 @@ export function checkPlugin(pluginDir: string): string {
     const logo = validateLogo(String(m.logo));
     if (logo.kind === "embedded") {
       const logoPath = assertPathInside(root, logo.value);
-      // codeql[js/path-injection]
       if (!fs.existsSync(logoPath) || !fs.statSync(logoPath).isFile()) {
         throw new Error(`embedded logo missing: ${logoPath}`);
       }
@@ -143,23 +141,19 @@ export function checkPlugin(pluginDir: string): string {
   const runtime = m.runtime ?? "native";
   if (runtime === "workerd") {
     const modulesDir = assertPathInside(root, m.workerd?.modules_dir ?? "modules");
-    // codeql[js/path-injection]
     if (!fs.existsSync(modulesDir) || !fs.statSync(modulesDir).isDirectory()) {
       throw new Error(`workerd modules_dir missing: ${modulesDir}`);
     }
     const main = assertPathInside(modulesDir, m.workerd!.main_module);
-    // codeql[js/path-injection]
     if (!fs.existsSync(main)) {
       throw new Error(`workerd main_module missing: ${main}`);
     }
     const mainLower = m.workerd!.main_module.toLowerCase();
     const entrypoints = m.entrypoints ?? [];
     if (mainLower.endsWith(".js") || mainLower.endsWith(".mjs")) {
-      // codeql[js/path-injection]
       const src = fs.readFileSync(main, "utf8");
       checkMainModuleSource(path.basename(main), src, entrypoints, "js");
     } else if (mainLower.endsWith(".py")) {
-      // codeql[js/path-injection]
       const src = fs.readFileSync(main, "utf8");
       checkMainModuleSource(path.basename(main), src, entrypoints, "python");
     }
@@ -168,10 +162,8 @@ export function checkPlugin(pluginDir: string): string {
     const resolved = path.isAbsolute(cmd)
       ? path.resolve(cmd)
       : assertPathInside(root, cmd);
-    // codeql[js/path-injection]
     if (
       !fs.existsSync(resolved) &&
-      // codeql[js/path-injection]
       fs.existsSync(assertPathInside(root, ".require-binary"))
     ) {
       throw new Error(`native command not found: ${resolved}`);
@@ -199,7 +191,6 @@ export function checkPlugin(pluginDir: string): string {
 export function syncEmbed(pluginDir: string): string {
   const root = path.resolve(pluginDir);
   const tomlPath = assertPathInside(root, "plugin.toml");
-  // codeql[js/path-injection]
   const m = parseToml(fs.readFileSync(tomlPath, "utf8")) as Manifest;
   validateManifest(m);
   if ((m.runtime ?? "native") !== "workerd") {
@@ -213,15 +204,12 @@ export function syncEmbed(pluginDir: string): string {
   }
   const modulesDir = assertPathInside(root, m.workerd?.modules_dir ?? "modules");
   const destDir = assertPathInside(modulesDir, path.join("@bookclerk", "plugin-sdk"));
-  // codeql[js/path-injection]
   fs.mkdirSync(destDir, { recursive: true });
   const dest = assertPathInside(destDir, "workerd.js");
   const src = sdkEmbedSrc();
-  // codeql[js/path-injection]
   if (!fs.existsSync(src)) {
     throw new Error(`SDK embed missing: ${src}`);
   }
-  // codeql[js/path-injection]
   fs.copyFileSync(src, dest);
   return `synced ${dest} (optional vendor; prefer package import + bookclerk-workerd inject)`;
 }

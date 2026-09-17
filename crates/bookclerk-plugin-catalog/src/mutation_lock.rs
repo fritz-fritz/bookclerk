@@ -70,8 +70,6 @@ impl PluginMutationLock {
                 "refusing plugin mutation lock path with '..' in files_dir",
             ));
         }
-        // Operator `$BOOKCLERK_FILES_DIR`; `..` rejected above.
-        // codeql[rust/path-injection]
         std::fs::create_dir_all(files_dir)?;
         let path = Self::path(files_dir);
         if !path.starts_with(files_dir) {
@@ -79,8 +77,6 @@ impl PluginMutationLock {
                 "plugin mutation lock path escaped files_dir",
             ));
         }
-        // Contained under files_dir (literal lock filename + starts_with).
-        // codeql[rust/path-injection]
         let file = OpenOptions::new()
             .create(true)
             .read(true)

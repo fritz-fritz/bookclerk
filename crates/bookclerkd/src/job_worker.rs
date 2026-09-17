@@ -73,12 +73,9 @@ pub async fn sweep_orphan_temp_dirs(
     Ok(swept)
 }
 
-/// Canonical path when the target exists; otherwise a rebuilt PathBuf.
+/// Canonical path when the target exists; otherwise the input path.
 fn normalize_existing_path(path: &Path) -> PathBuf {
-    match std::fs::canonicalize(path) {
-        Ok(canon) => PathBuf::from(canon.as_os_str().to_os_string()),
-        Err(_) => PathBuf::from(path.as_os_str().to_os_string()),
-    }
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Requires `path` to stay under canonical `root`.
@@ -94,7 +91,7 @@ fn require_under_sweep_root(root: &Path, path: &Path) -> Option<PathBuf> {
     if !path_norm.starts_with(&root_norm) {
         return None;
     }
-    Some(PathBuf::from(path_norm.as_os_str().to_os_string()))
+    Some(path_norm)
 }
 
 /// Deletes unregistered child directories under `root`.
@@ -116,8 +113,6 @@ async fn sweep_dir(root: &Path, keep: &HashSet<PathBuf>) -> u32 {
         if !meta.is_dir() {
             continue;
         }
-        // Contained under sweep root via [`require_under_sweep_root`].
-        // codeql[rust/path-injection]
         match tokio::fs::remove_dir_all(&path).await {
             Ok(()) => n += 1,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}

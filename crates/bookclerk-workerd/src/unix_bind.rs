@@ -376,8 +376,6 @@ mod tests {
             let (_stream, _) = listener.accept().expect("accept");
         });
         let output = {
-            // Fixed python argv; socket path travels in the environment (not `-c`).
-            // codeql[rust/command-line-injection]
             Command::new("python3")
                 .args([
                     "-c",

@@ -6,11 +6,6 @@ import os
 from pathlib import Path
 
 
-def _fresh(path_s: str) -> Path:
-    """Rebuild a path after validation so CodeQL does not follow the old node."""
-    return Path(os.fsdecode(os.fsencode(path_s)))
-
-
 def resolve_under(root: Path | str, *parts: str | Path) -> Path:
     """Join ``parts`` under ``root`` and require the result stay inside ``root``.
 
@@ -34,7 +29,7 @@ def resolve_under(root: Path | str, *parts: str | Path) -> Path:
     root_s = os.path.abspath(os.path.normpath(os.fspath(root)))
     if "\0" in root_s:
         raise ValueError(f"root path contains NUL: {root}")
-    root_path = _fresh(root_s)
+    root_path = Path(root_s)
 
     if len(parts) == 1 and os.path.isabs(os.fspath(parts[0])):
         resolved_s = os.path.abspath(os.path.normpath(os.fspath(parts[0])))
@@ -56,7 +51,7 @@ def resolve_under(root: Path | str, *parts: str | Path) -> Path:
         raise ValueError(f"path {resolved_s} escapes root {root_s}")
     if resolved_s != root_s and not resolved_s.startswith(root_s + os.sep):
         raise ValueError(f"path {resolved_s} escapes root {root_s}")
-    return _fresh(resolved_s)
+    return Path(resolved_s)
 
 
 def cli_user_path(raw: str | Path) -> Path:
@@ -84,4 +79,4 @@ def cli_user_path(raw: str | Path) -> Path:
         s = os.path.normpath(os.path.join(os.getcwd(), s))
     else:
         s = os.path.normpath(s)
-    return _fresh(s)
+    return Path(s)

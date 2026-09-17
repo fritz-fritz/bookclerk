@@ -103,15 +103,12 @@ fn dir_size_bytes(root: &Path) -> std::io::Result<u64> {
         if !dir.starts_with(root) {
             continue;
         }
-        // Contained under plugin state root (`starts_with` above).
-        // codeql[rust/path-injection]
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
             if !path.starts_with(root) {
                 continue;
             }
-            // codeql[rust/path-injection]
             let meta = std::fs::symlink_metadata(&path)?;
             let ft = meta.file_type();
             if ft.is_symlink() {
@@ -245,8 +242,6 @@ impl GuestJail {
         // must not become a late, opaque guest IO failure after jail start.
         if is_platform_local_storage(plugin) && config.output.local.enabled {
             let root = resolved_local_output_root(config);
-            // Operator `[output.local].root` under files_dir (or absolute).
-            // codeql[rust/path-injection]
             std::fs::create_dir_all(&root).map_err(|err| {
                 PluginError::message(format!(
                     "could not create local output root {}: {err}",
@@ -687,8 +682,6 @@ fn resolve_launcher(config: &Config, isolation: Isolation) -> std::result::Resul
 
 /// Accepts `path` as the jail launcher when it is a file; otherwise returns a source-labeled error.
 fn check_launcher(path: &Path, source: &str) -> std::result::Result<PathBuf, String> {
-    // Host helper path from env / beside binary; existence check only.
-    // codeql[rust/path-injection]
     if path.is_file() {
         Ok(path.to_path_buf())
     } else {

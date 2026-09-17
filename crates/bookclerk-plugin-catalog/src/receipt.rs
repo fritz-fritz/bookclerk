@@ -156,8 +156,6 @@ impl InstallReceipt {
                 path.display()
             )));
         }
-        // Contained under `plugin_root` (literal `receipt.json` join + starts_with).
-        // codeql[rust/path-injection]
         match fs::read_to_string(&path) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 Err(CatalogError::ReceiptNotFound)
@@ -190,8 +188,6 @@ impl InstallReceipt {
                 plugin_root.display()
             )));
         }
-        // Contained install directory (caller) + `..` rejection.
-        // codeql[rust/path-injection]
         fs::create_dir_all(plugin_root)?;
         let final_path = Self::path_in(plugin_root);
         if !final_path.starts_with(plugin_root) {
@@ -204,14 +200,10 @@ impl InstallReceipt {
             ));
         }
         let text = serde_json::to_string_pretty(self)?;
-        // codeql[rust/path-injection]
         fs::write(&tmp, text)?;
-        // codeql[rust/path-injection]
         if final_path.exists() {
-            // codeql[rust/path-injection]
             let _ = fs::copy(&final_path, plugin_root.join(RECEIPT_BACKUP));
         }
-        // codeql[rust/path-injection]
         fs::rename(&tmp, &final_path)?;
         Ok(())
     }

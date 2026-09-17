@@ -201,7 +201,6 @@ def collect_modules(directory: Path) -> list[Path]:
     out: list[Path] = []
 
     def walk(d: Path) -> None:
-        # codeql[py/path-injection]
         for entry in sorted(d.iterdir(), key=lambda p: p.name):
             if entry.is_symlink():
                 raise ValueError(
@@ -259,7 +258,6 @@ def _resolve_sdk_js(sdk_root: Path) -> Path:
         resolve_under(sdk_root.parents[2], "plugin-sdk", "embed", "bookclerk_plugin.js"),
     ]
     for c in candidates:
-        # codeql[py/path-injection]
         if c.is_file():
             return c
     raise FileNotFoundError(
@@ -309,25 +307,19 @@ def materialize_config(
     network_domains = list(net.get("domains") or [])
 
     bookclerk_dir = resolve_under(plugin_root, ".bookclerk")
-    # codeql[py/path-injection]
     bookclerk_dir.mkdir(parents=True, exist_ok=True)
     for name in ("bridge.js", "egress.js"):
         src = resolve_under(sdk_root, "bridge", name)
-        # codeql[py/path-injection]
         if not src.is_file():
             raise FileNotFoundError(f"missing vendored bridge {src}")
         dest = resolve_under(bookclerk_dir, name)
-        # codeql[py/path-injection]
         dest.write_bytes(src.read_bytes())
-    # codeql[py/path-injection]
     resolve_under(bookclerk_dir, "adapter.js").write_text(ADAPTER_JS, encoding="utf-8")
 
     modules_dir = resolve_under(plugin_root, modules_dir_name)
-    # codeql[py/path-injection]
     if not modules_dir.is_dir():
         raise FileNotFoundError(f"modules dir missing: {modules_dir}")
     main_abs = resolve_under(modules_dir, workerd["main_module"])
-    # codeql[py/path-injection]
     if not main_abs.is_file():
         raise FileNotFoundError(f"main module missing: {main_abs}")
 
@@ -357,7 +349,6 @@ def materialize_config(
     # The adapter isolate always needs the JS SDK embed; the author isolate gets
     # it when it has JS modules.
     sdk_js = _resolve_sdk_js(sdk_root)
-    # codeql[py/path-injection]
     resolve_under(bookclerk_dir, "sdk-workerd.js").write_text(
         sdk_js.read_text(encoding="utf-8"), encoding="utf-8"
     )
@@ -379,14 +370,11 @@ def materialize_config(
 
     if needs_python:
         sdk_py = resolve_under(sdk_root, "workerd.py")
-        # codeql[py/path-injection]
         if not sdk_py.is_file():
             raise FileNotFoundError(f"missing Python workerd SDK at {sdk_py}")
-        # codeql[py/path-injection]
         resolve_under(bookclerk_dir, "sdk-workerd.py").write_text(
             sdk_py.read_text(encoding="utf-8"), encoding="utf-8"
         )
-        # codeql[py/path-injection]
         resolve_under(bookclerk_dir, "sdk-init.py").write_text(SDK_PY_INIT, encoding="utf-8")
         # Modules imported by workerd.py / db_value.py inside the isolate.
         py_siblings = (
@@ -396,10 +384,8 @@ def materialize_config(
         )
         for mod_name, src_name, embed_file in py_siblings:
             src = resolve_under(sdk_root, src_name)
-            # codeql[py/path-injection]
             if not src.is_file():
                 raise FileNotFoundError(f"missing Python workerd SDK module at {src}")
-            # codeql[py/path-injection]
             resolve_under(bookclerk_dir, embed_file).write_text(
                 src.read_text(encoding="utf-8"), encoding="utf-8"
             )
@@ -536,6 +522,5 @@ const bridgeWorker :Workerd.Worker = (
 """
 
     config_path = resolve_under(plugin_root, config_name)
-    # codeql[py/path-injection]
     config_path.write_text(config, encoding="utf-8")
     return config_path, listen_addr

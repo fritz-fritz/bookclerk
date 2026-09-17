@@ -184,7 +184,6 @@ function collectModules(dir: string): string[] {
   const root = path.resolve(dir);
   const out: string[] = [];
   const walk = (d: string) => {
-    // codeql[js/path-injection]
     for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
       const p = assertPathInside(root, path.relative(root, path.join(d, ent.name)));
       if (ent.isDirectory()) {
@@ -274,24 +273,19 @@ export function materializeConfig(
   const networkDomains = manifest.capabilities?.network?.domains ?? [];
 
   const bookclerkDir = assertPathInside(root, ".bookclerk");
-  // codeql[js/path-injection]
   fs.mkdirSync(bookclerkDir, { recursive: true });
   for (const name of ["bridge.js", "egress.js"] as const) {
     const src = assertPathInside(sdkRoot, path.join("bridge", name));
     const dest = assertPathInside(bookclerkDir, name);
-    // codeql[js/path-injection]
     fs.copyFileSync(src, dest);
   }
-  // codeql[js/path-injection]
   fs.writeFileSync(assertPathInside(bookclerkDir, "adapter.js"), ADAPTER_JS);
 
   const modulesDir = assertPathInside(root, modulesDirName);
-  // codeql[js/path-injection]
   if (!fs.existsSync(modulesDir) || !fs.statSync(modulesDir).isDirectory()) {
     throw new Error(`modules dir missing: ${modulesDir}`);
   }
   const mainAbs = assertPathInside(modulesDir, workerd.main_module);
-  // codeql[js/path-injection]
   if (!fs.existsSync(mainAbs) || !fs.statSync(mainAbs).isFile()) {
     throw new Error(`main module missing: ${mainAbs}`);
   }
@@ -327,9 +321,7 @@ export function materializeConfig(
   // The adapter isolate always needs the SDK embed; the author isolate gets it
   // when it has JS modules.
   const sdkJsPath = assertPathInside(sdkRoot, path.join("embed", "bookclerk_plugin.js"));
-  // codeql[js/path-injection]
   const sdkJs = fs.readFileSync(sdkJsPath, "utf8");
-  // codeql[js/path-injection]
   fs.writeFileSync(assertPathInside(bookclerkDir, "sdk-workerd.js"), sdkJs);
   const adapterModules = [
     `(name = "adapter.js", esModule = embed ".bookclerk/adapter.js")`,
@@ -363,7 +355,6 @@ export function materializeConfig(
       ),
       assertPathInside(sdkRoot, "python-workerd.py"),
     ];
-    // codeql[js/path-injection]
     const pySrc = pyCandidates.find((p) => fs.existsSync(p));
     if (!pySrc) {
       throw new Error(
@@ -371,9 +362,7 @@ export function materializeConfig(
           "install bookclerk-plugin-sdk or use the Python smoke CLI for .py plugins",
       );
     }
-    // codeql[js/path-injection]
     fs.copyFileSync(pySrc, assertPathInside(bookclerkDir, "sdk-workerd.py"));
-    // codeql[js/path-injection]
     fs.writeFileSync(assertPathInside(bookclerkDir, "sdk-init.py"), SDK_PY_INIT);
     // Modules imported by workerd.py / db_value.py inside the isolate.
     const pySdkDir = path.dirname(pySrc);
@@ -384,11 +373,9 @@ export function materializeConfig(
     ];
     for (const [modName, srcName, embedFile] of pySiblings) {
       const src = assertPathInside(pySdkDir, srcName);
-      // codeql[js/path-injection]
       if (!fs.existsSync(src)) {
         throw new Error(`Python workerd SDK module ${srcName} not found beside ${pySrc}`);
       }
-      // codeql[js/path-injection]
       fs.copyFileSync(src, assertPathInside(bookclerkDir, embedFile));
       if (!seenNames.has(modName)) {
         moduleEmbeds.push(
@@ -520,7 +507,6 @@ const bridgeWorker :Workerd.Worker = (
 
   const configName = options.configName ?? ".bookclerk-workerd-config.capnp";
   const configPath = assertPathInside(root, configName);
-  // codeql[js/path-injection]
   fs.writeFileSync(configPath, config);
   return { configPath, listenAddr };
 }

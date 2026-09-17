@@ -16,7 +16,6 @@ export {
   assertPathInside,
   validateFetchUrl,
   validateSpawnExecutable,
-  argv0Allowlist,
   type WorkerdPin,
   type WorkerdAsset,
 } from "./ensure.js";

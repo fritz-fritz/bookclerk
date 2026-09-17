@@ -17,15 +17,6 @@ def _runner_roots() -> list[str]:
     return roots
 
 
-def _is_under(path: str, root: str) -> bool:
-    """True when ``path`` is ``root`` or a descendant after ``realpath``.
-
-    Uses equality / ``startswith(root + sep)`` (the CodeQL-documented
-    path-injection pattern) rather than a character allowlist.
-    """
-    return path == root or path.startswith(root + os.sep)
-
-
 def github_actions_file_path(path_s: str, *, label: str) -> str:
     """Resolve a GitHub Actions file-command path under a trusted runner root.
 
@@ -33,10 +24,7 @@ def github_actions_file_path(path_s: str, *, label: str) -> str:
     GitHub documents that workflow ``env:`` cannot overwrite default ``GITHUB_*``
     / ``RUNNER_*`` variables. This helper preserves the path (spaces, Unicode,
     Windows drive letters) and requires canonical containment under
-    ``RUNNER_TEMP`` or ``GITHUB_WORKSPACE`` via ``realpath`` + prefix check.
-
-    Static analysis: return value is a ``path-injection`` barrier in
-    ``.github/codeql/model-packs/bookclerk-python`` when that pack is wired.
+    ``RUNNER_TEMP`` or ``GITHUB_WORKSPACE``.
 
     Args:
         path_s: Raw env value for the file command.
@@ -62,7 +50,7 @@ def github_actions_file_path(path_s: str, *, label: str) -> str:
 
     resolved = os.path.realpath(path_s)
     for root in roots:
-        if _is_under(resolved, root):
+        if resolved == root or resolved.startswith(root + os.sep):
             return resolved
 
     raise SystemExit(
@@ -71,32 +59,5 @@ def github_actions_file_path(path_s: str, *, label: str) -> str:
 
 
 def open_github_actions_append(path_s: str, *, label: str) -> IO[Any]:
-    """Open a runner file-command path for append after semantic containment.
-
-    Inlines ``realpath`` + prefix check under ``RUNNER_TEMP`` /
-    ``GITHUB_WORKSPACE`` before ``open`` (CodeQL's recommended path-injection
-    pattern). Default setup does not load ``model-packs/``; the inline
-    annotation matches the barrier declared there for advanced wiring.
-    """
-    if not path_s or "\0" in path_s:
-        raise SystemExit(f"{label} must be a non-empty path without NUL")
-
-    roots = _runner_roots()
-    if not roots:
-        raise SystemExit(
-            f"{label} is set but neither RUNNER_TEMP nor GITHUB_WORKSPACE is a "
-            "usable path; refusing to open a runner file-command path outside "
-            "Actions"
-        )
-
-    resolved = os.path.realpath(path_s)
-    for root in roots:
-        if not _is_under(resolved, root):
-            continue
-        # Contained under runner-owned root after realpath (spaces/Unicode kept).
-        # codeql[py/path-injection]
-        return open(resolved, "a", encoding="utf-8")
-
-    raise SystemExit(
-        f"refusing {label} outside RUNNER_TEMP/GITHUB_WORKSPACE: {resolved}"
-    )
+    """Open a runner file-command path for append after semantic containment."""
+    return open(github_actions_file_path(path_s, label=label), "a", encoding="utf-8")

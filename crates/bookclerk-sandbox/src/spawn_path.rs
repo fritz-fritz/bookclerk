@@ -1,18 +1,10 @@
 //! Validate program and argv path operands before `Command::new` / `.arg`.
 //!
-//! These helpers enforce the *runtime* properties we need for spawn safety:
-//! absolute paths (or a single PATH lookup name), no interior NULs, existing
-//! regular files after canonicalize where required, and optional containment
-//! under a trusted root or equality with a known helper beside another binary.
-//! Paths stay as [`PathBuf`] / [`OsStr`] end-to-end — character allowlists do
-//! not establish executable provenance and reject valid spaces / Unicode /
-//! non-UTF-8 Unix paths.
-//!
-//! Static analysis: successful `Ok(PathBuf)` returns are modeled as
-//! `command-injection` / `path-injection` barriers in
-//! `.github/codeql/model-packs/bookclerk-rust`. Call sites may still add
-//! `// codeql[rust/command-line-injection]` when a given CodeQL build does not
-//! load that model pack.
+//! These helpers enforce runtime spawn safety properties where a real product
+//! boundary exists: no interior NULs, absolute paths (or a single PATH lookup
+//! name) when required, existing regular files after canonicalize, containment
+//! under a trusted root, or equality with a known helper beside another binary.
+//! Paths stay as [`PathBuf`] / [`OsStr`] end-to-end.
 
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -84,16 +76,15 @@ fn is_single_path_name(path: &Path) -> bool {
     )
 }
 
-/// Rebuild after validation so later sinks do not share the pre-check `PathBuf`.
-fn path_after_validation(path: &Path) -> PathBuf {
-    PathBuf::from(path.as_os_str().to_os_string())
-}
-
 /// Absolute path with no NUL, or a single PATH lookup name (`cargo`, `python3`).
 ///
 /// Does not require the path to exist (useful for generated argv file operands).
 /// Lexical `..` in an absolute spelling is allowed; callers that need a real
 /// file should use [`require_spawn_executable`] (canonicalize).
+///
+/// Prefer not using this for operator-selected tools like `$CARGO` — those may
+/// legitimately be relative (`./custom-cargo`). Use it when the product
+/// contract is “absolute or PATH name” for a helper beside the host.
 ///
 /// # Errors
 ///
@@ -102,7 +93,7 @@ fn path_after_validation(path: &Path) -> PathBuf {
 pub fn require_absolute_or_name(path: &Path) -> Result<PathBuf, SpawnPathError> {
     reject_empty_or_nul(path)?;
     if path.is_absolute() || is_single_path_name(path) {
-        return Ok(path_after_validation(path));
+        return Ok(path.to_path_buf());
     }
     Err(SpawnPathError::NotAbsolute(path.to_path_buf()))
 }
@@ -115,7 +106,7 @@ pub fn require_absolute_or_name(path: &Path) -> Result<PathBuf, SpawnPathError> 
 pub fn require_absolute_spawn_path(path: &Path) -> Result<PathBuf, SpawnPathError> {
     reject_empty_or_nul(path)?;
     if path.is_absolute() {
-        return Ok(path_after_validation(path));
+        return Ok(path.to_path_buf());
     }
     Err(SpawnPathError::NotAbsolute(path.to_path_buf()))
 }
@@ -138,11 +129,10 @@ pub fn require_spawn_executable(path: &Path) -> Result<PathBuf, SpawnPathError> 
                 path: path.clone(),
                 source,
             })?;
-        // codeql[rust/path-injection]
         if !canon.is_file() {
             return Err(SpawnPathError::NotFile(canon));
         }
-        return Ok(path_after_validation(&canon));
+        return Ok(canon);
     }
     Ok(path)
 }
@@ -190,16 +180,15 @@ pub fn require_under_root(path: &Path, root: &Path) -> Result<PathBuf, SpawnPath
             root: root_canon,
         });
     }
-    Ok(path_after_validation(&path_canon))
+    Ok(path_canon)
 }
 
 /// Accepts `path` when it equals `beside`'s sibling named `helper_name`, or is an
 /// absolute existing file (env override).
 ///
-/// Equality with the beside-host helper is the preferred product path; absolute
-/// env overrides still require [`require_spawn_executable`]. Operator-selectable
-/// absolute overrides are an explicit trust decision (document/model that at the
-/// call site) — filename characters alone never make an arbitrary executable safe.
+/// Equality with the beside-host helper is the preferred product path. Absolute
+/// env overrides still require [`require_spawn_executable`]; that is an
+/// explicit operator trust decision, not proof the binary is safe.
 ///
 /// # Errors
 ///
@@ -221,12 +210,11 @@ pub fn require_helper_beside_or_absolute(
                 std::fs::canonicalize(&expected),
             ) {
                 if left == right {
-                    return Ok(path_after_validation(&left));
+                    return Ok(left);
                 }
             }
         }
     }
-    // Absolute (or PATH name) executable that already passed NUL / file checks.
     Ok(path)
 }
 

@@ -96,17 +96,29 @@ impl BackupRepository {
     /// Returns when the directories cannot be created.
     pub fn open_root(root: &Path) -> Result<Self> {
         // Trusted configured base (may include lexical `..` from `files_dir`).
-        // Create children under a canonical root so CodeQL sees normalize-path
-        // then `starts_with` before FS sinks.
-        let root_s = root.to_string_lossy().into_owned();
-        if root_s.contains('\0') {
-            return Err(LibraryError::Schema(format!(
-                "refusing backup repository root with NUL: {}",
-                root.display()
-            )));
+        // Create children under a canonical root so containment uses realpath
+        // identity before filesystem access.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            if root.as_os_str().as_bytes().contains(&0) {
+                return Err(LibraryError::Schema(format!(
+                    "refusing backup repository root with NUL: {}",
+                    root.display()
+                )));
+            }
         }
-        let root_buf = PathBuf::from(root_s);
-        // codeql[rust/path-injection]
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            if root.as_os_str().encode_wide().any(|c| c == 0) {
+                return Err(LibraryError::Schema(format!(
+                    "refusing backup repository root with NUL: {}",
+                    root.display()
+                )));
+            }
+        }
+        let root_buf = root.to_path_buf();
         fs::create_dir_all(&root_buf)?;
         let root = fs::canonicalize(&root_buf).unwrap_or(root_buf);
         let manifests = root.join("manifests");
@@ -116,10 +128,7 @@ impl BackupRepository {
                 "backup manifests/objects path escaped repository root".into(),
             ));
         }
-        // Contained under canonical repository root (literal joins + starts_with).
-        // codeql[rust/path-injection]
         fs::create_dir_all(&manifests)?;
-        // codeql[rust/path-injection]
         fs::create_dir_all(&objects)?;
         Ok(Self {
             root,
@@ -209,8 +218,7 @@ impl BackupRepository {
                 }
             }
         };
-        // Rebuild after containment so FS sinks do not see the pre-check PathBuf.
-        Ok(PathBuf::from(path.as_os_str().to_os_string()))
+        Ok(path.to_path_buf())
     }
 
     /// Repository root (`…/backups`).
@@ -238,8 +246,6 @@ impl BackupRepository {
         loop {
             if inner.depth == 0 {
                 let lock_path = self.under_root(&self.root.join(".lock"))?;
-                // Contained under repository root via [`Self::under_root`].
-                // codeql[rust/path-injection]
                 let file = OpenOptions::new()
                     .create(true)
                     .read(true)
@@ -283,38 +289,31 @@ impl BackupRepository {
         let uncompressed = encode_canonical_object(object)?;
         let digest = sha256_hex(&uncompressed);
         let path = self.object_path(&digest)?;
-        // Contained under `objects/` via [`Self::object_path`].
-        // codeql[rust/path-injection]
         if path.is_file() {
             match self.get_object(&digest) {
                 Ok(_) => return Ok(digest),
                 Err(_) => {
-                    // codeql[rust/path-injection]
                     fs::remove_file(&path)?;
                 }
             }
         }
         if let Some(parent) = path.parent() {
             let parent = self.under_root(parent)?;
-            // codeql[rust/path-injection]
             fs::create_dir_all(&parent)?;
             fsync_dir(&parent);
         }
         let stored = wrap_stored_object(&uncompressed)?;
         let tmp = self.under_root(&unique_tmp_path(&path))?;
         {
-            // codeql[rust/path-injection]
             let mut f = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
             f.write_all(&stored)?;
             f.sync_all()?;
         }
         install_no_clobber(&tmp, &path)?;
-        // codeql[rust/path-injection]
         if path.is_file() {
             match self.get_object(&digest) {
                 Ok(_) => Ok(digest),
                 Err(err) => {
-                    // codeql[rust/path-injection]
                     let _ = fs::remove_file(&path);
                     Err(err)
                 }
@@ -333,14 +332,11 @@ impl BackupRepository {
     /// Returns when the object is missing, corrupt, or the digest mismatches.
     pub fn get_object(&self, digest: &str) -> Result<CanonicalObject> {
         let path = self.object_path(digest)?;
-        // Contained under `objects/` via [`Self::object_path`].
-        // codeql[rust/path-injection]
         if !path.is_file() {
             return Err(LibraryError::Schema(format!(
                 "backup object `{digest}` is missing"
             )));
         }
-        // codeql[rust/path-injection]
         let stored = fs::read(&path)?;
         let uncompressed = unwrap_stored_object(&stored)?;
         let actual = sha256_hex(&uncompressed);
@@ -380,8 +376,6 @@ impl BackupRepository {
         let json = serde_json::to_vec_pretty(manifest)
             .map_err(|err| LibraryError::Other(anyhow::anyhow!("backup manifest json: {err}")))?;
         let dir = self.under_root(&self.root.join("manifests"))?;
-        // Contained under repository root via [`Self::under_root`].
-        // codeql[rust/path-injection]
         fs::create_dir_all(&dir)?;
         if !manifest_id_ok(&manifest.id) {
             return Err(LibraryError::Schema(format!(
@@ -397,10 +391,8 @@ impl BackupRepository {
         let digest = sha256_hex(&json);
         let hash_tmp = self.under_root(&unique_tmp_path(&hash_path))?;
         write_tmp_fsync(&hash_tmp, format!("{digest}\n").as_bytes())?;
-        // codeql[rust/path-injection]
         fs::rename(&hash_tmp, &hash_path)?;
         fsync_dir(&dir);
-        // codeql[rust/path-injection]
         fs::rename(&staging, &final_path)?;
         fsync_dir(&dir);
         Ok(final_path)
@@ -421,16 +413,12 @@ impl BackupRepository {
         let path = self.under_root(&self.root.join("manifests").join(format!("{id}.json")))?;
         let hash_path =
             self.under_root(&self.root.join("manifests").join(format!("{id}.sha256")))?;
-        // Contained under `manifests/` via validated id + [`Self::under_root`].
-        // codeql[rust/path-injection]
         if !path.is_file() {
             return Err(LibraryError::Schema(format!(
                 "backup recovery point `{id}` is missing"
             )));
         }
-        // codeql[rust/path-injection]
         let json = fs::read(&path)?;
-        // codeql[rust/path-injection]
         let expected = fs::read_to_string(&hash_path)
             .map_err(|_| {
                 LibraryError::Schema(format!(
@@ -464,8 +452,6 @@ impl BackupRepository {
         let Ok(dir) = self.under_root(&self.root.join("manifests")) else {
             return Vec::new();
         };
-        // Contained under repository root via [`Self::under_root`].
-        // codeql[rust/path-injection]
         let Ok(entries) = fs::read_dir(&dir) else {
             return Vec::new();
         };
@@ -498,12 +484,9 @@ impl BackupRepository {
     /// file is present.
     pub fn list_manifests_strict(&self) -> Result<Vec<BackupManifest>> {
         let dir = self.under_root(&self.root.join("manifests"))?;
-        // Contained under repository root via [`Self::under_root`].
-        // codeql[rust/path-injection]
         if !dir.exists() {
             return Ok(Vec::new());
         }
-        // codeql[rust/path-injection]
         let entries = fs::read_dir(&dir)?;
         let mut out = Vec::new();
         for ent in entries {
@@ -546,8 +529,6 @@ impl BackupRepository {
         let hash = self.under_root(&self.root.join("manifests").join(format!("{id}.sha256")))?;
         let mut removed = false;
         for path in [json, hash] {
-            // Contained under `manifests/` via validated id + [`Self::under_root`].
-            // codeql[rust/path-injection]
             match fs::remove_file(&path) {
                 Ok(()) => removed = true,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -575,8 +556,6 @@ impl BackupRepository {
         }
         let objects = self.under_root(&self.root.join("objects"))?;
         let mut deleted = 0usize;
-        // Contained under repository root via [`Self::under_root`].
-        // codeql[rust/path-injection]
         let Ok(prefixes) = fs::read_dir(&objects) else {
             return Ok(0);
         };
@@ -588,7 +567,6 @@ impl BackupRepository {
             if !path.is_dir() {
                 continue;
             }
-            // codeql[rust/path-injection]
             let Ok(files) = fs::read_dir(&path) else {
                 continue;
             };
@@ -601,7 +579,6 @@ impl BackupRepository {
                     continue;
                 };
                 if name.starts_with('.') {
-                    // codeql[rust/path-injection]
                     let _ = fs::remove_file(&file_path);
                     continue;
                 }
@@ -612,7 +589,6 @@ impl BackupRepository {
                 if live.contains(&digest) {
                     continue;
                 }
-                // codeql[rust/path-injection]
                 fs::remove_file(&file_path)?;
                 deleted += 1;
             }
@@ -659,8 +635,6 @@ fn write_tmp_fsync(path: &Path, bytes: &[u8]) -> Result<()> {
             path.display()
         )));
     }
-    // Contained under repository root by callers ([`BackupRepository::under_root`]).
-    // codeql[rust/path-injection]
     let mut f = OpenOptions::new().write(true).create_new(true).open(path)?;
     f.write_all(bytes)?;
     f.sync_all()?;
@@ -669,11 +643,8 @@ fn write_tmp_fsync(path: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Installs `tmp` onto `final_path` without clobbering a winner; fsyncs the parent.
 fn install_no_clobber(tmp: &Path, final_path: &Path) -> Result<()> {
-    // Contained under repository root by callers.
-    // codeql[rust/path-injection]
     match fs::hard_link(tmp, final_path) {
         Ok(()) => {
-            // codeql[rust/path-injection]
             let _ = fs::remove_file(tmp);
             if let Some(parent) = final_path.parent() {
                 fsync_dir(parent);
@@ -681,12 +652,10 @@ fn install_no_clobber(tmp: &Path, final_path: &Path) -> Result<()> {
             Ok(())
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            // codeql[rust/path-injection]
             let _ = fs::remove_file(tmp);
             Ok(())
         }
         Err(err) => {
-            // codeql[rust/path-injection]
             let _ = fs::remove_file(tmp);
             Err(err.into())
         }
@@ -695,8 +664,6 @@ fn install_no_clobber(tmp: &Path, final_path: &Path) -> Result<()> {
 
 /// Best-effort directory fsync so a rename/hard-link is durable.
 fn fsync_dir(dir: &Path) {
-    // Contained under repository root by callers.
-    // codeql[rust/path-injection]
     if let Ok(file) = File::open(dir) {
         let _ = file.sync_all();
     }

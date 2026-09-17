@@ -843,7 +843,6 @@ async fn gc_fails_closed_when_published_manifest_is_unreadable() {
             assert!(!s.contains("..") && !s.contains('\0'));
             std::path::PathBuf::from(s)
         };
-        // codeql[rust/path-injection]
         assert!(
             path.is_file(),
             "GC must retain object {digest} when a published manifest is unreadable"

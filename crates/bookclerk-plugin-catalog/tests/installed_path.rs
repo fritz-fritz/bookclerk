@@ -23,7 +23,6 @@ fn rebuild_test_path(path: &Path) -> PathBuf {
 fn write_mini_archive(dir: &std::path::Path) -> (std::path::PathBuf, String) {
     let archive = rebuild_test_path(&dir.join("echo.tar.gz"));
     {
-        // codeql[rust/path-injection]
         let file = fs::File::create(&archive).unwrap();
         let enc = GzEncoder::new(file, Compression::default());
         let mut tar = Builder::new(enc);

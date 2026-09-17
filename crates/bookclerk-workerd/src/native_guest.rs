@@ -95,8 +95,6 @@ fn wrap_native_guest(
                 enforcement_required,
             );
             let json = serde_json::to_string(&spec).context("serialize nested native jail spec")?;
-            // Jail / backend paths validated absolute (helper-beside or env override).
-            // codeql[rust/command-line-injection]
             let mut wrapped = Command::new(&jail);
             wrapped.env(SPEC_ENV, json);
             wrapped.arg(&backend);
@@ -109,13 +107,9 @@ fn wrap_native_guest(
             tracing::warn!(
                 "bookclerk-jail not found beside bookclerk-workerd; native guest will not get nested AF_INET denial"
             );
-            // Backend path validated by require_absolute_spawn_path above.
-            // codeql[rust/command-line-injection]
             Command::new(&backend)
         }
     } else {
-        // Backend path validated by require_absolute_spawn_path above.
-        // codeql[rust/command-line-injection]
         Command::new(&backend)
     };
     cmd.stdin(Stdio::piped())

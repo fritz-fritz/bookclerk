@@ -398,8 +398,6 @@ pub async fn load_external_database(config: &Config) -> PluginResult<DatabaseReg
             );
             if let Ok(cwd) = std::env::current_dir() {
                 let alt = rebuild_hint_path(&cwd.join("BookclerkFiles").join("plugins").join(spec));
-                // Contained under cwd via literal joins + rebuild; path rebuilt after validation.
-                // codeql[rust/path-injection]
                 if alt.is_dir() && alt != expected {
                     hint.push_str(&format!(
                         "; found guest at {} — export {}={}",

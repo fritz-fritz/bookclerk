@@ -300,17 +300,12 @@ impl Installer {
         }
 
         let staging_parent = opts.plugins_root.join(".staging");
-        // Contained under `plugins_root` (literal `.staging` join).
-        // codeql[rust/path-injection]
         fs::create_dir_all(&staging_parent)?;
         let staging = staging_parent.join(format!("{}.{}", runtime.id, std::process::id()));
         let staging = require_under(&staging_parent, &staging)?;
         if staging.exists() {
-            // Contained by [`require_under`] under `.staging`.
-            // codeql[rust/path-injection]
             fs::remove_dir_all(&staging)?;
         }
-        // codeql[rust/path-injection]
         fs::create_dir_all(&staging)?;
 
         let archive_path = staging.join("download.archive");
@@ -326,7 +321,6 @@ impl Installer {
         }
 
         let extract_root = staging.join("root");
-        // codeql[rust/path-injection]
         fs::create_dir_all(&extract_root)?;
         let format = if artifact.url.ends_with(".zip") || target.starts_with("windows-") {
             ArchiveFormat::Zip
@@ -364,8 +358,6 @@ impl Installer {
         }
 
         // Validate plugin.toml binds id/kind/sandbox/command to the package manifest.
-        // Contained under extract/staging via [`safe_join`] / staging root.
-        // codeql[rust/path-injection]
         let toml_text = fs::read_to_string(&plugin_toml)?;
         validate_plugin_toml(
             &toml_text,
@@ -386,11 +378,8 @@ impl Installer {
             let bak = staging_parent.join(format!("{}.backup", incoming_key.fs_id()));
             let bak = require_under(&staging_parent, &bak)?;
             if bak.exists() {
-                // codeql[rust/path-injection]
                 fs::remove_dir_all(&bak)?;
             }
-            // Both sides under `plugins_root` (`dest` via [`safe_join`], bak via require_under).
-            // codeql[rust/path-injection]
             fs::rename(&dest, &bak)?;
             Some(bak)
         } else {
@@ -455,8 +444,6 @@ impl Installer {
 
         // Drop staging (download/extract). Leave `previous` backup for
         // commit/rollback after the caller's health check.
-        // Contained under `.staging` via [`require_under`].
-        // codeql[rust/path-injection]
         let _ = fs::remove_dir_all(&staging);
 
         Ok(InstallOutcome {
@@ -1029,8 +1016,6 @@ fn restore_tree_for_rollback(outcome: &InstallOutcome) -> Result<()> {
             restore_update_tree_from_backup(&dest, &bak)
         }
         Some(_) => {
-            // Contained by [`require_under`] under plugins root.
-            // codeql[rust/path-injection]
             if dest.exists() {
                 Ok(())
             } else {
@@ -1042,7 +1027,6 @@ fn restore_tree_for_rollback(outcome: &InstallOutcome) -> Result<()> {
             }
         }
         None => {
-            // codeql[rust/path-injection]
             if dest.exists() {
                 remove_dir_retry(&dest)?;
             }
@@ -1054,7 +1038,6 @@ fn restore_tree_for_rollback(outcome: &InstallOutcome) -> Result<()> {
 /// Moves the failed new tree aside and puts the backup back without deleting
 /// `dest` unless a usable backup is in place.
 fn restore_update_tree_from_backup(dest: &Path, backup: &Path) -> Result<()> {
-    // codeql[rust/path-injection]
     if dest.exists() {
         let staging_parent = dest
             .parent()
@@ -1065,7 +1048,6 @@ fn restore_update_tree_from_backup(dest: &Path, backup: &Path) -> Result<()> {
                     dest.display()
                 ))
             })?;
-        // codeql[rust/path-injection]
         fs::create_dir_all(&staging_parent)?;
         let dest_name = dest
             .file_name()
@@ -1074,8 +1056,6 @@ fn restore_update_tree_from_backup(dest: &Path, backup: &Path) -> Result<()> {
         let aside = unique_hold_path(&staging_parent, &format!("{dest_name}.rollback-new"));
         let aside = require_under(&staging_parent, &aside)?;
         rename_retry(dest, &aside)?;
-        // Contained: dest under plugins root, backup under staging/plugins.
-        // codeql[rust/path-injection]
         match fs::rename(backup, dest) {
             Ok(()) => {
                 let _ = remove_dir_retry(&aside);
@@ -1095,7 +1075,6 @@ fn restore_update_tree_from_backup(dest: &Path, backup: &Path) -> Result<()> {
             }
         }
     } else {
-        // codeql[rust/path-injection]
         fs::rename(backup, dest).map_err(|err| {
             CatalogError::message(format!(
                 "failed to restore previous plugin tree from {} to {}: {err}",
@@ -1246,14 +1225,11 @@ fn require_key_derived_path(dest: &Path, key: &PluginKey) -> Result<()> {
 /// Unused name under `parent` for a hold/aside directory.
 fn unique_hold_path(parent: &Path, base: &str) -> PathBuf {
     let candidate = parent.join(base);
-    // Parent is host staging/hold; leaf is a fixed base name.
-    // codeql[rust/path-injection]
     if !candidate.exists() {
         return candidate;
     }
     for n in 1..128 {
         let candidate = parent.join(format!("{base}-{n}"));
-        // codeql[rust/path-injection]
         if !candidate.exists() {
             return candidate;
         }
@@ -1263,9 +1239,7 @@ fn unique_hold_path(parent: &Path, base: &str) -> PathBuf {
 
 /// Moves a held install tree back to `dest` after a failed remove step.
 fn restore_held_tree(hold: &Path, dest: &Path) -> Result<()> {
-    // codeql[rust/path-injection]
     if dest.exists() {
-        // codeql[rust/path-injection]
         if hold.exists() {
             return Err(CatalogError::message(format!(
                 "cannot restore {} because {} already exists",
@@ -1275,7 +1249,6 @@ fn restore_held_tree(hold: &Path, dest: &Path) -> Result<()> {
         }
         return Ok(());
     }
-    // codeql[rust/path-injection]
     if !hold.exists() {
         return Err(CatalogError::message(format!(
             "held install tree {} is missing; cannot restore {}",
@@ -1439,7 +1412,6 @@ fn download_to(url: &str, dest: &Path, offline: bool) -> Result<()> {
 
 /// Recursively copies `src` into `dest`, creating missing parent directories.
 fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<()> {
-    // codeql[rust/path-injection]
     fs::create_dir_all(dest)?;
     for entry in walkdir::WalkDir::new(src) {
         let entry = entry?;
@@ -1458,15 +1430,11 @@ fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<()> {
             }
         };
         if entry.file_type().is_dir() {
-            // Contained by [`safe_join`].
-            // codeql[rust/path-injection]
             fs::create_dir_all(&out)?;
         } else if entry.file_type().is_file() {
             if let Some(parent) = out.parent() {
-                // codeql[rust/path-injection]
                 fs::create_dir_all(parent)?;
             }
-            // codeql[rust/path-injection]
             fs::copy(path, &out)?;
         }
     }
@@ -1486,8 +1454,6 @@ fn remove_dir_retry(path: &Path) -> Result<()> {
     }
     let mut last = None;
     for _ in 0..5 {
-        // Contained by caller (`safe_join` / `require_under`) + `..` rejection.
-        // codeql[rust/path-injection]
         match fs::remove_dir_all(path) {
             Ok(()) => return Ok(()),
             Err(e) => {
@@ -1517,8 +1483,6 @@ fn rename_retry(from: &Path, to: &Path) -> Result<()> {
     }
     let mut last = None;
     for _ in 0..5 {
-        // Contained by caller + `..` rejection above.
-        // codeql[rust/path-injection]
         match fs::rename(from, to) {
             Ok(()) => return Ok(()),
             Err(e) => {
@@ -1548,8 +1512,6 @@ mod tests {
     fn make_named_archive(dir: &Path, filename: &str, id: &str) -> (PathBuf, String) {
         let archive = dir.join(filename);
         {
-            // Tempdir / install-tree path in unit test.
-            // codeql[rust/path-injection]
             let file = fs::File::create(&archive).unwrap();
             let enc = GzEncoder::new(file, Compression::default());
             let mut tar = Builder::new(enc);
@@ -1634,8 +1596,6 @@ mod tests {
         if !path.is_dir() {
             return Vec::new();
         }
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let mut names: Vec<String> = fs::read_dir(path)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -1645,8 +1605,6 @@ mod tests {
     }
 
     fn corrupt_receipt(dest: &Path) {
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::write(dest.join("receipt.json"), b"{not-valid-receipt").unwrap();
     }
 
@@ -1778,8 +1736,6 @@ mod tests {
         let plugins = tmp.path().join("plugins");
         let (archive_a, digest_a) = make_echo_archive(tmp.path());
         let archive_b = tmp.path().join("echo-b.tar.gz");
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::copy(&archive_a, &archive_b).unwrap();
         let target = host_bookclerk_target();
         let manifest_for = |digest: String, url: String| BookclerkPackageManifest {
@@ -1999,8 +1955,6 @@ mod tests {
         };
         let first = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         Installer::commit(&first).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::write(first.plugin_root.join("marker.txt"), b"keep-me").unwrap();
         let files_dir = tmp.path();
         let key = first.receipt.plugin_key().unwrap();
@@ -2059,14 +2013,8 @@ mod tests {
         };
         let first = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         Installer::commit(&first).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::write(first.plugin_root.join("marker.txt"), b"untouched").unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let toml_before = fs::read(first.plugin_root.join("plugin.toml")).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let mut tree_before: Vec<_> = fs::read_dir(&plugins)
             .unwrap()
             .map(|e| e.unwrap().file_name())
@@ -2075,8 +2023,6 @@ mod tests {
 
         let ledger_path = InstallLedger::path(tmp.path());
         let garbage = b"{not-valid-install-ledger";
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::write(&ledger_path, garbage).unwrap();
 
         let err = Installer::install_from_manifest(&manifest, &coord, &opts)
@@ -2092,27 +2038,19 @@ mod tests {
         );
 
         assert_eq!(
-            // Tempdir / install-tree path in unit test.
-            // codeql[rust/path-injection]
             fs::read(&ledger_path).unwrap(),
             garbage,
             "malformed ledger must not be rewritten"
         );
         assert_eq!(
-            // Tempdir / install-tree path in unit test.
-            // codeql[rust/path-injection]
             fs::read(first.plugin_root.join("plugin.toml")).unwrap(),
             toml_before
         );
         assert_eq!(
-            // Tempdir / install-tree path in unit test.
-            // codeql[rust/path-injection]
             fs::read(first.plugin_root.join("marker.txt")).unwrap(),
             b"untouched"
         );
         assert!(first.plugin_root.is_dir());
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let mut tree_after: Vec<_> = fs::read_dir(&plugins)
             .unwrap()
             .map(|e| e.unwrap().file_name())
@@ -2120,8 +2058,6 @@ mod tests {
         tree_after.sort();
         assert_eq!(tree_before, tree_after);
         if plugins.join(".staging").is_dir() {
-            // Tempdir / install-tree path in unit test.
-            // codeql[rust/path-injection]
             let leftover: Vec<_> = fs::read_dir(plugins.join(".staging"))
                 .unwrap()
                 .map(|e| e.unwrap().file_name())
@@ -2177,11 +2113,7 @@ mod tests {
         };
         let first = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         Installer::commit(&first).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::create_dir_all(first.plugin_root.join("data")).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::write(first.plugin_root.join("data/old-state"), b"stale").unwrap();
         let second = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         Installer::commit(&second).unwrap();
@@ -2210,15 +2142,9 @@ mod tests {
         .unwrap();
         Installer::commit(&first).unwrap();
 
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let toml_before = fs::read(first.plugin_root.join("plugin.toml")).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let receipt_before = fs::read(first.plugin_root.join("receipt.json")).unwrap();
         let ledger_path = InstallLedger::path(tmp.path());
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let ledger_before = fs::read(&ledger_path).unwrap();
         let tree_before = dir_names(&plugins);
         let staging_before = dir_names(&plugins.join(".staging"));
@@ -2251,14 +2177,10 @@ mod tests {
         );
 
         assert_eq!(
-            // Tempdir / install-tree path in unit test.
-            // codeql[rust/path-injection]
             fs::read(first.plugin_root.join("plugin.toml")).unwrap(),
             toml_before
         );
         assert_eq!(
-            // Tempdir / install-tree path in unit test.
-            // codeql[rust/path-injection]
             fs::read(first.plugin_root.join("receipt.json")).unwrap(),
             receipt_before
         );
@@ -2379,11 +2301,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (plugins, dest, key, _, _, _) = installed_echo(tmp.path());
         let state = tmp.path().join("plugin-state").join(key.fs_id());
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::create_dir_all(state.join("data")).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::write(state.join("data/marker"), b"keep-me-not").unwrap();
         corrupt_receipt(&dest);
 
@@ -2401,8 +2319,6 @@ mod tests {
         let mut ledger = InstallLedger::load(tmp.path()).unwrap();
         ledger.remove(&key);
         ledger.store(tmp.path()).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
 
         let err = Installer::remove(&plugins, "echo", false)
@@ -2432,8 +2348,6 @@ mod tests {
                 .to_string();
         ledger.artifacts.push(extra);
         ledger.store(tmp.path()).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
 
         let err = Installer::remove(&plugins, "echo", false)
@@ -2459,11 +2373,7 @@ mod tests {
         let (plugins, dest, _, _, _, _) = installed_echo(tmp.path());
         let ledger_path = InstallLedger::path(tmp.path());
         let garbage = b"{not-valid-install-ledger";
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::write(&ledger_path, garbage).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
 
         let err = Installer::remove(&plugins, "echo", false)
@@ -2486,17 +2396,9 @@ mod tests {
     fn remove_ledger_write_failure_restores_held_tree() {
         let tmp = tempfile::tempdir().unwrap();
         let (plugins, dest, key, _, _, _) = installed_echo(tmp.path());
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let receipt_before = fs::read(dest.join("receipt.json")).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let ledger_before = fs::read(InstallLedger::path(tmp.path())).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::create_dir_all(tmp.path().join("install-ledger.json.tmp")).unwrap();
 
         let err = Installer::remove(&plugins, "echo", false)
@@ -2515,8 +2417,6 @@ mod tests {
         assert_eq!(fs::read(dest.join("plugin.toml")).unwrap(), toml_before);
         assert_eq!(fs::read(dest.join("receipt.json")).unwrap(), receipt_before);
         assert_eq!(
-            // Tempdir / install-tree path in unit test.
-            // codeql[rust/path-injection]
             fs::read(InstallLedger::path(tmp.path())).unwrap(),
             ledger_before
         );
@@ -2536,8 +2436,6 @@ mod tests {
         let mut value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         value["plugin_key"] = serde_json::Value::String(key.canonical().to_string());
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
     }
 
@@ -2570,11 +2468,7 @@ mod tests {
 
     /// Writes a marker file under `plugin-state/<fs-id>/data`.
     fn write_state_marker(state: &Path, marker: &str) {
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::create_dir_all(state.join("data")).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::write(state.join("data/marker"), marker.as_bytes()).unwrap();
     }
 
@@ -2587,14 +2481,8 @@ mod tests {
         write_state_marker(&state_b, "state-b");
         rewrite_receipt_plugin_key(&dest_a, &key_b);
         let plugins = tmp.path().join("plugins");
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let toml_a = fs::read(dest_a.join("plugin.toml")).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let toml_b = fs::read(dest_b.join("plugin.toml")).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let ledger_before = fs::read(InstallLedger::path(tmp.path())).unwrap();
 
         let err = Installer::remove(&plugins, "plugina", true)
@@ -2610,8 +2498,6 @@ mod tests {
         assert_eq!(fs::read(dest_a.join("plugin.toml")).unwrap(), toml_a);
         assert_eq!(fs::read(dest_b.join("plugin.toml")).unwrap(), toml_b);
         assert_eq!(
-            // Tempdir / install-tree path in unit test.
-            // codeql[rust/path-injection]
             fs::read(InstallLedger::path(tmp.path())).unwrap(),
             ledger_before
         );
@@ -2650,8 +2536,6 @@ mod tests {
         let (dest, _, key) = installed_named(tmp.path(), "echo.tar.gz", "echo");
         let plugins = tmp.path().join("plugins");
         let renamed = plugins.join("pk-ffffffffffffffffffffffffffffffff");
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::rename(&dest, &renamed).unwrap();
         let err = Installer::remove(&plugins, "echo", false)
             .unwrap_err()
@@ -2692,11 +2576,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (dest, state, key) = installed_named(tmp.path(), "echo.tar.gz", "echo");
         write_state_marker(&state, "keep-state");
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::create_dir_all(tmp.path().join("install-ledger.json.tmp")).unwrap();
         let err = Installer::remove(&tmp.path().join("plugins"), "echo", true)
             .unwrap_err()
@@ -2719,8 +2599,6 @@ mod tests {
                 "restore must not leave a state hold: {leftover:?}"
             );
         }
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::remove_dir_all(tmp.path().join("install-ledger.json.tmp")).unwrap();
         Installer::remove(&tmp.path().join("plugins"), "echo", true).unwrap();
         assert!(!dest.exists());
@@ -2732,15 +2610,11 @@ mod tests {
     fn rollback_retries_ledger_without_deleting_restored_tree() {
         let tmp = tempfile::tempdir().unwrap();
         let (plugins, dest, key, manifest, coord, mut opts) = installed_echo(tmp.path());
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::write(dest.join("old-marker"), b"v1").unwrap();
         opts.replace = true;
         let second = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         assert!(second.previous.as_ref().is_some_and(|p| p.exists()));
         assert!(!second.plugin_root.join("old-marker").is_file());
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::create_dir_all(tmp.path().join("install-ledger.json.tmp")).unwrap();
 
         let err = Installer::rollback(&second).unwrap_err().to_string();
@@ -2755,8 +2629,6 @@ mod tests {
             "restored tree must survive a ledger restore failure"
         );
         assert_eq!(
-            // Tempdir / install-tree path in unit test.
-            // codeql[rust/path-injection]
             fs::read(second.plugin_root.join("old-marker")).unwrap(),
             b"v1"
         );
@@ -2767,8 +2639,6 @@ mod tests {
             "retry must not delete the restored destination when the backup is gone"
         );
         assert_eq!(
-            // Tempdir / install-tree path in unit test.
-            // codeql[rust/path-injection]
             fs::read(second.plugin_root.join("old-marker")).unwrap(),
             b"v1"
         );
@@ -2777,8 +2647,6 @@ mod tests {
             "{err}"
         );
 
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::remove_dir_all(tmp.path().join("install-ledger.json.tmp")).unwrap();
         Installer::rollback(&second).unwrap();
         assert!(second.plugin_root.join("old-marker").is_file());
@@ -2829,8 +2697,6 @@ mod tests {
     fn commit_cleanup_failure_is_surfaced() {
         let tmp = tempfile::tempdir().unwrap();
         let bak = tmp.path().join("not-a-dir-backup");
-        // Tempdir / install-tree path in unit test.
-        // codeql[rust/path-injection]
         fs::write(&bak, b"file").unwrap();
         let outcome = InstallOutcome {
             plugin_root: tmp.path().join("dest"),

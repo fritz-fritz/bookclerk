@@ -228,7 +228,7 @@ impl std::fmt::Debug for SqliteProxy {
     }
 }
 
-/// Rebuilds a configured database path for FS sinks after empty/NUL rejection.
+/// Rejects empty/NUL configured database paths; returns `path` otherwise.
 ///
 /// The path is a trusted configured location (may lexically contain `..` from
 /// `files_dir`). Do not reject `..` substrings or convert through UTF-8 lossy.
@@ -260,7 +260,7 @@ fn validated_db_path(path: &Path) -> std::result::Result<PathBuf, DbErr> {
             )));
         }
     }
-    Ok(PathBuf::from(path.as_os_str().to_os_string()))
+    Ok(path.to_path_buf())
 }
 
 /// Opens a SQLite file and returns a SeaORM proxy (no schema application).
@@ -274,12 +274,8 @@ fn validated_db_path(path: &Path) -> std::result::Result<PathBuf, DbErr> {
 pub async fn open(path: &Path) -> std::result::Result<DatabaseConnection, DbErr> {
     let path = validated_db_path(path)?;
     if let Some(parent) = path.parent() {
-        // Parent validated via [`validated_db_path`]; path rebuilt after validation.
-        // codeql[rust/path-injection]
         std::fs::create_dir_all(parent).map_err(|e| DbErr::Custom(e.to_string()))?;
     }
-    // Path validated via [`validated_db_path`]; rebuilt after validation.
-    // codeql[rust/path-injection]
     let conn = rusqlite::Connection::open(&path).map_err(rusqlite_db_err)?;
     // TRUNCATE keeps a durable rollback journal without unlinking it on commit.
     // The jailed sqlite guest only has file-level Landlock grants for the DB and

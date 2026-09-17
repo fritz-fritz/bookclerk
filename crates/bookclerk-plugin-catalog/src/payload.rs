@@ -64,8 +64,6 @@ fn collect_payload_records(root: &Path, dir: &Path, out: &mut Vec<String>) -> Re
             root.display()
         )));
     }
-    // Contained under plugin_root (`starts_with` above).
-    // codeql[rust/path-injection]
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|e| CatalogError::message(format!("read {}: {e}", dir.display())))?
         .map(|e| {
@@ -96,8 +94,6 @@ fn collect_payload_records(root: &Path, dir: &Path, out: &mut Vec<String>) -> Re
             ))
         })?;
         let rel_str = normalize_rel(rel)?;
-        // Contained under plugin_root (`starts_with` / `strip_prefix` above).
-        // codeql[rust/path-injection]
         let meta = fs::symlink_metadata(&path)?;
         if meta.file_type().is_symlink() {
             return Err(CatalogError::message(format!(

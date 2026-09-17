@@ -103,8 +103,6 @@ fn stage_files_dir() -> Option<TempDir> {
         }
         std::path::PathBuf::from(s)
     };
-    // Test temp base rebuilt after `..`/NUL rejection.
-    // codeql[rust/path-injection]
     std::fs::create_dir_all(&base).ok()?;
     tempfile::Builder::new().prefix("td").tempdir_in(base).ok()
 }

@@ -61,8 +61,6 @@ pub struct DecryptOutcome {
 /// Decrypt Adrm aaxc natively (AES-128-CBC sample remux + optional trim).
 pub async fn decrypt_adrm(req: DecryptRequest) -> Result<DecryptOutcome> {
     let input = paths::validated_fs_path(&req.input)?;
-    // Path validated via [`paths::validated_fs_path`]; rebuilt after validation.
-    // codeql[rust/path-injection]
     if !input.exists() {
         return Err(DrmError::InputMissing(input));
     }
@@ -74,8 +72,6 @@ pub async fn decrypt_adrm(req: DecryptRequest) -> Result<DecryptOutcome> {
     };
     let output = paths::validated_fs_path(&req.output)?;
     if let Some(parent) = output.parent() {
-        // Path validated via [`paths::validated_fs_path`]; rebuilt after validation.
-        // codeql[rust/path-injection]
         tokio::fs::create_dir_all(parent).await?;
     }
     let key = key.clone();
@@ -89,15 +85,11 @@ pub async fn decrypt_adrm(req: DecryptRequest) -> Result<DecryptOutcome> {
 /// Decrypt Widevine CENC natively (fragmented DASH or progressive `enca`).
 pub async fn decrypt_cenc(req: CencDecryptRequest) -> Result<DecryptOutcome> {
     let input = paths::validated_fs_path(&req.input)?;
-    // Path validated via [`paths::validated_fs_path`]; rebuilt after validation.
-    // codeql[rust/path-injection]
     if !input.exists() {
         return Err(DrmError::InputMissing(input.clone()));
     }
     let output = paths::validated_fs_path(&req.output)?;
     if let Some(parent) = output.parent() {
-        // Path validated via [`paths::validated_fs_path`]; rebuilt after validation.
-        // codeql[rust/path-injection]
         tokio::fs::create_dir_all(parent).await?;
     }
     let kid = req.kid.clone();

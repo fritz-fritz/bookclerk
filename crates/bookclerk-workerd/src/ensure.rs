@@ -127,8 +127,6 @@ fn is_current(bin: &Path) -> Result<bool> {
     // Fallback: ask the binary (best-effort).
     let bin = bookclerk_sandbox::require_spawn_executable(bin)
         .with_context(|| format!("validate workerd binary {}", bin.display()))?;
-    // Absolute pinned/managed workerd binary path.
-    // codeql[rust/command-line-injection]
     let output = std::process::Command::new(&bin)
         .arg("--version")
         .output()

@@ -159,10 +159,8 @@ def run_smoke(plugin_dir: Path) -> str:
     """
     root = cli_user_path(plugin_dir)
     toml_path = resolve_under(root, "plugin.toml")
-    # codeql[py/path-injection]
     if not toml_path.is_file():
         raise FileNotFoundError(f"missing plugin.toml in {root}")
-    # codeql[py/path-injection]
     manifest = tomllib.loads(toml_path.read_text(encoding="utf-8"))
     validate_manifest(manifest)
     runtime = manifest.get("runtime") or "native"

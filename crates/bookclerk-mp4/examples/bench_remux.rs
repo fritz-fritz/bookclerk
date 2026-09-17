@@ -23,7 +23,7 @@ const FRAMES_PER_SECOND: usize = 43;
 /// Synthetic AAC frame size in bytes (~128 kbit/s at 43 frames/s).
 const BYTES_PER_FRAME: usize = 372;
 
-/// Rebuilds an absolute bench path after empty/NUL rejection (no `..` string ban).
+/// Rejects empty/NUL absolute bench paths; returns `path` otherwise.
 fn validated_absolute(path: &Path) -> PathBuf {
     assert!(
         path.is_absolute(),
@@ -39,7 +39,7 @@ fn validated_absolute(path: &Path) -> PathBuf {
             "bench path must not contain NUL"
         );
     }
-    PathBuf::from(path.as_os_str().to_os_string())
+    path.to_path_buf()
 }
 
 fn main() {
@@ -50,8 +50,6 @@ fn main() {
     let count = FRAMES_PER_SECOND * 3600 * hours;
 
     let dir = validated_absolute(&std::env::temp_dir().join("bench_remux"));
-    // Path validated via [`validated_absolute`]; rebuilt after validation.
-    // codeql[rust/path-injection]
     std::fs::create_dir_all(&dir).expect("create scratch dir");
     let input = validated_absolute(&dir.join("in.m4a"));
     let output = validated_absolute(&dir.join("out.m4b"));
@@ -76,6 +74,5 @@ fn main() {
         );
     }
 
-    // codeql[rust/path-injection]
     std::fs::remove_dir_all(&dir).ok();
 }

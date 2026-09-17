@@ -332,8 +332,6 @@ pub(crate) fn locate_launcher() -> Result<PathBuf> {
     let name = launcher_bin_name();
     if let Some(path) = std::env::var_os(WORKERD_LAUNCHER_ENV) {
         let path = PathBuf::from(path);
-        // Env override for host helper; existence check only.
-        // codeql[rust/path-injection]
         if path.is_file() {
             return Ok(path);
         }
@@ -346,8 +344,6 @@ pub(crate) fn locate_launcher() -> Result<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let candidate = dir.join(name);
-            // Contained beside host executable.
-            // codeql[rust/path-injection]
             if candidate.is_file() {
                 return Ok(candidate);
             }
@@ -357,7 +353,6 @@ pub(crate) fn locate_launcher() -> Result<PathBuf> {
             if dir.file_name().is_some_and(|last| last == "deps") {
                 if let Some(parent) = dir.parent() {
                     let candidate = parent.join(name);
-                    // codeql[rust/path-injection]
                     if candidate.is_file() {
                         return Ok(candidate);
                     }
@@ -383,8 +378,6 @@ pub(crate) fn locate_launcher() -> Result<PathBuf> {
 fn locate_workerd_bin(launcher: &Path) -> Result<PathBuf> {
     if let Some(path) = std::env::var_os(WORKERD_BIN_ENV) {
         let path = PathBuf::from(path);
-        // Env override for pinned workerd; existence check only.
-        // codeql[rust/path-injection]
         if path.is_file() {
             return Ok(path);
         }
@@ -397,8 +390,6 @@ fn locate_workerd_bin(launcher: &Path) -> Result<PathBuf> {
         .parent()
         .map(|dir| dir.join(cloudflare_workerd_bin_name()))
         .unwrap_or_default();
-    // Contained beside launcher binary.
-    // codeql[rust/path-injection]
     if candidate.is_file() {
         return Ok(candidate);
     }

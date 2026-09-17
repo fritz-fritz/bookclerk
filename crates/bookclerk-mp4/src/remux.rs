@@ -207,8 +207,6 @@ where
 
     let output = crate::fs_path::validated(output)?;
     if let Some(parent) = output.parent() {
-        // Path validated via [`crate::fs_path::validated`]; rebuilt after validation.
-        // codeql[rust/path-injection]
         std::fs::create_dir_all(parent)?;
     }
 
@@ -248,8 +246,6 @@ where
         moov_len = built_len;
     };
 
-    // Path validated via [`crate::fs_path::validated`]; rebuilt after validation.
-    // codeql[rust/path-injection]
     let mut out = BufWriter::with_capacity(IO_BUFFER_BYTES, File::create(&output)?);
     out.write_all(&ftyp_bytes)?;
     out.write_all(&moov)?;

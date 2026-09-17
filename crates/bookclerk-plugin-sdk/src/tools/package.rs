@@ -158,28 +158,36 @@ fn host_bookclerk_target() -> String {
     }
 }
 
-/// Rejects empty paths and interior `..` / NUL before filesystem access.
+/// Rejects empty paths and interior NULs before filesystem access.
 ///
 /// # Errors
 ///
-/// Returns [`SdkError`] when the path is empty or contains `..` / NUL.
-fn reject_unsafe_path(path: &Path) -> Result<()> {
+/// Returns [`SdkError`] when the path is empty or contains an interior NUL.
+fn reject_empty_or_nul(path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() {
         return Err(SdkError::message("refusing empty path"));
     }
-    let s = path.to_string_lossy();
-    if s.contains("..") || s.contains('\0') {
-        return Err(SdkError::message(format!(
-            "refusing unsafe path: {}",
-            path.display()
-        )));
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if path.as_os_str().as_bytes().contains(&0) {
+            return Err(SdkError::message(format!(
+                "refusing path with NUL: {}",
+                path.display()
+            )));
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        if path.as_os_str().encode_wide().any(|c| c == 0) {
+            return Err(SdkError::message(format!(
+                "refusing path with NUL: {}",
+                path.display()
+            )));
+        }
     }
     Ok(())
-}
-
-/// Rebuild after validation so CodeQL path taint does not reach FS sinks.
-fn rebuild_path(path: &Path) -> PathBuf {
-    PathBuf::from(path.to_string_lossy().into_owned())
 }
 
 /// Join `root` / `name` and require the result stays under `root`.
@@ -188,7 +196,7 @@ fn rebuild_path(path: &Path) -> PathBuf {
 ///
 /// Returns [`SdkError`] when `root` is unsafe, `name` escapes, or the join leaves `root`.
 fn join_under_root(root: &Path, name: &std::ffi::OsStr) -> Result<PathBuf> {
-    reject_unsafe_path(root)?;
+    reject_empty_or_nul(root)?;
     for comp in Path::new(name).components() {
         match comp {
             Component::Normal(_) | Component::CurDir => {}
@@ -201,7 +209,7 @@ fn join_under_root(root: &Path, name: &std::ffi::OsStr) -> Result<PathBuf> {
             }
         }
     }
-    let out = rebuild_path(&root.join(name));
+    let out = root.join(name);
     if !out.starts_with(root) {
         return Err(SdkError::message(format!(
             "path {} escapes root {}",
@@ -218,8 +226,8 @@ fn join_under_root(root: &Path, name: &std::ffi::OsStr) -> Result<PathBuf> {
 ///
 /// Returns [`SdkError`] when `path` is unsafe or escapes `root`.
 fn require_under_root(root: &Path, path: &Path) -> Result<PathBuf> {
-    reject_unsafe_path(path)?;
-    let path = rebuild_path(path);
+    reject_empty_or_nul(path)?;
+    let path = path.to_path_buf();
     if !path.starts_with(root) {
         return Err(SdkError::message(format!(
             "path {} escapes root {}",
@@ -237,15 +245,11 @@ fn require_under_root(root: &Path, path: &Path) -> Result<PathBuf> {
 /// Propagates filesystem errors from directory creation, traversal, or file copy
 /// as [`SdkError`].
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    reject_unsafe_path(src)?;
-    reject_unsafe_path(dst)?;
-    let src = rebuild_path(src);
-    let dst = rebuild_path(dst);
-    // Contained under dst (validated copy root); path rebuilt after validation.
-    // codeql[rust/path-injection]
+    reject_empty_or_nul(src)?;
+    reject_empty_or_nul(dst)?;
+    let src = src.to_path_buf();
+    let dst = dst.to_path_buf();
     std::fs::create_dir_all(&dst).map_err(SdkError::from)?;
-    // Contained under src via [`require_under_root`]; path rebuilt after validation.
-    // codeql[rust/path-injection]
     for entry in std::fs::read_dir(&src).map_err(SdkError::from)? {
         let entry = entry.map_err(SdkError::from)?;
         let ty = entry.file_type().map_err(SdkError::from)?;
@@ -254,8 +258,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         if ty.is_dir() {
             copy_dir_recursive(&from, &to)?;
         } else {
-            // Contained under src/dst via [`require_under_root`]/[`join_under_root`].
-            // codeql[rust/path-injection]
             std::fs::copy(&from, &to).map_err(SdkError::from)?;
         }
     }

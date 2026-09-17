@@ -676,8 +676,6 @@ fn push_manifest(
         return Ok(());
     }
     let command = resolve_spawn_command(root, &manifest)?;
-    // Contained under plugin install root via [`resolve_spawn_command`].
-    // codeql[rust/path-injection]
     if !command.is_file() {
         return Err(PluginError::message(format!(
             "plugin `{}`: command not found at {}",

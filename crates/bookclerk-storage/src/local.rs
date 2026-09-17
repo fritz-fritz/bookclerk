@@ -47,13 +47,21 @@ impl LocalFsBackend {
         let prefix = normalize_prefix(prefix);
         // Operator-configured storage root may include lexical `..` (joined onto
         // `files_dir` by config resolution). Reject NUL, create, then canonicalize
-        // so later joins get a normalize-path → starts_with barrier for CodeQL.
-        let root_s = root.to_string_lossy().into_owned();
-        if root_s.contains('\0') {
-            return Err(StorageError::InvalidKey(root.display().to_string()));
+        // so later joins use a realpath identity for containment.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            if root.as_os_str().as_bytes().contains(&0) {
+                return Err(StorageError::InvalidKey(root.display().to_string()));
+            }
         }
-        let root = PathBuf::from(root_s);
-        // codeql[rust/path-injection]
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            if root.as_os_str().encode_wide().any(|c| c == 0) {
+                return Err(StorageError::InvalidKey(root.display().to_string()));
+            }
+        }
         std::fs::create_dir_all(&root)?;
         let root = std::fs::canonicalize(&root).unwrap_or(root);
         if !prefix.is_empty() {
@@ -61,8 +69,6 @@ impl LocalFsBackend {
             if !prefix_dir.starts_with(&root) {
                 return Err(StorageError::InvalidKey(prefix));
             }
-            // Contained under canonical storage root (join + starts_with).
-            // codeql[rust/path-injection]
             std::fs::create_dir_all(&prefix_dir)?;
         }
         Ok(Self { root, prefix })
@@ -96,7 +102,7 @@ impl LocalFsBackend {
             if !canonical.starts_with(&canonical_root) {
                 return Err(StorageError::InvalidKey(key.into()));
             }
-            return Ok(PathBuf::from(canonical.as_os_str().to_os_string()));
+            return Ok(canonical);
         }
         // Missing leaf/intermediates: canonicalize nearest existing ancestor and
         // rejoin the suffix (rejects symlink-parent escapes).
@@ -163,11 +169,8 @@ impl StorageBackend for LocalFsBackend {
     async fn put(&self, key: &str, data: Bytes, meta: ObjectMeta) -> Result<()> {
         let path = self.resolve(key)?;
         if let Some(parent) = path.parent() {
-            // Contained under storage root via [`Self::resolve`].
-            // codeql[rust/path-injection]
             fs::create_dir_all(parent).await?;
         }
-        // codeql[rust/path-injection]
         fs::write(&path, &data).await?;
         write_local_meta_sidecar(self, key, &meta).await?;
         Ok(())
@@ -176,15 +179,12 @@ impl StorageBackend for LocalFsBackend {
     async fn put_file(&self, key: &str, source: &Path, meta: ObjectMeta) -> Result<()> {
         let dest = self.resolve(key)?;
         if let Some(parent) = dest.parent() {
-            // Contained under storage root via [`Self::resolve`].
-            // codeql[rust/path-injection]
             fs::create_dir_all(parent).await?;
         }
         // Prefer hard-link/copy without loading the whole audiobook into RAM.
         match fs::hard_link(source, &dest).await {
             Ok(()) => {}
             Err(_) => {
-                // codeql[rust/path-injection]
                 fs::copy(source, &dest).await?;
             }
         }
@@ -194,8 +194,6 @@ impl StorageBackend for LocalFsBackend {
 
     async fn get(&self, key: &str) -> Result<Bytes> {
         let path = self.resolve(key)?;
-        // Contained under storage root via [`Self::resolve`].
-        // codeql[rust/path-injection]
         let data = fs::read(&path).await.map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
                 StorageError::NotFound(key.into())
@@ -208,8 +206,6 @@ impl StorageBackend for LocalFsBackend {
 
     async fn exists(&self, key: &str) -> Result<bool> {
         let path = self.resolve(key)?;
-        // Contained under storage root via [`Self::resolve`].
-        // codeql[rust/path-injection]
         Ok(fs::try_exists(&path).await?)
     }
 
@@ -242,8 +238,6 @@ impl StorageBackend for LocalFsBackend {
 
     async fn probe(&self, key: &str) -> Result<ObjectProbe> {
         let path = self.resolve(key)?;
-        // Contained under storage root via [`Self::resolve`].
-        // codeql[rust/path-injection]
         let file_meta = fs::metadata(&path).await.map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
                 StorageError::NotFound(key.into())
@@ -284,11 +278,8 @@ impl StorageBackend for LocalFsBackend {
         let src = self.resolve(from)?;
         let dest = self.resolve(to)?;
         if let Some(parent) = dest.parent() {
-            // Contained under storage root via [`Self::resolve`].
-            // codeql[rust/path-injection]
             fs::create_dir_all(parent).await?;
         }
-        // codeql[rust/path-injection]
         fs::copy(&src, &dest).await.map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
                 StorageError::NotFound(from.into())
@@ -303,10 +294,8 @@ impl StorageBackend for LocalFsBackend {
             let meta_src = self.resolve(&from_meta)?;
             let meta_dest = self.resolve(&to_meta)?;
             if let Some(parent) = meta_dest.parent() {
-                // codeql[rust/path-injection]
                 fs::create_dir_all(parent).await?;
             }
-            // codeql[rust/path-injection]
             let _ = fs::copy(&meta_src, &meta_dest).await;
         }
         Ok(())
@@ -314,8 +303,6 @@ impl StorageBackend for LocalFsBackend {
 
     async fn delete(&self, key: &str) -> Result<()> {
         let path = self.resolve(key)?;
-        // Contained under storage root via [`Self::resolve`].
-        // codeql[rust/path-injection]
         match fs::remove_file(&path).await {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -414,8 +401,6 @@ impl StorageBackend for LocalFsBackend {
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
         let probe = self.probe(key).await?;
         let path = self.resolve(key)?;
-        // Contained under storage root via [`Self::resolve`].
-        // codeql[rust/path-injection]
         let mut file = tokio::fs::File::open(&path).await.map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
                 StorageError::NotFound(key.into())
@@ -441,8 +426,6 @@ impl StorageBackend for LocalFsBackend {
         use tokio::io::AsyncWriteExt;
         let path = self.resolve(key)?;
         if let Some(parent) = path.parent() {
-            // Contained under storage root via [`Self::resolve`].
-            // codeql[rust/path-injection]
             fs::create_dir_all(parent).await?;
         }
         let tmp = sibling_temp_path(&path);
@@ -450,8 +433,6 @@ impl StorageBackend for LocalFsBackend {
             return Err(StorageError::InvalidKey(key.into()));
         }
         let put = async {
-            // Contained sibling of resolved path under storage root.
-            // codeql[rust/path-injection]
             let mut file = tokio::fs::File::create(&tmp).await?;
             let bytes_written = tokio::io::copy(&mut body, &mut file).await?;
             if let Some(expected) = meta.content_length {
@@ -467,7 +448,6 @@ impl StorageBackend for LocalFsBackend {
             file.flush().await?;
             file.sync_all().await?;
             drop(file);
-            // codeql[rust/path-injection]
             tokio::fs::rename(&tmp, &path).await?;
             Ok(bytes_written)
         };
@@ -489,8 +469,6 @@ impl StorageBackend for LocalFsBackend {
 
 /// Deterministic directory listing (sorted by path).
 async fn sorted_dir_entries(dir: &Path) -> Result<Vec<fs::DirEntry>> {
-    // Caller walks only under the storage root ([`list_recursive`]).
-    // codeql[rust/path-injection]
     let mut read_dir = match fs::read_dir(dir).await {
         Ok(rd) => rd,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -539,8 +517,6 @@ async fn list_recursive(
         if !prefix.is_empty() && !key.starts_with(prefix) {
             continue;
         }
-        // Contained under storage root (`starts_with` + `strip_prefix` above).
-        // codeql[rust/path-injection]
         let meta = fs::metadata(&path).await?;
         out.push(ObjectInfo {
             key,
@@ -580,8 +556,6 @@ async fn bounded_list_page_walk(
     heap: &mut BinaryHeap<(String, u64)>,
     found_cursor: &mut bool,
 ) -> Result<()> {
-    // Caller walks only under the storage root.
-    // codeql[rust/path-injection]
     let mut read_dir = match fs::read_dir(dir).await {
         Ok(rd) => rd,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -640,8 +614,6 @@ async fn bounded_list_page_walk(
             continue;
         }
         if heap.len() < want {
-            // Contained under storage root (`starts_with` + `strip_prefix` above).
-            // codeql[rust/path-injection]
             let meta = fs::metadata(&path).await?;
             heap.push((key, meta.len()));
             track_list_page_retained(heap.len());
@@ -651,7 +623,6 @@ async fn bounded_list_page_walk(
             .peek()
             .is_some_and(|(top, _)| key.as_str() < top.as_str())
         {
-            // codeql[rust/path-injection]
             let meta = fs::metadata(&path).await?;
             heap.pop();
             heap.push((key, meta.len()));
@@ -694,11 +665,8 @@ async fn write_local_meta_sidecar(
         serde_json::to_vec(meta).map_err(|err| StorageError::Io(std::io::Error::other(err)))?;
     let path = backend.resolve(&sidecar)?;
     if let Some(parent) = path.parent() {
-        // Contained under storage root via [`LocalFsBackend::resolve`].
-        // codeql[rust/path-injection]
         fs::create_dir_all(parent).await?;
     }
-    // codeql[rust/path-injection]
     fs::write(&path, payload).await?;
     Ok(())
 }

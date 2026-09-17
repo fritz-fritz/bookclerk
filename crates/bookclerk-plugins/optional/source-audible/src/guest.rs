@@ -361,8 +361,6 @@ pub async fn guest_fetch_title(
     if want_cover {
         let work_dir = validated_fs_path(&cache_dir.join(title_id))
             .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
-        // Path validated via [`validated_fs_path`]; rebuilt after validation.
-        // codeql[rust/path-injection]
         tokio::fs::create_dir_all(&work_dir).await?;
         let cover_dest = validated_fs_path(&work_dir.join(format!("{title_id}.cover.jpg")))
             .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
@@ -384,8 +382,6 @@ pub async fn guest_fetch_title(
 
     let work_dir = validated_fs_path(&cache_dir.join(title_id))
         .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
-    // Path validated via [`validated_fs_path`]; rebuilt after validation.
-    // codeql[rust/path-injection]
     tokio::fs::create_dir_all(&work_dir).await?;
     let m4b_path = validated_fs_path(&work_dir.join(format!("{title_id}.m4b")))
         .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
@@ -454,14 +450,10 @@ pub async fn guest_fetch_title(
         }
     } else if downloaded.path != m4b_path {
         if let Some(parent) = m4b_path.parent() {
-            // Path validated via [`validated_fs_path`]; rebuilt after validation.
-            // codeql[rust/path-injection]
             tokio::fs::create_dir_all(parent).await?;
         }
         let from = validated_fs_path(&downloaded.path)
             .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
-        // Paths validated via [`validated_fs_path`]; rebuilt after validation.
-        // codeql[rust/path-injection]
         tokio::fs::copy(&from, &m4b_path).await?;
         m4b_path
     } else {

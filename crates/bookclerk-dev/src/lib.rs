@@ -103,14 +103,10 @@ pub fn reset_files_dir(files_dir: &std::path::Path) -> anyhow::Result<()> {
             files_dir.display()
         );
     }
-    // Absolute path validated by [`require_absolute_spawn_path`]; rebuilt after validation.
-    // codeql[rust/path-injection]
     if files_dir.exists() {
-        // codeql[rust/path-injection]
         std::fs::remove_dir_all(&files_dir)
             .with_context(|| format!("remove {}", files_dir.display()))?;
     }
-    // codeql[rust/path-injection]
     std::fs::create_dir_all(&files_dir)
         .with_context(|| format!("recreate {}", files_dir.display()))?;
     Ok(())

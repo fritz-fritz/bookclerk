@@ -37,8 +37,6 @@ pub fn sha256_file(path: &Path) -> Result<String> {
             path.display()
         )));
     }
-    // Contained by caller (`safe_join` / `require_under`) + `..` rejection above.
-    // codeql[rust/path-injection]
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
@@ -72,8 +70,6 @@ pub fn extract_archive(archive: &Path, format: ArchiveFormat, dest: &Path) -> Re
             dest.display()
         )));
     }
-    // Destination is host-chosen staging/install root; `..` rejected above.
-    // codeql[rust/path-injection]
     fs::create_dir_all(dest)?;
     match format {
         ArchiveFormat::TarGz => extract_tar_gz(archive, dest),
@@ -93,7 +89,6 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
             archive.display()
         )));
     }
-    // codeql[rust/path-injection]
     let file = File::open(archive)?;
     let meta = file.metadata()?;
     if meta.len() > MAX_ARCHIVE_BYTES {
@@ -110,8 +105,6 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
         let path = entry.path().map_err(io_err)?.into_owned();
         let out = safe_join(dest, &path)?;
         if entry.header().entry_type().is_dir() {
-            // Contained by [`safe_join`].
-            // codeql[rust/path-injection]
             fs::create_dir_all(&out)?;
             continue;
         }
@@ -140,12 +133,8 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
             ));
         }
         if let Some(parent) = out.parent() {
-            // Contained by [`safe_join`].
-            // codeql[rust/path-injection]
             fs::create_dir_all(parent)?;
         }
-        // Contained by [`safe_join`].
-        // codeql[rust/path-injection]
         let mut out_file = File::create(&out)?;
         io::copy(&mut entry, &mut out_file)?;
         #[cfg(unix)]
@@ -154,8 +143,6 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
             if entry.header().mode().unwrap_or(0) & 0o111 != 0 {
                 let mut perms = out_file.metadata()?.permissions();
                 perms.set_mode(0o755);
-                // Contained by [`safe_join`].
-                // codeql[rust/path-injection]
                 fs::set_permissions(&out, perms)?;
             }
         }
@@ -174,7 +161,6 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
             archive.display()
         )));
     }
-    // codeql[rust/path-injection]
     let file = File::open(archive)?;
     let meta = file.metadata()?;
     if meta.len() > MAX_ARCHIVE_BYTES {
@@ -196,8 +182,6 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
         let path = PathBuf::from(&name);
         let out = safe_join(dest, &path)?;
         if entry.is_dir() {
-            // Contained by [`safe_join`].
-            // codeql[rust/path-injection]
             fs::create_dir_all(&out)?;
             continue;
         }
@@ -230,22 +214,15 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
             ));
         }
         if let Some(parent) = out.parent() {
-            // Contained by [`safe_join`].
-            // codeql[rust/path-injection]
             fs::create_dir_all(parent)?;
         }
-        // Contained by [`safe_join`].
-        // codeql[rust/path-injection]
         let mut out_file = File::create(&out)?;
         io::copy(&mut entry, &mut out_file)?;
         #[cfg(unix)]
         if entry.unix_mode().is_some_and(|m| m & 0o111 != 0) {
             use std::os::unix::fs::PermissionsExt;
-            // Contained by [`safe_join`].
-            // codeql[rust/path-injection]
             let mut perms = fs::metadata(&out)?.permissions();
             perms.set_mode(0o755);
-            // codeql[rust/path-injection]
             fs::set_permissions(&out, perms)?;
         }
     }
@@ -369,7 +346,7 @@ pub fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
             root_norm.display()
         )));
     }
-    Ok(PathBuf::from(path_norm.as_os_str().to_os_string()))
+    Ok(path_norm)
 }
 
 /// Wraps an I/O or tar error as a catalog message.
@@ -388,12 +365,8 @@ pub fn write_file(path: &Path, data: &[u8]) -> Result<()> {
         )));
     }
     if let Some(parent) = path.parent() {
-        // Contained by caller + `..` rejection above.
-        // codeql[rust/path-injection]
         fs::create_dir_all(parent)?;
     }
-    // Contained by caller + `..` rejection above.
-    // codeql[rust/path-injection]
     let mut f = File::create(path)?;
     f.write_all(data)?;
     Ok(())

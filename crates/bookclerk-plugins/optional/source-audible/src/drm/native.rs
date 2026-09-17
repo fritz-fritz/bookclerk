@@ -38,15 +38,11 @@ pub fn decrypt_adrm_native(
     trim: Option<TrimRange>,
 ) -> Result<DecryptOutcome> {
     let input = validated_fs_path(input)?;
-    // Path validated via [`validated_fs_path`]; rebuilt after validation.
-    // codeql[rust/path-injection]
     if !input.exists() {
         return Err(DrmError::InputMissing(input));
     }
     let output = validated_fs_path(output)?;
     if let Some(parent) = output.parent() {
-        // Path validated via [`validated_fs_path`]; rebuilt after validation.
-        // codeql[rust/path-injection]
         std::fs::create_dir_all(parent)?;
     }
 
@@ -83,8 +79,6 @@ pub fn decrypt_adrm_native(
 
     decrypt_to_m4b(&input, &output, SampleCipher::Adrm { key, iv }, trim)?;
 
-    // Path validated via [`validated_fs_path`]; rebuilt after validation.
-    // codeql[rust/path-injection]
     if !output.exists() {
         return Err(DrmError::OutputMissing(output));
     }
@@ -104,15 +98,11 @@ pub fn decrypt_cenc_native(
     trim: Option<TrimRange>,
 ) -> Result<DecryptOutcome> {
     let input = validated_fs_path(input)?;
-    // Path validated via [`validated_fs_path`]; rebuilt after validation.
-    // codeql[rust/path-injection]
     if !input.exists() {
         return Err(DrmError::InputMissing(input.clone()));
     }
     let output = validated_fs_path(output)?;
     if let Some(parent) = output.parent() {
-        // Path validated via [`validated_fs_path`]; rebuilt after validation.
-        // codeql[rust/path-injection]
         std::fs::create_dir_all(parent)?;
     }
 
@@ -190,8 +180,6 @@ pub fn decrypt_cenc_native(
 /// Confirms the decrypted M4B exists and returns its path; missing output fails closed.
 fn finish_cenc_output(output: &Path) -> Result<DecryptOutcome> {
     let output = validated_fs_path(output)?;
-    // Path validated via [`validated_fs_path`]; rebuilt after validation.
-    // codeql[rust/path-injection]
     if !output.exists() {
         return Err(DrmError::OutputMissing(output.clone()));
     }

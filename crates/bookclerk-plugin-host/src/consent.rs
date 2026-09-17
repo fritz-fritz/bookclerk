@@ -533,12 +533,9 @@ impl PluginGrantStore {
         if !path.starts_with(files_dir) {
             return Err(PluginError::message("plugin-grants path escaped files_dir"));
         }
-        // Contained under `$BOOKCLERK_FILES_DIR` (literal grants filename).
-        // codeql[rust/path-injection]
         if !path.is_file() {
             return Ok(Self::default());
         }
-        // codeql[rust/path-injection]
         let text = std::fs::read_to_string(&path)?;
         Ok(serde_json::from_str(&text)?)
     }
@@ -572,14 +569,9 @@ impl PluginGrantStore {
                 "plugin-grants temp path escaped files_dir",
             ));
         }
-        // Contained under `$BOOKCLERK_FILES_DIR` (literal grants filename + starts_with).
-        // codeql[rust/path-injection]
         std::fs::write(&tmp, &text)?;
-        // codeql[rust/path-injection]
         if std::fs::rename(&tmp, &path).is_err() {
-            // codeql[rust/path-injection]
             let _ = std::fs::remove_file(&path);
-            // codeql[rust/path-injection]
             std::fs::rename(&tmp, &path)?;
         }
         crate::authority::notify_grants_changed();

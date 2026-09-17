@@ -1,4 +1,4 @@
-//! Path rebuild before MP4 filesystem sinks (CodeQL barrier only).
+//! Empty/NUL checks before MP4 filesystem sinks.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ fn os_contains_nul(s: &OsStr) -> bool {
     }
 }
 
-/// Rebuilds `path` for FS sinks after empty/NUL rejection.
+/// Rejects empty paths and interior NULs; returns `path` unchanged otherwise.
 ///
 /// These MP4 APIs take caller-selected filesystem paths (not untrusted
 /// suffixes under a trusted root). Do **not** reject lexical `..` or convert
@@ -41,5 +41,5 @@ pub(crate) fn validated(path: &Path) -> Result<PathBuf> {
             path.display()
         )));
     }
-    Ok(PathBuf::from(path.as_os_str().to_os_string()))
+    Ok(path.to_path_buf())
 }
