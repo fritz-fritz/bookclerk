@@ -2,7 +2,7 @@
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
@@ -12,12 +12,61 @@ use crate::pin::{
     binary_name, download_url, host_asset, WORKERD_RELEASE_TAG, WORKERD_VERSION_STAMP,
 };
 
+/// Join a single path component under `root` after canonicalize + `starts_with`.
+fn join_component_under(root: &Path, name: &str) -> Result<PathBuf> {
+    if name.is_empty()
+        || name.contains('\0')
+        || name.contains('/')
+        || name.contains('\\')
+        || name == "."
+        || name == ".."
+        || name.contains("..")
+    {
+        bail!("refusing unsafe path component: {name}");
+    }
+    let root_norm =
+        fs::canonicalize(root).with_context(|| format!("canonicalize root {}", root.display()))?;
+    let out = root_norm.join(name);
+    // Lexical under-root before any further FS probe on `out`.
+    if !out.starts_with(&root_norm) {
+        bail!(
+            "path {} escapes root {}",
+            out.display(),
+            root_norm.display()
+        );
+    }
+    Ok(out)
+}
+
+/// Ensure `dir` exists, canonicalize it, and require it stays under `$HOME` when possible.
+fn prepare_cache_dir(dir: &Path) -> Result<PathBuf> {
+    // Lexical rejection of `..` before mkdir/canonicalize of operator/cache roots.
+    if dir.components().any(|c| matches!(c, Component::ParentDir)) {
+        bail!("refusing cache dir with '..': {}", dir.display());
+    }
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let canon =
+        fs::canonicalize(dir).with_context(|| format!("canonicalize cache {}", dir.display()))?;
+    if let Ok(home) = std::env::var("HOME") {
+        if let Ok(home_norm) = fs::canonicalize(home) {
+            if !canon.starts_with(&home_norm) {
+                bail!(
+                    "workerd cache {} must resolve under home {}",
+                    canon.display(),
+                    home_norm.display()
+                );
+            }
+        }
+    }
+    Ok(canon)
+}
+
 /// Ensure `dir/workerd` matches [`WORKERD_RELEASE_TAG`], downloading if needed.
 ///
 /// Returns the path to the executable. Honors `BOOKCLERK_WORKERD_BIN` when set:
-/// if that path exists and its version stamp (sibling `workerd.version`) or
-/// `--version` output matches the pin, it is returned; otherwise ensure still
-/// installs into `dir` (override path is not overwritten).
+/// if that absolute path's sibling version stamp matches the pin, it is returned;
+/// otherwise ensure still installs into `dir` (override path is not overwritten).
+/// Currency is stamp-only — never `--version`-probes an env/cache path.
 ///
 /// # Arguments
 ///
@@ -32,17 +81,25 @@ use crate::pin::{
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn ensure_workerd(dir: &Path) -> Result<PathBuf> {
     if let Ok(override_bin) = std::env::var("BOOKCLERK_WORKERD_BIN") {
-        let path = PathBuf::from(override_bin);
-        if path.is_file() && is_current(&path)? {
-            return Ok(path);
+        if !override_bin.is_empty()
+            && !override_bin.contains('\0')
+            && Path::new(&override_bin).is_absolute()
+        {
+            let path = PathBuf::from(&override_bin);
+            // Stamp-only: no exists/metadata/spawn of the raw env path first.
+            if is_current_stamp_only(&path)? {
+                return bookclerk_sandbox::require_spawn_executable(&path)
+                    .with_context(|| format!("validate workerd override {}", path.display()));
+            }
         }
         // Stale/missing override: fall through to managed install in `dir`.
     }
 
-    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let dest = dir.join(binary_name());
-    if dest.is_file() && is_current(&dest)? {
-        return Ok(dest);
+    let dir = prepare_cache_dir(dir)?;
+    let dest = join_component_under(&dir, binary_name())?;
+    if is_current_stamp_only(&dest)? {
+        return bookclerk_sandbox::require_spawn_executable(&dest)
+            .with_context(|| format!("validate workerd binary {}", dest.display()));
     }
 
     let asset = host_asset().with_context(|| {
@@ -64,7 +121,7 @@ pub fn ensure_workerd(dir: &Path) -> Result<PathBuf> {
         .read_to_end(&mut binary)
         .context("gunzip workerd payload")?;
 
-    let tmp = dir.join(format!("{}.tmp", binary_name()));
+    let tmp = join_component_under(&dir, &format!("{}.tmp", binary_name()))?;
     {
         let mut f = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(&binary)
@@ -85,7 +142,7 @@ pub fn ensure_workerd(dir: &Path) -> Result<PathBuf> {
         )
     })?;
 
-    let stamp = dir.join(WORKERD_VERSION_STAMP);
+    let stamp = join_component_under(&dir, WORKERD_VERSION_STAMP)?;
     fs::write(&stamp, format!("{WORKERD_RELEASE_TAG}\n"))
         .with_context(|| format!("write {}", stamp.display()))?;
 
@@ -93,7 +150,8 @@ pub fn ensure_workerd(dir: &Path) -> Result<PathBuf> {
         "bookclerk-workerd: installed {WORKERD_RELEASE_TAG} → {}",
         dest.display()
     );
-    Ok(dest)
+    bookclerk_sandbox::require_spawn_executable(&dest)
+        .with_context(|| format!("validate installed workerd {}", dest.display()))
 }
 
 /// Preferred install directory: beside this process, else `dir` argument from callers.
@@ -108,38 +166,46 @@ pub fn ensure_workerd(dir: &Path) -> Result<PathBuf> {
 #[must_use]
 pub fn workerd_bin_path(dir: &Path) -> PathBuf {
     if let Ok(override_bin) = std::env::var("BOOKCLERK_WORKERD_BIN") {
-        return PathBuf::from(override_bin);
+        if !override_bin.is_empty()
+            && !override_bin.contains('\0')
+            && Path::new(&override_bin).is_absolute()
+        {
+            return PathBuf::from(override_bin);
+        }
     }
     dir.join(binary_name())
 }
 
-/// True when the sibling version stamp or `--version` output matches [`WORKERD_RELEASE_TAG`].
-fn is_current(bin: &Path) -> Result<bool> {
-    if let Some(dir) = bin.parent() {
-        let stamp = dir.join(WORKERD_VERSION_STAMP);
-        if stamp.is_file() {
-            let text = fs::read_to_string(&stamp).unwrap_or_default();
-            if text.trim() == WORKERD_RELEASE_TAG {
-                return Ok(true);
-            }
-        }
-    }
-    // Fallback: ask the binary (best-effort).
-    let bin = bookclerk_sandbox::require_spawn_executable(bin)
-        .with_context(|| format!("validate workerd binary {}", bin.display()))?;
-    let output = std::process::Command::new(&bin)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("run {} --version", bin.display()))?;
-    if !output.status.success() {
+/// True when the sibling version stamp matches [`WORKERD_RELEASE_TAG`].
+///
+/// Stamp-only: never `--version`-probes a cache or env path (command-injection
+/// under local threat modeling).
+fn is_current_stamp_only(bin: &Path) -> Result<bool> {
+    let Some(parent) = bin.parent() else {
         return Ok(false);
+    };
+    // Prefer canonical parent when it exists; fall back to lexical join.
+    let stamp = if parent.exists() {
+        join_component_under(parent, WORKERD_VERSION_STAMP)?
+    } else {
+        let stamp = parent.join(WORKERD_VERSION_STAMP);
+        if !stamp.starts_with(parent) {
+            bail!(
+                "stamp {} escapes parent {}",
+                stamp.display(),
+                parent.display()
+            );
+        }
+        stamp
+    };
+    if !stamp.starts_with(parent) && parent.exists() {
+        // join_component_under already checked against canonicalize(parent).
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{stdout}{stderr}");
-    // Tags look like v1.20260810.1; binaries often print without the leading v.
-    let pin = WORKERD_RELEASE_TAG.trim_start_matches('v');
-    Ok(combined.contains(WORKERD_RELEASE_TAG) || combined.contains(pin))
+    match fs::read_to_string(&stamp) {
+        Ok(text) => Ok(text.trim() == WORKERD_RELEASE_TAG),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("read {}", stamp.display())),
+    }
 }
 
 /// Downloads the pinned workerd artifact; fails on non-2xx or a truncated body.

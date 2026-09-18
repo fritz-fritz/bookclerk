@@ -299,35 +299,55 @@ pub fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
             root.display()
         ))
     })?;
-    let path_norm = match path.canonicalize() {
+    // Lexical under-root barrier *before* canonicalize/symlink_metadata sinks.
+    let lexical = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root_norm.join(path)
+    };
+    if !lexical.starts_with(&root_norm) {
+        return Err(CatalogError::message(format!(
+            "path {} escapes root {}",
+            lexical.display(),
+            root_norm.display()
+        )));
+    }
+    let path_norm = match lexical.canonicalize() {
         Ok(c) => c,
         Err(err) => {
-            match fs::symlink_metadata(path) {
+            match fs::symlink_metadata(&lexical) {
                 Ok(meta) if meta.file_type().is_symlink() => {
                     return Err(CatalogError::message(format!(
                         "refusing dangling or unresolvable symlink {}: {err}",
-                        path.display()
+                        lexical.display()
                     )));
                 }
                 Ok(_) => {
                     return Err(CatalogError::message(format!(
                         "could not canonicalize existing path {} under {}: {err}",
-                        path.display(),
+                        lexical.display(),
                         root.display()
                     )));
                 }
                 Err(meta_err) if meta_err.kind() != std::io::ErrorKind::NotFound => {
                     return Err(CatalogError::message(format!(
                         "could not stat path {} under {}: {meta_err}",
-                        path.display(),
+                        lexical.display(),
                         root.display()
                     )));
                 }
                 Err(_) => {}
             }
             let mut suffix = Vec::new();
-            let mut cursor = path.to_path_buf();
+            let mut cursor = lexical.clone();
             loop {
+                if !cursor.starts_with(&root_norm) {
+                    return Err(CatalogError::message(format!(
+                        "path {} escapes root {}",
+                        cursor.display(),
+                        root_norm.display()
+                    )));
+                }
                 match cursor.canonicalize() {
                     Ok(canon) => {
                         let mut out = canon;

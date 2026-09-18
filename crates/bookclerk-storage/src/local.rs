@@ -531,6 +531,7 @@ async fn list_recursive(
     let entries = sorted_dir_entries(dir).await?;
     for entry in entries {
         let path = entry.path();
+        // Lexical under-root before metadata/canonicalize sinks.
         if !path.starts_with(root) {
             continue;
         }
@@ -549,6 +550,10 @@ async fn list_recursive(
         {
             continue;
         }
+        let path = match tokio::fs::canonicalize(&path).await {
+            Ok(p) if p.starts_with(root) => p,
+            _ => continue,
+        };
         let rel = path
             .strip_prefix(root)
             .map_err(|_| StorageError::InvalidKey(path.display().to_string()))?;
@@ -602,6 +607,7 @@ async fn bounded_list_page_walk(
     };
     while let Some(entry) = read_dir.next_entry().await? {
         let path = entry.path();
+        // Lexical under-root before metadata/canonicalize sinks.
         if !path.starts_with(root) {
             continue;
         }
@@ -630,6 +636,10 @@ async fn bounded_list_page_walk(
         {
             continue;
         }
+        let path = match tokio::fs::canonicalize(&path).await {
+            Ok(p) if p.starts_with(root) => p,
+            _ => continue,
+        };
         let rel = path
             .strip_prefix(root)
             .map_err(|_| StorageError::InvalidKey(path.display().to_string()))?;

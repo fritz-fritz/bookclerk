@@ -58,6 +58,7 @@ fn require_single_path_component<'a>(label: &str, value: &'a str) -> Result<&'a 
 /// Requires `root` to already exist and canonicalize. For missing leaves,
 /// canonicalizes the nearest existing parent and rejoins the suffix — never
 /// returns a raw path that skipped canonicalize + `starts_with`.
+#[cfg(test)]
 fn join_under(root: &Path, rel: impl AsRef<Path>) -> Result<PathBuf> {
     let rel = rel.as_ref();
     if rel.is_absolute() {
@@ -107,30 +108,51 @@ fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
     }
     let root_norm =
         fs::canonicalize(root).with_context(|| format!("canonicalize root {}", root.display()))?;
-    let path_norm = match fs::canonicalize(path) {
+    // Lexical under-root barrier *before* canonicalize/symlink_metadata sinks.
+    let lexical = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root_norm.join(path)
+    };
+    if !lexical.starts_with(&root_norm) {
+        bail!(
+            "path {} escapes root {}",
+            lexical.display(),
+            root_norm.display()
+        );
+    }
+    let path_norm = match fs::canonicalize(&lexical) {
         Ok(c) => c,
         Err(err) => {
-            match fs::symlink_metadata(path) {
+            match fs::symlink_metadata(&lexical) {
                 Ok(meta) if meta.file_type().is_symlink() => {
                     bail!(
                         "refusing dangling or unresolvable symlink {}: {err}",
-                        path.display()
+                        lexical.display()
                     );
                 }
                 Ok(_) => {
                     bail!(
                         "could not canonicalize existing path {}: {err}",
-                        path.display()
+                        lexical.display()
                     );
                 }
                 Err(meta_err) if meta_err.kind() != std::io::ErrorKind::NotFound => {
-                    bail!("could not stat path {}: {meta_err}", path.display());
+                    bail!("could not stat path {}: {meta_err}", lexical.display());
                 }
                 Err(_) => {}
             }
             let mut suffix = Vec::new();
-            let mut cursor = path.to_path_buf();
+            let mut cursor = lexical.clone();
             loop {
+                // Keep walking only while the cursor stays under root_norm.
+                if !cursor.starts_with(&root_norm) {
+                    bail!(
+                        "path {} escapes root {}",
+                        cursor.display(),
+                        root_norm.display()
+                    );
+                }
                 match fs::canonicalize(&cursor) {
                     Ok(canon) => {
                         let mut out = canon;
