@@ -13,13 +13,7 @@ fn join_plugin_toml(root: &Path) -> Result<PathBuf> {
     }
     let root_norm = match fs::canonicalize(root) {
         Ok(c) => c,
-        Err(_) => {
-            let s = root.to_string_lossy().into_owned();
-            if s.contains("..") || s.contains('\0') {
-                bail!("refusing unsafe plugin root: {}", root.display());
-            }
-            PathBuf::from(s)
-        }
+        Err(_) => root.to_path_buf(),
     };
     let path = root_norm.join("plugin.toml");
     for comp in path.components() {
@@ -34,7 +28,7 @@ fn join_plugin_toml(root: &Path) -> Result<PathBuf> {
             root_norm.display()
         );
     }
-    Ok(PathBuf::from(path.to_string_lossy().into_owned()))
+    Ok(path)
 }
 
 /// Reads and validates `plugin.toml` from the guest install root.

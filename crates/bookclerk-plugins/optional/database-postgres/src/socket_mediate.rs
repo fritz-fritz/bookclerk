@@ -491,11 +491,6 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let dir = {
-            let s = dir.to_string_lossy().into_owned();
-            assert!(!s.contains("..") && !s.contains('\0'));
-            std::path::PathBuf::from(s)
-        };
         std::fs::create_dir_all(&dir).unwrap();
         let proxy_path = dir.join("proxy.sock");
         let listener = tokio::net::UnixListener::bind(&proxy_path).unwrap();

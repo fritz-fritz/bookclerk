@@ -181,17 +181,13 @@ def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
         return True
     try:
         validated = validate_spawn_executable(bin_path)
-        if validated.name not in ("workerd", "workerd.exe"):
-            raise ValueError(f"expected workerd binary, got {validated.name}")
-        # Literal program name + PATH to the validated directory.
-        env = {**os.environ, "PATH": str(validated.parent)}
+        # Probe the selected path directly (do not rewrite PATH / spawn by basename).
         proc = subprocess.run(
-            ["workerd", "--version"],
+            [os.fspath(validated), "--version"],
             capture_output=True,
             text=True,
             check=False,
             shell=False,
-            env=env,
         )
     except (OSError, ValueError):
         return False
