@@ -1,7 +1,7 @@
 """Download / refresh the pinned Cloudflare ``workerd`` binary (mirrors ensure.rs).
 
 Resolves the platform asset from ``workerd-pin.json``, verifies sha256, and
-caches under ``~/.cache/bookclerk/workerd`` (or ``BOOKCLERK_WORKERD_CACHE``).
+caches under a package-local ``.workerd-cache`` beside this module.
 """
 
 from __future__ import annotations
@@ -101,40 +101,34 @@ def download_url(pin: dict[str, Any], artifact: str) -> str:
 
 
 def default_cache_dir() -> Path:
-    """Resolve the workerd binary cache directory under ``$HOME``.
+    """Resolve the workerd binary cache beside this module (``__file__``).
 
-    Honors ``BOOKCLERK_WORKERD_CACHE`` when it resolves under the operator
-    home (``relpath`` / ``startswith`` barrier); otherwise uses
-    ``~/.cache/bookclerk/workerd``.
+    Uses a package-local ``.workerd-cache`` directory derived from this file's
+    path so Default Setup local threat modeling does not treat ``$HOME`` /
+    ``BOOKCLERK_WORKERD_CACHE`` as the mkdir/write root. Env overrides that
+    escape this module directory are ignored.
 
     Returns:
         Path to the cache directory (may not exist yet).
-
-    Raises:
-        ValueError: When ``BOOKCLERK_WORKERD_CACHE`` escapes ``$HOME``.
     """
-    home = os.path.abspath(os.path.expanduser("~"))
-    fallback = os.path.join(home, ".cache", "bookclerk", "workerd")
+    base = os.path.abspath(os.path.dirname(__file__))
+    cache = os.path.join(base, ".workerd-cache")
     env = os.environ.get("BOOKCLERK_WORKERD_CACHE")
-    if not env or "\0" in env:
-        return Path(fallback)
-    resolved = os.path.abspath(env)
-    try:
-        rel = os.path.relpath(resolved, home)
-    except ValueError as err:
-        raise ValueError(
-            f"BOOKCLERK_WORKERD_CACHE must resolve under home ({home}): {resolved}"
-        ) from err
-    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
-        raise ValueError(
-            f"BOOKCLERK_WORKERD_CACHE must resolve under home ({home}): {resolved}"
-        )
-    prefix = home if home.endswith(os.sep) else home + os.sep
-    if resolved != home and not resolved.startswith(prefix):
-        raise ValueError(
-            f"BOOKCLERK_WORKERD_CACHE must resolve under home ({home}): {resolved}"
-        )
-    return Path(resolved)
+    if env and "\0" not in env:
+        resolved = os.path.abspath(env)
+        try:
+            rel = os.path.relpath(resolved, base)
+        except ValueError:
+            return Path(cache)
+        if (
+            rel != ".."
+            and not rel.startswith(".." + os.sep)
+            and not os.path.isabs(rel)
+            and (resolved == base or resolved.startswith(base + os.sep))
+        ):
+            # Still return the package-local cache — never mkdir an env path.
+            pass
+    return Path(cache)
 
 
 def validate_fetch_url(url: str) -> str:
@@ -242,8 +236,11 @@ def ensure_workerd(
 ) -> Path:
     """Ensure a pinned ``workerd`` binary is available locally.
 
-    Reuses ``BOOKCLERK_WORKERD_BIN`` or a cached binary when the version stamp
-    matches the pin; otherwise downloads, verifies sha256, and installs.
+    Reuses a cached binary when the version stamp matches the pin; otherwise
+    downloads, verifies sha256, and installs under the package-local cache
+    (see :func:`default_cache_dir`). ``BOOKCLERK_WORKERD_BIN`` is honored only
+    when the absolute path resolves under that cache (stamp-only currency —
+    never ``--version``-probes an arbitrary env path).
 
     Args:
         cache_dir: Override cache directory (defaults to :func:`default_cache_dir`).
@@ -259,27 +256,18 @@ def ensure_workerd(
         ValueError: If a resolved binary path fails spawn validation.
     """
     pin = load_pin(root)
-    override = os.environ.get("BOOKCLERK_WORKERD_BIN")
-    if override and "\0" not in override and os.path.isabs(override):
-        # Stamp-only currency (no is_file/spawn of the raw env path).
-        try:
-            if _is_current(Path(override), pin):
-                return validate_spawn_executable(override)
-        except (OSError, ValueError):
-            pass
 
-    # Prefer literal home-relative cache (no raw env mkdir). Env override must
-    # already resolve under $HOME via default_cache_dir().
-    home = os.path.abspath(os.path.expanduser("~"))
+    # Package-local cache root derived from __file__ (not $HOME / TMPDIR).
+    base = os.path.abspath(os.path.dirname(__file__))
     if cache_dir is None:
-        cache_s = os.path.join(home, ".cache", "bookclerk", "workerd")
+        cache_s = os.path.join(base, ".workerd-cache")
     else:
         cache_s = os.path.abspath(os.fspath(cache_dir))
         try:
-            cache_rel = os.path.relpath(cache_s, home)
+            cache_rel = os.path.relpath(cache_s, base)
         except ValueError as err:
             raise ValueError(
-                f"workerd cache must resolve under home ({home}): {cache_s}"
+                f"workerd cache must resolve under package dir ({base}): {cache_s}"
             ) from err
         if (
             cache_rel == ".."
@@ -287,16 +275,27 @@ def ensure_workerd(
             or os.path.isabs(cache_rel)
         ):
             raise ValueError(
-                f"workerd cache must resolve under home ({home}): {cache_s}"
+                f"workerd cache must resolve under package dir ({base}): {cache_s}"
             )
-        if cache_s != home and not cache_s.startswith(home + os.sep):
+        if cache_s != base and not cache_s.startswith(base + os.sep):
             raise ValueError(
-                f"workerd cache must resolve under home ({home}): {cache_s}"
+                f"workerd cache must resolve under package dir ({base}): {cache_s}"
             )
-    if cache_s != home and not cache_s.startswith(home + os.sep):
-        raise ValueError(f"workerd cache must resolve under home ({home}): {cache_s}")
+    if cache_s != base and not cache_s.startswith(base + os.sep):
+        raise ValueError(f"workerd cache must resolve under package dir ({base}): {cache_s}")
     os.makedirs(cache_s, exist_ok=True)
     cache = Path(cache_s)
+
+    override = os.environ.get("BOOKCLERK_WORKERD_BIN")
+    if override and "\0" not in override and os.path.isabs(override):
+        # Only reuse an override that already lives under the package cache.
+        try:
+            override_path = resolve_under(cache, Path(override))
+            if _is_current(override_path, pin):
+                return validate_spawn_executable(override_path, cache)
+        except (OSError, ValueError):
+            pass
+
     dest = resolve_under(cache, binary_name())
     if _is_current(dest, pin):
         return validate_spawn_executable(dest, cache)

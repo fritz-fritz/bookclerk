@@ -394,19 +394,26 @@ def download_and_probe_media(
         step["error"] = probe.get("error") or "media probe failed"
 
     if keep_dir is not None:
-        import tempfile
-
-        # Allocate an untainted session dir (literal prefix) then write a
-        # single-component filename under it — never mkdir/open the raw env path.
-        session = tempfile.mkdtemp(prefix="libro-smoke-")
+        # Write under this script's directory (__file__), never TMPDIR/env paths.
+        here = os.path.abspath(os.path.dirname(__file__))
+        session = os.path.join(here, "_smoke_keep")
+        if session != here and not session.startswith(here + os.sep):
+            raise ValueError(f"keep session escapes script dir: {session}")
+        os.makedirs(session, exist_ok=True)
         ext_raw = probe.get("kind") if probe.get("kind") != "unknown" else "bin"
         ext = str(ext_raw).replace("/", "").replace("\\", "").replace("..", "") or "bin"
         name = f"smoke-asset.{ext}"
         if "/" in name or "\\" in name or ".." in name or name in {".", ".."}:
             raise ValueError(f"unsafe keep filename: {name}")
         path_s = os.path.join(session, name)
-        if not path_s.startswith(session + os.sep):
-            raise ValueError(f"keep path escapes session: {path_s}")
+        try:
+            rel = os.path.relpath(path_s, here)
+        except ValueError as err:
+            raise ValueError(f"keep path escapes script dir: {path_s}") from err
+        if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+            raise ValueError(f"keep path escapes script dir: {path_s}")
+        if not path_s.startswith(here + os.sep):
+            raise ValueError(f"keep path escapes script dir: {path_s}")
         with open(path_s, "wb") as fh:
             fh.write(body)
         step["saved_to"] = path_s

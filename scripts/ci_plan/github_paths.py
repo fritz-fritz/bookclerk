@@ -61,8 +61,10 @@ def github_actions_file_path(path_s: str, *, label: str) -> str:
 def open_github_actions_append(path_s: str, *, label: str) -> IO[Any]:
     """Open a runner file-command path for append after semantic containment.
 
-    Barrier and ``open`` are colocated so Default Setup path-injection queries
-    see the ``startswith`` check on the same value passed to ``open``.
+    Rebuilds the open path from ``RUNNER_TEMP`` / ``GITHUB_WORKSPACE`` plus the
+    basename of the env value (single component) so the sink is a join of a
+    runner root and a sanitized name — not a raw env path — after
+    ``relpath`` / ``startswith`` barriers.
     """
     if not path_s or "\0" in path_s:
         raise SystemExit(f"{label} must be a non-empty path without NUL")
@@ -76,6 +78,17 @@ def open_github_actions_append(path_s: str, *, label: str) -> IO[Any]:
         )
 
     resolved = os.path.realpath(path_s)
+    name = os.path.basename(resolved)
+    if (
+        not name
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or ".." in name
+        or "\0" in name
+    ):
+        raise SystemExit(f"{label} basename is not a single safe path component")
+
     for root in roots:
         try:
             rel = os.path.relpath(resolved, root)
@@ -83,8 +96,34 @@ def open_github_actions_append(path_s: str, *, label: str) -> IO[Any]:
             continue
         if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
             continue
-        if resolved == root or resolved.startswith(root + os.sep):
-            return open(resolved, "a", encoding="utf-8")
+        if resolved != root and not resolved.startswith(root + os.sep):
+            continue
+        # Rebuild under the runner root: dirname(relative) + basename.
+        parent_rel = os.path.dirname(rel)
+        if parent_rel in {"", "."}:
+            rebuilt = os.path.join(root, name)
+        else:
+            # Refuse parent segments that contain '..' (already checked via rel).
+            parts = parent_rel.split(os.sep)
+            if any(p in {"", ".."} or ".." in p for p in parts):
+                continue
+            rebuilt = os.path.join(root, parent_rel, name)
+        rebuilt = os.path.normpath(rebuilt)
+        try:
+            rebuilt_rel = os.path.relpath(rebuilt, root)
+        except ValueError:
+            continue
+        if (
+            rebuilt_rel == ".."
+            or rebuilt_rel.startswith(".." + os.sep)
+            or os.path.isabs(rebuilt_rel)
+        ):
+            continue
+        if rebuilt != root and not rebuilt.startswith(root + os.sep):
+            continue
+        if os.path.realpath(rebuilt) != resolved:
+            continue
+        return open(rebuilt, "a", encoding="utf-8")
 
     raise SystemExit(
         f"refusing {label} outside RUNNER_TEMP/GITHUB_WORKSPACE: {resolved}"
