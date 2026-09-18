@@ -87,6 +87,96 @@ def test_package_python_vendors_sdk_package(tmp_path: Path):
     assert any(n.endswith("modules/plugin.py") for n in names)
 
 
+def test_package_refuses_module_symlink_without_outside_bytes(tmp_path: Path):
+    import tarfile
+
+    from bookclerk_plugin_sdk.path_guard import copy_tree_no_symlinks
+
+    plugin = tmp_path / "plugin"
+    modules = plugin / "modules"
+    modules.mkdir(parents=True)
+    (plugin / "plugin.toml").write_text(
+        (ECHO_PY / "plugin.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (modules / "plugin.py").write_text(
+        (ECHO_PY / "modules" / "plugin.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside.txt"
+    outside.write_text("SECRET_OUTSIDE_BYTES", encoding="utf-8")
+    leak = modules / "leak.txt"
+    leak.symlink_to(outside)
+
+    dest = tmp_path / "copy"
+    with pytest.raises(ValueError, match="symlink"):
+        copy_tree_no_symlinks(modules, dest)
+
+    out = tmp_path / "dist"
+    with pytest.raises(ValueError, match="symlink"):
+        package_plugin(plugin, out)
+    assert not any(out.glob("*.tar.gz"))
+    assert "SECRET_OUTSIDE_BYTES" not in "".join(
+        p.read_text(encoding="utf-8", errors="ignore")
+        for p in out.rglob("*")
+        if p.is_file()
+    )
+
+
+def test_refuse_symlink_blocks_bookclerk_dir_link(tmp_path: Path):
+    from bookclerk_plugin_sdk.path_guard import refuse_symlink_path, resolve_under
+    from bookclerk_plugin_sdk.sparse_workerd.config import materialize_config
+
+    plugin = tmp_path / "plugin"
+    modules = plugin / "modules"
+    modules.mkdir(parents=True)
+    (plugin / "plugin.toml").write_text(
+        (ECHO_PY / "plugin.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (modules / "plugin.py").write_text(
+        (ECHO_PY / "modules" / "plugin.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside_dir"
+    outside.mkdir()
+    (plugin / ".bookclerk").symlink_to(outside)
+    bookclerk = resolve_under(plugin, ".bookclerk")
+    with pytest.raises(ValueError, match="symlink"):
+        refuse_symlink_path(plugin, bookclerk)
+    with pytest.raises(ValueError, match="symlink"):
+        materialize_config(
+            plugin,
+            __import__("tomllib").loads((plugin / "plugin.toml").read_text(encoding="utf-8")),
+            listen_port=0,
+            bridge_token="token",
+        )
+    assert not (outside / "bridge.js").exists()
+
+
+def test_refuse_symlink_blocks_main_module_link(tmp_path: Path):
+    from bookclerk_plugin_sdk.sparse_workerd.config import materialize_config
+    import tomllib
+
+    plugin = tmp_path / "plugin"
+    modules = plugin / "modules"
+    modules.mkdir(parents=True)
+    (plugin / "plugin.toml").write_text(
+        (ECHO_PY / "plugin.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside_main.py"
+    outside.write_text("# outside\n", encoding="utf-8")
+    (modules / "plugin.py").symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        materialize_config(
+            plugin,
+            tomllib.loads((plugin / "plugin.toml").read_text(encoding="utf-8")),
+            listen_port=0,
+            bridge_token="token",
+        )
+
+
 def test_sync_embed_optional_vendor(tmp_path: Path):
     staging = tmp_path / "plugin"
     staging.mkdir()
