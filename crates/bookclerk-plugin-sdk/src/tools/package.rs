@@ -336,3 +336,164 @@ fn sha256_file(path: &Path) -> Result<String> {
     }
     Ok(hex::encode(hasher.finalize()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_minimal_workerd_plugin(plugin: &Path) {
+        std::fs::create_dir_all(plugin.join("modules")).unwrap();
+        std::fs::write(
+            plugin.join("plugin.toml"),
+            r#"api_version = 3
+id = "pkg_symlink_test"
+version = "0.0.1"
+runtime = "workerd"
+entrypoints = ["cli"]
+
+[workerd]
+compatibility_date = "2026-08-01"
+main_module = "index.js"
+modules_dir = "modules"
+entrypoint = "default"
+
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            plugin.join("modules").join("index.js"),
+            "export default class P {}\n",
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_refuses_module_file_symlink_without_outside_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("plugin");
+        write_minimal_workerd_plugin(&plugin);
+        let outside = dir.path().join("outside.txt");
+        {
+            let mut f = File::create(&outside).unwrap();
+            f.write_all(b"SECRET_OUTSIDE_BYTES").unwrap();
+        }
+        std::os::unix::fs::symlink(&outside, plugin.join("modules").join("leak.txt")).unwrap();
+
+        let out = dir.path().join("dist");
+        let err = package_plugin(&plugin, &out).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected symlink refusal, got {err}"
+        );
+        assert!(
+            !out.exists()
+                || std::fs::read_dir(&out)
+                    .map(|entries| {
+                        !entries
+                            .filter_map(|e| e.ok())
+                            .any(|e| e.path().extension().is_some_and(|ext| ext == "gz"))
+                    })
+                    .unwrap_or(true),
+            "must not publish a successful .tar.gz"
+        );
+        assert!(!out.join("SHA256SUMS").is_file());
+        // Staging may remain after failure; ensure outside bytes were not copied in.
+        if let Ok(entries) = std::fs::read_dir(&out) {
+            for entry in entries.flatten() {
+                assert!(
+                    !walkdir_contains_secret(&entry.path(), b"SECRET_OUTSIDE_BYTES"),
+                    "outside secret must not appear under {}",
+                    entry.path().display()
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_refuses_modules_root_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("plugin");
+        write_minimal_workerd_plugin(&plugin);
+        let outside_modules = dir.path().join("outside_modules");
+        std::fs::create_dir_all(&outside_modules).unwrap();
+        std::fs::write(
+            outside_modules.join("index.js"),
+            "export default class X {}\n",
+        )
+        .unwrap();
+        std::fs::remove_dir_all(plugin.join("modules")).unwrap();
+        std::os::unix::fs::symlink(&outside_modules, plugin.join("modules")).unwrap();
+
+        let out = dir.path().join("dist");
+        let err = package_plugin(&plugin, &out).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert!(!out.join("SHA256SUMS").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_refuses_embedded_logo_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("plugin");
+        write_minimal_workerd_plugin(&plugin);
+        let toml = r#"api_version = 3
+id = "pkg_symlink_test"
+version = "0.0.1"
+runtime = "workerd"
+entrypoints = ["cli"]
+logo = "logo.png"
+
+[workerd]
+compatibility_date = "2026-08-01"
+main_module = "index.js"
+modules_dir = "modules"
+entrypoint = "default"
+
+[capabilities.network]
+mode = "deny"
+"#;
+        std::fs::write(plugin.join("plugin.toml"), toml).unwrap();
+        let outside = dir.path().join("outside.png");
+        std::fs::write(&outside, b"FAKEPNG").unwrap();
+        std::os::unix::fs::symlink(&outside, plugin.join("logo.png")).unwrap();
+
+        let out = dir.path().join("dist");
+        let err = package_plugin(&plugin, &out).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+    }
+
+    fn walkdir_contains_secret(root: &Path, secret: &[u8]) -> bool {
+        fn walk(path: &Path, secret: &[u8]) -> bool {
+            let Ok(meta) = std::fs::symlink_metadata(path) else {
+                return false;
+            };
+            if meta.file_type().is_symlink() {
+                return false;
+            }
+            if meta.is_file() {
+                if let Ok(bytes) = std::fs::read(path) {
+                    if bytes.windows(secret.len()).any(|w| w == secret) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            if meta.is_dir() {
+                if let Ok(rd) = std::fs::read_dir(path) {
+                    for entry in rd.flatten() {
+                        if walk(&entry.path(), secret) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        walk(root, secret)
+    }
+}

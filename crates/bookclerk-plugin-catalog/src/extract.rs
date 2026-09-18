@@ -479,4 +479,21 @@ mod tests {
             "{err}"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn require_under_rejects_dangling_symlink_leaf() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let missing = outside.join("new.txt");
+        let link = root.path().join("new.txt");
+        std::os::unix::fs::symlink(&missing, &link).unwrap();
+        let err = require_under(root.path(), &link).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected dangling symlink refusal, got {err}"
+        );
+        assert!(!missing.exists(), "must not create the outside target");
+    }
 }
