@@ -97,6 +97,72 @@ def resolve_under(root: Path | str, *parts: str | Path) -> Path:
     return Path(resolved_s)
 
 
+def ensure_dir_under(root: Path | str, rel: str | Path) -> Path:
+    """Create ``root`` / ``rel`` after realpath + ``startswith`` (sink colocated)."""
+    resolved = resolve_under(root, rel)
+    resolved.mkdir(parents=True, exist_ok=True)
+    root_s = os.path.realpath(os.fspath(root))
+    canon = os.path.realpath(os.fspath(resolved))
+    if not _is_under(root_s, canon):
+        raise ValueError(f"path {canon} escapes root {root_s}")
+    return Path(canon)
+
+
+def write_file_under(root: Path | str, name: str, contents: str | bytes) -> Path:
+    """Write ``contents`` to ``root`` / ``name`` after realpath + ``startswith``.
+
+    Creates the file when missing so realpath succeeds, then writes through the
+    realpath'd value in this function (sink + barrier colocated).
+    """
+    if (
+        not name
+        or "\0" in name
+        or "/" in name
+        or "\\" in name
+        or name in {".", ".."}
+        or ".." in name
+    ):
+        raise ValueError(f"file name must be a single path component: {name}")
+    root_s = os.path.realpath(os.fspath(root))
+    out = Path(root_s) / name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not out.exists():
+        out.write_bytes(b"")
+    canon = Path(os.path.realpath(out))
+    if not _is_under(root_s, os.fspath(canon)):
+        raise ValueError(f"path {canon} escapes root {root_s}")
+    if isinstance(contents, str):
+        canon.write_text(contents, encoding="utf-8")
+    else:
+        canon.write_bytes(contents)
+    return canon
+
+
+def copy_file_under(root: Path | str, name: str, src: Path | str) -> Path:
+    """Copy ``src`` to ``root`` / ``name`` after realpath + ``startswith`` on dest."""
+    import shutil
+
+    if (
+        not name
+        or "\0" in name
+        or "/" in name
+        or "\\" in name
+        or name in {".", ".."}
+        or ".." in name
+    ):
+        raise ValueError(f"file name must be a single path component: {name}")
+    root_s = os.path.realpath(os.fspath(root))
+    out = Path(root_s) / name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not out.exists():
+        out.write_bytes(b"")
+    canon = Path(os.path.realpath(out))
+    if not _is_under(root_s, os.fspath(canon)):
+        raise ValueError(f"path {canon} escapes root {root_s}")
+    shutil.copy2(src, canon, follow_symlinks=False)
+    return canon
+
+
 def refuse_symlink_path(trusted_root: Path | str, path: Path | str) -> Path:
     """Require ``path`` under ``trusted_root`` with no symlink suffix components.
 

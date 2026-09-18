@@ -187,6 +187,105 @@ export function assertPathInside(root: string, candidate: string): string {
 }
 
 /**
+ * Create `root` / `rel` as a directory after realpath + `startsWith`.
+ *
+ * Performs mkdir, realpath, and the prefix check in this function so Default
+ * Setup path-injection queries barrier the same value used at the sink.
+ *
+ * @param root - Trusted directory.
+ * @param rel - Relative suffix (may be multi-segment when each segment is safe).
+ * @returns Canonical absolute directory path under `root`.
+ */
+export function ensureDirUnder(root: string, rel: string): string {
+  const resolved = assertPathInside(root, rel);
+  fs.mkdirSync(resolved, { recursive: true });
+  const rootReal = fs.realpathSync(path.resolve(root));
+  const canon = fs.realpathSync(resolved);
+  const rootPrefix = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
+  if (canon !== rootReal && !canon.startsWith(rootPrefix)) {
+    throw new Error(`path ${canon} escapes root ${rootReal}`);
+  }
+  return canon;
+}
+
+/**
+ * Write `contents` to `root` / `name` (single component) after realpath + `startsWith`.
+ *
+ * Creates the file when missing so realpath succeeds, then writes through the
+ * realpath'd value in this function (sink + barrier colocated).
+ *
+ * @param root - Trusted directory.
+ * @param name - Single path component filename.
+ * @param contents - Bytes or string to write.
+ * @returns Canonical absolute file path under `root`.
+ */
+export function writeFileUnder(
+  root: string,
+  name: string,
+  contents: string | NodeJS.ArrayBufferView,
+): string {
+  if (
+    !name ||
+    name.includes("\0") ||
+    name.includes("/") ||
+    name.includes("\\") ||
+    name === "." ||
+    name === ".." ||
+    name.includes("..")
+  ) {
+    throw new Error(`file name must be a single path component: ${name}`);
+  }
+  const rootReal = fs.realpathSync(path.resolve(root));
+  const out = path.join(rootReal, name);
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  if (!fs.existsSync(out)) {
+    fs.writeFileSync(out, "");
+  }
+  const canon = fs.realpathSync(out);
+  const rootPrefix = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
+  if (canon !== rootReal && !canon.startsWith(rootPrefix)) {
+    throw new Error(`path ${canon} escapes root ${rootReal}`);
+  }
+  fs.writeFileSync(canon, contents);
+  return canon;
+}
+
+/**
+ * Copy `src` to `root` / `name` after realpath + `startsWith` on the destination.
+ *
+ * @param root - Trusted destination directory.
+ * @param name - Single path component filename.
+ * @param src - Absolute source file (already validated by the caller).
+ * @returns Canonical absolute destination path under `root`.
+ */
+export function copyFileUnder(root: string, name: string, src: string): string {
+  if (
+    !name ||
+    name.includes("\0") ||
+    name.includes("/") ||
+    name.includes("\\") ||
+    name === "." ||
+    name === ".." ||
+    name.includes("..")
+  ) {
+    throw new Error(`file name must be a single path component: ${name}`);
+  }
+  const rootReal = fs.realpathSync(path.resolve(root));
+  const out = path.join(rootReal, name);
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  if (!fs.existsSync(out)) {
+    fs.writeFileSync(out, "");
+  }
+  const canon = fs.realpathSync(out);
+  const rootPrefix = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
+  if (canon !== rootReal && !canon.startsWith(rootPrefix)) {
+    throw new Error(`path ${canon} escapes root ${rootReal}`);
+  }
+  fs.copyFileSync(src, canon);
+  return canon;
+}
+
+/**
  * Require `candidate` under `trustedRoot` with no symlink suffix components.
  *
  * Resolves the trusted root identity once (a symlinked operator/plugin root is
@@ -373,8 +472,7 @@ export async function ensureWorkerd(
     fs.chmodSync(tmp, 0o755);
   }
   fs.renameSync(tmp, dest);
-  const stampPath = assertPathInside(absCache, stampFileName(pin));
-  fs.writeFileSync(stampPath, `${pin.release_tag}\n`);
+  writeFileUnder(absCache, stampFileName(pin), `${pin.release_tag}\n`);
   console.error(
     `bookclerk-plugin: installed ${pin.release_tag} → ${dest}`,
   );

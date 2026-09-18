@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import type { Manifest } from "../tools/validate.js";
-import { assertPathInside, refuseSymlinkPath, packageRoot } from "./ensure.js";
+import { assertPathInside, refuseSymlinkPath, packageRoot, ensureDirUnder, writeFileUnder, copyFileUnder } from "./ensure.js";
 
 /**
  * Require a single relative path component (no separators, `.`, or `..`).
@@ -365,18 +365,13 @@ export function materializeConfig(
   const networkMode = manifest.capabilities?.network?.mode ?? "deny";
   const networkDomains = manifest.capabilities?.network?.domains ?? [];
 
-  const bookclerkDir = assertPathInside(stateDir, ".bookclerk");
+  const bookclerkDir = ensureDirUnder(stateDir, ".bookclerk");
   refuseSymlinkPath(stateDir, bookclerkDir);
-  fs.mkdirSync(bookclerkDir, { recursive: true });
   for (const name of ["bridge.js", "egress.js"] as const) {
     const src = assertPathInside(sdkRoot, path.join("bridge", name));
-    const dest = assertPathInside(bookclerkDir, name);
-    refuseSymlinkPath(stateDir, dest);
-    fs.copyFileSync(src, dest);
+    copyFileUnder(bookclerkDir, name, src);
   }
-  const adapterDest = assertPathInside(bookclerkDir, "adapter.js");
-  refuseSymlinkPath(stateDir, adapterDest);
-  fs.writeFileSync(adapterDest, ADAPTER_JS);
+  writeFileUnder(bookclerkDir, "adapter.js", ADAPTER_JS);
 
   const modulesDir = assertPathInside(root, modulesDirName);
   refuseSymlinkPath(root, modulesDir);
@@ -428,14 +423,10 @@ export function materializeConfig(
   const sdkJsPath = assertPathInside(sdkRoot, path.join("embed", "bookclerk_plugin.js"));
   const sdkJs = fs.readFileSync(sdkJsPath, "utf8");
   const writeGenerated = (name: string, contents: string | Buffer) => {
-    const dest = assertPathInside(bookclerkDir, name);
-    refuseSymlinkPath(stateDir, dest);
-    fs.writeFileSync(dest, contents);
+    writeFileUnder(bookclerkDir, name, contents);
   };
   const copyGenerated = (src: string, name: string) => {
-    const dest = assertPathInside(bookclerkDir, name);
-    refuseSymlinkPath(stateDir, dest);
-    fs.copyFileSync(src, dest);
+    copyFileUnder(bookclerkDir, name, src);
   };
 
   writeGenerated("sdk-workerd.js", sdkJs);
@@ -625,9 +616,7 @@ const bridgeWorker :Workerd.Worker = (
     options.configName ?? "workerd-config.capnp",
     "configName",
   );
-  const configPath = assertPathInside(stateDir, configName);
-  refuseSymlinkPath(stateDir, configPath);
-  fs.writeFileSync(configPath, config);
+  const configPath = writeFileUnder(stateDir, configName, config);
   return {
     configPath,
     listenAddr,

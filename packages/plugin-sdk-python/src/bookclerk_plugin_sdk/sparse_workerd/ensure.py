@@ -15,7 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from ..path_guard import resolve_under
+from ..path_guard import resolve_under, write_file_under
 
 _PKG = Path(__file__).resolve().parent.parent  # bookclerk_plugin_sdk/
 
@@ -265,7 +265,6 @@ def ensure_workerd(
     if platform.system().lower() != "windows":
         tmp.chmod(0o755)
     tmp.replace(dest)
-    stamp_path = resolve_under(cache, _stamp_file_name(pin))
-    stamp_path.write_text(f"{pin['release_tag']}\n", encoding="utf-8")
+    write_file_under(cache, _stamp_file_name(pin), f"{pin['release_tag']}\n")
     print(f"bookclerk-plugin: installed {pin['release_tag']} → {dest}", flush=True)
     return validate_spawn_executable(dest, cache)

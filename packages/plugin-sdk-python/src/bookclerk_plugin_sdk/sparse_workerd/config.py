@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from .ensure import package_root
-from ..path_guard import resolve_under, refuse_symlink_path
+from ..path_guard import (
+    resolve_under,
+    refuse_symlink_path,
+    ensure_dir_under,
+    write_file_under,
+    copy_file_under,
+)
 
 SDK_JS_MODULE_NAMES = ("@bookclerk/plugin-sdk/workerd", "@bookclerk/plugin-sdk")
 """Module names used when embedding the TypeScript workerd SDK."""
@@ -381,19 +387,14 @@ def materialize_config(
     network_mode = net.get("mode") or "deny"
     network_domains = list(net.get("domains") or [])
 
-    bookclerk_dir = resolve_under(state_dir, ".bookclerk")
+    bookclerk_dir = ensure_dir_under(state_dir, ".bookclerk")
     refuse_symlink_path(state_dir, bookclerk_dir)
-    bookclerk_dir.mkdir(parents=True, exist_ok=True)
     for name in ("bridge.js", "egress.js"):
         src = resolve_under(sdk_root, "bridge", name)
         if not src.is_file():
             raise FileNotFoundError(f"missing vendored bridge {src}")
-        dest = resolve_under(bookclerk_dir, name)
-        refuse_symlink_path(state_dir, dest)
-        dest.write_bytes(src.read_bytes())
-    adapter = resolve_under(bookclerk_dir, "adapter.js")
-    refuse_symlink_path(state_dir, adapter)
-    adapter.write_text(ADAPTER_JS, encoding="utf-8")
+        copy_file_under(bookclerk_dir, name, src)
+    write_file_under(bookclerk_dir, "adapter.js", ADAPTER_JS)
 
     modules_dir = resolve_under(plugin_root, modules_dir_name)
     refuse_symlink_path(plugin_root, modules_dir)
@@ -436,9 +437,7 @@ def materialize_config(
     sdk_js = _resolve_sdk_js(sdk_root)
 
     def write_generated(name: str, text: str) -> None:
-        dest = resolve_under(bookclerk_dir, name)
-        refuse_symlink_path(state_dir, dest)
-        dest.write_text(text, encoding="utf-8")
+        write_file_under(bookclerk_dir, name, text)
 
     write_generated("sdk-workerd.js", sdk_js.read_text(encoding="utf-8"))
     adapter_modules = [
@@ -607,9 +606,7 @@ const bridgeWorker :Workerd.Worker = (
 """
 
     config_name = _single_path_component(config_name, "config_name")
-    config_path = resolve_under(state_dir, config_name)
-    refuse_symlink_path(state_dir, config_path)
-    config_path.write_text(config, encoding="utf-8")
+    config_path = write_file_under(state_dir, config_name, config)
     return GeneratedConfig(
         config_path=config_path,
         listen_addr=listen_addr,
