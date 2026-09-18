@@ -11,7 +11,6 @@ import hashlib
 import os
 import platform
 import shutil
-import subprocess
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -190,35 +189,17 @@ def _stamp_file_name(pin: dict[str, Any]) -> str:
     return stamp
 
 
-def _is_current(
-    bin_path: Path,
-    pin: dict[str, Any],
-    *,
-    probe_root: Path | None = None,
-) -> bool:
+def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
+    """True when the pin version stamp next to ``bin_path`` matches the pin tag.
+
+    Stamp-only: never ``--version``-probes a cache or env path (those paths are
+    operator/env-influenced and trip command-injection queries under local
+    threat modeling).
+    """
     stamp = resolve_under(bin_path.parent, _stamp_file_name(pin))
-    if stamp.is_file() and stamp.read_text(encoding="utf-8").strip() == pin["release_tag"]:
-        return True
-    # Never ``--version``-probe an env override; stamp mismatch ⇒ not current.
-    if probe_root is None:
+    if not stamp.is_file():
         return False
-    try:
-        validated = validate_spawn_executable(bin_path, probe_root)
-        proc = subprocess.run(
-            [os.fspath(validated), "--version"],
-            capture_output=True,
-            text=True,
-            check=False,
-            shell=False,
-        )
-    except (OSError, ValueError):
-        return False
-    if proc.returncode != 0:
-        return False
-    combined = f"{proc.stdout}{proc.stderr}"
-    tag = pin["release_tag"]
-    bare = tag.lstrip("v")
-    return tag in combined or bare in combined
+    return stamp.read_text(encoding="utf-8").strip() == pin["release_tag"]
 
 
 def ensure_workerd(
@@ -255,7 +236,7 @@ def ensure_workerd(
     cache = Path(cache_s)
     cache.mkdir(parents=True, exist_ok=True)
     dest = resolve_under(cache, binary_name())
-    if dest.is_file() and _is_current(dest, pin, probe_root=cache):
+    if dest.is_file() and _is_current(dest, pin):
         return validate_spawn_executable(dest, cache)
 
     key = platform_key()

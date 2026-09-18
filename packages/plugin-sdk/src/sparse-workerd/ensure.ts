@@ -9,7 +9,6 @@ import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
 import os from "node:os";
 
 /**
@@ -279,30 +278,12 @@ function stampFileName(pin: WorkerdPin): string {
   return stamp;
 }
 
-function isCurrent(
-  bin: string,
-  pin: WorkerdPin,
-  /** When set, `--version` probes are allowed only for binaries under this root. */
-  probeRoot?: string,
-): boolean {
+function isCurrent(bin: string, pin: WorkerdPin): boolean {
   const dir = path.resolve(path.dirname(bin));
   const stamp = assertPathInside(dir, stampFileName(pin));
-  if (fs.existsSync(stamp)) {
-    const text = fs.readFileSync(stamp, "utf8").trim();
-    if (text === pin.release_tag) return true;
-  }
-  // Never `--version`-probe an env override or other path outside the cache:
-  // stamp mismatch means "not current" without spawning a user-controlled path.
-  if (!probeRoot) return false;
-  const validated = validateSpawnExecutable(bin, probeRoot);
-  const out = spawnSync(validated, ["--version"], {
-    encoding: "utf8",
-    shell: false,
-  });
-  if (out.status !== 0) return false;
-  const combined = `${out.stdout ?? ""}${out.stderr ?? ""}`;
-  const pinBare = pin.release_tag.replace(/^v/, "");
-  return combined.includes(pin.release_tag) || combined.includes(pinBare);
+  if (!fs.existsSync(stamp)) return false;
+  const text = fs.readFileSync(stamp, "utf8").trim();
+  return text === pin.release_tag;
 }
 
 /**
@@ -329,7 +310,7 @@ export async function ensureWorkerd(
   const absCache = path.resolve(cacheDir);
   fs.mkdirSync(absCache, { recursive: true });
   const dest = assertPathInside(absCache, binaryName());
-  if (fs.existsSync(dest) && isCurrent(dest, pin, absCache)) {
+  if (fs.existsSync(dest) && isCurrent(dest, pin)) {
     return validateSpawnExecutable(dest, absCache);
   }
 
