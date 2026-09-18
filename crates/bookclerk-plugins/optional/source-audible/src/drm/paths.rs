@@ -1,7 +1,8 @@
-//! Empty/NUL checks before DRM filesystem sinks.
+//! Empty/NUL checks and single-component joins before DRM filesystem sinks.
 
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 
 use super::error::{DrmError, Result};
 
@@ -39,4 +40,101 @@ pub(crate) fn validated_fs_path(path: &Path) -> Result<PathBuf> {
         )));
     }
     Ok(path.to_path_buf())
+}
+
+/// Join a single path component under `cache_dir` for title-scoped work dirs.
+///
+/// `component` must be one normal path segment (ASINs qualify). When the joined
+/// path already exists, containment is enforced with canonicalize + `starts_with`
+/// so Default Setup path-injection queries can barrier the flow.
+///
+/// # Errors
+///
+/// Returns [`DrmError::Native`] when `cache_dir` / `component` is unsafe or the
+/// join escapes the cache root.
+pub(crate) fn join_cache_component(cache_dir: &Path, component: &str) -> Result<PathBuf> {
+    let cache_dir = validated_fs_path(cache_dir)?;
+    if component.is_empty() || component.contains('\0') {
+        return Err(DrmError::Native("refusing empty cache path component".into()));
+    }
+    // CodeQL DotDotCheck barrier when false.
+    if component.contains("..") {
+        return Err(DrmError::Native(format!(
+            "refusing cache path component with '..': {component}"
+        )));
+    }
+    if component.contains('/') || component.contains('\\') {
+        return Err(DrmError::Native(format!(
+            "refusing multi-segment cache path component: {component}"
+        )));
+    }
+    let rel = Path::new(component);
+    if rel.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(DrmError::Native(format!(
+            "refusing multi-segment cache path component: {component}"
+        )));
+    }
+    let mut normals = rel.components().filter_map(|c| match c {
+        Component::Normal(s) => Some(s),
+        Component::CurDir => None,
+        _ => None,
+    });
+    let name = match (normals.next(), normals.next()) {
+        (Some(name), None) => name,
+        _ => {
+            return Err(DrmError::Native(format!(
+                "refusing multi-segment cache path component: {component}"
+            )));
+        }
+    };
+
+    let root_norm = match fs::canonicalize(&cache_dir) {
+        Ok(c) => c,
+        Err(_) => cache_dir.clone(),
+    };
+    let joined = root_norm.join(name);
+    if let Ok(canon) = fs::canonicalize(&joined) {
+        if !canon.starts_with(&root_norm) {
+            return Err(DrmError::Native(format!(
+                "path {} escapes cache root {}",
+                canon.display(),
+                root_norm.display()
+            )));
+        }
+        return Ok(canon);
+    }
+    if !joined.starts_with(&root_norm) {
+        return Err(DrmError::Native(format!(
+            "path {} escapes cache root {}",
+            joined.display(),
+            root_norm.display()
+        )));
+    }
+    Ok(joined)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_cache_component_rejects_traversal() {
+        let root = std::env::temp_dir();
+        assert!(join_cache_component(&root, "..").is_err());
+        assert!(join_cache_component(&root, "../x").is_err());
+        assert!(join_cache_component(&root, "a/b").is_err());
+        assert!(join_cache_component(&root, "a\\b").is_err());
+    }
+
+    #[test]
+    fn join_cache_component_accepts_asin_shape() {
+        let root = std::env::temp_dir();
+        let out = join_cache_component(&root, "B00EXAMPLE1").expect("asin");
+        assert!(out.ends_with("B00EXAMPLE1"));
+    }
 }

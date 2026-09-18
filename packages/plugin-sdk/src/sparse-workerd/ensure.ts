@@ -142,6 +142,13 @@ export function assertPathInside(root: string, candidate: string): string {
   const resolved = path.isAbsolute(candidate)
     ? path.resolve(candidate)
     : path.resolve(resolvedRoot, candidate);
+  // CodeQL-recognized containment: absolute-normalized path under root prefix.
+  const rootPrefix = resolvedRoot.endsWith(path.sep)
+    ? resolvedRoot
+    : resolvedRoot + path.sep;
+  if (resolved !== resolvedRoot && !resolved.startsWith(rootPrefix)) {
+    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
+  }
   const rel = path.relative(resolvedRoot, resolved);
   if (path.isAbsolute(rel)) {
     throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
@@ -257,15 +264,37 @@ export function validateSpawnExecutable(
   return path.resolve(bin);
 }
 
-function isCurrent(bin: string, pin: WorkerdPin): boolean {
+function stampFileName(pin: WorkerdPin): string {
+  const stamp = pin.version_stamp;
+  if (
+    !stamp ||
+    stamp.includes("\0") ||
+    stamp.includes("/") ||
+    stamp.includes("\\") ||
+    stamp === ".." ||
+    stamp === "."
+  ) {
+    throw new Error(`invalid workerd version_stamp: ${stamp}`);
+  }
+  return stamp;
+}
+
+function isCurrent(
+  bin: string,
+  pin: WorkerdPin,
+  /** When set, `--version` probes are allowed only for binaries under this root. */
+  probeRoot?: string,
+): boolean {
   const dir = path.resolve(path.dirname(bin));
-  const stamp = assertPathInside(dir, pin.version_stamp);
+  const stamp = assertPathInside(dir, stampFileName(pin));
   if (fs.existsSync(stamp)) {
     const text = fs.readFileSync(stamp, "utf8").trim();
     if (text === pin.release_tag) return true;
   }
-  const validated = validateSpawnExecutable(bin);
-  // Probe the selected path directly (do not rewrite PATH / spawn by basename).
+  // Never `--version`-probe an env override or other path outside the cache:
+  // stamp mismatch means "not current" without spawning a user-controlled path.
+  if (!probeRoot) return false;
+  const validated = validateSpawnExecutable(bin, probeRoot);
   const out = spawnSync(validated, ["--version"], {
     encoding: "utf8",
     shell: false,
@@ -293,14 +322,14 @@ export async function ensureWorkerd(
   const pin = loadPin(root);
   const override = process.env.BOOKCLERK_WORKERD_BIN;
   if (override && fs.existsSync(override) && isCurrent(override, pin)) {
-    // Env override: absolute file only (may live outside the cache dir).
+    // Env override: stamp-only currency check (no spawn of the env path).
     return validateSpawnExecutable(override);
   }
 
   const absCache = path.resolve(cacheDir);
   fs.mkdirSync(absCache, { recursive: true });
   const dest = assertPathInside(absCache, binaryName());
-  if (fs.existsSync(dest) && isCurrent(dest, pin)) {
+  if (fs.existsSync(dest) && isCurrent(dest, pin, absCache)) {
     return validateSpawnExecutable(dest, absCache);
   }
 
@@ -336,7 +365,7 @@ export async function ensureWorkerd(
     fs.chmodSync(tmp, 0o755);
   }
   fs.renameSync(tmp, dest);
-  const stampPath = assertPathInside(absCache, pin.version_stamp);
+  const stampPath = assertPathInside(absCache, stampFileName(pin));
   fs.writeFileSync(stampPath, `${pin.release_tag}\n`);
   console.error(
     `bookclerk-plugin: installed ${pin.release_tag} → ${dest}`,

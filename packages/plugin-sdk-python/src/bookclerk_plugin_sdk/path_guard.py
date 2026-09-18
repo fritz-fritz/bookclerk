@@ -11,11 +11,18 @@ def _is_under(root_s: str, resolved_s: str) -> bool:
 
     Uses ``os.path.commonpath`` so children of the filesystem root (``/``)
     are accepted; a redundant ``root + sep`` prefix check would reject them.
+    Also requires an explicit ``startswith`` prefix match so Default Setup
+    path-injection queries see a barrier guard on the resolved path.
     """
     try:
-        return os.path.commonpath([root_s, resolved_s]) == root_s
+        if os.path.commonpath([root_s, resolved_s]) != root_s:
+            return False
     except ValueError:
         return False
+    if resolved_s == root_s:
+        return True
+    prefix = root_s if root_s.endswith(os.sep) else root_s + os.sep
+    return resolved_s.startswith(prefix)
 
 
 def resolve_under(root: Path | str, *parts: str | Path) -> Path:

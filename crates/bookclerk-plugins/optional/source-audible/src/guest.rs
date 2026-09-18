@@ -14,7 +14,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::drm::{
-    decrypt_adrm, decrypt_cenc, validated_fs_path, CencDecryptRequest, DecryptRequest,
+    decrypt_adrm, decrypt_cenc, join_cache_component, validated_fs_path, CencDecryptRequest,
+    DecryptRequest,
 };
 use audible_rs::api::client::Client;
 use audible_rs::auth::login::{self as login_flow, LoginServer};
@@ -359,10 +360,11 @@ pub async fn guest_fetch_title(
     let want_cover = options.download_cover || options.fixup_metadata;
     let mut cover_path = None;
     if want_cover {
-        let work_dir = validated_fs_path(&cache_dir.join(title_id))
+        let work_dir = join_cache_component(cache_dir, title_id)
             .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
         tokio::fs::create_dir_all(&work_dir).await?;
-        let cover_dest = validated_fs_path(&work_dir.join(format!("{title_id}.cover.jpg")))
+        let cover_name = format!("{title_id}.cover.jpg");
+        let cover_dest = join_cache_component(&work_dir, &cover_name)
             .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
         match download_cover_jpeg(
             &account.client,
@@ -380,10 +382,11 @@ pub async fn guest_fetch_title(
         }
     }
 
-    let work_dir = validated_fs_path(&cache_dir.join(title_id))
+    let work_dir = join_cache_component(cache_dir, title_id)
         .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
     tokio::fs::create_dir_all(&work_dir).await?;
-    let m4b_path = validated_fs_path(&work_dir.join(format!("{title_id}.m4b")))
+    let m4b_name = format!("{title_id}.m4b");
+    let m4b_path = join_cache_component(&work_dir, &m4b_name)
         .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
 
     let trim = if options.strip_audible_brand_audio {

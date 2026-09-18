@@ -12,6 +12,29 @@ import path from "node:path";
 import type { Manifest } from "../tools/validate.js";
 import { assertPathInside, refuseSymlinkPath, packageRoot } from "./ensure.js";
 
+/**
+ * Require a single relative path component (no separators, `.`, or `..`).
+ *
+ * Manifest `modules_dir` / `main_module` are author-controlled; restricting
+ * them to one component prevents multi-segment joins under the plugin root.
+ */
+function singlePathComponent(value: string, label: string): string {
+  if (!value || value.includes("\0")) {
+    throw new Error(`${label} is empty or contains NUL`);
+  }
+  const normalized = value.replace(/\\/g, "/");
+  if (
+    normalized.includes("/") ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.includes("..")
+  ) {
+    // `includes("..")` is intentional for CodeQL's ContainsDotDot sanitizer on
+    // the rejected branch; single-component names like `edition..2` are not used.
+    throw new Error(`${label} must be a single path component: ${value}`);
+  }
+  return normalized;
+}
 const SDK_JS_MODULE_NAMES = [
   "@bookclerk/plugin-sdk/workerd",
   "@bookclerk/plugin-sdk",
@@ -274,7 +297,11 @@ export function materializeConfig(
   }
   const root = fs.realpathSync(path.resolve(pluginRoot));
   const sdkRoot = path.resolve(options.sdkRoot ?? packageRoot());
-  const modulesDirName = workerd.modules_dir ?? "modules";
+  const modulesDirName = singlePathComponent(
+    workerd.modules_dir ?? "modules",
+    "modules_dir",
+  );
+  const mainModuleName = singlePathComponent(workerd.main_module, "main_module");
   const entrypoint = workerd.entrypoint ?? "default";
   const networkMode = manifest.capabilities?.network?.mode ?? "deny";
   const networkDomains = manifest.capabilities?.network?.domains ?? [];
@@ -301,7 +328,7 @@ export function materializeConfig(
   ) {
     throw new Error(`modules dir missing: ${modulesDir}`);
   }
-  const mainAbs = assertPathInside(root, path.join(modulesDirName, workerd.main_module));
+  const mainAbs = assertPathInside(modulesDir, mainModuleName);
   refuseSymlinkPath(root, mainAbs);
   if (
     !fs.existsSync(mainAbs) ||
@@ -537,7 +564,10 @@ const bridgeWorker :Workerd.Worker = (
 );
 `;
 
-  const configName = options.configName ?? ".bookclerk-workerd-config.capnp";
+  const configName = singlePathComponent(
+    options.configName ?? ".bookclerk-workerd-config.capnp",
+    "configName",
+  );
   const configPath = assertPathInside(root, configName);
   refuseSymlinkPath(root, configPath);
   fs.writeFileSync(configPath, config);

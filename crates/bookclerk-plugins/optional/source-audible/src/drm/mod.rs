@@ -11,7 +11,7 @@ mod mp4;
 mod native;
 mod paths;
 
-pub(crate) use paths::validated_fs_path;
+pub(crate) use paths::{join_cache_component, validated_fs_path};
 
 pub use bookclerk_mp4::TrimRange;
 pub use error::{DrmError, Result};

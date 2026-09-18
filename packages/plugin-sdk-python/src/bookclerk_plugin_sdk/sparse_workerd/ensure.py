@@ -175,13 +175,35 @@ def validate_spawn_executable(
     return Path(os.path.abspath(s))
 
 
-def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
-    stamp = resolve_under(bin_path.parent, pin["version_stamp"])
+def _stamp_file_name(pin: dict[str, Any]) -> str:
+    stamp = pin.get("version_stamp")
+    if not isinstance(stamp, str) or not stamp:
+        raise ValueError("invalid workerd version_stamp")
+    if (
+        "\0" in stamp
+        or "/" in stamp
+        or "\\" in stamp
+        or stamp in {".", ".."}
+        or ".." in stamp
+    ):
+        raise ValueError(f"invalid workerd version_stamp: {stamp}")
+    return stamp
+
+
+def _is_current(
+    bin_path: Path,
+    pin: dict[str, Any],
+    *,
+    probe_root: Path | None = None,
+) -> bool:
+    stamp = resolve_under(bin_path.parent, _stamp_file_name(pin))
     if stamp.is_file() and stamp.read_text(encoding="utf-8").strip() == pin["release_tag"]:
         return True
+    # Never ``--version``-probe an env override; stamp mismatch ⇒ not current.
+    if probe_root is None:
+        return False
     try:
-        validated = validate_spawn_executable(bin_path)
-        # Probe the selected path directly (do not rewrite PATH / spawn by basename).
+        validated = validate_spawn_executable(bin_path, probe_root)
         proc = subprocess.run(
             [os.fspath(validated), "--version"],
             capture_output=True,
@@ -226,13 +248,14 @@ def ensure_workerd(
     if override:
         path = Path(override)
         if path.is_file() and _is_current(path, pin):
+            # Env override: stamp-only currency check (no spawn of the env path).
             return validate_spawn_executable(path)
 
     cache_s = os.path.abspath(os.fspath(cache_dir or default_cache_dir()))
     cache = Path(cache_s)
     cache.mkdir(parents=True, exist_ok=True)
     dest = resolve_under(cache, binary_name())
-    if dest.is_file() and _is_current(dest, pin):
+    if dest.is_file() and _is_current(dest, pin, probe_root=cache):
         return validate_spawn_executable(dest, cache)
 
     key = platform_key()
@@ -261,7 +284,7 @@ def ensure_workerd(
     if platform.system().lower() != "windows":
         tmp.chmod(0o755)
     tmp.replace(dest)
-    stamp_path = resolve_under(cache, pin["version_stamp"])
+    stamp_path = resolve_under(cache, _stamp_file_name(pin))
     stamp_path.write_text(f"{pin['release_tag']}\n", encoding="utf-8")
     print(f"bookclerk-plugin: installed {pin['release_tag']} → {dest}", flush=True)
     return validate_spawn_executable(dest, cache)

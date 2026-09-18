@@ -13,6 +13,44 @@ use bookclerk_plugin_manifest::{
 use crate::egress::EgressProxy;
 use crate::pin::BUNDLED_WORKERD_COMPAT_DATE;
 
+/// Require a single relative path component (no separators, `.`, or `..`).
+///
+/// Manifest `modules_dir` / `main_module` are author-controlled; restricting
+/// them to one component prevents multi-segment joins under the plugin root.
+fn require_single_path_component<'a>(label: &str, value: &'a str) -> Result<&'a str> {
+    if value.is_empty() || value.contains('\0') {
+        bail!("{label} is empty or contains NUL");
+    }
+    // CodeQL DotDotCheck: barrier when this is false.
+    if value.contains("..") {
+        bail!("{label} must not contain '..': {value}");
+    }
+    let path = Path::new(value);
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
+    {
+        bail!("{label} must be a single path component: {value}");
+    }
+    let mut normals = path.components().filter_map(|c| match c {
+        Component::Normal(s) => Some(s),
+        Component::CurDir => None,
+        _ => None,
+    });
+    match (normals.next(), normals.next()) {
+        (Some(name), None) => {
+            let s = name
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("{label} is not valid UTF-8: {value}"))?;
+            if s.is_empty() || s == "." || s == ".." {
+                bail!("{label} must be a single path component: {value}");
+            }
+            Ok(s)
+        }
+        _ => bail!("{label} must be a single path component: {value}"),
+    }
+}
+
 /// Join `root` / `rel` and require the result stays under `root`.
 ///
 /// Rejects `..` and absolute `rel`. Canonicalizes `root` when it exists so
@@ -50,6 +88,18 @@ fn join_under(root: &Path, rel: impl AsRef<Path>) -> Result<PathBuf> {
         Err(_) => root.to_path_buf(),
     };
     let out = root_norm.join(rel);
+    // Prefer canonicalize-then-starts_with when the target already exists so
+    // Default Setup's TaintedPath state machine can barrier the flow.
+    if let Ok(out_canon) = fs::canonicalize(&out) {
+        if !out_canon.starts_with(&root_norm) {
+            bail!(
+                "path {} escapes root {}",
+                out_canon.display(),
+                root_norm.display()
+            );
+        }
+        return Ok(out_canon);
+    }
     if !out.starts_with(&root_norm) {
         bail!(
             "path {} escapes root {}",
@@ -870,19 +920,16 @@ pub fn materialize(
     fs::write(join_under(&bookclerk_dir, "egress.js")?, EGRESS_JS)?;
     fs::write(join_under(&bookclerk_dir, "adapter.js")?, ADAPTER_JS)?;
 
+    let modules_name = require_single_path_component("modules_dir", &workerd.modules_dir)?;
+    let main_name = require_single_path_component("main_module", &workerd.main_module)?;
     let modules_dir = {
-        let rel = Path::new(&workerd.modules_dir);
-        if rel.components().any(|c| matches!(c, Component::ParentDir)) {
-            bail!("refusing modules_dir with '..': {}", workerd.modules_dir);
-        }
-        let dir = root.join(rel);
+        let dir = root.join(modules_name);
         require_under(root, &dir)?
     };
     if !modules_dir.is_dir() {
         bail!("modules dir missing: {}", modules_dir.display());
     }
-    let main_rel = format!("{}/{}", workerd.modules_dir, workerd.main_module);
-    let main_abs = require_under(root, &root.join(&main_rel))?;
+    let main_abs = require_under(root, &modules_dir.join(main_name))?;
     if !main_abs.is_file() {
         bail!("main module missing: {}", main_abs.display());
     }
@@ -893,7 +940,7 @@ pub fn materialize(
     let mut ordered = vec![main_abs.clone()];
     ordered.extend(module_files);
 
-    let modules_prefix = workerd.modules_dir.trim_matches('/').replace('\\', "/");
+    let modules_prefix = modules_name.replace('\\', "/");
     let mut module_embeds = Vec::new();
     let mut needs_python = false;
     let mut needs_js = false;
