@@ -394,11 +394,26 @@ def download_and_probe_media(
         step["error"] = probe.get("error") or "media probe failed"
 
     if keep_dir is not None:
-        keep_dir.mkdir(parents=True, exist_ok=True)
-        ext = probe.get("kind") if probe.get("kind") != "unknown" else "bin"
-        path = keep_dir / f"smoke-asset.{ext}"
-        path.write_bytes(body)
-        step["saved_to"] = str(path)
+        root_s = os.path.abspath(os.fspath(keep_dir))
+        # Single-component filename; barrier before mkdir/write (local TM).
+        ext_raw = probe.get("kind") if probe.get("kind") != "unknown" else "bin"
+        ext = str(ext_raw).replace("/", "").replace("\\", "").replace("..", "") or "bin"
+        name = f"smoke-asset.{ext}"
+        if "/" in name or "\\" in name or ".." in name:
+            raise ValueError(f"unsafe keep filename: {name}")
+        path_s = os.path.abspath(os.path.join(root_s, name))
+        try:
+            rel = os.path.relpath(path_s, root_s)
+        except ValueError as err:
+            raise ValueError(f"keep path escapes download dir: {path_s}") from err
+        if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+            raise ValueError(f"keep path escapes download dir: {path_s}")
+        if path_s != root_s and not path_s.startswith(root_s + os.sep):
+            raise ValueError(f"keep path escapes download dir: {path_s}")
+        os.makedirs(root_s, exist_ok=True)
+        with open(path_s, "wb") as fh:
+            fh.write(body)
+        step["saved_to"] = path_s
 
     # Drop body from return payload (too large for JSON reports).
     return step
@@ -1156,7 +1171,32 @@ def main(argv: list[str] | None = None) -> int:
         env_max = first_env("TEST_LIBRO_MAX_DOWNLOAD_BYTES")
         max_bytes = int(env_max) if env_max and env_max.isdigit() else DEFAULT_MAX_DOWNLOAD_BYTES
     keep_raw = first_env("TEST_LIBRO_DOWNLOAD_DIR")
-    download_dir = Path(keep_raw) if keep_raw else None
+    download_dir: Path | None = None
+    if keep_raw:
+        # Contain under the repo root (or cwd) so mkdir/write is barriered.
+        base = os.path.abspath(os.fspath(args.repo_root))
+        resolved = os.path.abspath(os.path.expanduser(keep_raw))
+        try:
+            rel = os.path.relpath(resolved, base)
+        except ValueError:
+            print(
+                f"error: TEST_LIBRO_DOWNLOAD_DIR must resolve under repo root ({base})",
+                file=sys.stderr,
+            )
+            return 2
+        if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+            print(
+                f"error: TEST_LIBRO_DOWNLOAD_DIR must resolve under repo root ({base})",
+                file=sys.stderr,
+            )
+            return 2
+        if resolved != base and not resolved.startswith(base + os.sep):
+            print(
+                f"error: TEST_LIBRO_DOWNLOAD_DIR must resolve under repo root ({base})",
+                file=sys.stderr,
+            )
+            return 2
+        download_dir = Path(resolved)
 
     report = args.report or (args.repo_root / "artifacts/librofm-apk-probe/report.json")
     apk_shapes = resolve_shapes(report, args.repo_root)

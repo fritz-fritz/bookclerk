@@ -109,12 +109,32 @@ export function downloadUrl(pin: WorkerdPin, artifact: string): string {
  *
  * @returns Absolute cache directory path.
  */
+/**
+ * Resolve a workerd cache directory under the operator home.
+ *
+ * Env override must stay under `$HOME` (relative/`startsWith` barrier) so
+ * mkdir/write sinks are not fed a raw env path under local threat modeling.
+ */
 export function defaultCacheDir(): string {
-  if (process.env.BOOKCLERK_WORKERD_CACHE) {
-    return process.env.BOOKCLERK_WORKERD_CACHE;
+  const home = path.resolve(os.homedir());
+  const fallback = path.join(home, ".cache", "bookclerk", "workerd");
+  const raw = process.env.BOOKCLERK_WORKERD_CACHE;
+  if (!raw || raw.includes("\0")) {
+    return fallback;
   }
-  const home = os.homedir();
-  return path.join(home, ".cache", "bookclerk", "workerd");
+  const resolved = path.resolve(raw);
+  const rel = path.relative(home, resolved);
+  if (rel.startsWith(".." + path.sep) || rel === ".." || path.isAbsolute(rel)) {
+    throw new Error(
+      `BOOKCLERK_WORKERD_CACHE must resolve under home (${home}): ${resolved}`,
+    );
+  }
+  if (!resolved.startsWith(home + path.sep) && resolved !== home) {
+    throw new Error(
+      `BOOKCLERK_WORKERD_CACHE must resolve under home (${home}): ${resolved}`,
+    );
+  }
+  return resolved;
 }
 
 /**
@@ -264,7 +284,12 @@ export function refuseSymlinkPath(trustedRoot: string, candidate: string): strin
   const rootLex = path.resolve(trustedRoot);
   const target = path.resolve(candidate);
   const rel = path.relative(rootLex, target);
-  if (path.isAbsolute(rel) || rel.split(path.sep).includes("..")) {
+  if (
+    path.isAbsolute(rel) ||
+    rel === ".." ||
+    rel.startsWith(".." + path.sep) ||
+    rel.split(path.sep).includes("..")
+  ) {
     throw new Error(`path ${target} escapes root ${rootLex}`);
   }
   // Allow the operator-selected root itself to be a symlink; constrain children.
@@ -272,7 +297,18 @@ export function refuseSymlinkPath(trustedRoot: string, candidate: string): strin
   const parts = rel === "" ? [] : rel.split(path.sep);
   let cur = root;
   for (let i = 0; i < parts.length; i++) {
-    cur = path.join(cur, parts[i]!);
+    cur = path.resolve(cur, parts[i]!);
+    const stepRel = path.relative(root, cur);
+    if (
+      path.isAbsolute(stepRel) ||
+      stepRel === ".." ||
+      stepRel.startsWith(".." + path.sep)
+    ) {
+      throw new Error(`path ${cur} escapes root ${root}`);
+    }
+    if (!cur.startsWith(root + path.sep) && cur !== root) {
+      throw new Error(`path ${cur} escapes root ${root}`);
+    }
     let st: fs.Stats;
     try {
       st = fs.lstatSync(cur);
@@ -391,15 +427,33 @@ export async function ensureWorkerd(
 ): Promise<string> {
   const pin = loadPin(root);
   const override = process.env.BOOKCLERK_WORKERD_BIN;
-  if (override && fs.existsSync(override) && isCurrent(override, pin)) {
-    // Env override: stamp-only currency check (no spawn of the env path).
-    return validateSpawnExecutable(override);
+  if (override && !override.includes("\0") && path.isAbsolute(override)) {
+    // Stamp-only currency (no existsSync/spawn of the raw env path).
+    try {
+      if (isCurrent(override, pin)) {
+        return validateSpawnExecutable(override);
+      }
+    } catch {
+      // Missing/invalid stamp → fall through to cache install.
+    }
   }
 
+  const home = path.resolve(os.homedir());
   const absCache = path.resolve(cacheDir);
+  const cacheRel = path.relative(home, absCache);
+  if (
+    cacheRel.startsWith(".." + path.sep) ||
+    cacheRel === ".." ||
+    path.isAbsolute(cacheRel)
+  ) {
+    throw new Error(`workerd cache must resolve under home (${home}): ${absCache}`);
+  }
+  if (!absCache.startsWith(home + path.sep) && absCache !== home) {
+    throw new Error(`workerd cache must resolve under home (${home}): ${absCache}`);
+  }
   fs.mkdirSync(absCache, { recursive: true });
   const dest = assertPathInside(absCache, binaryName());
-  if (fs.existsSync(dest) && isCurrent(dest, pin)) {
+  if (isCurrent(dest, pin)) {
     return validateSpawnExecutable(dest, absCache);
   }
 

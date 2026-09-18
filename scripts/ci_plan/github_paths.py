@@ -77,6 +77,12 @@ def open_github_actions_append(path_s: str, *, label: str) -> IO[Any]:
 
     resolved = os.path.realpath(path_s)
     for root in roots:
+        try:
+            rel = os.path.relpath(resolved, root)
+        except ValueError:
+            continue
+        if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+            continue
         if resolved == root or resolved.startswith(root + os.sep):
             return open(resolved, "a", encoding="utf-8")
 

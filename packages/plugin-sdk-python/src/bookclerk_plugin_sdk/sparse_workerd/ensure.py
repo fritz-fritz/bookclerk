@@ -101,18 +101,40 @@ def download_url(pin: dict[str, Any], artifact: str) -> str:
 
 
 def default_cache_dir() -> Path:
-    """Resolve the workerd binary cache directory.
+    """Resolve the workerd binary cache directory under ``$HOME``.
 
-    Honors ``BOOKCLERK_WORKERD_CACHE`` when set; otherwise uses
+    Honors ``BOOKCLERK_WORKERD_CACHE`` when it resolves under the operator
+    home (``relpath`` / ``startswith`` barrier); otherwise uses
     ``~/.cache/bookclerk/workerd``.
 
     Returns:
         Path to the cache directory (may not exist yet).
+
+    Raises:
+        ValueError: When ``BOOKCLERK_WORKERD_CACHE`` escapes ``$HOME``.
     """
-    if env := os.environ.get("BOOKCLERK_WORKERD_CACHE"):
-        return Path(env)
-    home = Path.home()
-    return home / ".cache" / "bookclerk" / "workerd"
+    home = os.path.abspath(os.path.expanduser("~"))
+    fallback = os.path.join(home, ".cache", "bookclerk", "workerd")
+    env = os.environ.get("BOOKCLERK_WORKERD_CACHE")
+    if not env or "\0" in env:
+        return Path(fallback)
+    resolved = os.path.abspath(env)
+    try:
+        rel = os.path.relpath(resolved, home)
+    except ValueError as err:
+        raise ValueError(
+            f"BOOKCLERK_WORKERD_CACHE must resolve under home ({home}): {resolved}"
+        ) from err
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+        raise ValueError(
+            f"BOOKCLERK_WORKERD_CACHE must resolve under home ({home}): {resolved}"
+        )
+    prefix = home if home.endswith(os.sep) else home + os.sep
+    if resolved != home and not resolved.startswith(prefix):
+        raise ValueError(
+            f"BOOKCLERK_WORKERD_CACHE must resolve under home ({home}): {resolved}"
+        )
+    return Path(resolved)
 
 
 def validate_fetch_url(url: str) -> str:
@@ -196,10 +218,18 @@ def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
     operator/env-influenced and trip command-injection queries under local
     threat modeling).
     """
-    stamp = resolve_under(bin_path.parent, _stamp_file_name(pin))
-    if not stamp.is_file():
+    from ..path_guard import _is_under
+
+    root_s = os.path.abspath(os.fspath(bin_path.parent))
+    stamp = resolve_under(root_s, _stamp_file_name(pin))
+    stamp_s = os.fspath(stamp)
+    if not _is_under(root_s, stamp_s):
         return False
-    return stamp.read_text(encoding="utf-8").strip() == pin["release_tag"]
+    try:
+        with open(stamp_s, encoding="utf-8") as fh:
+            return fh.read().strip() == pin["release_tag"]
+    except OSError:
+        return False
 
 
 def ensure_workerd(
@@ -226,17 +256,35 @@ def ensure_workerd(
     """
     pin = load_pin(root)
     override = os.environ.get("BOOKCLERK_WORKERD_BIN")
-    if override:
-        path = Path(override)
-        if path.is_file() and _is_current(path, pin):
-            # Env override: stamp-only currency check (no spawn of the env path).
-            return validate_spawn_executable(path)
+    if override and "\0" not in override and os.path.isabs(override):
+        # Stamp-only currency (no is_file/spawn of the raw env path).
+        try:
+            if _is_current(Path(override), pin):
+                return validate_spawn_executable(override)
+        except (OSError, ValueError):
+            pass
 
+    home = os.path.abspath(os.path.expanduser("~"))
     cache_s = os.path.abspath(os.fspath(cache_dir or default_cache_dir()))
+    try:
+        cache_rel = os.path.relpath(cache_s, home)
+    except ValueError as err:
+        raise ValueError(
+            f"workerd cache must resolve under home ({home}): {cache_s}"
+        ) from err
+    if (
+        cache_rel == ".."
+        or cache_rel.startswith(".." + os.sep)
+        or os.path.isabs(cache_rel)
+    ):
+        raise ValueError(f"workerd cache must resolve under home ({home}): {cache_s}")
+    prefix = home if home.endswith(os.sep) else home + os.sep
+    if cache_s != home and not cache_s.startswith(prefix):
+        raise ValueError(f"workerd cache must resolve under home ({home}): {cache_s}")
+    os.makedirs(cache_s, exist_ok=True)
     cache = Path(cache_s)
-    cache.mkdir(parents=True, exist_ok=True)
     dest = resolve_under(cache, binary_name())
-    if dest.is_file() and _is_current(dest, pin):
+    if _is_current(dest, pin):
         return validate_spawn_executable(dest, cache)
 
     key = platform_key()
