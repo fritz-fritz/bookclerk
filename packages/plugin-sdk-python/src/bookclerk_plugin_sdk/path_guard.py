@@ -69,12 +69,12 @@ def resolve_under(root: Path | str, *parts: str | Path) -> Path:
 
 
 def refuse_symlink_path(trusted_root: Path | str, path: Path | str) -> Path:
-    """Require ``path`` under ``trusted_root`` with no symlink components.
+    """Require ``path`` under ``trusted_root`` with no symlink suffix components.
 
-    Walks each component from ``trusted_root`` to ``path`` and refuses any
-    symlink so generated writes and embeds cannot follow ``.bookclerk`` or
-    ``modules`` links outside the plugin tree. Missing final components are
-    allowed (for create); intermediate missing parents raise.
+    Resolves the trusted root identity once (a symlinked operator/plugin root is
+    allowed). Only components *below* that identity are inspected for symlinks.
+    Missing final components are allowed (for create); intermediate missing
+    parents raise.
 
     Args:
         trusted_root: Original operator/plugin root (not a promoted child).
@@ -84,22 +84,26 @@ def refuse_symlink_path(trusted_root: Path | str, path: Path | str) -> Path:
         The validated ``path`` as a :class:`~pathlib.Path`.
 
     Raises:
-        ValueError: When a component is a symlink or escapes ``trusted_root``.
+        ValueError: When a suffix component is a symlink or escapes ``trusted_root``.
         FileNotFoundError: When an intermediate parent is missing.
     """
-    root = Path(os.path.abspath(os.path.normpath(os.fspath(trusted_root))))
+    root_lex = Path(os.path.abspath(os.path.normpath(os.fspath(trusted_root))))
     candidate = Path(os.path.abspath(os.path.normpath(os.fspath(path))))
-    if not _is_under(os.fspath(root), os.fspath(candidate)):
-        raise ValueError(f"path {candidate} escapes root {root}")
+    if not _is_under(os.fspath(root_lex), os.fspath(candidate)):
+        raise ValueError(f"path {candidate} escapes root {root_lex}")
 
     try:
-        rel = candidate.relative_to(root)
+        rel = candidate.relative_to(root_lex)
     except ValueError as err:
-        raise ValueError(f"path {candidate} escapes root {root}") from err
+        raise ValueError(f"path {candidate} escapes root {root_lex}") from err
+
+    # Allow the operator-selected root itself to be a symlink; constrain children.
+    try:
+        root = Path(os.path.realpath(root_lex))
+    except OSError as err:
+        raise ValueError(f"cannot resolve trusted root {root_lex}: {err}") from err
 
     cur = root
-    if cur.is_symlink():
-        raise ValueError(f"refusing symlink trusted root: {cur}")
     parts = rel.parts
     for i, part in enumerate(parts):
         cur = cur / part

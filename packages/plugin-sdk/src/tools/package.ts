@@ -77,7 +77,8 @@ function copyRecursiveNoSymlinks(src: string, dst: string): void {
  * ```
  */
 export function packagePlugin(pluginDir: string, outDir: string): string {
-  const root = path.resolve(pluginDir);
+  // Operator-selected root: resolve once so a symlinked plugin directory works.
+  const root = fs.realpathSync(path.resolve(pluginDir));
   const tomlPath = assertPathInside(root, "plugin.toml");
   const m = parseToml(fs.readFileSync(tomlPath, "utf8")) as Manifest;
   validateManifest(m);
@@ -97,7 +98,7 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
       if (!fs.existsSync(src) || fs.lstatSync(src).isSymbolicLink() || !fs.statSync(src).isFile()) {
         throw new Error(`embedded logo missing for package: ${src}`);
       }
-      const dest = path.join(staging, logo.value);
+      const dest = assertPathInside(staging, logo.value);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(src, dest);
     }
@@ -108,6 +109,7 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
   if (runtime === "native") {
     const cmd = m.command!;
     const absolute = path.isAbsolute(cmd);
+    // Absolute command paths are intentional operator-selected build outputs.
     const src = absolute ? path.resolve(cmd) : assertPathInside(root, cmd);
     if (!absolute) {
       refuseSymlinkPath(root, src);
@@ -119,9 +121,10 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
       throw new Error(`native binary not found for package: ${src}`);
     }
     const binName = path.basename(src);
-    fs.copyFileSync(src, path.join(staging, binName));
+    const dest = assertPathInside(staging, binName);
+    fs.copyFileSync(src, dest);
     try {
-      fs.chmodSync(path.join(staging, binName), 0o755);
+      fs.chmodSync(dest, 0o755);
     } catch {
       /* windows */
     }
@@ -130,7 +133,8 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
     const modulesDir = m.workerd?.modules_dir ?? "modules";
     const srcModules = assertPathInside(root, modulesDir);
     refuseSymlinkPath(root, srcModules);
-    copyRecursiveNoSymlinks(srcModules, path.join(staging, modulesDir));
+    const destModules = assertPathInside(staging, modulesDir);
+    copyRecursiveNoSymlinks(srcModules, destModules);
     // Authors import `@bookclerk/plugin-sdk/workerd`; bookclerk-workerd injects it.
     archiveStem = `bookclerk-plugin-${id}-${version}-workerd`;
   }

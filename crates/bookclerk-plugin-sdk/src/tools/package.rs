@@ -36,7 +36,10 @@ use crate::error::{Result, SdkError};
 /// Returns [`SdkError`] when the manifest is invalid, required binaries /
 /// modules are missing, or archive / checksum I/O fails.
 pub fn package_plugin(plugin_dir: &Path, out_dir: &Path) -> Result<PathBuf> {
-    let toml_path = plugin_dir.join("plugin.toml");
+    // Operator-selected root: resolve once so a symlinked plugin directory is
+    // allowed; only manifest-derived children are constrained below.
+    let root = trusted_plugin_root(plugin_dir)?;
+    let toml_path = join_relative_under(&root, Path::new("plugin.toml"))?;
     let text = std::fs::read_to_string(&toml_path)
         .map_err(|e| SdkError::message(format!("read {}: {e}", toml_path.display())))?;
     let manifest = parse(&text).map_err(|e| SdkError::message(e.to_string()))?;
@@ -54,20 +57,14 @@ pub fn package_plugin(plugin_dir: &Path, out_dir: &Path) -> Result<PathBuf> {
             bookclerk_plugin_manifest::validate_logo(logo)
                 .map_err(|e| SdkError::message(e.to_string()))?
         {
-            let src = plugin_dir.join(&rel);
-            if src.is_symlink() {
-                return Err(SdkError::message(format!(
-                    "refusing symlink embedded logo: {}",
-                    src.display()
-                )));
-            }
+            let src = require_existing_source_under(&root, Path::new(&rel))?;
             if !src.is_file() {
                 return Err(SdkError::message(format!(
                     "embedded logo missing for package: {}",
                     src.display()
                 )));
             }
-            let dest = staging.join(&rel);
+            let dest = join_relative_under(&staging, Path::new(&rel))?;
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent).map_err(SdkError::from)?;
             }
@@ -82,17 +79,11 @@ pub fn package_plugin(plugin_dir: &Path, out_dir: &Path) -> Result<PathBuf> {
                 .as_ref()
                 .ok_or_else(|| SdkError::message("native plugin missing command"))?;
             let src = if cmd.is_absolute() {
-                // Absolute command paths are operator-selected build outputs.
+                // Absolute command paths are intentional operator-selected build
+                // outputs (documented); not treated as untrusted manifest suffixes.
                 cmd.clone()
             } else {
-                let relative = plugin_dir.join(cmd);
-                if relative.is_symlink() {
-                    return Err(SdkError::message(format!(
-                        "refusing symlink native command under plugin: {}",
-                        relative.display()
-                    )));
-                }
-                relative
+                require_existing_source_under(&root, cmd)?
             };
             if !src.is_file() {
                 return Err(SdkError::message(format!(
@@ -104,7 +95,7 @@ pub fn package_plugin(plugin_dir: &Path, out_dir: &Path) -> Result<PathBuf> {
                 .file_name()
                 .ok_or_else(|| SdkError::message("binary name"))?
                 .to_os_string();
-            let dest = staging.join(&bin_name);
+            let dest = join_under_root(&staging, &bin_name)?;
             std::fs::copy(&src, &dest).map_err(SdkError::from)?;
             #[cfg(unix)]
             {
@@ -121,8 +112,8 @@ pub fn package_plugin(plugin_dir: &Path, out_dir: &Path) -> Result<PathBuf> {
                 .workerd
                 .as_ref()
                 .ok_or_else(|| SdkError::message("workerd config missing"))?;
-            let modules_src = plugin_dir.join(&w.modules_dir);
-            let modules_dst = staging.join(&w.modules_dir);
+            let modules_src = require_existing_source_under(&root, Path::new(&w.modules_dir))?;
+            let modules_dst = join_relative_under(&staging, Path::new(&w.modules_dir))?;
             copy_dir_recursive(&modules_src, &modules_dst)?;
             // `BookclerkEntrypoint` and the named `*Entrypoint` bases are imported
             // from `@bookclerk/plugin-sdk/workerd`; `bookclerk-workerd` injects that
@@ -170,6 +161,123 @@ fn host_bookclerk_target() -> String {
         ("windows", "x86_64") => "windows-x64".into(),
         _ => format!("{os}-{arch}"),
     }
+}
+
+/// Canonical identity of the operator-selected plugin directory.
+///
+/// A symlinked plugin root is allowed: we resolve once and treat that identity
+/// as the trusted base. Manifest-derived children are validated below it.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the path is empty/NUL or cannot be canonicalized.
+fn trusted_plugin_root(plugin_dir: &Path) -> Result<PathBuf> {
+    reject_empty_or_nul(plugin_dir)?;
+    plugin_dir.canonicalize().map_err(|e| {
+        SdkError::message(format!(
+            "canonicalize plugin root {}: {e}",
+            plugin_dir.display()
+        ))
+    })
+}
+
+/// Rejects absolute paths and `ParentDir` / prefix components in a relative
+/// manifest suffix (names like `edition..2` remain allowed).
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when `rel` is absolute or contains unsafe components.
+fn require_relative_manifest_path(rel: &Path) -> Result<()> {
+    reject_empty_or_nul(rel)?;
+    if rel.as_os_str().is_empty() {
+        return Err(SdkError::message("refusing empty manifest path"));
+    }
+    if rel.is_absolute() {
+        return Err(SdkError::message(format!(
+            "refusing absolute manifest path: {}",
+            rel.display()
+        )));
+    }
+    let mut saw_normal = false;
+    for comp in rel.components() {
+        match comp {
+            Component::Normal(_) => saw_normal = true,
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(SdkError::message(format!(
+                    "refusing unsafe manifest path component: {}",
+                    rel.display()
+                )));
+            }
+        }
+    }
+    if !saw_normal {
+        return Err(SdkError::message(format!(
+            "refusing empty manifest path: {}",
+            rel.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Join a relative manifest suffix under `root` with component-wise safety.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when `rel` is unsafe or the join escapes `root`.
+fn join_relative_under(root: &Path, rel: &Path) -> Result<PathBuf> {
+    require_relative_manifest_path(rel)?;
+    reject_empty_or_nul(root)?;
+    let mut out = root.to_path_buf();
+    for comp in rel.components() {
+        if let Component::Normal(name) = comp {
+            out.push(name);
+        }
+    }
+    require_under_root(root, &out)
+}
+
+/// Resolve a manifest-derived relative source under `root`.
+///
+/// Walks each component with link-aware metadata (refuses symlinks), then
+/// requires the existing path's canonicalize result to stay under `root`.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] on unsafe spelling, symlink components, missing paths,
+/// or escape after canonicalize.
+fn require_existing_source_under(root: &Path, rel: &Path) -> Result<PathBuf> {
+    join_relative_under(root, rel)?;
+    let mut cur = root.to_path_buf();
+    for comp in rel.components() {
+        let Component::Normal(name) = comp else {
+            continue;
+        };
+        cur.push(name);
+        let meta = std::fs::symlink_metadata(&cur).map_err(|e| {
+            SdkError::message(format!("stat package source {}: {e}", cur.display()))
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(SdkError::message(format!(
+                "refusing symlink in package source: {}",
+                cur.display()
+            )));
+        }
+    }
+    let canon = cur.canonicalize().map_err(|e| {
+        SdkError::message(format!(
+            "canonicalize package source {}: {e}",
+            cur.display()
+        ))
+    })?;
+    if !canon.starts_with(root) {
+        return Err(SdkError::message(format!(
+            "path {} escapes root {}",
+            canon.display(),
+            root.display()
+        )));
+    }
+    Ok(cur)
 }
 
 /// Rejects empty paths and interior NULs before filesystem access.
@@ -463,6 +571,83 @@ mode = "deny"
         let out = dir.path().join("dist");
         let err = package_plugin(&plugin, &out).unwrap_err();
         assert!(err.to_string().contains("symlink"), "{err}");
+    }
+
+    #[test]
+    fn package_refuses_intermediate_dir_symlink_on_native_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("plugin");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(
+            plugin.join("plugin.toml"),
+            r#"api_version = 3
+id = "native_sym"
+version = "0.0.1"
+runtime = "native"
+command = "bin/tool"
+entrypoints = ["cli"]
+
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .unwrap();
+        let outside = dir.path().join("outside_bin");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("tool"), b"#!/bin/sh\n").unwrap();
+        std::os::unix::fs::symlink(&outside, plugin.join("bin")).unwrap();
+
+        let out = dir.path().join("dist");
+        let err = package_plugin(&plugin, &out).unwrap_err();
+        assert!(
+            err.to_string().contains("symlink"),
+            "expected intermediate symlink refusal, got {err}"
+        );
+        assert!(!out.join("SHA256SUMS").is_file());
+    }
+
+    #[test]
+    fn package_refuses_parent_dir_in_native_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("plugin");
+        std::fs::create_dir_all(&plugin).unwrap();
+        let outside = dir.path().join("outside_tool");
+        std::fs::write(&outside, b"#!/bin/sh\n").unwrap();
+        std::fs::write(
+            plugin.join("plugin.toml"),
+            r#"api_version = 3
+id = "native_dotdot"
+version = "0.0.1"
+runtime = "native"
+command = "../outside_tool"
+entrypoints = ["cli"]
+
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .unwrap();
+
+        let out = dir.path().join("dist");
+        let err = package_plugin(&plugin, &out).unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe") || err.to_string().contains(".."),
+            "expected .. refusal, got {err}"
+        );
+    }
+
+    #[test]
+    fn package_allows_symlinked_plugin_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real_plugin");
+        write_minimal_workerd_plugin(&real);
+        let link = dir.path().join("link_plugin");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let out = dir.path().join("dist");
+        let archive = package_plugin(&link, &out).expect("symlinked plugin root must package");
+        assert!(archive.is_file());
+        assert!(out.join("SHA256SUMS").is_file());
     }
 
     fn walkdir_contains_secret(root: &Path, secret: &[u8]) -> bool {

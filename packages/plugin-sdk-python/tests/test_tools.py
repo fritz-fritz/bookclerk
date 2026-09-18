@@ -123,6 +123,59 @@ def test_package_refuses_module_symlink_without_outside_bytes(tmp_path: Path):
     )
 
 
+def test_package_refuses_intermediate_dir_symlink(tmp_path: Path):
+    plugin = tmp_path / "plugin"
+    modules = plugin / "modules"
+    modules.mkdir(parents=True)
+    (plugin / "plugin.toml").write_text(
+        (ECHO_PY / "plugin.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (modules / "plugin.py").write_text(
+        (ECHO_PY / "modules" / "plugin.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside_mods"
+    outside.mkdir()
+    (outside / "x.py").write_text("x = 1\n", encoding="utf-8")
+    (modules / "vendor").symlink_to(outside)
+    out = tmp_path / "dist"
+    with pytest.raises(ValueError, match="symlink"):
+        package_plugin(plugin, out)
+
+
+def test_package_allows_symlinked_plugin_root(tmp_path: Path):
+    real = tmp_path / "real"
+    modules = real / "modules"
+    modules.mkdir(parents=True)
+    (real / "plugin.toml").write_text(
+        (ECHO_PY / "plugin.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (modules / "plugin.py").write_text(
+        (ECHO_PY / "modules" / "plugin.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    out = tmp_path / "dist"
+    archive = package_plugin(link, out)
+    assert archive.is_file()
+
+
+def test_refuse_symlink_allows_symlinked_trusted_root(tmp_path: Path):
+    from bookclerk_plugin_sdk.path_guard import refuse_symlink_path, resolve_under
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "child.txt").write_text("ok\n", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    child = resolve_under(link, "child.txt")
+    # Root may be a symlink; child must not be.
+    assert refuse_symlink_path(link, child) == child
+
+
 def test_refuse_symlink_blocks_bookclerk_dir_link(tmp_path: Path):
     from bookclerk_plugin_sdk.path_guard import refuse_symlink_path, resolve_under
     from bookclerk_plugin_sdk.sparse_workerd.config import materialize_config

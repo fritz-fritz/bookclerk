@@ -154,23 +154,26 @@ export function assertPathInside(root: string, candidate: string): string {
 }
 
 /**
- * Require `candidate` under `trustedRoot` with no symlink components.
+ * Require `candidate` under `trustedRoot` with no symlink suffix components.
+ *
+ * Resolves the trusted root identity once (a symlinked operator/plugin root is
+ * allowed). Only path components *below* that identity are refused when they
+ * are symlinks.
  *
  * @param trustedRoot - Original operator/plugin root.
  * @param candidate - Path previously produced by {@link assertPathInside}.
  * @returns The validated absolute path.
- * @throws {Error} When a component is a symlink or escapes `trustedRoot`.
+ * @throws {Error} When a suffix component is a symlink or escapes `trustedRoot`.
  */
 export function refuseSymlinkPath(trustedRoot: string, candidate: string): string {
-  const root = path.resolve(trustedRoot);
+  const rootLex = path.resolve(trustedRoot);
   const target = path.resolve(candidate);
-  const rel = path.relative(root, target);
+  const rel = path.relative(rootLex, target);
   if (path.isAbsolute(rel) || rel.split(path.sep).includes("..")) {
-    throw new Error(`path ${target} escapes root ${root}`);
+    throw new Error(`path ${target} escapes root ${rootLex}`);
   }
-  if (fs.lstatSync(root).isSymbolicLink()) {
-    throw new Error(`refusing symlink trusted root: ${root}`);
-  }
+  // Allow the operator-selected root itself to be a symlink; constrain children.
+  const root = fs.realpathSync(rootLex);
   const parts = rel === "" ? [] : rel.split(path.sep);
   let cur = root;
   for (let i = 0; i < parts.length; i++) {

@@ -272,7 +272,7 @@ export function materializeConfig(
   if (!workerd) {
     throw new Error('missing [workerd] table');
   }
-  const root = path.resolve(pluginRoot);
+  const root = fs.realpathSync(path.resolve(pluginRoot));
   const sdkRoot = path.resolve(options.sdkRoot ?? packageRoot());
   const modulesDirName = workerd.modules_dir ?? "modules";
   const entrypoint = workerd.entrypoint ?? "default";

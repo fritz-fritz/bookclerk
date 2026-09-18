@@ -788,7 +788,7 @@ def package_plugin(plugin_dir: Path, out_dir: Path) -> Path:
         >>> # archive = package_plugin(Path("./my-plugin"), Path("./dist"))
         >>> # print(f"packed {archive}")
     """
-    root = cli_user_path(plugin_dir)
+    root = Path(os.path.realpath(cli_user_path(plugin_dir)))
     out = cli_user_path(out_dir)
     toml_path = resolve_under(root, "plugin.toml")
     m = tomllib.loads(toml_path.read_text(encoding="utf-8"))
