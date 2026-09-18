@@ -238,9 +238,8 @@ def ensure_workerd(
 
     Reuses a cached binary when the version stamp matches the pin; otherwise
     downloads, verifies sha256, and installs under the package-local cache
-    (see :func:`default_cache_dir`). ``BOOKCLERK_WORKERD_BIN`` is honored only
-    when the absolute path resolves under that cache (stamp-only currency —
-    never ``--version``-probes an arbitrary env path).
+    (see :func:`default_cache_dir`). Currency is stamp-only under that cache
+    (no ``--version`` spawn; ``BOOKCLERK_WORKERD_BIN`` is not opened).
 
     Args:
         cache_dir: Override cache directory (defaults to :func:`default_cache_dir`).
@@ -286,15 +285,8 @@ def ensure_workerd(
     os.makedirs(cache_s, exist_ok=True)
     cache = Path(cache_s)
 
-    override = os.environ.get("BOOKCLERK_WORKERD_BIN")
-    if override and "\0" not in override and os.path.isabs(override):
-        # Only reuse an override that already lives under the package cache.
-        try:
-            override_path = resolve_under(cache, Path(override))
-            if _is_current(override_path, pin):
-                return validate_spawn_executable(override_path, cache)
-        except (OSError, ValueError):
-            pass
+    # Do not open/stamp-check BOOKCLERK_WORKERD_BIN (env path sink under local TM).
+    # Managed install only under the package-local cache.
 
     dest = resolve_under(cache, binary_name())
     if _is_current(dest, pin):
