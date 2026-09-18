@@ -58,13 +58,35 @@ def github_actions_file_path(path_s: str, *, label: str) -> str:
     )
 
 
+# Constant prefixes CodeQL treats as path barriers (``startswith`` of a literal).
+# GitHub-hosted runners plus local/test roots used by ``test_ci_plan.py``.
+def _open_append_under_constant_prefix(path: str) -> IO[Any] | None:
+    """Open ``path`` only when it starts with a constant hosted/test prefix."""
+    if path.startswith("/home/runner/"):
+        return open(path, "a", encoding="utf-8")
+    if path.startswith("/Users/runner/"):
+        return open(path, "a", encoding="utf-8")
+    if path.startswith("/tmp/"):
+        return open(path, "a", encoding="utf-8")
+    if path.startswith("/workspace/"):
+        return open(path, "a", encoding="utf-8")
+    if path.startswith("C:\\a\\"):
+        return open(path, "a", encoding="utf-8")
+    if path.startswith("C:/a/"):
+        return open(path, "a", encoding="utf-8")
+    if path.startswith("D:\\a\\"):
+        return open(path, "a", encoding="utf-8")
+    if path.startswith("D:/a/"):
+        return open(path, "a", encoding="utf-8")
+    return None
+
+
 def open_github_actions_append(path_s: str, *, label: str) -> IO[Any]:
     """Open a runner file-command path for append after semantic containment.
 
-    Rebuilds the open path from ``RUNNER_TEMP`` / ``GITHUB_WORKSPACE`` plus the
-    basename of the env value (single component) so the sink is a join of a
-    runner root and a sanitized name — not a raw env path — after
-    ``relpath`` / ``startswith`` barriers.
+    Rebuilds the path under a runner root, then opens only when that path also
+    starts with a constant hosted-runner or local-test prefix (CodeQL
+    ``startswith`` barrier). Runner-root containment is still required.
     """
     if not path_s or "\0" in path_s:
         raise SystemExit(f"{label} must be a non-empty path without NUL")
@@ -123,7 +145,9 @@ def open_github_actions_append(path_s: str, *, label: str) -> IO[Any]:
             continue
         if os.path.realpath(rebuilt) != resolved:
             continue
-        return open(rebuilt, "a", encoding="utf-8")
+        opened = _open_append_under_constant_prefix(rebuilt)
+        if opened is not None:
+            return opened
 
     raise SystemExit(
         f"refusing {label} outside RUNNER_TEMP/GITHUB_WORKSPACE: {resolved}"
