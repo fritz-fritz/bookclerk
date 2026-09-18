@@ -104,6 +104,25 @@ impl LocalFsBackend {
             }
             return Ok(canonical);
         }
+        // Canonicalize failed: distinguish a dangling/unresolvable symlink from a
+        // genuinely missing component. Treating a dangling leaf as "missing" lets
+        // later `fs::write` follow the link and create the outside target.
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(StorageError::InvalidKey(format!(
+                    "refusing dangling or unresolvable symlink: {key}"
+                )));
+            }
+            Ok(_) => {
+                return Err(StorageError::InvalidKey(format!(
+                    "could not canonicalize existing path for key: {key}"
+                )));
+            }
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                return Err(StorageError::Io(err));
+            }
+            Err(_) => {}
+        }
         // Missing leaf/intermediates: canonicalize nearest existing ancestor and
         // rejoin the suffix (rejects symlink-parent escapes).
         let mut suffix = Vec::new();
@@ -123,7 +142,23 @@ impl LocalFsBackend {
                     }
                     return Ok(out);
                 }
-                Err(_) => {
+                Err(canon_err) => {
+                    match std::fs::symlink_metadata(&cursor) {
+                        Ok(meta) if meta.file_type().is_symlink() => {
+                            return Err(StorageError::InvalidKey(format!(
+                                "refusing dangling or unresolvable symlink in key path: {key}"
+                            )));
+                        }
+                        Ok(_) => {
+                            return Err(StorageError::InvalidKey(format!(
+                                "could not canonicalize path for key {key}: {canon_err}"
+                            )));
+                        }
+                        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(StorageError::Io(err));
+                        }
+                        Err(_) => {}
+                    }
                     let name = cursor
                         .file_name()
                         .ok_or_else(|| StorageError::InvalidKey(key.into()))?;
@@ -760,6 +795,36 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidKey(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_dangling_symlink_leaf_without_creating_outside() {
+        let dir = tempdir().unwrap();
+        let store = dir.path().join("store");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let backend = LocalFsBackend::new(store.clone()).unwrap();
+        let link = store.join("new.txt");
+        let target = outside.join("new.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        assert!(!target.exists());
+        let err = backend
+            .put(
+                "new.txt",
+                Bytes::from_static(b"payload"),
+                ObjectMeta::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidKey(_)), "{err:?}");
+        assert!(
+            !target.exists(),
+            "dangling symlink must not create the outside target"
+        );
     }
 
     #[tokio::test]

@@ -175,6 +175,27 @@ impl BackupRepository {
                 canon
             }
             Err(err) => {
+                match fs::symlink_metadata(path) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        return Err(LibraryError::Schema(format!(
+                            "refusing dangling or unresolvable backup symlink {}: {err}",
+                            path.display()
+                        )));
+                    }
+                    Ok(_) => {
+                        return Err(LibraryError::Schema(format!(
+                            "could not canonicalize existing backup path {}: {err}",
+                            path.display()
+                        )));
+                    }
+                    Err(meta_err) if meta_err.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(LibraryError::Schema(format!(
+                            "could not stat backup path {}: {meta_err}",
+                            path.display()
+                        )));
+                    }
+                    Err(_) => {}
+                }
                 // Missing leaf: canonicalize existing ancestors, rejoin suffix.
                 let mut suffix = Vec::new();
                 let mut cursor = path.to_path_buf();
@@ -194,7 +215,30 @@ impl BackupRepository {
                             }
                             break out;
                         }
-                        Err(_) => {
+                        Err(canon_err) => {
+                            match fs::symlink_metadata(&cursor) {
+                                Ok(meta) if meta.file_type().is_symlink() => {
+                                    return Err(LibraryError::Schema(format!(
+                                        "refusing dangling or unresolvable backup symlink {}: {canon_err}",
+                                        cursor.display()
+                                    )));
+                                }
+                                Ok(_) => {
+                                    return Err(LibraryError::Schema(format!(
+                                        "could not canonicalize backup path {}: {canon_err}",
+                                        cursor.display()
+                                    )));
+                                }
+                                Err(meta_err)
+                                    if meta_err.kind() != std::io::ErrorKind::NotFound =>
+                                {
+                                    return Err(LibraryError::Schema(format!(
+                                        "could not stat backup path {}: {meta_err}",
+                                        cursor.display()
+                                    )));
+                                }
+                                Err(_) => {}
+                            }
                             let name = cursor.file_name().ok_or_else(|| {
                                 LibraryError::Schema(format!(
                                     "could not resolve backup path {}: {err}",

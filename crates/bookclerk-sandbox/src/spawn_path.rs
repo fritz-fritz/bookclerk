@@ -156,6 +156,30 @@ pub fn require_under_root(path: &Path, root: &Path) -> Result<PathBuf, SpawnPath
     let path_canon = match std::fs::canonicalize(&path) {
         Ok(p) => p,
         Err(err) => {
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(SpawnPathError::Canonicalize {
+                        path: path.clone(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "refusing dangling or unresolvable symlink",
+                        ),
+                    });
+                }
+                Ok(_) => {
+                    return Err(SpawnPathError::Canonicalize {
+                        path: path.clone(),
+                        source: err,
+                    });
+                }
+                Err(meta_err) if meta_err.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(SpawnPathError::Canonicalize {
+                        path: path.clone(),
+                        source: meta_err,
+                    });
+                }
+                Err(_) => {}
+            }
             let parent = path
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
@@ -270,5 +294,22 @@ mod tests {
             require_under_root(&escape, root.path()),
             Err(SpawnPathError::OutsideRoot { .. })
         ));
+    }
+
+    #[test]
+    fn under_root_rejects_dangling_symlink_leaf() {
+        let root = tempfile::tempdir().expect("tmpdir");
+        let outside = tempfile::tempdir().expect("outside");
+        let target = outside.path().join("missing");
+        let link = root.path().join("leaf");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        assert!(matches!(
+            require_under_root(&link, root.path()),
+            Err(SpawnPathError::Canonicalize { .. })
+        ));
+        assert!(!target.exists());
     }
 }

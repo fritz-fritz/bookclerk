@@ -302,6 +302,29 @@ pub fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
     let path_norm = match path.canonicalize() {
         Ok(c) => c,
         Err(err) => {
+            match fs::symlink_metadata(path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(CatalogError::message(format!(
+                        "refusing dangling or unresolvable symlink {}: {err}",
+                        path.display()
+                    )));
+                }
+                Ok(_) => {
+                    return Err(CatalogError::message(format!(
+                        "could not canonicalize existing path {} under {}: {err}",
+                        path.display(),
+                        root.display()
+                    )));
+                }
+                Err(meta_err) if meta_err.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(CatalogError::message(format!(
+                        "could not stat path {} under {}: {meta_err}",
+                        path.display(),
+                        root.display()
+                    )));
+                }
+                Err(_) => {}
+            }
             let mut suffix = Vec::new();
             let mut cursor = path.to_path_buf();
             loop {
@@ -313,7 +336,31 @@ pub fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
                         }
                         break out;
                     }
-                    Err(_) => {
+                    Err(canon_err) => {
+                        match fs::symlink_metadata(&cursor) {
+                            Ok(meta) if meta.file_type().is_symlink() => {
+                                return Err(CatalogError::message(format!(
+                                    "refusing dangling or unresolvable symlink {} under {}: {canon_err}",
+                                    cursor.display(),
+                                    root.display()
+                                )));
+                            }
+                            Ok(_) => {
+                                return Err(CatalogError::message(format!(
+                                    "could not canonicalize path {} under {}: {canon_err}",
+                                    cursor.display(),
+                                    root.display()
+                                )));
+                            }
+                            Err(meta_err) if meta_err.kind() != std::io::ErrorKind::NotFound => {
+                                return Err(CatalogError::message(format!(
+                                    "could not stat path {} under {}: {meta_err}",
+                                    cursor.display(),
+                                    root.display()
+                                )));
+                            }
+                            Err(_) => {}
+                        }
                         let name = cursor.file_name().ok_or_else(|| {
                             CatalogError::message(format!(
                                 "could not resolve path {} under {}: {err}",
