@@ -87,7 +87,8 @@ pub struct AudioTrack {
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn parse_mp4(path: &Path) -> Result<Mp4File> {
-    let mut file = File::open(path)?;
+    let path = crate::fs_path::validated(path)?;
+    let mut file = File::open(&path)?;
     let file_size = file.seek(SeekFrom::End(0))?;
     file.seek(SeekFrom::Start(0))?;
 

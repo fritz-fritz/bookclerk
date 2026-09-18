@@ -5,7 +5,13 @@ assets, and runs describe/health smoke tests. Public helpers are re-exported
 from :mod:`.config`, :mod:`.ensure`, and :mod:`.smoke`.
 """
 
-from .config import egress_domains_for, materialize_config, plugin_global_outbound
+from .config import (
+    GeneratedConfig,
+    allocate_workerd_state_dir,
+    egress_domains_for,
+    materialize_config,
+    plugin_global_outbound,
+)
 from .ensure import (
     binary_name,
     default_cache_dir,
@@ -20,6 +26,8 @@ from ..path_guard import resolve_under
 from .smoke import run_smoke
 
 __all__ = [
+    "GeneratedConfig",
+    "allocate_workerd_state_dir",
     "binary_name",
     "default_cache_dir",
     "egress_domains_for",

@@ -60,4 +60,6 @@ def github_actions_file_path(path_s: str, *, label: str) -> str:
 
 def open_github_actions_append(path_s: str, *, label: str) -> IO[Any]:
     """Open a runner file-command path for append after semantic containment."""
-    return open(github_actions_file_path(path_s, label=label), "a", encoding="utf-8")
+    resolved = github_actions_file_path(path_s, label=label)
+    # Barrier + sink colocated: open the realpath'd value that passed startswith.
+    return open(resolved, "a", encoding="utf-8")

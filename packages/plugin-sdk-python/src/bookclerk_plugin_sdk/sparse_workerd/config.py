@@ -7,9 +7,12 @@ authoring tools that do not ship the Rust ``bookclerk-workerd`` binary.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import secrets
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .ensure import package_root
 from ..path_guard import resolve_under, refuse_symlink_path
@@ -273,6 +276,57 @@ def _resolve_sdk_js(sdk_root: Path) -> Path:
     )
 
 
+def _single_path_component(value: str, label: str) -> str:
+    if not value or "\0" in value:
+        raise ValueError(f"{label} is empty or contains NUL")
+    normalized = value.replace("\\", "/")
+    if "/" in normalized or normalized in {".", ".."} or ".." in normalized:
+        raise ValueError(f"{label} must be a single path component: {value}")
+    return normalized
+
+
+class GeneratedConfig(NamedTuple):
+    """Paths produced by :func:`materialize_config`."""
+
+    config_path: Path
+    listen_addr: str
+    state_dir: Path
+    import_path: Path
+
+
+def allocate_workerd_state_dir(plugin_root: Path) -> Path:
+    """Allocate a unique writable session directory for workerd generated embeds.
+
+    Keys the leaf by a short hash of the plugin root plus a random nonce.
+    Prefer ``TMPDIR`` / OS temp; fall back to ``.bookclerk-state`` beside the
+    plugin only when temp is unset.
+
+    Args:
+        plugin_root: Plugin install root (used only as an opaque id seed).
+
+    Returns:
+        Canonical absolute session directory.
+    """
+    root_key = hashlib.sha256(os.fspath(Path(plugin_root).resolve()).encode()).hexdigest()[:8]
+    base_env = os.environ.get("TMPDIR") or os.environ.get("TEMP") or os.environ.get("TMP")
+    if base_env:
+        base = Path(base_env).resolve()
+    else:
+        base = Path(plugin_root).resolve() / ".bookclerk-state"
+    base.mkdir(parents=True, exist_ok=True)
+    base = Path(os.path.realpath(base))
+    for _ in range(64):
+        nonce = secrets.token_hex(2)
+        leaf = f"w{root_key}{nonce}"
+        candidate = resolve_under(base, leaf)
+        try:
+            candidate.mkdir(mode=0o700)
+            return Path(os.path.realpath(candidate))
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"could not allocate a unique workerd state directory under {base}")
+
+
 def materialize_config(
     plugin_root: Path,
     manifest: dict[str, Any],
@@ -280,21 +334,28 @@ def materialize_config(
     listen_port: int,
     bridge_token: str,
     sdk_root: Path | None = None,
-    config_name: str = ".bookclerk-workerd-config.capnp",
-) -> tuple[Path, str]:
-    """Write bridge assets and Cap'n Proto config under ``plugin_root``.
+    state_dir: Path | None = None,
+    config_name: str = "workerd-config.capnp",
+) -> GeneratedConfig:
+    """Write bridge assets and Cap'n Proto under a host session directory.
+
+    Generated embeds (``.bookclerk/``, Cap'n Proto) are written under
+    ``state_dir`` (allocated under ``$TMPDIR`` when omitted). Author modules
+    stay on the read-only install root and are referenced via Cap'n Proto
+    ``/modules/…`` embeds resolved with ``workerd serve --import-path``.
 
     Args:
-        plugin_root: Plugin directory that contains ``modules/`` and receives
-            ``.bookclerk/`` plus the config file.
+        plugin_root: Plugin directory that contains ``modules/``.
         manifest: Parsed ``plugin.toml`` mapping (must include ``[workerd]``).
         listen_port: Loopback TCP port for the bridge RPC socket.
         bridge_token: Bearer token required by the bridge HTTP surface.
         sdk_root: SDK package root for bridge/SDK embeds (defaults to this package).
-        config_name: Output Cap'n Proto filename under ``plugin_root``.
+        state_dir: Existing session directory, or ``None`` to allocate one.
+        config_name: Output Cap'n Proto filename under the session directory.
 
     Returns:
-        ``(config_path, listen_addr)`` where ``listen_addr`` is ``127.0.0.1:<port>``.
+        :class:`GeneratedConfig` with config path, listen address, session dir,
+        and import path for ``--import-path``.
 
     Raises:
         ValueError: If ``[workerd]`` is missing or ``bridge_token`` is empty.
@@ -307,31 +368,38 @@ def materialize_config(
 
     plugin_root = Path(plugin_root).resolve()
     sdk_root = Path(sdk_root or package_root()).resolve()
-    modules_dir_name = workerd.get("modules_dir") or "modules"
+    if state_dir is None:
+        state_dir = allocate_workerd_state_dir(plugin_root)
+    else:
+        state_dir = Path(os.path.realpath(Path(state_dir).resolve()))
+    modules_dir_name = _single_path_component(
+        str(workerd.get("modules_dir") or "modules"), "modules_dir"
+    )
+    main_module_name = _single_path_component(str(workerd["main_module"]), "main_module")
     entrypoint = workerd.get("entrypoint") or "default"
     net = (manifest.get("capabilities") or {}).get("network") or {}
     network_mode = net.get("mode") or "deny"
     network_domains = list(net.get("domains") or [])
 
-    bookclerk_dir = resolve_under(plugin_root, ".bookclerk")
-    refuse_symlink_path(plugin_root, bookclerk_dir)
+    bookclerk_dir = resolve_under(state_dir, ".bookclerk")
+    refuse_symlink_path(state_dir, bookclerk_dir)
     bookclerk_dir.mkdir(parents=True, exist_ok=True)
     for name in ("bridge.js", "egress.js"):
         src = resolve_under(sdk_root, "bridge", name)
         if not src.is_file():
             raise FileNotFoundError(f"missing vendored bridge {src}")
         dest = resolve_under(bookclerk_dir, name)
-        refuse_symlink_path(plugin_root, dest)
+        refuse_symlink_path(state_dir, dest)
         dest.write_bytes(src.read_bytes())
     adapter = resolve_under(bookclerk_dir, "adapter.js")
-    refuse_symlink_path(plugin_root, adapter)
+    refuse_symlink_path(state_dir, adapter)
     adapter.write_text(ADAPTER_JS, encoding="utf-8")
 
     modules_dir = resolve_under(plugin_root, modules_dir_name)
     refuse_symlink_path(plugin_root, modules_dir)
     if modules_dir.is_symlink() or not modules_dir.is_dir():
         raise FileNotFoundError(f"modules dir missing: {modules_dir}")
-    main_abs = resolve_under(plugin_root, modules_dir_name, workerd["main_module"])
+    main_abs = resolve_under(modules_dir, main_module_name)
     refuse_symlink_path(plugin_root, main_abs)
     if main_abs.is_symlink() or not main_abs.is_file():
         raise FileNotFoundError(f"main module missing: {main_abs}")
@@ -349,8 +417,8 @@ def materialize_config(
     seen_names: set[str] = set()
 
     for file_path in ordered:
-        rel = file_path.relative_to(plugin_root).as_posix()
         name = file_path.relative_to(modules_dir).as_posix()
+        embed = f"/{modules_dir_name}/{name}"
         if is_legacy_sdk_embed(name):
             continue
         field, python = module_field_for(name)
@@ -360,7 +428,7 @@ def materialize_config(
             needs_js = True
         seen_names.add(name)
         module_embeds.append(
-            f'(name = "{escape_capnp(name)}", {field} = embed "{escape_capnp(rel)}")'
+            f'(name = "{escape_capnp(name)}", {field} = embed "{escape_capnp(embed)}")'
         )
 
     # The adapter isolate always needs the JS SDK embed; the author isolate gets
@@ -369,7 +437,7 @@ def materialize_config(
 
     def write_generated(name: str, text: str) -> None:
         dest = resolve_under(bookclerk_dir, name)
-        refuse_symlink_path(plugin_root, dest)
+        refuse_symlink_path(state_dir, dest)
         dest.write_text(text, encoding="utf-8")
 
     write_generated("sdk-workerd.js", sdk_js.read_text(encoding="utf-8"))
@@ -538,7 +606,13 @@ const bridgeWorker :Workerd.Worker = (
 );
 """
 
-    config_path = resolve_under(plugin_root, config_name)
-    refuse_symlink_path(plugin_root, config_path)
+    config_name = _single_path_component(config_name, "config_name")
+    config_path = resolve_under(state_dir, config_name)
+    refuse_symlink_path(state_dir, config_path)
     config_path.write_text(config, encoding="utf-8")
-    return config_path, listen_addr
+    return GeneratedConfig(
+        config_path=config_path,
+        listen_addr=listen_addr,
+        state_dir=state_dir,
+        import_path=plugin_root,
+    )

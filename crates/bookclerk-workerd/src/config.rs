@@ -55,8 +55,9 @@ fn require_single_path_component<'a>(label: &str, value: &'a str) -> Result<&'a 
 
 /// Join `root` / `rel` and require the result stays under `root`.
 ///
-/// Rejects `..` and absolute `rel`. Canonicalizes `root` when it exists so
-/// containment uses a realpath identity before filesystem access.
+/// Requires `root` to already exist and canonicalize. For missing leaves,
+/// canonicalizes the nearest existing parent and rejoins the suffix — never
+/// returns a raw path that skipped canonicalize + `starts_with`.
 fn join_under(root: &Path, rel: impl AsRef<Path>) -> Result<PathBuf> {
     let rel = rel.as_ref();
     if rel.is_absolute() {
@@ -85,49 +86,100 @@ fn join_under(root: &Path, rel: impl AsRef<Path>) -> Result<PathBuf> {
             }
         }
     }
-    let root_norm = match fs::canonicalize(root) {
-        Ok(c) => c,
-        Err(_) => root.to_path_buf(),
-    };
-    let out = root_norm.join(rel);
-    // Prefer canonicalize-then-starts_with when the target already exists so
-    // Default Setup's TaintedPath state machine can barrier the flow.
-    if let Ok(out_canon) = fs::canonicalize(&out) {
-        if !out_canon.starts_with(&root_norm) {
-            bail!(
-                "path {} escapes root {}",
-                out_canon.display(),
-                root_norm.display()
-            );
+    let root_norm =
+        fs::canonicalize(root).with_context(|| format!("canonicalize root {}", root.display()))?;
+    let mut out = root_norm.clone();
+    for comp in rel.components() {
+        if let Component::Normal(name) = comp {
+            out.push(name);
         }
-        return Ok(out_canon);
     }
-    if !out.starts_with(&root_norm) {
-        bail!(
-            "path {} escapes root {}",
-            out.display(),
-            root_norm.display()
-        );
-    }
-    Ok(out)
+    require_under(&root_norm, &out)
 }
 
-/// Returns `path` when it stays under `root` (canonical when present).
+/// Returns `path` when it stays under `root` after canonicalize + `starts_with`.
+///
+/// Missing leaves: canonicalize the nearest existing parent and rejoin. Existing
+/// dangling symlinks are refused. No raw-path fallback.
 fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
     if path.components().any(|c| matches!(c, Component::ParentDir)) {
         bail!("refusing path with '..': {}", path.display());
     }
-    let root_norm = match fs::canonicalize(root) {
-        Ok(c) => c,
-        Err(_) => root.to_path_buf(),
-    };
+    let root_norm =
+        fs::canonicalize(root).with_context(|| format!("canonicalize root {}", root.display()))?;
     let path_norm = match fs::canonicalize(path) {
         Ok(c) => c,
-        Err(_) => {
-            if !path.starts_with(root) && !path.starts_with(&root_norm) {
-                bail!("path {} escapes root {}", path.display(), root.display());
+        Err(err) => {
+            match fs::symlink_metadata(path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    bail!(
+                        "refusing dangling or unresolvable symlink {}: {err}",
+                        path.display()
+                    );
+                }
+                Ok(_) => {
+                    bail!(
+                        "could not canonicalize existing path {}: {err}",
+                        path.display()
+                    );
+                }
+                Err(meta_err) if meta_err.kind() != std::io::ErrorKind::NotFound => {
+                    bail!("could not stat path {}: {meta_err}", path.display());
+                }
+                Err(_) => {}
             }
-            path.to_path_buf()
+            let mut suffix = Vec::new();
+            let mut cursor = path.to_path_buf();
+            loop {
+                match fs::canonicalize(&cursor) {
+                    Ok(canon) => {
+                        let mut out = canon;
+                        for part in suffix.iter().rev() {
+                            out.push(part);
+                        }
+                        break out;
+                    }
+                    Err(canon_err) => {
+                        match fs::symlink_metadata(&cursor) {
+                            Ok(meta) if meta.file_type().is_symlink() => {
+                                bail!(
+                                    "refusing dangling or unresolvable symlink {}: {canon_err}",
+                                    cursor.display()
+                                );
+                            }
+                            Ok(_) => {
+                                bail!(
+                                    "could not canonicalize path {}: {canon_err}",
+                                    cursor.display()
+                                );
+                            }
+                            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                                bail!("could not stat path {}: {e}", cursor.display());
+                            }
+                            Err(_) => {}
+                        }
+                        let name = cursor
+                            .file_name()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("path has no file name: {}", path.display())
+                            })?
+                            .to_os_string();
+                        suffix.push(name);
+                        match cursor.parent() {
+                            Some(parent) if !parent.as_os_str().is_empty() => {
+                                cursor = parent.to_path_buf();
+                            }
+                            _ => {
+                                bail!(
+                                    "could not canonicalize path {} under {}: {canon_err}",
+                                    path.display(),
+                                    root.display()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     };
     if !path_norm.starts_with(&root_norm) {
@@ -140,24 +192,103 @@ fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
     Ok(path_norm)
 }
 
+/// Create `root` / `rel` as a directory, then return its canonical path under `root`.
+///
+/// Performs `create_dir_all`, canonicalize, and `starts_with` in this function so
+/// Default Setup path-injection queries can barrier the same value used at the
+/// filesystem sink.
+fn ensure_dir_under(root: &Path, rel: impl AsRef<Path>) -> Result<PathBuf> {
+    let rel = rel.as_ref();
+    let root_norm =
+        fs::canonicalize(root).with_context(|| format!("canonicalize root {}", root.display()))?;
+    let mut out = root_norm.clone();
+    for comp in rel.components() {
+        match comp {
+            Component::Normal(name) => out.push(name),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!(
+                    "refusing unsafe dir under {}: {}",
+                    root.display(),
+                    rel.display()
+                );
+            }
+        }
+    }
+    fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
+    let canon =
+        fs::canonicalize(&out).with_context(|| format!("canonicalize {}", out.display()))?;
+    if !canon.starts_with(&root_norm) {
+        bail!(
+            "path {} escapes root {}",
+            canon.display(),
+            root_norm.display()
+        );
+    }
+    Ok(canon)
+}
+
+/// Write `contents` to `root` / `name` (single component) after canonicalize + `starts_with`.
+///
+/// Creates parent directories and the file (if missing) so canonicalize succeeds,
+/// then writes through the canonical path in this function (sink + barrier colocated).
+fn write_file_under(root: &Path, name: &str, contents: impl AsRef<[u8]>) -> Result<PathBuf> {
+    let name = require_single_path_component("file name", name)?;
+    let root_norm =
+        fs::canonicalize(root).with_context(|| format!("canonicalize root {}", root.display()))?;
+    let out = root_norm.join(name);
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    if !out.exists() {
+        fs::File::create(&out).with_context(|| format!("create {}", out.display()))?;
+    }
+    let canon =
+        fs::canonicalize(&out).with_context(|| format!("canonicalize {}", out.display()))?;
+    if !canon.starts_with(&root_norm) {
+        bail!(
+            "path {} escapes root {}",
+            canon.display(),
+            root_norm.display()
+        );
+    }
+    fs::write(&canon, contents).with_context(|| format!("write {}", canon.display()))?;
+    Ok(canon)
+}
+
 /// Create `root` / `rel` (and parents). Used by tests writing under TempDir.
 #[cfg(test)]
 fn create_dir_under(root: &Path, rel: impl AsRef<Path>) -> PathBuf {
-    let path = join_under(root, rel).expect("under root");
-    fs::create_dir_all(&path).expect("mkdir");
-    path
+    ensure_dir_under(root, rel).expect("under root")
 }
 
 /// Write `contents` to `root` / `rel`. Used by tests writing under TempDir.
 #[cfg(test)]
 fn write_under(root: &Path, rel: impl AsRef<Path>, contents: impl AsRef<[u8]>) {
-    let path = join_under(root, rel).expect("under root");
-    if let Some(parent) = path.parent() {
-        if parent != root {
-            fs::create_dir_all(parent).expect("mkdir parent");
+    let rel = rel.as_ref();
+    let comps: Vec<_> = rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    match comps.as_slice() {
+        [name] => {
+            write_file_under(root, name, contents).expect("write");
+        }
+        _ => {
+            let path = join_under(root, rel).expect("under root");
+            if let Some(parent) = path.parent() {
+                if parent != root {
+                    fs::create_dir_all(parent).expect("mkdir parent");
+                }
+            }
+            // Re-barrier after parent create for multi-segment test helpers.
+            let path = require_under(root, &path).expect("under root");
+            fs::write(&path, contents).expect("write");
         }
     }
-    fs::write(&path, contents).expect("write");
 }
 
 /// Read a path that must stay under `root` (tests).
@@ -360,16 +491,48 @@ fn chmod_owner_only_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Writes `contents` and sets Unix mode `0600` (token-bearing files such as Cap'n Proto config).
+/// Writes `contents` to `root` / `name` with Unix mode `0600` after
+/// canonicalize + `starts_with` (token-bearing Cap'n Proto configs).
+///
+/// Creates the file when missing so canonicalize succeeds, then opens the
+/// canonical path in this function (sink + barrier colocated).
 ///
 /// # Errors
 ///
-/// Returns an error when the file cannot be created or written.
-fn write_owner_only_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+/// Returns an error when the path escapes `root` or the file cannot be written.
+fn write_owner_only_file_under(
+    root: &Path,
+    name: &str,
+    contents: impl AsRef<[u8]>,
+) -> Result<PathBuf> {
     use std::io::Write;
 
-    if path.components().any(|c| matches!(c, Component::ParentDir)) {
-        bail!("refusing path with '..': {}", path.display());
+    let name = require_single_path_component("file name", name)?;
+    let root_norm =
+        fs::canonicalize(root).with_context(|| format!("canonicalize root {}", root.display()))?;
+    let out = root_norm.join(name);
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    if !out.exists() {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(&out)
+            .with_context(|| format!("create {}", out.display()))?;
+    }
+    let canon =
+        fs::canonicalize(&out).with_context(|| format!("canonicalize {}", out.display()))?;
+    if !canon.starts_with(&root_norm) {
+        bail!(
+            "path {} escapes root {}",
+            canon.display(),
+            root_norm.display()
+        );
     }
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
@@ -379,17 +542,17 @@ fn write_owner_only_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> 
         opts.mode(0o600);
     }
     let mut file = opts
-        .open(path)
-        .with_context(|| format!("create {}", path.display()))?;
+        .open(&canon)
+        .with_context(|| format!("create {}", canon.display()))?;
     file.write_all(contents.as_ref())
-        .with_context(|| format!("write {}", path.display()))?;
+        .with_context(|| format!("write {}", canon.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", path.display()))?;
+        fs::set_permissions(&canon, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 0600 {}", canon.display()))?;
     }
-    Ok(())
+    Ok(canon)
 }
 
 /// Where bridge assets + Cap'n Proto config are written.
@@ -422,13 +585,26 @@ pub fn workerd_state_dir(plugin_root: &Path) -> Result<PathBuf> {
 
     let base = workerd_state_base(plugin_root);
     fs::create_dir_all(&base).with_context(|| format!("create {}", base.display()))?;
+    let base = fs::canonicalize(&base)
+        .with_context(|| format!("canonicalize state base {}", base.display()))?;
     let mut rng = rand::thread_rng();
     for _ in 0..64 {
         let mut nonce = [0u8; SESSION_NONCE_HEX / 2];
         rng.fill_bytes(&mut nonce);
-        let dir = join_under(&base, workerd_state_leaf(plugin_root, &hex::encode(nonce)))?;
+        let leaf = workerd_state_leaf(plugin_root, &hex::encode(nonce));
+        let dir = base.join(&leaf);
+        if dir.components().any(|c| matches!(c, Component::ParentDir)) {
+            bail!("refusing path with '..': {}", dir.display());
+        }
         match create_exclusive_owner_only_dir(&dir) {
-            Ok(()) => return Ok(dir),
+            Ok(()) => {
+                let canon = fs::canonicalize(&dir)
+                    .with_context(|| format!("canonicalize {}", dir.display()))?;
+                if !canon.starts_with(&base) {
+                    bail!("path {} escapes root {}", canon.display(), base.display());
+                }
+                return Ok(canon);
+            }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
                 return Err(err).with_context(|| format!("create {}", dir.display()));
@@ -442,14 +618,18 @@ pub fn workerd_state_dir(plugin_root: &Path) -> Result<PathBuf> {
 }
 
 /// Uses `state_dir` when provided; otherwise allocates via [`workerd_state_dir`].
+///
+/// Always returns a canonical absolute path so later `ensure_dir_under` /
+/// `write_file_under` barriers can fire.
 fn resolve_state_dir(root: &Path, state_dir: Option<&Path>) -> Result<PathBuf> {
-    match state_dir {
+    let dir = match state_dir {
         Some(dir) => {
             ensure_owner_only_dir(dir)?;
-            Ok(dir.to_path_buf())
+            dir.to_path_buf()
         }
-        None => workerd_state_dir(root),
-    }
+        None => workerd_state_dir(root)?,
+    };
+    fs::canonicalize(&dir).with_context(|| format!("canonicalize state dir {}", dir.display()))
 }
 
 /// How the bridge HTTP socket is exposed to `bookclerk-workerd`.
@@ -704,16 +884,11 @@ pub fn materialize_native_backend(
     state_dir: Option<&Path>,
 ) -> Result<GeneratedConfig> {
     let state_dir = resolve_state_dir(root, state_dir)?;
-    let bookclerk_dir = join_under(&state_dir, ".bookclerk")?;
-    fs::create_dir_all(&bookclerk_dir)
-        .with_context(|| format!("create {}", bookclerk_dir.display()))?;
-    fs::write(join_under(&bookclerk_dir, "bridge.js")?, BRIDGE_JS)?;
-    fs::write(join_under(&bookclerk_dir, "egress.js")?, EGRESS_JS)?;
-    fs::write(join_under(&bookclerk_dir, "adapter.js")?, NATIVE_ADAPTER_JS)?;
-    fs::write(
-        join_under(&bookclerk_dir, "sdk-workerd.js")?,
-        SDK_WORKERD_JS,
-    )?;
+    let bookclerk_dir = ensure_dir_under(&state_dir, ".bookclerk")?;
+    write_file_under(&bookclerk_dir, "bridge.js", BRIDGE_JS)?;
+    write_file_under(&bookclerk_dir, "egress.js", EGRESS_JS)?;
+    write_file_under(&bookclerk_dir, "adapter.js", NATIVE_ADAPTER_JS)?;
+    write_file_under(&bookclerk_dir, "sdk-workerd.js", SDK_WORKERD_JS)?;
 
     let domains = egress_domains_for(false, egress.mode(), egress.allowed_initial_hosts());
     let subrequests = match egress.policy().subrequests {
@@ -829,9 +1004,9 @@ const bridgeWorker :Workerd.Worker = (
         egress_flags = EGRESS_COMPAT_FLAGS,
     );
 
-    let config_path = join_under(&state_dir, "workerd-config.capnp")?;
-    write_owner_only_file(&config_path, config)?;
-    let import_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let config_path = write_owner_only_file_under(&state_dir, "workerd-config.capnp", config)?;
+    let import_path = fs::canonicalize(root)
+        .with_context(|| format!("canonicalize import path {}", root.display()))?;
     Ok(GeneratedConfig {
         config_path,
         listen,
@@ -915,12 +1090,10 @@ pub fn materialize(
         .context("missing [workerd] table")?;
 
     let state_dir = resolve_state_dir(root, state_dir)?;
-    let bookclerk_dir = join_under(&state_dir, ".bookclerk")?;
-    fs::create_dir_all(&bookclerk_dir)
-        .with_context(|| format!("create {}", bookclerk_dir.display()))?;
-    fs::write(join_under(&bookclerk_dir, "bridge.js")?, BRIDGE_JS)?;
-    fs::write(join_under(&bookclerk_dir, "egress.js")?, EGRESS_JS)?;
-    fs::write(join_under(&bookclerk_dir, "adapter.js")?, ADAPTER_JS)?;
+    let bookclerk_dir = ensure_dir_under(&state_dir, ".bookclerk")?;
+    write_file_under(&bookclerk_dir, "bridge.js", BRIDGE_JS)?;
+    write_file_under(&bookclerk_dir, "egress.js", EGRESS_JS)?;
+    write_file_under(&bookclerk_dir, "adapter.js", ADAPTER_JS)?;
 
     let modules_name = require_single_path_component("modules_dir", &workerd.modules_dir)?;
     let main_name = require_single_path_component("main_module", &workerd.main_module)?;
@@ -977,10 +1150,7 @@ pub fn materialize(
 
     // Inject dual-stack SDK under the package import names authors use.
     if needs_js {
-        fs::write(
-            join_under(&bookclerk_dir, "sdk-workerd.js")?,
-            SDK_WORKERD_JS,
-        )?;
+        write_file_under(&bookclerk_dir, "sdk-workerd.js", SDK_WORKERD_JS)?;
         for mod_name in SDK_JS_MODULE_NAMES {
             if seen_names.contains(*mod_name) {
                 continue;
@@ -993,23 +1163,11 @@ pub fn materialize(
         }
     }
     if needs_python {
-        fs::write(
-            join_under(&bookclerk_dir, "sdk-workerd.py")?,
-            SDK_WORKERD_PY,
-        )?;
-        fs::write(
-            join_under(&bookclerk_dir, "sdk-db-value.py")?,
-            SDK_DB_VALUE_PY,
-        )?;
-        fs::write(
-            join_under(&bookclerk_dir, "sdk-product-abi.py")?,
-            SDK_PRODUCT_ABI_PY,
-        )?;
-        fs::write(
-            join_under(&bookclerk_dir, "sdk-guest-sql.py")?,
-            SDK_GUEST_SQL_PY,
-        )?;
-        fs::write(join_under(&bookclerk_dir, "sdk-init.py")?, SDK_PY_INIT)?;
+        write_file_under(&bookclerk_dir, "sdk-workerd.py", SDK_WORKERD_PY)?;
+        write_file_under(&bookclerk_dir, "sdk-db-value.py", SDK_DB_VALUE_PY)?;
+        write_file_under(&bookclerk_dir, "sdk-product-abi.py", SDK_PRODUCT_ABI_PY)?;
+        write_file_under(&bookclerk_dir, "sdk-guest-sql.py", SDK_GUEST_SQL_PY)?;
+        write_file_under(&bookclerk_dir, "sdk-init.py", SDK_PY_INIT)?;
         for (module_name, embed_file) in [
             (SDK_PY_INIT_MODULE, "sdk-init.py"),
             (SDK_PY_PRODUCT_ABI_MODULE, "sdk-product-abi.py"),
@@ -1130,10 +1288,7 @@ pub fn materialize(
     }
 
     // Adapter always loads the JS SDK (even when the author isolate is Python).
-    fs::write(
-        join_under(&bookclerk_dir, "sdk-workerd.js")?,
-        SDK_WORKERD_JS,
-    )?;
+    write_file_under(&bookclerk_dir, "sdk-workerd.js", SDK_WORKERD_JS)?;
     let adapter_sdk_embeds: Vec<String> = SDK_JS_MODULE_NAMES
         .iter()
         .map(|mod_name| {
@@ -1228,10 +1383,10 @@ const bridgeWorker :Workerd.Worker = (
         egress_flags = EGRESS_COMPAT_FLAGS,
     );
 
-    let config_path = join_under(&state_dir, "workerd-config.capnp")?;
-    write_owner_only_file(&config_path, config)?;
+    let config_path = write_owner_only_file_under(&state_dir, "workerd-config.capnp", config)?;
 
-    let import_path = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let import_path = fs::canonicalize(root)
+        .with_context(|| format!("canonicalize import path {}", root.display()))?;
 
     Ok(GeneratedConfig {
         config_path,

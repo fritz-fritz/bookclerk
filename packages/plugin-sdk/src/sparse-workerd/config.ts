@@ -8,7 +8,9 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { createHash, randomBytes } from "node:crypto";
 import type { Manifest } from "../tools/validate.js";
 import { assertPathInside, refuseSymlinkPath, packageRoot } from "./ensure.js";
 
@@ -159,7 +161,13 @@ export type MaterializeOptions = {
    * the default (used by unit tests that vendor a fixture package tree).
    */
   sdkRoot?: string;
-  /** Cap'n Proto output filename under the plugin root (default `.bookclerk-workerd-config.capnp`). */
+  /**
+   * Existing session directory for generated embeds (default: allocate under
+   * `$TMPDIR`). Cap'n Proto + `.bookclerk/` are written here — never under the
+   * tainted plugin install root.
+   */
+  stateDir?: string;
+  /** Cap'n Proto output filename under the session dir (default `workerd-config.capnp`). */
   configName?: string;
 };
 
@@ -167,11 +175,52 @@ export type MaterializeOptions = {
  * Paths produced by {@link materializeConfig}.
  */
 export type GeneratedConfig = {
-  /** Absolute path to the Cap'n Proto config file. */
+  /** Absolute path to the Cap'n Proto config file (under {@link stateDir}). */
   configPath: string;
   /** Loopback listen address (`127.0.0.1:<port>`). */
   listenAddr: string;
+  /** Writable session directory holding `.bookclerk/` + Cap'n Proto. */
+  stateDir: string;
+  /** Pass to `workerd serve --import-path` for `/modules/…` embeds. */
+  importPath: string;
 };
+
+/**
+ * Allocate a unique writable session directory for workerd generated embeds.
+ *
+ * Keys the leaf by a short hash of the plugin root plus a random nonce so
+ * concurrent sessions cannot clobber Cap'n Proto. Prefer `$TMPDIR` / OS temp;
+ * fall back to `.bookclerk-state` beside the plugin only when temp is unset.
+ *
+ * @param pluginRoot - Plugin install root (used only as an opaque id seed).
+ * @returns Canonical absolute session directory.
+ */
+export function allocateWorkerdStateDir(pluginRoot: string): string {
+  const rootKey = createHash("sha256")
+    .update(path.resolve(pluginRoot))
+    .digest("hex")
+    .slice(0, 8);
+  const baseEnv = process.env.TMPDIR || process.env.TEMP || process.env.TMP;
+  const base = baseEnv && baseEnv.length > 0
+    ? path.resolve(baseEnv)
+    : path.resolve(pluginRoot, ".bookclerk-state");
+  fs.mkdirSync(base, { recursive: true });
+  const baseReal = fs.realpathSync(base);
+  for (let i = 0; i < 64; i++) {
+    const nonce = randomBytes(2).toString("hex");
+    const leaf = `w${rootKey}${nonce}`;
+    const dir = assertPathInside(baseReal, leaf);
+    try {
+      fs.mkdirSync(dir, { recursive: false, mode: 0o700 });
+      return fs.realpathSync(dir);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") continue;
+      throw err;
+    }
+  }
+  throw new Error(`could not allocate a unique workerd state directory under ${baseReal}`);
+}
 
 function escapeCapnp(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -279,16 +328,17 @@ export function egressDomainsFor(
 }
 
 /**
- * Materializes bridge assets + Cap'n Proto under `pluginRoot`.
+ * Materializes bridge assets + Cap'n Proto under a host session directory.
  *
- * Copies bridge scripts into `.bookclerk/`, embeds plugin modules (and the
- * injected SDK when JS/Python guests are present), and writes the Cap'n Proto
- * config.
+ * Copies bridge scripts into `stateDir/.bookclerk/`, embeds plugin modules via
+ * Cap'n Proto `/modules/…` + `--import-path` (read-only install root), and
+ * writes the Cap'n Proto config beside those embeds — never under the tainted
+ * plugin install path.
  *
  * @param pluginRoot - Plugin directory containing `plugin.toml` and modules.
  * @param manifest - Validated workerd manifest.
  * @param options - Listen port and bridge token.
- * @returns Generated config path and loopback listen address.
+ * @returns Generated config path, listen address, session dir, and import path.
  * @throws {Error} When `[workerd]` is missing, modules are absent, or the
  *   bridge token is empty.
  */
@@ -303,6 +353,9 @@ export function materializeConfig(
   }
   const root = fs.realpathSync(path.resolve(pluginRoot));
   const sdkRoot = path.resolve(options.sdkRoot ?? packageRoot());
+  const stateDir = options.stateDir
+    ? fs.realpathSync(path.resolve(options.stateDir))
+    : allocateWorkerdStateDir(root);
   const modulesDirName = singlePathComponent(
     workerd.modules_dir ?? "modules",
     "modules_dir",
@@ -312,17 +365,17 @@ export function materializeConfig(
   const networkMode = manifest.capabilities?.network?.mode ?? "deny";
   const networkDomains = manifest.capabilities?.network?.domains ?? [];
 
-  const bookclerkDir = assertPathInside(root, ".bookclerk");
-  refuseSymlinkPath(root, bookclerkDir);
+  const bookclerkDir = assertPathInside(stateDir, ".bookclerk");
+  refuseSymlinkPath(stateDir, bookclerkDir);
   fs.mkdirSync(bookclerkDir, { recursive: true });
   for (const name of ["bridge.js", "egress.js"] as const) {
     const src = assertPathInside(sdkRoot, path.join("bridge", name));
     const dest = assertPathInside(bookclerkDir, name);
-    refuseSymlinkPath(root, dest);
+    refuseSymlinkPath(stateDir, dest);
     fs.copyFileSync(src, dest);
   }
   const adapterDest = assertPathInside(bookclerkDir, "adapter.js");
-  refuseSymlinkPath(root, adapterDest);
+  refuseSymlinkPath(stateDir, adapterDest);
   fs.writeFileSync(adapterDest, ADAPTER_JS);
 
   const modulesDir = assertPathInside(root, modulesDirName);
@@ -354,21 +407,19 @@ export function materializeConfig(
   const seenNames = new Set<string>();
 
   for (const filePath of ordered) {
-    const rel = path
-      .relative(root, filePath)
-      .split(path.sep)
-      .join("/");
     const name = path
       .relative(modulesDir, filePath)
       .split(path.sep)
       .join("/");
+    // Cap'n Proto `/…` = import-path relative (same as Rust materialize).
+    const embed = `/${modulesDirName}/${name}`;
     if (isLegacySdkEmbed(name)) continue;
     const { field, python } = moduleFieldFor(name);
     if (python) needsPython = true;
     else if (name.endsWith(".js") || name.endsWith(".mjs")) needsJs = true;
     seenNames.add(name);
     moduleEmbeds.push(
-      `(name = "${escapeCapnp(name)}", ${field} = embed "${escapeCapnp(rel)}")`,
+      `(name = "${escapeCapnp(name)}", ${field} = embed "${escapeCapnp(embed)}")`,
     );
   }
 
@@ -378,12 +429,12 @@ export function materializeConfig(
   const sdkJs = fs.readFileSync(sdkJsPath, "utf8");
   const writeGenerated = (name: string, contents: string | Buffer) => {
     const dest = assertPathInside(bookclerkDir, name);
-    refuseSymlinkPath(root, dest);
+    refuseSymlinkPath(stateDir, dest);
     fs.writeFileSync(dest, contents);
   };
   const copyGenerated = (src: string, name: string) => {
     const dest = assertPathInside(bookclerkDir, name);
-    refuseSymlinkPath(root, dest);
+    refuseSymlinkPath(stateDir, dest);
     fs.copyFileSync(src, dest);
   };
 
@@ -571,11 +622,16 @@ const bridgeWorker :Workerd.Worker = (
 `;
 
   const configName = singlePathComponent(
-    options.configName ?? ".bookclerk-workerd-config.capnp",
+    options.configName ?? "workerd-config.capnp",
     "configName",
   );
-  const configPath = assertPathInside(root, configName);
-  refuseSymlinkPath(root, configPath);
+  const configPath = assertPathInside(stateDir, configName);
+  refuseSymlinkPath(stateDir, configPath);
   fs.writeFileSync(configPath, config);
-  return { configPath, listenAddr };
+  return {
+    configPath,
+    listenAddr,
+    stateDir,
+    importPath: root,
+  };
 }

@@ -263,13 +263,16 @@ fn require_relative_manifest_path(rel: &Path) -> Result<()> {
 fn join_relative_under(root: &Path, rel: &Path) -> Result<PathBuf> {
     require_relative_manifest_path(rel)?;
     reject_empty_or_nul(root)?;
-    let mut out = root.to_path_buf();
+    let root_norm = root.canonicalize().map_err(|e| {
+        SdkError::message(format!("canonicalize package root {}: {e}", root.display()))
+    })?;
+    let mut out = root_norm.clone();
     for comp in rel.components() {
         if let Component::Normal(name) = comp {
             out.push(name);
         }
     }
-    require_under_root(root, &out)
+    require_under_root(&root_norm, &out)
 }
 
 /// Resolve a manifest-derived relative source under `root`.
@@ -283,7 +286,10 @@ fn join_relative_under(root: &Path, rel: &Path) -> Result<PathBuf> {
 /// or escape after canonicalize.
 fn require_existing_source_under(root: &Path, rel: &Path) -> Result<PathBuf> {
     join_relative_under(root, rel)?;
-    let mut cur = root.to_path_buf();
+    let root_norm = root.canonicalize().map_err(|e| {
+        SdkError::message(format!("canonicalize package root {}: {e}", root.display()))
+    })?;
+    let mut cur = root_norm.clone();
     for comp in rel.components() {
         let Component::Normal(name) = comp else {
             continue;
@@ -305,14 +311,14 @@ fn require_existing_source_under(root: &Path, rel: &Path) -> Result<PathBuf> {
             cur.display()
         ))
     })?;
-    if !canon.starts_with(root) {
+    if !canon.starts_with(&root_norm) {
         return Err(SdkError::message(format!(
             "path {} escapes root {}",
             canon.display(),
-            root.display()
+            root_norm.display()
         )));
     }
-    Ok(cur)
+    Ok(canon)
 }
 
 /// Rejects empty paths and interior NULs before filesystem access.
@@ -366,33 +372,158 @@ fn join_under_root(root: &Path, name: &std::ffi::OsStr) -> Result<PathBuf> {
             }
         }
     }
-    let out = root.join(name);
-    if !out.starts_with(root) {
-        return Err(SdkError::message(format!(
-            "path {} escapes root {}",
-            out.display(),
-            root.display()
-        )));
-    }
-    Ok(out)
+    let root_norm = root.canonicalize().map_err(|e| {
+        SdkError::message(format!("canonicalize package root {}: {e}", root.display()))
+    })?;
+    let out = root_norm.join(name);
+    require_under_root(&root_norm, &out)
 }
 
-/// Requires `path` to stay under `root`.
+/// Requires `path` to stay under `root` after canonicalize + `starts_with`.
+///
+/// Missing leaves: canonicalize the nearest existing parent and rejoin. No
+/// raw-path fallback.
 ///
 /// # Errors
 ///
-/// Returns [`SdkError`] when `path` is unsafe or escapes `root`.
+/// Returns [`SdkError`] when `path` is unsafe, cannot canonicalize, or escapes `root`.
 fn require_under_root(root: &Path, path: &Path) -> Result<PathBuf> {
     reject_empty_or_nul(path)?;
-    let path = path.to_path_buf();
-    if !path.starts_with(root) {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(SdkError::message(format!(
-            "path {} escapes root {}",
-            path.display(),
-            root.display()
+            "refusing path with '..': {}",
+            path.display()
         )));
     }
-    Ok(path)
+    let root_norm = root.canonicalize().map_err(|e| {
+        SdkError::message(format!("canonicalize package root {}: {e}", root.display()))
+    })?;
+    // Walk suffix components under the root so intermediate symlinks are refused
+    // before canonicalize would follow them out of tree.
+    if let Ok(rel) = path
+        .strip_prefix(root)
+        .or_else(|_| path.strip_prefix(&root_norm))
+    {
+        let mut cur = root_norm.clone();
+        for comp in rel.components() {
+            let Component::Normal(name) = comp else {
+                continue;
+            };
+            cur.push(name);
+            match std::fs::symlink_metadata(&cur) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(SdkError::message(format!(
+                        "refusing symlink in package path: {}",
+                        cur.display()
+                    )));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) => {
+                    return Err(SdkError::message(format!(
+                        "could not stat path {}: {e}",
+                        cur.display()
+                    )));
+                }
+                Ok(_) => {}
+            }
+        }
+    } else {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(SdkError::message(format!(
+                    "refusing symlink in package path: {}",
+                    path.display()
+                )));
+            }
+            _ => {}
+        }
+    }
+    let path_norm = match path.canonicalize() {
+        Ok(c) => c,
+        Err(err) => {
+            match std::fs::symlink_metadata(path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(SdkError::message(format!(
+                        "refusing dangling or unresolvable symlink {}: {err}",
+                        path.display()
+                    )));
+                }
+                Ok(_) => {
+                    return Err(SdkError::message(format!(
+                        "could not canonicalize existing path {}: {err}",
+                        path.display()
+                    )));
+                }
+                Err(meta_err) if meta_err.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(SdkError::message(format!(
+                        "could not stat path {}: {meta_err}",
+                        path.display()
+                    )));
+                }
+                Err(_) => {}
+            }
+            let mut suffix = Vec::new();
+            let mut cursor = path.to_path_buf();
+            loop {
+                match cursor.canonicalize() {
+                    Ok(canon) => {
+                        let mut out = canon;
+                        for part in suffix.iter().rev() {
+                            out.push(part);
+                        }
+                        break out;
+                    }
+                    Err(canon_err) => {
+                        match std::fs::symlink_metadata(&cursor) {
+                            Ok(meta) if meta.file_type().is_symlink() => {
+                                return Err(SdkError::message(format!(
+                                    "refusing dangling or unresolvable symlink {}: {canon_err}",
+                                    cursor.display()
+                                )));
+                            }
+                            Ok(_) => {
+                                return Err(SdkError::message(format!(
+                                    "could not canonicalize path {}: {canon_err}",
+                                    cursor.display()
+                                )));
+                            }
+                            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                                return Err(SdkError::message(format!(
+                                    "could not stat path {}: {e}",
+                                    cursor.display()
+                                )));
+                            }
+                            Err(_) => {}
+                        }
+                        let name = cursor.file_name().ok_or_else(|| {
+                            SdkError::message(format!("path has no file name: {}", path.display()))
+                        })?;
+                        suffix.push(name.to_os_string());
+                        match cursor.parent() {
+                            Some(parent) if !parent.as_os_str().is_empty() => {
+                                cursor = parent.to_path_buf();
+                            }
+                            _ => {
+                                return Err(SdkError::message(format!(
+                                    "could not canonicalize path {} under {}: {canon_err}",
+                                    path.display(),
+                                    root.display()
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    if !path_norm.starts_with(&root_norm) {
+        return Err(SdkError::message(format!(
+            "path {} escapes root {}",
+            path_norm.display(),
+            root_norm.display()
+        )));
+    }
+    Ok(path_norm)
 }
 
 /// Recursively copies `src` into `dst`, creating directories as needed.

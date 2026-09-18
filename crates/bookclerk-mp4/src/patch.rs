@@ -60,7 +60,8 @@ pub struct MoovLocation {
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn read_moov(path: &Path) -> Result<(MoovLocation, Vec<u8>)> {
-    let mut file = File::open(path)?;
+    let path = crate::fs_path::validated(path)?;
+    let mut file = File::open(&path)?;
     let boxes = top_level_boxes(&mut file)?;
     let moov = boxes
         .iter()

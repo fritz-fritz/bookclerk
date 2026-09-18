@@ -313,7 +313,8 @@ pub async fn guest_fetch_title(
     if let Some(wvd_b64) = credentials.get("widevine_b64").and_then(Value::as_str) {
         match STANDARD.decode(wvd_b64) {
             Ok(bytes) => {
-                let dest = cache_dir.join("widevine.wvd");
+                let dest = join_cache_component(cache_dir, "widevine.wvd")
+                    .map_err(|e| AudibleError::Other(anyhow::anyhow!("{e}")))?;
                 if let Err(err) = tokio::fs::write(&dest, &bytes).await {
                     tracing::warn!(error = %err, "failed to write guest widevine.wvd");
                 }

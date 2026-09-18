@@ -30,7 +30,7 @@ from .ensure import (
 )
 
 # Default Cap'n Proto config name written by materialize_config.
-_WORKERD_SMOKE_CONFIG = ".bookclerk-workerd-config.capnp"
+_WORKERD_SMOKE_CONFIG = "workerd-config.capnp"
 
 
 def _free_loopback_port() -> int:
@@ -170,28 +170,36 @@ def run_smoke(plugin_dir: Path) -> str:
     workerd_bin = ensure_workerd(default_cache_dir())
     port = _free_loopback_port()
     bridge_token = secrets.token_hex(32)
-    config_path, listen_addr = materialize_config(
+    generated = materialize_config(
         root,
         manifest,
         listen_port=port,
         bridge_token=bridge_token,
     )
+    config_path = generated.config_path
+    listen_addr = generated.listen_addr
     base = f"http://{listen_addr}"
 
     env = {**os.environ, "BOOKCLERK_PLUGIN_ROOT": str(root)}
     validated_bin = validate_spawn_executable(workerd_bin)
     if validated_bin.name not in ("workerd", "workerd.exe"):
         raise ValueError(f"expected workerd binary, got {validated_bin.name}")
-    validated_cfg = validate_spawn_executable(config_path, root)
+    validated_cfg = validate_spawn_executable(config_path, generated.state_dir)
     if validated_cfg.name != _WORKERD_SMOKE_CONFIG:
         raise ValueError(
             f"expected {_WORKERD_SMOKE_CONFIG}, got {validated_cfg.name}"
         )
+    import_path = validate_spawn_executable(generated.import_path)
     env["PATH"] = f"{validated_bin.parent}{os.pathsep}{env.get('PATH', '')}"
-    # Literal argv only: workerd + fixed config name; PATH points at validated dir.
+    # Literal argv: workerd serve + config under session cwd; import-path = RO plugin root.
     proc = subprocess.Popen(
-        ["workerd", "serve", _WORKERD_SMOKE_CONFIG],
-        cwd=str(root),
+        [
+            "workerd",
+            "serve",
+            _WORKERD_SMOKE_CONFIG,
+            f"--import-path={import_path}",
+        ],
+        cwd=str(generated.state_dir),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

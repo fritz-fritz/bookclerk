@@ -84,13 +84,26 @@ mode = "deny"
   fs.mkdirSync(outsideDir);
   fs.symlinkSync(outsideDir, path.join(plugin, ".bookclerk"));
   fs.rmSync(path.join(modules, "leak.txt"));
-  mustThrow("materializeConfig refuses .bookclerk symlink", () =>
-    materializeConfig(plugin, manifest, { listenPort: 0, bridgeToken: "tok" }),
-  );
+  // Generated embeds go to a host session dir — a `.bookclerk` symlink under the
+  // plugin root must not receive bridge assets (and must not block materialize).
+  const generated = materializeConfig(plugin, manifest, {
+    listenPort: 0,
+    bridgeToken: "tok",
+  });
   if (fs.existsSync(path.join(outsideDir, "bridge.js"))) {
     console.error("FAIL: outside bridge.js was written");
     process.exit(1);
   }
+  if (!generated.stateDir || generated.stateDir === plugin) {
+    console.error("FAIL: expected session stateDir distinct from plugin root");
+    process.exit(1);
+  }
+  if (!fs.existsSync(path.join(generated.stateDir, ".bookclerk", "bridge.js"))) {
+    console.error("FAIL: bridge.js missing under session stateDir");
+    process.exit(1);
+  }
+  console.log("ok materializeConfig writes under session dir (ignores plugin .bookclerk symlink)");
+  fs.rmSync(generated.stateDir, { recursive: true, force: true });
 
   fs.rmSync(path.join(plugin, ".bookclerk"), { force: true });
   fs.rmSync(path.join(modules, "main.js"));

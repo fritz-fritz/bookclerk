@@ -22,6 +22,7 @@ export {
 } from "./ensure.js";
 export {
   materializeConfig,
+  allocateWorkerdStateDir,
   pluginGlobalOutbound,
   egressDomainsFor,
   type MaterializeOptions,

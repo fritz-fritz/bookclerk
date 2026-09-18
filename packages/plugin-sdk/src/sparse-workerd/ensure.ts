@@ -118,15 +118,16 @@ export function defaultCacheDir(): string {
 }
 
 /**
- * Resolves `candidate` and requires it to stay under `root`.
+ * Resolves `candidate` under `root` via resolve + realpath + `startsWith`.
  *
  * Rejects NUL bytes and `..` path components (names like `..draft` and
- * `edition..2` are allowed). Does not follow symlinks — callers that write or
- * embed must also use {@link refuseSymlinkPath}.
+ * `edition..2` are allowed). When the candidate exists, returns its realpath;
+ * when missing, realpaths the nearest existing parent and rejoins the suffix.
+ * Never returns a path that skipped the prefix check.
  *
  * @param root - Trusted directory (resolved).
  * @param candidate - Absolute path or path relative to `root`.
- * @returns Absolute path under `root`.
+ * @returns Absolute realpath under `root`.
  * @throws {Error} When the path is empty, contains NUL/`..`, or escapes `root`.
  */
 export function assertPathInside(root: string, candidate: string): string {
@@ -137,24 +138,50 @@ export function assertPathInside(root: string, candidate: string): string {
   if (normalized.split("/").includes("..")) {
     throw new Error(`path must not contain '..': ${candidate}`);
   }
-  const resolvedRoot = path.resolve(root);
-  const resolved = path.isAbsolute(candidate)
+  const resolvedRootLex = path.resolve(root);
+  const resolvedLex = path.isAbsolute(candidate)
     ? path.resolve(candidate)
-    : path.resolve(resolvedRoot, candidate);
-  // CodeQL-recognized containment: absolute-normalized path under root prefix.
-  const rootPrefix = resolvedRoot.endsWith(path.sep)
-    ? resolvedRoot
-    : resolvedRoot + path.sep;
-  if (resolved !== resolvedRoot && !resolved.startsWith(rootPrefix)) {
-    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
+    : path.resolve(resolvedRootLex, candidate);
+
+  const realRoot = fs.existsSync(resolvedRootLex)
+    ? fs.realpathSync(resolvedRootLex)
+    : resolvedRootLex;
+
+  let resolved: string;
+  if (fs.existsSync(resolvedLex)) {
+    resolved = fs.realpathSync(resolvedLex);
+  } else {
+    // Missing leaf: realpath nearest existing parent, rejoin suffix components.
+    const suffix: string[] = [];
+    let cursor = resolvedLex;
+    for (;;) {
+      if (fs.existsSync(cursor)) {
+        resolved = path.join(fs.realpathSync(cursor), ...suffix.reverse());
+        break;
+      }
+      const base = path.basename(cursor);
+      const parent = path.dirname(cursor);
+      if (!base || parent === cursor) {
+        throw new Error(
+          `could not realpath path ${resolvedLex} under ${realRoot}`,
+        );
+      }
+      suffix.push(base);
+      cursor = parent;
+    }
   }
-  const rel = path.relative(resolvedRoot, resolved);
+
+  const rootPrefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+  if (resolved !== realRoot && !resolved.startsWith(rootPrefix)) {
+    throw new Error(`path ${resolved} escapes root ${realRoot}`);
+  }
+  const rel = path.relative(realRoot, resolved);
   if (path.isAbsolute(rel)) {
-    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
+    throw new Error(`path ${resolved} escapes root ${realRoot}`);
   }
   const segments = rel.split(path.sep).filter((s) => s.length > 0);
   if (segments.some((s) => s === "..")) {
-    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
+    throw new Error(`path ${resolved} escapes root ${realRoot}`);
   }
   return resolved;
 }

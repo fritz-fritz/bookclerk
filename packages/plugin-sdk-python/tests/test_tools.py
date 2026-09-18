@@ -214,17 +214,24 @@ def test_refuse_symlink_blocks_bookclerk_dir_link(tmp_path: Path):
     outside = tmp_path / "outside_dir"
     outside.mkdir()
     (plugin / ".bookclerk").symlink_to(outside)
-    bookclerk = resolve_under(plugin, ".bookclerk")
-    with pytest.raises(ValueError, match="symlink"):
+    with pytest.raises(ValueError, match="symlink|escape"):
+        # realpath containment refuses the symlink escape at resolve_under;
+        # refuse_symlink_path remains the suffix guard for non-escaping links.
+        bookclerk = resolve_under(plugin, ".bookclerk")
         refuse_symlink_path(plugin, bookclerk)
-    with pytest.raises(ValueError, match="symlink"):
-        materialize_config(
-            plugin,
-            __import__("tomllib").loads((plugin / "plugin.toml").read_text(encoding="utf-8")),
-            listen_port=0,
-            bridge_token="token",
-        )
+    # Generated embeds go to a host session dir — plugin `.bookclerk` symlink is ignored.
+    generated = materialize_config(
+        plugin,
+        __import__("tomllib").loads((plugin / "plugin.toml").read_text(encoding="utf-8")),
+        listen_port=0,
+        bridge_token="token",
+    )
     assert not (outside / "bridge.js").exists()
+    assert generated.state_dir != plugin
+    assert (generated.state_dir / ".bookclerk" / "bridge.js").is_file()
+    import shutil
+
+    shutil.rmtree(generated.state_dir, ignore_errors=True)
 
 
 def test_refuse_symlink_blocks_main_module_link(tmp_path: Path):

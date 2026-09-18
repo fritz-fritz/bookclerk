@@ -95,10 +95,12 @@ pub(crate) fn join_cache_component(cache_dir: &Path, component: &str) -> Result<
         }
     };
 
-    let root_norm = match fs::canonicalize(&cache_dir) {
-        Ok(c) => c,
-        Err(_) => cache_dir.clone(),
-    };
+    let root_norm = fs::canonicalize(&cache_dir).map_err(|e| {
+        DrmError::Native(format!(
+            "could not canonicalize cache root {}: {e}",
+            cache_dir.display()
+        ))
+    })?;
     let joined = root_norm.join(name);
     if let Ok(canon) = fs::canonicalize(&joined) {
         if !canon.starts_with(&root_norm) {
@@ -109,6 +111,27 @@ pub(crate) fn join_cache_component(cache_dir: &Path, component: &str) -> Result<
             )));
         }
         return Ok(canon);
+    }
+    match fs::symlink_metadata(&joined) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(DrmError::Native(format!(
+                "refusing dangling or unresolvable symlink: {}",
+                joined.display()
+            )));
+        }
+        Ok(_) => {
+            return Err(DrmError::Native(format!(
+                "could not canonicalize existing path: {}",
+                joined.display()
+            )));
+        }
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(DrmError::Native(format!(
+                "could not stat path {}: {e}",
+                joined.display()
+            )));
+        }
+        Err(_) => {}
     }
     if !joined.starts_with(&root_norm) {
         return Err(DrmError::Native(format!(

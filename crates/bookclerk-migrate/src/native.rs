@@ -100,11 +100,27 @@ pub struct NativeImportSummary {
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn export_native(opts: NativeExportOptions) -> Result<NativeExportSummary> {
-    if let Some(parent) = opts.dest.parent() {
+    // Contain the operator-selected archive path under the configured files dir
+    // (canonicalize + starts_with) so Default Setup path-injection barriers fire.
+    let files_root = std::fs::canonicalize(&opts.files_dir).map_err(|source| {
+        err(format!(
+            "could not canonicalize files dir {}: {source}",
+            opts.files_dir.display()
+        ))
+    })?;
+    let dest_candidate = if opts.dest.is_absolute() {
+        opts.dest.clone()
+    } else {
+        files_root.join(&opts.dest)
+    };
+    let dest = require_under_walk_root(&files_root, &dest_candidate)?;
+    if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = File::create(&opts.dest)
-        .map_err(|source| err(format!("create {}: {source}", opts.dest.display())))?;
+    // Re-resolve after parent create so the open uses a path that passed the barrier.
+    let dest = require_under_walk_root(&files_root, &dest)?;
+    let file = File::create(&dest)
+        .map_err(|source| err(format!("create {}: {source}", dest.display())))?;
     let enc = GzEncoder::new(BufWriter::new(file), Compression::default());
     let mut builder = tar::Builder::new(enc);
 
@@ -112,23 +128,23 @@ pub fn export_native(opts: NativeExportOptions) -> Result<NativeExportSummary> {
     let mut file_count = 0usize;
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
 
-    push_if_exists(&opts.files_dir, "config.toml", &mut entries, &mut included)?;
-    push_if_exists(&opts.files_dir, "library.db", &mut entries, &mut included)?;
+    push_if_exists(&files_root, "config.toml", &mut entries, &mut included)?;
+    push_if_exists(&files_root, "library.db", &mut entries, &mut included)?;
 
     if opts.include_plugin_manifests {
-        let plugins = opts.files_dir.join("plugins");
+        let plugins = files_root.join("plugins");
         collect_plugin_tomls(&plugins, &mut entries, &mut included)?;
     }
     if opts.include_cache {
-        let cache = opts.files_dir.join("cache");
+        let cache = files_root.join("cache");
         collect_dir(&cache, &cache, "cache", &mut entries, &mut included, true)?;
     }
     if opts.include_logs {
-        let logs = opts.files_dir.join("logs");
+        let logs = files_root.join("logs");
         collect_dir(&logs, &logs, "logs", &mut entries, &mut included, true)?;
     }
     if opts.include_plugin_databases {
-        let plugin_databases = opts.files_dir.join("plugin-databases");
+        let plugin_databases = files_root.join("plugin-databases");
         collect_dir(
             &plugin_databases,
             &plugin_databases,
@@ -175,7 +191,7 @@ pub fn export_native(opts: NativeExportOptions) -> Result<NativeExportSummary> {
     enc.finish().map_err(|e| err(format!("gzip finish: {e}")))?;
 
     Ok(NativeExportSummary {
-        archive: opts.dest.display().to_string(),
+        archive: dest.display().to_string(),
         files: file_count,
         included,
     })
@@ -310,25 +326,101 @@ fn reject_empty_or_nul(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Requires `path` to stay under `root` (canonical when present).
+/// Requires `path` to stay under `root` after canonicalize + `starts_with`.
+///
+/// Missing leaves: canonicalize the nearest existing parent and rejoin. No
+/// raw-path fallback.
 fn require_under_walk_root(root: &Path, path: &Path) -> Result<PathBuf> {
     reject_empty_or_nul(root)?;
     reject_empty_or_nul(path)?;
-    let root_norm = match std::fs::canonicalize(root) {
-        Ok(c) => c,
-        Err(_) => root.to_path_buf(),
-    };
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(err(format!("refusing path with '..': {}", path.display())));
+    }
+    let root_norm = std::fs::canonicalize(root).map_err(|source| {
+        err(format!(
+            "could not canonicalize walk root {}: {source}",
+            root.display()
+        ))
+    })?;
     let path_norm = match std::fs::canonicalize(path) {
         Ok(c) => c,
-        Err(_) => {
-            if !path.starts_with(root) && !path.starts_with(&root_norm) {
-                return Err(err(format!(
-                    "path {} escapes walk root {}",
-                    path.display(),
-                    root.display()
-                )));
+        Err(err_canon) => {
+            match std::fs::symlink_metadata(path) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(err(format!(
+                        "refusing dangling or unresolvable symlink {}: {err_canon}",
+                        path.display()
+                    )));
+                }
+                Ok(_) => {
+                    return Err(err(format!(
+                        "could not canonicalize existing path {}: {err_canon}",
+                        path.display()
+                    )));
+                }
+                Err(meta_err) if meta_err.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(err(format!(
+                        "could not stat path {}: {meta_err}",
+                        path.display()
+                    )));
+                }
+                Err(_) => {}
             }
-            path.to_path_buf()
+            let mut suffix = Vec::new();
+            let mut cursor = path.to_path_buf();
+            loop {
+                match std::fs::canonicalize(&cursor) {
+                    Ok(canon) => {
+                        let mut out = canon;
+                        for part in suffix.iter().rev() {
+                            out.push(part);
+                        }
+                        break out;
+                    }
+                    Err(canon_err) => {
+                        match std::fs::symlink_metadata(&cursor) {
+                            Ok(meta) if meta.file_type().is_symlink() => {
+                                return Err(err(format!(
+                                    "refusing dangling or unresolvable symlink {}: {canon_err}",
+                                    cursor.display()
+                                )));
+                            }
+                            Ok(_) => {
+                                return Err(err(format!(
+                                    "could not canonicalize path {}: {canon_err}",
+                                    cursor.display()
+                                )));
+                            }
+                            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                                return Err(err(format!(
+                                    "could not stat path {}: {e}",
+                                    cursor.display()
+                                )));
+                            }
+                            Err(_) => {}
+                        }
+                        let name = cursor
+                            .file_name()
+                            .ok_or_else(|| {
+                                err(format!("path has no file name: {}", path.display()))
+                            })?
+                            .to_os_string();
+                        suffix.push(name);
+                        match cursor.parent() {
+                            Some(parent) if !parent.as_os_str().is_empty() => {
+                                cursor = parent.to_path_buf();
+                            }
+                            _ => {
+                                return Err(err(format!(
+                                    "could not canonicalize path {} under {}: {canon_err}",
+                                    path.display(),
+                                    root.display()
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
         }
     };
     if !path_norm.starts_with(&root_norm) {
@@ -450,7 +542,7 @@ mod tests {
         )
         .unwrap();
 
-        let archive = tmp.path().join("backup.tar.gz");
+        let archive = files.join("backup.tar.gz");
         let summary = export_native(NativeExportOptions {
             files_dir: files.clone(),
             dest: archive.clone(),

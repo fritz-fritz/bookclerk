@@ -63,13 +63,17 @@ impl LocalFsBackend {
             }
         }
         std::fs::create_dir_all(&root)?;
-        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        let root = std::fs::canonicalize(&root).map_err(StorageError::Io)?;
         if !prefix.is_empty() {
             let prefix_dir = root.join(prefix.trim_end_matches('/'));
             if !prefix_dir.starts_with(&root) {
                 return Err(StorageError::InvalidKey(prefix));
             }
             std::fs::create_dir_all(&prefix_dir)?;
+            let prefix_canon = std::fs::canonicalize(&prefix_dir).map_err(StorageError::Io)?;
+            if !prefix_canon.starts_with(&root) {
+                return Err(StorageError::InvalidKey(prefix));
+            }
         }
         Ok(Self { root, prefix })
     }
