@@ -109,12 +109,20 @@ fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
     let root_norm =
         fs::canonicalize(root).with_context(|| format!("canonicalize root {}", root.display()))?;
     // Lexical under-root barrier *before* canonicalize/symlink_metadata sinks.
+    // Compare against both the caller root and its canonical form: Windows
+    // canonicalize rewrites `C:\Users\RUNNER~1\...` to `\\?\C:\Users\runneradmin\...`,
+    // so a same-form `starts_with(root)` still holds when the canonical form does not.
     let lexical = if path.is_absolute() {
         path.to_path_buf()
     } else {
         root_norm.join(path)
     };
-    if !lexical.starts_with(&root_norm) {
+    #[cfg(not(windows))]
+    if !lexical.starts_with(&root_norm) && !lexical.starts_with(root) {
+        // Unix paths share one prefix form; a miss here is a real escape.
+        // Windows 8.3 / verbatim prefixes disagree until canonicalize, so this
+        // early reject is unix-only. The canonical `starts_with` below still
+        // applies on every platform.
         bail!(
             "path {} escapes root {}",
             lexical.display(),
@@ -145,8 +153,12 @@ fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
             let mut suffix = Vec::new();
             let mut cursor = lexical.clone();
             loop {
-                // Keep walking only while the cursor stays under root_norm.
-                if !cursor.starts_with(&root_norm) {
+                // Keep walking only while the cursor stays under the caller root
+                // or its canonical form. Windows short-name temps fail the
+                // canonical comparison until an ancestor is canonicalized, so
+                // the early reject is unix-only.
+                #[cfg(not(windows))]
+                if !cursor.starts_with(&root_norm) && !cursor.starts_with(root) {
                     bail!(
                         "path {} escapes root {}",
                         cursor.display(),

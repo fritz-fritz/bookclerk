@@ -300,12 +300,16 @@ pub fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
         ))
     })?;
     // Lexical under-root barrier *before* canonicalize/symlink_metadata sinks.
+    // Compare against both the caller root and its canonical form: Windows
+    // canonicalize rewrites 8.3 short names and adds a `\\?\` prefix, so a
+    // same-form `starts_with(root)` still holds when the canonical form does not.
     let lexical = if path.is_absolute() {
         path.to_path_buf()
     } else {
         root_norm.join(path)
     };
-    if !lexical.starts_with(&root_norm) {
+    #[cfg(not(windows))]
+    if !lexical.starts_with(&root_norm) && !lexical.starts_with(root) {
         return Err(CatalogError::message(format!(
             "path {} escapes root {}",
             lexical.display(),
@@ -341,7 +345,8 @@ pub fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
             let mut suffix = Vec::new();
             let mut cursor = lexical.clone();
             loop {
-                if !cursor.starts_with(&root_norm) {
+                #[cfg(not(windows))]
+                if !cursor.starts_with(&root_norm) && !cursor.starts_with(root) {
                     return Err(CatalogError::message(format!(
                         "path {} escapes root {}",
                         cursor.display(),

@@ -102,18 +102,12 @@ export function downloadUrl(pin: WorkerdPin, artifact: string): string {
 }
 
 /**
- * Resolves the preferred workerd cache directory.
- *
- * Honors `BOOKCLERK_WORKERD_CACHE`, otherwise uses
- * `~/.cache/bookclerk/workerd`.
- *
- * @returns Absolute cache directory path.
- */
-/**
  * Resolve a workerd cache directory under the operator home.
  *
  * Env override must stay under `$HOME` (relative/`startsWith` barrier) so
  * mkdir/write sinks are not fed a raw env path under local threat modeling.
+ *
+ * @returns Absolute cache directory path.
  */
 export function defaultCacheDir(): string {
   const home = path.resolve(os.homedir());
