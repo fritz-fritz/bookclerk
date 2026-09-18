@@ -350,11 +350,8 @@ impl ContentSource for AudibleSource {
         let want_cover = dl.download_cover || dl.fixup_metadata;
         let mut cover_path = None;
         if want_cover {
-            let dest = join_cache_component(
-                &opts.cache_dir,
-                &format!("{title_id}.cover.jpg"),
-            )
-            .map_err(|e| SourceError::api(format!("{e}")))?;
+            let dest = join_cache_component(&opts.cache_dir, &format!("{title_id}.cover.jpg"))
+                .map_err(|e| SourceError::api(format!("{e}")))?;
             match download_cover_jpeg(
                 &account.client,
                 &account.marketplace,

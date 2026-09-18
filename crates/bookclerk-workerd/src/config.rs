@@ -26,10 +26,12 @@ fn require_single_path_component<'a>(label: &str, value: &'a str) -> Result<&'a 
         bail!("{label} must not contain '..': {value}");
     }
     let path = Path::new(value);
-    if path
-        .components()
-        .any(|c| matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
-    {
+    if path.components().any(|c| {
+        matches!(
+            c,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
         bail!("{label} must be a single path component: {value}");
     }
     let mut normals = path.components().filter_map(|c| match c {

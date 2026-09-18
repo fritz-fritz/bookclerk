@@ -55,7 +55,9 @@ pub(crate) fn validated_fs_path(path: &Path) -> Result<PathBuf> {
 pub(crate) fn join_cache_component(cache_dir: &Path, component: &str) -> Result<PathBuf> {
     let cache_dir = validated_fs_path(cache_dir)?;
     if component.is_empty() || component.contains('\0') {
-        return Err(DrmError::Native("refusing empty cache path component".into()));
+        return Err(DrmError::Native(
+            "refusing empty cache path component".into(),
+        ));
     }
     // CodeQL DotDotCheck barrier when false.
     if component.contains("..") {
