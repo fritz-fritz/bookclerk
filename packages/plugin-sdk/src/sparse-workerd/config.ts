@@ -17,6 +17,12 @@ import { assertPathInside, refuseSymlinkPath, packageRoot } from "./ensure.js";
  *
  * Manifest `modules_dir` / `main_module` are author-controlled; restricting
  * them to one component prevents multi-segment joins under the plugin root.
+ *
+ * @param value - Candidate relative name from the manifest or options.
+ * @param label - Field name used in error messages.
+ * @returns The validated single path component.
+ * @throws {Error} When `value` is empty, contains NUL/`..`/separators, or has
+ *   more than one component.
  */
 function singlePathComponent(value: string, label: string): string {
   if (!value || value.includes("\0")) {
