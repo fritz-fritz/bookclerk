@@ -128,6 +128,62 @@ mode = "deny"
   }
   console.log("ok packagePlugin allows symlinked plugin root");
 
+  // Manifest version with `..` must not escape outDir or delete outside files.
+  const travPlugin = path.join(tmp, "trav_plugin");
+  fs.mkdirSync(path.join(travPlugin, "modules"), { recursive: true });
+  fs.writeFileSync(
+    path.join(travPlugin, "plugin.toml"),
+    `api_version = 3
+id = "probe"
+version = "../../../victim"
+runtime = "workerd"
+entrypoints = ["cli"]
+[workerd]
+compatibility_date = "2026-08-01"
+main_module = "main.js"
+modules_dir = "modules"
+entrypoint = "default"
+[capabilities.network]
+mode = "deny"
+`,
+  );
+  fs.writeFileSync(
+    path.join(travPlugin, "modules", "main.js"),
+    "export default class X {}",
+  );
+  const travOut = path.join(tmp, "trav_out");
+  fs.mkdirSync(travOut);
+  const victim = path.join(tmp, "victim-workerd.tar.gz");
+  fs.writeFileSync(victim, "PREEXISTING");
+  mustThrow(
+    "packagePlugin refuses version path traversal",
+    () => packagePlugin(travPlugin, travOut),
+    /\.\.|escape|must not contain/i,
+  );
+  if (fs.readFileSync(victim, "utf8") !== "PREEXISTING") {
+    console.error("FAIL: outside victim archive was modified");
+    process.exit(1);
+  }
+
+  // Tar failure must not delete a pre-existing final archive under outDir.
+  const failOut = path.join(tmp, "fail_out");
+  fs.mkdirSync(failOut);
+  const good = packagePlugin(plugin, failOut);
+  fs.writeFileSync(good, "KEEP_FINAL");
+  const prevPath = process.env.PATH;
+  process.env.PATH = "";
+  mustThrow(
+    "packagePlugin tar failure with empty PATH",
+    () => packagePlugin(plugin, failOut),
+    /tar failed|spawn|ENOENT|status/i,
+  );
+  process.env.PATH = prevPath;
+  if (fs.readFileSync(good, "utf8") !== "KEEP_FINAL") {
+    console.error("FAIL: pre-existing final archive was deleted on tar failure");
+    process.exit(1);
+  }
+  console.log("ok packagePlugin preserves final archive when tar fails");
+
   console.log("path security regressions passed");
 }
 

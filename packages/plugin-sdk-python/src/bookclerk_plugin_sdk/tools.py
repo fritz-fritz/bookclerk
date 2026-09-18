@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -847,12 +848,24 @@ def package_plugin(plugin_dir: Path, out_dir: Path) -> Path:
             shutil.copy2(src, dest, follow_symlinks=False)
 
     archive_name = f"{stem}.tar.gz"
+    # Free-form version may embed path segments; contain under out before write.
     archive_path = resolve_under(out, archive_name)
-    subprocess.run(
-        ["tar", "-C", str(staging), "-czf", str(archive_path), "."],
-        check=True,
+    tmp_path = resolve_under(
+        out, f".packaging-tmp-{plugin_id}-{os.getpid()}-{time.time_ns()}.tar.gz"
     )
-    shutil.rmtree(staging)
+    try:
+        subprocess.run(
+            ["tar", "-C", str(staging), "-czf", str(tmp_path), "."],
+            check=True,
+        )
+        os.replace(tmp_path, archive_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
     digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     sums = resolve_under(out, "SHA256SUMS")
     lines = []

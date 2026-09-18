@@ -144,6 +144,26 @@ def test_package_refuses_intermediate_dir_symlink(tmp_path: Path):
         package_plugin(plugin, out)
 
 
+def test_package_refuses_version_path_traversal(tmp_path: Path):
+    plugin = tmp_path / "plugin"
+    modules = plugin / "modules"
+    modules.mkdir(parents=True)
+    toml = (ECHO_PY / "plugin.toml").read_text(encoding="utf-8")
+    toml = toml.replace('version = "1.0.0"', 'version = "../../../victim"', 1)
+    (plugin / "plugin.toml").write_text(toml, encoding="utf-8")
+    (modules / "plugin.py").write_text(
+        (ECHO_PY / "modules" / "plugin.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    out = tmp_path / "dist"
+    out.mkdir()
+    victim = tmp_path / "victim-workerd.tar.gz"
+    victim.write_bytes(b"PREEXISTING")
+    with pytest.raises(ValueError, match=r"\.\.|escape"):
+        package_plugin(plugin, out)
+    assert victim.read_bytes() == b"PREEXISTING"
+
+
 def test_package_allows_symlinked_plugin_root(tmp_path: Path):
     real = tmp_path / "real"
     modules = real / "modules"

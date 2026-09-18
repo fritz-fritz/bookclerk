@@ -140,29 +140,35 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
   }
 
   const archiveName = `${archiveStem}.tar.gz`;
-  const archivePath = path.join(outDir, archiveName);
+  // Manifest version is free-form and may contain `/` or `..` segments — contain
+  // the final name under outDir before any write/delete.
+  const outRoot = fs.realpathSync(path.resolve(outDir));
+  const archivePath = assertPathInside(outRoot, archiveName);
+  const tmpName = `.packaging-tmp-${id}-${process.pid}-${Date.now()}.tar.gz`;
+  const tmpPath = assertPathInside(outRoot, tmpName);
   const tar = spawnSync(
     "tar",
-    ["-C", staging, "-czf", archivePath, "."],
+    ["-C", staging, "-czf", tmpPath, "."],
     { encoding: "utf8" },
   );
   if (tar.status !== 0) {
-    // Do not leave a partial archive advertised via SHA256SUMS.
+    // Attempt-owned temp only — never delete a pre-existing final archive.
     try {
-      fs.rmSync(archivePath, { force: true });
+      fs.rmSync(tmpPath, { force: true });
     } catch {
       /* ignore */
     }
     fs.rmSync(staging, { recursive: true, force: true });
-    throw new Error(`tar failed: ${tar.stderr || tar.stdout}`);
+    throw new Error(`tar failed: ${tar.stderr || tar.stdout || "status " + tar.status}`);
   }
+  fs.renameSync(tmpPath, archivePath);
   fs.rmSync(staging, { recursive: true, force: true });
 
   const digest = crypto
     .createHash("sha256")
     .update(fs.readFileSync(archivePath))
     .digest("hex");
-  const sumsPath = path.join(outDir, "SHA256SUMS");
+  const sumsPath = assertPathInside(outRoot, "SHA256SUMS");
   let body = "";
   if (fs.existsSync(sumsPath)) {
     body = fs
