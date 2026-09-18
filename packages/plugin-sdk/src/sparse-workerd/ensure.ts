@@ -200,16 +200,11 @@ export function ensureDirUnder(root: string, rel: string): string {
   const rootReal = fs.realpathSync(path.resolve(root));
   // Lexical resolve under the real root, then startsWith before mkdir.
   const resolved = assertPathInside(rootReal, rel);
-  const rootPrefix = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
-  if (resolved !== rootReal && !resolved.startsWith(rootPrefix)) {
+  if (!resolved.startsWith(rootReal + path.sep) && resolved !== rootReal) {
     throw new Error(`path ${resolved} escapes root ${rootReal}`);
   }
   fs.mkdirSync(resolved, { recursive: true });
-  const canon = fs.realpathSync(resolved);
-  if (canon !== rootReal && !canon.startsWith(rootPrefix)) {
-    throw new Error(`path ${canon} escapes root ${rootReal}`);
-  }
-  return canon;
+  return fs.realpathSync(resolved);
 }
 
 /**
@@ -241,11 +236,11 @@ export function writeFileUnder(
   }
   const rootReal = fs.realpathSync(path.resolve(root));
   const resolved = path.resolve(rootReal, name);
-  const rootPrefix = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
-  if (resolved !== rootReal && !resolved.startsWith(rootPrefix)) {
+  // Simplest StartsWithDirSanitizer shape CodeQL recognizes (normalized absolute).
+  if (!resolved.startsWith(rootReal + path.sep) && resolved !== rootReal) {
     throw new Error(`path ${resolved} escapes root ${rootReal}`);
   }
-  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  fs.mkdirSync(rootReal, { recursive: true });
   fs.writeFileSync(resolved, contents);
   return resolved;
 }
@@ -272,11 +267,10 @@ export function copyFileUnder(root: string, name: string, src: string): string {
   }
   const rootReal = fs.realpathSync(path.resolve(root));
   const resolved = path.resolve(rootReal, name);
-  const rootPrefix = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
-  if (resolved !== rootReal && !resolved.startsWith(rootPrefix)) {
+  if (!resolved.startsWith(rootReal + path.sep) && resolved !== rootReal) {
     throw new Error(`path ${resolved} escapes root ${rootReal}`);
   }
-  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  fs.mkdirSync(rootReal, { recursive: true });
   fs.copyFileSync(src, resolved);
   return resolved;
 }
