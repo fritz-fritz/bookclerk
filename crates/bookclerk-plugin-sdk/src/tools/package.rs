@@ -55,6 +55,12 @@ pub fn package_plugin(plugin_dir: &Path, out_dir: &Path) -> Result<PathBuf> {
                 .map_err(|e| SdkError::message(e.to_string()))?
         {
             let src = plugin_dir.join(&rel);
+            if src.is_symlink() {
+                return Err(SdkError::message(format!(
+                    "refusing symlink embedded logo: {}",
+                    src.display()
+                )));
+            }
             if !src.is_file() {
                 return Err(SdkError::message(format!(
                     "embedded logo missing for package: {}",
@@ -76,9 +82,17 @@ pub fn package_plugin(plugin_dir: &Path, out_dir: &Path) -> Result<PathBuf> {
                 .as_ref()
                 .ok_or_else(|| SdkError::message("native plugin missing command"))?;
             let src = if cmd.is_absolute() {
+                // Absolute command paths are operator-selected build outputs.
                 cmd.clone()
             } else {
-                plugin_dir.join(cmd)
+                let relative = plugin_dir.join(cmd);
+                if relative.is_symlink() {
+                    return Err(SdkError::message(format!(
+                        "refusing symlink native command under plugin: {}",
+                        relative.display()
+                    )));
+                }
+                relative
             };
             if !src.is_file() {
                 return Err(SdkError::message(format!(
@@ -240,25 +254,45 @@ fn require_under_root(root: &Path, path: &Path) -> Result<PathBuf> {
 
 /// Recursively copies `src` into `dst`, creating directories as needed.
 ///
+/// Symlinks and non-file/non-directory entries are refused so a plugin tree
+/// cannot embed host bytes via `modules/leak -> /outside`.
+///
 /// # Errors
 ///
 /// Propagates filesystem errors from directory creation, traversal, or file copy
-/// as [`SdkError`].
+/// as [`SdkError`]. Returns an error when a symlink or unsupported type is found.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     reject_empty_or_nul(src)?;
     reject_empty_or_nul(dst)?;
     let src = src.to_path_buf();
     let dst = dst.to_path_buf();
+    if src.is_symlink() {
+        return Err(SdkError::message(format!(
+            "refusing symlink package source: {}",
+            src.display()
+        )));
+    }
     std::fs::create_dir_all(&dst).map_err(SdkError::from)?;
     for entry in std::fs::read_dir(&src).map_err(SdkError::from)? {
         let entry = entry.map_err(SdkError::from)?;
         let ty = entry.file_type().map_err(SdkError::from)?;
         let to = join_under_root(&dst, &entry.file_name())?;
         let from = require_under_root(&src, &entry.path())?;
+        if ty.is_symlink() {
+            return Err(SdkError::message(format!(
+                "refusing symlink in package source: {}",
+                from.display()
+            )));
+        }
         if ty.is_dir() {
             copy_dir_recursive(&from, &to)?;
-        } else {
+        } else if ty.is_file() {
             std::fs::copy(&from, &to).map_err(SdkError::from)?;
+        } else {
+            return Err(SdkError::message(format!(
+                "refusing unsupported package source type: {}",
+                from.display()
+            )));
         }
     }
     Ok(())

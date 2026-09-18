@@ -14,6 +14,7 @@ export {
   binaryName,
   platformKey,
   assertPathInside,
+  refuseSymlinkPath,
   validateFetchUrl,
   validateSpawnExecutable,
   type WorkerdPin,

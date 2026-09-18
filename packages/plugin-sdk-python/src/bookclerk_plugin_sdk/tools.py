@@ -21,7 +21,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from .path_guard import resolve_under, cli_user_path
+from .path_guard import resolve_under, cli_user_path, copy_tree_no_symlinks, refuse_symlink_path
 
 # Required for local bookclerk-workerd / Pyodide without pywrangler.
 PYTHON_WORKERD_FLAGS = ("python_workers", "disable_python_external_sdk")
@@ -804,18 +804,23 @@ def package_plugin(plugin_dir: Path, out_dir: Path) -> Path:
     if runtime == "native":
         shutil.copy2(toml_path, resolve_under(staging, "plugin.toml"))
         cmd = Path(m["command"])
+        # Absolute command paths are operator-selected build outputs (documented).
+        # Relative paths must stay under the plugin tree without following links.
         src = cli_user_path(cmd) if cmd.is_absolute() else resolve_under(root, cmd)
-        if not src.is_file():
+        if not cmd.is_absolute():
+            refuse_symlink_path(root, src)
+        if src.is_symlink() or not src.is_file():
             raise FileNotFoundError(f"native binary not found for package: {src}")
         dest = resolve_under(staging, src.name)
-        shutil.copy2(src, dest)
+        shutil.copy2(src, dest, follow_symlinks=False)
         os.chmod(dest, 0o755)
         stem = f"bookclerk-plugin-{plugin_id}-{version}-{_host_target()}"
     else:
         modules_dir = m["workerd"].get("modules_dir") or "modules"
         src_modules = resolve_under(root, modules_dir)
+        refuse_symlink_path(root, src_modules)
         dest_modules = resolve_under(staging, modules_dir)
-        shutil.copytree(src_modules, dest_modules)
+        copy_tree_no_symlinks(src_modules, dest_modules)
         toml_text = toml_path.read_text(encoding="utf-8")
         if _is_python_workerd(m):
             # Vendor package-shaped SDK so archives work even without host injection.
@@ -834,11 +839,12 @@ def package_plugin(plugin_dir: Path, out_dir: Path) -> Path:
         kind, value = validate_logo(str(m["logo"]))
         if kind == "embedded":
             src = resolve_under(root, value)
-            if not src.is_file():
+            refuse_symlink_path(root, src)
+            if src.is_symlink() or not src.is_file():
                 raise FileNotFoundError(f"embedded logo missing for package: {src}")
             dest = resolve_under(staging, value)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
+            shutil.copy2(src, dest, follow_symlinks=False)
 
     archive_name = f"{stem}.tar.gz"
     archive_path = resolve_under(out, archive_name)
@@ -1010,6 +1016,7 @@ def generate_types(plugin_dir: Path, out_file: Path | None = None) -> str:
     validate_manifest(m)
     if out_file is None:
         dest = resolve_under(root, TYPES_OUTPUT_FILE)
+        refuse_symlink_path(root, dest)
     else:
         # Operator-selected output path (not forced under cwd).
         dest = cli_user_path(out_file)

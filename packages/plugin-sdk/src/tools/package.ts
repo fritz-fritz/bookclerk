@@ -8,6 +8,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { parse as parseToml } from "smol-toml";
 import { validateLogo, validateManifest, type Manifest } from "./validate.js";
+import { assertPathInside, refuseSymlinkPath } from "../sparse-workerd/ensure.js";
 
 function hostTarget(): string {
   const plat = process.platform;
@@ -20,13 +21,35 @@ function hostTarget(): string {
   return `${plat}-${arch}`;
 }
 
-function copyRecursive(src: string, dst: string): void {
+/**
+ * Copy a directory tree, refusing symlinks and non-file/non-dir entries.
+ *
+ * @param src - Source directory (must not itself be a symlink).
+ * @param dst - Destination directory to create.
+ * @throws {Error} When a symlink or unsupported type is found.
+ */
+function copyRecursiveNoSymlinks(src: string, dst: string): void {
+  const srcSt = fs.lstatSync(src);
+  if (srcSt.isSymbolicLink()) {
+    throw new Error(`refusing symlink package source: ${src}`);
+  }
+  if (!srcSt.isDirectory()) {
+    throw new Error(`package source is not a directory: ${src}`);
+  }
   fs.mkdirSync(dst, { recursive: true });
   for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
     const from = path.join(src, ent.name);
     const to = path.join(dst, ent.name);
-    if (ent.isDirectory()) copyRecursive(from, to);
-    else fs.copyFileSync(from, to);
+    if (ent.isSymbolicLink()) {
+      throw new Error(`refusing symlink in package source: ${from}`);
+    }
+    if (ent.isDirectory()) {
+      copyRecursiveNoSymlinks(from, to);
+    } else if (ent.isFile()) {
+      fs.copyFileSync(from, to);
+    } else {
+      throw new Error(`refusing unsupported package source type: ${from}`);
+    }
   }
 }
 
@@ -37,6 +60,10 @@ function copyRecursive(src: string, dst: string): void {
  * target triple. Workerd archives include the modules tree (the SDK is injected
  * by `bookclerk-workerd` at serve time). Updates `SHA256SUMS` beside the
  * archive.
+ *
+ * Absolute native `command` paths are treated as operator-selected build
+ * outputs. Relative package sources under the plugin tree refuse symlinks so
+ * outside bytes cannot enter the archive.
  *
  * @param pluginDir - Plugin root containing `plugin.toml`.
  * @param outDir - Destination directory for the archive and checksums.
@@ -50,7 +77,8 @@ function copyRecursive(src: string, dst: string): void {
  * ```
  */
 export function packagePlugin(pluginDir: string, outDir: string): string {
-  const tomlPath = path.join(pluginDir, "plugin.toml");
+  const root = path.resolve(pluginDir);
+  const tomlPath = assertPathInside(root, "plugin.toml");
   const m = parseToml(fs.readFileSync(tomlPath, "utf8")) as Manifest;
   validateManifest(m);
   const version = m.version ?? "0.0.0";
@@ -64,8 +92,9 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
   if (m.logo != null) {
     const logo = validateLogo(String(m.logo));
     if (logo.kind === "embedded") {
-      const src = path.join(pluginDir, logo.value);
-      if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
+      const src = assertPathInside(root, logo.value);
+      refuseSymlinkPath(root, src);
+      if (!fs.existsSync(src) || fs.lstatSync(src).isSymbolicLink() || !fs.statSync(src).isFile()) {
         throw new Error(`embedded logo missing for package: ${src}`);
       }
       const dest = path.join(staging, logo.value);
@@ -78,8 +107,15 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
   let archiveStem: string;
   if (runtime === "native") {
     const cmd = m.command!;
-    const src = path.isAbsolute(cmd) ? cmd : path.join(pluginDir, cmd);
-    if (!fs.existsSync(src)) {
+    const absolute = path.isAbsolute(cmd);
+    const src = absolute ? path.resolve(cmd) : assertPathInside(root, cmd);
+    if (!absolute) {
+      refuseSymlinkPath(root, src);
+      if (fs.lstatSync(src).isSymbolicLink()) {
+        throw new Error(`refusing symlink native command under plugin: ${src}`);
+      }
+    }
+    if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
       throw new Error(`native binary not found for package: ${src}`);
     }
     const binName = path.basename(src);
@@ -92,10 +128,9 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
     archiveStem = `bookclerk-plugin-${id}-${version}-${hostTarget()}`;
   } else {
     const modulesDir = m.workerd?.modules_dir ?? "modules";
-    copyRecursive(
-      path.join(pluginDir, modulesDir),
-      path.join(staging, modulesDir),
-    );
+    const srcModules = assertPathInside(root, modulesDir);
+    refuseSymlinkPath(root, srcModules);
+    copyRecursiveNoSymlinks(srcModules, path.join(staging, modulesDir));
     // Authors import `@bookclerk/plugin-sdk/workerd`; bookclerk-workerd injects it.
     archiveStem = `bookclerk-plugin-${id}-${version}-workerd`;
   }
@@ -108,6 +143,13 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
     { encoding: "utf8" },
   );
   if (tar.status !== 0) {
+    // Do not leave a partial archive advertised via SHA256SUMS.
+    try {
+      fs.rmSync(archivePath, { force: true });
+    } catch {
+      /* ignore */
+    }
+    fs.rmSync(staging, { recursive: true, force: true });
     throw new Error(`tar failed: ${tar.stderr || tar.stdout}`);
   }
   fs.rmSync(staging, { recursive: true, force: true });

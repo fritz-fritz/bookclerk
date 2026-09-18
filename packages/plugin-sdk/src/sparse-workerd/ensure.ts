@@ -121,9 +121,9 @@ export function defaultCacheDir(): string {
 /**
  * Resolves `candidate` and requires it to stay under `root`.
  *
- * Rejects NUL bytes and `..` segments. Absolute candidates are allowed when
- * they resolve inside `root`; relative candidates are joined under `root`
- * first. Used before filesystem reads/writes that take CLI/manifest paths.
+ * Rejects NUL bytes and `..` path components (names like `..draft` and
+ * `edition..2` are allowed). Does not follow symlinks — callers that write or
+ * embed must also use {@link refuseSymlinkPath}.
  *
  * @param root - Trusted directory (resolved).
  * @param candidate - Absolute path or path relative to `root`.
@@ -143,16 +143,53 @@ export function assertPathInside(root: string, candidate: string): string {
     ? path.resolve(candidate)
     : path.resolve(resolvedRoot, candidate);
   const rel = path.relative(resolvedRoot, resolved);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+  if (path.isAbsolute(rel)) {
     throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
-  const prefix = resolvedRoot.endsWith(path.sep)
-    ? resolvedRoot
-    : resolvedRoot + path.sep;
-  if (resolved !== resolvedRoot && !resolved.startsWith(prefix)) {
+  const segments = rel.split(path.sep).filter((s) => s.length > 0);
+  if (segments.some((s) => s === "..")) {
     throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
   return resolved;
+}
+
+/**
+ * Require `candidate` under `trustedRoot` with no symlink components.
+ *
+ * @param trustedRoot - Original operator/plugin root.
+ * @param candidate - Path previously produced by {@link assertPathInside}.
+ * @returns The validated absolute path.
+ * @throws {Error} When a component is a symlink or escapes `trustedRoot`.
+ */
+export function refuseSymlinkPath(trustedRoot: string, candidate: string): string {
+  const root = path.resolve(trustedRoot);
+  const target = path.resolve(candidate);
+  const rel = path.relative(root, target);
+  if (path.isAbsolute(rel) || rel.split(path.sep).includes("..")) {
+    throw new Error(`path ${target} escapes root ${root}`);
+  }
+  if (fs.lstatSync(root).isSymbolicLink()) {
+    throw new Error(`refusing symlink trusted root: ${root}`);
+  }
+  const parts = rel === "" ? [] : rel.split(path.sep);
+  let cur = root;
+  for (let i = 0; i < parts.length; i++) {
+    cur = path.join(cur, parts[i]!);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(cur);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" && i === parts.length - 1) {
+        break;
+      }
+      throw err;
+    }
+    if (st.isSymbolicLink()) {
+      throw new Error(`refusing symlink in path: ${cur}`);
+    }
+  }
+  return target;
 }
 
 /**
@@ -225,15 +262,10 @@ function isCurrent(bin: string, pin: WorkerdPin): boolean {
     if (text === pin.release_tag) return true;
   }
   const validated = validateSpawnExecutable(bin);
-  const base = path.basename(validated);
-  if (base !== "workerd" && base !== "workerd.exe") {
-    throw new Error(`expected workerd binary, got ${base}`);
-  }
-  // Literal program name; PATH points at the validated binary's directory.
-  const out = spawnSync("workerd", ["--version"], {
+  // Probe the selected path directly (do not rewrite PATH / spawn by basename).
+  const out = spawnSync(validated, ["--version"], {
     encoding: "utf8",
     shell: false,
-    env: { ...process.env, PATH: path.dirname(validated) },
   });
   if (out.status !== 0) return false;
   const combined = `${out.stdout ?? ""}${out.stderr ?? ""}`;

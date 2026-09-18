@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .ensure import package_root
-from ..path_guard import resolve_under
+from ..path_guard import resolve_under, refuse_symlink_path
 
 SDK_JS_MODULE_NAMES = ("@bookclerk/plugin-sdk/workerd", "@bookclerk/plugin-sdk")
 """Module names used when embedding the TypeScript workerd SDK."""
@@ -180,24 +180,31 @@ def module_field_for(name: str) -> tuple[str, bool]:
     )
 
 
-def collect_modules(directory: Path) -> list[Path]:
+def collect_modules(directory: Path, *, plugin_root: Path | None = None) -> list[Path]:
     """Collect embeddable module files under ``directory``.
 
     Symlinks are refused (matching the Rust workerd walker) so a nested
     ``modules/leak -> /outside`` cannot recurse or embed files outside the
-    plugin install tree. ``Path.is_dir()`` follows symlinks; check
-    ``is_symlink()`` first.
+    plugin install tree. The modules root itself is checked against
+    ``plugin_root`` (or ``directory`` when omitted) so a symlinked modules
+    directory cannot promote an outside tree into the embed set.
 
     Args:
         directory: Plugin modules root to walk recursively.
+        plugin_root: Original trusted plugin root; defaults to ``directory``.
 
     Returns:
         Sorted list of ``.js``/``.mjs``/``.py``/``.wasm``/``.json`` file paths.
 
     Raises:
-        ValueError: When a directory entry is a symlink.
+        ValueError: When a directory entry or the modules root is a symlink.
     """
-    root = directory.resolve()
+    import os
+
+    trusted = Path(plugin_root) if plugin_root is not None else directory
+    refuse_symlink_path(trusted, directory)
+    # Lexical root — do not realpath/promote a symlink target.
+    root = Path(os.path.abspath(os.path.normpath(os.fspath(directory))))
     out: list[Path] = []
 
     def walk(d: Path) -> None:
@@ -307,23 +314,33 @@ def materialize_config(
     network_domains = list(net.get("domains") or [])
 
     bookclerk_dir = resolve_under(plugin_root, ".bookclerk")
+    refuse_symlink_path(plugin_root, bookclerk_dir)
     bookclerk_dir.mkdir(parents=True, exist_ok=True)
     for name in ("bridge.js", "egress.js"):
         src = resolve_under(sdk_root, "bridge", name)
         if not src.is_file():
             raise FileNotFoundError(f"missing vendored bridge {src}")
         dest = resolve_under(bookclerk_dir, name)
+        refuse_symlink_path(plugin_root, dest)
         dest.write_bytes(src.read_bytes())
-    resolve_under(bookclerk_dir, "adapter.js").write_text(ADAPTER_JS, encoding="utf-8")
+    adapter = resolve_under(bookclerk_dir, "adapter.js")
+    refuse_symlink_path(plugin_root, adapter)
+    adapter.write_text(ADAPTER_JS, encoding="utf-8")
 
     modules_dir = resolve_under(plugin_root, modules_dir_name)
-    if not modules_dir.is_dir():
+    refuse_symlink_path(plugin_root, modules_dir)
+    if modules_dir.is_symlink() or not modules_dir.is_dir():
         raise FileNotFoundError(f"modules dir missing: {modules_dir}")
-    main_abs = resolve_under(modules_dir, workerd["main_module"])
-    if not main_abs.is_file():
+    main_abs = resolve_under(plugin_root, modules_dir_name, workerd["main_module"])
+    refuse_symlink_path(plugin_root, main_abs)
+    if main_abs.is_symlink() or not main_abs.is_file():
         raise FileNotFoundError(f"main module missing: {main_abs}")
 
-    module_files = [p for p in collect_modules(modules_dir) if p.resolve() != main_abs.resolve()]
+    module_files = [
+        p
+        for p in collect_modules(modules_dir, plugin_root=plugin_root)
+        if p.resolve() != main_abs.resolve()
+    ]
     ordered = [main_abs, *module_files]
 
     module_embeds: list[str] = []
@@ -349,9 +366,13 @@ def materialize_config(
     # The adapter isolate always needs the JS SDK embed; the author isolate gets
     # it when it has JS modules.
     sdk_js = _resolve_sdk_js(sdk_root)
-    resolve_under(bookclerk_dir, "sdk-workerd.js").write_text(
-        sdk_js.read_text(encoding="utf-8"), encoding="utf-8"
-    )
+
+    def write_generated(name: str, text: str) -> None:
+        dest = resolve_under(bookclerk_dir, name)
+        refuse_symlink_path(plugin_root, dest)
+        dest.write_text(text, encoding="utf-8")
+
+    write_generated("sdk-workerd.js", sdk_js.read_text(encoding="utf-8"))
     adapter_modules = [
         '(name = "adapter.js", esModule = embed ".bookclerk/adapter.js")',
         *(
@@ -372,10 +393,8 @@ def materialize_config(
         sdk_py = resolve_under(sdk_root, "workerd.py")
         if not sdk_py.is_file():
             raise FileNotFoundError(f"missing Python workerd SDK at {sdk_py}")
-        resolve_under(bookclerk_dir, "sdk-workerd.py").write_text(
-            sdk_py.read_text(encoding="utf-8"), encoding="utf-8"
-        )
-        resolve_under(bookclerk_dir, "sdk-init.py").write_text(SDK_PY_INIT, encoding="utf-8")
+        write_generated("sdk-workerd.py", sdk_py.read_text(encoding="utf-8"))
+        write_generated("sdk-init.py", SDK_PY_INIT)
         # Modules imported by workerd.py / db_value.py inside the isolate.
         py_siblings = (
             ("bookclerk_plugin_sdk/_abi.py", "_abi.py", "sdk-product-abi.py"),
@@ -386,9 +405,7 @@ def materialize_config(
             src = resolve_under(sdk_root, src_name)
             if not src.is_file():
                 raise FileNotFoundError(f"missing Python workerd SDK module at {src}")
-            resolve_under(bookclerk_dir, embed_file).write_text(
-                src.read_text(encoding="utf-8"), encoding="utf-8"
-            )
+            write_generated(embed_file, src.read_text(encoding="utf-8"))
             if mod_name not in seen_names:
                 module_embeds.append(
                     f'(name = "{escape_capnp(mod_name)}", pythonModule = embed ".bookclerk/{embed_file}")'
@@ -522,5 +539,6 @@ const bridgeWorker :Workerd.Worker = (
 """
 
     config_path = resolve_under(plugin_root, config_name)
+    refuse_symlink_path(plugin_root, config_path)
     config_path.write_text(config, encoding="utf-8")
     return config_path, listen_addr
