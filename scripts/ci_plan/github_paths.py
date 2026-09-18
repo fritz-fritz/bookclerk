@@ -59,7 +59,27 @@ def github_actions_file_path(path_s: str, *, label: str) -> str:
 
 
 def open_github_actions_append(path_s: str, *, label: str) -> IO[Any]:
-    """Open a runner file-command path for append after semantic containment."""
-    resolved = github_actions_file_path(path_s, label=label)
-    # Barrier + sink colocated: open the realpath'd value that passed startswith.
-    return open(resolved, "a", encoding="utf-8")
+    """Open a runner file-command path for append after semantic containment.
+
+    Barrier and ``open`` are colocated so Default Setup path-injection queries
+    see the ``startswith`` check on the same value passed to ``open``.
+    """
+    if not path_s or "\0" in path_s:
+        raise SystemExit(f"{label} must be a non-empty path without NUL")
+
+    roots = _runner_roots()
+    if not roots:
+        raise SystemExit(
+            f"{label} is set but neither RUNNER_TEMP nor GITHUB_WORKSPACE is a "
+            "usable path; refusing to open a runner file-command path outside "
+            "Actions"
+        )
+
+    resolved = os.path.realpath(path_s)
+    for root in roots:
+        if resolved == root or resolved.startswith(root + os.sep):
+            return open(resolved, "a", encoding="utf-8")
+
+    raise SystemExit(
+        f"refusing {label} outside RUNNER_TEMP/GITHUB_WORKSPACE: {resolved}"
+    )

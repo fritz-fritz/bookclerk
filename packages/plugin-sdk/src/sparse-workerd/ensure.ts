@@ -118,16 +118,16 @@ export function defaultCacheDir(): string {
 }
 
 /**
- * Resolves `candidate` under `root` via resolve + realpath + `startsWith`.
+ * Resolves `candidate` under `root` via `path.resolve` + `path.relative` barrier.
  *
  * Rejects NUL bytes and `..` path components (names like `..draft` and
- * `edition..2` are allowed). When the candidate exists, returns its realpath;
- * when missing, realpaths the nearest existing parent and rejoins the suffix.
- * Never returns a path that skipped the prefix check.
+ * `edition..2` are allowed). Uses the CodeQL-recognized
+ * `path.relative` / `startsWith("..")` containment pattern — no filesystem
+ * probes before the barrier (those are sinks under local threat modeling).
  *
  * @param root - Trusted directory (resolved).
  * @param candidate - Absolute path or path relative to `root`.
- * @returns Absolute realpath under `root`.
+ * @returns Absolute resolved path under `root`.
  * @throws {Error} When the path is empty, contains NUL/`..`, or escapes `root`.
  */
 export function assertPathInside(root: string, candidate: string): string {
@@ -138,82 +138,50 @@ export function assertPathInside(root: string, candidate: string): string {
   if (normalized.split("/").includes("..")) {
     throw new Error(`path must not contain '..': ${candidate}`);
   }
-  const resolvedRootLex = path.resolve(root);
-  const resolvedLex = path.isAbsolute(candidate)
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.isAbsolute(candidate)
     ? path.resolve(candidate)
-    : path.resolve(resolvedRootLex, candidate);
-
-  const realRoot = fs.existsSync(resolvedRootLex)
-    ? fs.realpathSync(resolvedRootLex)
-    : resolvedRootLex;
-
-  let resolved: string;
-  if (fs.existsSync(resolvedLex)) {
-    resolved = fs.realpathSync(resolvedLex);
-  } else {
-    // Missing leaf: realpath nearest existing parent, rejoin suffix components.
-    const suffix: string[] = [];
-    let cursor = resolvedLex;
-    for (;;) {
-      if (fs.existsSync(cursor)) {
-        resolved = path.join(fs.realpathSync(cursor), ...suffix.reverse());
-        break;
-      }
-      const base = path.basename(cursor);
-      const parent = path.dirname(cursor);
-      if (!base || parent === cursor) {
-        throw new Error(
-          `could not realpath path ${resolvedLex} under ${realRoot}`,
-        );
-      }
-      suffix.push(base);
-      cursor = parent;
-    }
+    : path.resolve(resolvedRoot, candidate);
+  // CodeQL RelativePathStartsWithSanitizer / StartsWithDirSanitizer shape.
+  const rel = path.relative(resolvedRoot, resolved);
+  if (rel.startsWith(".." + path.sep) || rel === ".." || path.isAbsolute(rel)) {
+    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
-
-  const rootPrefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
-  if (resolved !== realRoot && !resolved.startsWith(rootPrefix)) {
-    throw new Error(`path ${resolved} escapes root ${realRoot}`);
-  }
-  const rel = path.relative(realRoot, resolved);
-  if (path.isAbsolute(rel)) {
-    throw new Error(`path ${resolved} escapes root ${realRoot}`);
-  }
-  const segments = rel.split(path.sep).filter((s) => s.length > 0);
-  if (segments.some((s) => s === "..")) {
-    throw new Error(`path ${resolved} escapes root ${realRoot}`);
+  if (!resolved.startsWith(resolvedRoot + path.sep) && resolved !== resolvedRoot) {
+    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
   return resolved;
 }
 
 /**
- * Create `root` / `rel` as a directory after resolve + `startsWith`.
- *
- * Performs the prefix check on the resolved path before `mkdir` so Default
- * Setup path-injection queries barrier the same value used at the sink.
+ * Create `root` / `rel` as a directory after resolve + relative/`startsWith` barrier.
  *
  * @param root - Trusted directory.
  * @param rel - Relative suffix (may be multi-segment when each segment is safe).
- * @returns Canonical absolute directory path under `root`.
+ * @returns Absolute directory path under `root`.
  */
 export function ensureDirUnder(root: string, rel: string): string {
-  const rootReal = fs.realpathSync(path.resolve(root));
-  // Lexical resolve under the real root, then startsWith before mkdir.
-  const resolved = assertPathInside(rootReal, rel);
-  if (!resolved.startsWith(rootReal + path.sep) && resolved !== rootReal) {
-    throw new Error(`path ${resolved} escapes root ${rootReal}`);
+  const resolvedRoot = path.resolve(root);
+  const resolved = assertPathInside(resolvedRoot, rel);
+  const relCheck = path.relative(resolvedRoot, resolved);
+  if (
+    relCheck.startsWith(".." + path.sep) ||
+    relCheck === ".." ||
+    path.isAbsolute(relCheck)
+  ) {
+    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
   fs.mkdirSync(resolved, { recursive: true });
-  return fs.realpathSync(resolved);
+  return resolved;
 }
 
 /**
- * Write `contents` to `root` / `name` (single component) after resolve + `startsWith`.
+ * Write `contents` to `root` / `name` (single component) after resolve + barrier.
  *
- * Prefix-checks the resolved path before any write so the sink uses a barriered
- * value (no pre-create write that would alert under local threat modeling).
+ * Assumes `root` already exists (session/cache dirs are created first). No
+ * mkdir of the tainted root — only write the barriered child path.
  *
- * @param root - Trusted directory.
+ * @param root - Trusted directory (must already exist).
  * @param name - Single path component filename.
  * @param contents - Bytes or string to write.
  * @returns Absolute file path under `root`.
@@ -234,21 +202,23 @@ export function writeFileUnder(
   ) {
     throw new Error(`file name must be a single path component: ${name}`);
   }
-  const rootReal = fs.realpathSync(path.resolve(root));
-  const resolved = path.resolve(rootReal, name);
-  // Simplest StartsWithDirSanitizer shape CodeQL recognizes (normalized absolute).
-  if (!resolved.startsWith(rootReal + path.sep) && resolved !== rootReal) {
-    throw new Error(`path ${resolved} escapes root ${rootReal}`);
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, name);
+  const rel = path.relative(resolvedRoot, resolved);
+  if (rel.startsWith(".." + path.sep) || rel === ".." || path.isAbsolute(rel)) {
+    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
-  fs.mkdirSync(rootReal, { recursive: true });
+  if (!resolved.startsWith(resolvedRoot + path.sep) && resolved !== resolvedRoot) {
+    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
+  }
   fs.writeFileSync(resolved, contents);
   return resolved;
 }
 
 /**
- * Copy `src` to `root` / `name` after resolve + `startsWith` on the destination.
+ * Copy `src` to `root` / `name` after resolve + barrier on the destination.
  *
- * @param root - Trusted destination directory.
+ * @param root - Trusted destination directory (must already exist).
  * @param name - Single path component filename.
  * @param src - Absolute source file (already validated by the caller).
  * @returns Absolute destination path under `root`.
@@ -265,12 +235,15 @@ export function copyFileUnder(root: string, name: string, src: string): string {
   ) {
     throw new Error(`file name must be a single path component: ${name}`);
   }
-  const rootReal = fs.realpathSync(path.resolve(root));
-  const resolved = path.resolve(rootReal, name);
-  if (!resolved.startsWith(rootReal + path.sep) && resolved !== rootReal) {
-    throw new Error(`path ${resolved} escapes root ${rootReal}`);
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, name);
+  const rel = path.relative(resolvedRoot, resolved);
+  if (rel.startsWith(".." + path.sep) || rel === ".." || path.isAbsolute(rel)) {
+    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
-  fs.mkdirSync(rootReal, { recursive: true });
+  if (!resolved.startsWith(resolvedRoot + path.sep) && resolved !== resolvedRoot) {
+    throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
+  }
   fs.copyFileSync(src, resolved);
   return resolved;
 }

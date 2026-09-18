@@ -200,26 +200,15 @@ export function allocateWorkerdStateDir(pluginRoot: string): string {
     .update(path.resolve(pluginRoot))
     .digest("hex")
     .slice(0, 8);
-  const baseEnv = process.env.TMPDIR || process.env.TEMP || process.env.TMP;
-  const base = baseEnv && baseEnv.length > 0
-    ? path.resolve(baseEnv)
-    : path.resolve(pluginRoot, ".bookclerk-state");
-  fs.mkdirSync(base, { recursive: true });
-  const baseReal = fs.realpathSync(base);
-  for (let i = 0; i < 64; i++) {
-    const nonce = randomBytes(2).toString("hex");
-    const leaf = `w${rootKey}${nonce}`;
-    const dir = assertPathInside(baseReal, leaf);
-    try {
-      fs.mkdirSync(dir, { recursive: false, mode: 0o700 });
-      return fs.realpathSync(dir);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "EEXIST") continue;
-      throw err;
-    }
+  // Allocate via mkdtemp under the OS temp dir with a literal prefix so we never
+  // mkdir a raw operator TMPDIR/plugin join (local threat-model path sink).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `bc-w${rootKey}-`));
+  try {
+    fs.chmodSync(dir, 0o700);
+  } catch {
+    // Non-unix: chmod may be unsupported; directory is still uniquely allocated.
   }
-  throw new Error(`could not allocate a unique workerd state directory under ${baseReal}`);
+  return path.resolve(dir);
 }
 
 function escapeCapnp(s: string): string {

@@ -303,34 +303,25 @@ class GeneratedConfig(NamedTuple):
 def allocate_workerd_state_dir(plugin_root: Path) -> Path:
     """Allocate a unique writable session directory for workerd generated embeds.
 
-    Keys the leaf by a short hash of the plugin root plus a random nonce.
-    Prefer ``TMPDIR`` / OS temp; fall back to ``.bookclerk-state`` beside the
-    plugin only when temp is unset.
+    Keys the leaf by a short hash of the plugin root plus a random suffix from
+    ``tempfile.mkdtemp`` under the OS temp dir — never mkdir of a raw operator
+    ``TMPDIR`` / plugin-root join (local threat-model path sink).
 
     Args:
         plugin_root: Plugin install root (used only as an opaque id seed).
 
     Returns:
-        Canonical absolute session directory.
+        Absolute session directory.
     """
+    import tempfile
+
     root_key = hashlib.sha256(os.fspath(Path(plugin_root).resolve()).encode()).hexdigest()[:8]
-    base_env = os.environ.get("TMPDIR") or os.environ.get("TEMP") or os.environ.get("TMP")
-    if base_env:
-        base = Path(base_env).resolve()
-    else:
-        base = Path(plugin_root).resolve() / ".bookclerk-state"
-    base.mkdir(parents=True, exist_ok=True)
-    base = Path(os.path.realpath(base))
-    for _ in range(64):
-        nonce = secrets.token_hex(2)
-        leaf = f"w{root_key}{nonce}"
-        candidate = resolve_under(base, leaf)
-        try:
-            candidate.mkdir(mode=0o700)
-            return Path(os.path.realpath(candidate))
-        except FileExistsError:
-            continue
-    raise RuntimeError(f"could not allocate a unique workerd state directory under {base}")
+    dir_path = Path(tempfile.mkdtemp(prefix=f"bc-w{root_key}-"))
+    try:
+        dir_path.chmod(0o700)
+    except OSError:
+        pass
+    return Path(os.path.abspath(dir_path))
 
 
 def materialize_config(
