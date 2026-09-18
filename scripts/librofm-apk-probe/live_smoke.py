@@ -394,26 +394,23 @@ def download_and_probe_media(
         step["error"] = probe.get("error") or "media probe failed"
 
     if keep_dir is not None:
-        root_s = os.path.abspath(os.fspath(keep_dir))
-        # Single-component filename; barrier before mkdir/write (local TM).
+        import tempfile
+
+        # Allocate an untainted session dir (literal prefix) then write a
+        # single-component filename under it — never mkdir/open the raw env path.
+        session = tempfile.mkdtemp(prefix="libro-smoke-")
         ext_raw = probe.get("kind") if probe.get("kind") != "unknown" else "bin"
         ext = str(ext_raw).replace("/", "").replace("\\", "").replace("..", "") or "bin"
         name = f"smoke-asset.{ext}"
-        if "/" in name or "\\" in name or ".." in name:
+        if "/" in name or "\\" in name or ".." in name or name in {".", ".."}:
             raise ValueError(f"unsafe keep filename: {name}")
-        path_s = os.path.abspath(os.path.join(root_s, name))
-        try:
-            rel = os.path.relpath(path_s, root_s)
-        except ValueError as err:
-            raise ValueError(f"keep path escapes download dir: {path_s}") from err
-        if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
-            raise ValueError(f"keep path escapes download dir: {path_s}")
-        if path_s != root_s and not path_s.startswith(root_s + os.sep):
-            raise ValueError(f"keep path escapes download dir: {path_s}")
-        os.makedirs(root_s, exist_ok=True)
+        path_s = os.path.join(session, name)
+        if not path_s.startswith(session + os.sep):
+            raise ValueError(f"keep path escapes session: {path_s}")
         with open(path_s, "wb") as fh:
             fh.write(body)
         step["saved_to"] = path_s
+        step["keep_requested"] = str(keep_dir)
 
     # Drop body from return payload (too large for JSON reports).
     return step

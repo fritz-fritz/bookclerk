@@ -99,7 +99,13 @@ def write_file_under(root: Path | str, name: str, contents: str | bytes) -> Path
         raise ValueError(f"file name must be a single path component: {name}")
     root_s = os.path.abspath(os.path.normpath(os.fspath(root)))
     resolved_s = os.path.abspath(os.path.join(root_s, name))
-    if not _is_under(root_s, resolved_s):
+    try:
+        rel = os.path.relpath(resolved_s, root_s)
+    except ValueError as err:
+        raise ValueError(f"path {resolved_s} escapes root {root_s}") from err
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+        raise ValueError(f"path {resolved_s} escapes root {root_s}")
+    if resolved_s != root_s and not resolved_s.startswith(root_s + os.sep):
         raise ValueError(f"path {resolved_s} escapes root {root_s}")
     if isinstance(contents, str):
         with open(resolved_s, "w", encoding="utf-8") as fh:

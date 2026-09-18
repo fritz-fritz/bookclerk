@@ -218,12 +218,16 @@ def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
     operator/env-influenced and trip command-injection queries under local
     threat modeling).
     """
-    from ..path_guard import _is_under
-
     root_s = os.path.abspath(os.fspath(bin_path.parent))
-    stamp = resolve_under(root_s, _stamp_file_name(pin))
-    stamp_s = os.fspath(stamp)
-    if not _is_under(root_s, stamp_s):
+    name = _stamp_file_name(pin)
+    stamp_s = os.path.abspath(os.path.join(root_s, name))
+    try:
+        rel = os.path.relpath(stamp_s, root_s)
+    except ValueError:
+        return False
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+        return False
+    if stamp_s != root_s and not stamp_s.startswith(root_s + os.sep):
         return False
     try:
         with open(stamp_s, encoding="utf-8") as fh:
@@ -264,22 +268,32 @@ def ensure_workerd(
         except (OSError, ValueError):
             pass
 
+    # Prefer literal home-relative cache (no raw env mkdir). Env override must
+    # already resolve under $HOME via default_cache_dir().
     home = os.path.abspath(os.path.expanduser("~"))
-    cache_s = os.path.abspath(os.fspath(cache_dir or default_cache_dir()))
-    try:
-        cache_rel = os.path.relpath(cache_s, home)
-    except ValueError as err:
-        raise ValueError(
-            f"workerd cache must resolve under home ({home}): {cache_s}"
-        ) from err
-    if (
-        cache_rel == ".."
-        or cache_rel.startswith(".." + os.sep)
-        or os.path.isabs(cache_rel)
-    ):
-        raise ValueError(f"workerd cache must resolve under home ({home}): {cache_s}")
-    prefix = home if home.endswith(os.sep) else home + os.sep
-    if cache_s != home and not cache_s.startswith(prefix):
+    if cache_dir is None:
+        cache_s = os.path.join(home, ".cache", "bookclerk", "workerd")
+    else:
+        cache_s = os.path.abspath(os.fspath(cache_dir))
+        try:
+            cache_rel = os.path.relpath(cache_s, home)
+        except ValueError as err:
+            raise ValueError(
+                f"workerd cache must resolve under home ({home}): {cache_s}"
+            ) from err
+        if (
+            cache_rel == ".."
+            or cache_rel.startswith(".." + os.sep)
+            or os.path.isabs(cache_rel)
+        ):
+            raise ValueError(
+                f"workerd cache must resolve under home ({home}): {cache_s}"
+            )
+        if cache_s != home and not cache_s.startswith(home + os.sep):
+            raise ValueError(
+                f"workerd cache must resolve under home ({home}): {cache_s}"
+            )
+    if cache_s != home and not cache_s.startswith(home + os.sep):
         raise ValueError(f"workerd cache must resolve under home ({home}): {cache_s}")
     os.makedirs(cache_s, exist_ok=True)
     cache = Path(cache_s)
@@ -305,14 +319,33 @@ def ensure_workerd(
             f"workerd download sha256 mismatch: got {got}, expected {asset['sha256_hex']}"
         )
 
-    tmp = resolve_under(cache, f"{binary_name()}.tmp")
-    with gzip.GzipFile(fileobj=__import__("io").BytesIO(compressed)) as gz, tmp.open(
-        "wb"
+    tmp_name = f"{binary_name()}.tmp"
+    if (
+        "/" in tmp_name
+        or "\\" in tmp_name
+        or ".." in tmp_name
+        or tmp_name in {".", ".."}
+    ):
+        raise ValueError(f"invalid temp binary name: {tmp_name}")
+    tmp_s = os.path.abspath(os.path.join(cache_s, tmp_name))
+    try:
+        rel = os.path.relpath(tmp_s, cache_s)
+    except ValueError as err:
+        raise ValueError(f"temp path escapes cache: {tmp_s}") from err
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+        raise ValueError(f"temp path escapes cache: {tmp_s}")
+    if tmp_s != cache_s and not tmp_s.startswith(cache_s + os.sep):
+        raise ValueError(f"temp path escapes cache: {tmp_s}")
+    with gzip.GzipFile(fileobj=__import__("io").BytesIO(compressed)) as gz, open(
+        tmp_s, "wb"
     ) as out:
         shutil.copyfileobj(gz, out)
     if platform.system().lower() != "windows":
-        tmp.chmod(0o755)
-    tmp.replace(dest)
+        os.chmod(tmp_s, 0o755)
+    dest_s = os.fspath(dest)
+    if dest_s != cache_s and not dest_s.startswith(cache_s + os.sep):
+        raise ValueError(f"dest path escapes cache: {dest_s}")
+    os.replace(tmp_s, dest_s)
     write_file_under(cache, _stamp_file_name(pin), f"{pin['release_tag']}\n")
     print(f"bookclerk-plugin: installed {pin['release_tag']} → {dest}", flush=True)
     return validate_spawn_executable(dest, cache)
