@@ -337,7 +337,8 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
+#[allow(clippy::missing_panics_doc)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -370,7 +371,6 @@ mode = "deny"
         .unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
     fn package_refuses_module_file_symlink_without_outside_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -413,7 +413,6 @@ mode = "deny"
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn package_refuses_modules_root_symlink() {
         let dir = tempfile::tempdir().unwrap();
@@ -435,7 +434,6 @@ mode = "deny"
         assert!(!out.join("SHA256SUMS").is_file());
     }
 
-    #[cfg(unix)]
     #[test]
     fn package_refuses_embedded_logo_symlink() {
         let dir = tempfile::tempdir().unwrap();
