@@ -3,6 +3,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { createGunzip } from "node:zlib";
 import { pipeline } from "node:stream/promises";
@@ -102,33 +103,20 @@ export function downloadUrl(pin: WorkerdPin, artifact: string): string {
 }
 
 /**
- * Resolve a workerd cache directory under the operator home.
+ * Resolve the workerd cache directory.
  *
- * Env override must stay under `$HOME` (relative/`startsWith` barrier) so
- * mkdir/write sinks are not fed a raw env path under local threat modeling.
+ * Honors `BOOKCLERK_WORKERD_CACHE` as the selected install root (workspace
+ * `target/`, `/opt`, external volumes). Otherwise uses
+ * `~/.cache/bookclerk/workerd`. Derived files stay under that root.
  *
  * @returns Absolute cache directory path.
  */
 export function defaultCacheDir(): string {
-  const home = path.resolve(os.homedir());
-  const fallback = path.join(home, ".cache", "bookclerk", "workerd");
   const raw = process.env.BOOKCLERK_WORKERD_CACHE;
-  if (!raw || raw.includes("\0")) {
-    return fallback;
+  if (raw && !raw.includes("\0")) {
+    return path.resolve(raw);
   }
-  const resolved = path.resolve(raw);
-  const rel = path.relative(home, resolved);
-  if (rel.startsWith(".." + path.sep) || rel === ".." || path.isAbsolute(rel)) {
-    throw new Error(
-      `BOOKCLERK_WORKERD_CACHE must resolve under home (${home}): ${resolved}`,
-    );
-  }
-  if (!resolved.startsWith(home + path.sep) && resolved !== home) {
-    throw new Error(
-      `BOOKCLERK_WORKERD_CACHE must resolve under home (${home}): ${resolved}`,
-    );
-  }
-  return resolved;
+  return path.join(path.resolve(os.homedir()), ".cache", "bookclerk", "workerd");
 }
 
 /**
@@ -205,17 +193,7 @@ export function writeFileUnder(
   name: string,
   contents: string | NodeJS.ArrayBufferView,
 ): string {
-  if (
-    !name ||
-    name.includes("\0") ||
-    name.includes("/") ||
-    name.includes("\\") ||
-    name === "." ||
-    name === ".." ||
-    name.includes("..")
-  ) {
-    throw new Error(`file name must be a single path component: ${name}`);
-  }
+  singleFileComponent(name);
   const resolvedRoot = path.resolve(root);
   const resolved = path.resolve(resolvedRoot, name);
   const rel = path.relative(resolvedRoot, resolved);
@@ -225,6 +203,7 @@ export function writeFileUnder(
   if (!resolved.startsWith(resolvedRoot + path.sep) && resolved !== resolvedRoot) {
     throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
+  refuseSymlinkPath(resolvedRoot, resolved);
   fs.writeFileSync(resolved, contents);
   return resolved;
 }
@@ -238,17 +217,7 @@ export function writeFileUnder(
  * @returns Absolute destination path under `root`.
  */
 export function copyFileUnder(root: string, name: string, src: string): string {
-  if (
-    !name ||
-    name.includes("\0") ||
-    name.includes("/") ||
-    name.includes("\\") ||
-    name === "." ||
-    name === ".." ||
-    name.includes("..")
-  ) {
-    throw new Error(`file name must be a single path component: ${name}`);
-  }
+  singleFileComponent(name);
   const resolvedRoot = path.resolve(root);
   const resolved = path.resolve(resolvedRoot, name);
   const rel = path.relative(resolvedRoot, resolved);
@@ -258,6 +227,7 @@ export function copyFileUnder(root: string, name: string, src: string): string {
   if (!resolved.startsWith(resolvedRoot + path.sep) && resolved !== resolvedRoot) {
     throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
+  refuseSymlinkPath(resolvedRoot, resolved);
   fs.copyFileSync(src, resolved);
   return resolved;
 }
@@ -382,6 +352,19 @@ export function validateSpawnExecutable(
   return path.resolve(bin);
 }
 
+function singleFileComponent(name: string): void {
+  if (
+    !name ||
+    name.includes("\0") ||
+    name.includes("/") ||
+    name.includes("\\") ||
+    name === "." ||
+    name === ".."
+  ) {
+    throw new Error(`file name must be a single path component: ${name}`);
+  }
+}
+
 function stampFileName(pin: WorkerdPin): string {
   const stamp = pin.version_stamp;
   if (
@@ -397,18 +380,50 @@ function stampFileName(pin: WorkerdPin): string {
   return stamp;
 }
 
-function isCurrent(bin: string, pin: WorkerdPin): boolean {
-  const dir = path.resolve(path.dirname(bin));
-  const stamp = assertPathInside(dir, stampFileName(pin));
-  if (!fs.existsSync(stamp)) return false;
-  const text = fs.readFileSync(stamp, "utf8").trim();
-  return text === pin.release_tag;
+function usableFile(bin: string): boolean {
+  try {
+    return fs.statSync(bin).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when `bin` is a usable file matching `pin`.
+ *
+ * A sibling version stamp is enough when the binary exists. A stamp without a
+ * binary is not current. When no Bookclerk stamp matches, probe `--version`
+ * on the absolute path with fixed argv (`shell: false`, no `PATH` lookup).
+ *
+ * @param bin - Absolute candidate executable.
+ * @param pin - Loaded workerd pin.
+ * @returns Whether the binary is present and matches the pin.
+ */
+export function binaryMatchesPin(bin: string, pin: WorkerdPin): boolean {
+  if (!usableFile(bin)) return false;
+  try {
+    const dir = path.resolve(path.dirname(bin));
+    const stamp = assertPathInside(dir, stampFileName(pin));
+    if (fs.existsSync(stamp) && fs.readFileSync(stamp, "utf8").trim() === pin.release_tag) {
+      return true;
+    }
+  } catch {
+    // Missing or invalid stamp → probe the absolute binary.
+  }
+  const validated = validateSpawnExecutable(bin);
+  const out = spawnSync(validated, ["--version"], { encoding: "utf8", shell: false });
+  if (out.status !== 0) return false;
+  const combined = `${out.stdout ?? ""}${out.stderr ?? ""}`;
+  const pinBare = pin.release_tag.replace(/^v/, "");
+  return combined.includes(pin.release_tag) || combined.includes(pinBare);
 }
 
 /**
  * Ensures `cacheDir/workerd` matches the pin, downloading if needed.
  *
- * Honors `BOOKCLERK_WORKERD_BIN` when that binary exists and matches the pin.
+ * Honors `BOOKCLERK_WORKERD_BIN` when that absolute binary exists and matches
+ * the pin (stamp or `--version`). The selected cache directory is the trusted
+ * install root; children stay under it.
  *
  * @param cacheDir - Directory that will hold the binary (default {@link defaultCacheDir}).
  * @param root - Package root for loading the pin (default {@link packageRoot}).
@@ -422,32 +437,19 @@ export async function ensureWorkerd(
   const pin = loadPin(root);
   const override = process.env.BOOKCLERK_WORKERD_BIN;
   if (override && !override.includes("\0") && path.isAbsolute(override)) {
-    // Stamp-only currency (no existsSync/spawn of the raw env path).
     try {
-      if (isCurrent(override, pin)) {
+      if (binaryMatchesPin(override, pin)) {
         return validateSpawnExecutable(override);
       }
     } catch {
-      // Missing/invalid stamp → fall through to cache install.
+      // Unusable override → fall through to cache install.
     }
   }
 
-  const home = path.resolve(os.homedir());
   const absCache = path.resolve(cacheDir);
-  const cacheRel = path.relative(home, absCache);
-  if (
-    cacheRel.startsWith(".." + path.sep) ||
-    cacheRel === ".." ||
-    path.isAbsolute(cacheRel)
-  ) {
-    throw new Error(`workerd cache must resolve under home (${home}): ${absCache}`);
-  }
-  if (!absCache.startsWith(home + path.sep) && absCache !== home) {
-    throw new Error(`workerd cache must resolve under home (${home}): ${absCache}`);
-  }
   fs.mkdirSync(absCache, { recursive: true });
   const dest = assertPathInside(absCache, binaryName());
-  if (isCurrent(dest, pin)) {
+  if (binaryMatchesPin(dest, pin)) {
     return validateSpawnExecutable(dest, absCache);
   }
 

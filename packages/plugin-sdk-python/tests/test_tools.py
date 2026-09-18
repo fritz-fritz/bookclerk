@@ -323,3 +323,119 @@ def test_env_properties_include_sealed_and_loopback_bindings(tmp_path: Path):
     assert "OAUTH: Any" in stub
     assert "[secrets]" in stub
     assert "[oauth]" in stub
+
+
+def test_write_file_under_refuses_leaf_symlink_and_allows_double_dot(tmp_path: Path):
+    from bookclerk_plugin_sdk.path_guard import write_file_under
+
+    root = tmp_path / "state"
+    root.mkdir()
+    written = write_file_under(root, "edition..2.js", "ok")
+    assert written.read_text(encoding="utf-8") == "ok"
+    victim = tmp_path / "victim"
+    victim.write_text("VICTIM", encoding="utf-8")
+    (root / "adapter.js").symlink_to(victim)
+    with pytest.raises(ValueError, match="symlink"):
+        write_file_under(root, "adapter.js", "NEW")
+    assert victim.read_text(encoding="utf-8") == "VICTIM"
+
+
+def test_materialize_refuses_supplied_state_leaf_symlink(tmp_path: Path):
+    from bookclerk_plugin_sdk.sparse_workerd.config import materialize_config
+
+    plugin = tmp_path / "plugin"
+    modules = plugin / "modules"
+    modules.mkdir(parents=True)
+    (modules / "main.js").write_text("export default class X {}\n", encoding="utf-8")
+    state = tmp_path / "state"
+    bookclerk = state / ".bookclerk"
+    bookclerk.mkdir(parents=True)
+    victim = tmp_path / "victim.js"
+    victim.write_text("VICTIM", encoding="utf-8")
+    (bookclerk / "adapter.js").symlink_to(victim)
+    manifest = {
+        "api_version": 3,
+        "id": "leaf",
+        "runtime": "workerd",
+        "entrypoints": ["cli"],
+        "workerd": {
+            "compatibility_date": "2026-08-01",
+            "main_module": "main.js",
+            "modules_dir": "modules",
+            "entrypoint": "default",
+        },
+        "capabilities": {"network": {"mode": "deny"}},
+    }
+    with pytest.raises(ValueError, match="symlink"):
+        materialize_config(
+            plugin,
+            manifest,
+            listen_port=0,
+            bridge_token="token",
+            state_dir=state,
+        )
+    assert victim.read_text(encoding="utf-8") == "VICTIM"
+
+
+def test_materialize_nested_modules_and_double_dot_name(tmp_path: Path):
+    import shutil
+
+    from bookclerk_plugin_sdk.sparse_workerd.config import materialize_config
+
+    plugin = tmp_path / "plugin"
+    main = plugin / "dist" / "modules" / "nested" / "edition..2.js"
+    main.parent.mkdir(parents=True)
+    main.write_text("export default class Nested {}\n", encoding="utf-8")
+    generated = materialize_config(
+        plugin,
+        {
+            "api_version": 3,
+            "id": "nested",
+            "runtime": "workerd",
+            "entrypoints": ["cli"],
+            "workerd": {
+                "compatibility_date": "2026-08-01",
+                "main_module": "nested/edition..2.js",
+                "modules_dir": "dist/modules",
+                "entrypoint": "default",
+            },
+            "capabilities": {"network": {"mode": "deny"}},
+        },
+        listen_port=0,
+        bridge_token="token",
+    )
+    text = generated.config_path.read_text(encoding="utf-8")
+    assert "/dist/modules/nested/edition..2.js" in text
+    shutil.rmtree(generated.state_dir, ignore_errors=True)
+
+
+def test_workerd_cache_and_currency(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from bookclerk_plugin_sdk.sparse_workerd.ensure import (
+        _is_current,
+        default_cache_dir,
+        load_pin,
+    )
+
+    cache = tmp_path / "wd-cache"
+    monkeypatch.setenv("BOOKCLERK_WORKERD_CACHE", str(cache))
+    assert default_cache_dir() == cache.resolve()
+
+    pin = load_pin()
+    stamp_dir = tmp_path / "stamped"
+    stamp_dir.mkdir()
+    (stamp_dir / pin["version_stamp"]).write_text(pin["release_tag"] + "\n", encoding="utf-8")
+    missing = stamp_dir / "workerd"
+    assert _is_current(missing, pin) is False
+    present = stamp_dir / "present-workerd"
+    present.write_bytes(b"not-executable-needed")
+    assert _is_current(present, pin) is True
+
+    probe_dir = tmp_path / "probe"
+    probe_dir.mkdir()
+    script = probe_dir / "fake-workerd"
+    script.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' '{pin['release_tag']}'\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    assert _is_current(script, pin) is True

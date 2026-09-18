@@ -15,33 +15,58 @@ import type { Manifest } from "../tools/validate.js";
 import { assertPathInside, refuseSymlinkPath, packageRoot, ensureDirUnder, writeFileUnder, copyFileUnder } from "./ensure.js";
 
 /**
- * Require a single relative path component (no separators, `.`, or `..`).
+ * Require a relative manifest path (`modules_dir`, `main_module`).
  *
- * Manifest `modules_dir` / `main_module` are author-controlled; restricting
- * them to one component prevents multi-segment joins under the plugin root.
+ * Multiple components are valid (`dist/modules`, `nested/main.js`). A `..`
+ * sequence inside a filename (`edition..2.js`) is not traversal. Parent,
+ * absolute, empty, and NUL paths are rejected. Callers still contain the
+ * joined path with {@link assertPathInside} and {@link refuseSymlinkPath}.
  *
- * @param value - Candidate relative name from the manifest or options.
+ * @param value - Candidate relative path from the manifest or options.
  * @param label - Field name used in error messages.
- * @returns The validated single path component.
- * @throws {Error} When `value` is empty, contains NUL/`..`/separators, or has
- *   more than one component.
+ * @returns Normalized relative path using `/` separators.
+ * @throws {Error} When `value` is empty, absolute, or contains a parent component.
  */
-function singlePathComponent(value: string, label: string): string {
+function relativeManifestPath(value: string, label: string): string {
   if (!value || value.includes("\0")) {
     throw new Error(`${label} is empty or contains NUL`);
   }
   const normalized = value.replace(/\\/g, "/");
+  if (normalized.startsWith("/") || /^[A-Za-z]:/.test(normalized)) {
+    throw new Error(`${label} must be a relative path: ${value}`);
+  }
+  const parts = normalized.split("/").filter((part) => part !== "" && part !== ".");
+  if (parts.length === 0) {
+    throw new Error(`${label} is empty: ${value}`);
+  }
+  for (const part of parts) {
+    if (part === "..") {
+      throw new Error(`${label} must not contain parent components: ${value}`);
+    }
+  }
+  return parts.join("/");
+}
+
+/**
+ * Require one filename (no separators). `edition..2.js` is allowed.
+ *
+ * @param value - Candidate filename.
+ * @param label - Field name used in error messages.
+ * @returns The validated filename.
+ * @throws {Error} When `value` is empty, a separator path, `.`, or `..`.
+ */
+function singleFileName(value: string, label: string): string {
   if (
-    normalized.includes("/") ||
-    normalized === "." ||
-    normalized === ".." ||
-    normalized.includes("..")
+    !value ||
+    value.includes("\0") ||
+    value.includes("/") ||
+    value.includes("\\") ||
+    value === "." ||
+    value === ".."
   ) {
-    // `includes("..")` is intentional for CodeQL's ContainsDotDot sanitizer on
-    // the rejected branch; single-component names like `edition..2` are not used.
     throw new Error(`${label} must be a single path component: ${value}`);
   }
-  return normalized;
+  return value;
 }
 const SDK_JS_MODULE_NAMES = [
   "@bookclerk/plugin-sdk/workerd",
@@ -345,11 +370,11 @@ export function materializeConfig(
   const stateDir = options.stateDir
     ? fs.realpathSync(path.resolve(options.stateDir))
     : allocateWorkerdStateDir(root);
-  const modulesDirName = singlePathComponent(
+  const modulesDirName = relativeManifestPath(
     workerd.modules_dir ?? "modules",
     "modules_dir",
   );
-  const mainModuleName = singlePathComponent(workerd.main_module, "main_module");
+  const mainModuleName = relativeManifestPath(workerd.main_module, "main_module");
   const entrypoint = workerd.entrypoint ?? "default";
   const networkMode = manifest.capabilities?.network?.mode ?? "deny";
   const networkDomains = manifest.capabilities?.network?.domains ?? [];
@@ -601,7 +626,7 @@ const bridgeWorker :Workerd.Worker = (
 );
 `;
 
-  const configName = singlePathComponent(
+  const configName = singleFileName(
     options.configName ?? "workerd-config.capnp",
     "configName",
   );

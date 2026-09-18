@@ -197,6 +197,107 @@ mode = "deny"
   }
   console.log("ok packagePlugin preserves final archive when tar fails");
 
+  const state = fs.mkdtempSync(path.join(tmp, "supplied-state-"));
+  const bookclerk = path.join(state, ".bookclerk");
+  fs.mkdirSync(bookclerk);
+  const adapterVictim = path.join(tmp, "victim-adapter.js");
+  fs.writeFileSync(adapterVictim, "VICTIM");
+  fs.symlinkSync(adapterVictim, path.join(bookclerk, "adapter.js"));
+  const leafPlugin = path.join(tmp, "leaf_plugin");
+  const leafModules = path.join(leafPlugin, "modules");
+  fs.mkdirSync(leafModules, { recursive: true });
+  fs.writeFileSync(path.join(leafModules, "main.js"), "export default class X {}");
+  mustThrow("materializeConfig refuses leaf symlink in supplied stateDir", () =>
+    materializeConfig(leafPlugin, manifest, {
+      listenPort: 0,
+      bridgeToken: "tok",
+      stateDir: state,
+    }),
+  );
+  if (fs.readFileSync(adapterVictim, "utf8") !== "VICTIM") {
+    console.error("FAIL: supplied stateDir leaf symlink overwrote victim");
+    process.exit(1);
+  }
+  console.log("ok materializeConfig refuses leaf symlink in supplied stateDir");
+
+  const nested = path.join(tmp, "nested_plugin");
+  const nestedFile = path.join(nested, "dist", "modules", "nested", "edition..2.js");
+  fs.mkdirSync(path.dirname(nestedFile), { recursive: true });
+  fs.writeFileSync(nestedFile, "export default class Nested {}");
+  const nestedManifest = {
+    ...manifest,
+    id: "nested",
+    workerd: {
+      ...manifest.workerd,
+      modules_dir: "dist/modules",
+      main_module: "nested/edition..2.js",
+    },
+  };
+  const nestedGenerated = materializeConfig(nested, nestedManifest, {
+    listenPort: 0,
+    bridgeToken: "tok",
+  });
+  const nestedConfig = fs.readFileSync(nestedGenerated.configPath, "utf8");
+  if (!nestedConfig.includes("/dist/modules/nested/edition..2.js")) {
+    console.error("FAIL: nested module embed missing", nestedConfig);
+    process.exit(1);
+  }
+  console.log("ok materializeConfig allows nested modules and edition..2.js");
+  fs.rmSync(nestedGenerated.stateDir, { recursive: true, force: true });
+
+  const { writeFileUnder, defaultCacheDir, binaryMatchesPin, loadPin } = await import(
+    "../dist/sparse-workerd/ensure.js"
+  );
+  const writeRoot = path.join(tmp, "write-root");
+  fs.mkdirSync(writeRoot);
+  const written = writeFileUnder(writeRoot, "edition..2.js", "ok");
+  if (fs.readFileSync(written, "utf8") !== "ok") {
+    console.error("FAIL: edition..2.js was not written");
+    process.exit(1);
+  }
+  const linkVictim = path.join(tmp, "link-victim");
+  fs.writeFileSync(linkVictim, "KEEP");
+  fs.symlinkSync(linkVictim, path.join(writeRoot, "adapter.js"));
+  mustThrow("writeFileUnder refuses leaf symlink", () =>
+    writeFileUnder(writeRoot, "adapter.js", "NEW"),
+  );
+  if (fs.readFileSync(linkVictim, "utf8") !== "KEEP") {
+    console.error("FAIL: writeFileUnder followed leaf symlink");
+    process.exit(1);
+  }
+  console.log("ok writeFileUnder refuses leaf symlink and allows edition..2.js");
+
+  const prevCache = process.env.BOOKCLERK_WORKERD_CACHE;
+  const cacheOutside = path.join(tmp, "wd-cache");
+  process.env.BOOKCLERK_WORKERD_CACHE = cacheOutside;
+  if (path.resolve(defaultCacheDir()) !== path.resolve(cacheOutside)) {
+    console.error("FAIL: BOOKCLERK_WORKERD_CACHE was not honored", defaultCacheDir());
+    process.exit(1);
+  }
+  if (prevCache === undefined) delete process.env.BOOKCLERK_WORKERD_CACHE;
+  else process.env.BOOKCLERK_WORKERD_CACHE = prevCache;
+  console.log("ok defaultCacheDir honors cache outside home");
+
+  const pin = loadPin();
+  const stampDir = path.join(tmp, "stamp-only");
+  fs.mkdirSync(stampDir);
+  fs.writeFileSync(path.join(stampDir, pin.version_stamp), `${pin.release_tag}\n`);
+  const missingBin = path.join(stampDir, "workerd");
+  if (binaryMatchesPin(missingBin, pin)) {
+    console.error("FAIL: stamp without binary was treated as current");
+    process.exit(1);
+  }
+  const probeDir = path.join(tmp, "probe-only");
+  fs.mkdirSync(probeDir);
+  const fake = path.join(probeDir, "fake-workerd");
+  fs.writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' '${pin.release_tag}'\n`);
+  fs.chmodSync(fake, 0o755);
+  if (!binaryMatchesPin(fake, pin)) {
+    console.error("FAIL: --version probe rejected a current absolute binary");
+    process.exit(1);
+  }
+  console.log("ok binaryMatchesPin requires a file and probes --version");
+
   console.log("path security regressions passed");
 }
 

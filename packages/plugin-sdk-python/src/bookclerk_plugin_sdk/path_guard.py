@@ -87,6 +87,9 @@ def write_file_under(root: Path | str, name: str, contents: str | bytes) -> Path
     """Write ``contents`` to ``root`` / ``name`` after resolve + ``startswith``.
 
     Assumes ``root`` already exists (session/cache dirs are created first).
+    Refuses a symlink at the destination, including a leaf link out of ``root``.
+    Filenames may contain ``..`` (``edition..2.js``); ``.`` and ``..`` components
+    are rejected.
     """
     if (
         not name
@@ -94,7 +97,6 @@ def write_file_under(root: Path | str, name: str, contents: str | bytes) -> Path
         or "/" in name
         or "\\" in name
         or name in {".", ".."}
-        or ".." in name
     ):
         raise ValueError(f"file name must be a single path component: {name}")
     root_s = os.path.abspath(os.path.normpath(os.fspath(root)))
@@ -107,6 +109,7 @@ def write_file_under(root: Path | str, name: str, contents: str | bytes) -> Path
         raise ValueError(f"path {resolved_s} escapes root {root_s}")
     if resolved_s != root_s and not resolved_s.startswith(root_s + os.sep):
         raise ValueError(f"path {resolved_s} escapes root {root_s}")
+    refuse_symlink_path(root_s, resolved_s)
     if isinstance(contents, str):
         with open(resolved_s, "w", encoding="utf-8") as fh:
             fh.write(contents)
@@ -126,13 +129,13 @@ def copy_file_under(root: Path | str, name: str, src: Path | str) -> Path:
         or "/" in name
         or "\\" in name
         or name in {".", ".."}
-        or ".." in name
     ):
         raise ValueError(f"file name must be a single path component: {name}")
     root_s = os.path.abspath(os.path.normpath(os.fspath(root)))
     resolved_s = os.path.abspath(os.path.join(root_s, name))
     if not _is_under(root_s, resolved_s):
         raise ValueError(f"path {resolved_s} escapes root {root_s}")
+    refuse_symlink_path(root_s, resolved_s)
     shutil.copy2(src, resolved_s, follow_symlinks=False)
     return Path(resolved_s)
 

@@ -13,43 +13,69 @@ use bookclerk_plugin_manifest::{
 use crate::egress::EgressProxy;
 use crate::pin::BUNDLED_WORKERD_COMPAT_DATE;
 
-/// Require a single relative path component (no separators, `.`, or `..`).
+/// Require a relative manifest path (`modules_dir`, `main_module`).
 ///
-/// Manifest `modules_dir` / `main_module` are author-controlled; restricting
-/// them to one component prevents multi-segment joins under the plugin root.
-fn require_single_path_component<'a>(label: &str, value: &'a str) -> Result<&'a str> {
+/// Multiple normal components are valid (`dist/modules`, `nested/main.js`).
+/// A `..` sequence inside a filename (`edition..2.js`) is not traversal.
+/// Parent, root, prefix, absolute, empty, and NUL paths are rejected.
+/// Containment is still `canonicalize` + `starts_with` at the join site.
+fn require_relative_manifest_path<'a>(label: &str, value: &'a str) -> Result<&'a str> {
     if value.is_empty() || value.contains('\0') {
         bail!("{label} is empty or contains NUL");
     }
-    // CodeQL DotDotCheck: barrier when this is false.
-    if value.contains("..") {
-        bail!("{label} must not contain '..': {value}");
-    }
     let path = Path::new(value);
-    if path.components().any(|c| {
-        matches!(
-            c,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        bail!("{label} must be a single path component: {value}");
+    if path.is_absolute() {
+        bail!("{label} must be a relative path: {value}");
     }
-    let mut normals = path.components().filter_map(|c| match c {
+    let mut saw_normal = false;
+    for comp in path.components() {
+        match comp {
+            Component::Normal(name) => {
+                let s = name
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("{label} is not valid UTF-8: {value}"))?;
+                if s.is_empty() || s == "." || s == ".." {
+                    bail!("{label} must not contain parent or empty components: {value}");
+                }
+                saw_normal = true;
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!("{label} must not contain parent or root components: {value}");
+            }
+        }
+    }
+    if !saw_normal {
+        bail!("{label} is empty: {value}");
+    }
+    Ok(value)
+}
+
+/// Require one relative filename (no separators). `edition..2.js` is allowed.
+fn require_single_path_component<'a>(label: &str, value: &'a str) -> Result<&'a str> {
+    let value = require_relative_manifest_path(label, value)?;
+    let mut normals = Path::new(value).components().filter_map(|c| match c {
         Component::Normal(s) => Some(s),
         Component::CurDir => None,
         _ => None,
     });
     match (normals.next(), normals.next()) {
-        (Some(name), None) => {
-            let s = name
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("{label} is not valid UTF-8: {value}"))?;
-            if s.is_empty() || s == "." || s == ".." {
-                bail!("{label} must be a single path component: {value}");
-            }
-            Ok(s)
-        }
+        (Some(name), None) => name
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("{label} is not valid UTF-8: {value}")),
         _ => bail!("{label} must be a single path component: {value}"),
+    }
+}
+
+/// Refuse an existing symlink at `path`. A missing final component is allowed.
+fn refuse_symlink_component(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!("refusing symlink in path: {}", path.display());
+        }
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("stat {}", path.display())),
     }
 }
 
@@ -271,6 +297,14 @@ fn write_file_under(root: &Path, name: &str, contents: impl AsRef<[u8]>) -> Resu
     let root_norm =
         fs::canonicalize(root).with_context(|| format!("canonicalize root {}", root.display()))?;
     let out = root_norm.join(name);
+    if !out.starts_with(&root_norm) {
+        bail!(
+            "path {} escapes root {}",
+            out.display(),
+            root_norm.display()
+        );
+    }
+    refuse_symlink_component(&out)?;
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -545,6 +579,14 @@ fn write_owner_only_file_under(
     let root_norm =
         fs::canonicalize(root).with_context(|| format!("canonicalize root {}", root.display()))?;
     let out = root_norm.join(name);
+    if !out.starts_with(&root_norm) {
+        bail!(
+            "path {} escapes root {}",
+            out.display(),
+            root_norm.display()
+        );
+    }
+    refuse_symlink_component(&out)?;
     if let Some(parent) = out.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -1129,8 +1171,8 @@ pub fn materialize(
     write_file_under(&bookclerk_dir, "egress.js", EGRESS_JS)?;
     write_file_under(&bookclerk_dir, "adapter.js", ADAPTER_JS)?;
 
-    let modules_name = require_single_path_component("modules_dir", &workerd.modules_dir)?;
-    let main_name = require_single_path_component("main_module", &workerd.main_module)?;
+    let modules_name = require_relative_manifest_path("modules_dir", &workerd.modules_dir)?;
+    let main_name = require_relative_manifest_path("main_module", &workerd.main_module)?;
     let modules_dir = {
         let dir = root.join(modules_name);
         require_under(root, &dir)?
@@ -1665,6 +1707,106 @@ mode = "deny"
         assert!(capnp.contains("sdk-db-value.py"));
         let state_dir = &generated.state_dir;
         assert!(state_dir.join(".bookclerk/sdk-db-value.py").is_file());
+    }
+
+    #[test]
+    fn materialize_allows_nested_modules_and_double_dot_names() {
+        use bookclerk_plugin_manifest::{PluginManifest, WorkerdLimits};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rel = Path::new("dist").join("modules").join("nested");
+        let _ = create_dir_under(dir.path(), &rel);
+        write_under(dir.path(), rel.join("edition..2.js"), "export default {};");
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 3
+id = "nested"
+runtime = "workerd"
+entrypoints = ["cli"]
+[workerd]
+compatibility_date = "2026-08-01"
+main_module = "nested/edition..2.js"
+modules_dir = "dist/modules"
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .expect("manifest");
+        let generated = materialize(
+            dir.path(),
+            &manifest,
+            &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
+            WorkerdLimits::default().effective(),
+            ListenSpec::InheritedTcp { port: 9 },
+            None,
+            "token",
+            None,
+        )
+        .expect("materialize nested modules");
+        let capnp = read_under(&generated.state_dir, &generated.config_path);
+        assert!(
+            capnp.contains(r#"name = "edition..2.js""#) || capnp.contains("edition..2.js"),
+            "capnp missing double-dot module name:\n{capnp}"
+        );
+        assert!(
+            capnp.contains("/dist/modules/nested/edition..2.js"),
+            "capnp missing nested embed:\n{capnp}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_refuses_leaf_symlink_in_supplied_state_dir() {
+        use bookclerk_plugin_manifest::{PluginManifest, WorkerdLimits};
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _modules = create_dir_under(dir.path(), "modules");
+        write_under(
+            dir.path(),
+            Path::new("modules").join("index.js"),
+            "export default {};",
+        );
+        let state = tempfile::tempdir().expect("state");
+        let bookclerk = state.path().join(".bookclerk");
+        fs::create_dir(&bookclerk).expect("bookclerk dir");
+        let victim = dir.path().join("victim.js");
+        fs::write(&victim, b"VICTIM").expect("victim");
+        symlink(&victim, bookclerk.join("adapter.js")).expect("symlink");
+        let manifest = PluginManifest::parse(
+            r#"
+api_version = 3
+id = "echo"
+runtime = "workerd"
+entrypoints = ["cli"]
+[workerd]
+compatibility_date = "2026-08-01"
+main_module = "index.js"
+modules_dir = "modules"
+[capabilities.network]
+mode = "deny"
+"#,
+        )
+        .expect("manifest");
+        let err = match materialize(
+            dir.path(),
+            &manifest,
+            &EgressProxy::from_policy(bookclerk_plugin_manifest::EgressPolicy::deny()),
+            WorkerdLimits::default().effective(),
+            ListenSpec::InheritedTcp { port: 9 },
+            None,
+            "token",
+            Some(state.path()),
+        ) {
+            Ok(_) => panic!("leaf symlink must be refused"),
+            Err(err) => err,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("symlink"),
+            "expected symlink refusal, got {msg}"
+        );
+        assert_eq!(fs::read(&victim).expect("victim bytes"), b"VICTIM");
     }
 
     #[test]

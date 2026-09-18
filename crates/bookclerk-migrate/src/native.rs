@@ -37,7 +37,8 @@ pub struct NativeBackupManifest {
 pub struct NativeExportOptions {
     /// Bookclerk or Libation files directory root for this operation.
     pub files_dir: PathBuf,
-    /// Destination path for the export archive or directory.
+    /// Destination archive path. Absolute, or relative to the process cwd.
+    /// This is an operator choice and is not jailed under [`Self::files_dir`].
     pub dest: PathBuf,
     /// Bookclerk version string recorded in the backup manifest.
     pub bookclerk_version: String,
@@ -100,25 +101,28 @@ pub struct NativeImportSummary {
 ///
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn export_native(opts: NativeExportOptions) -> Result<NativeExportSummary> {
-    // Contain the operator-selected archive path under the configured files dir
-    // (canonicalize + starts_with) so Default Setup path-injection barriers fire.
+    // `files_dir` contains collected entries. `dest` is the operator-selected
+    // archive location (absolute, or cwd-relative) and is not joined onto it.
     let files_root = std::fs::canonicalize(&opts.files_dir).map_err(|source| {
         err(format!(
             "could not canonicalize files dir {}: {source}",
             opts.files_dir.display()
         ))
     })?;
-    let dest_candidate = if opts.dest.is_absolute() {
+    let dest = if opts.dest.is_absolute() {
         opts.dest.clone()
     } else {
-        files_root.join(&opts.dest)
+        std::env::current_dir()
+            .map_err(|source| err(format!("current directory: {source}")))?
+            .join(&opts.dest)
     };
-    let dest = require_under_walk_root(&files_root, &dest_candidate)?;
+    reject_empty_or_nul(&dest)?;
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|source| err(format!("create {}: {source}", parent.display())))?;
+        }
     }
-    // Re-resolve after parent create so the open uses a path that passed the barrier.
-    let dest = require_under_walk_root(&files_root, &dest)?;
     let file = File::create(&dest)
         .map_err(|source| err(format!("create {}: {source}", dest.display())))?;
     let enc = GzEncoder::new(BufWriter::new(file), Compression::default());
@@ -133,20 +137,34 @@ pub fn export_native(opts: NativeExportOptions) -> Result<NativeExportSummary> {
 
     if opts.include_plugin_manifests {
         let plugins = files_root.join("plugins");
-        collect_plugin_tomls(&plugins, &mut entries, &mut included)?;
+        collect_plugin_tomls(&files_root, &plugins, &mut entries, &mut included)?;
     }
     if opts.include_cache {
         let cache = files_root.join("cache");
-        collect_dir(&cache, &cache, "cache", &mut entries, &mut included, true)?;
+        collect_dir(
+            &files_root,
+            &cache,
+            "cache",
+            &mut entries,
+            &mut included,
+            true,
+        )?;
     }
     if opts.include_logs {
         let logs = files_root.join("logs");
-        collect_dir(&logs, &logs, "logs", &mut entries, &mut included, true)?;
+        collect_dir(
+            &files_root,
+            &logs,
+            "logs",
+            &mut entries,
+            &mut included,
+            true,
+        )?;
     }
     if opts.include_plugin_databases {
         let plugin_databases = files_root.join("plugin-databases");
         collect_dir(
-            &plugin_databases,
+            &files_root,
             &plugin_databases,
             "plugin-databases",
             &mut entries,
@@ -451,6 +469,10 @@ fn push_if_exists(
 }
 
 /// Walks a directory into archive entries (`cache/`, `logs/`); missing dirs are skipped.
+///
+/// A genuinely missing optional root is skipped before canonicalization. A
+/// dangling symlink is not "missing" and is rejected by [`require_under_walk_root`].
+/// `walk_root` is the existing files directory, not the optional child.
 fn collect_dir(
     walk_root: &Path,
     dir: &Path,
@@ -459,6 +481,9 @@ fn collect_dir(
     included: &mut Vec<String>,
     recursive: bool,
 ) -> Result<()> {
+    if optional_export_dir_absent(dir)? {
+        return Ok(());
+    }
     let dir = require_under_walk_root(walk_root, dir)?;
     if !dir.is_dir() {
         return Ok(());
@@ -478,13 +503,28 @@ fn collect_dir(
     Ok(())
 }
 
+/// True when `path` does not exist. Symlinks, including dangling ones, are present.
+fn optional_export_dir_absent(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(source) => Err(err(format!("stat {}: {source}", path.display()))),
+    }
+}
+
 /// Collects `plugins/**/plugin.toml` only (binaries stay out of the portable backup).
+///
+/// A missing `plugins/` directory is skipped. `files_root` is the containment root.
 fn collect_plugin_tomls(
+    files_root: &Path,
     plugins_root: &Path,
     entries: &mut Vec<(String, PathBuf)>,
     included: &mut Vec<String>,
 ) -> Result<()> {
-    let plugins_root = require_under_walk_root(plugins_root, plugins_root)?;
+    if optional_export_dir_absent(plugins_root)? {
+        return Ok(());
+    }
+    let plugins_root = require_under_walk_root(files_root, plugins_root)?;
     if !plugins_root.is_dir() {
         return Ok(());
     }
@@ -542,7 +582,7 @@ mod tests {
         )
         .unwrap();
 
-        let archive = files.join("backup.tar.gz");
+        let archive = tmp.path().join("backup.tar.gz");
         let summary = export_native(NativeExportOptions {
             files_dir: files.clone(),
             dest: archive.clone(),
@@ -554,6 +594,11 @@ mod tests {
         })
         .unwrap();
         assert!(summary.files >= 3);
+        assert!(
+            archive.is_file(),
+            "archive must be written outside files_dir"
+        );
+        assert!(!files.join("backup.tar.gz").exists());
 
         let dest = tmp.path().join("restored");
         let imp = import_native(NativeImportOptions {
@@ -569,5 +614,59 @@ mod tests {
             "library.auto_acquire = false\n"
         );
         assert!(dest.join("plugins/example/plugin.toml").is_file());
+    }
+
+    #[test]
+    fn export_skips_missing_optional_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = tmp.path().join("files");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(files.join("config.toml"), b"library.auto_acquire = false\n").unwrap();
+        let archive = tmp.path().join("backup.tar.gz");
+        let summary = export_native(NativeExportOptions {
+            files_dir: files,
+            dest: archive.clone(),
+            bookclerk_version: "0.1.0-test".into(),
+            include_plugin_manifests: true,
+            include_cache: true,
+            include_logs: true,
+            include_plugin_databases: true,
+        })
+        .expect("missing optional dirs are skipped");
+        assert!(archive.is_file());
+        assert!(summary.files >= 1);
+        assert!(!summary.included.iter().any(|p| p.starts_with("cache")));
+        assert!(!summary.included.iter().any(|p| p.starts_with("logs")));
+        assert!(!summary
+            .included
+            .iter()
+            .any(|p| p.starts_with("plugin-databases")));
+        assert!(!summary.included.iter().any(|p| p.starts_with("plugins")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_rejects_dangling_optional_directory_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = tmp.path().join("files");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(files.join("config.toml"), b"x\n").unwrap();
+        std::os::unix::fs::symlink(files.join("missing-cache-target"), files.join("cache"))
+            .unwrap();
+        let err = export_native(NativeExportOptions {
+            files_dir: files,
+            dest: tmp.path().join("backup.tar.gz"),
+            bookclerk_version: "0.1.0-test".into(),
+            include_plugin_manifests: false,
+            include_cache: true,
+            include_logs: false,
+            include_plugin_databases: false,
+        })
+        .expect_err("dangling cache symlink");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("symlink") || msg.contains("dangling"),
+            "expected dangling-symlink refusal, got {msg}"
+        );
     }
 }

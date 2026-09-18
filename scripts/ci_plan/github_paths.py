@@ -58,97 +58,21 @@ def github_actions_file_path(path_s: str, *, label: str) -> str:
     )
 
 
-# Constant prefixes CodeQL treats as path barriers (``startswith`` of a literal).
-# GitHub-hosted runners plus local/test roots used by ``test_ci_plan.py``.
-def _open_append_under_constant_prefix(path: str) -> IO[Any] | None:
-    """Open ``path`` only when it starts with a constant hosted/test prefix."""
-    if path.startswith("/home/runner/"):
-        return open(path, "a", encoding="utf-8")
-    if path.startswith("/Users/runner/"):
-        return open(path, "a", encoding="utf-8")
-    if path.startswith("/tmp/"):
-        return open(path, "a", encoding="utf-8")
-    if path.startswith("/workspace/"):
-        return open(path, "a", encoding="utf-8")
-    if path.startswith("C:\\a\\"):
-        return open(path, "a", encoding="utf-8")
-    if path.startswith("C:/a/"):
-        return open(path, "a", encoding="utf-8")
-    if path.startswith("D:\\a\\"):
-        return open(path, "a", encoding="utf-8")
-    if path.startswith("D:/a/"):
-        return open(path, "a", encoding="utf-8")
-    return None
-
-
 def open_github_actions_append(path_s: str, *, label: str) -> IO[Any]:
-    """Open a runner file-command path for append after semantic containment.
+    """Open a runner file-command path for append.
 
-    Rebuilds the path under a runner root, then opens only when that path also
-    starts with a constant hosted-runner or local-test prefix (CodeQL
-    ``startswith`` barrier). Runner-root containment is still required.
+    ``RUNNER_TEMP`` and ``GITHUB_WORKSPACE`` are the trusted runner-origin
+    boundary. GitHub documents that workflow ``env:`` cannot overwrite the
+    default ``GITHUB_*`` / ``RUNNER_*`` variables. This opens the path
+    :func:`github_actions_file_path` already verified (canonical containment
+    under that boundary). Ordinary filenames are preserved, including spaces,
+    Unicode, and ``..`` inside a name such as ``edition..2``.
+
+    CodeQL's local threat model still taints those environment variables, so
+    this ``open`` may remain a path-injection result. A hard-coded prefix
+    allowlist is not a substitute: self-hosted runners use ``/var/tmp``,
+    ``/srv/actions``, and macOS ``/private/var/folders`` layouts that no
+    literal hosted-runner prefix covers.
     """
-    if not path_s or "\0" in path_s:
-        raise SystemExit(f"{label} must be a non-empty path without NUL")
-
-    roots = _runner_roots()
-    if not roots:
-        raise SystemExit(
-            f"{label} is set but neither RUNNER_TEMP nor GITHUB_WORKSPACE is a "
-            "usable path; refusing to open a runner file-command path outside "
-            "Actions"
-        )
-
-    resolved = os.path.realpath(path_s)
-    name = os.path.basename(resolved)
-    if (
-        not name
-        or name in {".", ".."}
-        or "/" in name
-        or "\\" in name
-        or ".." in name
-        or "\0" in name
-    ):
-        raise SystemExit(f"{label} basename is not a single safe path component")
-
-    for root in roots:
-        try:
-            rel = os.path.relpath(resolved, root)
-        except ValueError:
-            continue
-        if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
-            continue
-        if resolved != root and not resolved.startswith(root + os.sep):
-            continue
-        # Rebuild under the runner root: dirname(relative) + basename.
-        parent_rel = os.path.dirname(rel)
-        if parent_rel in {"", "."}:
-            rebuilt = os.path.join(root, name)
-        else:
-            # Refuse parent segments that contain '..' (already checked via rel).
-            parts = parent_rel.split(os.sep)
-            if any(p in {"", ".."} or ".." in p for p in parts):
-                continue
-            rebuilt = os.path.join(root, parent_rel, name)
-        rebuilt = os.path.normpath(rebuilt)
-        try:
-            rebuilt_rel = os.path.relpath(rebuilt, root)
-        except ValueError:
-            continue
-        if (
-            rebuilt_rel == ".."
-            or rebuilt_rel.startswith(".." + os.sep)
-            or os.path.isabs(rebuilt_rel)
-        ):
-            continue
-        if rebuilt != root and not rebuilt.startswith(root + os.sep):
-            continue
-        if os.path.realpath(rebuilt) != resolved:
-            continue
-        opened = _open_append_under_constant_prefix(rebuilt)
-        if opened is not None:
-            return opened
-
-    raise SystemExit(
-        f"refusing {label} outside RUNNER_TEMP/GITHUB_WORKSPACE: {resolved}"
-    )
+    resolved = github_actions_file_path(path_s, label=label)
+    return open(resolved, "a", encoding="utf-8")

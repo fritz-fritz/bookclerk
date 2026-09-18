@@ -324,6 +324,23 @@ class GithubActionsFilePathTests(unittest.TestCase):
             with open(target, encoding="utf-8") as fh:
                 self.assertEqual(fh.read(), "full_suite=false\n")
 
+    def test_open_append_accepts_non_hosted_runner_root(self) -> None:
+        # Self-hosted RUNNER_TEMP is often /var/tmp or /srv/actions, not a
+        # GitHub-hosted prefix. Containment is the runner root itself.
+        if not (os.path.isdir("/var/tmp") and os.access("/var/tmp", os.W_OK)):
+            self.skipTest("/var/tmp is not writable")
+        with tempfile.TemporaryDirectory(prefix="bc-runner-", dir="/var/tmp") as tmp:
+            root = os.path.realpath(tmp)
+            self.assertTrue(root.startswith("/var/tmp") or root.startswith("/private/var/tmp"))
+            target = os.path.join(root, "edition..2")
+            with mock.patch.dict(os.environ, {"RUNNER_TEMP": root}, clear=True):
+                got = github_actions_file_path(target, label="GITHUB_OUTPUT")
+                self.assertEqual(got, os.path.realpath(target))
+                with open_github_actions_append(target, label="GITHUB_OUTPUT") as fh:
+                    fh.write("ok=1\n")
+            with open(target, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "ok=1\n")
+
 
 if __name__ == "__main__":
     unittest.main()

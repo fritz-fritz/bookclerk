@@ -20,6 +20,7 @@ export {
   refuseSymlinkPath,
   validateFetchUrl,
   validateSpawnExecutable,
+  binaryMatchesPin,
   type WorkerdPin,
   type WorkerdAsset,
 } from "./ensure.js";

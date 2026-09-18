@@ -282,13 +282,36 @@ def _resolve_sdk_js(sdk_root: Path) -> Path:
     )
 
 
-def _single_path_component(value: str, label: str) -> str:
+def _relative_manifest_path(value: str, label: str) -> str:
+    """Accept a relative manifest path with normal components only.
+
+    ``dist/modules`` and ``nested/main.js`` are valid. ``edition..2.js`` is a
+    filename, not a parent component. Absolute, empty, NUL, and ``..``
+    components are rejected.
+    """
     if not value or "\0" in value:
         raise ValueError(f"{label} is empty or contains NUL")
     normalized = value.replace("\\", "/")
-    if "/" in normalized or normalized in {".", ".."} or ".." in normalized:
+    if normalized.startswith("/") or (len(normalized) >= 2 and normalized[1] == ":"):
+        raise ValueError(f"{label} must be a relative path: {value}")
+    parts = [part for part in normalized.split("/") if part not in {"", "."}]
+    if not parts:
+        raise ValueError(f"{label} is empty: {value}")
+    if any(part == ".." for part in parts):
+        raise ValueError(f"{label} must not contain parent components: {value}")
+    return "/".join(parts)
+
+
+def _single_file_name(value: str, label: str) -> str:
+    if (
+        not value
+        or "\0" in value
+        or "/" in value
+        or "\\" in value
+        or value in {".", ".."}
+    ):
         raise ValueError(f"{label} must be a single path component: {value}")
-    return normalized
+    return value
 
 
 class GeneratedConfig(NamedTuple):
@@ -369,10 +392,10 @@ def materialize_config(
         state_dir = allocate_workerd_state_dir(plugin_root)
     else:
         state_dir = Path(os.path.realpath(Path(state_dir).resolve()))
-    modules_dir_name = _single_path_component(
+    modules_dir_name = _relative_manifest_path(
         str(workerd.get("modules_dir") or "modules"), "modules_dir"
     )
-    main_module_name = _single_path_component(str(workerd["main_module"]), "main_module")
+    main_module_name = _relative_manifest_path(str(workerd["main_module"]), "main_module")
     entrypoint = workerd.get("entrypoint") or "default"
     net = (manifest.get("capabilities") or {}).get("network") or {}
     network_mode = net.get("mode") or "deny"
@@ -596,7 +619,7 @@ const bridgeWorker :Workerd.Worker = (
 );
 """
 
-    config_name = _single_path_component(config_name, "config_name")
+    config_name = _single_file_name(config_name, "config_name")
     config_path = write_file_under(state_dir, config_name, config)
     return GeneratedConfig(
         config_path=config_path,

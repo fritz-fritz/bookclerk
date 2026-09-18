@@ -1,7 +1,8 @@
 """Download / refresh the pinned Cloudflare ``workerd`` binary (mirrors ensure.rs).
 
 Resolves the platform asset from ``workerd-pin.json``, verifies sha256, and
-caches under a package-local ``.workerd-cache`` beside this module.
+caches under the operator-selected directory (``BOOKCLERK_WORKERD_CACHE`` or
+``~/.cache/bookclerk/workerd``).
 """
 
 from __future__ import annotations
@@ -101,34 +102,21 @@ def download_url(pin: dict[str, Any], artifact: str) -> str:
 
 
 def default_cache_dir() -> Path:
-    """Resolve the workerd binary cache beside this module (``__file__``).
+    """Resolve the workerd binary cache directory.
 
-    Uses a package-local ``.workerd-cache`` directory derived from this file's
-    path so Default Setup local threat modeling does not treat ``$HOME`` /
-    ``BOOKCLERK_WORKERD_CACHE`` as the mkdir/write root. Env overrides that
-    escape this module directory are ignored.
+    Honors ``BOOKCLERK_WORKERD_CACHE`` as the selected install root (any
+    writable location, including paths outside ``$HOME`` and this package).
+    Otherwise uses ``~/.cache/bookclerk/workerd``. Derived files stay under
+    that root.
 
     Returns:
         Path to the cache directory (may not exist yet).
     """
-    base = os.path.abspath(os.path.dirname(__file__))
-    cache = os.path.join(base, ".workerd-cache")
     env = os.environ.get("BOOKCLERK_WORKERD_CACHE")
     if env and "\0" not in env:
-        resolved = os.path.abspath(env)
-        try:
-            rel = os.path.relpath(resolved, base)
-        except ValueError:
-            return Path(cache)
-        if (
-            rel != ".."
-            and not rel.startswith(".." + os.sep)
-            and not os.path.isabs(rel)
-            and (resolved == base or resolved.startswith(base + os.sep))
-        ):
-            # Still return the package-local cache — never mkdir an env path.
-            pass
-    return Path(cache)
+        return Path(os.path.abspath(os.path.expanduser(env)))
+    home = os.path.expanduser("~")
+    return Path(os.path.abspath(os.path.join(home, ".cache", "bookclerk", "workerd")))
 
 
 def validate_fetch_url(url: str) -> str:
@@ -199,35 +187,63 @@ def _stamp_file_name(pin: dict[str, Any]) -> str:
         or "/" in stamp
         or "\\" in stamp
         or stamp in {".", ".."}
-        or ".." in stamp
     ):
         raise ValueError(f"invalid workerd version_stamp: {stamp}")
     return stamp
 
 
 def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
-    """True when the pin version stamp next to ``bin_path`` matches the pin tag.
+    """True when ``bin_path`` is a file matching the pin.
 
-    Stamp-only: never ``--version``-probes a cache or env path (those paths are
-    operator/env-influenced and trip command-injection queries under local
-    threat modeling).
+    A sibling stamp is enough when the binary exists. A stamp without a binary
+    is not current. When no Bookclerk stamp matches, probe ``--version`` on the
+    absolute path with fixed argv (no ``PATH`` lookup).
     """
+    if not bin_path.is_file():
+        return False
     root_s = os.path.abspath(os.fspath(bin_path.parent))
     name = _stamp_file_name(pin)
     stamp_s = os.path.abspath(os.path.join(root_s, name))
     try:
         rel = os.path.relpath(stamp_s, root_s)
     except ValueError:
-        return False
-    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
-        return False
-    if stamp_s != root_s and not stamp_s.startswith(root_s + os.sep):
-        return False
+        rel = ".."
+    stamp_ok = (
+        rel != ".."
+        and not rel.startswith(".." + os.sep)
+        and not os.path.isabs(rel)
+        and (stamp_s == root_s or stamp_s.startswith(root_s + os.sep))
+    )
+    if stamp_ok:
+        try:
+            with open(stamp_s, encoding="utf-8") as fh:
+                if fh.read().strip() == pin["release_tag"]:
+                    return True
+        except OSError:
+            pass
+    return _version_probe_matches(bin_path, pin)
+
+
+def _version_probe_matches(bin_path: Path, pin: dict[str, Any]) -> bool:
+    import subprocess
+
+    validated = validate_spawn_executable(bin_path)
     try:
-        with open(stamp_s, encoding="utf-8") as fh:
-            return fh.read().strip() == pin["release_tag"]
+        out = subprocess.run(
+            [os.fspath(validated), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            shell=False,
+        )
     except OSError:
         return False
+    if out.returncode != 0:
+        return False
+    combined = (out.stdout or "") + (out.stderr or "")
+    tag = str(pin["release_tag"])
+    bare = tag[1:] if tag.startswith("v") else tag
+    return tag in combined or bare in combined
 
 
 def ensure_workerd(
@@ -236,10 +252,10 @@ def ensure_workerd(
 ) -> Path:
     """Ensure a pinned ``workerd`` binary is available locally.
 
-    Reuses a cached binary when the version stamp matches the pin; otherwise
-    downloads, verifies sha256, and installs under the package-local cache
-    (see :func:`default_cache_dir`). Currency is stamp-only under that cache
-    (no ``--version`` spawn; ``BOOKCLERK_WORKERD_BIN`` is not opened).
+    Reuses ``BOOKCLERK_WORKERD_BIN`` or a cached binary when that file exists
+    and the version stamp or ``--version`` output matches the pin. The selected
+    cache directory is the trusted install root (not this package directory).
+    A stamp without a binary is a cache miss.
 
     Args:
         cache_dir: Override cache directory (defaults to :func:`default_cache_dir`).
@@ -256,40 +272,26 @@ def ensure_workerd(
     """
     pin = load_pin(root)
 
-    # Package-local cache root derived from __file__ (not $HOME / TMPDIR).
-    base = os.path.abspath(os.path.dirname(__file__))
-    if cache_dir is None:
-        cache_s = os.path.join(base, ".workerd-cache")
-    else:
-        cache_s = os.path.abspath(os.fspath(cache_dir))
-        try:
-            cache_rel = os.path.relpath(cache_s, base)
-        except ValueError as err:
-            raise ValueError(
-                f"workerd cache must resolve under package dir ({base}): {cache_s}"
-            ) from err
+    override = os.environ.get("BOOKCLERK_WORKERD_BIN")
+    if override and "\0" not in override:
+        override_path = Path(override)
         if (
-            cache_rel == ".."
-            or cache_rel.startswith(".." + os.sep)
-            or os.path.isabs(cache_rel)
+            override_path.is_absolute()
+            and override_path.is_file()
+            and _is_current(override_path, pin)
         ):
-            raise ValueError(
-                f"workerd cache must resolve under package dir ({base}): {cache_s}"
-            )
-        if cache_s != base and not cache_s.startswith(base + os.sep):
-            raise ValueError(
-                f"workerd cache must resolve under package dir ({base}): {cache_s}"
-            )
-    if cache_s != base and not cache_s.startswith(base + os.sep):
-        raise ValueError(f"workerd cache must resolve under package dir ({base}): {cache_s}")
+            return validate_spawn_executable(override_path)
+
+    if cache_dir is None:
+        cache_dir = default_cache_dir()
+    cache_s = os.path.abspath(os.path.expanduser(os.fspath(cache_dir)))
+    if "\0" in cache_s:
+        raise ValueError("workerd cache path contains NUL")
     os.makedirs(cache_s, exist_ok=True)
     cache = Path(cache_s)
 
-    # Do not open/stamp-check BOOKCLERK_WORKERD_BIN (env path sink under local TM).
-    # Managed install only under the package-local cache.
-
     dest = resolve_under(cache, binary_name())
-    if _is_current(dest, pin):
+    if dest.is_file() and _is_current(dest, pin):
         return validate_spawn_executable(dest, cache)
 
     key = platform_key()
