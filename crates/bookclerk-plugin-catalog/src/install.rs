@@ -9,7 +9,7 @@ use chrono::Utc;
 
 use crate::coordinate::{PackageCoordinate, RegistrySource};
 use crate::error::{CatalogError, Result};
-use crate::extract::{extract_archive, safe_join, sha256_file, write_file};
+use crate::extract::{extract_archive, require_under, safe_join, sha256_file, write_file};
 use crate::identity::{PluginKey, PluginProvenance};
 use crate::kind::RuntimeIdentity;
 use crate::ledger::{record_install, restore_ledger_entry, InstallLedger, InstallLedgerEntry};
@@ -302,6 +302,7 @@ impl Installer {
         let staging_parent = opts.plugins_root.join(".staging");
         fs::create_dir_all(&staging_parent)?;
         let staging = staging_parent.join(format!("{}.{}", runtime.id, std::process::id()));
+        let staging = require_under(&staging_parent, &staging)?;
         if staging.exists() {
             fs::remove_dir_all(&staging)?;
         }
@@ -375,6 +376,7 @@ impl Installer {
 
         let backup = if dest.exists() {
             let bak = staging_parent.join(format!("{}.backup", incoming_key.fs_id()));
+            let bak = require_under(&staging_parent, &bak)?;
             if bak.exists() {
                 fs::remove_dir_all(&bak)?;
             }
@@ -997,22 +999,36 @@ fn alias_from_install_dir(dest: &Path) -> Option<String> {
 
 /// Restores (or confirms) the install tree for [`Installer::rollback`].
 fn restore_tree_for_rollback(outcome: &InstallOutcome) -> Result<()> {
+    let plugins_root = outcome.plugin_root.parent().ok_or_else(|| {
+        CatalogError::message(format!(
+            "cannot rollback {}: install path has no parent",
+            outcome.plugin_root.display()
+        ))
+    })?;
+    let dest = require_under(plugins_root, &outcome.plugin_root)?;
     match &outcome.previous {
-        Some(bak) if bak.exists() => restore_update_tree_from_backup(&outcome.plugin_root, bak),
+        Some(bak) if bak.exists() => {
+            let bak = require_under(plugins_root, bak).or_else(|_| {
+                // Backup lives under `plugins/.staging/`.
+                let staging = plugins_root.join(".staging");
+                require_under(&staging, bak)
+            })?;
+            restore_update_tree_from_backup(&dest, &bak)
+        }
         Some(_) => {
-            if outcome.plugin_root.exists() {
+            if dest.exists() {
                 Ok(())
             } else {
                 Err(CatalogError::message(format!(
                     "cannot rollback {}: previous-version backup is gone and the destination \
                      is missing",
-                    outcome.plugin_root.display()
+                    dest.display()
                 )))
             }
         }
         None => {
-            if outcome.plugin_root.exists() {
-                remove_dir_retry(&outcome.plugin_root)?;
+            if dest.exists() {
+                remove_dir_retry(&dest)?;
             }
             Ok(())
         }
@@ -1038,6 +1054,7 @@ fn restore_update_tree_from_backup(dest: &Path, backup: &Path) -> Result<()> {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "plugin".into());
         let aside = unique_hold_path(&staging_parent, &format!("{dest_name}.rollback-new"));
+        let aside = require_under(&staging_parent, &aside)?;
         rename_retry(dest, &aside)?;
         match fs::rename(backup, dest) {
             Ok(()) => {
@@ -1403,7 +1420,15 @@ fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<()> {
         if rel.as_os_str().is_empty() {
             continue;
         }
-        let out = dest.join(rel);
+        let out = match safe_join(dest, rel) {
+            Ok(p) => p,
+            Err(err) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    err.to_string(),
+                ));
+            }
+        };
         if entry.file_type().is_dir() {
             fs::create_dir_all(&out)?;
         } else if entry.file_type().is_file() {
@@ -1418,6 +1443,15 @@ fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<()> {
 
 /// Retries `remove_dir_all` up to five times (50 ms apart) for transient Windows locks.
 fn remove_dir_retry(path: &Path) -> Result<()> {
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(CatalogError::message(format!(
+            "refusing remove path with '..': {}",
+            path.display()
+        )));
+    }
     let mut last = None;
     for _ in 0..5 {
         match fs::remove_dir_all(path) {
@@ -1437,6 +1471,16 @@ fn remove_dir_retry(path: &Path) -> Result<()> {
 
 /// Retries `rename` up to five times (50 ms apart) for transient Windows locks.
 fn rename_retry(from: &Path, to: &Path) -> Result<()> {
+    for p in [from, to] {
+        if p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(CatalogError::message(format!(
+                "refusing rename path with '..': {}",
+                p.display()
+            )));
+        }
+    }
     let mut last = None;
     for _ in 0..5 {
         match fs::rename(from, to) {

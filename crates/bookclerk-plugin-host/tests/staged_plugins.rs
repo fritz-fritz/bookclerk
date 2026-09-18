@@ -44,8 +44,9 @@ async fn staged_first_party_plugins_describe() {
             return;
         }
     };
+    let ledger = files.join("install-ledger.json");
     assert!(
-        files.join("install-ledger.json").is_file(),
+        ledger.is_file(),
         "platform install ledger missing under {} (run cargo install-platform)",
         files.display()
     );

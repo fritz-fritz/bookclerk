@@ -72,6 +72,11 @@ impl PluginMutationLock {
         }
         std::fs::create_dir_all(files_dir)?;
         let path = Self::path(files_dir);
+        if !path.starts_with(files_dir) {
+            return Err(CatalogError::message(
+                "plugin mutation lock path escaped files_dir",
+            ));
+        }
         let file = OpenOptions::new()
             .create(true)
             .read(true)

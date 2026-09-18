@@ -530,6 +530,9 @@ impl PluginGrantStore {
     /// Returns [`PluginError`] when the file cannot be read or parsed.
     pub fn load(files_dir: &Path) -> Result<Self> {
         let path = Self::path(files_dir);
+        if !path.starts_with(files_dir) {
+            return Err(PluginError::message("plugin-grants path escaped files_dir"));
+        }
         if !path.is_file() {
             return Ok(Self::default());
         }
@@ -547,9 +550,25 @@ impl PluginGrantStore {
     ///
     /// Returns [`PluginError`] when serialization or the write fails.
     pub fn save(&self, files_dir: &Path) -> Result<()> {
+        if files_dir
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(PluginError::message(
+                "refusing plugin-grants path with '..' in files_dir",
+            ));
+        }
         let path = Self::path(files_dir);
+        if !path.starts_with(files_dir) {
+            return Err(PluginError::message("plugin-grants path escaped files_dir"));
+        }
         let text = serde_json::to_string_pretty(self)?;
         let tmp = path.with_extension("json.tmp");
+        if !tmp.starts_with(files_dir) {
+            return Err(PluginError::message(
+                "plugin-grants temp path escaped files_dir",
+            ));
+        }
         std::fs::write(&tmp, &text)?;
         if std::fs::rename(&tmp, &path).is_err() {
             let _ = std::fs::remove_file(&path);

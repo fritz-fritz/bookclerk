@@ -2,6 +2,7 @@
 //! static fixture registry, verify receipt + extract layout.
 
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use bookclerk_plugin_catalog::{
@@ -13,8 +14,14 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use tar::Builder;
 
+fn rebuild_test_path(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy().into_owned();
+    assert!(!s.contains("..") && !s.contains('\0'));
+    PathBuf::from(s)
+}
+
 fn write_mini_archive(dir: &std::path::Path) -> (std::path::PathBuf, String) {
-    let archive = dir.join("echo.tar.gz");
+    let archive = rebuild_test_path(&dir.join("echo.tar.gz"));
     {
         let file = fs::File::create(&archive).unwrap();
         let enc = GzEncoder::new(file, Compression::default());

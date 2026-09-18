@@ -45,9 +45,35 @@ impl LocalFsBackend {
     /// Returns an error when the operation fails.
     pub fn with_prefix(root: PathBuf, prefix: &str) -> Result<Self> {
         let prefix = normalize_prefix(prefix);
+        // Operator-configured storage root may include lexical `..` (joined onto
+        // `files_dir` by config resolution). Reject NUL, create, then canonicalize
+        // so later joins use a realpath identity for containment.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            if root.as_os_str().as_bytes().contains(&0) {
+                return Err(StorageError::InvalidKey(root.display().to_string()));
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            if root.as_os_str().encode_wide().any(|c| c == 0) {
+                return Err(StorageError::InvalidKey(root.display().to_string()));
+            }
+        }
         std::fs::create_dir_all(&root)?;
+        let root = std::fs::canonicalize(&root).map_err(StorageError::Io)?;
         if !prefix.is_empty() {
-            std::fs::create_dir_all(root.join(prefix.trim_end_matches('/')))?;
+            let prefix_dir = root.join(prefix.trim_end_matches('/'));
+            if !prefix_dir.starts_with(&root) {
+                return Err(StorageError::InvalidKey(prefix));
+            }
+            std::fs::create_dir_all(&prefix_dir)?;
+            let prefix_canon = std::fs::canonicalize(&prefix_dir).map_err(StorageError::Io)?;
+            if !prefix_canon.starts_with(&root) {
+                return Err(StorageError::InvalidKey(prefix));
+            }
         }
         Ok(Self { root, prefix })
     }
@@ -65,13 +91,13 @@ impl LocalFsBackend {
     fn resolve(&self, key: &str) -> Result<PathBuf> {
         validate_key(key)?;
         let full = self.full_key(key);
-        // full_key only prepends a normalized prefix; still reject escape in the
-        // combined path.
-        if full.contains("..") {
+        if Path::new(&full)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             return Err(StorageError::InvalidKey(key.into()));
         }
         let path = self.root.join(&full);
-        // Prevent path escape above root.
         let canonical_root = self
             .root
             .canonicalize()
@@ -80,31 +106,90 @@ impl LocalFsBackend {
             if !canonical.starts_with(&canonical_root) {
                 return Err(StorageError::InvalidKey(key.into()));
             }
-        } else {
-            // Parent must still stay under root when the file does not exist yet.
-            if let Some(parent) = path.parent() {
-                let parent_canon = if parent.exists() {
-                    parent
-                        .canonicalize()
-                        .unwrap_or_else(|_| parent.to_path_buf())
-                } else {
-                    parent.to_path_buf()
-                };
-                if parent_canon.is_absolute()
-                    && !parent_canon.starts_with(&canonical_root)
-                    && !path.starts_with(&self.root)
-                {
-                    return Err(StorageError::InvalidKey(key.into()));
+            return Ok(canonical);
+        }
+        // Canonicalize failed: distinguish a dangling/unresolvable symlink from a
+        // genuinely missing component. Treating a dangling leaf as "missing" lets
+        // later `fs::write` follow the link and create the outside target.
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(StorageError::InvalidKey(format!(
+                    "refusing dangling or unresolvable symlink: {key}"
+                )));
+            }
+            Ok(_) => {
+                return Err(StorageError::InvalidKey(format!(
+                    "could not canonicalize existing path for key: {key}"
+                )));
+            }
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                return Err(StorageError::Io(err));
+            }
+            Err(_) => {}
+        }
+        // Missing leaf/intermediates: canonicalize nearest existing ancestor and
+        // rejoin the suffix (rejects symlink-parent escapes).
+        let mut suffix = Vec::new();
+        let mut cursor = path.clone();
+        loop {
+            match cursor.canonicalize() {
+                Ok(canon) => {
+                    if !canon.starts_with(&canonical_root) {
+                        return Err(StorageError::InvalidKey(key.into()));
+                    }
+                    let mut out = canon;
+                    for part in suffix.iter().rev() {
+                        out.push(part);
+                    }
+                    if !out.starts_with(&canonical_root) {
+                        return Err(StorageError::InvalidKey(key.into()));
+                    }
+                    return Ok(out);
+                }
+                Err(canon_err) => {
+                    match std::fs::symlink_metadata(&cursor) {
+                        Ok(meta) if meta.file_type().is_symlink() => {
+                            return Err(StorageError::InvalidKey(format!(
+                                "refusing dangling or unresolvable symlink in key path: {key}"
+                            )));
+                        }
+                        Ok(_) => {
+                            return Err(StorageError::InvalidKey(format!(
+                                "could not canonicalize path for key {key}: {canon_err}"
+                            )));
+                        }
+                        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(StorageError::Io(err));
+                        }
+                        Err(_) => {}
+                    }
+                    let name = cursor
+                        .file_name()
+                        .ok_or_else(|| StorageError::InvalidKey(key.into()))?;
+                    suffix.push(name.to_os_string());
+                    match cursor.parent() {
+                        Some(parent) if !parent.as_os_str().is_empty() => {
+                            cursor = parent.to_path_buf();
+                        }
+                        _ => return Err(StorageError::InvalidKey(key.into())),
+                    }
                 }
             }
         }
-        Ok(path)
     }
 }
 
-/// Rejects empty keys, absolute keys, and any `..` segment.
+/// Rejects empty keys, absolute keys, and any `ParentDir` segment.
 fn validate_key(key: &str) -> Result<()> {
-    if key.is_empty() || key.starts_with('/') || key.contains("..") {
+    if key.is_empty() || key.starts_with('/') {
+        return Err(StorageError::InvalidKey(key.into()));
+    }
+    if Path::new(key).components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::RootDir
+        )
+    }) {
         return Err(StorageError::InvalidKey(key.into()));
     }
     Ok(())
@@ -383,6 +468,9 @@ impl StorageBackend for LocalFsBackend {
             fs::create_dir_all(parent).await?;
         }
         let tmp = sibling_temp_path(&path);
+        if !tmp.starts_with(&self.root) && !path.starts_with(&self.root) {
+            return Err(StorageError::InvalidKey(key.into()));
+        }
         let put = async {
             let mut file = tokio::fs::File::create(&tmp).await?;
             let bytes_written = tokio::io::copy(&mut body, &mut file).await?;
@@ -443,6 +531,10 @@ async fn list_recursive(
     let entries = sorted_dir_entries(dir).await?;
     for entry in entries {
         let path = entry.path();
+        // Lexical under-root before metadata/canonicalize sinks.
+        if !path.starts_with(root) {
+            continue;
+        }
         let file_type = entry.file_type().await?;
         if file_type.is_dir() {
             Box::pin(list_recursive(root, &path, prefix, out)).await?;
@@ -458,6 +550,10 @@ async fn list_recursive(
         {
             continue;
         }
+        let path = match tokio::fs::canonicalize(&path).await {
+            Ok(p) if p.starts_with(root) => p,
+            _ => continue,
+        };
         let rel = path
             .strip_prefix(root)
             .map_err(|_| StorageError::InvalidKey(path.display().to_string()))?;
@@ -511,6 +607,10 @@ async fn bounded_list_page_walk(
     };
     while let Some(entry) = read_dir.next_entry().await? {
         let path = entry.path();
+        // Lexical under-root before metadata/canonicalize sinks.
+        if !path.starts_with(root) {
+            continue;
+        }
         let file_type = entry.file_type().await?;
         if file_type.is_dir() {
             Box::pin(bounded_list_page_walk(
@@ -536,6 +636,10 @@ async fn bounded_list_page_walk(
         {
             continue;
         }
+        let path = match tokio::fs::canonicalize(&path).await {
+            Ok(p) if p.starts_with(root) => p,
+            _ => continue,
+        };
         let rel = path
             .strip_prefix(root)
             .map_err(|_| StorageError::InvalidKey(path.display().to_string()))?;
@@ -705,6 +809,36 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StorageError::InvalidKey(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_dangling_symlink_leaf_without_creating_outside() {
+        let dir = tempdir().unwrap();
+        let store = dir.path().join("store");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let backend = LocalFsBackend::new(store.clone()).unwrap();
+        let link = store.join("new.txt");
+        let target = outside.join("new.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        assert!(!target.exists());
+        let err = backend
+            .put(
+                "new.txt",
+                Bytes::from_static(b"payload"),
+                ObjectMeta::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidKey(_)), "{err:?}");
+        assert!(
+            !target.exists(),
+            "dangling symlink must not create the outside target"
+        );
     }
 
     #[tokio::test]

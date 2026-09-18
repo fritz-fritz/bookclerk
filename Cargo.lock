@@ -1481,6 +1481,7 @@ dependencies = [
  "anyhow",
  "bookclerk-plugin-catalog",
  "bookclerk-plugin-manifest",
+ "bookclerk-sandbox",
  "bookclerk-workerd",
  "clap",
  "flate2",

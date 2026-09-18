@@ -150,6 +150,12 @@ impl InstallReceipt {
     /// Any other I/O or JSON failure is returned as an error (fail closed).
     pub fn load(plugin_root: &Path) -> Result<Self> {
         let path = Self::path_in(plugin_root);
+        if !path.starts_with(plugin_root) {
+            return Err(CatalogError::message(format!(
+                "receipt path escaped plugin root: {}",
+                path.display()
+            )));
+        }
         match fs::read_to_string(&path) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 Err(CatalogError::ReceiptNotFound)
@@ -173,9 +179,26 @@ impl InstallReceipt {
     ///
     /// Returns an error when the operation fails.
     pub fn store(&self, plugin_root: &Path) -> Result<()> {
+        if plugin_root
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(CatalogError::message(format!(
+                "refusing receipt plugin_root with '..': {}",
+                plugin_root.display()
+            )));
+        }
         fs::create_dir_all(plugin_root)?;
         let final_path = Self::path_in(plugin_root);
+        if !final_path.starts_with(plugin_root) {
+            return Err(CatalogError::message("receipt path escaped plugin root"));
+        }
         let tmp = plugin_root.join(format!("{RECEIPT_FILE}.tmp"));
+        if !tmp.starts_with(plugin_root) {
+            return Err(CatalogError::message(
+                "receipt temp path escaped plugin root",
+            ));
+        }
         let text = serde_json::to_string_pretty(self)?;
         fs::write(&tmp, text)?;
         if final_path.exists() {

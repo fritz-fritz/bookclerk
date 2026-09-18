@@ -87,7 +87,6 @@ pub(crate) fn remove_avatar(files_dir: &Path, user_id: i64) {
             continue;
         };
         if path.is_file() {
-            // Contained under `{files_dir}/avatars` by [`avatar_path_with_ext`].
             // codeql[rust/path-injection]
             if let Err(err) = std::fs::remove_file(&path) {
                 tracing::warn!(error = %err, user_id, "failed to remove profile avatar");
