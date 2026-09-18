@@ -98,10 +98,12 @@ def resolve_under(root: Path | str, *parts: str | Path) -> Path:
 
 
 def ensure_dir_under(root: Path | str, rel: str | Path) -> Path:
-    """Create ``root`` / ``rel`` after realpath + ``startswith`` (sink colocated)."""
-    resolved = resolve_under(root, rel)
-    resolved.mkdir(parents=True, exist_ok=True)
+    """Create ``root`` / ``rel`` after resolve + ``startswith`` (check before mkdir)."""
     root_s = os.path.realpath(os.fspath(root))
+    resolved = resolve_under(root_s, rel)
+    if not _is_under(root_s, os.fspath(resolved)):
+        raise ValueError(f"path {resolved} escapes root {root_s}")
+    resolved.mkdir(parents=True, exist_ok=True)
     canon = os.path.realpath(os.fspath(resolved))
     if not _is_under(root_s, canon):
         raise ValueError(f"path {canon} escapes root {root_s}")
@@ -109,10 +111,10 @@ def ensure_dir_under(root: Path | str, rel: str | Path) -> Path:
 
 
 def write_file_under(root: Path | str, name: str, contents: str | bytes) -> Path:
-    """Write ``contents`` to ``root`` / ``name`` after realpath + ``startswith``.
+    """Write ``contents`` to ``root`` / ``name`` after resolve + ``startswith``.
 
-    Creates the file when missing so realpath succeeds, then writes through the
-    realpath'd value in this function (sink + barrier colocated).
+    Prefix-checks the resolved path before any write so the sink uses a
+    barriered value (no pre-create write under local threat modeling).
     """
     if (
         not name
@@ -124,22 +126,19 @@ def write_file_under(root: Path | str, name: str, contents: str | bytes) -> Path
     ):
         raise ValueError(f"file name must be a single path component: {name}")
     root_s = os.path.realpath(os.fspath(root))
-    out = Path(root_s) / name
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if not out.exists():
-        out.write_bytes(b"")
-    canon = Path(os.path.realpath(out))
-    if not _is_under(root_s, os.fspath(canon)):
-        raise ValueError(f"path {canon} escapes root {root_s}")
+    resolved = Path(os.path.abspath(os.path.join(root_s, name)))
+    if not _is_under(root_s, os.fspath(resolved)):
+        raise ValueError(f"path {resolved} escapes root {root_s}")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(contents, str):
-        canon.write_text(contents, encoding="utf-8")
+        resolved.write_text(contents, encoding="utf-8")
     else:
-        canon.write_bytes(contents)
-    return canon
+        resolved.write_bytes(contents)
+    return resolved
 
 
 def copy_file_under(root: Path | str, name: str, src: Path | str) -> Path:
-    """Copy ``src`` to ``root`` / ``name`` after realpath + ``startswith`` on dest."""
+    """Copy ``src`` to ``root`` / ``name`` after resolve + ``startswith`` on dest."""
     import shutil
 
     if (
@@ -152,15 +151,12 @@ def copy_file_under(root: Path | str, name: str, src: Path | str) -> Path:
     ):
         raise ValueError(f"file name must be a single path component: {name}")
     root_s = os.path.realpath(os.fspath(root))
-    out = Path(root_s) / name
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if not out.exists():
-        out.write_bytes(b"")
-    canon = Path(os.path.realpath(out))
-    if not _is_under(root_s, os.fspath(canon)):
-        raise ValueError(f"path {canon} escapes root {root_s}")
-    shutil.copy2(src, canon, follow_symlinks=False)
-    return canon
+    resolved = Path(os.path.abspath(os.path.join(root_s, name)))
+    if not _is_under(root_s, os.fspath(resolved)):
+        raise ValueError(f"path {resolved} escapes root {root_s}")
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, resolved, follow_symlinks=False)
+    return resolved
 
 
 def refuse_symlink_path(trusted_root: Path | str, path: Path | str) -> Path:

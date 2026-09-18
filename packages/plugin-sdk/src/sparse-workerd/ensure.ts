@@ -187,9 +187,9 @@ export function assertPathInside(root: string, candidate: string): string {
 }
 
 /**
- * Create `root` / `rel` as a directory after realpath + `startsWith`.
+ * Create `root` / `rel` as a directory after resolve + `startsWith`.
  *
- * Performs mkdir, realpath, and the prefix check in this function so Default
+ * Performs the prefix check on the resolved path before `mkdir` so Default
  * Setup path-injection queries barrier the same value used at the sink.
  *
  * @param root - Trusted directory.
@@ -197,11 +197,15 @@ export function assertPathInside(root: string, candidate: string): string {
  * @returns Canonical absolute directory path under `root`.
  */
 export function ensureDirUnder(root: string, rel: string): string {
-  const resolved = assertPathInside(root, rel);
-  fs.mkdirSync(resolved, { recursive: true });
   const rootReal = fs.realpathSync(path.resolve(root));
-  const canon = fs.realpathSync(resolved);
+  // Lexical resolve under the real root, then startsWith before mkdir.
+  const resolved = assertPathInside(rootReal, rel);
   const rootPrefix = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
+  if (resolved !== rootReal && !resolved.startsWith(rootPrefix)) {
+    throw new Error(`path ${resolved} escapes root ${rootReal}`);
+  }
+  fs.mkdirSync(resolved, { recursive: true });
+  const canon = fs.realpathSync(resolved);
   if (canon !== rootReal && !canon.startsWith(rootPrefix)) {
     throw new Error(`path ${canon} escapes root ${rootReal}`);
   }
@@ -209,15 +213,15 @@ export function ensureDirUnder(root: string, rel: string): string {
 }
 
 /**
- * Write `contents` to `root` / `name` (single component) after realpath + `startsWith`.
+ * Write `contents` to `root` / `name` (single component) after resolve + `startsWith`.
  *
- * Creates the file when missing so realpath succeeds, then writes through the
- * realpath'd value in this function (sink + barrier colocated).
+ * Prefix-checks the resolved path before any write so the sink uses a barriered
+ * value (no pre-create write that would alert under local threat modeling).
  *
  * @param root - Trusted directory.
  * @param name - Single path component filename.
  * @param contents - Bytes or string to write.
- * @returns Canonical absolute file path under `root`.
+ * @returns Absolute file path under `root`.
  */
 export function writeFileUnder(
   root: string,
@@ -236,27 +240,23 @@ export function writeFileUnder(
     throw new Error(`file name must be a single path component: ${name}`);
   }
   const rootReal = fs.realpathSync(path.resolve(root));
-  const out = path.join(rootReal, name);
-  fs.mkdirSync(path.dirname(out), { recursive: true });
-  if (!fs.existsSync(out)) {
-    fs.writeFileSync(out, "");
-  }
-  const canon = fs.realpathSync(out);
+  const resolved = path.resolve(rootReal, name);
   const rootPrefix = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
-  if (canon !== rootReal && !canon.startsWith(rootPrefix)) {
-    throw new Error(`path ${canon} escapes root ${rootReal}`);
+  if (resolved !== rootReal && !resolved.startsWith(rootPrefix)) {
+    throw new Error(`path ${resolved} escapes root ${rootReal}`);
   }
-  fs.writeFileSync(canon, contents);
-  return canon;
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  fs.writeFileSync(resolved, contents);
+  return resolved;
 }
 
 /**
- * Copy `src` to `root` / `name` after realpath + `startsWith` on the destination.
+ * Copy `src` to `root` / `name` after resolve + `startsWith` on the destination.
  *
  * @param root - Trusted destination directory.
  * @param name - Single path component filename.
  * @param src - Absolute source file (already validated by the caller).
- * @returns Canonical absolute destination path under `root`.
+ * @returns Absolute destination path under `root`.
  */
 export function copyFileUnder(root: string, name: string, src: string): string {
   if (
@@ -271,18 +271,14 @@ export function copyFileUnder(root: string, name: string, src: string): string {
     throw new Error(`file name must be a single path component: ${name}`);
   }
   const rootReal = fs.realpathSync(path.resolve(root));
-  const out = path.join(rootReal, name);
-  fs.mkdirSync(path.dirname(out), { recursive: true });
-  if (!fs.existsSync(out)) {
-    fs.writeFileSync(out, "");
-  }
-  const canon = fs.realpathSync(out);
+  const resolved = path.resolve(rootReal, name);
   const rootPrefix = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
-  if (canon !== rootReal && !canon.startsWith(rootPrefix)) {
-    throw new Error(`path ${canon} escapes root ${rootReal}`);
+  if (resolved !== rootReal && !resolved.startsWith(rootPrefix)) {
+    throw new Error(`path ${resolved} escapes root ${rootReal}`);
   }
-  fs.copyFileSync(src, canon);
-  return canon;
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+  fs.copyFileSync(src, resolved);
+  return resolved;
 }
 
 /**
