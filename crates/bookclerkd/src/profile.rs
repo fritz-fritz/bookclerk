@@ -62,26 +62,26 @@ fn avatar_path_with_ext(files_dir: &Path, user_id: i64, ext: &str) -> Option<Pat
     }
     let dir = avatars_dir(files_dir);
     let path = dir.join(format!("{user_id}.{ext}"));
-    path.starts_with(&dir).then_some(path)
-}
-
-/// Keep `path` only when it stays under `root` (lexical barrier on the sink SSA).
-fn require_under_avatars(root: &Path, path: PathBuf) -> Option<PathBuf> {
-    path.starts_with(root).then_some(path)
-}
-
-/// Existing regular file under `root`, canonicalized; refuses leaf symlinks.
-fn require_existing_under_avatars(root: &Path, path: PathBuf) -> Option<PathBuf> {
-    let path = require_under_avatars(root, path)?;
-    // Lexical barrier first so metadata probes are not CodeQL path sinks.
-    match std::fs::symlink_metadata(&path) {
-        Ok(meta) if meta.file_type().is_symlink() => return None,
-        Ok(meta) if meta.is_file() => {}
-        _ => return None,
+    if path.starts_with(&dir) {
+        Some(path)
+    } else {
+        None
     }
+}
+
+/// Resolve `path` under `root` the way CodeQL's Rust path-injection query
+/// requires: normalize (`canonicalize`) first, then `starts_with` the root.
+///
+/// Leaf symlinks that escape `root` fail the prefix check after canonicalize.
+/// Missing or dangling paths return `None`.
+fn resolve_existing_under(root: &Path, path: PathBuf) -> Option<PathBuf> {
     let root_canon = root.canonicalize().ok()?;
     let path_canon = path.canonicalize().ok()?;
-    path_canon.starts_with(&root_canon).then_some(path_canon)
+    if path_canon.starts_with(&root_canon) {
+        Some(path_canon)
+    } else {
+        None
+    }
 }
 
 /// Stored avatar path and content type when a file exists.
@@ -91,7 +91,7 @@ fn existing_avatar(files_dir: &Path, user_id: i64) -> Option<(PathBuf, &'static 
         let Some(path) = avatar_path_with_ext(files_dir, user_id, ext) else {
             continue;
         };
-        let Some(path) = require_existing_under_avatars(&dir, path) else {
+        let Some(path) = resolve_existing_under(&dir, path) else {
             continue;
         };
         return Some((path, *content_type));
@@ -107,14 +107,23 @@ pub(crate) fn avatar_exists(files_dir: &Path, user_id: i64) -> bool {
 /// Best-effort delete of a stored avatar; missing files are ignored.
 pub(crate) fn remove_avatar(files_dir: &Path, user_id: i64) {
     let dir = avatars_dir(files_dir);
+    let Ok(dir_canon) = dir.canonicalize() else {
+        return;
+    };
     for (ext, _) in AVATAR_KINDS {
-        let Some(path) = avatar_path_with_ext(files_dir, user_id, ext) else {
+        let leaf = format!("{user_id}.{ext}");
+        if leaf.contains("..") || leaf.contains('/') || leaf.contains('\\') {
+            continue;
+        }
+        let path = dir_canon.join(&leaf);
+        // Normalize then prefix-check before remove (CodeQL two-state barrier).
+        let Ok(path_canon) = path.canonicalize() else {
             continue;
         };
-        let Some(path) = require_existing_under_avatars(&dir, path) else {
+        if !path_canon.starts_with(&dir_canon) {
             continue;
-        };
-        if let Err(err) = std::fs::remove_file(&path) {
+        }
+        if let Err(err) = std::fs::remove_file(&path_canon) {
             tracing::warn!(error = %err, user_id, "failed to remove profile avatar");
         }
     }
@@ -317,8 +326,15 @@ pub async fn put_avatar(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     remove_avatar(&files, user_id);
     let leaf = format!("{user_id}.{}", kind.ext);
-    let dest =
-        require_under_avatars(&dir, dir.join(leaf)).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Single-component leaf: reject separators / `..` before join (CodeQL
+    // DotDotCheck + lexical deny). `user_id` is i64 so this is belt-and-braces.
+    if leaf.contains("..") || leaf.contains('/') || leaf.contains('\\') {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let dest = dir.join(&leaf);
+    if !dest.starts_with(&dir) {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
     tokio::fs::write(&dest, &body)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -380,13 +396,28 @@ pub async fn get_avatar(
         .ok_or(StatusCode::NOT_FOUND)?;
     let files = files_dir(&state).await.ok_or(StatusCode::NOT_FOUND)?;
     let dir = avatars_dir(&files);
-    let (path, content_type) = existing_avatar(&files, user_id).ok_or(StatusCode::NOT_FOUND)?;
-    // Re-check on the sink SSA against the canonical avatars root when resolvable.
-    let path = match dir.canonicalize() {
-        Ok(dir_canon) => require_under_avatars(&dir_canon, path),
-        Err(_) => require_under_avatars(&dir, path),
+    let Ok(dir_canon) = dir.canonicalize() else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let mut found: Option<(PathBuf, &'static str)> = None;
+    for (ext, content_type) in AVATAR_KINDS {
+        let leaf = format!("{user_id}.{ext}");
+        if leaf.contains("..") || leaf.contains('/') || leaf.contains('\\') {
+            continue;
+        }
+        let candidate = dir_canon.join(&leaf);
+        // Normalize then prefix-check in this function so CodeQL's two-state
+        // path-injection model sees both steps on the sink SSA.
+        let Ok(path_canon) = candidate.canonicalize() else {
+            continue;
+        };
+        if !path_canon.starts_with(&dir_canon) {
+            continue;
+        }
+        found = Some((path_canon, *content_type));
+        break;
     }
-    .ok_or(StatusCode::NOT_FOUND)?;
+    let (path, content_type) = found.ok_or(StatusCode::NOT_FOUND)?;
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
