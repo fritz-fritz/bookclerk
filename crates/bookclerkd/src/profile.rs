@@ -105,6 +105,10 @@ pub(crate) fn avatar_exists(files_dir: &Path, user_id: i64) -> bool {
 }
 
 /// Best-effort delete of a stored avatar; missing files are ignored.
+///
+/// Unlinks the intended directory entry under the canonical `avatars/` dir
+/// without following a leaf symlink (so `7.png -> 8.png` removes the link,
+/// not user 8's bytes; `7.png -> /outside` removes the link, not the target).
 pub(crate) fn remove_avatar(files_dir: &Path, user_id: i64) {
     let dir = avatars_dir(files_dir);
     let Ok(dir_canon) = dir.canonicalize() else {
@@ -116,15 +120,117 @@ pub(crate) fn remove_avatar(files_dir: &Path, user_id: i64) {
             continue;
         }
         let path = dir_canon.join(&leaf);
-        // Normalize then prefix-check before remove (CodeQL two-state barrier).
-        let Ok(path_canon) = path.canonicalize() else {
-            continue;
-        };
-        if !path_canon.starts_with(&dir_canon) {
+        // Parent is already canonical; lexical `starts_with` confines the join
+        // before we unlink the leaf entry (not its resolved target).
+        if !path.starts_with(&dir_canon) {
             continue;
         }
-        if let Err(err) = std::fs::remove_file(&path_canon) {
-            tracing::warn!(error = %err, user_id, "failed to remove profile avatar");
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                tracing::warn!(error = %err, user_id, "failed to remove profile avatar");
+            }
+        }
+    }
+}
+
+/// Unique same-directory staging path for an atomic avatar replace.
+fn staging_avatar_path(dir: &Path, dest: &Path) -> PathBuf {
+    let name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("avatar.bin");
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nonce: u64 = rand::random();
+    dir.join(format!(
+        ".{name}.tmp-{}-{nonce:016x}-{n}",
+        std::process::id()
+    ))
+}
+
+/// Replace `to` with staging file `from` without following a leaf symlink at `to`.
+///
+/// Unix `rename` replaces the directory entry. Windows `std::fs::rename` cannot
+/// replace an existing file, so this uses `MoveFileExW(REPLACE_EXISTING |
+/// WRITE_THROUGH)` (same pattern as `bookclerk-config`).
+fn replace_avatar_entry(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
+    #[cfg(windows)]
+    {
+        avatar_replace_windows(from, to)
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)] // MoveFileExW FFI — same boundary as bookclerk-config.
+fn avatar_replace_windows(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+    let src = wide(from);
+    let dst = wide(to);
+    // SAFETY: `src` and `dst` are NUL-terminated wide paths that outlive the call.
+    let ok = unsafe {
+        MoveFileExW(
+            src.as_ptr(),
+            dst.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Write `bytes` to `dest` via same-dir temp + atomic replace.
+///
+/// `dir` must already be the canonical `avatars/` directory. A pre-existing
+/// leaf symlink at `dest` is replaced as a directory entry (not followed).
+fn write_avatar_atomic(dir: &Path, dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if !dest.starts_with(dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "avatar destination escapes avatars directory",
+        ));
+    }
+    let staging = staging_avatar_path(dir, dest);
+    if !staging.starts_with(dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "avatar staging path escapes avatars directory",
+        ));
+    }
+    let staged = (|| {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&staging)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok::<(), std::io::Error>(())
+    })();
+    if let Err(err) = staged {
+        let _ = std::fs::remove_file(&staging);
+        return Err(err);
+    }
+    match replace_avatar_entry(&staging, dest) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&staging);
+            Err(err)
         }
     }
 }
@@ -335,9 +441,9 @@ pub async fn put_avatar(
     if !dest.starts_with(&dir) {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
-    tokio::fs::write(&dest, &body)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Same-dir temp + atomic replace so a leftover leaf symlink is overwritten
+    // as a directory entry instead of followed (see `write_avatar_atomic`).
+    write_avatar_atomic(&dir, &dest, &body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let library = state.library_snapshot().await;
     let _ = library
@@ -562,6 +668,108 @@ mod tests {
         {
             let _ = (outside, link);
         }
+    }
+
+    /// Outside target bytes must survive remove + atomic replace of a leaf symlink.
+    #[cfg(unix)]
+    #[test]
+    fn remove_and_replace_leave_outside_symlink_target_intact() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let files = tmp.path();
+        let avatars = files.join("avatars");
+        std::fs::create_dir_all(&avatars).expect("avatars");
+        let outside = tmp.path().join("outside.png");
+        std::fs::write(&outside, b"victim-bytes").expect("outside");
+        let link = avatars.join("7.png");
+        std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+
+        remove_avatar(files, 7);
+        assert!(
+            !link
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink()),
+            "remove_avatar must unlink the leaf entry"
+        );
+        assert_eq!(
+            std::fs::read(&outside).expect("outside after remove"),
+            b"victim-bytes"
+        );
+
+        // Re-plant the escape and prove atomic replace does not truncate outside.
+        std::os::unix::fs::symlink(&outside, &link).expect("re-symlink");
+        let dir = avatars.canonicalize().expect("avatars canon");
+        let dest = dir.join("7.png");
+        let png = tiny_png();
+        write_avatar_atomic(&dir, &dest, &png).expect("atomic write");
+        assert_eq!(
+            std::fs::read(&outside).expect("outside after write"),
+            b"victim-bytes",
+            "write must not follow the leaf symlink"
+        );
+        assert!(dest.is_file(), "dest must be a regular file after replace");
+        assert!(!dest
+            .symlink_metadata()
+            .expect("dest meta")
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&dest).expect("new avatar"), png);
+    }
+
+    /// Dangling outside link: remove/replace must not create the missing target.
+    #[cfg(unix)]
+    #[test]
+    fn remove_and_replace_refuse_dangling_outside_link() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let files = tmp.path();
+        let avatars = files.join("avatars");
+        std::fs::create_dir_all(&avatars).expect("avatars");
+        let missing = tmp.path().join("missing-outside.png");
+        let link = avatars.join("7.png");
+        std::os::unix::fs::symlink(&missing, &link).expect("dangling symlink");
+
+        remove_avatar(files, 7);
+        assert!(!link.exists() && link.symlink_metadata().is_err());
+        assert!(!missing.exists(), "remove must not create dangling target");
+
+        std::os::unix::fs::symlink(&missing, &link).expect("re-symlink");
+        let dir = avatars.canonicalize().expect("avatars canon");
+        let dest = dir.join("7.png");
+        let png = tiny_png();
+        write_avatar_atomic(&dir, &dest, &png).expect("atomic write");
+        assert!(!missing.exists(), "write must not create dangling target");
+        assert_eq!(std::fs::read(&dest).expect("new avatar"), png);
+    }
+
+    /// Cross-user link: deleting/replacing user 7 must not delete user 8's bytes.
+    #[cfg(unix)]
+    #[test]
+    fn remove_and_replace_leave_peer_avatar_intact() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let files = tmp.path();
+        let avatars = files.join("avatars");
+        std::fs::create_dir_all(&avatars).expect("avatars");
+        let peer = avatars.join("8.png");
+        std::fs::write(&peer, b"user-8-bytes").expect("peer");
+        let link = avatars.join("7.png");
+        std::os::unix::fs::symlink(&peer, &link).expect("cross-user symlink");
+
+        remove_avatar(files, 7);
+        assert!(link.symlink_metadata().is_err(), "user 7 link removed");
+        assert_eq!(
+            std::fs::read(&peer).expect("peer after remove"),
+            b"user-8-bytes"
+        );
+
+        std::os::unix::fs::symlink(&peer, &link).expect("re-symlink");
+        let dir = avatars.canonicalize().expect("avatars canon");
+        let dest = dir.join("7.png");
+        let png = tiny_png();
+        write_avatar_atomic(&dir, &dest, &png).expect("atomic write");
+        assert_eq!(
+            std::fs::read(&peer).expect("peer after write"),
+            b"user-8-bytes"
+        );
+        assert_eq!(std::fs::read(&dest).expect("user 7 avatar"), png);
     }
 
     #[tokio::test]
