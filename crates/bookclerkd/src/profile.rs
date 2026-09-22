@@ -201,6 +201,8 @@ fn avatar_replace_windows(from: &Path, to: &Path) -> std::io::Result<()> {
 ///
 /// `dir` must already be the canonical `avatars/` directory. A pre-existing
 /// leaf symlink at `dest` is replaced as a directory entry (not followed).
+/// Staging is created with `create_new` so an unexpected existing entry is not
+/// truncated or followed; cleanup only runs after this open succeeds.
 fn write_avatar_atomic(dir: &Path, dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if !dest.starts_with(dir) {
         return Err(std::io::Error::new(
@@ -215,14 +217,19 @@ fn write_avatar_atomic(dir: &Path, dest: &Path, bytes: &[u8]) -> std::io::Result
             "avatar staging path escapes avatars directory",
         ));
     }
-    let staged = (|| {
-        use std::io::Write;
-        let mut file = std::fs::File::create(&staging)?;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    // Exclusive create: do not truncate/follow an unexpected existing entry.
+    // `?` returns before any cleanup, so open failure never unlinks a foreign path.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)?;
+    if let Err(err) = (|| {
         file.write_all(bytes)?;
         file.sync_all()?;
         Ok::<(), std::io::Error>(())
-    })();
-    if let Err(err) = staged {
+    })() {
         let _ = std::fs::remove_file(&staging);
         return Err(err);
     }
@@ -443,7 +450,14 @@ pub async fn put_avatar(
     }
     // Same-dir temp + atomic replace so a leftover leaf symlink is overwritten
     // as a directory entry instead of followed (see `write_avatar_atomic`).
-    write_avatar_atomic(&dir, &dest, &body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Run on a blocking pool so sync_all cannot stall a Tokio worker.
+    let dir_c = dir.clone();
+    let dest_c = dest.clone();
+    let bytes = body.to_vec();
+    tokio::task::spawn_blocking(move || write_avatar_atomic(&dir_c, &dest_c, &bytes))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let library = state.library_snapshot().await;
     let _ = library
