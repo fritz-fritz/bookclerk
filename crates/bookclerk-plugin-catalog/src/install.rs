@@ -1522,8 +1522,7 @@ mod tests {
     use tar::Builder;
 
     /// Join `rel` under `root` with the CodeQL two-state path barrier.
-    fn under_tmp(root: impl AsRef<Path>, rel: impl AsRef<Path>) -> PathBuf {
-        let root = root.as_ref();
+    fn under_tmp(root: &Path, rel: impl AsRef<Path>) -> PathBuf {
         let joined = root.join(rel.as_ref());
         require_under(root, &joined).unwrap_or_else(|err| {
             panic!(
@@ -1535,12 +1534,12 @@ mod tests {
     }
 
     /// Re-check an absolute path stays under `root` before FS predicates/sinks.
-    fn path_under(root: impl AsRef<Path>, path: impl AsRef<Path>) -> PathBuf {
-        require_under(root.as_ref(), path.as_ref()).unwrap_or_else(|err| {
+    fn path_under(root: &Path, path: impl AsRef<Path>) -> PathBuf {
+        require_under(root, path.as_ref()).unwrap_or_else(|err| {
             panic!(
                 "test path {} must stay under {}: {err}",
                 path.as_ref().display(),
-                root.as_ref().display()
+                root.display()
             )
         })
     }
@@ -1641,7 +1640,7 @@ mod tests {
     }
 
     fn corrupt_receipt(dest: &Path) {
-        fs::write(under_tmp(&dest, "receipt.json"), b"{not-valid-receipt").unwrap();
+        fs::write(under_tmp(dest, "receipt.json"), b"{not-valid-receipt").unwrap();
     }
 
     #[test]
@@ -2482,7 +2481,7 @@ mod tests {
 
     /// Rewrites `receipt.json` `plugin_key` while leaving the rest parseable.
     fn rewrite_receipt_plugin_key(dest: &Path, key: &PluginKey) {
-        let path = under_tmp(&dest, "receipt.json");
+        let path = under_tmp(dest, "receipt.json");
         let mut value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         value["plugin_key"] = serde_json::Value::String(key.canonical().to_string());
