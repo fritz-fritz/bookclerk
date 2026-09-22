@@ -55,8 +55,6 @@ fn run_helper(role: &str, allowed: &Path, denied: &Path) -> std::process::Output
     let exe = std::env::current_exe().expect("current_exe");
     let exe = exe.canonicalize().expect("canonicalize current_exe");
     assert!(exe.is_file(), "current_exe must be a regular file");
-    // Rebuild after canon+is_file so Command::new sees a post-barrier PathBuf.
-    let exe = std::path::PathBuf::from(exe.as_os_str());
     Command::new(exe)
         .arg("--nocapture")
         // Run only the helper entry point, not the whole suite.

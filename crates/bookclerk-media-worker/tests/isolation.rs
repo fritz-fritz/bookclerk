@@ -142,7 +142,6 @@ fn run_worker(job: &MediaJob, confinement: Confinement) -> WorkerRun {
         let jail = jail_bin().expect("bookclerk-jail beside worker for spawn-time confinement");
         let jail = jail.canonicalize().expect("canonicalize jail");
         assert!(jail.is_file(), "jail binary must be a regular file");
-        let jail = std::path::PathBuf::from(jail.as_os_str());
         Command::new(jail)
             .arg("--")
             .arg(WORKER)

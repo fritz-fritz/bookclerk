@@ -362,7 +362,6 @@ fn child_cmd(op: &str) -> Command {
     let exe = std::env::current_exe().expect("current test exe");
     let exe = exe.canonicalize().expect("canonicalize current test exe");
     assert!(exe.is_file(), "current test exe must be a regular file");
-    let exe = std::path::PathBuf::from(exe.as_os_str());
     let mut cmd = Command::new(exe);
     cmd.env(CHILD_ENV, op)
         .env("RUST_BACKTRACE", "1")
