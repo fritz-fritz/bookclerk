@@ -347,11 +347,9 @@ fn media_worker_policy_shape_cannot_reach_key_material() {
 
     let job_dir = tempfile::tempdir().expect("tempdir");
     let files_dir = tempfile::tempdir().expect("tempdir");
-    let book = bookclerk_sandbox::require_under_root(
-        &job_dir.path().join("book.m4b"),
-        job_dir.path(),
-    )
-    .expect("book under job_dir");
+    let book =
+        bookclerk_sandbox::require_under_root(&job_dir.path().join("book.m4b"), job_dir.path())
+            .expect("book under job_dir");
     let key = bookclerk_sandbox::require_under_root(
         &files_dir.path().join("master.key"),
         files_dir.path(),

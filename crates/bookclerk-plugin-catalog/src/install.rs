@@ -2365,7 +2365,10 @@ mod tests {
         );
         assert!(err.contains("before mutating"), "{err}");
         assert!(path_under(tmp.path(), &dest).is_dir());
-        assert_eq!(fs::read(under_tmp(&dest, "plugin.toml")).unwrap(), toml_before);
+        assert_eq!(
+            fs::read(under_tmp(&dest, "plugin.toml")).unwrap(),
+            toml_before
+        );
         assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_none());
     }
 
@@ -2399,7 +2402,10 @@ mod tests {
             "{err}"
         );
         assert!(path_under(tmp.path(), &dest).is_dir());
-        assert_eq!(fs::read(under_tmp(&dest, "plugin.toml")).unwrap(), toml_before);
+        assert_eq!(
+            fs::read(under_tmp(&dest, "plugin.toml")).unwrap(),
+            toml_before
+        );
     }
 
     #[test]
@@ -2424,7 +2430,10 @@ mod tests {
         );
         assert_eq!(fs::read(&ledger_path).unwrap(), garbage);
         assert!(path_under(tmp.path(), &dest).is_dir());
-        assert_eq!(fs::read(under_tmp(&dest, "plugin.toml")).unwrap(), toml_before);
+        assert_eq!(
+            fs::read(under_tmp(&dest, "plugin.toml")).unwrap(),
+            toml_before
+        );
     }
 
     #[test]
@@ -2449,8 +2458,14 @@ mod tests {
             path_under(tmp.path(), &dest).is_dir(),
             "held tree must be restored after ledger write failure"
         );
-        assert_eq!(fs::read(under_tmp(&dest, "plugin.toml")).unwrap(), toml_before);
-        assert_eq!(fs::read(under_tmp(&dest, "receipt.json")).unwrap(), receipt_before);
+        assert_eq!(
+            fs::read(under_tmp(&dest, "plugin.toml")).unwrap(),
+            toml_before
+        );
+        assert_eq!(
+            fs::read(under_tmp(&dest, "receipt.json")).unwrap(),
+            receipt_before
+        );
         assert_eq!(
             fs::read(InstallLedger::path(tmp.path())).unwrap(),
             ledger_before
@@ -2545,8 +2560,14 @@ mod tests {
             .unwrap()
             .get(&key_b)
             .is_some());
-        assert_eq!(fs::read(under_tmp(&state_a, "data/marker")).unwrap(), b"state-a");
-        assert_eq!(fs::read(under_tmp(&state_b, "data/marker")).unwrap(), b"state-b");
+        assert_eq!(
+            fs::read(under_tmp(&state_a, "data/marker")).unwrap(),
+            b"state-a"
+        );
+        assert_eq!(
+            fs::read(under_tmp(&state_b, "data/marker")).unwrap(),
+            b"state-b"
+        );
     }
 
     #[test]
@@ -2625,8 +2646,14 @@ mod tests {
             "{err}"
         );
         assert!(path_under(tmp.path(), &dest).is_dir());
-        assert_eq!(fs::read(under_tmp(&dest, "plugin.toml")).unwrap(), toml_before);
-        assert_eq!(fs::read(under_tmp(&state, "data/marker")).unwrap(), b"keep-state");
+        assert_eq!(
+            fs::read(under_tmp(&dest, "plugin.toml")).unwrap(),
+            toml_before
+        );
+        assert_eq!(
+            fs::read(under_tmp(&state, "data/marker")).unwrap(),
+            b"keep-state"
+        );
         assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_some());
         let hold = under_tmp(tmp.path(), PLUGIN_HOLD_DIR);
         if path_under(tmp.path(), &hold).is_dir() {
@@ -2650,7 +2677,10 @@ mod tests {
         fs::write(under_tmp(&dest, "old-marker"), b"v1").unwrap();
         opts.replace = true;
         let second = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
-        assert!(second.previous.as_ref().is_some_and(|p| path_under(tmp.path(), p).exists()));
+        assert!(second
+            .previous
+            .as_ref()
+            .is_some_and(|p| path_under(tmp.path(), p).exists()));
         assert!(!under_tmp(&second.plugin_root, "old-marker").is_file());
         fs::create_dir_all(under_tmp(tmp.path(), "install-ledger.json.tmp")).unwrap();
 

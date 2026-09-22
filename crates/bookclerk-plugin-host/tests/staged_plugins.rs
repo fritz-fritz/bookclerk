@@ -44,10 +44,7 @@ async fn staged_first_party_plugins_describe() {
             return;
         }
     };
-    let ledger = bookclerk_sandbox::require_under_root(
-        &files.join("install-ledger.json"),
-        &files,
-    );
+    let ledger = bookclerk_sandbox::require_under_root(&files.join("install-ledger.json"), &files);
     assert!(
         ledger.as_ref().is_ok_and(|p| p.is_file()),
         "platform install ledger missing under {} (run cargo install-platform)",

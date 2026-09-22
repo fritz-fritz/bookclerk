@@ -132,9 +132,11 @@ fn install_from_static_fixture_registry() {
     assert!(InstallReceipt::load(&out.plugin_root).is_ok());
 
     Installer::remove(&plugins, "echo", true).unwrap();
-    assert!(!bookclerk_plugin_catalog::require_under(tmp.path(), &out.plugin_root)
-        .unwrap()
-        .exists());
+    assert!(
+        !bookclerk_plugin_catalog::require_under(tmp.path(), &out.plugin_root)
+            .unwrap()
+            .exists()
+    );
 }
 
 #[test]

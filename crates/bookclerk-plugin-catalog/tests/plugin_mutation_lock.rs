@@ -392,8 +392,9 @@ fn installed_plugin_dirs(plugins: &Path) -> Result<Vec<String>, String> {
         if name == ".staging" {
             continue;
         }
-        let toml = bookclerk_plugin_catalog::require_under(&plugins, &entry.path().join("plugin.toml"))
-            .map_err(|err| err.to_string())?;
+        let toml =
+            bookclerk_plugin_catalog::require_under(&plugins, &entry.path().join("plugin.toml"))
+                .map_err(|err| err.to_string())?;
         if toml.is_file() {
             names.push(name.into_owned());
         }
