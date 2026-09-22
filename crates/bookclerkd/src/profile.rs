@@ -45,6 +45,11 @@ struct AvatarKind {
     ext: &'static str,
 }
 
+/// `{files_dir}/avatars` join used as the containment root for avatar I/O.
+fn avatars_dir(files_dir: &Path) -> PathBuf {
+    files_dir.join("avatars")
+}
+
 /// Absolute path of a stored avatar for `user_id` with `ext`.
 ///
 /// `user_id` is numeric and `ext` must be an allowlisted kind, so the file name
@@ -55,22 +60,41 @@ fn avatar_path_with_ext(files_dir: &Path, user_id: i64, ext: &str) -> Option<Pat
     if !AVATAR_KINDS.iter().any(|(kind, _)| *kind == ext) {
         return None;
     }
-    let dir = files_dir.join("avatars");
+    let dir = avatars_dir(files_dir);
     let path = dir.join(format!("{user_id}.{ext}"));
     path.starts_with(&dir).then_some(path)
 }
 
+/// Keep `path` only when it stays under `root` (lexical barrier on the sink SSA).
+fn require_under_avatars(root: &Path, path: PathBuf) -> Option<PathBuf> {
+    path.starts_with(root).then_some(path)
+}
+
+/// Existing regular file under `root`, canonicalized; refuses leaf symlinks.
+fn require_existing_under_avatars(root: &Path, path: PathBuf) -> Option<PathBuf> {
+    let path = require_under_avatars(root, path)?;
+    // Lexical barrier first so metadata probes are not CodeQL path sinks.
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => return None,
+        Ok(meta) if meta.is_file() => {}
+        _ => return None,
+    }
+    let root_canon = root.canonicalize().ok()?;
+    let path_canon = path.canonicalize().ok()?;
+    path_canon.starts_with(&root_canon).then_some(path_canon)
+}
+
 /// Stored avatar path and content type when a file exists.
 fn existing_avatar(files_dir: &Path, user_id: i64) -> Option<(PathBuf, &'static str)> {
+    let dir = avatars_dir(files_dir);
     for (ext, content_type) in AVATAR_KINDS {
         let Some(path) = avatar_path_with_ext(files_dir, user_id, ext) else {
             continue;
         };
-        // Contained under `{files_dir}/avatars` by [`avatar_path_with_ext`].
-        // codeql[rust/path-injection]
-        if path.is_file() {
-            return Some((path, *content_type));
-        }
+        let Some(path) = require_existing_under_avatars(&dir, path) else {
+            continue;
+        };
+        return Some((path, *content_type));
     }
     None
 }
@@ -82,15 +106,16 @@ pub(crate) fn avatar_exists(files_dir: &Path, user_id: i64) -> bool {
 
 /// Best-effort delete of a stored avatar; missing files are ignored.
 pub(crate) fn remove_avatar(files_dir: &Path, user_id: i64) {
+    let dir = avatars_dir(files_dir);
     for (ext, _) in AVATAR_KINDS {
         let Some(path) = avatar_path_with_ext(files_dir, user_id, ext) else {
             continue;
         };
-        if path.is_file() {
-            // codeql[rust/path-injection]
-            if let Err(err) = std::fs::remove_file(&path) {
-                tracing::warn!(error = %err, user_id, "failed to remove profile avatar");
-            }
+        let Some(path) = require_existing_under_avatars(&dir, path) else {
+            continue;
+        };
+        if let Err(err) = std::fs::remove_file(&path) {
+            tracing::warn!(error = %err, user_id, "failed to remove profile avatar");
         }
     }
 }
@@ -281,15 +306,19 @@ pub async fn put_avatar(
         .await
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let kind = sniff_avatar(&body).ok_or(StatusCode::BAD_REQUEST)?;
-    let dir = files.join("avatars");
+    let dir = avatars_dir(&files);
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Prefer the canonical avatars directory once it exists so writes cannot
+    // follow a replaced leaf symlink under a non-canonical join.
+    let dir = dir
+        .canonicalize()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     remove_avatar(&files, user_id);
+    let leaf = format!("{user_id}.{}", kind.ext);
     let dest =
-        avatar_path_with_ext(&files, user_id, kind.ext).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    // Contained under `{files_dir}/avatars` by [`avatar_path_with_ext`].
-    // codeql[rust/path-injection]
+        require_under_avatars(&dir, dir.join(leaf)).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     tokio::fs::write(&dest, &body)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -350,9 +379,14 @@ pub async fn get_avatar(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
     let files = files_dir(&state).await.ok_or(StatusCode::NOT_FOUND)?;
+    let dir = avatars_dir(&files);
     let (path, content_type) = existing_avatar(&files, user_id).ok_or(StatusCode::NOT_FOUND)?;
-    // Contained under `{files_dir}/avatars` by [`avatar_path_with_ext`].
-    // codeql[rust/path-injection]
+    // Re-check on the sink SSA against the canonical avatars root when resolvable.
+    let path = match dir.canonicalize() {
+        Ok(dir_canon) => require_under_avatars(&dir_canon, path),
+        Err(_) => require_under_avatars(&dir, path),
+    }
+    .ok_or(StatusCode::NOT_FOUND)?;
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
@@ -477,6 +511,26 @@ mod tests {
             nested,
             PathBuf::from("/tmp/bookclerk-files/../data/avatars/7.png")
         );
+    }
+
+    #[test]
+    fn existing_avatar_refuses_leaf_symlink() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let files = tmp.path();
+        let avatars = files.join("avatars");
+        std::fs::create_dir_all(&avatars).expect("avatars");
+        let outside = tmp.path().join("outside.png");
+        std::fs::write(&outside, b"nope").expect("outside");
+        let link = avatars.join("7.png");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+            assert!(existing_avatar(files, 7).is_none());
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (outside, link);
+        }
     }
 
     #[tokio::test]
