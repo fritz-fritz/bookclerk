@@ -2571,6 +2571,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (dest, _, key) = installed_named(tmp.path(), "echo.tar.gz", "echo");
         let plugins = under_tmp(tmp.path(), "plugins");
+        let dest = path_under(tmp.path(), &dest);
         let renamed = under_tmp(&plugins, "pk-ffffffffffffffffffffffffffffffff");
         fs::rename(&dest, &renamed).unwrap();
         let err = Installer::remove(&plugins, "echo", false)

@@ -1,26 +1,22 @@
 //! Replay checked-in cargo-fuzz corpora in PR CI (no libFuzzer required).
 
-use std::path::{Path, PathBuf};
-
 use sea_orm::DatabaseBackend;
-
-/// Canonical containment under the corpus root (CodeQL two-state barrier).
-fn under_corpus(root: &Path, path: PathBuf) -> Option<PathBuf> {
-    let root = root.canonicalize().ok()?;
-    let path = path.canonicalize().ok()?;
-    path.starts_with(&root).then_some(path)
-}
 
 #[test]
 fn fuzz_corpus_sql_lower_does_not_panic() {
-    let dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/sql_lower");
-    let dir = dir.canonicalize().expect("canonicalize fuzz corpus");
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fuzz/corpus/sql_lower")
+        .canonicalize()
+        .expect("canonicalize fuzz corpus");
     for entry in std::fs::read_dir(&dir).expect("fuzz corpus") {
         let entry = entry.expect("entry");
-        let Some(path) = under_corpus(&dir, entry.path()) else {
+        // Inline canonicalize → starts_with at each sink (CodeQL two-state barrier).
+        let Ok(path) = entry.path().canonicalize() else {
             continue;
         };
+        if !path.starts_with(&dir) {
+            continue;
+        }
         if !path.is_file() {
             continue;
         }
