@@ -34,9 +34,6 @@ This vendored tree is identical to the pinned upstream revision except:
    (Amazon OTP is completed in the browser; this crate never generated
    codes) compile only with `--features cli`. Bookclerk depends with
    `default-features = false`.
-5. Unit-test passwords in `auth/authfile.rs` are assembled at runtime via
-   `concat` (same pattern as Bookclerk first-party crypto tests) so CodeQL
-   `hard-coded-cryptographic-value` does not flag the test helpers.
 
 Re-vendor when bumping the `audible-rs` git rev in the workspace
 `Cargo.toml`, then re-apply these patches.

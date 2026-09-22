@@ -361,8 +361,7 @@ mod tests {
     use super::*;
 
     fn password() -> SecretString {
-        // Assembled at runtime so CodeQL does not flag a hard-coded crypto secret.
-        SecretString::from(["correct", " horse ", "battery ", "staple"].concat())
+        SecretString::from("correct horse battery staple")
     }
 
     // Weak parameters keep most tests fast; the defaults are exercised in
@@ -421,7 +420,7 @@ mod tests {
     #[test]
     fn wrong_password_fails() {
         let envelope = encrypt_with_params(PLAINTEXT, &password(), TEST_PARAMS).unwrap();
-        let wrong = SecretString::from(["wrong", " ", "password"].concat());
+        let wrong = SecretString::from("wrong password");
         let result = decrypt(&envelope, &wrong);
         assert!(matches!(
             result,
