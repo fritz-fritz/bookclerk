@@ -359,10 +359,10 @@ fn wait_child(child: std::process::Child, label: &str) -> Result<std::process::E
 
 /// Test-harness command that re-execs this binary in child mode.
 fn child_cmd(op: &str) -> Command {
-    let exe = bookclerk_sandbox::require_spawn_executable(
-        &std::env::current_exe().expect("current test exe"),
-    )
-    .expect("canonicalize current test exe");
+    let exe = std::env::current_exe().expect("current test exe");
+    let exe = exe.canonicalize().expect("canonicalize current test exe");
+    assert!(exe.is_file(), "current test exe must be a regular file");
+    let exe = std::path::PathBuf::from(exe.as_os_str());
     let mut cmd = Command::new(exe);
     cmd.env(CHILD_ENV, op)
         .env("RUST_BACKTRACE", "1")
