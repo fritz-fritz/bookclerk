@@ -52,10 +52,10 @@ fn backend_enforces_filesystem() -> bool {
 
 /// Run this test binary again with `ROLE` set, and return its exit status.
 fn run_helper(role: &str, allowed: &Path, denied: &Path) -> std::process::Output {
-    let exe = std::env::current_exe()
-        .expect("current_exe")
-        .canonicalize()
-        .expect("canonicalize current_exe");
+    let exe = bookclerk_sandbox::require_spawn_executable(
+        &std::env::current_exe().expect("current_exe"),
+    )
+    .expect("canonicalize current_exe");
     Command::new(exe)
         .arg("--nocapture")
         // Run only the helper entry point, not the whole suite.

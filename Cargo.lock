@@ -1704,6 +1704,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bookclerk-plugin-manifest",
+ "bookclerk-sandbox",
  "chrono",
  "flate2",
  "fs4",
