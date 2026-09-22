@@ -9,7 +9,7 @@ use chrono::Utc;
 
 use crate::coordinate::{PackageCoordinate, RegistrySource};
 use crate::error::{CatalogError, Result};
-use crate::extract::{extract_archive, safe_join, sha256_file, write_file};
+use crate::extract::{extract_archive, require_under, safe_join, sha256_file, write_file};
 use crate::identity::{PluginKey, PluginProvenance};
 use crate::kind::RuntimeIdentity;
 use crate::ledger::{record_install, restore_ledger_entry, InstallLedger, InstallLedgerEntry};
@@ -302,12 +302,14 @@ impl Installer {
         let staging_parent = opts.plugins_root.join(".staging");
         fs::create_dir_all(&staging_parent)?;
         let staging = staging_parent.join(format!("{}.{}", runtime.id, std::process::id()));
+        let staging = require_under(&staging_parent, &staging)?;
         if staging.exists() {
             fs::remove_dir_all(&staging)?;
         }
         fs::create_dir_all(&staging)?;
 
         let archive_path = staging.join("download.archive");
+        let archive_path = require_under(&staging, &archive_path)?;
         download_to(&artifact.url, &archive_path, opts.offline)?;
 
         let actual = sha256_file(&archive_path)?;
@@ -320,6 +322,7 @@ impl Installer {
         }
 
         let extract_root = staging.join("root");
+        let extract_root = require_under(&staging, &extract_root)?;
         fs::create_dir_all(&extract_root)?;
         let format = if artifact.url.ends_with(".zip") || target.starts_with("windows-") {
             ArchiveFormat::Zip
@@ -375,6 +378,7 @@ impl Installer {
 
         let backup = if dest.exists() {
             let bak = staging_parent.join(format!("{}.backup", incoming_key.fs_id()));
+            let bak = require_under(&staging_parent, &bak)?;
             if bak.exists() {
                 fs::remove_dir_all(&bak)?;
             }
@@ -997,22 +1001,36 @@ fn alias_from_install_dir(dest: &Path) -> Option<String> {
 
 /// Restores (or confirms) the install tree for [`Installer::rollback`].
 fn restore_tree_for_rollback(outcome: &InstallOutcome) -> Result<()> {
+    let plugins_root = outcome.plugin_root.parent().ok_or_else(|| {
+        CatalogError::message(format!(
+            "cannot rollback {}: install path has no parent",
+            outcome.plugin_root.display()
+        ))
+    })?;
+    let dest = require_under(plugins_root, &outcome.plugin_root)?;
     match &outcome.previous {
-        Some(bak) if bak.exists() => restore_update_tree_from_backup(&outcome.plugin_root, bak),
+        Some(bak) if bak.exists() => {
+            let bak = require_under(plugins_root, bak).or_else(|_| {
+                // Backup lives under `plugins/.staging/`.
+                let staging = plugins_root.join(".staging");
+                require_under(&staging, bak)
+            })?;
+            restore_update_tree_from_backup(&dest, &bak)
+        }
         Some(_) => {
-            if outcome.plugin_root.exists() {
+            if dest.exists() {
                 Ok(())
             } else {
                 Err(CatalogError::message(format!(
                     "cannot rollback {}: previous-version backup is gone and the destination \
                      is missing",
-                    outcome.plugin_root.display()
+                    dest.display()
                 )))
             }
         }
         None => {
-            if outcome.plugin_root.exists() {
-                remove_dir_retry(&outcome.plugin_root)?;
+            if dest.exists() {
+                remove_dir_retry(&dest)?;
             }
             Ok(())
         }
@@ -1023,21 +1041,21 @@ fn restore_tree_for_rollback(outcome: &InstallOutcome) -> Result<()> {
 /// `dest` unless a usable backup is in place.
 fn restore_update_tree_from_backup(dest: &Path, backup: &Path) -> Result<()> {
     if dest.exists() {
-        let staging_parent = dest
-            .parent()
-            .map(|parent| parent.join(".staging"))
-            .ok_or_else(|| {
-                CatalogError::message(format!(
-                    "cannot rollback {}: destination has no parent",
-                    dest.display()
-                ))
-            })?;
+        let plugins_root = dest.parent().ok_or_else(|| {
+            CatalogError::message(format!(
+                "cannot rollback {}: destination has no parent",
+                dest.display()
+            ))
+        })?;
+        let staging_parent = plugins_root.join(".staging");
         fs::create_dir_all(&staging_parent)?;
+        let staging_parent = require_under(plugins_root, &staging_parent)?;
         let dest_name = dest
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "plugin".into());
         let aside = unique_hold_path(&staging_parent, &format!("{dest_name}.rollback-new"));
+        let aside = require_under(&staging_parent, &aside)?;
         rename_retry(dest, &aside)?;
         match fs::rename(backup, dest) {
             Ok(()) => {
@@ -1208,20 +1226,31 @@ fn require_key_derived_path(dest: &Path, key: &PluginKey) -> Result<()> {
 /// Unused name under `parent` for a hold/aside directory.
 fn unique_hold_path(parent: &Path, base: &str) -> PathBuf {
     let candidate = parent.join(base);
+    let Ok(candidate) = require_under(parent, &candidate) else {
+        return parent.join(base);
+    };
     if !candidate.exists() {
         return candidate;
     }
     for n in 1..128 {
         let candidate = parent.join(format!("{base}-{n}"));
+        let Ok(candidate) = require_under(parent, &candidate) else {
+            continue;
+        };
         if !candidate.exists() {
             return candidate;
         }
     }
-    parent.join(format!("{base}-{}", std::process::id()))
+    let fallback = parent.join(format!("{base}-{}", std::process::id()));
+    require_under(parent, &fallback).unwrap_or(fallback)
 }
 
 /// Moves a held install tree back to `dest` after a failed remove step.
 fn restore_held_tree(hold: &Path, dest: &Path) -> Result<()> {
+    let hold_root = hold.parent().unwrap_or(hold);
+    let dest_root = dest.parent().unwrap_or(dest);
+    let hold = require_under(hold_root, hold)?;
+    let dest = require_under(dest_root, dest)?;
     if dest.exists() {
         if hold.exists() {
             return Err(CatalogError::message(format!(
@@ -1239,7 +1268,7 @@ fn restore_held_tree(hold: &Path, dest: &Path) -> Result<()> {
             dest.display()
         )));
     }
-    rename_retry(hold, dest)
+    rename_retry(&hold, &dest)
 }
 
 /// Inputs for restoring tree/state/ledger after a failed remove step.
@@ -1403,7 +1432,15 @@ fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<()> {
         if rel.as_os_str().is_empty() {
             continue;
         }
-        let out = dest.join(rel);
+        let out = match safe_join(dest, rel) {
+            Ok(p) => p,
+            Err(err) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    err.to_string(),
+                ));
+            }
+        };
         if entry.file_type().is_dir() {
             fs::create_dir_all(&out)?;
         } else if entry.file_type().is_file() {
@@ -1418,6 +1455,15 @@ fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<()> {
 
 /// Retries `remove_dir_all` up to five times (50 ms apart) for transient Windows locks.
 fn remove_dir_retry(path: &Path) -> Result<()> {
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(CatalogError::message(format!(
+            "refusing remove path with '..': {}",
+            path.display()
+        )));
+    }
     let mut last = None;
     for _ in 0..5 {
         match fs::remove_dir_all(path) {
@@ -1437,6 +1483,16 @@ fn remove_dir_retry(path: &Path) -> Result<()> {
 
 /// Retries `rename` up to five times (50 ms apart) for transient Windows locks.
 fn rename_retry(from: &Path, to: &Path) -> Result<()> {
+    for p in [from, to] {
+        if p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(CatalogError::message(format!(
+                "refusing rename path with '..': {}",
+                p.display()
+            )));
+        }
+    }
     let mut last = None;
     for _ in 0..5 {
         match fs::rename(from, to) {
@@ -1465,8 +1521,21 @@ mod tests {
     use flate2::Compression;
     use tar::Builder;
 
+    /// Join `rel` under `root` with the CodeQL two-state path barrier.
+    fn under_tmp(root: impl AsRef<Path>, rel: impl AsRef<Path>) -> PathBuf {
+        let root = root.as_ref();
+        let joined = root.join(rel.as_ref());
+        require_under(root, &joined).unwrap_or_else(|err| {
+            panic!(
+                "test path {} must stay under {}: {err}",
+                joined.display(),
+                root.display()
+            )
+        })
+    }
+
     fn make_named_archive(dir: &Path, filename: &str, id: &str) -> (PathBuf, String) {
-        let archive = dir.join(filename);
+        let archive = under_tmp(dir, filename);
         {
             let file = fs::File::create(&archive).unwrap();
             let enc = GzEncoder::new(file, Compression::default());
@@ -1561,7 +1630,7 @@ mod tests {
     }
 
     fn corrupt_receipt(dest: &Path) {
-        fs::write(dest.join("receipt.json"), b"{not-valid-receipt").unwrap();
+        fs::write(under_tmp(&dest, "receipt.json"), b"{not-valid-receipt").unwrap();
     }
 
     #[test]
@@ -1594,7 +1663,7 @@ mod tests {
             released_at: None,
             publisher: None,
         };
-        let plugins = tmp.path().join("plugins");
+        let plugins = under_tmp(tmp.path(), "plugins");
         let opts = InstallOptions {
             plugins_root: plugins.clone(),
             trust: TrustPolicy::allow_unverified_publisher(),
@@ -1606,7 +1675,7 @@ mod tests {
             version: "1.0.0".into(),
         };
         let out = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
-        assert!(out.plugin_root.join("plugin.toml").is_file());
+        assert!(under_tmp(&out.plugin_root, "plugin.toml").is_file());
         Installer::commit(&out).unwrap();
         let receipt = InstallReceipt::load(&out.plugin_root).unwrap();
         assert_eq!(receipt.runtime.id, "echo");
@@ -1636,7 +1705,7 @@ mod tests {
     #[test]
     fn rejects_same_plugin_key_different_kind_on_install() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
+        let plugins = under_tmp(tmp.path(), "plugins");
         let (archive, digest) = make_echo_archive(tmp.path());
         let target = host_bookclerk_target();
         let mut manifest = BookclerkPackageManifest {
@@ -1689,9 +1758,9 @@ mod tests {
     #[test]
     fn same_alias_different_plugin_keys_are_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
+        let plugins = under_tmp(tmp.path(), "plugins");
         let (archive_a, digest_a) = make_echo_archive(tmp.path());
-        let archive_b = tmp.path().join("echo-b.tar.gz");
+        let archive_b = under_tmp(tmp.path(), "echo-b.tar.gz");
         fs::copy(&archive_a, &archive_b).unwrap();
         let target = host_bookclerk_target();
         let manifest_for = |digest: String, url: String| BookclerkPackageManifest {
@@ -1767,7 +1836,7 @@ mod tests {
     #[test]
     fn same_plugin_key_update_is_allowed() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
+        let plugins = under_tmp(tmp.path(), "plugins");
         let (archive, digest) = make_echo_archive(tmp.path());
         let target = host_bookclerk_target();
         let manifest = BookclerkPackageManifest {
@@ -1818,7 +1887,7 @@ mod tests {
     #[test]
     fn failed_first_install_rollback_removes_tree_and_ledger() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
+        let plugins = under_tmp(tmp.path(), "plugins");
         let (archive, digest) = make_echo_archive(tmp.path());
         let target = host_bookclerk_target();
         let manifest = BookclerkPackageManifest {
@@ -1859,7 +1928,7 @@ mod tests {
         let out = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         let files_dir = tmp.path();
         let key = out.receipt.plugin_key().unwrap();
-        assert!(out.plugin_root.join("plugin.toml").is_file());
+        assert!(under_tmp(&out.plugin_root, "plugin.toml").is_file());
         assert!(InstallLedger::load(files_dir).unwrap().get(&key).is_some());
         assert!(out.previous.is_none());
         Installer::rollback(&out).unwrap();
@@ -1870,7 +1939,7 @@ mod tests {
     #[test]
     fn failed_update_rollback_restores_old_tree_and_ledger() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
+        let plugins = under_tmp(tmp.path(), "plugins");
         let (archive, digest) = make_echo_archive(tmp.path());
         let target = host_bookclerk_target();
         let manifest = BookclerkPackageManifest {
@@ -1911,15 +1980,15 @@ mod tests {
         };
         let first = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         Installer::commit(&first).unwrap();
-        fs::write(first.plugin_root.join("marker.txt"), b"keep-me").unwrap();
+        fs::write(under_tmp(&first.plugin_root, "marker.txt"), b"keep-me").unwrap();
         let files_dir = tmp.path();
         let key = first.receipt.plugin_key().unwrap();
         let old_payload = first.receipt.payload_root_sha256.clone();
         let second = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         assert!(second.previous.is_some());
-        assert!(!second.plugin_root.join("marker.txt").is_file());
+        assert!(!under_tmp(&second.plugin_root, "marker.txt").is_file());
         Installer::rollback(&second).unwrap();
-        assert!(first.plugin_root.join("marker.txt").is_file());
+        assert!(under_tmp(&first.plugin_root, "marker.txt").is_file());
         let restored = InstallLedger::load(files_dir).unwrap();
         let row = restored.get(&key).expect("ledger row");
         assert_eq!(row.payload_root_sha256, old_payload);
@@ -1928,7 +1997,7 @@ mod tests {
     #[test]
     fn malformed_trust_ledger_aborts_before_tree_mutation() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
+        let plugins = under_tmp(tmp.path(), "plugins");
         let (archive, digest) = make_echo_archive(tmp.path());
         let target = host_bookclerk_target();
         let manifest = BookclerkPackageManifest {
@@ -1969,8 +2038,8 @@ mod tests {
         };
         let first = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         Installer::commit(&first).unwrap();
-        fs::write(first.plugin_root.join("marker.txt"), b"untouched").unwrap();
-        let toml_before = fs::read(first.plugin_root.join("plugin.toml")).unwrap();
+        fs::write(under_tmp(&first.plugin_root, "marker.txt"), b"untouched").unwrap();
+        let toml_before = fs::read(under_tmp(&first.plugin_root, "plugin.toml")).unwrap();
         let mut tree_before: Vec<_> = fs::read_dir(&plugins)
             .unwrap()
             .map(|e| e.unwrap().file_name())
@@ -1999,11 +2068,11 @@ mod tests {
             "malformed ledger must not be rewritten"
         );
         assert_eq!(
-            fs::read(first.plugin_root.join("plugin.toml")).unwrap(),
+            fs::read(under_tmp(&first.plugin_root, "plugin.toml")).unwrap(),
             toml_before
         );
         assert_eq!(
-            fs::read(first.plugin_root.join("marker.txt")).unwrap(),
+            fs::read(under_tmp(&first.plugin_root, "marker.txt")).unwrap(),
             b"untouched"
         );
         assert!(first.plugin_root.is_dir());
@@ -2013,8 +2082,8 @@ mod tests {
             .collect();
         tree_after.sort();
         assert_eq!(tree_before, tree_after);
-        if plugins.join(".staging").is_dir() {
-            let leftover: Vec<_> = fs::read_dir(plugins.join(".staging"))
+        if under_tmp(&plugins, ".staging").is_dir() {
+            let leftover: Vec<_> = fs::read_dir(under_tmp(&plugins, ".staging"))
                 .unwrap()
                 .map(|e| e.unwrap().file_name())
                 .collect();
@@ -2028,7 +2097,7 @@ mod tests {
     #[test]
     fn replace_does_not_copy_install_root_data_tmp_into_payload() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
+        let plugins = under_tmp(tmp.path(), "plugins");
         let (archive, digest) = make_echo_archive(tmp.path());
         let target = host_bookclerk_target();
         let manifest = BookclerkPackageManifest {
@@ -2069,18 +2138,18 @@ mod tests {
         };
         let first = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         Installer::commit(&first).unwrap();
-        fs::create_dir_all(first.plugin_root.join("data")).unwrap();
-        fs::write(first.plugin_root.join("data/old-state"), b"stale").unwrap();
+        fs::create_dir_all(under_tmp(&first.plugin_root, "data")).unwrap();
+        fs::write(under_tmp(&first.plugin_root, "data/old-state"), b"stale").unwrap();
         let second = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         Installer::commit(&second).unwrap();
-        assert!(!second.plugin_root.join("data/old-state").exists());
-        assert!(second.plugin_root.join("data/packaged.txt").is_file());
+        assert!(!under_tmp(&second.plugin_root, "data/old-state").exists());
+        assert!(under_tmp(&second.plugin_root, "data/packaged.txt").is_file());
     }
 
     #[test]
     fn same_plugin_key_alias_change_is_rejected_even_with_replace() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins = tmp.path().join("plugins");
+        let plugins = under_tmp(tmp.path(), "plugins");
         let (archive, digest) = make_named_archive(tmp.path(), "echo.tar.gz", "echo");
         let target = host_bookclerk_target();
         let file_url = |p: &Path| format!("file://{}", p.display());
@@ -2098,12 +2167,12 @@ mod tests {
         .unwrap();
         Installer::commit(&first).unwrap();
 
-        let toml_before = fs::read(first.plugin_root.join("plugin.toml")).unwrap();
-        let receipt_before = fs::read(first.plugin_root.join("receipt.json")).unwrap();
+        let toml_before = fs::read(under_tmp(&first.plugin_root, "plugin.toml")).unwrap();
+        let receipt_before = fs::read(under_tmp(&first.plugin_root, "receipt.json")).unwrap();
         let ledger_path = InstallLedger::path(tmp.path());
         let ledger_before = fs::read(&ledger_path).unwrap();
         let tree_before = dir_names(&plugins);
-        let staging_before = dir_names(&plugins.join(".staging"));
+        let staging_before = dir_names(&under_tmp(&plugins, ".staging"));
 
         let (archive2, digest2) = make_named_archive(tmp.path(), "echo.tar.gz", "echo2");
         assert_eq!(archive, archive2);
@@ -2133,16 +2202,16 @@ mod tests {
         );
 
         assert_eq!(
-            fs::read(first.plugin_root.join("plugin.toml")).unwrap(),
+            fs::read(under_tmp(&first.plugin_root, "plugin.toml")).unwrap(),
             toml_before
         );
         assert_eq!(
-            fs::read(first.plugin_root.join("receipt.json")).unwrap(),
+            fs::read(under_tmp(&first.plugin_root, "receipt.json")).unwrap(),
             receipt_before
         );
         assert_eq!(fs::read(&ledger_path).unwrap(), ledger_before);
         assert_eq!(dir_names(&plugins), tree_before);
-        assert_eq!(dir_names(&plugins.join(".staging")), staging_before);
+        assert_eq!(dir_names(&under_tmp(&plugins, ".staging")), staging_before);
         let receipt = InstallReceipt::load(&first.plugin_root).unwrap();
         assert_eq!(receipt.runtime.id, "echo");
         assert_eq!(
@@ -2198,7 +2267,7 @@ mod tests {
         PackageCoordinate,
         InstallOptions,
     ) {
-        let plugins = tmp.join("plugins");
+        let plugins = under_tmp(tmp, "plugins");
         let (archive, digest) = make_echo_archive(tmp);
         let target = host_bookclerk_target();
         let opts = echo_install_opts(plugins.clone(), true);
@@ -2256,9 +2325,8 @@ mod tests {
     fn remove_recovered_plugin_key_purges_state_when_requested() {
         let tmp = tempfile::tempdir().unwrap();
         let (plugins, dest, key, _, _, _) = installed_echo(tmp.path());
-        let state = tmp.path().join("plugin-state").join(key.fs_id());
-        fs::create_dir_all(state.join("data")).unwrap();
-        fs::write(state.join("data/marker"), b"keep-me-not").unwrap();
+        let state = dest_state(tmp.path(), &key);
+        write_state_marker(&state, "keep-me-not");
         corrupt_receipt(&dest);
 
         Installer::remove(&plugins, "echo", true).unwrap();
@@ -2275,7 +2343,7 @@ mod tests {
         let mut ledger = InstallLedger::load(tmp.path()).unwrap();
         ledger.remove(&key);
         ledger.store(tmp.path()).unwrap();
-        let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
+        let toml_before = fs::read(under_tmp(&dest, "plugin.toml")).unwrap();
 
         let err = Installer::remove(&plugins, "echo", false)
             .unwrap_err()
@@ -2286,7 +2354,7 @@ mod tests {
         );
         assert!(err.contains("before mutating"), "{err}");
         assert!(dest.is_dir());
-        assert_eq!(fs::read(dest.join("plugin.toml")).unwrap(), toml_before);
+        assert_eq!(fs::read(under_tmp(&dest, "plugin.toml")).unwrap(), toml_before);
         assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_none());
     }
 
@@ -2298,13 +2366,13 @@ mod tests {
         let mut ledger = InstallLedger::load(tmp.path()).unwrap();
         let mut extra = ledger.get(&key).unwrap().clone();
         extra.plugin_key =
-            PluginKey::from_install_path(&tmp.path().join("other-archive.tar.gz"), "echo")
+            PluginKey::from_install_path(&under_tmp(tmp.path(), "other-archive.tar.gz"), "echo")
                 .unwrap()
                 .canonical()
                 .to_string();
         ledger.artifacts.push(extra);
         ledger.store(tmp.path()).unwrap();
-        let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
+        let toml_before = fs::read(under_tmp(&dest, "plugin.toml")).unwrap();
 
         let err = Installer::remove(&plugins, "echo", false)
             .unwrap_err()
@@ -2320,7 +2388,7 @@ mod tests {
             "{err}"
         );
         assert!(dest.is_dir());
-        assert_eq!(fs::read(dest.join("plugin.toml")).unwrap(), toml_before);
+        assert_eq!(fs::read(under_tmp(&dest, "plugin.toml")).unwrap(), toml_before);
     }
 
     #[test]
@@ -2330,7 +2398,7 @@ mod tests {
         let ledger_path = InstallLedger::path(tmp.path());
         let garbage = b"{not-valid-install-ledger";
         fs::write(&ledger_path, garbage).unwrap();
-        let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
+        let toml_before = fs::read(under_tmp(&dest, "plugin.toml")).unwrap();
 
         let err = Installer::remove(&plugins, "echo", false)
             .unwrap_err()
@@ -2345,17 +2413,17 @@ mod tests {
         );
         assert_eq!(fs::read(&ledger_path).unwrap(), garbage);
         assert!(dest.is_dir());
-        assert_eq!(fs::read(dest.join("plugin.toml")).unwrap(), toml_before);
+        assert_eq!(fs::read(under_tmp(&dest, "plugin.toml")).unwrap(), toml_before);
     }
 
     #[test]
     fn remove_ledger_write_failure_restores_held_tree() {
         let tmp = tempfile::tempdir().unwrap();
         let (plugins, dest, key, _, _, _) = installed_echo(tmp.path());
-        let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
-        let receipt_before = fs::read(dest.join("receipt.json")).unwrap();
+        let toml_before = fs::read(under_tmp(&dest, "plugin.toml")).unwrap();
+        let receipt_before = fs::read(under_tmp(&dest, "receipt.json")).unwrap();
         let ledger_before = fs::read(InstallLedger::path(tmp.path())).unwrap();
-        fs::create_dir_all(tmp.path().join("install-ledger.json.tmp")).unwrap();
+        fs::create_dir_all(under_tmp(tmp.path(), "install-ledger.json.tmp")).unwrap();
 
         let err = Installer::remove(&plugins, "echo", false)
             .unwrap_err()
@@ -2370,15 +2438,15 @@ mod tests {
             dest.is_dir(),
             "held tree must be restored after ledger write failure"
         );
-        assert_eq!(fs::read(dest.join("plugin.toml")).unwrap(), toml_before);
-        assert_eq!(fs::read(dest.join("receipt.json")).unwrap(), receipt_before);
+        assert_eq!(fs::read(under_tmp(&dest, "plugin.toml")).unwrap(), toml_before);
+        assert_eq!(fs::read(under_tmp(&dest, "receipt.json")).unwrap(), receipt_before);
         assert_eq!(
             fs::read(InstallLedger::path(tmp.path())).unwrap(),
             ledger_before
         );
         assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_some());
-        if plugins.join(".staging").is_dir() {
-            let leftover = dir_names(&plugins.join(".staging"));
+        if under_tmp(&plugins, ".staging").is_dir() {
+            let leftover = dir_names(&under_tmp(&plugins, ".staging"));
             assert!(
                 leftover.iter().all(|n| !n.contains("removing")),
                 "restore must not leave a .removing hold: {leftover:?}"
@@ -2388,7 +2456,7 @@ mod tests {
 
     /// Rewrites `receipt.json` `plugin_key` while leaving the rest parseable.
     fn rewrite_receipt_plugin_key(dest: &Path, key: &PluginKey) {
-        let path = dest.join("receipt.json");
+        let path = under_tmp(&dest, "receipt.json");
         let mut value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         value["plugin_key"] = serde_json::Value::String(key.canonical().to_string());
@@ -2397,7 +2465,7 @@ mod tests {
 
     /// Installs `id` from a uniquely named local archive.
     fn installed_named(tmp: &Path, filename: &str, id: &str) -> (PathBuf, PathBuf, PluginKey) {
-        let plugins = tmp.join("plugins");
+        let plugins = under_tmp(tmp, "plugins");
         let (archive, digest) = make_named_archive(tmp, filename, id);
         let target = host_bookclerk_target();
         let opts = echo_install_opts(plugins, false);
@@ -2419,13 +2487,14 @@ mod tests {
 
     /// `$FILES_DIR/plugin-state/<fs-id>` for a test plugin.
     fn dest_state(tmp: &Path, key: &PluginKey) -> PathBuf {
-        tmp.join("plugin-state").join(key.fs_id())
+        under_tmp(tmp, Path::new("plugin-state").join(key.fs_id()))
     }
 
     /// Writes a marker file under `plugin-state/<fs-id>/data`.
     fn write_state_marker(state: &Path, marker: &str) {
-        fs::create_dir_all(state.join("data")).unwrap();
-        fs::write(state.join("data/marker"), marker.as_bytes()).unwrap();
+        fs::create_dir_all(state).unwrap();
+        fs::create_dir_all(under_tmp(state, "data")).unwrap();
+        fs::write(under_tmp(state, "data/marker"), marker.as_bytes()).unwrap();
     }
 
     #[test]
@@ -2436,9 +2505,9 @@ mod tests {
         write_state_marker(&state_a, "state-a");
         write_state_marker(&state_b, "state-b");
         rewrite_receipt_plugin_key(&dest_a, &key_b);
-        let plugins = tmp.path().join("plugins");
-        let toml_a = fs::read(dest_a.join("plugin.toml")).unwrap();
-        let toml_b = fs::read(dest_b.join("plugin.toml")).unwrap();
+        let plugins = under_tmp(tmp.path(), "plugins");
+        let toml_a = fs::read(under_tmp(&dest_a, "plugin.toml")).unwrap();
+        let toml_b = fs::read(under_tmp(&dest_b, "plugin.toml")).unwrap();
         let ledger_before = fs::read(InstallLedger::path(tmp.path())).unwrap();
 
         let err = Installer::remove(&plugins, "plugina", true)
@@ -2451,8 +2520,8 @@ mod tests {
         );
         assert!(dest_a.is_dir());
         assert!(dest_b.is_dir());
-        assert_eq!(fs::read(dest_a.join("plugin.toml")).unwrap(), toml_a);
-        assert_eq!(fs::read(dest_b.join("plugin.toml")).unwrap(), toml_b);
+        assert_eq!(fs::read(under_tmp(&dest_a, "plugin.toml")).unwrap(), toml_a);
+        assert_eq!(fs::read(under_tmp(&dest_b, "plugin.toml")).unwrap(), toml_b);
         assert_eq!(
             fs::read(InstallLedger::path(tmp.path())).unwrap(),
             ledger_before
@@ -2465,8 +2534,8 @@ mod tests {
             .unwrap()
             .get(&key_b)
             .is_some());
-        assert_eq!(fs::read(state_a.join("data/marker")).unwrap(), b"state-a");
-        assert_eq!(fs::read(state_b.join("data/marker")).unwrap(), b"state-b");
+        assert_eq!(fs::read(under_tmp(&state_a, "data/marker")).unwrap(), b"state-a");
+        assert_eq!(fs::read(under_tmp(&state_b, "data/marker")).unwrap(), b"state-b");
     }
 
     #[test]
@@ -2474,10 +2543,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (dest, _, key) = installed_named(tmp.path(), "echo.tar.gz", "echo");
         let foreign =
-            PluginKey::from_install_path(&tmp.path().join("other.tar.gz"), "echo").unwrap();
+            PluginKey::from_install_path(&under_tmp(tmp.path(), "other.tar.gz"), "echo").unwrap();
         assert_ne!(foreign.fs_id(), dest.file_name().unwrap().to_string_lossy());
         rewrite_receipt_plugin_key(&dest, &foreign);
-        let plugins = tmp.path().join("plugins");
+        let plugins = under_tmp(tmp.path(), "plugins");
         let err = Installer::remove(&plugins, "echo", false)
             .unwrap_err()
             .to_string();
@@ -2490,8 +2559,8 @@ mod tests {
     fn remove_directory_fs_id_mismatching_ledger_fails_closed() {
         let tmp = tempfile::tempdir().unwrap();
         let (dest, _, key) = installed_named(tmp.path(), "echo.tar.gz", "echo");
-        let plugins = tmp.path().join("plugins");
-        let renamed = plugins.join("pk-ffffffffffffffffffffffffffffffff");
+        let plugins = under_tmp(tmp.path(), "plugins");
+        let renamed = under_tmp(&plugins, "pk-ffffffffffffffffffffffffffffffff");
         fs::rename(&dest, &renamed).unwrap();
         let err = Installer::remove(&plugins, "echo", false)
             .unwrap_err()
@@ -2510,10 +2579,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (dest, state, key) = installed_named(tmp.path(), "echo.tar.gz", "echo");
         write_state_marker(&state, "keep");
-        Installer::remove(&tmp.path().join("plugins"), "echo", false).unwrap();
+        Installer::remove(&under_tmp(tmp.path(), "plugins"), "echo", false).unwrap();
         assert!(!dest.exists());
         assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_none());
-        assert_eq!(fs::read(state.join("data/marker")).unwrap(), b"keep");
+        assert_eq!(fs::read(under_tmp(&state, "data/marker")).unwrap(), b"keep");
     }
 
     #[test]
@@ -2521,7 +2590,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (dest, state, key) = installed_named(tmp.path(), "echo.tar.gz", "echo");
         write_state_marker(&state, "gone");
-        Installer::remove(&tmp.path().join("plugins"), "echo", true).unwrap();
+        Installer::remove(&under_tmp(tmp.path(), "plugins"), "echo", true).unwrap();
         assert!(!dest.exists());
         assert!(!state.exists());
         assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_none());
@@ -2532,9 +2601,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (dest, state, key) = installed_named(tmp.path(), "echo.tar.gz", "echo");
         write_state_marker(&state, "keep-state");
-        let toml_before = fs::read(dest.join("plugin.toml")).unwrap();
-        fs::create_dir_all(tmp.path().join("install-ledger.json.tmp")).unwrap();
-        let err = Installer::remove(&tmp.path().join("plugins"), "echo", true)
+        let toml_before = fs::read(under_tmp(&dest, "plugin.toml")).unwrap();
+        fs::create_dir_all(under_tmp(tmp.path(), "install-ledger.json.tmp")).unwrap();
+        let err = Installer::remove(&under_tmp(tmp.path(), "plugins"), "echo", true)
             .unwrap_err()
             .to_string();
         assert!(
@@ -2544,10 +2613,10 @@ mod tests {
             "{err}"
         );
         assert!(dest.is_dir());
-        assert_eq!(fs::read(dest.join("plugin.toml")).unwrap(), toml_before);
-        assert_eq!(fs::read(state.join("data/marker")).unwrap(), b"keep-state");
+        assert_eq!(fs::read(under_tmp(&dest, "plugin.toml")).unwrap(), toml_before);
+        assert_eq!(fs::read(under_tmp(&state, "data/marker")).unwrap(), b"keep-state");
         assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_some());
-        let hold = tmp.path().join(PLUGIN_HOLD_DIR);
+        let hold = under_tmp(tmp.path(), PLUGIN_HOLD_DIR);
         if hold.is_dir() {
             let leftover = dir_names(&hold);
             assert!(
@@ -2555,8 +2624,8 @@ mod tests {
                 "restore must not leave a state hold: {leftover:?}"
             );
         }
-        fs::remove_dir_all(tmp.path().join("install-ledger.json.tmp")).unwrap();
-        Installer::remove(&tmp.path().join("plugins"), "echo", true).unwrap();
+        fs::remove_dir_all(under_tmp(tmp.path(), "install-ledger.json.tmp")).unwrap();
+        Installer::remove(&under_tmp(tmp.path(), "plugins"), "echo", true).unwrap();
         assert!(!dest.exists());
         assert!(!state.exists());
         assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_none());
@@ -2566,12 +2635,12 @@ mod tests {
     fn rollback_retries_ledger_without_deleting_restored_tree() {
         let tmp = tempfile::tempdir().unwrap();
         let (plugins, dest, key, manifest, coord, mut opts) = installed_echo(tmp.path());
-        fs::write(dest.join("old-marker"), b"v1").unwrap();
+        fs::write(under_tmp(&dest, "old-marker"), b"v1").unwrap();
         opts.replace = true;
         let second = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
         assert!(second.previous.as_ref().is_some_and(|p| p.exists()));
-        assert!(!second.plugin_root.join("old-marker").is_file());
-        fs::create_dir_all(tmp.path().join("install-ledger.json.tmp")).unwrap();
+        assert!(!under_tmp(&second.plugin_root, "old-marker").is_file());
+        fs::create_dir_all(under_tmp(tmp.path(), "install-ledger.json.tmp")).unwrap();
 
         let err = Installer::rollback(&second).unwrap_err().to_string();
         assert!(
@@ -2585,7 +2654,7 @@ mod tests {
             "restored tree must survive a ledger restore failure"
         );
         assert_eq!(
-            fs::read(second.plugin_root.join("old-marker")).unwrap(),
+            fs::read(under_tmp(&second.plugin_root, "old-marker")).unwrap(),
             b"v1"
         );
 
@@ -2595,7 +2664,7 @@ mod tests {
             "retry must not delete the restored destination when the backup is gone"
         );
         assert_eq!(
-            fs::read(second.plugin_root.join("old-marker")).unwrap(),
+            fs::read(under_tmp(&second.plugin_root, "old-marker")).unwrap(),
             b"v1"
         );
         assert!(
@@ -2603,9 +2672,9 @@ mod tests {
             "{err}"
         );
 
-        fs::remove_dir_all(tmp.path().join("install-ledger.json.tmp")).unwrap();
+        fs::remove_dir_all(under_tmp(tmp.path(), "install-ledger.json.tmp")).unwrap();
         Installer::rollback(&second).unwrap();
-        assert!(second.plugin_root.join("old-marker").is_file());
+        assert!(under_tmp(&second.plugin_root, "old-marker").is_file());
         assert!(InstallLedger::load(tmp.path()).unwrap().get(&key).is_some());
         assert_eq!(
             dir_names(&plugins)
@@ -2620,7 +2689,7 @@ mod tests {
     fn first_install_rollback_is_retryable() {
         let tmp = tempfile::tempdir().unwrap();
         let (archive, digest) = make_echo_archive(tmp.path());
-        let plugins = tmp.path().join("plugins");
+        let plugins = under_tmp(tmp.path(), "plugins");
         let opts = echo_install_opts(plugins, false);
         let coord = PackageCoordinate {
             source: RegistrySource::LocalArchive,
@@ -2652,10 +2721,10 @@ mod tests {
     #[test]
     fn commit_cleanup_failure_is_surfaced() {
         let tmp = tempfile::tempdir().unwrap();
-        let bak = tmp.path().join("not-a-dir-backup");
+        let bak = under_tmp(tmp.path(), "not-a-dir-backup");
         fs::write(&bak, b"file").unwrap();
         let outcome = InstallOutcome {
-            plugin_root: tmp.path().join("dest"),
+            plugin_root: under_tmp(tmp.path(), "dest"),
             receipt: InstallReceipt::load(&{
                 let (dest, _, _) = installed_named(tmp.path(), "echo.tar.gz", "echo");
                 dest

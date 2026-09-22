@@ -40,17 +40,11 @@ fn skip_workerd_allowed() -> bool {
 
 fn find_workerd() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("BOOKCLERK_WORKERD_BIN") {
-        let path = PathBuf::from(p);
-        if path.is_file() {
-            return Some(path);
-        }
+        return bookclerk_sandbox::require_spawn_executable(Path::new(&p)).ok();
     }
     let launcher = PathBuf::from(env!("CARGO_BIN_EXE_bookclerk-workerd"));
     if let Some(dir) = launcher.parent() {
-        let candidate = dir.join(binary_name());
-        if candidate.is_file() {
-            return Some(candidate);
-        }
+        return bookclerk_sandbox::require_spawn_executable(&dir.join(binary_name())).ok();
     }
     None
 }
