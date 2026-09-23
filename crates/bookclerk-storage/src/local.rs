@@ -45,6 +45,12 @@ impl LocalFsBackend {
     /// Returns an error when the operation fails.
     pub fn with_prefix(root: PathBuf, prefix: &str) -> Result<Self> {
         let prefix = normalize_prefix(prefix);
+        // Reject ParentDir (and absolute/root components) in the *prefix* before
+        // any join/mkdir. Operator `root` may still contain `..` and is
+        // canonicalized below.
+        if !prefix.is_empty() {
+            validate_key(prefix.trim_end_matches('/'))?;
+        }
         // Operator-configured storage root may include lexical `..` (joined onto
         // `files_dir` by config resolution). Reject NUL, create, then canonicalize
         // so later joins use a realpath identity for containment.
@@ -65,9 +71,27 @@ impl LocalFsBackend {
         std::fs::create_dir_all(&root)?;
         let root = std::fs::canonicalize(&root).map_err(StorageError::Io)?;
         if !prefix.is_empty() {
-            let prefix_dir = root.join(prefix.trim_end_matches('/'));
+            let prefix_rel = prefix.trim_end_matches('/');
+            let prefix_dir = root.join(prefix_rel);
             if !prefix_dir.starts_with(&root) {
                 return Err(StorageError::InvalidKey(prefix));
+            }
+            // Walk ancestors under root and refuse symlink components before mkdir
+            // so `root/link -> /outside` + missing child cannot create outside.
+            let mut cursor = root.clone();
+            for comp in Path::new(prefix_rel).components() {
+                cursor = cursor.join(comp.as_os_str());
+                if !cursor.starts_with(&root) {
+                    return Err(StorageError::InvalidKey(prefix.clone()));
+                }
+                match std::fs::symlink_metadata(&cursor) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        return Err(StorageError::InvalidKey(format!(
+                            "refusing symlink in storage prefix path: {prefix}"
+                        )));
+                    }
+                    Ok(_) | Err(_) => {}
+                }
             }
             std::fs::create_dir_all(&prefix_dir)?;
             let prefix_canon = std::fs::canonicalize(&prefix_dir).map_err(StorageError::Io)?;
@@ -872,6 +896,49 @@ mod tests {
         let listed = backend.list_audio("").await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].key, "Author/Book.m4b");
+    }
+
+    #[test]
+    fn with_prefix_rejects_parent_dir_components() {
+        let dir = tempdir().unwrap();
+        let outside_before = std::fs::read_dir(dir.path().parent().unwrap())
+            .unwrap()
+            .count();
+        assert!(LocalFsBackend::with_prefix(dir.path().to_path_buf(), "../outside/new").is_err());
+        assert!(LocalFsBackend::with_prefix(dir.path().to_path_buf(), "foo/../bar").is_err());
+        let outside_after = std::fs::read_dir(dir.path().parent().unwrap())
+            .unwrap()
+            .count();
+        assert_eq!(
+            outside_before, outside_after,
+            "ParentDir prefix must not create siblings outside root"
+        );
+        assert!(!dir.path().join("foo").exists());
+        assert!(!dir.path().join("bar").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_prefix_rejects_symlink_ancestor_with_missing_child() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let link = dir.path().join("escape");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let before: Vec<_> = std::fs::read_dir(outside.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        let err = LocalFsBackend::with_prefix(dir.path().to_path_buf(), "escape/newchild").unwrap_err();
+        assert!(
+            matches!(err, StorageError::InvalidKey(_)),
+            "expected InvalidKey, got {err:?}"
+        );
+        let after: Vec<_> = std::fs::read_dir(outside.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(before, after, "must not mkdir through symlink ancestor");
+        assert!(!outside.path().join("newchild").exists());
     }
 
     #[tokio::test]

@@ -87,28 +87,70 @@ pub fn default_files_dir() -> std::path::PathBuf {
 /// Returns an error when the underlying I/O, parse, network, or store operation fails.
 pub fn reset_files_dir(files_dir: &std::path::Path) -> anyhow::Result<()> {
     use anyhow::{bail, Context};
-    use bookclerk_sandbox::require_absolute_spawn_path;
+    use std::path::{Component, PathBuf};
 
-    let files_dir = require_absolute_spawn_path(files_dir)
-        .map_err(|err| anyhow::anyhow!("invalid BOOKCLERK_FILES_DIR: {err}"))?;
-    // Guard against wiping a filesystem root if misconfigured.
-    if files_dir
+    if files_dir.as_os_str().is_empty() {
+        bail!("refusing empty files dir");
+    }
+
+    // Resolve cwd-relative and absolute operator paths (including `..` spelling)
+    // without the spawn-helper absolute-file contract.
+    let absolute = if files_dir.is_absolute() {
+        files_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("current_dir for relative BOOKCLERK_FILES_DIR")?
+            .join(files_dir)
+    };
+
+    // Lexical normalize `..` / `.` without following symlinks.
+    let mut normalized = PathBuf::new();
+    for comp in absolute.components() {
+        match comp {
+            Component::Prefix(p) => normalized.push(p.as_os_str()),
+            Component::RootDir => normalized.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    bail!(
+                        "refusing files dir that escapes past root: {}",
+                        files_dir.display()
+                    );
+                }
+            }
+            Component::Normal(c) => normalized.push(c),
+        }
+    }
+
+    // Guard against wiping a filesystem root (Unix `/`, Windows drive/UNC root).
+    let depth = normalized
         .components()
-        .filter(|c| !matches!(c, std::path::Component::RootDir))
-        .count()
-        < 1
-    {
+        .filter(|c| matches!(c, Component::Normal(_)))
+        .count();
+    if depth < 1 {
         bail!(
             "refusing to reset suspicious files dir {}",
-            files_dir.display()
+            normalized.display()
         );
     }
-    if files_dir.exists() {
-        std::fs::remove_dir_all(&files_dir)
-            .with_context(|| format!("remove {}", files_dir.display()))?;
+
+    if let Ok(meta) = std::fs::symlink_metadata(&normalized) {
+        if meta.file_type().is_symlink() {
+            bail!(
+                "refusing to reset files dir that is a symlink: {}",
+                normalized.display()
+            );
+        }
+        if meta.is_dir() {
+            std::fs::remove_dir_all(&normalized)
+                .with_context(|| format!("remove {}", normalized.display()))?;
+        } else {
+            std::fs::remove_file(&normalized)
+                .with_context(|| format!("remove file {}", normalized.display()))?;
+        }
     }
-    std::fs::create_dir_all(&files_dir)
-        .with_context(|| format!("recreate {}", files_dir.display()))?;
+    std::fs::create_dir_all(&normalized)
+        .with_context(|| format!("recreate {}", normalized.display()))?;
     Ok(())
 }
 
@@ -138,5 +180,52 @@ mod tests {
     #[test]
     fn reset_files_dir_refuses_filesystem_root() {
         assert!(reset_files_dir(std::path::Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn reset_files_dir_accepts_missing_leaf() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("missing-files");
+        assert!(!root.exists());
+        reset_files_dir(&root).expect("create missing");
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn reset_files_dir_accepts_parent_dir_spelling() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nested = tmp.path().join("nested");
+        std::fs::create_dir_all(nested.join("BookclerkFiles")).unwrap();
+        std::fs::write(nested.join("BookclerkFiles").join("stale"), b"x").unwrap();
+        let with_dotdot = nested.join("..").join(nested.file_name().unwrap()).join("BookclerkFiles");
+        reset_files_dir(&with_dotdot).expect("reset with ..");
+        assert!(nested.join("BookclerkFiles").is_dir());
+        assert!(!nested.join("BookclerkFiles").join("stale").exists());
+    }
+
+    #[test]
+    fn reset_files_dir_accepts_cwd_relative() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("rel-files");
+        std::fs::create_dir_all(root.join("plugins")).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let result = reset_files_dir(std::path::Path::new("rel-files"));
+        std::env::set_current_dir(&cwd).unwrap();
+        result.expect("relative reset");
+        assert!(root.is_dir());
+        assert!(!root.join("plugins").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_files_dir_refuses_symlink_leaf() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("keep"), b"safe").unwrap();
+        let link = tmp.path().join("files-link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        assert!(reset_files_dir(&link).is_err());
+        assert!(outside.path().join("keep").is_file());
     }
 }

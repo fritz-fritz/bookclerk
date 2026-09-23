@@ -214,6 +214,11 @@ pub fn require_under_root(path: &Path, root: &Path) -> Result<PathBuf, SpawnPath
 /// env overrides still require [`require_spawn_executable`]; that is an
 /// explicit operator trust decision, not proof the binary is safe.
 ///
+/// Bare PATH names (single component, non-absolute) are rejected for this API
+/// unless they match the beside-host helper. Callers that intentionally want
+/// PATH lookup must use [`require_absolute_or_name`] / [`require_spawn_executable`]
+/// directly.
+///
 /// # Errors
 ///
 /// Returns [`SpawnPathError`] when validation fails.
@@ -222,24 +227,29 @@ pub fn require_helper_beside_or_absolute(
     helper_name: &str,
     beside: Option<&Path>,
 ) -> Result<PathBuf, SpawnPathError> {
-    let path = require_spawn_executable(path)?;
+    // Prefer beside match on the raw path before absolute-only enforcement so
+    // `dir/bookclerk-workerd` next to the host still works.
     if let Some(beside) = beside {
         if let Some(dir) = beside.parent() {
             let expected = dir.join(helper_name);
             if path == expected {
-                return Ok(path);
+                return require_spawn_executable(path);
             }
-            if let (Ok(left), Ok(right)) = (
-                std::fs::canonicalize(&path),
-                std::fs::canonicalize(&expected),
-            ) {
-                if left == right {
-                    return Ok(left);
+            if path.is_absolute() {
+                if let (Ok(left), Ok(right)) = (
+                    std::fs::canonicalize(path),
+                    std::fs::canonicalize(&expected),
+                ) {
+                    if left == right {
+                        return require_spawn_executable(path);
+                    }
                 }
             }
         }
     }
-    Ok(path)
+    // Env override contract: absolute existing file only (no bare PATH names).
+    let path = require_absolute_spawn_path(path)?;
+    require_spawn_executable(&path)
 }
 
 #[cfg(test)]
@@ -311,5 +321,72 @@ mod tests {
             Err(SpawnPathError::Canonicalize { .. })
         ));
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn helper_beside_accepts_sibling_match() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let host = dir.path().join("bookclerkd");
+        let helper = dir.path().join("bookclerk-workerd");
+        std::fs::write(&host, b"host").expect("write");
+        std::fs::write(&helper, b"helper").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for p in [&host, &helper] {
+                let mut perms = std::fs::metadata(p).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(p, perms).unwrap();
+            }
+        }
+        let got = require_helper_beside_or_absolute(&helper, "bookclerk-workerd", Some(&host))
+            .expect("beside ok");
+        assert_eq!(got, std::fs::canonicalize(&helper).unwrap());
+    }
+
+    #[test]
+    fn helper_absolute_override_requires_existing_file() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let bin = dir.path().join("custom-workerd");
+        std::fs::write(&bin, b"x").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin, perms).unwrap();
+        }
+        let got = require_helper_beside_or_absolute(&bin, "bookclerk-workerd", None)
+            .expect("absolute file");
+        assert_eq!(got, std::fs::canonicalize(&bin).unwrap());
+
+        let missing = dir.path().join("missing-bin");
+        assert!(matches!(
+            require_helper_beside_or_absolute(&missing, "bookclerk-workerd", None),
+            Err(SpawnPathError::Canonicalize { .. })
+        ));
+
+        assert!(matches!(
+            require_helper_beside_or_absolute(dir.path(), "bookclerk-workerd", None),
+            Err(SpawnPathError::NotFile(_)) | Err(SpawnPathError::Canonicalize { .. })
+        ));
+    }
+
+    #[test]
+    fn helper_rejects_bare_path_name_and_relative() {
+        assert!(matches!(
+            require_helper_beside_or_absolute(Path::new("workerd"), "bookclerk-workerd", None),
+            Err(SpawnPathError::NotAbsolute(_))
+        ));
+        assert!(matches!(
+            require_helper_beside_or_absolute(
+                Path::new("rel/bookclerk-workerd"),
+                "bookclerk-workerd",
+                None
+            ),
+            Err(SpawnPathError::NotAbsolute(_))
+        ));
+        // Bare names remain valid for the general spawn APIs.
+        assert!(require_absolute_or_name(Path::new("workerd")).is_ok());
     }
 }

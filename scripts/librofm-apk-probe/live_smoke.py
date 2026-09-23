@@ -37,6 +37,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -394,33 +395,73 @@ def download_and_probe_media(
         step["error"] = probe.get("error") or "media probe failed"
 
     if keep_dir is not None:
-        # Write under this script's directory (__file__), never TMPDIR/env paths.
-        here = os.path.abspath(os.path.dirname(__file__))
-        session = os.path.join(here, "_smoke_keep")
-        if session != here and not session.startswith(here + os.sep):
-            raise ValueError(f"keep session escapes script dir: {session}")
-        os.makedirs(session, exist_ok=True)
-        ext_raw = probe.get("kind") if probe.get("kind") != "unknown" else "bin"
-        ext = str(ext_raw).replace("/", "").replace("\\", "").replace("..", "") or "bin"
-        name = f"smoke-asset.{ext}"
-        if "/" in name or "\\" in name or ".." in name or name in {".", ".."}:
-            raise ValueError(f"unsafe keep filename: {name}")
-        path_s = os.path.join(session, name)
-        try:
-            rel = os.path.relpath(path_s, here)
-        except ValueError as err:
-            raise ValueError(f"keep path escapes script dir: {path_s}") from err
-        if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
-            raise ValueError(f"keep path escapes script dir: {path_s}")
-        if not path_s.startswith(here + os.sep):
-            raise ValueError(f"keep path escapes script dir: {path_s}")
-        with open(path_s, "wb") as fh:
-            fh.write(body)
-        step["saved_to"] = path_s
+        saved = _write_keep_bytes(keep_dir, body, probe)
+        step["saved_to"] = saved
         step["keep_requested"] = str(keep_dir)
 
     # Drop body from return payload (too large for JSON reports).
     return step
+
+
+def _write_keep_bytes(
+    keep_dir: Path | str,
+    body: bytes,
+    probe: dict[str, Any],
+) -> str:
+    """Write media bytes under the operator-selected keep root.
+
+    Resolves ``keep_dir`` (cwd-relative or absolute). Refuses a destination leaf
+    that is a symlink (existing or dangling) so outside targets stay untouched.
+    Uses exclusive create when the leaf is missing.
+    """
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(keep_dir))))
+    root.mkdir(parents=True, exist_ok=True)
+    # Re-resolve after mkdir so a pre-existing directory path is absolute.
+    root = Path(os.path.abspath(os.fspath(root)))
+    if root.is_symlink():
+        raise ValueError(f"refusing keep_dir that is a symlink: {root}")
+
+    ext_raw = probe.get("kind") if probe.get("kind") != "unknown" else "bin"
+    ext = str(ext_raw).replace("/", "").replace("\\", "").replace("..", "") or "bin"
+    name = f"smoke-asset.{ext}"
+    if "/" in name or "\\" in name or ".." in name or name in {".", ".."}:
+        raise ValueError(f"unsafe keep filename: {name}")
+
+    path_s = os.path.join(os.fspath(root), name)
+    try:
+        rel = os.path.relpath(path_s, os.fspath(root))
+    except ValueError as err:
+        raise ValueError(f"keep path escapes keep_dir: {path_s}") from err
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+        raise ValueError(f"keep path escapes keep_dir: {path_s}")
+    if not path_s.startswith(os.fspath(root) + os.sep):
+        raise ValueError(f"keep path escapes keep_dir: {path_s}")
+
+    if os.path.lexists(path_s):
+        if os.path.islink(path_s):
+            raise ValueError(f"refusing keep destination symlink: {path_s}")
+        # Replace an existing regular file via exclusive temp + rename.
+        tmp_name = f".{name}.tmp-{os.getpid()}-{time.time_ns()}"
+        tmp_path = os.path.join(os.fspath(root), tmp_name)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        fd = os.open(tmp_path, flags, 0o644)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(body)
+            os.replace(tmp_path, path_s)
+        except Exception:
+            if os.path.lexists(tmp_path) and not os.path.islink(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            raise
+    else:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        fd = os.open(path_s, flags, 0o644)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(body)
+    return path_s
 
 
 def load_apk_shapes(report_path: Path) -> dict[str, Any]:
@@ -1081,6 +1122,52 @@ def _run_self_test() -> int:
         assert profile.library_path == "/api/v13/library"
         assert profile.download_manifest_path == "/api/v13/download-manifest"
         assert "v13" in profile.packaged_m4b_path
+
+    # keep_dir writes land under the operator-selected root (not script _smoke_keep).
+    with tempfile.TemporaryDirectory() as td:
+        root_a = Path(td) / "keep-a"
+        root_b = Path(td) / "keep-b"
+        probe = {"kind": "m4b", "ok": True}
+        saved_a = _write_keep_bytes(root_a, b"AAA", probe)
+        saved_b = _write_keep_bytes(root_b, b"BBB", probe)
+        assert saved_a.startswith(str(root_a.resolve()) + os.sep)
+        assert saved_b.startswith(str(root_b.resolve()) + os.sep)
+        assert saved_a != saved_b
+        assert Path(saved_a).read_bytes() == b"AAA"
+        assert Path(saved_b).read_bytes() == b"BBB"
+
+        cwd = os.getcwd()
+        try:
+            os.chdir(td)
+            saved_rel = _write_keep_bytes(Path("rel-keep"), b"REL", probe)
+            assert os.path.isfile(saved_rel)
+            assert b"REL" == Path(saved_rel).read_bytes()
+        finally:
+            os.chdir(cwd)
+
+        outside = Path(td) / "outside-victim"
+        outside.write_bytes(b"KEEP")
+        dest_link = root_a / "smoke-asset.m4b"
+        if dest_link.exists() or dest_link.is_symlink():
+            dest_link.unlink()
+        dest_link.symlink_to(outside)
+        try:
+            _write_keep_bytes(root_a, b"NEW", probe)
+            raise AssertionError("expected refusal of destination symlink")
+        except ValueError:
+            pass
+        assert outside.read_bytes() == b"KEEP"
+
+        dangling = root_b / "smoke-asset.m4b"
+        if dangling.exists() or dangling.is_symlink():
+            dangling.unlink()
+        dangling.symlink_to(Path(td) / "missing-target")
+        try:
+            _write_keep_bytes(root_b, b"NEW", probe)
+            raise AssertionError("expected refusal of dangling destination symlink")
+        except ValueError:
+            pass
+        assert not (Path(td) / "missing-target").exists()
 
     print("live_smoke self-test ok")
     return 0

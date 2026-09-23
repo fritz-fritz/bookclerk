@@ -80,6 +80,7 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
   // Operator-selected root: resolve once so a symlinked plugin directory works.
   const root = fs.realpathSync(path.resolve(pluginDir));
   const tomlPath = assertPathInside(root, "plugin.toml");
+  refuseSymlinkPath(root, tomlPath);
   const m = parseToml(fs.readFileSync(tomlPath, "utf8")) as Manifest;
   validateManifest(m);
   const version = m.version ?? "0.0.0";

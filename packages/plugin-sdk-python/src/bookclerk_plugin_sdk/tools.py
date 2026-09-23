@@ -22,7 +22,14 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from .path_guard import resolve_under, cli_user_path, copy_tree_no_symlinks, refuse_symlink_path
+from .path_guard import (
+    resolve_under,
+    cli_user_path,
+    copy_tree_no_symlinks,
+    refuse_symlink_path,
+    write_file_under,
+    copy_file_under,
+)
 
 # Required for local bookclerk-workerd / Pyodide without pywrangler.
 PYTHON_WORKERD_FLAGS = ("python_workers", "disable_python_external_sdk")
@@ -451,6 +458,7 @@ def sync_embed(plugin_dir: Path) -> str:
     """
     root = cli_user_path(plugin_dir)
     toml_path = resolve_under(root, "plugin.toml")
+    refuse_symlink_path(root, toml_path)
     text = toml_path.read_text(encoding="utf-8")
     m = tomllib.loads(text)
     validate_manifest(m)
@@ -462,20 +470,24 @@ def sync_embed(plugin_dir: Path) -> str:
             f"(got {m['workerd'].get('main_module')!r})"
         )
     modules_dir = _workerd_modules_dir(root, m)
+    refuse_symlink_path(root, modules_dir)
     pkg = resolve_under(modules_dir, "bookclerk_plugin_sdk")
+    refuse_symlink_path(root, pkg)
     pkg.mkdir(parents=True, exist_ok=True)
+    refuse_symlink_path(root, pkg)
     init = resolve_under(pkg, "__init__.py")
     if not init.is_file():
-        init.write_text(
+        write_file_under(
+            pkg,
+            "__init__.py",
             '"""Bookclerk plugin SDK (vendored for workerd). Prefer .workerd."""\n',
-            encoding="utf-8",
         )
-    dest = resolve_under(pkg, "workerd.py")
-    shutil.copy2(_sdk_workerd_embed_src(), dest)
+    dest = copy_file_under(pkg, "workerd.py", _sdk_workerd_embed_src())
 
     new_text = _ensure_python_flags_in_toml_text(text, m)
     if new_text != text:
-        toml_path.write_text(new_text, encoding="utf-8")
+        refuse_symlink_path(root, toml_path)
+        write_file_under(root, "plugin.toml", new_text)
         return f"synced {dest} + python workerd flags in {toml_path}"
     return f"synced {dest}"
 
@@ -792,6 +804,7 @@ def package_plugin(plugin_dir: Path, out_dir: Path) -> Path:
     root = Path(os.path.realpath(cli_user_path(plugin_dir)))
     out = cli_user_path(out_dir)
     toml_path = resolve_under(root, "plugin.toml")
+    refuse_symlink_path(root, toml_path)
     m = tomllib.loads(toml_path.read_text(encoding="utf-8"))
     validate_manifest(m)
     version = m.get("version") or "0.0.0"

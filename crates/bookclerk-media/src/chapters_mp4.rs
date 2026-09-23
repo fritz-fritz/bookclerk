@@ -23,8 +23,8 @@ use crate::error::{MediaError, Result};
 const CHAPTER_TIMESCALE: u32 = 1000;
 /// Nero `chpl` start-time timescale (mp4ameta / Nero default).
 const CHPL_TIMESCALE: u64 = 10_000_000;
-/// In-memory `moov` rebuild ceiling (untrusted container size from the file).
-const MAX_MOOV_REBUILD_BYTES: usize = 64 * 1024 * 1024;
+/// In-memory `moov` rebuild ceiling — same policy as [`bookclerk_mp4::boxutil::MAX_READ_EXACT_VEC_BYTES`].
+const MAX_MOOV_REBUILD_BYTES: usize = bookclerk_mp4::boxutil::MAX_READ_EXACT_VEC_BYTES;
 
 /// Trailing UTF-8 `encd` atom appended to each QuickTime chapter sample.
 const ENCD: [u8; 12] = [

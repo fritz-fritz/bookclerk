@@ -119,23 +119,26 @@ pub fn parse_mp4(path: &Path) -> Result<Mp4File> {
     let (mvhd_timescale, mvhd_duration) = parse_mvhd(&mut file, &moov)?;
     let audio = parse_audio_track(&mut file, &moov)?;
 
-    let mut ftyp_bytes = vec![
-        0u8;
-        usize::try_from(ftyp.size).map_err(|_| {
-            Mp4Error::container(format!("ftyp too large: {}", ftyp.size))
-        })?
-    ];
+    let file_len = file.seek(SeekFrom::End(0))?;
+    let ftyp_end = ftyp
+        .start
+        .checked_add(ftyp.size)
+        .ok_or_else(|| Mp4Error::container("ftyp extent overflows"))?;
+    let moov_end = moov
+        .start
+        .checked_add(moov.size)
+        .ok_or_else(|| Mp4Error::container("moov extent overflows"))?;
+    if ftyp_end > file_len || moov_end > file_len {
+        return Err(Mp4Error::container("ftyp/moov extent exceeds file length"));
+    }
+    let ftyp_len = usize::try_from(ftyp.size)
+        .map_err(|_| Mp4Error::container(format!("ftyp too large: {}", ftyp.size)))?;
+    let moov_len = usize::try_from(moov.size)
+        .map_err(|_| Mp4Error::container(format!("moov too large: {}", moov.size)))?;
     file.seek(SeekFrom::Start(ftyp.start))?;
-    file.read_exact(&mut ftyp_bytes)?;
-
-    let mut moov_bytes = vec![
-        0u8;
-        usize::try_from(moov.size).map_err(|_| {
-            Mp4Error::container(format!("moov too large: {}", moov.size))
-        })?
-    ];
+    let ftyp_bytes = crate::boxutil::read_exact_vec(&mut file, ftyp_len)?;
     file.seek(SeekFrom::Start(moov.start))?;
-    file.read_exact(&mut moov_bytes)?;
+    let moov_bytes = crate::boxutil::read_exact_vec(&mut file, moov_len)?;
 
     Ok(Mp4File {
         path: path.to_path_buf(),

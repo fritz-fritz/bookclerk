@@ -20,11 +20,12 @@ function mustThrow(label, fn, pattern = /symlink|\.\.|unsafe|escape|must not con
 }
 
 async function main() {
-  let assertPathInside, packagePlugin, materializeConfig;
+  let assertPathInside, packagePlugin, materializeConfig, syncEmbed;
   try {
     ({ assertPathInside } = await import("../dist/sparse-workerd/ensure.js"));
     ({ packagePlugin } = await import("../dist/tools/package.js"));
     ({ materializeConfig } = await import("../dist/sparse-workerd/config.js"));
+    ({ syncEmbed } = await import("../dist/tools/check.js"));
   } catch {
     console.error("dist/ missing — run npm run build first");
     process.exit(1);
@@ -70,6 +71,64 @@ mode = "deny"
   mustThrow("packagePlugin refuses module symlink", () =>
     packagePlugin(plugin, path.join(tmp, "dist")),
   );
+
+  // Outside TOML via leaf symlink must be refused before archive publish.
+  const tomlOutside = path.join(tmp, "evil-plugin.toml");
+  fs.copyFileSync(path.join(plugin, "plugin.toml"), tomlOutside);
+  fs.rmSync(path.join(plugin, "plugin.toml"));
+  fs.symlinkSync(tomlOutside, path.join(plugin, "plugin.toml"));
+  mustThrow("packagePlugin refuses plugin.toml leaf symlink", () =>
+    packagePlugin(plugin, path.join(tmp, "dist-toml")),
+  );
+  fs.rmSync(path.join(plugin, "plugin.toml"));
+  fs.copyFileSync(tomlOutside, path.join(plugin, "plugin.toml"));
+
+  // syncEmbed: modules dir / leaf embed symlinks refused; nested OK; symlinked root OK.
+  mustThrow("syncEmbed refuses modules dir symlink", () => {
+    const p = path.join(tmp, "sync-mod");
+    fs.mkdirSync(path.join(p, "modules"), { recursive: true });
+    fs.copyFileSync(path.join(plugin, "plugin.toml"), path.join(p, "plugin.toml"));
+    fs.writeFileSync(path.join(p, "modules", "main.js"), "export default class X {}");
+    fs.rmSync(path.join(p, "modules"), { recursive: true, force: true });
+    fs.symlinkSync(path.join(tmp, "outside-mod"), path.join(p, "modules"));
+    fs.mkdirSync(path.join(tmp, "outside-mod"), { recursive: true });
+    syncEmbed(p);
+  });
+
+  const syncPlugin = path.join(tmp, "sync-plugin");
+  fs.mkdirSync(path.join(syncPlugin, "modules"), { recursive: true });
+  fs.copyFileSync(path.join(plugin, "plugin.toml"), path.join(syncPlugin, "plugin.toml"));
+  fs.writeFileSync(path.join(syncPlugin, "modules", "main.js"), "export default class X {}");
+  const embedVictim = path.join(tmp, "embed-victim.js");
+  fs.writeFileSync(embedVictim, "SECRET_EMBED");
+  fs.mkdirSync(path.join(syncPlugin, "modules", "@bookclerk", "plugin-sdk"), {
+    recursive: true,
+  });
+  fs.symlinkSync(
+    embedVictim,
+    path.join(syncPlugin, "modules", "@bookclerk", "plugin-sdk", "workerd.js"),
+  );
+  mustThrow("syncEmbed refuses workerd leaf symlink", () => syncEmbed(syncPlugin));
+  if (fs.readFileSync(embedVictim, "utf8") !== "SECRET_EMBED") {
+    console.error("FAIL: embed victim was modified");
+    process.exit(1);
+  }
+  fs.rmSync(path.join(syncPlugin, "modules", "@bookclerk"), { recursive: true, force: true });
+  const synced = syncEmbed(syncPlugin);
+  if (!synced.includes("synced")) {
+    console.error("FAIL: syncEmbed nested modules", synced);
+    process.exit(1);
+  }
+  console.log("ok syncEmbed writes nested modules");
+
+  const syncLink = path.join(tmp, "sync-link");
+  fs.symlinkSync(syncPlugin, syncLink);
+  const syncedLink = syncEmbed(syncLink);
+  if (!syncedLink.includes("synced")) {
+    console.error("FAIL: syncEmbed symlinked root", syncedLink);
+    process.exit(1);
+  }
+  console.log("ok syncEmbed allows symlinked plugin root");
 
   const draftRoot = path.join(tmp, "draftroot");
   fs.mkdirSync(draftRoot);

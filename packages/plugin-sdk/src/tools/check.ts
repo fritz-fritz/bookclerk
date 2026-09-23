@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
-import { assertPathInside } from "../sparse-workerd/ensure.js";
+import { assertPathInside, copyFileUnder, ensureDirUnder, refuseSymlinkPath } from "../sparse-workerd/ensure.js";
 import { validateLogo, validateManifest, type Manifest } from "./validate.js";
 
 /**
@@ -189,8 +189,10 @@ export function checkPlugin(pluginDir: string): string {
  * ```
  */
 export function syncEmbed(pluginDir: string): string {
-  const root = path.resolve(pluginDir);
+  // Operator-selected root may itself be a symlink; refuse only child leaves.
+  const root = fs.realpathSync(path.resolve(pluginDir));
   const tomlPath = assertPathInside(root, "plugin.toml");
+  refuseSymlinkPath(root, tomlPath);
   const m = parseToml(fs.readFileSync(tomlPath, "utf8")) as Manifest;
   validateManifest(m);
   if ((m.runtime ?? "native") !== "workerd") {
@@ -203,13 +205,13 @@ export function syncEmbed(pluginDir: string): string {
     );
   }
   const modulesDir = assertPathInside(root, m.workerd?.modules_dir ?? "modules");
-  const destDir = assertPathInside(modulesDir, path.join("@bookclerk", "plugin-sdk"));
-  fs.mkdirSync(destDir, { recursive: true });
-  const dest = assertPathInside(destDir, "workerd.js");
+  refuseSymlinkPath(root, modulesDir);
+  const destDir = ensureDirUnder(modulesDir, path.join("@bookclerk", "plugin-sdk"));
+  refuseSymlinkPath(root, destDir);
   const src = sdkEmbedSrc();
   if (!fs.existsSync(src)) {
     throw new Error(`SDK embed missing: ${src}`);
   }
-  fs.copyFileSync(src, dest);
+  const dest = copyFileUnder(destDir, "workerd.js", src);
   return `synced ${dest} (optional vendor; prefer package import + bookclerk-workerd inject)`;
 }

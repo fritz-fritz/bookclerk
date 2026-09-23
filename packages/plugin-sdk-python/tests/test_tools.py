@@ -275,6 +275,91 @@ def test_sync_embed_optional_vendor(tmp_path: Path):
     assert "ok" in check_plugin(staging)
 
 
+def test_sync_embed_refuses_modules_and_leaf_symlinks(tmp_path: Path):
+    staging = tmp_path / "plugin"
+    staging.mkdir()
+    (staging / "plugin.toml").write_text(
+        (ECHO_PY / "plugin.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "workerd.py").write_text("SECRET", encoding="utf-8")
+    modules = staging / "modules"
+    modules.symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        sync_embed(staging)
+
+    modules.unlink()
+    modules.mkdir()
+    (modules / "plugin.py").write_text(
+        (ECHO_PY / "modules" / "plugin.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    pkg = modules / "bookclerk_plugin_sdk"
+    pkg.mkdir()
+    (pkg / "workerd.py").symlink_to(outside / "workerd.py")
+    with pytest.raises(ValueError, match="symlink"):
+        sync_embed(staging)
+    assert (outside / "workerd.py").read_text(encoding="utf-8") == "SECRET"
+
+
+def test_sync_embed_refuses_dangling_package_dir_link(tmp_path: Path):
+    staging = tmp_path / "plugin"
+    staging.mkdir()
+    (staging / "plugin.toml").write_text(
+        (ECHO_PY / "plugin.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    modules = staging / "modules"
+    modules.mkdir()
+    (modules / "plugin.py").write_text(
+        (ECHO_PY / "modules" / "plugin.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (modules / "bookclerk_plugin_sdk").symlink_to(staging / "missing-pkg")
+    with pytest.raises(ValueError, match="symlink"):
+        sync_embed(staging)
+
+
+def test_sync_embed_allows_symlinked_operator_root(tmp_path: Path):
+    real = tmp_path / "real-plugin"
+    real.mkdir()
+    (real / "plugin.toml").write_text(
+        (ECHO_PY / "plugin.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    modules = real / "modules"
+    modules.mkdir()
+    (modules / "plugin.py").write_text(
+        (ECHO_PY / "modules" / "plugin.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    link = tmp_path / "link-plugin"
+    link.symlink_to(real)
+    assert "synced" in sync_embed(link)
+    assert (modules / "bookclerk_plugin_sdk" / "workerd.py").is_file()
+
+
+def test_package_refuses_toml_leaf_symlink(tmp_path: Path):
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    outside = tmp_path / "evil.toml"
+    outside.write_text(
+        (ECHO_PY / "plugin.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (plugin / "plugin.toml").symlink_to(outside)
+    modules = plugin / "modules"
+    modules.mkdir()
+    (modules / "plugin.py").write_text(
+        (ECHO_PY / "modules" / "plugin.py").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="symlink"):
+        package_plugin(plugin, tmp_path / "dist")
+
+
 def test_format_manifest_emits_sealed_and_loopback_tables():
     text = format_manifest(
         {

@@ -608,9 +608,22 @@ impl BackupRepository {
             if !path.starts_with(&objects) {
                 continue;
             }
-            if !path.is_dir() {
+            // Refuse symlinked object-prefix directories (including dangling links)
+            // before descending — `is_dir()` would follow and GC could delete
+            // outside bytes.
+            let Ok(prefix_meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if prefix_meta.file_type().is_symlink() {
+                return Err(LibraryError::Schema(format!(
+                    "refusing symlinked backup object prefix {}",
+                    path.display()
+                )));
+            }
+            if !prefix_meta.is_dir() {
                 continue;
             }
+            let path = self.under_root(&path)?;
             let Ok(files) = fs::read_dir(&path) else {
                 continue;
             };
@@ -622,14 +635,29 @@ impl BackupRepository {
                 let Some(name) = file_path.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
+                // Unlink the directory entry only — never follow a leaf symlink
+                // (would delete another object's or an outside file's bytes).
+                let Ok(leaf_meta) = fs::symlink_metadata(&file_path) else {
+                    continue;
+                };
+                let ft = leaf_meta.file_type();
+                if ft.is_dir() {
+                    continue;
+                }
                 if name.starts_with('.') {
                     let _ = fs::remove_file(&file_path);
+                    continue;
+                }
+                if !ft.is_file() && !ft.is_symlink() {
                     continue;
                 }
                 let Some(dir) = path.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
                 let digest = format!("{dir}{name}");
+                if !object_digest_ok(&digest) {
+                    continue;
+                }
                 if live.contains(&digest) {
                     continue;
                 }
