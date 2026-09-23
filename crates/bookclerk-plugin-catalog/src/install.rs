@@ -1012,6 +1012,11 @@ fn alias_from_install_dir(dest: &Path) -> Option<String> {
 }
 
 /// Restores (or confirms) the install tree for [`Installer::rollback`].
+///
+/// Mutation operands are validated with [`require_mutable_child`] so a
+/// destination leaf symlink cannot redirect delete/rename onto a sibling or
+/// the plugins root. Missing destinations remain a no-op for first-install
+/// rollback.
 fn restore_tree_for_rollback(outcome: &InstallOutcome) -> Result<()> {
     let plugins_root = outcome.plugin_root.parent().ok_or_else(|| {
         CatalogError::message(format!(
@@ -1019,11 +1024,12 @@ fn restore_tree_for_rollback(outcome: &InstallOutcome) -> Result<()> {
             outcome.plugin_root.display()
         ))
     })?;
-    let dest = require_under(plugins_root, &outcome.plugin_root)?;
+    // Preserve the intended directory entry; do not follow a leaf symlink.
+    let dest = require_mutable_child(plugins_root, &outcome.plugin_root)?;
     match &outcome.previous {
         Some(bak) if bak.exists() => {
             let bak = require_mutable_child(plugins_root, bak)?;
-            restore_update_tree_from_backup(&dest, &bak)
+            restore_update_tree_from_backup(plugins_root, &dest, &bak)
         }
         Some(_) => {
             if dest.exists() {
@@ -1047,14 +1053,14 @@ fn restore_tree_for_rollback(outcome: &InstallOutcome) -> Result<()> {
 
 /// Moves the failed new tree aside and puts the backup back without deleting
 /// `dest` unless a usable backup is in place.
-fn restore_update_tree_from_backup(dest: &Path, backup: &Path) -> Result<()> {
+///
+/// `dest` and `backup` must already be lexical mutable children of
+/// `plugins_root` (see [`require_mutable_child`]).
+fn restore_update_tree_from_backup(plugins_root: &Path, dest: &Path, backup: &Path) -> Result<()> {
+    // Re-validate against the trusted plugins root before any rename/delete.
+    let dest = require_mutable_child(plugins_root, dest)?;
+    let backup = require_mutable_child(plugins_root, backup)?;
     if dest.exists() {
-        let plugins_root = dest.parent().ok_or_else(|| {
-            CatalogError::message(format!(
-                "cannot rollback {}: destination has no parent",
-                dest.display()
-            ))
-        })?;
         fs::create_dir_all(plugins_root)?;
         let staging_parent_path = plugins_root.join(".staging");
         let staging_parent = require_mutable_child(plugins_root, &staging_parent_path)?;
@@ -1066,14 +1072,14 @@ fn restore_update_tree_from_backup(dest: &Path, backup: &Path) -> Result<()> {
             .unwrap_or_else(|| "plugin".into());
         let aside = unique_hold_path(&staging_parent, &format!("{dest_name}.rollback-new"));
         let aside = require_mutable_child(plugins_root, &aside)?;
-        rename_retry(dest, &aside)?;
-        match fs::rename(backup, dest) {
+        rename_retry(&dest, &aside)?;
+        match fs::rename(&backup, &dest) {
             Ok(()) => {
                 let _ = remove_dir_retry(&aside);
                 Ok(())
             }
             Err(err) => {
-                let restore = restore_held_tree(&aside, dest);
+                let restore = restore_held_tree(&aside, &dest);
                 Err(CatalogError::message(format!(
                     "failed to restore previous plugin tree from {}: {err}{}",
                     backup.display(),
@@ -1086,7 +1092,7 @@ fn restore_update_tree_from_backup(dest: &Path, backup: &Path) -> Result<()> {
             }
         }
     } else {
-        fs::rename(backup, dest).map_err(|err| {
+        fs::rename(&backup, &dest).map_err(|err| {
             CatalogError::message(format!(
                 "failed to restore previous plugin tree from {} to {}: {err}",
                 backup.display(),
@@ -1256,11 +1262,26 @@ fn unique_hold_path(parent: &Path, base: &str) -> PathBuf {
 }
 
 /// Moves a held install tree back to `dest` after a failed remove step.
+///
+/// Both operands are validated with [`require_mutable_child`] under their
+/// immediate parents so a leaf symlink cannot redirect rename onto a peer or
+/// the trusted root. Missing `dest` with a present hold still renames; an
+/// already-restored destination remains a no-op when the hold is gone.
 fn restore_held_tree(hold: &Path, dest: &Path) -> Result<()> {
-    let hold_root = hold.parent().unwrap_or(hold);
-    let dest_root = dest.parent().unwrap_or(dest);
-    let hold = require_under(hold_root, hold)?;
-    let dest = require_under(dest_root, dest)?;
+    let hold_root = hold.parent().ok_or_else(|| {
+        CatalogError::message(format!(
+            "cannot restore held tree {}: path has no parent",
+            hold.display()
+        ))
+    })?;
+    let dest_root = dest.parent().ok_or_else(|| {
+        CatalogError::message(format!(
+            "cannot restore to {}: path has no parent",
+            dest.display()
+        ))
+    })?;
+    let hold = require_mutable_child(hold_root, hold)?;
+    let dest = require_mutable_child(dest_root, dest)?;
     if dest.exists() {
         if hold.exists() {
             return Err(CatalogError::message(format!(
@@ -2767,6 +2788,148 @@ mod tests {
             .unwrap()
             .get(&out.receipt.plugin_key().unwrap())
             .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_install_rollback_refuses_dest_symlink_to_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (archive, digest) = make_echo_archive(tmp.path());
+        let plugins = under_tmp(tmp.path(), "plugins");
+        let opts = echo_install_opts(plugins.clone(), false);
+        let coord = PackageCoordinate {
+            source: RegistrySource::LocalArchive,
+            name: archive.display().to_string(),
+            version: "1.0.0".into(),
+        };
+        let out = Installer::install_from_manifest(
+            &echo_manifest(
+                "echo",
+                digest,
+                format!("file://{}", archive.display()),
+                host_bookclerk_target(),
+            ),
+            &coord,
+            &opts,
+        )
+        .unwrap();
+        assert!(out.previous.is_none());
+        let dest = out.plugin_root.clone();
+        let sibling = under_tmp(&plugins, "sibling-keep");
+        fs::create_dir_all(&sibling).unwrap();
+        let sentinel = under_tmp(&sibling, "sentinel.txt");
+        fs::write(&sentinel, b"keep-sibling").unwrap();
+        // Replace the install entry with a leaf symlink to the sibling.
+        fs::remove_dir_all(&dest).unwrap();
+        std::os::unix::fs::symlink(&sibling, &dest).unwrap();
+
+        let err = Installer::rollback(&out).unwrap_err().to_string();
+        assert!(
+            err.contains("symlink") || err.contains("mutation"),
+            "expected symlink refusal, got {err}"
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), b"keep-sibling");
+        assert!(dest.is_symlink());
+        assert!(sibling.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_install_rollback_refuses_dest_symlink_to_plugins_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (archive, digest) = make_echo_archive(tmp.path());
+        let plugins = under_tmp(tmp.path(), "plugins");
+        let opts = echo_install_opts(plugins.clone(), false);
+        let coord = PackageCoordinate {
+            source: RegistrySource::LocalArchive,
+            name: archive.display().to_string(),
+            version: "1.0.0".into(),
+        };
+        let out = Installer::install_from_manifest(
+            &echo_manifest(
+                "echo",
+                digest,
+                format!("file://{}", archive.display()),
+                host_bookclerk_target(),
+            ),
+            &coord,
+            &opts,
+        )
+        .unwrap();
+        let dest = out.plugin_root.clone();
+        let root_sentinel = under_tmp(&plugins, "root-sentinel.txt");
+        fs::write(&root_sentinel, b"keep-root").unwrap();
+        fs::remove_dir_all(&dest).unwrap();
+        std::os::unix::fs::symlink(&plugins, &dest).unwrap();
+
+        let err = Installer::rollback(&out).unwrap_err().to_string();
+        assert!(
+            err.contains("symlink") || err.contains("mutation") || err.contains("strict child"),
+            "expected refusal of plugins-root alias, got {err}"
+        );
+        assert_eq!(fs::read(&root_sentinel).unwrap(), b"keep-root");
+        assert!(plugins.is_dir());
+        assert!(dest.is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_rollback_refuses_symlinked_dest_preserving_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (plugins, dest, _key, manifest, coord, mut opts) = installed_echo(tmp.path());
+        fs::write(under_tmp(&dest, "old-marker"), b"v1").unwrap();
+        opts.replace = true;
+        let second = Installer::install_from_manifest(&manifest, &coord, &opts).unwrap();
+        let bak = second.previous.clone().expect("backup from replace");
+        assert!(path_under(tmp.path(), &bak).exists());
+        assert!(fs::read(under_tmp(&bak, "old-marker")).unwrap() == b"v1");
+
+        let sibling = under_tmp(&plugins, "peer-keep");
+        fs::create_dir_all(&sibling).unwrap();
+        let sentinel = under_tmp(&sibling, "peer.txt");
+        fs::write(&sentinel, b"peer-ok").unwrap();
+        // Swap the new install tree for a symlink to the peer.
+        fs::remove_dir_all(&second.plugin_root).unwrap();
+        std::os::unix::fs::symlink(&sibling, &second.plugin_root).unwrap();
+
+        let err = Installer::rollback(&second).unwrap_err().to_string();
+        assert!(
+            err.contains("symlink") || err.contains("mutation"),
+            "expected symlink refusal, got {err}"
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), b"peer-ok");
+        assert!(path_under(tmp.path(), &bak).is_dir());
+        assert_eq!(fs::read(under_tmp(&bak, "old-marker")).unwrap(), b"v1");
+        assert!(second.plugin_root.is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_held_tree_refuses_symlinked_hold_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = under_tmp(tmp.path(), "plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let staging = under_tmp(&plugins, ".staging");
+        fs::create_dir_all(&staging).unwrap();
+        let real_hold = under_tmp(&staging, "real-hold");
+        fs::create_dir_all(&real_hold).unwrap();
+        let sentinel = under_tmp(&real_hold, "held.txt");
+        fs::write(&sentinel, b"held-bytes").unwrap();
+        let link_hold = under_tmp(&staging, "link-hold");
+        std::os::unix::fs::symlink(&real_hold, &link_hold).unwrap();
+        let dest = under_tmp(&plugins, "restore-dest");
+
+        let err = restore_held_tree(&link_hold, &dest)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("symlink") || err.contains("mutation"),
+            "expected held symlink refusal, got {err}"
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), b"held-bytes");
+        assert!(real_hold.is_dir());
+        assert!(!dest.exists());
+        assert!(link_hold.is_symlink());
     }
 
     #[test]
