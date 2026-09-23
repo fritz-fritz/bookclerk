@@ -15,3 +15,40 @@ lockfile package name, so a path patch would not clear the scan. Accept the
 INFO finding until upstream moves to maintained `pastey` (or equivalent).
 Re-evaluate when tokenizers/fastembed stop depending on `paste`.
 """
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0253"
+reason = """
+lru 0.16.4 use-after-free in `LruCache::pop()` under panic. Fixed in lru 0.18.2+.
+aws-sdk-s3 was upgraded so its edge uses lru 0.18.5. Remaining consumer is
+tantivy 0.26.2 (`bookclerk-search`), which still requires `lru ^0.16.3` and has
+no newer crates.io release that moves off 0.16. Cannot `cargo update -p lru`
+without breaking tantivy. Accept until tantivy publishes a release on lru 0.18+.
+Re-evaluate on each tantivy bump.
+"""
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0235"
+reason = """
+rkyv 0.7.46 archive validation advisory; fixed in rkyv 0.8.17. Listed in
+Cargo.lock as an optional dependency of rust_decimal (optional behind
+sea-orm's `with-rust_decimal`, which we do not enable — sea-orm features are
+macros/with-chrono/uuid/json/proxy/sqlx-postgres/runtime-tokio-rustls/stream
+only). `cargo tree -i rkyv` reports no activated consumer; rust_decimal's
+own `rkyv` feature is off. OSV still matches the lockfile package name.
+Accept the lockfile-only finding until we enable with-rust_decimal or
+upstream drops the 0.7 optional edge. Re-evaluate when sea-orm/rust_decimal
+feature selection changes.
+"""
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+reason = """
+rsa 0.9.x Marvin Attack (CVE-2023-49092) timing sidechannel on PKCS#1 v1.5
+decryption. No patched crates.io release of `rsa` exists (`fixed version: --`).
+Pulled only via jsonwebtoken 11 + openidconnect 4 in bookclerkd for JWT / OIDC
+signature verification (rust_crypto), not RSA private-key decryption of
+attacker-chosen ciphertexts. Upstream jsonwebtoken/openidconnect have not
+moved off rsa 0.9. Accept until those crates drop rsa or rsa ships a fix.
+Re-evaluate on jsonwebtoken / openidconnect / rsa releases.
+"""
