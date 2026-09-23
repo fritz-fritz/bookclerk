@@ -247,6 +247,11 @@ fn replace_receipt_entry(from: &Path, to: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 #[allow(unsafe_code)] // MoveFileExW FFI — same boundary as bookclerk-config.
+/// Atomically replaces `to` with `from` via `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`.
+///
+/// # Errors
+///
+/// Returns an I/O error when `MoveFileExW` fails.
 fn replace_receipt_windows(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
