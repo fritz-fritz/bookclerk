@@ -1169,6 +1169,12 @@ def _run_self_test() -> int:
             pass
         assert not (Path(td) / "missing-target").exists()
 
+        # Absolute operator-selected root outside the script/repo is allowed.
+        external = Path(td) / "external-abs"
+        saved_ext = _write_keep_bytes(external, b"EXT", probe)
+        assert Path(saved_ext).read_bytes() == b"EXT"
+        assert saved_ext.startswith(str(external.resolve()) + os.sep)
+
     print("live_smoke self-test ok")
     return 0
 
@@ -1264,30 +1270,9 @@ def main(argv: list[str] | None = None) -> int:
     keep_raw = first_env("TEST_LIBRO_DOWNLOAD_DIR")
     download_dir: Path | None = None
     if keep_raw:
-        # Contain under the repo root (or cwd) so mkdir/write is barriered.
-        base = os.path.abspath(os.fspath(args.repo_root))
-        resolved = os.path.abspath(os.path.expanduser(keep_raw))
-        try:
-            rel = os.path.relpath(resolved, base)
-        except ValueError:
-            print(
-                f"error: TEST_LIBRO_DOWNLOAD_DIR must resolve under repo root ({base})",
-                file=sys.stderr,
-            )
-            return 2
-        if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
-            print(
-                f"error: TEST_LIBRO_DOWNLOAD_DIR must resolve under repo root ({base})",
-                file=sys.stderr,
-            )
-            return 2
-        if resolved != base and not resolved.startswith(base + os.sep):
-            print(
-                f"error: TEST_LIBRO_DOWNLOAD_DIR must resolve under repo root ({base})",
-                file=sys.stderr,
-            )
-            return 2
-        download_dir = Path(resolved)
+        # Operator-selected output root (absolute or cwd-relative). Leaf writes
+        # are constrained by `_write_keep_bytes`; do not jail to repo_root.
+        download_dir = Path(os.path.abspath(os.path.expanduser(keep_raw)))
 
     report = args.report or (args.repo_root / "artifacts/librofm-apk-probe/report.json")
     apk_shapes = resolve_shapes(report, args.repo_root)

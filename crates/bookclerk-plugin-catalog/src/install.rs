@@ -9,7 +9,9 @@ use chrono::Utc;
 
 use crate::coordinate::{PackageCoordinate, RegistrySource};
 use crate::error::{CatalogError, Result};
-use crate::extract::{extract_archive, require_under, safe_join, sha256_file, write_file};
+use crate::extract::{
+    extract_archive, require_mutable_child, require_under, safe_join, sha256_file, write_file,
+};
 use crate::identity::{PluginKey, PluginProvenance};
 use crate::kind::RuntimeIdentity;
 use crate::ledger::{record_install, restore_ledger_entry, InstallLedger, InstallLedgerEntry};
@@ -299,17 +301,20 @@ impl Installer {
             });
         }
 
-        let staging_parent = opts.plugins_root.join(".staging");
+        let staging_parent_path = opts.plugins_root.join(".staging");
+        // Trusted root is plugins_root — never a pre-existing `.staging` symlink.
+        let staging_parent = require_mutable_child(&opts.plugins_root, &staging_parent_path)?;
         fs::create_dir_all(&staging_parent)?;
-        let staging = staging_parent.join(format!("{}.{}", runtime.id, std::process::id()));
-        let staging = require_under(&staging_parent, &staging)?;
+        let staging_parent = require_mutable_child(&opts.plugins_root, &staging_parent_path)?;
+        let staging_path = staging_parent.join(format!("{}.{}", runtime.id, std::process::id()));
+        let staging = require_mutable_child(&opts.plugins_root, &staging_path)?;
         if staging.exists() {
             fs::remove_dir_all(&staging)?;
         }
         fs::create_dir_all(&staging)?;
 
         let archive_path = staging.join("download.archive");
-        let archive_path = require_under(&staging, &archive_path)?;
+        let archive_path = require_mutable_child(&opts.plugins_root, &archive_path)?;
         download_to(&artifact.url, &archive_path, opts.offline)?;
 
         let actual = sha256_file(&archive_path)?;
@@ -322,7 +327,7 @@ impl Installer {
         }
 
         let extract_root = staging.join("root");
-        let extract_root = require_under(&staging, &extract_root)?;
+        let extract_root = require_mutable_child(&opts.plugins_root, &extract_root)?;
         fs::create_dir_all(&extract_root)?;
         let format = if artifact.url.ends_with(".zip") || target.starts_with("windows-") {
             ArchiveFormat::Zip
@@ -377,8 +382,8 @@ impl Installer {
         }
 
         let backup = if dest.exists() {
-            let bak = staging_parent.join(format!("{}.backup", incoming_key.fs_id()));
-            let bak = require_under(&staging_parent, &bak)?;
+            let bak_path = staging_parent.join(format!("{}.backup", incoming_key.fs_id()));
+            let bak = require_mutable_child(&opts.plugins_root, &bak_path)?;
             if bak.exists() {
                 fs::remove_dir_all(&bak)?;
             }
@@ -606,9 +611,12 @@ impl Installer {
         let key = resolve_remove_plugin_key(&dest, ledger.as_ref())?;
         let previous_ledger = ledger.as_ref().and_then(|loaded| loaded.get(&key).cloned());
 
-        let staging_parent = plugins_root.join(".staging");
+        let staging_parent_path = plugins_root.join(".staging");
+        let staging_parent = require_mutable_child(plugins_root, &staging_parent_path)?;
         fs::create_dir_all(&staging_parent)?;
+        let staging_parent = require_mutable_child(plugins_root, &staging_parent_path)?;
         let tree_hold = unique_hold_path(&staging_parent, &format!("{}.removing", key.fs_id()));
+        let tree_hold = require_mutable_child(plugins_root, &tree_hold)?;
         rename_retry(&dest, &tree_hold)?;
 
         let state_dest = files_dir.map(|dir| dir.join("plugin-state").join(key.fs_id()));
@@ -1010,11 +1018,7 @@ fn restore_tree_for_rollback(outcome: &InstallOutcome) -> Result<()> {
     let dest = require_under(plugins_root, &outcome.plugin_root)?;
     match &outcome.previous {
         Some(bak) if bak.exists() => {
-            let bak = require_under(plugins_root, bak).or_else(|_| {
-                // Backup lives under `plugins/.staging/`.
-                let staging = plugins_root.join(".staging");
-                require_under(&staging, bak)
-            })?;
+            let bak = require_mutable_child(plugins_root, bak)?;
             restore_update_tree_from_backup(&dest, &bak)
         }
         Some(_) => {
@@ -1047,15 +1051,16 @@ fn restore_update_tree_from_backup(dest: &Path, backup: &Path) -> Result<()> {
                 dest.display()
             ))
         })?;
-        let staging_parent = plugins_root.join(".staging");
+        let staging_parent_path = plugins_root.join(".staging");
+        let staging_parent = require_mutable_child(plugins_root, &staging_parent_path)?;
         fs::create_dir_all(&staging_parent)?;
-        let staging_parent = require_under(plugins_root, &staging_parent)?;
+        let staging_parent = require_mutable_child(plugins_root, &staging_parent_path)?;
         let dest_name = dest
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "plugin".into());
         let aside = unique_hold_path(&staging_parent, &format!("{dest_name}.rollback-new"));
-        let aside = require_under(&staging_parent, &aside)?;
+        let aside = require_mutable_child(plugins_root, &aside)?;
         rename_retry(dest, &aside)?;
         match fs::rename(backup, dest) {
             Ok(()) => {

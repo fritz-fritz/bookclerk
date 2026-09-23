@@ -869,33 +869,48 @@ def package_plugin(plugin_dir: Path, out_dir: Path) -> Path:
     archive_name = f"{stem}.tar.gz"
     # Free-form version may embed path segments; contain under out before write.
     archive_path = resolve_under(out, archive_name)
-    tmp_path = resolve_under(
-        out, f".packaging-tmp-{plugin_id}-{os.getpid()}-{time.time_ns()}.tar.gz"
-    )
+    attempt_name = f".packaging-attempt-{plugin_id}-{os.getpid()}-{time.time_ns()}"
+    attempt_dir = resolve_under(out, attempt_name)
+    os.mkdir(attempt_dir)
+    owned_attempt = True
+    tmp_path = resolve_under(attempt_dir, "archive.tar.gz")
     try:
-        subprocess.run(
-            ["tar", "-C", str(staging), "-czf", str(tmp_path), "."],
-            check=True,
-        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        fd = os.open(os.fspath(tmp_path), flags, 0o644)
+        try:
+            with os.fdopen(fd, "wb") as out_fh:
+                proc = subprocess.run(
+                    ["tar", "-C", str(staging), "-czf", "-", "."],
+                    check=True,
+                    stdout=out_fh,
+                )
+                del proc
+        except Exception:
+            if tmp_path.exists() and not tmp_path.is_symlink():
+                tmp_path.unlink(missing_ok=True)
+            raise
         os.replace(tmp_path, archive_path)
+        shutil.rmtree(attempt_dir, ignore_errors=True)
+        owned_attempt = False
     except Exception:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+        if owned_attempt:
+            shutil.rmtree(attempt_dir, ignore_errors=True)
         raise
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
     digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     sums = resolve_under(out, "SHA256SUMS")
+    refuse_symlink_path(out, sums)
     lines = []
-    if sums.is_file():
+    if sums.is_file() and not sums.is_symlink():
         lines = [
             ln
             for ln in sums.read_text(encoding="utf-8").splitlines()
             if ln and not ln.endswith(archive_name)
         ]
     lines.append(f"{digest}  {archive_name}")
-    sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_file_under(out, "SHA256SUMS", "\n".join(lines) + "\n")
     return archive_path
 
 

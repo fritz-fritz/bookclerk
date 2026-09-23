@@ -69,32 +69,29 @@ fn avatar_path_with_ext(files_dir: &Path, user_id: i64, ext: &str) -> Option<Pat
     }
 }
 
-/// Resolve `path` under `root` the way CodeQL's Rust path-injection query
-/// requires: normalize (`canonicalize`) first, then `starts_with` the root.
-///
-/// Leaf symlinks that escape `root` fail the prefix check after canonicalize.
-/// Missing or dangling paths return `None`.
-fn resolve_existing_under(root: &Path, path: PathBuf) -> Option<PathBuf> {
-    let root_canon = root.canonicalize().ok()?;
-    let path_canon = path.canonicalize().ok()?;
-    if path_canon.starts_with(&root_canon) {
-        Some(path_canon)
-    } else {
-        None
-    }
-}
-
 /// Stored avatar path and content type when a file exists.
 fn existing_avatar(files_dir: &Path, user_id: i64) -> Option<(PathBuf, &'static str)> {
     let dir = avatars_dir(files_dir);
+    let Ok(dir_canon) = dir.canonicalize() else {
+        return None;
+    };
     for (ext, content_type) in AVATAR_KINDS {
         let Some(path) = avatar_path_with_ext(files_dir, user_id, ext) else {
             continue;
         };
-        let Some(path) = resolve_existing_under(&dir, path) else {
+        let Some(name) = path.file_name() else {
             continue;
         };
-        return Some((path, *content_type));
+        let candidate = dir_canon.join(name);
+        if !candidate.starts_with(&dir_canon) {
+            continue;
+        }
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(meta) if meta.file_type().is_symlink() => continue,
+            Ok(meta) if meta.is_file() => {}
+            _ => continue,
+        }
+        return Some((candidate, *content_type));
     }
     None
 }
@@ -526,15 +523,16 @@ pub async fn get_avatar(
             continue;
         }
         let candidate = dir_canon.join(&leaf);
-        // Normalize then prefix-check in this function so CodeQL's two-state
-        // path-injection model sees both steps on the sink SSA.
-        let Ok(path_canon) = candidate.canonicalize() else {
-            continue;
-        };
-        if !path_canon.starts_with(&dir_canon) {
+        if !candidate.starts_with(&dir_canon) {
             continue;
         }
-        found = Some((path_canon, *content_type));
+        // Serve the owned directory entry only — refuse peer/outside leaf links.
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(meta) if meta.file_type().is_symlink() => continue,
+            Ok(meta) if meta.is_file() => {}
+            _ => continue,
+        }
+        found = Some((candidate, *content_type));
         break;
     }
     let (path, content_type) = found.ok_or(StatusCode::NOT_FOUND)?;

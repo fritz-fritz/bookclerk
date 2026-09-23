@@ -97,27 +97,32 @@ fn require_under_sweep_root(root: &Path, path: &Path) -> Option<PathBuf> {
 /// Deletes unregistered child directories under `root`.
 async fn sweep_dir(root: &Path, keep: &HashSet<PathBuf>) -> u32 {
     let mut n = 0u32;
+    let Ok(root_canon) = tokio::fs::canonicalize(root).await else {
+        return 0;
+    };
     let Ok(mut rd) = tokio::fs::read_dir(root).await else {
         return 0;
     };
     while let Ok(Some(entry)) = rd.next_entry().await {
+        let Ok(file_type) = entry.file_type().await else {
+            continue;
+        };
+        // Tokio DirEntry::metadata does not follow symlinks; skip links explicitly
+        // and never delete when the candidate resolves to the sweep root itself.
+        if file_type.is_symlink() || !file_type.is_dir() {
+            continue;
+        }
         let Some(path) = require_under_sweep_root(root, &entry.path()) else {
             continue;
         };
-        if keep.contains(&path) {
+        if path == root_canon || keep.contains(&path) {
             continue;
         }
-        let Ok(meta) = entry.metadata().await else {
-            continue;
-        };
-        if !meta.is_dir() {
-            continue;
-        }
-        match tokio::fs::remove_dir_all(&path).await {
+        match tokio::fs::remove_dir_all(&entry.path()).await {
             Ok(()) => n += 1,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => {
-                warn!(path = %path.display(), error = %err, "failed to sweep orphan work dir")
+                warn!(path = %entry.path().display(), error = %err, "failed to sweep orphan work dir")
             }
         }
     }

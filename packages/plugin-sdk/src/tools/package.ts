@@ -8,7 +8,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { parse as parseToml } from "smol-toml";
 import { validateLogo, validateManifest, type Manifest } from "./validate.js";
-import { assertPathInside, refuseSymlinkPath } from "../sparse-workerd/ensure.js";
+import { assertPathInside, refuseSymlinkPath, writeFileUnder } from "../sparse-workerd/ensure.js";
 
 function hostTarget(): string {
   const plat = process.platform;
@@ -145,24 +145,42 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
   // the final name under outDir before any write/delete.
   const outRoot = fs.realpathSync(path.resolve(outDir));
   const archivePath = assertPathInside(outRoot, archiveName);
-  const tmpName = `.packaging-tmp-${id}-${process.pid}-${Date.now()}.tar.gz`;
-  const tmpPath = assertPathInside(outRoot, tmpName);
-  const tar = spawnSync(
-    "tar",
-    ["-C", staging, "-czf", tmpPath, "."],
-    { encoding: "utf8" },
-  );
-  if (tar.status !== 0) {
-    // Attempt-owned temp only — never delete a pre-existing final archive.
+  const attemptDirName = `.packaging-attempt-${id}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const attemptDir = assertPathInside(outRoot, attemptDirName);
+  fs.mkdirSync(attemptDir, { recursive: false });
+  const tmpPath = assertPathInside(attemptDir, "archive.tar.gz");
+  let ownedAttempt = true;
+  try {
+    const fd = fs.openSync(tmpPath, "wx");
     try {
-      fs.rmSync(tmpPath, { force: true });
-    } catch {
-      /* ignore */
+      const tar = spawnSync(
+        "tar",
+        ["-C", staging, "-czf", "-", "."],
+        { encoding: "buffer", maxBuffer: 512 * 1024 * 1024 },
+      );
+      if (tar.status !== 0) {
+        throw new Error(
+          `tar failed: ${tar.stderr?.toString() || tar.stdout?.toString() || "status " + tar.status}`,
+        );
+      }
+      fs.writeFileSync(fd, tar.stdout as Buffer);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmpPath, archivePath);
+    fs.rmSync(attemptDir, { recursive: true, force: true });
+    ownedAttempt = false;
+  } catch (err) {
+    if (ownedAttempt) {
+      try {
+        fs.rmSync(attemptDir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
     }
     fs.rmSync(staging, { recursive: true, force: true });
-    throw new Error(`tar failed: ${tar.stderr || tar.stdout || "status " + tar.status}`);
+    throw err;
   }
-  fs.renameSync(tmpPath, archivePath);
   fs.rmSync(staging, { recursive: true, force: true });
 
   const digest = crypto
@@ -170,6 +188,7 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
     .update(fs.readFileSync(archivePath))
     .digest("hex");
   const sumsPath = assertPathInside(outRoot, "SHA256SUMS");
+  refuseSymlinkPath(outRoot, sumsPath);
   let body = "";
   if (fs.existsSync(sumsPath)) {
     body = fs
@@ -180,6 +199,6 @@ export function packagePlugin(pluginDir: string, outDir: string): string {
     if (body && !body.endsWith("\n")) body += "\n";
   }
   body += `${digest}  ${archiveName}\n`;
-  fs.writeFileSync(sumsPath, body);
+  writeFileUnder(outRoot, "SHA256SUMS", body);
   return archivePath;
 }

@@ -12,6 +12,7 @@ import hashlib
 import os
 import platform
 import shutil
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -197,9 +198,16 @@ def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
 
     A sibling stamp is enough when the binary exists. A stamp without a binary
     is not current. When no Bookclerk stamp matches, probe ``--version`` on the
-    absolute path with fixed argv (no ``PATH`` lookup).
+    absolute path with fixed argv (no ``PATH`` lookup). Managed stamp leaves
+    that are symlinks are ignored (not treated as a pin match).
     """
-    if not bin_path.is_file():
+    try:
+        st = os.lstat(bin_path)
+    except OSError:
+        return False
+    import stat as stat_mod
+
+    if stat_mod.S_ISLNK(st.st_mode) or not stat_mod.S_ISREG(st.st_mode):
         return False
     root_s = os.path.abspath(os.fspath(bin_path.parent))
     name = _stamp_file_name(pin)
@@ -214,7 +222,7 @@ def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
         and not os.path.isabs(rel)
         and (stamp_s == root_s or stamp_s.startswith(root_s + os.sep))
     )
-    if stamp_ok:
+    if stamp_ok and not os.path.islink(stamp_s):
         try:
             with open(stamp_s, encoding="utf-8") as fh:
                 if fh.read().strip() == pin["release_tag"]:
@@ -291,6 +299,8 @@ def ensure_workerd(
     cache = Path(cache_s)
 
     dest = resolve_under(cache, binary_name())
+    if dest.is_symlink():
+        raise ValueError(f"refusing managed workerd symlink: {dest}")
     if dest.is_file() and _is_current(dest, pin):
         return validate_spawn_executable(dest, cache)
 
@@ -312,11 +322,10 @@ def ensure_workerd(
             f"workerd download sha256 mismatch: got {got}, expected {asset['sha256_hex']}"
         )
 
-    tmp_name = f"{binary_name()}.tmp"
+    tmp_name = f".{binary_name()}.tmp-{os.getpid()}-{time.time_ns()}"
     if (
         "/" in tmp_name
         or "\\" in tmp_name
-        or ".." in tmp_name
         or tmp_name in {".", ".."}
     ):
         raise ValueError(f"invalid temp binary name: {tmp_name}")
@@ -329,16 +338,29 @@ def ensure_workerd(
         raise ValueError(f"temp path escapes cache: {tmp_s}")
     if tmp_s != cache_s and not tmp_s.startswith(cache_s + os.sep):
         raise ValueError(f"temp path escapes cache: {tmp_s}")
-    with gzip.GzipFile(fileobj=__import__("io").BytesIO(compressed)) as gz, open(
-        tmp_s, "wb"
-    ) as out:
-        shutil.copyfileobj(gz, out)
-    if platform.system().lower() != "windows":
-        os.chmod(tmp_s, 0o755)
-    dest_s = os.fspath(dest)
-    if dest_s != cache_s and not dest_s.startswith(cache_s + os.sep):
-        raise ValueError(f"dest path escapes cache: {dest_s}")
-    os.replace(tmp_s, dest_s)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    fd = os.open(tmp_s, flags, 0o755 if platform.system().lower() != "windows" else 0o644)
+    owned_tmp = True
+    try:
+        with os.fdopen(fd, "wb") as out, gzip.GzipFile(
+            fileobj=__import__("io").BytesIO(compressed)
+        ) as gz:
+            shutil.copyfileobj(gz, out)
+        if platform.system().lower() != "windows":
+            os.chmod(tmp_s, 0o755)
+        dest_s = os.fspath(dest)
+        if dest_s != cache_s and not dest_s.startswith(cache_s + os.sep):
+            raise ValueError(f"dest path escapes cache: {dest_s}")
+        if os.path.islink(dest_s):
+            raise ValueError(f"refusing managed workerd symlink: {dest_s}")
+        os.replace(tmp_s, dest_s)
+        owned_tmp = False
+    finally:
+        if owned_tmp and os.path.lexists(tmp_s) and not os.path.islink(tmp_s):
+            try:
+                os.unlink(tmp_s)
+            except OSError:
+                pass
     write_file_under(cache, _stamp_file_name(pin), f"{pin['release_tag']}\n")
     print(f"bookclerk-plugin: installed {pin['release_tag']} → {dest}", flush=True)
     return validate_spawn_executable(dest, cache)

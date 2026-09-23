@@ -1,6 +1,6 @@
 //! Download / refresh the pinned Cloudflare `workerd` binary.
 
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -38,6 +38,24 @@ fn join_component_under(root: &Path, name: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// Refuse a managed-cache leaf that exists as a symlink (dangling or otherwise).
+fn refuse_managed_leaf_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!("refusing managed cache symlink: {}", path.display());
+        }
+        Ok(_) | Err(_) => Ok(()),
+    }
+}
+
+/// True when `path` is an existing regular file (not a symlink).
+fn is_regular_file(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => meta.is_file() && !meta.file_type().is_symlink(),
+        Err(_) => false,
+    }
+}
+
 /// Ensure `dir` exists and return its canonical path.
 ///
 /// The selected cache/install root is trusted (workspace `target/`, `/opt`,
@@ -48,6 +66,41 @@ fn prepare_cache_dir(dir: &Path) -> Result<PathBuf> {
     }
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     fs::canonicalize(dir).with_context(|| format!("canonicalize cache {}", dir.display()))
+}
+
+/// Unique same-directory staging path for an exclusive install attempt.
+fn staging_install_path(dir: &Path, dest_name: &str) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nonce: u64 = rand::random();
+    dir.join(format!(
+        ".{dest_name}.tmp-{}-{nonce:016x}-{n}",
+        std::process::id()
+    ))
+}
+
+/// Replace directory entry `to` with staging file `from` without following a leaf symlink.
+///
+/// Unix `rename` replaces the entry. Windows cannot replace via `std::fs::rename`,
+/// so an existing regular destination is unlinked first (symlinks already refused).
+fn replace_cache_entry(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        match fs::symlink_metadata(to) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "refusing to replace through a symlink destination",
+                ));
+            }
+            Ok(_) => {
+                let _ = fs::remove_file(to);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    fs::rename(from, to)
 }
 
 /// Ensure `dir/workerd` matches [`WORKERD_RELEASE_TAG`], downloading if needed.
@@ -87,7 +140,8 @@ pub fn ensure_workerd(dir: &Path) -> Result<PathBuf> {
 
     let dir = prepare_cache_dir(dir)?;
     let dest = join_component_under(&dir, binary_name())?;
-    if dest.is_file() && is_current(&dest)? {
+    refuse_managed_leaf_symlink(&dest)?;
+    if is_regular_file(&dest) && is_current(&dest)? {
         return bookclerk_sandbox::require_spawn_executable(&dest)
             .with_context(|| format!("validate workerd binary {}", dest.display()));
     }
@@ -111,11 +165,22 @@ pub fn ensure_workerd(dir: &Path) -> Result<PathBuf> {
         .read_to_end(&mut binary)
         .context("gunzip workerd payload")?;
 
-    let tmp = join_component_under(&dir, &format!("{}.tmp", binary_name()))?;
+    let tmp = staging_install_path(&dir, binary_name());
+    let tmp = join_component_under(
+        &dir,
+        tmp.file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("invalid staging name"))?,
+    )?;
     {
-        let mut f = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| format!("create exclusive {}", tmp.display()))?;
         f.write_all(&binary)
             .with_context(|| format!("write {}", tmp.display()))?;
+        f.sync_all().ok();
     }
     #[cfg(unix)]
     {
@@ -124,17 +189,42 @@ pub fn ensure_workerd(dir: &Path) -> Result<PathBuf> {
         perms.set_mode(0o755);
         fs::set_permissions(&tmp, perms)?;
     }
-    fs::rename(&tmp, &dest).with_context(|| {
-        format!(
-            "install workerd → {} (replace {})",
-            dest.display(),
-            tmp.display()
-        )
-    })?;
+    refuse_managed_leaf_symlink(&dest)?;
+    if let Err(err) = replace_cache_entry(&tmp, &dest) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err).with_context(|| {
+            format!(
+                "install workerd → {} (replace {})",
+                dest.display(),
+                tmp.display()
+            )
+        });
+    }
 
     let stamp = join_component_under(&dir, WORKERD_VERSION_STAMP)?;
-    fs::write(&stamp, format!("{WORKERD_RELEASE_TAG}\n"))
-        .with_context(|| format!("write {}", stamp.display()))?;
+    refuse_managed_leaf_symlink(&stamp)?;
+    let stamp_tmp = staging_install_path(&dir, WORKERD_VERSION_STAMP);
+    let stamp_tmp = join_component_under(
+        &dir,
+        stamp_tmp
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("invalid stamp staging name"))?,
+    )?;
+    {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stamp_tmp)
+            .with_context(|| format!("create exclusive {}", stamp_tmp.display()))?;
+        f.write_all(format!("{WORKERD_RELEASE_TAG}\n").as_bytes())
+            .with_context(|| format!("write {}", stamp_tmp.display()))?;
+        f.sync_all().ok();
+    }
+    if let Err(err) = replace_cache_entry(&stamp_tmp, &stamp) {
+        let _ = fs::remove_file(&stamp_tmp);
+        return Err(err).with_context(|| format!("write {}", stamp.display()));
+    }
 
     eprintln!(
         "bookclerk-workerd: installed {WORKERD_RELEASE_TAG} → {}",
@@ -200,6 +290,14 @@ fn stamp_matches(bin: &Path) -> Result<bool> {
         }
         stamp
     };
+    match fs::symlink_metadata(&stamp) {
+        Ok(meta) if meta.file_type().is_symlink() => return Ok(false),
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err).with_context(|| format!("stat {}", stamp.display()));
+        }
+    }
     match fs::read_to_string(&stamp) {
         Ok(text) => Ok(text.trim() == WORKERD_RELEASE_TAG),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),

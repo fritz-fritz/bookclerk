@@ -472,6 +472,8 @@ fn push_if_exists(
 ///
 /// A genuinely missing optional root is skipped before canonicalization. A
 /// dangling symlink is not "missing" and is rejected by [`require_under_walk_root`].
+/// Symlink directory entries (including a symlinked optional root) are refused
+/// before canonicalize so a self-loop cannot re-enter and inflate the walk.
 /// `walk_root` is the existing files directory, not the optional child.
 fn collect_dir(
     walk_root: &Path,
@@ -484,20 +486,42 @@ fn collect_dir(
     if optional_export_dir_absent(dir)? {
         return Ok(());
     }
-    let dir = require_under_walk_root(walk_root, dir)?;
-    if !dir.is_dir() {
+    let dir_meta = std::fs::symlink_metadata(dir)
+        .map_err(|source| err(format!("stat export dir {}: {source}", dir.display())))?;
+    if dir_meta.file_type().is_symlink() {
+        return Err(err(format!(
+            "refusing symlink export directory: {}",
+            dir.display()
+        )));
+    }
+    let dir_canon = require_under_walk_root(walk_root, dir)?;
+    if !dir_meta.is_dir() {
         return Ok(());
     }
     included.push(format!("{arc_prefix}/"));
-    for entry in std::fs::read_dir(&dir)? {
+    for entry in std::fs::read_dir(&dir_canon)? {
         let entry = entry?;
-        let path = require_under_walk_root(walk_root, &entry.path())?;
+        let entry_path = entry.path();
+        let file_type = entry.file_type().map_err(|source| {
+            err(format!(
+                "stat export entry {}: {source}",
+                entry_path.display()
+            ))
+        })?;
+        if file_type.is_symlink() {
+            return Err(err(format!(
+                "refusing symlink export entry: {}",
+                entry_path.display()
+            )));
+        }
+        let path = require_under_walk_root(walk_root, &entry_path)?;
         let name = entry.file_name();
         let arc_name = format!("{arc_prefix}/{}", name.to_string_lossy());
-        if path.is_file() {
+        if file_type.is_file() {
             entries.push((arc_name, path));
-        } else if recursive && path.is_dir() {
-            collect_dir(walk_root, &path, &arc_name, entries, included, true)?;
+        } else if recursive && file_type.is_dir() {
+            // Recurse on the directory entry path (not a resolved alias).
+            collect_dir(walk_root, &entry_path, &arc_name, entries, included, true)?;
         }
     }
     Ok(())
@@ -524,8 +548,20 @@ fn collect_plugin_tomls(
     if optional_export_dir_absent(plugins_root)? {
         return Ok(());
     }
+    let plugins_meta = std::fs::symlink_metadata(plugins_root).map_err(|source| {
+        err(format!(
+            "stat plugins dir {}: {source}",
+            plugins_root.display()
+        ))
+    })?;
+    if plugins_meta.file_type().is_symlink() {
+        return Err(err(format!(
+            "refusing symlink plugins directory: {}",
+            plugins_root.display()
+        )));
+    }
     let plugins_root = require_under_walk_root(files_root, plugins_root)?;
-    if !plugins_root.is_dir() {
+    if !plugins_meta.is_dir() {
         return Ok(());
     }
     included.push("plugins/**/plugin.toml".into());
@@ -536,10 +572,23 @@ fn collect_plugin_tomls(
     }
     for entry in std::fs::read_dir(&plugins_root)? {
         let entry = entry?;
-        let path = require_under_walk_root(plugins_root.as_path(), &entry.path())?;
-        if !path.is_dir() {
+        let entry_path = entry.path();
+        let file_type = entry.file_type().map_err(|source| {
+            err(format!(
+                "stat plugin entry {}: {source}",
+                entry_path.display()
+            ))
+        })?;
+        if file_type.is_symlink() {
+            return Err(err(format!(
+                "refusing symlink plugin entry: {}",
+                entry_path.display()
+            )));
+        }
+        if !file_type.is_dir() {
             continue;
         }
+        let path = require_under_walk_root(plugins_root.as_path(), &entry_path)?;
         let toml = require_under_walk_root(plugins_root.as_path(), &path.join("plugin.toml"))?;
         if toml.is_file() {
             let name = entry.file_name();
@@ -668,5 +717,56 @@ mod tests {
             msg.contains("symlink") || msg.contains("dangling"),
             "expected dangling-symlink refusal, got {msg}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_rejects_cache_symlink_self_loop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = tmp.path().join("files");
+        let cache = files.join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(files.join("config.toml"), b"x\n").unwrap();
+        std::os::unix::fs::symlink(&cache, cache.join("loop")).unwrap();
+        let err = export_native(NativeExportOptions {
+            files_dir: files,
+            dest: tmp.path().join("backup.tar.gz"),
+            bookclerk_version: "0.1.0-test".into(),
+            include_plugin_manifests: false,
+            include_cache: true,
+            include_logs: false,
+            include_plugin_databases: false,
+        })
+        .expect_err("self-loop cache symlink");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("symlink"),
+            "expected symlink refusal, got {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_rejects_two_directory_cache_symlink_loop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let files = tmp.path().join("files");
+        let a = files.join("cache/a");
+        let b = files.join("cache/b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(files.join("config.toml"), b"x\n").unwrap();
+        std::os::unix::fs::symlink(&b, a.join("to-b")).unwrap();
+        std::os::unix::fs::symlink(&a, b.join("to-a")).unwrap();
+        let err = export_native(NativeExportOptions {
+            files_dir: files,
+            dest: tmp.path().join("backup.tar.gz"),
+            bookclerk_version: "0.1.0-test".into(),
+            include_plugin_manifests: false,
+            include_cache: true,
+            include_logs: false,
+            include_plugin_databases: false,
+        })
+        .expect_err("two-dir cache symlink loop");
+        assert!(format!("{err}").contains("symlink"));
     }
 }

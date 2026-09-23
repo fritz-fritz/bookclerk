@@ -117,6 +117,10 @@ pub fn require_absolute_spawn_path(path: &Path) -> Result<PathBuf, SpawnPathErro
 /// to the file that will actually be executed. PATH lookup names are returned
 /// as-is for the OS to resolve at spawn time.
 ///
+/// Prefer [`require_existing_regular_file`] for configured/env worker paths that
+/// must identify a real file (including cwd-relative `./bin`) and must not
+/// authorize ambient PATH lookup for a bare name.
+///
 /// # Errors
 ///
 /// Returns [`SpawnPathError`] when validation fails, canonicalize fails, or an
@@ -135,6 +139,40 @@ pub fn require_spawn_executable(path: &Path) -> Result<PathBuf, SpawnPathError> 
         return Ok(canon);
     }
     Ok(path)
+}
+
+/// Existing regular file after resolving relative paths against the process cwd.
+///
+/// Absolute and multi-component relative paths (`./worker`, `bin/tool`) are
+/// accepted when they canonicalize to a regular file. A bare name is accepted
+/// only when that name exists as a file under the current directory — never as
+/// an ambient `PATH` lookup. Use this for media worker / jail path knobs that
+/// historically required `path.is_file()`.
+///
+/// # Errors
+///
+/// Returns [`SpawnPathError`] when the path is empty/NUL, cannot be resolved, or
+/// is not a regular file.
+pub fn require_existing_regular_file(path: &Path) -> Result<PathBuf, SpawnPathError> {
+    reject_empty_or_nul(path)?;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let cwd = std::env::current_dir().map_err(|source| SpawnPathError::Canonicalize {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        cwd.join(path)
+    };
+    let canon =
+        std::fs::canonicalize(&absolute).map_err(|source| SpawnPathError::Canonicalize {
+            path: absolute.clone(),
+            source,
+        })?;
+    if !canon.is_file() {
+        return Err(SpawnPathError::NotFile(canon));
+    }
+    Ok(canon)
 }
 
 /// Canonicalizes `path` and requires it to stay under canonical `root`.
@@ -388,5 +426,33 @@ mod tests {
         ));
         // Bare names remain valid for the general spawn APIs.
         assert!(require_absolute_or_name(Path::new("workerd")).is_ok());
+    }
+
+    #[test]
+    fn existing_regular_file_resolves_relative_and_rejects_missing_bare_name() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let bin = dir.path().join("worker-bin");
+        std::fs::write(&bin, b"x").expect("write");
+        let prev = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(dir.path()).expect("chdir");
+        let got = require_existing_regular_file(Path::new("./worker-bin")).expect("./ ok");
+        assert_eq!(got, std::fs::canonicalize(&bin).unwrap());
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let nested_bin = nested.join("tool");
+        std::fs::write(&nested_bin, b"y").unwrap();
+        let got = require_existing_regular_file(Path::new("nested/tool")).expect("nested ok");
+        assert_eq!(got, std::fs::canonicalize(&nested_bin).unwrap());
+        let bare = require_existing_regular_file(Path::new("worker-bin")).expect("cwd bare file");
+        assert_eq!(bare, std::fs::canonicalize(&bin).unwrap());
+        assert!(matches!(
+            require_existing_regular_file(Path::new("not-on-disk-anywhere")),
+            Err(SpawnPathError::Canonicalize { .. })
+        ));
+        assert!(matches!(
+            require_existing_regular_file(Path::new("nested")),
+            Err(SpawnPathError::NotFile(_))
+        ));
+        std::env::set_current_dir(prev).expect("restore cwd");
     }
 }

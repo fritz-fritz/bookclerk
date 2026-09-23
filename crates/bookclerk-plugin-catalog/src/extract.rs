@@ -24,19 +24,14 @@ pub const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 /// SHA-256 hex digest of a file.
 ///
 /// Callers must pass a path already contained under a trusted root (for
-/// example via [`safe_join`] / [`require_under`]). This rejects `..`
-/// components as a last-line guard before the open.
+/// example via [`safe_join`] / [`require_under`]). Trusted roots may retain
+/// intentional `..` spelling until the caller canonicalizes them; this hasher
+/// does not re-litigate path spelling.
 ///
 /// # Errors
 ///
-/// Returns an error when the path escapes via `..` or the file cannot be read.
+/// Returns an error when the file cannot be read.
 pub fn sha256_file(path: &Path) -> Result<String> {
-    if path.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(CatalogError::message(format!(
-            "refusing path with '..': {}",
-            path.display()
-        )));
-    }
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
@@ -419,6 +414,78 @@ pub fn require_under(root: &Path, path: &Path) -> Result<PathBuf> {
         )));
     }
     Ok(path_norm)
+}
+
+/// Lexical child path under `root` safe for `remove_dir_all` / `rename` / create.
+///
+/// Unlike [`require_under`], this returns the intended directory entry (not a
+/// symlink target) and refuses when the leaf exists as a symlink or when a
+/// resolved existing path equals the trusted root (so cleanup cannot wipe the
+/// root via an in-root alias). Missing leaves are validated via [`require_under`].
+///
+/// # Errors
+///
+/// Returns when the path escapes `root`, is a symlink leaf, or would mutate the root.
+pub fn require_mutable_child(root: &Path, path: &Path) -> Result<PathBuf> {
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(CatalogError::message(format!(
+            "refusing path with '..': {}",
+            path.display()
+        )));
+    }
+    let root_norm = root.canonicalize().map_err(|source| {
+        CatalogError::message(format!(
+            "could not canonicalize root {}: {source}",
+            root.display()
+        ))
+    })?;
+    let lexical = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root_norm.join(path)
+    };
+    #[cfg(not(windows))]
+    if !lexical.starts_with(&root_norm) && !lexical.starts_with(root) {
+        return Err(CatalogError::message(format!(
+            "path {} escapes root {}",
+            lexical.display(),
+            root_norm.display()
+        )));
+    }
+    match fs::symlink_metadata(&lexical) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(CatalogError::message(format!(
+                "refusing symlink for mutation: {}",
+                lexical.display()
+            )));
+        }
+        Ok(_) => {
+            let canon = lexical.canonicalize().map_err(|source| {
+                CatalogError::message(format!(
+                    "could not canonicalize {}: {source}",
+                    lexical.display()
+                ))
+            })?;
+            if !canon.starts_with(&root_norm) || canon == root_norm {
+                return Err(CatalogError::message(format!(
+                    "refusing mutation of {} (not a strict child of {})",
+                    lexical.display(),
+                    root_norm.display()
+                )));
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            // Missing leaf: prove the intended spelling stays under root.
+            let _ = require_under(root, &lexical)?;
+        }
+        Err(source) => {
+            return Err(CatalogError::message(format!(
+                "could not stat {}: {source}",
+                lexical.display()
+            )));
+        }
+    }
+    Ok(lexical)
 }
 
 /// Wraps an I/O or tar error as a catalog message.

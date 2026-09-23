@@ -639,8 +639,11 @@ fn check_worker_bin(path: &Path, source: &str) -> std::result::Result<PathBuf, S
 }
 
 /// Confirms `path` is a regular file; failures name `source` (env var or config key).
+///
+/// Resolves relative paths against the process cwd and requires an existing
+/// regular file. Bare names are not ambient `PATH` lookups.
 fn check_bin(path: &Path, source: &str) -> std::result::Result<PathBuf, String> {
-    bookclerk_sandbox::require_spawn_executable(path).map_err(|err| {
+    bookclerk_sandbox::require_existing_regular_file(path).map_err(|err| {
         format!(
             "{source} points at {}, which is not a valid executable ({err})",
             path.display()

@@ -5,9 +5,7 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import { createGunzip } from "node:zlib";
-import { pipeline } from "node:stream/promises";
-import { Readable } from "node:stream";
+import { gunzipSync } from "node:zlib";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
@@ -445,9 +443,10 @@ function stampFileName(pin: WorkerdPin): string {
   return stamp;
 }
 
-function usableFile(bin: string): boolean {
+function usableRegularFile(bin: string): boolean {
   try {
-    return fs.statSync(bin).isFile();
+    const st = fs.lstatSync(bin);
+    return st.isFile() && !st.isSymbolicLink();
   } catch {
     return false;
   }
@@ -465,11 +464,16 @@ function usableFile(bin: string): boolean {
  * @returns Whether the binary is present and matches the pin.
  */
 export function binaryMatchesPin(bin: string, pin: WorkerdPin): boolean {
-  if (!usableFile(bin)) return false;
+  if (!usableRegularFile(bin)) return false;
   try {
     const dir = path.resolve(path.dirname(bin));
     const stamp = assertPathInside(dir, stampFileName(pin));
-    if (fs.existsSync(stamp) && fs.readFileSync(stamp, "utf8").trim() === pin.release_tag) {
+    const stampSt = fs.lstatSync(stamp);
+    if (
+      !stampSt.isSymbolicLink() &&
+      stampSt.isFile() &&
+      fs.readFileSync(stamp, "utf8").trim() === pin.release_tag
+    ) {
       return true;
     }
   } catch {
@@ -514,6 +518,7 @@ export async function ensureWorkerd(
   const absCache = path.resolve(cacheDir);
   fs.mkdirSync(absCache, { recursive: true });
   const dest = assertPathInside(absCache, binaryName());
+  refuseSymlinkPath(absCache, dest);
   if (binaryMatchesPin(dest, pin)) {
     return validateSpawnExecutable(dest, absCache);
   }
@@ -540,16 +545,34 @@ export async function ensureWorkerd(
     );
   }
 
-  const tmp = assertPathInside(absCache, `${binaryName()}.tmp`);
-  await pipeline(
-    Readable.from(compressed),
-    createGunzip(),
-    fs.createWriteStream(tmp),
-  );
-  if (process.platform !== "win32") {
-    fs.chmodSync(tmp, 0o755);
+  const tmpName = `.${binaryName()}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const tmp = assertPathInside(absCache, tmpName);
+  let ownedTmp = false;
+  try {
+    const fd = fs.openSync(tmp, "wx");
+    ownedTmp = true;
+    try {
+      const binary = gunzipSync(compressed);
+      fs.writeFileSync(fd, binary);
+      if (process.platform !== "win32") {
+        fs.fchmodSync(fd, 0o755);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    refuseSymlinkPath(absCache, dest);
+    fs.renameSync(tmp, dest);
+    ownedTmp = false;
+  } catch (err) {
+    if (ownedTmp) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        /* ignore */
+      }
+    }
+    throw err;
   }
-  fs.renameSync(tmp, dest);
   writeFileUnder(absCache, stampFileName(pin), `${pin.release_tag}\n`);
   console.error(
     `bookclerk-plugin: installed ${pin.release_tag} → ${dest}`,
