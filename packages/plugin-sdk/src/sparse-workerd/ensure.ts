@@ -173,6 +173,9 @@ export function ensureDirUnder(root: string, rel: string): string {
   ) {
     throw new Error(`path ${resolved} escapes root ${resolvedRoot}`);
   }
+  // Inspect existing components before recursive mkdir so a symlink prefix
+  // (e.g. `root/@bookclerk -> /outside`) cannot create `/outside/plugin-sdk`.
+  refuseSymlinkExistingComponents(resolvedRoot, resolved);
   fs.mkdirSync(resolved, { recursive: true });
   return resolved;
 }
@@ -230,6 +233,68 @@ export function copyFileUnder(root: string, name: string, src: string): string {
   refuseSymlinkPath(resolvedRoot, resolved);
   fs.copyFileSync(src, resolved);
   return resolved;
+}
+
+/**
+ * Require `candidate` under `trustedRoot` with no symlink among *existing*
+ * suffix components.
+ *
+ * Unlike {@link refuseSymlinkPath}, any trailing missing components are
+ * allowed (not only the final one). Use before `mkdirSync(recursive)` so a
+ * symlink intermediate cannot redirect directory creation outside the root.
+ *
+ * @param trustedRoot - Original operator/plugin root.
+ * @param candidate - Path previously produced by {@link assertPathInside}.
+ * @returns The validated absolute path.
+ * @throws {Error} When an existing suffix component is a symlink or escapes.
+ */
+export function refuseSymlinkExistingComponents(
+  trustedRoot: string,
+  candidate: string,
+): string {
+  const rootLex = path.resolve(trustedRoot);
+  const target = path.resolve(candidate);
+  const rel = path.relative(rootLex, target);
+  if (
+    path.isAbsolute(rel) ||
+    rel === ".." ||
+    rel.startsWith(".." + path.sep) ||
+    rel.split(path.sep).includes("..")
+  ) {
+    throw new Error(`path ${target} escapes root ${rootLex}`);
+  }
+  const root = fs.realpathSync(rootLex);
+  const parts = rel === "" ? [] : rel.split(path.sep);
+  let cur = root;
+  for (let i = 0; i < parts.length; i++) {
+    cur = path.resolve(cur, parts[i]!);
+    const stepRel = path.relative(root, cur);
+    if (
+      path.isAbsolute(stepRel) ||
+      stepRel === ".." ||
+      stepRel.startsWith(".." + path.sep)
+    ) {
+      throw new Error(`path ${cur} escapes root ${root}`);
+    }
+    if (!cur.startsWith(root + path.sep) && cur !== root) {
+      throw new Error(`path ${cur} escapes root ${root}`);
+    }
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(cur);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        // Missing from here on: safe to create under the last existing prefix.
+        break;
+      }
+      throw err;
+    }
+    if (st.isSymbolicLink()) {
+      throw new Error(`refusing symlink in path: ${cur}`);
+    }
+  }
+  return target;
 }
 
 /**

@@ -275,6 +275,36 @@ def test_sync_embed_optional_vendor(tmp_path: Path):
     assert "ok" in check_plugin(staging)
 
 
+def test_sync_embed_creates_absent_default_modules(tmp_path: Path):
+    staging = tmp_path / "plugin"
+    staging.mkdir()
+    (staging / "plugin.toml").write_text(
+        (ECHO_PY / "plugin.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    # No modules/ yet — ordinary first-time sync-embed.
+    assert not (staging / "modules").exists()
+    assert "synced" in sync_embed(staging)
+    assert (staging / "modules" / "bookclerk_plugin_sdk" / "workerd.py").is_file()
+
+
+def test_sync_embed_creates_nested_missing_modules_path(tmp_path: Path):
+    staging = tmp_path / "plugin"
+    staging.mkdir()
+    toml = (ECHO_PY / "plugin.toml").read_text(encoding="utf-8")
+    toml = toml.replace('modules_dir = "modules"', 'modules_dir = "mods/nested"')
+    if 'modules_dir = "mods/nested"' not in toml:
+        # Echo fixture may omit modules_dir (defaults to modules); inject under [workerd].
+        toml = toml.replace(
+            "[workerd]",
+            '[workerd]\nmodules_dir = "mods/nested"',
+            1,
+        )
+    (staging / "plugin.toml").write_text(toml, encoding="utf-8")
+    assert "synced" in sync_embed(staging)
+    assert (staging / "mods" / "nested" / "bookclerk_plugin_sdk" / "workerd.py").is_file()
+
+
 def test_sync_embed_refuses_modules_and_leaf_symlinks(tmp_path: Path):
     staging = tmp_path / "plugin"
     staging.mkdir()

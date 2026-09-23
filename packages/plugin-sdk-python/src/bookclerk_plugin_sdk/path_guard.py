@@ -78,6 +78,9 @@ def ensure_dir_under(root: Path | str, rel: str | Path) -> Path:
     resolved_s = os.fspath(resolved)
     if not _is_under(root_s, resolved_s):
         raise ValueError(f"path {resolved} escapes root {root_s}")
+    # Inspect existing components before recursive mkdir so a symlink prefix
+    # cannot redirect creation outside ``root``.
+    refuse_symlink_existing_components(root_s, resolved_s)
     # mkdir only the barriered child — never the raw operator root.
     os.makedirs(resolved_s, exist_ok=True)
     return Path(resolved_s)
@@ -138,6 +141,56 @@ def copy_file_under(root: Path | str, name: str, src: Path | str) -> Path:
     refuse_symlink_path(root_s, resolved_s)
     shutil.copy2(src, resolved_s, follow_symlinks=False)
     return Path(resolved_s)
+
+
+def refuse_symlink_existing_components(trusted_root: Path | str, path: Path | str) -> Path:
+    """Like :func:`refuse_symlink_path`, but any trailing missing components are OK.
+
+    Use before ``os.makedirs(..., exist_ok=True)`` so a symlink intermediate
+    cannot redirect recursive directory creation outside ``trusted_root``.
+    """
+    root_lex = os.path.abspath(os.path.normpath(os.fspath(trusted_root)))
+    candidate_lex = os.path.abspath(os.path.normpath(os.fspath(path)))
+
+    if not _is_under(root_lex, candidate_lex):
+        raise ValueError(f"path {candidate_lex} escapes root {root_lex}")
+
+    try:
+        root = os.path.realpath(root_lex)
+    except OSError as err:
+        raise ValueError(f"cannot resolve trusted root {root_lex}: {err}") from err
+
+    if _is_under(root_lex, candidate_lex):
+        suffix = os.path.relpath(candidate_lex, root_lex)
+        if suffix in {"", "."}:
+            candidate = root
+        else:
+            candidate = os.path.abspath(os.path.join(root, suffix))
+    else:
+        candidate = candidate_lex
+
+    if not _is_under(root, candidate) and candidate != root:
+        raise ValueError(f"path {candidate_lex} escapes root {root_lex}")
+
+    try:
+        rel = os.path.relpath(candidate, root)
+    except ValueError as err:
+        raise ValueError(f"path {candidate_lex} escapes root {root_lex}") from err
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+        raise ValueError(f"path {candidate_lex} escapes root {root_lex}")
+
+    cur = root
+    parts = [] if rel in {"", "."} else rel.split(os.sep)
+    for part in parts:
+        cur = os.path.join(cur, part)
+        if not _is_under(root, cur) and cur != root:
+            raise ValueError(f"path {cur} escapes root {root_lex}")
+        if os.path.islink(cur):
+            raise ValueError(f"refusing symlink in path: {cur}")
+        if not os.path.lexists(cur):
+            # Missing from here on: safe to create under the last existing prefix.
+            break
+    return Path(candidate_lex)
 
 
 def refuse_symlink_path(trusted_root: Path | str, path: Path | str) -> Path:

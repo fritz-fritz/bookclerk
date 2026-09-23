@@ -95,6 +95,29 @@ mode = "deny"
     syncEmbed(p);
   });
 
+  // modules/@bookclerk -> outside with missing plugin-sdk must not mkdir outside.
+  const syncEscape = path.join(tmp, "sync-escape");
+  const outsideBookclerk = path.join(tmp, "outside-bookclerk");
+  fs.mkdirSync(path.join(syncEscape, "modules"), { recursive: true });
+  fs.mkdirSync(outsideBookclerk, { recursive: true });
+  fs.copyFileSync(path.join(plugin, "plugin.toml"), path.join(syncEscape, "plugin.toml"));
+  fs.writeFileSync(path.join(syncEscape, "modules", "main.js"), "export default class X {}");
+  fs.symlinkSync(outsideBookclerk, path.join(syncEscape, "modules", "@bookclerk"));
+  const outsideBefore = fs.readdirSync(outsideBookclerk);
+  mustThrow("syncEmbed refuses @bookclerk symlink before mkdir", () =>
+    syncEmbed(syncEscape),
+  );
+  const outsideAfter = fs.readdirSync(outsideBookclerk);
+  if (JSON.stringify(outsideBefore) !== JSON.stringify(outsideAfter)) {
+    console.error("FAIL: outside-bookclerk was mutated by syncEmbed", outsideAfter);
+    process.exit(1);
+  }
+  if (fs.existsSync(path.join(outsideBookclerk, "plugin-sdk"))) {
+    console.error("FAIL: outside/plugin-sdk was created through @bookclerk symlink");
+    process.exit(1);
+  }
+  console.log("ok syncEmbed refuses @bookclerk symlink before mkdir");
+
   const syncPlugin = path.join(tmp, "sync-plugin");
   fs.mkdirSync(path.join(syncPlugin, "modules"), { recursive: true });
   fs.copyFileSync(path.join(plugin, "plugin.toml"), path.join(syncPlugin, "plugin.toml"));

@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
-import { assertPathInside, copyFileUnder, ensureDirUnder, refuseSymlinkPath } from "../sparse-workerd/ensure.js";
+import { assertPathInside, copyFileUnder, ensureDirUnder, refuseSymlinkExistingComponents, refuseSymlinkPath } from "../sparse-workerd/ensure.js";
 import { validateLogo, validateManifest, type Manifest } from "./validate.js";
 
 /**
@@ -206,7 +206,12 @@ export function syncEmbed(pluginDir: string): string {
   }
   const modulesDir = assertPathInside(root, m.workerd?.modules_dir ?? "modules");
   refuseSymlinkPath(root, modulesDir);
-  const destDir = ensureDirUnder(modulesDir, path.join("@bookclerk", "plugin-sdk"));
+  const embedRel = path.join("@bookclerk", "plugin-sdk");
+  // Full destination under the plugin root — inspect existing components before
+  // ensureDirUnder's recursive mkdir can follow a `@bookclerk` symlink.
+  const destDirLex = assertPathInside(modulesDir, embedRel);
+  refuseSymlinkExistingComponents(root, destDirLex);
+  const destDir = ensureDirUnder(modulesDir, embedRel);
   refuseSymlinkPath(root, destDir);
   const destLeaf = assertPathInside(destDir, "workerd.js");
   refuseSymlinkPath(root, destLeaf);

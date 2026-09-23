@@ -27,8 +27,10 @@ from .path_guard import (
     cli_user_path,
     copy_tree_no_symlinks,
     refuse_symlink_path,
+    refuse_symlink_existing_components,
     write_file_under,
     copy_file_under,
+    ensure_dir_under,
 )
 
 # Required for local bookclerk-workerd / Pyodide without pywrangler.
@@ -469,11 +471,15 @@ def sync_embed(plugin_dir: Path) -> str:
             "sync-embed (Python SDK): main_module must end with .py "
             f"(got {m['workerd'].get('main_module')!r})"
         )
-    modules_dir = _workerd_modules_dir(root, m)
+    modules_rel = (m.get("workerd") or {}).get("modules_dir") or "modules"
+    modules_dir = resolve_under(root, modules_rel)
+    # Validate existing ancestors only; create missing modules components safely.
+    refuse_symlink_existing_components(root, modules_dir)
+    modules_dir = ensure_dir_under(root, modules_rel)
     refuse_symlink_path(root, modules_dir)
     pkg = resolve_under(modules_dir, "bookclerk_plugin_sdk")
-    refuse_symlink_path(root, pkg)
-    pkg.mkdir(parents=True, exist_ok=True)
+    refuse_symlink_existing_components(root, pkg)
+    pkg = ensure_dir_under(modules_dir, "bookclerk_plugin_sdk")
     refuse_symlink_path(root, pkg)
     init = resolve_under(pkg, "__init__.py")
     if not init.is_file():
