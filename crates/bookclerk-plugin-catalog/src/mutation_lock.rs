@@ -178,11 +178,13 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         let with_dotdot = nested.join("..").join(nested.file_name().unwrap());
         let lock = PluginMutationLock::acquire(&with_dotdot).unwrap();
-        assert!(PluginMutationLock::path(tmp.path()).is_file() || {
-            // Lock lives under the resolved nested dir spelling the caller passed.
-            PluginMutationLock::path(&with_dotdot).exists()
-                || PluginMutationLock::path(&nested).is_file()
-        });
+        assert!(
+            PluginMutationLock::path(tmp.path()).is_file() || {
+                // Lock lives under the resolved nested dir spelling the caller passed.
+                PluginMutationLock::path(&with_dotdot).exists()
+                    || PluginMutationLock::path(&nested).is_file()
+            }
+        );
         drop(lock);
         let again = PluginMutationLock::acquire(&with_dotdot).unwrap();
         drop(again);

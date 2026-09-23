@@ -846,7 +846,12 @@ async fn gc_unlinks_leaf_symlink_without_following_target() {
     std::os::unix::fs::symlink(&outside, &link).unwrap();
     // Also plant a leaf symlink to a live in-repo object and ensure peer survives GC
     // when that digest is still live (symlink to peer is not a live digest name).
-    let live: String = outcome.manifest.referenced_objects().into_iter().next().unwrap();
+    let live: String = outcome
+        .manifest
+        .referenced_objects()
+        .into_iter()
+        .next()
+        .unwrap();
     let peer = objects.join(&live[..2]).join(&live[2..]);
     assert!(peer.is_file(), "live object must exist");
     let peer_link = prefix.join("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
@@ -854,12 +859,25 @@ async fn gc_unlinks_leaf_symlink_without_following_target() {
     let peer_bytes = std::fs::read(&peer).unwrap();
     let repo = BackupRepository::open(files.path()).unwrap();
     let deleted = repo.gc_unreferenced_objects().unwrap();
-    assert!(deleted >= 2, "expected orphan + symlink leaves removed, got {deleted}");
+    assert!(
+        deleted >= 2,
+        "expected orphan + symlink leaves removed, got {deleted}"
+    );
     assert!(!orphan.exists());
-    assert!(link.symlink_metadata().is_err(), "outside symlink leaf removed");
+    assert!(
+        link.symlink_metadata().is_err(),
+        "outside symlink leaf removed"
+    );
     assert_eq!(std::fs::read(&outside).unwrap(), b"do-not-delete");
-    assert!(peer_link.symlink_metadata().is_err(), "peer symlink leaf removed");
-    assert_eq!(std::fs::read(&peer).unwrap(), peer_bytes, "live peer bytes survive");
+    assert!(
+        peer_link.symlink_metadata().is_err(),
+        "peer symlink leaf removed"
+    );
+    assert_eq!(
+        std::fs::read(&peer).unwrap(),
+        peer_bytes,
+        "live peer bytes survive"
+    );
     verify_recovery_point(&repo, &outcome.manifest.id).unwrap();
 }
 

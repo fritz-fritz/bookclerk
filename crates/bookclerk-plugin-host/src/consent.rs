@@ -2607,8 +2607,11 @@ mode = "deny"
     #[test]
     fn grant_store_load_refuses_dangling_symlink() {
         let dir = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(dir.path().join("missing.json"), dir.path().join(GRANTS_FILE))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("missing.json"),
+            dir.path().join(GRANTS_FILE),
+        )
+        .unwrap();
         let err = PluginGrantStore::load(dir.path()).unwrap_err();
         assert!(
             err.to_string().contains("symlink")

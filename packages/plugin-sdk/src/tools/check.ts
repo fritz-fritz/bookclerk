@@ -22,7 +22,7 @@ export const EMBED_BOOKCLERK_PLUGIN_JS = "bookclerk_plugin.js";
 export function sdkEmbedSrc(): string {
   return path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
-    "../../../embed/bookclerk_plugin.js",
+    "../../embed/bookclerk_plugin.js",
   );
 }
 
@@ -208,6 +208,8 @@ export function syncEmbed(pluginDir: string): string {
   refuseSymlinkPath(root, modulesDir);
   const destDir = ensureDirUnder(modulesDir, path.join("@bookclerk", "plugin-sdk"));
   refuseSymlinkPath(root, destDir);
+  const destLeaf = assertPathInside(destDir, "workerd.js");
+  refuseSymlinkPath(root, destLeaf);
   const src = sdkEmbedSrc();
   if (!fs.existsSync(src)) {
     throw new Error(`SDK embed missing: ${src}`);

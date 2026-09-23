@@ -197,7 +197,10 @@ mod tests {
         let nested = tmp.path().join("nested");
         std::fs::create_dir_all(nested.join("BookclerkFiles")).unwrap();
         std::fs::write(nested.join("BookclerkFiles").join("stale"), b"x").unwrap();
-        let with_dotdot = nested.join("..").join(nested.file_name().unwrap()).join("BookclerkFiles");
+        let with_dotdot = nested
+            .join("..")
+            .join(nested.file_name().unwrap())
+            .join("BookclerkFiles");
         reset_files_dir(&with_dotdot).expect("reset with ..");
         assert!(nested.join("BookclerkFiles").is_dir());
         assert!(!nested.join("BookclerkFiles").join("stale").exists());

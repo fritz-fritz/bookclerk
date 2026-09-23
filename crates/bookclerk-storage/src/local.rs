@@ -901,20 +901,21 @@ mod tests {
     #[test]
     fn with_prefix_rejects_parent_dir_components() {
         let dir = tempdir().unwrap();
-        let outside_before = std::fs::read_dir(dir.path().parent().unwrap())
-            .unwrap()
-            .count();
+        let parent = dir.path().parent().unwrap();
+        let marker = parent.join(format!(
+            "bookclerk-prefix-escape-marker-{}",
+            std::process::id()
+        ));
         assert!(LocalFsBackend::with_prefix(dir.path().to_path_buf(), "../outside/new").is_err());
         assert!(LocalFsBackend::with_prefix(dir.path().to_path_buf(), "foo/../bar").is_err());
-        let outside_after = std::fs::read_dir(dir.path().parent().unwrap())
-            .unwrap()
-            .count();
-        assert_eq!(
-            outside_before, outside_after,
+        assert!(
+            !marker.exists(),
             "ParentDir prefix must not create siblings outside root"
         );
+        assert!(!parent.join("outside").exists());
         assert!(!dir.path().join("foo").exists());
         assert!(!dir.path().join("bar").exists());
+        assert!(!dir.path().join("outside").exists());
     }
 
     #[cfg(unix)]
@@ -928,7 +929,8 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        let err = LocalFsBackend::with_prefix(dir.path().to_path_buf(), "escape/newchild").unwrap_err();
+        let err =
+            LocalFsBackend::with_prefix(dir.path().to_path_buf(), "escape/newchild").unwrap_err();
         assert!(
             matches!(err, StorageError::InvalidKey(_)),
             "expected InvalidKey, got {err:?}"

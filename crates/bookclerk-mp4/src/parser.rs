@@ -1,7 +1,7 @@
 //! Progressive (non-fragmented) MP4 structure parsing.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 
 use crate::boxutil::{

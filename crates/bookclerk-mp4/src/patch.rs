@@ -13,7 +13,7 @@
 //! header rather than by the file.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::boxutil::{read_box_header, BoxHeader, MOOV};

@@ -448,8 +448,11 @@ mod tests {
     #[test]
     fn load_refuses_dangling_receipt_symlink() {
         let dir = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(dir.path().join("missing.json"), dir.path().join(RECEIPT_FILE))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("missing.json"),
+            dir.path().join(RECEIPT_FILE),
+        )
+        .unwrap();
         let err = InstallReceipt::load(dir.path()).unwrap_err();
         assert!(!err.is_receipt_not_found(), "{err}");
         assert!(
