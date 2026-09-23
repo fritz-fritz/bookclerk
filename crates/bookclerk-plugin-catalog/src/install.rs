@@ -301,8 +301,11 @@ impl Installer {
             });
         }
 
+        // Trusted root is plugins_root — create it before canonicalize-based checks.
+        // (Previously create_dir_all(.staging) created this as a side effect.)
+        fs::create_dir_all(&opts.plugins_root)?;
         let staging_parent_path = opts.plugins_root.join(".staging");
-        // Trusted root is plugins_root — never a pre-existing `.staging` symlink.
+        // Never treat a pre-existing `.staging` symlink as the trusted root.
         let staging_parent = require_mutable_child(&opts.plugins_root, &staging_parent_path)?;
         fs::create_dir_all(&staging_parent)?;
         let staging_parent = require_mutable_child(&opts.plugins_root, &staging_parent_path)?;
@@ -611,6 +614,7 @@ impl Installer {
         let key = resolve_remove_plugin_key(&dest, ledger.as_ref())?;
         let previous_ledger = ledger.as_ref().and_then(|loaded| loaded.get(&key).cloned());
 
+        fs::create_dir_all(plugins_root)?;
         let staging_parent_path = plugins_root.join(".staging");
         let staging_parent = require_mutable_child(plugins_root, &staging_parent_path)?;
         fs::create_dir_all(&staging_parent)?;
@@ -1051,6 +1055,7 @@ fn restore_update_tree_from_backup(dest: &Path, backup: &Path) -> Result<()> {
                 dest.display()
             ))
         })?;
+        fs::create_dir_all(plugins_root)?;
         let staging_parent_path = plugins_root.join(".staging");
         let staging_parent = require_mutable_child(plugins_root, &staging_parent_path)?;
         fs::create_dir_all(&staging_parent)?;
