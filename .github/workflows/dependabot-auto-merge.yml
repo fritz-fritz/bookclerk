@@ -29,6 +29,10 @@ jobs:
     name: enable auto-merge
     if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
+    # The action's inner dependabot/fetch-metadata step lists PR commits with
+    # the job's GITHUB_TOKEN (it does not accept the App token).
+    permissions:
+      pull-requests: read
     steps:
       - name: Mint App token
         id: app
