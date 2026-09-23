@@ -204,7 +204,12 @@ export function syncEmbed(pluginDir: string): string {
       `sync-embed (TypeScript SDK): main_module must be .js/.mjs (got ${m.workerd!.main_module})`,
     );
   }
-  const modulesDir = assertPathInside(root, m.workerd?.modules_dir ?? "modules");
+  const modulesRel = m.workerd?.modules_dir ?? "modules";
+  const modulesDirLex = assertPathInside(root, modulesRel);
+  // Validate existing ancestors only; create missing modules under the plugin root
+  // (ensureDirUnder requires its trusted root to already exist / be realpath-able).
+  refuseSymlinkExistingComponents(root, modulesDirLex);
+  const modulesDir = ensureDirUnder(root, modulesRel);
   refuseSymlinkPath(root, modulesDir);
   const embedRel = path.join("@bookclerk", "plugin-sdk");
   // Full destination under the plugin root — inspect existing components before

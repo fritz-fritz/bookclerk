@@ -118,6 +118,62 @@ mode = "deny"
   }
   console.log("ok syncEmbed refuses @bookclerk symlink before mkdir");
 
+  // Absent default modules/ must be created (ordinary first-time sync-embed).
+  const syncAbsent = path.join(tmp, "sync-absent");
+  fs.mkdirSync(syncAbsent, { recursive: true });
+  fs.copyFileSync(path.join(plugin, "plugin.toml"), path.join(syncAbsent, "plugin.toml"));
+  if (fs.existsSync(path.join(syncAbsent, "modules"))) {
+    console.error("FAIL: sync-absent fixture must start without modules/");
+    process.exit(1);
+  }
+  const syncedAbsent = syncEmbed(syncAbsent);
+  if (!syncedAbsent.includes("synced")) {
+    console.error("FAIL: syncEmbed absent modules", syncedAbsent);
+    process.exit(1);
+  }
+  if (
+    !fs.existsSync(
+      path.join(syncAbsent, "modules", "@bookclerk", "plugin-sdk", "workerd.js"),
+    )
+  ) {
+    console.error("FAIL: syncEmbed did not create modules/@bookclerk/plugin-sdk/workerd.js");
+    process.exit(1);
+  }
+  console.log("ok syncEmbed creates absent default modules");
+
+  // Nested missing modules_dir path must also be created under the plugin root.
+  const syncNested = path.join(tmp, "sync-nested");
+  fs.mkdirSync(syncNested, { recursive: true });
+  fs.writeFileSync(
+    path.join(syncNested, "plugin.toml"),
+    `api_version = 3
+id = "sym_nested"
+runtime = "workerd"
+entrypoints = ["cli"]
+[workerd]
+compatibility_date = "2026-08-01"
+main_module = "main.js"
+modules_dir = "mods/nested"
+entrypoint = "default"
+[capabilities.network]
+mode = "deny"
+`,
+  );
+  const syncedNested = syncEmbed(syncNested);
+  if (!syncedNested.includes("synced")) {
+    console.error("FAIL: syncEmbed nested modules path", syncedNested);
+    process.exit(1);
+  }
+  if (
+    !fs.existsSync(
+      path.join(syncNested, "mods", "nested", "@bookclerk", "plugin-sdk", "workerd.js"),
+    )
+  ) {
+    console.error("FAIL: syncEmbed did not create mods/nested/@bookclerk/plugin-sdk/workerd.js");
+    process.exit(1);
+  }
+  console.log("ok syncEmbed creates nested missing modules path");
+
   const syncPlugin = path.join(tmp, "sync-plugin");
   fs.mkdirSync(path.join(syncPlugin, "modules"), { recursive: true });
   fs.copyFileSync(path.join(plugin, "plugin.toml"), path.join(syncPlugin, "plugin.toml"));
