@@ -443,10 +443,12 @@ function stampFileName(pin: WorkerdPin): string {
   return stamp;
 }
 
-function usableRegularFile(bin: string): boolean {
+function usableFile(bin: string): boolean {
   try {
-    const st = fs.lstatSync(bin);
-    return st.isFile() && !st.isSymbolicLink();
+    // Follow leaf symlinks so BOOKCLERK_WORKERD_BIN overrides that point at a
+    // pinned executable still match. Managed-cache callers refuse symlink
+    // leaves before invoking binaryMatchesPin.
+    return fs.statSync(bin).isFile();
   } catch {
     return false;
   }
@@ -464,7 +466,7 @@ function usableRegularFile(bin: string): boolean {
  * @returns Whether the binary is present and matches the pin.
  */
 export function binaryMatchesPin(bin: string, pin: WorkerdPin): boolean {
-  if (!usableRegularFile(bin)) return false;
+  if (!usableFile(bin)) return false;
   try {
     const dir = path.resolve(path.dirname(bin));
     const stamp = assertPathInside(dir, stampFileName(pin));

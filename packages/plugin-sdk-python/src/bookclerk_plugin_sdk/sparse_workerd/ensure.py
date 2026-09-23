@@ -198,16 +198,14 @@ def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
 
     A sibling stamp is enough when the binary exists. A stamp without a binary
     is not current. When no Bookclerk stamp matches, probe ``--version`` on the
-    absolute path with fixed argv (no ``PATH`` lookup). Managed stamp leaves
-    that are symlinks are ignored (not treated as a pin match).
-    """
-    try:
-        st = os.lstat(bin_path)
-    except OSError:
-        return False
-    import stat as stat_mod
+    absolute path with fixed argv (no ``PATH`` lookup).
 
-    if stat_mod.S_ISLNK(st.st_mode) or not stat_mod.S_ISREG(st.st_mode):
+    Follows leaf symlinks so an explicit ``BOOKCLERK_WORKERD_BIN`` override that
+    points at a pinned executable still matches. Managed-cache callers must
+    refuse symlink leaves before invoking this helper.
+    """
+    # Follow symlinks: operator overrides may be links to a pinned binary.
+    if not bin_path.is_file():
         return False
     root_s = os.path.abspath(os.fspath(bin_path.parent))
     name = _stamp_file_name(pin)
@@ -222,6 +220,7 @@ def _is_current(bin_path: Path, pin: dict[str, Any]) -> bool:
         and not os.path.isabs(rel)
         and (stamp_s == root_s or stamp_s.startswith(root_s + os.sep))
     )
+    # Symlink stamps are not a pin match (fall through to --version).
     if stamp_ok and not os.path.islink(stamp_s):
         try:
             with open(stamp_s, encoding="utf-8") as fh:

@@ -527,7 +527,9 @@ def test_materialize_nested_modules_and_double_dot_name(tmp_path: Path):
 def test_workerd_cache_and_currency(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from bookclerk_plugin_sdk.sparse_workerd.ensure import (
         _is_current,
+        binary_name,
         default_cache_dir,
+        ensure_workerd,
         load_pin,
     )
 
@@ -545,6 +547,11 @@ def test_workerd_cache_and_currency(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     present.write_bytes(b"not-executable-needed")
     assert _is_current(present, pin) is True
 
+    # Symlink to a stamped regular file still counts as current (override path).
+    link = stamp_dir / "link-workerd"
+    link.symlink_to(present)
+    assert _is_current(link, pin) is True
+
     probe_dir = tmp_path / "probe"
     probe_dir.mkdir()
     script = probe_dir / "fake-workerd"
@@ -554,3 +561,42 @@ def test_workerd_cache_and_currency(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     )
     script.chmod(0o755)
     assert _is_current(script, pin) is True
+    script_link = probe_dir / "fake-workerd-link"
+    script_link.symlink_to(script)
+    assert _is_current(script_link, pin) is True
+
+    # Explicit absolute override that is a symlink must be accepted without download.
+    monkeypatch.setenv("BOOKCLERK_WORKERD_BIN", str(link))
+
+    def _forbid_download(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("ensure_workerd must not download when override matches")
+
+    monkeypatch.setattr(
+        "bookclerk_plugin_sdk.sparse_workerd.ensure.urllib.request.urlopen",
+        _forbid_download,
+    )
+    got = ensure_workerd(cache_dir=cache)
+    assert Path(got).resolve() == present.resolve()
+
+    # No-stamp --version symlink override.
+    monkeypatch.setenv("BOOKCLERK_WORKERD_BIN", str(script_link))
+    got2 = ensure_workerd(cache_dir=cache)
+    assert Path(got2).resolve() == script.resolve()
+
+    # Mismatched override falls through; managed cache leaf symlink is refused.
+    bad = tmp_path / "wrong-workerd"
+    bad.write_bytes(b"nope")
+    monkeypatch.setenv("BOOKCLERK_WORKERD_BIN", str(bad))
+    managed = cache / binary_name()
+    cache.mkdir(parents=True, exist_ok=True)
+    if managed.exists() or managed.is_symlink():
+        managed.unlink()
+    outside = tmp_path / "outside-bin"
+    outside.write_bytes(b"OUT")
+    managed.symlink_to(outside)
+    try:
+        ensure_workerd(cache_dir=cache)
+        raise AssertionError("expected managed cache symlink refusal")
+    except ValueError as err:
+        assert "symlink" in str(err).lower()
+    assert outside.read_bytes() == b"OUT"

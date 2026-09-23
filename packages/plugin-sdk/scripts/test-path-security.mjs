@@ -425,6 +425,18 @@ mode = "deny"
     console.error("FAIL: stamp without binary was treated as current");
     process.exit(1);
   }
+  const stampedBin = path.join(stampDir, "present-workerd");
+  fs.writeFileSync(stampedBin, "not-executable-needed");
+  if (!binaryMatchesPin(stampedBin, pin)) {
+    console.error("FAIL: stamped regular file was not current");
+    process.exit(1);
+  }
+  const stampedLink = path.join(stampDir, "link-workerd");
+  fs.symlinkSync(stampedBin, stampedLink);
+  if (!binaryMatchesPin(stampedLink, pin)) {
+    console.error("FAIL: stamped symlink override was rejected");
+    process.exit(1);
+  }
   const probeDir = path.join(tmp, "probe-only");
   fs.mkdirSync(probeDir);
   const fake = path.join(probeDir, "fake-workerd");
@@ -434,7 +446,74 @@ mode = "deny"
     console.error("FAIL: --version probe rejected a current absolute binary");
     process.exit(1);
   }
-  console.log("ok binaryMatchesPin requires a file and probes --version");
+  const fakeLink = path.join(probeDir, "fake-workerd-link");
+  fs.symlinkSync(fake, fakeLink);
+  if (!binaryMatchesPin(fakeLink, pin)) {
+    console.error("FAIL: --version symlink override was rejected");
+    process.exit(1);
+  }
+  console.log("ok binaryMatchesPin follows override symlinks and probes --version");
+
+  const { ensureWorkerd, binaryName } = await import("../dist/sparse-workerd/ensure.js");
+  const prevBin = process.env.BOOKCLERK_WORKERD_BIN;
+  const overrideCache = path.join(tmp, "ensure-cache");
+  fs.mkdirSync(overrideCache);
+  process.env.BOOKCLERK_WORKERD_BIN = stampedLink;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("ensureWorkerd must not download when override matches");
+  };
+  try {
+    const got = await ensureWorkerd(overrideCache);
+    if (fs.realpathSync(got) !== fs.realpathSync(stampedBin)) {
+      console.error("FAIL: stamped symlink override did not short-circuit", got);
+      process.exit(1);
+    }
+    process.env.BOOKCLERK_WORKERD_BIN = fakeLink;
+    const gotProbe = await ensureWorkerd(overrideCache);
+    if (fs.realpathSync(gotProbe) !== fs.realpathSync(fake)) {
+      console.error("FAIL: --version symlink override did not short-circuit", gotProbe);
+      process.exit(1);
+    }
+  } finally {
+    globalThis.fetch = origFetch;
+    if (prevBin === undefined) delete process.env.BOOKCLERK_WORKERD_BIN;
+    else process.env.BOOKCLERK_WORKERD_BIN = prevBin;
+  }
+  // Managed cache leaf symlink still refused before reuse.
+  const managed = path.join(overrideCache, binaryName());
+  const managedOutside = path.join(tmp, "outside-managed-bin");
+  fs.writeFileSync(managedOutside, "OUT");
+  try {
+    fs.unlinkSync(managed);
+  } catch {
+    /* missing */
+  }
+  fs.symlinkSync(managedOutside, managed);
+  process.env.BOOKCLERK_WORKERD_BIN = path.join(tmp, "missing-override");
+  globalThis.fetch = async () => {
+    throw new Error("download must not run after managed symlink refusal");
+  };
+  try {
+    await ensureWorkerd(overrideCache);
+    console.error("FAIL: managed cache symlink leaf was accepted");
+    process.exit(1);
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (!/symlink/i.test(msg)) {
+      console.error("FAIL: expected managed symlink refusal, got", msg);
+      process.exit(1);
+    }
+  } finally {
+    globalThis.fetch = origFetch;
+    if (prevBin === undefined) delete process.env.BOOKCLERK_WORKERD_BIN;
+    else process.env.BOOKCLERK_WORKERD_BIN = prevBin;
+  }
+  if (fs.readFileSync(managedOutside, "utf8") !== "OUT") {
+    console.error("FAIL: managed symlink refusal mutated outside bytes");
+    process.exit(1);
+  }
+  console.log("ok ensureWorkerd accepts override symlinks; refuses managed leaf links");
 
   console.log("path security regressions passed");
 }
