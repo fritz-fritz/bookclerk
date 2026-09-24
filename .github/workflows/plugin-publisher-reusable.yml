@@ -134,9 +134,9 @@ jobs:
           # depends on bookclerk-plugin-sdk — same check/package as local CI.
           if cargo metadata --no-deps --format-version 1 2>/dev/null \
             | grep -q '"name":"bookclerk-plugin-sdk"'; then
-            cargo run -q -p bookclerk-plugin-sdk --features tools --bin bookclerk-plugin -- check staging
+            cargo run -q -p bookclerk-plugin-tools --bin bookclerk-plugin -- check staging
             # package emits bookclerk-plugin-<id>-<ver>-<target>.tar.gz + SHA256SUMS
-            cargo run -q -p bookclerk-plugin-sdk --features tools --bin bookclerk-plugin -- \
+            cargo run -q -p bookclerk-plugin-tools --bin bookclerk-plugin -- \
               package --out "$out" staging
             archive="$(ls -1 "$out"/bookclerk-plugin-"${PLUGIN_ID}"-*.tar.gz | head -1)"
             archive_name="$(basename "$archive")"

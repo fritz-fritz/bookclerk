@@ -292,7 +292,7 @@ jobs:
 
       - name: Rust plugin SDK tools conformance
         if: needs.plan.outputs.run_sdk == 'true'
-        run: cargo test -p bookclerk-plugin-sdk --features tools --test tools_conformance
+        run: cargo test -p bookclerk-plugin-tools --test tools_conformance
 
       - name: Format
         run: cargo fmt --all -- --check
