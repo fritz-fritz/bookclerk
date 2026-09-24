@@ -76,6 +76,23 @@ class CiPlanTests(unittest.TestCase):
         p = self.plan("crates/bookclerk-media/src/lib.rs")
         self.assertTrue(p.confinement)
 
+    def test_workerd_triggers_confinement(self) -> None:
+        # Windows SOCKET_PROXY coverage lives only in the confinement job.
+        p = self.plan("crates/bookclerk-workerd/src/lib.rs")
+        self.assertFalse(p.full_suite)
+        self.assertTrue(p.confinement)
+        self.assertIn("bookclerk-workerd", p.rust_packages)
+
+    def test_plugin_host_triggers_confinement(self) -> None:
+        p = self.plan("crates/bookclerk-plugin-host/src/lib.rs")
+        self.assertFalse(p.full_suite)
+        self.assertTrue(p.confinement)
+
+    def test_plugin_sdk_triggers_confinement(self) -> None:
+        p = self.plan("crates/bookclerk-plugin-sdk/src/lib.rs")
+        self.assertFalse(p.full_suite)
+        self.assertTrue(p.confinement)
+
     def test_tray_package(self) -> None:
         p = self.plan("crates/bookclerk-tray/src/lib.rs")
         self.assertTrue(p.tray)
@@ -85,6 +102,9 @@ class CiPlanTests(unittest.TestCase):
         p = self.plan("ui/src/App.tsx")
         self.assertTrue(p.ui)
         self.assertEqual(p.rust_packages, [])
+        self.assertFalse(p.confinement)
+        self.assertFalse(p.tray)
+        self.assertFalse(p.release)
 
     def test_bookclerkd_pulls_ui(self) -> None:
         p = self.plan("crates/bookclerkd/src/main.rs")

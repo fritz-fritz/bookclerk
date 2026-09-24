@@ -43,6 +43,17 @@ CONFINEMENT_NAME_PREFIXES = (
     "bookclerk-media",
 )
 
+# Exact names that also schedule the confinement job. The Windows matrix is the
+# only place that clippy/tests bookclerk-workerd (named-pipe SOCKET_PROXY) and
+# Windows-only host/sdk Denial paths — see .github/workflows/ci.yml.
+CONFINEMENT_PACKAGES = frozenset(
+    {
+        "bookclerk-workerd",
+        "bookclerk-plugin-host",
+        "bookclerk-plugin-sdk",
+    }
+)
+
 TRAY_PACKAGE = "bookclerk-tray"
 
 # Non-Cargo surfaces (path prefix → plan flag).
@@ -333,6 +344,8 @@ def reverse_closure(seeds: Iterable[str], index: PackageIndex) -> set[str]:
 
 
 def is_confinement_package(name: str) -> bool:
+    if name in CONFINEMENT_PACKAGES:
+        return True
     return any(name == p or name.startswith(p) for p in CONFINEMENT_NAME_PREFIXES)
 
 
