@@ -32,6 +32,11 @@ use crate::{check_plugin, package_plugin, smoke_plugin, sync_embed};
 /// ```
 pub fn run() -> ExitCode {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
+    // `cargo plugin -- check .` forwards a literal `--` because the alias
+    // already ends with one.
+    if args.first().map(String::as_str) == Some("--") {
+        args.remove(0);
+    }
     if args.is_empty() {
         eprint_usage();
         return ExitCode::from(2);
