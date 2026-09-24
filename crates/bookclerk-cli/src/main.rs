@@ -354,3 +354,4 @@ async fn run(cli: Cli, config: Config) -> anyhow::Result<()> {
         }
     }
 }
+// CI probe: selective-path validation for PR #220 (do not merge).
