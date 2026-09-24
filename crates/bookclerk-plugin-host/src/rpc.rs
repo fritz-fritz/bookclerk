@@ -93,3 +93,4 @@ mod env_tests {
         assert!(err.to_string().contains("limit 32"), "got: {err}");
     }
 }
+// CI probe: selective-path validation for PR #220 (do not merge).
