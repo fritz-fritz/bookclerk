@@ -172,7 +172,7 @@ and `bookclerk-db-exec`, grammar-aware sqlite admission plus a PostgreSQL 16
 differential (normalized `DbValue` / `DbErrorClass`), and coverage-guided
 `cargo-fuzz` targets (`sql_parse`, `sql_lower`) with checked-in corpora under
 `fuzz/corpus/`. It is `workflow_dispatch` + weekly; PR CI keeps the modest
-in-crate case counts, deterministic corpus replay, and the postgres-jobs
+in-crate case counts, deterministic corpus replay, and the postgres
 matrix (binding UTF8 readiness + sqlite/postgres differential).
 
 The scheduled **workerd pin bump** job (`.github/workflows/workerd-pin-bump.yml`)
