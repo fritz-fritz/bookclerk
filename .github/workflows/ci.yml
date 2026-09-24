@@ -20,12 +20,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUSTFLAGS: "-D warnings"
-  # Selective PR CI (#157). Keep "0" (shadow) until representative PRs have
-  # executed the selective command branches. When "1", job/step selection
-  # follows the planner; merge_group / main still force full_suite via
-  # --force-full. execute_full_suite collapses to plan.full_suite when
-  # selection is on.
-  SELECTIVE_CI: "0"
+  # Selective PR CI (#157). When "1", job/step selection follows the planner;
+  # merge_group / main still force full_suite via --force-full.
+  # execute_full_suite collapses to plan.full_suite when selection is on.
+  SELECTIVE_CI: "1"
 
 jobs:
   plan:
