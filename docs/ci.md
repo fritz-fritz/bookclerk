@@ -4,14 +4,38 @@ Bookclerk’s GitHub Actions workflow (`.github/workflows/ci.yml`) uses a
 **dependency-aware planner** so pull requests can skip unrelated work, while
 `merge_group` and pushes to `main` always run the full suite.
 
-## Shadow → selective
+## Selective CI
 
-`SELECTIVE_CI` in `.github/workflows/ci.yml` is **`0`** (shadow): the planner
-still publishes predictions (`full_suite` and surface flags), but
-`execute_full_suite` stays true so every command branch runs the full baseline.
-Flip to `1` in a small follow-up after representative docs-only, UI-only,
-binary-only, leaf-crate, and shared-crate PRs have executed the selective
-paths. `merge_group` / `main` always `--force-full`.
+`SELECTIVE_CI` in `.github/workflows/ci.yml` is **`1`**: pull requests follow
+the planner’s job and step selection. `merge_group` and pushes to `main`
+always pass `--force-full`, so the full suite remains the post-merge (and,
+once an organization merge queue exists, pre-merge) trust boundary.
+
+### Shadow evaluation
+
+While `SELECTIVE_CI` was `0`, the planner still published predictions on every
+PR. A sample of 73 successful PR `ci-plan` artifacts (~2026-08-20 →
+2026-09-23) showed:
+
+- About **97%** predicted `full_suite=true` (mostly `Cargo.lock`, workflows,
+  unknown `tools/`, or unclassified paths) — fail-closed and correct.
+- Only one selective shape appeared in Actions: a `bookclerk-workerd` + docs
+  PR predicted `confinement=false`, which would have skipped the Windows
+  named-pipe `SOCKET_PROXY` coverage that lives only in the confinement job.
+
+The planner now treats `bookclerk-workerd`, `bookclerk-plugin-host`, and
+`bookclerk-plugin-sdk` as confinement triggers (in addition to the sandbox /
+jail / media prefixes) so that Windows-only steps cannot be skipped on those
+PRs. Docs-only and UI-only plans still skip confinement, tray, and release.
+
+### Interim trust model
+
+Until the repository is organization-owned and a merge queue is required,
+selective PR CI is the fast path and **`push` to `main` is the full-suite
+safety net**. A planner miss can therefore land before `main` CI catches it;
+prefer small, reviewable PRs for planner and workflow changes. After the
+org transfer, enable the merge queue so `merge_group` runs the full suite on
+the stacked commit before landing (see below).
 
 ## Planner
 
@@ -46,7 +70,8 @@ Conservative **full suite** triggers include root `Cargo.toml` / `Cargo.lock`,
 `rust-toolchain.toml`, `.cargo/**`, CI workflows, the planner itself, unresolved
 package manifests, unknown top-level paths, unclassified paths under known roots,
 and planner failures. There is **no** per-crate lane metadata — specialization
-roots are discovered from directories (confinement, tray, platform/optional/examples
+roots are discovered from directories (confinement — sandbox / jail / media
+prefixes plus workerd / plugin-host / plugin-sdk, tray, platform/optional/examples
 plugins, SDKs).
 
 ## Jobs
@@ -56,7 +81,7 @@ plugins, SDKs).
 | `plan` | Always runs; publishes outputs + `ci-plan` artifact |
 | `fmt / clippy / test` | Selective steps driven by plan outputs (when `SELECTIVE_CI=1`). Installs `capnproto`. The plugin ABI contract requires pinned `target/debug/workerd` (fails closed unless a local `BOOKCLERK_SKIP_WORKERD=1` skip is used — CI never sets that) |
 | `release build` | When hosts/platform packaging are affected (or full suite). Installs `capnproto`. |
-| `sandbox + jailed tiers` | When confinement packages are affected (or full suite). Windows runs `--test-threads=1` so parallel AppContainer tests do not starve `Local\bookclerk-dacl-tx`. Windows also installs Cap'n Proto and clippy/tests `bookclerk-workerd` (named-pipe SOCKET_PROXY), `bookclerk-plugin-sdk` with `http`, and `bookclerk-plugin-host --lib` so `#[cfg(windows)]` nested Deny is compiled. |
+| `sandbox + jailed tiers` | When confinement packages are affected (or full suite): sandbox / jail / media prefixes, plus `bookclerk-workerd`, `bookclerk-plugin-host`, and `bookclerk-plugin-sdk` (Windows SOCKET_PROXY and host/sdk Denial paths). Windows runs `--test-threads=1` so parallel AppContainer tests do not starve `Local\bookclerk-dacl-tx`. Windows also installs Cap'n Proto and clippy/tests `bookclerk-workerd` (named-pipe SOCKET_PROXY), `bookclerk-plugin-sdk` with `http`, and `bookclerk-plugin-host --lib` so `#[cfg(windows)]` nested Deny is compiled. |
 | `tray` | When `bookclerk-tray` is affected (or full suite) |
 | `postgres 16/17/18` | When Rust runs (or full suite). Matrix of every supported PostgreSQL major ≥ 16 (`fail-fast: false`; `CI Gate` requires the whole job). Installs `capnproto`. Requires a Postgres service at that major. Runs ignored job-queue tests, TOTP atomic conformance, shared SQL-plan vectors, guest page tests, binding-schema isolation, and production RPC LIKE. |
 | `CI Gate` | Stable required check: succeeds for intentional skips; fails on real failures |
