@@ -195,6 +195,19 @@ class RelationsGuardrailTests(unittest.TestCase):
                         )
                     self.assertNotIn(f'"{leaf}/', f.read_text(errors="ignore"), f"{_rel(f)} reads {leaf}")
 
+    def test_macro_built_include_paths_are_reviewed(self) -> None:
+        # `include_str!(concat!(env!(..), "..."))` hides the path from the
+        # literal scan above; each use must be reviewed explicitly.
+        macro_include = re.compile(r'include_(?:str|bytes)!\(\s*concat!\((?:[^()]|\([^()]*\))*?"([^"]+)"')
+        problems = []
+        for name, info in INDEX.by_name.items():
+            for f in _rust_files(REPO / info.manifest_dir):
+                for tail in macro_include.findall(f.read_text(errors="ignore")):
+                    target = _rel((REPO / info.manifest_dir / tail.lstrip("/")).resolve())
+                    if not (_covered(name, target, tail) or _reviewed(name, target)):
+                        problems.append(f"{name}: {_rel(f)} includes {target} via concat!")
+        self.assertEqual(problems, [], "declare or add a [[reviewed]] entry with a reason")
+
     def test_reviewed_entries_have_reasons(self) -> None:
         for r in REL.reviewed:
             self.assertTrue(r.get("reason"), r)
