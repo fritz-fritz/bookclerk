@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Unit tests for scripts/ci_plan (no live git history required)."""
+"""Unit tests for scripts/ci_plan (no live git history required).
+
+Scenario tests assert the *executed* plan: selected checks, their
+prerequisites, and the exact commands ``ci-exec.py run`` would issue.
+"""
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,290 +19,543 @@ from pathlib import Path
 from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
+REPO = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 
+from ci_plan.execute import (  # noqa: E402
+    SCHEMA_VERSION,
+    Context,
+    ExecError,
+    execution_mode,
+    gate,
+    job_outputs,
+    planned_commands,
+    resolve,
+    validate,
+)
 from ci_plan.github_paths import (  # noqa: E402
     github_actions_file_path,
     open_github_actions_append,
 )
 from ci_plan.plan import (  # noqa: E402
-    PlanError,
+    ALL_CHECKS,
+    E2E_PACKAGE,
+    JOB_CHECKS,
     build_plan,
+    discover_guests,
+    glob_match,
+    list_changed_paths,
+    load_relations,
     package_for_path,
     package_index_from_metadata,
-    plan_to_github_output,
+    plan_from_dict,
+    plan_from_event,
+    plan_to_dict,
     plan_to_json,
-    reverse_closure,
+    plan_to_summary,
+    validate_relations,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "ci_plan_fixtures"
 META = json.loads((FIXTURES / "workspace_metadata.json").read_text(encoding="utf-8"))
+INDEX = package_index_from_metadata(META)
+RELATIONS = load_relations()
+GUESTS = discover_guests(REPO, INDEX)
+WORKERD_RUNTIME = sorted(g.id for g in GUESTS.values() if g.runtime == "workerd")
 
 
-class CiPlanTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.index = package_index_from_metadata(META)
+def plan(*paths: str, index=INDEX):
+    return build_plan(list(paths), index, RELATIONS, guests=GUESTS)
 
-    def plan(self, *paths: str):
-        return build_plan(list(paths), self.index)
 
-    def test_docs_only(self) -> None:
-        p = self.plan("docs/architecture.md", "docs/README.md")
-        self.assertFalse(p.full_suite)
-        self.assertTrue(p.docs_markdown)
-        self.assertEqual(p.rust_packages, [])
-        self.assertFalse(p.confinement)
-        self.assertFalse(p.tray)
-        self.assertFalse(p.release)
-        self.assertFalse(p.ui)
+def artifact(p, mode: str = "selective") -> dict:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": "1",
+        "event": "pull_request",
+        "base_sha": "b",
+        "head_sha": "h",
+        "checkout_sha": "c",
+        "selective_ci": "1",
+        "mode": mode,
+        "predicted": plan_to_dict(p),
+        "execution": plan_to_dict(p),
+    }
 
-    def test_isolated_leaf_naming(self) -> None:
-        # bookclerk-naming is a small leaf; only its reverse dependents run.
-        p = self.plan("crates/bookclerk-naming/src/lib.rs")
-        self.assertFalse(p.full_suite)
-        self.assertIn("bookclerk-naming", p.changed_packages)
-        self.assertIn("bookclerk-naming", p.rust_packages)
-        # Should include reverse dependents if any.
-        closure = reverse_closure(["bookclerk-naming"], self.index)
-        self.assertEqual(set(p.rust_packages), closure)
 
-    def test_shared_crate_reverse_dependents(self) -> None:
-        p = self.plan("crates/bookclerk-config/src/lib.rs")
-        self.assertFalse(p.full_suite)
-        self.assertIn("bookclerk-config", p.rust_packages)
-        # Config is widely depended on — expect multiple packages.
-        self.assertGreater(len(p.rust_packages), 3)
+CTX = Context(
+    workspace=Path("/ws"),
+    os_name="Linux",
+    tmp=Path("/tmp/x"),
+    files_dir=Path("/tmp/x/files"),
+    artifacts=Path("/tmp/x/art"),
+)
 
-    def test_confinement_dependency(self) -> None:
-        p = self.plan("crates/bookclerk-sandbox/src/lib.rs")
-        self.assertTrue(p.confinement)
-        self.assertIn("bookclerk-sandbox", p.rust_packages)
 
-    def test_media_triggers_confinement(self) -> None:
-        p = self.plan("crates/bookclerk-media/src/lib.rs")
-        self.assertTrue(p.confinement)
+def commands(p, check: str) -> list[list[str]]:
+    return [c.argv for _, c in planned_commands(artifact(p), check, CTX)]
 
-    def test_workerd_triggers_confinement(self) -> None:
-        # Windows SOCKET_PROXY coverage lives only in the confinement job.
-        p = self.plan("crates/bookclerk-workerd/src/lib.rs")
-        self.assertFalse(p.full_suite)
-        self.assertTrue(p.confinement)
-        self.assertIn("bookclerk-workerd", p.rust_packages)
 
-    def test_plugin_host_triggers_confinement(self) -> None:
-        p = self.plan("crates/bookclerk-plugin-host/src/lib.rs")
-        self.assertFalse(p.full_suite)
-        self.assertTrue(p.confinement)
+def check_argv(p, check: str) -> list[list[str]]:
+    """Check commands only (no prerequisites)."""
+    return [c.argv for key, c in planned_commands(artifact(p), check, CTX) if not key]
 
-    def test_plugin_sdk_triggers_confinement(self) -> None:
-        p = self.plan("crates/bookclerk-plugin-sdk/src/lib.rs")
-        self.assertFalse(p.full_suite)
-        self.assertTrue(p.confinement)
 
-    def test_tray_package(self) -> None:
-        p = self.plan("crates/bookclerk-tray/src/lib.rs")
-        self.assertTrue(p.tray)
-        self.assertFalse(p.confinement)
-
-    def test_ui_path(self) -> None:
-        p = self.plan("ui/src/App.tsx")
-        self.assertTrue(p.ui)
-        self.assertEqual(p.rust_packages, [])
-        self.assertFalse(p.confinement)
-        self.assertFalse(p.tray)
-        self.assertFalse(p.release)
-
-    def test_bookclerkd_pulls_ui(self) -> None:
-        p = self.plan("crates/bookclerkd/src/main.rs")
-        self.assertIn("bookclerkd", p.rust_packages)
-        self.assertTrue(p.ui)
-        self.assertTrue(p.store_free)
-        self.assertTrue(p.release)
-
-    def test_binary_only_excluded_from_doctest_packages(self) -> None:
-        p = self.plan("crates/bookclerkd/src/main.rs")
-        self.assertIn("bookclerkd", p.rust_packages)
-        self.assertIn("bookclerkd", p.rust_doc_packages)
-        self.assertNotIn("bookclerkd", p.rust_doctest_packages)
-        self.assertFalse(self.index.by_name["bookclerkd"].supports_doctest)
-        # Library dependents in the reverse closure remain doctestable.
-        self.assertTrue(
-            any(self.index.by_name[n].supports_doctest for n in p.rust_doctest_packages)
-            or len(p.rust_doctest_packages) == 0
+class WorkspaceModelTests(unittest.TestCase):
+    def test_fixture_matches_live_workspace_members(self) -> None:
+        if shutil.which("cargo") is None:
+            self.skipTest("cargo not installed")
+        live = json.loads(
+            subprocess.check_output(
+                ["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=REPO, text=True
+            )
         )
-
-    def test_lib_crate_included_in_doctest_packages(self) -> None:
-        p = self.plan("crates/bookclerk-config/src/lib.rs")
-        self.assertIn("bookclerk-config", p.rust_doctest_packages)
-        self.assertTrue(self.index.by_name["bookclerk-config"].supports_doctest)
-
-    def test_abi_schema_paths(self) -> None:
-        p = self.plan("scripts/gen-plugin-abi.py")
-        self.assertTrue(p.abi_sync)
-        # Script alone is not a Cargo package.
-        self.assertEqual(p.rust_packages, [])
-        self.assertFalse(p.full_suite)
-
-    def test_plugin_sdk_ts(self) -> None:
-        p = self.plan("packages/plugin-sdk/src/index.ts")
-        self.assertTrue(p.ts_sdk)
-        self.assertTrue(p.abi_sync)
-
-    def test_python_sdk(self) -> None:
-        p = self.plan("packages/plugin-sdk-python/src/bookclerk_plugin_sdk/__init__.py")
-        self.assertTrue(p.python_sdk)
-        self.assertTrue(p.abi_sync)
-
-    def test_embedded_ts_sdk_selects_workerd(self) -> None:
-        # bookclerk-workerd include_str!s the TS embed; its conformance tests
-        # must run when the embed changes.
-        p = self.plan("packages/plugin-sdk/embed/bookclerk_plugin.js")
-        self.assertTrue(p.ts_sdk)
-        self.assertIn("bookclerk-workerd", p.changed_packages)
-        self.assertIn("bookclerk-workerd", p.rust_packages)
-
-    def test_embedded_python_sdk_selects_workerd(self) -> None:
-        p = self.plan("packages/plugin-sdk-python/src/bookclerk_plugin_sdk/workerd.py")
-        self.assertTrue(p.python_sdk)
-        self.assertIn("bookclerk-workerd", p.rust_packages)
-
-    def test_non_embedded_python_sdk_does_not_select_workerd(self) -> None:
-        p = self.plan("packages/plugin-sdk-python/src/bookclerk_plugin_sdk/__init__.py")
-        self.assertNotIn("bookclerk-workerd", p.rust_packages)
-
-    def test_host_change_stages_full_install(self) -> None:
-        # tests/staged_plugins.rs asserts every optional/example guest.
-        p = self.plan("crates/bookclerk-plugin-host/src/lib.rs")
-        self.assertIn("bookclerk-plugin-host", p.rust_packages)
-        self.assertTrue(p.build_app_platform)
-        self.assertTrue(p.build_app_optional)
-        self.assertTrue(p.build_app_examples)
-
-    def test_cli_only_is_binary_only_package_set(self) -> None:
-        # Selective test invocation must not pass --lib for this set.
-        p = self.plan("crates/bookclerk-cli/src/main.rs")
-        self.assertEqual(p.rust_packages, ["bookclerk-cli"])
-        self.assertEqual(p.rust_doctest_packages, [])
-
-    def test_new_optional_plugin_under_glob(self) -> None:
-        # Existing optional plugin change.
-        p = self.plan(
-            "crates/bookclerk-plugins/optional/source-audible/src/main.rs"
-        )
-        self.assertTrue(p.build_app_optional)
-        self.assertIn("bookclerk-plugin-source-audible", p.rust_packages)
-
-    def test_platform_plugin(self) -> None:
-        p = self.plan(
-            "crates/bookclerk-plugins/platform/database-sqlite/src/main.rs"
-        )
-        self.assertTrue(p.build_app_platform)
-        self.assertTrue(p.release)
-
-    def test_example_rust_plugin(self) -> None:
-        p = self.plan("examples/plugins-echo-native-rust/src/main.rs")
-        self.assertTrue(p.build_app_examples)
-
-    def test_non_cargo_example_plugin(self) -> None:
-        p = self.plan("examples/plugins-echo-workerd-ts/src/index.ts")
-        self.assertTrue(p.build_app_examples)
-        self.assertEqual(p.rust_packages, [])
-        self.assertFalse(p.full_suite)
-
-    def test_root_cargo_toml_full_suite(self) -> None:
-        p = self.plan("Cargo.toml")
-        self.assertTrue(p.full_suite)
-        self.assertTrue(p.confinement)
-        self.assertTrue(p.tray)
-        self.assertTrue(p.release)
-        self.assertEqual(len(p.rust_packages), len(self.index.by_name))
-
-    def test_cargo_lock_full_suite(self) -> None:
-        p = self.plan("Cargo.lock")
-        self.assertTrue(p.full_suite)
-
-    def test_toolchain_full_suite(self) -> None:
-        p = self.plan("rust-toolchain.toml")
-        self.assertTrue(p.full_suite)
-
-    def test_workflow_full_suite(self) -> None:
-        p = self.plan(".github/workflows/ci.yml")
-        self.assertTrue(p.full_suite)
-
-    def test_ci_plan_script_full_suite(self) -> None:
-        p = self.plan("scripts/ci-plan.py")
-        self.assertTrue(p.full_suite)
-
-    def test_unknown_top_level_full_suite(self) -> None:
-        p = self.plan("brand-new-tooling/foo.sh")
-        self.assertTrue(p.full_suite)
-
-    def test_fuzz_crate_full_suite(self) -> None:
-        p = self.plan("fuzz/fuzz_targets/sql_parse.rs")
-        self.assertTrue(p.full_suite)
-        self.assertTrue(any("global path" in r for r in p.reasons))
-
-    def test_unresolved_manifest_full_suite(self) -> None:
-        p = self.plan("crates/does-not-exist-yet/Cargo.toml")
-        self.assertTrue(p.full_suite)
-
-    def test_third_party_unclassified_full_suite(self) -> None:
-        p = self.plan("third_party/audible-rs/src/lib.rs")
-        self.assertTrue(p.full_suite)
-        self.assertTrue(any("unclassified path" in r for r in p.reasons))
-
-    def test_unknown_child_under_known_root_full_suite(self) -> None:
-        p = self.plan("packages/brand-new-sdk/src/index.ts")
-        self.assertTrue(p.full_suite)
-        self.assertTrue(any("unclassified path" in r for r in p.reasons))
-
-    def test_github_actions_unclassified_full_suite(self) -> None:
-        p = self.plan(".github/actions/setup-rust/action.yml")
-        self.assertTrue(p.full_suite)
-        self.assertTrue(any("unclassified path" in r for r in p.reasons))
-
-    def test_arbitrary_script_unclassified_full_suite(self) -> None:
-        p = self.plan("scripts/ad-hoc-helper.sh")
-        self.assertTrue(p.full_suite)
-        self.assertTrue(any("unclassified path" in r for r in p.reasons))
-
-    def test_all_files_under_crate_count(self) -> None:
-        # README / fixtures / non-rs still map to the package.
         self.assertEqual(
-            package_for_path("crates/bookclerk-config/README.md", self.index),
-            "bookclerk-config",
+            sorted(p["name"] for p in META["packages"]),
+            sorted(p["name"] for p in live["packages"]),
+            "regenerate scripts/tests/ci_plan_fixtures/workspace_metadata.json "
+            "(cargo metadata --no-deps --format-version 1)",
         )
-        p = self.plan("crates/bookclerk-config/README.md")
-        self.assertIn("bookclerk-config", p.changed_packages)
+
+    def test_relations_reference_real_packages(self) -> None:
+        self.assertEqual(validate_relations(RELATIONS, INDEX), [])
+
+    def test_dev_edges_are_separate_from_compile_edges(self) -> None:
+        # library dev-depends on the sqlite guest; that edge must not make
+        # sqlite changes recompile library's production consumers.
+        self.assertIn("bookclerk-library", INDEX.dev_consumers["bookclerk-plugin-database-sqlite"])
+        self.assertNotIn(
+            "bookclerk-library", INDEX.compile_consumers.get("bookclerk-plugin-database-sqlite", set())
+        )
+
+    def test_sdk_no_longer_depends_on_workerd(self) -> None:
+        self.assertNotIn(
+            "bookclerk-plugin-sdk", INDEX.compile_consumers.get("bookclerk-workerd", set())
+        )
+        self.assertIn(
+            "bookclerk-plugin-tools", INDEX.compile_consumers["bookclerk-workerd"]
+        )
+
+    def test_guest_inventory(self) -> None:
+        self.assertEqual(GUESTS["libro"].package, "bookclerk-plugin-source-libro")
+        self.assertEqual(GUESTS["sqlite"].tier, "platform")
+        self.assertEqual(GUESTS["echo_workerd_ts"].runtime, "workerd")
+        self.assertIsNone(GUESTS["echo_workerd_ts"].package)
+
+    def test_glob_match(self) -> None:
+        self.assertTrue(glob_match("crates/bookclerk-plugins/optional/source-libro/plugin.toml", "crates/bookclerk-plugins/*/*/plugin.toml"))
+        self.assertFalse(glob_match("crates/bookclerk-plugin-abi/fixtures/tools/x/plugin.toml", "crates/bookclerk-plugins/*/*/plugin.toml"))
+        self.assertTrue(glob_match("a/b/c.rs", "a/**"))
+        self.assertTrue(glob_match("plugin.toml", "**/plugin.toml"))
+
+    def test_package_for_path_counts_every_file(self) -> None:
+        self.assertEqual(package_for_path("crates/bookclerk-config/README.md", INDEX), "bookclerk-config")
+
+
+class ScenarioTests(unittest.TestCase):
+    def test_docs_only_runs_nothing(self) -> None:
+        p = plan("docs/architecture.md", "docs/README.md")
+        self.assertFalse(p.full_suite)
+        self.assertEqual(p.checks, {})
+        self.assertFalse(any(p.jobs.values()))
+
+    def test_ui_only(self) -> None:
+        p = plan("ui/src/App.tsx")
+        self.assertEqual(sorted(p.checks), ["api_docs", "ui"])
+        self.assertEqual(p.params("api_docs"), {"rust_packages": [], "typescript": False, "ui": True, "python": False})
+        self.assertEqual({j for j, on in p.jobs.items() if on}, {"check"})
+
+    def test_cli_only_binary_package_uses_tests_target_selection(self) -> None:
+        p = plan("crates/bookclerk-cli/src/main.rs")
+        self.assertEqual(p.lint_packages(), ["bookclerk-cli"])
+        self.assertEqual(check_argv(p, "rust_test"), [["cargo", "test", "-p", "bookclerk-cli", "--tests"]])
+        self.assertNotIn("--lib", sum(check_argv(p, "rust_test"), []))
+        self.assertFalse(p.selected("doctest"))
+        self.assertFalse(p.selected("postgres"))
+        self.assertFalse(p.selected("e2e"))
+        self.assertEqual(p.params("release"), {"mode": "affected", "packages": ["bookclerk-cli"]})
+        self.assertEqual(
+            check_argv(p, "release"), [["cargo", "build", "--release", "-p", "bookclerk-cli"]]
+        )
+        self.assertEqual(p.prereqs("rust_test"), [])
+
+    def test_host_only(self) -> None:
+        p = plan("crates/bookclerk-plugin-host/src/rpc.rs")
+        self.assertEqual(p.params("e2e")["scope"], sorted(RELATIONS.runtime_smoke))
+        self.assertNotIn(E2E_PACKAGE, p.params("rust_test")["packages"])
+        self.assertIn(E2E_PACKAGE, p.lint_packages())
+        build = next(x for x in p.prereqs("rust_test") if x["kind"] == "build")
+        for pkg in ("bookclerk-plugin-database-sqlite", "bookclerk-plugin-database-postgres", "bookclerk-jail", "bookclerk-workerd"):
+            self.assertIn(pkg, build["packages"])
+        self.assertIn("ensure_workerd", [x["kind"] for x in p.prereqs("rust_test")])
+        self.assertEqual(p.params("postgres")["steps"], ["rpc_like"])
+        self.assertTrue(p.selected("windows_gateway"))
+        self.assertFalse(p.selected("confinement"))
+        self.assertEqual(p.params("release")["packages"], ["bookclerk-cli", "bookclerkd"])
+        stage = next(x for x in p.prereqs("e2e") if x["kind"] == "stage_plugins")
+        self.assertEqual(stage["plugins"], sorted(RELATIONS.runtime_smoke))
+
+    def test_host_discovery_change_checks_full_installation(self) -> None:
+        p = plan("crates/bookclerk-plugin-host/src/discover.rs")
+        self.assertEqual(p.params("e2e")["scope"], "full")
+
+    def test_workerd_source_change(self) -> None:
+        p = plan("crates/bookclerk-workerd/src/config.rs")
+        self.assertEqual(p.params("e2e")["scope"], "full")
+        self.assertEqual(
+            sorted(p.lint_packages()),
+            ["bookclerk-dev", "bookclerk-plugin-tools", "bookclerk-workerd"],
+        )
+        build = next(x for x in p.prereqs("rust_test") if x["kind"] == "build")
+        self.assertEqual(
+            sorted(build["packages"]),
+            ["bookclerk-plugin-database-sqlite", "bookclerk-plugin-destination-local", "bookclerk-plugin-echo-native-rust"],
+        )
+        stage = next(x for x in p.prereqs("e2e") if x["kind"] == "stage_plugins")
+        self.assertTrue(stage["all"])
+
+    def test_embedded_ts_sdk_selects_workerd_runtime_subset(self) -> None:
+        p = plan("packages/plugin-sdk/embed/bookclerk_plugin.js")
+        self.assertIn("bookclerk-workerd", p.test_packages())
+        self.assertTrue(p.packages["bookclerk-workerd"].compiled)
+        self.assertEqual(p.params("e2e")["scope"], WORKERD_RUNTIME)
+        self.assertTrue(p.selected("plugin_sdk_abi"))
+        self.assertTrue(p.params("api_docs")["typescript"])
+
+    def test_embedded_python_sdk_selects_workerd_runtime_subset(self) -> None:
+        p = plan("packages/plugin-sdk-python/src/bookclerk_plugin_sdk/workerd.py")
+        self.assertIn("bookclerk-workerd", p.test_packages())
+        self.assertEqual(p.params("e2e")["scope"], WORKERD_RUNTIME)
+        self.assertTrue(p.selected("python_sdk"))
+
+    def test_non_embedded_python_sdk_file_does_not_select_workerd(self) -> None:
+        p = plan("packages/plugin-sdk-python/src/bookclerk_plugin_sdk/__init__.py")
+        self.assertNotIn("bookclerk-workerd", p.packages)
+        self.assertFalse(p.selected("e2e"))
+
+    def test_single_optional_plugin(self) -> None:
+        p = plan("crates/bookclerk-plugins/optional/source-libro/src/client.rs")
+        self.assertEqual(p.test_packages(), ["bookclerk-plugin-source-libro"])
+        self.assertEqual(p.params("e2e")["scope"], ["libro"])
+        build = next(x for x in p.prereqs("e2e") if x["kind"] == "build")
+        self.assertIn("bookclerk-plugin-source-libro", build["packages"])
+        self.assertNotIn("bookclerk-plugin-source-audible", build["packages"])
+        stage = next(x for x in p.prereqs("e2e") if x["kind"] == "stage_plugins")
+        self.assertEqual(stage["plugins"], ["libro"])
+        self.assertFalse(p.selected("release"))
+        self.assertFalse(p.selected("postgres"))
+        e2e_cmd = [c for key, c in planned_commands(artifact(p), "e2e", CTX) if not key][0]
+        self.assertEqual(e2e_cmd.argv, ["cargo", "test", "-p", E2E_PACKAGE, "--tests"])
+        self.assertEqual(e2e_cmd.env["BOOKCLERK_STAGED_PLUGINS"], "libro")
+        self.assertEqual(e2e_cmd.env["BOOKCLERK_REQUIRE_STAGED_PLUGINS"], "1")
+        stage_cmd = [c.argv for key, c in planned_commands(artifact(p), "e2e", CTX) if key.startswith("stage_plugins")]
+        self.assertEqual(
+            stage_cmd,
+            [["cargo", "stage-plugins", "--skip-build", "--dest", "/tmp/x/art", "--plugin", "libro"]],
+        )
+
+    def test_test_only_file_selects_owner_only(self) -> None:
+        p = plan("crates/bookclerk-plugin-host/tests/guest_jail.rs")
+        self.assertEqual(p.lint_packages(), ["bookclerk-plugin-host"])
+        self.assertFalse(p.packages["bookclerk-plugin-host"].compiled)
+        self.assertEqual(check_argv(p, "rust_test"), [["cargo", "test", "-p", "bookclerk-plugin-host", "--tests"]])
+        self.assertFalse(p.selected("doctest"))
+        self.assertFalse(p.selected("postgres"))
+        self.assertFalse(p.selected("windows_gateway"))
+        self.assertFalse(p.selected("e2e"))
+
+    def test_example_only_file_builds_examples(self) -> None:
+        p = plan("crates/bookclerk-mp4/examples/bench_remux.rs")
+        self.assertEqual(p.params("rust_test")["packages"], [])
+        self.assertEqual(check_argv(p, "rust_test"), [["cargo", "build", "-p", "bookclerk-mp4", "--examples"]])
+
+    def test_bench_only_file_builds_benches(self) -> None:
+        meta = copy.deepcopy(META)
+        pkg = next(x for x in meta["packages"] if x["name"] == "bookclerk-naming")
+        root = os.path.dirname(pkg["manifest_path"])
+        pkg["targets"].append({"kind": ["bench"], "name": "b", "src_path": f"{root}/benches/b.rs"})
+        idx = package_index_from_metadata(meta)
+        p = build_plan(["crates/bookclerk-naming/benches/b.rs"], idx, RELATIONS, guests=GUESTS)
+        self.assertEqual(p.params("rust_test")["packages"], [])
+        self.assertEqual(
+            check_argv(p, "rust_test"),
+            [["cargo", "bench", "-p", "bookclerk-naming", "--benches", "--no-run"]],
+        )
+
+    def test_shared_fixture_selects_declared_consumers_only(self) -> None:
+        p = plan("crates/bookclerk-plugin-abi/fixtures/tools/valid-workerd/plugin.toml")
+        self.assertEqual(p.lint_packages(), ["bookclerk-plugin-tools"])
+        self.assertNotIn("bookclerk-plugin-abi", p.packages)
+        self.assertTrue(p.selected("plugin_sdk_abi"))
+        self.assertTrue(p.selected("python_sdk"))
+        self.assertFalse(p.selected("e2e"))
+
+    def test_dev_edge_selects_consumer_tests_and_doctests_not_its_consumers(self) -> None:
+        p = plan("crates/bookclerk-plugins/platform/database-sqlite/src/plugin.rs")
+        lib = p.packages["bookclerk-library"]
+        self.assertFalse(lib.compiled)
+        self.assertTrue(lib.tests and lib.doctest)
+        self.assertIn("bookclerk-library", p.doctest_packages())
+        self.assertNotIn("bookclerk-library", p.doc_packages())
+        # Production consumers of library that have no dev edge to sqlite of
+        # their own must not be selected through library's dev edge.
+        sqlite = "bookclerk-plugin-database-sqlite"
+        production_only = (
+            INDEX.compile_consumers["bookclerk-library"]
+            - INDEX.dev_consumers[sqlite]
+            - INDEX.compile_consumers.get(sqlite, set())
+            - {sqlite}
+        )
+        self.assertIn("bookclerk-cli", production_only)
+        self.assertEqual(production_only & set(p.packages), set())
+
+    def test_database_changes_select_postgres_steps(self) -> None:
+        guest = plan("crates/bookclerk-db-guest/src/session.rs")
+        self.assertIn("db_guest", guest.params("postgres")["steps"])
+        self.assertIn("binding_schema", guest.params("postgres")["steps"])
+        lib = plan("crates/bookclerk-library/src/store.rs")
+        self.assertTrue({"library_queue", "library_totp", "library_vectors"} <= set(lib.params("postgres")["steps"]))
+        self.assertNotIn("binding_schema", lib.params("postgres")["steps"])
+        pg = plan("crates/bookclerk-plugins/optional/database-postgres/src/main.rs")
+        self.assertEqual(sorted(pg.params("postgres")["steps"]), ["binding_schema", "rpc_like"])
+
+    def test_e2e_full_takes_precedence_over_subsets(self) -> None:
+        p = plan(
+            "crates/bookclerk-plugins/optional/source-libro/src/client.rs",
+            "crates/bookclerk-workerd/src/config.rs",
+        )
+        self.assertEqual(p.params("e2e")["scope"], "full")
+
+    def test_e2e_subsets_union(self) -> None:
+        p = plan(
+            "crates/bookclerk-plugins/optional/source-libro/src/client.rs",
+            "crates/bookclerk-plugins/optional/source-chirp/src/main.rs",
+        )
+        self.assertEqual(p.params("e2e")["scope"], ["chirp", "libro"])
+
+    def test_platform_only_e2e_scope_stages_nothing(self) -> None:
+        p = plan("crates/bookclerk-plugins/platform/destination-local/src/plugin.rs")
+        self.assertEqual(p.params("e2e")["scope"], ["local"])
+        cmds = [c.argv for key, c in planned_commands(artifact(p), "e2e", CTX) if key.startswith("stage_plugins")]
+        self.assertEqual(cmds, [["<mkdir>", "/tmp/x/art"]])
+
+    def test_prerequisites_do_not_select_suites(self) -> None:
+        # Host tests build the sqlite/postgres guests; that must not select
+        # their own tests or E2E ids.
+        p = plan("crates/bookclerk-plugin-host/tests/guest_jail.rs")
+        self.assertNotIn("bookclerk-plugin-database-sqlite", p.packages)
+        self.assertNotIn("bookclerk-plugin-database-postgres", p.packages)
+
+    def test_non_cargo_example_guest(self) -> None:
+        p = plan("examples/plugins-echo-workerd-ts/src/index.ts")
+        self.assertEqual(p.params("e2e")["scope"], ["echo_workerd_ts"])
+        self.assertEqual(p.lint_packages(), [])
+
+    def test_manifest_change_compiles_package(self) -> None:
+        p = plan("crates/bookclerk-naming/Cargo.toml")
+        self.assertTrue(p.packages["bookclerk-naming"].compiled)
+
+    def test_plugin_manifest_is_inventory(self) -> None:
+        p = plan("crates/bookclerk-plugins/optional/source-libro/plugin.toml")
+        self.assertEqual(p.params("e2e")["scope"], "full")
+        self.assertIn("bookclerk-plugin-host", p.test_packages())
+
+    def test_packaging_change_uses_full_release(self) -> None:
+        p = plan("crates/bookclerk-dev/src/plugins.rs")
+        self.assertEqual(p.params("release"), {"mode": "full"})
+        self.assertEqual(p.params("e2e")["scope"], "full")
+
+    def test_embedded_asset(self) -> None:
+        p = plan("assets/brand/svg/bookclerk-logo.svg")
+        self.assertTrue(p.packages["bookclerkd"].compiled)
+        self.assertTrue(p.selected("ui"))
+
+    def test_e2e_crate_owns_its_suite(self) -> None:
+        p = plan("crates/bookclerk-plugin-e2e/src/lib.rs")
+        self.assertEqual(p.params("e2e")["scope"], "full")
+        self.assertFalse(p.selected("rust_test"))
+        self.assertIn(E2E_PACKAGE, p.params("clippy")["packages"])
+
+    def test_confinement_and_tray_jobs(self) -> None:
+        self.assertTrue(plan("crates/bookclerk-sandbox/src/lib.rs").selected("confinement"))
+        self.assertTrue(plan("crates/bookclerk-tray/src/lib.rs").selected("tray"))
+        self.assertFalse(plan("crates/bookclerk-tray/src/lib.rs").selected("confinement"))
+
+    def test_rename_and_deletion_report_both_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            def git(*a: str) -> str:
+                return subprocess.check_output(["git", *a], cwd=tmp, text=True).strip()
+
+            git("init", "-q")
+            git("config", "user.email", "t@example.com")
+            git("config", "user.name", "t")
+            os.makedirs(os.path.join(tmp, "crates/x/src"))
+            for name in ("a.rs", "gone.rs"):
+                Path(tmp, "crates/x/src", name).write_text("fn a() {}\n" * 20)
+            git("add", "-A")
+            git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD")
+            git("mv", "crates/x/src/a.rs", "crates/x/src/b.rs")
+            git("rm", "-q", "crates/x/src/gone.rs")
+            git("commit", "-qm", "rename")
+            head = git("rev-parse", "HEAD")
+            self.assertEqual(
+                list_changed_paths(base, head, tmp),
+                ["crates/x/src/a.rs", "crates/x/src/b.rs", "crates/x/src/gone.rs"],
+            )
+
+    def test_deleted_package_file_fails_closed(self) -> None:
+        p = plan("crates/bookclerk-removed/src/lib.rs")
+        self.assertTrue(p.full_suite)
+
+
+class FullSuiteTests(unittest.TestCase):
+    def assert_full(self, p) -> None:
+        self.assertTrue(p.full_suite)
+        self.assertEqual(set(p.checks), set(ALL_CHECKS))
+        self.assertTrue(all(p.jobs.values()))
+        self.assertEqual(p.params("e2e"), {"scope": "full"})
+        self.assertEqual(p.params("release"), {"mode": "full"})
+        self.assertEqual(p.params("postgres")["steps"], list(RELATIONS.postgres_steps))
+
+    def test_global_paths(self) -> None:
+        for path in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".github/workflows/ci.yml", "scripts/ci-plan.py", "scripts/ci-exec.py", "scripts/ci_plan/relations.toml", "fuzz/fuzz_targets/sql_parse.rs"):
+            with self.subTest(path=path):
+                self.assert_full(plan(path))
+
+    def test_unknown_and_unclassified(self) -> None:
+        for path in ("brand-new-tooling/foo.sh", "third_party/audible-rs/src/lib.rs", "packages/brand-new-sdk/src/index.ts", ".github/actions/x/action.yml", "scripts/ad-hoc-helper.sh", "crates/does-not-exist-yet/Cargo.toml", "assets/other.png"):
+            with self.subTest(path=path):
+                self.assert_full(plan(path))
+
+    def test_full_suite_commands(self) -> None:
+        p = plan("Cargo.lock")
+        self.assertEqual(
+            check_argv(p, "rust_test")[0],
+            ["cargo", "test", "--workspace", "--exclude", E2E_PACKAGE, "--tests"],
+        )
+        self.assertIn(["cargo", "build", "-p", "bookclerk-mp4", "--examples"], check_argv(p, "rust_test"))
+        self.assertIn(
+            ["cargo", "test", "-p", "bookclerk-plugin-database-sqlite", "--features", "host-helpers", "--tests"],
+            check_argv(p, "rust_test"),
+        )
+        self.assertEqual(check_argv(p, "release")[0], ["cargo", "build-app", "--release", "--platform"])
+
+    def test_planner_error_escalates_to_full(self) -> None:
+        p = plan_from_event(base=None, head=None, metadata=META, paths=None, workspace_root=REPO)
+        self.assert_full(p)
+        self.assertTrue(any("planner error" in r for r in p.reasons))
 
     def test_force_full(self) -> None:
-        p = build_plan(["docs/x.md"], self.index, force_full=True, force_full_reason="err")
-        self.assertTrue(p.full_suite)
-        self.assertIn("err", p.reasons[0])
+        self.assert_full(build_plan(["docs/x.md"], INDEX, RELATIONS, force_full=True, guests=GUESTS))
 
-    def test_github_output_format(self) -> None:
-        p = self.plan("docs/a.md")
-        text = plan_to_github_output(p)
-        self.assertIn("full_suite=false", text)
-        self.assertIn("docs_markdown=true", text)
-        self.assertIn("confinement=false", text)
-        self.assertIn("rust_doctest_packages=", text)
 
-    def test_json_roundtrip_keys(self) -> None:
-        p = self.plan("ui/src/main.tsx")
-        data = json.loads(plan_to_json(p))
-        self.assertTrue(data["ui"])
-        self.assertIn("decisions", data)
-        self.assertIn("rust_doctest_packages", data)
+class ExecutionTests(unittest.TestCase):
+    def test_modes(self) -> None:
+        self.assertEqual(execution_mode(plan("Cargo.lock"), "1"), "full")
+        self.assertEqual(execution_mode(plan("docs/a.md"), "0"), "shadow")
+        self.assertEqual(execution_mode(plan("docs/a.md"), "1"), "selective")
 
-    def test_planner_error_escalation_via_empty_base(self) -> None:
-        # plan_from_event with missing base/head and no paths escalates.
-        from ci_plan.plan import plan_from_event
+    def test_shadow_executes_full_scope_and_records_prediction(self) -> None:
+        art = resolve(
+            base=None,
+            head=None,
+            selective_ci="0",
+            run_id="9",
+            checkout_sha="abc",
+            event="pull_request",
+            paths=["crates/bookclerk-cli/src/main.rs"],
+            metadata=META,
+            workspace=REPO,
+        )
+        self.assertEqual(art["mode"], "shadow")
+        execution = plan_from_dict(art["execution"])
+        self.assertTrue(all(execution.jobs.values()))
+        self.assertEqual(execution.params("e2e"), {"scope": "full"})
+        predicted = plan_from_dict(art["predicted"])
+        self.assertFalse(predicted.full_suite)
+        self.assertFalse(predicted.selected("e2e"))
+        outputs = job_outputs(art)
+        self.assertEqual(outputs["job_tray"], "true")
+        self.assertEqual(outputs["release_mode"], "full")
 
-        p = plan_from_event(base=None, head=None, metadata=META, paths=None)
-        self.assertTrue(p.full_suite)
-        self.assertTrue(any("planner error" in r for r in p.reasons))
+    def test_selective_outputs_follow_prediction(self) -> None:
+        art = resolve(
+            base=None,
+            head=None,
+            selective_ci="1",
+            run_id="9",
+            checkout_sha="abc",
+            event="pull_request",
+            paths=["crates/bookclerk-cli/src/main.rs"],
+            metadata=META,
+            workspace=REPO,
+        )
+        out = job_outputs(art)
+        self.assertEqual(out["mode"], "selective")
+        self.assertEqual(out["job_check"], "true")
+        self.assertEqual(out["job_postgres"], "false")
+        self.assertEqual(out["check_e2e"], "false")
+        self.assertEqual(out["release_mode"], "affected")
+        self.assertEqual(out["check_needs_node"], "false")
+        self.assertEqual(
+            set(out),
+            {"mode", "check_needs_cargo", "check_needs_node", "release_mode"}
+            | {f"job_{j.replace('-', '_')}" for j in JOB_CHECKS}
+            | {f"check_{c}" for c in JOB_CHECKS["check"]},
+        )
+
+    def test_validate(self) -> None:
+        art = artifact(plan("crates/bookclerk-cli/src/main.rs"))
+        validate(art, run_id="1", checkout_sha="c")
+        with self.assertRaisesRegex(ExecError, "run_id"):
+            validate(art, run_id="2", checkout_sha="c")
+        with self.assertRaisesRegex(ExecError, "computed for"):
+            validate(art, run_id="1", checkout_sha="other")
+        bad = dict(art, schema_version=1)
+        with self.assertRaisesRegex(ExecError, "schema_version"):
+            validate(bad, run_id="1", checkout_sha="c")
+        broken = dict(art)
+        del broken["execution"]
+        with self.assertRaisesRegex(ExecError, "missing `execution`"):
+            validate(broken, run_id="1", checkout_sha="c")
+
+    def test_unselected_check_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ExecError, "not in this run's execution plan"):
+            planned_commands(artifact(plan("docs/a.md")), "rust_test", CTX)
+
+    def test_prerequisites_run_before_the_check_in_declared_order(self) -> None:
+        p = plan("crates/bookclerk-plugins/optional/source-libro/src/client.rs")
+        kinds = [key.split("-")[0] for key, _ in planned_commands(artifact(p), "e2e", CTX)]
+        self.assertEqual(kinds, ["build", "ensure_workerd", "install_platform", "stage_plugins", ""])
+
+    def test_gate(self) -> None:
+        p = plan("crates/bookclerk-cli/src/main.rs")
+        art = artifact(p)
+        ok = {"plan": {"result": "success"}}
+        for job, on in p.jobs.items():
+            ok[job] = {"result": "success" if on else "skipped"}
+        self.assertEqual(gate(art, ok), [])
+        for job, result, needle in (
+            ("check", "skipped", "expected to run"),
+            ("check", "failure", "expected to run"),
+            ("check", "cancelled", "expected to run"),
+            ("tray", "success", "expected to skip"),
+            ("plan", "failure", "plan: failure"),
+        ):
+            with self.subTest(job=job, result=result):
+                bad = copy.deepcopy(ok)
+                bad[job]["result"] = result
+                self.assertTrue(any(needle in x for x in gate(art, bad)), gate(art, bad))
+        missing = copy.deepcopy(ok)
+        del missing["postgres"]
+        self.assertTrue(any("not reported" in x for x in gate(art, missing)))
+
+    def test_json_roundtrip(self) -> None:
+        p = plan("crates/bookclerk-plugin-host/src/rpc.rs")
+        again = plan_from_dict(json.loads(plan_to_json(p)))
+        self.assertEqual(plan_to_dict(again), plan_to_dict(p))
+        self.assertIn("### Checks", plan_to_summary(p))
 
 
 class GithubActionsFilePathTests(unittest.TestCase):
