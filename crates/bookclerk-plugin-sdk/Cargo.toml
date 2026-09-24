@@ -76,8 +76,6 @@ webpki-roots = { version = "1", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
-bookclerk-library.workspace = true
-bookclerk-plugin-database-sqlite = { workspace = true, features = ["host-helpers"] }
 tempfile.workspace = true
 
 [package.metadata.docs.rs]
