@@ -1786,6 +1786,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookclerk-plugin-e2e"
+version = "0.1.0"
+dependencies = [
+ "bookclerk-config",
+ "bookclerk-plugin-host",
+ "bookclerk-plugin-manifest",
+ "bookclerk-plugin-sdk",
+ "bookclerk-sandbox",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "bookclerk-plugin-echo-native-rust"
 version = "0.1.0"
 dependencies = [

@@ -455,7 +455,7 @@ fn dev_host(
     }
 }
 
-/// Stages optional+example guests and runs the host staged-guest conformance test.
+/// Stages optional+example guests and runs the staged-guest e2e suite (`bookclerk-plugin-e2e`).
 fn test_staged(root: &Path, release: bool, skip_build: bool) -> Result<()> {
     let files_dir = default_files_dir();
     let artifacts = default_artifacts(root);
@@ -478,7 +478,7 @@ fn test_staged(root: &Path, release: bool, skip_build: bool) -> Result<()> {
     cmd.args([
         "test",
         "-p",
-        "bookclerk-plugin-host",
+        "bookclerk-plugin-e2e",
         "--test",
         "staged_plugins",
     ]);
@@ -487,6 +487,8 @@ fn test_staged(root: &Path, release: bool, skip_build: bool) -> Result<()> {
     }
     cmd.env("BOOKCLERK_PLUGIN_ARTIFACTS", &artifacts);
     cmd.env("BOOKCLERK_FILES_DIR", &files_dir);
+    // Everything was just staged; a missing root must fail, not skip.
+    cmd.env("BOOKCLERK_REQUIRE_STAGED_PLUGINS", "1");
     cmd.env(
         "BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT",
         std::env::var_os("BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT").unwrap_or_else(|| "1".into()),
@@ -498,7 +500,7 @@ fn test_staged(root: &Path, release: bool, skip_build: bool) -> Result<()> {
 
     let status = cmd
         .status()
-        .context("cargo test -p bookclerk-plugin-host --test staged_plugins")?;
+        .context("cargo test -p bookclerk-plugin-e2e --test staged_plugins")?;
     if status.success() {
         Ok(())
     } else {

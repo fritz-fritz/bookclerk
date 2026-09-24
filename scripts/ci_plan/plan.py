@@ -66,9 +66,9 @@ EMBEDDED_INPUTS = {
     "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/guest_sql.py": "bookclerk-workerd",
 }
 
-# Host test targets that exercise every staged optional/example guest
+# Packages whose tests exercise every staged optional/example guest
 # (``tests/staged_plugins.rs``) and need the complete installation.
-STAGED_INSTALL_TEST_PACKAGES = frozenset({"bookclerk-plugin-host"})
+STAGED_INSTALL_TEST_PACKAGES = frozenset({"bookclerk-plugin-e2e"})
 
 # Non-Cargo surfaces (path prefix → plan flag).
 UI_PREFIX = "ui/"

@@ -19,6 +19,7 @@ members = [
     "crates/bookclerk-naming",
     "crates/bookclerk-plugin-abi",
     "crates/bookclerk-plugin-catalog",
+    "crates/bookclerk-plugin-e2e",
     "crates/bookclerk-plugin-host",
     "crates/bookclerk-plugin-manifest",
     "crates/bookclerk-plugin-sdk",

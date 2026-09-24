@@ -103,8 +103,14 @@ cargo build-app --optional --examples   # optional + Cargo examples
 cargo install-platform                  # sqlite + local → FILES_DIR/plugins
 cargo stage-plugins --optional          # optional → target/plugin-artifacts
 cargo stage-plugins --examples --skip-build
-cargo test-staged                       # describe/health conformance smoke
+cargo test-staged                       # describe/health conformance smoke (bookclerk-plugin-e2e)
 ```
+
+The staged suite lives in `crates/bookclerk-plugin-e2e` so ordinary
+`bookclerk-plugin-host` tests never need a staged installation. Set
+`BOOKCLERK_STAGED_PLUGINS=libro,echo_workerd_ts` to check a subset (platform
+guests are always checked) and `BOOKCLERK_REQUIRE_STAGED_PLUGINS=1` to fail
+instead of skipping when staging roots are missing.
 
 Add `--release` to any alias for release builds. Override staging dir with
 `BOOKCLERK_PLUGIN_ARTIFACTS`. Forward host args after `--` (e.g. `cargo dev -- --help`).
