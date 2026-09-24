@@ -18,7 +18,7 @@ use cmac::Cmac;
 use hmac::{Hmac, Mac as _};
 use prost::Message as _;
 use rsa::pkcs1::DecodeRsaPrivateKey as _;
-use rsa::pss::SigningKey;
+use rsa::pss::BlindedSigningKey;
 use rsa::signature::{RandomizedSigner as _, SignatureEncoding as _};
 use rsa::{Oaep, RsaPrivateKey};
 use sha1::Sha1;
@@ -129,9 +129,11 @@ impl Cdm {
         let request = request.encode_to_vec();
 
         // RSA-PSS over SHA-1 (salt length = digest length, matching the app).
-        let signing_key = SigningKey::<Sha1>::new(self.private_key.clone());
-        let mut rng = OsRng;
-        let signature = signing_key.sign_with_rng(&mut rng, &request).to_vec();
+        // `pss::SigningKey` uses the RNG for the salt but passes `blind = false`
+        // into the private operation (rsa 0.9.10). `BlindedSigningKey` keeps
+        // the same EMSA-PSS encoding and sets that flag. Not a patched `rsa`.
+        let signing_key = BlindedSigningKey::<Sha1>::new(self.private_key.clone());
+        let signature = signing_key.sign_with_rng(&mut OsRng, &request).to_vec();
 
         let signed = proto::SignedMessage {
             r#type: Some(proto::signed_message::MessageType::LicenseRequest as i32),
@@ -343,5 +345,27 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].kid, kid);
         assert_eq!(&*keys[0].key, content_key.as_slice());
+    }
+
+    #[test]
+    fn challenge_signature_verifies_as_rsa_pss_sha1() {
+        use rsa::pss::{Signature, VerifyingKey};
+        use rsa::signature::Verifier as _;
+
+        let (cdm, private_key) = test_cdm();
+        let challenge = cdm.challenge(b"pssh-init", true).expect("challenge");
+        let signed =
+            proto::SignedMessage::decode(challenge.message.as_slice()).expect("signed message");
+        assert_eq!(
+            signed.r#type,
+            Some(proto::signed_message::MessageType::LicenseRequest as i32)
+        );
+        let msg = signed.msg.expect("request bytes");
+        let raw = signed.signature.expect("pss signature");
+        let signature = Signature::try_from(raw.as_slice()).expect("signature length");
+        let verifying = VerifyingKey::<Sha1>::new(RsaPublicKey::from(private_key));
+        verifying
+            .verify(&msg, &signature)
+            .expect("RSA-PSS/SHA-1 challenge signature verifies");
     }
 }

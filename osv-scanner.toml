@@ -69,43 +69,38 @@ Activated rsa 0.9 consumers (verified `cargo tree -i rsa`):
    (`sign_id_token` / `EncodingKey::from_rsa_pem`). No PKCS#1 v1.5 or OAEP
    private-key *decryption* of remote ciphertext on this path.
 
+Bookclerk does not perform PKCS#1 v1.5 private-key *decryption*.
+
 2) Audible request signing (third_party/audible-rs auth/signing.rs). PKCS#1
-   v1.5 *signing* (SHA-256) of `method\\npath\\ntimestamp\\nbody\\nadp_token`
-   with the device key. Login only *parses/re-encodes* the registration
-   private key (PKCS#1/PKCS#8 → PEM). Signing is not PKCS#1 v1.5 decryption
-   and does not consume attacker-chosen ciphertext as a decrypt input.
+   v1.5 *signing* (SHA-256) of `method\\npath\\ntimestamp\\nbody\\nadp_token`.
+   Uses `pkcs1v15::SigningKey::sign_with_rng` (rsa 0.9.10 `RandomizedSigner`),
+   which passes the RNG only as RSA blinding. The signature stays
+   deterministic (crate docs on `pkcs1v15::sign`). Login only parses/re-encodes
+   the registration private key.
 
 3) Widevine challenge (audible-rs widevine/client.rs). RSA-PSS *signing*
-   (SHA-1, salt=digest) over the serialized LicenseRequest. Signing, not
-   decryption.
+   (SHA-1, salt length = digest length) via `pss::BlindedSigningKey`. In
+   rsa 0.9.10, `pss::SigningKey::sign_with_rng` uses the RNG for the salt but
+   passes `blind = false`; `BlindedSigningKey` keeps the same EMSA-PSS
+   encoding and sets that flag. PSS signatures are randomized by the salt.
 
-4) Widevine license parse (`Cdm::parse_license`). Private-key RSA-OAEP/SHA-1
-   *decryption* of `SignedMessage.session_key`. This is the only activated
-   rsa private-key decrypt. Ciphertext origin: Audible `drmlicense` HTTPS
-   JSON `license` (base64 SignedMessage). A malicious or compromised license
-   endpoint, or a TLS MitM, can choose those bytes. Bookclerk does not expose
-   a decrypt network service.
+4) Widevine license parse (`Cdm::parse_license`). The only activated rsa
+   private-key *decrypt*: RSA-OAEP/SHA-1 of `SignedMessage.session_key` via
+   `RsaPrivateKey::decrypt_blinded`. Ciphertext origin: the `drmlicense` HTTP
+   response (`license` base64 SignedMessage). A malicious or compromised
+   license endpoint, or a TLS MitM, can choose those bytes.
 
-   Error behavior: OAEP failure → `ClientError::SessionKey` (distinct from
-   License/NotALicense/Signature/Decrypt). The error is local (acquire/plugin
-   error string); it is not returned to `drmlicense`. There is no tight
-   chosen-ciphertext retry loop: one challenge/license per obtain_content_key,
-   then `.wvkey` cache. Follow-on CENC download happens only after success.
-   Network RTT + TLS dominate any local decrypt timing; a remote observer of
-   the next request sees coarse success/fail plus jitter, not a Marvin-style
-   high-resolution PKCS#1 v1.5 padding oracle.
+   `parse_license()` runs only after that response has completed. Bookclerk
+   does not send the decrypt result, the `ClientError` class, or an immediate
+   protocol response back to the license server, so this is not an obvious
+   synchronous remote padding/timing oracle. One acquire writes a `.wvkey`
+   cache on success. Residual local timing and repeated-observation risk
+   remain. Blinding is defense in depth, not a patched `rsa`.
 
-   Implementation: `decrypt_blinded` + OsRng (same OAEP/SHA-1 semantics as
-   `decrypt`; crate docs: blinding mitigates sidechannels on the private-key
-   op). Still not a patched rsa; residual timing/behavioral concerns on the
-   crate remain open upstream.
-
-Not claimed safe: OAEP unwrap of remote-controlled ciphertext. Claimed:
-advisory's PKCS#1 v1.5 decrypt oracle is not an operation we perform; the
-OAEP path is one-shot behind TLS to Audible and is not a network-exposed
-decrypt endpoint. Residual uncertainty: a local high-resolution timer, or
-a compromised license host plus many operator-driven acquires, is outside
-this reachability argument.
+Not claimed safe, and the advisory is not fixed: `rsa` 0.9.10 is still an
+affected, unpatched dependency. Residual uncertainty: a local high-resolution
+timer, or a compromised license host plus many operator-driven acquires, is
+outside the structural argument above.
 
 Alternatives checked and rejected for now: rsa 0.10-rc still affected;
 openssl / aws-lc-rs OAEP swap would not remove rsa (signing + JWT remain)
