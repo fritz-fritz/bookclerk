@@ -15,9 +15,11 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -41,8 +43,11 @@ from .plan import (
     plan_to_summary,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 ARTIFACT_NAME = "ci-plan.json"
+# One path segment. A fresh id is minted per resolve so marker dirs cannot
+# collide across local re-resolves that share a temp dir, commit, and run id.
+_EXECUTION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 CLIPPY_LINTS = (
     "-D",
     "warnings",
@@ -175,6 +180,16 @@ def execution_mode(predicted: Plan, selective_ci: str) -> str:
     return "selective" if selective_ci == "1" else "shadow"
 
 
+def require_execution_id(artifact: Mapping[str, Any]) -> str:
+    """Returns ``execution_id`` or raises when it is missing or unsafe as a path segment."""
+    if "execution_id" not in artifact:
+        raise ExecError("plan artifact missing `execution_id`")
+    value = artifact["execution_id"]
+    if not isinstance(value, str) or _EXECUTION_ID.fullmatch(value) is None:
+        raise ExecError(f"plan execution_id {value!r} is not a single safe path segment")
+    return value
+
+
 def resolve(
     *,
     base: str | None,
@@ -188,7 +203,11 @@ def resolve(
     paths: Sequence[str] | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Predicts the plan and resolves the execution the jobs must perform."""
+    """Predicts the plan and resolves one execution the jobs must perform.
+
+    Every call mints a new ``execution_id``. Prerequisite completion is
+    namespaced by that id, so resolving again starts a fresh execution.
+    """
     predicted = plan_from_event(
         base=base,
         head=head,
@@ -211,6 +230,7 @@ def resolve(
         execution = predicted
     return {
         "schema_version": SCHEMA_VERSION,
+        "execution_id": uuid.uuid4().hex,
         "run_id": str(run_id),
         "event": event,
         "base_sha": base or "",
@@ -270,9 +290,10 @@ def validate(
         raise ExecError(
             f"plan schema_version {artifact.get('schema_version')!r} != {SCHEMA_VERSION}"
         )
-    for key in ("run_id", "checkout_sha", "mode", "predicted", "execution"):
+    for key in ("run_id", "checkout_sha", "mode", "predicted", "execution", "execution_id"):
         if key not in artifact:
             raise ExecError(f"plan artifact missing `{key}`")
+    require_execution_id(artifact)
     if artifact["mode"] not in ("full", "shadow", "selective"):
         raise ExecError(f"plan mode {artifact['mode']!r} is invalid")
     if run_id is not None and str(artifact["run_id"]) != str(run_id):
@@ -565,8 +586,10 @@ def _run_one(cmd: Command, ctx: Context) -> None:
 
 
 def run_check(artifact: Mapping[str, Any], check: str, ctx: Context, *, dry_run: bool = False) -> None:
-    """Runs ``check`` with its prerequisites (each prerequisite once per job)."""
-    markers = ctx.tmp / "ci-exec-prereqs"
+    """Runs ``check`` with its prerequisites (each prerequisite once per execution)."""
+    # Validated before any path join. Checks that share this artifact share
+    # the directory; a new resolve gets a new id and cannot see these markers.
+    markers = ctx.tmp / "ci-exec-prereqs" / require_execution_id(artifact)
     for key, cmd in planned_commands(artifact, check, ctx):
         env_note = " ".join(f"{k}={v}" for k, v in sorted(cmd.env.items()) if k != "PATH")
         line = f"{cmd.label}: {' '.join(cmd.argv)}" + (f"  [{env_note}]" if env_note else "")

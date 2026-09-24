@@ -31,6 +31,7 @@ from ci_plan.execute import (  # noqa: E402
     job_outputs,
     planned_commands,
     resolve,
+    run_check,
     validate,
 )
 from ci_plan.github_paths import (  # noqa: E402
@@ -71,6 +72,7 @@ def plan(*paths: str, index=INDEX):
 def artifact(p, mode: str = "selective") -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
+        "execution_id": "fixtureexec0001",
         "run_id": "1",
         "event": "pull_request",
         "base_sha": "b",
@@ -532,6 +534,15 @@ class ExecutionTests(unittest.TestCase):
         del broken["execution"]
         with self.assertRaisesRegex(ExecError, "missing `execution`"):
             validate(broken, run_id="1", checkout_sha="c")
+        missing_id = dict(art)
+        del missing_id["execution_id"]
+        with self.assertRaisesRegex(ExecError, "missing `execution_id`"):
+            validate(missing_id, run_id="1", checkout_sha="c")
+        for unsafe in ("", ".", "..", "../escape", "a/b", "has space", "id\x00", 1, "x" * 65):
+            with self.subTest(execution_id=unsafe):
+                bad_id = dict(art, execution_id=unsafe)
+                with self.assertRaisesRegex(ExecError, "safe path segment"):
+                    validate(bad_id, run_id="1", checkout_sha="c")
 
     def test_unselected_check_is_rejected(self) -> None:
         with self.assertRaisesRegex(ExecError, "not in this run's execution plan"):
@@ -563,6 +574,123 @@ class ExecutionTests(unittest.TestCase):
         missing = copy.deepcopy(ok)
         del missing["postgres"]
         self.assertTrue(any("not reported" in x for x in gate(art, missing)))
+
+    def _exec_ctx(self, root: Path) -> Context:
+        tmp = root / "tmp"
+        return Context(
+            workspace=root,
+            os_name="Linux",
+            tmp=tmp,
+            files_dir=tmp / "files",
+            artifacts=tmp / "plugins",
+        )
+
+    def _resolve_same_selection(self) -> dict:
+        return resolve(
+            base=None,
+            head=None,
+            selective_ci="1",
+            run_id="local",
+            checkout_sha="abc",
+            event="pull_request",
+            paths=["crates/bookclerk-plugins/optional/source-libro/src/client.rs"],
+            metadata=META,
+            workspace=REPO,
+        )
+
+    def test_separate_resolves_rerun_prerequisites_in_the_same_temp_dir(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(argv, cwd=None, env=None):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0)
+
+        with tempfile.TemporaryDirectory(prefix="bc-exec-") as tmp:
+            ctx = self._exec_ctx(Path(tmp))
+            with mock.patch("ci_plan.execute.subprocess.run", side_effect=fake_run):
+                first = self._resolve_same_selection()
+                second = self._resolve_same_selection()
+                self.assertNotEqual(first["execution_id"], second["execution_id"])
+                self.assertEqual(first["run_id"], second["run_id"])
+                self.assertEqual(first["checkout_sha"], second["checkout_sha"])
+                self.assertEqual(first["execution"], second["execution"])
+                run_check(first, "e2e", ctx)
+                run_check(second, "e2e", ctx)
+            marker_root = ctx.tmp / "ci-exec-prereqs"
+            self.assertTrue((marker_root / first["execution_id"]).is_dir())
+            self.assertTrue((marker_root / second["execution_id"]).is_dir())
+            self.assertEqual(len(list((marker_root / first["execution_id"]).iterdir())), 4)
+            self.assertEqual(len(list((marker_root / second["execution_id"]).iterdir())), 4)
+        for argv in (
+            ["cargo", "build"],
+            ["cargo", "ensure-workerd"],
+            ["cargo", "install-platform", "--skip-build"],
+            ["cargo", "stage-plugins", "--skip-build"],
+        ):
+            hits = [c for c in calls if c[: len(argv)] == argv]
+            self.assertEqual(len(hits), 2, calls)
+
+    def test_checks_in_one_execution_share_prerequisite_markers(self) -> None:
+        p = plan("crates/bookclerk-plugin-host/src/rpc.rs")
+        art = artifact(p)
+        calls: list[list[str]] = []
+
+        def fake_run(argv, cwd=None, env=None):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0)
+
+        with tempfile.TemporaryDirectory(prefix="bc-exec-") as tmp:
+            ctx = self._exec_ctx(Path(tmp))
+            with mock.patch("ci_plan.execute.subprocess.run", side_effect=fake_run):
+                run_check(art, "rust_test", ctx)
+                run_check(art, "e2e", ctx)
+                run_check(art, "e2e", ctx)
+        workerd = [c for c in calls if c[:2] == ["cargo", "ensure-workerd"]]
+        staged = [c for c in calls if c[:2] == ["cargo", "stage-plugins"]]
+        e2e = [c for c in calls if c[:4] == ["cargo", "test", "-p", E2E_PACKAGE]]
+        self.assertEqual(len(workerd), 1, calls)
+        self.assertEqual(len(staged), 1, calls)
+        self.assertEqual(len(e2e), 2, calls)
+
+    def test_failed_prerequisite_is_not_marked_complete(self) -> None:
+        art = artifact(plan("crates/bookclerk-plugins/optional/source-libro/src/client.rs"))
+        calls: list[list[str]] = []
+        fail_workerd = True
+
+        def fake_run(argv, cwd=None, env=None):
+            calls.append(list(argv))
+            if fail_workerd and list(argv)[:2] == ["cargo", "ensure-workerd"]:
+                return subprocess.CompletedProcess(argv, 1)
+            return subprocess.CompletedProcess(argv, 0)
+
+        with tempfile.TemporaryDirectory(prefix="bc-exec-") as tmp:
+            ctx = self._exec_ctx(Path(tmp))
+            markers = ctx.tmp / "ci-exec-prereqs" / art["execution_id"]
+            with mock.patch("ci_plan.execute.subprocess.run", side_effect=fake_run):
+                with self.assertRaisesRegex(ExecError, "ensure-workerd"):
+                    run_check(art, "e2e", ctx)
+                names = sorted(p.name for p in markers.iterdir())
+                self.assertEqual(len(names), 1)
+                self.assertTrue(names[0].startswith("build-"))
+                self.assertFalse(any(n.startswith("ensure_workerd-") for n in names))
+                fail_workerd = False
+                before = len(calls)
+                run_check(art, "e2e", ctx)
+            retried = calls[before:]
+            self.assertFalse(any(c[:2] == ["cargo", "build"] for c in retried), retried)
+            self.assertTrue(any(c[:2] == ["cargo", "ensure-workerd"] for c in retried), retried)
+            names = sorted(p.name for p in markers.iterdir())
+            self.assertEqual(len(names), 4)
+            self.assertTrue(any(n.startswith("ensure_workerd-") for n in names))
+
+    def test_dry_run_does_not_create_completion_markers(self) -> None:
+        art = artifact(plan("crates/bookclerk-plugins/optional/source-libro/src/client.rs"))
+        with tempfile.TemporaryDirectory(prefix="bc-exec-") as tmp:
+            ctx = self._exec_ctx(Path(tmp))
+            with mock.patch("ci_plan.execute.subprocess.run") as run:
+                run_check(art, "e2e", ctx, dry_run=True)
+            run.assert_not_called()
+            self.assertFalse((ctx.tmp / "ci-exec-prereqs").exists())
 
     def test_json_roundtrip(self) -> None:
         p = plan("crates/bookclerk-plugin-host/src/rpc.rs")

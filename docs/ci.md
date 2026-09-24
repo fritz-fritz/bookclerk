@@ -36,14 +36,14 @@ flowchart LR
 ```
 
 - The `plan` job runs `scripts/ci-exec.py resolve`, which writes
-  `ci-plan.json` (schema version, run id, checked-out commit, the prediction
-  and the resolved `execution`) and the job outputs used by `if:` gates —
-  both from the same JSON.
+  `ci-plan.json` (schema version, run id, a fresh `execution_id`, checked-out
+  commit, the prediction and the resolved `execution`) and the job outputs
+  used by `if:` gates — both from the same JSON.
 - Every downstream job downloads that artifact and runs
   `ci-exec.py validate` first; a missing, stale or foreign artifact fails the
   job.
 - Each check is one workflow step running `ci-exec.py run <check>`. The
-  executor runs the check's prerequisites (once per job, in order: builds →
+  executor runs the check's prerequisites (once per execution, in order: builds →
   pinned `workerd` → platform install → guest staging) and then its commands.
   Local reproduction uses the same entry points:
 
@@ -53,6 +53,12 @@ flowchart LR
   python3 scripts/ci-exec.py show rust_test --run-id local   # print commands
   python3 scripts/ci-exec.py run rust_test --run-id local    # run them
   ```
+
+  Resolving again mints a new `execution_id` and starts a fresh execution.
+  Prerequisite completion from the previous artifact is not reused, even in
+  the same temporary directory with the same commit and run id. Checks that
+  share one artifact still run each prerequisite only once. `show` prints
+  commands and does not record completion.
 
 - `CI Gate` compares every job's result with `execution.jobs`: expected jobs
   must succeed, unexpected jobs must be skipped. Failures, cancellations,
