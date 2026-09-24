@@ -452,6 +452,7 @@ jobs:
           BOOKCLERK_PLUGIN_ARTIFACTS: ${{ runner.temp }}/bookclerk-plugins
           BOOKCLERK_SANDBOX_REQUIRE_ENFORCEMENT: "1"
           BOOKCLERK_SANDBOX_REQUIRE_SPAWN_ENFORCEMENT: "1"
+          BOOKCLERK_REQUIRE_TEST_GUESTS: "1"
           BOOKCLERK_WORKERD_BIN: ${{ github.workspace }}/target/debug/workerd
         run: |
           set -euo pipefail
@@ -473,7 +474,7 @@ jobs:
             # this job. `cargo test -p bookclerk-plugin-host` does not rebuild
             # dependency bins, so a stale snapshot binary advertises
             # maxFunctionArgs=0 and fails host minimums.
-            cargo build -p bookclerk-plugin-database-sqlite
+            cargo build -p bookclerk-plugin-database-sqlite -p bookclerk-plugin-database-postgres
           fi
           if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
             # `--tests` selects every target with `test = true`: lib and bin
