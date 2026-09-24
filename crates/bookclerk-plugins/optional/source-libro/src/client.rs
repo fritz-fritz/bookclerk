@@ -615,3 +615,4 @@ where
         Some(_) => Ok(None),
     }
 }
+// CI probe: selective-path validation for PR #220 (do not merge).
