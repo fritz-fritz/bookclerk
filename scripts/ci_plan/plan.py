@@ -56,6 +56,20 @@ CONFINEMENT_PACKAGES = frozenset(
 
 TRAY_PACKAGE = "bookclerk-tray"
 
+# Files outside a package directory that a package compiles in via
+# ``include_str!`` (not visible in cargo metadata).
+EMBEDDED_INPUTS = {
+    "packages/plugin-sdk/embed/bookclerk_plugin.js": "bookclerk-workerd",
+    "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/workerd.py": "bookclerk-workerd",
+    "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/db_value.py": "bookclerk-workerd",
+    "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/_abi.py": "bookclerk-workerd",
+    "packages/plugin-sdk-python/src/bookclerk_plugin_sdk/guest_sql.py": "bookclerk-workerd",
+}
+
+# Host test targets that exercise every staged optional/example guest
+# (``tests/staged_plugins.rs``) and need the complete installation.
+STAGED_INSTALL_TEST_PACKAGES = frozenset({"bookclerk-plugin-host"})
+
 # Non-Cargo surfaces (path prefix → plan flag).
 UI_PREFIX = "ui/"
 TS_SDK_PREFIX = "packages/plugin-sdk/"
@@ -422,6 +436,11 @@ def build_plan(
         if pkg is not None:
             changed_pkgs.add(pkg)
             classified = True
+        embed_owner = EMBEDDED_INPUTS.get(path)
+        if embed_owner is not None and embed_owner in index.by_name:
+            changed_pkgs.add(embed_owner)
+            plan.decisions.setdefault(embed_owner, f"embeds {path}")
+            classified = True
 
         # Non-Cargo surfaces (explicit classifiers).
         if path.startswith(UI_PREFIX) or path == "ui":
@@ -509,6 +528,13 @@ def build_plan(
         if name in PUBLISH_DOC_CRATES:
             plan.abi_sync = True
             plan.decisions.setdefault("abi_sync", f"package {name}")
+        if name in STAGED_INSTALL_TEST_PACKAGES:
+            plan.build_app_platform = True
+            plan.decisions.setdefault("build_app_platform", f"{name} staged-install tests")
+            plan.build_app_optional = True
+            plan.decisions.setdefault("build_app_optional", f"{name} staged-install tests")
+            plan.build_app_examples = True
+            plan.decisions.setdefault("build_app_examples", f"{name} staged-install tests")
 
     # Hosts that embed the UI must rebuild UI when bookclerkd changes.
     if "bookclerkd" in affected:

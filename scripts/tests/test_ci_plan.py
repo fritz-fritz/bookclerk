@@ -147,6 +147,37 @@ class CiPlanTests(unittest.TestCase):
         self.assertTrue(p.python_sdk)
         self.assertTrue(p.abi_sync)
 
+    def test_embedded_ts_sdk_selects_workerd(self) -> None:
+        # bookclerk-workerd include_str!s the TS embed; its conformance tests
+        # must run when the embed changes.
+        p = self.plan("packages/plugin-sdk/embed/bookclerk_plugin.js")
+        self.assertTrue(p.ts_sdk)
+        self.assertIn("bookclerk-workerd", p.changed_packages)
+        self.assertIn("bookclerk-workerd", p.rust_packages)
+
+    def test_embedded_python_sdk_selects_workerd(self) -> None:
+        p = self.plan("packages/plugin-sdk-python/src/bookclerk_plugin_sdk/workerd.py")
+        self.assertTrue(p.python_sdk)
+        self.assertIn("bookclerk-workerd", p.rust_packages)
+
+    def test_non_embedded_python_sdk_does_not_select_workerd(self) -> None:
+        p = self.plan("packages/plugin-sdk-python/src/bookclerk_plugin_sdk/__init__.py")
+        self.assertNotIn("bookclerk-workerd", p.rust_packages)
+
+    def test_host_change_stages_full_install(self) -> None:
+        # tests/staged_plugins.rs asserts every optional/example guest.
+        p = self.plan("crates/bookclerk-plugin-host/src/lib.rs")
+        self.assertIn("bookclerk-plugin-host", p.rust_packages)
+        self.assertTrue(p.build_app_platform)
+        self.assertTrue(p.build_app_optional)
+        self.assertTrue(p.build_app_examples)
+
+    def test_cli_only_is_binary_only_package_set(self) -> None:
+        # Selective test invocation must not pass --lib for this set.
+        p = self.plan("crates/bookclerk-cli/src/main.rs")
+        self.assertEqual(p.rust_packages, ["bookclerk-cli"])
+        self.assertEqual(p.rust_doctest_packages, [])
+
     def test_new_optional_plugin_under_glob(self) -> None:
         # Existing optional plugin change.
         p = self.plan(
