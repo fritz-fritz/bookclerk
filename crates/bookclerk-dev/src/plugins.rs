@@ -932,6 +932,16 @@ fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
 }
 
 /// Runs `cargo build [-p …]` for the selected packages; inherits stdio and fails on non-zero exit.
+///
+/// # Arguments
+///
+/// * `root` - Cargo workspace root directory.
+/// * `release` - Build with `--release` when true.
+/// * `packages` - Cargo package names passed as `-p`.
+///
+/// # Errors
+///
+/// Returns an error when `cargo` cannot be spawned or exits non-zero.
 pub fn build_packages(root: &Path, release: bool, packages: &[String]) -> Result<()> {
     let mut cmd = cargo(root);
     cmd.arg("build");
