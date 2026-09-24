@@ -18,7 +18,7 @@
 //! `bookclerk-workerd` injects `@bookclerk/plugin-sdk/workerd` (and the package
 //! root) into the isolate — authors do not vendor a relative filepath. Optional
 //! offline vendors can copy [`EMBED_BOOKCLERK_PLUGIN_JS_SRC`] via
-//! `bookclerk-plugin sync-embed` (feature `tools`).
+//! `bookclerk-plugin sync-embed` (crate `bookclerk-plugin-tools`).
 //!
 //! Layout (see `examples/plugins-echo-workerd-rust/`):
 //!

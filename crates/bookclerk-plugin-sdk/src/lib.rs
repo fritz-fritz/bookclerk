@@ -18,7 +18,7 @@
 //! | Workerd / Wasm guests | [`workerd`] + npm `@bookclerk/plugin-sdk` |
 //! | ABI DTOs / method names | [`protocol`] (re-exports `bookclerk-plugin-abi`) |
 //! | Database guest session / atomic execution | feature `db` → [`database_adapter`] |
-//! | Author CLI (`check` / `fmt` / `package` / `smoke`) | feature `tools` → [`tools`] |
+//! | Author CLI (`check` / `fmt` / `sync-embed` / `package` / `smoke`) | separate crate `bookclerk-plugin-tools` (`cargo plugin`) |
 //!
 //! ```toml
 //! # In a standalone plugin repo / workspace:
