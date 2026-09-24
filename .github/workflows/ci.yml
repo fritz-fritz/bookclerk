@@ -476,19 +476,20 @@ jobs:
             cargo build -p bookclerk-plugin-database-sqlite
           fi
           if [ "${{ needs.plan.outputs.execute_full_suite }}" = "true" ]; then
-            # `--lib --bins --tests` keeps unit + integration tests and skips
-            # doctests (already run in "Explicit doctests"). `--tests` alone
-            # would drop `src/` unit tests.
-            cargo test --workspace --lib --bins --tests
-            cargo test -p bookclerk-plugin-database-sqlite --features host-helpers --lib --bins --tests
+            # `--tests` selects every target with `test = true`: lib and bin
+            # unit tests plus integration tests. Doctests run separately in
+            # "Explicit doctests". Explicit `--lib` would fail for binary-only
+            # package sets (e.g. `bookclerk-cli`).
+            cargo test --workspace --tests
+            cargo test -p bookclerk-plugin-database-sqlite --features host-helpers --tests
           else
             PKGS="${{ needs.plan.outputs.rust_packages }}"
             ARGS=()
             for p in $PKGS; do ARGS+=(-p "$p"); done
-            cargo test "${ARGS[@]}" --lib --bins --tests
+            cargo test "${ARGS[@]}" --tests
             case " $PKGS " in
               *" bookclerk-plugin-database-sqlite "*)
-                cargo test -p bookclerk-plugin-database-sqlite --features host-helpers --lib --bins --tests
+                cargo test -p bookclerk-plugin-database-sqlite --features host-helpers --tests
                 ;;
             esac
           fi
