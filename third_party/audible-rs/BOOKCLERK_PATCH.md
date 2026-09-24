@@ -37,6 +37,12 @@ This vendored tree is identical to the pinned upstream revision except:
 5. `auth/authfile.rs` unit test `wrong_password_fails` derives its mismatch
    from the literal fixture password at runtime (analyzer hygiene for a
    second hard-coded secret). This is not a security improvement.
+6. Widevine `Cdm::parse_license` unwraps `SignedMessage.session_key` with
+   `RsaPrivateKey::decrypt_blinded` (same RSA-OAEP/SHA-1 as upstream
+   `decrypt`). Default `decrypt` runs the private-key modexp unblinded
+   (RUSTSEC-2023-0071). This is hardening, not a patched `rsa` release.
+7. `downloader` lib tests import `url::Url` (used by the annotation-base
+   lockstep test; the type was previously unresolved under `--lib` tests).
 
 Re-vendor when bumping the `audible-rs` git rev in the workspace
 `Cargo.toml`, then re-apply these patches.
