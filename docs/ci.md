@@ -6,85 +6,159 @@ Bookclerk’s GitHub Actions workflow (`.github/workflows/ci.yml`) uses a
 
 ## Selective CI
 
-`SELECTIVE_CI` in `.github/workflows/ci.yml` is **`1`**: pull requests follow
-the planner’s job and step selection. `merge_group` and pushes to `main`
-always pass `--force-full`, so the full suite remains the post-merge (and,
-once an organization merge queue exists, pre-merge) trust boundary.
+`SELECTIVE_CI` in `.github/workflows/ci.yml` selects the execution mode:
 
-### Shadow evaluation
+| Mode | When | What runs |
+| --- | --- | --- |
+| `full` | `main` push, `merge_group`, or any fail-closed trigger | Every job and check at full scope |
+| `shadow` | `SELECTIVE_CI != "1"` | Every job at full scope; the selective prediction is recorded in the plan summary for audit |
+| `selective` | `SELECTIVE_CI == "1"` on a PR | Only the predicted checks, each with its prerequisites |
 
-While `SELECTIVE_CI` was `0`, the planner still published predictions on every
-PR. A sample of 73 successful PR `ci-plan` artifacts (~2026-08-20 →
-2026-09-23) showed:
+Full-suite runs on `main` (and `merge_group` once a queue exists) are the
+audit for missed selective coverage: a check that fails there but was skipped
+on the PR is a planner bug. Until the repository is organization-owned and a
+merge queue is required, **`push` to `main` is the full-suite safety net** —
+a planner miss can land before `main` CI catches it, so keep planner and
+workflow changes small and reviewable.
 
-- About **97%** predicted `full_suite=true` (mostly `Cargo.lock`, workflows,
-  unknown `tools/`, or unclassified paths) — fail-closed and correct.
-- Only one selective shape appeared in Actions: a `bookclerk-workerd` + docs
-  PR predicted `confinement=false`, which would have skipped the Windows
-  named-pipe `SOCKET_PROXY` coverage that lives only in the confinement job.
+### Plan → execution contract
 
-The planner now treats `bookclerk-workerd`, `bookclerk-plugin-host`, and
-`bookclerk-plugin-sdk` as confinement triggers (in addition to the sandbox /
-jail / media prefixes) so that Windows-only steps cannot be skipped on those
-PRs. Docs-only and UI-only plans still skip confinement, tray, and release.
+```mermaid
+flowchart LR
+  Diff["git diff --no-renames"] --> Stage1["stage 1: affected checks"]
+  Meta["cargo metadata --no-deps"] --> Stage1
+  Rel["scripts/ci_plan/relations.toml"] --> Stage1
+  Stage1 --> Stage2["stage 2: prerequisites"]
+  Stage2 --> Resolve["ci-exec resolve: mode"]
+  Resolve --> Artifact["ci-plan.json artifact"]
+  Artifact --> Jobs["jobs: validate, then ci-exec run CHECK"]
+  Artifact --> Gate["CI Gate: expected execution vs results"]
+```
 
-### Interim trust model
+- The `plan` job runs `scripts/ci-exec.py resolve`, which writes
+  `ci-plan.json` (schema version, run id, checked-out commit, the prediction
+  and the resolved `execution`) and the job outputs used by `if:` gates —
+  both from the same JSON.
+- Every downstream job downloads that artifact and runs
+  `ci-exec.py validate` first; a missing, stale or foreign artifact fails the
+  job.
+- Each check is one workflow step running `ci-exec.py run <check>`. The
+  executor runs the check's prerequisites (once per job, in order: builds →
+  pinned `workerd` → platform install → guest staging) and then its commands.
+  Local reproduction uses the same entry points:
 
-Until the repository is organization-owned and a merge queue is required,
-selective PR CI is the fast path and **`push` to `main` is the full-suite
-safety net**. A planner miss can therefore land before `main` CI catches it;
-prefer small, reviewable PRs for planner and workflow changes. After the
-org transfer, enable the merge queue so `merge_group` runs the full suite on
-the stacked commit before landing (see below).
+  ```bash
+  python3 scripts/ci-plan.py --paths crates/bookclerk-cli/src/main.rs --format summary
+  python3 scripts/ci-exec.py resolve --selective 1 --paths crates/bookclerk-cli/src/main.rs
+  python3 scripts/ci-exec.py show rust_test --run-id local   # print commands
+  python3 scripts/ci-exec.py run rust_test --run-id local    # run them
+  ```
+
+- `CI Gate` compares every job's result with `execution.jobs`: expected jobs
+  must succeed, unexpected jobs must be skipped. Failures, cancellations,
+  unexpected skips and unexpected runs all fail the gate. Because the gate
+  uses the *execution* (not the prediction), shadow mode's intentional full
+  runs pass.
+- `scripts/tests/test_ci_contract.py` (PyYAML, hash-pinned in
+  `scripts/tests/requirements.txt`) fails when the workflow and planner could
+  diverge: unknown or unused outputs, a check with zero or two steps, a job
+  the gate does not see, a job that does not validate first, unpinned actions,
+  or `continue-on-error`.
 
 ## Planner
 
 ```bash
 python3 scripts/ci-plan.py --base <sha> --head <sha> --format summary
-python3 scripts/tests/test_ci_plan.py -q
+python3 scripts/tests/test_ci_plan.py        # planner + executor scenarios
+python3 scripts/tests/test_ci_relations.py   # relations.toml guardrails
+python3 scripts/tests/test_ci_contract.py    # workflow contract (needs PyYAML)
 ```
 
-The planner:
+### Stage 1: affected checks
 
-1. Diffs changed paths (`git diff --name-only base...head`).
-2. Maps every file under a Cargo package root to that package (not only `.rs`).
-3. Loads workspace members and path-dependency edges from
-   `cargo metadata --no-deps`.
-4. Expands each changed package to its reverse-transitive dependents.
-5. Classifies non-Cargo surfaces (`ui/`, `packages/plugin-sdk/`,
-   `packages/plugin-sdk-python/`, docs, plugin tiers).
-6. **Fails closed** for any changed path that is neither a Cargo package member
-   nor an explicit non-Cargo classifier (e.g. `third_party/**`,
-   `.github/actions/**`, arbitrary `scripts/**`, unknown `packages/<name>/**`).
-7. Emits JSON / GitHub Actions outputs and a step summary explaining every
-   run/skip decision. `rust_doc_packages` feeds `cargo doc`;
-   `rust_doctest_packages` is the lib+`doctest` subset used for
-   `cargo test --doc`. Binary-only crates are excluded from
-   `rust_doctest_packages`, but remain in `rust_doc_packages` and are rendered
-   by `cargo doc` (Cargo’s `--doc` test target is library-only, whereas
-   `cargo doc` documents selected binary and library targets and includes
-   private items for binaries by default). Workspace Clippy also enforces
-   `missing_docs_in_private_items` (see `docs/code-documentation.md`).
+Each changed path (renames contribute old and new paths) is classified:
 
-Conservative **full suite** triggers include root `Cargo.toml` / `Cargo.lock`,
-`rust-toolchain.toml`, `.cargo/**`, CI workflows, the planner itself, unresolved
-package manifests, unknown top-level paths, unclassified paths under known roots,
-and planner failures. There is **no** per-crate lane metadata — specialization
-roots are discovered from directories (confinement — sandbox / jail / media
-prefixes plus workerd / plugin-host / plugin-sdk, tray, platform/optional/examples
-plugins, SDKs).
+| Input | Effect |
+| --- | --- |
+| Package source (`src/`, `build.rs`, `Cargo.toml`, other package files) | Package is **compiled-affected**; propagates over **normal/build** edges to compiled consumers (optional edges count — no feature resolution) |
+| `tests/**`, `benches/**`, `examples/**` in a package | Owner only, by target type: `--tests`, `cargo bench --benches --no-run`, `cargo build --examples` |
+| **Dev** edge to a compiled package | Consumer's tests, bench/example builds and doctests; **not** propagated to its production consumers |
+| Declared `embed` (e.g. TS/Python SDK runtime into `bookclerk-workerd`) | Package compiled-affected |
+| Declared `test_input` / `fixture` | Consumer tests (fixtures skip the owner's compile propagation) |
+| Declared `test_guests` executable changed | Launching package's tests re-run (no propagation) |
+| `ui/`, `packages/plugin-sdk*/`, ABI scripts | UI, SDK ABI and API-doc checks |
+| `docs/**` | Nothing beyond the plan job's always-on lint tests |
+| Root `Cargo.toml` / `Cargo.lock`, toolchain, `.cargo/`, workflows, the planner, `fuzz/`, unknown or unclassified paths, planner errors | **Full suite** |
+
+`Cargo.lock` stays a full-suite trigger in this iteration; dependency-update
+precision can follow.
+
+### Stage 2: prerequisites
+
+Every selected check lists what a clean runner needs, with a reason:
+
+- `rust_test`: `cargo build -p` for executables its packages' tests launch
+  (`test_guests`), plus pinned `workerd` when they spawn through it. Tests run
+  with `BOOKCLERK_REQUIRE_TEST_GUESTS=1`, so a missing guest fails instead of
+  skipping.
+- `e2e`: jail + launcher + the native guests in scope, pinned `workerd`,
+  `cargo install-platform --skip-build`, and `cargo stage-plugins --plugin
+  <id>…` (or `--optional --examples` for the full installation). Runs
+  `bookclerk-plugin-e2e` with `BOOKCLERK_REQUIRE_STAGED_PLUGINS=1`.
+- `postgres` `rpc_like`: postgres guest + launcher + jail and pinned `workerd`.
+
+Prerequisites never select suites: building the sqlite guest for host tests
+does not select sqlite's own tests or E2E.
+
+### Staged E2E scope
+
+`bookclerk-plugin-e2e` owns the staged-installation suite; the ordinary test
+step excludes it (`--exclude bookclerk-plugin-e2e` on the full suite).
+
+- **Full** — a direct source change in a `staged_e2e.full_packages` package
+  (dev, manifest, abi, workerd, jail, sandbox, the e2e crate), an inventory
+  manifest (`crates/bookclerk-plugins/*/*/plugin.toml`,
+  `examples/plugins-*/plugin.toml`), host discovery / registry / install
+  preflight, or the full suite.
+- **Subsets** — each compiled-affected guest package adds its id; changed
+  non-Cargo example guests add theirs; the workerd SDK runtime embed adds
+  every workerd-runtime guest; shared host runtime changes add the
+  `runtime_smoke` guests (native Rust, workerd TS, workerd Python).
+- **Combination** — full wins over subsets, subsets are unioned,
+  prerequisites add nothing. Platform guests (`sqlite`, `local`) are always
+  installed and checked. An embedded SDK change marks `bookclerk-workerd`
+  affected *through the embed*, so it selects the workerd-runtime subset, not
+  the full installation; a change under `crates/bookclerk-workerd/src/` is a
+  direct source change and selects full.
+
+### Declarations (`scripts/ci_plan/relations.toml`)
+
+The only handwritten graph: relationships `cargo metadata` cannot describe
+(embedded assets, cross-package test inputs and fixtures, executables tests
+launch, feature-specific test runs, postgres step owners, E2E scope rules,
+platform-job membership, release packaging inputs). It does not restate the
+workspace dependency graph.
+
+`scripts/tests/test_ci_relations.py` is a **guardrail, not a completeness
+guarantee**. It recognizes literal `include_str!` / `include_bytes!` paths,
+Rust string literals that resolve to another package or repository path, and
+workspace binary names in `tests/`; each must be declared, related through
+Cargo, under a full-suite path, or listed in `[[reviewed]]` with a reason.
+Computed paths, macro-generated includes and dynamically discovered fixtures
+are **not** detected — declare them, or rely on the conservative fallbacks.
 
 ## Jobs
 
-| Job | Role |
-| --- | --- |
-| `plan` | Always runs; publishes outputs + `ci-plan` artifact |
-| `fmt / clippy / test` | Selective steps driven by plan outputs (when `SELECTIVE_CI=1`). Installs `capnproto`. The plugin ABI contract requires pinned `target/debug/workerd` (fails closed unless a local `BOOKCLERK_SKIP_WORKERD=1` skip is used — CI never sets that) |
-| `release build` | When hosts/platform packaging are affected (or full suite). Installs `capnproto`. |
-| `sandbox + jailed tiers` | When confinement packages are affected (or full suite): sandbox / jail / media prefixes, plus `bookclerk-workerd`, `bookclerk-plugin-host`, and `bookclerk-plugin-sdk` (Windows SOCKET_PROXY and host/sdk Denial paths). Windows runs `--test-threads=1` so parallel AppContainer tests do not starve `Local\bookclerk-dacl-tx`. Windows also installs Cap'n Proto and clippy/tests `bookclerk-workerd` (named-pipe SOCKET_PROXY), `bookclerk-plugin-sdk` with `http`, and `bookclerk-plugin-host --lib` so `#[cfg(windows)]` nested Deny is compiled. |
-| `tray` | When `bookclerk-tray` is affected (or full suite) |
-| `postgres 16/17/18` | When Rust runs (or full suite). Matrix of every supported PostgreSQL major ≥ 16 (`fail-fast: false`; `CI Gate` requires the whole job). Installs `capnproto`. Requires a Postgres service at that major. Runs ignored job-queue tests, TOTP atomic conformance, shared SQL-plan vectors, guest page tests, binding-schema isolation, and production RPC LIKE. |
-| `CI Gate` | Stable required check: succeeds for intentional skips; fails on real failures |
+| Job | Runs when | Checks |
+| --- | --- | --- |
+| `plan` | Always | Planner/executor/contract/guardrail tests, DB isolation + docs lints, `resolve`, `ci-plan` artifact |
+| `fmt / clippy / test` | Any check below is selected | `ui`, `plugin_sdk_abi`, `python_sdk`, `author_surface`, `fmt`, `clippy`, `clippy_publish`, `api_docs`, `doctest`, `store_free`, `rust_test`, `e2e` — related Rust checks share one compile |
+| `release build` | A shipped binary (hosts, helpers, platform guests) is compiled-affected | `affected`: `cargo build --release -p <affected shipped>`; `full` (packaging inputs: `bookclerk-dev`, workerd pins, platform manifests; or full suite): `build-app --release --platform` + helper layout assertions |
+| `sandbox + jailed tiers` (3 OS) | sandbox / jail / media / media-worker affected | Clippy + enforcement tests (Windows `--test-threads=1`) |
+| `native-behind-workerd gateway` (Windows) | workerd / plugin-sdk affected, or plugin-host `src` | Clippy workerd, sdk `http`, host `--lib`; named-pipe `SOCKET_PROXY` tests |
+| `tray` (3 OS) | `bookclerk-tray` affected | Clippy + tests |
+| `postgres 16/17/18` | An owning package's unit tests are affected (library, db-guest, postgres guest, plugin-host RPC LIKE) | Only the owners' steps, on every supported major |
+| `CI Gate` | Always | Stable required check (see contract above) |
 
 OSV scanning remains a separate workflow/gate. A green OSV job that applies
 [`osv-scanner.toml`](../osv-scanner.toml) `IgnoredVulns` means **zero
@@ -176,15 +250,13 @@ has fallen behind `main` until it is rebased. Either:
 
 ## Expected PR feedback (when `SELECTIVE_CI=1`)
 
-For a **documentation-only** change (`docs/**` only):
+| Change | Jobs after `plan` | Notes |
+| --- | --- | --- |
+| `docs/**` only | none | `CI Gate` passes with every job skipped |
+| `ui/**` only | `fmt / clippy / test` (UI + UI API docs) | no Rust toolchain checks |
+| `crates/bookclerk-cli/src/**` | check (`-p bookclerk-cli --tests`), release (`bookclerk-cli`) | no postgres, no E2E |
+| `crates/bookclerk-plugin-host/src/**` | check (host + dependents, runtime-smoke E2E), release (hosts), windows gateway, postgres (`rpc_like` only) | no sandbox matrix |
+| One optional guest (e.g. Libro) | check (guest tests, E2E `libro` only) | other storefronts are neither built nor staged |
+| `packages/plugin-sdk/embed/**` | check (workerd tests, workerd-runtime E2E subset, SDK ABI), release (launcher), windows gateway | not the full installation |
 
-- `plan` runs (planner unit tests + path plan)
-- `fmt / clippy / test` runs **format only** (no clippy/test/docs generation/build-app)
-- `release` / `confinement` / `tray` are **skipped**
-- `CI Gate` succeeds
-
-Wall time target: under **three minutes** excluding Actions queueing (planner
-itself is sub-second; the remaining cost is checkout + rustfmt toolchain).
-
-For `merge_group` / `main`, the planner forces `full_suite=true` so every job
-and the strengthened documentation checks still run.
+For `merge_group` / `main`, `--force-full` runs every job and check.
