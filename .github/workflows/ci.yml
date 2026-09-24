@@ -23,7 +23,7 @@ env:
   # Selective PR CI (#157). "0" = shadow: every job runs at full scope and the
   # selective prediction is recorded in the plan summary for audit. "1" = jobs
   # and checks follow the prediction. merge_group / main always --force-full.
-  SELECTIVE_CI: "0"
+  SELECTIVE_CI: "1"
 
 # Every job below `plan` downloads the `ci-plan` artifact, validates it
 # (schema, run id, checked-out commit) and runs checks through
