@@ -320,7 +320,11 @@ pub fn sync_embed(plugin_dir: &Path) -> Result<String> {
         .join("plugin-sdk");
     std::fs::create_dir_all(&dest_dir).map_err(SdkError::from)?;
     let dest = dest_dir.join("workerd.js");
-    std::fs::write(&dest, bookclerk_plugin_sdk::workerd::EMBED_BOOKCLERK_PLUGIN_JS_SRC).map_err(SdkError::from)?;
+    std::fs::write(
+        &dest,
+        bookclerk_plugin_sdk::workerd::EMBED_BOOKCLERK_PLUGIN_JS_SRC,
+    )
+    .map_err(SdkError::from)?;
     Ok(format!(
         "synced {} (optional vendor; prefer package import + bookclerk-workerd inject)",
         dest.display()
