@@ -1422,3 +1422,4 @@ def transport_database(transport: Any) -> DatabaseBinding:
         return await guest.execute(request)
 
     return create_database_binding(bound_execute)
+# CI probe: selective-path validation for PR #220 (do not merge).
