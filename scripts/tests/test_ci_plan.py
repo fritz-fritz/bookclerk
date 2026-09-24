@@ -204,12 +204,14 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(p.params("e2e")["scope"], "full")
         self.assertEqual(
             sorted(p.lint_packages()),
-            ["bookclerk-dev", "bookclerk-plugin-tools", "bookclerk-workerd"],
+            # host: its tests spawn guests through the launcher (test_guests).
+            ["bookclerk-dev", "bookclerk-plugin-host", "bookclerk-plugin-tools", "bookclerk-workerd"],
         )
+        self.assertFalse(p.packages["bookclerk-plugin-host"].compiled)
         build = next(x for x in p.prereqs("rust_test") if x["kind"] == "build")
-        self.assertEqual(
-            sorted(build["packages"]),
-            ["bookclerk-plugin-database-sqlite", "bookclerk-plugin-destination-local", "bookclerk-plugin-echo-native-rust"],
+        self.assertLessEqual(
+            {"bookclerk-plugin-database-sqlite", "bookclerk-plugin-destination-local", "bookclerk-plugin-echo-native-rust"},
+            set(build["packages"]),
         )
         stage = next(x for x in p.prereqs("e2e") if x["kind"] == "stage_plugins")
         self.assertTrue(stage["all"])
@@ -345,6 +347,17 @@ class ScenarioTests(unittest.TestCase):
         p = plan("crates/bookclerk-plugin-host/tests/guest_jail.rs")
         self.assertNotIn("bookclerk-plugin-database-sqlite", p.packages)
         self.assertNotIn("bookclerk-plugin-database-postgres", p.packages)
+
+    def test_tests_that_launch_a_changed_guest_rerun(self) -> None:
+        p = plan("crates/bookclerk-plugins/optional/database-postgres/src/main.rs")
+        host = p.packages["bookclerk-plugin-host"]
+        self.assertIn("tests launch bookclerk-plugin-database-postgres", host.why)
+        self.assertTrue(host.tests and not host.compiled)
+        # No propagation to host's production consumers.
+        self.assertNotIn("bookclerk-cli", p.packages)
+        local = plan("crates/bookclerk-plugins/platform/destination-local/src/plugin.rs")
+        self.assertIn("bookclerk-workerd", local.test_packages())
+        self.assertFalse(local.packages["bookclerk-workerd"].compiled)
 
     def test_non_cargo_example_guest(self) -> None:
         p = plan("examples/plugins-echo-workerd-ts/src/index.ts")

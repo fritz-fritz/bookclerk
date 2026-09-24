@@ -712,6 +712,17 @@ def build_plan(
             s.examples = s.examples or info.has_examples
             s.doctest = s.doctest or info.supports_doctest
 
+    # Tests that launch a changed workspace executable re-run (no further
+    # propagation); building it for them is a prerequisite, not a selection.
+    for consumer, spec in sorted(rel.test_guests.items()):
+        launched = sorted(set(spec.get("build", [])) & compiled)
+        if not launched or consumer in compiled:
+            continue
+        s = sel.setdefault(consumer, PackageSelection())
+        for g in launched:
+            s.add_why(f"tests launch {g}")
+        s.tests = s.unit_tests = True
+
     # Test-input changes: only the owning target type.
     for name, kinds in test_seeds.items():
         s = sel.setdefault(name, PackageSelection())

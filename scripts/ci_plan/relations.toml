@@ -45,13 +45,11 @@ paths = ["scripts/check-db-plugin-isolation.py"]
 
 [[test_input]]
 package = "bookclerk-plugin-host"
-# plugin_inventory walks every plugin.toml; rpc_proxy_like stages the sqlite
-# and postgres guest directories (manifest + assets) next to their binaries.
+# plugin_inventory walks every plugin.toml. (rpc_proxy_like's sqlite/postgres
+# guest directories are covered by [test_guests.bookclerk-plugin-host].)
 paths = [
     "crates/bookclerk-plugins/*/*/plugin.toml",
     "examples/plugins-*/plugin.toml",
-    "crates/bookclerk-plugins/platform/database-sqlite/**",
-    "crates/bookclerk-plugins/optional/database-postgres/**",
 ]
 
 # Package-local files that no target of the owning package compiles (shared
@@ -63,7 +61,8 @@ paths = ["crates/bookclerk-plugin-abi/fixtures/**"]
 checks = ["plugin_sdk_abi", "python_sdk"]
 
 # Workspace executables launched by a package's tests. Built before the tests
-# run; prerequisites never select their owners' own checks.
+# run; a change to one re-runs the launching package's tests (no further
+# propagation). Prerequisites never select their owners' own checks.
 [test_guests.bookclerk-workerd]
 build = [
     "bookclerk-plugin-echo-native-rust",
