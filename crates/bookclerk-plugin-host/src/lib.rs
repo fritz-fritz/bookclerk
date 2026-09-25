@@ -130,8 +130,8 @@ pub use rpc_session::{
     RpcBackupOps, SessionServices, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
 pub use spawn_plan::{
-    GuestRuntimeKind, SpawnPlan, SpawnTransport, WorkerdFrontDoor, NATIVE_BACKEND_ENV,
-    NESTED_JAIL_BIN_ENV, NESTED_NATIVE_JAIL_ENV, WORKERD_BIN_ENV, WORKERD_LAUNCHER_ENV,
+    GuestRuntimeKind, SpawnPlan, SpawnTransport, WorkerdFrontDoor, WORKERD_BIN_ENV,
+    WORKERD_LAUNCHER_ENV,
 };
 
 /// Register discovered external plugins into the in-process registries.

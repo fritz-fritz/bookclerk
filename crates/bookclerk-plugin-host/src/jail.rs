@@ -190,21 +190,39 @@ pub(crate) enum Start {
     },
 }
 
-/// A guest's directories plus the decision about how to start it.
+/// Directories and start decisions for one plugin session.
+///
+/// Native-behind-workerd fills [`Self::guest_start`]: the host spawns two
+/// sibling jails. Isolates and direct-native use only [`Self::start`].
 #[derive(Debug)]
 pub(crate) struct GuestJail {
-    /// Private state directory, also the guest's `HOME`.
+    /// Private state directory, also the native guest's `HOME`.
     pub data: PathBuf,
-    /// Scratch directory, the guest's `TMPDIR`.
+    /// Scratch directory, the native guest's `TMPDIR`.
     pub scratch: PathBuf,
-    /// Confined launcher + spec, or an unconfined start with the skip reason.
+    /// Host-owned session directory (`0700`) for the gateway's `TMPDIR` /
+    /// `BOOKCLERK_WORKERD_STATE_DIR`. `None` when this session has no sibling.
+    pub session_dir: Option<PathBuf>,
+    /// Child the host speaks Cap'n Proto to (gateway jail, isolate, or direct).
     pub start: Start,
-    /// AppContainer Package SID (SDDL) when the guest will run confined on Windows.
+    /// Native sibling jail when [`crate::GuestRuntimeKind::NativeBehindWorkerd`].
+    pub guest_start: Option<Start>,
+    /// Aggregate session resource ceilings (Windows Job / Linux cgroup).
+    #[allow(dead_code)] // read on Windows (`SessionJob`); Linux writes limits at create.
+    pub session_limits: bookclerk_sandbox::ResourceLimits,
+    /// Linux session cgroup leaf both siblings join (held so the host owns it).
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub session_cgroup: Option<PathBuf>,
+    /// AppContainer Package SID of the native guest (callback proxy DACL).
     #[cfg(windows)]
     pub package_sid: Option<String>,
-    /// Host-owned AppContainer profile; deleted when the plugin client drops.
+    /// Host-owned AppContainer profile for the Cap'n Proto child.
     #[cfg(windows)]
     pub appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
+    /// Host-owned AppContainer profile for the native sibling.
+    #[cfg(windows)]
+    pub guest_appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
 }
 
 impl GuestJail {
@@ -259,14 +277,51 @@ impl GuestJail {
         }
 
         let isolation = config.plugins.isolation;
+        let siblings = spawn.runtime == crate::GuestRuntimeKind::NativeBehindWorkerd;
+        let session_dir = if siblings {
+            Some(create_session_dir(&plugin_state_root(config, plugin)?)?)
+        } else {
+            None
+        };
+        let mut session_limits = session_resource_limits(plugin, spawn.runtime, grant.as_ref());
+        apply_global_jail_resource_overrides(
+            &mut session_limits,
+            &config.plugins.jail,
+            spawn.runtime,
+        );
+        #[cfg(target_os = "linux")]
+        let session_cgroup = if siblings {
+            bookclerk_sandbox::create_session_cgroup(
+                &session_limits,
+                &format!("{}-{}", plugin.plugin_key().fs_id(), std::process::id()),
+            )
+            .ok()
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let cgroup_dir = session_cgroup.clone();
+        #[cfg(not(target_os = "linux"))]
+        let cgroup_dir = None;
         #[cfg(windows)]
         let mut package_sid = None;
         #[cfg(windows)]
         let mut appcontainer = None;
-        let start = match isolation {
-            Isolation::Off => Start::Unconfined {
-                reason: "[plugins].isolation = off".to_string(),
-            },
+        #[cfg(windows)]
+        let mut guest_appcontainer = None;
+
+        let (start, guest_start) = match isolation {
+            Isolation::Off => plan_isolation_off(
+                config,
+                plugin,
+                spawn,
+                &data,
+                &scratch,
+                session_dir.as_deref(),
+                grant.as_ref(),
+                cgroup_dir.clone(),
+                siblings,
+            )?,
             Isolation::Required | Isolation::BestEffort => {
                 let enforcement = if isolation == Isolation::Required {
                     Enforcement::Required
@@ -277,23 +332,37 @@ impl GuestJail {
                     Ok(launcher) => {
                         #[cfg(windows)]
                         {
-                            let label = format!("plugin:{}", plugin.plugin_key().fs_id());
-                            match bookclerk_sandbox::spawn::AppContainerSession::create(&label) {
-                                Ok(session) => {
-                                    package_sid = Some(session.package_sid().to_string());
-                                    appcontainer = Some(session);
+                            match create_windows_profiles(plugin, siblings, isolation) {
+                                Ok(profiles) => {
+                                    package_sid = profiles
+                                        .guest
+                                        .as_ref()
+                                        .or(profiles.gateway.as_ref())
+                                        .map(|s| s.package_sid().to_string());
+                                    appcontainer = profiles.gateway;
+                                    guest_appcontainer = profiles.guest;
                                 }
                                 Err(err) if isolation == Isolation::BestEffort => {
                                     return Ok(Self {
                                         data,
                                         scratch,
+                                        session_dir,
                                         start: Start::Unconfined {
                                             reason: format!(
                                                 "AppContainer profile unavailable: {err}"
                                             ),
                                         },
+                                        guest_start: siblings.then(|| Start::Unconfined {
+                                            reason: format!(
+                                                "AppContainer profile unavailable: {err}"
+                                            ),
+                                        }),
+                                        session_limits,
+                                        #[cfg(target_os = "linux")]
+                                        session_cgroup,
                                         package_sid: None,
                                         appcontainer: None,
+                                        guest_appcontainer: None,
                                     });
                                 }
                                 Err(err) => {
@@ -303,33 +372,43 @@ impl GuestJail {
                                 }
                             }
                         }
-                        // The product ABI does not pass per-RPC descriptors; fetch scratch is
-                        // plugin `tmp` and sqlite paths are spawn-time grants.
-                        let preserve_fds: Vec<i32> = Vec::new();
-
                         #[cfg(windows)]
-                        let windows_profile_name =
+                        let gateway_profile =
                             appcontainer.as_ref().map(|s| s.profile_name().to_string());
+                        #[cfg(windows)]
+                        let guest_profile = guest_appcontainer
+                            .as_ref()
+                            .map(|s| s.profile_name().to_string());
                         #[cfg(not(windows))]
-                        let windows_profile_name = None;
+                        let gateway_profile = None;
+                        #[cfg(not(windows))]
+                        let guest_profile = None;
 
-                        Start::Confined {
+                        confined_starts(
                             launcher,
-                            spec: Box::new(build_spec_with_grant(
-                                plugin,
-                                spawn,
-                                config,
-                                &data,
-                                &scratch,
-                                preserve_fds,
-                                enforcement,
-                                windows_profile_name,
-                                grant.as_ref(),
-                            )),
-                        }
+                            plugin,
+                            spawn,
+                            config,
+                            &data,
+                            &scratch,
+                            session_dir.as_deref(),
+                            grant.as_ref(),
+                            enforcement,
+                            gateway_profile,
+                            guest_profile,
+                            cgroup_dir,
+                            siblings,
+                        )
                     }
-                    Err(reason) if isolation == Isolation::BestEffort => {
-                        Start::Unconfined { reason }
+                    Err(reason)
+                        if isolation == Isolation::BestEffort && !windows_needs_jail(siblings) =>
+                    {
+                        (
+                            Start::Unconfined {
+                                reason: reason.clone(),
+                            },
+                            siblings.then_some(Start::Unconfined { reason }),
+                        )
                     }
                     Err(reason) => {
                         return Err(PluginError::message(format!(
@@ -344,13 +423,193 @@ impl GuestJail {
         Ok(Self {
             data,
             scratch,
+            session_dir,
             start,
+            guest_start,
+            session_limits,
+            #[cfg(target_os = "linux")]
+            session_cgroup,
             #[cfg(windows)]
             package_sid,
             #[cfg(windows)]
             appcontainer,
+            #[cfg(windows)]
+            guest_appcontainer,
         })
     }
+}
+
+/// Windows native-behind always goes through `bookclerk-jail` (handoff).
+fn windows_needs_jail(siblings: bool) -> bool {
+    cfg!(windows) && siblings
+}
+
+/// Isolation::Off: Unix siblings stay unconfined; Windows siblings still use
+/// `bookclerk-jail` with [`Enforcement::Disabled`] so handle handoff works.
+#[allow(clippy::too_many_arguments)]
+fn plan_isolation_off(
+    config: &Config,
+    plugin: &DiscoveredPlugin,
+    spawn: &SpawnPlan,
+    data: &Path,
+    scratch: &Path,
+    session_dir: Option<&Path>,
+    grant: Option<&PluginGrant>,
+    cgroup_dir: Option<PathBuf>,
+    siblings: bool,
+) -> Result<(Start, Option<Start>)> {
+    if windows_needs_jail(siblings) {
+        let launcher = resolve_launcher(config, Isolation::Off).map_err(|reason| {
+            PluginError::message(format!(
+                "Windows native-behind-workerd requires `{JAIL_BIN_NAME}` beside the host \
+                 even when [plugins].isolation = off ({reason})"
+            ))
+        })?;
+        return Ok(confined_starts(
+            launcher,
+            plugin,
+            spawn,
+            config,
+            data,
+            scratch,
+            session_dir,
+            grant,
+            Enforcement::Disabled,
+            None,
+            None,
+            cgroup_dir,
+            siblings,
+        ));
+    }
+    Ok((
+        Start::Unconfined {
+            reason: "[plugins].isolation = off".to_string(),
+        },
+        siblings.then(|| Start::Unconfined {
+            reason: "[plugins].isolation = off".to_string(),
+        }),
+    ))
+}
+
+/// Confined gateway (and optional guest) starts sharing one session cgroup.
+#[allow(clippy::too_many_arguments)]
+fn confined_starts(
+    launcher: PathBuf,
+    plugin: &DiscoveredPlugin,
+    spawn: &SpawnPlan,
+    config: &Config,
+    data: &Path,
+    scratch: &Path,
+    session_dir: Option<&Path>,
+    grant: Option<&PluginGrant>,
+    enforcement: Enforcement,
+    gateway_profile: Option<String>,
+    guest_profile: Option<String>,
+    cgroup_dir: Option<PathBuf>,
+    siblings: bool,
+) -> (Start, Option<Start>) {
+    let gateway = Start::Confined {
+        launcher: launcher.clone(),
+        spec: Box::new(build_spec_with_grant(
+            plugin,
+            spawn,
+            config,
+            data,
+            scratch,
+            session_dir,
+            if siblings {
+                JailRole::Gateway
+            } else {
+                JailRole::Combined
+            },
+            enforcement,
+            gateway_profile,
+            grant,
+            cgroup_dir.clone(),
+        )),
+    };
+    let guest = siblings.then(|| Start::Confined {
+        launcher,
+        spec: Box::new(build_spec_with_grant(
+            plugin,
+            spawn,
+            config,
+            data,
+            scratch,
+            session_dir,
+            JailRole::Guest,
+            enforcement,
+            guest_profile,
+            grant,
+            cgroup_dir,
+        )),
+    });
+    (gateway, guest)
+}
+
+/// Create the gateway profile and, for siblings, a distinct guest profile.
+#[cfg(windows)]
+struct WindowsProfiles {
+    gateway: Option<bookclerk_sandbox::spawn::AppContainerSession>,
+    guest: Option<bookclerk_sandbox::spawn::AppContainerSession>,
+}
+
+#[cfg(windows)]
+fn create_windows_profiles(
+    plugin: &DiscoveredPlugin,
+    siblings: bool,
+    isolation: Isolation,
+) -> std::result::Result<WindowsProfiles, bookclerk_sandbox::SandboxError> {
+    let _ = isolation;
+    let gateway_label = format!("plugin:{}", plugin.plugin_key().fs_id());
+    let gateway = bookclerk_sandbox::spawn::AppContainerSession::create(&gateway_label)?;
+    let guest = if siblings {
+        let guest_label = format!("plugin:{}:guest", plugin.plugin_key().fs_id());
+        Some(bookclerk_sandbox::spawn::AppContainerSession::create(
+            &guest_label,
+        )?)
+    } else {
+        None
+    };
+    Ok(WindowsProfiles {
+        gateway: Some(gateway),
+        guest,
+    })
+}
+
+/// Host-owned `plugin-state/<fs_id>/session-<nonce>` (0700).
+fn create_session_dir(state_root: &Path) -> Result<PathBuf> {
+    let nonce = format!(
+        "{:x}-{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let dir = state_root.join(format!("session-{nonce}"));
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        PluginError::message(format!("could not create {}: {err}", dir.display()))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|err| {
+            PluginError::message(format!("could not chmod {}: {err}", dir.display()))
+        })?;
+    }
+    Ok(dir)
+}
+
+/// Which filesystem / net / fd contract a jail spec uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JailRole {
+    /// Isolate or direct-native: today's single-jail grants.
+    Combined,
+    /// Native-behind gateway: OutboundListen, session dir, fds 3+4.
+    Gateway,
+    /// Native-behind guest: Deny, data/tmp, fd 3.
+    Guest,
 }
 
 /// Build the allowlist for one guest.
@@ -366,68 +625,117 @@ fn build_spec(
     enforcement: Enforcement,
     windows_profile_name: Option<String>,
 ) -> Spec {
+    let _ = preserve_fds;
     build_spec_with_grant(
         plugin,
         spawn,
         config,
         data,
         scratch,
-        preserve_fds,
+        None,
+        JailRole::Combined,
         enforcement,
         windows_profile_name,
+        None,
         None,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Builds a jail `Spec`: install/launcher-tree reads, data/tmp (and granted output/SQLite) writes, and grant-derived net/resources.
+/// Builds a jail `Spec` for [`JailRole`]: install reads, granted writes, net, resources.
 fn build_spec_with_grant(
     plugin: &DiscoveredPlugin,
     spawn: &SpawnPlan,
     config: &Config,
     data: &Path,
     scratch: &Path,
-    preserve_fds: Vec<i32>,
+    session_dir: Option<&Path>,
+    role: JailRole,
     enforcement: Enforcement,
     windows_profile_name: Option<String>,
     grant: Option<&PluginGrant>,
+    cgroup_dir: Option<PathBuf>,
 ) -> Spec {
-    let mut writes = vec![data.to_path_buf(), scratch.to_path_buf()];
-    // Local output writes under `[output.local].root`; grant only that tree.
-    // Require the `storage` entrypoint so a non-output plugin cannot claim id "local".
-    if is_platform_local_storage(plugin) && config.output.local.enabled {
-        // Directory creation happens in [`GuestJail::plan`] (hard error).
-        writes.push(resolved_local_output_root(config));
-    }
-    // File-level grants only — never the files-dir parent (see module docs).
-    if is_sqlite_database_plugin(plugin) {
-        writes.extend(sqlite_library_paths(config));
-        // Isolated per-binding database files for named plugin database
-        // bindings live under one host-managed tree the adapter owns.
-        writes.push(plugin_databases_dir(config));
-    }
-    let mut resources = guest_spec_resource_limits(plugin, spawn.runtime, grant);
-    // Global jail knobs only override resource ceilings. Guest filesystems remain
-    // install read-only plus host-managed data/tmp grants, not free-form paths.
-    apply_global_jail_resource_overrides(&mut resources, &config.plugins.jail, spawn.runtime);
-    Spec {
-        label: format!("plugin:{}", plugin.plugin_key().fs_id()),
-        // The install directory covers `plugin.toml` and, in the usual layout,
-        // the binary. A manifest may name an absolute `command` elsewhere, and
-        // a workerd-fronted guest also execs `bookclerk-workerd`, the pinned
-        // `workerd`, and (native) the backend — grant each executable
-        // explicitly rather than relying on them sharing a directory.
-        reads: {
+    let (writes, reads, net, preserve_fds, unix_socket_dirs, label_suffix) = match role {
+        JailRole::Combined => {
+            let mut writes = vec![data.to_path_buf(), scratch.to_path_buf()];
+            if is_platform_local_storage(plugin) && config.output.local.enabled {
+                writes.push(resolved_local_output_root(config));
+            }
+            if is_sqlite_database_plugin(plugin) {
+                writes.extend(sqlite_library_paths(config));
+                writes.push(plugin_databases_dir(config));
+            }
             let mut reads = vec![plugin.root.clone()];
             reads.extend(spawn.executable_reads());
-            reads
-        },
+            (
+                writes,
+                reads,
+                jail_net_policy(plugin, spawn, grant),
+                Vec::new(),
+                None,
+                String::new(),
+            )
+        }
+        JailRole::Gateway => {
+            let session = session_dir
+                .expect("native-behind gateway requires a host session directory")
+                .to_path_buf();
+            let mut reads = vec![plugin.root.clone()];
+            reads.extend(spawn.gateway_executable_reads());
+            (
+                vec![session.clone()],
+                reads,
+                NetPolicy::OutboundListen,
+                vec![
+                    bookclerk_sandbox::GATEWAY_RPC_FD,
+                    bookclerk_sandbox::GATEWAY_PROXY_FD,
+                ],
+                Some(vec![session]),
+                ":gateway".to_string(),
+            )
+        }
+        JailRole::Guest => {
+            let mut writes = vec![data.to_path_buf(), scratch.to_path_buf()];
+            if is_platform_local_storage(plugin) && config.output.local.enabled {
+                writes.push(resolved_local_output_root(config));
+            }
+            if is_sqlite_database_plugin(plugin) {
+                writes.extend(sqlite_library_paths(config));
+                writes.push(plugin_databases_dir(config));
+            }
+            let mut reads = vec![plugin.root.clone()];
+            reads.extend(spawn.guest_executable_reads());
+            (
+                writes,
+                reads,
+                NetPolicy::Deny,
+                vec![bookclerk_sandbox::GUEST_PROXY_FD],
+                Some(Vec::new()),
+                ":guest".to_string(),
+            )
+        }
+    };
+    let mut resources = match role {
+        JailRole::Gateway => gateway_spec_resource_limits(plugin, grant),
+        JailRole::Guest => sibling_guest_spec_resource_limits(plugin, grant),
+        JailRole::Combined => guest_spec_resource_limits(plugin, spawn.runtime, grant),
+    };
+    let override_runtime = match role {
+        JailRole::Gateway => crate::GuestRuntimeKind::Workerd,
+        JailRole::Guest => crate::GuestRuntimeKind::NativeDirect,
+        JailRole::Combined => spawn.runtime,
+    };
+    apply_global_jail_resource_overrides(&mut resources, &config.plugins.jail, override_runtime);
+    if role == JailRole::Gateway {
+        // Extra processes belong on the guest / session cap, not the gateway.
+        resources.active_processes = Some(2);
+    }
+    Spec {
+        label: format!("plugin:{}{label_suffix}", plugin.plugin_key().fs_id()),
+        reads,
         writes,
-        net: jail_net_policy(plugin, spawn, grant),
-        // The launcher has to exec the guest to hand over. See the
-        // `bookclerk-jail` crate docs on why this is close to free.
-        // On Windows, `allow_exec` is not separately enforceable at CreateProcess;
-        // path ACLs and low integrity remain the boundary (see windows_spawn docs).
+        net,
         allow_exec: true,
         system_paths: true,
         enforcement,
@@ -437,8 +745,8 @@ fn build_spec_with_grant(
         active_processes: resources.active_processes,
         cpu_rate_percent: resources.cpu_rate_percent,
         inherit_handles: Vec::new(),
-        cgroup_dir: None,
-        unix_socket_dirs: None,
+        cgroup_dir,
+        unix_socket_dirs,
     }
 }
 
@@ -493,13 +801,12 @@ fn jail_net_policy(
     if spawn.fronted_by_workerd() {
         // Intentional OS-jail exception (see docs/adr/plugin-workers-rpc-workerd.md):
         // `bookclerk-workerd` must `bind(127.0.0.1:0)` for the host↔isolate RPC
-        // bridge, for author isolates and native backends alike. Linux Landlock
-        // has no loopback-only policy, so `OutboundListen` also permits
-        // `connect` for the launcher. Isolate egress (`WORKERD_GRANT_*` →
-        // `globalOutbound = blocked` under deny) remains the grant enforcement
-        // layer for isolates. Native-behind-workerd guests are wrapped in a
-        // nested `NetPolicy::Deny` jail (`native_guest.rs`) and must use the
-        // SDK socket proxy rather than ambient `AF_INET`.
+        // bridge. Linux Landlock has no loopback-only policy, so
+        // `OutboundListen` also permits `connect` for the launcher. Isolate
+        // egress (`WORKERD_GRANT_*` → `globalOutbound = blocked` under deny)
+        // remains the grant enforcement layer for isolates. Native-behind
+        // *guests* use [`JailRole::Guest`] (`NetPolicy::Deny`) and the SDK
+        // socket proxy rather than ambient `AF_INET`.
         return NetPolicy::OutboundListen;
     }
     let denied = grant.is_some_and(|g| g.network_mode.eq_ignore_ascii_case("deny"));
@@ -565,6 +872,34 @@ fn guest_spec_resource_limits(
         active_processes: Some(active_processes_for(runtime, extra)),
         cpu_rate_percent: Some(cpu_rate),
     }
+}
+
+/// Gateway jail occupancy: `bookclerk-workerd` + pinned `workerd` (2). Extra
+/// processes belong on the guest / session Job.
+fn gateway_spec_resource_limits(
+    plugin: &DiscoveredPlugin,
+    grant: Option<&PluginGrant>,
+) -> bookclerk_sandbox::ResourceLimits {
+    let mut limits = guest_spec_resource_limits(plugin, crate::GuestRuntimeKind::Workerd, grant);
+    limits.active_processes = Some(2);
+    limits
+}
+
+/// Native sibling occupancy: guest (1) + grant extra.
+fn sibling_guest_spec_resource_limits(
+    plugin: &DiscoveredPlugin,
+    grant: Option<&PluginGrant>,
+) -> bookclerk_sandbox::ResourceLimits {
+    guest_spec_resource_limits(plugin, crate::GuestRuntimeKind::NativeDirect, grant)
+}
+
+/// Session Job / cgroup: same aggregate as today's combined native-behind spec.
+fn session_resource_limits(
+    plugin: &DiscoveredPlugin,
+    runtime: crate::GuestRuntimeKind,
+    grant: Option<&PluginGrant>,
+) -> bookclerk_sandbox::ResourceLimits {
+    guest_spec_resource_limits(plugin, runtime, grant)
 }
 
 /// True when this guest is the verified Bookclerk platform SQLite adapter.
@@ -1000,12 +1335,10 @@ entrypoints = ["{entrypoint}"]
         assert!(!spec.reads.contains(&config.paths().files_dir));
     }
 
-    /// The product path: the jail execs `bookclerk-workerd`, which execs the
-    /// pinned `workerd`, the nested `bookclerk-jail`, and the native backend.
-    /// All four must stay readable, the loopback bridge needs `OutboundListen`,
-    /// and the pids budget counts the whole launcher tree.
+    /// Sibling specs: gateway reads workerd helpers + session dir; guest reads
+    /// the backend and writes data/tmp. Neither sees the other's private paths.
     #[test]
-    fn a_native_guest_behind_workerd_gets_the_launcher_tree_grants() {
+    fn a_native_guest_behind_workerd_gets_split_sibling_grants() {
         let files = tempfile::tempdir().expect("tempdir");
         let install = tempfile::tempdir().expect("tempdir");
         let helpers = tempfile::tempdir().expect("tempdir");
@@ -1013,42 +1346,76 @@ entrypoints = ["{entrypoint}"]
         let plugin = plugin_at(install.path(), "sqlite", JailNetworkNeed::None);
         let plan = fronted(&plugin, helpers.path());
         assert_eq!(plan.runtime, GuestRuntimeKind::NativeBehindWorkerd);
+        let data = plugin_data_dir(&config, &plugin).unwrap();
+        let scratch = plugin_scratch_dir(&config, &plugin).unwrap();
+        let session = files.path().join("session-test");
+        std::fs::create_dir_all(&session).expect("session dir");
 
-        let spec = build_spec(
+        let gateway = build_spec_with_grant(
             &plugin,
             &plan,
             &config,
-            &plugin_data_dir(&config, &plugin).unwrap(),
-            &plugin_scratch_dir(&config, &plugin).unwrap(),
-            Vec::new(),
+            &data,
+            &scratch,
+            Some(session.as_path()),
+            JailRole::Gateway,
             Enforcement::Required,
+            None,
+            None,
+            None,
+        );
+        let guest = build_spec_with_grant(
+            &plugin,
+            &plan,
+            &config,
+            &data,
+            &scratch,
+            Some(session.as_path()),
+            JailRole::Guest,
+            Enforcement::Required,
+            None,
+            None,
             None,
         );
         for exe in [
             &plan.launcher,
             plan.workerd_bin.as_ref().expect("workerd bin"),
-            &plugin.command,
-            plan.nested_jail_helper()
-                .as_ref()
-                .expect("nested jail beside launcher"),
         ] {
             assert!(
-                spec.reads.iter().any(|r| exe.starts_with(r)),
-                "{} must be readable inside the jail: {:?}",
+                gateway.reads.iter().any(|r| exe.starts_with(r)),
+                "{} must be readable in the gateway: {:?}",
                 exe.display(),
-                spec.reads
+                gateway.reads
+            );
+            assert!(
+                !guest.reads.iter().any(|r| exe.starts_with(r)),
+                "{} must not be readable in the guest: {:?}",
+                exe.display(),
+                guest.reads
             );
         }
-        assert!(spec.allow_exec);
-        assert_eq!(
-            spec.net,
-            NetPolicy::OutboundListen,
-            "the loopback RPC bridge needs bind even for a deny-network native"
+        assert!(
+            guest.reads.iter().any(|r| plugin.command.starts_with(r)),
+            "backend must be readable in the guest"
         );
-        // launcher + workerd + native guest (3) + default extra (2).
-        assert_eq!(spec.active_processes, Some(5));
-        // The helpers directory itself is never granted, only the two files.
-        assert!(!spec.reads.contains(&helpers.path().to_path_buf()));
+        // The install directory is granted to both (plugin.toml); the gateway
+        // must not receive an extra explicit grant of the workerd helpers'
+        // parent, and the guest must not receive the helper binaries.
+        assert_eq!(gateway.net, NetPolicy::OutboundListen);
+        assert_eq!(guest.net, NetPolicy::Deny);
+        assert_eq!(gateway.active_processes, Some(2));
+        // guest 1 + default extra 2
+        assert_eq!(guest.active_processes, Some(3));
+        assert_eq!(gateway.writes, vec![session.clone()]);
+        assert!(guest.writes.contains(&data));
+        assert!(guest.writes.contains(&scratch));
+        assert!(!guest.writes.contains(&session));
+        assert_eq!(
+            gateway.unix_socket_dirs.as_deref(),
+            Some([session.clone()].as_slice())
+        );
+        assert_eq!(guest.unix_socket_dirs.as_deref(), Some([].as_slice()));
+        assert!(!gateway.reads.contains(&helpers.path().to_path_buf()));
     }
 
     #[test]
@@ -1147,10 +1514,12 @@ entrypoints = ["{entrypoint}"]
             &config,
             &plugin_data_dir(&config, &workerd).unwrap(),
             &plugin_scratch_dir(&config, &workerd).unwrap(),
-            Vec::new(),
+            None,
+            JailRole::Combined,
             Enforcement::Required,
             None,
             Some(&deny),
+            None,
         );
         assert_eq!(denied.net, NetPolicy::OutboundListen);
 
@@ -1163,7 +1532,8 @@ entrypoints = ["{entrypoint}"]
             &config,
             &plugin_data_dir(&config, &native_listen).unwrap(),
             &plugin_scratch_dir(&config, &native_listen).unwrap(),
-            Vec::new(),
+            None,
+            JailRole::Combined,
             Enforcement::Required,
             None,
             Some(&PluginGrant {
@@ -1190,6 +1560,7 @@ entrypoints = ["{entrypoint}"]
                 approved_at: "2026-01-01T00:00:00Z".into(),
                 ..PluginGrant::empty()
             }),
+            None,
         );
         assert_eq!(native_denied.net, NetPolicy::Deny);
     }
@@ -1219,19 +1590,45 @@ entrypoints = ["{entrypoint}"]
         assert_eq!(spec.cpu_rate_percent, Some(80));
         assert_eq!(spec.active_processes, Some(2));
 
-        // Same ceiling behind the front door keeps the launcher tree: 3 + 1 = 4.
+        // Session aggregate behind the front door stays 3 + 1 = 4; the gateway
+        // jail is fixed at 2 and the guest takes 1 + extra.
         let helpers = tempfile::tempdir().expect("tempdir");
-        let fronted_spec = build_spec(
+        let plan = fronted(&native, helpers.path());
+        let session = files.path().join("session-limits");
+        std::fs::create_dir_all(&session).expect("session");
+        let data = plugin_data_dir(&config, &native).unwrap();
+        let scratch = plugin_scratch_dir(&config, &native).unwrap();
+        let gateway = build_spec_with_grant(
             &native,
-            &fronted(&native, helpers.path()),
+            &plan,
             &config,
-            &plugin_data_dir(&config, &native).unwrap(),
-            &plugin_scratch_dir(&config, &native).unwrap(),
-            vec![],
+            &data,
+            &scratch,
+            Some(session.as_path()),
+            JailRole::Gateway,
             Enforcement::Required,
             None,
+            None,
+            None,
         );
-        assert_eq!(fronted_spec.active_processes, Some(4));
+        let guest = build_spec_with_grant(
+            &native,
+            &plan,
+            &config,
+            &data,
+            &scratch,
+            Some(session.as_path()),
+            JailRole::Guest,
+            Enforcement::Required,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(gateway.active_processes, Some(2));
+        assert_eq!(guest.active_processes, Some(2));
+        let mut session = session_resource_limits(&native, plan.runtime, None);
+        apply_global_jail_resource_overrides(&mut session, &config.plugins.jail, plan.runtime);
+        assert_eq!(session.active_processes, Some(4));
     }
 
     #[test]
@@ -1265,7 +1662,8 @@ entrypoints = ["{entrypoint}"]
             &config,
             &plugin_data_dir(&config, &native).unwrap(),
             &plugin_scratch_dir(&config, &native).unwrap(),
-            vec![],
+            None,
+            JailRole::Combined,
             Enforcement::Required,
             None,
             Some(&PluginGrant {
@@ -1292,6 +1690,7 @@ entrypoints = ["{entrypoint}"]
                 approved_at: "2026-01-01T00:00:00Z".into(),
                 ..PluginGrant::empty()
             }),
+            None,
         );
         assert_eq!(native_with_grant.memory_bytes, Some(256 * 1024 * 1024));
         assert_eq!(native_with_grant.cpu_rate_percent, Some(40));
@@ -1356,7 +1755,8 @@ entrypoints = ["{entrypoint}"]
             &config,
             &plugin_data_dir(&config, &native).unwrap(),
             &plugin_scratch_dir(&config, &native).unwrap(),
-            vec![],
+            None,
+            JailRole::Combined,
             Enforcement::Required,
             None,
             Some(&PluginGrant {
@@ -1383,6 +1783,7 @@ entrypoints = ["{entrypoint}"]
                 approved_at: "2026-01-01T00:00:00Z".into(),
                 ..PluginGrant::empty()
             }),
+            None,
         );
         assert_eq!(spec.cpu_rate_percent, Some(want));
     }

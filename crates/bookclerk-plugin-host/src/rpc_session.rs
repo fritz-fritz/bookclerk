@@ -541,8 +541,12 @@ pub struct PluginSession {
     account_id: String,
     /// Expanded executor identity (not a PID).
     session_key: String,
-    /// Guest child PID, when the OS still reports one after spawn.
+    /// Native guest PID (sibling) or the single child when there is no sibling.
     guest_pid: Option<u32>,
+    /// Gateway / Cap'n Proto child PID for native-behind-workerd.
+    gateway_pid: Option<u32>,
+    /// Host-owned gateway session directory (native-behind-workerd).
+    session_dir: Option<std::path::PathBuf>,
     /// Negotiated scalar limits.
     limits: ScalarLimits,
     /// Intersected RPC features.
@@ -619,9 +623,9 @@ impl PluginSession {
     ///
     /// This is the one place every product spawn passes through: the
     /// [`SpawnPlan`] resolved here decides that a `runtime = "native"` manifest
-    /// is fronted by `bookclerk-workerd` (its executable exported as
-    /// `BOOKCLERK_NATIVE_BACKEND`) unless `services.spawn_transport` opted into
-    /// the diagnostic direct transport.
+    /// is fronted by `bookclerk-workerd` (host-spawned sibling jails joined by
+    /// inherited links) unless `services.spawn_transport` opted into the
+    /// diagnostic direct transport.
     ///
     /// # Errors
     ///
@@ -677,7 +681,9 @@ impl PluginSession {
         let spawn_config = spawned.spawn_config.clone();
         #[cfg(windows)]
         let package_sid = spawned.package_sid.clone();
-        let guest_pid = spawned.child.id();
+        let guest_pid = spawned.guest_pid;
+        let gateway_pid = spawned.gateway_pid;
+        let session_dir = spawned.session_dir.clone();
         let instance_key = plugin_instance_key(&id, account_id);
         let identity = ExecutorIdentity::from_plugin_with_runtime(plugin, account_id, plan.runtime)
             .with_overlay_config(config)
@@ -741,6 +747,8 @@ impl PluginSession {
             account_id: account_id.to_string(),
             session_key: identity.session_key(),
             guest_pid,
+            gateway_pid,
+            session_dir,
             limits,
             features,
             describe: desc,
@@ -771,10 +779,22 @@ impl PluginSession {
         &self.session_key
     }
 
-    /// Guest child PID for this isolate, when known.
+    /// Native guest PID (sibling jail) or the single child when there is none.
     #[must_use]
     pub fn guest_pid(&self) -> Option<u32> {
         self.guest_pid
+    }
+
+    /// Gateway / Cap'n Proto child PID for native-behind-workerd, when known.
+    #[must_use]
+    pub fn gateway_pid(&self) -> Option<u32> {
+        self.gateway_pid
+    }
+
+    /// Host-owned gateway session directory, when this session has a sibling.
+    #[must_use]
+    pub fn session_dir(&self) -> Option<&std::path::Path> {
+        self.session_dir.as_deref()
     }
 
     /// Negotiated scalar limits.
@@ -1863,6 +1883,15 @@ fn missing_entrypoint(name: &str) -> PluginError {
     PluginError::message(format!("plugin exported no `{name}` entrypoint"))
 }
 
+/// Removes a host-owned session directory when the vat thread exits.
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Dedicated `open` for a database adapter: returns the `databaseAdapter`
 /// entrypoint or fails closed.
 async fn open_database_adapter(
@@ -1913,7 +1942,11 @@ fn vat_thread(
         local
             .run_until(async move {
                 let grant = spawned.grant;
+                let _remove_session_dir = spawned.session_dir.map(RemoveOnDrop);
+                #[cfg(windows)]
+                let _session_job = spawned.session_job;
                 let mut child = spawned.child;
+                let mut guest = spawned.guest;
                 let stderr_tail = spawned.stderr_tail;
                 let (client, rpc) =
                     connect_plugin(spawned.stdout, spawned.stdin, MAX_STREAM_WINDOW_BYTES);
@@ -1932,8 +1965,11 @@ fn vat_thread(
                     },
                     Err(err) => {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let extra =
-                            crate::spawn_stdio::spawn_failure_detail(&mut child, &stderr_tail);
+                        let extra = crate::spawn_stdio::spawn_failure_detail(
+                            &mut child,
+                            guest.as_mut(),
+                            &stderr_tail,
+                        );
                         let _ = ready.send(Err(crate::spawn_stdio::with_spawn_detail(
                             map_abi(err),
                             extra,
@@ -2522,6 +2558,7 @@ fn vat_thread(
                     }
                 }
                 drop(child);
+                drop(guest);
             })
             .await;
     });

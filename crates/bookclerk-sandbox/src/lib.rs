@@ -48,6 +48,10 @@ pub use platform::BACKEND;
 /// Linux session-cgroup constructor used by the plugin host.
 #[cfg(target_os = "linux")]
 pub use platform::create_session_cgroup;
+
+/// Host-owned Windows Job that holds both sibling `bookclerk-jail` processes.
+#[cfg(windows)]
+pub use platform::windows_launch::SessionJob;
 pub use spawn_path::{
     canonicalize, require_absolute_or_name, require_absolute_spawn_path,
     require_existing_regular_file, require_helper_beside_or_absolute, require_spawn_executable,

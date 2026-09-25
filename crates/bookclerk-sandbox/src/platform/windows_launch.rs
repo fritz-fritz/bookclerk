@@ -791,6 +791,61 @@ fn launch_err(stage: &str, detail: &str) -> SandboxError {
     }
 }
 
+/// Host-owned Job that holds both sibling `bookclerk-jail` processes.
+///
+/// Nested per-guest Jobs created by the jail still work; this Job is the
+/// session-level `KILL_ON_JOB_CLOSE` cap (aggregate memory / PIDs / CPU).
+pub struct SessionJob {
+    handle: HANDLE,
+}
+
+impl SessionJob {
+    /// Create a kill-on-close Job with `limits` (best-effort when a field is unset).
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when `CreateJobObjectW` or Job configuration fails.
+    pub fn create(limits: &crate::ResourceLimits) -> std::io::Result<Self> {
+        let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+        let job_limits = JobResourceLimits {
+            memory_bytes: limits.memory_bytes.and_then(|b| usize::try_from(b).ok()),
+            cpu_rate_percent: limits.cpu_rate_percent,
+            active_processes: limits.active_processes,
+        };
+        if let Err(err) = configure_job(job, &job_limits) {
+            let _ = unsafe { CloseHandle(job) };
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                err.to_string(),
+            ));
+        }
+        Ok(Self { handle: job })
+    }
+
+    /// Assign an already-started process (typically `bookclerk-jail.exe`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when `AssignProcessToJobObject` fails.
+    pub fn assign(&self, process: RawHandle) -> std::io::Result<()> {
+        unsafe {
+            AssignProcessToJobObject(self.handle, HANDLE(process))
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
+        }
+    }
+}
+
+impl Drop for SessionJob {
+    fn drop(&mut self) {
+        if !self.handle.is_invalid() {
+            // Closing the Job kills the tree (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
+            let _ = unsafe { CloseHandle(self.handle) };
+            self.handle = HANDLE::default();
+        }
+    }
+}
+
 /// Terminate every process in `job` (best-effort) then close it.
 #[allow(dead_code)]
 pub fn terminate_job_tree(job: HANDLE) {

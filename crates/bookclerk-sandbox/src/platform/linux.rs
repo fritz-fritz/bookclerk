@@ -358,7 +358,10 @@ fn move_self_into_cgroup(dir: &Path) -> Result<(), String> {
 ///
 /// Returns a string when the hierarchy is missing, a child cannot be created,
 /// or a limit file cannot be written.
-pub fn create_session_cgroup(limits: &crate::ResourceLimits) -> Result<std::path::PathBuf, String> {
+pub fn create_session_cgroup(
+    limits: &crate::ResourceLimits,
+    suffix: &str,
+) -> Result<std::path::PathBuf, String> {
     let root = Path::new("/sys/fs/cgroup");
     if !root.join("cgroup.controllers").is_file() {
         return Err("cgroup v2 not mounted at /sys/fs/cgroup".into());
@@ -376,7 +379,14 @@ pub fn create_session_cgroup(limits: &crate::ResourceLimits) -> Result<std::path
         ));
     }
     let _ = enable_subtree_controllers(&parent);
-    let child_name = format!("bookclerk-session-{}", std::process::id());
+    let suffix = suffix
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect::<String>();
+    if suffix.is_empty() {
+        return Err("session cgroup suffix is empty".into());
+    }
+    let child_name = format!("bookclerk-session-{suffix}");
     let child = parent.join(&child_name);
     match std::fs::create_dir(&child) {
         Ok(()) => {}
