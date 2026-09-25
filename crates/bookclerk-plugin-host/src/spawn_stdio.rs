@@ -12,6 +12,10 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use bookclerk_config::Config;
+#[cfg(any(windows, test))]
+use bookclerk_sandbox::GATEWAY_GUEST_RPC_WRITE_ENV;
+#[cfg(windows)]
+use bookclerk_sandbox::{DuplexHalf, StdioEnds};
 use bookclerk_sandbox::{
     DuplexLink, GATEWAY_GUEST_RPC_ENV, GATEWAY_PROXY_ENV, SOCKET_PROXY_ENV, WORKERD_STATE_DIR_ENV,
 };
@@ -274,10 +278,17 @@ async fn spawn_siblings(
         PluginError::message("native-behind-workerd jail plan is missing the session directory")
     })?;
 
-    // Guest stdin/stdout must be a synchronous pipe. The proxy stays a fully
-    // overlapped pair: both the gateway and the guest SDK wrap it in Tokio.
-    let (rpc_gateway, rpc_guest) = DuplexLink::pair_for_guest_stdio()
+    // Unix guest RPC is one socketpair. Windows guest RPC is two unidirectional
+    // pipes (sync guest ends, overlapped gateway ends): a pending synchronous
+    // read on a duplex end locks a synchronous write, so the second Cap'n Proto
+    // call never returns. The proxy stays one overlapped duplex; both sides
+    // wrap it in Tokio.
+    #[cfg(unix)]
+    let (rpc_gateway, rpc_guest) = DuplexLink::pair()
         .map_err(|err| PluginError::message(format!("could not create guest RPC link: {err}")))?;
+    #[cfg(windows)]
+    let rpc_pipes = StdioEnds::pair()
+        .map_err(|err| PluginError::message(format!("could not create guest RPC pipes: {err}")))?;
     let (proxy_gateway, proxy_guest) = DuplexLink::pair().map_err(|err| {
         PluginError::message(format!("could not create socket-proxy link: {err}"))
     })?;
@@ -340,7 +351,13 @@ async fn spawn_siblings(
 
     #[cfg(windows)]
     {
-        if let Err(err) = windows_handoff_gateway(&mut gateway, &rpc_gateway, &proxy_gateway).await
+        if let Err(err) = windows_handoff_gateway(
+            &mut gateway,
+            &rpc_pipes.host_stdout,
+            &rpc_pipes.host_stdin,
+            &proxy_gateway,
+        )
+        .await
         {
             let _ = gateway.kill().await;
             return Err(err);
@@ -367,7 +384,14 @@ async fn spawn_siblings(
 
     #[cfg(windows)]
     {
-        if let Err(err) = windows_handoff_guest(&mut guest, &rpc_guest, &proxy_guest).await {
+        if let Err(err) = windows_handoff_guest(
+            &mut guest,
+            &rpc_pipes.guest_stdin,
+            &rpc_pipes.guest_stdout,
+            &proxy_guest,
+        )
+        .await
+        {
             let _ = gateway.kill().await;
             let _ = guest.kill().await;
             return Err(err);
@@ -512,12 +536,18 @@ fn inherit_unix_guest(cmd: &mut Command, rpc: DuplexLink, proxy: &DuplexLink) ->
 #[cfg(windows)]
 async fn windows_handoff_gateway(
     child: &mut Child,
-    rpc: &DuplexLink,
+    rpc_read: &DuplexHalf,
+    rpc_write: &DuplexHalf,
     proxy: &DuplexLink,
 ) -> Result<()> {
     let target = process_handle(child)?;
-    let rpc_h = bookclerk_sandbox::duplicate_handle_into(rpc.as_raw_handle(), target)
-        .map_err(|err| PluginError::message(format!("DuplicateHandle gateway RPC: {err}")))?;
+    // Read half is guest stdout → gateway. Write half is gateway → guest stdin.
+    let rpc_read_h = bookclerk_sandbox::duplicate_handle_into(rpc_read.as_raw_handle(), target)
+        .map_err(|err| PluginError::message(format!("DuplicateHandle gateway RPC read: {err}")))?;
+    let rpc_write_h = bookclerk_sandbox::duplicate_handle_into(rpc_write.as_raw_handle(), target)
+        .map_err(|err| {
+        PluginError::message(format!("DuplicateHandle gateway RPC write: {err}"))
+    })?;
     let proxy_h = bookclerk_sandbox::duplicate_handle_into(proxy.as_raw_handle(), target)
         .map_err(|err| PluginError::message(format!("DuplicateHandle gateway proxy: {err}")))?;
     let handoff = JailHandoff {
@@ -527,7 +557,11 @@ async fn windows_handoff_gateway(
         extra: vec![
             JailHandoffExtra {
                 env: GATEWAY_GUEST_RPC_ENV.into(),
-                handle: rpc_h,
+                handle: rpc_read_h,
+            },
+            JailHandoffExtra {
+                env: GATEWAY_GUEST_RPC_WRITE_ENV.into(),
+                handle: rpc_write_h,
             },
             JailHandoffExtra {
                 env: GATEWAY_PROXY_ENV.into(),
@@ -541,16 +575,17 @@ async fn windows_handoff_gateway(
 #[cfg(windows)]
 async fn windows_handoff_guest(
     child: &mut Child,
-    rpc: &DuplexLink,
+    rpc_stdin: &DuplexHalf,
+    rpc_stdout: &DuplexHalf,
     proxy: &DuplexLink,
 ) -> Result<()> {
     let target = process_handle(child)?;
-    // Two copies of the same duplex. The inherit list rejects a repeated
-    // value, and the guest must be able to close stdout without closing stdin
-    // (Unix uses `DuplexLink::try_clone` for the same reason).
-    let rpc_in = bookclerk_sandbox::duplicate_handle_into(rpc.as_raw_handle(), target)
+    // Separate pipes. Duplicating one duplex end for both stdio handles lets a
+    // synchronous read lock the write, and the inherit list also rejects a
+    // repeated handle value.
+    let rpc_in = bookclerk_sandbox::duplicate_handle_into(rpc_stdin.as_raw_handle(), target)
         .map_err(|err| PluginError::message(format!("DuplicateHandle guest RPC stdin: {err}")))?;
-    let rpc_out = bookclerk_sandbox::duplicate_handle_into(rpc.as_raw_handle(), target)
+    let rpc_out = bookclerk_sandbox::duplicate_handle_into(rpc_stdout.as_raw_handle(), target)
         .map_err(|err| PluginError::message(format!("DuplicateHandle guest RPC stdout: {err}")))?;
     let proxy_h = bookclerk_sandbox::duplicate_handle_into(proxy.as_raw_handle(), target)
         .map_err(|err| PluginError::message(format!("DuplicateHandle guest proxy: {err}")))?;
@@ -619,6 +654,7 @@ fn guest_env_forbidden_key(key: &str) -> bool {
     upper.starts_with("BOOKCLERK_WORKERD_GRANT_")
         || upper.starts_with("BOOKCLERK_JAIL_")
         || upper == GATEWAY_GUEST_RPC_ENV
+        || upper == GATEWAY_GUEST_RPC_WRITE_ENV
         || upper == GATEWAY_PROXY_ENV
         || upper == WORKERD_STATE_DIR_ENV
         || upper == "BOOKCLERK_NATIVE_BACKEND"
@@ -798,6 +834,7 @@ mod tests {
             );
         }
         assert!(!keys.contains(GATEWAY_GUEST_RPC_ENV));
+        assert!(!keys.contains(GATEWAY_GUEST_RPC_WRITE_ENV));
         assert!(!keys.contains(GATEWAY_PROXY_ENV));
         assert!(!keys.contains(WORKERD_STATE_DIR_ENV));
         assert!(!keys.contains(bookclerk_sandbox::SPEC_ENV));

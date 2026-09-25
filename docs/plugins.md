@@ -292,10 +292,14 @@ applies a confinement policy to itself and then `exec`s the program the host
 named. **`bookclerk-workerd`** is the front door: for `runtime = "workerd"` it
 loads the author's isolate; for `runtime = "native"` the host also starts the
 native backend as a **sibling** jail. The two children are joined by
-host-created inherited duplex links (`BOOKCLERK_GATEWAY_GUEST_RPC` /
+host-created inherited links (`BOOKCLERK_GATEWAY_GUEST_RPC` /
 `BOOKCLERK_GATEWAY_PROXY` on the gateway, `BOOKCLERK_SOCKET_PROXY` on the
-guest, each `fd:<n>` / `handle:<n>`). `bookclerk-workerd` never nests a
-second jail.
+guest). On Unix each link is one duplex socket (`fd:<n>`). On Windows the
+proxy stays one overlapped duplex (`handle:<n>`); guest RPC is two
+unidirectional pipes so a synchronous stdin read cannot lock stdout
+(`BOOKCLERK_GATEWAY_GUEST_RPC` is the gateway read half,
+`BOOKCLERK_GATEWAY_GUEST_RPC_WRITE` is the write half). `bookclerk-workerd`
+never nests a second jail.
 
 Nesting is impossible on two of the three production OSes. A Seatbelt
 process cannot apply a second profile (`sandbox_init` returns EPERM even

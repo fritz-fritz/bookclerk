@@ -751,12 +751,39 @@ fn spawn_native_behind_workerd(
             .expect("chmod session");
     }
 
-    let (rpc_gw, rpc_guest) = DuplexLink::pair_for_guest_stdio().expect("rpc link");
     let (proxy_gw, proxy_guest) = DuplexLink::pair().expect("proxy link");
 
-    let guest_child = spawn_sibling_guest(guest, rpc_guest, &proxy_guest, tmp, extra_env);
-    let gateway = spawn_sibling_gateway(workerd, root, &session, &rpc_gw, &proxy_gw);
-    drop(rpc_gw);
+    #[cfg(unix)]
+    let (gateway, guest_child) = {
+        let (rpc_gw, rpc_guest) = DuplexLink::pair().expect("rpc link");
+        let guest_child = spawn_sibling_guest(guest, rpc_guest, &proxy_guest, tmp, extra_env);
+        let gateway = spawn_sibling_gateway(workerd, root, &session, &rpc_gw, &proxy_gw);
+        drop(rpc_gw);
+        (gateway, guest_child)
+    };
+    #[cfg(windows)]
+    let (gateway, guest_child) = {
+        use bookclerk_sandbox::StdioEnds;
+        let rpc = StdioEnds::pair().expect("rpc pipes");
+        let guest_child = spawn_sibling_guest(
+            guest,
+            rpc.guest_stdin,
+            rpc.guest_stdout,
+            &proxy_guest,
+            tmp,
+            extra_env,
+        );
+        let gateway = spawn_sibling_gateway(
+            workerd,
+            root,
+            &session,
+            &rpc.host_stdout,
+            &rpc.host_stdin,
+            &proxy_gw,
+        );
+        drop(rpc);
+        (gateway, guest_child)
+    };
     drop(proxy_gw);
     drop(proxy_guest);
     NativeBehind {
@@ -801,7 +828,8 @@ fn spawn_sibling_guest(
 #[cfg(windows)]
 fn spawn_sibling_guest(
     guest: &Path,
-    rpc: bookclerk_sandbox::DuplexLink,
+    rpc_stdin: bookclerk_sandbox::DuplexHalf,
+    rpc_stdout: bookclerk_sandbox::DuplexHalf,
     proxy: &bookclerk_sandbox::DuplexLink,
     tmp: &Path,
     extra_env: &[(&str, &Path)],
@@ -822,11 +850,8 @@ fn spawn_sibling_guest(
     for (key, value) in extra_env {
         upsert_env(&mut env, key, value.as_os_str());
     }
-    let stdin = rpc
-        .try_clone()
-        .expect("dup rpc for stdin")
-        .into_owned_handle();
-    let stdout = rpc.into_owned_handle();
+    let stdin = rpc_stdin.into_owned_handle();
+    let stdout = rpc_stdout.into_owned_handle();
     let mut child = bookclerk_sandbox::spawn::spawn_with_handle_list(
         guest,
         tmp,
@@ -883,14 +908,20 @@ fn spawn_sibling_gateway(
     workerd: &Path,
     root: &Path,
     session: &Path,
-    rpc: &bookclerk_sandbox::DuplexLink,
+    rpc_read: &bookclerk_sandbox::DuplexHalf,
+    rpc_write: &bookclerk_sandbox::DuplexHalf,
     proxy: &bookclerk_sandbox::DuplexLink,
 ) -> GatewayProc {
-    use bookclerk_sandbox::{GATEWAY_GUEST_RPC_ENV, GATEWAY_PROXY_ENV, WORKERD_STATE_DIR_ENV};
+    use bookclerk_sandbox::{
+        GATEWAY_GUEST_RPC_ENV, GATEWAY_GUEST_RPC_WRITE_ENV, GATEWAY_PROXY_ENV,
+        WORKERD_STATE_DIR_ENV,
+    };
 
-    let rpc_dup = duplicate_link(rpc);
+    let rpc_read_dup = duplicate_half(rpc_read);
+    let rpc_write_dup = duplicate_half(rpc_write);
     let proxy_dup = duplicate_link(proxy);
-    let rpc_value = raw_value(&rpc_dup);
+    let rpc_read_value = raw_value(&rpc_read_dup);
+    let rpc_write_value = raw_value(&rpc_write_dup);
     let proxy_value = raw_value(&proxy_dup);
     let mut env = process_env();
     upsert_env(&mut env, "BOOKCLERK_PLUGIN_ROOT", root.as_os_str());
@@ -898,7 +929,12 @@ fn spawn_sibling_gateway(
     upsert_env(
         &mut env,
         GATEWAY_GUEST_RPC_ENV,
-        std::ffi::OsStr::new(&format!("handle:{rpc_value}")),
+        std::ffi::OsStr::new(&format!("handle:{rpc_read_value}")),
+    );
+    upsert_env(
+        &mut env,
+        GATEWAY_GUEST_RPC_WRITE_ENV,
+        std::ffi::OsStr::new(&format!("handle:{rpc_write_value}")),
     );
     upsert_env(
         &mut env,
@@ -915,7 +951,7 @@ fn spawn_sibling_gateway(
         env,
         None,
         None,
-        vec![rpc_dup, proxy_dup],
+        vec![rpc_read_dup, rpc_write_dup, proxy_dup],
     )
     .expect("spawn native-behind-workerd gateway");
     let stdin = child.take_stdin().map(spawn_writer);
@@ -946,6 +982,11 @@ fn upsert_env(
 #[cfg(windows)]
 fn duplicate_link(link: &bookclerk_sandbox::DuplexLink) -> std::os::windows::io::OwnedHandle {
     bookclerk_sandbox::duplicate_owned_handle(link.as_raw_handle()).expect("duplicate sibling link")
+}
+
+#[cfg(windows)]
+fn duplicate_half(link: &bookclerk_sandbox::DuplexHalf) -> std::os::windows::io::OwnedHandle {
+    bookclerk_sandbox::duplicate_owned_handle(link.as_raw_handle()).expect("duplicate sibling pipe")
 }
 
 #[cfg(windows)]

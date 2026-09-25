@@ -45,7 +45,9 @@ async fn guest_that_exits_immediately_fails_closed() {
         ),
     )
     .await
-    .expect("spawn timed out");
+    .unwrap_or_else(|_| {
+        ng_harness::fail_deadline(&format!("spawn timed out after {SPAWN_TIMEOUT:?}"))
+    });
     let err = match result {
         Ok(_) => panic!("immediate-exit guest must fail closed"),
         Err(err) => err,
@@ -124,7 +126,7 @@ async fn killing_guest_errors_rpc_and_exits_gateway() {
     wait_for_exit(guest).await;
     let rpc = tokio::time::timeout(ng_harness::RPC_TIMEOUT, session.describe())
         .await
-        .expect("describe hung after the guest was killed");
+        .unwrap_or_else(|_| ng_harness::fail_deadline("describe hung after the guest was killed"));
     assert!(rpc.is_err(), "RPC must fail after the guest is killed");
     wait_for_exit(gateway).await;
     drop(session);
@@ -154,8 +156,9 @@ async fn grant_revision_bump_fences_the_live_session() {
     while Instant::now() < deadline {
         match tokio::time::timeout(ng_harness::RPC_TIMEOUT, session.describe())
             .await
-            .expect("describe hung while waiting for the grant fence")
-        {
+            .unwrap_or_else(|_| {
+                ng_harness::fail_deadline("describe hung while waiting for the grant fence")
+            }) {
             Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
             Err(_) => {
                 fenced = true;

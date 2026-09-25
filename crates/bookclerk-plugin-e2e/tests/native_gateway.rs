@@ -56,7 +56,9 @@ async fn native_guest_reaches_only_granted_tcp_through_the_front_door() {
     let plugin = install.plugin();
     let describe = tokio::time::timeout(RPC_TIMEOUT, session.describe())
         .await
-        .expect("describe timed out")
+        .unwrap_or_else(|_| {
+            ng_harness::fail_deadline(&format!("describe timed out after {RPC_TIMEOUT:?}"))
+        })
         .expect("describe");
     assert_eq!(describe.id, ng_harness::PLUGIN_ID);
     assert_eq!(
@@ -157,6 +159,7 @@ async fn native_guest_reaches_only_granted_tcp_through_the_front_door() {
             "guest env leaked jail key {key}"
         );
         assert_ne!(upper, "BOOKCLERK_GATEWAY_GUEST_RPC");
+        assert_ne!(upper, "BOOKCLERK_GATEWAY_GUEST_RPC_WRITE");
         assert_ne!(upper, "BOOKCLERK_GATEWAY_PROXY");
         assert_ne!(upper, "BOOKCLERK_WORKERD_STATE_DIR");
         assert_ne!(upper, "BOOKCLERK_NATIVE_BACKEND");

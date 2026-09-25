@@ -86,6 +86,38 @@ impl InheritedDuplex {
         }
     }
 
+    /// Open the two unidirectional Windows handles that carry guest RPC.
+    ///
+    /// `read_spec` is the gateway's overlapped read half (`handle:<n>`, guest
+    /// stdout). `write_spec` is the overlapped write half (guest stdin). They
+    /// must be distinct handles: one synchronous duplex locks a pending
+    /// `ReadFile` against `WriteFile` on the guest, so the second Cap'n Proto
+    /// call never completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either spec is not a distinct `handle:<n>` or the
+    /// handle cannot be wrapped as an overlapped named pipe.
+    #[cfg(windows)]
+    pub fn open_halves(
+        read_spec: &str,
+        write_spec: &str,
+    ) -> Result<(
+        Box<dyn AsyncRead + Unpin + Send>,
+        Box<dyn AsyncWrite + Unpin + Send>,
+    )> {
+        let read_id = handle_id(read_spec)?;
+        let write_id = handle_id(write_spec)?;
+        if read_id == write_id {
+            bail!("guest RPC read and write handles must be distinct (both {read_id})");
+        }
+        let read = Self::open(read_spec).context("open guest RPC read half")?;
+        let write = Self::open(write_spec).context("open guest RPC write half")?;
+        let Self::Pipe(read_pipe) = read;
+        let Self::Pipe(write_pipe) = write;
+        Ok((Box::new(read_pipe), Box::new(write_pipe)))
+    }
+
     /// Split into read and write halves for Cap'n Proto or the mux server.
     pub fn into_split(
         self,
@@ -122,6 +154,14 @@ fn open_fd(fd: i32, spec: &str) -> Result<InheritedDuplex> {
     } else {
         let _ = fd;
         bail!("fd: link specs are Unix-only (got `{spec}`)")
+    }
+}
+
+#[cfg(windows)]
+fn handle_id(spec: &str) -> Result<u64> {
+    match LinkSpec::parse(spec).with_context(|| format!("parse inherited link `{spec}`"))? {
+        LinkSpec::Handle(value) => Ok(value),
+        LinkSpec::Fd(_) => bail!("Windows guest RPC half must be handle:<n>, got `{spec}`"),
     }
 }
 

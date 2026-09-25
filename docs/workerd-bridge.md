@@ -19,12 +19,14 @@ host ──stdio Cap'n Proto (plugin.capnp)──▶ bookclerk-jail ──▶ bo
 
 For `runtime = "native"` the host also starts a **sibling** `bookclerk-jail`
 around the backend. The launcher does not spawn, resolve, or exec that
-binary (`BOOKCLERK_NATIVE_BACKEND` is gone). The host creates two duplex
-links and inherits them into both children:
+binary (`BOOKCLERK_NATIVE_BACKEND` is gone). The host creates the links
+and inherits them into both children. Unix RPC is one socketpair. Windows
+RPC is two unidirectional pipes (synchronous guest ends, overlapped
+gateway ends) so a blocking stdin read cannot lock stdout.
 
 | Link | Gateway env | Guest |
 | --- | --- | --- |
-| RPC (Cap'n Proto) | `BOOKCLERK_GATEWAY_GUEST_RPC=fd:3` / `handle:…` | stdin + stdout |
+| RPC (Cap'n Proto) | Unix `BOOKCLERK_GATEWAY_GUEST_RPC=fd:3`. Windows `BOOKCLERK_GATEWAY_GUEST_RPC=handle:<read>` and `BOOKCLERK_GATEWAY_GUEST_RPC_WRITE=handle:<write>` | stdin + stdout |
 | CONNECT mux | `BOOKCLERK_GATEWAY_PROXY=fd:4` / `handle:…` | `BOOKCLERK_SOCKET_PROXY=fd:3` / `handle:…` |
 
 `BOOKCLERK_WORKERD_STATE_DIR` is the host-owned `session-<nonce>/` directory

@@ -341,9 +341,11 @@ async fn run_isolate(
 ///
 /// The host spawned the native backend as a sibling jail. This launcher never
 /// sees the backend path: [`bookclerk_sandbox::GATEWAY_GUEST_RPC_ENV`] is the
-/// Cap'n Proto duplex and [`bookclerk_sandbox::GATEWAY_PROXY_ENV`] is the muxed
-/// CONNECT proxy. Plugin input cannot choose either link. Only `describe` /
-/// `open` policy and `shutdown` pass through the adapter isolate.
+/// Cap'n Proto link and [`bookclerk_sandbox::GATEWAY_PROXY_ENV`] is the muxed
+/// CONNECT proxy. On Windows the RPC link is two unidirectional pipes
+/// ([`bookclerk_sandbox::GATEWAY_GUEST_RPC_WRITE_ENV`] is the write half).
+/// Plugin input cannot choose either link. Only `describe` / `open` policy
+/// and `shutdown` pass through the adapter isolate.
 async fn run_native_behind_workerd(
     rpc_spec: &str,
     root: &Path,
@@ -362,9 +364,23 @@ async fn run_native_behind_workerd(
             bookclerk_sandbox::GATEWAY_GUEST_RPC_ENV
         )
     })?;
-    let rpc = InheritedDuplex::open(rpc_spec).context("open inherited guest RPC link")?;
     let proxy = InheritedDuplex::open(&proxy_spec).context("open inherited proxy link")?;
-    let (guest_stdout, guest_stdin) = rpc.into_split();
+    #[cfg(windows)]
+    let (guest_stdout, guest_stdin) = {
+        let write_spec = std::env::var(bookclerk_sandbox::GATEWAY_GUEST_RPC_WRITE_ENV)
+            .with_context(|| {
+                format!(
+                    "{} is required on Windows",
+                    bookclerk_sandbox::GATEWAY_GUEST_RPC_WRITE_ENV
+                )
+            })?;
+        InheritedDuplex::open_halves(rpc_spec, &write_spec)
+            .context("open inherited guest RPC pipes")?
+    };
+    #[cfg(not(windows))]
+    let (guest_stdout, guest_stdin) = InheritedDuplex::open(rpc_spec)
+        .context("open inherited guest RPC link")?
+        .into_split();
 
     let workerd_bin = resolve_workerd_binary()?;
     let grant = OperatorGrantEnv::from_env();

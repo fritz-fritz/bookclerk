@@ -1,8 +1,11 @@
 //! Host-created IPC links delivered by descriptor or handle inheritance.
 //!
 //! Native-behind-workerd siblings never open each other by name. The host
-//! creates two duplex links (guest RPC + multiplexed socket proxy), keeps both
-//! ends `CLOEXEC` / non-inheritable, and delivers the child ends:
+//! creates the guest RPC link and the multiplexed socket-proxy link, keeps
+//! every end `CLOEXEC` / non-inheritable, and delivers the child ends.
+//! On Unix both links are duplex sockets. On Windows the proxy stays one
+//! overlapped duplex; guest RPC is two unidirectional pipes so a synchronous
+//! stdin read cannot lock stdout.
 //!
 //! - **Unix:** [`inherit_fd_at`] from `Command::pre_exec` (`dup2` onto a fixed
 //!   child fd). Concurrent spawns cannot inherit another session's link.
@@ -21,7 +24,16 @@ use std::io;
 use serde::{Deserialize, Serialize};
 
 /// Env var naming the guest Cap'n Proto link for `bookclerk-workerd`.
+///
+/// Unix: one duplex socket, `fd:<n>`. Windows: the gateway's overlapped read
+/// half (guest stdout → gateway), `handle:<n>`. The write half is
+/// [`GATEWAY_GUEST_RPC_WRITE_ENV`].
 pub const GATEWAY_GUEST_RPC_ENV: &str = "BOOKCLERK_GATEWAY_GUEST_RPC";
+/// Windows-only env var naming the gateway's overlapped write half of guest RPC.
+///
+/// `handle:<n>` writes into the guest's synchronous stdin. Absent on Unix,
+/// where [`GATEWAY_GUEST_RPC_ENV`] is a full-duplex socket.
+pub const GATEWAY_GUEST_RPC_WRITE_ENV: &str = "BOOKCLERK_GATEWAY_GUEST_RPC_WRITE";
 /// Env var naming the multiplexed CONNECT-proxy link for `bookclerk-workerd`.
 pub const GATEWAY_PROXY_ENV: &str = "BOOKCLERK_GATEWAY_PROXY";
 /// Env var naming the socket-proxy link for a native guest (SDK `net::connect`).
@@ -31,7 +43,7 @@ pub const JAIL_HANDOFF_ENV: &str = "BOOKCLERK_JAIL_HANDOFF";
 /// Host-chosen workerd session directory (`0700`, under `$TMPDIR`).
 pub const WORKERD_STATE_DIR_ENV: &str = "BOOKCLERK_WORKERD_STATE_DIR";
 
-/// Child fd the gateway uses for the guest RPC duplex (`BOOKCLERK_GATEWAY_GUEST_RPC`).
+/// Child fd the gateway uses for the guest RPC socket (`BOOKCLERK_GATEWAY_GUEST_RPC`).
 pub const GATEWAY_RPC_FD: i32 = 3;
 /// Child fd the gateway uses for the proxy mux (`BOOKCLERK_GATEWAY_PROXY`).
 pub const GATEWAY_PROXY_FD: i32 = 4;
@@ -206,36 +218,6 @@ impl DuplexLink {
         #[cfg(windows)]
         {
             windows::duplex_pair()
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "DuplexLink requires Unix or Windows",
-            ))
-        }
-    }
-
-    /// Duplex pair for a native guest's stdin and stdout.
-    ///
-    /// The first end is the gateway side. The second end is the guest side.
-    /// On Windows the gateway end is overlapped so `bookclerk-workerd` can wrap
-    /// it in a Tokio named pipe, and the guest end is synchronous. Rust std
-    /// aborts (`operation failed to complete synchronously`) when stdin blocks
-    /// on an overlapped handle. Unix is a normal socketpair: both directions
-    /// block in the guest and can be set non-blocking in the gateway.
-    ///
-    /// # Errors
-    ///
-    /// Returns an I/O error when the kernel cannot allocate the pair.
-    pub fn pair_for_guest_stdio() -> io::Result<(Self, Self)> {
-        #[cfg(unix)]
-        {
-            unix::socketpair()
-        }
-        #[cfg(windows)]
-        {
-            windows::duplex_stdio_pair()
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -704,68 +686,6 @@ mod windows {
             },
             DuplexLink {
                 handle: owned(client)?,
-            },
-        ))
-    }
-
-    /// Gateway end overlapped, guest end synchronous.
-    ///
-    /// `DuplicateHandle` keeps the overlapped bit of the source, so the guest
-    /// stdin/stdout copies must be opened without `FILE_FLAG_OVERLAPPED`.
-    /// The gateway copy is the `CreateFileW` client and stays overlapped.
-    pub(super) fn duplex_stdio_pair() -> io::Result<(DuplexLink, DuplexLink)> {
-        let name = random_pipe_name("s");
-        let name_w = wide(&name);
-        let server = unsafe {
-            CreateNamedPipeW(
-                PCWSTR(name_w.as_ptr()),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
-                16 * 1024,
-                16 * 1024,
-                0,
-                None,
-            )
-        };
-        if server.is_invalid() {
-            return Err(io::Error::last_os_error());
-        }
-        let client = unsafe {
-            CreateFileW(
-                PCWSTR(name_w.as_ptr()),
-                windows::Win32::Storage::FileSystem::FILE_GENERIC_READ.0
-                    | windows::Win32::Storage::FileSystem::FILE_GENERIC_WRITE.0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                None,
-                OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
-                None,
-            )
-        };
-        let client = match client {
-            Ok(h) => h,
-            Err(err) => {
-                close_if_valid(server);
-                return Err(io::Error::other(err));
-            }
-        };
-        let connected = unsafe { ConnectNamedPipe(server, None) };
-        if connected.is_err() {
-            let err = io::Error::last_os_error();
-            // 535 == ERROR_PIPE_CONNECTED
-            if err.raw_os_error() != Some(535) {
-                close_if_valid(server);
-                close_if_valid(client);
-                return Err(err);
-            }
-        }
-        Ok((
-            DuplexLink {
-                handle: owned(client)?,
-            },
-            DuplexLink {
-                handle: owned(server)?,
             },
         ))
     }

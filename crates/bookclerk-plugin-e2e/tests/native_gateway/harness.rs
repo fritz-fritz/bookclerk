@@ -152,9 +152,19 @@ impl Install {
             ),
         )
         .await
-        .unwrap_or_else(|_| panic!("spawn timed out after {SPAWN_TIMEOUT:?}"))
+        .unwrap_or_else(|_| fail_deadline(&format!("spawn timed out after {SPAWN_TIMEOUT:?}")))
         .unwrap_or_else(|err| panic!("spawn through the workerd front door failed: {err}"))
     }
+}
+
+/// End the test process when an RPC deadline expires.
+///
+/// A panic leaves the Cap'n Proto vat thread blocked inside the guest call,
+/// so the test binary never exits and the CI job runs until the workflow
+/// timeout. Exiting fails the same assertion and lets the job report it.
+pub fn fail_deadline(what: &str) -> ! {
+    eprintln!("native_gateway: {what}");
+    std::process::exit(1);
 }
 
 pub fn probe_binary() -> PathBuf {
@@ -210,7 +220,11 @@ pub async fn probe(
     };
     let result = tokio::time::timeout(RPC_TIMEOUT, session.cli_invoke(params))
         .await
-        .unwrap_or_else(|_| panic!("probe {op}:{port} timed out after {RPC_TIMEOUT:?}"))
+        .unwrap_or_else(|_| {
+            fail_deadline(&format!(
+                "probe {op}:{port} timed out after {RPC_TIMEOUT:?}"
+            ))
+        })
         .unwrap_or_else(|err| panic!("probe {op}:{port} RPC failed: {err}"));
     assert_eq!(result.exit_code, 0, "probe {op} stderr: {}", result.stderr);
     serde_json::from_str(&result.stdout)
@@ -322,7 +336,7 @@ pub fn session_dirs_under(files: &Path) -> Vec<PathBuf> {
 pub async fn open_session(session: &PluginSession) {
     tokio::time::timeout(RPC_TIMEOUT, session.open(BindingValues::default()))
         .await
-        .expect("open timed out")
+        .unwrap_or_else(|_| fail_deadline(&format!("open timed out after {RPC_TIMEOUT:?}")))
         .expect("open");
 }
 
