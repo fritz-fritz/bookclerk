@@ -832,12 +832,12 @@ fn cleanup_optional(handles: &[Option<HANDLE>]) {
 /// Windows rejects a repeated entry. Callers may still point both standard
 /// handles at one value; that value is listed a single time.
 fn unique_handle_list(handles: impl IntoIterator<Item = HANDLE>) -> Vec<HANDLE> {
-    let mut out = Vec::new();
+    let mut out: Vec<HANDLE> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for h in handles {
-        if out.iter().any(|existing| existing.0 == h.0) {
-            continue;
+        if seen.insert(h.0 as usize) {
+            out.push(h);
         }
-        out.push(h);
     }
     out
 }
