@@ -236,7 +236,7 @@ async fn connect_proxy(spec: &str) -> Result<ProxyStream> {
     }
     #[cfg(target_os = "macos")]
     if spec.len() >= MACOS_SUN_PATH_BYTES {
-        return connect_beneath_parent(std::path::Path::new(spec));
+        return Ok(UnixStream::connect(relative_to_cwd(std::path::Path::new(spec))?).await?);
     }
     Ok(UnixStream::connect(spec).await?)
 }
@@ -245,81 +245,54 @@ async fn connect_proxy(spec: &str) -> Result<ProxyStream> {
 #[cfg(target_os = "macos")]
 const MACOS_SUN_PATH_BYTES: usize = 104;
 
-/// Connects to a pathname socket whose absolute path overflows `sun_path`.
+/// Shortens a socket proxy path that overflows macOS `sun_path`.
 ///
-/// macOS has no `/proc/self/fd`, and the proxy lives under the plugin's
-/// state directory, which is routinely longer than 104 bytes. `connectat(2)`
-/// resolves the short file name against an open handle on the parent
-/// directory, so no process-wide `chdir` is needed.
+/// macOS has neither `/proc/self/fd` nor a public `connectat(2)`, and the
+/// proxy lives under the plugin state directory, which routinely exceeds 104
+/// bytes. The guest's cwd is its install directory, a sibling of that state
+/// tree, so the path relative to cwd is short. Both sides are resolved
+/// physically first (`/var` → `/private/var`). The result is only valid while
+/// the process cwd stays put.
 ///
 /// # Errors
 ///
-/// Returns an error when the parent cannot be opened or `connectat` fails.
+/// Returns an error when either side cannot be resolved or the relative path
+/// still overflows `sun_path`.
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn connect_beneath_parent(path: &std::path::Path) -> Result<ProxyStream> {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::os::unix::ffi::OsStrExt;
-
-    extern "C" {
-        /// `<sys/socket.h>` (macOS 10.11+): `connect` with a relative
-        /// `sun_path` resolved against directory `fd`.
-        fn connectat(
-            fd: libc::c_int,
-            socket: libc::c_int,
-            address: *const libc::sockaddr,
-            address_len: libc::socklen_t,
-        ) -> libc::c_int;
-    }
-
+fn relative_to_cwd(path: &std::path::Path) -> Result<std::path::PathBuf> {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(SdkError::message(format!(
             "socket proxy path {} has no parent directory",
             path.display()
         )));
     };
-    let name = name.as_bytes();
-    // SAFETY: `sockaddr_un` is plain old data; all-zero is a valid value.
-    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    if name.len() >= addr.sun_path.len() {
+    let target = std::fs::canonicalize(parent)?.join(name);
+    let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
+    let relative = lexical_relative(&target, &cwd);
+    if relative.as_os_str().len() >= MACOS_SUN_PATH_BYTES {
         return Err(SdkError::message(format!(
-            "socket proxy file name is too long: {}",
-            path.display()
+            "socket proxy path {} overflows sun_path even relative to cwd {}",
+            path.display(),
+            cwd.display()
         )));
     }
-    let dir = std::fs::File::open(parent)?;
-    // SAFETY: plain syscall; the result is checked before use.
-    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-    if raw < 0 {
-        return Err(std::io::Error::last_os_error().into());
+    Ok(relative)
+}
+
+/// `target` expressed relative to directory `base`; both must be absolute.
+#[cfg(any(target_os = "macos", test))]
+fn lexical_relative(target: &std::path::Path, base: &std::path::Path) -> std::path::PathBuf {
+    let target: Vec<_> = target.components().collect();
+    let base: Vec<_> = base.components().collect();
+    let common = target.iter().zip(&base).take_while(|(a, b)| a == b).count();
+    let mut out = std::path::PathBuf::new();
+    for _ in common..base.len() {
+        out.push("..");
     }
-    // SAFETY: `raw` is a fresh descriptor owned by nothing else.
-    let socket = unsafe { OwnedFd::from_raw_fd(raw) };
-    // SAFETY: `socket` is a valid open descriptor.
-    if unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
+    for part in &target[common..] {
+        out.push(part);
     }
-    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    for (dst, src) in addr.sun_path.iter_mut().zip(name) {
-        *dst = *src as libc::c_char;
-    }
-    let len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + name.len() + 1;
-    addr.sun_len = u8::try_from(len).unwrap_or(u8::MAX);
-    // SAFETY: `addr` is initialised for `len` bytes and both descriptors are open.
-    let rc = unsafe {
-        connectat(
-            dir.as_raw_fd(),
-            socket.as_raw_fd(),
-            std::ptr::addr_of!(addr).cast(),
-            libc::socklen_t::try_from(len).unwrap_or(libc::socklen_t::MAX),
-        )
-    };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let stream = std::os::unix::net::UnixStream::from(socket);
-    stream.set_nonblocking(true)?;
-    Ok(tokio::net::UnixStream::from_std(stream)?)
+    out
 }
 
 #[cfg(windows)]
@@ -395,6 +368,26 @@ where
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn lexical_relative_walks_up_to_the_common_ancestor() {
+        use std::path::Path;
+        assert_eq!(
+            lexical_relative(
+                Path::new("/files/plugin-state/pk-1/tmp/we2/sockets.sock"),
+                Path::new("/files/plugins/probe"),
+            ),
+            Path::new("../../plugin-state/pk-1/tmp/we2/sockets.sock")
+        );
+        assert_eq!(
+            lexical_relative(Path::new("/a/b/c.sock"), Path::new("/a/b")),
+            Path::new("c.sock")
+        );
+        assert_eq!(
+            lexical_relative(Path::new("/x/s.sock"), Path::new("/a/b")),
+            Path::new("../../x/s.sock")
+        );
+    }
 
     #[tokio::test]
     async fn connect_through_fake_proxy_and_403() {
