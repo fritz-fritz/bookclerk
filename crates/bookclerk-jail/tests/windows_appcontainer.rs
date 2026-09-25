@@ -919,7 +919,7 @@ fn host_job_kill_on_close_terminates_jail_tree() {
     let root = tempfile::tempdir().expect("tempdir");
     let allowed = root.path().join("allowed");
     std::fs::create_dir_all(&allowed).expect("allowed");
-    let spec = base_spec("test:e5-host-job", vec![], vec![allowed]);
+    let spec = base_spec("test:e5-host-job", vec![], vec![allowed.clone()]);
 
     let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.expect("CreateJobObjectW");
     unsafe {
@@ -934,10 +934,16 @@ fn host_job_kill_on_close_terminates_jail_tree() {
         .expect("SetInformationJobObject");
     }
 
+    let holding = allowed.join("holding");
+    let finished = allowed.join("finished");
     let mut child = Command::new(JAIL)
         .arg(PROBE)
         .arg("--hold-ms")
         .arg("30000")
+        .arg("--signal")
+        .arg(&holding)
+        .arg("--after-hold")
+        .arg(&finished)
         .env(
             bookclerk_sandbox::SPEC_ENV,
             serde_json::to_string(&spec).expect("encode"),
@@ -951,6 +957,56 @@ fn host_job_kill_on_close_terminates_jail_tree() {
     unsafe {
         AssignProcessToJobObject(job, HANDLE(child.as_raw_handle()))
             .expect("AssignProcessToJobObject");
+    }
+
+    // Drain both pipes. An unread stdout/stderr buffer can stall the guest
+    // before it reaches the hold, which looks like a fast exit.
+    let stdout = child.stdout.take().expect("stdout");
+    let stderr = child.stderr.take().expect("stderr");
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stdout_for_drain = Arc::clone(&stdout_buf);
+    let stderr_for_drain = Arc::clone(&stderr_buf);
+    let drain_out = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut std::io::BufReader::new(stdout), &mut buf);
+        if let Ok(mut slot) = stdout_for_drain.lock() {
+            *slot = buf;
+        }
+    });
+    let drain_err = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut std::io::BufReader::new(stderr), &mut buf);
+        if let Ok(mut slot) = stderr_for_drain.lock() {
+            *slot = buf;
+        }
+    });
+
+    let signaled = std::time::Instant::now();
+    while !holding.exists() {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            let _ = drain_out.join();
+            let _ = drain_err.join();
+            let err = stderr_buf
+                .lock()
+                .ok()
+                .map(|buf| String::from_utf8_lossy(&buf).into_owned());
+            panic!(
+                "jail exited before the guest entered the hold: {status:?}\nstderr={}",
+                err.unwrap_or_default()
+            );
+        }
+        assert!(
+            signaled.elapsed() < Duration::from_secs(60),
+            "guest never reached the pre-hold signal"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // Close only after the guest is inside the hold. Windows reports
+    // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE as exit code 0, so the proof is that
+    // the post-hold marker is never written.
+    unsafe {
         let _ = CloseHandle(job);
     }
 
@@ -967,8 +1023,30 @@ fn host_job_kill_on_close_terminates_jail_tree() {
             }
         }
     };
+    let _ = drain_out.join();
+    let _ = drain_err.join();
+    let err = stderr_buf
+        .lock()
+        .ok()
+        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+        .unwrap_or_default();
+    let out = stdout_buf
+        .lock()
+        .ok()
+        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+        .unwrap_or_default();
     assert!(
-        !status.success(),
-        "jail killed by host Job should not exit 0: {status:?}"
+        !finished.exists(),
+        "guest finished the hold after host Job close: {status:?}\nstderr={err}\nstdout={out}"
     );
+    let report = first_json_line(&out);
+    let guest_pid = report["pid"].as_u64().expect("guest pid") as u32;
+    let guest_deadline = std::time::Instant::now();
+    while process_alive(guest_pid) {
+        assert!(
+            guest_deadline.elapsed() < Duration::from_secs(5),
+            "guest pid {guest_pid} still alive after host Job close\nstderr={err}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 }

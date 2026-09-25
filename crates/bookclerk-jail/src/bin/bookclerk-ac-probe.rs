@@ -54,6 +54,7 @@ fn run() -> Result<(), String> {
     let mut spawn_child = false;
     let mut exit_immediately = false;
     let mut hold_ms: Option<u64> = None;
+    let mut after_hold: Option<PathBuf> = None;
     let mut loopback_self = false;
     let mut connect_tcp: Option<(String, u16)> = None;
 
@@ -112,6 +113,11 @@ fn run() -> Result<(), String> {
                         .parse()
                         .map_err(|err| format!("bad --hold-ms: {err}"))?,
                 );
+            }
+            "--after-hold" => {
+                after_hold = Some(PathBuf::from(
+                    args.next().ok_or("--after-hold needs a path")?,
+                ));
             }
             "--loopback-self" => loopback_self = true,
             "--connect-tcp" => {
@@ -250,6 +256,13 @@ fn run() -> Result<(), String> {
 
     if let Some(ms) = hold_ms {
         std::thread::sleep(Duration::from_millis(ms));
+    }
+
+    if let Some(path) = &after_hold {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::write(path, b"done").map_err(|err| format!("after-hold {}: {err}", path.display()))?;
     }
 
     if let Some(path) = &wait_after {

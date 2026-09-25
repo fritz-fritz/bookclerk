@@ -330,7 +330,7 @@ async fn connect_proxy(spec: &str) -> Result<ProxyStream> {
     {
         use tokio::net::windows::named_pipe::ClientOptions;
         let name = spec.strip_prefix("pipe:").unwrap_or(spec);
-        return Ok(ProxyStream::Pipe(ClientOptions::new().open(name)?));
+        Ok(ProxyStream::Pipe(ClientOptions::new().open(name)?))
     }
 }
 
