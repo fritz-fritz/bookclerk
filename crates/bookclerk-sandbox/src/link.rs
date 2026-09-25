@@ -216,6 +216,37 @@ impl DuplexLink {
         }
     }
 
+    /// Duplicate this end. Both copies stay `CLOEXEC` / non-inheritable.
+    ///
+    /// Used so guest stdin and stdout can share one duplex without racing
+    /// `dup` in the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the kernel cannot duplicate the descriptor.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                fd: self.fd.try_clone()?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                handle: self.handle.try_clone()?,
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = self;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "DuplexLink requires Unix or Windows",
+            ))
+        }
+    }
+
     /// Unix raw fd (still owned by `self`).
     #[cfg(unix)]
     #[must_use]
@@ -251,6 +282,18 @@ impl DuplexLink {
     #[must_use]
     pub fn handle_value(&self) -> u64 {
         self.as_raw_handle() as usize as u64
+    }
+
+    /// Mark this end inheritable. Product hosts never call this (they
+    /// `DuplicateHandle` into `bookclerk-jail` instead). Unconfined tests
+    /// use it with `CommandExt::inherit_handles`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when `SetHandleInformation` fails.
+    #[cfg(windows)]
+    pub fn set_inheritable(&self, inherit: bool) -> io::Result<()> {
+        windows::set_handle_inheritable(self.as_raw_handle(), inherit)
     }
 }
 
@@ -688,6 +731,18 @@ mod windows {
                 handle: guest_stdout,
             },
         })
+    }
+
+    pub(super) fn set_handle_inheritable(handle: RawHandle, inherit: bool) -> io::Result<()> {
+        let flags = if inherit {
+            HANDLE_FLAG_INHERIT
+        } else {
+            HANDLE_FLAGS(0)
+        };
+        unsafe {
+            SetHandleInformation(HANDLE(handle), HANDLE_FLAG_INHERIT.0, flags)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))
+        }
     }
 
     pub(super) fn duplicate_handle_into(handle: RawHandle, target: RawHandle) -> io::Result<u64> {

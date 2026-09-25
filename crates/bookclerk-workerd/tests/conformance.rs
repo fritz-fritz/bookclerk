@@ -255,21 +255,15 @@ mode = "deny"
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_bookclerk-workerd"))
-                .env("BOOKCLERK_PLUGIN_ROOT", &root)
-                .env("BOOKCLERK_WORKERD_BIN", &workerd)
-                .env("BOOKCLERK_NATIVE_BACKEND", &guest)
-                .env("BOOKCLERK_OUTPUT_LOCAL_ROOT", &out)
-                .env("TMPDIR", tmp.path())
-                .env("HOME", tmp.path())
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .kill_on_drop(true)
-                .spawn()
-                .expect("spawn native-behind-workerd");
-            let stdin = child.stdin.take().expect("stdin");
-            let stdout = child.stdout.take().expect("stdout");
+            let mut child = spawn_native_behind_workerd(
+                &workerd,
+                &root,
+                &guest,
+                tmp.path(),
+                &[("BOOKCLERK_OUTPUT_LOCAL_ROOT", out.as_path())],
+            );
+            let stdin = child.gateway.stdin.take().expect("stdin");
+            let stdout = child.gateway.stdout.take().expect("stdout");
             let (client, rpc) = connect_plugin(stdout, stdin, 64 * 1024);
             tokio::task::spawn_local(rpc);
             let desc = tokio::time::timeout(Duration::from_secs(90), client.describe())
@@ -279,7 +273,7 @@ mode = "deny"
             assert_eq!(desc.api_version, PRODUCT_API_VERSION);
             assert_eq!(desc.id, "local");
             destination_roundtrip(&client).await;
-            let _ = child.kill().await;
+            let _ = child.gateway.kill().await;
         })
         .await;
 }
@@ -666,20 +660,9 @@ supports_suspend = true
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_bookclerk-workerd"))
-                .env("BOOKCLERK_PLUGIN_ROOT", &root)
-                .env("BOOKCLERK_WORKERD_BIN", &workerd)
-                .env("BOOKCLERK_NATIVE_BACKEND", &guest)
-                .env("TMPDIR", tmp.path())
-                .env("HOME", tmp.path())
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .kill_on_drop(true)
-                .spawn()
-                .expect("spawn native-behind-workerd echo");
-            let stdin = child.stdin.take().expect("stdin");
-            let stdout = child.stdout.take().expect("stdout");
+            let mut child = spawn_native_behind_workerd(&workerd, &root, &guest, tmp.path(), &[]);
+            let stdin = child.gateway.stdin.take().expect("stdin");
+            let stdout = child.gateway.stdout.take().expect("stdout");
             let (client, rpc) = connect_plugin(stdout, stdin, 64 * 1024);
             tokio::task::spawn_local(rpc);
             let desc = tokio::time::timeout(Duration::from_secs(90), client.describe())
@@ -688,7 +671,7 @@ supports_suspend = true
                 .expect("describe");
             assert_eq!(desc.api_version, PRODUCT_API_VERSION);
             event_result_vectors(&client).await;
-            let _ = child.kill().await;
+            let _ = child.gateway.kill().await;
         })
         .await;
 }
@@ -700,29 +683,193 @@ fn find_sqlite_guest() -> Option<PathBuf> {
     bookclerk_sandbox::require_spawn_executable(&candidate).ok()
 }
 
-/// Spawns `bookclerk-workerd` in native mode over `guest` with the manifest
-/// at `root`, plus extra guest environment.
+/// Gateway + sibling guest joined by inherited RPC/proxy links.
+struct NativeBehind {
+    gateway: tokio::process::Child,
+    _guest: tokio::process::Child,
+}
+
+impl NativeBehind {
+    async fn kill(&mut self) {
+        let _ = self.gateway.kill().await;
+        let _ = self._guest.kill().await;
+    }
+}
+
+/// Spawns `bookclerk-workerd` as a link-driven gateway and `guest` as its sibling.
+///
+/// Extra environment is applied to the native guest (sqlite path, local output).
 fn spawn_native_behind_workerd(
     workerd: &Path,
     root: &Path,
     guest: &Path,
     tmp: &Path,
     extra_env: &[(&str, &Path)],
+) -> NativeBehind {
+    use bookclerk_sandbox::DuplexLink;
+
+    let session = tmp.join(format!(
+        "session-{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    create_dir_test(&session);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod session");
+    }
+
+    let (rpc_gw, rpc_guest) = DuplexLink::pair().expect("rpc link");
+    let (proxy_gw, proxy_guest) = DuplexLink::pair().expect("proxy link");
+
+    let guest_child = spawn_sibling_guest(guest, rpc_guest, &proxy_guest, tmp, extra_env);
+    let gateway = spawn_sibling_gateway(workerd, root, &session, &rpc_gw, &proxy_gw);
+    drop(rpc_gw);
+    drop(proxy_gw);
+    drop(proxy_guest);
+    NativeBehind {
+        gateway,
+        _guest: guest_child,
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn spawn_sibling_guest(
+    guest: &Path,
+    rpc: bookclerk_sandbox::DuplexLink,
+    proxy: &bookclerk_sandbox::DuplexLink,
+    tmp: &Path,
+    extra_env: &[(&str, &Path)],
 ) -> tokio::process::Child {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bookclerk-workerd"));
-    cmd.env("BOOKCLERK_PLUGIN_ROOT", root)
-        .env("BOOKCLERK_WORKERD_BIN", workerd)
-        .env("BOOKCLERK_NATIVE_BACKEND", guest)
+    use bookclerk_sandbox::{inherit_fd_at, GUEST_PROXY_FD, SOCKET_PROXY_ENV};
+
+    let stdin = rpc.try_clone().expect("dup rpc for stdin");
+    let proxy_src = proxy.as_raw_fd();
+    let mut cmd = Command::new(guest);
+    cmd.stdin(Stdio::from(stdin.into_owned_fd()))
+        .stdout(Stdio::from(rpc.into_owned_fd()))
+        .stderr(Stdio::inherit())
         .env("TMPDIR", tmp)
         .env("HOME", tmp)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .env(SOCKET_PROXY_ENV, format!("fd:{GUEST_PROXY_FD}"))
         .kill_on_drop(true);
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
-    cmd.spawn().expect("spawn native-behind-workerd")
+    unsafe {
+        cmd.pre_exec(move || inherit_fd_at(proxy_src, GUEST_PROXY_FD));
+    }
+    cmd.spawn().expect("spawn sibling guest")
+}
+
+#[cfg(windows)]
+fn spawn_sibling_guest(
+    guest: &Path,
+    rpc: bookclerk_sandbox::DuplexLink,
+    proxy: &bookclerk_sandbox::DuplexLink,
+    tmp: &Path,
+    extra_env: &[(&str, &Path)],
+) -> tokio::process::Child {
+    use bookclerk_sandbox::SOCKET_PROXY_ENV;
+    use std::os::windows::process::CommandExt;
+
+    rpc.set_inheritable(true).expect("rpc inherit");
+    proxy.set_inheritable(true).expect("proxy inherit");
+    let stdin = rpc.try_clone().expect("dup rpc for stdin");
+    stdin.set_inheritable(true).expect("stdin inherit");
+    let mut cmd = Command::new(guest);
+    cmd.stdin(Stdio::from(stdin.into_owned_handle()))
+        .stdout(Stdio::from(rpc.into_owned_handle()))
+        .stderr(Stdio::inherit())
+        .env("TMP", tmp)
+        .env("TEMP", tmp)
+        .env("HOME", tmp)
+        .env(SOCKET_PROXY_ENV, format!("handle:{}", proxy.handle_value()))
+        .kill_on_drop(true);
+    cmd.inherit_handles(true);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    cmd.spawn().expect("spawn sibling guest")
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn spawn_sibling_gateway(
+    workerd: &Path,
+    root: &Path,
+    session: &Path,
+    rpc: &bookclerk_sandbox::DuplexLink,
+    proxy: &bookclerk_sandbox::DuplexLink,
+) -> tokio::process::Child {
+    use bookclerk_sandbox::{
+        inherit_fd_at, GATEWAY_GUEST_RPC_ENV, GATEWAY_PROXY_ENV, GATEWAY_PROXY_FD, GATEWAY_RPC_FD,
+        WORKERD_STATE_DIR_ENV,
+    };
+
+    let rpc_src = rpc.as_raw_fd();
+    let proxy_src = proxy.as_raw_fd();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bookclerk-workerd"));
+    cmd.env("BOOKCLERK_PLUGIN_ROOT", root)
+        .env("BOOKCLERK_WORKERD_BIN", workerd)
+        .env(GATEWAY_GUEST_RPC_ENV, format!("fd:{GATEWAY_RPC_FD}"))
+        .env(GATEWAY_PROXY_ENV, format!("fd:{GATEWAY_PROXY_FD}"))
+        .env(WORKERD_STATE_DIR_ENV, session)
+        .env("TMPDIR", session)
+        .env("HOME", session)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    unsafe {
+        cmd.pre_exec(move || {
+            inherit_fd_at(rpc_src, GATEWAY_RPC_FD)?;
+            inherit_fd_at(proxy_src, GATEWAY_PROXY_FD)?;
+            Ok(())
+        });
+    }
+    cmd.spawn().expect("spawn native-behind-workerd gateway")
+}
+
+#[cfg(windows)]
+fn spawn_sibling_gateway(
+    workerd: &Path,
+    root: &Path,
+    session: &Path,
+    rpc: &bookclerk_sandbox::DuplexLink,
+    proxy: &bookclerk_sandbox::DuplexLink,
+) -> tokio::process::Child {
+    use bookclerk_sandbox::{GATEWAY_GUEST_RPC_ENV, GATEWAY_PROXY_ENV, WORKERD_STATE_DIR_ENV};
+    use std::os::windows::process::CommandExt;
+
+    rpc.set_inheritable(true).expect("rpc inherit");
+    proxy.set_inheritable(true).expect("proxy inherit");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bookclerk-workerd"));
+    cmd.env("BOOKCLERK_PLUGIN_ROOT", root)
+        .env("BOOKCLERK_WORKERD_BIN", workerd)
+        .env(
+            GATEWAY_GUEST_RPC_ENV,
+            format!("handle:{}", rpc.handle_value()),
+        )
+        .env(
+            GATEWAY_PROXY_ENV,
+            format!("handle:{}", proxy.handle_value()),
+        )
+        .env(WORKERD_STATE_DIR_ENV, session)
+        .env("TMP", session)
+        .env("TEMP", session)
+        .env("HOME", session)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    cmd.inherit_handles(true);
+    cmd.spawn().expect("spawn native-behind-workerd gateway")
 }
 
 /// One typed `SELECT 1` batch with a hash-bound proof, as the host would send.
@@ -839,8 +986,8 @@ mode = "deny"
                 tmp.path(),
                 &[("BOOKCLERK_SQLITE_PATH", workerd_db.as_path())],
             );
-            let stdin = child.stdin.take().expect("stdin");
-            let stdout = child.stdout.take().expect("stdout");
+            let stdin = child.gateway.stdin.take().expect("stdin");
+            let stdout = child.gateway.stdout.take().expect("stdout");
             let (client, rpc) = connect_plugin(stdout, stdin, 64 * 1024);
             tokio::task::spawn_local(rpc);
             let desc = tokio::time::timeout(Duration::from_secs(90), client.describe())
@@ -905,8 +1052,8 @@ mode = "deny"
                 tmp.path(),
                 &[("BOOKCLERK_OUTPUT_LOCAL_ROOT", out.as_path())],
             );
-            let stdin = child.stdin.take().expect("stdin");
-            let stdout = child.stdout.take().expect("stdout");
+            let stdin = child.gateway.stdin.take().expect("stdin");
+            let stdout = child.gateway.stdout.take().expect("stdout");
             let (client, rpc) = connect_plugin(stdout, stdin, 64 * 1024);
             tokio::task::spawn_local(rpc);
             let desc = tokio::time::timeout(Duration::from_secs(90), client.describe())
@@ -1023,11 +1170,11 @@ async fn spawn_native_fixture_direct(tmp: &Path) -> (tokio::process::Child, Plug
 async fn spawn_native_fixture_behind_workerd(
     workerd: &Path,
     tmp: &Path,
-) -> (tokio::process::Child, PluginClient) {
+) -> (NativeBehind, PluginClient) {
     let mut child =
         spawn_native_behind_workerd(workerd, &native_fixture_root(), &native_fixture(), tmp, &[]);
-    let stdin = child.stdin.take().expect("stdin");
-    let stdout = child.stdout.take().expect("stdout");
+    let stdin = child.gateway.stdin.take().expect("stdin");
+    let stdout = child.gateway.stdout.take().expect("stdout");
     let (client, rpc) = connect_plugin(stdout, stdin, 64 * 1024);
     tokio::task::spawn_local(rpc);
     let desc = tokio::time::timeout(Duration::from_secs(90), client.describe())

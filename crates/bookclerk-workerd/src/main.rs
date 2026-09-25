@@ -59,21 +59,20 @@ async fn main() -> Result<()> {
     let root = plugin_root()?;
     let manifest = load_manifest(&root)?;
 
-    if let Some(backend) = std::env::var_os("BOOKCLERK_NATIVE_BACKEND") {
-        let backend = PathBuf::from(backend);
-        let backend = bookclerk_sandbox::require_spawn_executable(&backend).with_context(|| {
-            format!(
-                "BOOKCLERK_NATIVE_BACKEND={} is not a usable native backend",
-                backend.display()
-            )
-        })?;
-        return run_native_behind_workerd(&backend, &root, &manifest).await;
+    if let Ok(rpc_spec) = std::env::var(bookclerk_sandbox::GATEWAY_GUEST_RPC_ENV) {
+        if rpc_spec.is_empty() {
+            bail!(
+                "{} must name an inherited link",
+                bookclerk_sandbox::GATEWAY_GUEST_RPC_ENV
+            );
+        }
+        return run_native_behind_workerd(&rpc_spec, &root, &manifest).await;
     }
 
     let workerd_meta = manifest
         .workerd
         .as_ref()
-        .context("bookclerk-workerd requires runtime = \"workerd\" and [workerd] table (or BOOKCLERK_NATIVE_BACKEND)")?;
+        .context("bookclerk-workerd requires runtime = \"workerd\" and [workerd] table (or BOOKCLERK_GATEWAY_GUEST_RPC)")?;
 
     if workerd_meta.compatibility_date.as_str() > BUNDLED_WORKERD_COMPAT_DATE {
         warn!(
@@ -307,19 +306,34 @@ async fn run_isolate(
     result
 }
 
-/// Host-owned native-behind-workerd: workerd control plane + verified native guest.
+/// Host-owned native-behind-workerd: workerd control plane plus inherited guest links.
 ///
-/// `BOOKCLERK_NATIVE_BACKEND` names the verified executable. Plugin input cannot
-/// choose it or weaken the sandbox. The launcher connects to the guest's Cap'n
-/// Proto vat and forwards every entrypoint call typed; only `describe` /
-/// `open` policy and `shutdown` pass through the adapter isolate. Direct Cap'n
-/// Proto remains a host-selected fallback, never plugin-selectable.
+/// The host spawned the native backend as a sibling jail. This launcher never
+/// sees the backend path: [`bookclerk_sandbox::GATEWAY_GUEST_RPC_ENV`] is the
+/// Cap'n Proto duplex and [`bookclerk_sandbox::GATEWAY_PROXY_ENV`] is the muxed
+/// CONNECT proxy. Plugin input cannot choose either link. Only `describe` /
+/// `open` policy and `shutdown` pass through the adapter isolate.
 async fn run_native_behind_workerd(
-    backend: &Path,
+    rpc_spec: &str,
     root: &Path,
     manifest: &PluginManifest,
 ) -> Result<()> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
     use bookclerk_plugin_manifest::WorkerdLimits;
+    use bookclerk_workerd::inherited_link::InheritedDuplex;
+
+    let proxy_spec = std::env::var(bookclerk_sandbox::GATEWAY_PROXY_ENV).with_context(|| {
+        format!(
+            "{} is required when {} is set",
+            bookclerk_sandbox::GATEWAY_PROXY_ENV,
+            bookclerk_sandbox::GATEWAY_GUEST_RPC_ENV
+        )
+    })?;
+    let rpc = InheritedDuplex::open(rpc_spec).context("open inherited guest RPC link")?;
+    let proxy = InheritedDuplex::open(&proxy_spec).context("open inherited proxy link")?;
+    let (guest_stdout, guest_stdin) = rpc.into_split();
 
     let workerd_bin = resolve_workerd_binary()?;
     let grant = OperatorGrantEnv::from_env();
@@ -327,65 +341,12 @@ async fn run_native_behind_workerd(
     let limits = grant.apply_limits(WorkerdLimits::default().effective());
     info!(
         plugin = %manifest.id,
-        backend = %backend.display(),
         workerd = %workerd_bin.display(),
         "starting native-behind-workerd isolate"
     );
 
-    let state_dir = config::workerd_state_dir(root)?;
-    let _state_cleanup = RemoveDirOnDrop(state_dir.clone());
+    let state_dir = config::host_state_dir()?;
     let bridge_token = generate_bridge_token();
-
-    #[cfg(unix)]
-    let socket_proxy =
-        bookclerk_workerd::unix_bind::bind_socket_proxy(&state_dir).context("bind socket proxy")?;
-    #[cfg(unix)]
-    let inherit_fds = {
-        use std::os::fd::AsRawFd;
-        let mut fds = Vec::new();
-        if let Some(ref dir) = socket_proxy.inherit_dir {
-            bookclerk_workerd::unix_bind::clear_cloexec(dir.as_raw_fd())
-                .context("clear CLOEXEC on socket-proxy dir fd")?;
-            fds.push(dir.as_raw_fd());
-        }
-        fds
-    };
-    #[cfg(windows)]
-    let socket_proxy = {
-        let sid = std::env::var(bookclerk_workerd::native_guest::NESTED_AC_SID_ENV).ok();
-        bookclerk_workerd::pipe_bind::bind_socket_proxy(sid.as_deref())
-            .context("bind socket proxy named pipe")?
-    };
-    #[cfg(not(any(unix, windows)))]
-    let inherit_fds: Vec<i32> = Vec::new();
-    #[cfg(windows)]
-    let inherit_fds: Vec<i32> = Vec::new();
-
-    let mut guest_cmd = bookclerk_workerd::native_guest::native_guest_command(
-        backend,
-        root,
-        &state_dir,
-        &inherit_fds,
-    )?;
-    #[cfg(unix)]
-    {
-        guest_cmd.env(
-            bookclerk_workerd::socket_proxy::SOCKET_PROXY_ENV,
-            &socket_proxy.spec,
-        );
-    }
-    #[cfg(windows)]
-    {
-        guest_cmd.env(
-            bookclerk_workerd::socket_proxy::SOCKET_PROXY_ENV,
-            &socket_proxy.spec,
-        );
-    }
-    let mut guest = guest_cmd
-        .spawn()
-        .with_context(|| format!("spawn native guest {}", backend.display()))?;
-    let guest_stdin = guest.stdin.take().context("native guest stdin")?;
-    let guest_stdout = guest.stdout.take().context("native guest stdout")?;
 
     #[cfg(unix)]
     let (listen, rpc_listener) = {
@@ -453,32 +414,12 @@ async fn run_native_behind_workerd(
         .await
         .context("workerd bridge /health did not become ready")?;
 
-    #[cfg(unix)]
-    let socket_fence = {
-        use std::sync::atomic::AtomicBool;
-        use std::sync::Arc;
-        let fence = Arc::new(AtomicBool::new(false));
-        bookclerk_workerd::socket_proxy::spawn_unix(
-            socket_proxy.listener,
-            egress.policy().clone(),
-            Arc::clone(&fence),
-        )?;
-        fence
-    };
-    #[cfg(windows)]
-    let socket_fence = {
-        use std::sync::atomic::AtomicBool;
-        use std::sync::Arc;
-        let fence = Arc::new(AtomicBool::new(false));
-        bookclerk_workerd::socket_proxy::spawn_windows(
-            socket_proxy.first,
-            socket_proxy.name,
-            socket_proxy.package_sid,
-            egress.policy().clone(),
-            Arc::clone(&fence),
-        )?;
-        fence
-    };
+    let socket_fence = Arc::new(AtomicBool::new(false));
+    bookclerk_workerd::socket_proxy::spawn_link(
+        proxy,
+        egress.policy().clone(),
+        Arc::clone(&socket_fence),
+    )?;
 
     let result = mediate_native(
         generated.listen.port(),
@@ -493,28 +434,27 @@ async fn run_native_behind_workerd(
     )
     .await;
 
-    #[cfg(unix)]
-    socket_fence.store(true, std::sync::atomic::Ordering::SeqCst);
-    #[cfg(windows)]
     socket_fence.store(true, std::sync::atomic::Ordering::SeqCst);
 
     let _ = child.kill().await;
     let _ = child.wait().await;
-    let _ = guest.kill().await;
-    let _ = guest.wait().await;
     result
 }
 
 /// Cap'n Proto stdio with the native guest's vat as the typed data plane.
-async fn mediate_native(
+async fn mediate_native<R, W>(
     port: u16,
     token: String,
     #[cfg(unix)] granted_unix: Option<std::os::unix::net::UnixListener>,
     #[cfg(not(unix))] granted_tcp: Option<std::net::TcpListener>,
-    guest_stdout: tokio::process::ChildStdout,
-    guest_stdin: tokio::process::ChildStdin,
+    guest_stdout: R,
+    guest_stdin: W,
     capabilities: bookclerk_plugin_abi::PluginCapabilities,
-) -> Result<()> {
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin + 'static,
+    W: tokio::io::AsyncWrite + Unpin + 'static,
+{
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
