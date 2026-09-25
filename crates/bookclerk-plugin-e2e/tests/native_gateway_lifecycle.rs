@@ -15,8 +15,20 @@ use ng_harness::{
     wait_for_exit, Install, Listener, SPAWN_TIMEOUT,
 };
 
+/// Serializes tests in this binary. `missing_workerd_fails_closed` replaces
+/// process `BOOKCLERK_WORKERD_BIN`, which every other spawn reads.
+async fn workerd_bin_lock() -> tokio::sync::OwnedMutexGuard<()> {
+    use std::sync::{Arc, OnceLock};
+    static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+    LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+        .lock_owned()
+        .await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn guest_that_exits_immediately_fails_closed() {
+    let _env = workerd_bin_lock().await;
     let listener = Listener::bind(true).await;
     let install = Install::new(listener.port);
     let extra = [("BOOKCLERK_PROBE_EXIT", OsString::from("1"))];
@@ -47,6 +59,7 @@ async fn guest_that_exits_immediately_fails_closed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_workerd_fails_closed() {
+    let _env = workerd_bin_lock().await;
     let listener = Listener::bind(true).await;
     let install = Install::new(listener.port);
     let missing = install.files_dir().join("no-such-workerd");
@@ -84,6 +97,7 @@ async fn missing_workerd_fails_closed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn killing_gateway_exits_the_guest() {
+    let _env = workerd_bin_lock().await;
     let listener = Listener::bind(true).await;
     let install = Install::new(listener.port);
     let session = install.spawn().await;
@@ -99,6 +113,7 @@ async fn killing_gateway_exits_the_guest() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn killing_guest_errors_rpc_and_exits_gateway() {
+    let _env = workerd_bin_lock().await;
     let listener = Listener::bind(true).await;
     let install = Install::new(listener.port);
     let session = install.spawn().await;
@@ -118,6 +133,7 @@ async fn killing_guest_errors_rpc_and_exits_gateway() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grant_revision_bump_fences_the_live_session() {
+    let _env = workerd_bin_lock().await;
     let listener = Listener::bind(true).await;
     let install = Install::new(listener.port);
     let session = install.spawn().await;
@@ -156,6 +172,7 @@ async fn grant_revision_bump_fences_the_live_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sequential_and_concurrent_spawn_cycles_do_not_leak() {
+    let _env = workerd_bin_lock().await;
     let fds_before = linux_fd_count();
     for i in 0..20 {
         let listener = Listener::bind(true).await;

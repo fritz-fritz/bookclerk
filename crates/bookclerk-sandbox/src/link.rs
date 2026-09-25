@@ -741,7 +741,7 @@ mod windows {
         };
         unsafe {
             SetHandleInformation(HANDLE(handle), HANDLE_FLAG_INHERIT.0, flags)
-                .map_err(|err| io::Error::other(err))
+                .map_err(io::Error::other)
         }
     }
 

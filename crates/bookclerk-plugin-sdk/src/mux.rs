@@ -10,7 +10,7 @@
 //! u32 length_of_rest | u8 type | u32 conn_id | payload
 //! ```
 //! Types: `Open=1`, `Data=2`, `Close=3`, `Window=4`. Data payloads are capped
-//! at 1 MiB. A [`Window`] frame carries a `u32` credit (bytes the peer may
+//! at 1 MiB. A `Window` frame carries a `u32` credit (bytes the peer may
 //! send). Each stream starts with [`INITIAL_WINDOW`] bytes of send credit.
 
 #![allow(clippy::missing_docs_in_private_items)]

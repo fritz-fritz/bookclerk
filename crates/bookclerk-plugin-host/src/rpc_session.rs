@@ -1976,7 +1976,19 @@ fn vat_thread(
                 let (client, rpc) =
                     connect_plugin(spawned.stdout, spawned.stdin, MAX_STREAM_WINDOW_BYTES);
                 tokio::task::spawn_local(rpc);
-                let client = match client.describe().await {
+                // A sibling that exits before describe completes must fail the
+                // spawn. Cap'n Proto does not always surface that EOF (seen on
+                // macOS), so the wait is raced with process exit.
+                let described = tokio::select! {
+                    biased;
+                    result = client.describe() => result.map_err(map_abi),
+                    () = sibling_exit(&mut child, &mut guest) => {
+                        Err(PluginError::unavailable(
+                            "native guest RPC transport closed",
+                        ))
+                    }
+                };
+                let client = match described {
                     Ok(desc) => match negotiate_describe(&desc, &manifest, &grant) {
                         Ok((limits, features)) => {
                             let client = client.with_limits(limits);
@@ -1997,10 +2009,7 @@ fn vat_thread(
                             &stderr_tail,
                         );
                         drop(remove_session_dir.take());
-                        let _ = ready.send(Err(crate::spawn_stdio::with_spawn_detail(
-                            map_abi(err),
-                            extra,
-                        )));
+                        let _ = ready.send(Err(crate::spawn_stdio::with_spawn_detail(err, extra)));
                         return;
                     }
                 };

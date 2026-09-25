@@ -158,11 +158,11 @@ fn open_unix_fd(fd: i32) -> Result<InheritedDuplex> {
 
 #[cfg(windows)]
 fn open_windows_handle(value: u64) -> Result<InheritedDuplex> {
-    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use std::os::windows::io::RawHandle;
     let pipe = unsafe {
         tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
             value as usize as RawHandle,
-        )
+        )?
     };
     Ok(InheritedDuplex::Pipe(pipe))
 }
