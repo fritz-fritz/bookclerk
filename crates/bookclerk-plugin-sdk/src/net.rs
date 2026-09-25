@@ -335,6 +335,11 @@ async fn connect_proxy(spec: &str) -> Result<ProxyStream> {
 }
 
 /// Process-wide mux over the inherited `fd:` / `handle:` proxy link.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the inherited descriptor cannot be opened, or when
+/// an earlier open of this process's proxy link failed.
 #[cfg(any(unix, windows))]
 fn shared_mux(spec: &str) -> Result<crate::mux::Mux> {
     use std::sync::{Mutex, OnceLock};
@@ -364,12 +369,23 @@ fn shared_mux(spec: &str) -> Result<crate::mux::Mux> {
     }
 }
 
+/// Opens one logical stream on the process-wide inherited mux.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the mux is unavailable or the writer task has exited.
 #[cfg(any(unix, windows))]
 async fn open_mux_proxy(spec: &str) -> Result<ProxyStream> {
     let mux = shared_mux(spec)?;
     Ok(ProxyStream::Mux(mux.open().await?))
 }
 
+/// Builds a client mux from an `fd:` or `handle:` link spec.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the spec is the wrong OS form, the number does not
+/// parse, or the descriptor cannot be wrapped.
 #[cfg(any(unix, windows))]
 fn open_inherited_mux(spec: &str) -> Result<crate::mux::Mux> {
     if let Some(rest) = spec.strip_prefix("fd:") {
@@ -405,6 +421,12 @@ fn open_inherited_mux(spec: &str) -> Result<crate::mux::Mux> {
     )))
 }
 
+/// Takes ownership of `fd` and multiplexes it as a client link.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the descriptor cannot be made non-blocking or
+/// wrapped as a Tokio stream.
 #[cfg(unix)]
 fn mux_from_unix_fd(fd: i32) -> Result<crate::mux::Mux> {
     use std::os::fd::FromRawFd;
@@ -415,6 +437,11 @@ fn mux_from_unix_fd(fd: i32) -> Result<crate::mux::Mux> {
     Ok(crate::mux::Mux::client(reader, writer))
 }
 
+/// Takes ownership of `value` and multiplexes it as a client link.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the handle cannot be wrapped as a Tokio pipe.
 #[cfg(windows)]
 fn mux_from_windows_handle(value: u64) -> Result<crate::mux::Mux> {
     use std::os::windows::io::{FromRawHandle, RawHandle};

@@ -500,4 +500,51 @@ mod tests {
         assert!(text.contains("403"), "{text}");
         fence.store(true, Ordering::SeqCst);
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mux_link_echoes_approved_tcp() {
+        use bookclerk_plugin_sdk::mux::Mux;
+
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = echo.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut upstream, _) = echo.accept().await.unwrap();
+            let mut buf = [0_u8; 64];
+            let n = upstream.read(&mut buf).await.unwrap();
+            upstream.write_all(&buf[..n]).await.unwrap();
+        });
+
+        let (gateway_std, guest_std) = std::os::unix::net::UnixStream::pair().unwrap();
+        gateway_std.set_nonblocking(true).unwrap();
+        guest_std.set_nonblocking(true).unwrap();
+        let gateway_link = tokio::net::UnixStream::from_std(gateway_std).unwrap();
+        let policy = tcp_policy("127.0.0.1", port, &["127.0.0.1/32"]);
+        let fence = Arc::new(AtomicBool::new(false));
+        spawn_link(gateway_link, policy, Arc::clone(&fence)).unwrap();
+
+        let guest_link = tokio::net::UnixStream::from_std(guest_std).unwrap();
+        let (reader, writer) = guest_link.into_split();
+        let mux = Mux::client(reader, writer);
+        let mut stream = mux.open().await.unwrap();
+        let req = format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut head = Vec::new();
+        let mut tmp = [0_u8; 1];
+        loop {
+            stream.read_exact(&mut tmp).await.unwrap();
+            head.push(tmp[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&head);
+        assert!(text.contains("200"), "{text}");
+        let payload = b"ping-through-mux";
+        stream.write_all(payload).await.unwrap();
+        let mut buf = vec![0_u8; payload.len()];
+        stream.read_exact(&mut buf).await.unwrap();
+        assert_eq!(buf, payload);
+        fence.store(true, Ordering::SeqCst);
+    }
 }

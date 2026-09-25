@@ -339,8 +339,12 @@ async fn splice_to_proxy(
         bookclerk_plugin_sdk::ConnectOptions::default(),
     )
     .await?;
+    // `fd:` / `handle:` proxies are mux streams. `PluginSocket::into_split`
+    // only accepts a pathname Unix socket and panics on a mux link, which
+    // sqlx reports as "connection reset by peer".
+    let remote = remote.into_stream();
     let (mut lr, mut lw) = local.into_split();
-    let (mut rr, mut rw) = remote.into_split();
+    let (mut rr, mut rw) = tokio::io::split(remote);
     let _ = tokio::join!(
         tokio::io::copy(&mut lr, &mut rw),
         tokio::io::copy(&mut rr, &mut lw),

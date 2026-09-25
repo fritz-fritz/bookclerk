@@ -299,6 +299,11 @@ async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Frame> {
     }
 }
 
+/// Writes one length-prefixed mux frame and flushes it.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the underlying write or flush fails.
 async fn write_raw<W: AsyncWrite + Unpin>(
     writer: &mut W,
     typ: u8,
