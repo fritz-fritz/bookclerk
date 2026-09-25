@@ -133,7 +133,7 @@ JOB_CHECKS: dict[str, tuple[str, ...]] = {
     ),
     "release": ("release",),
     "confinement": ("confinement",),
-    "windows-gateway": ("windows_gateway",),
+    "native-gateway": ("native_gateway",),
     "tray": ("tray",),
     "postgres": ("postgres",),
 }
@@ -207,6 +207,8 @@ class Relations:
     runtime_smoke: tuple[str, ...]
     runtime_smoke_packages: frozenset[str]
     platform_jobs: dict[str, frozenset[str]]
+    native_gateway_packages: frozenset[str]
+    native_gateway_paths: tuple[str, ...]
     release_shipped: tuple[str, ...]
     release_full_packages: frozenset[str]
     release_full_paths: tuple[str, ...]
@@ -223,6 +225,7 @@ def load_relations(path: str | Path | None = None) -> Relations:
     e2e = raw.get("staged_e2e", {})
     release = raw.get("release", {})
     jobs = raw.get("platform_jobs", {})
+    gateway = raw.get("native_gateway", {})
     return Relations(
         embeds=list(raw.get("embed", [])),
         test_inputs=list(raw.get("test_input", [])),
@@ -235,6 +238,8 @@ def load_relations(path: str | Path | None = None) -> Relations:
         runtime_smoke=tuple(e2e.get("runtime_smoke", [])),
         runtime_smoke_packages=frozenset(e2e.get("runtime_smoke_packages", [])),
         platform_jobs={k: frozenset(v) for k, v in jobs.items()},
+        native_gateway_packages=frozenset(gateway.get("packages", [])),
+        native_gateway_paths=tuple(gateway.get("paths", [])),
         release_shipped=tuple(release.get("shipped", [])),
         release_full_packages=frozenset(release.get("full_packages", [])),
         release_full_paths=tuple(release.get("full_paths", [])),
@@ -270,8 +275,12 @@ def validate_relations(rel: Relations, index: PackageIndex) -> list[str]:
     for pkg in rel.e2e_full_packages | rel.runtime_smoke_packages:
         need(pkg, "staged_e2e")
     for job, pkgs in rel.platform_jobs.items():
+        if job not in CHECK_JOB:
+            problems.append(f"platform_jobs: unknown check `{job}`")
         for pkg in pkgs:
             need(pkg, f"platform_jobs.{job}")
+    for pkg in rel.native_gateway_packages:
+        need(pkg, "native_gateway")
     for pkg in (*rel.release_shipped, *rel.release_full_packages):
         need(pkg, "release")
     return problems
@@ -569,6 +578,7 @@ class _Surfaces:
         self.e2e_full: list[str] = []
         self.e2e_ids: dict[str, str] = {}
         self.release_full: list[str] = []
+        self.native_gateway: list[str] = []
         self.fixture_checks: dict[str, list[str]] = {}
 
 
@@ -623,11 +633,14 @@ def build_plan(
         elif pkg is not None:
             classified = True
             changed_pkgs.add(pkg)
-            if pkg == E2E_PACKAGE:
+            # Smoke-only inputs (its target, support and fixture guest) do
+            # not feed the staged installation suite.
+            smoke_only = any(glob_match(path, p) for p in rel.native_gateway_paths)
+            if pkg == E2E_PACKAGE and not smoke_only:
                 e2e_direct.append(path)
             kind = test_input_kind(path, index.by_name[pkg])
             if kind is None:
-                compiled_seeds[pkg].append(f"changed {path}")
+                compiled_seeds[pkg].append(f"{'smoke input' if smoke_only else 'changed'} {path}")
             else:
                 test_seeds[pkg][kind].append(f"{kind} input {path}")
 
@@ -669,6 +682,8 @@ def build_plan(
             surf.e2e_full.append(path)
         if any(glob_match(path, p) for p in rel.release_full_paths):
             surf.release_full.append(path)
+        if any(glob_match(path, p) for p in rel.native_gateway_paths):
+            surf.native_gateway.append(path)
 
         if not classified:
             plan.mark_full(f"unclassified path {path}")
@@ -851,14 +866,16 @@ def _select_checks(
             )
 
     unit = {n for n, s in sel.items() if s.unit_tests}
-    for check in ("confinement", "windows_gateway", "tray"):
-        members = rel.platform_jobs.get(check, frozenset())
-        hit = lint & members
-        if check == "windows_gateway" and "bookclerk-plugin-host" not in unit:
-            # The gateway only checks bookclerk-plugin-host --lib.
-            hit -= {"bookclerk-plugin-host"}
+    for check in ("confinement", "tray"):
+        hit = lint & rel.platform_jobs.get(check, frozenset())
         if hit:
             _select(plan, check, _why(sel, hit, "affected"))
+
+    # Shipped launch-path code (Cargo-compiled closure), not test-only edits.
+    gateway_why = _why(sel, compiled & rel.native_gateway_packages, "launch path compiled")
+    gateway_why += [f"smoke input {p}" for p in surf.native_gateway]
+    if gateway_why:
+        _select(plan, "native_gateway", gateway_why)
 
     steps = [step for step, owner in rel.postgres_steps.items() if owner in unit]
     if steps:
@@ -990,6 +1007,16 @@ def _expand_prereqs(
             packages=["bookclerk-plugin-database-postgres", "bookclerk-workerd", "bookclerk-jail"],
         )
         _prereq(plan, "postgres", "ensure_workerd", "rpc_like spawns through pinned workerd")
+
+    if plan.selected("native_gateway"):
+        _prereq(
+            plan,
+            "native_gateway",
+            "build",
+            "the smoke spawns its guest through bookclerk-jail + bookclerk-workerd",
+            packages=["bookclerk-jail", "bookclerk-workerd"],
+        )
+        _prereq(plan, "native_gateway", "ensure_workerd", "the front door runs pinned workerd")
 
 
 def _derive_jobs(plan: Plan) -> None:

@@ -151,6 +151,30 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("ci-exec.py gate", run["run"])
         self.assertEqual(run["env"]["NEEDS_JSON"], "${{ toJSON(needs) }}")
 
+    def test_native_gateway_runs_on_every_os(self) -> None:
+        job = self.jobs["native-gateway"]
+        self.assertEqual(job["runs-on"], "${{ matrix.os }}")
+        self.assertIs(job["strategy"]["fail-fast"], False)
+        self.assertEqual(job["strategy"]["matrix"], {"os": ["ubuntu-latest", "macos-latest", "windows-latest"]})
+        steps = job["steps"]
+        capnp = {s.get("if") for s in steps if "capnp" in s.get("run", "") and "ci-exec.py" not in s.get("run", "")}
+        self.assertEqual(
+            capnp, {"runner.os == 'Linux'", "runner.os == 'macOS'", "runner.os == 'Windows'"}
+        )
+        run = [s for s in steps if "ci-exec.py run native_gateway" in s.get("run", "")]
+        self.assertEqual(len(run), 1)
+        self.assertNotIn("if", run[0], "the smoke must run on every matrix child")
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("windows_gateway", text)
+        self.assertNotIn("windows-gateway", text)
+
+    def test_native_gateway_smoke_inputs_exist(self) -> None:
+        from ci_plan.plan import load_relations
+
+        for pattern in load_relations().native_gateway_paths:
+            if "*" not in pattern:
+                self.assertTrue((REPO / pattern).is_file(), pattern)
+
     def test_nothing_can_hide_a_failure(self) -> None:
         for name, job in self.jobs.items():
             self.assertNotIn("continue-on-error", job, name)

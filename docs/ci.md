@@ -115,8 +115,14 @@ Every selected check lists what a clean runner needs, with a reason:
 - `e2e`: jail + launcher + the native guests in scope, pinned `workerd`,
   `cargo install-platform --skip-build`, and `cargo stage-plugins --plugin
   <id>…` (or `--optional --examples` for the full installation). Runs
-  `bookclerk-plugin-e2e` with `BOOKCLERK_REQUIRE_STAGED_PLUGINS=1`.
+  `bookclerk-plugin-e2e` (`--lib --test staged_plugins --test
+  installed_plugin_path`; never `native_gateway`) with
+  `BOOKCLERK_REQUIRE_STAGED_PLUGINS=1`.
 - `postgres` `rpc_like`: postgres guest + launcher + jail and pinned `workerd`.
+- `native_gateway`: `cargo build -p bookclerk-jail -p bookclerk-workerd` and
+  pinned `workerd` only — no platform install, staging, database services or
+  app build. The fixture guest is a bin target of `bookclerk-plugin-e2e`, so
+  `cargo test --test native_gateway` builds it.
 
 Prerequisites never select suites: building the sqlite guest for host tests
 does not select sqlite's own tests or E2E.
@@ -166,7 +172,7 @@ are **not** detected — declare them, or rely on the conservative fallbacks.
 | `fmt / clippy / test` | Any check below is selected | `ui`, `plugin_sdk_abi`, `python_sdk`, `author_surface`, `fmt`, `clippy`, `clippy_publish`, `api_docs`, `doctest`, `store_free`, `rust_test`, `e2e` — related Rust checks share one compile |
 | `release build` | A shipped binary (hosts, helpers, platform guests) is compiled-affected | `affected`: `cargo build --release -p <affected shipped>`; `full` (packaging inputs: `bookclerk-dev`, workerd pins, platform manifests; or full suite): `build-app --release --platform` + helper layout assertions |
 | `sandbox + jailed tiers` (3 OS) | sandbox / jail / media / media-worker affected | Clippy + enforcement tests (Windows `--test-threads=1`) |
-| `native-behind-workerd gateway` (Windows) | workerd / plugin-sdk affected, or plugin-host `src` | Clippy workerd, sdk `http`, host `--lib`; named-pipe `SOCKET_PROXY` tests |
+| `native-behind-workerd gateway` (3 OS) | A `[native_gateway].packages` member (plugin-host, workerd, plugin-sdk, sandbox, jail, the e2e crate) is in the Cargo-compiled closure, a `[native_gateway].paths` smoke input changed, or the full suite | `cargo test -p bookclerk-plugin-e2e --test native_gateway` on every OS (see below); Windows adds clippy workerd, sdk `http`, host `--lib` and workerd lib tests (named-pipe `SOCKET_PROXY`); macOS adds workerd lib tests |
 | `tray` (3 OS) | `bookclerk-tray` affected | Clippy + tests |
 | `postgres 16/17/18` | An owning package's unit tests are affected (library, db-guest, postgres guest, plugin-host RPC LIKE) | Only the owners' steps, on every supported major |
 | `CI Gate` | Always | Stable required check (see contract above) |
@@ -190,11 +196,36 @@ The scheduled **workerd pin bump** job (`.github/workflows/workerd-pin-bump.yml`
 also compiles `bookclerk-workerd` / `bookclerk-plugin-abi`, so it installs
 `capnproto` before `cargo build` when a pin bump is eligible.
 
+### Native-behind-workerd gateway smoke
+
+`crates/bookclerk-plugin-e2e/tests/native_gateway.rs` installs the test-only
+`native_gateway_probe` guest (an SDK-only bin of the e2e crate; never staged or
+packaged) into a temporary files dir, grants exactly one ephemeral loopback TCP
+port, and spawns it through `PluginSession::spawn_with` with
+`Isolation::Required`. The session goes through host discovery and launch
+planning, `bookclerk-jail`, `bookclerk-workerd` + pinned `workerd`, the nested
+deny-network jail and the platform socket proxy (on Windows, the host-created
+nested AppContainer and its Package-SID pipe ACL). It asserts, against
+harness-held listeners:
+
+- describe/open and a real CLI entrypoint RPC answer through the front door;
+- a unique payload round-trips through `bookclerk_plugin_sdk::net::connect`
+  to the granted port;
+- a second, live listener on an ungranted port is refused by policy (`403`)
+  and is never dialed;
+- a direct `std::net` connect from the guest to the live granted listener is
+  blocked.
+
+Nothing skips: a missing helper, runtime, confinement backend, startup failure
+or timeout fails the test. Smoke-only inputs (the target, `tests/native_gateway/`
+and the fixture guest source) select `native_gateway` but not the staged E2E
+suite.
+
 ## Branch protection / merge queue
 
 Configure repository rulesets / branch protection so the **required** CI check
 is **`CI Gate`** (plus the OSV check), **not** every matrix child. Skipped
-`release` / `confinement` / `tray` jobs report `skipped`; if those job names are
+`release` / `confinement` / `native-gateway` / `tray` jobs report `skipped`; if those job names are
 individually required, merges stay pending forever.
 
 Also enable a merge queue that consumes `merge_group` checks so the full suite
@@ -266,8 +297,8 @@ has fallen behind `main` until it is rebased. Either:
 | `docs/**` only | none | `CI Gate` passes with every job skipped |
 | `ui/**` only | `fmt / clippy / test` (UI + UI API docs) | no Rust toolchain checks |
 | `crates/bookclerk-cli/src/**` | check (`-p bookclerk-cli --tests`), release (`bookclerk-cli`) | no postgres, no E2E |
-| `crates/bookclerk-plugin-host/src/**` | check (host + dependents, runtime-smoke E2E), release (hosts), windows gateway, postgres (`rpc_like` only) | no sandbox matrix |
+| `crates/bookclerk-plugin-host/src/**` | check (host + dependents, runtime-smoke E2E), release (hosts), native gateway (3 OS), postgres (`rpc_like` only) | no sandbox matrix |
 | One optional guest (e.g. Libro) | check (guest tests, E2E `libro` only) | other storefronts are neither built nor staged |
-| `packages/plugin-sdk/embed/**` | check (workerd tests, workerd-runtime E2E subset, SDK ABI), release (launcher), windows gateway | not the full installation |
+| `packages/plugin-sdk/embed/**` | check (workerd tests, workerd-runtime E2E subset, SDK ABI), release (launcher), native gateway (3 OS) | not the full installation |
 
 For `merge_group` / `main`, `--force-full` runs every job and check.

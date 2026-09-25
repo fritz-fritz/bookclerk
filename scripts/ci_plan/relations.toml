@@ -134,9 +134,30 @@ confinement = [
     "bookclerk-media",
     "bookclerk-media-worker",
 ]
-# Windows-only native-behind-workerd gateway (named-pipe SOCKET_PROXY).
-windows_gateway = ["bookclerk-workerd", "bookclerk-plugin-host", "bookclerk-plugin-sdk"]
 tray = ["bookclerk-tray"]
+
+# Native-behind-workerd gateway smoke (3 OS): `bookclerk-plugin-e2e --test
+# native_gateway` launches a guest through the production PluginSession path.
+[native_gateway]
+# Selected when any of these is in the Cargo-compiled closure of the change
+# (source or a normal/build dependency changed). Test-only edits in these
+# packages do not compile them and do not select the smoke.
+packages = [
+    "bookclerk-plugin-host",
+    "bookclerk-workerd",
+    "bookclerk-plugin-sdk",
+    "bookclerk-sandbox",
+    "bookclerk-jail",
+    "bookclerk-plugin-e2e",
+]
+# Inputs only the smoke reads: its target and support files under `tests/`
+# (Cargo's target model would route those to the e2e crate's own tests) and
+# the fixture guest. They select `native_gateway`, not the staged e2e suite.
+paths = [
+    "crates/bookclerk-plugin-e2e/tests/native_gateway.rs",
+    "crates/bookclerk-plugin-e2e/tests/native_gateway/**",
+    "crates/bookclerk-plugin-e2e/src/bin/native_gateway_probe.rs",
+]
 
 [release]
 # Shipped beside hosts: release builds cover these when affected.

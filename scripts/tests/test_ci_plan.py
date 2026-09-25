@@ -193,7 +193,7 @@ class ScenarioTests(unittest.TestCase):
             self.assertIn(pkg, build["packages"])
         self.assertIn("ensure_workerd", [x["kind"] for x in p.prereqs("rust_test")])
         self.assertEqual(p.params("postgres")["steps"], ["rpc_like"])
-        self.assertTrue(p.selected("windows_gateway"))
+        self.assertTrue(p.selected("native_gateway"))
         self.assertFalse(p.selected("confinement"))
         self.assertEqual(p.params("release")["packages"], ["bookclerk-cli", "bookclerkd"])
         stage = next(x for x in p.prereqs("e2e") if x["kind"] == "stage_plugins")
@@ -251,7 +251,10 @@ class ScenarioTests(unittest.TestCase):
         self.assertFalse(p.selected("release"))
         self.assertFalse(p.selected("postgres"))
         e2e_cmd = [c for key, c in planned_commands(artifact(p), "e2e", CTX) if not key][0]
-        self.assertEqual(e2e_cmd.argv, ["cargo", "test", "-p", E2E_PACKAGE, "--tests"])
+        self.assertEqual(
+            e2e_cmd.argv,
+            ["cargo", "test", "-p", E2E_PACKAGE, "--lib", "--test", "staged_plugins", "--test", "installed_plugin_path"],
+        )
         self.assertEqual(e2e_cmd.env["BOOKCLERK_STAGED_PLUGINS"], "libro")
         self.assertEqual(e2e_cmd.env["BOOKCLERK_REQUIRE_STAGED_PLUGINS"], "1")
         stage_cmd = [c.argv for key, c in planned_commands(artifact(p), "e2e", CTX) if key.startswith("stage_plugins")]
@@ -267,7 +270,7 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(check_argv(p, "rust_test"), [["cargo", "test", "-p", "bookclerk-plugin-host", "--tests"]])
         self.assertFalse(p.selected("doctest"))
         self.assertFalse(p.selected("postgres"))
-        self.assertFalse(p.selected("windows_gateway"))
+        self.assertFalse(p.selected("native_gateway"))
         self.assertFalse(p.selected("e2e"))
 
     def test_example_only_file_builds_examples(self) -> None:
@@ -522,6 +525,167 @@ class FullSuiteTests(unittest.TestCase):
 
     def test_force_full(self) -> None:
         self.assert_full(build_plan(["docs/x.md"], INDEX, RELATIONS, force_full=True, guests=GUESTS))
+
+
+def _ctx(os_name: str) -> Context:
+    return Context(
+        workspace=Path("/ws"),
+        os_name=os_name,
+        tmp=Path("/tmp/x"),
+        files_dir=Path("/tmp/x/files"),
+        artifacts=Path("/tmp/x/art"),
+    )
+
+
+class NativeGatewayTests(unittest.TestCase):
+    SMOKE = ["cargo", "test", "-p", E2E_PACKAGE, "--test", "native_gateway", "--", "--nocapture"]
+
+    def test_launch_path_changes_select_the_smoke(self) -> None:
+        for path in (
+            "crates/bookclerk-plugin-host/src/spawn_stdio.rs",
+            "crates/bookclerk-plugin-host/src/rpc_session.rs",
+            "crates/bookclerk-workerd/src/socket_proxy.rs",
+            "crates/bookclerk-workerd/src/pipe_bind.rs",
+            "crates/bookclerk-workerd/workerd-pin.json",
+            "packages/plugin-sdk/embed/bookclerk_plugin.js",
+            "crates/bookclerk-plugin-sdk/src/net.rs",
+            "crates/bookclerk-sandbox/src/lib.rs",
+            "crates/bookclerk-jail/src/main.rs",
+            "crates/bookclerk-plugin-e2e/Cargo.toml",
+            "crates/bookclerk-plugin-e2e/src/bin/native_gateway_probe.rs",
+            "crates/bookclerk-plugin-e2e/tests/native_gateway.rs",
+            "crates/bookclerk-plugin-e2e/tests/native_gateway/support.rs",
+        ):
+            with self.subTest(path=path):
+                p = plan(path)
+                self.assertTrue(p.selected("native_gateway"), p.checks.keys())
+                self.assertTrue(p.jobs["native-gateway"])
+
+    def test_unrelated_changes_skip_the_smoke(self) -> None:
+        for path in (
+            "crates/bookclerk-cli/src/main.rs",
+            "ui/src/App.tsx",
+            "docs/plugins.md",
+            "crates/bookclerk-plugins/optional/source-libro/src/client.rs",
+            "crates/bookclerk-plugin-host/tests/guest_jail.rs",
+            "crates/bookclerk-workerd/tests/connect_gateway.rs",
+            "crates/bookclerk-plugin-e2e/tests/staged_plugins.rs",
+        ):
+            with self.subTest(path=path):
+                p = plan(path)
+                self.assertFalse(p.selected("native_gateway"), p.checks.get("native_gateway"))
+                self.assertFalse(p.jobs["native-gateway"])
+
+    def test_prerequisites_are_complete_and_minimal(self) -> None:
+        for p in (plan("crates/bookclerk-plugin-sdk/src/net.rs"), plan("Cargo.lock")):
+            with self.subTest(full=p.full_suite):
+                self.assertEqual(
+                    p.prereqs("native_gateway"),
+                    [
+                        {
+                            "kind": "build",
+                            "why": ["the smoke spawns its guest through bookclerk-jail + bookclerk-workerd"],
+                            "packages": ["bookclerk-jail", "bookclerk-workerd"],
+                        },
+                        {"kind": "ensure_workerd", "why": ["the front door runs pinned workerd"]},
+                    ],
+                )
+        # Building the helpers must not select their own suites, and the
+        # smoke's own inputs do not pull in the staged installation.
+        for path in (
+            "crates/bookclerk-plugin-e2e/tests/native_gateway.rs",
+            "crates/bookclerk-plugin-e2e/src/bin/native_gateway_probe.rs",
+        ):
+            with self.subTest(path=path):
+                p = plan(path)
+                self.assertTrue(p.selected("native_gateway"))
+                for check in ("e2e", "rust_test", "confinement", "release"):
+                    self.assertFalse(p.selected(check), check)
+                self.assertEqual(p.lint_packages(), [E2E_PACKAGE])
+        self.assertEqual(plan("crates/bookclerk-plugin-e2e/src/lib.rs").params("e2e"), {"scope": "full"})
+
+    def test_commands_per_os_on_a_fresh_runner(self) -> None:
+        art = artifact(plan("crates/bookclerk-plugin-sdk/src/net.rs"))
+        for os_name, extra in (
+            ("Linux", []),
+            ("Darwin", [["cargo", "test", "-p", "bookclerk-workerd", "--lib"]]),
+            (
+                "Windows",
+                [
+                    ["cargo", "clippy", "-p", "bookclerk-workerd", "--all-targets", "--", "-D", "warnings"],
+                    ["cargo", "clippy", "-p", "bookclerk-plugin-sdk", "--features", "http", "--all-targets", "--", "-D", "warnings"],
+                    ["cargo", "clippy", "-p", "bookclerk-plugin-host", "--lib", "--", "-D", "warnings"],
+                    ["cargo", "test", "-p", "bookclerk-workerd", "--lib"],
+                ],
+            ),
+        ):
+            with self.subTest(os=os_name):
+                cmds = planned_commands(art, "native_gateway", _ctx(os_name))
+                self.assertEqual(
+                    [c.argv for key, c in cmds if key],
+                    [["cargo", "build", "-p", "bookclerk-jail", "-p", "bookclerk-workerd"], ["cargo", "ensure-workerd"]],
+                )
+                checks = [c for key, c in cmds if not key]
+                self.assertEqual([c.argv for c in checks], extra + [self.SMOKE])
+                exe = "workerd.exe" if os_name == "Windows" else "workerd"
+                self.assertEqual(
+                    checks[-1].env["BOOKCLERK_WORKERD_BIN"], str(Path("/ws/target/debug") / exe)
+                )
+
+    def test_smoke_runs_only_in_its_own_check(self) -> None:
+        full = artifact(plan("Cargo.lock"))
+        for check in ALL_CHECKS:
+            if check == "native_gateway":
+                continue
+            for _, cmd in planned_commands(full, check, CTX):
+                with self.subTest(check=check, argv=cmd.argv):
+                    self.assertNotIn("native_gateway", cmd.argv)
+                    if cmd.argv[:2] == ["cargo", "test"] and ["-p", E2E_PACKAGE] == cmd.argv[2:4]:
+                        self.assertNotIn("--tests", cmd.argv)
+                        self.assertNotIn("--all-targets", cmd.argv)
+        workspace = check_argv(plan("Cargo.lock"), "rust_test")[0]
+        self.assertEqual(workspace[workspace.index("--exclude") + 1], E2E_PACKAGE)
+
+    def test_staged_e2e_runs_every_other_e2e_target(self) -> None:
+        tests_dir = REPO / "crates" / "bookclerk-plugin-e2e" / "tests"
+        targets = sorted(f.stem for f in tests_dir.glob("*.rs") if f.stem != "native_gateway")
+        argv = check_argv(plan("crates/bookclerk-plugins/optional/source-libro/src/client.rs"), "e2e")[0]
+        named = sorted(argv[i + 1] for i, a in enumerate(argv) if a == "--test")
+        self.assertEqual(named, targets)
+        self.assertIn("--lib", argv)
+
+    def test_full_and_shadow_run_the_gateway(self) -> None:
+        self.assertTrue(plan("Cargo.lock").selected("native_gateway"))
+        art = resolve(
+            base=None,
+            head=None,
+            selective_ci="0",
+            run_id="9",
+            checkout_sha="abc",
+            event="pull_request",
+            paths=["docs/a.md"],
+            metadata=META,
+            workspace=REPO,
+        )
+        self.assertEqual(art["mode"], "shadow")
+        self.assertFalse(plan_from_dict(art["predicted"]).selected("native_gateway"))
+        self.assertTrue(plan_from_dict(art["execution"]).selected("native_gateway"))
+        self.assertEqual(job_outputs(art)["job_native_gateway"], "true")
+
+    def test_gate_covers_the_matrix_job(self) -> None:
+        for path, want in (("crates/bookclerk-plugin-sdk/src/net.rs", True), ("docs/a.md", False)):
+            p = plan(path)
+            art = artifact(p)
+            ok = {"plan": {"result": "success"}}
+            for job, on in p.jobs.items():
+                ok[job] = {"result": "success" if on else "skipped"}
+            self.assertEqual(ok["native-gateway"]["result"], "success" if want else "skipped")
+            self.assertEqual(gate(art, ok), [])
+            for result in ("failure", "cancelled", "skipped" if want else "success"):
+                with self.subTest(path=path, result=result):
+                    bad = copy.deepcopy(ok)
+                    bad["native-gateway"]["result"] = result
+                    self.assertTrue(any(x.startswith("native-gateway:") for x in gate(art, bad)))
 
 
 class ExecutionTests(unittest.TestCase):

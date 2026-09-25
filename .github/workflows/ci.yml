@@ -39,7 +39,7 @@ jobs:
       job_check: ${{ steps.resolve.outputs.job_check }}
       job_release: ${{ steps.resolve.outputs.job_release }}
       job_confinement: ${{ steps.resolve.outputs.job_confinement }}
-      job_windows_gateway: ${{ steps.resolve.outputs.job_windows_gateway }}
+      job_native_gateway: ${{ steps.resolve.outputs.job_native_gateway }}
       job_tray: ${{ steps.resolve.outputs.job_tray }}
       job_postgres: ${{ steps.resolve.outputs.job_postgres }}
       check_ui: ${{ steps.resolve.outputs.check_ui }}
@@ -315,11 +315,15 @@ jobs:
       - name: Confinement clippy + enforcement tests
         run: python scripts/ci-exec.py run confinement
 
-  windows-gateway:
-    name: native-behind-workerd gateway (windows-latest)
+  native-gateway:
+    name: native-behind-workerd gateway (${{ matrix.os }})
     needs: plan
-    if: needs.plan.outputs.job_windows_gateway == 'true'
-    runs-on: windows-latest
+    if: needs.plan.outputs.job_native_gateway == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -348,7 +352,18 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install capnproto (Windows native gateway)
+      - name: Install capnproto (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends capnproto
+
+      - name: Install capnproto (macOS)
+        if: runner.os == 'macOS'
+        run: brew install capnp
+
+      - name: Install capnproto (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $url = "https://capnproto.org/capnproto-c++-win32-1.1.0.zip"
@@ -369,8 +384,8 @@ jobs:
           }
           echo $toolsDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Windows gateway clippy + named-pipe SOCKET_PROXY
-        run: python scripts/ci-exec.py run windows_gateway
+      - name: Native gateway smoke (+ Windows/macOS workerd checks)
+        run: python scripts/ci-exec.py run native_gateway
 
   tray:
     name: tray (${{ matrix.os }})
@@ -471,7 +486,7 @@ jobs:
 
   ci-gate:
     name: CI Gate
-    needs: [plan, check, release, confinement, windows-gateway, tray, postgres]
+    needs: [plan, check, release, confinement, native-gateway, tray, postgres]
     if: always()
     runs-on: ubuntu-latest
     steps:

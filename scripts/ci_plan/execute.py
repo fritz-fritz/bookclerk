@@ -72,6 +72,10 @@ CONFINEMENT_PACKAGES = (
     "bookclerk-media-worker",
     "bookclerk-jail",
 )
+# Staged-installation targets of the e2e crate. `native_gateway` is its own
+# check (three OSes) and must not run again here.
+E2E_STAGED_TARGETS = ("--lib", "--test", "staged_plugins", "--test", "installed_plugin_path")
+NATIVE_GATEWAY_TEST = "native_gateway"
 POSTGRES_STEPS: dict[str, tuple[str, list[str]]] = {
     "library_queue": (
         "Postgres job-queue tests",
@@ -496,7 +500,7 @@ def check_commands(check: str, plan: Plan, ctx: Context) -> list[Command]:
         if scope != "full":
             env["BOOKCLERK_STAGED_PLUGINS"] = ",".join(scope)
         label = "staged e2e (full)" if scope == "full" else "staged e2e (" + ", ".join(scope) + ")"
-        return [Command(label, ["cargo", "test", "-p", E2E_PACKAGE, "--tests"], env=env)]
+        return [Command(label, ["cargo", "test", "-p", E2E_PACKAGE, *E2E_STAGED_TARGETS], env=env)]
     if check == "release":
         if params.get("mode") == "full":
             cmds = [Command("release build (platform)", ["cargo", "build-app", "--release", "--platform"])]
@@ -518,16 +522,28 @@ def check_commands(check: str, plan: Plan, ctx: Context) -> list[Command]:
             Command("clippy (confinement)", ["cargo", "clippy", *_pkg_args(CONFINEMENT_PACKAGES), "--all-targets", "--", "-D", "warnings"]),
             Command("confinement tests", test, env=env),
         ]
-    if check == "windows_gateway":
-        return [
-            Command("clippy bookclerk-workerd", ["cargo", "clippy", "-p", "bookclerk-workerd", "--all-targets", "--", "-D", "warnings"]),
+    if check == "native_gateway":
+        cmds = []
+        if ctx.os_name == "Windows":
+            cmds += [
+                Command("clippy bookclerk-workerd", ["cargo", "clippy", "-p", "bookclerk-workerd", "--all-targets", "--", "-D", "warnings"]),
+                Command(
+                    "clippy bookclerk-plugin-sdk (http)",
+                    ["cargo", "clippy", "-p", "bookclerk-plugin-sdk", "--features", "http", "--all-targets", "--", "-D", "warnings"],
+                ),
+                Command("clippy bookclerk-plugin-host --lib", ["cargo", "clippy", "-p", "bookclerk-plugin-host", "--lib", "--", "-D", "warnings"]),
+                Command("named-pipe SOCKET_PROXY", ["cargo", "test", "-p", "bookclerk-workerd", "--lib"]),
+            ]
+        elif ctx.os_name == "Darwin":
+            cmds.append(Command("bookclerk-workerd lib tests", ["cargo", "test", "-p", "bookclerk-workerd", "--lib"]))
+        cmds.append(
             Command(
-                "clippy bookclerk-plugin-sdk (http)",
-                ["cargo", "clippy", "-p", "bookclerk-plugin-sdk", "--features", "http", "--all-targets", "--", "-D", "warnings"],
-            ),
-            Command("clippy bookclerk-plugin-host --lib", ["cargo", "clippy", "-p", "bookclerk-plugin-host", "--lib", "--", "-D", "warnings"]),
-            Command("named-pipe SOCKET_PROXY", ["cargo", "test", "-p", "bookclerk-workerd", "--lib"]),
-        ]
+                "native-behind-workerd gateway smoke",
+                ["cargo", "test", "-p", E2E_PACKAGE, "--test", NATIVE_GATEWAY_TEST, "--", "--nocapture"],
+                env=runtime_env,
+            )
+        )
+        return cmds
     if check == "tray":
         return [
             Command("clippy bookclerk-tray", ["cargo", "clippy", "-p", "bookclerk-tray", "--all-targets", "--", "-D", "warnings"]),
