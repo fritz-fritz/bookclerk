@@ -16,11 +16,16 @@ npm bridge described in `src/workerd.rs`.
 
 ## Socket proxy (`BOOKCLERK_SOCKET_PROXY`)
 
-Native-behind-workerd guests now receive an inherited link (`fd:<n>` on Unix,
-`handle:<n>` on Windows) and multiplex CONNECT streams over [`mux`]. Older SDKs
-that only open a pathname / named-pipe proxy cannot reach the host; they fail
-closed (no ambient TCP). Pathname, `abstract:`, and `\\.\pipe\` forms remain
-for tests.
+Native-behind-workerd guests receive an inherited link (`fd:<n>` on Unix,
+`handle:<n>` on Windows) and multiplex CONNECT streams over [`mux`]. This is
+a **minor-incompatible** guest contract: older SDKs that only open a
+pathname or named-pipe proxy cannot reach the host and fail closed (no
+ambient TCP). Rebuild guests against this SDK. Pathname, `abstract:`, and
+`\\.\pipe\` forms remain for tests.
+
+`BOOKCLERK_NATIVE_BACKEND` and `BOOKCLERK_NESTED_*` are gone (they were
+host↔launcher internals). Windows `Isolation::Off` still needs
+`bookclerk-jail.exe` beside the host so handle handoff can run.
 
 The `bookclerk-plugin` author CLI (`check` / `fmt` / `sync-embed` / `package` /
 `smoke`) lives in [`bookclerk-plugin-tools`](../bookclerk-plugin-tools), so

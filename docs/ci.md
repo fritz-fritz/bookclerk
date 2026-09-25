@@ -172,7 +172,7 @@ are **not** detected — declare them, or rely on the conservative fallbacks.
 | `fmt / clippy / test` | Any check below is selected | `ui`, `plugin_sdk_abi`, `python_sdk`, `author_surface`, `fmt`, `clippy`, `clippy_publish`, `api_docs`, `doctest`, `store_free`, `rust_test`, `e2e` — related Rust checks share one compile |
 | `release build` | A shipped binary (hosts, helpers, platform guests) is compiled-affected | `affected`: `cargo build --release -p <affected shipped>`; `full` (packaging inputs: `bookclerk-dev`, workerd pins, platform manifests; or full suite): `build-app --release --platform` + helper layout assertions |
 | `sandbox + jailed tiers` (3 OS) | sandbox / jail / media / media-worker affected | Clippy + enforcement tests (Windows `--test-threads=1`) |
-| `native-behind-workerd gateway` (3 OS) | A `[native_gateway].packages` member (plugin-host, workerd, plugin-sdk, sandbox, jail, the e2e crate) is in the Cargo-compiled closure, a `[native_gateway].paths` smoke input changed, or the full suite | `cargo test -p bookclerk-plugin-e2e --test native_gateway` on every OS (see below); Windows adds clippy workerd, sdk `http`, host `--lib` and workerd lib tests (named-pipe `SOCKET_PROXY`); macOS adds workerd lib tests |
+| `native-behind-workerd gateway` (3 OS) | A `[native_gateway].packages` member (plugin-host, workerd, plugin-sdk, sandbox, jail, the e2e crate) is in the Cargo-compiled closure, a `[native_gateway].paths` smoke input changed, or the full suite | `cargo test -p bookclerk-plugin-e2e --test native_gateway --test native_gateway_isolation --test native_gateway_lifecycle` on every OS (see below); Windows adds clippy workerd, sdk `http`, host `--lib` and workerd lib tests (inherited `handle:` `SOCKET_PROXY`); macOS adds workerd lib tests |
 | `tray` (3 OS) | `bookclerk-tray` affected | Clippy + tests |
 | `postgres 16/17/18` | An owning package's unit tests are affected (library, db-guest, postgres guest, plugin-host RPC LIKE) | Only the owners' steps, on every supported major |
 | `CI Gate` | Always | Stable required check (see contract above) |
@@ -198,15 +198,17 @@ also compiles `bookclerk-workerd` / `bookclerk-plugin-abi`, so it installs
 
 ### Native-behind-workerd gateway smoke
 
-`crates/bookclerk-plugin-e2e/tests/native_gateway.rs` installs the test-only
-`native_gateway_probe` guest (an SDK-only bin of the e2e crate; never staged or
-packaged) into a temporary files dir, grants exactly one ephemeral loopback TCP
-port, and spawns it through `PluginSession::spawn_with` with
-`Isolation::Required`. The session goes through host discovery and launch
-planning, `bookclerk-jail`, `bookclerk-workerd` + pinned `workerd`, the nested
-deny-network jail and the platform socket proxy (on Windows, the host-created
-nested AppContainer and its Package-SID pipe ACL). It asserts, against
-harness-held listeners:
+`crates/bookclerk-plugin-e2e/tests/native_gateway.rs` (plus
+`native_gateway_isolation.rs` and `native_gateway_lifecycle.rs`) installs the
+test-only `native_gateway_probe` guest (an SDK-only bin of the e2e crate;
+never staged or packaged) into a temporary files dir, grants exactly one
+ephemeral loopback TCP port, and spawns it through `PluginSession::spawn_with`
+with `Isolation::Required`. The session goes through host discovery and
+launch planning, then two sibling `bookclerk-jail` processes:
+`bookclerk-workerd` + pinned `workerd` in the gateway jail, and the native
+backend in a deny-network sibling joined by inherited duplex links (on
+Windows, two host-created AppContainers plus a session Job; no named-pipe
+`SOCKET_PROXY`). It asserts, against harness-held listeners:
 
 - describe/open and a real CLI entrypoint RPC answer through the front door;
 - a unique payload round-trips through `bookclerk_plugin_sdk::net::connect`
@@ -214,12 +216,17 @@ harness-held listeners:
 - a second, live listener on an ungranted port is refused by policy (`403`)
   and is never dialed;
 - a direct `std::net` connect from the guest to the live granted listener is
-  blocked.
+  blocked;
+- both `gateway_pid()` and `guest_pid()` exit after drop, the host session
+  directory is gone, and the guest cannot read gateway state or
+  `WORKERD_GRANT_*` / `BOOKCLERK_JAIL_*` env;
+- two concurrent sessions cannot use each other's inherited link values;
+- guest-exit / missing-workerd / mid-session kill fail closed.
 
 Nothing skips: a missing helper, runtime, confinement backend, startup failure
-or timeout fails the test. Smoke-only inputs (the target, `tests/native_gateway/`
-and the fixture guest source) select `native_gateway` but not the staged E2E
-suite.
+or timeout fails the test. Smoke-only inputs (the three targets,
+`tests/native_gateway/`, and the fixture guest source) select
+`native_gateway` but not the staged E2E suite.
 
 ## Branch protection / merge queue
 

@@ -20,13 +20,15 @@ use std::sync::Mutex;
 /// Env var set by `bookclerk-workerd` for native-behind-workerd guests.
 pub const SOCKET_PROXY_ENV: &str = "BOOKCLERK_SOCKET_PROXY";
 
-/// Host sets this to `1` so the native backend is nested under `NetPolicy::Deny`.
+/// Optional fail-closed flag: deny ambient TCP when [`SOCKET_PROXY_ENV`] is unset.
 ///
-/// SDK HTTP and native TCP fail closed when this is set and
-/// [`SOCKET_PROXY_ENV`] is unset.
+/// The host no longer sets this (sibling Deny + inherited `SOCKET_PROXY` is
+/// the production contract). SDK HTTP and native TCP still fail closed when
+/// this is `1` without a proxy, so tests and older launchers cannot fall
+/// through to `socket(AF_INET)`.
 pub const NESTED_NATIVE_JAIL_ENV: &str = "BOOKCLERK_NESTED_NATIVE_JAIL";
 
-/// True when the host nested the native backend under `NetPolicy::Deny`.
+/// True when [`NESTED_NATIVE_JAIL_ENV`] is `1`.
 #[must_use]
 pub fn nested_native_jail_requested() -> bool {
     std::env::var(NESTED_NATIVE_JAIL_ENV).as_deref() == Ok("1")

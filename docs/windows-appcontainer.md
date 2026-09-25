@@ -20,6 +20,40 @@ Implemented in `bookclerk-sandbox` (`windows_launch.rs`), not rappct 0.13.3:
 
 Test hook: `BOOKCLERK_TEST_FAIL_JOB_ASSIGN=1` forces fail-closed teardown.
 
+## Sibling native-behind-workerd
+
+The host never nests an AppContainer. Microsoft documents that pipes created
+inside a container must use `\\.\pipe\LOCAL\` and that pipes cannot be used
+between different AppContainers (Win10 1709+). Creating a second container
+from inside one also fails. So `bookclerk-workerd` cannot spawn or name-connect
+the native backend.
+
+Instead the unsandboxed host:
+
+1. Creates two duplex links (guest stdio = two unidirectional pipes with the
+   launcher end overlapped; proxy = one duplex overlapped pipe). Names are
+   random, owner-only DACL, `reject_remote_clients`, closed to further
+   clients immediately.
+2. Spawns two `bookclerk-jail.exe` processes (gateway `OutboundListen`, guest
+   `NetPolicy::Deny`). Isolation::Off still goes through the jail with
+   `Enforcement::Disabled` so handle handoff has a single-threaded parent.
+3. `DuplicateHandle`s each link end into the matching jail, then writes one
+   bounded JSON handoff line on that jail's stdin
+   (`BOOKCLERK_JAIL_HANDOFF=1`). The jail marks the duplicates inheritable,
+   puts them on `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, and exports
+   `handle:<n>` env. The host never marks a handle inheritable itself.
+4. Assigns both jail processes to one session Job (`KILL_ON_JOB_CLOSE` plus
+   the grant's aggregate memory / active-process / CPU limits). Each jail's
+   own Job still nests under it.
+
+The guest never opens a named pipe for RPC or `SOCKET_PROXY`. OAuth callback
+pipes stay host-created and ACLed to the **guest** Package SID. Isolation::Required
+fails closed if either profile or the session Job cannot be created.
+
+Permanent tests: E2 (inherited pipe + ambient TCP denied), E2b (two
+AppContainers on one inherited duplex), E3 (same-container loopback for the
+workerd bridge), E5 (closing the session Job kills the tree).
+
 ## Profile folder
 
 `GetAppContainerFolderPath` is authoritative when the path is under Known Folder
@@ -59,7 +93,7 @@ label (`S:(ML;;NW;;;LW)`). See [plugins.md](plugins.md) (Interactive listeners).
 | | Plugins | Media |
 | --- | --- | --- |
 | Job memory (cumulative) | 512 MiB | 2 GiB |
-| Active processes | overhead + extra (native 1+2=3, workerd 2+2=4 by default) | 64 |
+| Active processes | overhead + extra (direct-native 1+2=3, isolate 2+2=4, native-behind session 3+extra split gateway 2 / guest 1+extra) | 64 |
 | CPU rate | 80% of one core hard cap | uncapped |
 | Stderr proxy budget | 1 MiB | 16 MiB |
 | data/tmp growth (plan + side-pass) | 512 MiB each | n/a |

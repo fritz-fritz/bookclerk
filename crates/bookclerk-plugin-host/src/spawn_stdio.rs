@@ -3,9 +3,9 @@
 #![allow(clippy::missing_docs_in_private_items)]
 #![cfg_attr(unix, allow(unsafe_code))] // `Command::pre_exec` + `inherit_fd_at` (dup2).
 
-use std::collections::VecDeque;
 #[cfg(test)]
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
