@@ -63,6 +63,7 @@ mod fetch_dir;
 pub mod http;
 mod json;
 mod manifest_caps;
+pub mod mux;
 pub mod net;
 mod pass_fd;
 pub mod protocol;

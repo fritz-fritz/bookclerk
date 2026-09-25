@@ -14,6 +14,14 @@ npm bridge described in `src/workerd.rs`.
 | `db` | SeaORM ↔ Workers RPC DTO helpers for database guests |
 | `http` | Native HTTPS through the workerd socket proxy |
 
+## Socket proxy (`BOOKCLERK_SOCKET_PROXY`)
+
+Native-behind-workerd guests now receive an inherited link (`fd:<n>` on Unix,
+`handle:<n>` on Windows) and multiplex CONNECT streams over [`mux`]. Older SDKs
+that only open a pathname / named-pipe proxy cannot reach the host; they fail
+closed (no ambient TCP). Pathname, `abstract:`, and `\\.\pipe\` forms remain
+for tests.
+
 The `bookclerk-plugin` author CLI (`check` / `fmt` / `sync-embed` / `package` /
 `smoke`) lives in [`bookclerk-plugin-tools`](../bookclerk-plugin-tools), so
 guests depending on this SDK never pull `bookclerk-workerd`:

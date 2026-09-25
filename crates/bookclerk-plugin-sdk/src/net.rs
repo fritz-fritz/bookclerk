@@ -1,17 +1,16 @@
 //! Mediated TCP sockets for native guests (Workers `connect()` equivalent).
 //!
 //! Native plugins must not call `socket(AF_INET)` / `connect` themselves. The
-//! nested jail denies ambient internet; this module speaks HTTP CONNECT to the
-//! host socket proxy (`BOOKCLERK_SOCKET_PROXY`) which applies the same
+//! guest jail denies ambient internet; this module speaks HTTP CONNECT through
+//! `BOOKCLERK_SOCKET_PROXY`, which applies the same
 //! [`bookclerk_plugin_manifest::EgressPolicy`] as workerd `fetch()`/`connect()`.
 //!
-//! On Linux the launcher sets `BOOKCLERK_SOCKET_PROXY=/proc/self/fd/{n}/sockets.sock`
-//! (nested Landlock ABI 6 scopes abstract Unix sockets out of the guest domain).
-//! `abstract:{name}` is still accepted for tests and older launchers.
-//! On Windows the launcher sets `BOOKCLERK_SOCKET_PROXY=\\.\pipe\bc-s-{hex}` with a
-//! Package-SID DACL so the nested AppContainer guest can CONNECT.
+//! Production native-behind-workerd sets `fd:<n>` or `handle:<n>` and multiplexes
+//! CONNECT streams over that inherited link ([`crate::mux`]). Pathname,
+//! `abstract:`, and `\\.\pipe\` forms remain for tests and older launchers.
 
 #![allow(clippy::missing_docs_in_private_items)]
+#![allow(unsafe_code)] // inherited fd:/handle: → UnixStream / NamedPipeClient.
 
 use crate::error::{Result, SdkError};
 
@@ -44,11 +43,77 @@ pub(crate) static SOCKET_PROXY_ENV_LOCK: Mutex<()> = Mutex::new(());
 pub const SOCKET_PROXY_ABSTRACT_PREFIX: &str = "abstract:";
 
 /// Byte stream to the host CONNECT proxy (past the HTTP handshake).
-#[cfg(unix)]
-pub type ProxyStream = tokio::net::UnixStream;
-/// Byte stream to the host CONNECT proxy (past the HTTP handshake).
-#[cfg(windows)]
-pub type ProxyStream = tokio::net::windows::named_pipe::NamedPipeClient;
+#[cfg(any(unix, windows))]
+pub enum ProxyStream {
+    /// Pathname / abstract Unix socket (tests and older launchers).
+    #[cfg(unix)]
+    Unix(tokio::net::UnixStream),
+    /// Windows named-pipe pathname (tests and older launchers).
+    #[cfg(windows)]
+    Pipe(tokio::net::windows::named_pipe::NamedPipeClient),
+    /// Inherited `fd:` / `handle:` multiplexed link.
+    Mux(crate::mux::MuxStream),
+}
+
+#[cfg(any(unix, windows))]
+impl tokio::io::AsyncRead for ProxyStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+            #[cfg(windows)]
+            Self::Pipe(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+            Self::Mux(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl tokio::io::AsyncWrite for ProxyStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+            #[cfg(windows)]
+            Self::Pipe(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+            Self::Mux(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+            #[cfg(windows)]
+            Self::Pipe(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+            Self::Mux(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+            #[cfg(windows)]
+            Self::Pipe(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+            Self::Mux(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
 
 /// Destination for [`connect`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,7 +181,11 @@ impl PluginSocket {
         &mut self.stream
     }
 
-    /// Split into owned reader/writer halves.
+    /// Split into owned reader/writer halves (pathname Unix sockets only).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the proxy is a multiplexed `fd:` / `handle:` link.
     #[cfg(unix)]
     #[must_use]
     pub fn into_split(
@@ -125,7 +194,13 @@ impl PluginSocket {
         tokio::net::unix::OwnedReadHalf,
         tokio::net::unix::OwnedWriteHalf,
     ) {
-        self.stream.into_split()
+        match self.stream {
+            ProxyStream::Unix(stream) => stream.into_split(),
+            ProxyStream::Mux(_) => panic!(
+                "PluginSocket::into_split requires a Unix pathname SOCKET_PROXY; \
+                 mux links stay on PluginSocket::stream"
+            ),
+        }
     }
 
     /// Consumes the socket, returning the CONNECT-established proxy stream.
@@ -136,10 +211,19 @@ impl PluginSocket {
     }
 
     /// Consumes the socket, returning the CONNECT-established Unix stream.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the proxy is a multiplexed `fd:` / `handle:` link.
     #[cfg(unix)]
     #[must_use]
     pub fn into_unix_stream(self) -> tokio::net::UnixStream {
-        self.into_stream()
+        match self.into_stream() {
+            ProxyStream::Unix(stream) => stream,
+            ProxyStream::Mux(_) => {
+                panic!("PluginSocket::into_unix_stream requires a Unix pathname SOCKET_PROXY")
+            }
+        }
     }
 
     /// Start TLS on a `starttls` socket.
@@ -222,89 +306,123 @@ pub async fn connect(address: SocketAddress, options: ConnectOptions) -> Result<
     }
 }
 
-#[cfg(unix)]
-/// Connects to the host socket proxy (pathname or Linux `abstract:` name).
+#[cfg(any(unix, windows))]
+/// Connects to the host socket proxy (`fd:`/`handle:`, pathname, or `abstract:`).
 ///
 /// # Errors
 ///
-/// Returns an I/O error when the proxy cannot be reached, or a message when
-/// `abstract:` is used off Linux.
+/// Returns an I/O error when the proxy cannot be reached.
 async fn connect_proxy(spec: &str) -> Result<ProxyStream> {
-    use tokio::net::UnixStream;
-    if let Some(name) = spec.strip_prefix(SOCKET_PROXY_ABSTRACT_PREFIX) {
-        return connect_abstract(name).await;
+    if spec.starts_with("fd:") || spec.starts_with("handle:") {
+        return open_mux_proxy(spec).await;
     }
-    #[cfg(target_os = "macos")]
-    if spec.len() >= MACOS_SUN_PATH_BYTES {
-        return Ok(UnixStream::connect(relative_to_cwd(std::path::Path::new(spec))?).await?);
+    #[cfg(unix)]
+    {
+        use tokio::net::UnixStream;
+        if let Some(name) = spec.strip_prefix(SOCKET_PROXY_ABSTRACT_PREFIX) {
+            return Ok(ProxyStream::Unix(connect_abstract(name).await?));
+        }
+        return Ok(ProxyStream::Unix(UnixStream::connect(spec).await?));
     }
-    Ok(UnixStream::connect(spec).await?)
+    #[cfg(windows)]
+    {
+        use tokio::net::windows::named_pipe::ClientOptions;
+        let name = spec.strip_prefix("pipe:").unwrap_or(spec);
+        return Ok(ProxyStream::Pipe(ClientOptions::new().open(name)?));
+    }
 }
 
-/// `sizeof(sockaddr_un.sun_path)` on macOS, including the trailing NUL.
-#[cfg(target_os = "macos")]
-const MACOS_SUN_PATH_BYTES: usize = 104;
+/// Process-wide mux over the inherited `fd:` / `handle:` proxy link.
+#[cfg(any(unix, windows))]
+fn shared_mux(spec: &str) -> Result<crate::mux::Mux> {
+    use std::sync::{Mutex, OnceLock};
 
-/// Shortens a socket proxy path that overflows macOS `sun_path`.
-///
-/// macOS has neither `/proc/self/fd` nor a public `connectat(2)`, and the
-/// proxy lives under the plugin state directory, which routinely exceeds 104
-/// bytes. The guest's cwd is its install directory, a sibling of that state
-/// tree, so the path relative to cwd is short. Both sides are resolved
-/// physically first (`/var` → `/private/var`). The result is only valid while
-/// the process cwd stays put.
-///
-/// # Errors
-///
-/// Returns an error when either side cannot be resolved or the relative path
-/// still overflows `sun_path`.
-#[cfg(target_os = "macos")]
-fn relative_to_cwd(path: &std::path::Path) -> Result<std::path::PathBuf> {
-    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        return Err(SdkError::message(format!(
-            "socket proxy path {} has no parent directory",
-            path.display()
-        )));
-    };
-    let target = std::fs::canonicalize(parent)?.join(name);
-    let cwd = std::fs::canonicalize(std::env::current_dir()?)?;
-    let relative = lexical_relative(&target, &cwd);
-    if relative.as_os_str().len() >= MACOS_SUN_PATH_BYTES {
-        return Err(SdkError::message(format!(
-            "socket proxy path {} overflows sun_path even relative to cwd {}",
-            path.display(),
-            cwd.display()
-        )));
+    static MUX: OnceLock<Mutex<Option<std::result::Result<crate::mux::Mux, String>>>> =
+        OnceLock::new();
+    let slot = MUX.get_or_init(|| Mutex::new(None));
+    let mut guard = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = guard.as_ref() {
+        return match existing {
+            Ok(mux) => Ok(mux.clone()),
+            Err(err) => Err(SdkError::message(err.clone())),
+        };
     }
-    Ok(relative)
+    match open_inherited_mux(spec) {
+        Ok(mux) => {
+            *guard = Some(Ok(mux.clone()));
+            Ok(mux)
+        }
+        Err(err) => {
+            let msg = err.to_string();
+            *guard = Some(Err(msg.clone()));
+            Err(SdkError::message(msg))
+        }
+    }
 }
 
-/// `target` expressed relative to directory `base`; both must be absolute.
-#[cfg(any(target_os = "macos", all(test, unix)))]
-fn lexical_relative(target: &std::path::Path, base: &std::path::Path) -> std::path::PathBuf {
-    let target: Vec<_> = target.components().collect();
-    let base: Vec<_> = base.components().collect();
-    let common = target.iter().zip(&base).take_while(|(a, b)| a == b).count();
-    let mut out = std::path::PathBuf::new();
-    for _ in common..base.len() {
-        out.push("..");
+#[cfg(any(unix, windows))]
+async fn open_mux_proxy(spec: &str) -> Result<ProxyStream> {
+    let mux = shared_mux(spec)?;
+    Ok(ProxyStream::Mux(mux.open().await?))
+}
+
+#[cfg(any(unix, windows))]
+fn open_inherited_mux(spec: &str) -> Result<crate::mux::Mux> {
+    if let Some(rest) = spec.strip_prefix("fd:") {
+        #[cfg(unix)]
+        {
+            let fd: i32 = rest
+                .parse()
+                .map_err(|_| SdkError::message(format!("invalid fd link spec {spec}")))?;
+            return mux_from_unix_fd(fd);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = rest;
+            return Err(SdkError::message("fd: SOCKET_PROXY is Unix-only"));
+        }
     }
-    for part in &target[common..] {
-        out.push(part);
+    if let Some(rest) = spec.strip_prefix("handle:") {
+        #[cfg(windows)]
+        {
+            let value: u64 = rest
+                .parse()
+                .map_err(|_| SdkError::message(format!("invalid handle link spec {spec}")))?;
+            return mux_from_windows_handle(value);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = rest;
+            return Err(SdkError::message("handle: SOCKET_PROXY is Windows-only"));
+        }
     }
-    out
+    Err(SdkError::message(format!(
+        "socket proxy spec must be fd:<n> or handle:<n>, got {spec}"
+    )))
+}
+
+#[cfg(unix)]
+fn mux_from_unix_fd(fd: i32) -> Result<crate::mux::Mux> {
+    use std::os::fd::FromRawFd;
+    let std = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    std.set_nonblocking(true)?;
+    let tokio = tokio::net::UnixStream::from_std(std)?;
+    let (reader, writer) = tokio.into_split();
+    Ok(crate::mux::Mux::client(reader, writer))
 }
 
 #[cfg(windows)]
-/// Connects to the host SOCKET_PROXY named pipe.
-///
-/// # Errors
-///
-/// Returns an I/O error when `CreateFile` on the pipe fails.
-async fn connect_proxy(spec: &str) -> Result<ProxyStream> {
-    use tokio::net::windows::named_pipe::ClientOptions;
-    let name = spec.strip_prefix("pipe:").unwrap_or(spec);
-    Ok(ClientOptions::new().open(name)?)
+fn mux_from_windows_handle(value: u64) -> Result<crate::mux::Mux> {
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    let pipe = unsafe {
+        tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
+            value as usize as RawHandle,
+        )
+    };
+    let (reader, writer) = tokio::io::split(pipe);
+    Ok(crate::mux::Mux::client(reader, writer))
 }
 
 #[cfg(all(unix, target_os = "linux"))]
@@ -368,26 +486,6 @@ where
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    #[test]
-    fn lexical_relative_walks_up_to_the_common_ancestor() {
-        use std::path::Path;
-        assert_eq!(
-            lexical_relative(
-                Path::new("/files/plugin-state/pk-1/tmp/we2/sockets.sock"),
-                Path::new("/files/plugins/probe"),
-            ),
-            Path::new("../../plugin-state/pk-1/tmp/we2/sockets.sock")
-        );
-        assert_eq!(
-            lexical_relative(Path::new("/a/b/c.sock"), Path::new("/a/b")),
-            Path::new("c.sock")
-        );
-        assert_eq!(
-            lexical_relative(Path::new("/x/s.sock"), Path::new("/a/b")),
-            Path::new("../../x/s.sock")
-        );
-    }
 
     #[tokio::test]
     async fn connect_through_fake_proxy_and_403() {
@@ -510,6 +608,52 @@ mod tests {
         assert_eq!(&buf[..n], b"abs");
         sock.close().await.unwrap();
         server.await.unwrap();
+        std::env::remove_var(SOCKET_PROXY_ENV);
+    }
+
+    #[tokio::test]
+    async fn connect_through_inherited_fd_mux() {
+        use std::os::fd::IntoRawFd;
+
+        let _guard = SOCKET_PROXY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let (guest, gateway) = tokio::net::UnixStream::pair().expect("pair");
+        let guest_fd = guest.into_std().expect("into_std").into_raw_fd();
+        let (gr, gw) = gateway.into_split();
+        let server = crate::mux::Mux::server(gr, gw);
+        let server_task = tokio::spawn(async move {
+            let mut stream = server.accept().await.expect("accept");
+            let mut buf = vec![0_u8; 256];
+            let n = stream.read(&mut buf).await.expect("read connect");
+            assert!(
+                String::from_utf8_lossy(&buf[..n]).starts_with("CONNECT 127.0.0.1:9"),
+                "{}",
+                String::from_utf8_lossy(&buf[..n])
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .expect("200");
+            stream.write_all(b"mux").await.expect("body");
+        });
+
+        std::env::set_var(SOCKET_PROXY_ENV, format!("fd:{guest_fd}"));
+        let mut sock = connect(
+            SocketAddress {
+                hostname: "127.0.0.1".into(),
+                port: 9,
+            },
+            ConnectOptions::default(),
+        )
+        .await
+        .expect("mux connect");
+        let mut buf = [0_u8; 8];
+        let n = sock.stream().read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"mux");
+        sock.close().await.unwrap();
+        server_task.await.unwrap();
         std::env::remove_var(SOCKET_PROXY_ENV);
     }
 }
