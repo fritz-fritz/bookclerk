@@ -107,7 +107,9 @@ async fn killing_guest_errors_rpc_and_exits_gateway() {
     let guest = session.guest_pid().expect("guest");
     kill_pid(guest);
     wait_for_exit(guest).await;
-    let rpc = session.describe().await;
+    let rpc = tokio::time::timeout(ng_harness::RPC_TIMEOUT, session.describe())
+        .await
+        .expect("describe hung after the guest was killed");
     assert!(rpc.is_err(), "RPC must fail after the guest is killed");
     wait_for_exit(gateway).await;
     drop(session);
@@ -134,7 +136,10 @@ async fn grant_revision_bump_fences_the_live_session() {
     let deadline = Instant::now() + SPAWN_TIMEOUT;
     let mut fenced = false;
     while Instant::now() < deadline {
-        match session.describe().await {
+        match tokio::time::timeout(ng_harness::RPC_TIMEOUT, session.describe())
+            .await
+            .expect("describe hung while waiting for the grant fence")
+        {
             Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
             Err(_) => {
                 fenced = true;

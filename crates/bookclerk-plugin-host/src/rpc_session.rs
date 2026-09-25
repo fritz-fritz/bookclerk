@@ -1911,6 +1911,28 @@ async fn open_database_adapter(
         .ok_or_else(|| missing_entrypoint("databaseAdapter"))
 }
 
+/// True when the gateway or native guest has already exited.
+fn sibling_exited(
+    gateway: &mut tokio::process::Child,
+    guest: Option<&mut tokio::process::Child>,
+) -> bool {
+    gateway.try_wait().ok().flatten().is_some()
+        || guest.is_some_and(|child| child.try_wait().ok().flatten().is_some())
+}
+
+/// Resolves when the gateway or native guest exits.
+async fn sibling_exit(
+    gateway: &mut tokio::process::Child,
+    guest: &mut Option<tokio::process::Child>,
+) {
+    loop {
+        if sibling_exited(gateway, guest.as_mut()) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
 /// Short OS thread name (Linux `TASK_COMM_LEN` is 16 bytes including NUL).
 fn vat_thread_name(plugin_key: &str) -> String {
     let alias = plugin_key.rsplit('#').next().unwrap_or("plugin");
@@ -1994,11 +2016,40 @@ fn vat_thread(
                     String,
                     Box<dyn bookclerk_plugin_abi::AdapterTransaction>,
                 > = std::collections::HashMap::new();
-                while let Some(work) = rx.recv().await {
+                loop {
+                    // `try_wait` before taking work: a SIGKILL'd sibling is
+                    // already a zombie, and cancelling `Child::wait` inside
+                    // `select!` can drop that status so the next wait hangs.
+                    if sibling_exited(&mut child, guest.as_mut()) {
+                        tracing::info!("sibling exited; ending plugin vat");
+                        break;
+                    }
+                    let work = tokio::select! {
+                        biased;
+                        () = sibling_exit(&mut child, &mut guest) => {
+                            tracing::info!("sibling exited while idle; ending plugin vat");
+                            break;
+                        }
+                        work = rx.recv() => work,
+                    };
+                    let Some(work) = work else {
+                        break;
+                    };
                     match work {
                         Work::Shutdown => break,
                         Work::Describe { reply } => {
-                            let _ = reply.send(client.describe().await.map_err(map_abi));
+                            let described = tokio::select! {
+                                biased;
+                                () = sibling_exit(&mut child, &mut guest) => {
+                                    Err(PluginError::unavailable("plugin process exited"))
+                                }
+                                result = client.describe() => result.map_err(map_abi),
+                            };
+                            let dead = described.is_err();
+                            let _ = reply.send(described);
+                            if dead && sibling_exited(&mut child, guest.as_mut()) {
+                                break;
+                            }
                         }
                         Work::Open { values, reply } => {
                             let out = primary_entrypoints(
