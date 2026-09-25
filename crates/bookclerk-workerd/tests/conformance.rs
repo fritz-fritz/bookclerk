@@ -751,7 +751,7 @@ fn spawn_native_behind_workerd(
             .expect("chmod session");
     }
 
-    let (rpc_gw, rpc_guest) = DuplexLink::pair().expect("rpc link");
+    let (rpc_gw, rpc_guest) = DuplexLink::pair_for_guest_stdio().expect("rpc link");
     let (proxy_gw, proxy_guest) = DuplexLink::pair().expect("proxy link");
 
     let guest_child = spawn_sibling_guest(guest, rpc_guest, &proxy_guest, tmp, extra_env);

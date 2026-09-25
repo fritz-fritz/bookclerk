@@ -274,7 +274,9 @@ async fn spawn_siblings(
         PluginError::message("native-behind-workerd jail plan is missing the session directory")
     })?;
 
-    let (rpc_gateway, rpc_guest) = DuplexLink::pair()
+    // Guest stdin/stdout must be a synchronous pipe. The proxy stays a fully
+    // overlapped pair: both the gateway and the guest SDK wrap it in Tokio.
+    let (rpc_gateway, rpc_guest) = DuplexLink::pair_for_guest_stdio()
         .map_err(|err| PluginError::message(format!("could not create guest RPC link: {err}")))?;
     let (proxy_gateway, proxy_guest) = DuplexLink::pair().map_err(|err| {
         PluginError::message(format!("could not create socket-proxy link: {err}"))
