@@ -48,7 +48,7 @@ use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS,
     EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST,
     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESTDHANDLES, STARTUPINFOEXW,
@@ -408,10 +408,11 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
     let cwd_w = wide_os(request.cwd.as_os_str());
     let env_block = build_env_block(&request.env);
 
-    // CREATE_NO_WINDOW keeps conhost.exe out of the Job. A console host counts
-    // toward JOB_OBJECT_LIMIT_ACTIVE_PROCESS and would turn a 2-process
-    // gateway (launcher + workerd) into ERROR_ACCESS_DENIED on the next spawn.
-    let mut flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
+    // DETACHED_PROCESS keeps conhost.exe out of the Job. CREATE_NO_WINDOW still
+    // starts a hidden console host, and that host counts toward
+    // JOB_OBJECT_LIMIT_ACTIVE_PROCESS — a 2-process gateway (launcher + workerd)
+    // then fails the next CreateProcess with ERROR_ACCESS_DENIED.
+    let mut flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS;
     if !use_job_list {
         flags |= CREATE_SUSPENDED;
     }
@@ -451,7 +452,7 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
         flags = EXTENDED_STARTUPINFO_PRESENT
             | CREATE_UNICODE_ENVIRONMENT
             | CREATE_SUSPENDED
-            | CREATE_NO_WINDOW;
+            | DETACHED_PROCESS;
         pi = PROCESS_INFORMATION::default();
         cp = CreateProcessW(
             PCWSTR(exe_w.as_ptr()),

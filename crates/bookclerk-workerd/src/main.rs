@@ -45,9 +45,10 @@ use tracing::{info, warn};
 
 use crate::manifest_env::load_manifest;
 
-/// `CREATE_NO_WINDOW`. A console host would consume a Job active-process slot.
+/// `DETACHED_PROCESS`. `CREATE_NO_WINDOW` still starts conhost.exe, which
+/// consumes a Job active-process slot.
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -183,7 +184,7 @@ fn workerd_serve_command(
     workerd_bin: &Path,
     generated: &config::GeneratedConfig,
     root: &Path,
-) -> Result<tokio::process::Command> {
+) -> Result<(tokio::process::Command, PathBuf)> {
     let bin = bookclerk_sandbox::require_spawn_executable(workerd_bin)
         .with_context(|| format!("validate workerd binary {}", workerd_bin.display()))?;
     let config_path =
@@ -193,12 +194,12 @@ fn workerd_serve_command(
         .context("validate workerd --import-path")?;
 
     // Win32 form: an AppContainer CreateProcess on a `\\?\` path is access-denied
-    // even when the same file is readable. CREATE_NO_WINDOW keeps conhost out of
-    // the gateway Job's active-process cap.
+    // even when the same file is readable. DETACHED_PROCESS keeps conhost out of
+    // the gateway Job's active-process cap (`CREATE_NO_WINDOW` does not).
     let spawn_bin = bookclerk_sandbox::create_process_path(&bin);
     let mut cmd = tokio::process::Command::new(&spawn_bin);
     #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.creation_flags(DETACHED_PROCESS);
     cmd.arg("serve")
         // Unlocks the egress worker's `$experimental` inbound CONNECT handler.
         .arg(bookclerk_workerd::WORKERD_SERVE_EXPERIMENTAL);
@@ -211,7 +212,7 @@ fn workerd_serve_command(
         .stderr(Stdio::piped())
         .env("BOOKCLERK_PLUGIN_ROOT", root)
         .kill_on_drop(true);
-    Ok(cmd)
+    Ok((cmd, spawn_bin))
 }
 
 /// Materializes config, spawns workerd, mediates host stdio ↔ bridge HTTP, then kills the child.
@@ -280,7 +281,7 @@ async fn run_isolate(
         Some(state_dir.as_path()),
     )?;
 
-    let mut cmd = workerd_serve_command(workerd_bin, &generated, root)?;
+    let (mut cmd, spawn_bin) = workerd_serve_command(workerd_bin, &generated, root)?;
 
     #[cfg(unix)]
     if let Some(ref listener) = rpc_listener {
@@ -290,7 +291,7 @@ async fn run_isolate(
 
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("spawn {}", workerd_bin.display()))?;
+        .with_context(|| format!("spawn {}", spawn_bin.display()))?;
 
     // workerd now owns the listening socket; close our copy after spawn.
     drop(rpc_listener);
@@ -407,7 +408,7 @@ async fn run_native_behind_workerd(
         Some(state_dir.as_path()),
     )?;
 
-    let mut cmd = workerd_serve_command(&workerd_bin, &generated, root)?;
+    let (mut cmd, spawn_bin) = workerd_serve_command(&workerd_bin, &generated, root)?;
 
     #[cfg(unix)]
     if let Some(ref listener) = rpc_listener {
@@ -417,7 +418,7 @@ async fn run_native_behind_workerd(
 
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("spawn {}", workerd_bin.display()))?;
+        .with_context(|| format!("spawn {}", spawn_bin.display()))?;
     drop(rpc_listener);
     forward_child_logs(&mut child);
     wait_for_bridge(&generated.listen, &bridge_token)
