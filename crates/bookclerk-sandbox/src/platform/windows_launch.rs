@@ -877,8 +877,11 @@ fn launch_err(stage: &str, detail: &str) -> SandboxError {
 /// Nested per-guest Jobs created by the jail still work; this Job is the
 /// session-level `KILL_ON_JOB_CLOSE` cap (aggregate memory / PIDs / CPU).
 pub struct SessionJob {
-    /// Job object. Drop closes it and kills the tree (`KILL_ON_JOB_CLOSE`).
-    handle: HANDLE,
+    /// Owned job-object handle as an integer so `SessionJob` is `Send`.
+    ///
+    /// The kernel object can be used from the vat thread. Drop closes it and
+    /// kills the tree (`KILL_ON_JOB_CLOSE`). `0` means already closed.
+    handle: isize,
 }
 
 impl SessionJob {
@@ -899,7 +902,9 @@ impl SessionJob {
             let _ = unsafe { CloseHandle(job) };
             return Err(std::io::Error::other(err.to_string()));
         }
-        Ok(Self { handle: job })
+        Ok(Self {
+            handle: job.0 as isize,
+        })
     }
 
     /// Assign an already-started process (typically `bookclerk-jail.exe`).
@@ -909,17 +914,23 @@ impl SessionJob {
     /// Returns an I/O error when `AssignProcessToJobObject` fails.
     pub fn assign(&self, process: RawHandle) -> std::io::Result<()> {
         unsafe {
-            AssignProcessToJobObject(self.handle, HANDLE(process)).map_err(std::io::Error::other)
+            AssignProcessToJobObject(self.as_handle(), HANDLE(process))
+                .map_err(std::io::Error::other)
         }
+    }
+
+    /// Reconstruct the Win32 job handle from the stored integer.
+    fn as_handle(&self) -> HANDLE {
+        HANDLE(self.handle as *mut std::ffi::c_void)
     }
 }
 
 impl Drop for SessionJob {
     fn drop(&mut self) {
-        if !self.handle.is_invalid() {
+        if self.handle != 0 {
             // Closing the Job kills the tree (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
-            let _ = unsafe { CloseHandle(self.handle) };
-            self.handle = HANDLE::default();
+            let _ = unsafe { CloseHandle(self.as_handle()) };
+            self.handle = 0;
         }
     }
 }

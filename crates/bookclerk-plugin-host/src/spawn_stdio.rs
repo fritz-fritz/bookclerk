@@ -496,8 +496,7 @@ async fn windows_handoff_gateway(
     rpc: &DuplexLink,
     proxy: &DuplexLink,
 ) -> Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    let target = child.as_raw_handle();
+    let target = process_handle(child)?;
     let rpc_h = bookclerk_sandbox::duplicate_handle_into(rpc.as_raw_handle(), target)
         .map_err(|err| PluginError::message(format!("DuplicateHandle gateway RPC: {err}")))?;
     let proxy_h = bookclerk_sandbox::duplicate_handle_into(proxy.as_raw_handle(), target)
@@ -526,8 +525,7 @@ async fn windows_handoff_guest(
     rpc: &DuplexLink,
     proxy: &DuplexLink,
 ) -> Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    let target = child.as_raw_handle();
+    let target = process_handle(child)?;
     let rpc_h = bookclerk_sandbox::duplicate_handle_into(rpc.as_raw_handle(), target)
         .map_err(|err| PluginError::message(format!("DuplicateHandle guest RPC: {err}")))?;
     let proxy_h = bookclerk_sandbox::duplicate_handle_into(proxy.as_raw_handle(), target)
@@ -574,9 +572,15 @@ async fn write_handoff_line(child: &mut Child, handoff: &JailHandoff) -> Result<
 
 #[cfg(windows)]
 fn assign_job(job: &bookclerk_sandbox::SessionJob, child: &Child) -> Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    job.assign(child.as_raw_handle())
+    job.assign(process_handle(child)?)
         .map_err(|err| PluginError::message(format!("AssignProcessToJobObject: {err}")))
+}
+
+#[cfg(windows)]
+fn process_handle(child: &Child) -> Result<std::os::windows::io::RawHandle> {
+    child
+        .raw_handle()
+        .ok_or_else(|| PluginError::message("jail process handle is gone"))
 }
 
 #[cfg(windows)]
