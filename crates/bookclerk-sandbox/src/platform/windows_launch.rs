@@ -195,6 +195,7 @@ pub fn launch_appcontainer_guest(
 ///
 /// Drop closes the kill-on-close Job and terminates the process tree.
 pub struct HandleListChild {
+    /// Running guest. Drop closes the Job and kills the tree.
     inner: LaunchedGuest,
 }
 
@@ -254,12 +255,14 @@ pub fn spawn_with_handle_list(
     Ok(HandleListChild { inner: guest })
 }
 
+/// Drop Rust ownership so CreateProcess can close the raw handle itself.
 fn forget_raw(handle: OwnedHandle) -> HANDLE {
     let raw = handle.as_raw_handle();
     std::mem::forget(handle);
-    HANDLE(raw as *mut std::ffi::c_void)
+    HANDLE(raw)
 }
 
+/// Quote `exe` for `lpCommandLine` when the path contains spaces or quotes.
 fn quote_exe(exe: &Path) -> String {
     let text = exe.as_os_str().to_string_lossy();
     if text.chars().any(|ch| ch == ' ' || ch == '\t' || ch == '"') {
