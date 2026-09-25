@@ -488,6 +488,7 @@ fn test_staged(root: &Path, release: bool, skip_build: bool, plugin_ids: &[Strin
     let files_dir = default_files_dir();
     let artifacts = default_artifacts(root);
     let full = plugin_ids.is_empty();
+    let stage_skip_build = stage_plugins_skip_build(skip_build, full);
     if !skip_build {
         plugins::build_selection(
             root,
@@ -502,7 +503,13 @@ fn test_staged(root: &Path, release: bool, skip_build: bool, plugin_ids: &[Strin
     let _ = ensure_workerd_for_profile(root, release)?;
     plugins::install_platform(root, &files_dir, release)?;
     plugins::stage_plugins(
-        root, &artifacts, release, full, full, plugin_ids, skip_build,
+        root,
+        &artifacts,
+        release,
+        full,
+        full,
+        plugin_ids,
+        stage_skip_build,
     )?;
 
     let mut cmd = cargo(root);
@@ -539,5 +546,35 @@ fn test_staged(root: &Path, release: bool, skip_build: bool, plugin_ids: &[Strin
         Ok(())
     } else {
         bail!("staged plugin test exited with {status}");
+    }
+}
+
+/// Whether `stage_plugins` should build again during `test-staged`.
+///
+/// A full run already built platform, optional, and example packages, so
+/// staging must not rebuild them. A subset run only built the platform, so
+/// selected guests are built while staging. `--skip-build` skips both phases.
+fn stage_plugins_skip_build(skip_build: bool, full: bool) -> bool {
+    skip_build || full
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stage_plugins_skip_build;
+
+    #[test]
+    fn full_staged_test_stages_without_rebuilding() {
+        assert!(stage_plugins_skip_build(false, true));
+    }
+
+    #[test]
+    fn subset_staged_test_builds_selected_guests_while_staging() {
+        assert!(!stage_plugins_skip_build(false, false));
+    }
+
+    #[test]
+    fn skip_build_skips_the_stage_build() {
+        assert!(stage_plugins_skip_build(true, true));
+        assert!(stage_plugins_skip_build(true, false));
     }
 }
