@@ -151,9 +151,7 @@ impl PluginCli for Probe {
             });
         }
         let host = arg(&params, "host");
-        let port: u16 = arg(&params, "port")
-            .parse()
-            .map_err(|err| PluginError::invalid_params(format!("port: {err}")))?;
+        let port: u16 = arg(&params, "port").parse().unwrap_or(0);
         let outcome = match arg(&params, "op") {
             "connect" => match mediated(host, port, arg(&params, "payload")).await {
                 Ok(echo) => serde_json::json!({ "ok": true, "echo": echo }),
@@ -163,6 +161,25 @@ impl PluginCli for Probe {
                 Ok(()) => serde_json::json!({ "ok": true }),
                 Err(error) => serde_json::json!({ "ok": false, "error": error }),
             },
+            "env_keys" => {
+                let mut keys: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+                keys.sort();
+                let proxy = std::env::var(bookclerk_plugin_sdk::SOCKET_PROXY_ENV).ok();
+                serde_json::json!({ "ok": true, "keys": keys, "socket_proxy": proxy })
+            }
+            "read_path" => {
+                let path = arg(&params, "payload");
+                match std::fs::read(path) {
+                    Ok(bytes) => serde_json::json!({
+                        "ok": true,
+                        "len": bytes.len(),
+                    }),
+                    Err(err) => serde_json::json!({
+                        "ok": false,
+                        "error": format!("{:?}: {err}", err.kind()),
+                    }),
+                }
+            }
             other => {
                 return Err(PluginError::invalid_params(format!("unknown op `{other}`")));
             }
@@ -177,6 +194,9 @@ impl PluginCli for Probe {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("BOOKCLERK_PROBE_EXIT").is_some() {
+        return Ok(());
+    }
     serve(Root).await?;
     Ok(())
 }

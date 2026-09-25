@@ -72,10 +72,14 @@ CONFINEMENT_PACKAGES = (
     "bookclerk-media-worker",
     "bookclerk-jail",
 )
-# Staged-installation targets of the e2e crate. `native_gateway` is its own
+# Staged-installation targets of the e2e crate. `native_gateway*` is its own
 # check (three OSes) and must not run again here.
 E2E_STAGED_TARGETS = ("--lib", "--test", "staged_plugins", "--test", "installed_plugin_path")
-NATIVE_GATEWAY_TEST = "native_gateway"
+NATIVE_GATEWAY_TESTS = (
+    "native_gateway",
+    "native_gateway_isolation",
+    "native_gateway_lifecycle",
+)
 POSTGRES_STEPS: dict[str, tuple[str, list[str]]] = {
     "library_queue": (
         "Postgres job-queue tests",
@@ -536,10 +540,14 @@ def check_commands(check: str, plan: Plan, ctx: Context) -> list[Command]:
             ]
         elif ctx.os_name == "Darwin":
             cmds.append(Command("bookclerk-workerd lib tests", ["cargo", "test", "-p", "bookclerk-workerd", "--lib"]))
+        smoke = ["cargo", "test", "-p", E2E_PACKAGE]
+        for target in NATIVE_GATEWAY_TESTS:
+            smoke.extend(["--test", target])
+        smoke.extend(["--", "--nocapture"])
         cmds.append(
             Command(
                 "native-behind-workerd gateway smoke",
-                ["cargo", "test", "-p", E2E_PACKAGE, "--test", NATIVE_GATEWAY_TEST, "--", "--nocapture"],
+                smoke,
                 env=runtime_env,
             )
         )
