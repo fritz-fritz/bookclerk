@@ -1047,28 +1047,23 @@ def plan_from_event(
             guests=guests,
         )
     except PlanError as exc:
-        plan = Plan(changed_paths=changed)
-        plan.mark_full(f"planner error: {exc}")
+        # A recoverable error (for example an unavailable diff) still runs the
+        # normal full plan. An incomplete handwritten plan is not executable:
+        # without metadata or the guest inventory, resolve must fail.
+        reason = f"planner error: {exc}"
         try:
             meta = load_metadata(workspace_root, metadata)
             index = package_index_from_metadata(meta)
             rel = relations or load_relations()
             guests = discover_guests(workspace_root or index.workspace_root, index)
-            return build_plan(
-                changed, index, rel, force_full=True, force_full_reason=plan.reasons[0], guests=guests
-            )
-        except PlanError:
-            # Without metadata nothing can be scoped: every job, workspace-wide.
-            plan.checks = {c: {"why": plan.reasons[:], "params": {}, "prereqs": []} for c in ALL_CHECKS}
-            plan.checks["clippy"]["params"] = {"workspace": True}
-            plan.checks["api_docs"]["params"] = {"all": True}
-            plan.checks["doctest"]["params"] = {"workspace": True}
-            plan.checks["rust_test"]["params"] = {"workspace": True, "exclude": [E2E_PACKAGE]}
-            plan.checks["e2e"]["params"] = {"scope": "full"}
-            plan.checks["release"]["params"] = {"mode": "full"}
-            plan.checks["postgres"]["params"] = {"steps": []}
-            _derive_jobs(plan)
-            return plan
+        except PlanError as blocked:
+            raise PlanError(
+                f"{reason}; cannot build a prerequisite-complete full plan "
+                f"(metadata, relations, and guest inventory are required): {blocked}"
+            ) from blocked
+        return build_plan(
+            changed, index, rel, force_full=True, force_full_reason=reason, guests=guests
+        )
 
 
 # ---------------------------------------------------------------------------

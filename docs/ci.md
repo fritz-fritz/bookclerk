@@ -96,6 +96,11 @@ Each changed path (renames contribute old and new paths) is classified:
 | `docs/**` | Nothing beyond the plan job's always-on lint tests |
 | Root `Cargo.toml` / `Cargo.lock`, toolchain, `.cargo/`, workflows, the planner, `fuzz/`, unknown or unclassified paths, planner errors | **Full suite** |
 
+A planner error still uses that normal full plan when metadata, relations, and
+the guest inventory are available (an unavailable diff is the usual case).
+If those inputs are missing, `ci-exec.py resolve` fails instead of publishing
+a plan with empty prerequisites.
+
 `Cargo.lock` stays a full-suite trigger in this iteration; dependency-update
 precision can follow.
 

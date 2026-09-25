@@ -8,6 +8,7 @@ prerequisites, and the exact commands ``ci-exec.py run`` would issue.
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import os
 import shutil
@@ -49,6 +50,7 @@ from ci_plan.plan import (  # noqa: E402
     load_relations,
     package_for_path,
     package_index_from_metadata,
+    PlanError,
     plan_from_dict,
     plan_from_event,
     plan_to_dict,
@@ -460,6 +462,63 @@ class FullSuiteTests(unittest.TestCase):
         p = plan_from_event(base=None, head=None, metadata=META, paths=None, workspace_root=REPO)
         self.assert_full(p)
         self.assertTrue(any("planner error" in r for r in p.reasons))
+        self.assertTrue(p.prereqs("e2e"))
+        self.assertEqual(p.params("postgres")["steps"], list(RELATIONS.postgres_steps))
+
+    def test_persistent_metadata_failure_is_not_executable(self) -> None:
+        with mock.patch("ci_plan.plan.load_metadata", side_effect=PlanError("cargo metadata failed: boom")):
+            with self.assertRaises(PlanError) as ctx:
+                plan_from_event(
+                    base="a", head="b", metadata=None, paths=["docs/a.md"], workspace_root=REPO
+                )
+        message = str(ctx.exception)
+        self.assertIn("cargo metadata failed", message)
+        self.assertIn("prerequisite-complete", message)
+
+    def test_persistent_guest_discovery_failure_is_not_executable(self) -> None:
+        with mock.patch("ci_plan.plan.discover_guests", side_effect=PlanError("cannot parse plugin.toml")):
+            with self.assertRaises(PlanError) as ctx:
+                plan_from_event(
+                    base="a",
+                    head="b",
+                    metadata=META,
+                    paths=["docs/a.md"],
+                    workspace_root=REPO,
+                )
+        message = str(ctx.exception)
+        self.assertIn("cannot parse plugin.toml", message)
+        self.assertIn("prerequisite-complete", message)
+
+    def test_unavailable_diff_still_builds_the_normal_full_plan(self) -> None:
+        with mock.patch("ci_plan.plan.list_changed_paths", side_effect=PlanError("git diff failed: boom")):
+            p = plan_from_event(base="a", head="b", metadata=META, paths=None, workspace_root=REPO)
+        self.assert_full(p)
+        self.assertTrue(any("git diff failed" in r for r in p.reasons))
+        kinds = [item["kind"] for item in p.prereqs("e2e")]
+        self.assertEqual(kinds, ["build", "ensure_workerd", "install_platform", "stage_plugins"])
+        self.assertTrue(next(item for item in p.prereqs("e2e") if item["kind"] == "stage_plugins")["all"])
+        self.assertEqual(p.params("postgres")["steps"], list(RELATIONS.postgres_steps))
+
+    def test_resolve_failure_publishes_no_artifact_or_success_outputs(self) -> None:
+        spec = importlib.util.spec_from_file_location("ci_exec_cli", SCRIPTS / "ci-exec.py")
+        assert spec is not None and spec.loader is not None
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        with tempfile.TemporaryDirectory(prefix="bc-resolve-") as tmp:
+            root = Path(tmp)
+            plan_path = root / "ci-plan" / "ci-plan.json"
+            output = root / "github_output"
+            summary = root / "summary"
+            output.write_text("before\n", encoding="utf-8")
+            summary.write_text("before\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)}):
+                with mock.patch("ci_plan.plan.load_metadata", side_effect=PlanError("cargo metadata failed: boom")):
+                    code = cli.main(["--plan", str(plan_path), "resolve", "--paths", "docs/a.md", "--run-id", "local"])
+            self.assertEqual(code, 1)
+            self.assertFalse(plan_path.exists())
+            self.assertFalse(plan_path.parent.exists())
+            self.assertEqual(output.read_text(encoding="utf-8"), "before\n")
+            self.assertEqual(summary.read_text(encoding="utf-8"), "before\n")
 
     def test_force_full(self) -> None:
         self.assert_full(build_plan(["docs/x.md"], INDEX, RELATIONS, force_full=True, guests=GUESTS))
