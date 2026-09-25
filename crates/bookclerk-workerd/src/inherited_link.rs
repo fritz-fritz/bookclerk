@@ -170,6 +170,7 @@ fn open_windows_handle(value: u64) -> Result<InheritedDuplex> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use bookclerk_sandbox::DuplexLink;
 
     #[cfg(unix)]

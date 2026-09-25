@@ -791,7 +791,7 @@ fn spawn_sibling_guest(
         .env("HOME", tmp)
         .env(SOCKET_PROXY_ENV, format!("handle:{}", proxy.handle_value()))
         .kill_on_drop(true);
-    cmd.inherit_handles(true);
+    cmd.as_std_mut().inherit_handles(true);
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
@@ -868,7 +868,7 @@ fn spawn_sibling_gateway(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
-    cmd.inherit_handles(true);
+    cmd.as_std_mut().inherit_handles(true);
     cmd.spawn().expect("spawn native-behind-workerd gateway")
 }
 
