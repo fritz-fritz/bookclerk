@@ -42,7 +42,7 @@ pub use link::{
 pub use link::inherit_fd_at;
 
 #[cfg(windows)]
-pub use link::duplicate_handle_into;
+pub use link::{duplicate_handle_into, duplicate_handle_local, duplicate_owned_handle};
 pub use platform::BACKEND;
 
 /// Linux session-cgroup constructor used by the plugin host.
@@ -76,6 +76,9 @@ pub mod spawn {
 
     #[cfg(windows)]
     pub use crate::platform::windows_spawn::dacl_mentions_sid;
+
+    #[cfg(windows)]
+    pub use crate::platform::windows_launch::{spawn_with_handle_list, HandleListChild};
 
     /// Former name of [`run_appcontainer`]; kept as a thin alias for callers.
     pub use run_appcontainer as spawn_appcontainer;

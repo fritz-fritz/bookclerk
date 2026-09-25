@@ -20,7 +20,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::{FromRawHandle, RawHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::time::Duration;
@@ -189,6 +189,84 @@ pub fn launch_appcontainer_guest(
     request: LaunchRequest<'_>,
 ) -> Result<LaunchedGuest, SandboxError> {
     unsafe { launch_impl(request) }
+}
+
+/// Child of [`spawn_with_handle_list`].
+///
+/// Drop closes the kill-on-close Job and terminates the process tree.
+pub struct HandleListChild {
+    inner: LaunchedGuest,
+}
+
+impl HandleListChild {
+    /// Parent write end when stdin was not an explicit inherited handle.
+    pub fn take_stdin(&mut self) -> Option<File> {
+        self.inner.stdin.take()
+    }
+
+    /// Parent read end when stdout was not an explicit inherited handle.
+    pub fn take_stdout(&mut self) -> Option<File> {
+        self.inner.stdout.take()
+    }
+
+    /// Parent read end of the stderr pipe.
+    pub fn take_stderr(&mut self) -> Option<File> {
+        self.inner.stderr.take()
+    }
+}
+
+/// Spawn `exe` with no AppContainer, inheriting only the listed handles.
+///
+/// Stdio handles and `extra` are placed on `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
+/// This is the stable replacement for `CommandExt::inherit_handles`, which does
+/// not inherit every inheritable handle in the parent. `stdin`, `stdout`, and
+/// `extra` are closed in this process after the child inherits them.
+///
+/// # Errors
+///
+/// Returns [`SandboxError::Backend`] when CreateProcess fails.
+pub fn spawn_with_handle_list(
+    exe: &Path,
+    cwd: &Path,
+    env: Vec<(OsString, OsString)>,
+    stdin: Option<OwnedHandle>,
+    stdout: Option<OwnedHandle>,
+    extra: Vec<OwnedHandle>,
+) -> Result<HandleListChild, SandboxError> {
+    let explicit_stdin = stdin.map(forget_raw);
+    let explicit_stdout = stdout.map(forget_raw);
+    let extra_handles = extra.into_iter().map(forget_raw).collect();
+    let guest = launch_appcontainer_guest(LaunchRequest {
+        exe,
+        cmdline: quote_exe(exe),
+        cwd: cwd.to_path_buf(),
+        env,
+        sec: None,
+        job: JobResourceLimits {
+            memory_bytes: None,
+            cpu_rate_percent: None,
+            active_processes: None,
+        },
+        extra_handles,
+        explicit_stdin,
+        explicit_stdout,
+    })?;
+    Ok(HandleListChild { inner: guest })
+}
+
+fn forget_raw(handle: OwnedHandle) -> HANDLE {
+    let raw = handle.as_raw_handle();
+    std::mem::forget(handle);
+    HANDLE(raw as *mut std::ffi::c_void)
+}
+
+fn quote_exe(exe: &Path) -> String {
+    let text = exe.as_os_str().to_string_lossy();
+    if text.chars().any(|ch| ch == ' ' || ch == '\t' || ch == '"') {
+        format!("\"{text}\"")
+    } else {
+        text.into_owned()
+    }
 }
 
 /// Creates an AppContainer child with stdio pipes and Job Object membership.

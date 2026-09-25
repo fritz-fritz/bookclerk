@@ -285,8 +285,8 @@ impl DuplexLink {
     }
 
     /// Mark this end inheritable. Product hosts never call this (they
-    /// `DuplicateHandle` into `bookclerk-jail` instead). Unconfined tests
-    /// use it with `CommandExt::inherit_handles`.
+    /// `DuplicateHandle` into `bookclerk-jail` instead). Unconfined tests pass
+    /// a duplicate on `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
     ///
     /// # Errors
     ///
@@ -419,6 +419,30 @@ pub fn duplicate_handle_into(
     target: std::os::windows::io::RawHandle,
 ) -> io::Result<u64> {
     windows::duplicate_handle_into(handle, target)
+}
+
+/// Duplicate `handle` into this process. The copy is not inheritable.
+///
+/// # Errors
+///
+/// Returns an I/O error when `DuplicateHandle` fails.
+#[cfg(windows)]
+pub fn duplicate_handle_local(handle: std::os::windows::io::RawHandle) -> io::Result<u64> {
+    windows::duplicate_handle_local(handle)
+}
+
+/// Owned duplicate of `handle` in this process. The copy is not inheritable.
+///
+/// # Errors
+///
+/// Returns an I/O error when `DuplicateHandle` fails.
+#[cfg(windows)]
+pub fn duplicate_owned_handle(
+    handle: std::os::windows::io::RawHandle,
+) -> io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle, RawHandle};
+    let value = duplicate_handle_local(handle)?;
+    Ok(unsafe { OwnedHandle::from_raw_handle(value as usize as RawHandle) })
 }
 
 #[cfg(unix)]
@@ -743,6 +767,10 @@ mod windows {
             SetHandleInformation(HANDLE(handle), HANDLE_FLAG_INHERIT.0, flags)
                 .map_err(io::Error::other)
         }
+    }
+
+    pub(super) fn duplicate_handle_local(handle: RawHandle) -> io::Result<u64> {
+        duplicate_handle_into(handle, unsafe { GetCurrentProcess() }.0 as RawHandle)
     }
 
     pub(super) fn duplicate_handle_into(handle: RawHandle, target: RawHandle) -> io::Result<u64> {
