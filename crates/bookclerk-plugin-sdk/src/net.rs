@@ -280,7 +280,7 @@ fn relative_to_cwd(path: &std::path::Path) -> Result<std::path::PathBuf> {
 }
 
 /// `target` expressed relative to directory `base`; both must be absolute.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn lexical_relative(target: &std::path::Path, base: &std::path::Path) -> std::path::PathBuf {
     let target: Vec<_> = target.components().collect();
     let base: Vec<_> = base.components().collect();
