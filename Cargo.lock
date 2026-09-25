@@ -1789,12 +1789,14 @@ dependencies = [
 name = "bookclerk-plugin-e2e"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bookclerk-config",
  "bookclerk-plugin-host",
  "bookclerk-plugin-manifest",
  "bookclerk-plugin-sdk",
  "bookclerk-sandbox",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

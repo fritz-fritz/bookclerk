@@ -7,6 +7,10 @@
 //! package so ordinary `bookclerk-plugin-host` test runs never need that
 //! installation.
 //!
+//! `tests/native_gateway.rs` is separate: it needs no staged installation and
+//! launches the test-only `native_gateway_probe` bin through the production
+//! native-behind-workerd path (CI check `native_gateway`, all three OSes).
+//!
 //! | Variable | Effect |
 //! | --- | --- |
 //! | `BOOKCLERK_PLUGIN_ARTIFACTS` / `BOOKCLERK_FILES_DIR` | Staging roots; unset skips locally |
