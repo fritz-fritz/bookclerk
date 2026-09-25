@@ -196,6 +196,10 @@ fn workerd_serve_command(
     // Win32 form: an AppContainer CreateProcess on a `\\?\` path is access-denied
     // even when the same file is readable. DETACHED_PROCESS keeps conhost out of
     // the gateway Job's active-process cap (`CREATE_NO_WINDOW` does not).
+    // Stdin is a pipe, not `Stdio::null()`: null opens `\\.\NUL`, and an
+    // AppContainer token is denied that device (`ERROR_ACCESS_DENIED`) before
+    // `CreateProcess` runs. [`spawn_workerd_process`] drops the write end so
+    // the child still sees EOF.
     let spawn_bin = bookclerk_sandbox::create_process_path(&bin);
     let mut cmd = tokio::process::Command::new(&spawn_bin);
     #[cfg(windows)]
@@ -207,12 +211,25 @@ fn workerd_serve_command(
         // Cap'n Proto `/modules/…` embeds resolve against the RO install root.
         .arg(format!("--import-path={}", import_path.display()))
         .current_dir(&generated.state_dir)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("BOOKCLERK_PLUGIN_ROOT", root)
         .kill_on_drop(true);
     Ok((cmd, spawn_bin))
+}
+
+/// Spawns `workerd serve` and closes stdin so the child reads EOF.
+///
+/// # Errors
+///
+/// Returns an error when the operating system refuses to create the process.
+fn spawn_workerd_process(cmd: &mut tokio::process::Command, spawn_bin: &Path) -> Result<Child> {
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("spawn {}", spawn_bin.display()))?;
+    drop(child.stdin.take());
+    Ok(child)
 }
 
 /// Materializes config, spawns workerd, mediates host stdio ↔ bridge HTTP, then kills the child.
@@ -289,9 +306,7 @@ async fn run_isolate(
         cmd.arg(format!("--socket-fd=rpc={}", listener.as_raw_fd()));
     }
 
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("spawn {}", spawn_bin.display()))?;
+    let mut child = spawn_workerd_process(&mut cmd, &spawn_bin)?;
 
     // workerd now owns the listening socket; close our copy after spawn.
     drop(rpc_listener);
@@ -416,9 +431,7 @@ async fn run_native_behind_workerd(
         cmd.arg(format!("--socket-fd=rpc={}", listener.as_raw_fd()));
     }
 
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("spawn {}", spawn_bin.display()))?;
+    let mut child = spawn_workerd_process(&mut cmd, &spawn_bin)?;
     drop(rpc_listener);
     forward_child_logs(&mut child);
     wait_for_bridge(&generated.listen, &bridge_token)
