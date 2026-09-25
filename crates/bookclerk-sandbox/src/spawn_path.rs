@@ -51,7 +51,12 @@ pub enum SpawnPathError {
 /// re-attaches the caller's drive, and accepts it only when it opens as the
 /// very same file (volume serial + file index); otherwise the original error
 /// stands.
-fn canonicalize_file(path: &Path) -> std::io::Result<PathBuf> {
+///
+/// # Errors
+///
+/// Returns the [`std::fs::canonicalize`] error when the path cannot be
+/// resolved (or, on Windows, cannot be proven identical by handle).
+pub fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
     match std::fs::canonicalize(path) {
         #[cfg(windows)]
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -61,7 +66,7 @@ fn canonicalize_file(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
-/// Handle-based final-path resolution for [`canonicalize_file`].
+/// Handle-based final-path resolution for [`canonicalize`].
 #[cfg(windows)]
 #[allow(unsafe_code)] // Win32 file-identity and final-path queries.
 mod windows_final_path {
@@ -219,7 +224,7 @@ pub fn require_absolute_spawn_path(path: &Path) -> Result<PathBuf, SpawnPathErro
 pub fn require_spawn_executable(path: &Path) -> Result<PathBuf, SpawnPathError> {
     let path = require_absolute_or_name(path)?;
     if path.is_absolute() {
-        let canon = canonicalize_file(&path).map_err(|source| SpawnPathError::Canonicalize {
+        let canon = canonicalize(&path).map_err(|source| SpawnPathError::Canonicalize {
             path: path.clone(),
             source,
         })?;
@@ -254,7 +259,7 @@ pub fn require_existing_regular_file(path: &Path) -> Result<PathBuf, SpawnPathEr
         })?;
         cwd.join(path)
     };
-    let canon = canonicalize_file(&absolute).map_err(|source| SpawnPathError::Canonicalize {
+    let canon = canonicalize(&absolute).map_err(|source| SpawnPathError::Canonicalize {
         path: absolute.clone(),
         source,
     })?;
@@ -275,12 +280,11 @@ pub fn require_existing_regular_file(path: &Path) -> Result<PathBuf, SpawnPathEr
 pub fn require_under_root(path: &Path, root: &Path) -> Result<PathBuf, SpawnPathError> {
     let path = require_absolute_spawn_path(path)?;
     let root = require_absolute_spawn_path(root)?;
-    let root_canon =
-        std::fs::canonicalize(&root).map_err(|source| SpawnPathError::Canonicalize {
-            path: root.clone(),
-            source,
-        })?;
-    let path_canon = match std::fs::canonicalize(&path) {
+    let root_canon = canonicalize(&root).map_err(|source| SpawnPathError::Canonicalize {
+        path: root.clone(),
+        source,
+    })?;
+    let path_canon = match canonicalize(&path) {
         Ok(p) => p,
         Err(err) => {
             match std::fs::symlink_metadata(&path) {
@@ -315,7 +319,7 @@ pub fn require_under_root(path: &Path, root: &Path) -> Result<PathBuf, SpawnPath
                     source: err,
                 })?;
             let parent_canon =
-                std::fs::canonicalize(parent).map_err(|source| SpawnPathError::Canonicalize {
+                canonicalize(parent).map_err(|source| SpawnPathError::Canonicalize {
                     path: parent.to_path_buf(),
                     source,
                 })?;
@@ -363,10 +367,7 @@ pub fn require_helper_beside_or_absolute(
                 return require_spawn_executable(path);
             }
             if path.is_absolute() {
-                if let (Ok(left), Ok(right)) = (
-                    std::fs::canonicalize(path),
-                    std::fs::canonicalize(&expected),
-                ) {
+                if let (Ok(left), Ok(right)) = (canonicalize(path), canonicalize(&expected)) {
                     if left == right {
                         return require_spawn_executable(path);
                     }
