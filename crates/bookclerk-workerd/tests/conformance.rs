@@ -764,11 +764,16 @@ fn spawn_native_behind_workerd(
     #[cfg(windows)]
     let (gateway, guest_child) = {
         use bookclerk_sandbox::StdioEnds;
-        let rpc = StdioEnds::pair().expect("rpc pipes");
+        let bookclerk_sandbox::StdioEnds {
+            host_stdin,
+            host_stdout,
+            guest_stdin,
+            guest_stdout,
+        } = StdioEnds::pair().expect("rpc pipes");
         let guest_child = spawn_sibling_guest(
             guest,
-            rpc.guest_stdin,
-            rpc.guest_stdout,
+            guest_stdin,
+            guest_stdout,
             &proxy_guest,
             tmp,
             extra_env,
@@ -777,11 +782,12 @@ fn spawn_native_behind_workerd(
             workerd,
             root,
             &session,
-            &rpc.host_stdout,
-            &rpc.host_stdin,
+            &host_stdout,
+            &host_stdin,
             &proxy_gw,
         );
-        drop(rpc);
+        drop(host_stdout);
+        drop(host_stdin);
         (gateway, guest_child)
     };
     drop(proxy_gw);
