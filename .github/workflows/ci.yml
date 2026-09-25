@@ -102,6 +102,7 @@ jobs:
           "$PY" scripts/tests/test_ci_plan.py
           "$PY" scripts/tests/test_ci_relations.py
           "$PY" scripts/tests/test_ci_contract.py
+          "$PY" scripts/tests/test_plugin_publisher.py
 
       - name: Database plugin isolation
         run: python3 scripts/tests/test_db_plugin_isolation.py -q
