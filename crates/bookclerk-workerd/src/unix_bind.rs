@@ -47,11 +47,31 @@ static CHDIR_BIND: Mutex<()> = Mutex::new(());
 /// Returns when `fcntl` `F_GETFD` / `F_SETFD` fails.
 #[allow(unsafe_code)]
 pub fn clear_cloexec(fd: std::os::fd::RawFd) -> io::Result<()> {
+    set_fd_cloexec(fd, false)
+}
+
+/// Sets `FD_CLOEXEC` so a later `workerd` spawn cannot keep a sibling link open.
+///
+/// # Errors
+///
+/// Returns when `fcntl` `F_GETFD` / `F_SETFD` fails.
+#[allow(unsafe_code)]
+pub fn set_cloexec(fd: std::os::fd::RawFd) -> io::Result<()> {
+    set_fd_cloexec(fd, true)
+}
+
+#[allow(unsafe_code)]
+fn set_fd_cloexec(fd: std::os::fd::RawFd, cloexec: bool) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
         return Err(io::Error::last_os_error());
     }
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+    let next = if cloexec {
+        flags | libc::FD_CLOEXEC
+    } else {
+        flags & !libc::FD_CLOEXEC
+    };
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, next) } < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())

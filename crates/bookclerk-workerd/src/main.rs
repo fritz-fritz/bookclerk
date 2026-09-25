@@ -473,7 +473,7 @@ where
     local
         .run_until(async move {
             let (client, rpc) = connect_plugin(guest_stdout, guest_stdin, MAX_STREAM_WINDOW_BYTES);
-            tokio::task::spawn_local(rpc);
+            let rpc_task = tokio::task::spawn_local(rpc);
             #[cfg(unix)]
             {
                 let std_listener = granted_unix.context("missing granted unix listener")?;
@@ -488,7 +488,14 @@ where
                 let listener = tokio::net::TcpListener::from_std(std_listener)?;
                 spawn_granted(listener, token, Rc::clone(&table));
             }
-            mediate_bridge_stdio(http, table, capabilities, Backend::Native(client)).await
+            let mediate = mediate_bridge_stdio(http, table, capabilities, Backend::Native(client));
+            tokio::select! {
+                result = mediate => result,
+                rpc = rpc_task => match rpc {
+                    Ok(()) => anyhow::bail!("native guest RPC transport closed"),
+                    Err(err) => anyhow::bail!("native guest RPC task: {err}"),
+                },
+            }
         })
         .await
 }

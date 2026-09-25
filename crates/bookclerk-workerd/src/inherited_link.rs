@@ -144,10 +144,14 @@ fn open_handle(handle: u64, spec: &str) -> Result<InheritedDuplex> {
 
 #[cfg(unix)]
 fn open_unix_fd(fd: i32) -> Result<InheritedDuplex> {
-    use std::os::fd::FromRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
     let std = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
     std.set_nonblocking(true)
         .context("set inherited RPC/proxy fd non-blocking")?;
+    // workerd is spawned without a handle list; CLOEXEC keeps SIGKILL of this
+    // launcher from leaving the guest RPC/proxy ends open in the child.
+    crate::unix_bind::set_cloexec(std.as_raw_fd())
+        .context("set CLOEXEC on inherited RPC/proxy fd")?;
     let tokio = tokio::net::UnixStream::from_std(std).context("wrap inherited UnixStream")?;
     Ok(InheritedDuplex::Unix(tokio))
 }
@@ -178,6 +182,11 @@ mod tests {
         let child_fd = child.into_owned_fd().into_raw_fd();
         let spec = format!("fd:{child_fd}");
         let opened = InheritedDuplex::open(&spec).expect("open child end");
+        let flags = unsafe { libc::fcntl(child_fd, libc::F_GETFD) };
+        assert!(
+            flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+            "inherited link must be CLOEXEC so workerd cannot hold it"
+        );
         let (mut reader, mut writer) = opened.into_split();
 
         let host_fd = host.into_owned_fd().into_raw_fd();
