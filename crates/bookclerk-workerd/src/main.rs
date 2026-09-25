@@ -492,7 +492,8 @@ where
             tokio::select! {
                 result = mediate => result,
                 rpc = rpc_task => match rpc {
-                    Ok(()) => anyhow::bail!("native guest RPC transport closed"),
+                    Ok(Ok(())) => anyhow::bail!("native guest RPC transport closed"),
+                    Ok(Err(err)) => anyhow::bail!("native guest RPC transport: {err}"),
                     Err(err) => anyhow::bail!("native guest RPC task: {err}"),
                 },
             }
