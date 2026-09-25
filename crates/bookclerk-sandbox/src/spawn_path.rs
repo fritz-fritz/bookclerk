@@ -384,13 +384,14 @@ pub fn require_helper_beside_or_absolute(
     require_spawn_executable(&path)
 }
 
-/// Path passed to `CreateProcess` / `Command::new`.
+/// Path passed to `CreateProcess`, `Command`, or a child that parses Win32 paths.
 ///
 /// Windows canonical paths use the `\\?\` prefix. An AppContainer can open
 /// that form for read and still be denied process creation
-/// (`ERROR_ACCESS_DENIED`). The prefix is removed only after callers have
-/// already canonicalized, so the Win32 path names the same resolved file.
-/// Other platforms return `path` unchanged.
+/// (`ERROR_ACCESS_DENIED`). Pinned `workerd` rejects the same prefix: its
+/// filesystem parser treats `?` as the first component and aborts. The prefix
+/// is removed only after callers have already canonicalized, so the Win32 path
+/// names the same resolved file. Other platforms return `path` unchanged.
 #[must_use]
 pub fn create_process_path(path: &Path) -> PathBuf {
     strip_verbatim_prefix(path)

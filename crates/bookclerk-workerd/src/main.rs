@@ -194,27 +194,32 @@ fn workerd_serve_command(
         .context("validate workerd --import-path")?;
 
     // Win32 form: an AppContainer CreateProcess on a `\\?\` path is access-denied
-    // even when the same file is readable. DETACHED_PROCESS keeps conhost out of
-    // the gateway Job's active-process cap (`CREATE_NO_WINDOW` does not).
-    // Stdin is a pipe, not `Stdio::null()`: null opens `\\.\NUL`, and an
-    // AppContainer token is denied that device (`ERROR_ACCESS_DENIED`) before
-    // `CreateProcess` runs. [`spawn_workerd_process`] drops the write end so
-    // the child still sees EOF.
+    // even when the same file is readable, and workerd's kj parser aborts when
+    // the first component is `?`. Strip the prefix only after the checks above.
+    // DETACHED_PROCESS keeps conhost out of the gateway Job's active-process
+    // cap (`CREATE_NO_WINDOW` does not). Stdin is a pipe, not `Stdio::null()`:
+    // null opens `\\.\NUL`, and an AppContainer token is denied that device
+    // (`ERROR_ACCESS_DENIED`) before `CreateProcess` runs.
+    // [`spawn_workerd_process`] drops the write end so the child still sees EOF.
     let spawn_bin = bookclerk_sandbox::create_process_path(&bin);
+    let config_arg = bookclerk_sandbox::create_process_path(&config_path);
+    let import_arg = bookclerk_sandbox::create_process_path(&import_path);
+    let cwd = bookclerk_sandbox::create_process_path(&generated.state_dir);
+    let plugin_root = bookclerk_sandbox::create_process_path(root);
     let mut cmd = tokio::process::Command::new(&spawn_bin);
     #[cfg(windows)]
     cmd.creation_flags(DETACHED_PROCESS);
     cmd.arg("serve")
         // Unlocks the egress worker's `$experimental` inbound CONNECT handler.
         .arg(bookclerk_workerd::WORKERD_SERVE_EXPERIMENTAL);
-    cmd.arg(&config_path)
+    cmd.arg(&config_arg)
         // Cap'n Proto `/modules/…` embeds resolve against the RO install root.
-        .arg(format!("--import-path={}", import_path.display()))
-        .current_dir(&generated.state_dir)
+        .arg(format!("--import-path={}", import_arg.display()))
+        .current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("BOOKCLERK_PLUGIN_ROOT", root)
+        .env("BOOKCLERK_PLUGIN_ROOT", &plugin_root)
         .kill_on_drop(true);
     Ok((cmd, spawn_bin))
 }
