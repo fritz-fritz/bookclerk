@@ -1888,7 +1888,17 @@ struct RemoveOnDrop(std::path::PathBuf);
 
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        // `workerd` keeps this directory as its cwd until it exits. The first
+        // `remove_dir_all` can lose that race (`EBUSY`); retry until the
+        // process group kill has reaped it.
+        for attempt in 0..40 {
+            match std::fs::remove_dir_all(&self.0) {
+                Ok(()) => return,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) if attempt == 39 => return,
+                Err(_) => thread::sleep(Duration::from_millis(50)),
+            }
+        }
     }
 }
 
@@ -1918,6 +1928,34 @@ fn sibling_exited(
 ) -> bool {
     gateway.try_wait().ok().flatten().is_some()
         || guest.is_some_and(|child| child.try_wait().ok().flatten().is_some())
+}
+
+/// Kills both siblings and waits until they exit.
+///
+/// On Unix the spawn put each child in its own process group, so this also
+/// kills grandchildren (`workerd`) that would otherwise keep the session
+/// directory as their cwd.
+async fn reap_siblings(
+    gateway: &mut tokio::process::Child,
+    guest: &mut Option<tokio::process::Child>,
+) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = gateway.id() {
+            crate::spawn_stdio::kill_process_group(pid);
+        }
+        if let Some(pid) = guest.as_ref().and_then(|child| child.id()) {
+            crate::spawn_stdio::kill_process_group(pid);
+        }
+    }
+    let _ = gateway.start_kill();
+    if let Some(child) = guest.as_mut() {
+        let _ = child.start_kill();
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(5), gateway.wait()).await;
+    if let Some(child) = guest.as_mut() {
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    }
 }
 
 /// Resolves when the gateway or native guest exits.
@@ -1996,6 +2034,9 @@ fn vat_thread(
                             client
                         }
                         Err(err) => {
+                            #[cfg(windows)]
+                            drop(_session_job);
+                            reap_siblings(&mut child, &mut guest).await;
                             drop(remove_session_dir.take());
                             let _ = ready.send(Err(err));
                             return;
@@ -2008,6 +2049,9 @@ fn vat_thread(
                             guest.as_mut(),
                             &stderr_tail,
                         );
+                        #[cfg(windows)]
+                        drop(_session_job);
+                        reap_siblings(&mut child, &mut guest).await;
                         drop(remove_session_dir.take());
                         let _ = ready.send(Err(crate::spawn_stdio::with_spawn_detail(err, extra)));
                         return;
@@ -2622,8 +2666,12 @@ fn vat_thread(
                         }
                     }
                 }
+                #[cfg(windows)]
+                drop(_session_job);
+                reap_siblings(&mut child, &mut guest).await;
                 drop(child);
                 drop(guest);
+                drop(remove_session_dir.take());
             })
             .await;
     });

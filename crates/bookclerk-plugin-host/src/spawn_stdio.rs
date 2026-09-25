@@ -410,6 +410,11 @@ fn command_for_start(start: &Start, program: &std::path::Path, args: &[String]) 
         Start::Confined { launcher, .. } => {
             let mut cmd = Command::new(launcher);
             cmd.arg("--").arg(program).args(args);
+            // New process group so shutdown can signal the jail and its
+            // grandchildren (pinned `workerd`) together. A lone SIGKILL of the
+            // jail skips its `Drop` and leaves `workerd` holding the session dir.
+            #[cfg(unix)]
+            cmd.process_group(0);
             cmd
         }
         Start::Unconfined { reason } => {
@@ -420,8 +425,20 @@ fn command_for_start(start: &Start, program: &std::path::Path, args: &[String]) 
             );
             let mut cmd = Command::new(program);
             cmd.args(args);
+            #[cfg(unix)]
+            cmd.process_group(0);
             cmd
         }
+    }
+}
+
+/// SIGKILL `pid`'s process group. No-op when the group is already gone.
+///
+/// Spawn uses `process_group(0)`, so `pid` is the group leader.
+#[cfg(unix)]
+pub(crate) fn kill_process_group(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
     }
 }
 
