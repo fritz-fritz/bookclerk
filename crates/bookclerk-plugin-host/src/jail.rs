@@ -436,6 +436,9 @@ fn build_spec_with_grant(
         memory_bytes: resources.memory_bytes,
         active_processes: resources.active_processes,
         cpu_rate_percent: resources.cpu_rate_percent,
+        inherit_handles: Vec::new(),
+        cgroup_dir: None,
+        unix_socket_dirs: None,
     }
 }
 

@@ -11,11 +11,9 @@ authors.workspace = true
 [dependencies]
 rand = { workspace = true }
 serde = { workspace = true }
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-
-[dev-dependencies.serde_json]
-workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"
@@ -35,6 +33,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_System_JobObjects",
     "Win32_System_Pipes",
+    "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Shell",

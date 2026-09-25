@@ -27,11 +27,27 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+mod link;
 mod platform;
 mod spawn_path;
 mod spec;
 
+pub use link::{
+    DuplexHalf, DuplexLink, JailHandoff, JailHandoffExtra, LinkSpec, LinkSpecError, StdioEnds,
+    GATEWAY_GUEST_RPC_ENV, GATEWAY_PROXY_ENV, GATEWAY_PROXY_FD, GATEWAY_RPC_FD, GUEST_PROXY_FD,
+    JAIL_HANDOFF_ENV, SOCKET_PROXY_ENV, WORKERD_STATE_DIR_ENV,
+};
+
+#[cfg(unix)]
+pub use link::inherit_fd_at;
+
+#[cfg(windows)]
+pub use link::duplicate_handle_into;
 pub use platform::BACKEND;
+
+/// Linux session-cgroup constructor used by the plugin host.
+#[cfg(target_os = "linux")]
+pub use platform::create_session_cgroup;
 pub use spawn_path::{
     canonicalize, require_absolute_or_name, require_absolute_spawn_path,
     require_existing_regular_file, require_helper_beside_or_absolute, require_spawn_executable,
@@ -127,6 +143,10 @@ pub struct Policy {
     active_processes: Option<u32>,
     /// Optional CPU hard-cap as percent of one logical CPU (1..=cores×100).
     cpu_rate_percent: Option<u32>,
+    /// macOS Seatbelt pathname Unix-socket directories (`None` = writable paths).
+    unix_socket_dirs: Option<Vec<PathBuf>>,
+    /// Linux cgroup v2 leaf to join instead of creating `bookclerk-<pid>`.
+    cgroup_dir: Option<PathBuf>,
 }
 
 /// Number of logical CPUs visible to this process (at least 1).
@@ -235,6 +255,8 @@ impl Policy {
             memory_bytes: None,
             active_processes: None,
             cpu_rate_percent: None,
+            unix_socket_dirs: None,
+            cgroup_dir: None,
         }
     }
 
@@ -326,6 +348,36 @@ impl Policy {
         let max = host_cpu_rate_max();
         self.cpu_rate_percent = percent.map(|p| p.clamp(1, max));
         self
+    }
+
+    /// Restrict pathname Unix sockets to `dirs` (`Some([])` denies them).
+    ///
+    /// `None` (the default) keeps the historical Seatbelt rule: UDS under every
+    /// writable path. Hosts that want an explicit list — the native-behind-workerd
+    /// gateway session directory, or no UDS for a Deny guest — set this.
+    #[must_use]
+    pub fn unix_socket_dirs(mut self, dirs: Option<Vec<PathBuf>>) -> Self {
+        self.unix_socket_dirs = dirs;
+        self
+    }
+
+    /// Join this cgroup v2 leaf instead of creating `bookclerk-<pid>`.
+    #[must_use]
+    pub fn cgroup_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.cgroup_dir = dir;
+        self
+    }
+
+    /// Explicit Unix-socket directories, or `None` for the writable-path default.
+    #[must_use]
+    pub fn unix_socket_dirs_opt(&self) -> Option<&[PathBuf]> {
+        self.unix_socket_dirs.as_deref()
+    }
+
+    /// Optional session cgroup to join (Linux).
+    #[must_use]
+    pub fn cgroup_dir_opt(&self) -> Option<&std::path::Path> {
+        self.cgroup_dir.as_deref()
     }
 
     /// Diagnostics label supplied to [`Self::new`] (logs / doctor output only).

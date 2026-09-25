@@ -100,6 +100,30 @@ pub struct Spec {
     /// cannot enforce this (see docs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_rate_percent: Option<u32>,
+    /// Windows handles the jail must put on the child's inherit list.
+    ///
+    /// The host never marks these inheritable itself. It
+    /// [`DuplicateHandle`](crate::link::duplicate_handle_into)s them into
+    /// `bookclerk-jail` and names them here / in the stdin handoff line so the
+    /// jail can add them to `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherit_handles: Vec<u64>,
+    /// Linux cgroup v2 leaf both sibling jails join (session aggregate limits).
+    ///
+    /// When set, the jail moves into this directory instead of creating
+    /// `bookclerk-<pid>`. The host writes the ceilings; the jail must not
+    /// overwrite them with a per-process budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cgroup_dir: Option<PathBuf>,
+    /// macOS Seatbelt pathname Unix-socket directories.
+    ///
+    /// `None` (default, omitted on the wire) keeps the historical rule: bind
+    /// and connect under every writable path. `Some(dirs)` allows UDS only in
+    /// those directories (`Some([])` grants none). The native-behind-workerd
+    /// gateway sets the host-chosen session directory; the Deny guest sets
+    /// `Some([])`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unix_socket_dirs: Option<Vec<PathBuf>>,
 }
 
 /// Default for [`Spec::system_paths`]: include system library/loader paths.
@@ -124,6 +148,9 @@ impl Spec {
             memory_bytes: None,
             active_processes: None,
             cpu_rate_percent: None,
+            inherit_handles: Vec::new(),
+            cgroup_dir: None,
+            unix_socket_dirs: None,
         }
     }
 
@@ -140,6 +167,8 @@ impl Spec {
             .memory_bytes(self.memory_bytes)
             .active_processes(self.active_processes)
             .cpu_rate_percent(self.cpu_rate_percent)
+            .unix_socket_dirs(self.unix_socket_dirs.clone())
+            .cgroup_dir(self.cgroup_dir.clone())
     }
 }
 
@@ -162,6 +191,9 @@ mod tests {
             memory_bytes: Some(512 * 1024 * 1024),
             active_processes: Some(8),
             cpu_rate_percent: Some(80),
+            inherit_handles: vec![42],
+            cgroup_dir: Some(PathBuf::from("/sys/fs/cgroup/bookclerk-session")),
+            unix_socket_dirs: Some(vec![PathBuf::from("/tmp/session")]),
         };
         let json = serde_json::to_string(&spec).expect("encode");
         assert_eq!(
@@ -197,6 +229,20 @@ mod tests {
         // so the omitted default has to be the permissive one.
         assert!(spec.system_paths);
         assert_eq!(spec.enforcement, Enforcement::Required);
+        assert!(spec.inherit_handles.is_empty());
+        assert_eq!(spec.cgroup_dir, None);
+        assert_eq!(spec.unix_socket_dirs, None);
+    }
+
+    #[test]
+    fn omitted_sibling_fields_stay_backward_compatible() {
+        let spec: Spec = serde_json::from_str(
+            r#"{"label":"probe","reads":[],"writes":[],"net":"deny","allow_exec":true}"#,
+        )
+        .expect("decode");
+        assert!(spec.inherit_handles.is_empty());
+        assert_eq!(spec.cgroup_dir, None);
+        assert_eq!(spec.unix_socket_dirs, None);
     }
 
     #[test]

@@ -50,7 +50,11 @@ pub enum SpawnPathError {
 /// fallback resolves the volume-relative final path from the open handle,
 /// re-attaches the caller's drive, and accepts it only when it opens as the
 /// very same file (volume serial + file index); otherwise the original error
-/// stands.
+/// stands. `GetFinalPathNameByHandleW` follows reparse points; a junction to
+/// another volume yields a different identity and falls back to the original
+/// error. Callers that later reopen the returned path by name (rather than by
+/// the handle used here) still see the usual TOCTOU gap — this helper proves
+/// identity at the moment of canonicalize, not at a later open.
 ///
 /// # Errors
 ///

@@ -72,6 +72,9 @@ fn base_spec(label: &str, reads: Vec<PathBuf>, writes: Vec<PathBuf>) -> Spec {
         memory_bytes: None,
         active_processes: None,
         cpu_rate_percent: None,
+        inherit_handles: Vec::new(),
+        cgroup_dir: None,
+        unix_socket_dirs: None,
     }
 }
 

@@ -166,7 +166,7 @@ fn apply_cgroup_v2_limits(policy: &Policy) -> LayerStatus {
         return LayerStatus::NotRequested;
     }
     let limits = policy.resource_limits();
-    match try_apply_cgroup_v2(&limits) {
+    match try_apply_cgroup_v2(&limits, policy.cgroup_dir_opt()) {
         Ok(()) => LayerStatus::Enforced,
         Err(detail) => {
             let detail = friendly_cgroup_error(detail);
@@ -192,7 +192,18 @@ fn apply_cgroup_v2_limits(policy: &Policy) -> LayerStatus {
 ///
 /// Never writes limits onto the current/parent cgroup: that would throttle
 /// siblings (and in CI, the whole job) sharing the runner slice.
-fn try_apply_cgroup_v2(limits: &crate::ResourceLimits) -> Result<(), String> {
+///
+/// When `join` is set (host-created session leaf), this process moves into
+/// that directory and does **not** rewrite limits — the host already wrote
+/// the aggregate memory/CPU/pids ceilings.
+fn try_apply_cgroup_v2(limits: &crate::ResourceLimits, join: Option<&Path>) -> Result<(), String> {
+    if let Some(dir) = join {
+        if !dir.is_dir() {
+            return Err(format!("cgroup_dir {} is not a directory", dir.display()));
+        }
+        return move_self_into_cgroup(dir);
+    }
+
     let root = Path::new("/sys/fs/cgroup");
     if !root.join("cgroup.controllers").is_file() {
         return Err("cgroup v2 not mounted at /sys/fs/cgroup".into());
@@ -335,6 +346,53 @@ fn move_self_into_cgroup(dir: &Path) -> Result<(), String> {
     let path = dir.join("cgroup.procs");
     let pid = std::process::id().to_string();
     std::fs::write(&path, &pid).map_err(|err| format!("move pid into {}: {err}", path.display()))
+}
+
+/// Create a session cgroup leaf and write `limits` without moving the caller.
+///
+/// The host assigns both sibling jails via [`Spec::cgroup_dir`]. Failure is
+/// best-effort (same posture as [`try_apply_cgroup_v2`]): callers treat
+/// `Err` as not-applicable, never as fake enforcement.
+///
+/// # Errors
+///
+/// Returns a string when the hierarchy is missing, a child cannot be created,
+/// or a limit file cannot be written.
+pub fn create_session_cgroup(limits: &crate::ResourceLimits) -> Result<std::path::PathBuf, String> {
+    let root = Path::new("/sys/fs/cgroup");
+    if !root.join("cgroup.controllers").is_file() {
+        return Err("cgroup v2 not mounted at /sys/fs/cgroup".into());
+    }
+    let current_rel = current_cgroup_v2_path()?;
+    let parent = if current_rel.is_empty() || current_rel == "/" {
+        root.to_path_buf()
+    } else {
+        root.join(current_rel.trim_start_matches('/'))
+    };
+    if !parent.is_dir() {
+        return Err(format!(
+            "current cgroup path {} is missing under /sys/fs/cgroup",
+            parent.display()
+        ));
+    }
+    let _ = enable_subtree_controllers(&parent);
+    let child_name = format!("bookclerk-session-{}", std::process::id());
+    let child = parent.join(&child_name);
+    match std::fs::create_dir(&child) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => {
+            return Err(format!(
+                "could not create session cgroup {}: {err}",
+                child.display()
+            ));
+        }
+    }
+    if let Err(err) = write_cgroup_limits(&child, limits) {
+        let _ = std::fs::remove_dir(&child);
+        return Err(err);
+    }
+    Ok(child)
 }
 
 /// Fold Landlock's network result together with what seccomp covers.
@@ -662,6 +720,32 @@ mod tests {
             std::fs::read_to_string(dir.path().join("pids.max")).unwrap(),
             "8"
         );
+    }
+
+    #[test]
+    fn joining_a_session_cgroup_does_not_rewrite_limits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let limits = crate::ResourceLimits {
+            memory_bytes: Some(64 * 1024 * 1024),
+            cpu_rate_percent: Some(25),
+            active_processes: Some(3),
+        };
+        // A missing join target fails closed.
+        let missing = dir.path().join("nope");
+        let err = try_apply_cgroup_v2(&limits, Some(&missing)).expect_err("missing");
+        assert!(err.contains("not a directory"), "{err}");
+
+        // A present leaf is joined by writing cgroup.procs only — never
+        // memory.max / cpu.max / pids.max (those stay host-owned).
+        try_apply_cgroup_v2(&limits, Some(dir.path())).expect("join temp leaf");
+        assert!(
+            !dir.path().join("memory.max").exists(),
+            "join must not rewrite host-owned limits"
+        );
+        assert!(!dir.path().join("cpu.max").exists());
+        assert!(!dir.path().join("pids.max").exists());
+        let procs = std::fs::read_to_string(dir.path().join("cgroup.procs")).expect("procs");
+        assert_eq!(procs, std::process::id().to_string());
     }
 
     #[test]
