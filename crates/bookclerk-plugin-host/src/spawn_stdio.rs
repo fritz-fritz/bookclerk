@@ -526,14 +526,19 @@ async fn windows_handoff_guest(
     proxy: &DuplexLink,
 ) -> Result<()> {
     let target = process_handle(child)?;
-    let rpc_h = bookclerk_sandbox::duplicate_handle_into(rpc.as_raw_handle(), target)
-        .map_err(|err| PluginError::message(format!("DuplicateHandle guest RPC: {err}")))?;
+    // Two copies of the same duplex. The inherit list rejects a repeated
+    // value, and the guest must be able to close stdout without closing stdin
+    // (Unix uses `DuplexLink::try_clone` for the same reason).
+    let rpc_in = bookclerk_sandbox::duplicate_handle_into(rpc.as_raw_handle(), target)
+        .map_err(|err| PluginError::message(format!("DuplicateHandle guest RPC stdin: {err}")))?;
+    let rpc_out = bookclerk_sandbox::duplicate_handle_into(rpc.as_raw_handle(), target)
+        .map_err(|err| PluginError::message(format!("DuplicateHandle guest RPC stdout: {err}")))?;
     let proxy_h = bookclerk_sandbox::duplicate_handle_into(proxy.as_raw_handle(), target)
         .map_err(|err| PluginError::message(format!("DuplicateHandle guest proxy: {err}")))?;
     let handoff = JailHandoff {
         v: JailHandoff::VERSION,
-        stdin: Some(rpc_h),
-        stdout: Some(rpc_h),
+        stdin: Some(rpc_in),
+        stdout: Some(rpc_out),
         extra: vec![JailHandoffExtra {
             env: SOCKET_PROXY_ENV.into(),
             handle: proxy_h,

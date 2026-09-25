@@ -347,12 +347,13 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
         return Err(err);
     }
 
-    let mut inherit = vec![child_stdin, child_stdout, child_stderr];
-    for &h in &request.extra_handles {
-        if !inherit.iter().any(|existing| existing.0 == h.0) {
-            inherit.push(h);
-        }
-    }
+    // `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` fails with ERROR_INVALID_PARAMETER
+    // when the same value appears twice. Stdio may alias one duplex pipe.
+    let inherit = unique_handle_list(
+        [child_stdin, child_stdout, child_stderr]
+            .into_iter()
+            .chain(request.extra_handles.iter().copied()),
+    );
     let cleanup_all = || {
         let _ = CloseHandle(job);
         close_stdio();
@@ -826,6 +827,21 @@ fn cleanup_optional(handles: &[Option<HANDLE>]) {
     }
 }
 
+/// Handle values for `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, each value once.
+///
+/// Windows rejects a repeated entry. Callers may still point both standard
+/// handles at one value; that value is listed a single time.
+fn unique_handle_list(handles: impl IntoIterator<Item = HANDLE>) -> Vec<HANDLE> {
+    let mut out = Vec::new();
+    for h in handles {
+        if out.iter().any(|existing| existing.0 == h.0) {
+            continue;
+        }
+        out.push(h);
+    }
+    out
+}
+
 /// Closes each distinct non-invalid handle once.
 fn close_unique_handles(handles: impl IntoIterator<Item = HANDLE>) {
     let mut seen = std::collections::HashSet::new();
@@ -932,6 +948,24 @@ impl Drop for SessionJob {
             let _ = unsafe { CloseHandle(self.as_handle()) };
             self.handle = 0;
         }
+    }
+}
+
+/// Windows handle-list invariants that do not need a live process.
+#[cfg(test)]
+mod tests {
+    use super::unique_handle_list;
+    use windows::Win32::Foundation::HANDLE;
+
+    /// A repeated stdio value is listed once for `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
+    #[test]
+    fn handle_list_lists_each_value_once() {
+        let stdin = HANDLE(std::ptr::without_provenance_mut(1));
+        let stderr = HANDLE(std::ptr::without_provenance_mut(2));
+        let list = unique_handle_list([stdin, stdin, stderr, stdin]);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].0, stdin.0);
+        assert_eq!(list[1].0, stderr.0);
     }
 }
 

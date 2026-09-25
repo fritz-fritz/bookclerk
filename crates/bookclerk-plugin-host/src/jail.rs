@@ -550,10 +550,20 @@ fn confined_starts(
 /// Create the gateway profile and, for siblings, a distinct guest profile.
 #[cfg(windows)]
 struct WindowsProfiles {
+    /// AppContainer for the Cap'n Proto child (`bookclerk-workerd`).
     gateway: Option<bookclerk_sandbox::spawn::AppContainerSession>,
+    /// AppContainer for the native sibling. `None` when this session is a single jail.
     guest: Option<bookclerk_sandbox::spawn::AppContainerSession>,
 }
 
+/// Create distinct AppContainer profiles for the gateway and, when `siblings`
+/// is set, the native guest.
+///
+/// Profiles stay host-owned. The jail launcher receives only the profile name.
+///
+/// # Errors
+///
+/// Returns an error when Windows refuses to create a profile.
 #[cfg(windows)]
 fn create_windows_profiles(
     plugin: &DiscoveredPlugin,
