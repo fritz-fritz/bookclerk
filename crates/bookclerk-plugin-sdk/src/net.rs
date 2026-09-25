@@ -444,11 +444,11 @@ fn mux_from_unix_fd(fd: i32) -> Result<crate::mux::Mux> {
 /// Returns [`SdkError`] when the handle cannot be wrapped as a Tokio pipe.
 #[cfg(windows)]
 fn mux_from_windows_handle(value: u64) -> Result<crate::mux::Mux> {
-    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use std::os::windows::io::RawHandle;
     let pipe = unsafe {
         tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
             value as usize as RawHandle,
-        )
+        )?
     };
     let (reader, writer) = tokio::io::split(pipe);
     Ok(crate::mux::Mux::client(reader, writer))

@@ -735,6 +735,19 @@ pub fn host_state_dir() -> Result<PathBuf> {
 /// Returns an error when the path is relative, contains `..`, is not a
 /// directory, escapes the process temp root, or cannot be chmodded owner-only.
 pub fn validate_host_state_dir(dir: &Path) -> Result<PathBuf> {
+    let tmp_root = process_tmp_root().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{WORKERD_STATE_DIR_ENV} requires TMPDIR/TEMP/TMP so the session dir can be checked"
+        )
+    })?;
+    validate_host_state_dir_under(dir, &tmp_root)
+}
+
+/// Same checks as [`validate_host_state_dir`] against an explicit temp root.
+///
+/// Tests pass `tmp_root` directly so they do not retarget process `TMPDIR`
+/// (parallel tests create directories there).
+fn validate_host_state_dir_under(dir: &Path, tmp_root: &Path) -> Result<PathBuf> {
     if dir.components().any(|c| matches!(c, Component::ParentDir)) {
         bail!("refusing path with '..': {}", dir.display());
     }
@@ -750,12 +763,7 @@ pub fn validate_host_state_dir(dir: &Path) -> Result<PathBuf> {
             dir.display()
         );
     }
-    let tmp_root = process_tmp_root().ok_or_else(|| {
-        anyhow::anyhow!(
-            "{WORKERD_STATE_DIR_ENV} requires TMPDIR/TEMP/TMP so the session dir can be checked"
-        )
-    })?;
-    let tmp_root = bookclerk_sandbox::canonicalize(&tmp_root)
+    let tmp_root = bookclerk_sandbox::canonicalize(tmp_root)
         .with_context(|| format!("canonicalize temp root {}", tmp_root.display()))?;
     ensure_owner_only_dir(dir)?;
     let canon = bookclerk_sandbox::canonicalize(dir)
@@ -2509,52 +2517,25 @@ mode = "deny"
 
     #[test]
     fn validate_host_state_dir_requires_absolute_dir_under_tmpdir() {
-        struct RestoreTemp(
-            Option<std::ffi::OsString>,
-            Option<std::ffi::OsString>,
-            Option<std::ffi::OsString>,
-        );
-        impl Drop for RestoreTemp {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(v) => std::env::set_var("TMPDIR", v),
-                    None => std::env::remove_var("TMPDIR"),
-                }
-                match self.1.take() {
-                    Some(v) => std::env::set_var("TEMP", v),
-                    None => std::env::remove_var("TEMP"),
-                }
-                match self.2.take() {
-                    Some(v) => std::env::set_var("TMP", v),
-                    None => std::env::remove_var("TMP"),
-                }
-            }
-        }
-        let _restore = RestoreTemp(
-            std::env::var_os("TMPDIR"),
-            std::env::var_os("TEMP"),
-            std::env::var_os("TMP"),
-        );
-        // Create the fixture first so tempfile still uses the process default.
+        // Pass the fixture as the temp root. Setting process TMPDIR makes
+        // parallel tests nest their temp dirs inside a directory this test deletes.
         let tmp = tempfile::tempdir().expect("tmp");
-        std::env::set_var("TMPDIR", tmp.path());
-        std::env::set_var("TEMP", tmp.path());
-        std::env::set_var("TMP", tmp.path());
         let session = tmp.path().join("session-ab12");
         std::fs::create_dir(&session).expect("mkdir");
-        let canon = validate_host_state_dir(&session).expect("valid session");
+        let canon = validate_host_state_dir_under(&session, tmp.path()).expect("valid session");
         assert!(canon.ends_with("session-ab12"));
 
         let escaped = tmp.path().parent().expect("parent").join("outside-session");
         std::fs::create_dir_all(&escaped).expect("outside");
-        let err = validate_host_state_dir(&escaped).expect_err("escape");
+        let err = validate_host_state_dir_under(&escaped, tmp.path()).expect_err("escape");
         assert!(
             err.to_string().contains("not under the process temp root"),
             "{err}"
         );
         let _ = std::fs::remove_dir_all(&escaped);
 
-        let err = validate_host_state_dir(Path::new("relative/session")).expect_err("relative");
+        let err = validate_host_state_dir_under(Path::new("relative/session"), tmp.path())
+            .expect_err("relative");
         assert!(err.to_string().contains("absolute"), "{err}");
     }
 }

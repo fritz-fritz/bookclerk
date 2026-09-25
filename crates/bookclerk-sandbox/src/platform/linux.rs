@@ -350,8 +350,8 @@ fn move_self_into_cgroup(dir: &Path) -> Result<(), String> {
 
 /// Create a session cgroup leaf and write `limits` without moving the caller.
 ///
-/// The host assigns both sibling jails via [`Spec::cgroup_dir`]. Failure is
-/// best-effort (same posture as [`try_apply_cgroup_v2`]): callers treat
+/// The host assigns both sibling jails via [`crate::Spec::cgroup_dir`]. Failure is
+/// best-effort (same posture as `try_apply_cgroup_v2`): callers treat
 /// `Err` as not-applicable, never as fake enforcement.
 ///
 /// # Errors

@@ -1955,6 +1955,9 @@ fn vat_thread(
     {
         Ok(rt) => rt,
         Err(err) => {
+            if let Some(dir) = spawned.session_dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
             let _ = ready.send(Err(PluginError::message(format!("plugin runtime: {err}"))));
             return;
         }
@@ -1964,7 +1967,7 @@ fn vat_thread(
         local
             .run_until(async move {
                 let grant = spawned.grant;
-                let _remove_session_dir = spawned.session_dir.map(RemoveOnDrop);
+                let mut remove_session_dir = spawned.session_dir.map(RemoveOnDrop);
                 #[cfg(windows)]
                 let _session_job = spawned.session_job;
                 let mut child = spawned.child;
@@ -1981,6 +1984,7 @@ fn vat_thread(
                             client
                         }
                         Err(err) => {
+                            drop(remove_session_dir.take());
                             let _ = ready.send(Err(err));
                             return;
                         }
@@ -1992,6 +1996,7 @@ fn vat_thread(
                             guest.as_mut(),
                             &stderr_tail,
                         );
+                        drop(remove_session_dir.take());
                         let _ = ready.send(Err(crate::spawn_stdio::with_spawn_detail(
                             map_abi(err),
                             extra,

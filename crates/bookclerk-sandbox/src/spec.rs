@@ -102,10 +102,10 @@ pub struct Spec {
     pub cpu_rate_percent: Option<u32>,
     /// Windows handles the jail must put on the child's inherit list.
     ///
-    /// The host never marks these inheritable itself. It
-    /// [`DuplicateHandle`](crate::link::duplicate_handle_into)s them into
-    /// `bookclerk-jail` and names them here / in the stdin handoff line so the
-    /// jail can add them to `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
+    /// The host never marks these inheritable itself. It duplicates them into
+    /// `bookclerk-jail` with `duplicate_handle_into` and names them here / in
+    /// the stdin handoff line so the jail can add them to
+    /// `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inherit_handles: Vec<u64>,
     /// Linux cgroup v2 leaf both sibling jails join (session aggregate limits).

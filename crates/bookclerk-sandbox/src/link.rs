@@ -113,9 +113,9 @@ impl std::str::FromStr for LinkSpec {
 
 /// One-shot Windows jail stdin line. Bounded JSON; never a general broker.
 ///
-/// The host derives every handle from values it just
-/// [`duplicate_handle_into`]d. The jail is the sole spawner and marks them
-/// inheritable immediately before `CreateProcess`.
+/// The host derives every handle from values it just duplicated with
+/// `duplicate_handle_into` (Windows). The jail is the sole spawner and marks
+/// them inheritable immediately before `CreateProcess`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JailHandoff {
     /// Wire version. Only `1` is accepted.
@@ -586,7 +586,7 @@ mod windows {
             SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)).map_err(
                 |err| {
                     close_if_valid(handle);
-                    io::Error::new(io::ErrorKind::Other, err)
+                    io::Error::other(err)
                 },
             )?;
         }
@@ -628,7 +628,7 @@ mod windows {
             Ok(h) => h,
             Err(err) => {
                 close_if_valid(server);
-                return Err(io::Error::new(io::ErrorKind::Other, err));
+                return Err(io::Error::other(err));
             }
         };
         // ConnectNamedPipe after CreateFile: the instance is already connected;
@@ -700,7 +700,7 @@ mod windows {
             Ok(h) => h,
             Err(err) => {
                 close_if_valid(server);
-                return Err(io::Error::new(io::ErrorKind::Other, err));
+                return Err(io::Error::other(err));
             }
         };
         let connected = unsafe { ConnectNamedPipe(server, None) };
@@ -741,7 +741,7 @@ mod windows {
         };
         unsafe {
             SetHandleInformation(HANDLE(handle), HANDLE_FLAG_INHERIT.0, flags)
-                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))
+                .map_err(|err| io::Error::other(err))
         }
     }
 
@@ -757,7 +757,7 @@ mod windows {
                 false,
                 windows::Win32::Foundation::DUPLICATE_SAME_ACCESS,
             )
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            .map_err(io::Error::other)?;
         }
         Ok(dest.0 as usize as u64)
     }

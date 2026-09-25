@@ -796,6 +796,7 @@ fn launch_err(stage: &str, detail: &str) -> SandboxError {
 /// Nested per-guest Jobs created by the jail still work; this Job is the
 /// session-level `KILL_ON_JOB_CLOSE` cap (aggregate memory / PIDs / CPU).
 pub struct SessionJob {
+    /// Job object. Drop closes it and kills the tree (`KILL_ON_JOB_CLOSE`).
     handle: HANDLE,
 }
 
@@ -806,8 +807,8 @@ impl SessionJob {
     ///
     /// Returns an I/O error when `CreateJobObjectW` or Job configuration fails.
     pub fn create(limits: &crate::ResourceLimits) -> std::io::Result<Self> {
-        let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+        let job =
+            unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(std::io::Error::other)?;
         let job_limits = JobResourceLimits {
             memory_bytes: limits.memory_bytes.and_then(|b| usize::try_from(b).ok()),
             cpu_rate_percent: limits.cpu_rate_percent,
@@ -815,10 +816,7 @@ impl SessionJob {
         };
         if let Err(err) = configure_job(job, &job_limits) {
             let _ = unsafe { CloseHandle(job) };
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                err.to_string(),
-            ));
+            return Err(std::io::Error::other(err.to_string()));
         }
         Ok(Self { handle: job })
     }
@@ -830,8 +828,7 @@ impl SessionJob {
     /// Returns an I/O error when `AssignProcessToJobObject` fails.
     pub fn assign(&self, process: RawHandle) -> std::io::Result<()> {
         unsafe {
-            AssignProcessToJobObject(self.handle, HANDLE(process))
-                .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
+            AssignProcessToJobObject(self.handle, HANDLE(process)).map_err(std::io::Error::other)
         }
     }
 }
