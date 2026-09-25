@@ -53,7 +53,7 @@ pub use platform::create_session_cgroup;
 #[cfg(windows)]
 pub use platform::windows_launch::SessionJob;
 pub use spawn_path::{
-    canonicalize, require_absolute_or_name, require_absolute_spawn_path,
+    canonicalize, create_process_path, require_absolute_or_name, require_absolute_spawn_path,
     require_existing_regular_file, require_helper_beside_or_absolute, require_spawn_executable,
     require_under_root, SpawnPathError,
 };

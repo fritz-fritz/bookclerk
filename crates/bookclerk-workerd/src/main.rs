@@ -45,6 +45,10 @@ use tracing::{info, warn};
 
 use crate::manifest_env::load_manifest;
 
+/// `CREATE_NO_WINDOW`. A console host would consume a Job active-process slot.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -188,7 +192,13 @@ fn workerd_serve_command(
     let import_path = bookclerk_sandbox::require_absolute_spawn_path(&generated.import_path)
         .context("validate workerd --import-path")?;
 
-    let mut cmd = tokio::process::Command::new(&bin);
+    // Win32 form: an AppContainer CreateProcess on a `\\?\` path is access-denied
+    // even when the same file is readable. CREATE_NO_WINDOW keeps conhost out of
+    // the gateway Job's active-process cap.
+    let spawn_bin = bookclerk_sandbox::create_process_path(&bin);
+    let mut cmd = tokio::process::Command::new(&spawn_bin);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.arg("serve")
         // Unlocks the egress worker's `$experimental` inbound CONNECT handler.
         .arg(bookclerk_workerd::WORKERD_SERVE_EXPERIMENTAL);
