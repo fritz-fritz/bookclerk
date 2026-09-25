@@ -81,10 +81,23 @@ pub struct LaunchRequest<'a> {
     pub cwd: PathBuf,
     /// Child environment block entries as key/value pairs.
     pub env: Vec<(OsString, OsString)>,
-    /// AppContainer security capabilities for extended startup info.
-    pub sec: &'a SecurityCapabilities,
+    /// AppContainer security capabilities. `None` launches without a container
+    /// (Windows `Isolation::Off` still uses the jail for handle inheritance).
+    pub sec: Option<&'a SecurityCapabilities>,
     /// Resource limits applied to the kill-on-close Job Object.
     pub job: JobResourceLimits,
+    /// Extra inheritable handles (already duplicated into this process).
+    pub extra_handles: Vec<HANDLE>,
+    /// Guest stdin handle; `None` creates a pipe and returns the parent write end.
+    pub explicit_stdin: Option<HANDLE>,
+    /// Guest stdout handle; `None` creates a pipe and returns the parent read end.
+    pub explicit_stdout: Option<HANDLE>,
+}
+
+/// Reconstruct a [`HANDLE`] from a [`crate::JailHandoff`] integer.
+#[must_use]
+pub fn handle_from_u64(value: u64) -> HANDLE {
+    HANDLE(value as usize as *mut std::ffi::c_void)
 }
 
 /// A running AppContainer guest with proxied stdio and a kill-on-close Job.
@@ -184,7 +197,10 @@ pub fn launch_appcontainer_guest(
 ///
 /// Caller must ensure `request` paths and Win32 inputs are valid for CreateProcess.
 unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, SandboxError> {
-    let owned_caps = OwnedSecurityCapabilities::from_rappct(request.sec)?;
+    let owned_caps = match request.sec {
+        Some(sec) => Some(OwnedSecurityCapabilities::from_rappct(sec)?),
+        None => None,
+    };
 
     let mut sa = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -192,64 +208,73 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
         bInheritHandle: TRUE,
     };
 
-    let (child_stdin, parent_stdin_raw) = create_pipe_pair(&mut sa)?;
-    let (parent_stdout_raw, child_stdout) = create_pipe_pair(&mut sa)?;
+    let (child_stdin, parent_stdin_raw) = match request.explicit_stdin {
+        Some(h) => (h, None),
+        None => {
+            let (read, write) = create_pipe_pair(&mut sa)?;
+            (read, Some(write))
+        }
+    };
+    let (parent_stdout_raw, child_stdout) = match request.explicit_stdout {
+        Some(h) => (None, h),
+        None => {
+            let (read, write) = create_pipe_pair(&mut sa)?;
+            (Some(read), write)
+        }
+    };
     let (parent_stderr_raw, child_stderr) = create_pipe_pair(&mut sa)?;
 
-    // Ensure parent ends are not inherited.
-    for h in [parent_stdin_raw, parent_stdout_raw, parent_stderr_raw] {
+    let close_stdio = || {
+        cleanup_handles(&[child_stdin, child_stdout, child_stderr]);
+        cleanup_optional(&[parent_stdin_raw, parent_stdout_raw, Some(parent_stderr_raw)]);
+    };
+
+    // Parent pipe ends stay non-inheritable. Extra / explicit child ends
+    // must be inheritable so HANDLE_LIST can pass them.
+    for h in [parent_stdin_raw, parent_stdout_raw, Some(parent_stderr_raw)]
+        .into_iter()
+        .flatten()
+    {
         SetHandleInformation(h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)).map_err(|err| {
-            cleanup_handles(&[
-                child_stdin,
-                child_stdout,
-                child_stderr,
-                parent_stdin_raw,
-                parent_stdout_raw,
-                parent_stderr_raw,
-            ]);
+            close_stdio();
             launch_err("SetHandleInformation", &err.to_string())
+        })?;
+    }
+    for &h in request
+        .extra_handles
+        .iter()
+        .chain(request.explicit_stdin.iter())
+        .chain(request.explicit_stdout.iter())
+    {
+        SetHandleInformation(h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT).map_err(|err| {
+            close_stdio();
+            launch_err("SetHandleInformation(inherit extra)", &err.to_string())
         })?;
     }
 
     let job = match CreateJobObjectW(None, PCWSTR::null()) {
         Ok(h) => h,
         Err(err) => {
-            cleanup_handles(&[
-                child_stdin,
-                child_stdout,
-                child_stderr,
-                parent_stdin_raw,
-                parent_stdout_raw,
-                parent_stderr_raw,
-            ]);
+            close_stdio();
             return Err(launch_err("CreateJobObjectW", &err.to_string()));
         }
     };
 
     if let Err(err) = configure_job(job, &request.job) {
         let _ = CloseHandle(job);
-        cleanup_handles(&[
-            child_stdin,
-            child_stdout,
-            child_stderr,
-            parent_stdin_raw,
-            parent_stdout_raw,
-            parent_stderr_raw,
-        ]);
+        close_stdio();
         return Err(err);
     }
 
-    let inherit = [child_stdin, child_stdout, child_stderr];
+    let mut inherit = vec![child_stdin, child_stdout, child_stderr];
+    for &h in &request.extra_handles {
+        if !inherit.iter().any(|existing| existing.0 == h.0) {
+            inherit.push(h);
+        }
+    }
     let cleanup_all = || {
         let _ = CloseHandle(job);
-        cleanup_handles(&[
-            child_stdin,
-            child_stdout,
-            child_stderr,
-            parent_stdin_raw,
-            parent_stdout_raw,
-            parent_stderr_raw,
-        ]);
+        close_stdio();
     };
 
     // Primary path: CREATE_SUSPENDED → AssignProcessToJobObject → ResumeThread.
@@ -261,11 +286,14 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
     let try_job_list =
         !force_assign_fail && std::env::var_os("BOOKCLERK_AC_USE_JOB_LIST").is_some();
 
-    let prepare_attrs = |count: u32| -> Result<AttributeList, SandboxError> {
+    let prepare_attrs = |with_job: bool| -> Result<AttributeList, SandboxError> {
+        let count = 1 + u32::from(owned_caps.is_some()) + u32::from(with_job);
         let mut attrs = AttributeList::new(count).inspect_err(|_| cleanup_all())?;
-        attrs
-            .set_security_capabilities(&owned_caps)
-            .inspect_err(|_| cleanup_all())?;
+        if let Some(caps) = owned_caps.as_ref() {
+            attrs
+                .set_security_capabilities(caps)
+                .inspect_err(|_| cleanup_all())?;
+        }
         attrs
             .set_handle_list(&inherit)
             .inspect_err(|_| cleanup_all())?;
@@ -273,16 +301,16 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
     };
 
     let (mut attr, use_job_list) = if try_job_list {
-        let mut with_job = prepare_attrs(3)?;
+        let mut with_job = prepare_attrs(true)?;
         if with_job.set_job_list(&[job]).is_ok() {
             (with_job, true)
         } else {
             tracing::debug!("PROC_THREAD_ATTRIBUTE_JOB_LIST refused; using CREATE_SUSPENDED");
             drop(with_job);
-            (prepare_attrs(2)?, false)
+            (prepare_attrs(false)?, false)
         }
     } else {
-        (prepare_attrs(2)?, false)
+        (prepare_attrs(false)?, false)
     };
 
     let mut si_ex: STARTUPINFOEXW = std::mem::zeroed();
@@ -325,18 +353,12 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
             std::io::Error::last_os_error()
         );
         drop(attr);
-        let mut retry_attrs = match prepare_attrs(2) {
+        let mut retry_attrs = match prepare_attrs(false) {
             Ok(a) => a,
             Err(err) => {
                 let _ = CloseHandle(job);
-                cleanup_handles(&[
-                    child_stdin,
-                    child_stdout,
-                    child_stderr,
-                    parent_stdin_raw,
-                    parent_stdout_raw,
-                    parent_stderr_raw,
-                ]);
+                cleanup_handles(&[child_stdin, child_stdout, child_stderr]);
+                cleanup_optional(&[parent_stdin_raw, parent_stdout_raw, Some(parent_stderr_raw)]);
                 return Err(err);
             }
         };
@@ -361,16 +383,18 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
         use_job_list
     };
 
-    // Child pipe ends must not stay open in the parent.
-    let _ = CloseHandle(child_stdin);
-    let _ = CloseHandle(child_stdout);
-    let _ = CloseHandle(child_stderr);
+    // Child pipe / extra ends must not stay open in the parent.
+    close_unique_handles(
+        [child_stdin, child_stdout, child_stderr]
+            .into_iter()
+            .chain(request.extra_handles.iter().copied()),
+    );
     drop(attr);
     drop(owned_caps);
 
     if cp.is_err() {
         let _ = CloseHandle(job);
-        cleanup_handles(&[parent_stdin_raw, parent_stdout_raw, parent_stderr_raw]);
+        cleanup_optional(&[parent_stdin_raw, parent_stdout_raw, Some(parent_stderr_raw)]);
         return Err(launch_err(
             "CreateProcessW",
             &format!(
@@ -388,7 +412,7 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
             let _ = CloseHandle(pi.hThread);
             let _ = CloseHandle(pi.hProcess);
             let _ = CloseHandle(job);
-            cleanup_handles(&[parent_stdin_raw, parent_stdout_raw, parent_stderr_raw]);
+            cleanup_optional(&[parent_stdin_raw, parent_stdout_raw, Some(parent_stderr_raw)]);
         }
         launch_err(stage, detail)
     };
@@ -428,8 +452,8 @@ unsafe fn launch_impl(request: LaunchRequest<'_>) -> Result<LaunchedGuest, Sandb
 
     let _ = CloseHandle(pi.hThread);
 
-    let stdin = Some(file_from_handle(parent_stdin_raw));
-    let stdout = Some(file_from_handle(parent_stdout_raw));
+    let stdin = parent_stdin_raw.map(file_from_handle);
+    let stdout = parent_stdout_raw.map(file_from_handle);
     let stderr = Some(file_from_handle(parent_stderr_raw));
 
     Ok(LaunchedGuest {
@@ -707,6 +731,26 @@ fn file_from_handle(handle: HANDLE) -> File {
 fn cleanup_handles(handles: &[HANDLE]) {
     for &h in handles {
         if !h.is_invalid() && h != HANDLE::default() {
+            unsafe {
+                let _ = CloseHandle(h);
+            }
+        }
+    }
+}
+
+/// Closes every present handle in `handles`.
+fn cleanup_optional(handles: &[Option<HANDLE>]) {
+    for handle in handles.iter().flatten() {
+        cleanup_handles(&[*handle]);
+    }
+}
+
+/// Closes each distinct non-invalid handle once.
+fn close_unique_handles(handles: impl IntoIterator<Item = HANDLE>) {
+    let mut seen = std::collections::HashSet::new();
+    for h in handles {
+        let key = h.0 as usize;
+        if !h.is_invalid() && h != HANDLE::default() && seen.insert(key) {
             unsafe {
                 let _ = CloseHandle(h);
             }

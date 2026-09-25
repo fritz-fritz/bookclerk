@@ -66,8 +66,8 @@ pub mod spawn {
     pub use crate::platform::windows_pipe::NamedPipeSecurity;
     pub use crate::platform::windows_spawn::{
         grant_path_access, is_os_managed_path, plan_appcontainer, profile_name_for_label,
-        run_appcontainer, unique_profile_moniker, AclGrant, AppContainerLaunch,
-        AppContainerSession,
+        run_appcontainer, run_appcontainer_with_handoff, run_unconfined_with_handoff,
+        unique_profile_moniker, AclGrant, AppContainerLaunch, AppContainerSession,
     };
 
     #[cfg(windows)]

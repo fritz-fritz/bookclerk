@@ -438,18 +438,64 @@ pub fn run_appcontainer(
     args: &[OsString],
     session: Option<&AppContainerSession>,
 ) -> Result<u32, SandboxError> {
+    run_appcontainer_with_handoff(policy, program, args, session, None)
+}
+
+/// [`run_appcontainer`] plus an optional host [`crate::JailHandoff`] of inherited handles.
+///
+/// # Errors
+///
+/// Returns [`SandboxError::Backend`] when the profile, ACLs, or CreateProcess
+/// step fails. On non-Windows hosts this always fails.
+pub fn run_appcontainer_with_handoff(
+    policy: &Policy,
+    program: &Path,
+    args: &[OsString],
+    session: Option<&AppContainerSession>,
+    handoff: Option<&crate::JailHandoff>,
+) -> Result<u32, SandboxError> {
     #[cfg(windows)]
     {
-        run_appcontainer_windows(policy, program, args, session)
+        run_appcontainer_windows(policy, program, args, session, handoff)
     }
     #[cfg(not(windows))]
     {
-        let _ = (program, args, session);
+        let _ = (program, args, session, handoff);
         let _ = plan_appcontainer(policy);
         Err(SandboxError::Backend {
             label: policy.label().to_string(),
             backend: "appcontainer",
             detail: "AppContainer CreateProcess is only available on Windows".to_string(),
+        })
+    }
+}
+
+/// Launch without an AppContainer, inheriting the host-duplicated handoff handles.
+///
+/// Used when `[plugins].isolation = off` on Windows: the jail is still the
+/// sole `CreateProcess` so `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` can name the
+/// session links. There is no package SID and no ACL mutation.
+///
+/// # Errors
+///
+/// Returns [`SandboxError::Backend`] when CreateProcess fails. On non-Windows
+/// hosts this always fails.
+pub fn run_unconfined_with_handoff(
+    program: &Path,
+    args: &[OsString],
+    handoff: &crate::JailHandoff,
+) -> Result<u32, SandboxError> {
+    #[cfg(windows)]
+    {
+        run_unconfined_windows(program, args, handoff)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (program, args, handoff);
+        Err(SandboxError::Backend {
+            label: "unconfined".to_string(),
+            backend: "appcontainer",
+            detail: "Windows handle handoff is only available on Windows".to_string(),
         })
     }
 }
@@ -637,6 +683,7 @@ fn run_appcontainer_windows(
     program: &Path,
     args: &[OsString],
     session: Option<&AppContainerSession>,
+    handoff: Option<&crate::JailHandoff>,
 ) -> Result<u32, SandboxError> {
     use std::io::{self, Read, Write};
     use std::thread;
@@ -861,13 +908,17 @@ fn run_appcontainer_windows(
     // argv[0] (the program image) so Rust/C argv parsing lines up.
     let cmdline = windows_command_line(program, args);
     let job_limits = job_limits_for_policy(policy);
+    let (extra_handles, explicit_stdin, explicit_stdout) = handoff_handles(handoff);
     let request = LaunchRequest {
         exe: program,
         cmdline,
         cwd,
         env: child_env,
-        sec: &sec,
+        sec: Some(&sec),
         job: job_limits,
+        extra_handles,
+        explicit_stdin,
+        explicit_stdout,
     };
 
     let mut io = match launch_appcontainer_guest(request) {
@@ -941,6 +992,100 @@ fn run_appcontainer_windows(
         "AppContainer guest exited"
     );
     Ok(code)
+}
+
+/// Launch without AppContainer, inheriting handoff handles and pumping stdio.
+#[cfg(windows)]
+fn run_unconfined_windows(
+    program: &Path,
+    args: &[OsString],
+    handoff: &crate::JailHandoff,
+) -> Result<u32, SandboxError> {
+    use std::io::{self, Read, Write};
+    use std::thread;
+    use std::time::Duration;
+
+    use super::windows_launch::{launch_appcontainer_guest, LaunchRequest};
+
+    let cmdline = windows_command_line(program, args);
+    let cwd = std::env::current_dir().map_err(|err| SandboxError::Backend {
+        label: "unconfined".into(),
+        backend: "appcontainer",
+        detail: format!("current_dir: {err}"),
+    })?;
+    let env = appcontainer_child_env(std::env::vars_os(), &cwd, &std::env::temp_dir());
+    let (extra_handles, explicit_stdin, explicit_stdout) = handoff_handles(Some(handoff));
+    let request = LaunchRequest {
+        exe: program,
+        cmdline,
+        cwd,
+        env,
+        sec: None,
+        job: super::windows_launch::JobResourceLimits::default(),
+        extra_handles,
+        explicit_stdin,
+        explicit_stdout,
+    };
+    let mut io = launch_appcontainer_guest(request).map_err(|err| SandboxError::Backend {
+        label: "unconfined".into(),
+        backend: "appcontainer",
+        detail: format!("CreateProcess (unconfined handoff) failed: {err}"),
+    })?;
+    let mut child_stdin = io.stdin.take();
+    let mut child_stdout = io.stdout.take();
+    let mut child_stderr = io.stderr.take();
+    let t_in = thread::spawn(move || {
+        if let Some(mut dest) = child_stdin.take() {
+            let _ = io::copy(&mut io::stdin(), &mut dest);
+            let _ = dest.flush();
+        }
+    });
+    let t_out = thread::spawn(move || {
+        if let Some(mut src) = child_stdout.take() {
+            let _ = copy_flushing(&mut src, &mut io::stdout());
+        }
+    });
+    let t_err = thread::spawn(move || {
+        if let Some(src) = child_stderr.take() {
+            let mut limited = src.take(1024 * 1024);
+            let _ = copy_flushing(&mut limited, &mut io::stderr());
+        }
+    });
+    let wait_result = io.wait(None);
+    join_proxy_timeout(t_out, Duration::from_secs(2));
+    join_proxy_timeout(t_err, Duration::from_secs(2));
+    drop(t_in);
+    wait_result.map_err(|err| SandboxError::Backend {
+        label: "unconfined".into(),
+        backend: "appcontainer",
+        detail: format!("waiting for unconfined guest failed: {err}"),
+    })
+}
+
+/// Decode [`crate::JailHandoff`] handle integers into Win32 [`HANDLE`]s.
+#[cfg(windows)]
+fn handoff_handles(
+    handoff: Option<&crate::JailHandoff>,
+) -> (
+    Vec<windows::Win32::Foundation::HANDLE>,
+    Option<windows::Win32::Foundation::HANDLE>,
+    Option<windows::Win32::Foundation::HANDLE>,
+) {
+    use super::windows_launch::handle_from_u64;
+
+    let Some(handoff) = handoff else {
+        return (Vec::new(), None, None);
+    };
+    let extra = handoff
+        .extra
+        .iter()
+        .map(|item| handle_from_u64(item.handle))
+        .collect();
+    (
+        extra,
+        handoff.stdin.map(handle_from_u64),
+        handoff.stdout.map(handle_from_u64),
+    )
 }
 
 /// Join a stdio proxy briefly after the guest exits; detach if it does not
@@ -1068,6 +1213,7 @@ fn appcontainer_child_env(
     let replaced = |key: &OsString| {
         let key = key.to_string_lossy();
         key.eq_ignore_ascii_case(crate::SPEC_ENV)
+            || key.eq_ignore_ascii_case(crate::JAIL_HANDOFF_ENV)
             || APPCONTAINER_PROFILE_ENV
                 .iter()
                 .any(|k| key.eq_ignore_ascii_case(k))
@@ -1839,6 +1985,7 @@ mod tests {
             ("TEMP", "C:\\Users\\host\\Temp"),
             ("tmp", "C:\\Users\\host\\Temp"),
             (crate::SPEC_ENV, "{\"label\":\"x\"}"),
+            (crate::JAIL_HANDOFF_ENV, "1"),
         ]
         .map(|(k, v)| (OsString::from(k), OsString::from(v)));
         let folder = Path::new("C:\\Users\\host\\AppData\\Local\\Packages\\bc.x\\AC");
@@ -1866,6 +2013,11 @@ mod tests {
             get(crate::SPEC_ENV),
             None,
             "the jail spec must not reach the guest"
+        );
+        assert_eq!(
+            get(crate::JAIL_HANDOFF_ENV),
+            None,
+            "the jail handoff flag must not reach the guest"
         );
     }
 

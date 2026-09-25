@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "bookclerk-loopback-probe"
+path = "src/bin/bookclerk-loopback-probe.rs"
+
 [dependencies]
 rand = { workspace = true }
 serde = { workspace = true }
