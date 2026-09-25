@@ -234,7 +234,92 @@ async fn connect_proxy(spec: &str) -> Result<ProxyStream> {
     if let Some(name) = spec.strip_prefix(SOCKET_PROXY_ABSTRACT_PREFIX) {
         return connect_abstract(name).await;
     }
+    #[cfg(target_os = "macos")]
+    if spec.len() >= MACOS_SUN_PATH_BYTES {
+        return connect_beneath_parent(std::path::Path::new(spec));
+    }
     Ok(UnixStream::connect(spec).await?)
+}
+
+/// `sizeof(sockaddr_un.sun_path)` on macOS, including the trailing NUL.
+#[cfg(target_os = "macos")]
+const MACOS_SUN_PATH_BYTES: usize = 104;
+
+/// Connects to a pathname socket whose absolute path overflows `sun_path`.
+///
+/// macOS has no `/proc/self/fd`, and the proxy lives under the plugin's
+/// state directory, which is routinely longer than 104 bytes. `connectat(2)`
+/// resolves the short file name against an open handle on the parent
+/// directory, so no process-wide `chdir` is needed.
+///
+/// # Errors
+///
+/// Returns an error when the parent cannot be opened or `connectat` fails.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn connect_beneath_parent(path: &std::path::Path) -> Result<ProxyStream> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    extern "C" {
+        /// `<sys/socket.h>` (macOS 10.11+): `connect` with a relative
+        /// `sun_path` resolved against directory `fd`.
+        fn connectat(
+            fd: libc::c_int,
+            socket: libc::c_int,
+            address: *const libc::sockaddr,
+            address_len: libc::socklen_t,
+        ) -> libc::c_int;
+    }
+
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(SdkError::message(format!(
+            "socket proxy path {} has no parent directory",
+            path.display()
+        )));
+    };
+    let name = name.as_bytes();
+    // SAFETY: `sockaddr_un` is plain old data; all-zero is a valid value.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if name.len() >= addr.sun_path.len() {
+        return Err(SdkError::message(format!(
+            "socket proxy file name is too long: {}",
+            path.display()
+        )));
+    }
+    let dir = std::fs::File::open(parent)?;
+    // SAFETY: plain syscall; the result is checked before use.
+    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: `raw` is a fresh descriptor owned by nothing else.
+    let socket = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: `socket` is a valid open descriptor.
+    if unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (dst, src) in addr.sun_path.iter_mut().zip(name) {
+        *dst = *src as libc::c_char;
+    }
+    let len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + name.len() + 1;
+    addr.sun_len = u8::try_from(len).unwrap_or(u8::MAX);
+    // SAFETY: `addr` is initialised for `len` bytes and both descriptors are open.
+    let rc = unsafe {
+        connectat(
+            dir.as_raw_fd(),
+            socket.as_raw_fd(),
+            std::ptr::addr_of!(addr).cast(),
+            libc::socklen_t::try_from(len).unwrap_or(libc::socklen_t::MAX),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let stream = std::os::unix::net::UnixStream::from(socket);
+    stream.set_nonblocking(true)?;
+    Ok(tokio::net::UnixStream::from_std(stream)?)
 }
 
 #[cfg(windows)]
