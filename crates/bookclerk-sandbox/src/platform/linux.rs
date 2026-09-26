@@ -166,7 +166,7 @@ fn apply_cgroup_v2_limits(policy: &Policy) -> LayerStatus {
         return LayerStatus::NotRequested;
     }
     let limits = policy.resource_limits();
-    match try_apply_cgroup_v2(&limits) {
+    match try_apply_cgroup_v2(&limits, policy.cgroup_dir_opt()) {
         Ok(()) => LayerStatus::Enforced,
         Err(detail) => {
             let detail = friendly_cgroup_error(detail);
@@ -192,7 +192,18 @@ fn apply_cgroup_v2_limits(policy: &Policy) -> LayerStatus {
 ///
 /// Never writes limits onto the current/parent cgroup: that would throttle
 /// siblings (and in CI, the whole job) sharing the runner slice.
-fn try_apply_cgroup_v2(limits: &crate::ResourceLimits) -> Result<(), String> {
+///
+/// When `join` is set (host-created session leaf), this process moves into
+/// that directory and does **not** rewrite limits — the host already wrote
+/// the aggregate memory/CPU/pids ceilings.
+fn try_apply_cgroup_v2(limits: &crate::ResourceLimits, join: Option<&Path>) -> Result<(), String> {
+    if let Some(dir) = join {
+        if !dir.is_dir() {
+            return Err(format!("cgroup_dir {} is not a directory", dir.display()));
+        }
+        return move_self_into_cgroup(dir);
+    }
+
     let root = Path::new("/sys/fs/cgroup");
     if !root.join("cgroup.controllers").is_file() {
         return Err("cgroup v2 not mounted at /sys/fs/cgroup".into());
@@ -335,6 +346,142 @@ fn move_self_into_cgroup(dir: &Path) -> Result<(), String> {
     let path = dir.join("cgroup.procs");
     let pid = std::process::id().to_string();
     std::fs::write(&path, &pid).map_err(|err| format!("move pid into {}: {err}", path.display()))
+}
+
+/// Create an exclusive session cgroup leaf and write `limits` without moving the caller.
+///
+/// The host assigns both sibling jails via [`crate::Spec::cgroup_dir`]. The leaf
+/// name is the suffix the caller supplies; `create_dir` fails when that name
+/// already exists so two sessions never share a leaf. `pids.max` is the payload
+/// thread budget from `limits` (not the Windows process baseline).
+///
+/// Failure is best-effort (same posture as `try_apply_cgroup_v2`): callers treat
+/// `Err` as not-applicable and fall back to process-group kill, which does not
+/// cover a descendant that calls `setsid`. That is not fake enforcement.
+///
+/// # Errors
+///
+/// Returns a string when the hierarchy is missing, the leaf already exists, a
+/// child cannot be created, or a limit file cannot be written. A partial
+/// directory is removed when writing limits fails.
+pub fn create_session_cgroup(
+    limits: &crate::ResourceLimits,
+    suffix: &str,
+) -> Result<std::path::PathBuf, String> {
+    let root = Path::new("/sys/fs/cgroup");
+    if !root.join("cgroup.controllers").is_file() {
+        return Err("cgroup v2 not mounted at /sys/fs/cgroup".into());
+    }
+    let current_rel = current_cgroup_v2_path()?;
+    let parent = if current_rel.is_empty() || current_rel == "/" {
+        root.to_path_buf()
+    } else {
+        root.join(current_rel.trim_start_matches('/'))
+    };
+    if !parent.is_dir() {
+        return Err(format!(
+            "current cgroup path {} is missing under /sys/fs/cgroup",
+            parent.display()
+        ));
+    }
+    let _ = enable_subtree_controllers(&parent);
+    let suffix = suffix
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect::<String>();
+    if suffix.is_empty() {
+        return Err("session cgroup suffix is empty".into());
+    }
+    let child_name = format!("bookclerk-session-{suffix}");
+    let child = parent.join(&child_name);
+    match std::fs::create_dir(&child) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(format!(
+                "session cgroup {} already exists; refusing to share a leaf",
+                child.display()
+            ));
+        }
+        Err(err) => {
+            return Err(format!(
+                "could not create session cgroup {}: {err}",
+                child.display()
+            ));
+        }
+    }
+    if let Err(err) = write_cgroup_limits(&child, limits) {
+        let _ = std::fs::remove_dir(&child);
+        return Err(err);
+    }
+    Ok(child)
+}
+
+/// Kill every member of `dir` except this process, wait until `cgroup.procs`
+/// is empty, and remove the leaf.
+///
+/// A missing directory is success, so teardown is idempotent. Pid 0 is never
+/// signalled. The host process is skipped when it appears in the leaf.
+///
+/// # Errors
+///
+/// Returns a string when membership cannot be read, members are still present
+/// after the wait, or the empty directory cannot be removed.
+pub fn destroy_session_cgroup(dir: &Path) -> Result<(), String> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let host = std::process::id();
+    loop {
+        let members = read_cgroup_procs(dir)?;
+        let mut alive = false;
+        for pid in members {
+            if pid == 0 || pid == host {
+                continue;
+            }
+            alive = true;
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+        if !alive {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "session cgroup {} still has members after kill",
+                dir.display()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    match std::fs::remove_dir(dir) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("remove session cgroup {}: {err}", dir.display())),
+    }
+}
+
+/// Pids listed in `dir/cgroup.procs`. A missing file is an empty set.
+fn read_cgroup_procs(dir: &Path) -> Result<Vec<u32>, String> {
+    let path = dir.join("cgroup.procs");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(format!("read {}: {err}", path.display())),
+    };
+    let mut pids = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let pid = line
+            .parse::<u32>()
+            .map_err(|err| format!("cgroup.procs pid `{line}`: {err}"))?;
+        pids.push(pid);
+    }
+    Ok(pids)
 }
 
 /// Fold Landlock's network result together with what seccomp covers.
@@ -662,6 +809,75 @@ mod tests {
             std::fs::read_to_string(dir.path().join("pids.max")).unwrap(),
             "8"
         );
+    }
+
+    #[test]
+    fn joining_a_session_cgroup_does_not_rewrite_limits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let limits = crate::ResourceLimits {
+            memory_bytes: Some(64 * 1024 * 1024),
+            cpu_rate_percent: Some(25),
+            active_processes: Some(3),
+        };
+        // A missing join target fails closed.
+        let missing = dir.path().join("nope");
+        let err = try_apply_cgroup_v2(&limits, Some(&missing)).expect_err("missing");
+        assert!(err.contains("not a directory"), "{err}");
+
+        // A present leaf is joined by writing cgroup.procs only — never
+        // memory.max / cpu.max / pids.max (those stay host-owned).
+        try_apply_cgroup_v2(&limits, Some(dir.path())).expect("join temp leaf");
+        assert!(
+            !dir.path().join("memory.max").exists(),
+            "join must not rewrite host-owned limits"
+        );
+        assert!(!dir.path().join("cpu.max").exists());
+        assert!(!dir.path().join("pids.max").exists());
+        let procs = std::fs::read_to_string(dir.path().join("cgroup.procs")).expect("procs");
+        assert_eq!(procs, std::process::id().to_string());
+    }
+
+    /// Real delegated hierarchy only. A temp file named `cgroup.procs` is not
+    /// this test: uniqueness is `create_dir` failing with `AlreadyExists`.
+    #[test]
+    fn exclusive_session_leaves_when_the_hierarchy_is_delegated() {
+        let limits = crate::ResourceLimits {
+            memory_bytes: None,
+            cpu_rate_percent: None,
+            active_processes: Some(32),
+        };
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let suffix = format!("excl-{}-{nonce}", std::process::id());
+        let first = match create_session_cgroup(&limits, &suffix) {
+            Ok(dir) => dir,
+            Err(err) => {
+                eprintln!(
+                    "delegated cgroup unavailable ({err}); exclusive leaf not enforced here. \
+                     process-group kill is the fallback and does not cover a descendant that calls setsid"
+                );
+                return;
+            }
+        };
+        let err = create_session_cgroup(&limits, &suffix)
+            .expect_err("a second session must not share the leaf");
+        assert!(
+            err.contains("already exists"),
+            "collision must name the existing leaf: {err}"
+        );
+        let second =
+            create_session_cgroup(&limits, &format!("{suffix}-b")).expect("distinct suffix");
+        assert_ne!(
+            first, second,
+            "two sessions of one plugin need distinct leaves"
+        );
+        destroy_session_cgroup(&first).expect("remove first");
+        destroy_session_cgroup(&second).expect("remove second");
+        assert!(!first.exists());
+        assert!(!second.exists());
+        destroy_session_cgroup(&first).expect("idempotent destroy");
     }
 
     #[test]

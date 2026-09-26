@@ -81,12 +81,13 @@ pub use consent::{
     inject_workerd_grant_env, jail_process_overhead, network_compatible,
     overlay_host_implied_network, pending_structural, percent_to_cores,
     reconcile_host_overlay_authority, require_binding, require_grant, spawn_config_for_grant,
-    spawn_grant, validate_approved_grant, validate_described_capabilities, GrantedEventConsumer,
-    PendingStructural, PluginGrant, PluginGrantStore, GRANTS_FILE, GRANT_SCHEMA_VERSION,
-    KNOWN_HOST_BINDINGS, PLUGIN_JAIL_ACTIVE_PROCESSES_MAX, PLUGIN_JAIL_CPU_CORES_DEFAULT,
-    PLUGIN_JAIL_CPU_RATE_DEFAULT, PLUGIN_JAIL_CPU_RATE_MAX, PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT,
-    PLUGIN_JAIL_EXTRA_PROCESSES_MAX, PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX,
-    PLUGIN_STATE_BUDGET_MIB_DEFAULT, PLUGIN_STATE_BUDGET_MIB_MAX, WORKERD_GRANT_CPU_MS_ENV,
+    spawn_grant, validate_approved_grant, validate_described_capabilities,
+    windows_session_active_processes, GrantedEventConsumer, PendingStructural, PluginGrant,
+    PluginGrantStore, GRANTS_FILE, GRANT_SCHEMA_VERSION, KNOWN_HOST_BINDINGS,
+    PLUGIN_JAIL_ACTIVE_PROCESSES_MAX, PLUGIN_JAIL_CPU_CORES_DEFAULT, PLUGIN_JAIL_CPU_RATE_DEFAULT,
+    PLUGIN_JAIL_CPU_RATE_MAX, PLUGIN_JAIL_EXTRA_PROCESSES_DEFAULT, PLUGIN_JAIL_EXTRA_PROCESSES_MAX,
+    PLUGIN_JAIL_MEMORY_MIB_DEFAULT, PLUGIN_JAIL_MEMORY_MIB_MAX, PLUGIN_STATE_BUDGET_MIB_DEFAULT,
+    PLUGIN_STATE_BUDGET_MIB_MAX, WINDOWS_SESSION_PROCESS_BASELINE, WORKERD_GRANT_CPU_MS_ENV,
     WORKERD_GRANT_DOMAINS_ENV, WORKERD_GRANT_NETWORK_MODE_ENV, WORKERD_GRANT_POLICY_ENV,
     WORKERD_GRANT_SUBREQUESTS_ENV,
 };
@@ -130,8 +131,8 @@ pub use rpc_session::{
     RpcBackupOps, SessionServices, HOST_SHARED_ACCOUNT, OPERATOR_ACCOUNT,
 };
 pub use spawn_plan::{
-    GuestRuntimeKind, SpawnPlan, SpawnTransport, WorkerdFrontDoor, NATIVE_BACKEND_ENV,
-    NESTED_JAIL_BIN_ENV, NESTED_NATIVE_JAIL_ENV, WORKERD_BIN_ENV, WORKERD_LAUNCHER_ENV,
+    GuestRuntimeKind, SpawnPlan, SpawnTransport, WorkerdFrontDoor, WORKERD_BIN_ENV,
+    WORKERD_LAUNCHER_ENV,
 };
 
 /// Register discovered external plugins into the in-process registries.

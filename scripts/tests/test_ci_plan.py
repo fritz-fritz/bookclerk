@@ -538,7 +538,20 @@ def _ctx(os_name: str) -> Context:
 
 
 class NativeGatewayTests(unittest.TestCase):
-    SMOKE = ["cargo", "test", "-p", E2E_PACKAGE, "--test", "native_gateway", "--", "--nocapture"]
+    SMOKE = [
+        "cargo",
+        "test",
+        "-p",
+        E2E_PACKAGE,
+        "--test",
+        "native_gateway",
+        "--test",
+        "native_gateway_isolation",
+        "--test",
+        "native_gateway_lifecycle",
+        "--",
+        "--nocapture",
+    ]
 
     def test_launch_path_changes_select_the_smoke(self) -> None:
         for path in (
@@ -648,7 +661,9 @@ class NativeGatewayTests(unittest.TestCase):
 
     def test_staged_e2e_runs_every_other_e2e_target(self) -> None:
         tests_dir = REPO / "crates" / "bookclerk-plugin-e2e" / "tests"
-        targets = sorted(f.stem for f in tests_dir.glob("*.rs") if f.stem != "native_gateway")
+        targets = sorted(
+            f.stem for f in tests_dir.glob("*.rs") if not f.stem.startswith("native_gateway")
+        )
         argv = check_argv(plan("crates/bookclerk-plugins/optional/source-libro/src/client.rs"), "e2e")[0]
         named = sorted(argv[i + 1] for i, a in enumerate(argv) if a == "--test")
         self.assertEqual(named, targets)

@@ -118,7 +118,28 @@ pub fn register_session_revisions(
     revision: &str,
     shutdown: SessionShutdown,
 ) -> Arc<AtomicBool> {
-    let cancelled = Arc::new(AtomicBool::new(false));
+    register_session_revisions_on(
+        plugin_key,
+        grant_revision,
+        revision,
+        shutdown,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+/// [`register_session_revisions`] using a cancel flag the proxy already holds.
+///
+/// Authority revocation stores `true` on `cancelled` before the shutdown hook
+/// runs, so describe, ordinary RPCs, and the host proxy observe it without
+/// waiting for the vat work queue.
+#[must_use]
+pub fn register_session_revisions_on(
+    plugin_key: &str,
+    grant_revision: &str,
+    revision: &str,
+    shutdown: SessionShutdown,
+    cancelled: Arc<AtomicBool>,
+) -> Arc<AtomicBool> {
     if let Ok(mut guard) = live().lock() {
         guard.push(LiveSession {
             plugin_key: plugin_key.to_string(),

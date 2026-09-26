@@ -364,10 +364,13 @@ impl MediaPool {
             Some(jail) => format!("{} -- {}", jail.display(), launch.bin.display()),
             None => launch.bin.display().to_string(),
         };
-        let mut child = command.spawn().map_err(|err| MediaError::Worker {
-            job: label,
-            detail: format!("could not spawn {spawned}: {err}"),
-        })?;
+        let mut child =
+            bookclerk_sandbox::with_fd_spawn_lock(|| command.spawn()).map_err(|err| {
+                MediaError::Worker {
+                    job: label,
+                    detail: format!("could not spawn {spawned}: {err}"),
+                }
+            })?;
         if let Some(stderr) = child.stderr.take() {
             forward_worker_stderr(label, stderr);
         }
@@ -564,6 +567,9 @@ fn media_job_spec(job: &MediaJob, confinement: Confinement) -> Spec {
         memory_bytes: None,
         active_processes: None,
         cpu_rate_percent: None,
+        inherit_handles: Vec::new(),
+        cgroup_dir: None,
+        unix_socket_dirs: None,
     }
 }
 
