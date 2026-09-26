@@ -516,7 +516,7 @@ async fn finish_clean_session(install: &Install, listener: &Listener, label: &st
             .join("plugins")
             .join(ng_harness::PLUGIN_ID);
         for path in [install.files_dir(), plugin.as_path()] {
-            let mentioned = bookclerk_sandbox::dacl_mentions_sid(path, sid)
+            let mentioned = bookclerk_sandbox::spawn::dacl_mentions_sid(path, sid)
                 .unwrap_or_else(|err| panic!("{label}: DACL read {}: {err}", path.display()));
             assert!(
                 !mentioned,
@@ -603,7 +603,7 @@ async fn outer_session_job_failure_leaves_no_session_and_no_proxy() {
         let _clear = ClearJobFail;
         std::env::set_var("BOOKCLERK_TEST_FAIL_SESSION_JOB", mode);
         let plugin = install.plugin();
-        let err = tokio::time::timeout(
+        let spawned = tokio::time::timeout(
             std::time::Duration::from_secs(60),
             PluginSession::spawn_with(
                 &plugin,
@@ -615,8 +615,11 @@ async fn outer_session_job_failure_leaves_no_session_and_no_proxy() {
             ),
         )
         .await
-        .unwrap_or_else(|_| panic!("{mode}: spawn hung"))
-        .expect_err("required isolation must fail closed");
+        .unwrap_or_else(|_| panic!("{mode}: spawn hung"));
+        // `PluginSession` is not `Debug`, so this cannot use `expect_err`.
+        let Err(err) = spawned else {
+            panic!("{mode}: required isolation returned a session");
+        };
         std::env::remove_var("BOOKCLERK_TEST_FAIL_SESSION_JOB");
         let text = err.to_string();
         assert!(text.contains("outer session Job"), "{mode}: {text}");

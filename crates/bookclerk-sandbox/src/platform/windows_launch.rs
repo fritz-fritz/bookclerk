@@ -1385,16 +1385,19 @@ mod tests {
                 children.push(child);
             }
             assert_eq!(job.active_process_count().expect("count"), cap);
-            let extra = spawn_linger();
+            let mut extra = spawn_linger();
             let err = job
                 .assign(extra.as_raw_handle())
                 .expect_err("process past the cap");
             let text = err.to_string().to_ascii_lowercase();
+            // Active-process denial is `ERROR_ACCESS_DENIED` on some builds and
+            // `ERROR_NOT_ENOUGH_QUOTA` (0x80070718) on windows-latest.
             assert!(
-                text.contains("denied") || text.contains("access"),
+                text.contains("denied") || text.contains("access") || text.contains("quota"),
                 "cap {cap} next assign: {err}"
             );
-            drop(extra);
+            let _ = extra.kill();
+            let _ = extra.wait();
             drop(job);
             for mut child in children {
                 let _ = child.wait();
