@@ -24,8 +24,8 @@ const LONGEST_SOCKET_NAME: &str = ".s.PGSQL.65535";
 /// # Errors
 ///
 /// Returns when `/tmp` cannot hold the directory, or when the canonical path
-/// plus [`.s.PGSQL.65535`](LONGEST_SOCKET_NAME) does not fit. The error includes
-/// the path length and the directory that was too long.
+/// plus `.s.PGSQL.65535` does not fit. The error includes the path length and
+/// the directory that was too long.
 pub fn create_guest_ipc_dir() -> Result<PathBuf, String> {
     use std::os::unix::fs::PermissionsExt;
 

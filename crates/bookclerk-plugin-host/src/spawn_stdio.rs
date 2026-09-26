@@ -88,6 +88,7 @@ pub(crate) struct SpawnedStdio {
     /// Best-effort spawn continued with no outer Job because that kernel
     /// feature is unsupported. Required isolation fails before this is set.
     #[cfg(windows)]
+    #[allow(dead_code)] // recorded on the session; Required isolation never sets it
     pub outer_job_unsupported: bool,
     /// Cancel flag shared by the host proxy, initial describe, and RPCs.
     pub cancel: Arc<AtomicBool>,
@@ -108,6 +109,7 @@ pub(crate) struct SpawnedStdio {
     pub guest_ipc: Option<crate::jail::GuestIpcDir>,
     /// Host-owned ACL rollback for this session's package SIDs.
     #[cfg(windows)]
+    #[allow(dead_code)] // Drop revokes; the vat owns the journal by holding it
     pub acl_journal: AclJournal,
     /// Last lines of guest + gateway stderr, for spawn failures.
     pub stderr_tail: Arc<Mutex<VecDeque<String>>>,
@@ -167,6 +169,9 @@ pub(crate) async fn spawn_stdio_guest(
     let persisted_grant = spawn_grant(&config.paths().files_dir, plugin)?;
     let grant = effective_spawn_grant(&persisted_grant, plugin, config);
     let spawn_config = spawn_config_for_grant(&grant, config_table);
+    // Unix takes the cgroup and guest IPC directory out of the jail. Windows
+    // only moves fields, so `mut` is unused there.
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut jail = GuestJail::plan(config, plugin, plan)?;
     let mut session_guard = SessionDirGuard(jail.session_dir.clone());
     let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));

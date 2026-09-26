@@ -1084,7 +1084,8 @@ fn query_active_process_limit(job: HANDLE) -> Result<Option<u32>, String> {
 fn query_in_job(job: HANDLE, process: HANDLE) -> Result<bool, String> {
     let mut inside = BOOL(0);
     unsafe {
-        IsProcessInJob(job, Some(process), &mut inside).map_err(|err| err.to_string())?;
+        // Win32 order is process, then job. The job handle is not a process.
+        IsProcessInJob(process, Some(job), &mut inside).map_err(|err| err.to_string())?;
     }
     Ok(inside.as_bool())
 }
@@ -1225,7 +1226,8 @@ impl SessionJob {
     pub fn contains_process(&self, process: RawHandle) -> std::io::Result<bool> {
         let mut inside = BOOL(0);
         unsafe {
-            IsProcessInJob(self.as_handle(), Some(HANDLE(process)), &mut inside)
+            // Win32 order is process, then job. The job handle is not a process.
+            IsProcessInJob(HANDLE(process), Some(self.as_handle()), &mut inside)
                 .map_err(std::io::Error::other)?;
         }
         Ok(inside.as_bool())
@@ -1472,21 +1474,34 @@ mod tests {
             control.cpu_rate,
             crate::windows_job_cpu_rate(10, crate::host_logical_cpus())
         );
+        // Startup runs before the gate, so Job accounting does not include it.
+        // The burn itself is 2s of wall time after the process is in the Job.
+        let gate = std::env::temp_dir().join(format!(
+            "bookclerk-cpu-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let script = format!(
+            "$gate='{}'; while(-not (Test-Path -LiteralPath $gate)){{ Start-Sleep -Milliseconds 20 }}; $sw=[Diagnostics.Stopwatch]::StartNew(); while($sw.ElapsedMilliseconds -lt 2000){{}}",
+            gate.display().to_string().replace('\'', "''")
+        );
         let mut child = std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "$sw=[Diagnostics.Stopwatch]::StartNew(); while($sw.ElapsedMilliseconds -lt 1000){}",
-            ])
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .spawn()
             .expect("powershell");
         job.assign(child.as_raw_handle()).expect("assign burner");
+        std::fs::write(&gate, b"go").expect("open gate");
         let _ = child.wait().expect("wait burner");
+        let _ = std::fs::remove_file(&gate);
         let cpu = job.cpu_time().expect("cpu time");
+        // 10% of one core for 2s is ~200ms. The Job interval can burst; an
+        // uncapped burn is ~2s, so 1.2s still shows the hard cap engaged.
         assert!(
-            cpu < std::time::Duration::from_millis(450),
-            "10% of one core over ~1s wall exceeded tolerance: {cpu:?}"
+            cpu < std::time::Duration::from_millis(1200),
+            "10% of one core over ~2s wall exceeded tolerance: {cpu:?}"
         );
         assert!(
             cpu > std::time::Duration::from_millis(15),

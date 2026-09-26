@@ -2564,6 +2564,17 @@ mod tests {
         );
     }
 
+    /// ACE list from a DACL SDDL. `AI` / `P` control flags and trailing NULs
+    /// are not ACEs; Windows sets `AI` after an inherit/revoke pass.
+    #[cfg(windows)]
+    fn dacl_ace_list(sddl: &str) -> &str {
+        let sddl = sddl.trim_matches('\0');
+        match sddl.find('(') {
+            Some(start) => sddl[start..].trim_end_matches('\0'),
+            None => sddl,
+        }
+    }
+
     /// Job kill skips jail `Drop`. The host journal is the revoke that still
     /// runs, and it must leave a second session's SID in place.
     #[cfg(windows)]
@@ -2657,8 +2668,8 @@ mod tests {
         let fresh = leaf.join("after-revoke.txt");
         std::fs::write(&fresh, b"fresh").expect("fresh");
         assert_eq!(
-            dacl_sddl(&fresh).expect("fresh dacl"),
-            before_child,
+            dacl_ace_list(&dacl_sddl(&fresh).expect("fresh dacl")),
+            dacl_ace_list(&before_child),
             "inheritable leaf ACEs survived revoke"
         );
     }
