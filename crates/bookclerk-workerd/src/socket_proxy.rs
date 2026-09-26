@@ -15,11 +15,24 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use bookclerk_plugin_manifest::EgressPolicy;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Env var naming the socket proxy path for the native SDK.
 pub const SOCKET_PROXY_ENV: &str = "BOOKCLERK_SOCKET_PROXY";
+
+/// CONNECT handlers that may run at once. The accept loop takes a permit
+/// before `tokio::spawn`.
+const MAX_CONNECT_TASKS: usize = 16;
+/// CONNECT request line, including the newline.
+const MAX_REQUEST_LINE: usize = 2048;
+/// Header bytes after the request line.
+const MAX_HEADER_BYTES: usize = 8192;
+/// Header lines after the request line.
+const MAX_HEADER_COUNT: usize = 32;
+/// Time allowed to finish the CONNECT request line and headers.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// In-flight host CONNECT proxy. Dropping it cancels accepts and handlers.
 ///
@@ -98,6 +111,7 @@ pub fn spawn_unix(
     let tasks = Arc::new(Mutex::new(Vec::new()));
     let accept_tasks = Arc::clone(&tasks);
     let accept_fence = Arc::clone(&fence);
+    let admits = Arc::new(Semaphore::new(MAX_CONNECT_TASKS));
     let accept = tokio::spawn(async move {
         loop {
             if accept_fence.load(Ordering::SeqCst) {
@@ -108,9 +122,14 @@ pub fn spawn_unix(
                 accept = listener.accept() => {
                     match accept {
                         Ok((stream, _)) => {
+                            let Some(permit) = admit(&admits) else {
+                                drop(stream);
+                                continue;
+                            };
                             let policy = policy.clone();
                             let fence = Arc::clone(&accept_fence);
                             let handle = tokio::spawn(async move {
+                                let _permit = permit;
                                 if let Err(err) = handle_client(stream, policy, fence).await {
                                     tracing::debug!(error = %err, "socket proxy session ended");
                                 }
@@ -142,18 +161,18 @@ where
     }
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
-    let mut line = String::new();
-    read_line_fenced(&mut reader, &mut line, &fence).await?;
-    let request = line.trim_end().to_string();
-    let (host, port) = parse_connect(&request)?;
-    // Drain remaining request headers.
-    loop {
-        line.clear();
-        read_line_fenced(&mut reader, &mut line, &fence).await?;
-        if line.trim().is_empty() {
-            break;
+    let handshake = read_connect_headers(&mut reader, &fence);
+    let (host, port) = match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
+        Ok(Ok(parts)) => parts,
+        Ok(Err(err)) => {
+            let _ = write_fenced(&mut writer, BAD_REQUEST, &fence).await;
+            return Err(err);
         }
-    }
+        Err(_) => {
+            let _ = write_fenced(&mut writer, HANDSHAKE_TIMEOUT_BODY, &fence).await;
+            bail!("CONNECT handshake timed out");
+        }
+    };
     if fence.load(Ordering::SeqCst) {
         let _ = write_fenced(
             &mut writer,
@@ -270,20 +289,70 @@ could not dial an allowed address",
 const FORBIDDEN_FENCED: &[u8] =
     b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
 
-async fn read_line_fenced<R>(
+const BAD_REQUEST: &[u8] =
+    b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+const HANDSHAKE_TIMEOUT_BODY: &[u8] =
+    b"HTTP/1.1 408 Request Timeout\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+
+fn admit(admits: &Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
+    admits.clone().try_acquire_owned().ok()
+}
+
+async fn read_connect_headers<R>(
     reader: &mut BufReader<R>,
-    line: &mut String,
     fence: &AtomicBool,
-) -> Result<()>
+) -> Result<(String, u16)>
 where
-    R: tokio::io::AsyncRead + Unpin,
+    R: AsyncRead + Unpin,
 {
-    tokio::select! {
-        biased;
-        () = wait_fence(fence) => bail!("session fenced"),
-        result = reader.read_line(line) => {
-            result?;
-            Ok(())
+    let line = read_bounded_line(reader, MAX_REQUEST_LINE, fence).await?;
+    let request = String::from_utf8_lossy(&line).trim_end().to_string();
+    let (host, port) = parse_connect(&request)?;
+    let mut header_bytes = 0usize;
+    let mut header_count = 0usize;
+    loop {
+        let header = read_bounded_line(reader, MAX_REQUEST_LINE, fence).await?;
+        if header == b"\n" || header == b"\r\n" || header.iter().all(u8::is_ascii_whitespace) {
+            break;
+        }
+        header_count += 1;
+        header_bytes = header_bytes.saturating_add(header.len());
+        if header_count > MAX_HEADER_COUNT || header_bytes > MAX_HEADER_BYTES {
+            bail!("CONNECT headers exceed the admission cap");
+        }
+    }
+    Ok((host, port))
+}
+
+/// Reads one line, stopping at `max` bytes. The cap is checked before the
+/// buffer grows past it.
+async fn read_bounded_line<R>(
+    reader: &mut BufReader<R>,
+    max: usize,
+    fence: &AtomicBool,
+) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut out = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if out.len() >= max {
+            bail!("CONNECT line exceeds {max} bytes");
+        }
+        tokio::select! {
+            biased;
+            () = wait_fence(fence) => bail!("session fenced"),
+            result = reader.read(&mut byte) => {
+                let n = result?;
+                if n == 0 {
+                    bail!("CONNECT handshake closed");
+                }
+                out.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return Ok(out);
+                }
+            }
         }
     }
 }
@@ -344,6 +413,7 @@ where
     let tasks = Arc::new(Mutex::new(Vec::new()));
     let accept_tasks = Arc::clone(&tasks);
     let accept_fence = Arc::clone(&fence);
+    let admits = Arc::new(Semaphore::new(MAX_CONNECT_TASKS));
     let accept = tokio::spawn(async move {
         loop {
             if accept_fence.load(Ordering::SeqCst) {
@@ -354,9 +424,14 @@ where
                 accepted = mux.accept() => {
                     match accepted {
                         Ok(stream) => {
+                            let Some(permit) = admit(&admits) else {
+                                drop(stream);
+                                continue;
+                            };
                             let policy = policy.clone();
                             let fence = Arc::clone(&accept_fence);
                             let handle = tokio::spawn(async move {
+                                let _permit = permit;
                                 if let Err(err) = handle_client(stream, policy, fence).await {
                                     tracing::debug!(error = %err, "socket proxy session ended");
                                 }
@@ -468,7 +543,7 @@ pub fn resolved_addresses_denied(policy: &EgressPolicy, ips: &[IpAddr]) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bookclerk_plugin_manifest::{NetworkMode, TcpGrant};
+    use bookclerk_plugin_manifest::{EgressPolicy, NetworkMode, TcpGrant};
     #[cfg(unix)]
     use std::time::Duration as StdDuration;
     #[cfg(unix)]
@@ -736,5 +811,150 @@ mod tests {
         stream.read_exact(&mut buf).await.unwrap();
         assert_eq!(buf, payload);
         fence.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(unix)]
+    async fn wait_until_idle(proxy: &ProxyServer) {
+        let deadline = tokio::time::Instant::now() + StdDuration::from_secs(2);
+        while proxy.unfinished_handlers() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "CONNECT handlers did not finish"
+            );
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn endless_request_line_is_rejected_and_the_task_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("proxy.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let fence = Arc::new(AtomicBool::new(false));
+        let proxy = spawn_unix(listener, EgressPolicy::deny(), Arc::clone(&fence)).unwrap();
+        let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        client
+            .write_all(&vec![b'A'; MAX_REQUEST_LINE + 64])
+            .await
+            .unwrap();
+        let mut buf = [0_u8; 128];
+        let n = tokio::time::timeout(StdDuration::from_secs(2), client.read(&mut buf))
+            .await
+            .expect("long line must not stall the handler")
+            .unwrap_or(0);
+        if n > 0 {
+            let text = String::from_utf8_lossy(&buf[..n]);
+            assert!(text.contains("400"), "{text}");
+        }
+        wait_until_idle(&proxy).await;
+        fence.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn endless_headers_are_rejected_and_the_task_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("proxy.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let fence = Arc::new(AtomicBool::new(false));
+        let proxy = spawn_unix(listener, EgressPolicy::deny(), Arc::clone(&fence)).unwrap();
+        let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        let mut req = b"CONNECT db.example.com:5432 HTTP/1.1\r\n".to_vec();
+        for i in 0..(MAX_HEADER_COUNT + 4) {
+            req.extend(format!("X-{i}: v\r\n").into_bytes());
+        }
+        client.write_all(&req).await.unwrap();
+        let mut buf = [0_u8; 128];
+        let n = tokio::time::timeout(StdDuration::from_secs(2), client.read(&mut buf))
+            .await
+            .expect("header flood must not stall the handler")
+            .unwrap_or(0);
+        if n > 0 {
+            let text = String::from_utf8_lossy(&buf[..n]);
+            assert!(text.contains("400"), "{text}");
+        }
+        wait_until_idle(&proxy).await;
+        fence.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_handshake_times_out_and_the_task_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("proxy.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let fence = Arc::new(AtomicBool::new(false));
+        let proxy = spawn_unix(listener, EgressPolicy::deny(), Arc::clone(&fence)).unwrap();
+        let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        let mut buf = [0_u8; 128];
+        let n = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT + StdDuration::from_secs(2),
+            client.read(&mut buf),
+        )
+        .await
+        .expect("silent client must hit the handshake deadline")
+        .unwrap_or(0);
+        if n > 0 {
+            let text = String::from_utf8_lossy(&buf[..n]);
+            assert!(text.contains("408"), "{text}");
+        }
+        wait_until_idle(&proxy).await;
+        fence.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn denied_destination_finishes_without_holding_a_handler() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("proxy.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = echo.local_addr().unwrap().port();
+        let policy = tcp_policy("127.0.0.1", port, &[]);
+        let fence = Arc::new(AtomicBool::new(false));
+        let proxy = spawn_unix(listener, policy, Arc::clone(&fence)).unwrap();
+        let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        let req = format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n");
+        client.write_all(req.as_bytes()).await.unwrap();
+        let mut buf = [0_u8; 256];
+        let n = client.read(&mut buf).await.unwrap();
+        let text = String::from_utf8_lossy(&buf[..n]);
+        assert!(text.contains("403"), "{text}");
+        wait_until_idle(&proxy).await;
+        drop(echo);
+        fence.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handler_admission_stops_at_the_task_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("proxy.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let fence = Arc::new(AtomicBool::new(false));
+        let proxy = spawn_unix(listener, EgressPolicy::deny(), Arc::clone(&fence)).unwrap();
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONNECT_TASKS {
+            held.push(tokio::net::UnixStream::connect(&sock).await.unwrap());
+        }
+        let deadline = tokio::time::Instant::now() + StdDuration::from_secs(2);
+        while proxy.unfinished_handlers() < MAX_CONNECT_TASKS {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "admission did not start {MAX_CONNECT_TASKS} handlers"
+            );
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+        let extra = tokio::net::UnixStream::connect(&sock).await.unwrap();
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        assert!(
+            proxy.unfinished_handlers() <= MAX_CONNECT_TASKS,
+            "spawned a handler without an admission permit"
+        );
+        fence.store(true, Ordering::SeqCst);
+        drop(held);
+        drop(extra);
+        wait_until_idle(&proxy).await;
     }
 }
