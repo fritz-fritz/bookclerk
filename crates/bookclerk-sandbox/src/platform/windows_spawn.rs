@@ -39,9 +39,7 @@
 #![cfg_attr(windows, allow(unsafe_code))] // Win32 ACL revoke uses raw SID/ACL APIs.
 
 use std::ffi::OsString;
-use std::path::Path;
-#[cfg(windows)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::{NetPolicy, Policy, SandboxError};
 
@@ -202,6 +200,36 @@ impl AppContainerSession {
         self.delete_on_drop
     }
 
+    /// Profile folder and its `Temp` directory, when Windows can resolve them.
+    ///
+    /// These are the paths the jail grants for the launch. The host journal
+    /// revokes them after the jail process is gone.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn profile_directories(&self) -> Vec<PathBuf> {
+        use rappct::AppContainerProfile;
+        use rappct::AppContainerSid;
+
+        let profile = AppContainerProfile {
+            name: self.profile_name.clone(),
+            sid: AppContainerSid::from_sddl(&self.package_sid),
+        };
+        match profile.folder_path() {
+            Ok(folder) => {
+                let temp = folder.join("Temp");
+                vec![folder, temp]
+            }
+            Err(err) => {
+                tracing::debug!(
+                    profile = %self.profile_name,
+                    error = %err,
+                    "AppContainer profile folder is not available for the ACL journal"
+                );
+                Vec::new()
+            }
+        }
+    }
+
     /// Relinquish deletion ownership (e.g. transfer to another owner).
     pub fn disarm_delete(&mut self) {
         self.delete_on_drop = false;
@@ -360,6 +388,135 @@ impl Drop for AclGrant {
             }
         }
     }
+}
+
+/// One planned DACL mutation for a session's package SID.
+///
+/// The host builds this from the spec it already handed to the jail. Revoke
+/// matches only `package_sid`, so a second live session on the same path keeps
+/// its grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AclJournalEntry {
+    /// Filesystem path the jail was going to ACE.
+    pub path: PathBuf,
+    /// Package SID trustee. Revoke removes only this trustee.
+    pub package_sid: String,
+    /// Directory at grant time. Selects the revoke inheritance flag.
+    pub is_dir: bool,
+    /// `true` for inheritable leaf grants (`SetSecurityInfo` on revoke).
+    /// Ancestor traverse is `false` (`SetKernelObjectSecurity`).
+    pub propagate: bool,
+}
+
+/// Planned ACL mutations for one sibling, derived from `spec`.
+///
+/// Ambient OS paths are omitted. `profile_dirs` are extra inheritable write
+/// grants (the AppContainer folder and `Temp`). Ancestor traverse entries use
+/// `propagate = false`.
+#[must_use]
+pub fn plan_acl_journal(
+    spec: &crate::Spec,
+    package_sid: &str,
+    program: Option<&Path>,
+    profile_dirs: &[PathBuf],
+) -> Vec<AclJournalEntry> {
+    let mut entries = Vec::new();
+    let mut granted = std::collections::HashSet::new();
+    let mut allowlisted = Vec::new();
+
+    for path in &spec.writes {
+        if is_os_managed_path(path) || !granted.insert(path.clone()) {
+            continue;
+        }
+        let is_dir = path.is_dir();
+        allowlisted.push(path.clone());
+        entries.push(AclJournalEntry {
+            path: path.clone(),
+            package_sid: package_sid.to_string(),
+            is_dir,
+            propagate: is_dir,
+        });
+    }
+    for path in &spec.reads {
+        if is_os_managed_path(path) || !granted.insert(path.clone()) {
+            continue;
+        }
+        let is_dir = path.is_dir();
+        allowlisted.push(path.clone());
+        entries.push(AclJournalEntry {
+            path: path.clone(),
+            package_sid: package_sid.to_string(),
+            is_dir,
+            propagate: is_dir,
+        });
+    }
+
+    let mut seen_ancestors = std::collections::HashSet::new();
+    for path in &allowlisted {
+        for ancestor in ancestor_directories(path) {
+            if !seen_ancestors.insert(ancestor.clone()) || is_os_managed_path(&ancestor) {
+                continue;
+            }
+            entries.push(AclJournalEntry {
+                path: ancestor,
+                package_sid: package_sid.to_string(),
+                is_dir: true,
+                propagate: false,
+            });
+        }
+    }
+
+    if let Some(program) = program {
+        if !is_os_managed_path(program) && granted.insert(program.to_path_buf()) {
+            entries.push(AclJournalEntry {
+                path: program.to_path_buf(),
+                package_sid: package_sid.to_string(),
+                is_dir: false,
+                propagate: false,
+            });
+        }
+    }
+
+    for path in profile_dirs {
+        if !granted.insert(path.clone()) {
+            continue;
+        }
+        entries.push(AclJournalEntry {
+            path: path.clone(),
+            package_sid: package_sid.to_string(),
+            is_dir: true,
+            propagate: true,
+        });
+    }
+    entries
+}
+
+/// Revoke every entry. A missing path is success. A second call is a no-op
+/// for SIDs that are already gone.
+///
+/// # Errors
+///
+/// Returns [`SandboxError::Backend`] when a present path cannot be updated.
+pub fn revoke_acl_journal(entries: &[AclJournalEntry]) -> Result<(), SandboxError> {
+    #[cfg(windows)]
+    {
+        for entry in entries {
+            if !entry.path.exists() {
+                continue;
+            }
+            revoke_package_access(
+                &entry.path,
+                &entry.package_sid,
+                entry.is_dir,
+                entry.propagate,
+            )?;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = entries;
+    }
+    Ok(())
 }
 
 /// Grant the Package SID access to `path` for one RPC / spawn allowlist entry.
@@ -1644,13 +1801,12 @@ fn windows_command_line(program: &Path, args: &[OsString]) -> String {
     line
 }
 
-/// Parent directories of `path` up to (but not including) the drive root.
-#[cfg(windows)]
+/// Parent directories of `path` up to (but not including) the filesystem root.
 fn ancestor_directories(path: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut cur = path;
     while let Some(parent) = cur.parent() {
-        if parent.as_os_str().is_empty() {
+        if parent.as_os_str().is_empty() || parent == Path::new("/") {
             break;
         }
         let text = parent.to_string_lossy();
@@ -1961,6 +2117,9 @@ fn revoke_package_access(
     is_dir: bool,
     propagate: bool,
 ) -> Result<(), SandboxError> {
+    if !path.exists() {
+        return Ok(());
+    }
     use std::ptr;
 
     use windows::core::{PCWSTR, PWSTR};
@@ -2358,5 +2517,149 @@ mod tests {
         );
         let after = dacl_sddl(&child).expect("child dacl after");
         assert_eq!(before, after, "revoke rewrote the child DACL");
+    }
+
+    #[test]
+    fn journal_lists_leaves_ancestors_and_profile_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let leaf = dir.path().join("install");
+        std::fs::create_dir(&leaf).expect("leaf");
+        let nested = leaf.join("guest");
+        std::fs::create_dir(&nested).expect("nested");
+        let program = nested.join("guest.bin");
+        std::fs::write(&program, b"x").expect("program");
+        let profile = dir.path().join("profile");
+        let mut spec = crate::Spec::new("journal");
+        spec.writes.push(leaf.clone());
+        spec.reads.push(nested.clone());
+        let entries = plan_acl_journal(
+            &spec,
+            "S-1-15-2-test",
+            Some(&program),
+            std::slice::from_ref(&profile),
+        );
+        let find = |path: &Path, propagate: bool| {
+            entries
+                .iter()
+                .find(|entry| entry.path == path && entry.propagate == propagate)
+        };
+        let write = find(&leaf, true).expect("write leaf");
+        assert!(write.is_dir);
+        assert_eq!(write.package_sid, "S-1-15-2-test");
+        assert!(find(&nested, true).is_some(), "read directory");
+        assert!(find(&program, false).is_some(), "executable");
+        let profile_entry = find(&profile, true).expect("profile dir");
+        assert!(profile_entry.is_dir);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.path == dir.path() && !entry.propagate),
+            "ancestor traverse is not inheritable"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.path == leaf && !entry.propagate),
+            "a granted directory that parents another grant also gets no-inherit traverse"
+        );
+    }
+
+    /// Job kill skips jail `Drop`. The host journal is the revoke that still
+    /// runs, and it must leave a second session's SID in place.
+    #[cfg(windows)]
+    #[test]
+    fn host_journal_revoke_is_idempotent_and_keeps_the_other_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let leaf = dir.path().join("install");
+        std::fs::create_dir(&leaf).expect("leaf");
+        let profile = dir.path().join("profile");
+        std::fs::create_dir(&profile).expect("profile");
+        let mut spec = crate::Spec::new("journal-live");
+        spec.writes.push(leaf.clone());
+
+        let session_a = AppContainerSession::create("journal-a").expect("profile a");
+        let session_b = AppContainerSession::create("journal-b").expect("profile b");
+        let journal_a = plan_acl_journal(
+            &spec,
+            session_a.package_sid(),
+            None,
+            std::slice::from_ref(&profile),
+        );
+        let journal_b = plan_acl_journal(
+            &spec,
+            session_b.package_sid(),
+            None,
+            std::slice::from_ref(&profile),
+        );
+
+        let before_child = {
+            let child = leaf.join("inherited.txt");
+            std::fs::write(&child, b"before").expect("child");
+            let sddl = dacl_sddl(&child).expect("baseline child");
+            std::fs::remove_file(&child).expect("remove baseline child");
+            sddl
+        };
+
+        for entry in journal_a.iter().chain(journal_b.iter()) {
+            if entry.propagate {
+                let grant =
+                    grant_path_access(&entry.package_sid, &entry.path, true).expect("leaf grant");
+                // Forced supervisor death: the jail's Drop never runs.
+                std::mem::forget(grant);
+            } else if entry.is_dir {
+                grant_directory_traverse_no_inherit(&entry.package_sid, &entry.path)
+                    .expect("ancestor");
+            }
+        }
+
+        let inherited = leaf.join("inherited.txt");
+        std::fs::write(&inherited, b"after").expect("inherited");
+        assert!(
+            dacl_mentions_sid(&leaf, session_a.package_sid()).expect("leaf a"),
+            "session A leaf grant missing"
+        );
+        assert!(
+            dacl_mentions_sid(&leaf, session_b.package_sid()).expect("leaf b"),
+            "session B leaf grant missing"
+        );
+        assert!(
+            dacl_mentions_sid(&inherited, session_a.package_sid()).expect("inherited a"),
+            "inheritable leaf ACE did not reach the new child"
+        );
+        assert!(
+            dacl_mentions_sid(dir.path(), session_a.package_sid()).expect("ancestor a"),
+            "ancestor traverse missing"
+        );
+
+        revoke_acl_journal(&journal_a).expect("revoke A");
+        assert!(!dacl_mentions_sid(&leaf, session_a.package_sid()).expect("leaf a gone"));
+        assert!(!dacl_mentions_sid(&inherited, session_a.package_sid()).expect("child a gone"));
+        assert!(!dacl_mentions_sid(dir.path(), session_a.package_sid()).expect("ancestor a gone"));
+        assert!(
+            dacl_mentions_sid(&leaf, session_b.package_sid()).expect("leaf b stays"),
+            "revoking A removed session B"
+        );
+        assert!(dacl_mentions_sid(&inherited, session_b.package_sid()).expect("child b stays"));
+        revoke_acl_journal(&journal_a).expect("second revoke is idempotent");
+        assert!(dacl_mentions_sid(&leaf, session_b.package_sid()).expect("B after second revoke"));
+
+        // Injected launch failure: revoke a path that was never created.
+        let mut partial = journal_b.clone();
+        partial.push(AclJournalEntry {
+            path: dir.path().join("missing-on-failed-launch"),
+            package_sid: session_b.package_sid().to_string(),
+            is_dir: true,
+            propagate: true,
+        });
+        revoke_acl_journal(&partial).expect("missing path is success");
+        assert!(!dacl_mentions_sid(&leaf, session_b.package_sid()).expect("B revoked"));
+        assert!(!dacl_mentions_sid(&inherited, session_b.package_sid()).expect("child B revoked"));
+        let fresh = leaf.join("after-revoke.txt");
+        std::fs::write(&fresh, b"fresh").expect("fresh");
+        assert_eq!(
+            dacl_sddl(&fresh).expect("fresh dacl"),
+            before_child,
+            "inheritable leaf ACEs survived revoke"
+        );
     }
 }

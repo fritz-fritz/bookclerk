@@ -666,12 +666,21 @@ Workerd consent does not edit process budget (host-managed headroom). Workerd
 guests use isolate `cpu_ms` for the script budget; their jail CPU rate comes
 from the host default / `[plugins.jail]` per-jail ceiling (default **80**)
 rather than a per-plugin `cpuRatePercent`. On Linux the Spec fields are applied
-best-effort via a dedicated cgroup v2 child (never written onto a shared parent
-slice). Creating that child or writing `memory.max` / `cpu.max` / `pids.max` is
-often refused inside desktop app cgroup scopes (browsers, IDEs); Bookclerk then
-reports resources as not applicable and still enforces filesystem, syscall, and
-network jail. On macOS Seatbelt they are ignored (documented as unsupported — FS/net
-only). `[plugins.jail].cpu_rate_percent` is a **per-jail ceiling** only (not a
+best-effort via an exclusive cgroup v2 leaf (never written onto a shared parent
+slice). The leaf name includes the plugin id, the host pid, and a per-session
+nonce; creating a leaf that already exists fails, and two sessions of the same
+plugin do not share one. `pids.max` is that payload thread budget, not the
+Windows outer process count. The host kills members, waits until `cgroup.procs`
+is empty, and removes the leaf on failed startup and on teardown. Creating the
+leaf or writing `memory.max` / `cpu.max` / `pids.max` is often refused inside
+desktop app cgroup scopes (browsers, IDEs). Bookclerk reports that and falls
+back to process-group SIGKILL. The fallback does not cover a descendant that
+calls `setsid`. The host records each leader's pid and start time (`/proc/<pid>/stat`
+starttime on Linux, `proc_pidinfo` on macOS) and signals the group only while
+that identity still matches, including after the leader has been reaped.
+Tokio `Child::wait` is cancellation-safe; cancelling it does not drop zombie
+status. On macOS Seatbelt the resource fields are ignored (documented as
+unsupported — FS/net only). `[plugins.jail].cpu_rate_percent` is a **per-jail ceiling** only (not a
 cumulative reservation; default 80). Quotas cap how fast a guest may burn CPU;
 if many plugins’ ceilings sum above host capacity, the OS scheduler shares
 cycles among runnable guests. Each plugin's `data/` and `tmp/` directories are

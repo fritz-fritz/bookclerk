@@ -37,6 +37,8 @@
 //! docs for why, and for what permitting `execve` costs.
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bookclerk_config::{Config, Isolation};
 use bookclerk_sandbox::{Enforcement, NetPolicy, Spec};
@@ -217,10 +219,12 @@ pub(crate) struct GuestJail {
     /// Isolation mode from config. Required refuses a missing outer Windows Job.
     #[allow(dead_code)] // read on Windows when the outer Job cannot be created
     pub isolation: Isolation,
-    /// Linux session cgroup leaf both siblings join (held so the host owns it).
+    /// Linux session cgroup leaf both siblings join.
+    ///
+    /// Drop removes the leaf (killing leftover members) unless the host has
+    /// taken ownership for the life of the vat.
     #[cfg(target_os = "linux")]
-    #[allow(dead_code)]
-    pub session_cgroup: Option<PathBuf>,
+    pub session_cgroup: Option<SessionCgroup>,
     /// AppContainer Package SID of the native guest (callback proxy DACL).
     #[cfg(windows)]
     pub package_sid: Option<String>,
@@ -230,6 +234,64 @@ pub(crate) struct GuestJail {
     /// Host-owned AppContainer profile for the native sibling.
     #[cfg(windows)]
     pub guest_appcontainer: Option<bookclerk_sandbox::spawn::AppContainerSession>,
+}
+
+/// Host-owned Linux cgroup leaf. Drop kills members and removes the directory.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub(crate) struct SessionCgroup {
+    /// Leaf path. `None` after Drop has taken it.
+    path: Option<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+impl SessionCgroup {
+    /// Own `path` until this value is dropped.
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    /// Leaf directory both sibling jails join.
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SessionCgroup {
+    fn drop(&mut self) {
+        if let Some(dir) = self.path.take() {
+            if let Err(err) = bookclerk_sandbox::destroy_session_cgroup(&dir) {
+                tracing::warn!(
+                    error = %err,
+                    path = %dir.display(),
+                    "could not remove the session cgroup"
+                );
+            }
+        }
+    }
+}
+
+/// Per-session leaf name: plugin id, host pid, and a nonce.
+///
+/// Pid alone collides when one host starts two sessions of the same plugin.
+///
+/// # Arguments
+///
+/// * `plugin` - The plugin whose filesystem id is part of the leaf name.
+#[cfg(target_os = "linux")]
+fn session_cgroup_suffix(plugin: &DiscoveredPlugin) -> String {
+    static NONCE: AtomicU64 = AtomicU64::new(1);
+    let n = NONCE.fetch_add(1, Ordering::Relaxed);
+    let tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}-{}-{tick}-{n}",
+        plugin.plugin_key().fs_id(),
+        std::process::id()
+    )
 }
 
 impl GuestJail {
@@ -298,16 +360,28 @@ impl GuestJail {
         );
         #[cfg(target_os = "linux")]
         let session_cgroup = if siblings {
-            bookclerk_sandbox::create_session_cgroup(
+            // `pids.max` stays the payload thread budget in `session_limits`.
+            // The Windows outer process baseline is not applied here.
+            match bookclerk_sandbox::create_session_cgroup(
                 &session_limits,
-                &format!("{}-{}", plugin.plugin_key().fs_id(), std::process::id()),
-            )
-            .ok()
+                &session_cgroup_suffix(plugin),
+            ) {
+                Ok(path) => Some(SessionCgroup::new(path)),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "session cgroup unavailable; process-group kill is the fallback and does not cover a descendant that calls setsid"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
         #[cfg(target_os = "linux")]
-        let cgroup_dir = session_cgroup.clone();
+        let cgroup_dir = session_cgroup
+            .as_ref()
+            .and_then(|cgroup| cgroup.path().map(Path::to_path_buf));
         #[cfg(not(target_os = "linux"))]
         let cgroup_dir = None;
         #[cfg(windows)]

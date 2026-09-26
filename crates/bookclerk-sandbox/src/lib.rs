@@ -48,7 +48,7 @@ pub use platform::BACKEND;
 
 /// Linux session-cgroup constructor used by the plugin host.
 #[cfg(target_os = "linux")]
-pub use platform::create_session_cgroup;
+pub use platform::{create_session_cgroup, destroy_session_cgroup};
 
 /// Host-owned Windows Job that holds both sibling `bookclerk-jail` processes.
 #[cfg(windows)]
@@ -73,9 +73,10 @@ pub use spec::{Spec, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV, SPEC_ENV};
 pub mod spawn {
     pub use crate::platform::windows_pipe::NamedPipeSecurity;
     pub use crate::platform::windows_spawn::{
-        grant_path_access, is_os_managed_path, plan_appcontainer, profile_name_for_label,
-        run_appcontainer, run_appcontainer_with_handoff, run_unconfined_with_handoff,
-        unique_profile_moniker, AclGrant, AppContainerLaunch, AppContainerSession,
+        grant_path_access, is_os_managed_path, plan_acl_journal, plan_appcontainer,
+        profile_name_for_label, revoke_acl_journal, run_appcontainer,
+        run_appcontainer_with_handoff, run_unconfined_with_handoff, unique_profile_moniker,
+        AclGrant, AclJournalEntry, AppContainerLaunch, AppContainerSession,
     };
 
     #[cfg(windows)]

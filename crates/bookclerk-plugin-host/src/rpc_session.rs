@@ -1947,22 +1947,16 @@ fn sibling_exited(
 
 /// Kills both siblings and waits until they exit.
 ///
-/// On Unix the spawn put each child in its own process group, so this also
-/// kills grandchildren (`workerd`) that would otherwise keep the session
-/// directory as their cwd.
+/// On Unix the spawn put each child in its own process group. The signal uses
+/// the pid and start time recorded at spawn, so it still runs after `try_wait`
+/// has cleared [`tokio::process::Child::id`], and it does not signal a pid that
+/// has already been reused.
 async fn reap_siblings(
     gateway: &mut tokio::process::Child,
     guest: &mut Option<tokio::process::Child>,
+    identities: &crate::spawn_stdio::SiblingIdentities,
 ) {
-    #[cfg(unix)]
-    {
-        if let Some(pid) = gateway.id() {
-            crate::spawn_stdio::kill_process_group(pid);
-        }
-        if let Some(pid) = guest.as_ref().and_then(|child| child.id()) {
-            crate::spawn_stdio::kill_process_group(pid);
-        }
-    }
+    identities.kill_matching();
     let _ = gateway.start_kill();
     if let Some(child) = guest.as_mut() {
         let _ = child.start_kill();
@@ -2025,6 +2019,7 @@ fn vat_thread(
                 let _session_job = spawned.session_job;
                 let cancel = Arc::clone(&spawned.cancel);
                 let _proxy = spawned.proxy;
+                let identities = spawned.identities.clone();
                 let mut child = spawned.child;
                 let mut guest = spawned.guest;
                 let stderr_tail = spawned.stderr_tail;
@@ -2056,7 +2051,7 @@ fn vat_thread(
                         Err(err) => {
                             #[cfg(windows)]
                             drop(_session_job);
-                            reap_siblings(&mut child, &mut guest).await;
+                            reap_siblings(&mut child, &mut guest, &identities).await;
                             drop(remove_session_dir.take());
                             let _ = ready.send(Err(err));
                             return;
@@ -2071,7 +2066,7 @@ fn vat_thread(
                         );
                         #[cfg(windows)]
                         drop(_session_job);
-                        reap_siblings(&mut child, &mut guest).await;
+                        reap_siblings(&mut child, &mut guest, &identities).await;
                         drop(remove_session_dir.take());
                         let _ = ready.send(Err(crate::spawn_stdio::with_spawn_detail(err, extra)));
                         return;
@@ -2739,7 +2734,7 @@ fn vat_thread(
                 }
                 #[cfg(windows)]
                 drop(_session_job);
-                reap_siblings(&mut child, &mut guest).await;
+                reap_siblings(&mut child, &mut guest, &identities).await;
                 drop(child);
                 drop(guest);
                 drop(remove_session_dir.take());

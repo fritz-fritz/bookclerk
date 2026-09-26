@@ -111,12 +111,24 @@ heuristic. Memory uses Job Object **job-wide** commit charge
 children). Limits are best-effort Job Object + host policy, not a hard
 multi-tenant quota.
 
-Cross-platform: Linux applies the same Spec fields via cgroup v2 into a
-**dedicated child** cgroup when the hierarchy allows it (never onto a shared
-parent slice). If a leaf cannot be created, the resources layer is reported
-not-applicable and Required still rests on FS/net. macOS Seatbelt cannot
-enforce memory/CPU/pids — Bookclerk reports that layer as not applicable and
-does not fake enforcement.
+Cross-platform: Linux applies the same Spec fields via cgroup v2 into an
+**exclusive** child cgroup when the hierarchy allows it (never onto a shared
+parent slice, and never a leaf that already exists). `pids.max` counts threads
+and is not the Windows process baseline. If a leaf cannot be created, the
+resources layer is reported not-applicable, process-group kill is the fallback
+(it does not cover `setsid`), and Required still rests on FS/net. macOS
+Seatbelt cannot enforce memory/CPU/pids — Bookclerk reports that layer as not
+applicable and does not fake enforcement.
+
+The host keeps a journal of each session's package SID and the paths that
+session's spec grants: inheritable leaf ACEs, no-inherit ancestor traverse, and
+the profile folder plus `Temp`. After the session Job is closed, on graceful
+exit, and on failed startup, the host revokes that journal under
+`Local\bookclerk-dacl-tx`. Revoke is idempotent, treats a missing path as
+success, and removes only that session's SID. The jail may revoke as well when
+its process exits normally. Job kill skips that `Drop`, so the host journal is
+the owner that still runs. Ancestor traverse stays a `SetKernelObjectSecurity`
+write on that directory alone.
 
 ## AppContainer vs LPAC
 

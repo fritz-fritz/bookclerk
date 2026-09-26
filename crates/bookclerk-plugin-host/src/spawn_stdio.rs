@@ -91,24 +91,37 @@ pub(crate) struct SpawnedStdio {
     pub cancel: Arc<AtomicBool>,
     /// Host CONNECT proxy. Drop cancels its tasks.
     pub proxy: Option<bookclerk_workerd::socket_proxy::ProxyServer>,
+    /// Pid and start time captured when each sibling was spawned.
+    ///
+    /// Cleanup signals that process group only while the start time still
+    /// matches, including after `try_wait` has cleared [`Child::id`].
+    pub identities: SiblingIdentities,
+    /// Linux cgroup leaf. Drop kills members and removes the directory.
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)] // ownership is the Drop impl; nothing else reads the path
+    pub session_cgroup: Option<crate::jail::SessionCgroup>,
+    /// Host-owned ACL rollback for this session's package SIDs.
+    #[cfg(windows)]
+    pub acl_journal: AclJournal,
     /// Last lines of guest + gateway stderr, for spawn failures.
     pub stderr_tail: Arc<Mutex<VecDeque<String>>>,
     /// Files dir used to re-read `plugin-grants.json` before returning a session.
     pub files_dir: PathBuf,
 }
 
-/// Child processes plus the session cancel token and optional host proxy.
-type SpawnedParts = (
-    Child,
-    Option<Child>,
-    ChildStdin,
-    ChildStdout,
-    Option<u32>,
-    Option<u32>,
-    Option<WindowsSessionJob>,
-    Arc<AtomicBool>,
-    Option<bookclerk_workerd::socket_proxy::ProxyServer>,
-);
+/// Child processes plus the session cancel token, proxy, and recorded identities.
+struct SpawnedParts {
+    child: Child,
+    guest: Option<Child>,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    gateway_pid: Option<u32>,
+    guest_pid: Option<u32>,
+    session_job: Option<WindowsSessionJob>,
+    cancel: Arc<AtomicBool>,
+    proxy: Option<bookclerk_workerd::socket_proxy::ProxyServer>,
+    identities: SiblingIdentities,
+}
 
 /// Removes `session_dir` unless [`Self::disarm`] is called after a successful spawn.
 struct SessionDirGuard(Option<PathBuf>);
@@ -148,9 +161,11 @@ pub(crate) async fn spawn_stdio_guest(
     let persisted_grant = spawn_grant(&config.paths().files_dir, plugin)?;
     let grant = effective_spawn_grant(&persisted_grant, plugin, config);
     let spawn_config = spawn_config_for_grant(&grant, config_table);
-    let jail = GuestJail::plan(config, plugin, plan)?;
+    let mut jail = GuestJail::plan(config, plugin, plan)?;
     let mut session_guard = SessionDirGuard(jail.session_dir.clone());
     let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+    #[cfg(windows)]
+    let acl_journal = build_acl_journal(&jail, plan);
 
     let spawned = if jail.guest_start.is_some() {
         spawn_siblings(
@@ -176,32 +191,33 @@ pub(crate) async fn spawn_stdio_guest(
         .await
     };
 
-    let (child, guest, stdin, stdout, gateway_pid, guest_pid, session_job, cancel, proxy) =
-        match spawned {
-            Ok(parts) => parts,
-            Err(err) => {
-                return Err(err);
-            }
-        };
+    let parts = match spawned {
+        Ok(parts) => parts,
+        Err(err) => return Err(err),
+    };
     let session_dir = session_guard.disarm();
     #[cfg(not(windows))]
-    let _ = session_job;
+    let _ = &parts.session_job;
+    #[cfg(windows)]
+    let outer_job_unsupported = jail.guest_start.is_some() && parts.session_job.is_none();
+    #[cfg(target_os = "linux")]
+    let session_cgroup = jail.session_cgroup.take();
 
     Ok(SpawnedStdio {
         id,
         alias,
-        child,
-        guest,
-        stdin,
-        stdout,
+        child: parts.child,
+        guest: parts.guest,
+        stdin: parts.stdin,
+        stdout: parts.stdout,
         grant,
         persisted_grant,
         spawn_config,
         data: jail.data,
         scratch: jail.scratch,
         session_dir,
-        gateway_pid,
-        guest_pid,
+        gateway_pid: parts.gateway_pid,
+        guest_pid: parts.guest_pid,
         #[cfg(windows)]
         package_sid: jail.package_sid,
         #[cfg(windows)]
@@ -209,11 +225,16 @@ pub(crate) async fn spawn_stdio_guest(
         #[cfg(windows)]
         guest_appcontainer: jail.guest_appcontainer,
         #[cfg(windows)]
-        session_job,
+        session_job: parts.session_job,
         #[cfg(windows)]
-        outer_job_unsupported: jail.guest_start.is_some() && session_job.is_none(),
-        cancel,
-        proxy,
+        outer_job_unsupported,
+        cancel: parts.cancel,
+        proxy: parts.proxy,
+        identities: parts.identities,
+        #[cfg(target_os = "linux")]
+        session_cgroup,
+        #[cfg(windows)]
+        acl_journal,
         stderr_tail,
         files_dir: config.paths().files_dir.clone(),
     })
@@ -255,6 +276,7 @@ async fn spawn_single(
         .kill_on_drop(true);
 
     let mut child = cmd.spawn()?;
+    let identities = sibling_identities(Some(&child), None);
     if let Some(stderr) = child.stderr.take() {
         forward_guest_stderr(id.to_string(), "guest", stderr, Arc::clone(&stderr_tail));
     }
@@ -267,17 +289,18 @@ async fn spawn_single(
         .take()
         .ok_or_else(|| PluginError::message("plugin stdout missing"))?;
     let pid = child.id();
-    Ok((
+    Ok(SpawnedParts {
         child,
-        None,
+        guest: None,
         stdin,
         stdout,
-        None,
-        pid,
-        None,
-        Arc::new(AtomicBool::new(false)),
-        None,
-    ))
+        gateway_pid: None,
+        guest_pid: pid,
+        session_job: None,
+        cancel: Arc::new(AtomicBool::new(false)),
+        proxy: None,
+        identities,
+    })
 }
 
 /// Host-spawned gateway + native guest joined by inherited duplex links.
@@ -394,6 +417,8 @@ async fn spawn_siblings(
     let mut gateway = gateway_cmd.spawn().map_err(|err| {
         PluginError::message(format!("could not start gateway for `{id}`: {err}"))
     })?;
+    #[cfg(unix)]
+    let gateway_identity = ProcessIdentity::capture(gateway.id());
     // Created before the handoff so the jail cannot finish CreateProcess
     // first and miss the event.
     #[cfg(windows)]
@@ -466,6 +491,10 @@ async fn spawn_siblings(
     let mut guest = match guest_spawn {
         Ok(child) => child,
         Err(err) => {
+            #[cfg(unix)]
+            if let Some(identity) = gateway_identity.as_ref() {
+                identity.kill_if_same();
+            }
             let _ = gateway.kill().await;
             return Err(PluginError::message(format!(
                 "could not start native guest for `{id}`: {err}\n{}",
@@ -505,27 +534,45 @@ async fn spawn_siblings(
         let _ = (rpc_gateway, proxy_guest);
     }
 
-    let stdin = gateway
-        .stdin
-        .take()
-        .ok_or_else(|| PluginError::message("gateway stdin missing"))?;
-    let stdout = gateway
-        .stdout
-        .take()
-        .ok_or_else(|| PluginError::message("gateway stdout missing"))?;
+    #[cfg(unix)]
+    let identities = SiblingIdentities {
+        gateway: gateway_identity,
+        guest: ProcessIdentity::capture(guest.id()),
+    };
+    #[cfg(not(unix))]
+    let identities = SiblingIdentities::default();
+    let stdin = match gateway.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            identities.kill_matching();
+            let _ = gateway.kill().await;
+            let _ = guest.kill().await;
+            return Err(PluginError::message("gateway stdin missing"));
+        }
+    };
+    let stdout = match gateway.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            identities.kill_matching();
+            let _ = gateway.kill().await;
+            let _ = guest.kill().await;
+            return Err(PluginError::message("gateway stdout missing"));
+        }
+    };
     let gateway_pid = gateway.id();
     let guest_pid = guest.id();
-    Ok((
-        gateway,
-        Some(guest),
+    Ok(SpawnedParts {
+        child: gateway,
+        guest: Some(guest),
         stdin,
         stdout,
         gateway_pid,
         guest_pid,
         session_job,
         cancel,
-        Some(proxy),
-    ))
+        proxy: Some(proxy),
+        identities,
+    })
 }
 
 /// `bookclerk-jail -- program args`, or `program args` when unconfined.
@@ -558,12 +605,245 @@ fn command_for_start(start: &Start, program: &std::path::Path, args: &[String]) 
 
 /// SIGKILL `pid`'s process group. No-op when the group is already gone.
 ///
-/// Spawn uses `process_group(0)`, so `pid` is the group leader.
+/// Spawn uses `process_group(0)`, so `pid` is the group leader. Callers must
+/// confirm the pid still names that leader ([`ProcessIdentity::kill_if_same`]);
+/// a recycled pid must not be signalled.
 #[cfg(unix)]
 pub(crate) fn kill_process_group(pid: u32) {
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
+}
+
+/// Start time of a process, used to detect pid reuse.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessStart {
+    /// Linux `/proc/<pid>/stat` field 22, in clock ticks since boot.
+    #[cfg(target_os = "linux")]
+    LinuxTicks(u64),
+    /// macOS `proc_bsdinfo` start timeval.
+    #[cfg(target_os = "macos")]
+    MacMicros { sec: u64, usec: u64 },
+}
+
+/// Pid plus the start time observed when the child was spawned.
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+pub(crate) struct ProcessIdentity {
+    pid: u32,
+    start: ProcessStart,
+}
+
+#[cfg(unix)]
+impl ProcessIdentity {
+    /// Read the start time before any wait. `None` when the pid or the start
+    /// time cannot be read; callers then must not signal the process group.
+    pub(crate) fn capture(pid: Option<u32>) -> Option<Self> {
+        let pid = pid?;
+        let start = read_process_start(pid)?;
+        Some(Self { pid, start })
+    }
+
+    fn still_same(&self) -> bool {
+        match read_process_start(self.pid) {
+            Some(start) => start == self.start,
+            None => false,
+        }
+    }
+
+    /// SIGKILL the process group only while `pid` still has this start time.
+    pub(crate) fn kill_if_same(&self) {
+        if !self.still_same() {
+            tracing::warn!(
+                pid = self.pid,
+                "refusing to signal a process group whose start time no longer matches"
+            );
+            return;
+        }
+        kill_process_group(self.pid);
+    }
+
+    /// Same pid with a start time that cannot match a live process.
+    #[cfg(test)]
+    fn with_bogus_start(mut self) -> Self {
+        self.start = match self.start {
+            #[cfg(target_os = "linux")]
+            ProcessStart::LinuxTicks(ticks) => ProcessStart::LinuxTicks(ticks.wrapping_add(1)),
+            #[cfg(target_os = "macos")]
+            ProcessStart::MacMicros { sec, usec } => ProcessStart::MacMicros {
+                sec: sec.wrapping_add(1),
+                usec,
+            },
+        };
+        self
+    }
+}
+
+/// Leaders recorded at spawn. Empty on Windows, where the session Job is the tree.
+#[derive(Clone, Default)]
+pub(crate) struct SiblingIdentities {
+    #[cfg(unix)]
+    pub gateway: Option<ProcessIdentity>,
+    #[cfg(unix)]
+    pub guest: Option<ProcessIdentity>,
+}
+
+impl SiblingIdentities {
+    /// Signal each recorded group whose start time still matches.
+    pub(crate) fn kill_matching(&self) {
+        #[cfg(unix)]
+        {
+            if let Some(identity) = &self.gateway {
+                identity.kill_if_same();
+            }
+            if let Some(identity) = &self.guest {
+                identity.kill_if_same();
+            }
+        }
+    }
+}
+
+/// Capture identities for leaders that exist right now.
+fn sibling_identities(gateway: Option<&Child>, guest: Option<&Child>) -> SiblingIdentities {
+    #[cfg(unix)]
+    {
+        SiblingIdentities {
+            gateway: gateway.and_then(|child| ProcessIdentity::capture(child.id())),
+            guest: guest.and_then(|child| ProcessIdentity::capture(child.id())),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (gateway, guest);
+        SiblingIdentities::default()
+    }
+}
+
+/// Linux starttime: the 20th whitespace token after the last `)` in `/proc/pid/stat`.
+#[cfg(target_os = "linux")]
+fn linux_start_ticks(stat: &str) -> Option<u64> {
+    let rest = stat.rsplit_once(')')?.1;
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn read_process_start(pid: u32) -> Option<ProcessStart> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    linux_start_ticks(&text).map(ProcessStart::LinuxTicks)
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct ProcBsdInfo {
+    pbi_flags: u32,
+    pbi_status: u32,
+    pbi_xstatus: u32,
+    pbi_pid: u32,
+    pbi_ppid: u32,
+    pbi_uid: u32,
+    pbi_gid: u32,
+    pbi_ruid: u32,
+    pbi_rgid: u32,
+    pbi_svuid: u32,
+    pbi_svgid: u32,
+    rfu_1: u32,
+    pbi_comm: [u8; 16],
+    pbi_name: [u8; 32],
+    pbi_nfiles: u32,
+    pbi_pgid: u32,
+    pbi_pjobc: u32,
+    e_tdev: u32,
+    e_tpgid: u32,
+    pbi_nice: i32,
+    pbi_start_tvsec: u64,
+    pbi_start_tvusec: u64,
+}
+
+#[cfg(target_os = "macos")]
+const PROC_PIDTBSDINFO: i32 = 3;
+
+#[cfg(target_os = "macos")]
+#[link(name = "proc")]
+extern "C" {
+    fn proc_pidinfo(
+        pid: i32,
+        flavor: i32,
+        arg: u64,
+        buffer: *mut ProcBsdInfo,
+        buffersize: i32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+fn read_process_start(pid: u32) -> Option<ProcessStart> {
+    const _: () = assert!(std::mem::offset_of!(ProcBsdInfo, pbi_start_tvsec) == 120);
+    let mut info = std::mem::MaybeUninit::<ProcBsdInfo>::zeroed();
+    let wrote = unsafe {
+        proc_pidinfo(
+            pid as i32,
+            PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr(),
+            std::mem::size_of::<ProcBsdInfo>() as i32,
+        )
+    };
+    if wrote < std::mem::size_of::<ProcBsdInfo>() as i32 {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    if info.pbi_pid != pid {
+        return None;
+    }
+    Some(ProcessStart::MacMicros {
+        sec: info.pbi_start_tvsec,
+        usec: info.pbi_start_tvusec,
+    })
+}
+
+/// Host journal of package SIDs and paths. Drop revokes only those SIDs.
+#[cfg(windows)]
+pub(crate) struct AclJournal {
+    entries: Vec<bookclerk_sandbox::spawn::AclJournalEntry>,
+}
+
+#[cfg(windows)]
+impl Drop for AclJournal {
+    fn drop(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        if let Err(err) = bookclerk_sandbox::spawn::revoke_acl_journal(&self.entries) {
+            tracing::warn!(error = %err, "host ACL journal revoke failed");
+        }
+        self.entries.clear();
+    }
+}
+
+/// Paths the jail will ACE, taken from the specs and profiles already built.
+#[cfg(windows)]
+fn build_acl_journal(jail: &GuestJail, plan: &crate::spawn_plan::SpawnPlan) -> AclJournal {
+    let mut entries = Vec::new();
+    if let (Start::Confined { spec, .. }, Some(session)) = (&jail.start, jail.appcontainer.as_ref())
+    {
+        entries.extend(bookclerk_sandbox::spawn::plan_acl_journal(
+            spec,
+            session.package_sid(),
+            Some(plan.launcher.as_path()),
+            &session.profile_directories(),
+        ));
+    }
+    if let (Some(Start::Confined { spec, .. }), Some(session)) =
+        (&jail.guest_start, jail.guest_appcontainer.as_ref())
+    {
+        entries.extend(bookclerk_sandbox::spawn::plan_acl_journal(
+            spec,
+            session.package_sid(),
+            plan.native_backend.as_deref(),
+            &session.profile_directories(),
+        ));
+    }
+    AclJournal { entries }
 }
 
 /// Allowlisted host env plus `BOOKCLERK_PLUGIN_*`.
@@ -1097,5 +1377,165 @@ mod tests {
             decide_outer_job(Isolation::Off, Some(OuterJobFailure::Unsupported)),
             OuterJobDecision::AbsentUnsupported
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stat_starttime_is_the_token_after_the_comm_field() {
+        // Field 22 is the 20th whitespace token after the last ')'.
+        let stat = "9 (comm with) parens) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242 99";
+        assert_eq!(linux_start_ticks(stat), Some(4242));
+    }
+
+    #[cfg(unix)]
+    fn process_alive(pid: u32) -> bool {
+        let rc = unsafe { libc::kill(pid as i32, 0) };
+        if rc == 0 {
+            true
+        } else {
+            std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mismatched_start_time_does_not_signal_the_group() {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        cmd.process_group(0);
+        let mut child = cmd.spawn().expect("sleep");
+        let pid = child.id();
+        let identity = ProcessIdentity::capture(Some(pid)).expect("start time");
+        assert!(identity.still_same());
+        identity.clone().with_bogus_start().kill_if_same();
+        assert!(
+            process_alive(pid),
+            "a mismatched start time must not signal the live pid"
+        );
+        identity.kill_if_same();
+        let _ = child.wait();
+        assert!(
+            !process_alive(pid),
+            "matching identity must reap the leader"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_kill_reaps_a_descendant_of_the_leader() {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("sleep 30 & echo $!; wait");
+        cmd.process_group(0);
+        cmd.stdout(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("sh");
+        let leader = ProcessIdentity::capture(Some(child.id())).expect("leader");
+        let stdout = child.stdout.take().expect("stdout");
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line)
+            .expect("descendant pid");
+        let descendant: u32 = line.trim().parse().expect("pid");
+        assert!(process_alive(descendant));
+        leader.kill_if_same();
+        let _ = child.wait();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && process_alive(descendant) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !process_alive(descendant),
+            "a descendant that stays in the leader's process group must exit"
+        );
+        assert!(!process_alive(leader.pid));
+    }
+
+    /// `setsid` leaves the leader's process group. A delegated cgroup still
+    /// contains that descendant; without one, group kill does not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn setsid_descendant_is_contained_only_by_a_delegated_cgroup() {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg("setsid sleep 30 & echo $!; wait");
+        cmd.process_group(0);
+        cmd.stdout(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("sh");
+        let leader = ProcessIdentity::capture(Some(child.id())).expect("leader");
+        let stdout = child.stdout.take().expect("stdout");
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line)
+            .expect("setsid pid");
+        let escaped: u32 = line.trim().parse().expect("pid");
+        assert!(process_alive(escaped));
+        let detached = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{escaped}/stat")).unwrap_or_default();
+            let pgrp = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(2))
+                .and_then(|token| token.parse::<u32>().ok());
+            if pgrp == Some(escaped) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < detached,
+                "setsid descendant did not leave the leader's process group"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        leader.kill_if_same();
+        let _ = child.wait();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            process_alive(escaped),
+            "process-group kill must not be treated as covering setsid"
+        );
+
+        let limits = bookclerk_sandbox::ResourceLimits {
+            memory_bytes: None,
+            cpu_rate_percent: None,
+            active_processes: Some(32),
+        };
+        let suffix = format!(
+            "setsid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        );
+        match bookclerk_sandbox::create_session_cgroup(&limits, &suffix) {
+            Ok(dir) => {
+                if let Err(err) = std::fs::write(dir.join("cgroup.procs"), format!("{escaped}")) {
+                    eprintln!(
+                        "could not move the setsid descendant into {}: {err}. \
+                         process-group kill is the fallback and does not cover setsid",
+                        dir.display()
+                    );
+                    unsafe {
+                        libc::kill(escaped as i32, libc::SIGKILL);
+                    }
+                    let _ = bookclerk_sandbox::destroy_session_cgroup(&dir);
+                    return;
+                }
+                bookclerk_sandbox::destroy_session_cgroup(&dir)
+                    .expect("cgroup destroy reaps members and removes the leaf");
+                assert!(
+                    !process_alive(escaped),
+                    "a delegated cgroup must reap the setsid descendant"
+                );
+                assert!(!dir.exists(), "the leaf must be removed");
+            }
+            Err(err) => {
+                eprintln!(
+                    "delegated cgroup unavailable ({err}); process-group kill is the fallback \
+                     and does not cover a descendant that calls setsid"
+                );
+                unsafe {
+                    libc::kill(escaped as i32, libc::SIGKILL);
+                }
+            }
+        }
     }
 }
