@@ -1613,6 +1613,25 @@ mod tests {
             }
             names.join("\n")
         }
+        /// `CLOEXEC` closes descriptors at `exec`, not at `fork`. `/proc/<pid>/fd`
+        /// before `exec` still lists the parent's sockets.
+        async fn wait_until_exec_sleep(pid: u32) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+                if comm.trim() == "sleep" {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "child {pid} did not exec sleep (comm {comm:?})"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+        fn count_fd(text: &str, id: &str) -> usize {
+            text.lines().filter(|line| *line == id).count()
+        }
 
         let (rpc_gateway, rpc_guest) = DuplexLink::pair().expect("rpc pair");
         let (proxy_host, proxy_guest) = DuplexLink::pair().expect("proxy pair");
@@ -1626,21 +1645,22 @@ mod tests {
         inherit_unix_guest(&mut cmd, rpc_guest, &proxy_guest).expect("inherit guest");
         let mut child = with_fd_spawn_lock(|| cmd.spawn()).expect("spawn guest shape");
         let pid = child.id().expect("guest pid");
+        wait_until_exec_sleep(pid).await;
         let text = child_sockets(pid);
         let _ = child.start_kill();
         let _ = child.wait().await;
         assert_eq!(
-            text.matches(proxy_guest_id.as_str()).count(),
+            count_fd(&text, &proxy_guest_id),
             1,
             "proxy fd should be the dup2 destination only\n{text}"
         );
         assert_eq!(
-            text.matches(rpc_guest_id.as_str()).count(),
+            count_fd(&text, &rpc_guest_id),
             2,
             "guest RPC end belongs on stdin and stdout\n{text}"
         );
         assert!(
-            !text.contains(&rpc_gateway_id) && !text.contains(&proxy_host_id),
+            count_fd(&text, &rpc_gateway_id) == 0 && count_fd(&text, &proxy_host_id) == 0,
             "gateway ends leaked into the guest\n{text}"
         );
         drop((rpc_gateway, proxy_host));
@@ -1661,12 +1681,13 @@ mod tests {
             .stderr(Stdio::null());
         let mut child = with_fd_spawn_lock(|| unrelated.spawn()).expect("unrelated");
         let pid = child.id().expect("unrelated pid");
+        wait_until_exec_sleep(pid).await;
         let text = child_sockets(pid);
         let _ = child.start_kill();
         let _ = child.wait().await;
         for id in &ids {
             assert!(
-                !text.contains(id.as_str()),
+                count_fd(&text, id) == 0,
                 "unrelated child inherited {id}\n{text}"
             );
         }
