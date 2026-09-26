@@ -1,4 +1,8 @@
-//! Two concurrent native-behind-workerd sessions must not share IPC or state.
+//! Concurrent native-behind-workerd sessions keep separate grants and state.
+//!
+//! This checks filesystem state and egress policy. It does not treat a numeric
+//! fd or handle value as cross-process identity. Overlapping launches prove
+//! that with the per-session proxy challenge.
 
 #[path = "native_gateway/harness.rs"]
 mod ng_harness;
@@ -10,7 +14,7 @@ use ng_harness::{
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_sessions_cannot_reach_each_others_proxy_or_state() {
+async fn concurrent_sessions_keep_separate_grants_and_state() {
     let listener_a = Listener::bind(true).await;
     let listener_b = Listener::bind(true).await;
     assert_ne!(listener_a.port, listener_b.port);

@@ -1155,7 +1155,20 @@ adapter isolate only decides `describe` (merged against `PLUGIN_DESCRIBE`) and
 Direct host↔native Cap'n Proto is not a product path: it exists only as
 `SpawnTransport::DirectNativeDiagnostic` for tests and diagnostics, and a
 missing `bookclerk-workerd` / `workerd` is a hard spawn error in every
-isolation mode. The OS jail is still required.
+isolation mode. The OS jail is still required. Windows `Isolation::Off`
+still requires `bookclerk-jail` beside the host.
+
+Native plugins must be rebuilt against this SDK. Production transport is the
+mux `fd:` / `handle:` link and `PluginSocket::into_stream`. `into_split` and
+`into_unix_stream` are Unix pathname sockets only; they return an
+unsupported-transport error on a mux link and do not open a TCP socket.
+The host gives each guest a fresh challenge (`BOOKCLERK_SESSION_CHALLENGE`)
+and reads those bytes before it serves the proxy. An unrelated child, or the
+other session's guest, cannot complete that challenge. The numeric descriptor
+is not the session. On macOS, socket and pipe creation holds a process-wide
+lock from allocation through `FD_CLOEXEC` and through in-process
+`Command::spawn`, because macOS has no `SOCK_CLOEXEC`. The SDK sets
+`FD_CLOEXEC` again when it adopts an inherited descriptor.
 
 List pagination is **opaque and bounded**. Missing/stale cursors return
 `invalid_cursor` (never silently restart at page one). Concurrent mutation is

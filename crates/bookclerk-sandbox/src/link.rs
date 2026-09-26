@@ -9,10 +9,15 @@
 //! proxy mux uses overlapped ends on both peers.
 //!
 //! - **Unix:** [`inherit_fd_at`] from `Command::pre_exec` (`dup2` onto a fixed
-//!   child fd). Concurrent spawns cannot inherit another session's link.
+//!   child fd, then close the source in that child). macOS has no
+//!   `SOCK_CLOEXEC`; [`with_fd_spawn_lock`] covers allocation through
+//!   `FD_CLOEXEC` and every in-process spawn. Concurrent spawns cannot inherit
+//!   another session's link.
 //! - **Windows:** [`duplicate_handle_into`] the jail process, then one bounded
-//!   JSON [`JailHandoff`] line on the jail's stdin. The jail marks the
+//!   JSON [`JailHandoff`] line on the jail's stdin. The jail marks only those
 //!   duplicates inheritable and puts them on `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
+//!   Named pipes are created with a DACL for the creating user, SYSTEM, and
+//!   Administrators. The guest uses the inherited handle, not the pipe name.
 //!
 //! Children name an inherited end with [`LinkSpec`] (`fd:3` / `handle:123`).
 
@@ -66,6 +71,35 @@ pub const GATEWAY_RPC_FD: i32 = 3;
 pub const GATEWAY_PROXY_FD: i32 = 4;
 /// Child fd the native guest uses for the proxy mux (`BOOKCLERK_SOCKET_PROXY`).
 pub const GUEST_PROXY_FD: i32 = 3;
+
+/// Serialize macOS descriptor allocation with in-process `Command` spawns.
+///
+/// macOS has no `SOCK_CLOEXEC` or `pipe2`. Socket and pipe creation in this
+/// crate holds the lock from allocation until `FD_CLOEXEC` is set. Every
+/// `Command::spawn` in that process must hold it for the `spawn` call, or a
+/// concurrent `fork` inherits the new descriptor. Linux `SOCK_CLOEXEC` /
+/// `pipe2` are atomic, so this is a no-op there. Do not create a link while
+/// already inside the lock: the mutex is not reentrant.
+pub fn with_fd_spawn_lock<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(target_os = "macos")]
+    {
+        let _guard = fd_spawn_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        f()
+    }
+}
+
+/// Process-wide lock for [`with_fd_spawn_lock`].
+#[cfg(target_os = "macos")]
+fn fd_spawn_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
+}
 
 /// How a confined child names an inherited duplex or pipe end.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,8 +469,11 @@ impl DuplexHalf {
 
 /// `dup2` `src` onto `dest` and clear `FD_CLOEXEC` on the destination.
 ///
-/// Call from `Command::pre_exec` only. `src` stays `CLOEXEC` in the parent;
-/// after `dup2` the child sees `dest` without `CLOEXEC`.
+/// Call from `Command::pre_exec` only. `src` stays `CLOEXEC` in the parent.
+/// The child must close `src` when it differs from `dest` so the pre-dup
+/// descriptor does not survive `exec`. After `dup2` the child sees `dest`
+/// without `CLOEXEC`; the guest sets `FD_CLOEXEC` again when it adopts that
+/// descriptor.
 ///
 /// # Errors
 ///
@@ -500,32 +537,34 @@ mod unix {
     use super::{DuplexHalf, DuplexLink, StdioEnds};
 
     pub(super) fn socketpair() -> io::Result<(DuplexLink, DuplexLink)> {
-        let mut fds = [0 as RawFd; 2];
-        // Linux: SOCK_CLOEXEC. macOS: SOCK_STREAM then FD_CLOEXEC (no SOCK_CLOEXEC
-        // on older SDKs). The host never inherits these across an unrelated spawn.
-        #[cfg(target_os = "linux")]
-        let ty = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
-        #[cfg(not(target_os = "linux"))]
-        let ty = libc::SOCK_STREAM;
-        let rc = unsafe { libc::socketpair(libc::AF_UNIX, ty, 0, fds.as_mut_ptr()) };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if let Err(err) = set_cloexec(fds[0]).and_then(|()| set_cloexec(fds[1])) {
-            unsafe {
-                libc::close(fds[0]);
-                libc::close(fds[1]);
+        allocate_cloexec(|| {
+            let mut fds = [0 as RawFd; 2];
+            // Linux: SOCK_CLOEXEC. macOS: SOCK_STREAM then FD_CLOEXEC (no
+            // SOCK_CLOEXEC). The spawn lock covers that window.
+            #[cfg(target_os = "linux")]
+            let ty = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+            #[cfg(not(target_os = "linux"))]
+            let ty = libc::SOCK_STREAM;
+            let rc = unsafe { libc::socketpair(libc::AF_UNIX, ty, 0, fds.as_mut_ptr()) };
+            if rc != 0 {
+                return Err(io::Error::last_os_error());
             }
-            return Err(err);
-        }
-        Ok((
-            DuplexLink {
-                fd: unsafe { OwnedFd::from_raw_fd(fds[0]) },
-            },
-            DuplexLink {
-                fd: unsafe { OwnedFd::from_raw_fd(fds[1]) },
-            },
-        ))
+            if let Err(err) = set_cloexec(fds[0]).and_then(|()| set_cloexec(fds[1])) {
+                unsafe {
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
+                }
+                return Err(err);
+            }
+            Ok((
+                DuplexLink {
+                    fd: unsafe { OwnedFd::from_raw_fd(fds[0]) },
+                },
+                DuplexLink {
+                    fd: unsafe { OwnedFd::from_raw_fd(fds[1]) },
+                },
+            ))
+        })
     }
 
     fn set_cloexec(fd: RawFd) -> io::Result<()> {
@@ -541,7 +580,8 @@ mod unix {
 
     fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
         let mut fds = [0 as RawFd; 2];
-        // `pipe2` is Linux-only; macOS gets `pipe` + `FD_CLOEXEC`.
+        // `pipe2` is Linux-only; macOS gets `pipe` + `FD_CLOEXEC` under the
+        // spawn lock held by [`stdio_pair`].
         #[cfg(target_os = "linux")]
         let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
         #[cfg(not(target_os = "linux"))]
@@ -561,14 +601,28 @@ mod unix {
         }))
     }
 
+    /// Hold the macOS spawn lock across both pipes so a `fork` cannot split them.
+    fn allocate_cloexec<R>(f: impl FnOnce() -> R) -> R {
+        #[cfg(target_os = "macos")]
+        {
+            super::with_fd_spawn_lock(f)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            f()
+        }
+    }
+
     pub(super) fn stdio_pair() -> io::Result<StdioEnds> {
-        let (guest_stdin, host_stdin) = pipe_cloexec()?;
-        let (host_stdout, guest_stdout) = pipe_cloexec()?;
-        Ok(StdioEnds {
-            host_stdin: DuplexHalf { fd: host_stdin },
-            host_stdout: DuplexHalf { fd: host_stdout },
-            guest_stdin: DuplexHalf { fd: guest_stdin },
-            guest_stdout: DuplexHalf { fd: guest_stdout },
+        allocate_cloexec(|| {
+            let (guest_stdin, host_stdin) = pipe_cloexec()?;
+            let (host_stdout, guest_stdout) = pipe_cloexec()?;
+            Ok(StdioEnds {
+                host_stdin: DuplexHalf { fd: host_stdin },
+                host_stdout: DuplexHalf { fd: host_stdout },
+                guest_stdin: DuplexHalf { fd: guest_stdin },
+                guest_stdout: DuplexHalf { fd: guest_stdout },
+            })
         })
     }
 
@@ -601,11 +655,10 @@ mod windows {
         CloseHandle, DuplicateHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS,
         HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
     };
-    use windows::Win32::Security::SECURITY_ATTRIBUTES;
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, PIPE_ACCESS_INBOUND,
-        PIPE_ACCESS_OUTBOUND,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+        FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING, PIPE_ACCESS_DUPLEX, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND,
     };
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
@@ -614,8 +667,6 @@ mod windows {
     use windows::Win32::System::Threading::GetCurrentProcess;
 
     use super::{DuplexHalf, DuplexLink, StdioEnds};
-
-    const PIPE_UNLIMITED_INSTANCES: u32 = 255;
 
     fn random_pipe_name(kind: &str) -> String {
         let mut nonce = [0u8; 8];
@@ -635,6 +686,31 @@ mod windows {
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// First-instance pipe with a creator/SYSTEM/Administrators DACL.
+    fn create_named_pipe(
+        name_w: &[u16],
+        open_mode: FILE_FLAGS_AND_ATTRIBUTES,
+    ) -> io::Result<HANDLE> {
+        let mut security = crate::platform::windows_pipe::NamedPipeSecurity::for_creator()
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        let server = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(name_w.as_ptr()),
+                open_mode,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                16 * 1024,
+                16 * 1024,
+                0,
+                Some(security.as_security_attributes()),
+            )
+        };
+        if server.is_invalid() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(server)
     }
 
     fn close_if_valid(handle: HANDLE) {
@@ -741,21 +817,10 @@ mod windows {
     pub(super) fn duplex_pair() -> io::Result<(DuplexLink, DuplexLink)> {
         let name = random_pipe_name("l");
         let name_w = wide(&name);
-        let server = unsafe {
-            CreateNamedPipeW(
-                PCWSTR(name_w.as_ptr()),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
-                16 * 1024,
-                16 * 1024,
-                0,
-                None,
-            )
-        };
-        if server.is_invalid() {
-            return Err(io::Error::last_os_error());
-        }
+        let server = create_named_pipe(
+            &name_w,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        )?;
         let client = unsafe {
             CreateFileW(
                 PCWSTR(name_w.as_ptr()),
@@ -810,21 +875,7 @@ mod windows {
         } else {
             access | FILE_FLAG_FIRST_PIPE_INSTANCE
         };
-        let server = unsafe {
-            CreateNamedPipeW(
-                PCWSTR(name_w.as_ptr()),
-                mode,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
-                16 * 1024,
-                16 * 1024,
-                0,
-                None,
-            )
-        };
-        if server.is_invalid() {
-            return Err(io::Error::last_os_error());
-        }
+        let server = create_named_pipe(&name_w, mode)?;
         let desired = if host_writes {
             windows::Win32::Storage::FileSystem::FILE_GENERIC_WRITE.0
         } else {
@@ -907,12 +958,168 @@ mod windows {
         Ok(dest.0 as usize as u64)
     }
 
-    #[allow(dead_code)]
-    fn _sa_unused() {
-        // Keep SECURITY_ATTRIBUTES import live for future owner-only explicit DACLs.
-        let _ = std::mem::size_of::<SECURITY_ATTRIBUTES>();
-        let _ = ptr::null_mut::<()>();
-        let _ = PIPE_UNLIMITED_INSTANCES;
+    /// Anonymous open of the pipe name fails; the inherited handle still carries bytes.
+    #[cfg(test)]
+    pub(super) fn creator_dacl_blocks_anonymous_and_keeps_the_handle() -> io::Result<()> {
+        use std::io::{Read, Write};
+        use std::os::windows::io::FromRawHandle;
+        use windows::core::PWSTR;
+        use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
+        use windows::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+            SE_FILE_OBJECT,
+        };
+        use windows::Win32::Security::{
+            ImpersonateAnonymousToken, RevertToSelf, DACL_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR,
+        };
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_EXISTING,
+        };
+        use windows::Win32::System::Threading::GetCurrentThread;
+
+        let name = random_pipe_name("dacl");
+        let name_w = wide(&name);
+        let server =
+            create_named_pipe(&name_w, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE)?;
+        let mut psd = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+        let info = unsafe {
+            GetSecurityInfo(
+                server,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                None,
+                None,
+                Some(&mut psd),
+            )
+        };
+        if info.0 != 0 {
+            close_if_valid(server);
+            return Err(io::Error::other(format!("GetSecurityInfo {info:?}")));
+        }
+        let mut sddl_wide = PWSTR::null();
+        let converted = unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                psd,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut sddl_wide,
+                None,
+            )
+        };
+        let sddl = if converted.is_ok() && !sddl_wide.is_null() {
+            unsafe { sddl_wide.to_string().unwrap_or_default() }
+        } else {
+            String::new()
+        };
+        if !sddl_wide.is_null() {
+            use windows::Win32::Foundation::{LocalFree, HLOCAL};
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(sddl_wide.as_ptr().cast())));
+            }
+        }
+        if !psd.0.is_null() {
+            use windows::Win32::Foundation::{LocalFree, HLOCAL};
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(psd.0)));
+            }
+        }
+        for forbidden in ["WD", "AN", "AC", "S-1-1-0", "S-1-5-7", "S-1-15-2"] {
+            if sddl.contains(forbidden) {
+                close_if_valid(server);
+                return Err(io::Error::other(format!(
+                    "pipe DACL grants {forbidden}: {sddl}"
+                )));
+            }
+        }
+        let names_system = sddl.contains("SY") || sddl.contains("S-1-5-18");
+        let names_admins = sddl.contains("BA") || sddl.contains("S-1-5-32-544");
+        if !names_system || !names_admins {
+            close_if_valid(server);
+            return Err(io::Error::other(format!(
+                "pipe DACL must name SYSTEM and Administrators: {sddl}"
+            )));
+        }
+
+        struct RevertOnDrop;
+        impl Drop for RevertOnDrop {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = RevertToSelf();
+                }
+            }
+        }
+        unsafe {
+            ImpersonateAnonymousToken(GetCurrentThread()).map_err(|err| {
+                close_if_valid(server);
+                io::Error::other(format!("ImpersonateAnonymousToken: {err}"))
+            })?;
+        }
+        let _revert = RevertOnDrop;
+        let anonymous = unsafe {
+            CreateFileW(
+                PCWSTR(name_w.as_ptr()),
+                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+        };
+        drop(_revert);
+        match anonymous {
+            Ok(handle) => {
+                close_if_valid(handle);
+                close_if_valid(server);
+                return Err(io::Error::other("anonymous token opened the pipe by name"));
+            }
+            Err(err) => {
+                if !is_win32(&err, ERROR_ACCESS_DENIED.0) {
+                    close_if_valid(server);
+                    return Err(io::Error::other(format!(
+                        "anonymous open failed with {err}, expected ACCESS_DENIED"
+                    )));
+                }
+            }
+        }
+
+        let client = unsafe {
+            CreateFileW(
+                PCWSTR(name_w.as_ptr()),
+                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+        }
+        .map_err(|err| {
+            close_if_valid(server);
+            io::Error::other(format!("creator open: {err}"))
+        })?;
+        if let Err(err) = finish_connect(server, false) {
+            close_if_valid(server);
+            close_if_valid(client);
+            return Err(err);
+        }
+        let mut server_file = unsafe { std::fs::File::from_raw_handle(server.0 as RawHandle) };
+        let mut client_file = unsafe { std::fs::File::from_raw_handle(client.0 as RawHandle) };
+        client_file
+            .write_all(b"mux")
+            .map_err(|err| io::Error::other(format!("inherited client write: {err}")))?;
+        let mut buf = [0u8; 3];
+        server_file.read_exact(&mut buf)?;
+        if &buf != b"mux" {
+            return Err(io::Error::other(
+                "inherited handle did not carry the mux bytes",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -962,6 +1169,13 @@ mod tests {
         use std::io::{Read, Write};
 
         let (a, b) = DuplexLink::pair().expect("pair");
+        for fd in [a.as_raw_fd(), b.as_raw_fd()] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(
+                flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+                "link ends must be CLOEXEC before any spawn"
+            );
+        }
         let mut a = std::fs::File::from(a.into_owned_fd());
         let mut b = std::fs::File::from(b.into_owned_fd());
         a.write_all(b"ping").expect("write");
@@ -1006,5 +1220,11 @@ mod tests {
         let mut buf = [0u8; 2];
         dest_file.read_exact(&mut buf).expect("read dest");
         assert_eq!(&buf, b"hi");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn named_pipe_dacl_rejects_anonymous_and_keeps_inherited_bytes() {
+        windows::creator_dacl_blocks_anonymous_and_keeps_the_handle().expect("creator DACL");
     }
 }

@@ -83,7 +83,8 @@ pub use manifest_caps::manifest_capabilities;
 pub use net::{
     connect as connect_socket, nested_native_jail_requested, ConnectOptions, PluginSocket,
     SecureTransport, SocketAddress, GUEST_IPC_DIR_ENV, NESTED_NATIVE_JAIL_ENV,
-    SOCKET_PROXY_ABSTRACT_PREFIX, SOCKET_PROXY_ENV, SOCKET_PROXY_WRITE_ENV,
+    SESSION_CHALLENGE_ENV, SESSION_CHALLENGE_LEN, SOCKET_PROXY_ABSTRACT_PREFIX, SOCKET_PROXY_ENV,
+    SOCKET_PROXY_WRITE_ENV,
 };
 pub use pass_fd::{fd_proc_path, recv_passed_fd, PLUGIN_FD_CHANNEL, PLUGIN_FD_CHANNEL_ENV};
 pub use protocol::{

@@ -32,8 +32,11 @@ Instead the unsandboxed host:
 
 1. Creates two duplex links (guest stdio = two unidirectional pipes with the
    launcher end overlapped; proxy = one duplex overlapped pipe). Names are
-   random, owner-only DACL, `reject_remote_clients`, closed to further
-   clients immediately.
+   random. The DACL grants only the creating user, SYSTEM, and Administrators
+   — not Everyone, Anonymous, or All Application Packages. Each pipe is the
+   first instance, rejects remote clients, and is connected before the handle
+   is delivered. The AppContainer guest uses that inherited handle; it does
+   not open the pipe by name.
 2. Spawns two `bookclerk-jail.exe` processes (gateway `OutboundListen`, guest
    `NetPolicy::Deny`). Isolation::Off still goes through the jail with
    `Enforcement::Disabled` so handle handoff has a single-threaded parent.
@@ -41,7 +44,11 @@ Instead the unsandboxed host:
    bounded JSON handoff line on that jail's stdin
    (`BOOKCLERK_JAIL_HANDOFF=1`). The jail marks the duplicates inheritable,
    puts them on `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, and exports
-   `handle:<n>` env. The host never marks a handle inheritable itself.
+   `handle:<n>` env. The list contains only those handed-off handles.
+   Unrelated process handles stay off it. The host never marks a handle
+   inheritable itself. A numeric handle value is not a session identity:
+   the guest must write a per-session challenge on the proxy before the
+   host serves mux frames.
 4. Assigns both jail processes to one session Job (`KILL_ON_JOB_CLOSE` plus
    the grant's aggregate memory / active-process / CPU limits). Each jail's
    own Job still nests under it.

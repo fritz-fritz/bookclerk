@@ -38,10 +38,10 @@ mod spec;
 pub use guest_ipc::{create_guest_ipc_dir, ensure_guest_ipc_fits, MACOS_SUN_PATH_CAPACITY};
 
 pub use link::{
-    DuplexHalf, DuplexLink, JailHandoff, JailHandoffExtra, LinkSpec, LinkSpecError, StdioEnds,
-    GATEWAY_GUEST_RPC_ENV, GATEWAY_GUEST_RPC_WRITE_ENV, GATEWAY_PROXY_ENV, GATEWAY_PROXY_FD,
-    GATEWAY_PROXY_WRITE_ENV, GATEWAY_RPC_FD, GUEST_PROXY_FD, JAIL_HANDOFF_ENV, SOCKET_PROXY_ENV,
-    SOCKET_PROXY_WRITE_ENV, WORKERD_STATE_DIR_ENV,
+    with_fd_spawn_lock, DuplexHalf, DuplexLink, JailHandoff, JailHandoffExtra, LinkSpec,
+    LinkSpecError, StdioEnds, GATEWAY_GUEST_RPC_ENV, GATEWAY_GUEST_RPC_WRITE_ENV,
+    GATEWAY_PROXY_ENV, GATEWAY_PROXY_FD, GATEWAY_PROXY_WRITE_ENV, GATEWAY_RPC_FD, GUEST_PROXY_FD,
+    JAIL_HANDOFF_ENV, SOCKET_PROXY_ENV, SOCKET_PROXY_WRITE_ENV, WORKERD_STATE_DIR_ENV,
 };
 
 #[cfg(unix)]

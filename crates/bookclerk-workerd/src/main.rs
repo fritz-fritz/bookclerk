@@ -230,8 +230,7 @@ fn workerd_serve_command(
 ///
 /// Returns an error when the operating system refuses to create the process.
 fn spawn_workerd_process(cmd: &mut tokio::process::Command, spawn_bin: &Path) -> Result<Child> {
-    let mut child = cmd
-        .spawn()
+    let mut child = bookclerk_sandbox::with_fd_spawn_lock(|| cmd.spawn())
         .with_context(|| format!("spawn {}", spawn_bin.display()))?;
     drop(child.stdin.take());
     Ok(child)

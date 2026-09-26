@@ -19,11 +19,13 @@ use bookclerk_sandbox::DuplexLink;
 use bookclerk_sandbox::GATEWAY_GUEST_RPC_WRITE_ENV;
 #[cfg(test)]
 use bookclerk_sandbox::GATEWAY_PROXY_ENV;
+use bookclerk_sandbox::{
+    with_fd_spawn_lock, GATEWAY_GUEST_RPC_ENV, SOCKET_PROXY_ENV, WORKERD_STATE_DIR_ENV,
+};
 #[cfg(windows)]
 use bookclerk_sandbox::{DuplexHalf, StdioEnds};
 #[cfg(windows)]
 use bookclerk_sandbox::{JailHandoff, JailHandoffExtra, JAIL_HANDOFF_ENV};
-use bookclerk_sandbox::{GATEWAY_GUEST_RPC_ENV, SOCKET_PROXY_ENV, WORKERD_STATE_DIR_ENV};
 #[cfg(unix)]
 use bookclerk_sandbox::{GATEWAY_RPC_FD, GUEST_PROXY_FD};
 use serde_json::Value;
@@ -283,7 +285,7 @@ async fn spawn_single(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let mut child = cmd.spawn()?;
+    let mut child = with_fd_spawn_lock(|| cmd.spawn())?;
     let identities = sibling_identities(Some(&child), None);
     if let Some(stderr) = child.stderr.take() {
         forward_guest_stderr(id.to_string(), "guest", stderr, Arc::clone(&stderr_tail));
@@ -402,16 +404,28 @@ async fn spawn_siblings(
     // dial the host's loopback on Windows (no machine-wide exemption), and
     // the same host-side check is the policy boundary on every OS.
     // The cancel flag exists before either sibling so a revoke during startup
-    // reaches the proxy and the initial describe.
+    // reaches the proxy and the initial describe. The challenge is delivered
+    // only in the guest environment; the fd number is not the session identity.
     let cancel = Arc::new(AtomicBool::new(false));
+    let challenge = new_session_challenge();
+    guest_cmd.env(
+        bookclerk_plugin_sdk::SESSION_CHALLENGE_ENV,
+        hex::encode(challenge),
+    );
     #[cfg(unix)]
-    let proxy = serve_host_socket_proxy(proxy_gateway, grant.egress_policy(), Arc::clone(&cancel))?;
+    let proxy = serve_host_socket_proxy(
+        proxy_gateway,
+        grant.egress_policy(),
+        Arc::clone(&cancel),
+        challenge,
+    )?;
     #[cfg(windows)]
     let proxy = serve_host_socket_proxy(
         proxy_pipes.host_stdout,
         proxy_pipes.host_stdin,
         grant.egress_policy(),
         Arc::clone(&cancel),
+        challenge,
     )?;
 
     #[cfg(unix)]
@@ -426,7 +440,7 @@ async fn spawn_siblings(
         guest_cmd.env(JAIL_HANDOFF_ENV, "1");
     }
 
-    let mut gateway = gateway_cmd.spawn().map_err(|err| {
+    let mut gateway = with_fd_spawn_lock(|| gateway_cmd.spawn()).map_err(|err| {
         PluginError::message(format!("could not start gateway for `{id}`: {err}"))
     })?;
     #[cfg(unix)]
@@ -499,7 +513,7 @@ async fn spawn_siblings(
         }
     }
 
-    let guest_spawn = guest_cmd.spawn();
+    let guest_spawn = with_fd_spawn_lock(|| guest_cmd.spawn());
     let mut guest = match guest_spawn {
         Ok(child) => child,
         Err(err) => {
@@ -878,6 +892,16 @@ fn apply_temp_and_home(cmd: &mut Command, tmp: &std::path::Path, home: &std::pat
     cmd.env("HOME", home);
 }
 
+/// 32 random bytes the guest must write before the proxy mux starts.
+fn new_session_challenge() -> [u8; bookclerk_plugin_sdk::SESSION_CHALLENGE_LEN] {
+    let mut out = [0u8; bookclerk_plugin_sdk::SESSION_CHALLENGE_LEN];
+    let first = uuid::Uuid::new_v4();
+    let second = uuid::Uuid::new_v4();
+    out[..16].copy_from_slice(first.as_bytes());
+    out[16..].copy_from_slice(second.as_bytes());
+    out
+}
+
 fn apply_spec_env(cmd: &mut Command, start: &Start) -> Result<()> {
     if let Start::Confined { spec, .. } = start {
         cmd.env(
@@ -896,6 +920,9 @@ fn inherit_unix_gateway(cmd: &mut Command, rpc: &DuplexLink) {
     unsafe {
         cmd.pre_exec(move || {
             bookclerk_sandbox::inherit_fd_at(rpc_fd, GATEWAY_RPC_FD)?;
+            if rpc_fd != GATEWAY_RPC_FD {
+                libc::close(rpc_fd);
+            }
             Ok(())
         });
     }
@@ -911,6 +938,7 @@ fn serve_host_socket_proxy(
     link: DuplexLink,
     policy: bookclerk_plugin_manifest::EgressPolicy,
     fence: Arc<AtomicBool>,
+    challenge: [u8; bookclerk_plugin_sdk::SESSION_CHALLENGE_LEN],
 ) -> Result<bookclerk_workerd::socket_proxy::ProxyServer> {
     use std::os::unix::net::UnixStream;
     let std_stream = UnixStream::from(link.into_owned_fd());
@@ -919,7 +947,7 @@ fn serve_host_socket_proxy(
         .map_err(|err| PluginError::message(format!("host socket proxy nonblocking: {err}")))?;
     let stream = tokio::net::UnixStream::from_std(std_stream)
         .map_err(|err| PluginError::message(format!("host socket proxy wrap: {err}")))?;
-    bookclerk_workerd::socket_proxy::spawn_link(stream, policy, fence)
+    bookclerk_workerd::socket_proxy::spawn_link_with_challenge(stream, policy, fence, challenge)
         .map_err(|err| PluginError::message(format!("host socket proxy failed to start: {err}")))
 }
 
@@ -931,6 +959,7 @@ fn serve_host_socket_proxy(
     write: DuplexHalf,
     policy: bookclerk_plugin_manifest::EgressPolicy,
     fence: Arc<AtomicBool>,
+    challenge: [u8; bookclerk_plugin_sdk::SESSION_CHALLENGE_LEN],
 ) -> Result<bookclerk_workerd::socket_proxy::ProxyServer> {
     use std::os::windows::io::IntoRawHandle;
     let read = unsafe {
@@ -945,8 +974,10 @@ fn serve_host_socket_proxy(
         )
     }
     .map_err(|err| PluginError::message(format!("host proxy write pipe: {err}")))?;
-    bookclerk_workerd::socket_proxy::spawn_halves(read, write, policy, fence)
-        .map_err(|err| PluginError::message(format!("host socket proxy failed to start: {err}")))
+    bookclerk_workerd::socket_proxy::spawn_halves_with_challenge(
+        read, write, policy, fence, challenge,
+    )
+    .map_err(|err| PluginError::message(format!("host socket proxy failed to start: {err}")))
 }
 
 #[cfg(unix)]
@@ -960,6 +991,9 @@ fn inherit_unix_guest(cmd: &mut Command, rpc: DuplexLink, proxy: &DuplexLink) ->
     unsafe {
         cmd.pre_exec(move || {
             bookclerk_sandbox::inherit_fd_at(proxy_fd, GUEST_PROXY_FD)?;
+            if proxy_fd != GUEST_PROXY_FD {
+                libc::close(proxy_fd);
+            }
             Ok(())
         });
     }
@@ -1416,7 +1450,7 @@ mod tests {
         let mut cmd = std::process::Command::new("sleep");
         cmd.arg("30");
         cmd.process_group(0);
-        let mut child = cmd.spawn().expect("sleep");
+        let mut child = with_fd_spawn_lock(|| cmd.spawn()).expect("sleep");
         let pid = child.id();
         let identity = ProcessIdentity::capture(Some(pid)).expect("start time");
         assert!(identity.still_same());
@@ -1441,7 +1475,7 @@ mod tests {
         cmd.arg("-c").arg("sleep 30 & echo $!; wait");
         cmd.process_group(0);
         cmd.stdout(std::process::Stdio::piped());
-        let mut child = cmd.spawn().expect("sh");
+        let mut child = with_fd_spawn_lock(|| cmd.spawn()).expect("sh");
         let leader = ProcessIdentity::capture(Some(child.id())).expect("leader");
         let stdout = child.stdout.take().expect("stdout");
         let mut line = String::new();
@@ -1472,7 +1506,7 @@ mod tests {
         cmd.arg("-c").arg("setsid sleep 30 & echo $!; wait");
         cmd.process_group(0);
         cmd.stdout(std::process::Stdio::piped());
-        let mut child = cmd.spawn().expect("sh");
+        let mut child = with_fd_spawn_lock(|| cmd.spawn()).expect("sh");
         let leader = ProcessIdentity::capture(Some(child.id())).expect("leader");
         let stdout = child.stdout.take().expect("stdout");
         let mut line = String::new();
@@ -1549,5 +1583,88 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The guest's stdin and stdout are its RPC end. Fd 3 is its proxy end.
+    /// The gateway RPC end and the host proxy end stay in the parent.
+    /// Socketpair ends have distinct inodes, so the parent reads `/proc/<pid>/fd`
+    /// while the child is still alive.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn guest_stdio_does_not_include_the_gateway_rpc_end() {
+        fn socket_id(link: &DuplexLink) -> String {
+            std::fs::read_link(format!("/proc/self/fd/{}", link.as_raw_fd()))
+                .expect("socket link")
+                .to_string_lossy()
+                .into_owned()
+        }
+        fn child_sockets(pid: u32) -> String {
+            let dir = std::fs::read_dir(format!("/proc/{pid}/fd")).expect("child fds");
+            let mut names = Vec::new();
+            for entry in dir.flatten() {
+                if let Ok(target) = std::fs::read_link(entry.path()) {
+                    names.push(target.to_string_lossy().into_owned());
+                }
+            }
+            names.join("\n")
+        }
+
+        let (rpc_gateway, rpc_guest) = DuplexLink::pair().expect("rpc pair");
+        let (proxy_host, proxy_guest) = DuplexLink::pair().expect("proxy pair");
+        let rpc_guest_id = socket_id(&rpc_guest);
+        let rpc_gateway_id = socket_id(&rpc_gateway);
+        let proxy_guest_id = socket_id(&proxy_guest);
+        let proxy_host_id = socket_id(&proxy_host);
+
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30").stderr(Stdio::null());
+        inherit_unix_guest(&mut cmd, rpc_guest, &proxy_guest).expect("inherit guest");
+        let mut child = with_fd_spawn_lock(|| cmd.spawn()).expect("spawn guest shape");
+        let pid = child.id().expect("guest pid");
+        let text = child_sockets(pid);
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        assert_eq!(
+            text.matches(proxy_guest_id.as_str()).count(),
+            1,
+            "proxy fd should be the dup2 destination only\n{text}"
+        );
+        assert_eq!(
+            text.matches(rpc_guest_id.as_str()).count(),
+            2,
+            "guest RPC end belongs on stdin and stdout\n{text}"
+        );
+        assert!(
+            !text.contains(&rpc_gateway_id) && !text.contains(&proxy_host_id),
+            "gateway ends leaked into the guest\n{text}"
+        );
+        drop((rpc_gateway, proxy_host));
+
+        let (rpc_gateway, rpc_guest) = DuplexLink::pair().expect("rpc pair");
+        let (proxy_host, proxy_guest) = DuplexLink::pair().expect("proxy pair");
+        let ids = [
+            socket_id(&rpc_gateway),
+            socket_id(&rpc_guest),
+            socket_id(&proxy_host),
+            socket_id(&proxy_guest),
+        ];
+        let mut unrelated = Command::new("sleep");
+        unrelated
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = with_fd_spawn_lock(|| unrelated.spawn()).expect("unrelated");
+        let pid = child.id().expect("unrelated pid");
+        let text = child_sockets(pid);
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        for id in &ids {
+            assert!(
+                !text.contains(id.as_str()),
+                "unrelated child inherited {id}\n{text}"
+            );
+        }
+        drop((rpc_gateway, rpc_guest, proxy_host, proxy_guest));
     }
 }

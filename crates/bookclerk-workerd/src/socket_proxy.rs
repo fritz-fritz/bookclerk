@@ -391,6 +391,27 @@ where
     spawn_halves(reader, writer, policy, fence)
 }
 
+/// [`spawn_link`] that reads a 32-byte session challenge before any mux frame.
+///
+/// A mismatch, EOF, or fence closes the link and serves nothing. The numeric
+/// descriptor is not treated as the session identity.
+///
+/// # Errors
+///
+/// Returns an error only if the accept task cannot be spawned (it does not).
+pub fn spawn_link_with_challenge<S>(
+    link: S,
+    policy: EgressPolicy,
+    fence: Arc<AtomicBool>,
+    challenge: [u8; bookclerk_plugin_sdk::SESSION_CHALLENGE_LEN],
+) -> Result<ProxyServer>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let (reader, writer) = tokio::io::split(link);
+    spawn_halves_with_challenge(reader, writer, policy, fence, challenge)
+}
+
 /// Serve HTTP CONNECT on mux halves that are already separate pipes.
 ///
 /// Windows product spawns pass two unidirectional handles. Splitting one
@@ -409,12 +430,58 @@ where
     R: tokio::io::AsyncRead + Send + Unpin + 'static,
     W: tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
-    let mux = bookclerk_plugin_sdk::mux::Mux::server(reader, writer);
+    spawn_halves_inner(reader, writer, policy, fence, None)
+}
+
+/// [`spawn_halves`] that requires `challenge` on the read half before mux frames.
+///
+/// # Errors
+///
+/// Returns an error only if the accept task cannot be spawned (it does not).
+pub fn spawn_halves_with_challenge<R, W>(
+    reader: R,
+    writer: W,
+    policy: EgressPolicy,
+    fence: Arc<AtomicBool>,
+    challenge: [u8; bookclerk_plugin_sdk::SESSION_CHALLENGE_LEN],
+) -> Result<ProxyServer>
+where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    spawn_halves_inner(reader, writer, policy, fence, Some(challenge))
+}
+
+fn spawn_halves_inner<R, W>(
+    reader: R,
+    writer: W,
+    policy: EgressPolicy,
+    fence: Arc<AtomicBool>,
+    challenge: Option<[u8; bookclerk_plugin_sdk::SESSION_CHALLENGE_LEN]>,
+) -> Result<ProxyServer>
+where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
     let tasks = Arc::new(Mutex::new(Vec::new()));
     let accept_tasks = Arc::clone(&tasks);
     let accept_fence = Arc::clone(&fence);
     let admits = Arc::new(Semaphore::new(MAX_CONNECT_TASKS));
     let accept = tokio::spawn(async move {
+        let mut reader = reader;
+        if let Some(expected) = challenge {
+            let mut got = [0u8; bookclerk_plugin_sdk::SESSION_CHALLENGE_LEN];
+            let matched = tokio::select! {
+                biased;
+                () = wait_fence(&accept_fence) => false,
+                result = reader.read_exact(&mut got) => result.is_ok() && got == expected,
+            };
+            if !matched {
+                tracing::debug!("socket proxy session challenge rejected");
+                return;
+            }
+        }
+        let mux = bookclerk_plugin_sdk::mux::Mux::server(reader, writer);
         loop {
             if accept_fence.load(Ordering::SeqCst) {
                 break;
@@ -956,5 +1023,110 @@ mod tests {
         drop(held);
         drop(extra);
         wait_until_idle(&proxy).await;
+    }
+
+    /// Another session's secret and an unrelated child that inherited the fd
+    /// cannot open the mux. The descriptor number is not the session identity.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_challenge_rejects_the_other_secret_and_an_unrelated_child() {
+        use bookclerk_plugin_sdk::mux::Mux;
+        use std::os::fd::{AsRawFd, OwnedFd};
+        use std::process::Stdio;
+
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = echo.local_addr().unwrap().port();
+        let saw_accept = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&saw_accept);
+        tokio::spawn(async move {
+            if echo.accept().await.is_ok() {
+                flag.store(true, Ordering::SeqCst);
+            }
+        });
+        let expected = [0x11u8; bookclerk_plugin_sdk::SESSION_CHALLENGE_LEN];
+        let other = [0x22u8; bookclerk_plugin_sdk::SESSION_CHALLENGE_LEN];
+        let policy = tcp_policy("127.0.0.1", port, &["127.0.0.1/32"]);
+
+        let (host_std, guest_std) = std::os::unix::net::UnixStream::pair().unwrap();
+        host_std.set_nonblocking(true).unwrap();
+        guest_std.set_nonblocking(true).unwrap();
+        let other_fd = guest_std.as_raw_fd();
+        let host = tokio::net::UnixStream::from_std(host_std).unwrap();
+        let mut guest = tokio::net::UnixStream::from_std(guest_std).unwrap();
+        let fence = Arc::new(AtomicBool::new(false));
+        let proxy =
+            spawn_link_with_challenge(host, policy.clone(), Arc::clone(&fence), expected).unwrap();
+        // `fd:{other_fd}` names this process's descriptor, not the host's end.
+        let spec = format!("fd:{other_fd}");
+        assert!(matches!(
+            bookclerk_sandbox::LinkSpec::parse(&spec),
+            Ok(bookclerk_sandbox::LinkSpec::Fd(fd)) if fd == other_fd
+        ));
+        guest.write_all(&other).await.unwrap();
+        let mut buf = [0u8; 4];
+        let read = tokio::time::timeout(StdDuration::from_secs(1), guest.read(&mut buf)).await;
+        assert!(
+            read.is_ok(),
+            "wrong challenge must close the link instead of waiting"
+        );
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+        assert!(
+            !saw_accept.load(Ordering::SeqCst),
+            "the other session's challenge opened a stream"
+        );
+        drop(proxy);
+        drop(guest);
+
+        let (host_std, child_std) = std::os::unix::net::UnixStream::pair().unwrap();
+        host_std.set_nonblocking(true).unwrap();
+        let host = tokio::net::UnixStream::from_std(host_std).unwrap();
+        let fence = Arc::new(AtomicBool::new(false));
+        let proxy =
+            spawn_link_with_challenge(host, policy.clone(), Arc::clone(&fence), expected).unwrap();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("head -c 32 /dev/zero")
+            .stdout(Stdio::from(OwnedFd::from(child_std)))
+            .stderr(Stdio::null())
+            .env_remove(bookclerk_plugin_sdk::SESSION_CHALLENGE_ENV);
+        let status =
+            bookclerk_sandbox::with_fd_spawn_lock(|| cmd.status()).expect("unrelated child");
+        assert!(status.success(), "unrelated child status {status}");
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+        assert!(
+            !saw_accept.load(Ordering::SeqCst),
+            "an unrelated child completed the session challenge"
+        );
+        drop(proxy);
+
+        let (host_std, guest_std) = std::os::unix::net::UnixStream::pair().unwrap();
+        host_std.set_nonblocking(true).unwrap();
+        guest_std.set_nonblocking(true).unwrap();
+        let host = tokio::net::UnixStream::from_std(host_std).unwrap();
+        let mut guest = tokio::net::UnixStream::from_std(guest_std).unwrap();
+        let fence = Arc::new(AtomicBool::new(false));
+        let _proxy = spawn_link_with_challenge(host, policy, Arc::clone(&fence), expected).unwrap();
+        guest.write_all(&expected).await.unwrap();
+        let (reader, writer) = guest.into_split();
+        let mux = Mux::client(reader, writer);
+        let mut stream = mux.open().await.expect("open after the matching challenge");
+        let req = format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+        stream.write_all(req.as_bytes()).await.unwrap();
+        let mut head = Vec::new();
+        let mut tmp = [0u8; 1];
+        loop {
+            stream.read_exact(&mut tmp).await.unwrap();
+            head.push(tmp[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&head);
+        assert!(text.contains("200"), "{text}");
+        assert!(
+            saw_accept.load(Ordering::SeqCst),
+            "approved dial did not connect"
+        );
+        fence.store(true, Ordering::SeqCst);
     }
 }

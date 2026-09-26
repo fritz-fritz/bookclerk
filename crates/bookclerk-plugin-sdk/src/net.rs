@@ -6,8 +6,11 @@
 //! [`bookclerk_plugin_manifest::EgressPolicy`] as workerd `fetch()`/`connect()`.
 //!
 //! Production native-behind-workerd sets `fd:<n>` or `handle:<n>` and multiplexes
-//! CONNECT streams over that inherited link ([`crate::mux`]). Pathname,
-//! `abstract:`, and `\\.\pipe\` forms remain for tests and older launchers.
+//! CONNECT streams over that inherited link ([`crate::mux`]). A per-session
+//! challenge ([`SESSION_CHALLENGE_ENV`]) is written before the first mux frame
+//! so a numeric descriptor is not an identity. Pathname, `abstract:`, and
+//! `\\.\pipe\` forms remain for tests and older launchers. Native plugins must
+//! be rebuilt against this SDK; there is no ambient TCP fallback.
 
 #![allow(clippy::missing_docs_in_private_items)]
 #![allow(unsafe_code)] // inherited fd:/handle: → UnixStream / NamedPipeClient.
@@ -39,6 +42,17 @@ pub const NESTED_NATIVE_JAIL_ENV: &str = "BOOKCLERK_NESTED_NATIVE_JAIL";
 /// this directory (OAuth callback and the macOS Postgres mediator). Linux
 /// Postgres still splices through `/proc/self/fd`. Unset on Windows.
 pub const GUEST_IPC_DIR_ENV: &str = "BOOKCLERK_GUEST_IPC_DIR";
+
+/// Hex-encoded 32-byte secret for the inherited proxy mux.
+///
+/// The guest writes these bytes before any mux frame. The host accepts the
+/// link only when they match the secret it put in this process's environment.
+/// An unrelated child, or another session's guest, does not have this value.
+/// A numeric `fd:` / `handle:` is not an identity across processes.
+pub const SESSION_CHALLENGE_ENV: &str = "BOOKCLERK_SESSION_CHALLENGE";
+
+/// Length of [`SESSION_CHALLENGE_ENV`] before hex encoding.
+pub const SESSION_CHALLENGE_LEN: usize = 32;
 
 /// True when [`NESTED_NATIVE_JAIL_ENV`] is `1`.
 #[must_use]
@@ -197,23 +211,23 @@ impl PluginSocket {
 
     /// Split into owned reader/writer halves (pathname Unix sockets only).
     ///
-    /// # Panics
+    /// Production native plugins use the mux `fd:` / `handle:` link and
+    /// [`Self::into_stream`]. This does not open a TCP socket.
     ///
-    /// Panics when the proxy is a multiplexed `fd:` / `handle:` link.
+    /// # Errors
+    ///
+    /// Returns an unsupported-transport error when the proxy is a multiplexed
+    /// `fd:` / `handle:` link.
     #[cfg(unix)]
-    #[must_use]
     pub fn into_split(
         self,
-    ) -> (
+    ) -> Result<(
         tokio::net::unix::OwnedReadHalf,
         tokio::net::unix::OwnedWriteHalf,
-    ) {
+    )> {
         match self.stream {
-            ProxyStream::Unix(stream) => stream.into_split(),
-            ProxyStream::Mux(_) => panic!(
-                "PluginSocket::into_split requires a Unix pathname SOCKET_PROXY; \
-                 mux links stay on PluginSocket::stream"
-            ),
+            ProxyStream::Unix(stream) => Ok(stream.into_split()),
+            ProxyStream::Mux(_) => Err(unsupported_pathname_transport("into_split")),
         }
     }
 
@@ -226,25 +240,27 @@ impl PluginSocket {
 
     /// Consumes the socket, returning the CONNECT-established Unix stream.
     ///
-    /// # Panics
+    /// Production native plugins use [`Self::into_stream`]. This does not open
+    /// a TCP socket when the proxy is a mux link.
     ///
-    /// Panics when the proxy is a multiplexed `fd:` / `handle:` link.
+    /// # Errors
+    ///
+    /// Returns an unsupported-transport error when the proxy is a multiplexed
+    /// `fd:` / `handle:` link.
     #[cfg(unix)]
-    #[must_use]
-    pub fn into_unix_stream(self) -> tokio::net::UnixStream {
+    pub fn into_unix_stream(self) -> Result<tokio::net::UnixStream> {
         match self.into_stream() {
-            ProxyStream::Unix(stream) => stream,
-            ProxyStream::Mux(_) => {
-                panic!("PluginSocket::into_unix_stream requires a Unix pathname SOCKET_PROXY")
-            }
+            ProxyStream::Unix(stream) => Ok(stream),
+            ProxyStream::Mux(_) => Err(unsupported_pathname_transport("into_unix_stream")),
         }
     }
 
     /// Start TLS on a `starttls` socket.
     ///
     /// The proxy is byte-transparent, so TLS is end-to-end. Wrap
-    /// [`Self::into_split`] with `tokio-rustls` (same pattern as workerd
-    /// `socket.startTls()` after `secureTransport: "starttls"`).
+    /// [`Self::into_stream`] with `tokio-rustls` (same pattern as workerd
+    /// `socket.startTls()` after `secureTransport: "starttls"`). Pathname
+    /// sockets may use [`Self::into_split`]. Mux links have no TCP fallback.
     ///
     /// # Errors
     ///
@@ -260,9 +276,17 @@ impl PluginSocket {
         }
         self.started_tls = true;
         Err(SdkError::message(
-            "native startTls: wrap PluginSocket::into_split() with tokio-rustls (proxy is byte-transparent)",
+            "native startTls: wrap PluginSocket::into_stream() with tokio-rustls (proxy is byte-transparent; into_split is pathname-only)",
         ))
     }
+}
+
+/// `into_split` / `into_unix_stream` are pathname transports. Mux stays on [`PluginSocket::into_stream`].
+#[cfg(unix)]
+fn unsupported_pathname_transport(method: &str) -> SdkError {
+    SdkError::message(format!(
+        "unsupported transport: PluginSocket::{method} requires a Unix pathname SOCKET_PROXY; production native plugins use mux fd:/handle: and PluginSocket::into_stream"
+    ))
 }
 
 /// Open a TCP connection through the Bookclerk socket proxy.
@@ -353,31 +377,21 @@ async fn connect_proxy(spec: &str) -> Result<ProxyStream> {
 /// Returns [`SdkError`] when the inherited descriptor cannot be opened, or when
 /// an earlier open of this process's proxy link failed.
 #[cfg(any(unix, windows))]
-fn shared_mux(spec: &str) -> Result<crate::mux::Mux> {
-    use std::sync::{Mutex, OnceLock};
+async fn shared_mux(spec: &str) -> Result<crate::mux::Mux> {
+    use tokio::sync::OnceCell;
 
-    static MUX: OnceLock<Mutex<Option<std::result::Result<crate::mux::Mux, String>>>> =
-        OnceLock::new();
-    let slot = MUX.get_or_init(|| Mutex::new(None));
-    let mut guard = slot
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(existing) = guard.as_ref() {
-        return match existing {
-            Ok(mux) => Ok(mux.clone()),
-            Err(err) => Err(SdkError::message(err.clone())),
-        };
-    }
-    match open_inherited_mux(spec) {
-        Ok(mux) => {
-            *guard = Some(Ok(mux.clone()));
-            Ok(mux)
-        }
-        Err(err) => {
-            let msg = err.to_string();
-            *guard = Some(Err(msg.clone()));
-            Err(SdkError::message(msg))
-        }
+    static MUX: OnceCell<std::result::Result<crate::mux::Mux, String>> = OnceCell::const_new();
+    let stored = MUX
+        .get_or_init(|| async {
+            match open_inherited_mux(spec).await {
+                Ok(mux) => Ok(mux),
+                Err(err) => Err(err.to_string()),
+            }
+        })
+        .await;
+    match stored {
+        Ok(mux) => Ok(mux.clone()),
+        Err(err) => Err(SdkError::message(err.clone())),
     }
 }
 
@@ -388,25 +402,28 @@ fn shared_mux(spec: &str) -> Result<crate::mux::Mux> {
 /// Returns [`SdkError`] when the mux is unavailable or the writer task has exited.
 #[cfg(any(unix, windows))]
 async fn open_mux_proxy(spec: &str) -> Result<ProxyStream> {
-    let mux = shared_mux(spec)?;
+    let mux = shared_mux(spec).await?;
     Ok(ProxyStream::Mux(mux.open().await?))
 }
 
 /// Builds a client mux from an `fd:` or `handle:` link spec.
 ///
+/// When [`SESSION_CHALLENGE_ENV`] is set, those bytes are written before the
+/// mux takes the writer.
+///
 /// # Errors
 ///
 /// Returns [`SdkError`] when the spec is the wrong OS form, the number does not
-/// parse, or the descriptor cannot be wrapped.
+/// parse, the challenge is malformed, or the descriptor cannot be wrapped.
 #[cfg(any(unix, windows))]
-fn open_inherited_mux(spec: &str) -> Result<crate::mux::Mux> {
+async fn open_inherited_mux(spec: &str) -> Result<crate::mux::Mux> {
     if let Some(rest) = spec.strip_prefix("fd:") {
         #[cfg(unix)]
         {
             let fd: i32 = rest
                 .parse()
                 .map_err(|_| SdkError::message(format!("invalid fd link spec {spec}")))?;
-            return mux_from_unix_fd(fd);
+            return mux_from_unix_fd(fd).await;
         }
         #[cfg(not(unix))]
         {
@@ -419,13 +436,13 @@ fn open_inherited_mux(spec: &str) -> Result<crate::mux::Mux> {
         {
             if let Ok(write_spec) = std::env::var(SOCKET_PROXY_WRITE_ENV) {
                 if !write_spec.is_empty() {
-                    return mux_from_windows_halves(spec, &write_spec);
+                    return mux_from_windows_halves(spec, &write_spec).await;
                 }
             }
             let value: u64 = rest
                 .parse()
                 .map_err(|_| SdkError::message(format!("invalid handle link spec {spec}")))?;
-            return mux_from_windows_handle(value);
+            return mux_from_windows_handle(value).await;
         }
         #[cfg(not(windows))]
         {
@@ -438,20 +455,84 @@ fn open_inherited_mux(spec: &str) -> Result<crate::mux::Mux> {
     )))
 }
 
-/// Takes ownership of `fd` and multiplexes it as a client link.
+/// Takes ownership of `fd`, marks it `CLOEXEC`, and multiplexes it.
 ///
 /// # Errors
 ///
 /// Returns [`SdkError`] when the descriptor cannot be made non-blocking or
-/// wrapped as a Tokio stream.
+/// wrapped as a Tokio stream, or when the session challenge cannot be written.
 #[cfg(unix)]
-fn mux_from_unix_fd(fd: i32) -> Result<crate::mux::Mux> {
-    use std::os::fd::FromRawFd;
+async fn mux_from_unix_fd(fd: i32) -> Result<crate::mux::Mux> {
+    use std::os::fd::{AsRawFd, FromRawFd};
     let std = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    set_inherited_cloexec(std.as_raw_fd())?;
     std.set_nonblocking(true)?;
     let tokio = tokio::net::UnixStream::from_std(std)?;
     let (reader, writer) = tokio.into_split();
+    finish_client_mux(reader, writer).await
+}
+
+/// `FD_CLOEXEC` on a descriptor this process just adopted.
+///
+/// The host cleared it so `exec` could deliver the link. Grandchildren must
+/// not inherit it.
+#[cfg(unix)]
+pub(crate) fn set_inherited_cloexec(fd: i32) -> Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(SdkError::message(format!(
+            "F_GETFD on inherited descriptor: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(SdkError::message(format!(
+            "FD_CLOEXEC on inherited descriptor: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+/// Writes [`SESSION_CHALLENGE_ENV`] when set, then starts the client mux.
+#[cfg(any(unix, windows))]
+async fn finish_client_mux<R, W>(reader: R, mut writer: W) -> Result<crate::mux::Mux>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncWriteExt;
+    if let Some(bytes) = session_challenge_bytes()? {
+        writer.write_all(&bytes).await?;
+    }
     Ok(crate::mux::Mux::client(reader, writer))
+}
+
+/// Decodes [`SESSION_CHALLENGE_ENV`]. `Ok(None)` when it is unset.
+///
+/// # Errors
+///
+/// Returns [`SdkError`] when the variable is set but is not 32 bytes of hex.
+#[cfg(any(unix, windows))]
+fn session_challenge_bytes() -> Result<Option<[u8; SESSION_CHALLENGE_LEN]>> {
+    let Ok(text) = std::env::var(SESSION_CHALLENGE_ENV) else {
+        return Ok(None);
+    };
+    let text = text.trim();
+    if text.len() != SESSION_CHALLENGE_LEN * 2 || !text.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(SdkError::message(format!(
+            "{SESSION_CHALLENGE_ENV} must be {SESSION_CHALLENGE_LEN} bytes of hex"
+        )));
+    }
+    let mut out = [0u8; SESSION_CHALLENGE_LEN];
+    for (index, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).map_err(|_| {
+            SdkError::message(format!(
+                "{SESSION_CHALLENGE_ENV} must be {SESSION_CHALLENGE_LEN} bytes of hex"
+            ))
+        })?;
+    }
+    Ok(Some(out))
 }
 
 /// Takes ownership of `value` and multiplexes it as a client link.
@@ -460,15 +541,10 @@ fn mux_from_unix_fd(fd: i32) -> Result<crate::mux::Mux> {
 ///
 /// Returns [`SdkError`] when the handle cannot be wrapped as a Tokio pipe.
 #[cfg(windows)]
-fn mux_from_windows_handle(value: u64) -> Result<crate::mux::Mux> {
-    use std::os::windows::io::RawHandle;
-    let pipe = unsafe {
-        tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
-            value as usize as RawHandle,
-        )?
-    };
+async fn mux_from_windows_handle(value: u64) -> Result<crate::mux::Mux> {
+    let pipe = windows_pipe_client(value)?;
     let (reader, writer) = tokio::io::split(pipe);
-    Ok(crate::mux::Mux::client(reader, writer))
+    finish_client_mux(reader, writer).await
 }
 
 /// Multiplexes two unidirectional Windows handles (read, then write).
@@ -478,7 +554,7 @@ fn mux_from_windows_handle(value: u64) -> Result<crate::mux::Mux> {
 /// Returns [`SdkError`] when either spec is not a distinct `handle:<n>` or a
 /// handle cannot be wrapped.
 #[cfg(windows)]
-fn mux_from_windows_halves(read_spec: &str, write_spec: &str) -> Result<crate::mux::Mux> {
+async fn mux_from_windows_halves(read_spec: &str, write_spec: &str) -> Result<crate::mux::Mux> {
     let read_id = windows_handle_id(read_spec)?;
     let write_id = windows_handle_id(write_spec)?;
     if read_id == write_id {
@@ -488,7 +564,7 @@ fn mux_from_windows_halves(read_spec: &str, write_spec: &str) -> Result<crate::m
     }
     let read = windows_pipe_client(read_id)?;
     let write = windows_pipe_client(write_id)?;
-    Ok(crate::mux::Mux::client(read, write))
+    finish_client_mux(read, write).await
 }
 
 #[cfg(windows)]
@@ -725,6 +801,7 @@ mod tests {
             stream.write_all(b"mux").await.expect("body");
         });
 
+        std::env::remove_var(SESSION_CHALLENGE_ENV);
         std::env::set_var(SOCKET_PROXY_ENV, format!("fd:{guest_fd}"));
         let mut sock = connect(
             SocketAddress {
@@ -741,5 +818,99 @@ mod tests {
         sock.close().await.unwrap();
         server_task.await.unwrap();
         std::env::remove_var(SOCKET_PROXY_ENV);
+    }
+
+    #[tokio::test]
+    async fn pathname_split_works_and_mux_has_no_tcp_fallback() {
+        let (unix_peer, other) = tokio::net::UnixStream::pair().expect("pair");
+        let pathname = PluginSocket {
+            stream: ProxyStream::Unix(unix_peer),
+            secure: SecureTransport::Off,
+            started_tls: false,
+        };
+        pathname.into_split().expect("pathname into_split");
+        let again = PluginSocket {
+            stream: ProxyStream::Unix(other),
+            secure: SecureTransport::Off,
+            started_tls: false,
+        };
+        again.into_unix_stream().expect("pathname into_unix_stream");
+
+        let (left, right) = tokio::net::UnixStream::pair().expect("pair");
+        let (server_read, server_write) = left.into_split();
+        let _server = crate::mux::Mux::server(server_read, server_write);
+        let (client_read, client_write) = right.into_split();
+        let client = crate::mux::Mux::client(client_read, client_write);
+        let opened = client.open().await.expect("mux open");
+        let mux_sock = PluginSocket {
+            stream: ProxyStream::Mux(opened),
+            secure: SecureTransport::Off,
+            started_tls: false,
+        };
+        let err = mux_sock.into_split().expect_err("mux into_split");
+        assert_mux_transport(&err.to_string());
+
+        let opened = client.open().await.expect("second mux open");
+        let mux_sock = PluginSocket {
+            stream: ProxyStream::Mux(opened),
+            secure: SecureTransport::Off,
+            started_tls: false,
+        };
+        let err = mux_sock
+            .into_unix_stream()
+            .expect_err("mux into_unix_stream");
+        assert_mux_transport(&err.to_string());
+
+        let opened = client.open().await.expect("third mux open");
+        let mux_sock = PluginSocket {
+            stream: ProxyStream::Mux(opened),
+            secure: SecureTransport::Off,
+            started_tls: false,
+        };
+        assert!(matches!(mux_sock.into_stream(), ProxyStream::Mux(_)));
+    }
+
+    fn assert_mux_transport(msg: &str) {
+        assert!(msg.contains("unsupported transport"), "{msg}");
+        assert!(msg.contains("fd:") && msg.contains("handle:"), "{msg}");
+        assert!(!msg.contains("127.0.0.1"), "{msg}");
+    }
+
+    /// Adopting an inherited `fd:` writes the session challenge and sets `FD_CLOEXEC`.
+    #[tokio::test]
+    async fn inherited_fd_writes_the_session_challenge_and_is_cloexec() {
+        use std::os::fd::IntoRawFd;
+        use tokio::io::AsyncReadExt;
+
+        struct ClearChallenge;
+        impl Drop for ClearChallenge {
+            fn drop(&mut self) {
+                std::env::remove_var(SESSION_CHALLENGE_ENV);
+            }
+        }
+
+        let _guard = SOCKET_PROXY_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _clear = ClearChallenge;
+
+        let (guest, mut host) = tokio::net::UnixStream::pair().expect("pair");
+        let guest_fd = guest.into_std().expect("into_std").into_raw_fd();
+        let challenge = [0xab_u8; SESSION_CHALLENGE_LEN];
+        let hex_challenge: String = challenge.iter().map(|byte| format!("{byte:02x}")).collect();
+        std::env::set_var(SESSION_CHALLENGE_ENV, &hex_challenge);
+
+        let mux = mux_from_unix_fd(guest_fd).await.expect("client mux");
+        let flags = unsafe { libc::fcntl(guest_fd, libc::F_GETFD) };
+        assert!(flags >= 0, "F_GETFD on the adopted descriptor");
+        assert_ne!(
+            flags & libc::FD_CLOEXEC,
+            0,
+            "an adopted fd must not stay inheritable"
+        );
+        let mut got = [0u8; SESSION_CHALLENGE_LEN];
+        host.read_exact(&mut got).await.expect("challenge preamble");
+        assert_eq!(got, challenge);
+        drop(mux);
     }
 }

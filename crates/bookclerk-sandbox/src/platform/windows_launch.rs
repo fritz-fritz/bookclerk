@@ -1295,6 +1295,19 @@ mod tests {
         assert_eq!(list[1].0, stderr.0);
     }
 
+    /// Handles the caller did not pass stay off `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`.
+    #[test]
+    fn handle_list_omits_unrelated_handles() {
+        let stdin = HANDLE(std::ptr::without_provenance_mut(1));
+        let stdout = HANDLE(std::ptr::without_provenance_mut(2));
+        let stderr = HANDLE(std::ptr::without_provenance_mut(3));
+        let extra = HANDLE(std::ptr::without_provenance_mut(4));
+        let decoy = HANDLE(std::ptr::without_provenance_mut(99));
+        let list = unique_handle_list([stdin, stdout, stderr, extra]);
+        assert_eq!(list.len(), 4);
+        assert!(list.iter().all(|handle| handle.0 != decoy.0));
+    }
+
     use std::os::windows::io::AsRawHandle;
     use std::sync::Mutex;
 
