@@ -861,8 +861,16 @@ impl PluginSession {
         self.tx
             .send(build(reply))
             .map_err(|_| PluginError::unavailable("plugin vat thread closed"))?;
-        rx.await
-            .map_err(|_| PluginError::unavailable("plugin vat thread dropped reply"))?
+        let result = rx
+            .await
+            .map_err(|_| PluginError::unavailable("plugin vat thread dropped reply"))?;
+        // The vat can observe the guest's reply in the same turn the cancel
+        // flag is set. Deliver the fence, not a result from a revoked grant.
+        if crate::authority::is_fenced(&self.authority_fence) {
+            let _ = self.tx.send(Work::Shutdown);
+            return Err(crate::authority::fenced_error());
+        }
+        result
     }
 
     /// Opens the session's primary entrypoints with the granted binding
@@ -1926,9 +1934,11 @@ struct RemoveOnDrop(std::path::PathBuf);
 
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
-        // `workerd` keeps this directory as its cwd until it exits. The first
-        // `remove_dir_all` can lose that race (`EBUSY`); retry until the
-        // process group kill has reaped it.
+        // `workerd` keeps this directory as its cwd until it exits. The Linux
+        // session cgroup is destroyed first so members, including a descendant
+        // that left the process group, are dead before this removal. The first
+        // `remove_dir_all` can still lose that race (`EBUSY`); retry until it
+        // is gone.
         for attempt in 0..40 {
             match std::fs::remove_dir_all(&self.0) {
                 Ok(()) => return,
@@ -2038,6 +2048,8 @@ fn vat_thread(
             .run_until(async move {
                 let grant = spawned.grant;
                 let mut remove_session_dir = spawned.session_dir.map(RemoveOnDrop);
+                #[cfg(target_os = "linux")]
+                let mut session_cgroup = spawned.session_cgroup;
                 #[cfg(windows)]
                 let _session_job = spawned.session_job;
                 let cancel = Arc::clone(&spawned.cancel);
@@ -2075,6 +2087,8 @@ fn vat_thread(
                             #[cfg(windows)]
                             drop(_session_job);
                             reap_siblings(&mut child, &mut guest, &identities).await;
+                            #[cfg(target_os = "linux")]
+                            drop(session_cgroup.take());
                             drop(remove_session_dir.take());
                             let _ = ready.send(Err(err));
                             return;
@@ -2090,6 +2104,8 @@ fn vat_thread(
                         #[cfg(windows)]
                         drop(_session_job);
                         reap_siblings(&mut child, &mut guest, &identities).await;
+                        #[cfg(target_os = "linux")]
+                        drop(session_cgroup.take());
                         drop(remove_session_dir.take());
                         let _ = ready.send(Err(crate::spawn_stdio::with_spawn_detail(err, extra)));
                         return;
@@ -2760,6 +2776,8 @@ fn vat_thread(
                 reap_siblings(&mut child, &mut guest, &identities).await;
                 drop(child);
                 drop(guest);
+                #[cfg(target_os = "linux")]
+                drop(session_cgroup.take());
                 drop(remove_session_dir.take());
             })
             .await;

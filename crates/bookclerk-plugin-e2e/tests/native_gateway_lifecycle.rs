@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bookclerk_plugin_host::{
-    consent_request, reconcile_grants_from_disk, PluginGrantStore, PluginSession, SessionServices,
+    reconcile_grants_from_disk, PluginGrantStore, PluginSession, SessionServices,
     HOST_SHARED_ACCOUNT, WORKERD_BIN_ENV,
 };
 use bookclerk_plugin_sdk::CliInvokeParams;
@@ -138,11 +138,14 @@ async fn killing_guest_errors_rpc_and_exits_gateway() {
 }
 
 fn revoke_grant(install: &Install) {
-    let plugin = install.plugin();
+    // Edit the persisted row directly. Rediscovering the package hashes the
+    // staged guest and can outlast the dial pause, so the fence would land
+    // after `TcpStream::connect`.
     let mut grants = PluginGrantStore::load(install.files_dir()).expect("load grants");
-    let mut grant = consent_request(&plugin.manifest, plugin.plugin_key());
+    let mut grant = grants.grants.first().cloned().expect("installed grant");
     grant.extra_processes = Some(1);
     grant.domains.insert("revoked.example".into());
+    // `upsert` fences a live session before the file is flushed.
     grants.upsert(grant);
     grants.save(install.files_dir()).expect("save grants");
     reconcile_grants_from_disk(install.files_dir());
@@ -227,6 +230,13 @@ async fn grant_revision_bump_fences_the_live_session() {
     let gateway = session.gateway_pid().expect("gateway");
     let guest = session.guest_pid().expect("guest");
     let files = install.files_dir().to_path_buf();
+    let tree = ProcessTree::capture();
+    let workerd = tree.pinned_workerd(gateway).unwrap_or_else(|| {
+        panic!(
+            "pinned workerd missing under gateway {gateway}\n{}",
+            tree.describe(gateway)
+        )
+    });
 
     let params = CliInvokeParams {
         command: "probe".into(),
@@ -284,11 +294,7 @@ async fn grant_revision_bump_fences_the_live_session() {
     );
     wait_for_exit(gateway).await;
     wait_for_exit(guest).await;
-    assert!(
-        session_dirs_under(&files).is_empty(),
-        "session dir leaked under {}",
-        files.display()
-    );
+    wait_until_session_dirs_gone(&files, workerd).await;
     step("grant revision bump closed the stream and the session");
 }
 
@@ -304,6 +310,13 @@ async fn revoke_during_dial_does_not_open_the_upstream() {
     let gateway = session.gateway_pid().expect("gateway");
     let guest = session.guest_pid().expect("guest");
     let files = install.files_dir().to_path_buf();
+    let tree = ProcessTree::capture();
+    let workerd = tree.pinned_workerd(gateway).unwrap_or_else(|| {
+        panic!(
+            "pinned workerd missing under gateway {gateway}\n{}",
+            tree.describe(gateway)
+        )
+    });
     let port = listener.port;
     let hung = tokio::spawn(async move {
         session
@@ -330,13 +343,18 @@ async fn revoke_during_dial_does_not_open_the_upstream() {
             })
             .await
     });
+    let started = Instant::now();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     revoke_grant(&install);
     let rpc = tokio::time::timeout(ng_harness::RPC_TIMEOUT, hung)
         .await
         .unwrap_or_else(|_| ng_harness::fail_deadline("dial RPC did not return after revoke"))
         .expect("rpc task");
-    assert!(rpc.is_err(), "dial RPC must fail when revoked: {rpc:?}");
+    assert!(
+        rpc.is_err(),
+        "dial RPC must fail when revoked after {}ms: {rpc:?}",
+        started.elapsed().as_millis()
+    );
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(
         listener.accepts.load(Ordering::SeqCst),
@@ -345,7 +363,7 @@ async fn revoke_during_dial_does_not_open_the_upstream() {
     );
     wait_for_exit(gateway).await;
     wait_for_exit(guest).await;
-    assert!(session_dirs_under(&files).is_empty());
+    wait_until_session_dirs_gone(&files, workerd).await;
     step("revoke during dial closed the session without an upstream accept");
 }
 
@@ -455,6 +473,7 @@ async fn finish_clean_session(install: &Install, listener: &Listener, label: &st
     let cgroup = linux_session_cgroup(guest).or_else(|| linux_session_cgroup(gateway));
     #[cfg(windows)]
     let sid = session.package_sid().map(str::to_string);
+    let session_dir = session.session_dir().map(std::path::Path::to_path_buf);
     drop(session);
     wait_for_exit(gateway).await;
     wait_for_exit(guest).await;
@@ -464,12 +483,17 @@ async fn finish_clean_session(install: &Install, listener: &Listener, label: &st
         install.files_dir().is_dir(),
         "{label}: installation parent disappeared"
     );
-    let dirs = session_dirs_under(install.files_dir());
-    assert!(
-        dirs.is_empty(),
-        "{label} leaked session dirs under {}: {dirs:?}",
-        install.files_dir().display()
-    );
+    if let Some(dir) = session_dir {
+        let deadline = Instant::now() + SETTLE_TIMEOUT;
+        while dir.exists() && Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            !dir.exists(),
+            "{label}: session dir remains {}",
+            dir.display()
+        );
+    }
     match cgroup {
         Some(dir) => {
             let deadline = Instant::now() + SETTLE_TIMEOUT;
@@ -522,6 +546,31 @@ async fn guest_descendant(session: &PluginSession, guest: u32, label: &str) -> u
         tree.describe(guest)
     );
     pid
+}
+
+/// Waits until production cleanup removes the session directory.
+///
+/// `files` is the installation parent and must still exist. An empty session
+/// listing then means the directory was removed, not that the fixture was
+/// dropped. Pinned `workerd` keeps the directory as its cwd until it exits.
+async fn wait_until_session_dirs_gone(files: &std::path::Path, workerd: u32) {
+    wait_for_exit(workerd).await;
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    loop {
+        assert!(
+            files.is_dir(),
+            "installation parent disappeared before session cleanup"
+        );
+        if session_dirs_under(files).is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session dir leaked under {}",
+            files.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 fn note_missing_cgroup() {
