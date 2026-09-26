@@ -1353,13 +1353,13 @@ mod tests {
         }
     }
 
-    fn comspec() -> String {
-        std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into())
-    }
-
     fn spawn_linger() -> std::process::Child {
-        std::process::Command::new(comspec())
-            .args(["/d", "/c", "ping -n 30 127.0.0.1 >nul"])
+        // One process. `cmd /c ping` keeps cmd and ping, and a child created
+        // after assignment counts toward JOB_OBJECT_LIMIT_ACTIVE_PROCESS.
+        std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn linger")
     }
